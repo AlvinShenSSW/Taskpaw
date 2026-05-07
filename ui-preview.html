@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskPaw UI Preview</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #e2e8f0; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding: 32px; }
+
+  /* Color tokens */
+  :root {
+    --bg: #f0f4f8;
+    --surface: #ffffff;
+    --surface2: #e8edf2;
+    --border: #c8d1dc;
+    --accent: #4a9ede;
+    --accent-light: #6bb5f0;
+    --success: #2eaa6f;
+    --warning: #e6a817;
+    --error: #d94f3d;
+    --text: #2d3748;
+    --text-dim: #718096;
+    --text-bright: #1a202c;
+  }
+
+  .window { width: 780px; background: var(--bg); border-radius: 8px; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.15); border: 1px solid var(--border); }
+
+  /* Title bar */
+  .titlebar { background: var(--surface); padding: 8px 16px; display: flex; align-items: center; border-bottom: 1px solid var(--border); }
+  .titlebar-dots { display: flex; gap: 6px; margin-right: 12px; }
+  .titlebar-dots span { width: 12px; height: 12px; border-radius: 50%; }
+  .dot-close { background: var(--error); }
+  .dot-min { background: var(--warning); }
+  .dot-max { background: var(--success); }
+  .titlebar-text { color: var(--text-dim); font-size: 13px; }
+
+  /* Main content */
+  .main { padding: 16px; }
+
+  /* Header */
+  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .header-left { display: flex; align-items: baseline; gap: 12px; }
+  .header h1 { font-size: 22px; font-weight: 700; color: var(--text-bright); }
+  .header .machine { font-size: 13px; color: var(--text-dim); }
+  .header .status { font-size: 13px; color: var(--success); }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; margin-bottom: 0; }
+  .tab { padding: 10px 20px; font-size: 14px; cursor: pointer; border: none; background: var(--surface2); color: var(--text-dim); border-radius: 6px 6px 0 0; transition: all 0.15s; }
+  .tab.active { background: var(--accent); color: #fff; font-weight: 600; }
+  .tab:hover:not(.active) { background: var(--border); }
+
+  .tab-content { background: var(--bg); border-top: 2px solid var(--accent); padding: 16px 0; min-height: 400px; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Toolbar */
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .toolbar h2 { font-size: 15px; font-weight: 700; color: var(--accent); }
+  .toolbar-btns { display: flex; gap: 6px; }
+
+  /* Buttons */
+  .btn { padding: 8px 16px; border: none; border-radius: 5px; font-size: 13px; cursor: pointer; font-family: inherit; transition: all 0.15s; }
+  .btn-accent { background: var(--accent); color: #fff; font-weight: 700; padding: 8px 20px; }
+  .btn-accent:hover { background: var(--accent-light); }
+  .btn-default { background: var(--surface2); color: var(--text); }
+  .btn-default:hover { background: var(--border); }
+  .btn-sm { padding: 4px 12px; font-size: 12px; border-radius: 4px; }
+  .btn-success { background: var(--success); color: #fff; }
+  .btn-error { background: var(--error); color: #fff; }
+  .btn-delete { background: var(--surface2); color: var(--error); }
+
+  /* Watcher cards */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; margin-bottom: 8px; }
+  .card-row1 { display: flex; align-items: center; justify-content: space-between; }
+  .card-info { display: flex; align-items: center; gap: 8px; }
+  .card-name { font-size: 14px; font-weight: 700; color: var(--text-bright); }
+  .card-type { font-size: 12px; color: var(--text-dim); }
+  .card-desc { font-size: 12px; color: var(--accent); }
+  .card-status { font-size: 12px; font-weight: 500; }
+  .card-status.listening { color: var(--success); }
+  .card-status.processing { color: var(--warning); }
+  .card-status.stopped { color: var(--text-dim); }
+  .card-status.error { color: var(--error); }
+  .card-row2 { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+  .card-detail { font-size: 12px; color: var(--text-dim); }
+  .card-btns { display: flex; gap: 4px; }
+
+  /* Settings tab */
+  .settings-section { margin-bottom: 20px; }
+  .settings-section h3 { font-size: 15px; font-weight: 700; color: var(--accent); margin-bottom: 10px; }
+  .form-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .form-row label { font-size: 13px; color: var(--text); min-width: 110px; }
+  .form-input { padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-size: 13px; font-family: inherit; }
+  .form-input.wide { width: 260px; }
+  .form-input.narrow { width: 80px; }
+  .form-input.token { width: 380px; }
+  .form-hint { font-size: 12px; color: var(--text-dim); }
+  .checkbox-row { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); margin-bottom: 6px; }
+  .separator { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+  .settings-footer { font-size: 12px; color: var(--text-dim); margin-top: 12px; }
+
+  /* Log tab */
+  .log-area { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-family: 'Consolas', 'Courier New', monospace; font-size: 12px; color: var(--text); min-height: 340px; max-height: 340px; overflow-y: auto; line-height: 1.7; }
+  .log-area .dim { color: var(--text-dim); }
+  .log-toolbar { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+  /* Empty state */
+  .empty { text-align: center; color: var(--text-dim); font-size: 14px; padding: 60px 20px; line-height: 1.8; }
+
+  /* View selector */
+  .view-selector { display: flex; gap: 16px; justify-content: center; margin-bottom: 24px; }
+  .view-btn { padding: 8px 20px; border: 2px solid var(--accent); border-radius: 20px; background: transparent; color: var(--accent); font-size: 13px; cursor: pointer; font-family: inherit; font-weight: 600; }
+  .view-btn.active { background: var(--accent); color: #fff; }
+</style>
+</head>
+<body>
+
+<div>
+  <div class="view-selector">
+    <button class="view-btn active" onclick="showView('populated')">With Monitors</button>
+    <button class="view-btn" onclick="showView('empty')">Empty State</button>
+    <button class="view-btn" onclick="showView('settings')">Settings Tab</button>
+    <button class="view-btn" onclick="showView('log')">Log Tab</button>
+  </div>
+
+  <div class="window">
+    <!-- Title bar -->
+    <div class="titlebar">
+      <div class="titlebar-dots">
+        <span class="dot-close"></span>
+        <span class="dot-min"></span>
+        <span class="dot-max"></span>
+      </div>
+      <span class="titlebar-text">TaskPaw v1.0.0 — GPU-Server-01</span>
+    </div>
+
+    <div class="main">
+      <!-- Header -->
+      <div class="header">
+        <div class="header-left">
+          <h1>🐾 TaskPaw</h1>
+          <span class="machine">📍 GPU-Server-01</span>
+        </div>
+        <span class="status" id="conn-status">● Connected</span>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab" id="tab-monitors" onclick="switchTab('monitors')">📡 Monitors</button>
+        <button class="tab" id="tab-settings" onclick="switchTab('settings')">⚙️ OpenClaw Settings</button>
+        <button class="tab" id="tab-log" onclick="switchTab('log')">📜 Activity Log</button>
+      </div>
+
+      <div class="tab-content">
+        <!-- Monitors Tab (populated) -->
+        <div class="tab-panel" id="panel-monitors">
+          <div class="toolbar">
+            <h2>Active Monitors</h2>
+            <div class="toolbar-btns">
+              <button class="btn btn-accent">+ Add Monitor</button>
+              <button class="btn btn-default">Start All</button>
+              <button class="btn btn-default">Stop All</button>
+            </div>
+          </div>
+
+          <!-- Populated state -->
+          <div id="view-populated">
+            <div class="card">
+              <div class="card-row1">
+                <div class="card-info">
+                  <span class="card-name">🎨 ComfyUI Workflow</span>
+                  <span class="card-type">[ComfyUI (Queue Monitor)]</span>
+                  <span class="card-desc">📝 SDXL batch — product photos</span>
+                </div>
+                <span class="card-status processing">● Processing (running:1 queued:4)</span>
+              </div>
+              <div class="card-row2">
+                <span class="card-detail">Address: 127.0.0.1:8188 | Confirm count: 3</span>
+                <div class="card-btns">
+                  <button class="btn btn-sm btn-error">Stop</button>
+                  <button class="btn btn-sm btn-default">Edit</button>
+                  <button class="btn btn-sm btn-delete">Delete</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-row1">
+                <div class="card-info">
+                  <span class="card-name">🎬 Lada Video Upscale</span>
+                  <span class="card-type">[Lada (Process Monitor)]</span>
+                  <span class="card-desc">📝 Upscaling wedding footage</span>
+                </div>
+                <span class="card-status listening">● Listening</span>
+              </div>
+              <div class="card-row2">
+                <span class="card-detail">Process: lada-cli.exe | Poll: 10s</span>
+                <div class="card-btns">
+                  <button class="btn btn-sm btn-error">Stop</button>
+                  <button class="btn btn-sm btn-default">Edit</button>
+                  <button class="btn btn-sm btn-delete">Delete</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-row1">
+                <div class="card-info">
+                  <span class="card-name">📁 Downloads Folder</span>
+                  <span class="card-type">[Folder Monitor (Downloads etc.)]</span>
+                </div>
+                <span class="card-status listening">● Listening</span>
+              </div>
+              <div class="card-row2">
+                <span class="card-detail">Directory: D:\Downloads | Stable: 30s</span>
+                <div class="card-btns">
+                  <button class="btn btn-sm btn-error">Stop</button>
+                  <button class="btn btn-sm btn-default">Edit</button>
+                  <button class="btn btn-sm btn-delete">Delete</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-row1">
+                <div class="card-info">
+                  <span class="card-name">⚙️ FFmpeg Encoder</span>
+                  <span class="card-type">[Process Monitor (Generic)]</span>
+                </div>
+                <span class="card-status stopped">● Stopped</span>
+              </div>
+              <div class="card-row2">
+                <span class="card-detail">Process: ffmpeg.exe | Poll: 10s</span>
+                <div class="card-btns">
+                  <button class="btn btn-sm btn-success">Start</button>
+                  <button class="btn btn-sm btn-default">Edit</button>
+                  <button class="btn btn-sm btn-delete">Delete</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Empty state -->
+          <div id="view-empty" style="display:none;">
+            <div class="empty">
+              <div style="font-size:40px; margin-bottom:12px;">📡</div>
+              No monitors yet<br><br>
+              Click "<strong>+ Add Monitor</strong>" to create your first monitor<br>
+              Supports Lada, ComfyUI, folder watch, process watch, and more
+            </div>
+          </div>
+        </div>
+
+        <!-- Settings Tab -->
+        <div class="tab-panel" id="panel-settings">
+          <div class="settings-section">
+            <h3>Machine Settings</h3>
+            <div class="form-row">
+              <label>Machine Alias:</label>
+              <input class="form-input wide" value="GPU-Server-01">
+              <span class="form-hint">e.g. BlackGoldPig, WorkStation-01</span>
+            </div>
+          </div>
+
+          <hr class="separator">
+
+          <div class="settings-section">
+            <h3>OpenClaw Connection</h3>
+            <div class="form-row">
+              <label>Host:</label>
+              <input class="form-input wide" value="192.168.1.198">
+              <label style="min-width:auto; margin-left:8px;">Port:</label>
+              <input class="form-input narrow" value="18789">
+            </div>
+            <div class="form-row">
+              <label>Token:</label>
+              <input class="form-input token" type="password" value="abcdef1234567890">
+              <label class="checkbox-row" style="min-width:auto;"><input type="checkbox"> Show</label>
+            </div>
+            <div class="form-row" style="margin-top: 12px;">
+              <button class="btn btn-accent">💾 Save Settings</button>
+              <button class="btn btn-default">🔗 Test Connection</button>
+            </div>
+            <div style="margin-top:8px; font-size:13px; color: var(--success);">✅ Connected (HTTP 200)</div>
+          </div>
+
+          <hr class="separator">
+
+          <div class="settings-section">
+            <h3>SSH Tunnel</h3>
+            <label class="checkbox-row"><input type="checkbox" checked> Enable SSH Tunnel (recommended)</label>
+            <div class="form-row">
+              <label>Mac Mini IP:</label>
+              <input class="form-input wide" value="192.168.1.198">
+              <label style="min-width:auto; margin-left:8px;">SSH Port:</label>
+              <input class="form-input narrow" value="22">
+            </div>
+            <div class="form-row">
+              <label>Username:</label>
+              <input class="form-input wide" value="clawpig">
+            </div>
+            <div class="form-row">
+              <label>Private Key:</label>
+              <input class="form-input" style="width:300px;" value="C:\Users\Alvin\.ssh\id_rsa" readonly>
+              <button class="btn btn-default btn-sm">Browse...</button>
+            </div>
+            <div class="form-row">
+              <label>Remote Port:</label>
+              <input class="form-input narrow" value="18789">
+              <label style="min-width:auto; margin-left:8px;">Local Port:</label>
+              <input class="form-input narrow" value="18789">
+            </div>
+            <div class="form-row" style="margin-top: 10px; gap: 12px;">
+              <button class="btn btn-success btn-sm">🔗 Connect</button>
+              <button class="btn btn-default btn-sm">Disconnect</button>
+              <span style="font-size: 13px; color: var(--success); margin-left: 8px;">● Tunnel Active — localhost:18789 → 127.0.0.1:18789</span>
+            </div>
+          </div>
+
+          <hr class="separator">
+
+          <div class="settings-section">
+            <h3>App Settings</h3>
+            <label class="checkbox-row"><input type="checkbox"> Start minimized to background</label>
+          </div>
+
+          <hr class="separator">
+
+          <div class="settings-section">
+            <h3>Heartbeat (Status Reports)</h3>
+            <label class="checkbox-row"><input type="checkbox" checked> Send periodic status reports to OpenClaw</label>
+            <div class="form-row">
+              <label>Interval (min):</label>
+              <input class="form-input narrow" value="30">
+              <span class="form-hint" style="margin-left: 8px;">(sends a status summary every N minutes)</span>
+            </div>
+          </div>
+
+          <div class="settings-footer">
+            Config file: C:\Users\Alvin\AppData\Roaming\TaskPaw\config.json<br>
+            Log file: C:\Users\Alvin\AppData\Roaming\TaskPaw\taskpaw.log
+          </div>
+        </div>
+
+        <!-- Log Tab -->
+        <div class="tab-panel" id="panel-log">
+          <div class="log-area">
+            <span class="dim">[14:22:01]</span> TaskPaw v1.0.0 started<br>
+            <span class="dim">[14:22:01]</span> [SSH] Connecting to clawpig@192.168.1.198:22...<br>
+            <span class="dim">[14:22:02]</span> [SSH] Tunnel active: localhost:18789 → 127.0.0.1:18789<br>
+            <span class="dim">[14:22:02]</span> [Heartbeat] Started — reporting every 30 min<br>
+            <span class="dim">[14:22:02]</span> [ComfyUI Workflow] Starting ComfyUI queue monitor<br>
+            <span class="dim">[14:22:02]</span> [Lada Video Upscale] Starting Lada process monitor<br>
+            <span class="dim">[14:22:02]</span> [Downloads Folder] Starting folder monitor: D:\Downloads<br>
+            <span class="dim">[14:22:11]</span> [ComfyUI Workflow] Tasks detected, queue is busy<br>
+            <span class="dim">[14:25:33]</span> [Downloads Folder] New file: dataset_v2.zip (1204.3 MB)<br>
+            <span class="dim">[14:28:15]</span> [Downloads Folder] File complete: dataset_v2.zip (1204.3 MB)<br>
+            <span class="dim">[14:28:15]</span> OpenClaw notification sent (HTTP 200)<br>
+            <span class="dim">[14:35:42]</span> [Lada Video Upscale] Detected lada-cli.exe started running<br>
+            <span class="dim">[14:52:18]</span> [Lada Video Upscale] lada-cli.exe has exited, processing complete<br>
+            <span class="dim">[14:52:18]</span> OpenClaw notification sent (HTTP 200)<br>
+            <span class="dim">[14:52:02]</span> [Heartbeat] Sending status report to OpenClaw...<br>
+            <span class="dim">[14:52:02]</span> [Heartbeat] Status report sent successfully<br>
+            <span class="dim">[15:01:07]</span> [ComfyUI Workflow] All tasks complete, queue is idle<br>
+            <span class="dim">[15:01:07]</span> OpenClaw notification sent (HTTP 200)<br>
+          </div>
+          <div class="log-toolbar">
+            <button class="btn btn-default btn-sm">Clear Log</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  function switchTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    document.getElementById('panel-' + name).classList.add('active');
+  }
+
+  function showView(view) {
+    document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+
+    if (view === 'populated') {
+      switchTab('monitors');
+      document.getElementById('view-populated').style.display = 'block';
+      document.getElementById('view-empty').style.display = 'none';
+      document.getElementById('conn-status').textContent = '● Connected';
+      document.getElementById('conn-status').style.color = 'var(--success)';
+    } else if (view === 'empty') {
+      switchTab('monitors');
+      document.getElementById('view-populated').style.display = 'none';
+      document.getElementById('view-empty').style.display = 'block';
+      document.getElementById('conn-status').textContent = '● Not connected';
+      document.getElementById('conn-status').style.color = 'var(--text-dim)';
+    } else if (view === 'settings') {
+      switchTab('settings');
+      document.getElementById('view-populated').style.display = 'block';
+      document.getElementById('view-empty').style.display = 'none';
+    } else if (view === 'log') {
+      switchTab('log');
+      document.getElementById('view-populated').style.display = 'block';
+      document.getElementById('view-empty').style.display = 'none';
+    }
+  }
+
+  // Initialize
+  showView('populated');
+</script>
+</body>
+</html>
