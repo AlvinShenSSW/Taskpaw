@@ -601,9 +601,11 @@ class LadaWatcher(BaseWatcher):
         # Used by _detect_current_file() to identify which file lada-cli is
         # working on by indexing this list with the count of files already
         # written to the output folder. This is robust to lada renaming
-        # outputs (suffix like "_restored") or deleting inputs after each
-        # file finishes — both of which broke the previous stem-match
-        # heuristic and caused the "queue of 20 always shows file #1" bug.
+        # outputs (suffix like "_restored") and to the user manually
+        # cleaning processed files out of the input folder mid-run — both
+        # of which broke the previous stem-match heuristic and caused the
+        # "queue of 20 always shows file #1" bug. Kept in sync with user
+        # removals by _reconcile_snapshot().
         self._initial_inputs: list = []
 
     def run(self):
@@ -787,6 +789,10 @@ class LadaWatcher(BaseWatcher):
         with self._progress_lock:
             pg = dict(self._progress)
 
+        # Reconcile snapshot before reading queue stats so user-initiated
+        # removals from the input folder are reflected in this cycle's total.
+        self._reconcile_snapshot()
+
         current_file = pg.get("current_file") or self._detect_current_file()
         if current_file:
             parts.append(f"Running: {current_file}")
@@ -950,13 +956,77 @@ class LadaWatcher(BaseWatcher):
         except Exception:
             return []
 
+    def _reconcile_snapshot(self):
+        """Drop pending entries from the input snapshot that the user has
+        manually removed from the input folder mid-run.
+
+        Context: lada-cli does not delete its own input files. Users
+        sometimes clean up mid-run by moving processed videos out of the
+        output folder and deleting the matching files from the input
+        folder (to keep the two in sync). Without reconciling, the
+        snapshot-based total stays stuck at the initial count and the
+        displayed queue size doesn't shrink with the user's cleanup —
+        the bug this method fixes.
+
+        Assumes lada-cli processes files in the order returned by
+        _list_input_files (alphabetical). Entries at indices
+        [0, output_count) are treated as already processed and always
+        preserved — they may have been moved out by the user as part of
+        a cleanup. Entries beyond that index that are no longer in the
+        input folder must have been removed by the user (lada hasn't
+        reached them yet, and lada doesn't delete inputs on its own).
+        """
+        if not self._initial_inputs or not self.cfg.lada_input_folder:
+            return
+
+        input_folder = self.cfg.lada_input_folder
+        try:
+            input_path = Path(input_folder)
+            if not input_path.exists():
+                return
+            current_input = {
+                f.name for f in input_path.iterdir()
+                if f.is_file() and f.suffix.lower() in self.VIDEO_EXTENSIONS
+            }
+        except Exception:
+            return
+
+        output_count = 0
+        output_folder = self.cfg.lada_output_folder
+        if output_folder:
+            try:
+                output_path = Path(output_folder)
+                if output_path.exists():
+                    output_count = sum(
+                        1 for f in output_path.iterdir()
+                        if f.is_file() and f.suffix.lower() in self.VIDEO_EXTENSIONS
+                    )
+            except Exception:
+                return
+
+        output_count = min(output_count, len(self._initial_inputs))
+        processed = self._initial_inputs[:output_count]
+        pending = [
+            f for f in self._initial_inputs[output_count:]
+            if f in current_input
+        ]
+        new_snapshot = processed + pending
+        removed = len(self._initial_inputs) - len(new_snapshot)
+        if removed > 0:
+            self.log(
+                f"Detected {removed} pending input file(s) removed by user; "
+                f"queue total now {len(new_snapshot)}"
+            )
+            self._initial_inputs = new_snapshot
+
     def _detect_current_file(self) -> Optional[str]:
         """Identify which input file lada-cli is currently processing.
 
         Strategy: index the start-of-run input snapshot by the count of
         files in the output folder. Robust to:
           - lada renaming outputs (e.g., adding "_restored" suffix)
-          - lada deleting input files after processing (snapshot is fixed)
+          - user cleanup of processed input/output files mid-run
+            (_reconcile_snapshot keeps the snapshot in sync)
           - lada writing to a different folder layout
 
         The previous implementation matched input stems against output
@@ -1073,10 +1143,13 @@ class LadaWatcher(BaseWatcher):
     def _get_queue_info(self) -> Optional[str]:
         """Count video files in input folder vs output folder.
 
-        Total is taken from the initial-input snapshot when available,
-        so the displayed total stays stable even if lada deletes inputs
-        after processing each one (otherwise total would shrink while
-        completed grew, producing nonsense like "Queue: 20/5 done").
+        Total is taken from the input snapshot (kept in sync with user
+        removals by _reconcile_snapshot), so the displayed total stays
+        stable as users clean processed files out of the input folder
+        mid-run — and shrinks only when they actually remove pending
+        files. Without the snapshot, a naive live-count of input would
+        produce nonsense like "Queue: 20/5 done" once processed files
+        get moved out.
         """
         input_folder = self.cfg.lada_input_folder
         output_folder = self.cfg.lada_output_folder
