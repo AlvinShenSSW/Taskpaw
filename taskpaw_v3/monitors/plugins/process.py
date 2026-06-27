@@ -43,11 +43,10 @@ class ProcessConfig(BaseMonitorConfig):
         return v
 
 
-def process_matches(pattern: str, search_cmdline: bool) -> bool:
-    """True if any running process matches. Pure-ish (psutil) for easy testing."""
+def _scan(rx: "re.Pattern[str]", search_cmdline: bool) -> bool:
+    """True if any running process matches the precompiled regex."""
     if psutil is None:
         raise RuntimeError("psutil not available")
-    rx = re.compile(pattern, re.IGNORECASE)
     fields = ["name", "cmdline"] if search_cmdline else ["name"]
     for proc in psutil.process_iter(fields):
         try:
@@ -66,14 +65,21 @@ def process_matches(pattern: str, search_cmdline: bool) -> bool:
     return False
 
 
+def process_matches(pattern: str, search_cmdline: bool) -> bool:
+    """Convenience: compile + scan (used standalone / in tests)."""
+    return _scan(re.compile(pattern, re.IGNORECASE), search_cmdline)
+
+
 class ProcessInstance(MonitorInstance):
     def __init__(self, instance_id: str, config: ProcessConfig) -> None:
         super().__init__(instance_id, config)
         self._prev_alive: Optional[bool] = None
+        # Precompile once (design §4.4) — validated compilable at config time.
+        self._rx = re.compile(config.pattern, re.IGNORECASE)
 
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: ProcessConfig = self.config  # type: ignore[assignment]
-        alive = process_matches(cfg.pattern, cfg.search_cmdline)
+        alive = _scan(self._rx, cfg.search_cmdline)
         # Alert on a down state at startup (prev is None) too, not only on a
         # healthy→down transition.
         if not alive and self._prev_alive in (None, True):

@@ -114,9 +114,9 @@ def test_process_instance_emits_on_transition(monkeypatch):
     inst = plugin.create("p", ProcessConfig(name="p", pattern="x"))
     events = []
     emit = lambda *a, **k: events.append((a, k))
-    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process.process_matches", lambda *a, **k: True)
+    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process._scan", lambda *a, **k: True)
     inst.check(emit)  # first observation, prev=None → no emit
-    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process.process_matches", lambda *a, **k: False)
+    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process._scan", lambda *a, **k: False)
     st = inst.check(emit)  # transition alive→down → alert
     assert st.state == "error" and events and events[-1][0][0] == "alert"
 
@@ -300,7 +300,7 @@ def test_start_is_idempotent():
 
 
 def test_process_emits_alert_on_unhealthy_startup(monkeypatch):
-    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process.process_matches", lambda *a, **k: False)
+    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process._scan", lambda *a, **k: False)
     inst = ProcessPlugin().create("p", ProcessConfig(name="p", pattern="x"))
     events = []
     inst.check(lambda *a, **k: events.append(a))  # first check, already down → alert

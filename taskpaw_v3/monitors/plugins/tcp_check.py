@@ -19,9 +19,12 @@ from taskpaw_v3.monitors.base import (
 )
 
 
+from pydantic import Field
+
+
 class TcpCheckConfig(BaseMonitorConfig):
     host: str = "127.0.0.1"
-    port: int
+    port: int = Field(..., ge=1, le=65535)
     connect_timeout: float = 5.0  # cap per attempt (documented, configurable)
 
 

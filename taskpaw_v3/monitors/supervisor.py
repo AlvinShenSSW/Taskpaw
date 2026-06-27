@@ -71,6 +71,8 @@ class _Managed:
     emit_count: int = 0
     dropped_in_window: int = 0
     seen_dedupe: _BoundedKeySet = field(default_factory=_BoundedKeySet)
+    restart_count: int = 0       # unexpected thread-death restarts (watchdog)
+    last_restart: float = 0.0    # monotonic time of last restart
 
 
 class Supervisor:
@@ -110,16 +112,17 @@ class Supervisor:
 
     def stop(self, timeout: float = 5.0) -> None:
         self._running.clear()
+        deadline = time.monotonic() + timeout  # one budget for the whole shutdown
         with self._lock:
             managed = list(self._monitors.values())
         for m in managed:
             m.stop.set()
         for m in managed:
             if m.thread:
-                m.thread.join(timeout=timeout)
-            self._cleanup_instance(m.instance, timeout)
+                m.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            self._cleanup_instance(m.instance, max(0.0, deadline - time.monotonic()))
         if self._watchdog:
-            self._watchdog.join(timeout=timeout)
+            self._watchdog.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def reconfigure(self, instance_id: str, config: BaseMonitorConfig) -> None:
         # Whole sequence serialized so a worker can't run against a half-swapped
@@ -170,6 +173,10 @@ class Supervisor:
             with self._lock:
                 if self._monitors.get(instance_id) is not m:
                     return
+            # Wallclock cadence (constitution §4): deadline set BEFORE check, so
+            # the interval is poll_interval, not poll_interval + check duration.
+            iter_start = time.monotonic()
+            interval = max(1.0, m.instance.config.poll_interval)
             try:
                 # check() runs OUTSIDE the lock (it may be slow / blocking)…
                 status = m.instance.check(self._emitter_for(instance_id, m))
@@ -181,7 +188,8 @@ class Supervisor:
                         m.failures = 0
                         m.degraded = False
                         m.seen_dedupe.discard(f"{instance_id}:degraded")  # allow re-alert
-                m.stop.wait(timeout=max(1.0, m.instance.config.poll_interval))
+                    m.restart_count = 0  # healthy → reset thread-death backoff
+                m.stop.wait(timeout=max(0.0, iter_start + interval - time.monotonic()))
             except Exception as e:  # check() failure → backoff, not thread death
                 with self._lock:
                     m.failures += 1
@@ -197,27 +205,45 @@ class Supervisor:
                                f"{DEGRADE_AFTER} consecutive failures: {e}",
                                dedupe_key=f"{instance_id}:degraded")
                 backoff = min(BACKOFF_MAX, BACKOFF_MIN * (2 ** (failures - 1)))
-                m.stop.wait(timeout=backoff)
+                m.stop.wait(timeout=max(0.0, iter_start + backoff - time.monotonic()))
 
     def on_instance_error(self, instance_id: str, exc: Exception) -> None:
         """Hook for instance errors (overridable). Default: already logged."""
 
     def _watch(self) -> None:
-        """Restart worker threads that died unexpectedly (is_alive()).
+        """Restart worker threads that died unexpectedly (is_alive()), with
+        exponential backoff so a plugin that crashes on start doesn't spin —
+        repeated thread deaths transition it to DEGRADED.
 
-        Lock order is ALWAYS _life → _lock (matches register/start/reconfigure)
-        to avoid a lock-order inversion deadlock against a concurrent reconfigure.
+        Lock-order invariant: whenever BOTH locks are held it is always
+        _life → _lock. (Listing ids briefly takes _lock alone and releases it
+        before _life is acquired, so the invariant holds.)
         """
         while self._running.is_set():
             with self._lock:
                 ids = list(self._monitors)
             for iid in ids:
                 with self._life:  # outer lock first, consistently
+                    now = time.monotonic()
                     with self._lock:
                         m = self._monitors.get(iid)
-                        needs = bool(m and not m.stop.is_set() and m.thread and not m.thread.is_alive())
-                    if needs:
-                        log.error("monitor %s thread died; restarting", iid)
+                        dead = bool(m and not m.stop.is_set() and m.thread and not m.thread.is_alive())
+                        if dead:
+                            backoff = min(BACKOFF_MAX, BACKOFF_MIN * (2 ** m.restart_count))
+                            due = (now - m.last_restart) >= backoff if m.restart_count else True
+                        else:
+                            due = False
+                    if dead and due:
+                        m.restart_count += 1
+                        m.last_restart = now
+                        log.error("monitor %s thread died; restart #%d", iid, m.restart_count)
+                        if m.restart_count >= DEGRADE_AFTER and not m.degraded:
+                            m.degraded = True
+                            m.instance._status = MonitorStatus(state="degraded",
+                                                               detail="worker keeps dying")
+                            self._emit(iid, "alert", f"{iid} degraded",
+                                       f"worker thread died {m.restart_count} times",
+                                       dedupe_key=f"{iid}:degraded")
                         self._start_worker(iid)  # takes _lock, nested under _life
             time.sleep(2)
 
