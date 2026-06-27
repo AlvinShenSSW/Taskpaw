@@ -38,6 +38,34 @@ class HubService:
         )
         self._running = threading.Event()
         self._thread: threading.Thread | None = None
+        # Hub self-monitor (§5b.2): watch the Hub's OWN host. Its events go to the
+        # outbox (forwarded to OpenClaw when active) tagged with the hub machine;
+        # its snapshot is exposed in /status. No separate agent needed.
+        self.self_supervisor = self._build_self_supervisor() if config.self_monitor else None
+
+    def _build_self_supervisor(self):
+        from taskpaw_v3.monitors.registry import default_registry
+        from taskpaw_v3.monitors.supervisor import Supervisor
+
+        def sink(instance_id, level, title, message, data=None, dedupe_key=None):
+            active = (
+                self.store.get_config("openclaw_enabled", "1" if self.config.openclaw_enabled else "0") == "1"
+                and bool(self.store.get_config("openclaw_token", self.config.openclaw_token))
+            )
+            if not active:
+                return
+            import json
+            self.store.enqueue_delivery(
+                server_name=self.config.machine, kind="event",
+                payload_json=json.dumps({"text": f"TaskPaw Event | {self.config.machine}: {message}"}),
+                dedupe_key=f"{self.config.machine}:{instance_id}:{title}",
+            )
+
+        sup = Supervisor(sink=sink)
+        reg = default_registry()
+        plugin = reg.get("host_metrics")
+        sup.register(plugin, plugin.validate_config({"name": "hub-host"}))
+        return sup
 
     def _loop(self) -> None:
         next_due = time.monotonic()
@@ -55,11 +83,15 @@ class HubService:
         self._running.set()
         self._thread = threading.Thread(target=self._loop, name="hub-poller", daemon=True)
         self._thread.start()
+        if self.self_supervisor:
+            self.self_supervisor.start()
 
     def stop(self) -> bool:
         """Stop the poll loop. Returns True iff the thread actually exited
         (so the caller knows it's safe to close the shared store)."""
         self._running.clear()
+        if self.self_supervisor:
+            self.self_supervisor.stop()
         if self._thread:
             # Generous: a cycle may be mid-urlopen (<= http timeout) or in a
             # slow transaction. Cover that before the store is closed.
@@ -83,6 +115,8 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             "servers": store.list_servers(),
             # Locked snapshot — the poller thread mutates this concurrently.
             "acks": service.poller.snapshot_acks(),
+            # Hub's own host-health self-monitor (§5b.2).
+            "self": service.self_supervisor.snapshot() if service.self_supervisor else {},
         }
 
     return app, service

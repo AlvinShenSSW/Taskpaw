@@ -65,6 +65,8 @@ class HubConfig(BaseModel):
     openclaw_enabled: bool = False
     openclaw_url: str = "http://127.0.0.1:18789/hooks/wake"
     openclaw_token: str = ""
+    # Run a host_metrics self-monitor for the Hub's own machine (§5b.2).
+    self_monitor: bool = True
 
     @field_validator("bind_port")
     @classmethod
