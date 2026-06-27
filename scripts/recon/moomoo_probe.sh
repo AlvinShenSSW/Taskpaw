@@ -32,19 +32,42 @@ printf 'os:   %s\n' "$(uname -a 2>/dev/null)"
 sec "1. process manager (pm2) + orchestrator job"
 if have pm2; then
   note "pm2 found: $(command -v pm2)  version: $(pm2 --version 2>/dev/null)"
-  note "-- pm2 ping (daemon liveness) --"
-  pm2 ping 2>&1 | sed 's/^/   /'
-  note "-- pm2 jlist (name | pm_id | status | restarts) --"
-  if have node; then
-    pm2 jlist 2>/dev/null | node -e '
-      let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-        try{for(const p of JSON.parse(s)){
-          const e=p.pm2_env||{};
-          console.log("   "+[p.name,p.pm_id,e.status,(e.restart_time??"?")+" restarts",e.pm_exec_path||""].join("  |  "));
-        }}catch(err){console.log("   (could not parse pm2 jlist: "+err.message+")");}
-      });' 2>/dev/null || pm2 list 2>&1 | sed 's/^/   /'
+
+  # READ-ONLY liveness: detect the PM2 God Daemon by process inspection.
+  # Do NOT run `pm2 ping` / `pm2 list` first — those auto-SPAWN the daemon when
+  # it is down, which both mutates the machine and makes "is it alive?" always
+  # report alive. Process inspection never starts anything.
+  daemon_alive=""
+  if have pgrep; then
+    if pgrep -fl -i 'PM2.*God' >/dev/null 2>&1; then daemon_alive="yes"; fi
+    note "-- PM2 God Daemon process (read-only liveness) --"
+    pgrep -afl -i 'PM2.*God' 2>/dev/null | sed 's/^/   /' \
+      || pgrep -afl -i 'PM2 v' 2>/dev/null | sed 's/^/   /' \
+      || note "   (no PM2 God Daemon process found → daemon NOT running)"
   else
-    pm2 list 2>&1 | sed 's/^/   /'
+    note "-- PM2 God Daemon process (read-only liveness) --"
+    ps aux 2>/dev/null | grep -i 'PM2' | grep -iv grep | sed 's/^/   /' || true
+    note "   (pgrep unavailable; inspect the ps output above for 'PM2 ... God Daemon')"
+  fi
+
+  if [ -n "$daemon_alive" ]; then
+    # Safe now: daemon is already up, so jlist won't spawn it.
+    note "-- pm2 jlist (daemon already up; name | pm_id | status | restarts) --"
+    if have node; then
+      pm2 jlist 2>/dev/null | node -e '
+        let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+          try{for(const p of JSON.parse(s)){
+            const e=p.pm2_env||{};
+            console.log("   "+[p.name,p.pm_id,e.status,(e.restart_time??"?")+" restarts",e.pm_exec_path||""].join("  |  "));
+          }}catch(err){console.log("   (could not parse pm2 jlist: "+err.message+")");}
+        });' 2>/dev/null || pm2 list 2>&1 | sed 's/^/   /'
+    else
+      pm2 list 2>&1 | sed 's/^/   /'
+    fi
+  else
+    note "-- pm2 jlist SKIPPED: daemon not detected (running it would spawn the daemon). --"
+    note "   Job name comes from ecosystem.config.* below; if you need live status,"
+    note "   the operator can run 'pm2 jlist' manually (note: that starts the daemon)."
   fi
 else
   note "pm2 NOT on PATH. If the manager is launchd instead, report:"
@@ -117,6 +140,7 @@ cat <<'Q'
    [ ] 2a. orchestrator_heartbeat.json path: ____
    [ ] 2b. grace / watchdog threshold:       ____ (seconds)
    [ ] 3a. OpenD port (actual):              ____ (default 11111?)
-   [ ] 4a. pm2 daemon liveness method:       `pm2 ping` ok? God Daemon proc name = ____
+   [ ] 4a. pm2 daemon liveness (read-only):  God Daemon process present? proc name = ____
+           (detected via pgrep 'PM2.*God' — NOT `pm2 ping`, which would start it)
 Q
 printf '===== end of report =====\n'
