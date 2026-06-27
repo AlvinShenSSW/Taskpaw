@@ -30,11 +30,21 @@ _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if _IS_WINDOWS el
 def split_command(command: str) -> list[str]:
     """Tokenize a command string for shell=False execution.
 
-    On Windows, POSIX shlex treats backslashes as escapes, so `C:\\Tools\\x.bat`
-    collapses to `C:Toolsx.bat`. Use non-POSIX mode there so Windows paths and
-    backslashes survive (Codex #20 r6); POSIX mode elsewhere.
+    POSIX everywhere except Windows: there, POSIX shlex treats backslashes as
+    escapes, so `C:\\Tools\\x.bat` collapses to `C:Toolsx.bat` (Codex #20 r6).
+    Non-POSIX mode keeps backslashes but RETAINS the quote characters in each
+    token (Codex #20 r7), so `"C:\\Program Files\\x.exe"` would reach CreateProcess
+    with literal quotes and fail to launch. Strip the balanced surrounding quotes
+    each token so quoted paths / args with spaces work.
     """
-    return shlex.split(command, posix=not _IS_WINDOWS)
+    if not _IS_WINDOWS:
+        return shlex.split(command, posix=True)
+    out: list[str] = []
+    for tok in shlex.split(command, posix=False):
+        if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ("'", '"'):
+            tok = tok[1:-1]
+        out.append(tok)
+    return out
 
 
 class CustomCmdConfig(BaseMonitorConfig):

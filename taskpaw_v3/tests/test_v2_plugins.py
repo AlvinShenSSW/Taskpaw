@@ -69,6 +69,14 @@ def test_split_command_windows_preserves_backslashes(monkeypatch):
     assert "--all" in argv
 
 
+def test_split_command_windows_quoted_path_and_args(monkeypatch):
+    """Quoted Windows paths/args: backslashes kept, surrounding quotes stripped
+    so the executable resolves and args don't carry literal quotes (Codex r7)."""
+    monkeypatch.setattr(custom_cmd_mod, "_IS_WINDOWS", True)
+    argv = split_command(r'"C:\Program Files\Tool\check.exe" --arg "hello world"')
+    assert argv == [r"C:\Program Files\Tool\check.exe", "--arg", "hello world"]
+
+
 def test_split_command_posix_mode(monkeypatch):
     monkeypatch.setattr(custom_cmd_mod, "_IS_WINDOWS", False)
     assert split_command("echo hi there") == ["echo", "hi", "there"]
