@@ -271,3 +271,29 @@ def test_bounded_key_set_evicts_oldest():
     for k in ["a", "b", "c", "d"]:
         s.add(k)
     assert "a" not in s and "d" in s and "b" in s
+
+
+def test_supervisor_sink_exception_isolated_and_not_recorded():
+    """A throwing sink must not propagate (no false degrade) and a failed delivery
+    must not record the dedupe key (so it can be retried)."""
+    calls = []
+    def bad_sink(*a):
+        calls.append(a)
+        raise RuntimeError("sink down")
+    sup = Supervisor(sink=bad_sink)
+    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")), _FakeConfig(name="f"))
+    sup._emit("f", "alert", "t", "m", None, "k1")  # must not raise
+    assert "k1" not in sup._monitors["f"].seen_dedupe  # not recorded → retryable
+    assert len(calls) == 1
+
+
+def test_start_is_idempotent():
+    sup = Supervisor(sink=lambda *a: None)
+    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")), _FakeConfig(name="f", poll_interval=1))
+    sup.start()
+    wd1 = sup._watchdog
+    sup.start()  # second call must not spawn a new watchdog
+    try:
+        assert sup._watchdog is wd1
+    finally:
+        sup.stop()

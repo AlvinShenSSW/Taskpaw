@@ -50,14 +50,19 @@ def process_matches(pattern: str, search_cmdline: bool) -> bool:
     rx = re.compile(pattern, re.IGNORECASE)
     fields = ["name", "cmdline"] if search_cmdline else ["name"]
     for proc in psutil.process_iter(fields):
-        info = proc.info
-        name = info.get("name") or ""
-        if rx.search(name):
-            return True
-        if search_cmdline:
-            cmd = " ".join(info.get("cmdline") or [])
-            if cmd and rx.search(cmd):
+        try:
+            info = proc.info
+            name = info.get("name") or ""
+            if rx.search(name):
                 return True
+            if search_cmdline:
+                cmd = " ".join(info.get("cmdline") or [])
+                if cmd and rx.search(cmd):
+                    return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            # Process vanished or is inaccessible mid-iteration — skip, don't let
+            # a transient race degrade a healthy monitor.
+            continue
     return False
 
 

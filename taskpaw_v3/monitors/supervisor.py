@@ -97,6 +97,8 @@ class Supervisor:
         return instance_id
 
     def start(self) -> None:
+        if self._watchdog and self._watchdog.is_alive():
+            return  # idempotent — don't leak a second watchdog
         self._running.set()
         with self._lock:
             ids = list(self._monitors)
@@ -166,24 +168,32 @@ class Supervisor:
                 if self._monitors.get(instance_id) is not m:
                     return
             try:
+                # check() runs OUTSIDE the lock (it may be slow / blocking)…
                 status = m.instance.check(self._emitter_for(instance_id, m))
-                m.instance._status = status or m.instance.snapshot()
-                if m.failures or m.degraded:
-                    m.failures = 0
-                    m.degraded = False
-                    m.seen_dedupe.discard(f"{instance_id}:degraded")  # allow re-alert
+                # …then mutate shared state briefly UNDER the lock so snapshot()
+                # and _emit() observe consistent failures/degraded/_status.
+                with self._lock:
+                    m.instance._status = status or m.instance.snapshot()
+                    if m.failures or m.degraded:
+                        m.failures = 0
+                        m.degraded = False
+                        m.seen_dedupe.discard(f"{instance_id}:degraded")  # allow re-alert
                 m.stop.wait(timeout=max(1.0, m.instance.config.poll_interval))
             except Exception as e:  # check() failure → backoff, not thread death
-                m.failures += 1
-                log.warning("monitor %s check failed (%d): %s", instance_id, m.failures, e)
+                with self._lock:
+                    m.failures += 1
+                    failures = m.failures
+                    degrade_now = failures >= DEGRADE_AFTER and not m.degraded
+                    if degrade_now:
+                        m.degraded = True
+                        m.instance._status = MonitorStatus(state="degraded", detail=str(e))
+                log.warning("monitor %s check failed (%d): %s", instance_id, failures, e)
                 self.on_instance_error(instance_id, e)
-                if m.failures >= DEGRADE_AFTER and not m.degraded:
-                    m.degraded = True
-                    m.instance._status = MonitorStatus(state="degraded", detail=str(e))
+                if degrade_now:
                     self._emit(instance_id, "alert", f"{instance_id} degraded",
                                f"{DEGRADE_AFTER} consecutive failures: {e}",
                                dedupe_key=f"{instance_id}:degraded")
-                backoff = min(BACKOFF_MAX, BACKOFF_MIN * (2 ** (m.failures - 1)))
+                backoff = min(BACKOFF_MAX, BACKOFF_MIN * (2 ** (failures - 1)))
                 m.stop.wait(timeout=backoff)
 
     def on_instance_error(self, instance_id: str, exc: Exception) -> None:
@@ -210,7 +220,19 @@ class Supervisor:
             self._emit(instance_id, level, title, message, data, dedupe_key)
         return emit
 
+    def _safe_sink(self, level, title, message, data=None, dedupe_key=None) -> bool:
+        """Call the sink, isolating its exceptions (a bad sink must not degrade a
+        healthy monitor or lose-then-suppress later events). Returns success."""
+        try:
+            self._sink(level, title, message, data, dedupe_key)
+            return True
+        except Exception as e:
+            log.error("event sink failed (%s): %s", title, e)
+            return False
+
     def _emit(self, instance_id, level, title, message, data=None, dedupe_key=None) -> None:
+        folded_msg = None
+        deliver = False
         with self._lock:
             m = self._monitors.get(instance_id)
             if m is None:
@@ -220,19 +242,26 @@ class Supervisor:
             window = int(self._clock() // 60)
             if window != m.last_emit_window:
                 if m.dropped_in_window:
-                    folded = m.dropped_in_window
+                    folded_msg = (f"{instance_id}: {m.dropped_in_window} suppressed",
+                                  f"{m.dropped_in_window} events folded (rate limit)")
                     m.dropped_in_window = 0
-                    self._sink("warn", f"{instance_id}: {folded} suppressed",
-                               f"{folded} events folded (rate limit)", None, None)
                 m.last_emit_window = window
                 m.emit_count = 0
             if m.emit_count >= m.instance.config.max_events_per_minute:
                 m.dropped_in_window += 1  # dropped → do NOT record the key
-                return
-            m.emit_count += 1
-            if dedupe_key is not None:
-                m.seen_dedupe.add(dedupe_key)  # record only on actual delivery
-        self._sink(level, title, message, data, dedupe_key)
+            else:
+                m.emit_count += 1
+                deliver = True
+        # Sink calls happen OUTSIDE the lock (a blocking sink must not stall
+        # lifecycle ops) and are exception-isolated.
+        if folded_msg is not None:
+            self._safe_sink("warn", folded_msg[0], folded_msg[1], None, None)
+        if deliver:
+            if self._safe_sink(level, title, message, data, dedupe_key) and dedupe_key is not None:
+                with self._lock:
+                    m = self._monitors.get(instance_id)
+                    if m is not None:
+                        m.seen_dedupe.add(dedupe_key)  # record only after success
 
     # ── introspection ──────────────────────────────────────────────────────
     def snapshot(self) -> dict:
