@@ -400,3 +400,30 @@ def test_folded_summary_flushed_when_quiet_after_burst():
     clock[0] = 120.0
     sup._flush_folded("f")             # periodic flush in a new, quiet window
     assert any("suppressed" in s[1] for s in sink)
+
+
+def test_reconfigure_bad_config_preserves_old_monitor():
+    """If building the replacement fails (bad config), the old monitor must stay
+    installed and running — a failed update must not kill it."""
+    class _PickyPlugin(MonitorPlugin):
+        type_id = "picky"
+        @classmethod
+        def config_model(cls):
+            return _FakeConfig
+        def create(self, instance_id, config):
+            if config.name == "bad":
+                raise ValueError("nope")
+            return _FakeInstance(instance_id, config, lambda e: MonitorStatus(state="ok"))
+
+    sup = Supervisor(sink=lambda *a: None)
+    sup.register(_PickyPlugin(), _FakeConfig(name="ok-cfg"), instance_id="f")
+    sup.start()
+    try:
+        old = sup._monitors["f"]
+        with pytest.raises(ValueError):
+            sup.reconfigure("f", _FakeConfig(name="bad"))
+        assert sup._monitors["f"] is old          # old entry preserved
+        assert not old.stop.is_set()              # old worker untouched
+        assert old.thread.is_alive()
+    finally:
+        sup.stop()

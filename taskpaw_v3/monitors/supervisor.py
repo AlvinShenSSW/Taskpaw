@@ -148,21 +148,27 @@ class Supervisor:
                 if m is None:
                     raise KeyError(instance_id)
                 plugin, old_instance, old_thread, old_stop = m.plugin, m.instance, m.thread, m.stop
+            # Build the replacement FIRST: if the new config is bad and create()
+            # raises, fail without having touched the old monitor (a failed config
+            # update must not turn a healthy monitor into a dead one).
+            try:
+                new_instance = plugin.create(instance_id, config)
+            except Exception as e:
+                raise ValueError(f"reconfigure of {instance_id} rejected (bad config): {e}") from e
             old_stop.set()
             if old_thread:
                 old_thread.join(timeout=stop_timeout)
                 if old_thread.is_alive():
                     # The old worker is stuck (e.g. a long check). Abort WITHOUT
                     # killing it: clear the stop flag so it keeps running on the
-                    # OLD config, and surface the failure for the caller to retry.
-                    # (Leaving stop set would let the worker exit when the check
-                    # finally returns, with the watchdog unable to restart it.)
+                    # OLD config (resources untouched — we have NOT called its
+                    # stop() yet), and surface the failure for the caller to retry.
                     old_stop.clear()
                     raise RuntimeError(
                         f"reconfigure of {instance_id} aborted: old worker did not stop"
                     )
             self._cleanup_instance(old_instance, 5.0)
-            new = _Managed(plugin=plugin, instance=plugin.create(instance_id, config))
+            new = _Managed(plugin=plugin, instance=new_instance)
             with self._lock:
                 self._monitors[instance_id] = new
             if self._running.is_set():
