@@ -39,9 +39,11 @@ def default_registry() -> PluginRegistry:
     from taskpaw_v3.monitors.plugins.process import ProcessPlugin
     from taskpaw_v3.monitors.plugins.heartbeat import HeartbeatPlugin
     from taskpaw_v3.monitors.plugins.tcp_check import TcpCheckPlugin
+    from taskpaw_v3.monitors.plugins.host_metrics import HostMetricsPlugin
 
     reg = PluginRegistry()
     reg.register(ProcessPlugin())
     reg.register(HeartbeatPlugin())
     reg.register(TcpCheckPlugin())
+    reg.register(HostMetricsPlugin())
     return reg
