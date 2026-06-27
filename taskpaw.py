@@ -289,6 +289,12 @@ def add_event(
             evt["data"] = dict(data)
         _events_queue.append(evt)
         _next_event_id += 1
+        # Persist the counter INSIDE the lock, on purpose: the id must be durable
+        # before the event becomes visible to a Hub poll (which also takes
+        # _events_lock). Persisting after releasing would reopen a crash window
+        # where a polled+acked id is reused after restart and then deduped away.
+        # add_event is low-frequency (one call per monitor event), so the small
+        # atomic write under the lock is negligible — correctness over micro-perf.
         _save_event_state()
         overflow = len(_events_queue) - MAX_EVENTS_QUEUE
         if overflow > 0:

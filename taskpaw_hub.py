@@ -884,22 +884,6 @@ class PollingEngine(threading.Thread):
         """Emit a local-only high-priority alert; do not route via OpenClaw."""
         logger.critical(message)
 
-    def send_event_to_openclaw(self, server_name: str, event: Dict[str, Any]):
-        """Send event immediately to OpenClaw."""
-        token = self.db_manager.get_config("openclaw_token", "")
-        if not token:
-            return
-
-        message = f"TaskPaw Event | {server_name}: {event.get('message', 'Unknown event')}"
-        payload = {"text": message}
-
-        try:
-            self._send_openclaw_payload(payload)
-            logger.info(f"Event sent to OpenClaw: {message}")
-        except Exception as e:
-            self._enqueue_failed_delivery(server_name, "event", payload, e)
-            logger.error(f"Failed to send event to OpenClaw: {e}")
-
     def send_summary_to_openclaw(
         self, server_statuses: Dict[str, Dict[str, Any]]
     ):
@@ -996,7 +980,7 @@ class PollingEngine(threading.Thread):
             self.db_manager.set_config("last_event_ids", json.dumps(self.last_event_ids))
             return True
         except Exception as e:
-            logger.debug(f"Failed to persist event ids: {e}")
+            logger.error(f"Failed to persist event ids: {e}")
             return False
 
     def stop(self):

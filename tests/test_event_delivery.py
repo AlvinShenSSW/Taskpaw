@@ -224,11 +224,6 @@ def test_hub_poll_stores_enqueues_then_advances_ack_and_drains_outbox(
             "poll_server",
             lambda server: {"reachable": True, "last_seen": datetime.now(), "monitors": []},
         )
-        monkeypatch.setattr(
-            engine,
-            "send_event_to_openclaw",
-            lambda *_: pytest.fail("events must flow through the outbox"),
-        )
 
         def fake_urlopen(req, timeout):
             if req.full_url.startswith("http://127.0.0.1:5678/events"):
@@ -354,18 +349,21 @@ def test_hub_write_status_file_writes_atomically(tmp_path, monkeypatch):
         db._conn.close()
 
 
-def test_hub_failed_openclaw_send_enqueues_outbox(tmp_path, monkeypatch):
+def test_hub_failed_delivery_enqueues_outbox(tmp_path, monkeypatch):
+    """A failed OpenClaw send is captured in the outbox as a 'failed' row for
+    retry (exercises _enqueue_failed_delivery, the shared failure path)."""
     hub = import_hub(tmp_path, monkeypatch)
     db = hub.DatabaseManager(tmp_path / "hub.db")
     db.set_config("openclaw_token", "token")
     try:
         engine = hub.PollingEngine(db, lambda _: None)
 
-        def fail_urlopen(req, timeout):
-            raise urllib.error.URLError("down")
-
-        monkeypatch.setattr(hub.urllib.request, "urlopen", fail_urlopen)
-        engine.send_event_to_openclaw("agent", {"message": "done"})
+        engine._enqueue_failed_delivery(
+            "agent",
+            "event",
+            {"text": "TaskPaw Event | agent: done"},
+            urllib.error.URLError("down"),
+        )
 
         rows = db._conn.execute(
             "SELECT server_name, kind, delivery_state, attempts, payload_json FROM delivery_outbox"
