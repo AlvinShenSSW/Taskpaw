@@ -83,6 +83,10 @@ class StateFileInstance(MonitorInstance):
         self._prev: Optional[str] = None   # busy|waiting|idle|unknown|missing
         self._busy_alerted = False
         self._stale_alerted = False
+        # When the CURRENT busy episode began (file ts at first busy sighting).
+        # Held across busy refreshes so the busy-too-long watchdog measures
+        # continuous busy time, not time-since-last-write (Codex #22).
+        self._busy_start_ts: Optional[float] = None
 
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: StateFileConfig = self.config  # type: ignore[assignment]
@@ -91,6 +95,7 @@ class StateFileInstance(MonitorInstance):
 
         if not p.exists():
             self._busy_alerted = self._stale_alerted = False
+            self._busy_start_ts = None
             if cfg.missing_is_idle:
                 self._maybe_emit_transition(emit, "missing", cfg)
                 return MonitorStatus(state="idle", detail="no activity file yet")
@@ -128,12 +133,20 @@ class StateFileInstance(MonitorInstance):
         self._stale_alerted = False
 
         # Watchdog: busy for too long → possibly stuck / waiting unnoticed.
-        if kind == "busy" and cfg.busy_alert_seconds and age > cfg.busy_alert_seconds:
-            if not self._busy_alerted:
-                emit("alert", f"{cfg.name}: busy too long",
-                     f"{tool} has been busy for {int(age)}s")
-                self._busy_alerted = True
-        elif kind != "busy":
+        # Measure from when THIS busy episode began (held across refreshes), not
+        # `age` (time since last write), which a busy producer keeps resetting.
+        if kind == "busy":
+            if self._busy_start_ts is None:
+                self._busy_start_ts = ts
+            busy_elapsed = max(0.0, now - self._busy_start_ts)
+            metrics["busy_s"] = int(busy_elapsed)
+            if cfg.busy_alert_seconds and busy_elapsed > cfg.busy_alert_seconds:
+                if not self._busy_alerted:
+                    emit("alert", f"{cfg.name}: busy too long",
+                         f"{tool} has been busy for {int(busy_elapsed)}s")
+                    self._busy_alerted = True
+        else:
+            self._busy_start_ts = None
             self._busy_alerted = False
 
         return MonitorStatus(state=state, detail=detail, metrics=metrics)

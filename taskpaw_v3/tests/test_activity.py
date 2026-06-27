@@ -88,6 +88,35 @@ def test_busy_too_long_alerts_once(tmp_path):
     assert len(alerts) == 1 and "busy too long" in alerts[0][1]
 
 
+def test_busy_duration_survives_refresh(tmp_path):
+    """Repeated busy writes (fresh ts) must not reset the busy-start clock — the
+    watchdog measures continuous busy time, not time-since-last-write (Codex #22)."""
+    f = tmp_path / "act.json"
+    inst = StateFileInstance("a1", StateFileConfig(
+        name="agent", path=str(f), busy_alert_seconds=9999))
+    _, emit = _collector()
+    _write(f, "busy", ts=time.time() - 30)
+    inst.check(emit)
+    start1 = inst._busy_start_ts
+    _write(f, "busy", ts=time.time())          # producer refreshes ts mid-turn
+    inst.check(emit)
+    start2 = inst._busy_start_ts
+    assert start1 is not None and start1 == start2  # busy-start NOT reset by refresh
+
+
+def test_busy_alerts_despite_refreshes(tmp_path):
+    """A long busy episode still alerts even when the file ts keeps refreshing."""
+    f = tmp_path / "act.json"
+    inst = StateFileInstance("a1", StateFileConfig(
+        name="agent", path=str(f), busy_alert_seconds=60))
+    events, emit = _collector()
+    _write(f, "busy", ts=time.time() - 120)   # episode began 2 min ago
+    inst.check(emit)
+    _write(f, "busy", ts=time.time())          # refresh with a brand-new ts
+    inst.check(emit)                           # still flagged busy-too-long
+    assert len([a for a, _ in events if a[0] == "alert"]) == 1
+
+
 def test_stale_file_degrades(tmp_path):
     f = tmp_path / "act.json"
     inst = StateFileInstance("a1", StateFileConfig(
