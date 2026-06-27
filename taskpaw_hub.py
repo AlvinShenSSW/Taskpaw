@@ -5,8 +5,17 @@ A macOS GUI application that polls Windows servers running TaskPaw V2,
 collects their status and events, stores in SQLite, and sends reports to OpenClaw.
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from __future__ import annotations
+
+# Guarded so the module can be imported headless (tests/CI/service) where Tk is
+# absent. The GUI only runs under `if __name__ == "__main__"`; tk is not used at
+# module/class-definition level (annotations are strings via __future__).
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, simpledialog
+except ImportError:  # pragma: no cover - headless import (no display/Tk)
+    tk = None
+    ttk = messagebox = simpledialog = None
 import os
 import random
 import sqlite3

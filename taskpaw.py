@@ -4,6 +4,8 @@ Monitors Lada / ComfyUI / download tasks etc., reports events via built-in HTTP 
 Windows system tray app with background running support.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -31,8 +33,15 @@ except ImportError:  # pragma: no cover - psutil is required for fast CPU/RAM st
     psutil = None
 
 # ── GUI ──────────────────────────────────────────────
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, scrolledtext
+# Guarded so the module can be imported headless (tests/CI/service) where Tk is
+# absent. The GUI only runs under `if __name__ == "__main__"`; tk is not used at
+# module/class-definition level (annotations are strings via __future__).
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, filedialog, scrolledtext
+except ImportError:  # pragma: no cover - headless import (no display/Tk)
+    tk = None
+    ttk = messagebox = filedialog = scrolledtext = None
 
 # =====================================================
 # Constants & Paths
