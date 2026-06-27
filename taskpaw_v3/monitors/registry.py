@@ -44,6 +44,7 @@ def default_registry() -> PluginRegistry:
     from taskpaw_v3.monitors.plugins.folder import FolderPlugin
     from taskpaw_v3.monitors.plugins.comfyui import ComfyUIPlugin
     from taskpaw_v3.monitors.plugins.custom_cmd import CustomCmdPlugin
+    from taskpaw_v3.monitors.plugins.state_file import StateFilePlugin
 
     reg = PluginRegistry()
     reg.register(ProcessPlugin())
@@ -53,4 +54,5 @@ def default_registry() -> PluginRegistry:
     reg.register(FolderPlugin())
     reg.register(ComfyUIPlugin())
     reg.register(CustomCmdPlugin())
+    reg.register(StateFilePlugin())
     return reg
