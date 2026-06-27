@@ -70,8 +70,28 @@ def run_agent(
     queue = queue or build_queue(config, state_path)
     shutdown = shutdown or GracefulShutdown()
 
+    # Build + start the monitor supervisor from config.monitors (if any), wiring
+    # its events into the same queue the Hub polls.
+    supervisor = None
+    if config.monitors:
+        from taskpaw_v3.monitors.registry import default_registry
+        from taskpaw_v3.monitors.runtime import build_supervisor
+
+        supervisor = build_supervisor(default_registry(), config.monitors, queue, config.machine)
+        supervisor.start()
+        shutdown.register("supervisor", lambda: supervisor.stop())
+
+    def _status_provider() -> dict:
+        import platform
+        return {
+            "machine": config.machine,
+            "server_id": config.server_id,
+            "os": platform.platform(),
+            "monitors": supervisor.snapshot() if supervisor else {},
+        }
+
     net = uvicorn.Server(
-        uvicorn.Config(create_network_app(config, queue), log_level="warning")
+        uvicorn.Config(create_network_app(config, queue, _status_provider), log_level="warning")
     )
     ctl = uvicorn.Server(
         uvicorn.Config(create_control_app(config), log_level="warning")

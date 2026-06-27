@@ -1,0 +1,55 @@
+"""Wire a Supervisor to an agent EventQueue, and build one from agent config.
+
+The Supervisor's sink signature is (level, title, message, data, dedupe_key);
+the agent EventQueue.add is (monitor, message, level, title, data). This adapter
+bridges them so monitor events flow into the same queue the Hub polls.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Iterable
+
+from taskpaw_v3.core.protocol import EventQueue
+from taskpaw_v3.monitors.registry import PluginRegistry
+from taskpaw_v3.monitors.supervisor import Supervisor
+
+log = logging.getLogger("taskpaw.monitors.runtime")
+
+
+def make_queue_sink(queue: EventQueue, machine: str):
+    """Adapter: Supervisor sink → EventQueue.add (additive level/title/data)."""
+    def sink(level: str, title: str, message: str, data=None, dedupe_key=None) -> None:
+        # The supervisor sink doesn't carry the instance id; the title is the
+        # human label ("<name> down" / "<name> degraded"), which we use as the
+        # monitor field for the V2-compatible event.
+        monitor = title or "monitor"
+        lvl = level if level in {"info", "warn", "alert", "done"} else None
+        try:
+            queue.add(monitor=monitor, message=message, level=lvl, title=title, data=data)
+        except Exception as e:
+            log.error("failed to enqueue monitor event %r: %s", title, e)
+    return sink
+
+
+def build_supervisor(
+    registry: PluginRegistry,
+    monitors: Iterable[dict[str, Any]],
+    queue: EventQueue,
+    machine: str,
+) -> Supervisor:
+    """Build (not start) a Supervisor from a list of {type_id, config} specs.
+
+    Each spec's config is validated by the plugin's pydantic model (server-side
+    authority). Unknown type_ids and invalid configs raise — the caller decides
+    whether to fail the whole agent or skip the bad monitor.
+    """
+    sup = Supervisor(sink=make_queue_sink(queue, machine))
+    for spec in monitors:
+        type_id = spec.get("type_id")
+        if not type_id or not registry.has(type_id):
+            raise ValueError(f"unknown monitor type_id: {type_id!r}")
+        plugin = registry.get(type_id)
+        cfg = plugin.validate_config(spec.get("config", {}))
+        sup.register(plugin, cfg)
+    return sup
