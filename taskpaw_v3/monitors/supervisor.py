@@ -134,7 +134,7 @@ class Supervisor:
         if self._watchdog:
             self._watchdog.join(timeout=max(0.0, deadline - time.monotonic()))
 
-    def reconfigure(self, instance_id: str, config: BaseMonitorConfig) -> None:
+    def reconfigure(self, instance_id: str, config: BaseMonitorConfig, stop_timeout: float = 10.0) -> None:
         # Whole sequence serialized so a worker can't run against a half-swapped
         # entry and a concurrent reconfigure can't interleave.
         with self._life:
@@ -145,11 +145,14 @@ class Supervisor:
                 plugin, old_instance, old_thread, old_stop = m.plugin, m.instance, m.thread, m.stop
             old_stop.set()
             if old_thread:
-                old_thread.join(timeout=10)
+                old_thread.join(timeout=stop_timeout)
                 if old_thread.is_alive():
-                    # Don't cleanup/replace under a live worker. Surface the
-                    # failure so the control layer can retry, rather than
-                    # silently leaving the old config in place.
+                    # The old worker is stuck (e.g. a long check). Abort WITHOUT
+                    # killing it: clear the stop flag so it keeps running on the
+                    # OLD config, and surface the failure for the caller to retry.
+                    # (Leaving stop set would let the worker exit when the check
+                    # finally returns, with the watchdog unable to restart it.)
+                    old_stop.clear()
                     raise RuntimeError(
                         f"reconfigure of {instance_id} aborted: old worker did not stop"
                     )

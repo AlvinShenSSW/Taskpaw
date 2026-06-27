@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -355,3 +356,31 @@ def test_config_validators_grace_and_pattern():
         HeartbeatConfig(name="h", path="")  # empty path
     with pytest.raises(ValidationError):
         ProcessConfig(name="p", pattern="")  # empty pattern
+
+
+def test_reconfigure_abort_keeps_old_monitor_running():
+    """If the old worker is stuck (long check), an aborted reconfigure must NOT
+    kill it — stop is cleared so it keeps running on the old config."""
+    release = threading.Event()
+    entered = threading.Event()
+
+    def blocking_check(emit):
+        entered.set()
+        release.wait(timeout=5)  # simulate a long check
+        return MonitorStatus(state="ok")
+
+    sup = Supervisor(sink=lambda *a: None)
+    sup.register(_FakePlugin(blocking_check), _FakeConfig(name="f", poll_interval=1))
+    sup.start()
+    try:
+        assert entered.wait(timeout=3)  # worker is inside the blocking check
+        old = sup._monitors["f"]
+        with pytest.raises(RuntimeError):
+            sup.reconfigure("f", _FakeConfig(name="f", poll_interval=2), stop_timeout=0.3)
+        # Old entry preserved, stop cleared, worker still alive.
+        assert sup._monitors["f"] is old
+        assert not old.stop.is_set()
+        assert old.thread.is_alive()
+    finally:
+        release.set()
+        sup.stop()
