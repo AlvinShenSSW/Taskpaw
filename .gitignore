@@ -14,3 +14,10 @@ dist/
 
 # Logs / local state
 *.log
+
+# V3 frontend / Tauri shell build artifacts
+taskpaw_v3/ui/node_modules/
+taskpaw_v3/ui/dist/
+taskpaw_v3/src-tauri/target/
+taskpaw_v3/src-tauri/gen/
+taskpaw_v3/ui/package-lock.json
