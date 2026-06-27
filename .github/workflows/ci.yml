@@ -31,7 +31,7 @@ jobs:
         run: uv lock --check
 
       - name: Sync dev environment
-        run: uv sync --group dev --python ${{ matrix.python-version }}
+        run: uv sync --group dev --extra v3 --python ${{ matrix.python-version }}
 
       - name: Run tests
         run: uv run --python ${{ matrix.python-version }} pytest
