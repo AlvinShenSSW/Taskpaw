@@ -1,0 +1,54 @@
+# TaskPaw V3 agent config — copy to the platform location and edit:
+#   macOS   : ~/Library/Application Support/TaskPaw/agent.yaml
+#   Windows : %APPDATA%\TaskPaw\agent.yaml
+#   Linux   : /etc/taskpaw/agent.yaml
+# Run headless with:  python -m taskpaw_v3.agent
+
+server_id: moomoo-agent        # stable unique id for this agent
+machine: moomoo                # display name shown on the Hub
+
+# Network read API the Hub polls. Loopback by default (secure). To let the Hub
+# on another machine reach it, set bind_host to THIS machine's LAN IP — never
+# 0.0.0.0 / a public IP (constitution §2). Keep it on a trusted LAN / Tailscale.
+bind_host: 127.0.0.1           # e.g. 192.168.1.50 to expose to the Hub
+bind_port: 5680
+
+# Local control API (start/stop, edit) — loopback only, enforced.
+control_host: 127.0.0.1
+control_port: 5681
+
+# Bearer token. Empty = open (V2 parity, fine on a trusted LAN). If set, the
+# Hub's polling_token MUST match.
+api_token: ""
+
+# Auto-run a host_metrics self-monitor (CPU/mem/disk/net; GPU+VRAM on Windows).
+host_metrics: true
+
+# Monitor instances. Empty by default — with host_metrics:true above you already
+# get CPU/mem/disk/net (GPU+VRAM on Windows) with nothing else configured. Paste
+# your real monitors from `python -m taskpaw_v3.migrate --yaml`, or uncomment and
+# adapt the samples below (each is {type_id, name, config}). Don't ship the
+# samples as-is — the paths/processes won't exist and will emit spurious alerts.
+monitors: []
+#  - type_id: process
+#    name: PM2 daemon
+#    config:
+#      name: PM2 daemon
+#      pattern: ^PM2.*God$
+#      search_cmdline: true
+#  - type_id: comfyui
+#    name: ComfyUI
+#    config:
+#      name: ComfyUI
+#      host: 127.0.0.1
+#      port: 8188
+#      idle_confirm: 3
+#      stuck_checks: 0          # >0 to alert on a prompt stuck that many polls
+#  - type_id: folder
+#    name: Downloads
+#    config:
+#      name: Downloads
+#      path: D:/downloads
+#      extensions: [mp4, mkv]
+#      stable_seconds: 30
+#      poll_interval: 1

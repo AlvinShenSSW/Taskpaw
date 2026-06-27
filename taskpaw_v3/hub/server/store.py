@@ -152,6 +152,37 @@ class HubStore:
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+    def set_server_enabled(self, server_id: int, enabled: bool) -> bool:
+        """Enable/disable polling of a server. Returns True if a row changed."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE servers SET enabled=? WHERE id=?", (int(enabled), server_id)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def remove_server(self, server_id: int) -> bool:
+        """Delete a server, its status_log/events (FK cascade), AND its queued
+        OpenClaw deliveries. `delivery_outbox` keys on server_name with no FK, so
+        cascade misses it — purge those rows explicitly or removed agents keep
+        firing notifications. Returns True if a server row was removed."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT name FROM servers WHERE id=?", (server_id,)
+                ).fetchone()
+                if row is None:
+                    return False
+                self._conn.execute(
+                    "DELETE FROM delivery_outbox WHERE server_name=?", (row[0],)
+                )
+                cur = self._conn.execute("DELETE FROM servers WHERE id=?", (server_id,))
+                self._conn.commit()
+                return cur.rowcount > 0
+            except Exception:
+                self._conn.rollback()
+                raise
+
     # ── events ────────────────────────────────────────────────────────────
     def store_event(self, server_id: int, ev: dict) -> None:
         """Idempotent on (server_id, event_id) — at-least-once delivery may
