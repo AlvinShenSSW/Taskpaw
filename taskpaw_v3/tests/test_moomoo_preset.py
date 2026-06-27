@@ -85,3 +85,42 @@ def test_queue_sink_drops_unknown_level_gracefully():
     ev = q.payload(ack_id=0)["events"][0]
     assert "level" not in ev  # add_event only includes level when valid/provided
     assert ev["monitor"] == "inst"
+
+
+def test_failed_enqueue_not_marked_delivered_so_keyed_alert_retries():
+    """If queue.add fails, the supervisor must NOT record the dedupe key (else a
+    never-queued keyed alert is permanently suppressed)."""
+    from taskpaw_v3.monitors.supervisor import Supervisor
+    from taskpaw_v3.monitors.base import MonitorPlugin, MonitorInstance, BaseMonitorConfig, MonitorStatus
+
+    class _Cfg(BaseMonitorConfig):
+        pass
+    class _Inst(MonitorInstance):
+        def check(self, emit):
+            return MonitorStatus(state="ok")
+    class _Plug(MonitorPlugin):
+        type_id = "x"
+        @classmethod
+        def config_model(cls):
+            return _Cfg
+        def create(self, iid, cfg):
+            return _Inst(iid, cfg)
+
+    q = EventQueue("m")
+    sink = make_queue_sink(q, "m")
+    sup = Supervisor(sink=sink)
+    sup.register(_Plug(), _Cfg(name="f"))
+
+    calls = {"n": 0}
+    orig_add = q.add
+    def flaky_add(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")  # first delivery fails
+        return orig_add(*a, **k)
+    q.add = flaky_add  # type: ignore[assignment]
+
+    sup._emit("f", "alert", "f degraded", "msg", None, "f:degraded")  # add fails → not recorded
+    assert "f:degraded" not in sup._monitors["f"].seen_dedupe
+    sup._emit("f", "alert", "f degraded", "msg", None, "f:degraded")  # retries, succeeds now
+    assert q.payload(ack_id=0)["events"]  # delivered on retry

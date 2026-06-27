@@ -1,20 +1,18 @@
 """Wire a Supervisor to an agent EventQueue, and build one from agent config.
 
-The Supervisor's sink signature is (level, title, message, data, dedupe_key);
-the agent EventQueue.add is (monitor, message, level, title, data). This adapter
-bridges them so monitor events flow into the same queue the Hub polls.
+The Supervisor's sink signature is (instance_id, level, title, message, data,
+dedupe_key); the agent EventQueue.add is (monitor, message, level, title, data).
+This adapter bridges them (monitor = the stable instance_id) so monitor events
+flow into the same queue the Hub polls.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Iterable
 
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.supervisor import Supervisor
-
-log = logging.getLogger("taskpaw.monitors.runtime")
 
 
 def make_queue_sink(queue: EventQueue, machine: str):
@@ -26,10 +24,11 @@ def make_queue_sink(queue: EventQueue, machine: str):
     def sink(instance_id: str, level: str, title: str, message: str,
              data=None, dedupe_key=None) -> None:
         lvl = level if level in {"info", "warn", "alert", "done"} else None
-        try:
-            queue.add(monitor=instance_id, message=message, level=lvl, title=title, data=data)
-        except Exception as e:
-            log.error("failed to enqueue monitor event %r: %s", instance_id, e)
+        # Do NOT swallow: if enqueue fails (e.g. the counter persist errors), let
+        # it propagate to Supervisor._safe_sink, which logs it and returns failure
+        # so the dedupe key is NOT recorded and the keyed alert can retry. Catching
+        # here would make a never-queued alert look delivered → permanent suppression.
+        queue.add(monitor=instance_id, message=message, level=lvl, title=title, data=data)
     return sink
 
 
