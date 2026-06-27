@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from pydantic import Field
+
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -24,10 +26,10 @@ from taskpaw_v3.monitors.base import (
 
 
 class HeartbeatConfig(BaseMonitorConfig):
-    path: str
+    path: str = Field(..., min_length=1)
     status_field: str = "status"
     due_field: str = "next_check_due_utc"
-    grace_seconds: float = 300.0
+    grace_seconds: float = Field(300.0, ge=0)
     hibernating_states: list[str] = ["hibernating", "sleeping", "paused"]
 
 

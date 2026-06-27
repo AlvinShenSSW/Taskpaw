@@ -324,3 +324,34 @@ def test_config_forbids_unknown_keys():
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         TcpCheckConfig(name="t", port=1, typoo_field=123)
+
+
+def test_supervisor_watchdog_restarts_dead_worker():
+    """A worker that dies unexpectedly is restarted by the watchdog."""
+    starts = []
+    def behavior(emit):
+        starts.append(1)
+        if len(starts) == 1:
+            raise SystemExit("simulate unexpected thread death")  # kills the worker
+        return MonitorStatus(state="ok")
+    # SystemExit isn't caught by the check try/except (BaseException) → thread dies.
+    sup = Supervisor(sink=lambda *a: None)
+    sup.register(_FakePlugin(behavior), _FakeConfig(name="f", poll_interval=1))
+    sup.start()
+    try:
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline and len(starts) < 2:
+            time.sleep(0.1)
+        assert len(starts) >= 2  # watchdog restarted it
+    finally:
+        sup.stop()
+
+
+def test_config_validators_grace_and_pattern():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        HeartbeatConfig(name="h", path="/x", grace_seconds=-1)
+    with pytest.raises(ValidationError):
+        HeartbeatConfig(name="h", path="")  # empty path
+    with pytest.raises(ValidationError):
+        ProcessConfig(name="p", pattern="")  # empty pattern
