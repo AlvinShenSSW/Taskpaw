@@ -124,7 +124,16 @@ def _map_process(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
     proc = (w.get("process_name") or "").strip()
     if not proc:
         return [], [f"process watcher {name!r} has no process_name set"]
-    cfg: dict[str, Any] = {"name": name, "pattern": re.escape(proc), "category_label": "service"}
+    # V2 matched on exact process NAME equality (case-insensitive), not substring
+    # and not the command line. Anchor the regex and disable cmdline search so an
+    # unrelated process merely containing this name can't mask a real outage
+    # (the plugin compiles with re.IGNORECASE) (Codex #20 r8).
+    cfg: dict[str, Any] = {
+        "name": name,
+        "pattern": f"^{re.escape(proc)}$",
+        "search_cmdline": False,
+        "category_label": "service",
+    }
     warn = (f"process watcher {name!r}: V2 sent neutral start/exit notifications; "
             f"V3 treats the process being absent as an alert (and recovery as "
             f"done). Review severity, or disable if it was a short-lived task.")

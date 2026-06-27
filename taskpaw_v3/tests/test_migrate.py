@@ -57,7 +57,9 @@ def test_generic_process_watcher_maps_to_process():
     plan = migrate_config({"watchers": [_w(watcher_type="process", name="PM2",
                                            process_name="pm2 God")]})
     m = plan.monitors[0]
-    assert m.type_id == "process" and m.config["pattern"] == r"pm2\ God"
+    # anchored exact-name match, no cmdline search — preserves V2 semantics (Codex r8)
+    assert m.type_id == "process" and m.config["pattern"] == r"^pm2\ God$"
+    assert m.config["search_cmdline"] is False
     assert m.config["category_label"] == "service"
     # mapped, but the operator is warned the severity semantics differ (Codex r5)
     assert any("neutral start/exit" in w.reason for w in plan.warnings)
