@@ -116,7 +116,7 @@ def run_agent(
         uvicorn.Config(create_network_app(config, queue, _status_provider), log_level="warning")
     )
     ctl = uvicorn.Server(
-        uvicorn.Config(create_control_app(config), log_level="warning")
+        uvicorn.Config(create_control_app(config, status_provider=_status_provider), log_level="warning")
     )
 
     def _serve(server, sock, label):

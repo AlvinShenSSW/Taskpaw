@@ -1,0 +1,27 @@
+[package]
+name = "taskpaw"
+version = "3.0.0"
+description = "TaskPaw V3 desktop shell"
+authors = ["TaskPaw"]
+edition = "2021"
+
+# Desktop binary-only crate (the entry point is src/main.rs). No [lib] target —
+# declaring one without a src/lib.rs would break cargo build/check.
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SIGTERM for graceful backend shutdown (so the backend's GracefulShutdown can
+# stop its supervisor + managed child processes before we force-kill).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Job Object so the whole backend process tree is killed when the shell exits
+# (Windows "X = exit, no residual processes").
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_Foundation", "Win32_Security"] }

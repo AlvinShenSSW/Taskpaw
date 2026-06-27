@@ -104,7 +104,10 @@ class HubService:
 
 
 def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubService]:
+    from taskpaw_v3.core.cors import add_ui_cors
+
     app = FastAPI(title="TaskPaw Hub", docs_url=None, redoc_url=None)
+    add_ui_cors(app)  # the Hub dashboard UI talks to this API (design §3.2)
     service = HubService(config, store)
 
     @app.get("/ping")

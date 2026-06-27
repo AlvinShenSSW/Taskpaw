@@ -76,13 +76,25 @@ def create_network_app(
 def create_control_app(
     config: AgentConfig,
     on_command: Optional[Callable[[str, dict], dict]] = None,
+    status_provider: Optional[Callable[[], dict]] = None,
 ) -> FastAPI:
-    """Loopback-only control API. #15 ships a minimal surface; #17/#5 extend it."""
+    """Loopback-only control API for the local UI (agent console). CORS is opened
+    for the desktop UI origins here (NOT on the network API)."""
+    from taskpaw_v3.core.cors import add_ui_cors
+
     app = FastAPI(title="TaskPaw Agent Control", docs_url=None, redoc_url=None)
+    add_ui_cors(app)
 
     @app.get("/control/ping")
     def ping() -> dict:
         return {"ok": True}
+
+    @app.get("/control/status")
+    def control_status() -> dict:
+        # The agent console reads status from the loopback control API.
+        if status_provider is not None:
+            return status_provider()
+        return {"machine": config.machine, "server_id": config.server_id, "monitors": {}}
 
     @app.get("/control/config")
     def get_config() -> dict:
