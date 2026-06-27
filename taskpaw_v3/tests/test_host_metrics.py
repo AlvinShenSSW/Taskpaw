@@ -194,3 +194,28 @@ def test_supervisor_snapshot_includes_metrics(monkeypatch):
     snap = sup.snapshot()["host"]
     assert "metrics" in snap and snap["metrics"]["cpu_pct"] == 11.0
     assert snap["metrics"]["mem_pct"] == 22.0
+
+
+def test_effective_monitors_avoids_name_collision():
+    from taskpaw_v3.agent.server.launcher import effective_monitors
+    from taskpaw_v3.core.config import AgentConfig
+    # an existing monitor already occupies "dev-host"
+    cfg = AgentConfig(server_id="s", machine="dev",
+                      monitors=[{"type_id": "tcp_check", "config": {"name": "dev-host", "port": 22}}])
+    mons = effective_monitors(cfg)
+    names = [(m.get("config") or {}).get("name") for m in mons]
+    assert names.count("dev-host") == 1            # the existing one
+    hm_name = [m["config"]["name"] for m in mons if m["type_id"] == "host_metrics"][0]
+    assert hm_name == "dev-host-1"                 # injected one got a free name
+
+
+def test_host_metrics_recovery_message_not_threshold_claim(monkeypatch):
+    monkeypatch.setattr(hm, "read_gpu", lambda: None)
+    events = []
+    monkeypatch.setattr(hm, "psutil", fake_psutil(mem=99.0))
+    inst = HostMetricsPlugin().create("host", HostMetricsConfig(name="host"))
+    inst.check(lambda *a, **k: events.append(a))          # breach
+    monkeypatch.setattr(hm, "psutil", fake_psutil(mem=40.0))
+    inst.check(lambda *a, **k: events.append(a))          # recover
+    done = [e for e in events if e[0] == "done" and "memory" in e[1]][0]
+    assert "≥" not in done[2] and "back to 40%" in done[2]

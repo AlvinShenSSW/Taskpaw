@@ -83,14 +83,15 @@ class HostMetricsInstance(MonitorInstance):
         self._cpu_breaches = 0
         self._alerted: set[str] = set()  # which metrics are currently in alert
 
-    def _emit_threshold(self, emit, metric: str, breached: bool, msg: str) -> None:
-        """Edge-triggered alert/recovery per metric (dedupe by metric name)."""
+    def _emit_threshold(self, emit, metric: str, breached: bool, breach_msg: str, recover_msg: str) -> None:
+        """Edge-triggered alert/recovery per metric (separate messages so the
+        recovery 'done' doesn't claim the threshold is still exceeded)."""
         if breached and metric not in self._alerted:
             self._alerted.add(metric)
-            emit("alert", f"{self.config.name}: {metric} high", msg, dedupe_key=None)
+            emit("alert", f"{self.config.name}: {metric} high", breach_msg, dedupe_key=None)
         elif not breached and metric in self._alerted:
             self._alerted.discard(metric)
-            emit("done", f"{self.config.name}: {metric} recovered", msg, dedupe_key=None)
+            emit("done", f"{self.config.name}: {metric} recovered", recover_msg, dedupe_key=None)
 
     def check(self, emit: EventEmitter) -> MonitorStatus:
         if psutil is None:
@@ -118,12 +119,18 @@ class HostMetricsInstance(MonitorInstance):
             self._cpu_breaches += 1
         else:
             self._cpu_breaches = 0
-        self._emit_threshold(emit, "cpu", self._cpu_breaches >= cfg.cpu_sustained_cycles,
-                             f"CPU {cpu:.0f}% ≥ {cfg.cpu_alert_pct:.0f}% for {self._cpu_breaches} cycles")
-        self._emit_threshold(emit, "memory", mem >= cfg.mem_alert_pct,
-                             f"memory {mem:.0f}% ≥ {cfg.mem_alert_pct:.0f}%")
-        self._emit_threshold(emit, "disk", disk >= cfg.disk_alert_pct,
-                             f"disk {disk:.0f}% ≥ {cfg.disk_alert_pct:.0f}%")
+        self._emit_threshold(
+            emit, "cpu", self._cpu_breaches >= cfg.cpu_sustained_cycles,
+            f"CPU {cpu:.0f}% ≥ {cfg.cpu_alert_pct:.0f}% for {self._cpu_breaches} cycles",
+            f"CPU back to {cpu:.0f}% (< {cfg.cpu_alert_pct:.0f}%)")
+        self._emit_threshold(
+            emit, "memory", mem >= cfg.mem_alert_pct,
+            f"memory {mem:.0f}% ≥ {cfg.mem_alert_pct:.0f}%",
+            f"memory back to {mem:.0f}% (< {cfg.mem_alert_pct:.0f}%)")
+        self._emit_threshold(
+            emit, "disk", disk >= cfg.disk_alert_pct,
+            f"disk {disk:.0f}% ≥ {cfg.disk_alert_pct:.0f}%",
+            f"disk back to {disk:.0f}% (< {cfg.disk_alert_pct:.0f}%)")
 
         # A breached threshold is a "degraded" status (a valid MonitorStatus
         # state); "warn"/"alert" are EVENT levels, not statuses.
