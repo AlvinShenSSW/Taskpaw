@@ -106,6 +106,38 @@ def test_folder_resets_on_size_change(tmp_path):
     assert [a for a, _ in events if a[0] == "done"]
 
 
+def test_folder_baselines_existing_files_on_start(tmp_path):
+    """Files already present at start() must NOT replay completions — only new
+    arrivals fire (Codex #20 r4)."""
+    (tmp_path / "old1.mp4").write_bytes(b"abc")
+    (tmp_path / "old2.mp4").write_bytes(b"def")
+    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    events, emit = _collector()
+    inst.start(emit)            # baseline the two existing files
+    inst.check(emit)
+    inst.check(emit)
+    assert not [a for a, _ in events if a[0] == "done"]  # no replay
+    # a NEW file after start still completes
+    (tmp_path / "new.mp4").write_bytes(b"xyz")
+    inst.check(emit)
+    inst.check(emit)
+    done = [a for a, _ in events if a[0] == "done"]
+    assert len(done) == 1 and "new.mp4" in done[0][2]
+
+
+def test_folder_start_zero_byte_not_baselined(tmp_path):
+    """A 0-byte placeholder present at start fires once it gets real content."""
+    f = tmp_path / "dl.mp4"
+    f.write_bytes(b"")
+    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    events, emit = _collector()
+    inst.start(emit)
+    f.write_bytes(b"data")      # download fills in
+    inst.check(emit)
+    inst.check(emit)
+    assert [a for a, _ in events if a[0] == "done"]
+
+
 def test_folder_reused_filename_refires(tmp_path):
     """A completed file that's deleted then recreated with the same name must
     fire again, not be skipped by a stale completed record (Codex #20)."""

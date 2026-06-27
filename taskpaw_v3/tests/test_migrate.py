@@ -103,10 +103,18 @@ def test_incomplete_watcher_warns():
     assert not plan.monitors and plan.warnings
 
 
-def test_disabled_flag_carried():
-    plan = migrate_config({"watchers": [_w(watcher_type="custom_cmd", name="c",
-                                           custom_command="x", enabled=False)]})
+def test_disabled_flag_carried_but_excluded_from_runtime():
+    plan = migrate_config({"watchers": [
+        _w(watcher_type="custom_cmd", name="off", custom_command="x", enabled=False),
+        _w(watcher_type="custom_cmd", name="on", custom_command="y", enabled=True),
+    ]})
     assert plan.monitors[0].enabled is False
+    # disabled watcher is in monitors (preview) but NOT in the runnable set
+    runtime = plan.to_runtime_monitors()
+    names = [m["name"] for m in runtime]
+    assert names == ["on"]
+    assert all(set(m) == {"type_id", "name", "config"} for m in runtime)
+    assert any("disabled in V2" in w.reason for w in plan.warnings)
 
 
 def test_poll_interval_carried_when_sane():

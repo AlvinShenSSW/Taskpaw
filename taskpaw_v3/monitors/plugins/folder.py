@@ -41,6 +41,25 @@ class FolderInstance(MonitorInstance):
             return True
         return name.rsplit(".", 1)[-1].lower() in exts if "." in name else False
 
+    def start(self, emit: EventEmitter) -> None:
+        """Baseline the files already present so we only notify on NEW arrivals
+        — never replay historical completions on startup (V2 took a start
+        snapshot; Codex #20 r4). Files here at start are recorded completed."""
+        cfg: FolderConfig = self.config  # type: ignore[assignment]
+        base = Path(cfg.path).expanduser()
+        try:
+            entries = list(base.iterdir())
+        except OSError:
+            return  # dir missing/unreadable now; check() will surface the error
+        for p in entries:
+            try:
+                if p.is_file() and self._matches(p.name):
+                    size = p.stat().st_size
+                    if size > 0:  # 0-byte placeholders aren't completions (see check)
+                        self._files[p.name] = [size, 0.0, True]
+            except OSError:
+                continue
+
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: FolderConfig = self.config  # type: ignore[assignment]
         base = Path(cfg.path).expanduser()

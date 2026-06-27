@@ -55,6 +55,17 @@ class MigrationPlan:
     def is_clean(self) -> bool:
         return not self.warnings
 
+    def to_runtime_monitors(self) -> list[dict]:
+        """Only the ENABLED monitors, in the `{type_id, name, config}` shape the
+        agent's build_supervisor() consumes. Disabled V2 watchers stay in
+        `monitors` for preview but are excluded here so they never start — the
+        supervisor builder does not honor a top-level enabled flag (Codex #20 r4).
+        """
+        return [
+            {"type_id": m.type_id, "name": m.name, "config": m.config}
+            for m in self.monitors if m.enabled
+        ]
+
 
 def _split_extensions(raw: str) -> list[str]:
     """V2 stores extensions as a comma-separated string; V3 wants a list."""
@@ -167,11 +178,15 @@ def migrate_config(config: dict) -> MigrationPlan:
         specs, notes = mapper(w, name)
         for reason in notes:
             plan.warnings.append(MigrationWarning(sid, wtype, name, reason))
+        enabled = bool(w.get("enabled", True))
+        if specs and not enabled:
+            plan.warnings.append(MigrationWarning(sid, wtype, name,
+                "watcher was disabled in V2 — migrated for reference but excluded "
+                "from the runnable set (to_runtime_monitors)"))
         for type_id, mname, cfg in specs:
             plan.monitors.append(MigratedMonitor(
                 type_id=type_id, name=mname, config=cfg,
-                enabled=bool(w.get("enabled", True)),
-                source_id=sid, source_type=wtype,
+                enabled=enabled, source_id=sid, source_type=wtype,
             ))
     return plan
 
