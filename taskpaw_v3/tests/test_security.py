@@ -225,3 +225,10 @@ def test_hub_api_has_cors_for_ui_origin(tmp_path):
         assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
     finally:
         store.close()
+
+
+def test_cors_allows_windows_tauri_origin():
+    cfg = AgentConfig(server_id="s", machine="dev")
+    client = TestClient(create_control_app(cfg))
+    r = client.get("/control/ping", headers={"Origin": "http://tauri.localhost"})
+    assert r.headers.get("access-control-allow-origin") == "http://tauri.localhost"

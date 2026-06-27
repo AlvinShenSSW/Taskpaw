@@ -12,10 +12,14 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# The Tauri webview origins (per-OS) + the Vite dev server.
+# The Tauri webview origins (per-OS) + the Vite dev server. The packaged Windows
+# webview uses http://tauri.localhost; macOS/Linux use tauri://localhost (and
+# https://tauri.localhost in some configs) — include all so the bearer-gated
+# preflight passes on every platform.
 UI_ORIGINS = [
     "tauri://localhost",
     "https://tauri.localhost",
+    "http://tauri.localhost",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
