@@ -21,3 +21,4 @@ taskpaw_v3/ui/dist/
 taskpaw_v3/src-tauri/target/
 taskpaw_v3/src-tauri/gen/
 taskpaw_v3/ui/package-lock.json
+taskpaw_v3/ui/*.tsbuildinfo
