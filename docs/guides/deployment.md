@@ -35,6 +35,34 @@ Commands below assume that environment is active (or prefixed with `uv run`).
 
 ---
 
+## One-click setup (recommended)
+
+Don't hand-type the steps — use the wrappers in `scripts/`, which install deps,
+scaffold the config, register agents, and start the service:
+
+| Machine             | Do this |
+|---------------------|---------|
+| **Mac Hub**         | edit the `AGENTS=(…)` list at the top of `scripts/setup-hub.command`, then **double-click** it (or `bash scripts/setup-hub.command`) |
+| **Mac agent**       | **double-click** `scripts/setup-agent.command` |
+| **Windows (moomoo)**| right-click `scripts\setup-agent.ps1` → **Run with PowerShell** (migrates the V2 config, scaffolds, then starts) |
+
+> First double-click on macOS may be blocked by Gatekeeper — right-click → Open
+> once, or `chmod +x scripts/*.command` (already executable in the repo).
+
+Under the hood these call the cross-platform bootstrapper, which you can also run
+directly:
+
+```bash
+python -m taskpaw_v3.bootstrap agent [--run]
+python -m taskpaw_v3.bootstrap hub --agent moomoo,192.168.1.50 --agent mac,127.0.0.1 [--run]
+```
+
+It copies the example config into place (never clobbering an existing one unless
+`--force`), registers the listed agents, and with `--run` launches the service.
+The manual steps below are the fallback / reference.
+
+---
+
 ## 1. Mac Hub machine
 
 The Hub polls agents and remembers them in its own SQLite DB (`hub.db`, created
