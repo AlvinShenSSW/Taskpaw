@@ -68,18 +68,20 @@ def test_build_supervisor_rejects_unknown_type():
 def test_queue_sink_adapter_enqueues_with_level_and_title():
     q = EventQueue("moomoo")
     sink = make_queue_sink(q, "moomoo")
-    sink("alert", "moomoo-opend down", "127.0.0.1:11111 not accepting connections")
+    # (instance_id, level, title, message)
+    sink("moomoo-opend", "alert", "moomoo-opend down", "127.0.0.1:11111 not accepting connections")
     events = q.payload(ack_id=0)["events"]
     assert len(events) == 1
     ev = events[0]
     assert ev["level"] == "alert"
     assert ev["title"] == "moomoo-opend down"
-    assert ev["monitor"] == "moomoo-opend down"
+    assert ev["monitor"] == "moomoo-opend"  # STABLE id, not the state-varying title
     assert "11111" in ev["message"]
 
 
 def test_queue_sink_drops_unknown_level_gracefully():
     q = EventQueue("m")
-    make_queue_sink(q, "m")("weird", "t", "m")  # invalid level → omitted, not crash
+    make_queue_sink(q, "m")("inst", "weird", "t", "msg")  # invalid level → omitted, not crash
     ev = q.payload(ack_id=0)["events"][0]
     assert "level" not in ev  # add_event only includes level when valid/provided
+    assert ev["monitor"] == "inst"

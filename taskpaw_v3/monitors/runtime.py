@@ -18,17 +18,18 @@ log = logging.getLogger("taskpaw.monitors.runtime")
 
 
 def make_queue_sink(queue: EventQueue, machine: str):
-    """Adapter: Supervisor sink → EventQueue.add (additive level/title/data)."""
-    def sink(level: str, title: str, message: str, data=None, dedupe_key=None) -> None:
-        # The supervisor sink doesn't carry the instance id; the title is the
-        # human label ("<name> down" / "<name> degraded"), which we use as the
-        # monitor field for the V2-compatible event.
-        monitor = title or "monitor"
+    """Adapter: Supervisor sink → EventQueue.add (additive level/title/data).
+
+    `monitor` is the STABLE instance id (so Hub history/grouping is consistent
+    across a monitor's state changes); `title` carries the display text.
+    """
+    def sink(instance_id: str, level: str, title: str, message: str,
+             data=None, dedupe_key=None) -> None:
         lvl = level if level in {"info", "warn", "alert", "done"} else None
         try:
-            queue.add(monitor=monitor, message=message, level=lvl, title=title, data=data)
+            queue.add(monitor=instance_id, message=message, level=lvl, title=title, data=data)
         except Exception as e:
-            log.error("failed to enqueue monitor event %r: %s", title, e)
+            log.error("failed to enqueue monitor event %r: %s", instance_id, e)
     return sink
 
 
