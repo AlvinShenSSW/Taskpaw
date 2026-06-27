@@ -60,6 +60,16 @@ def test_custom_port_carried(tmp_path):
     assert HubStore(Path(db)).list_servers()[0]["port"] == 5999
 
 
+@pytest.mark.parametrize("bad", ["0", "70000", "-1", "abc"])
+def test_add_server_rejects_invalid_port(tmp_path, bad):
+    """Out-of-range/non-int ports must be rejected at parse time, not persisted
+    (an invalid port makes the agent permanently unpollable) — Codex."""
+    db = _db(tmp_path)
+    with pytest.raises(SystemExit):   # argparse exits non-zero on bad type
+        main(["--db", db, "add-server", "--name", "p", "--ip", "1.1.1.1", "--port", bad])
+    assert HubStore(Path(db)).list_servers() == []
+
+
 # ── run subcommand → missing config is a clean failure, not a crash ───────--
 def test_run_missing_config_returns_1(tmp_path, capsys):
     missing = tmp_path / "nope.yaml"

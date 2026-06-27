@@ -22,6 +22,17 @@ from taskpaw_v3.hub.server.service import default_config_path, default_db_path, 
 from taskpaw_v3.hub.server.store import HubStore
 
 
+def _port(value: str) -> int:
+    """argparse type: a valid TCP port (1–65535), else a parse error."""
+    try:
+        p = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"port must be an integer, got {value!r}")
+    if not (1 <= p <= 65535):
+        raise argparse.ArgumentTypeError(f"port must be 1–65535, got {p}")
+    return p
+
+
 def _store(args) -> HubStore:
     db = Path(args.db).expanduser() if args.db else default_db_path(
         Path(args.config).expanduser() if args.config else default_config_path())
@@ -52,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     p_add = sub.add_parser("add-server", help="register an agent to poll")
     p_add.add_argument("--name", required=True)
     p_add.add_argument("--ip", required=True, help="agent LAN IP (its bind_host)")
-    p_add.add_argument("--port", type=int, default=5680, help="agent bind_port (default 5680)")
+    p_add.add_argument("--port", type=_port, default=5680, help="agent bind_port (default 5680)")
     p_add.add_argument("--disabled", action="store_true", help="register but don't poll yet")
 
     for name in ("enable-server", "disable-server", "remove-server"):
