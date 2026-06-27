@@ -384,3 +384,19 @@ def test_reconfigure_abort_keeps_old_monitor_running():
     finally:
         release.set()
         sup.stop()
+
+
+def test_folded_summary_flushed_when_quiet_after_burst():
+    """Burst over cap then silence: the folded summary must still be delivered
+    by the periodic flush, not only by a later _emit."""
+    sink = []
+    clock = [0.0]
+    sup = Supervisor(sink=lambda *a: sink.append(a), clock=lambda: clock[0])
+    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")),
+                 _FakeConfig(name="f", max_events_per_minute=1))
+    sup._emit("f", "info", "t", "m")   # delivered
+    sup._emit("f", "info", "t", "m")   # dropped (over cap)
+    assert not any("suppressed" in s[1] for s in sink)  # not yet
+    clock[0] = 120.0
+    sup._flush_folded("f")             # periodic flush in a new, quiet window
+    assert any("suppressed" in s[1] for s in sink)

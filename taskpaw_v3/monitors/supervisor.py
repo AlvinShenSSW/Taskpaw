@@ -125,9 +125,14 @@ class Supervisor:
             for m in managed:
                 m.stop.set()
             for m in managed:
+                # Call instance.stop() FIRST: for a monitor whose stop() closes a
+                # socket/file/subprocess to unblock a running check(), this lets
+                # the worker break out of a blocking check; THEN we join it. Doing
+                # it the other way could burn the budget joining a still-blocked
+                # worker and return with the thread alive + resources held.
+                self._cleanup_instance(m.instance, max(0.0, deadline - time.monotonic()))
                 if m.thread:
                     m.thread.join(timeout=max(0.0, deadline - time.monotonic()))
-                self._cleanup_instance(m.instance, max(0.0, deadline - time.monotonic()))
         finally:
             if acquired:
                 self._life.release()
@@ -193,6 +198,9 @@ class Supervisor:
             with self._lock:
                 if self._monitors.get(instance_id) is not m:
                     return
+            # Flush a pending rate-limit summary even in the burst-then-quiet case
+            # (where no later _emit would otherwise roll the window).
+            self._flush_folded(instance_id)
             # Wallclock cadence (constitution §4): deadline set BEFORE check, so
             # the interval is poll_interval, not poll_interval + check duration.
             iter_start = time.monotonic()
@@ -278,6 +286,25 @@ class Supervisor:
         def emit(level, title, message, data=None, dedupe_key=None):
             self._emit(instance_id, level, title, message, data, dedupe_key)
         return emit
+
+    def _flush_folded(self, instance_id) -> None:
+        """If the rate-limit window rolled over with suppressed events pending,
+        emit the folded summary now (even with no new event to trigger it)."""
+        folded = None
+        with self._lock:
+            m = self._monitors.get(instance_id)
+            if m is None:
+                return
+            window = int(self._clock() // 60)
+            if window != m.last_emit_window:
+                if m.dropped_in_window:
+                    folded = (f"{instance_id}: {m.dropped_in_window} suppressed",
+                              f"{m.dropped_in_window} events folded (rate limit)")
+                    m.dropped_in_window = 0
+                m.last_emit_window = window
+                m.emit_count = 0
+        if folded is not None:
+            self._safe_sink("warn", folded[0], folded[1], None, None)
 
     def _safe_sink(self, level, title, message, data=None, dedupe_key=None) -> bool:
         """Call the sink, isolating its exceptions (a bad sink must not degrade a
