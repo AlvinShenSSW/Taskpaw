@@ -282,3 +282,20 @@ def test_hub_outbox_dead_letters_once_after_attempt_cap(tmp_path, monkeypatch):
         assert "dead-lettered" in alerts[0]
     finally:
         db._conn.close()
+
+
+def test_agent_event_queue_capped(tmp_path, monkeypatch):
+    """clear-on-ack retains events until acked; the queue must not grow without
+    bound when the Hub never acks. Oldest events are dropped past the cap."""
+    taskpaw = import_taskpaw(tmp_path, monkeypatch)
+    monkeypatch.setattr(taskpaw, "MAX_EVENTS_QUEUE", 5)
+    taskpaw._events_queue.clear()
+    taskpaw._next_event_id = 1
+
+    for i in range(8):
+        taskpaw.add_event("machine", "monitor", f"evt-{i}")
+
+    # Never acked, but capped at 5 with the oldest dropped.
+    assert len(taskpaw._events_queue) == 5
+    ids = [e["id"] for e in taskpaw._events_queue]
+    assert ids == [4, 5, 6, 7, 8]  # first 3 dropped, ids still monotonic

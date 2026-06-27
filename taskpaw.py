@@ -215,6 +215,13 @@ _events_queue: list[dict] = []
 _next_event_id: int = 1
 _app_start_time = datetime.now()
 
+# Safety cap on the in-memory queue. With clear-on-ack the queue retains events
+# until the Hub acks them, so a Hub that polls but never advances its ack (e.g.
+# its DB persist keeps failing) could otherwise grow it without bound. The cap
+# is far above any normal backlog; when exceeded we drop the OLDEST events (most
+# likely already delivered-but-unacked / stale) and log loudly.
+MAX_EVENTS_QUEUE = 10000
+
 
 def _load_event_state():
     """Load the next event id from disk on startup so ids keep growing
@@ -273,6 +280,14 @@ def add_event(
             evt["data"] = data
         _events_queue.append(evt)
         _next_event_id += 1
+        overflow = len(_events_queue) - MAX_EVENTS_QUEUE
+        if overflow > 0:
+            del _events_queue[:overflow]
+            log.warning(
+                "Event queue exceeded %d (Hub not acking?); dropped %d oldest event(s)",
+                MAX_EVENTS_QUEUE,
+                overflow,
+            )
     # Persist outside the lock — this hits disk and we don't want the
     # critical section to wait on I/O.
     _save_event_state()
