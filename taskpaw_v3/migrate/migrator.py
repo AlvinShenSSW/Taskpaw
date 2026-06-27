@@ -4,7 +4,10 @@ Pure functions, no I/O of its own beyond reading the two JSON paths handed in.
 The output is a `MigrationPlan` the caller can preview before writing anything.
 
 Type mapping (V2 `watcher_type` → V3 `type_id`):
-    lada       → process    (process_name → pattern; GPU handled by host_metrics)
+    lada       → folder     (Lada is a task: process-exit=done; the faithful V3
+                             signal is its output folder. No output folder →
+                             skip+warn. GPU is covered by host_metrics.)
+    process    → process    (generic; process_name → pattern, service-semantics)
     comfyui    → comfyui    (host/port/idle_confirm_count)
     folder     → folder     (watch_folder/stable_seconds/file_extensions)
     custom_cmd → custom_cmd (custom_command)
@@ -76,30 +79,26 @@ _Spec = tuple[str, str, dict]
 
 
 def _map_lada(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
-    specs: list[_Spec] = []
+    # V2 Lada is a TASK: process running = busy, process EXIT = completion (a
+    # success notification), NOT a failure. V3's `process` plugin is service-
+    # semantics (down → alert), so mapping Lada→process would turn every normal
+    # finish into a false "down" alert (Codex #20 P2 r3). The faithful V3 signal
+    # is the OUTPUT folder — a finished file appearing = done. Map to a folder
+    # monitor; if there's no output folder we can't represent it, so skip+warn.
     warnings: list[str] = []
-    proc = (w.get("process_name") or "").strip()
-    if not proc:
-        return [], [f"lada watcher {name!r} has no process_name to map to a process pattern"]
-    # V2 matched the process by literal name; escape it into a safe regex.
-    pcfg: dict[str, Any] = {"name": name, "pattern": re.escape(proc), "category_label": "task"}
-    specs.append(("process", name, _carry_common(w, pcfg)))
-
-    # V3 observes; it does not launch/manage processes (constitution). A V2 Lada
-    # watcher in managed mode (lada_cli_path / extra args / progress capture)
-    # can't be reproduced — carry the OUTPUT folder as a completion observer and
-    # warn that managed launching is dropped (Codex #20 P1).
-    out = (w.get("lada_output_folder") or "").strip()
-    if out:
-        fcfg: dict[str, Any] = {"name": f"{name} output", "path": out}
-        specs.append(("folder", f"{name} output", _carry_common(w, fcfg)))
     if (w.get("lada_cli_path") or "").strip():
         warnings.append(
             f"lada watcher {name!r} ran in managed mode (lada_cli_path set); V3 "
-            f"observes only — it is migrated as a process"
-            + (" + output-folder monitor" if out else "")
-            + ", and will NOT launch lada-cli")
-    return specs, warnings
+            f"observes only and will NOT launch lada-cli")
+    out = (w.get("lada_output_folder") or "").strip()
+    if not out:
+        warnings.append(
+            f"lada watcher {name!r} has no lada_output_folder; its process-exit "
+            f"completion can't be represented by a V3 plugin (the process plugin "
+            f"would alert on normal completion) — skipped, configure manually")
+        return [], warnings
+    fcfg: dict[str, Any] = {"name": name, "path": out}
+    return [("folder", name, _carry_common(w, fcfg))], warnings
 
 
 def _map_process(w: dict, name: str) -> tuple[list[_Spec], list[str]]:

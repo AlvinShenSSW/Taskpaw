@@ -17,39 +17,39 @@ def _w(**kw):
 
 
 # ── per-type mapping ─────────────────────────────────────────────────────--
-def test_lada_maps_to_process_with_escaped_pattern():
+def test_lada_maps_to_output_folder():
+    """Lada is a task (process-exit = done); the faithful V3 signal is the
+    output folder, not a service-semantics process monitor (Codex #20 r3)."""
     plan = migrate_config({"watchers": [_w(watcher_type="lada", name="Lada",
-                                           process_name="lada-cli.exe")]})
+                                           process_name="lada-cli.exe",
+                                           lada_output_folder="/out")]})
     assert not plan.warnings
     m = plan.monitors[0]
-    assert m.type_id == "process"
-    assert m.config["pattern"] == r"lada\-cli\.exe"
-    assert m.config["category_label"] == "task"
+    assert m.type_id == "folder"
+    assert m.config["path"] == "/out"
     assert m.source_type == "lada"
 
 
-def test_lada_managed_mode_adds_output_folder_and_warns():
-    """Managed Lada (lada_cli_path set) → process + output-folder observer,
+def test_lada_managed_mode_warns_but_still_maps_output_folder():
+    """Managed Lada (lada_cli_path set) → folder monitor on the output folder,
     plus a warning that V3 won't launch lada (Codex #20 P1)."""
     plan = migrate_config({"watchers": [_w(
         watcher_type="lada", name="Lada", process_name="lada-cli",
         lada_cli_path="C:/lada/lada-cli.exe",
         lada_output_folder="D:/out",
         lada_extra_args="--device cuda:1")]})
-    types = [(m.type_id, m.name) for m in plan.monitors]
-    assert ("process", "Lada") in types
-    assert ("folder", "Lada output") in types
+    assert [m.type_id for m in plan.monitors] == ["folder"]
+    assert plan.monitors[0].config["path"] == "D:/out"
     assert any("managed mode" in w.reason for w in plan.warnings)
-    # the output folder observer points at the V2 output folder
-    folder = next(m for m in plan.monitors if m.type_id == "folder")
-    assert folder.config["path"] == "D:/out"
 
 
-def test_lada_passive_mode_no_warning():
+def test_lada_without_output_folder_skipped_with_warning():
+    """No output folder → no faithful V3 signal (process plugin would false-
+    alert on completion); skip + warn rather than emit a wrong monitor."""
     plan = migrate_config({"watchers": [_w(
         watcher_type="lada", name="Lada", process_name="lada-cli")]})
-    assert not plan.warnings
-    assert [m.type_id for m in plan.monitors] == ["process"]
+    assert not plan.monitors
+    assert any("can't be represented" in w.reason for w in plan.warnings)
 
 
 def test_generic_process_watcher_maps_to_process():
@@ -124,13 +124,15 @@ def test_machine_name_preserved():
 def test_migrated_configs_validate_against_plugins():
     reg = default_registry()
     cfg = {"watchers": [
-        _w(watcher_type="lada", name="Lada", process_name="lada-cli"),
+        _w(watcher_type="lada", name="Lada", process_name="lada-cli",
+           lada_output_folder="/out"),
+        _w(watcher_type="process", name="PM2", process_name="pm2"),
         _w(watcher_type="comfyui", name="Comfy"),
         _w(watcher_type="folder", name="DL", watch_folder="/tmp", file_extensions="mp4"),
         _w(watcher_type="custom_cmd", name="C", custom_command="echo hi"),
     ]}
     plan = migrate_config(cfg)
-    assert len(plan.monitors) == 4
+    assert len(plan.monitors) == 5
     for m in plan.monitors:
         plugin = reg.get(m.type_id)
         validated = plugin.validate_config(m.config)  # raises on bad mapping
