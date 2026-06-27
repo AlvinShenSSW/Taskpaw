@@ -19,7 +19,7 @@ from typing import Any, Literal, Optional, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-Category = Literal["task", "service"]
+Category = Literal["task", "service", "both"]
 State = Literal["unknown", "ok", "idle", "running", "degraded", "error", "stopped"]
 
 

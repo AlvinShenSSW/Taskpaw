@@ -35,15 +35,22 @@ class PluginRegistry:
 
 
 def default_registry() -> PluginRegistry:
-    """Registry with the built-in plugins (process / heartbeat / tcp_check)."""
+    """Registry with the built-in plugins (process / heartbeat / tcp_check /
+    host_metrics) plus the V2-parity plugins (folder / comfyui / custom_cmd)."""
     from taskpaw_v3.monitors.plugins.process import ProcessPlugin
     from taskpaw_v3.monitors.plugins.heartbeat import HeartbeatPlugin
     from taskpaw_v3.monitors.plugins.tcp_check import TcpCheckPlugin
     from taskpaw_v3.monitors.plugins.host_metrics import HostMetricsPlugin
+    from taskpaw_v3.monitors.plugins.folder import FolderPlugin
+    from taskpaw_v3.monitors.plugins.comfyui import ComfyUIPlugin
+    from taskpaw_v3.monitors.plugins.custom_cmd import CustomCmdPlugin
 
     reg = PluginRegistry()
     reg.register(ProcessPlugin())
     reg.register(HeartbeatPlugin())
     reg.register(TcpCheckPlugin())
     reg.register(HostMetricsPlugin())
+    reg.register(FolderPlugin())
+    reg.register(ComfyUIPlugin())
+    reg.register(CustomCmdPlugin())
     return reg
