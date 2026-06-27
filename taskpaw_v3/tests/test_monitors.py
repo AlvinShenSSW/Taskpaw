@@ -163,7 +163,7 @@ def test_supervisor_emit_throttle_and_dedupe():
     assert len(sink) == 2
     clock[0] = 120.0  # next window flushes a folded summary
     sup._emit("f", "info", "t", "m", None, "k4")
-    assert any("suppressed" in s[1] for s in sink)
+    assert any("suppressed" in s[2] for s in sink)
 
 
 def test_supervisor_runs_check_and_snapshot():
@@ -180,7 +180,7 @@ def test_supervisor_runs_check_and_snapshot():
         time.sleep(0.2)  # immediate first check
         assert calls  # ran at least once
         assert sup.snapshot()["f"]["alive"] is True
-        assert any(s[0] == "done" for s in sink)
+        assert any(s[1] == "done" for s in sink)
     finally:
         sup.stop()
 
@@ -196,11 +196,13 @@ def test_supervisor_degrades_after_failures(monkeypatch):
     sup.register(_FakePlugin(boom), _FakeConfig(name="f", poll_interval=1))
     sup.start()
     try:
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and not sup.snapshot()["f"]["degraded"]:
+        # Wait for the ALERT to reach the sink (it's emitted just after the
+        # degraded flag is set, so waiting on the sink avoids a flag-vs-emit race).
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any("degraded" in s[2] for s in sink):
             time.sleep(0.05)
+        assert any("degraded" in s[2] for s in sink)
         assert sup.snapshot()["f"]["degraded"] is True
-        assert any("degraded" in s[1] for s in sink)
     finally:
         sup.stop()
 
@@ -215,10 +217,10 @@ def test_supervisor_throttled_keyed_event_not_permanently_suppressed():
                  _FakeConfig(name="f", max_events_per_minute=1))
     sup._emit("f", "info", "first", "m", None, "kA")   # delivered (cap=1)
     sup._emit("f", "alert", "boom", "m", None, "kB")   # over cap → dropped, not recorded
-    assert [s[2] for s in sink] == ["m"]  # only first delivered
+    assert [s[3] for s in sink] == ["m"]  # only first delivered
     clock[0] = 120.0
     sup._emit("f", "alert", "boom", "m", None, "kB")   # new window → now delivered
-    assert any(s[1] == "boom" for s in sink)  # the alert eventually got through
+    assert any(s[2] == "boom" for s in sink)  # the alert eventually got through
 
 
 def test_supervisor_reconfigure_stops_old_instance():
@@ -260,10 +262,10 @@ def test_supervisor_degraded_key_cleared_on_recovery():
     sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")), _FakeConfig(name="f"))
     sup._emit("f", "alert", "f degraded", "x", None, "f:degraded")
     sup._emit("f", "alert", "f degraded", "x", None, "f:degraded")  # deduped
-    assert sum(1 for s in sink if s[1] == "f degraded") == 1
+    assert sum(1 for s in sink if s[2] == "f degraded") == 1
     sup._monitors["f"].seen_dedupe.discard("f:degraded")  # recovery clears it
     sup._emit("f", "alert", "f degraded", "x", None, "f:degraded")  # re-alert allowed
-    assert sum(1 for s in sink if s[1] == "f degraded") == 2
+    assert sum(1 for s in sink if s[2] == "f degraded") == 2
 
 
 def test_bounded_key_set_evicts_oldest():
@@ -396,10 +398,10 @@ def test_folded_summary_flushed_when_quiet_after_burst():
                  _FakeConfig(name="f", max_events_per_minute=1))
     sup._emit("f", "info", "t", "m")   # delivered
     sup._emit("f", "info", "t", "m")   # dropped (over cap)
-    assert not any("suppressed" in s[1] for s in sink)  # not yet
+    assert not any("suppressed" in s[2] for s in sink)  # not yet
     clock[0] = 120.0
     sup._flush_folded("f")             # periodic flush in a new, quiet window
-    assert any("suppressed" in s[1] for s in sink)
+    assert any("suppressed" in s[2] for s in sink)
 
 
 def test_reconfigure_bad_config_preserves_old_monitor():
@@ -427,3 +429,15 @@ def test_reconfigure_bad_config_preserves_old_monitor():
         assert old.thread.is_alive()
     finally:
         sup.stop()
+
+
+def test_heartbeat_expands_user_path(tmp_path, monkeypatch):
+    """A ~/... heartbeat path must be expanded (Path() alone doesn't)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "hb.json").write_text(
+        json.dumps({"status": "cycling",
+                    "next_check_due_utc": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()}),
+        encoding="utf-8",
+    )
+    st = evaluate_heartbeat(HeartbeatConfig(name="hb", path="~/hb.json"))
+    assert st.state == "ok"  # resolved under HOME, not reported missing
