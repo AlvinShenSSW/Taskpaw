@@ -74,6 +74,11 @@ class MonitorInstance(abc.ABC):
     def snapshot(self) -> MonitorStatus:
         return self._status
 
+    def stop(self, timeout: float = 5.0) -> None:
+        """Release any owned resources (subprocess/socket/file watcher/tail).
+        Default no-op; override when the instance owns something. Called by the
+        supervisor on both shutdown AND reconfigure."""
+
     def reconfigure(self, config: BaseMonitorConfig) -> None:
         """Default: caller (supervisor) stop→recreate→start. Override to hot-apply."""
         self.config = config

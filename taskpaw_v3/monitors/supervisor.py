@@ -89,10 +89,7 @@ class Supervisor:
         for m in managed:
             if m.thread:
                 m.thread.join(timeout=timeout)
-            try:
-                m.instance.stop(timeout) if hasattr(m.instance, "stop") else None
-            except Exception as e:
-                log.error("instance %s stop() failed: %s", m.instance.instance_id, e)
+            self._cleanup_instance(m.instance, timeout)
         if self._watchdog:
             self._watchdog.join(timeout=timeout)
 
@@ -102,12 +99,23 @@ class Supervisor:
             if m is None:
                 raise KeyError(instance_id)
             plugin = m.plugin
+            old_instance = m.instance
         # Default semantics: stop → recreate → start.
         self._stop_worker(instance_id)
+        # Release the OLD instance's resources before replacing it (a monitor may
+        # own a subprocess/socket/tail handle) — matches stop()'s cleanup.
+        self._cleanup_instance(old_instance, 5.0)
         with self._lock:
             self._monitors[instance_id] = _Managed(plugin=plugin, instance=plugin.create(instance_id, config))
         if self._running.is_set():
             self._start_worker(instance_id)
+
+    @staticmethod
+    def _cleanup_instance(instance: MonitorInstance, timeout: float) -> None:
+        try:
+            instance.stop(timeout)
+        except Exception as e:
+            log.error("instance %s stop() failed: %s", instance.instance_id, e)
 
     # ── worker ────────────────────────────────────────────────────────────
     def _start_worker(self, instance_id: str) -> None:
@@ -177,11 +185,9 @@ class Supervisor:
         if m is None:
             return
         with self._lock:
-            # de-dupe identical keyed events
-            if dedupe_key is not None:
-                if dedupe_key in m.seen_dedupe:
-                    return
-                m.seen_dedupe.add(dedupe_key)
+            # de-dupe identical keyed events (only ones we actually delivered)
+            if dedupe_key is not None and dedupe_key in m.seen_dedupe:
+                return
             # per-minute throttle (storm → folded summary)
             window = int(self._clock() // 60)
             if window != m.last_emit_window:
@@ -193,9 +199,13 @@ class Supervisor:
                 m.last_emit_window = window
                 m.emit_count = 0
             if m.emit_count >= m.instance.config.max_events_per_minute:
+                # Dropped → do NOT record the dedupe key, so a later window can
+                # still deliver this alert (it was never forwarded).
                 m.dropped_in_window += 1
                 return
             m.emit_count += 1
+            if dedupe_key is not None:
+                m.seen_dedupe.add(dedupe_key)  # record only on actual delivery
         self._sink(level, title, message, data, dedupe_key)
 
     # ── introspection ──────────────────────────────────────────────────────

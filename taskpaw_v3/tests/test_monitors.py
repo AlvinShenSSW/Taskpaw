@@ -202,3 +202,43 @@ def test_supervisor_degrades_after_failures(monkeypatch):
         assert any("degraded" in s[1] for s in sink)
     finally:
         sup.stop()
+
+
+def test_supervisor_throttled_keyed_event_not_permanently_suppressed():
+    """A keyed alert dropped by the rate limit must NOT be recorded as seen, so a
+    later window can still deliver it (Codex 外门 P2)."""
+    sink = []
+    clock = [0.0]
+    sup = Supervisor(sink=lambda *a: sink.append(a), clock=lambda: clock[0])
+    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")),
+                 _FakeConfig(name="f", max_events_per_minute=1))
+    sup._emit("f", "info", "first", "m", None, "kA")   # delivered (cap=1)
+    sup._emit("f", "alert", "boom", "m", None, "kB")   # over cap → dropped, not recorded
+    assert [s[2] for s in sink] == ["m"]  # only first delivered
+    clock[0] = 120.0
+    sup._emit("f", "alert", "boom", "m", None, "kB")   # new window → now delivered
+    assert any(s[1] == "boom" for s in sink)  # the alert eventually got through
+
+
+def test_supervisor_reconfigure_stops_old_instance():
+    stopped = []
+
+    class _StopInstance(MonitorInstance):
+        def check(self, emit):
+            return MonitorStatus(state="ok")
+        def stop(self, timeout=5.0):
+            stopped.append(self.instance_id)
+
+    class _StopPlugin(MonitorPlugin):
+        type_id = "stoppy"
+        @classmethod
+        def config_model(cls):
+            return _FakeConfig
+        def create(self, instance_id, config):
+            return _StopInstance(instance_id, config)
+
+    sup = Supervisor(sink=lambda *a: None)
+    sup.register(_StopPlugin(), _FakeConfig(name="f", poll_interval=1))
+    sup.reconfigure("f", _FakeConfig(name="f", poll_interval=2))
+    assert stopped == ["f"]  # old instance was cleaned up before replacement
+    sup.stop()
