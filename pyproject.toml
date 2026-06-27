@@ -1,0 +1,38 @@
+[project]
+name = "taskpaw"
+version = "2.7.1"
+description = "Local AI-workflow & service monitor with reliable alerting (Windows/macOS agents + macOS Hub)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+# Only the truly cross-platform runtime dependency lives here. The system-tray
+# GUI deps are optional (see [project.optional-dependencies]) so that headless
+# environments and CI can install and test without a GUI backend.
+dependencies = [
+    "psutil>=5.9.0,<6.0.0",
+]
+
+[project.optional-dependencies]
+# System-tray support for the interactive agent (Windows/macOS desktop only).
+tray = [
+    "pystray>=0.19.0,<1.0.0",
+    "Pillow>=10.0.0,<11.0.0",
+]
+# .exe / app packaging.
+build = [
+    "pyinstaller>=6.0.0,<7.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0,<9.0.0",
+]
+
+# This repo is a set of flat scripts (taskpaw.py / taskpaw_hub.py / macsubs.py),
+# not an installable package — tell uv not to try to build/install it.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
