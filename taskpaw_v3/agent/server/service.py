@@ -11,15 +11,15 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from core.config import AgentConfig, load_yaml
-from agent.server.launcher import run_agent
+from taskpaw_v3.core.config import AgentConfig, load_yaml
+from taskpaw_v3.agent.server.launcher import run_agent
 
 
 def default_config_path() -> Path:
     if sys.platform == "win32":
-        base = Path(os.environ.get("APPDATA", Path.home())) / "TaskPaw"
+        # `or` (not get-default): APPDATA can be set to an empty string.
+        base = Path(os.environ.get("APPDATA") or Path.home()) / "TaskPaw"
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "TaskPaw"
     else:
@@ -34,7 +34,9 @@ def main() -> int:
         print(f"No agent config at {path}", file=sys.stderr)
         return 1
     config: AgentConfig = load_yaml(AgentConfig, path)  # type: ignore[assignment]
-    run_agent(config, block=True)
+    # Persist the monotonic event-id counter next to the config.
+    state_path = path.with_name("agent.state.json")
+    run_agent(config, state_path=state_path, block=True)
     return 0
 
 

@@ -44,9 +44,10 @@ class AgentConfig(BaseModel):
     @field_validator("control_host")
     @classmethod
     def _control_is_loopback(cls, v: str) -> str:
-        # The control API must never be reachable off-box.
-        if v not in {"127.0.0.1", "::1", "localhost"}:
-            raise ValueError("control_host must be loopback (127.0.0.1 / ::1 / localhost)")
+        # Numeric loopback only — "localhost" can resolve to a family that
+        # mismatches the bind probe, so reject it to avoid a false port-free.
+        if v not in {"127.0.0.1", "::1"}:
+            raise ValueError("control_host must be a numeric loopback address (127.0.0.1 / ::1)")
         return v
 
 

@@ -8,16 +8,17 @@ due index), and local-ISO timestamps compared lexically (consistent format).
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 
 def _dt(value: Optional[datetime] = None) -> str:
-    return (value or datetime.now()).isoformat(timespec="seconds")
+    """UTC ISO-8601 — tz-aware and lexically sortable, so comparisons survive
+    DST changes / clock jumps (unlike naive local time)."""
+    return (value or datetime.now(timezone.utc)).isoformat(timespec="seconds")
 
 
 class HubStore:
@@ -83,13 +84,20 @@ class HubStore:
                     last_error TEXT,
                     next_attempt_at TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    dead_letter_alerted INTEGER NOT NULL DEFAULT 0
+                    dead_letter_alerted INTEGER NOT NULL DEFAULT 0,
+                    dedupe_key TEXT
                 )
                 """
             )
             c.execute(
                 "CREATE INDEX IF NOT EXISTS idx_delivery_outbox_due "
                 "ON delivery_outbox(delivery_state, next_attempt_at)"
+            )
+            # Idempotent enqueue: at-least-once replay (crash before ack persist)
+            # must not create duplicate OpenClaw deliveries.
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_outbox_dedupe "
+                "ON delivery_outbox(dedupe_key) WHERE dedupe_key IS NOT NULL"
             )
             c.execute(
                 """
@@ -178,17 +186,23 @@ class HubStore:
         attempts: int = 0,
         last_error: Optional[str] = None,
         next_attempt_at: Optional[datetime] = None,
+        dedupe_key: Optional[str] = None,
     ) -> int:
+        """Insert a delivery. When `dedupe_key` is given, the insert is
+        idempotent (INSERT OR IGNORE on the unique partial index), so an
+        at-least-once replay after a crash does not double-deliver to OpenClaw.
+        """
+        verb = "INSERT OR IGNORE INTO" if dedupe_key is not None else "INSERT INTO"
         with self._lock:
             try:
                 cur = self._conn.execute(
-                    "INSERT INTO delivery_outbox"
+                    f"{verb} delivery_outbox"
                     "(server_name, payload_json, kind, delivery_state, attempts, "
-                    " last_error, next_attempt_at, created_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    " last_error, next_attempt_at, created_at, dedupe_key) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         server_name, payload_json, kind, delivery_state, attempts,
-                        last_error, _dt(next_attempt_at), _dt(),
+                        last_error, _dt(next_attempt_at), _dt(), dedupe_key,
                     ),
                 )
                 self._conn.commit()

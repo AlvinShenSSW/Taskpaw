@@ -6,9 +6,9 @@ import json
 
 import pytest
 
-from hub.server import poller as poller_mod
-from hub.server.poller import Poller
-from hub.server.store import HubStore
+from taskpaw_v3.hub.server import poller as poller_mod
+from taskpaw_v3.hub.server.poller import Poller
+from taskpaw_v3.hub.server.store import HubStore
 
 
 class FakeResp:
@@ -123,7 +123,7 @@ def test_poller_disabled_stores_without_outbox(tmp_path, monkeypatch):
 
 def test_outbox_dead_letters_once(tmp_path, monkeypatch):
     import urllib.error
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     s = _store(tmp_path)
     try:
@@ -131,7 +131,7 @@ def test_outbox_dead_letters_once(tmp_path, monkeypatch):
         s.enqueue_delivery(
             "agent", "event", json.dumps({"text": "x"}),
             delivery_state="failed", attempts=9,
-            next_attempt_at=datetime.now() - timedelta(seconds=1),
+            next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         )
         p = Poller(s, "http://oc/hook", get_active=lambda: True, get_token=lambda: "tok")
         alerts = []
@@ -167,3 +167,20 @@ def test_poller_uses_configured_polling_token(tmp_path):
         assert p2._auth_headers() == {"Authorization": "Bearer fromdb"}
     finally:
         s.close()
+
+
+def test_outbox_dedupe_key_idempotent(tmp_path):
+    s = _store(tmp_path)
+    try:
+        s.enqueue_delivery("agent", "event", json.dumps({"text": "x"}), dedupe_key="1:5")
+        s.enqueue_delivery("agent", "event", json.dumps({"text": "x"}), dedupe_key="1:5")
+        n = s._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0]
+        assert n == 1  # replay didn't double-enqueue
+    finally:
+        s.close()
+
+
+def test_agent_base_url_brackets_ipv6():
+    from taskpaw_v3.hub.server.poller import _agent_base_url
+    assert _agent_base_url("127.0.0.1", 5680) == "http://127.0.0.1:5680"
+    assert _agent_base_url("::1", 5680) == "http://[::1]:5680"

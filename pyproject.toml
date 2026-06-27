@@ -32,7 +32,7 @@ v3 = [
 ]
 
 [dependency-groups]
-# The dev env must be able to run the WHOLE suite (incl. taskpaw-v3/tests, which
+# The dev env must be able to run the WHOLE suite (incl. taskpaw_v3/tests, which
 # import fastapi/pydantic/yaml), so the v3 libs live here too — `uv sync --group
 # dev` + `uv run pytest` works with no extra flags. The `v3` optional-dependency
 # group remains for installing just the V3 app at runtime.
@@ -51,5 +51,5 @@ dev = [
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "taskpaw-v3/tests"]
+testpaths = ["tests", "taskpaw_v3/tests"]
 addopts = "-q"

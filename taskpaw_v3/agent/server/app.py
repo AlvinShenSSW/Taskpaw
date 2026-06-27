@@ -18,14 +18,10 @@ from typing import Any, Callable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from core.auth import token_ok
-from core.config import AgentConfig
-from core.protocol import EventQueue
+from taskpaw_v3.core.auth import token_ok
+from taskpaw_v3.core.config import AgentConfig
+from taskpaw_v3.core.protocol import EventQueue
 
 
 def _unauthorized() -> JSONResponse:

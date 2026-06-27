@@ -8,19 +8,16 @@ Tauri dashboard (#19) and richer endpoints come later.
 from __future__ import annotations
 
 import logging
-import sys
 import threading
 import time
-from pathlib import Path
 
 from fastapi import FastAPI
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from core.config import HubConfig
-from core.lifecycle import GracefulShutdown
-from hub.server.poller import Poller
-from hub.server.store import HubStore
+from taskpaw_v3.core.config import HubConfig
+from taskpaw_v3.core.lifecycle import GracefulShutdown
+from taskpaw_v3.hub.server.poller import Poller
+from taskpaw_v3.hub.server.store import HubStore
 
 log = logging.getLogger("taskpaw.hub")
 
@@ -59,10 +56,16 @@ class HubService:
         self._thread = threading.Thread(target=self._loop, name="hub-poller", daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
+        """Stop the poll loop. Returns True iff the thread actually exited
+        (so the caller knows it's safe to close the shared store)."""
         self._running.clear()
         if self._thread:
-            self._thread.join(timeout=5)
+            # Generous: a cycle may be mid-urlopen (<= http timeout) or in a
+            # slow transaction. Cover that before the store is closed.
+            self._thread.join(timeout=20)
+            return not self._thread.is_alive()
+        return True
 
 
 def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubService]:
@@ -78,7 +81,8 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         return {
             "machine": config.machine,
             "servers": store.list_servers(),
-            "acks": service.poller.last_event_ids,
+            # Snapshot: the poller thread mutates this dict concurrently.
+            "acks": dict(service.poller.last_event_ids),
         }
 
     return app, service
@@ -88,20 +92,28 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
             block: bool = True) -> GracefulShutdown:
     import uvicorn
 
+    from taskpaw_v3.core.net import claim_port
+
     shutdown = shutdown or GracefulShutdown()
+    sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
     app, service = create_hub_app(config, store)
     service.start()
 
-    server = uvicorn.Server(
-        uvicorn.Config(app, host=config.bind_host, port=config.bind_port, log_level="warning")
-    )
-    server_thread = threading.Thread(target=server.run, name="hub-api", daemon=True)
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
+    server_thread = threading.Thread(target=lambda: server.run(sockets=[sock]), name="hub-api", daemon=True)
 
     def _stop() -> None:
-        service.stop()
+        stopped = service.stop()  # join the poll thread FIRST
         server.should_exit = True
-        server_thread.join(timeout=5)
-        store.close()
+        server_thread.join(timeout=10)
+        try:
+            sock.close()
+        except OSError:
+            pass
+        if stopped:
+            store.close()  # only safe once the poller thread is truly gone
+        else:
+            log.error("Poller thread still alive; leaving DB connection open to avoid a race")
 
     shutdown.register("hub", _stop)
     shutdown.install_signal_handlers()

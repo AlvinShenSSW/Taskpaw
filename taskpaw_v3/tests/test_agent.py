@@ -7,10 +7,10 @@ import socket
 import pytest
 from fastapi.testclient import TestClient
 
-from agent.server.app import create_control_app, create_network_app
-from agent.server.launcher import ensure_port_free, port_available, PortInUseError
-from core.config import AgentConfig
-from core.protocol import EventQueue
+from taskpaw_v3.agent.server.app import create_control_app, create_network_app
+from taskpaw_v3.agent.server.launcher import ensure_port_free, port_available, PortInUseError
+from taskpaw_v3.core.config import AgentConfig
+from taskpaw_v3.core.protocol import EventQueue
 
 
 def _cfg(**kw):

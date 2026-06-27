@@ -17,4 +17,5 @@ def send_payload(url: str, token: str, payload: dict, timeout: float = 5.0) -> N
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    urllib.request.urlopen(req, timeout=timeout)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        resp.read()  # drain + close the socket (avoid FD leak)

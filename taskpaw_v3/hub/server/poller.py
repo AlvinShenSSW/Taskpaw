@@ -18,8 +18,18 @@ import random
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _agent_base_url(ip: str, port: int) -> str:
+    """Build a base URL, bracketing literal IPv6 addresses."""
+    host = f"[{ip}]" if ":" in ip else ip
+    return f"http://{host}:{port}"
 
 from .openclaw import send_payload
 from .store import HubStore
@@ -74,7 +84,7 @@ class Poller:
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     def fetch_events(self, server: dict) -> list[dict]:
-        base = f"http://{server['ip']}:{server['port']}"
+        base = _agent_base_url(server["ip"], server["port"])
         last_id = self.last_event_ids.get(server["id"], -1)
         q = urllib.parse.urlencode({"ack": last_id})
         try:
@@ -103,7 +113,7 @@ class Poller:
     def drain_outbox(self) -> None:
         if not self.get_token():
             return
-        now = datetime.now()
+        now = _now()
         for row in self.store.due_deliveries(now=now, limit=10):
             try:
                 attempts = int(row["attempts"])
@@ -151,9 +161,12 @@ class Poller:
                 self.store.store_event(server["id"], ev)
                 if active:
                     msg = f"TaskPaw Event | {server['name']}: {ev.get('message', 'Unknown event')}"
+                    # Idempotent: a crash before ack-persist re-fetches the same
+                    # event; the dedupe key keeps OpenClaw from being double-sent.
                     self.store.enqueue_delivery(
                         server_name=server["name"], kind="event",
                         payload_json=json.dumps({"text": msg}),
+                        dedupe_key=f"{server['id']}:{ev.get('id')}",
                     )
                 max_id = max(max_id, ev.get("id", max_id))
 

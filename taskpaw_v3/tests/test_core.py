@@ -7,10 +7,10 @@ import sys
 
 import pytest
 
-from core.auth import token_ok
-from core.config import AgentConfig, HubConfig, load_yaml, save_yaml
-from core.lifecycle import GracefulShutdown
-from core.protocol import EventQueue
+from taskpaw_v3.core.auth import token_ok
+from taskpaw_v3.core.config import AgentConfig, HubConfig, load_yaml, save_yaml
+from taskpaw_v3.core.lifecycle import GracefulShutdown
+from taskpaw_v3.core.protocol import EventQueue
 
 
 # ── protocol ──────────────────────────────────────────────────────────────
@@ -143,3 +143,25 @@ def test_agent_config_rejects_bad_port_and_nonloopback_control():
 def test_hub_config_defaults():
     h = HubConfig()
     assert h.poll_interval == 60 and h.openclaw_enabled is False
+
+
+def test_agent_state_persists_event_id(tmp_path):
+    from taskpaw_v3.core.state import load_next_id, save_next_id
+
+    p = tmp_path / "agent.state.json"
+    assert load_next_id(p) == 1
+    save_next_id(p, 42)
+    assert load_next_id(p) == 42
+
+
+def test_build_queue_persists_across_restart(tmp_path):
+    from taskpaw_v3.agent.server.launcher import build_queue
+
+    cfg = AgentConfig(server_id="s", machine="dev")
+    state = tmp_path / "agent.state.json"
+    q1 = build_queue(cfg, state)
+    assert q1.add("mon", "a")["id"] == 1
+    assert q1.add("mon", "b")["id"] == 2
+    # New queue (simulated restart) resumes from the persisted counter.
+    q2 = build_queue(cfg, state)
+    assert q2.add("mon", "c")["id"] == 3
