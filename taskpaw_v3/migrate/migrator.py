@@ -113,12 +113,22 @@ def _map_lada(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
 
 
 def _map_process(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
-    """V2 generic process watcher → V3 process monitor (service, not a task)."""
+    """V2 generic process watcher → V3 process monitor.
+
+    Semantics differ and the operator must know (Codex #20 r5): V2's generic
+    watcher sent NEUTRAL start/exit notifications and never alerted on absence,
+    whereas V3's process plugin treats the process being absent (at startup or on
+    exit) as an ALERT and recovery as `done`. We still map it — process is the
+    right plugin and skipping would lose the monitor — but warn about the change.
+    """
     proc = (w.get("process_name") or "").strip()
     if not proc:
         return [], [f"process watcher {name!r} has no process_name set"]
     cfg: dict[str, Any] = {"name": name, "pattern": re.escape(proc), "category_label": "service"}
-    return [("process", name, _carry_common(w, cfg))], []
+    warn = (f"process watcher {name!r}: V2 sent neutral start/exit notifications; "
+            f"V3 treats the process being absent as an alert (and recovery as "
+            f"done). Review severity, or disable if it was a short-lived task.")
+    return [("process", name, _carry_common(w, cfg))], [warn]
 
 
 def _map_comfyui(w: dict, name: str) -> tuple[list[_Spec], list[str]]:

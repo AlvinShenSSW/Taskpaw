@@ -56,10 +56,11 @@ def test_generic_process_watcher_maps_to_process():
     """V2 watcher_type 'process' must migrate, not fall into unknown-type (Codex #20 r2)."""
     plan = migrate_config({"watchers": [_w(watcher_type="process", name="PM2",
                                            process_name="pm2 God")]})
-    assert not plan.warnings
     m = plan.monitors[0]
     assert m.type_id == "process" and m.config["pattern"] == r"pm2\ God"
     assert m.config["category_label"] == "service"
+    # mapped, but the operator is warned the severity semantics differ (Codex r5)
+    assert any("neutral start/exit" in w.reason for w in plan.warnings)
 
 
 def test_comfyui_maps_host_port_idle():

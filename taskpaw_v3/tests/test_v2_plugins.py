@@ -125,6 +125,21 @@ def test_folder_baselines_existing_files_on_start(tmp_path):
     assert len(done) == 1 and "new.mp4" in done[0][2]
 
 
+def test_folder_baselined_file_still_growing_completes(tmp_path):
+    """A file present at start() but still being written must still fire when it
+    finishes — baselining suppresses only files that never change (Codex #20 r5)."""
+    f = tmp_path / "active.mp4"
+    f.write_bytes(b"partial")
+    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    events, emit = _collector()
+    inst.start(emit)            # baselined as completed at current size
+    f.write_bytes(b"partial+more")  # download continues → size changes
+    inst.check(emit)            # size changed → reactivated, not done yet
+    assert not [a for a, _ in events if a[0] == "done"]
+    inst.check(emit)            # now stable → completes
+    assert [a for a, _ in events if a[0] == "done"]
+
+
 def test_folder_start_zero_byte_not_baselined(tmp_path):
     """A 0-byte placeholder present at start fires once it gets real content."""
     f = tmp_path / "dl.mp4"

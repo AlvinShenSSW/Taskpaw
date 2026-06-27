@@ -93,11 +93,16 @@ class FolderInstance(MonitorInstance):
             if rec is None:
                 self._files[p.name] = [size, now, False]
                 pending += 1
-            elif rec[2]:
-                continue  # already completed
             elif rec[0] != size:
-                rec[0], rec[1] = size, now  # size changed → reset stability clock
+                # Size changed → (re)activate and reset the stability clock, even
+                # if the record was completed/baselined. This is what lets a file
+                # that was still being written at start() (baselined as done) fire
+                # when it finishes, while a truly stable historical file — whose
+                # size never changes — stays suppressed (Codex #20 r4+r5).
+                rec[0], rec[1], rec[2] = size, now, False
                 pending += 1
+            elif rec[2]:
+                continue  # completed and unchanged → nothing to do
             elif now - rec[1] >= cfg.stable_seconds:
                 rec[2] = True  # stable long enough → complete
                 emit("done", f"{cfg.name}: file complete", f"{p.name} ({size} bytes)")
