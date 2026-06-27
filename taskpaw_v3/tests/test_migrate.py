@@ -52,6 +52,16 @@ def test_lada_passive_mode_no_warning():
     assert [m.type_id for m in plan.monitors] == ["process"]
 
 
+def test_generic_process_watcher_maps_to_process():
+    """V2 watcher_type 'process' must migrate, not fall into unknown-type (Codex #20 r2)."""
+    plan = migrate_config({"watchers": [_w(watcher_type="process", name="PM2",
+                                           process_name="pm2 God")]})
+    assert not plan.warnings
+    m = plan.monitors[0]
+    assert m.type_id == "process" and m.config["pattern"] == r"pm2\ God"
+    assert m.config["category_label"] == "service"
+
+
 def test_comfyui_maps_host_port_idle():
     plan = migrate_config({"watchers": [_w(watcher_type="comfyui", name="Comfy",
                                            comfyui_host="10.0.0.5", comfyui_port=9000,

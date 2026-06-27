@@ -102,6 +102,15 @@ def _map_lada(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
     return specs, warnings
 
 
+def _map_process(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
+    """V2 generic process watcher → V3 process monitor (service, not a task)."""
+    proc = (w.get("process_name") or "").strip()
+    if not proc:
+        return [], [f"process watcher {name!r} has no process_name set"]
+    cfg: dict[str, Any] = {"name": name, "pattern": re.escape(proc), "category_label": "service"}
+    return [("process", name, _carry_common(w, cfg))], []
+
+
 def _map_comfyui(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
     cfg: dict[str, Any] = {
         "name": name,
@@ -137,6 +146,7 @@ def _map_custom_cmd(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
 
 _MAPPERS = {
     "lada": _map_lada,
+    "process": _map_process,
     "comfyui": _map_comfyui,
     "folder": _map_folder,
     "custom_cmd": _map_custom_cmd,
