@@ -106,6 +106,24 @@ def test_folder_resets_on_size_change(tmp_path):
     assert [a for a, _ in events if a[0] == "done"]
 
 
+def test_folder_reused_filename_refires(tmp_path):
+    """A completed file that's deleted then recreated with the same name must
+    fire again, not be skipped by a stale completed record (Codex #20)."""
+    f = tmp_path / "video.mp4"
+    f.write_bytes(b"abc")
+    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    events, emit = _collector()
+    inst.check(emit)            # first sight
+    inst.check(emit)            # complete
+    assert len([a for a, _ in events if a[0] == "done"]) == 1
+    f.unlink()
+    inst.check(emit)            # gone → record purged
+    f.write_bytes(b"xyz")       # same name, new download
+    inst.check(emit)            # first sight again
+    inst.check(emit)            # complete again
+    assert len([a for a, _ in events if a[0] == "done"]) == 2
+
+
 def test_folder_missing_dir_is_error():
     inst = FolderInstance("f1", FolderConfig(name="dl", path="/no/such/dir/xyz"))
     _, emit = _collector()
@@ -116,8 +134,8 @@ def test_folder_missing_dir_is_error():
 def test_comfyui_done_after_idle_confirm(monkeypatch):
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
-    depths = iter([2, 0, 0])
-    monkeypatch.setattr(mod, "queue_depth", lambda *a, **k: next(depths))
+    counts = iter([(1, 1), (0, 0), (0, 0)])  # busy → empty → empty
+    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: next(counts))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", idle_confirm=2))
     events, emit = _collector()
     assert inst.check(emit).state == "running"   # busy
@@ -130,7 +148,7 @@ def test_comfyui_done_after_idle_confirm(monkeypatch):
 def test_comfyui_no_false_done_when_never_busy(monkeypatch):
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
-    monkeypatch.setattr(mod, "queue_depth", lambda *a, **k: 0)
+    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: (0, 0))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", idle_confirm=1))
     events, emit = _collector()
     inst.check(emit)
@@ -141,7 +159,37 @@ def test_comfyui_no_false_done_when_never_busy(monkeypatch):
 def test_comfyui_unreachable_is_error(monkeypatch):
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
-    monkeypatch.setattr(mod, "queue_depth", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: None)
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy"))
     _, emit = _collector()
     assert inst.check(emit).state == "error"
+
+
+def test_comfyui_detects_stalled_queue(monkeypatch):
+    """running==0 & pending>0 held for stall_confirm → error + one alert."""
+    import taskpaw_v3.monitors.plugins.comfyui as mod
+
+    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: (0, 2))
+    inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", stall_confirm=2))
+    events, emit = _collector()
+    assert inst.check(emit).state == "running"   # stall 1/2, still running
+    assert not events
+    st = inst.check(emit)                         # stall 2/2 → error + alert
+    assert st.state == "error" and st.metrics["pending"] == 2
+    alerts = [a for a, _ in events if a[0] == "alert"]
+    assert len(alerts) == 1
+    inst.check(emit)                             # still stalled, no duplicate alert
+    assert len([a for a, _ in events if a[0] == "alert"]) == 1
+
+
+def test_comfyui_stall_clears_then_completes(monkeypatch):
+    import taskpaw_v3.monitors.plugins.comfyui as mod
+
+    seq = iter([(0, 1), (1, 0), (0, 0)])  # stalled-ish → running → empty
+    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: next(seq))
+    inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", idle_confirm=1, stall_confirm=2))
+    events, emit = _collector()
+    inst.check(emit)   # pending only, stall 1/2 (not yet error)
+    inst.check(emit)   # running now → stall reset, busy
+    inst.check(emit)   # empty → done
+    assert any(a[0] == "done" for a, _ in events)

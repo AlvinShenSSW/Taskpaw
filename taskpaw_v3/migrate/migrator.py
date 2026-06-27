@@ -68,16 +68,41 @@ def _carry_common(w: dict, cfg: dict) -> dict:
     return cfg
 
 
-def _map_lada(w: dict, name: str) -> tuple[Optional[dict], Optional[str]]:
+# A mapper returns (specs, warnings):
+#   specs    — list of (type_id, name, config) — usually one, but Lada may emit
+#              both a process observer AND a folder observer for its output.
+#   warnings — list of human-readable strings (non-fatal notes).
+_Spec = tuple[str, str, dict]
+
+
+def _map_lada(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
+    specs: list[_Spec] = []
+    warnings: list[str] = []
     proc = (w.get("process_name") or "").strip()
     if not proc:
-        return None, "lada watcher has no process_name to map to a process pattern"
+        return [], [f"lada watcher {name!r} has no process_name to map to a process pattern"]
     # V2 matched the process by literal name; escape it into a safe regex.
-    cfg: dict[str, Any] = {"name": name, "pattern": re.escape(proc), "category_label": "task"}
-    return _carry_common(w, cfg), None
+    pcfg: dict[str, Any] = {"name": name, "pattern": re.escape(proc), "category_label": "task"}
+    specs.append(("process", name, _carry_common(w, pcfg)))
+
+    # V3 observes; it does not launch/manage processes (constitution). A V2 Lada
+    # watcher in managed mode (lada_cli_path / extra args / progress capture)
+    # can't be reproduced — carry the OUTPUT folder as a completion observer and
+    # warn that managed launching is dropped (Codex #20 P1).
+    out = (w.get("lada_output_folder") or "").strip()
+    if out:
+        fcfg: dict[str, Any] = {"name": f"{name} output", "path": out}
+        specs.append(("folder", f"{name} output", _carry_common(w, fcfg)))
+    if (w.get("lada_cli_path") or "").strip():
+        warnings.append(
+            f"lada watcher {name!r} ran in managed mode (lada_cli_path set); V3 "
+            f"observes only — it is migrated as a process"
+            + (" + output-folder monitor" if out else "")
+            + ", and will NOT launch lada-cli")
+    return specs, warnings
 
 
-def _map_comfyui(w: dict, name: str) -> tuple[Optional[dict], Optional[str]]:
+def _map_comfyui(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
     cfg: dict[str, Any] = {
         "name": name,
         "host": w.get("comfyui_host") or "127.0.0.1",
@@ -86,13 +111,13 @@ def _map_comfyui(w: dict, name: str) -> tuple[Optional[dict], Optional[str]]:
     idle = w.get("idle_confirm_count")
     if isinstance(idle, int) and idle >= 1:
         cfg["idle_confirm"] = idle
-    return _carry_common(w, cfg), None
+    return [("comfyui", name, _carry_common(w, cfg))], []
 
 
-def _map_folder(w: dict, name: str) -> tuple[Optional[dict], Optional[str]]:
+def _map_folder(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
     path = (w.get("watch_folder") or "").strip()
     if not path:
-        return None, "folder watcher has no watch_folder set"
+        return [], [f"folder watcher {name!r} has no watch_folder set"]
     cfg: dict[str, Any] = {"name": name, "path": path}
     exts = _split_extensions(w.get("file_extensions") or "")
     if exts:
@@ -100,14 +125,14 @@ def _map_folder(w: dict, name: str) -> tuple[Optional[dict], Optional[str]]:
     stable = w.get("stable_seconds")
     if isinstance(stable, (int, float)) and stable >= 0:
         cfg["stable_seconds"] = float(stable)
-    return _carry_common(w, cfg), None
+    return [("folder", name, _carry_common(w, cfg))], []
 
 
-def _map_custom_cmd(w: dict, name: str) -> tuple[Optional[dict], Optional[str]]:
+def _map_custom_cmd(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
     cmd = (w.get("custom_command") or "").strip()
     if not cmd:
-        return None, "custom_cmd watcher has no custom_command set"
-    return _carry_common(w, {"name": name, "command": cmd}), None
+        return [], [f"custom_cmd watcher {name!r} has no custom_command set"]
+    return [("custom_cmd", name, _carry_common(w, {"name": name, "command": cmd}))], []
 
 
 _MAPPERS = {
@@ -130,16 +155,15 @@ def migrate_config(config: dict) -> MigrationPlan:
             plan.warnings.append(MigrationWarning(sid, wtype, name,
                 f"no V3 plugin maps watcher_type {wtype!r}"))
             continue
-        cfg, err = mapper(w, name)
-        if err is not None:
-            plan.warnings.append(MigrationWarning(sid, wtype, name, err))
-            continue
-        type_id = "process" if wtype == "lada" else wtype
-        plan.monitors.append(MigratedMonitor(
-            type_id=type_id, name=name, config=cfg,
-            enabled=bool(w.get("enabled", True)),
-            source_id=sid, source_type=wtype,
-        ))
+        specs, notes = mapper(w, name)
+        for reason in notes:
+            plan.warnings.append(MigrationWarning(sid, wtype, name, reason))
+        for type_id, mname, cfg in specs:
+            plan.monitors.append(MigratedMonitor(
+                type_id=type_id, name=mname, config=cfg,
+                enabled=bool(w.get("enabled", True)),
+                source_id=sid, source_type=wtype,
+            ))
     return plan
 
 

@@ -54,6 +54,13 @@ class FolderInstance(MonitorInstance):
         except OSError as e:
             return MonitorStatus(state="error", detail=f"cannot read dir: {e}")
 
+        # Purge tracked names no longer present (V2 parity): a deleted/moved file
+        # that reappears with the same name must be treated as a NEW download,
+        # not skipped as an already-completed record (Codex #20 finding).
+        present = {p.name for p in entries if p.is_file()}
+        for stale in [n for n in self._files if n not in present]:
+            del self._files[stale]
+
         for p in entries:
             if not p.is_file() or not self._matches(p.name):
                 continue

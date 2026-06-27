@@ -28,6 +28,30 @@ def test_lada_maps_to_process_with_escaped_pattern():
     assert m.source_type == "lada"
 
 
+def test_lada_managed_mode_adds_output_folder_and_warns():
+    """Managed Lada (lada_cli_path set) → process + output-folder observer,
+    plus a warning that V3 won't launch lada (Codex #20 P1)."""
+    plan = migrate_config({"watchers": [_w(
+        watcher_type="lada", name="Lada", process_name="lada-cli",
+        lada_cli_path="C:/lada/lada-cli.exe",
+        lada_output_folder="D:/out",
+        lada_extra_args="--device cuda:1")]})
+    types = [(m.type_id, m.name) for m in plan.monitors]
+    assert ("process", "Lada") in types
+    assert ("folder", "Lada output") in types
+    assert any("managed mode" in w.reason for w in plan.warnings)
+    # the output folder observer points at the V2 output folder
+    folder = next(m for m in plan.monitors if m.type_id == "folder")
+    assert folder.config["path"] == "D:/out"
+
+
+def test_lada_passive_mode_no_warning():
+    plan = migrate_config({"watchers": [_w(
+        watcher_type="lada", name="Lada", process_name="lada-cli")]})
+    assert not plan.warnings
+    assert [m.type_id for m in plan.monitors] == ["process"]
+
+
 def test_comfyui_maps_host_port_idle():
     plan = migrate_config({"watchers": [_w(watcher_type="comfyui", name="Comfy",
                                            comfyui_host="10.0.0.5", comfyui_port=9000,
