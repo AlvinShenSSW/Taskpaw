@@ -41,22 +41,37 @@ class HostMetricsConfig(BaseMonitorConfig):
     collect_gpu: bool = True  # honored only on Windows (else n/a)
 
 
-def read_gpu_percent() -> Optional[float]:
-    """Windows GPU utilization via nvidia-smi (V2 method). None when unavailable
-    (non-Windows, no nvidia-smi, or no NVIDIA GPU)."""
+def read_gpu() -> Optional[dict]:
+    """Windows GPU utilization + VRAM via nvidia-smi (V2 method): util%, and
+    memory used/total (MB) summed across GPUs. None when unavailable (non-Windows,
+    no nvidia-smi, or no NVIDIA GPU)."""
     if sys.platform != "win32":
         return None
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            ["nvidia-smi",
+             "--query-gpu=utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if out.returncode != 0 or not out.stdout.strip():
             return None
-        # average across GPUs
-        vals = [float(x) for x in out.stdout.strip().splitlines() if x.strip()]
-        return round(sum(vals) / len(vals), 1) if vals else None
+        utils, used, total = [], 0.0, 0.0
+        for line in out.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            utils.append(float(parts[0]))
+            used += float(parts[1])
+            total += float(parts[2])
+        if not utils:
+            return None
+        return {
+            "util_pct": round(sum(utils) / len(utils), 1),  # avg utilization
+            "mem_used_mb": round(used),                     # summed VRAM
+            "mem_total_mb": round(total),
+        }
     except Exception:
         return None
 
@@ -96,7 +111,7 @@ class HostMetricsInstance(MonitorInstance):
             net_in = max(0.0, (net.bytes_recv - self._prev_net[2]) / dt)
         self._prev_net = (now, net.bytes_sent, net.bytes_recv)
 
-        gpu = read_gpu_percent() if cfg.collect_gpu else None
+        gpu = read_gpu() if cfg.collect_gpu else None
 
         # sustained-CPU alerting
         if cpu >= cfg.cpu_alert_pct:
@@ -110,14 +125,18 @@ class HostMetricsInstance(MonitorInstance):
         self._emit_threshold(emit, "disk", disk >= cfg.disk_alert_pct,
                              f"disk {disk:.0f}% ≥ {cfg.disk_alert_pct:.0f}%")
 
-        state = "warn" if self._alerted else "ok"
+        # A breached threshold is a "degraded" status (a valid MonitorStatus
+        # state); "warn"/"alert" are EVENT levels, not statuses.
+        state = "degraded" if self._alerted else "ok"
         metrics = {
             "cpu_pct": round(cpu, 1),
             "mem_pct": round(mem, 1),
             "disk_pct": round(disk, 1),
             "net_in_bps": round(net_in),
             "net_out_bps": round(net_out),
-            "gpu_pct": gpu if gpu is not None else "n/a",
+            "gpu_pct": gpu["util_pct"] if gpu else "n/a",
+            "gpu_mem_used_mb": gpu["mem_used_mb"] if gpu else "n/a",
+            "gpu_mem_total_mb": gpu["mem_total_mb"] if gpu else "n/a",
         }
         return MonitorStatus(state=state, detail=",".join(sorted(self._alerted)) or "ok", metrics=metrics)
 

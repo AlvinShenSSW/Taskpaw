@@ -24,7 +24,7 @@ def fake_psutil(cpu=10.0, mem=20.0, disk=30.0, sent=0, recv=0):
 
 def _inst(monkeypatch, **psutil_kw):
     monkeypatch.setattr(hm, "psutil", fake_psutil(**psutil_kw))
-    monkeypatch.setattr(hm, "read_gpu_percent", lambda: None)  # macOS path = n/a
+    monkeypatch.setattr(hm, "read_gpu", lambda: None)  # macOS path = n/a
     return HostMetricsPlugin().create("host", HostMetricsConfig(name="host"))
 
 
@@ -36,16 +36,17 @@ def test_metrics_keys_and_gpu_na(monkeypatch):
     inst = _inst(monkeypatch, cpu=12.0, mem=34.0, disk=56.0)
     st = inst.check(lambda *a, **k: None)
     m = st.metrics
-    assert set(m) == {"cpu_pct", "mem_pct", "disk_pct", "net_in_bps", "net_out_bps", "gpu_pct"}
+    assert set(m) == {"cpu_pct", "mem_pct", "disk_pct", "net_in_bps", "net_out_bps",
+                      "gpu_pct", "gpu_mem_used_mb", "gpu_mem_total_mb"}
     assert m["cpu_pct"] == 12.0 and m["mem_pct"] == 34.0 and m["disk_pct"] == 56.0
-    assert m["gpu_pct"] == "n/a"  # macOS: GPU ignored
+    assert m["gpu_pct"] == "n/a" and m["gpu_mem_used_mb"] == "n/a"  # macOS: GPU ignored
     assert st.state == "ok"
 
 
 def test_cpu_sustained_alert_then_recovery(monkeypatch):
     events = []
     emit = lambda *a, **k: events.append(a)
-    monkeypatch.setattr(hm, "read_gpu_percent", lambda: None)
+    monkeypatch.setattr(hm, "read_gpu", lambda: None)
 
     # cpu over threshold (90) — needs 3 sustained cycles by default
     monkeypatch.setattr(hm, "psutil", fake_psutil(cpu=95.0))
@@ -63,18 +64,17 @@ def test_cpu_sustained_alert_then_recovery(monkeypatch):
 
 def test_mem_and_disk_immediate_alert(monkeypatch):
     events = []
-    monkeypatch.setattr(hm, "read_gpu_percent", lambda: None)
+    monkeypatch.setattr(hm, "read_gpu", lambda: None)
     monkeypatch.setattr(hm, "psutil", fake_psutil(mem=99.0, disk=99.0))
     inst = HostMetricsPlugin().create("host", HostMetricsConfig(name="host"))
     st = inst.check(lambda *a, **k: events.append(a))
-    kinds = {(e[0], "mem" in e[1] or "memory" in e[1], "disk" in e[1]) for e in events}
     assert any(e[0] == "alert" and "memory" in e[1] for e in events)
     assert any(e[0] == "alert" and "disk" in e[1] for e in events)
-    assert st.state == "warn"
+    assert st.state == "degraded"  # a valid MonitorStatus state (not the event level "warn")
 
 
 def test_net_throughput_uses_delta(monkeypatch):
-    monkeypatch.setattr(hm, "read_gpu_percent", lambda: None)
+    monkeypatch.setattr(hm, "read_gpu", lambda: None)
     inst = HostMetricsPlugin().create("host", HostMetricsConfig(name="host"))
     monkeypatch.setattr(hm, "psutil", fake_psutil(sent=0, recv=0))
     inst.check(lambda *a, **k: None)  # establishes baseline, net=0
@@ -83,9 +83,9 @@ def test_net_throughput_uses_delta(monkeypatch):
     assert st.metrics["net_out_bps"] > 0 and st.metrics["net_in_bps"] > 0
 
 
-def test_read_gpu_percent_none_on_non_windows(monkeypatch):
+def test_read_gpu_none_on_non_windows(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
-    assert hm.read_gpu_percent() is None
+    assert hm.read_gpu() is None
 
 
 # ── Hub self-monitor ────────────────────────────────────────────────────---
@@ -118,3 +118,16 @@ def test_hub_self_monitor_can_be_disabled(tmp_path):
         assert r.json()["self"] == {}
     finally:
         store.close()
+
+
+def test_read_gpu_windows_parses_util_and_vram(monkeypatch):
+    import types as _t
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def fake_run(*a, **k):
+        return _t.SimpleNamespace(returncode=0, stdout="50, 2048, 8192\n70, 1024, 8192\n")
+    monkeypatch.setattr(hm.subprocess, "run", fake_run)
+    g = hm.read_gpu()
+    assert g["util_pct"] == 60.0           # avg(50,70)
+    assert g["mem_used_mb"] == 3072        # 2048+1024 summed
+    assert g["mem_total_mb"] == 16384
