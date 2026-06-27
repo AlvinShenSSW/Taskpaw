@@ -5,8 +5,19 @@ A macOS GUI application that polls Windows servers running TaskPaw V2,
 collects their status and events, stores in SQLite, and sends reports to OpenClaw.
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from __future__ import annotations
+
+# Guarded so the module can be imported headless (tests/CI/service) where Tk is
+# absent. The GUI only runs under `if __name__ == "__main__"`; tk is not used at
+# module/class-definition level (annotations are strings via __future__).
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, simpledialog
+except ImportError:  # pragma: no cover - headless import (no display/Tk)
+    tk = None
+    ttk = messagebox = simpledialog = None
+import os
+import random
 import sqlite3
 import threading
 import logging
@@ -15,6 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import urllib.request
 import urllib.error
+import urllib.parse
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 import time
@@ -138,6 +150,30 @@ class DatabaseManager:
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS delivery_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_name TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('event', 'summary')),
+                    delivery_state TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (delivery_state IN ('pending', 'failed', 'dead_letter')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    next_attempt_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    dead_letter_alerted INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_delivery_outbox_due
+                ON delivery_outbox(delivery_state, next_attempt_at)
                 """
             )
 
@@ -367,6 +403,172 @@ class DatabaseManager:
                 self._conn.rollback()
                 raise
 
+    @staticmethod
+    def _dt(value: Optional[datetime] = None) -> str:
+        return (value or datetime.now()).isoformat(timespec="seconds")
+
+    def enqueue_delivery(
+        self,
+        server_name: str,
+        kind: str,
+        payload_json: str,
+        delivery_state: str = "pending",
+        attempts: int = 0,
+        last_error: Optional[str] = None,
+        next_attempt_at: Optional[datetime] = None,
+        created_at: Optional[datetime] = None,
+    ) -> int:
+        """Add an OpenClaw delivery to the retry outbox."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO delivery_outbox (
+                        server_name, payload_json, kind, delivery_state,
+                        attempts, last_error, next_attempt_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        server_name,
+                        payload_json,
+                        kind,
+                        delivery_state,
+                        attempts,
+                        last_error,
+                        self._dt(next_attempt_at),
+                        self._dt(created_at),
+                    ),
+                )
+                self._conn.commit()
+                return cursor.lastrowid
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def get_due_deliveries(
+        self, now: Optional[datetime] = None, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Return OpenClaw deliveries due for retry."""
+        now_text = self._dt(now)
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, server_name, payload_json, kind, delivery_state,
+                       attempts, last_error, next_attempt_at, created_at,
+                       dead_letter_alerted
+                FROM delivery_outbox
+                WHERE delivery_state IN ('pending', 'failed')
+                  AND next_attempt_at <= ?
+                ORDER BY next_attempt_at, id
+                LIMIT ?
+                """,
+                (now_text, limit),
+            )
+            columns = [desc[0] for desc in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    def mark_delivery_succeeded(self, delivery_id: int):
+        """Remove a delivery once OpenClaw accepts it."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            try:
+                cursor.execute("DELETE FROM delivery_outbox WHERE id=?", (delivery_id,))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def discard_delivery(self, delivery_id: int):
+        """Delete a malformed outbox row that cannot be retried safely."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            try:
+                cursor.execute("DELETE FROM delivery_outbox WHERE id=?", (delivery_id,))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def mark_delivery_failed(
+        self,
+        delivery_id: int,
+        attempts: int,
+        last_error: str,
+        next_attempt_at: datetime,
+    ):
+        """Update retry metadata for a failed delivery."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    UPDATE delivery_outbox
+                    SET delivery_state='failed',
+                        attempts=?,
+                        last_error=?,
+                        next_attempt_at=?
+                    WHERE id=?
+                    """,
+                    (attempts, last_error, self._dt(next_attempt_at), delivery_id),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def mark_delivery_dead_letter(
+        self, delivery_id: int, attempts: int, last_error: str
+    ) -> bool:
+        """Mark a delivery dead-lettered. Returns True if a local alert is due."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            try:
+                cursor.execute(
+                    "SELECT dead_letter_alerted FROM delivery_outbox WHERE id=?",
+                    (delivery_id,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    self._conn.commit()
+                    return False
+                should_alert = row[0] == 0
+                cursor.execute(
+                    """
+                    UPDATE delivery_outbox
+                    SET delivery_state='dead_letter',
+                        attempts=?,
+                        last_error=?,
+                        dead_letter_alerted=1
+                    WHERE id=?
+                    """,
+                    (attempts, last_error, delivery_id),
+                )
+                self._conn.commit()
+                return should_alert
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def prune_dead_letters(self, days: int = 7):
+        """Delete dead-letter rows after the retention window."""
+        cutoff = self._dt(datetime.now() - timedelta(days=days))
+        with self._lock:
+            cursor = self._conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    DELETE FROM delivery_outbox
+                    WHERE delivery_state='dead_letter' AND created_at < ?
+                    """,
+                    (cutoff,),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
 
 class PollingEngine(threading.Thread):
     """Background thread that polls all servers."""
@@ -408,6 +610,18 @@ class PollingEngine(threading.Thread):
         servers = self.db_manager.get_servers()
         server_statuses = {}
 
+        # Only enqueue/drain OpenClaw deliveries when forwarding is enabled AND a
+        # token is configured — retry_due_deliveries() no-ops without a token, so
+        # enqueuing then would let the outbox accumulate undeliverable rows
+        # forever. store_event (history) below still happens unconditionally.
+        openclaw_active = (
+            self.db_manager.get_config("openclaw_enabled") == "1"
+            and bool(self.db_manager.get_config("openclaw_token", ""))
+        )
+
+        if openclaw_active:
+            self.retry_due_deliveries()
+
         for server in servers:
             if not server.enabled:
                 continue
@@ -418,6 +632,7 @@ class PollingEngine(threading.Thread):
             # Check for new events
             new_events = self.get_new_events(server)
             if new_events:
+                max_event_id = self.last_event_ids.get(server.id, -1)
                 for event in new_events:
                     self.db_manager.store_event(
                         server.id,
@@ -425,16 +640,42 @@ class PollingEngine(threading.Thread):
                         event.get("monitor"),
                         event.get("message"),
                     )
-                # Send immediate notification for new events
-                if self.db_manager.get_config("openclaw_enabled") == "1":
-                    for event in new_events:
-                        self.send_event_to_openclaw(server.name, event)
+                    if openclaw_active:
+                        self.db_manager.enqueue_delivery(
+                            server_name=server.name,
+                            kind="event",
+                            delivery_state="pending",
+                            payload_json=json.dumps(
+                                {
+                                    "text": (
+                                        "TaskPaw Event | "
+                                        f"{server.name}: {event.get('message', 'Unknown event')}"
+                                    )
+                                }
+                            ),
+                        )
+                    max_event_id = max(max_event_id, event.get("id", max_event_id))
+                previous_event_id = self.last_event_ids.get(server.id)
+                self.last_event_ids[server.id] = max_event_id
+                if not self._persist_event_ids():
+                    if previous_event_id is None:
+                        self.last_event_ids.pop(server.id, None)
+                    else:
+                        self.last_event_ids[server.id] = previous_event_id
+
+        if openclaw_active:
+            self.retry_due_deliveries()
 
         # Prune old logs
         try:
             self.db_manager.prune_old_status_logs()
         except Exception as e:
             logger.error(f"Prune failed: {e}")
+
+        try:
+            self.db_manager.prune_dead_letters()
+        except Exception as e:
+            logger.error(f"Dead-letter prune failed: {e}")
 
         # Send periodic summary to OpenClaw
         if (
@@ -504,23 +745,26 @@ class PollingEngine(threading.Thread):
         """Get new events from a server."""
         url_base = f"http://{server.ip}:{server.port}"
         try:
+            last_id = self.last_event_ids.get(server.id, -1)
+            query = urllib.parse.urlencode({"ack": last_id})
             req = urllib.request.Request(
-                f"{url_base}/events", headers=self._auth_headers()
+                f"{url_base}/events?{query}", headers=self._auth_headers()
             )
-            resp = urllib.request.urlopen(req, timeout=5)
+            try:
+                resp = urllib.request.urlopen(req, timeout=5)
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise
+                req = urllib.request.Request(
+                    f"{url_base}/events", headers=self._auth_headers()
+                )
+                resp = urllib.request.urlopen(req, timeout=5)
             events = json.loads(resp.read().decode("utf-8")).get("events", [])
 
             # Filter for new events (simple: by ID)
-            last_id = self.last_event_ids.get(server.id, -1)
             new_events = [
                 e for e in events if e.get("id", -1) > last_id
             ]
-
-            if new_events:
-                self.last_event_ids[server.id] = max(
-                    e.get("id", last_id) for e in new_events
-                )
-                self._persist_event_ids()
 
             return new_events
 
@@ -533,29 +777,112 @@ class PollingEngine(threading.Thread):
         status = self.db_manager.get_latest_status(server_id)
         return status["timestamp"] if status else None
 
-    def send_event_to_openclaw(self, server_name: str, event: Dict[str, Any]):
-        """Send event immediately to OpenClaw."""
+    def _retry_delay_seconds(self, attempts: int) -> float:
+        base = min(3600, 30 * (2 ** max(0, attempts - 1)))
+        return base * random.uniform(0.8, 1.2)
+
+    def _send_openclaw_payload(self, payload: Dict[str, Any]):
         token = self.db_manager.get_config("openclaw_token", "")
         if not token:
             return
 
-        message = f"TaskPaw Event | {server_name}: {event.get('message', 'Unknown event')}"
-        payload = json.dumps({"text": message}).encode("utf-8")
+        payload_bytes = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:18789/hooks/wake",
+            data=payload_bytes,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
 
-        try:
-            req = urllib.request.Request(
-                "http://127.0.0.1:18789/hooks/wake",
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
+    def _enqueue_failed_delivery(
+        self,
+        server_name: str,
+        kind: str,
+        payload: Dict[str, Any],
+        error: Exception,
+    ):
+        attempts = 1
+        next_attempt_at = datetime.now() + timedelta(
+            seconds=self._retry_delay_seconds(attempts)
+        )
+        self.db_manager.enqueue_delivery(
+            server_name=server_name,
+            kind=kind,
+            payload_json=json.dumps(payload),
+            delivery_state="failed",
+            attempts=attempts,
+            last_error=str(error),
+            next_attempt_at=next_attempt_at,
+        )
+
+    def retry_due_deliveries(self):
+        """Retry due OpenClaw outbox rows and dead-letter exhausted rows."""
+        if not self.db_manager.get_config("openclaw_token", ""):
+            return
+
+        now = datetime.now()
+        # Keep this bounded in the polling thread; a dedicated retry worker is V3 (#15).
+        for row in self.db_manager.get_due_deliveries(now=now, limit=10):
+            try:
+                attempts = int(row["attempts"])
+                created_at = datetime.fromisoformat(row["created_at"])
+                payload = json.loads(row["payload_json"])
+            except Exception as e:
+                logger.error(
+                    f"Dropping malformed OpenClaw outbox row id={row.get('id')}: {e}"
+                )
+                self.db_manager.discard_delivery(row["id"])
+                continue
+
+            age_exceeded = now - created_at > timedelta(hours=24)
+            if attempts >= 10 or age_exceeded:
+                reason = (
+                    "attempt cap exceeded" if attempts >= 10 else "age exceeded"
+                )
+                self._dead_letter_delivery(row, attempts, reason)
+                continue
+
+            try:
+                self._send_openclaw_payload(payload)
+                self.db_manager.mark_delivery_succeeded(row["id"])
+                logger.info(
+                    f"OpenClaw outbox delivery succeeded: id={row['id']} kind={row['kind']}"
+                )
+            except Exception as e:
+                attempts += 1
+                if attempts >= 10 or age_exceeded:
+                    self._dead_letter_delivery(row, attempts, str(e))
+                    continue
+                next_attempt_at = now + timedelta(
+                    seconds=self._retry_delay_seconds(attempts)
+                )
+                self.db_manager.mark_delivery_failed(
+                    row["id"], attempts, str(e), next_attempt_at
+                )
+                logger.warning(
+                    f"OpenClaw outbox delivery failed: id={row['id']} attempts={attempts}: {e}"
+                )
+
+    def _dead_letter_delivery(
+        self, row: Dict[str, Any], attempts: int, last_error: str
+    ):
+        should_alert = self.db_manager.mark_delivery_dead_letter(
+            row["id"], attempts, last_error
+        )
+        if should_alert:
+            self.emit_local_alert(
+                "OpenClaw delivery dead-lettered "
+                f"id={row['id']} kind={row['kind']} server={row['server_name']}: "
+                f"{last_error}"
             )
-            urllib.request.urlopen(req, timeout=5)
-            logger.info(f"Event sent to OpenClaw: {message}")
-        except Exception as e:
-            logger.error(f"Failed to send event to OpenClaw: {e}")
+
+    def emit_local_alert(self, message: str):
+        """Emit a local-only high-priority alert; do not route via OpenClaw."""
+        logger.critical(message)
 
     def send_summary_to_openclaw(
         self, server_statuses: Dict[str, Dict[str, Any]]
@@ -584,21 +911,13 @@ class PollingEngine(threading.Thread):
                 parts.append(f"{server_name}: offline")
 
         message = " | ".join(parts)
-        payload = json.dumps({"text": message}).encode("utf-8")
+        payload = {"text": message}
 
         try:
-            req = urllib.request.Request(
-                "http://127.0.0.1:18789/hooks/wake",
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            urllib.request.urlopen(req, timeout=5)
+            self._send_openclaw_payload(payload)
             logger.info(f"Summary sent to OpenClaw")
         except Exception as e:
+            self._enqueue_failed_delivery("hub", "summary", payload, e)
             logger.error(f"Failed to send summary to OpenClaw: {e}")
 
     def write_status_file(self, server_statuses: Dict[str, Dict[str, Any]]):
@@ -655,12 +974,14 @@ class PollingEngine(threading.Thread):
             logger.debug(f"Failed to load event ids: {e}")
             self.last_event_ids = {}
 
-    def _persist_event_ids(self):
+    def _persist_event_ids(self) -> bool:
         """Persist last_event_ids to database."""
         try:
             self.db_manager.set_config("last_event_ids", json.dumps(self.last_event_ids))
+            return True
         except Exception as e:
-            logger.debug(f"Failed to persist event ids: {e}")
+            logger.error(f"Failed to persist event ids: {e}")
+            return False
 
     def stop(self):
         """Stop the polling engine."""

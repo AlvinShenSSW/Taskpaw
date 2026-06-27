@@ -4,6 +4,8 @@ Monitors Lada / ComfyUI / download tasks etc., reports events via built-in HTTP 
 Windows system tray app with background running support.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -15,6 +17,7 @@ import uuid
 import logging
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, asdict
@@ -30,8 +33,15 @@ except ImportError:  # pragma: no cover - psutil is required for fast CPU/RAM st
     psutil = None
 
 # ── GUI ──────────────────────────────────────────────
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, scrolledtext
+# Guarded so the module can be imported headless (tests/CI/service) where Tk is
+# absent. The GUI only runs under `if __name__ == "__main__"`; tk is not used at
+# module/class-definition level (annotations are strings via __future__).
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, filedialog, scrolledtext
+except ImportError:  # pragma: no cover - headless import (no display/Tk)
+    tk = None
+    ttk = messagebox = filedialog = scrolledtext = None
 
 # =====================================================
 # Constants & Paths
@@ -214,6 +224,13 @@ _events_queue: list[dict] = []
 _next_event_id: int = 1
 _app_start_time = datetime.now()
 
+# Safety cap on the in-memory queue. With clear-on-ack the queue retains events
+# until the Hub acks them, so a Hub that polls but never advances its ack (e.g.
+# its DB persist keeps failing) could otherwise grow it without bound. The cap
+# is far above any normal backlog; when exceeded we drop the OLDEST events (most
+# likely already delivered-but-unacked / stale) and log loudly.
+MAX_EVENTS_QUEUE = 10000
+
 
 def _load_event_state():
     """Load the next event id from disk on startup so ids keep growing
@@ -241,9 +258,21 @@ def _save_event_state():
         log.debug(f"Failed to persist event state: {e}")
 
 
-def add_event(machine: str, monitor: str, message: str):
+def add_event(
+    machine: str,
+    monitor: str,
+    message: str,
+    level: Optional[str] = None,
+    title: Optional[str] = None,
+    data: Optional[dict] = None,
+):
     """Add an event to the thread-safe queue with a monotonic id."""
     global _next_event_id
+    if level is not None and level not in {"info", "warn", "alert", "done"}:
+        raise ValueError("level must be one of: info, warn, alert, done")
+    if data is not None and not isinstance(data, dict):
+        raise ValueError("data must be a dict when provided")
+
     with _events_lock:
         evt = {
             "id": _next_event_id,
@@ -252,11 +281,29 @@ def add_event(machine: str, monitor: str, message: str):
             "monitor": monitor,
             "message": message,
         }
+        if level is not None:
+            evt["level"] = level
+        if title is not None:
+            evt["title"] = title
+        if data is not None:
+            evt["data"] = dict(data)
         _events_queue.append(evt)
         _next_event_id += 1
-    # Persist outside the lock — this hits disk and we don't want the
-    # critical section to wait on I/O.
-    _save_event_state()
+        # Persist the counter INSIDE the lock, on purpose: the id must be durable
+        # before the event becomes visible to a Hub poll (which also takes
+        # _events_lock). Persisting after releasing would reopen a crash window
+        # where a polled+acked id is reused after restart and then deduped away.
+        # add_event is low-frequency (one call per monitor event), so the small
+        # atomic write under the lock is negligible — correctness over micro-perf.
+        _save_event_state()
+        overflow = len(_events_queue) - MAX_EVENTS_QUEUE
+        if overflow > 0:
+            del _events_queue[:overflow]
+            log.error(
+                "Event queue exceeded %d (Hub not acking?); dropped %d oldest event(s)",
+                MAX_EVENTS_QUEUE,
+                overflow,
+            )
 
 
 def get_and_clear_events() -> list[dict]:
@@ -265,6 +312,24 @@ def get_and_clear_events() -> list[dict]:
         events = list(_events_queue)
         _events_queue.clear()
         return events
+
+
+def get_events_after_ack(ack_id: int) -> list[dict]:
+    """Trim events acknowledged by the Hub and return the remaining queue."""
+    with _events_lock:
+        _events_queue[:] = [
+            event for event in _events_queue if int(event.get("id", -1)) > ack_id
+        ]
+        return list(_events_queue)
+
+
+def get_events_payload(ack_id: Optional[int] = None) -> dict:
+    """Build the /events response payload."""
+    if ack_id is None:
+        events = get_and_clear_events()
+    else:
+        events = get_events_after_ack(ack_id)
+    return {"events": events}
 
 
 # Load persisted state at import time so the first event after launch
@@ -284,15 +349,16 @@ class APIRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         """Handle GET requests."""
-        if self.path == "/status":
+        parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/status":
             if not self._check_auth():
                 return
             self._handle_status()
-        elif self.path == "/events":
+        elif parsed.path == "/events":
             if not self._check_auth():
                 return
-            self._handle_events()
-        elif self.path == "/ping":
+            self._handle_events(parsed.query)
+        elif parsed.path == "/ping":
             # /ping intentionally does NOT require auth — it's a trivial
             # reachability probe and the response carries no sensitive data.
             self._handle_ping()
@@ -376,16 +442,32 @@ class APIRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(response).encode())
 
-    def _handle_events(self):
-        """Return new events and clear the queue.
+    def _handle_events(self, query: str = ""):
+        """Return new events.
 
         Response shape MUST be {"events": [...]} — Hub does
         json.loads(...).get("events", []) and would silently drop a
         bare list (AttributeError caught and swallowed there). Each
         event carries a monotonic "id" so Hub can dedupe across polls.
+
+        When ack is absent, preserve the legacy clear-on-read behavior
+        for un-upgraded Hubs. When ack is present, trim only events at
+        or below the acknowledged id, then return the rest without
+        clearing them.
         """
-        events = get_and_clear_events()
-        payload = {"events": events}
+        params = urllib.parse.parse_qs(query, keep_blank_values=True)
+        if "ack" in params:
+            try:
+                ack = int(params["ack"][-1])
+            except (TypeError, ValueError):
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Invalid ack"}).encode())
+                return
+            payload = get_events_payload(ack)
+        else:
+            payload = get_events_payload()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
