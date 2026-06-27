@@ -28,7 +28,7 @@ mod jobobj {
     // handle closes (i.e. when this shell process exits).
     use std::os::windows::io::AsRawHandle;
     use std::process::Child;
-    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
         JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -46,13 +46,19 @@ mod jobobj {
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            SetInformationJobObject(
+            // Bail out if either call fails — otherwise we'd report a KILL_ON_JOB_CLOSE
+            // guarantee that isn't actually installed (descendants could leak).
+            let set_ok = SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
                 &info as *const _ as *const _,
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE);
+            ) != 0;
+            let assign_ok = AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) != 0;
+            if !set_ok || !assign_ok {
+                CloseHandle(job);
+                return None;
+            }
             Some(Job(job))
         }
     }
