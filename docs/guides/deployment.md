@@ -20,8 +20,18 @@ Config locations per OS:
 Examples to copy: [`taskpaw_v3/examples/agent.example.yaml`](../../taskpaw_v3/examples/agent.example.yaml),
 [`hub.example.yaml`](../../taskpaw_v3/examples/hub.example.yaml).
 
-Prereq on every machine: Python 3.10+ and the project installed (`uv sync`, or
-`pip install -e .`). Commands below assume the project venv is active.
+Prereq on every machine: Python 3.10+ and the project installed **with the V3
+dependency extra** — the V3 runtime imports `pydantic`, `PyYAML`, `fastapi`, and
+`uvicorn`, which live in the optional `v3` extra (a base install omits them and
+`python -m taskpaw_v3.*` fails on import):
+
+```bash
+uv sync --extra v3            # then prefix commands with `uv run`, e.g. uv run python -m taskpaw_v3.hub run
+# or, with pip:
+pip install -e '.[v3]'
+```
+
+Commands below assume that environment is active (or prefixed with `uv run`).
 
 ---
 

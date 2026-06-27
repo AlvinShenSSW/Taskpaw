@@ -24,29 +24,31 @@ api_token: ""
 # Auto-run a host_metrics self-monitor (CPU/mem/disk/net; GPU+VRAM on Windows).
 host_metrics: true
 
-# Monitor instances — paste the block from:
-#   python -m taskpaw_v3.migrate --yaml
-# (each is {type_id, name, config}). Examples:
-monitors:
-  - type_id: process
-    name: PM2 daemon
-    config:
-      name: PM2 daemon
-      pattern: ^PM2.*God$
-      search_cmdline: true
-  - type_id: comfyui
-    name: ComfyUI
-    config:
-      name: ComfyUI
-      host: 127.0.0.1
-      port: 8188
-      idle_confirm: 3
-      stuck_checks: 0          # >0 to alert on a prompt stuck that many polls
-  - type_id: folder
-    name: Downloads
-    config:
-      name: Downloads
-      path: D:/downloads
-      extensions: [mp4, mkv]
-      stable_seconds: 30
-      poll_interval: 1
+# Monitor instances. Empty by default — with host_metrics:true above you already
+# get CPU/mem/disk/net (GPU+VRAM on Windows) with nothing else configured. Paste
+# your real monitors from `python -m taskpaw_v3.migrate --yaml`, or uncomment and
+# adapt the samples below (each is {type_id, name, config}). Don't ship the
+# samples as-is — the paths/processes won't exist and will emit spurious alerts.
+monitors: []
+#  - type_id: process
+#    name: PM2 daemon
+#    config:
+#      name: PM2 daemon
+#      pattern: ^PM2.*God$
+#      search_cmdline: true
+#  - type_id: comfyui
+#    name: ComfyUI
+#    config:
+#      name: ComfyUI
+#      host: 127.0.0.1
+#      port: 8188
+#      idle_confirm: 3
+#      stuck_checks: 0          # >0 to alert on a prompt stuck that many polls
+#  - type_id: folder
+#    name: Downloads
+#    config:
+#      name: Downloads
+#      path: D:/downloads
+#      extensions: [mp4, mkv]
+#      stable_seconds: 30
+#      poll_interval: 1
