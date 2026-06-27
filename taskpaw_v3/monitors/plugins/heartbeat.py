@@ -41,7 +41,8 @@ def _parse_dt(s: str) -> datetime:
 def evaluate_heartbeat(cfg: HeartbeatConfig, now: Optional[datetime] = None) -> MonitorStatus:
     """Pure evaluation (testable): returns the heartbeat status."""
     now = now or datetime.now(timezone.utc)
-    p = Path(cfg.path)
+    # expanduser so a `~/...` path in agent.yaml resolves (Path() alone doesn't).
+    p = Path(cfg.path).expanduser()
     if not p.exists():
         return MonitorStatus(state="error", detail=f"heartbeat file missing: {cfg.path}")
     try:

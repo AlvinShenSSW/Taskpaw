@@ -36,7 +36,9 @@ BACKOFF_MAX = 300.0
 DEGRADE_AFTER = 5
 DEDUPE_MAX = 10_000
 
-EventSink = Callable[[str, str, str, Optional[dict], Optional[str]], None]
+# (instance_id, level, title, message, data, dedupe_key) — instance_id is the
+# STABLE monitor name (used as the event's `monitor` field), title is display text.
+EventSink = Callable[[str, str, str, str, Optional[dict], Optional[str]], None]
 
 
 class _BoundedKeySet:
@@ -310,13 +312,13 @@ class Supervisor:
                 m.last_emit_window = window
                 m.emit_count = 0
         if folded is not None:
-            self._safe_sink("warn", folded[0], folded[1], None, None)
+            self._safe_sink(instance_id, "warn", folded[0], folded[1], None, None)
 
-    def _safe_sink(self, level, title, message, data=None, dedupe_key=None) -> bool:
+    def _safe_sink(self, instance_id, level, title, message, data=None, dedupe_key=None) -> bool:
         """Call the sink, isolating its exceptions (a bad sink must not degrade a
         healthy monitor or lose-then-suppress later events). Returns success."""
         try:
-            self._sink(level, title, message, data, dedupe_key)
+            self._sink(instance_id, level, title, message, data, dedupe_key)
             return True
         except Exception as e:
             log.error("event sink failed (%s): %s", title, e)
@@ -347,9 +349,9 @@ class Supervisor:
         # Sink calls happen OUTSIDE the lock (a blocking sink must not stall
         # lifecycle ops) and are exception-isolated.
         if folded_msg is not None:
-            self._safe_sink("warn", folded_msg[0], folded_msg[1], None, None)
+            self._safe_sink(instance_id, "warn", folded_msg[0], folded_msg[1], None, None)
         if deliver:
-            if self._safe_sink(level, title, message, data, dedupe_key) and dedupe_key is not None:
+            if self._safe_sink(instance_id, level, title, message, data, dedupe_key) and dedupe_key is not None:
                 with self._lock:
                     m = self._monitors.get(instance_id)
                     if m is not None:
