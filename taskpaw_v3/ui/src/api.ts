@@ -32,18 +32,22 @@ declare global {
   }
 }
 
-function cfg() {
+// Default backend ports differ by role: agent 5680, Hub 5690. An injected
+// baseUrl (shell) or VITE_TASKPAW_BASE (browser) overrides both.
+const DEFAULT_PORT = { agent: 5680, hub: 5690 } as const;
+
+function cfg(role: "agent" | "hub") {
   const injected = window.__TASKPAW__ || {};
   const baseUrl =
     injected.baseUrl ||
     (import.meta.env.VITE_TASKPAW_BASE as string) ||
-    "http://127.0.0.1:5680";
+    `http://127.0.0.1:${DEFAULT_PORT[role]}`;
   const apiKey = injected.apiKey || (import.meta.env.VITE_TASKPAW_TOKEN as string) || "";
   return { baseUrl, apiKey };
 }
 
-async function get<T>(path: string): Promise<T> {
-  const { baseUrl, apiKey } = cfg();
+async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
+  const { baseUrl, apiKey } = cfg(role);
   const res = await fetch(`${baseUrl}${path}`, {
     headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
   });
@@ -52,7 +56,6 @@ async function get<T>(path: string): Promise<T> {
 }
 
 export const api = {
-  agentStatus: () => get<AgentStatus>("/status"),
-  hubStatus: () => get<HubStatus>("/status"),
-  ping: () => get<{ ok: boolean; machine: string }>("/ping"),
+  agentStatus: () => get<AgentStatus>("agent", "/status"),
+  hubStatus: () => get<HubStatus>("hub", "/status"),
 };

@@ -12,6 +12,7 @@
 
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{Manager, RunEvent};
 
 /// Holds the spawned backend child so we can terminate it on exit.
@@ -45,10 +46,38 @@ fn spawn_backend() -> Option<Child> {
     }
 }
 
+/// Ask the backend to shut down GRACEFULLY (SIGTERM) so its GracefulShutdown
+/// handler stops the supervisor + terminates managed child processes (e.g.
+/// lada-cli) and releases ports. On Unix only — Windows has no SIGTERM.
+#[cfg(unix)]
+fn request_graceful(child: &Child) {
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+}
+#[cfg(not(unix))]
+fn request_graceful(_child: &Child) {
+    // Windows: no SIGTERM. A future hardening is a Job Object so the whole child
+    // tree is terminated; for now we fall back to kill() below.
+}
+
 fn kill_backend(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Backend>() {
         if let Ok(mut guard) = state.0.lock() {
             if let Some(child) = guard.as_mut() {
+                // Graceful first → let the backend tear down its supervisor +
+                // managed children, then force-kill only if it doesn't exit.
+                request_graceful(child);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => return,            // exited cleanly
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        _ => break,                       // timed out or error
+                    }
+                }
                 let _ = child.kill();
                 let _ = child.wait();
             }
