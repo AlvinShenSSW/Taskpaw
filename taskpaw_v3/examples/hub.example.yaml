@@ -1,0 +1,28 @@
+# TaskPaw V3 Hub config — copy to the platform location and edit:
+#   macOS   : ~/Library/Application Support/TaskPaw/hub.yaml
+#   Windows : %APPDATA%\TaskPaw\hub.yaml
+#   Linux   : /etc/taskpaw/hub.yaml
+# Run headless with:  python -m taskpaw_v3.hub run
+# Register agents (stored in hub.db, NOT here) with:
+#   python -m taskpaw_v3.hub add-server --name moomoo --ip 192.168.1.50
+
+machine: hub                   # display name for the Hub's own machine
+
+# Hub API (the UI / dashboards read this). Loopback by default; expose to the
+# LAN only if other machines render the dashboard.
+bind_host: 127.0.0.1
+bind_port: 5690
+
+poll_interval: 60              # seconds between polling each agent
+
+# Bearer sent to agents when polling. Must match each agent's api_token (leave
+# empty if the agents have no token).
+polling_token: ""
+
+# OpenClaw wake hook — POST when a watched task completes (optional).
+openclaw_enabled: false
+openclaw_url: http://127.0.0.1:18789/hooks/wake
+openclaw_token: ""
+
+# Run a host_metrics self-monitor for the Hub's own machine.
+self_monitor: true
