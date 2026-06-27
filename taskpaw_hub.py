@@ -610,12 +610,16 @@ class PollingEngine(threading.Thread):
         servers = self.db_manager.get_servers()
         server_statuses = {}
 
-        # Only enqueue/drain OpenClaw deliveries when forwarding is enabled —
-        # otherwise the outbox would accumulate undeliverable rows forever.
-        # store_event (history) below still happens unconditionally.
-        openclaw_enabled = self.db_manager.get_config("openclaw_enabled") == "1"
+        # Only enqueue/drain OpenClaw deliveries when forwarding is enabled AND a
+        # token is configured — retry_due_deliveries() no-ops without a token, so
+        # enqueuing then would let the outbox accumulate undeliverable rows
+        # forever. store_event (history) below still happens unconditionally.
+        openclaw_active = (
+            self.db_manager.get_config("openclaw_enabled") == "1"
+            and bool(self.db_manager.get_config("openclaw_token", ""))
+        )
 
-        if openclaw_enabled:
+        if openclaw_active:
             self.retry_due_deliveries()
 
         for server in servers:
@@ -636,7 +640,7 @@ class PollingEngine(threading.Thread):
                         event.get("monitor"),
                         event.get("message"),
                     )
-                    if openclaw_enabled:
+                    if openclaw_active:
                         self.db_manager.enqueue_delivery(
                             server_name=server.name,
                             kind="event",
@@ -659,7 +663,7 @@ class PollingEngine(threading.Thread):
                     else:
                         self.last_event_ids[server.id] = previous_event_id
 
-        if openclaw_enabled:
+        if openclaw_active:
             self.retry_due_deliveries()
 
         # Prune old logs

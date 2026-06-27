@@ -9,6 +9,13 @@ The AFK / review gates self-check against this file — a violation is a blocker
 - **V2 is frozen.** `taskpaw.py`, `taskpaw_hub.py`, `macsubs.py` accept only
   critical bug fixes until V3 ships (operator decision §9.6 of the V3 design).
   No new features, no refactors-for-taste in V2.
+  - **Documented exception — issue #14 (event-delivery optimization).** The
+    operator explicitly chose to implement #14's clear-on-ack + Hub→OpenClaw
+    outbox + additive event fields on the **existing V2 code** (not the V3
+    monorepo), because #14 precedes the V3 backend (#15) in the dependency order
+    and §10 #1 scopes it as optimizing the *current* protocol implementation.
+    These changes are backward-compatible. V3 inherits them. This is the only
+    sanctioned V2 feature work; it does not reopen V2 for anything else.
 - **V3 is greenfield** and lives under `taskpaw-v3/` (a monorepo, not yet
   created). New capability goes there, per
   [docs/specs/2026-06-27-taskpaw-v3-design.md](specs/2026-06-27-taskpaw-v3-design.md).

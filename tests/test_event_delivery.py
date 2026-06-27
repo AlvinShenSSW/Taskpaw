@@ -273,9 +273,11 @@ def test_hub_poll_stores_enqueues_then_advances_ack_and_drains_outbox(
 def test_hub_poll_crash_before_ack_persist_refetches_events(tmp_path, monkeypatch):
     hub = import_hub(tmp_path, monkeypatch)
     db = hub.DatabaseManager(tmp_path / "hub.db")
-    # Forwarding enabled so the outbox enqueue path (where the crash is injected)
-    # actually runs; with it disabled, events are stored but never enqueued.
+    # Forwarding enabled + token set so the outbox enqueue path (where the crash
+    # is injected) actually runs; without enabled+token, events are stored but
+    # never enqueued.
     db.set_config("openclaw_enabled", "1")
+    db.set_config("openclaw_token", "token")
     db.set_config("report_every_n_polls", "999")
     server_id = db.add_server(
         hub.Server(name="agent", ip="127.0.0.1", port=5678, enabled=True)
@@ -293,8 +295,13 @@ def test_hub_poll_crash_before_ack_persist_refetches_events(tmp_path, monkeypatc
         )
 
         def fake_urlopen(req, timeout):
-            seen_event_urls.append(req.full_url)
-            return FakeHTTPResponse({"events": [{"id": 3, "message": "new"}]})
+            if req.full_url.startswith("http://127.0.0.1:5678/events"):
+                seen_event_urls.append(req.full_url)
+                return FakeHTTPResponse({"events": [{"id": 3, "message": "new"}]})
+            # OpenClaw POST from outbox drain — succeed quietly (at-least-once may
+            # re-deliver the row left by the crashed first poll); don't pollute
+            # seen_event_urls.
+            return FakeHTTPResponse({"ok": True})
 
         monkeypatch.setattr(hub.urllib.request, "urlopen", fake_urlopen)
 
@@ -536,6 +543,42 @@ def test_hub_poll_disabled_openclaw_stores_history_without_outbox(tmp_path, monk
             if req.full_url.startswith("http://127.0.0.1:5678/events"):
                 return FakeHTTPResponse({"events": [{"id": 3, "message": "new"}]})
             raise AssertionError(f"no OpenClaw call expected when disabled: {req.full_url}")
+
+        monkeypatch.setattr(hub.urllib.request, "urlopen", fake_urlopen)
+        engine.poll_all_servers()
+
+        rows = db._conn.execute("SELECT message FROM events ORDER BY id").fetchall()
+        assert [row[0] for row in rows] == ["new"]
+        assert json.loads(db.get_config("last_event_ids")) == {str(server_id): 3}
+        assert db._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+    finally:
+        db._conn.close()
+
+
+def test_hub_poll_enabled_without_token_does_not_enqueue(tmp_path, monkeypatch):
+    """OpenClaw enabled but no token: retry_due_deliveries() no-ops, so enqueuing
+    would leak undeliverable rows. Events are stored but the outbox stays empty."""
+    hub = import_hub(tmp_path, monkeypatch)
+    db = hub.DatabaseManager(tmp_path / "hub.db")
+    db.set_config("openclaw_enabled", "1")  # enabled but NO token
+    db.set_config("report_every_n_polls", "999")
+    server_id = db.add_server(
+        hub.Server(name="agent", ip="127.0.0.1", port=5678, enabled=True)
+    )
+    db.set_config("last_event_ids", json.dumps({str(server_id): 2}))
+    try:
+        engine = hub.PollingEngine(db, lambda _: None)
+        engine.last_event_ids = {server_id: 2}
+        monkeypatch.setattr(
+            engine,
+            "poll_server",
+            lambda server: {"reachable": True, "last_seen": datetime.now(), "monitors": []},
+        )
+
+        def fake_urlopen(req, timeout):
+            if req.full_url.startswith("http://127.0.0.1:5678/events"):
+                return FakeHTTPResponse({"events": [{"id": 3, "message": "new"}]})
+            raise AssertionError(f"no OpenClaw call expected without token: {req.full_url}")
 
         monkeypatch.setattr(hub.urllib.request, "urlopen", fake_urlopen)
         engine.poll_all_servers()

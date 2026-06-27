@@ -46,12 +46,24 @@ Old consumers continue to ignore unknown fields.
 
 Hub-internal SQLite table: `delivery_outbox`.
 
-The outbox is the source of truth for OpenClaw event delivery. For every fetched
-event, the Hub first stores the event history row, then inserts a `pending`
-outbox row, and only after both writes commit does it advance and persist
-`last_event_ids` for that agent. The poll loop drains due outbox rows at the
-start of a cycle and again after newly fetched events are enqueued, so normal
+The outbox is the source of truth for OpenClaw **per-event** delivery. For every
+fetched event, the Hub first stores the event history row, then inserts a
+`pending` outbox row, and only after both writes commit does it advance and
+persist `last_event_ids` for that agent. The poll loop drains due outbox rows at
+the start of a cycle and again after newly fetched events are enqueued, so normal
 delivery is still prompt but no longer depends on a direct in-loop send.
+
+Enqueue happens only when OpenClaw forwarding is **active** (enabled *and* a token
+is configured). With forwarding off, events are still stored as history but not
+enqueued, so the outbox can't accumulate undeliverable rows. `store_event` is
+unconditional regardless.
+
+**Scope note — periodic summaries are a separate path.** The N-poll summary
+(`send_summary_to_openclaw`) is best-effort: it posts directly and falls back to
+the outbox only on failure. Summaries are regenerated every report cycle, so a
+dropped one self-heals on the next cycle; routing them through the outbox as a
+durable source of truth is unnecessary. "Source of truth" above refers to
+per-event delivery, not summaries.
 
 This is intentionally at-least-once. If the Hub crashes after storing/enqueuing
 an event but before persisting the ack point, the next poll re-fetches that event
