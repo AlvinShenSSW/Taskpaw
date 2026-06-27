@@ -162,12 +162,26 @@ class HubStore:
             return cur.rowcount > 0
 
     def remove_server(self, server_id: int) -> bool:
-        """Delete a server (and its events/outbox via ON DELETE CASCADE).
-        Returns True if a row was removed."""
+        """Delete a server, its status_log/events (FK cascade), AND its queued
+        OpenClaw deliveries. `delivery_outbox` keys on server_name with no FK, so
+        cascade misses it — purge those rows explicitly or removed agents keep
+        firing notifications. Returns True if a server row was removed."""
         with self._lock:
-            cur = self._conn.execute("DELETE FROM servers WHERE id=?", (server_id,))
-            self._conn.commit()
-            return cur.rowcount > 0
+            try:
+                row = self._conn.execute(
+                    "SELECT name FROM servers WHERE id=?", (server_id,)
+                ).fetchone()
+                if row is None:
+                    return False
+                self._conn.execute(
+                    "DELETE FROM delivery_outbox WHERE server_name=?", (row[0],)
+                )
+                cur = self._conn.execute("DELETE FROM servers WHERE id=?", (server_id,))
+                self._conn.commit()
+                return cur.rowcount > 0
+            except Exception:
+                self._conn.rollback()
+                raise
 
     # ── events ────────────────────────────────────────────────────────────
     def store_event(self, server_id: int, ev: dict) -> None:

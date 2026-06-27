@@ -84,3 +84,17 @@ def test_store_set_enabled_and_remove_return_flags(tmp_path):
     assert s.remove_server(sid) is True
     assert s.remove_server(sid) is False
     s.close()
+
+
+def test_remove_server_purges_queued_deliveries(tmp_path):
+    """delivery_outbox keys on server_name (no FK cascade) — removing a server
+    must drop its pending deliveries so a removed agent can't still fire (Codex)."""
+    s = HubStore(tmp_path / "h.db")
+    sid = s.add_server("moomoo", "1.2.3.4")
+    s.enqueue_delivery("moomoo", "event", "{}")
+    s.enqueue_delivery("other", "event", "{}")
+    assert len(s.due_deliveries()) == 2
+    assert s.remove_server(sid) is True
+    remaining = s.due_deliveries()
+    assert len(remaining) == 1 and remaining[0]["server_name"] == "other"
+    s.close()
