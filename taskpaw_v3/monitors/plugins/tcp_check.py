@@ -54,12 +54,12 @@ class TcpCheckInstance(MonitorInstance):
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: TcpCheckConfig = self.config  # type: ignore[assignment]
         up = tcp_listening(cfg.host, cfg.port, cfg.connect_timeout)
-        if self._prev_up is not None and up != self._prev_up:
-            target = f"{cfg.host}:{cfg.port}"
-            if up:
-                emit("done", f"{cfg.name} listening", f"{target} is up again")
-            else:
-                emit("alert", f"{cfg.name} down", f"{target} not accepting connections")
+        target = f"{cfg.host}:{cfg.port}"
+        # Alert on a down state at startup too, not only on a healthy→down change.
+        if not up and self._prev_up in (None, True):
+            emit("alert", f"{cfg.name} down", f"{target} not accepting connections")
+        elif up and self._prev_up is False:
+            emit("done", f"{cfg.name} listening", f"{target} is up again")
         self._prev_up = up
         return MonitorStatus(
             state="ok" if up else "error",

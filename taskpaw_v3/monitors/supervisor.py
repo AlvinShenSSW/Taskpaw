@@ -134,9 +134,12 @@ class Supervisor:
             if old_thread:
                 old_thread.join(timeout=10)
                 if old_thread.is_alive():
-                    # Don't cleanup/replace under a live worker — abort safely.
-                    log.error("reconfigure aborted: worker %s still alive after join", instance_id)
-                    return
+                    # Don't cleanup/replace under a live worker. Surface the
+                    # failure so the control layer can retry, rather than
+                    # silently leaving the old config in place.
+                    raise RuntimeError(
+                        f"reconfigure of {instance_id} aborted: old worker did not stop"
+                    )
             self._cleanup_instance(old_instance, 5.0)
             new = _Managed(plugin=plugin, instance=plugin.create(instance_id, config))
             with self._lock:
@@ -200,18 +203,22 @@ class Supervisor:
         """Hook for instance errors (overridable). Default: already logged."""
 
     def _watch(self) -> None:
-        """Restart worker threads that died unexpectedly (is_alive())."""
+        """Restart worker threads that died unexpectedly (is_alive()).
+
+        Lock order is ALWAYS _life → _lock (matches register/start/reconfigure)
+        to avoid a lock-order inversion deadlock against a concurrent reconfigure.
+        """
         while self._running.is_set():
             with self._lock:
                 ids = list(self._monitors)
             for iid in ids:
-                with self._lock:
-                    m = self._monitors.get(iid)
-                    needs = bool(m and not m.stop.is_set() and m.thread and not m.thread.is_alive())
-                if needs:
-                    log.error("monitor %s thread died; restarting", iid)
-                    with self._life:
-                        self._start_worker(iid)
+                with self._life:  # outer lock first, consistently
+                    with self._lock:
+                        m = self._monitors.get(iid)
+                        needs = bool(m and not m.stop.is_set() and m.thread and not m.thread.is_alive())
+                    if needs:
+                        log.error("monitor %s thread died; restarting", iid)
+                        self._start_worker(iid)  # takes _lock, nested under _life
             time.sleep(2)
 
     # ── emit (throttle + dedupe) ───────────────────────────────────────────

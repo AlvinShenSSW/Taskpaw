@@ -74,13 +74,14 @@ class ProcessInstance(MonitorInstance):
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: ProcessConfig = self.config  # type: ignore[assignment]
         alive = process_matches(cfg.pattern, cfg.search_cmdline)
-        if self._prev_alive is not None and alive != self._prev_alive:
-            if alive:
-                emit("done", f"{cfg.name} recovered", f"process matching /{cfg.pattern}/ is back",
-                     dedupe_key=None)
-            else:
-                emit("alert", f"{cfg.name} down", f"no process matching /{cfg.pattern}/",
-                     dedupe_key=None)
+        # Alert on a down state at startup (prev is None) too, not only on a
+        # healthy→down transition.
+        if not alive and self._prev_alive in (None, True):
+            emit("alert", f"{cfg.name} down", f"no process matching /{cfg.pattern}/",
+                 dedupe_key=None)
+        elif alive and self._prev_alive is False:
+            emit("done", f"{cfg.name} recovered", f"process matching /{cfg.pattern}/ is back",
+                 dedupe_key=None)
         self._prev_alive = alive
         return MonitorStatus(
             state="ok" if alive else "error",

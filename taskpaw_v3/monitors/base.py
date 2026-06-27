@@ -17,7 +17,7 @@ import abc
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 Category = Literal["task", "service"]
 State = Literal["unknown", "ok", "idle", "running", "degraded", "error", "stopped"]
@@ -39,6 +39,9 @@ class EventEmitter(Protocol):
 
 class BaseMonitorConfig(BaseModel):
     """Common config every monitor carries (design §4.4 resource caps)."""
+
+    # Reject unknown/typo keys instead of silently dropping them.
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1)
     poll_interval: float = Field(10.0, ge=1.0)      # seconds, min 1s

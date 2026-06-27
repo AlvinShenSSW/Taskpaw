@@ -297,3 +297,30 @@ def test_start_is_idempotent():
         assert sup._watchdog is wd1
     finally:
         sup.stop()
+
+
+def test_process_emits_alert_on_unhealthy_startup(monkeypatch):
+    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process.process_matches", lambda *a, **k: False)
+    inst = ProcessPlugin().create("p", ProcessConfig(name="p", pattern="x"))
+    events = []
+    inst.check(lambda *a, **k: events.append(a))  # first check, already down → alert
+    assert events and events[0][0] == "alert"
+
+
+def test_tcp_emits_alert_on_unhealthy_startup():
+    inst = TcpCheckPlugin().create("t", TcpCheckConfig(name="t", host="127.0.0.1", port=1, connect_timeout=0.2))
+    events = []
+    inst.check(lambda *a, **k: events.append(a))  # nothing listening on :1 → alert
+    assert events and events[0][0] == "alert"
+
+
+def test_heartbeat_non_dict_json_is_clean_error(tmp_path):
+    p = tmp_path / "hb.json"
+    p.write_text("[1, 2, 3]", encoding="utf-8")  # a list, not an object
+    assert evaluate_heartbeat(HeartbeatConfig(name="hb", path=str(p))).state == "error"
+
+
+def test_config_forbids_unknown_keys():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        TcpCheckConfig(name="t", port=1, typoo_field=123)

@@ -46,6 +46,8 @@ def evaluate_heartbeat(cfg: HeartbeatConfig, now: Optional[datetime] = None) -> 
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception as e:
         return MonitorStatus(state="error", detail=f"unreadable heartbeat: {e}")
+    if not isinstance(data, dict):
+        return MonitorStatus(state="error", detail="heartbeat JSON must be an object")
 
     status = str(data.get(cfg.status_field, "")).lower()
     if status in {s.lower() for s in cfg.hibernating_states}:
@@ -79,11 +81,11 @@ class HeartbeatInstance(MonitorInstance):
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: HeartbeatConfig = self.config  # type: ignore[assignment]
         status = evaluate_heartbeat(cfg)
-        if self._prev_state is not None and status.state != self._prev_state:
-            if status.state == "error":
-                emit("alert", f"{cfg.name} unhealthy", status.detail)
-            elif status.state == "ok":
-                emit("done", f"{cfg.name} healthy", status.detail)
+        # Alert on an unhealthy state at startup too, not only on a transition.
+        if status.state == "error" and self._prev_state != "error":
+            emit("alert", f"{cfg.name} unhealthy", status.detail)
+        elif status.state == "ok" and self._prev_state == "error":
+            emit("done", f"{cfg.name} healthy", status.detail)
         self._prev_state = status.state
         return status
 
