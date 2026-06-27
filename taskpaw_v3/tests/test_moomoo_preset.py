@@ -124,3 +124,12 @@ def test_failed_enqueue_not_marked_delivered_so_keyed_alert_retries():
     assert "f:degraded" not in sup._monitors["f"].seen_dedupe
     sup._emit("f", "alert", "f degraded", "msg", None, "f:degraded")  # retries, succeeds now
     assert q.payload(ack_id=0)["events"]  # delivered on retry
+
+
+def test_build_supervisor_accepts_top_level_name_shape():
+    """The V3 source-of-truth / migration shape {type_id, name, config} (name at
+    top level) must register, not fail on missing BaseMonitorConfig.name."""
+    q = EventQueue("m")
+    specs = [{"type_id": "tcp_check", "name": "opend", "config": {"port": 11111}}]
+    sup = build_supervisor(default_registry(), specs, q, "m")
+    assert set(sup.snapshot()) == {"opend"}

@@ -50,6 +50,11 @@ def build_supervisor(
         if not type_id or not registry.has(type_id):
             raise ValueError(f"unknown monitor type_id: {type_id!r}")
         plugin = registry.get(type_id)
-        cfg = plugin.validate_config(spec.get("config", {}))
+        # Accept both shapes: the V3 source-of-truth / migration shape
+        # {type_id, name, config} (name at top level) AND name-inside-config.
+        raw = dict(spec.get("config", {}))
+        if "name" in spec and "name" not in raw:
+            raw["name"] = spec["name"]
+        cfg = plugin.validate_config(raw)
         sup.register(plugin, cfg)
     return sup
