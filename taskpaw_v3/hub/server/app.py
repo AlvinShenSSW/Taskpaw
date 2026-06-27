@@ -55,10 +55,13 @@ class HubService:
             if not active:
                 return
             import json
+            # No dedupe_key: these are edge-triggered incidents (alert on breach,
+            # done on recovery). A stable title-based key would let the permanent
+            # outbox unique index suppress every future recurrence of the same
+            # metric. Each transition is a distinct delivery.
             self.store.enqueue_delivery(
                 server_name=self.config.machine, kind="event",
                 payload_json=json.dumps({"text": f"TaskPaw Event | {self.config.machine}: {message}"}),
-                dedupe_key=f"{self.config.machine}:{instance_id}:{title}",
             )
 
         sup = Supervisor(sink=sink)

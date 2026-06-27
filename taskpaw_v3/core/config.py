@@ -37,6 +37,8 @@ class AgentConfig(BaseModel):
     api_token: str = ""
     # Monitor instances. Opaque dicts here; #17 defines the plugin schema.
     monitors: list[dict[str, Any]] = Field(default_factory=list)
+    # Auto-run a host_metrics self-monitor on this agent (§5b: every agent).
+    host_metrics: bool = True
 
     @field_validator("bind_port", "control_port")
     @classmethod

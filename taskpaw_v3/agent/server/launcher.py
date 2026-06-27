@@ -28,6 +28,15 @@ def ensure_port_free(host: str, port: int, what: str) -> None:
         raise PortInUseError(f"{what} port {host}:{port} is already in use.")
 
 
+def effective_monitors(config: AgentConfig) -> list[dict]:
+    """config.monitors plus a default host_metrics self-monitor (§5b: every
+    agent) unless one is already configured or host_metrics is disabled."""
+    monitors = list(config.monitors)
+    if config.host_metrics and not any(m.get("type_id") == "host_metrics" for m in monitors):
+        monitors.append({"type_id": "host_metrics", "config": {"name": f"{config.machine}-host"}})
+    return monitors
+
+
 def build_queue(config: AgentConfig, state_path: Optional[Path]) -> EventQueue:
     """EventQueue with persisted monotonic id (constitution §3)."""
     if state_path is None:
@@ -70,14 +79,16 @@ def run_agent(
     queue = queue or build_queue(config, state_path)
     shutdown = shutdown or GracefulShutdown()
 
-    # Build + start the monitor supervisor from config.monitors (if any), wiring
-    # its events into the same queue the Hub polls.
+    # Build + start the monitor supervisor from the effective monitor list
+    # (config.monitors + a default host_metrics per §5b), wiring events into the
+    # same queue the Hub polls.
+    monitors = effective_monitors(config)
     supervisor = None
-    if config.monitors:
+    if monitors:
         from taskpaw_v3.monitors.registry import default_registry
         from taskpaw_v3.monitors.runtime import build_supervisor
 
-        supervisor = build_supervisor(default_registry(), config.monitors, queue, config.machine)
+        supervisor = build_supervisor(default_registry(), monitors, queue, config.machine)
         supervisor.start()
         shutdown.register("supervisor", lambda: supervisor.stop())
 

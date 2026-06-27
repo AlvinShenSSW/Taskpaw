@@ -131,3 +131,49 @@ def test_read_gpu_windows_parses_util_and_vram(monkeypatch):
     assert g["util_pct"] == 60.0           # avg(50,70)
     assert g["mem_used_mb"] == 3072        # 2048+1024 summed
     assert g["mem_total_mb"] == 16384
+
+
+def test_agent_injects_default_host_metrics():
+    from taskpaw_v3.agent.server.launcher import effective_monitors
+    from taskpaw_v3.core.config import AgentConfig
+    mons = effective_monitors(AgentConfig(server_id="s", machine="dev"))
+    hm_specs = [m for m in mons if m["type_id"] == "host_metrics"]
+    assert len(hm_specs) == 1 and hm_specs[0]["config"]["name"] == "dev-host"
+
+
+def test_agent_host_metrics_can_be_disabled():
+    from taskpaw_v3.agent.server.launcher import effective_monitors
+    from taskpaw_v3.core.config import AgentConfig
+    mons = effective_monitors(AgentConfig(server_id="s", machine="dev", host_metrics=False))
+    assert not any(m["type_id"] == "host_metrics" for m in mons)
+
+
+def test_agent_does_not_duplicate_configured_host_metrics():
+    from taskpaw_v3.agent.server.launcher import effective_monitors
+    from taskpaw_v3.core.config import AgentConfig
+    cfg = AgentConfig(server_id="s", machine="dev",
+                      monitors=[{"type_id": "host_metrics", "config": {"name": "custom"}}])
+    mons = effective_monitors(cfg)
+    assert len([m for m in mons if m["type_id"] == "host_metrics"]) == 1
+
+
+def test_hub_self_monitor_repeat_alerts_not_suppressed(tmp_path):
+    """breach→recover→breach must enqueue each incident (no permanent dedupe)."""
+    from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.store import HubStore
+
+    store = HubStore(tmp_path / "hub.db")
+    store.set_config("openclaw_enabled", "1")
+    store.set_config("openclaw_token", "tok")
+    try:
+        _app, svc = create_hub_app(HubConfig(machine="hub", openclaw_enabled=True,
+                                             openclaw_token="tok", self_monitor=True), store)
+        sink = svc.self_supervisor._sink
+        # same title twice (e.g. cpu high → recovered → cpu high again)
+        sink("hub-host", "alert", "hub-host: cpu high", "CPU 95%")
+        sink("hub-host", "alert", "hub-host: cpu high", "CPU 96%")
+        n = store._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0]
+        assert n == 2  # both incidents queued, not deduped away
+    finally:
+        store.close()
