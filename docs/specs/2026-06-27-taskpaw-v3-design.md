@@ -187,6 +187,7 @@ class Supervisor:
 | **`http_health`** | service | GET 端点看状态码/JSON 字段 | 新增 |
 | **`state_file`** | service | 监视 JSON 字段变化/阈值/mtime | 新增 |
 | **`webhook_in`** | both | 本机被监控脚本→agent 入站 POST（仅本地，非 agent→Hub） | 新增（可选） |
+| **`host_metrics`** | service | 本机主机健康：CPU / 内存 / GPU / 网络 / 磁盘基础指标 + 阈值告警（psutil；GPU 跨平台需平台分支，见 §5.3） | 新增 |
 
 ### 4.3 schema 驱动 UI 的边界（评审 P2#6）
 
@@ -242,6 +243,46 @@ class Supervisor:
 
 moomoo agent 跑在**独立的一台 macOS**（非 Linux，非 Hub 那台 Mac）→ 对 Hub 是远程。
 按 §3.2：**保留现有 Hub 轮询模型**，moomoo agent 在同一局域网暴露 `/ping /status /events` + Bearer，Hub 按内网 IP 轮询——与现存 Windows agent 完全一致。无 push、无 VPN、无 loopback。
+
+---
+
+## 5b. 主机健康监控（Hub 母体 + 每台 agent 机器）
+
+**范围（operator 明确）**：除了业务监控（Lada / ComfyUI / moomoo），还要监控**承载机本身的健康**——
+即 **Hub 母体 Mac** 与 **Mac 开发 agent** 两台机器（以及任何 agent 机器）。要监控的信息**很简单**，只两类：
+
+1. **机器存活**（没挂）。
+2. **基础资源指标**：CPU / 内存 / GPU / 网络（+ 磁盘）占用。
+
+### 5b.1 用 `host_metrics` 插件（service 类）
+
+新增内置插件 `host_metrics`（§4.2），每台 agent 注册一个本机实例，采样并随 `/status` 上报：
+
+| 指标 | 来源 | 备注 |
+|---|---|---|
+| CPU % | `psutil.cpu_percent` | 跨平台稳定 |
+| 内存 % | `psutil.virtual_memory` | 跨平台稳定 |
+| 网络吞吐 | `psutil.net_io_counters`（取差分 → bytes/s 收/发） | 跨平台稳定 |
+| 磁盘 % | `psutil.disk_usage` | 跨平台稳定 |
+| **GPU %** | **平台分支**：macOS 无免 sudo 的通用 API（`powermetrics` 需 sudo；`ioreg`/IOKit 可取但口径不一）；NVIDIA 走 `nvidia-smi` | **#0 勘测确认每台机的可行口径**；取不到则该项标 `unavailable`，不阻塞其余指标 |
+
+- **阈值告警**：每指标可配阈值（默认例：CPU>90% 持续 3 周期、内存>90%、磁盘>90% → `warn`/`alert`）。默认只报不致命。
+- **机器存活**：无需额外探针——agent 可被 Hub 轮询到即视为存活；连续 N 次轮询失败由 Hub 侧判离线告警（沿用现有机制）。`host_metrics` 实例在跑本身即"主机活着且 agent 在工作"的证据。
+- 复用 V2 已有的 `_get_cpu_memory()`（psutil）逻辑，扩展出 GPU/网络/磁盘。
+
+### 5b.2 Hub 母体的自监控（特例）
+
+Hub 是聚合方、与 agent 必为异机（§3.0），但**它自己的主机健康也要监控**。
+做法：**Hub 内置一个 `host_metrics` 自监控实例**（监控 Hub 所在 Mac 本机），直接喂进 Hub 自己的仪表盘——
+**不需要在 Hub 上再装一个独立 agent**。这是"Hub 看自己"，不破坏"一平台一机"的拓扑约束。
+
+> 实质：`host_metrics` 是唯一一个 **Hub 与 agent 都会运行**的插件。其余监控仍只在 agent 侧。
+
+### 5b.3 部署
+
+- **Mac 开发 agent**：本就跑 agent，加一个 `host_metrics` 实例即可（连同它承载的 Lada/ComfyUI 业务监控）。
+- **Hub 母体**：Hub 后端启动时自动起一个本机 `host_metrics` 自监控（§5b.2）。
+- 指标采样低频（与 poll 同档，默认 10s），资源开销可忽略（§4.4 资源上限同样适用）。
 
 ---
 
