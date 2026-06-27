@@ -5,9 +5,8 @@ description = "TaskPaw V3 desktop shell"
 authors = ["TaskPaw"]
 edition = "2021"
 
-[lib]
-name = "taskpaw_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop binary-only crate (the entry point is src/main.rs). No [lib] target —
+# declaring one without a src/lib.rs would break cargo build/check.
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

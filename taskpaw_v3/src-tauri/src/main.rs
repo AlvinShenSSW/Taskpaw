@@ -17,22 +17,29 @@ use tauri::{Manager, RunEvent};
 /// Holds the spawned backend child so we can terminate it on exit.
 struct Backend(Mutex<Option<Child>>);
 
-/// Spawn the headless backend. The command is provided via TASKPAW_BACKEND_CMD
-/// (a packaged build points this at the bundled Python/service binary). If unset,
-/// the shell still runs and the UI connects to an already-running backend.
+/// Spawn the headless backend DIRECTLY (no shell wrapper) so the stored Child is
+/// the real long-running backend — closing the app then actually terminates it
+/// (a `sh -c`/`cmd /C` wrapper could leave the backend orphaned holding its
+/// port), and we don't violate the repo's no-shell invariant.
+///
+/// `TASKPAW_BACKEND_CMD` is the executable path; `TASKPAW_BACKEND_ARGS` (optional)
+/// is whitespace-separated argv. A packaged build points these at the bundled
+/// service binary. If unset, the UI connects to an already-running backend.
 fn spawn_backend() -> Option<Child> {
-    let cmd = std::env::var("TASKPAW_BACKEND_CMD").ok()?;
-    if cmd.trim().is_empty() {
+    let program = std::env::var("TASKPAW_BACKEND_CMD").ok()?;
+    if program.trim().is_empty() {
         return None;
     }
-    #[cfg(windows)]
-    let child = Command::new("cmd").args(["/C", &cmd]).spawn();
-    #[cfg(not(windows))]
-    let child = Command::new("sh").args(["-c", &cmd]).spawn();
-    match child {
+    let mut command = Command::new(&program);
+    if let Ok(args) = std::env::var("TASKPAW_BACKEND_ARGS") {
+        for arg in args.split_whitespace() {
+            command.arg(arg);
+        }
+    }
+    match command.spawn() {
         Ok(c) => Some(c),
         Err(e) => {
-            eprintln!("failed to spawn backend: {e}");
+            eprintln!("failed to spawn backend {program:?}: {e}");
             None
         }
     }
