@@ -81,8 +81,8 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         return {
             "machine": config.machine,
             "servers": store.list_servers(),
-            # Snapshot: the poller thread mutates this dict concurrently.
-            "acks": dict(service.poller.last_event_ids),
+            # Locked snapshot — the poller thread mutates this concurrently.
+            "acks": service.poller.snapshot_acks(),
         }
 
     return app, service
@@ -100,7 +100,15 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
     service.start()
 
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-    server_thread = threading.Thread(target=lambda: server.run(sockets=[sock]), name="hub-api", daemon=True)
+
+    def _serve() -> None:
+        try:
+            server.run(sockets=[sock])
+        except Exception as e:  # a failed server must not hang run_hub forever
+            log.error("Hub API server crashed: %s", e)
+            shutdown.shutdown()
+
+    server_thread = threading.Thread(target=_serve, name="hub-api", daemon=True)
 
     def _stop() -> None:
         stopped = service.stop()  # join the poll thread FIRST
@@ -110,10 +118,12 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
             sock.close()
         except OSError:
             pass
-        if stopped:
-            store.close()  # only safe once the poller thread is truly gone
+        # Closing the shared SQLite connection is only safe once BOTH the poller
+        # and the API thread have truly exited.
+        if stopped and not server_thread.is_alive():
+            store.close()
         else:
-            log.error("Poller thread still alive; leaving DB connection open to avoid a race")
+            log.error("A hub thread is still alive; leaving the DB connection open to avoid a race")
 
     shutdown.register("hub", _stop)
     shutdown.install_signal_handlers()

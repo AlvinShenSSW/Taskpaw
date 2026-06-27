@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,7 +58,13 @@ class Poller:
             lambda: self.store.get_config("polling_token", "")
         )
         self.http_timeout = http_timeout
+        self._acks_lock = threading.Lock()
         self.last_event_ids: dict[int, int] = self._load_acks()
+
+    def snapshot_acks(self) -> dict[int, int]:
+        """Thread-safe copy of the ack cursor for the API thread (/status)."""
+        with self._acks_lock:
+            return dict(self.last_event_ids)
 
     # ── ack cursor persistence ───────────────────────────────────────────
     def _load_acks(self) -> dict[int, int]:
@@ -99,7 +106,7 @@ class Poller:
             events = json.loads(resp.read().decode("utf-8")).get("events", [])
             return [e for e in events if e.get("id", -1) > last_id]
         except Exception as e:
-            log.debug("Failed to fetch events from %s: %s", server.get("name"), e)
+            log.warning("Failed to fetch events from %s: %s", server.get("name"), e)
             return []
 
     # ── retry/backoff ────────────────────────────────────────────────────
@@ -170,14 +177,15 @@ class Poller:
                     )
                 max_id = max(max_id, ev.get("id", max_id))
 
-            prev = self.last_event_ids.get(server["id"])
-            self.last_event_ids[server["id"]] = max_id
-            if not self._persist_acks():
-                # Roll back the in-memory ack so the next poll re-fetches.
-                if prev is None:
-                    self.last_event_ids.pop(server["id"], None)
-                else:
-                    self.last_event_ids[server["id"]] = prev
+            with self._acks_lock:  # serialize vs snapshot_acks() (API thread)
+                prev = self.last_event_ids.get(server["id"])
+                self.last_event_ids[server["id"]] = max_id
+                if not self._persist_acks():
+                    # Roll back the in-memory ack so the next poll re-fetches.
+                    if prev is None:
+                        self.last_event_ids.pop(server["id"], None)
+                    else:
+                        self.last_event_ids[server["id"]] = prev
 
         if active:
             self.drain_outbox()

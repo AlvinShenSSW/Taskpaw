@@ -25,8 +25,10 @@ class AgentConfig(BaseModel):
 
     server_id: str = Field(..., min_length=1)
     machine: str = Field(..., min_length=1)
-    # Network-facing read API (Hub polls this). LAN nic.
-    bind_host: str = "0.0.0.0"
+    # Network-facing read API (Hub polls this). Secure default = loopback;
+    # the operator must set this to the LAN nic IP to expose it to the Hub
+    # (constitution §2: no public/WAN exposure — never default to 0.0.0.0).
+    bind_host: str = "127.0.0.1"
     bind_port: int = 5680
     # Local control API (start/stop, edit config) — loopback only.
     control_host: str = "127.0.0.1"
@@ -77,14 +79,15 @@ def load_yaml(model: type[BaseModel], path: Path) -> BaseModel:
 
 
 def save_yaml(cfg: BaseModel, path: Path) -> None:
-    """Atomically persist a config model to YAML (tmp + replace)."""
+    """Atomically persist a config model to YAML (tmp + fsync + replace)."""
     import os
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        yaml.safe_dump(cfg.model_dump(), sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
-    )
+    text = yaml.safe_dump(cfg.model_dump(), sort_keys=False, allow_unicode=True)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())  # durable before replace (no empty file on power-loss)
     os.replace(tmp, path)

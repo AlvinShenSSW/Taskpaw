@@ -77,8 +77,15 @@ def run_agent(
         uvicorn.Config(create_control_app(config), log_level="warning")
     )
 
-    net_thread = threading.Thread(target=lambda: net.run(sockets=[net_sock]), name="agent-net", daemon=True)
-    ctl_thread = threading.Thread(target=lambda: ctl.run(sockets=[ctl_sock]), name="agent-ctl", daemon=True)
+    def _serve(server, sock, label):
+        try:
+            server.run(sockets=[sock])
+        except Exception as e:  # a failed server must not hang run_agent forever
+            log.error("Agent %s server crashed: %s", label, e)
+            shutdown.shutdown()
+
+    net_thread = threading.Thread(target=lambda: _serve(net, net_sock, "network"), name="agent-net", daemon=True)
+    ctl_thread = threading.Thread(target=lambda: _serve(ctl, ctl_sock, "control"), name="agent-ctl", daemon=True)
 
     def _stop_servers() -> None:
         net.should_exit = True

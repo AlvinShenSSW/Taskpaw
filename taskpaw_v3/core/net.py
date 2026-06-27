@@ -20,9 +20,13 @@ def _family(host: str) -> int:
 
 
 def port_available(host: str, port: int) -> bool:
-    """Best-effort probe (advisory; prefer claim_port for the real bind)."""
+    """Best-effort probe (advisory; prefer claim_port for the real bind).
+
+    Deliberately does NOT set SO_REUSEADDR: on macOS/BSD it would let this bind
+    succeed even when another listener already holds the port, defeating the
+    "is it in use?" check on the primary platform.
+    """
     with socket.socket(_family(host), socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind((host, port))
             return True
@@ -35,9 +39,12 @@ def claim_port(host: str, port: int, what: str) -> socket.socket:
 
     The returned socket is owned by the caller and should be passed to
     `uvicorn.Server.run(sockets=[sock])` (or closed). No TOCTOU gap.
+
+    No SO_REUSEADDR — we WANT bind to fail if another instance already owns the
+    port (the "refuse to start if in use" contract); on macOS SO_REUSEADDR would
+    silently allow a second agent to share 5680.
     """
     s = socket.socket(_family(host), socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind((host, port))
         s.listen(128)

@@ -77,3 +77,19 @@ def test_port_guard_detects_in_use():
             ensure_port_free(host, port, "test")
     # released now
     assert port_available("127.0.0.1", port) in (True, False)  # may race; just callable
+
+
+def test_bind_host_defaults_to_loopback():
+    # Secure default: never 0.0.0.0 (constitution §2). Operator opts into LAN.
+    assert _cfg().bind_host == "127.0.0.1"
+
+
+def test_claim_port_refuses_second_binder():
+    from taskpaw_v3.core.net import claim_port
+    s = claim_port("127.0.0.1", 0, "first")
+    try:
+        host, port = s.getsockname()
+        with pytest.raises(PortInUseError):
+            claim_port(host, port, "second")  # SO_REUSEADDR no longer masks this
+    finally:
+        s.close()
