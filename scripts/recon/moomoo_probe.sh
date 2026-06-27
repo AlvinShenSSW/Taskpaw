@@ -22,6 +22,17 @@ sec()  { line; printf '## %s\n' "$1"; line; }
 note() { printf '   %s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Portable file mtime. macOS/BSD `date -r` means epoch-seconds, not a file path
+# (that's GNU), so use `stat` per-platform instead.
+fmtmtime() {
+  local f="$1"
+  if [ "$(uname 2>/dev/null)" = "Darwin" ]; then
+    stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S %z' "$f" 2>/dev/null
+  else
+    stat -c '%y' "$f" 2>/dev/null
+  fi
+}
+
 MQT_HOME="${1:-${MQT_HOME:-}}"
 
 printf '===== TaskPaw V3 #13 — moomoo recon report =====\n'
@@ -82,7 +93,7 @@ for base in "$MQT_HOME" "$HOME/mqt" "$HOME" "$PWD"; do
     [ -n "$f" ] || continue
     found_eco="yes"
     note "found: $f"
-    grep -nE "name\s*:" "$f" 2>/dev/null | sed 's/^/      /'
+    grep -nE "name[[:space:]]*:" "$f" 2>/dev/null | sed 's/^/      /'
   done < <(find "$base" -maxdepth 4 -name 'ecosystem.config.*' 2>/dev/null | head -5)
 done
 [ -n "$found_eco" ] || note "(no ecosystem.config.* found under searched roots — confirm job name from pm2 jlist above)"
@@ -97,7 +108,7 @@ for base in "$MQT_HOME" "$HOME/mqt" "$HOME" "$PWD"; do
     hb_found="yes"
     note "found: $hb"
     note "  perms: $(ls -l "$hb" 2>/dev/null | awk '{print $1, $3, $4}')"
-    note "  mtime: $(date -r "$hb" '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null)"
+    note "  mtime: $(fmtmtime "$hb")"
     note "  content:"
     sed 's/^/      /' "$hb" 2>/dev/null | head -40
   done < <(find "$base" -maxdepth 5 -name 'orchestrator_heartbeat.json' 2>/dev/null | head -3)
