@@ -264,11 +264,11 @@ moomoo agent 跑在**独立的一台 macOS**（非 Linux，非 Hub 那台 Mac）
 | 内存 % | `psutil.virtual_memory` | 跨平台稳定 |
 | 网络吞吐 | `psutil.net_io_counters`（取差分 → bytes/s 收/发） | 跨平台稳定 |
 | 磁盘 % | `psutil.disk_usage` | 跨平台稳定 |
-| **GPU %** | **平台分支（operator 定）**：**macOS 忽略 GPU**（不采集）；**Windows 必须采集**——优先 `nvidia-smi`（N 卡），无 N 卡则用 Windows 性能计数器（PDH `GPU Engine`）/`wmi` | Windows 取不到时标 `unavailable` 不阻塞其余指标；macOS 该字段恒 `n/a` |
+| **GPU %** | **operator 定**：**macOS 忽略 GPU**（字段恒 `n/a`）；**Windows 采集**——**直接复用 V2 已实现的 `_get_gpu_info()`（`taskpaw.py:541`，`nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total`）** | 已是成熟代码，非勘测项；非 N 卡机取不到时标 `unavailable`，不阻塞其余指标 |
 
 - **阈值告警**：每指标可配阈值（默认例：CPU>90% 持续 3 周期、内存>90%、磁盘>90% → `warn`/`alert`）。默认只报不致命。
 - **机器存活**：无需额外探针——agent 可被 Hub 轮询到即视为存活；连续 N 次轮询失败由 Hub 侧判离线告警（沿用现有机制）。`host_metrics` 实例在跑本身即"主机活着且 agent 在工作"的证据。
-- 复用 V2 已有的 `_get_cpu_memory()`（psutil）逻辑，扩展出 GPU/网络/磁盘。
+- 复用 V2 已有的 `_get_cpu_memory()`（psutil，`taskpaw.py:516`）与 `_get_gpu_info()`（nvidia-smi，`taskpaw.py:541`），扩展出网络/磁盘。**GPU 无需勘测——V2 已能取到。**
 
 ### 5b.2 Hub 母体的自监控（特例）
 
