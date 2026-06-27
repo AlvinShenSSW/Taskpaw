@@ -308,7 +308,7 @@ def test_process_emits_alert_on_unhealthy_startup(monkeypatch):
 
 
 def test_tcp_emits_alert_on_unhealthy_startup():
-    inst = TcpCheckPlugin().create("t", TcpCheckConfig(name="t", host="127.0.0.1", port=1, connect_timeout=0.2))
+    inst = TcpCheckPlugin().create("t", TcpCheckConfig(name="t", host="127.0.0.1", port=1, timeout=0.2))
     events = []
     inst.check(lambda *a, **k: events.append(a))  # nothing listening on :1 → alert
     assert events and events[0][0] == "alert"

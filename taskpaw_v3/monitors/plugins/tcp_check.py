@@ -25,7 +25,7 @@ from pydantic import Field
 class TcpCheckConfig(BaseMonitorConfig):
     host: str = "127.0.0.1"
     port: int = Field(..., ge=1, le=65535)
-    connect_timeout: float = 5.0  # cap per attempt (documented, configurable)
+    # Connect deadline = the shared BaseMonitorConfig.timeout (one knob, not two).
 
 
 def tcp_listening(host: str, port: int, timeout: float) -> bool:
@@ -56,7 +56,7 @@ class TcpCheckInstance(MonitorInstance):
 
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: TcpCheckConfig = self.config  # type: ignore[assignment]
-        up = tcp_listening(cfg.host, cfg.port, cfg.connect_timeout)
+        up = tcp_listening(cfg.host, cfg.port, cfg.timeout)
         target = f"{cfg.host}:{cfg.port}"
         # Alert on a down state at startup too, not only on a healthy→down change.
         if not up and self._prev_up in (None, True):

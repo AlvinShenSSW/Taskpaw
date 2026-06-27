@@ -113,14 +113,24 @@ class Supervisor:
     def stop(self, timeout: float = 5.0) -> None:
         self._running.clear()
         deadline = time.monotonic() + timeout  # one budget for the whole shutdown
-        with self._lock:
-            managed = list(self._monitors.values())
-        for m in managed:
-            m.stop.set()
-        for m in managed:
-            if m.thread:
-                m.thread.join(timeout=max(0.0, deadline - time.monotonic()))
-            self._cleanup_instance(m.instance, max(0.0, deadline - time.monotonic()))
+        # Serialize against register/reconfigure (same lifecycle lock) so a
+        # concurrent op can't add/replace a monitor mid-shutdown. Timed acquire
+        # so a stuck lifecycle op can't block shutdown indefinitely.
+        acquired = self._life.acquire(timeout=max(0.0, timeout))
+        if not acquired:
+            log.error("stop(): could not acquire lifecycle lock in time; proceeding best-effort")
+        try:
+            with self._lock:
+                managed = list(self._monitors.values())
+            for m in managed:
+                m.stop.set()
+            for m in managed:
+                if m.thread:
+                    m.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+                self._cleanup_instance(m.instance, max(0.0, deadline - time.monotonic()))
+        finally:
+            if acquired:
+                self._life.release()
         if self._watchdog:
             self._watchdog.join(timeout=max(0.0, deadline - time.monotonic()))
 
@@ -168,6 +178,13 @@ class Supervisor:
             m.thread.start()
 
     def _run(self, instance_id: str, m: _Managed) -> None:
+        # One-time init hook (open tails/subprocesses). A failure kills the
+        # worker → the watchdog restarts it with backoff (and degrades).
+        try:
+            m.instance.start(self._emitter_for(instance_id, m))
+        except Exception as e:
+            log.error("monitor %s start() failed: %s", instance_id, e)
+            return
         while not m.stop.is_set() and self._running.is_set():
             # Exit if this _Managed is no longer the current one (reconfigured).
             with self._lock:
@@ -189,7 +206,8 @@ class Supervisor:
                         m.degraded = False
                         m.seen_dedupe.discard(f"{instance_id}:degraded")  # allow re-alert
                     m.restart_count = 0  # healthy → reset thread-death backoff
-                m.stop.wait(timeout=max(0.0, iter_start + interval - time.monotonic()))
+                # min 0.1s pause so a check slower than poll_interval can't tight-loop.
+                m.stop.wait(timeout=max(0.1, iter_start + interval - time.monotonic()))
             except Exception as e:  # check() failure → backoff, not thread death
                 with self._lock:
                     m.failures += 1
@@ -205,7 +223,7 @@ class Supervisor:
                                f"{DEGRADE_AFTER} consecutive failures: {e}",
                                dedupe_key=f"{instance_id}:degraded")
                 backoff = min(BACKOFF_MAX, BACKOFF_MIN * (2 ** (failures - 1)))
-                m.stop.wait(timeout=max(0.0, iter_start + backoff - time.monotonic()))
+                m.stop.wait(timeout=max(0.1, iter_start + backoff - time.monotonic()))
 
     def on_instance_error(self, instance_id: str, exc: Exception) -> None:
         """Hook for instance errors (overridable). Default: already logged."""
@@ -223,28 +241,33 @@ class Supervisor:
             with self._lock:
                 ids = list(self._monitors)
             for iid in ids:
+                now = time.monotonic()
+                do_restart = False
+                do_emit = False
+                restarts = 0
                 with self._life:  # outer lock first, consistently
-                    now = time.monotonic()
-                    with self._lock:
+                    with self._lock:  # all _Managed mutations stay under _lock
                         m = self._monitors.get(iid)
                         dead = bool(m and not m.stop.is_set() and m.thread and not m.thread.is_alive())
                         if dead:
-                            backoff = min(BACKOFF_MAX, BACKOFF_MIN * (2 ** m.restart_count))
-                            due = (now - m.last_restart) >= backoff if m.restart_count else True
-                        else:
-                            due = False
-                    if dead and due:
-                        m.restart_count += 1
-                        m.last_restart = now
-                        log.error("monitor %s thread died; restart #%d", iid, m.restart_count)
-                        if m.restart_count >= DEGRADE_AFTER and not m.degraded:
-                            m.degraded = True
-                            m.instance._status = MonitorStatus(state="degraded",
-                                                               detail="worker keeps dying")
-                            self._emit(iid, "alert", f"{iid} degraded",
-                                       f"worker thread died {m.restart_count} times",
-                                       dedupe_key=f"{iid}:degraded")
+                            backoff = min(BACKOFF_MAX, BACKOFF_MIN * (2 ** m.restart_count)) if m.restart_count else 0
+                            if (now - m.last_restart) >= backoff or m.restart_count == 0:
+                                m.restart_count += 1
+                                m.last_restart = now
+                                restarts = m.restart_count
+                                do_restart = True
+                                if restarts >= DEGRADE_AFTER and not m.degraded:
+                                    m.degraded = True
+                                    m.instance._status = MonitorStatus(state="degraded", detail="worker keeps dying")
+                                    do_emit = True
+                    if do_restart:
+                        log.error("monitor %s thread died; restart #%d", iid, restarts)
                         self._start_worker(iid)  # takes _lock, nested under _life
+                # _emit OUTSIDE _life — the sink must not block lifecycle ops.
+                if do_emit:
+                    self._emit(iid, "alert", f"{iid} degraded",
+                               f"worker thread died {restarts} times",
+                               dedupe_key=f"{iid}:degraded")
             time.sleep(2)
 
     # ── emit (throttle + dedupe) ───────────────────────────────────────────

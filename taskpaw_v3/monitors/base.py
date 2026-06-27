@@ -74,6 +74,10 @@ class MonitorInstance(abc.ABC):
         state transitions. Called by the supervisor every `poll_interval`.
         Must not loop or sleep — the supervisor schedules cadence."""
 
+    def start(self, emit: EventEmitter) -> None:
+        """One-time init before the first check (open files/tails/subprocesses).
+        Default no-op; the supervisor calls it once per worker start. May emit."""
+
     def snapshot(self) -> MonitorStatus:
         return self._status
 
