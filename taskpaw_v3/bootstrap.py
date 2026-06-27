@@ -12,7 +12,7 @@ wrappers in `scripts/` call this so the operator never touches a command line.
 from __future__ import annotations
 
 import argparse
-import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -37,7 +37,16 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() and not force:
         return dst, False
-    shutil.copyfile(src, dst)
+    # Atomic write (repo invariant: configs are reader-visible state) — a tmp
+    # file in the same dir + fsync + os.replace, so an interrupted/​power-lost
+    # bootstrap never leaves a truncated config the service would read.
+    data = Path(src).read_bytes()
+    tmp = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, dst)
     return dst, True
 
 

@@ -47,6 +47,13 @@ def test_scaffold_force_overwrites(home):
     assert created and "custom" not in path.read_text()
 
 
+def test_scaffold_is_atomic_no_tmp_left(home):
+    """Atomic write: the dst is the example content and no .tmp residue remains."""
+    path, _ = bootstrap.scaffold("agent")
+    assert "monitors: []" in path.read_text()
+    assert list(path.parent.glob(".*.tmp")) == []
+
+
 # ── agent spec parsing ───────────────────────────────────────────────────--
 def test_parse_agent_spec_variants():
     assert bootstrap._parse_agent_spec("moomoo,192.168.1.50") == ("moomoo", "192.168.1.50", 5680)
