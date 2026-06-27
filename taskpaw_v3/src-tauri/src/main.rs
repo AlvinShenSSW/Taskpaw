@@ -68,9 +68,17 @@ fn spawn_backend() -> Option<Child> {
     }
     let mut command = Command::new(&program);
     if let Ok(args) = std::env::var("TASKPAW_BACKEND_ARGS") {
-        for arg in args.split_whitespace() {
-            command.arg(arg);
-        }
+        // Prefer a JSON array (argv-safe for paths with spaces, e.g. macOS
+        // "Application Support"); fall back to whitespace split for convenience.
+        let argv: Vec<String> = serde_json::from_str(&args)
+            .unwrap_or_else(|_| args.split_whitespace().map(str::to_string).collect());
+        command.args(argv);
+    }
+    // Own process group so we can signal the WHOLE backend tree on exit.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
     match command.spawn() {
         Ok(c) => Some(c),
@@ -81,21 +89,23 @@ fn spawn_backend() -> Option<Child> {
     }
 }
 
+// Signal the backend's whole process GROUP on Unix (negative pid), so a wedged
+// backend's children are terminated too — not just the direct process.
 #[cfg(unix)]
-fn request_graceful(child: &Child) {
-    // SIGTERM → backend GracefulShutdown stops supervisor + managed children.
+fn signal_group(child: &Child, sig: libc::c_int) {
     unsafe {
-        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        libc::kill(-(child.id() as libc::pid_t), sig);
     }
 }
-#[cfg(not(unix))]
-fn request_graceful(_child: &Child) {}
 
 fn kill_backend(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Backend>() {
         if let Ok(mut guard) = state.0.lock() {
             if let Some(child) = guard.as_mut() {
-                request_graceful(child);
+                // Graceful first → the backend's GracefulShutdown stops the
+                // supervisor + managed children.
+                #[cfg(unix)]
+                signal_group(child, libc::SIGTERM);
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
                     match child.try_wait() {
@@ -106,6 +116,11 @@ fn kill_backend(app: &tauri::AppHandle) {
                         _ => break,
                     }
                 }
+                // Force-kill the whole group (Unix) / the process (Windows; the
+                // Job Object reaps the rest of the tree).
+                #[cfg(unix)]
+                signal_group(child, libc::SIGKILL);
+                #[cfg(not(unix))]
                 let _ = child.kill();
                 let _ = child.wait();
             }
