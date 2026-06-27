@@ -27,7 +27,7 @@ from taskpaw_v3.monitors.supervisor import Supervisor
 # ── registry ────────────────────────────────────────────────────────────--
 def test_default_registry_has_builtin_plugins():
     reg = default_registry()
-    assert set(reg.types()) == {"process", "heartbeat", "tcp_check"}
+    assert {"process", "heartbeat", "tcp_check", "host_metrics"} <= set(reg.types())
     assert reg.get("process").type_id == "process"
 
 
