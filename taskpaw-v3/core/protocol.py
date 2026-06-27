@@ -69,8 +69,9 @@ class EventQueue:
             raise ValueError("data must be a dict when provided")
 
         with self._lock:
+            candidate_id = self._next_id
             evt: dict[str, Any] = {
-                "id": self._next_id,
+                "id": candidate_id,
                 "time": _now_iso(),
                 "machine": self.machine,
                 "monitor": monitor,
@@ -82,11 +83,16 @@ class EventQueue:
                 evt["title"] = title
             if data is not None:
                 evt["data"] = dict(data)  # shallow copy: caller may mutate theirs
-            self._queue.append(evt)
-            self._next_id += 1
-            # Durable before visible: persist the counter under the lock.
+
+            # Durable BEFORE visible: persist the post-event counter first. If it
+            # raises, nothing is mutated (id not advanced, event not appended) so
+            # the caller can retry and we never expose an event whose id wasn't
+            # durably reserved (which would let a restart reuse it → dedup loss).
             if self._persist_counter is not None:
-                self._persist_counter(self._next_id)
+                self._persist_counter(candidate_id + 1)
+
+            self._queue.append(evt)
+            self._next_id = candidate_id + 1
             overflow = len(self._queue) - self._max_size
             if overflow > 0:
                 del self._queue[:overflow]

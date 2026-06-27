@@ -150,3 +150,20 @@ def test_outbox_dead_letters_once(tmp_path, monkeypatch):
         assert len(alerts) == 1
     finally:
         s.close()
+
+
+def test_poller_uses_configured_polling_token(tmp_path):
+    """Polling auth header comes from get_polling_token (HubConfig fallback), not
+    only a SQLite row — an authed agent must not silently 401."""
+    s = _store(tmp_path)
+    try:
+        p = Poller(s, "http://oc/hook", get_active=lambda: False,
+                   get_token=lambda: "", get_polling_token=lambda: "polltok")
+        assert p._auth_headers() == {"Authorization": "Bearer polltok"}
+        # default (no override) reads the SQLite row
+        p2 = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
+        assert p2._auth_headers() == {}
+        s.set_config("polling_token", "fromdb")
+        assert p2._auth_headers() == {"Authorization": "Bearer fromdb"}
+    finally:
+        s.close()

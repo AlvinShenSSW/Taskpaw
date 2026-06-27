@@ -37,6 +37,7 @@ class HubService:
                 and bool(store.get_config("openclaw_token", config.openclaw_token))
             ),
             get_token=lambda: store.get_config("openclaw_token", config.openclaw_token),
+            get_polling_token=lambda: store.get_config("polling_token", config.polling_token),
         )
         self._running = threading.Event()
         self._thread: threading.Thread | None = None

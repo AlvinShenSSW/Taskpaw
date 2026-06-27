@@ -47,6 +47,24 @@ def test_eventqueue_persists_counter_before_visible():
     assert saved == [2]  # next_id persisted during add()
 
 
+def test_eventqueue_persist_failure_keeps_event_invisible():
+    """If the counter persist raises, nothing is mutated: the event is not
+    appended and the id is not advanced (durable-before-visible)."""
+    def boom(_next_id):
+        raise OSError("disk full")
+
+    q = EventQueue(machine="m", persist_counter=boom)
+    with pytest.raises(OSError):
+        q.add("mon", "x")
+    assert len(q) == 0
+    assert q.next_id == 1  # not advanced
+    # A working persist afterwards still starts at id 1 (no gap/reuse).
+    saved = []
+    q._persist_counter = saved.append
+    assert q.add("mon", "y")["id"] == 1
+    assert saved == [2]
+
+
 def test_eventqueue_cap_drops_oldest():
     dropped = []
     q = EventQueue(machine="m", max_size=3, on_overflow=dropped.append)

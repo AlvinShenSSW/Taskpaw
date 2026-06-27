@@ -34,12 +34,18 @@ class Poller:
         openclaw_url: str,
         get_active: Callable[[], bool],
         get_token: Callable[[], str],
+        get_polling_token: Optional[Callable[[], str]] = None,
         http_timeout: float = 5.0,
     ) -> None:
         self.store = store
         self.openclaw_url = openclaw_url
         self.get_active = get_active   # openclaw_enabled AND token
-        self.get_token = get_token
+        self.get_token = get_token     # OpenClaw token
+        # Bearer sent to agents when polling. Falls back to the SQLite config row
+        # for back-compat; callers should pass one that also honors HubConfig.
+        self.get_polling_token = get_polling_token or (
+            lambda: self.store.get_config("polling_token", "")
+        )
         self.http_timeout = http_timeout
         self.last_event_ids: dict[int, int] = self._load_acks()
 
@@ -64,7 +70,7 @@ class Poller:
 
     # ── HTTP ─────────────────────────────────────────────────────────────
     def _auth_headers(self) -> dict:
-        token = self.store.get_config("polling_token", "")
+        token = self.get_polling_token()
         return {"Authorization": f"Bearer {token}"} if token else {}
 
     def fetch_events(self, server: dict) -> list[dict]:
