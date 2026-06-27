@@ -82,6 +82,13 @@ def _carry_common(w: dict, cfg: dict) -> dict:
     return cfg
 
 
+# V2's FolderWatcher IGNORES the stored poll_interval and polls every 1 second.
+# Carrying the (often-default-10 or stale) V2 value would report completions much
+# later than V2 did, especially with small stable_seconds (Codex #20 r9). Pin the
+# V2-equivalent cadence instead of carrying the meaningless field.
+_V2_FOLDER_POLL = 1.0
+
+
 # A mapper returns (specs, warnings):
 #   specs    — list of (type_id, name, config) — usually one, but Lada may emit
 #              both a process observer AND a folder observer for its output.
@@ -108,8 +115,8 @@ def _map_lada(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
             f"completion can't be represented by a V3 plugin (the process plugin "
             f"would alert on normal completion) — skipped, configure manually")
         return [], warnings
-    fcfg: dict[str, Any] = {"name": name, "path": out}
-    return [("folder", name, _carry_common(w, fcfg))], warnings
+    fcfg: dict[str, Any] = {"name": name, "path": out, "poll_interval": _V2_FOLDER_POLL}
+    return [("folder", name, fcfg)], warnings
 
 
 def _map_process(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
@@ -156,14 +163,16 @@ def _map_folder(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
     path = (w.get("watch_folder") or "").strip()
     if not path:
         return [], [f"folder watcher {name!r} has no watch_folder set"]
-    cfg: dict[str, Any] = {"name": name, "path": path}
+    # V2-equivalent 1s cadence (see _V2_FOLDER_POLL) — do NOT carry the ignored
+    # V2 poll_interval.
+    cfg: dict[str, Any] = {"name": name, "path": path, "poll_interval": _V2_FOLDER_POLL}
     exts = _split_extensions(w.get("file_extensions") or "")
     if exts:
         cfg["extensions"] = exts
     stable = w.get("stable_seconds")
     if isinstance(stable, (int, float)) and stable >= 0:
         cfg["stable_seconds"] = float(stable)
-    return [("folder", name, _carry_common(w, cfg))], []
+    return [("folder", name, cfg)], []
 
 
 def _map_custom_cmd(w: dict, name: str) -> tuple[list[_Spec], list[str]]:

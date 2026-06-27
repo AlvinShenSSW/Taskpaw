@@ -27,6 +27,7 @@ def test_lada_maps_to_output_folder():
     m = plan.monitors[0]
     assert m.type_id == "folder"
     assert m.config["path"] == "/out"
+    assert m.config["poll_interval"] == 1.0  # V2 folder cadence (Codex r9)
     assert m.source_type == "lada"
 
 
@@ -85,6 +86,9 @@ def test_folder_maps_extensions_and_stable():
     assert m.config["path"] == "/data/out"
     assert m.config["extensions"] == ["mp4", "mkv", "avi"]
     assert m.config["stable_seconds"] == 45.0
+    # V2 FolderWatcher polled every 1s and ignored the stored poll_interval;
+    # don't carry a value that would delay completions (Codex r9).
+    assert m.config["poll_interval"] == 1.0
 
 
 def test_custom_cmd_maps_command():

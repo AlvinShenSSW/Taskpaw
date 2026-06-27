@@ -89,9 +89,12 @@ class ComfyUIInstance(MonitorInstance):
             self._stall_count += 1
             if self._stall_count >= cfg.stall_confirm:
                 if not self._stalled:
+                    # No dedupe_key: the supervisor's seen-set persists across
+                    # episodes, which would permanently suppress a SECOND stall
+                    # after a recovery. The _stalled flag (reset on recovery)
+                    # already prevents duplicates within one episode (Codex r9).
                     emit("alert", f"{cfg.name}: queue stalled",
-                         f"{pending} pending but nothing running",
-                         dedupe_key=f"{self.instance_id}:stalled")
+                         f"{pending} pending but nothing running")
                     self._stalled = True
                 return MonitorStatus(state="error", detail=f"stalled: {pending} pending",
                                      metrics={"running": 0, "pending": pending})
@@ -115,9 +118,10 @@ class ComfyUIInstance(MonitorInstance):
                 self._stuck = False
             if cfg.stuck_checks and self._running_count >= cfg.stuck_checks:
                 if not self._stuck:
+                    # No dedupe_key — same reason as the stall path: avoid
+                    # permanently suppressing a later independent stuck prompt.
                     emit("alert", f"{cfg.name}: prompt stuck",
-                         f"prompt running for {self._running_count} polls without finishing",
-                         dedupe_key=f"{self.instance_id}:stuck")
+                         f"prompt running for {self._running_count} polls without finishing")
                     self._stuck = True
                 return MonitorStatus(state="error", detail=f"stuck: {self._running_count} polls",
                                      metrics={"running": running, "pending": pending})

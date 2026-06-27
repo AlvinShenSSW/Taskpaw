@@ -252,6 +252,24 @@ def test_comfyui_detects_stalled_queue(monkeypatch):
     assert len([a for a, _ in events if a[0] == "alert"]) == 1
 
 
+def test_comfyui_realerts_on_second_stall_after_recovery(monkeypatch):
+    """A stall, recovery, then a second stall must produce a SECOND alert — the
+    earlier permanent dedupe_key suppressed it forever (Codex #20 r9)."""
+    import taskpaw_v3.monitors.plugins.comfyui as mod
+
+    seq = iter([
+        ([], 1), ([], 1),     # stall episode 1 (stall_confirm=2) → alert
+        (["p"], 0),           # recover (running)
+        ([], 1), ([], 1),     # stall episode 2 → must alert again
+    ])
+    monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: next(seq))
+    inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", stall_confirm=2))
+    events, emit = _collector()
+    for _ in range(5):
+        inst.check(emit)
+    assert len([a for a, _ in events if a[0] == "alert"]) == 2
+
+
 def test_comfyui_stall_clears_then_completes(monkeypatch):
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
