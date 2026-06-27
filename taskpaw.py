@@ -286,20 +286,18 @@ def add_event(
         if title is not None:
             evt["title"] = title
         if data is not None:
-            evt["data"] = data
+            evt["data"] = dict(data)
         _events_queue.append(evt)
         _next_event_id += 1
+        _save_event_state()
         overflow = len(_events_queue) - MAX_EVENTS_QUEUE
         if overflow > 0:
             del _events_queue[:overflow]
-            log.warning(
+            log.error(
                 "Event queue exceeded %d (Hub not acking?); dropped %d oldest event(s)",
                 MAX_EVENTS_QUEUE,
                 overflow,
             )
-    # Persist outside the lock — this hits disk and we don't want the
-    # critical section to wait on I/O.
-    _save_event_state()
 
 
 def get_and_clear_events() -> list[dict]:

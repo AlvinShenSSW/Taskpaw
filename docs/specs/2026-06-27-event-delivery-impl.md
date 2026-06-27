@@ -14,8 +14,9 @@ The agent keeps the existing `/events` endpoint and response envelope:
   the queue immediately.
 - `GET /events?ack=N`: first trim queued events with `id <= N`, then return events
   with `id > N` without clearing them.
-- Hub polls with `ack=<last_event_ids[server.id]>`, keeps its existing `id >
-  last_seen` dedup, and persists `last_event_ids` as before.
+- Hub polls with `ack=<last_event_ids[server.id]>`, where `last_event_ids`
+  represents the Hub's durably persisted ack point for that server. Fetching
+  events does not advance this value.
 - If an older agent returns 404 for `/events?ack=N`, the upgraded Hub falls back to
   `/events`.
 
@@ -44,6 +45,19 @@ Old consumers continue to ignore unknown fields.
 ## Hub OpenClaw Outbox
 
 Hub-internal SQLite table: `delivery_outbox`.
+
+The outbox is the source of truth for OpenClaw event delivery. For every fetched
+event, the Hub first stores the event history row, then inserts a `pending`
+outbox row, and only after both writes commit does it advance and persist
+`last_event_ids` for that agent. The poll loop drains due outbox rows at the
+start of a cycle and again after newly fetched events are enqueued, so normal
+delivery is still prompt but no longer depends on a direct in-loop send.
+
+This is intentionally at-least-once. If the Hub crashes after storing/enqueuing
+an event but before persisting the ack point, the next poll re-fetches that event
+and may store/enqueue/deliver a duplicate. That rare duplicate is acceptable; the
+ordering prevents the worse failure mode where an event is acked to the agent
+before it is durable in the Hub and is then lost completely.
 
 Columns:
 
@@ -74,3 +88,10 @@ Dead-letter policy:
 - 10 failed attempts or 24h row age marks the row `dead_letter`.
 - The Hub emits exactly one local high-priority alert via its local log channel.
 - Dead-letter alerts are not sent through OpenClaw.
+
+## Deferred Overflow Spill
+
+The agent keeps `MAX_EVENTS_QUEUE` as an OOM backstop. Under a sustained
+Hub-down or never-ack condition, once more than 10,000 unacked events accumulate,
+the oldest unacked events are dropped and a loud error is logged. Durable
+overflow spill-to-disk is intentionally deferred to the V3 backend work (#15).

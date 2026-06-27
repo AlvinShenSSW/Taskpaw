@@ -7,6 +7,8 @@ import urllib.error
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -87,18 +89,37 @@ def test_agent_add_event_optional_fields_are_additive(tmp_path, monkeypatch):
         "message",
     }
 
+    payload = {"code": 42}
     taskpaw.add_event(
         "machine",
         "monitor",
         "rich",
         level="alert",
         title="Needs attention",
-        data={"code": 42},
+        data=payload,
     )
+    payload["code"] = 99
     rich = taskpaw._events_queue[-1]
     assert rich["level"] == "alert"
     assert rich["title"] == "Needs attention"
     assert rich["data"] == {"code": 42}
+
+
+def test_agent_event_counter_saved_while_lock_held(tmp_path, monkeypatch):
+    taskpaw = import_taskpaw(tmp_path, monkeypatch)
+    taskpaw._events_queue.clear()
+    taskpaw._next_event_id = 1
+    saved_next_ids = []
+
+    def fake_save_event_state():
+        assert taskpaw._events_lock.locked()
+        saved_next_ids.append(taskpaw._next_event_id)
+
+    monkeypatch.setattr(taskpaw, "_save_event_state", fake_save_event_state)
+
+    taskpaw.add_event("machine", "monitor", "locked save")
+
+    assert saved_next_ids == [2]
 
 
 class FakeHTTPResponse:
@@ -115,13 +136,14 @@ class FakeHTTPResponse:
         return False
 
 
-def test_hub_get_new_events_dedups_advances_and_sends_ack(tmp_path, monkeypatch):
+def test_hub_get_new_events_sends_ack_without_advancing(tmp_path, monkeypatch):
     hub = import_hub(tmp_path, monkeypatch)
     db = hub.DatabaseManager(tmp_path / "hub.db")
     try:
         engine = hub.PollingEngine(db, lambda _: None)
         server = hub.Server(id=7, name="agent", ip="127.0.0.1", port=5678)
         engine.last_event_ids = {7: 2}
+        db.set_config("last_event_ids", json.dumps({"7": 2}))
         seen_urls = []
 
         def fake_urlopen(req, timeout):
@@ -142,8 +164,8 @@ def test_hub_get_new_events_dedups_advances_and_sends_ack(tmp_path, monkeypatch)
         events = engine.get_new_events(server)
 
         assert [event["id"] for event in events] == [3, 4]
-        assert engine.last_event_ids[7] == 4
-        assert json.loads(db.get_config("last_event_ids")) == {"7": 4}
+        assert engine.last_event_ids[7] == 2
+        assert json.loads(db.get_config("last_event_ids")) == {"7": 2}
         assert seen_urls == ["http://127.0.0.1:5678/events?ack=2"]
     finally:
         db._conn.close()
@@ -175,6 +197,135 @@ def test_hub_get_new_events_falls_back_for_legacy_agent(tmp_path, monkeypatch):
             "http://127.0.0.1:5678/events?ack=2",
             "http://127.0.0.1:5678/events",
         ]
+    finally:
+        db._conn.close()
+
+
+def test_hub_poll_stores_enqueues_then_advances_ack_and_drains_outbox(
+    tmp_path, monkeypatch
+):
+    hub = import_hub(tmp_path, monkeypatch)
+    db = hub.DatabaseManager(tmp_path / "hub.db")
+    db.set_config("openclaw_enabled", "1")
+    db.set_config("openclaw_token", "token")
+    db.set_config("report_every_n_polls", "999")
+    server_id = db.add_server(
+        hub.Server(name="agent", ip="127.0.0.1", port=5678, enabled=True)
+    )
+    db.set_config("last_event_ids", json.dumps({str(server_id): 2}))
+    try:
+        engine = hub.PollingEngine(db, lambda _: None)
+        engine.last_event_ids = {server_id: 2}
+        seen_event_urls = []
+        sent_payloads = []
+
+        monkeypatch.setattr(
+            engine,
+            "poll_server",
+            lambda server: {"reachable": True, "last_seen": datetime.now(), "monitors": []},
+        )
+        monkeypatch.setattr(
+            engine,
+            "send_event_to_openclaw",
+            lambda *_: pytest.fail("events must flow through the outbox"),
+        )
+
+        def fake_urlopen(req, timeout):
+            if req.full_url.startswith("http://127.0.0.1:5678/events"):
+                seen_event_urls.append(req.full_url)
+                return FakeHTTPResponse(
+                    {
+                        "events": [
+                            {"id": 2, "message": "seen"},
+                            {"id": 3, "message": "new"},
+                            {"id": 4, "message": "newer"},
+                        ]
+                    }
+                )
+            if req.full_url == "http://127.0.0.1:18789/hooks/wake":
+                sent_payloads.append(json.loads(req.data.decode("utf-8")))
+                return FakeHTTPResponse({"ok": True})
+            raise AssertionError(req.full_url)
+
+        monkeypatch.setattr(hub.urllib.request, "urlopen", fake_urlopen)
+
+        engine.poll_all_servers()
+
+        assert seen_event_urls == [f"http://127.0.0.1:5678/events?ack=2"]
+        assert engine.last_event_ids[server_id] == 4
+        assert json.loads(db.get_config("last_event_ids")) == {str(server_id): 4}
+        rows = db._conn.execute(
+            "SELECT message FROM events ORDER BY id"
+        ).fetchall()
+        assert [row[0] for row in rows] == ["new", "newer"]
+        assert sent_payloads == [
+            {"text": "TaskPaw Event | agent: new"},
+            {"text": "TaskPaw Event | agent: newer"},
+        ]
+        outbox_count = db._conn.execute(
+            "SELECT COUNT(*) FROM delivery_outbox"
+        ).fetchone()[0]
+        assert outbox_count == 0
+    finally:
+        db._conn.close()
+
+
+def test_hub_poll_crash_before_ack_persist_refetches_events(tmp_path, monkeypatch):
+    hub = import_hub(tmp_path, monkeypatch)
+    db = hub.DatabaseManager(tmp_path / "hub.db")
+    # Forwarding enabled so the outbox enqueue path (where the crash is injected)
+    # actually runs; with it disabled, events are stored but never enqueued.
+    db.set_config("openclaw_enabled", "1")
+    db.set_config("report_every_n_polls", "999")
+    server_id = db.add_server(
+        hub.Server(name="agent", ip="127.0.0.1", port=5678, enabled=True)
+    )
+    db.set_config("last_event_ids", json.dumps({str(server_id): 2}))
+    try:
+        engine = hub.PollingEngine(db, lambda _: None)
+        engine.last_event_ids = {server_id: 2}
+        seen_event_urls = []
+
+        monkeypatch.setattr(
+            engine,
+            "poll_server",
+            lambda server: {"reachable": True, "last_seen": datetime.now(), "monitors": []},
+        )
+
+        def fake_urlopen(req, timeout):
+            seen_event_urls.append(req.full_url)
+            return FakeHTTPResponse({"events": [{"id": 3, "message": "new"}]})
+
+        monkeypatch.setattr(hub.urllib.request, "urlopen", fake_urlopen)
+
+        original_enqueue = db.enqueue_delivery
+        enqueue_calls = 0
+
+        def enqueue_then_crash(*args, **kwargs):
+            nonlocal enqueue_calls
+            enqueue_calls += 1
+            delivery_id = original_enqueue(*args, **kwargs)
+            if enqueue_calls == 1:
+                raise RuntimeError("crash before ack persist")
+            return delivery_id
+
+        monkeypatch.setattr(db, "enqueue_delivery", enqueue_then_crash)
+
+        with pytest.raises(RuntimeError):
+            engine.poll_all_servers()
+
+        assert engine.last_event_ids == {server_id: 2}
+        assert json.loads(db.get_config("last_event_ids")) == {str(server_id): 2}
+
+        monkeypatch.setattr(db, "enqueue_delivery", original_enqueue)
+        engine.poll_all_servers()
+
+        assert seen_event_urls == [
+            f"http://127.0.0.1:5678/events?ack=2",
+            f"http://127.0.0.1:5678/events?ack=2",
+        ]
+        assert engine.last_event_ids[server_id] == 3
+        assert json.loads(db.get_config("last_event_ids")) == {str(server_id): 3}
     finally:
         db._conn.close()
 
@@ -249,6 +400,65 @@ def test_hub_recovering_openclaw_sink_drains_outbox(tmp_path, monkeypatch):
         db._conn.close()
 
 
+def test_hub_retry_drops_malformed_outbox_row_and_continues(tmp_path, monkeypatch):
+    hub = import_hub(tmp_path, monkeypatch)
+    db = hub.DatabaseManager(tmp_path / "hub.db")
+    db.set_config("openclaw_token", "token")
+    try:
+        engine = hub.PollingEngine(db, lambda _: None)
+        db.enqueue_delivery(
+            server_name="agent",
+            kind="event",
+            payload_json="{not json",
+            delivery_state="pending",
+            next_attempt_at=datetime.now() - timedelta(seconds=1),
+        )
+        db.enqueue_delivery(
+            server_name="agent",
+            kind="event",
+            payload_json=json.dumps({"text": "still send me"}),
+            delivery_state="pending",
+            next_attempt_at=datetime.now() - timedelta(seconds=1),
+        )
+        sent_payloads = []
+
+        def ok_urlopen(req, timeout):
+            sent_payloads.append(json.loads(req.data.decode("utf-8")))
+            return FakeHTTPResponse({"ok": True})
+
+        monkeypatch.setattr(hub.urllib.request, "urlopen", ok_urlopen)
+        engine.retry_due_deliveries()
+
+        assert sent_payloads == [{"text": "still send me"}]
+        count = db._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0]
+        assert count == 0
+    finally:
+        db._conn.close()
+
+
+def test_hub_delivery_outbox_schema_has_due_index_without_timestamp_defaults(
+    tmp_path, monkeypatch
+):
+    hub = import_hub(tmp_path, monkeypatch)
+    db = hub.DatabaseManager(tmp_path / "hub.db")
+    try:
+        create_sql = db._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='delivery_outbox'"
+        ).fetchone()[0]
+        indexes = {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+
+        assert "next_attempt_at TEXT NOT NULL DEFAULT" not in create_sql
+        assert "created_at TEXT NOT NULL DEFAULT" not in create_sql
+        assert "idx_delivery_outbox_due" in indexes
+    finally:
+        db._conn.close()
+
+
 def test_hub_outbox_dead_letters_once_after_attempt_cap(tmp_path, monkeypatch):
     hub = import_hub(tmp_path, monkeypatch)
     db = hub.DatabaseManager(tmp_path / "hub.db")
@@ -299,3 +509,40 @@ def test_agent_event_queue_capped(tmp_path, monkeypatch):
     assert len(taskpaw._events_queue) == 5
     ids = [e["id"] for e in taskpaw._events_queue]
     assert ids == [4, 5, 6, 7, 8]  # first 3 dropped, ids still monotonic
+
+
+def test_hub_poll_disabled_openclaw_stores_history_without_outbox(tmp_path, monkeypatch):
+    """With OpenClaw forwarding disabled, events are still stored (history) and
+    the ack advances, but nothing is enqueued — the outbox must not accumulate
+    undeliverable rows."""
+    hub = import_hub(tmp_path, monkeypatch)
+    db = hub.DatabaseManager(tmp_path / "hub.db")
+    # openclaw_enabled left unset -> forwarding disabled
+    db.set_config("report_every_n_polls", "999")
+    server_id = db.add_server(
+        hub.Server(name="agent", ip="127.0.0.1", port=5678, enabled=True)
+    )
+    db.set_config("last_event_ids", json.dumps({str(server_id): 2}))
+    try:
+        engine = hub.PollingEngine(db, lambda _: None)
+        engine.last_event_ids = {server_id: 2}
+        monkeypatch.setattr(
+            engine,
+            "poll_server",
+            lambda server: {"reachable": True, "last_seen": datetime.now(), "monitors": []},
+        )
+
+        def fake_urlopen(req, timeout):
+            if req.full_url.startswith("http://127.0.0.1:5678/events"):
+                return FakeHTTPResponse({"events": [{"id": 3, "message": "new"}]})
+            raise AssertionError(f"no OpenClaw call expected when disabled: {req.full_url}")
+
+        monkeypatch.setattr(hub.urllib.request, "urlopen", fake_urlopen)
+        engine.poll_all_servers()
+
+        rows = db._conn.execute("SELECT message FROM events ORDER BY id").fetchall()
+        assert [row[0] for row in rows] == ["new"]
+        assert json.loads(db.get_config("last_event_ids")) == {str(server_id): 3}
+        assert db._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+    finally:
+        db._conn.close()

@@ -164,10 +164,16 @@ class DatabaseManager:
                         CHECK (delivery_state IN ('pending', 'failed', 'dead_letter')),
                     attempts INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT,
-                    next_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    next_attempt_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
                     dead_letter_alerted INTEGER NOT NULL DEFAULT 0
                 )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_delivery_outbox_due
+                ON delivery_outbox(delivery_state, next_attempt_at)
                 """
             )
 
@@ -441,7 +447,7 @@ class DatabaseManager:
                 raise
 
     def get_due_deliveries(
-        self, now: Optional[datetime] = None, limit: int = 20
+        self, now: Optional[datetime] = None, limit: int = 10
     ) -> List[Dict[str, Any]]:
         """Return OpenClaw deliveries due for retry."""
         now_text = self._dt(now)
@@ -465,6 +471,17 @@ class DatabaseManager:
 
     def mark_delivery_succeeded(self, delivery_id: int):
         """Remove a delivery once OpenClaw accepts it."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            try:
+                cursor.execute("DELETE FROM delivery_outbox WHERE id=?", (delivery_id,))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def discard_delivery(self, delivery_id: int):
+        """Delete a malformed outbox row that cannot be retried safely."""
         with self._lock:
             cursor = self._conn.cursor()
             try:
@@ -593,7 +610,12 @@ class PollingEngine(threading.Thread):
         servers = self.db_manager.get_servers()
         server_statuses = {}
 
-        if self.db_manager.get_config("openclaw_enabled") == "1":
+        # Only enqueue/drain OpenClaw deliveries when forwarding is enabled —
+        # otherwise the outbox would accumulate undeliverable rows forever.
+        # store_event (history) below still happens unconditionally.
+        openclaw_enabled = self.db_manager.get_config("openclaw_enabled") == "1"
+
+        if openclaw_enabled:
             self.retry_due_deliveries()
 
         for server in servers:
@@ -606,6 +628,7 @@ class PollingEngine(threading.Thread):
             # Check for new events
             new_events = self.get_new_events(server)
             if new_events:
+                max_event_id = self.last_event_ids.get(server.id, -1)
                 for event in new_events:
                     self.db_manager.store_event(
                         server.id,
@@ -613,10 +636,31 @@ class PollingEngine(threading.Thread):
                         event.get("monitor"),
                         event.get("message"),
                     )
-                # Send immediate notification for new events
-                if self.db_manager.get_config("openclaw_enabled") == "1":
-                    for event in new_events:
-                        self.send_event_to_openclaw(server.name, event)
+                    if openclaw_enabled:
+                        self.db_manager.enqueue_delivery(
+                            server_name=server.name,
+                            kind="event",
+                            delivery_state="pending",
+                            payload_json=json.dumps(
+                                {
+                                    "text": (
+                                        "TaskPaw Event | "
+                                        f"{server.name}: {event.get('message', 'Unknown event')}"
+                                    )
+                                }
+                            ),
+                        )
+                    max_event_id = max(max_event_id, event.get("id", max_event_id))
+                previous_event_id = self.last_event_ids.get(server.id)
+                self.last_event_ids[server.id] = max_event_id
+                if not self._persist_event_ids():
+                    if previous_event_id is None:
+                        self.last_event_ids.pop(server.id, None)
+                    else:
+                        self.last_event_ids[server.id] = previous_event_id
+
+        if openclaw_enabled:
+            self.retry_due_deliveries()
 
         # Prune old logs
         try:
@@ -718,12 +762,6 @@ class PollingEngine(threading.Thread):
                 e for e in events if e.get("id", -1) > last_id
             ]
 
-            if new_events:
-                self.last_event_ids[server.id] = max(
-                    e.get("id", last_id) for e in new_events
-                )
-                self._persist_event_ids()
-
             return new_events
 
         except Exception as e:
@@ -783,17 +821,28 @@ class PollingEngine(threading.Thread):
             return
 
         now = datetime.now()
-        for row in self.db_manager.get_due_deliveries(now=now):
-            attempts = int(row["attempts"])
-            created_at = datetime.fromisoformat(row["created_at"])
+        # Keep this bounded in the polling thread; a dedicated retry worker is V3 (#15).
+        for row in self.db_manager.get_due_deliveries(now=now, limit=10):
+            try:
+                attempts = int(row["attempts"])
+                created_at = datetime.fromisoformat(row["created_at"])
+                payload = json.loads(row["payload_json"])
+            except Exception as e:
+                logger.error(
+                    f"Dropping malformed OpenClaw outbox row id={row.get('id')}: {e}"
+                )
+                self.db_manager.discard_delivery(row["id"])
+                continue
+
             age_exceeded = now - created_at > timedelta(hours=24)
             if attempts >= 10 or age_exceeded:
-                reason = "attempt cap exceeded" if attempts >= 10 else "age exceeded"
+                reason = (
+                    "attempt cap exceeded" if attempts >= 10 else "age exceeded"
+                )
                 self._dead_letter_delivery(row, attempts, reason)
                 continue
 
             try:
-                payload = json.loads(row["payload_json"])
                 self._send_openclaw_payload(payload)
                 self.db_manager.mark_delivery_succeeded(row["id"])
                 logger.info(
@@ -937,12 +986,14 @@ class PollingEngine(threading.Thread):
             logger.debug(f"Failed to load event ids: {e}")
             self.last_event_ids = {}
 
-    def _persist_event_ids(self):
+    def _persist_event_ids(self) -> bool:
         """Persist last_event_ids to database."""
         try:
             self.db_manager.set_config("last_event_ids", json.dumps(self.last_event_ids))
+            return True
         except Exception as e:
             logger.debug(f"Failed to persist event ids: {e}")
+            return False
 
     def stop(self):
         """Stop the polling engine."""
