@@ -177,3 +177,20 @@ def test_hub_self_monitor_repeat_alerts_not_suppressed(tmp_path):
         assert n == 2  # both incidents queued, not deduped away
     finally:
         store.close()
+
+
+def test_supervisor_snapshot_includes_metrics(monkeypatch):
+    """snapshot must surface MonitorStatus.metrics (the actual values), not just
+    state/alive — otherwise host_metrics values never reach /status."""
+    from taskpaw_v3.monitors.supervisor import Supervisor
+    monkeypatch.setattr(hm, "psutil", fake_psutil(cpu=11.0, mem=22.0, disk=33.0))
+    monkeypatch.setattr(hm, "read_gpu", lambda: None)
+    sup = Supervisor(sink=lambda *a: None)
+    plugin = HostMetricsPlugin()
+    sup.register(plugin, HostMetricsConfig(name="host"))
+    # drive one check synchronously and store the status as _run would
+    inst = sup._monitors["host"].instance
+    inst._status = inst.check(lambda *a, **k: None)
+    snap = sup.snapshot()["host"]
+    assert "metrics" in snap and snap["metrics"]["cpu_pct"] == 11.0
+    assert snap["metrics"]["mem_pct"] == 22.0

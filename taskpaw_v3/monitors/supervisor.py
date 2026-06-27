@@ -363,6 +363,10 @@ class Supervisor:
             return {
                 iid: {
                     "state": m.instance.snapshot().state,
+                    # The actual measured values (CPU/mem/GPU/net for host_metrics,
+                    # queue depth, etc.) — the whole point of /status.
+                    "metrics": dict(m.instance.snapshot().metrics),
+                    "detail": m.instance.snapshot().detail,
                     "alive": bool(m.thread and m.thread.is_alive()),
                     "failures": m.failures,
                     "degraded": m.degraded,
