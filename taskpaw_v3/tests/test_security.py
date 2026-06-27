@@ -10,9 +10,11 @@ the full checklist + evidence mapping.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from taskpaw_v3.agent.server.app import create_control_app, create_network_app
 from taskpaw_v3.core.config import AgentConfig, HubConfig
@@ -32,7 +34,8 @@ def _net(token=SECRET):
 # ── network surface is minimal + read-only (§3.2) ──────────────────────────
 def test_network_app_does_not_expose_control_routes():
     _, _, client = _net()
-    # control endpoints must not exist on the network app
+    # NONE of the control endpoints may exist on the network app.
+    assert client.get("/control/ping").status_code == 404
     assert client.get("/control/config").status_code == 404
     assert client.post("/control/command", json={}).status_code == 404
 
@@ -80,11 +83,32 @@ def test_secret_never_in_status_or_config():
     assert SECRET not in cr.text and cr.json()["api_token"] == "***"
 
 
-def test_token_not_logged(caplog):
-    _, _, client = _net()
+def test_token_not_logged(caplog, tmp_path):
+    """No token-bearing endpoint may log the secret (agent + Hub paths)."""
+    cfg, _, client = _net()
+    ctl = TestClient(create_control_app(cfg))
+    auth = {"Authorization": f"Bearer {SECRET}"}
     with caplog.at_level(logging.DEBUG):
-        client.get("/status", headers={"Authorization": f"Bearer {SECRET}"})
+        client.get("/ping")
+        client.get("/status", headers=auth)
         client.get("/status", headers={"Authorization": "Bearer wrong"})
+        client.get("/events", headers=auth)
+        client.get("/events")  # 401
+        ctl.get("/control/config")
+        # Hub paths
+        from taskpaw_v3.hub.server.app import create_hub_app
+        from taskpaw_v3.hub.server.store import HubStore
+
+        store = HubStore(tmp_path / "hub.db")
+        try:
+            store.set_config("openclaw_token", SECRET)
+            store.set_config("polling_token", SECRET)
+            hub_app, _ = create_hub_app(HubConfig(openclaw_token=SECRET, polling_token=SECRET), store)
+            hub_client = TestClient(hub_app)
+            hub_client.get("/ping")
+            hub_client.get("/status")
+        finally:
+            store.close()
     assert SECRET not in caplog.text
 
 
@@ -97,7 +121,7 @@ def test_control_host_must_be_numeric_loopback():
     AgentConfig(server_id="s", machine="m", control_host="127.0.0.1")
     AgentConfig(server_id="s", machine="m", control_host="::1")
     for bad in ("0.0.0.0", "192.168.1.5", "localhost", "example.com"):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):  # precise: the loopback validator, not any error
             AgentConfig(server_id="s", machine="m", control_host=bad)
 
 
@@ -130,3 +154,38 @@ def test_hub_status_endpoint_never_returns_tokens(tmp_path):
         assert r2.status_code == 200 and SECRET not in r2.text
     finally:
         store.close()
+
+
+def test_runtime_binding_separation_and_loopback_control():
+    """The bind mechanism run_agent() uses (claim_port) actually binds the
+    network and control sockets to their configured, distinct addresses, and the
+    control socket sits on a numeric loopback."""
+    from taskpaw_v3.core.net import claim_port
+
+    net_sock = claim_port("127.0.0.1", 0, "network")
+    try:
+        ctl_sock = claim_port("127.0.0.1", 0, "control")
+        try:
+            net_host, net_port = net_sock.getsockname()[:2]
+            ctl_host, ctl_port = ctl_sock.getsockname()[:2]
+            assert net_port != ctl_port  # distinct sockets
+            assert ctl_host in {"127.0.0.1", "::1"}  # control on loopback
+            assert net_sock.getsockname() != ctl_sock.getsockname()
+        finally:
+            ctl_sock.close()
+    finally:
+        net_sock.close()
+
+
+def test_no_token_bearing_cli_flags_in_v3_sources():
+    """Constitution §2: secrets come from config/env, never argv. Guard against a
+    future CLI flag that would put a token on the command line / in ps output."""
+    v3_root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for py in v3_root.rglob("*.py"):
+        if "tests" in py.parts:
+            continue
+        text = py.read_text(encoding="utf-8").lower()
+        if "add_argument" in text and "token" in text:
+            offenders.append(str(py.relative_to(v3_root)))
+    assert not offenders, f"token-bearing CLI flags found in: {offenders}"
