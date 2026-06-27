@@ -32,9 +32,11 @@ declare global {
   }
 }
 
-// Default backend ports differ by role: agent 5680, Hub 5690. An injected
-// baseUrl (shell) or VITE_TASKPAW_BASE (browser) overrides both.
-const DEFAULT_PORT = { agent: 5680, hub: 5690 } as const;
+// The agent console talks to the agent's loopback CONTROL API (5681) — the
+// network API (5680) is the Hub-facing, CORS-free read surface. The Hub
+// dashboard talks to the Hub API (5690). An injected baseUrl (shell) or
+// VITE_TASKPAW_BASE (browser) overrides both.
+const DEFAULT_PORT = { agent: 5681, hub: 5690 } as const;
 
 function cfg(role: "agent" | "hub") {
   const injected = window.__TASKPAW__ || {};
@@ -56,6 +58,6 @@ async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
 }
 
 export const api = {
-  agentStatus: () => get<AgentStatus>("agent", "/status"),
+  agentStatus: () => get<AgentStatus>("agent", "/control/status"),
   hubStatus: () => get<HubStatus>("hub", "/status"),
 };

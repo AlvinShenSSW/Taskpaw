@@ -189,3 +189,39 @@ def test_no_token_bearing_cli_flags_in_v3_sources():
         if "add_argument" in text and "token" in text:
             offenders.append(str(py.relative_to(v3_root)))
     assert not offenders, f"token-bearing CLI flags found in: {offenders}"
+
+
+# ── UI CORS (design §3.2): control + hub APIs allow the UI origins ──────────
+def test_control_api_has_cors_for_ui_origin():
+    cfg = AgentConfig(server_id="s", machine="dev")
+    client = TestClient(create_control_app(cfg))
+    r = client.get("/control/ping", headers={"Origin": "tauri://localhost"})
+    assert r.headers.get("access-control-allow-origin") == "tauri://localhost"
+
+
+def test_control_status_served_from_provider():
+    cfg = AgentConfig(server_id="s", machine="dev")
+    client = TestClient(create_control_app(cfg, status_provider=lambda: {"machine": "dev", "monitors": {"x": {"state": "ok"}}}))
+    r = client.get("/control/status")
+    assert r.status_code == 200 and r.json()["monitors"]["x"]["state"] == "ok"
+
+
+def test_network_api_has_NO_cors(  ):
+    # The agent network API must stay CORS-free (design §3.2: agent doesn't open CORS).
+    cfg = AgentConfig(server_id="s", machine="dev")
+    client = TestClient(create_network_app(cfg, EventQueue("dev")))
+    r = client.get("/ping", headers={"Origin": "tauri://localhost"})
+    assert "access-control-allow-origin" not in r.headers
+
+
+def test_hub_api_has_cors_for_ui_origin(tmp_path):
+    from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.store import HubStore
+    store = HubStore(tmp_path / "hub.db")
+    try:
+        app, _svc = create_hub_app(HubConfig(machine="hub"), store)
+        r = TestClient(app).get("/ping", headers={"Origin": "http://localhost:5173"})
+        assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
+    finally:
+        store.close()
