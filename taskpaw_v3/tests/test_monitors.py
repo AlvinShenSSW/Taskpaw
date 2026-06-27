@@ -196,11 +196,13 @@ def test_supervisor_degrades_after_failures(monkeypatch):
     sup.register(_FakePlugin(boom), _FakeConfig(name="f", poll_interval=1))
     sup.start()
     try:
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and not sup.snapshot()["f"]["degraded"]:
+        # Wait for the ALERT to reach the sink (it's emitted just after the
+        # degraded flag is set, so waiting on the sink avoids a flag-vs-emit race).
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any("degraded" in s[2] for s in sink):
             time.sleep(0.05)
-        assert sup.snapshot()["f"]["degraded"] is True
         assert any("degraded" in s[2] for s in sink)
+        assert sup.snapshot()["f"]["degraded"] is True
     finally:
         sup.stop()
 
