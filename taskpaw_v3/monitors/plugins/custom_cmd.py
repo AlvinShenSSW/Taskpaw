@@ -6,8 +6,10 @@ shlex.split + shell=False (constitution §2 — no shell injection).
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
+import sys
 from typing import Optional
 
 from pydantic import Field
@@ -19,6 +21,20 @@ from taskpaw_v3.monitors.base import (
     MonitorPlugin,
     MonitorStatus,
 )
+
+_IS_WINDOWS = os.name == "nt"
+# Don't pop a console window for each poll on Windows (V2 used CREATE_NO_WINDOW).
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if _IS_WINDOWS else 0
+
+
+def split_command(command: str) -> list[str]:
+    """Tokenize a command string for shell=False execution.
+
+    On Windows, POSIX shlex treats backslashes as escapes, so `C:\\Tools\\x.bat`
+    collapses to `C:Toolsx.bat`. Use non-POSIX mode there so Windows paths and
+    backslashes survive (Codex #20 r6); POSIX mode elsewhere.
+    """
+    return shlex.split(command, posix=not _IS_WINDOWS)
 
 
 class CustomCmdConfig(BaseMonitorConfig):
@@ -32,12 +48,13 @@ class CustomCmdInstance(MonitorInstance):
 
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: CustomCmdConfig = self.config  # type: ignore[assignment]
-        argv = shlex.split(cfg.command)
+        argv = split_command(cfg.command)
         if not argv:
             return MonitorStatus(state="error", detail="empty command")
         try:
             result = subprocess.run(
-                argv, shell=False, capture_output=True, text=True, timeout=cfg.timeout
+                argv, shell=False, capture_output=True, text=True,
+                timeout=cfg.timeout, creationflags=_CREATE_NO_WINDOW,
             )
             ok = result.returncode == 0
             detail = f"exit {result.returncode}"

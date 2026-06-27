@@ -7,10 +7,12 @@ import sys
 import pytest
 
 from taskpaw_v3.monitors.plugins.comfyui import ComfyUIConfig, ComfyUIInstance, ComfyUIPlugin
+from taskpaw_v3.monitors.plugins import custom_cmd as custom_cmd_mod
 from taskpaw_v3.monitors.plugins.custom_cmd import (
     CustomCmdConfig,
     CustomCmdInstance,
     CustomCmdPlugin,
+    split_command,
 )
 from taskpaw_v3.monitors.plugins.folder import FolderConfig, FolderInstance, FolderPlugin
 from taskpaw_v3.monitors.registry import default_registry
@@ -57,6 +59,19 @@ def test_custom_cmd_emits_alert_then_recovery():
 def test_custom_cmd_empty_command_rejected():
     with pytest.raises(Exception):
         CustomCmdConfig(name="x", command="")
+
+
+def test_split_command_windows_preserves_backslashes(monkeypatch):
+    """On Windows, backslash paths must not be eaten as POSIX escapes (Codex r6)."""
+    monkeypatch.setattr(custom_cmd_mod, "_IS_WINDOWS", True)
+    argv = split_command(r"C:\Tools\check.bat --all")
+    assert argv[0] == r"C:\Tools\check.bat"
+    assert "--all" in argv
+
+
+def test_split_command_posix_mode(monkeypatch):
+    monkeypatch.setattr(custom_cmd_mod, "_IS_WINDOWS", False)
+    assert split_command("echo hi there") == ["echo", "hi", "there"]
 
 
 # ── folder ───────────────────────────────────────────────────────────────--
@@ -181,8 +196,8 @@ def test_folder_missing_dir_is_error():
 def test_comfyui_done_after_idle_confirm(monkeypatch):
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
-    counts = iter([(1, 1), (0, 0), (0, 0)])  # busy → empty → empty
-    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: next(counts))
+    snaps = iter([(["p1"], 1), ([], 0), ([], 0)])  # busy → empty → empty
+    monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: next(snaps))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", idle_confirm=2))
     events, emit = _collector()
     assert inst.check(emit).state == "running"   # busy
@@ -195,7 +210,7 @@ def test_comfyui_done_after_idle_confirm(monkeypatch):
 def test_comfyui_no_false_done_when_never_busy(monkeypatch):
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
-    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: ([], 0))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", idle_confirm=1))
     events, emit = _collector()
     inst.check(emit)
@@ -206,7 +221,7 @@ def test_comfyui_no_false_done_when_never_busy(monkeypatch):
 def test_comfyui_unreachable_is_error(monkeypatch):
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
-    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: None)
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy"))
     _, emit = _collector()
     assert inst.check(emit).state == "error"
@@ -216,7 +231,7 @@ def test_comfyui_detects_stalled_queue(monkeypatch):
     """running==0 & pending>0 held for stall_confirm → error + one alert."""
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
-    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: (0, 2))
+    monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: ([], 2))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", stall_confirm=2))
     events, emit = _collector()
     assert inst.check(emit).state == "running"   # stall 1/2, still running
@@ -232,11 +247,52 @@ def test_comfyui_detects_stalled_queue(monkeypatch):
 def test_comfyui_stall_clears_then_completes(monkeypatch):
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
-    seq = iter([(0, 1), (1, 0), (0, 0)])  # stalled-ish → running → empty
-    monkeypatch.setattr(mod, "queue_counts", lambda *a, **k: next(seq))
+    seq = iter([([], 1), (["p1"], 0), ([], 0)])  # stalled-ish → running → empty
+    monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: next(seq))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", idle_confirm=1, stall_confirm=2))
     events, emit = _collector()
     inst.check(emit)   # pending only, stall 1/2 (not yet error)
     inst.check(emit)   # running now → stall reset, busy
     inst.check(emit)   # empty → done
     assert any(a[0] == "done" for a, _ in events)
+
+
+def test_comfyui_detects_stuck_prompt(monkeypatch):
+    """Same running prompt id across stuck_checks polls → error + one alert."""
+    import taskpaw_v3.monitors.plugins.comfyui as mod
+
+    monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: (["hung-prompt"], 0))
+    inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", stuck_checks=3))
+    events, emit = _collector()
+    assert inst.check(emit).state == "running"   # 1/3
+    assert inst.check(emit).state == "running"   # 2/3
+    st = inst.check(emit)                         # 3/3 → stuck
+    assert st.state == "error"
+    assert len([a for a, _ in events if a[0] == "alert"]) == 1
+    inst.check(emit)                             # still stuck, no duplicate alert
+    assert len([a for a, _ in events if a[0] == "alert"]) == 1
+
+
+def test_comfyui_stuck_resets_when_prompt_changes(monkeypatch):
+    """A new running prompt id resets the stuck counter (progress is happening)."""
+    import taskpaw_v3.monitors.plugins.comfyui as mod
+
+    seq = iter([(["a"], 0), (["a"], 0), (["b"], 0), (["b"], 0)])
+    monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: next(seq))
+    inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", stuck_checks=3))
+    events, emit = _collector()
+    for _ in range(4):
+        assert inst.check(emit).state == "running"
+    assert not [a for a, _ in events if a[0] == "alert"]
+
+
+def test_comfyui_stuck_disabled_by_default(monkeypatch):
+    """stuck_checks=0 (default) → never flags stuck however long a prompt runs."""
+    import taskpaw_v3.monitors.plugins.comfyui as mod
+
+    monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: (["x"], 0))
+    inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy"))
+    events, emit = _collector()
+    for _ in range(10):
+        assert inst.check(emit).state == "running"
+    assert not events
