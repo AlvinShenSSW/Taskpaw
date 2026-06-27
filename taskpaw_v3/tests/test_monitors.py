@@ -427,3 +427,15 @@ def test_reconfigure_bad_config_preserves_old_monitor():
         assert old.thread.is_alive()
     finally:
         sup.stop()
+
+
+def test_heartbeat_expands_user_path(tmp_path, monkeypatch):
+    """A ~/... heartbeat path must be expanded (Path() alone doesn't)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "hb.json").write_text(
+        json.dumps({"status": "cycling",
+                    "next_check_due_utc": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()}),
+        encoding="utf-8",
+    )
+    st = evaluate_heartbeat(HeartbeatConfig(name="hb", path="~/hb.json"))
+    assert st.state == "ok"  # resolved under HOME, not reported missing
