@@ -242,3 +242,32 @@ def test_supervisor_reconfigure_stops_old_instance():
     sup.reconfigure("f", _FakeConfig(name="f", poll_interval=2))
     assert stopped == ["f"]  # old instance was cleaned up before replacement
     sup.stop()
+
+
+def test_process_config_rejects_invalid_regex():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        ProcessConfig(name="p", pattern="(unclosed[")  # invalid regex at config time
+
+
+def test_supervisor_degraded_key_cleared_on_recovery():
+    """After recovery, a later re-degrade must alert again (dedupe key cleared)."""
+    import taskpaw_v3.monitors.supervisor as sm
+    sink = []
+    sup = Supervisor(sink=lambda *a: sink.append(a))
+    # emit a degraded alert (keyed), then simulate recovery clearing the key
+    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")), _FakeConfig(name="f"))
+    sup._emit("f", "alert", "f degraded", "x", None, "f:degraded")
+    sup._emit("f", "alert", "f degraded", "x", None, "f:degraded")  # deduped
+    assert sum(1 for s in sink if s[1] == "f degraded") == 1
+    sup._monitors["f"].seen_dedupe.discard("f:degraded")  # recovery clears it
+    sup._emit("f", "alert", "f degraded", "x", None, "f:degraded")  # re-alert allowed
+    assert sum(1 for s in sink if s[1] == "f degraded") == 2
+
+
+def test_bounded_key_set_evicts_oldest():
+    from taskpaw_v3.monitors.supervisor import _BoundedKeySet
+    s = _BoundedKeySet(cap=3)
+    for k in ["a", "b", "c", "d"]:
+        s.add(k)
+    assert "a" not in s and "d" in s and "b" in s

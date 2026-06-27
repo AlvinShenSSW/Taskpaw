@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from pydantic import field_validator
+
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -29,6 +31,16 @@ class ProcessConfig(BaseMonitorConfig):
     pattern: str                      # regex matched against name / cmdline
     search_cmdline: bool = True       # also match the full command line
     category_label: str = "service"
+
+    @field_validator("pattern")
+    @classmethod
+    def _compilable(cls, v: str) -> str:
+        # Fail fast at config time, not as a runtime check loop → spurious DEGRADED.
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"invalid regex pattern: {e}") from e
+        return v
 
 
 def process_matches(pattern: str, search_cmdline: bool) -> bool:

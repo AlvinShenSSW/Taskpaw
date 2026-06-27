@@ -5,8 +5,11 @@
   consecutive failures → DEGRADED state + one alert.
 - A watchdog restarts any worker thread that died unexpectedly (is_alive()).
 - `emit` is throttled per instance to `max_events_per_minute` (storm → one
-  folded summary), and de-duplicated by `dedupe_key`.
-- `reconfigure` = stop → recreate → start (instances may override hot-apply).
+  folded summary), de-duplicated by `dedupe_key` (bounded LRU — no leak), and
+  the key is recorded only on actual delivery.
+- Lifecycle ops (register/start/stop/reconfigure) are serialized per instance so
+  a reconfigure can't race a still-running worker; observability (snapshot/emit)
+  uses a separate lock and never blocks on a thread join.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -30,9 +34,29 @@ log = logging.getLogger("taskpaw.supervisor")
 BACKOFF_MIN = 5.0
 BACKOFF_MAX = 300.0
 DEGRADE_AFTER = 5
+DEDUPE_MAX = 10_000
 
-# Sink the supervisor forwards confirmed events to (e.g. the agent EventQueue).
 EventSink = Callable[[str, str, str, Optional[dict], Optional[str]], None]
+
+
+class _BoundedKeySet:
+    """FIFO-bounded set of dedupe keys — no unbounded memory growth."""
+
+    def __init__(self, cap: int = DEDUPE_MAX) -> None:
+        self._d: "OrderedDict[str, None]" = OrderedDict()
+        self._cap = cap
+
+    def __contains__(self, k: str) -> bool:
+        return k in self._d
+
+    def add(self, k: str) -> None:
+        self._d[k] = None
+        self._d.move_to_end(k)
+        while len(self._d) > self._cap:
+            self._d.popitem(last=False)
+
+    def discard(self, k: str) -> None:
+        self._d.pop(k, None)
 
 
 @dataclass
@@ -46,14 +70,15 @@ class _Managed:
     last_emit_window: int = 0
     emit_count: int = 0
     dropped_in_window: int = 0
-    seen_dedupe: set = field(default_factory=set)
+    seen_dedupe: _BoundedKeySet = field(default_factory=_BoundedKeySet)
 
 
 class Supervisor:
     def __init__(self, sink: EventSink, clock: Callable[[], float] = time.monotonic) -> None:
         self._sink = sink
         self._clock = clock
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()          # guards _monitors + emit state
+        self._life = threading.RLock()           # serializes lifecycle ops
         self._monitors: dict[str, _Managed] = {}
         self._running = threading.Event()
         self._watchdog: Optional[threading.Thread] = None
@@ -61,14 +86,14 @@ class Supervisor:
     # ── registration / lifecycle ──────────────────────────────────────────
     def register(self, plugin: MonitorPlugin, config: BaseMonitorConfig, instance_id: Optional[str] = None) -> str:
         instance_id = instance_id or config.name
-        inst = plugin.create(instance_id, config)
-        with self._lock:
-            if instance_id in self._monitors:
-                raise ValueError(f"instance already registered: {instance_id}")
-            m = _Managed(plugin=plugin, instance=inst)
-            self._monitors[instance_id] = m
-        if self._running.is_set():
-            self._start_worker(instance_id)
+        with self._life:
+            inst = plugin.create(instance_id, config)
+            with self._lock:
+                if instance_id in self._monitors:
+                    raise ValueError(f"instance already registered: {instance_id}")
+                self._monitors[instance_id] = _Managed(plugin=plugin, instance=inst)
+            if self._running.is_set():
+                self._start_worker(instance_id)
         return instance_id
 
     def start(self) -> None:
@@ -76,7 +101,8 @@ class Supervisor:
         with self._lock:
             ids = list(self._monitors)
         for iid in ids:
-            self._start_worker(iid)
+            with self._life:
+                self._start_worker(iid)
         self._watchdog = threading.Thread(target=self._watch, name="supervisor-watchdog", daemon=True)
         self._watchdog.start()
 
@@ -94,21 +120,27 @@ class Supervisor:
             self._watchdog.join(timeout=timeout)
 
     def reconfigure(self, instance_id: str, config: BaseMonitorConfig) -> None:
-        with self._lock:
-            m = self._monitors.get(instance_id)
-            if m is None:
-                raise KeyError(instance_id)
-            plugin = m.plugin
-            old_instance = m.instance
-        # Default semantics: stop → recreate → start.
-        self._stop_worker(instance_id)
-        # Release the OLD instance's resources before replacing it (a monitor may
-        # own a subprocess/socket/tail handle) — matches stop()'s cleanup.
-        self._cleanup_instance(old_instance, 5.0)
-        with self._lock:
-            self._monitors[instance_id] = _Managed(plugin=plugin, instance=plugin.create(instance_id, config))
-        if self._running.is_set():
-            self._start_worker(instance_id)
+        # Whole sequence serialized so a worker can't run against a half-swapped
+        # entry and a concurrent reconfigure can't interleave.
+        with self._life:
+            with self._lock:
+                m = self._monitors.get(instance_id)
+                if m is None:
+                    raise KeyError(instance_id)
+                plugin, old_instance, old_thread, old_stop = m.plugin, m.instance, m.thread, m.stop
+            old_stop.set()
+            if old_thread:
+                old_thread.join(timeout=10)
+                if old_thread.is_alive():
+                    # Don't cleanup/replace under a live worker — abort safely.
+                    log.error("reconfigure aborted: worker %s still alive after join", instance_id)
+                    return
+            self._cleanup_instance(old_instance, 5.0)
+            new = _Managed(plugin=plugin, instance=plugin.create(instance_id, config))
+            with self._lock:
+                self._monitors[instance_id] = new
+            if self._running.is_set():
+                self._start_worker(instance_id)
 
     @staticmethod
     def _cleanup_instance(instance: MonitorInstance, timeout: float) -> None:
@@ -121,28 +153,25 @@ class Supervisor:
     def _start_worker(self, instance_id: str) -> None:
         with self._lock:
             m = self._monitors[instance_id]
+            if m.thread and m.thread.is_alive():
+                return  # never run two workers for one instance
             m.stop.clear()
-            m.thread = threading.Thread(target=self._run, args=(instance_id,), name=f"mon-{instance_id}", daemon=True)
+            m.thread = threading.Thread(target=self._run, args=(instance_id, m), name=f"mon-{instance_id}", daemon=True)
             m.thread.start()
 
-    def _stop_worker(self, instance_id: str) -> None:
-        with self._lock:
-            m = self._monitors.get(instance_id)
-        if not m:
-            return
-        m.stop.set()
-        if m.thread:
-            m.thread.join(timeout=5)
-
-    def _run(self, instance_id: str) -> None:
-        m = self._monitors[instance_id]
+    def _run(self, instance_id: str, m: _Managed) -> None:
         while not m.stop.is_set() and self._running.is_set():
+            # Exit if this _Managed is no longer the current one (reconfigured).
+            with self._lock:
+                if self._monitors.get(instance_id) is not m:
+                    return
             try:
-                status = m.instance.check(self._emitter_for(instance_id))
+                status = m.instance.check(self._emitter_for(instance_id, m))
                 m.instance._status = status or m.instance.snapshot()
                 if m.failures or m.degraded:
                     m.failures = 0
                     m.degraded = False
+                    m.seen_dedupe.discard(f"{instance_id}:degraded")  # allow re-alert
                 m.stop.wait(timeout=max(1.0, m.instance.config.poll_interval))
             except Exception as e:  # check() failure → backoff, not thread death
                 m.failures += 1
@@ -166,29 +195,28 @@ class Supervisor:
             with self._lock:
                 ids = list(self._monitors)
             for iid in ids:
-                m = self._monitors.get(iid)
-                if not m or m.stop.is_set():
-                    continue
-                if m.thread and not m.thread.is_alive():
+                with self._lock:
+                    m = self._monitors.get(iid)
+                    needs = bool(m and not m.stop.is_set() and m.thread and not m.thread.is_alive())
+                if needs:
                     log.error("monitor %s thread died; restarting", iid)
-                    self._start_worker(iid)
+                    with self._life:
+                        self._start_worker(iid)
             time.sleep(2)
 
     # ── emit (throttle + dedupe) ───────────────────────────────────────────
-    def _emitter_for(self, instance_id: str) -> EventEmitter:
+    def _emitter_for(self, instance_id: str, m: _Managed) -> EventEmitter:
         def emit(level, title, message, data=None, dedupe_key=None):
             self._emit(instance_id, level, title, message, data, dedupe_key)
         return emit
 
     def _emit(self, instance_id, level, title, message, data=None, dedupe_key=None) -> None:
-        m = self._monitors.get(instance_id)
-        if m is None:
-            return
         with self._lock:
-            # de-dupe identical keyed events (only ones we actually delivered)
+            m = self._monitors.get(instance_id)
+            if m is None:
+                return
             if dedupe_key is not None and dedupe_key in m.seen_dedupe:
                 return
-            # per-minute throttle (storm → folded summary)
             window = int(self._clock() // 60)
             if window != m.last_emit_window:
                 if m.dropped_in_window:
@@ -199,9 +227,7 @@ class Supervisor:
                 m.last_emit_window = window
                 m.emit_count = 0
             if m.emit_count >= m.instance.config.max_events_per_minute:
-                # Dropped → do NOT record the dedupe key, so a later window can
-                # still deliver this alert (it was never forwarded).
-                m.dropped_in_window += 1
+                m.dropped_in_window += 1  # dropped → do NOT record the key
                 return
             m.emit_count += 1
             if dedupe_key is not None:

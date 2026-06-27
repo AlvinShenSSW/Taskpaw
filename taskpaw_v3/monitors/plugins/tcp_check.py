@@ -22,17 +22,28 @@ from taskpaw_v3.monitors.base import (
 class TcpCheckConfig(BaseMonitorConfig):
     host: str = "127.0.0.1"
     port: int
+    connect_timeout: float = 5.0  # cap per attempt (documented, configurable)
 
 
 def tcp_listening(host: str, port: int, timeout: float) -> bool:
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    """True if any resolved address for host:port accepts a connection.
+
+    Uses getaddrinfo so hostnames that resolve to IPv6-only (or multiple)
+    addresses are tried with the correct family.
+    """
     try:
-        with socket.socket(family, socket.SOCK_STREAM) as s:
-            s.settimeout(timeout)
-            s.connect((host, port))
-            return True
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError:
         return False
+    for family, socktype, proto, _canon, sockaddr in infos:
+        try:
+            with socket.socket(family, socktype, proto) as s:
+                s.settimeout(timeout)
+                s.connect(sockaddr)
+                return True
+        except OSError:
+            continue
+    return False
 
 
 class TcpCheckInstance(MonitorInstance):
@@ -42,7 +53,7 @@ class TcpCheckInstance(MonitorInstance):
 
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: TcpCheckConfig = self.config  # type: ignore[assignment]
-        up = tcp_listening(cfg.host, cfg.port, min(cfg.timeout, 5.0))
+        up = tcp_listening(cfg.host, cfg.port, cfg.connect_timeout)
         if self._prev_up is not None and up != self._prev_up:
             target = f"{cfg.host}:{cfg.port}"
             if up:
