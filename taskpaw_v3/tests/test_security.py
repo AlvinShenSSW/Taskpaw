@@ -9,7 +9,6 @@ the full checklist + evidence mapping.
 
 from __future__ import annotations
 
-import json
 import logging
 
 import pytest
@@ -110,12 +109,24 @@ def test_auth_disabled_when_token_empty_is_explicit():
 
 
 # ── Hub forwarding secret handling ─────────────────────────────────────────
-def test_hub_config_openclaw_token_not_in_repr_or_dump_text():
-    # The token is a value, but a casual model_dump_json must be handled carefully
-    # by callers; assert the masking helper pattern is available for /status-like
-    # surfaces (the Hub never echoes openclaw_token in its read API).
-    h = HubConfig(openclaw_token=SECRET, polling_token=SECRET)
-    # The Hub /status (tested elsewhere) returns servers + acks only — no tokens.
-    # Here we document that tokens live only in config, never in status payloads.
-    status_like = {"machine": h.machine, "servers": [], "acks": {}}
-    assert SECRET not in json.dumps(status_like)
+def test_hub_status_endpoint_never_returns_tokens(tmp_path):
+    """Exercise the REAL Hub /status: even with secrets in config + a server
+    row, the read API must not leak openclaw_token / polling_token."""
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.store import HubStore
+
+    store = HubStore(tmp_path / "hub.db")
+    try:
+        store.add_server("agent", "127.0.0.1", 5680)
+        store.set_config("openclaw_token", SECRET)
+        store.set_config("polling_token", SECRET)
+        config = HubConfig(openclaw_token=SECRET, polling_token=SECRET)
+        app, _service = create_hub_app(config, store)
+        client = TestClient(app)
+        r = client.get("/status")
+        assert r.status_code == 200
+        assert SECRET not in r.text  # regression guard: no token in the real payload
+        r2 = client.get("/ping")
+        assert r2.status_code == 200 and SECRET not in r2.text
+    finally:
+        store.close()
