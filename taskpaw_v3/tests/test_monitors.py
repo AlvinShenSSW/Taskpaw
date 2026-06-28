@@ -433,7 +433,10 @@ def test_reconfigure_bad_config_preserves_old_monitor():
 
 def test_heartbeat_expands_user_path(tmp_path, monkeypatch):
     """A ~/... heartbeat path must be expanded (Path() alone doesn't)."""
+    # expanduser reads HOME on POSIX but USERPROFILE on Windows — set both so ~
+    # resolves to tmp_path on every OS.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     (tmp_path / "hb.json").write_text(
         json.dumps({"status": "cycling",
                     "next_check_due_utc": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()}),
