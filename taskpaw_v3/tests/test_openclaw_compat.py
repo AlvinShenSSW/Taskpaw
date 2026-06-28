@@ -284,10 +284,13 @@ def test_hubconfig_data_dir_default():
     assert cfg.write_status_md is True
 
 
-def test_db_path_for_uses_data_dir():
+def test_db_path_for_uses_data_dir(tmp_path):
+    from pathlib import Path
     from taskpaw_v3.hub.server.service import db_path_for
-    cfg = HubConfig(data_dir="/tmp/tp-test")
-    assert str(db_path_for(cfg)) == "/tmp/tp-test/hub.db"
+    # tmp_path is an absolute path on every OS; a literal "/tmp/..." isn't absolute
+    # on Windows and the data_dir validator would reject it (#68).
+    cfg = HubConfig(data_dir=str(tmp_path))
+    assert Path(db_path_for(cfg)) == tmp_path / "hub.db"
 
 
 # ── poller: fetch_status + poll logs status_log ──────────────────────────--

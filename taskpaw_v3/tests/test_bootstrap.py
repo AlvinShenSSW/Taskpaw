@@ -20,7 +20,13 @@ def load_hub_cfg():
 def home(tmp_path, monkeypatch):
     """Point platform config paths at a temp HOME (mac layout)."""
     monkeypatch.setattr(sys, "platform", "darwin")
+    # os.path.expanduser (used to resolve a "~/..." data_dir) reads HOME on POSIX
+    # but USERPROFILE on Windows — set BOTH so a "~" path lands inside tmp_path on
+    # every OS. Without USERPROFILE, Windows expanded "~" to the REAL home and the
+    # hub.db persisted there across runs (so re-adds reported "already registered"
+    # instead of "+ name", and the test polluted the developer's home dir) (#68).
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     return tmp_path
 
