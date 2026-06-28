@@ -33,8 +33,11 @@ export function EventLog({ events }: { events?: EventItem[] }) {
       {rows.map((e, i) => {
         const level = (e.level ?? "info").toLowerCase();
         const where = e.server ?? e.machine; // hub: server name; agent: machine
+        // Globally-unique key: a Hub event_id is unique only WITH its server, so
+        // compose server_id:event_id (agent events use their monotonic id) (Codex).
+        const key = `${e.server_id ?? ""}:${e.event_id ?? e.id ?? i}`;
         return (
-          <Stack key={e.id ?? e.event_id ?? i} direction="row" spacing={1.5}
+          <Stack key={key} direction="row" spacing={1.5}
             alignItems="baseline" sx={{ py: 0.75 }}>
             <Typography sx={{ fontFamily: '"Fira Code", monospace', fontSize: 12,
                               color: "text.secondary", fontVariantNumeric: "tabular-nums",

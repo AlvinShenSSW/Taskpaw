@@ -61,6 +61,7 @@ export interface MonitorSpec {
 export interface EventItem {
   id?: number;
   event_id?: number;
+  server_id?: number; // Hub events: id is only unique WITH the server (key needs both)
   time?: string;
   received_at?: string;
   machine?: string;
