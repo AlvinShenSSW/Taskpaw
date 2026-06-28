@@ -17,6 +17,7 @@ from taskpaw_v3.core.net import (  # re-export
     PortInUseError,
     announce_ready,
     claim_port,
+    loopback_url,
     port_available,
 )
 from taskpaw_v3.core.protocol import EventQueue
@@ -154,8 +155,9 @@ def run_agent(
     # once the sockets are bound + servers started — the Tauri shell reads it
     # before loading the webview and injects this base_url (so a custom
     # control_port works and the UI never races the backend). All other logs go
-    # to stderr (logging.basicConfig). The UI talks to the loopback CONTROL API.
-    announce_ready("agent", f"http://127.0.0.1:{config.control_port}")
+    # to stderr (logging.basicConfig). The UI talks to the loopback CONTROL API on
+    # its CONFIGURED host (so an IPv6 `::1` control_host is announced correctly).
+    announce_ready("agent", loopback_url(config.control_host, config.control_port))
 
     if block:
         shutdown.stopped.wait()

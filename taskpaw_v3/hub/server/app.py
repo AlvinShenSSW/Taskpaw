@@ -157,7 +157,7 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
             block: bool = True) -> GracefulShutdown:
     import uvicorn
 
-    from taskpaw_v3.core.net import announce_ready, claim_port
+    from taskpaw_v3.core.net import announce_ready, claim_port, loopback_url
 
     shutdown = shutdown or GracefulShutdown()
     sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
@@ -196,8 +196,9 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
     log.info("Hub up on %s:%s", config.bind_host, config.bind_port)
     # §3.1 readiness handshake (#48) — one stdout line the Tauri shell reads
     # before loading the webview; injects this loopback base_url (custom port
-    # supported). The dashboard talks to the loopback Hub API.
-    announce_ready("hub", f"http://127.0.0.1:{config.bind_port}")
+    # supported). A wildcard/IPv6 bind maps to the reachable loopback host so the
+    # local dashboard hits the socket that's actually listening.
+    announce_ready("hub", loopback_url(config.bind_host, config.bind_port))
 
     if block:
         shutdown.stopped.wait()

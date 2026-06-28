@@ -187,6 +187,16 @@ def test_announce_ready_emits_one_json_line(capsys):
                                 "base_url": "http://127.0.0.1:5681"}
 
 
+def test_loopback_url_maps_wildcard_and_brackets_ipv6():
+    # The readiness base_url must reach the socket that's actually bound (#48):
+    # wildcard → loopback, IPv6 bracketed (Codex).
+    from taskpaw_v3.core.net import loopback_url
+    assert loopback_url("127.0.0.1", 5681) == "http://127.0.0.1:5681"
+    assert loopback_url("0.0.0.0", 5690) == "http://127.0.0.1:5690"   # UI is local
+    assert loopback_url("::1", 5681) == "http://[::1]:5681"           # IPv6 bracketed
+    assert loopback_url("::", 5690) == "http://[::1]:5690"            # IPv6 wildcard
+
+
 def test_run_agent_announces_readiness_with_real_control_port(capsys):
     # run_agent must print the readiness line (role + the ACTUAL loopback control
     # base_url) once the servers are up, so the shell can inject the real port (#48).
