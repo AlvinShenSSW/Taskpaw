@@ -151,6 +151,20 @@ def test_admin_add_rejects_auto_monitor_collision(tmp_path):
     assert not path.exists()            # nothing persisted
 
 
+def test_control_cors_allows_patch_delete(tmp_path):
+    # The desktop UI preflights PATCH/DELETE for monitor edit/remove — CORS must
+    # allow them or the requests never reach the handlers (Codex #57a).
+    cfg = _agent_config()
+    reg = _registry()
+    admin = MonitorAdmin(cfg, None, reg, tmp_path / "a.yaml")
+    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    r = client.options("/control/monitors/x",
+                       headers={"Origin": "http://tauri.localhost",
+                                "Access-Control-Request-Method": "DELETE"})
+    allowed = r.headers.get("access-control-allow-methods", "")
+    assert "DELETE" in allowed and "PATCH" in allowed
+
+
 def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
     # A combined PATCH with an INVALID config + enabled:false must fail (400)
     # without having toggled/persisted enabled (Codex #57a).
