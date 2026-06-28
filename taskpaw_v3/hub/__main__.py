@@ -50,8 +50,17 @@ def _store(args) -> HubStore:
             # the default db (operator could manage the wrong store) (Kimi).
             print(f"error: hub config not found: {cfg_path}", file=sys.stderr)
             raise SystemExit(2)
-        # No --config and none at the default path → use the default data_dir db.
-        return HubStore(db_path_for(HubConfig()))
+        # No --config and none at the default path → use the default data_dir db,
+        # but still honor the legacy guard (a config-adjacent hub.db may exist
+        # even without a hub.yaml) (Kimi).
+        db = db_path_for(HubConfig())
+        legacy = legacy_db_conflict(default_config_path(), db)
+        if legacy:
+            print(f"error: would operate on {db}, but an older hub.db exists at "
+                  f"{legacy}.\n  Move it, set data_dir, or pass --db to target one.",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        return HubStore(db)
     try:
         config: HubConfig = load_yaml(HubConfig, cfg_path)  # type: ignore[assignment]
     except Exception as e:

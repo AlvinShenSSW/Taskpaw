@@ -100,7 +100,9 @@ class Poller:
                     "last_seen": ts,
                 }
         except Exception as e:
-            log.warning("Could not seed status snapshot: %s", e)
+            # Don't fail hub startup on a transient read race, but make a real
+            # corrupt-store/schema problem visible (Kimi).
+            log.error("Could not seed status snapshot: %s", e)
         return seed
 
     def status_snapshot(self) -> list[dict]:
@@ -160,8 +162,8 @@ class Poller:
         base = _agent_base_url(server["ip"], server["port"])
         try:
             req = urllib.request.Request(f"{base}/status", headers=self._auth_headers())
-            resp = urllib.request.urlopen(req, timeout=self.http_timeout)
-            body = resp.read().decode("utf-8")
+            with urllib.request.urlopen(req, timeout=self.http_timeout) as resp:
+                body = resp.read().decode("utf-8")
             try:
                 json.loads(body)  # validate it's JSON before persisting
             except json.JSONDecodeError as e:

@@ -83,14 +83,16 @@ def _db_has_servers(path: Path) -> bool:
             finally:
                 conn.close()
         except sqlite3.OperationalError:
-            # Locked/busy — retry; if we still can't tell, assume it HAS data so
-            # we don't wrongly declare "no conflict" and abandon a real db.
+            # Locked/busy — retry; if we STILL can't read it, fail closed (False).
+            # For the resolved db that means "no confirmed data" → the legacy
+            # guard fires and the hub refuses to start rather than risk starting
+            # against an unverified/empty db (Kimi).
             if attempt == 2:
-                return True
+                return False
             continue
         except Exception:
             return False
-    return True
+    return False
 
 
 def legacy_db_conflict(config_path: Path, resolved_db: Path) -> Path | None:
@@ -103,7 +105,9 @@ def legacy_db_conflict(config_path: Path, resolved_db: Path) -> Path | None:
     resolved_db = Path(resolved_db)
     # Normalize before comparing — a relative data_dir resolving to the config
     # dir is the SAME file and must not be flagged as a conflict (Kimi).
-    if legacy.resolve() == resolved_db.resolve() or not _is_sqlite_db(legacy):
+    # The legacy must be a real TaskPaw db WITH servers (a stray/empty/non-TaskPaw
+    # sqlite file shouldn't block startup); the resolved must NOT already have data.
+    if legacy.resolve() == resolved_db.resolve() or not _db_has_servers(legacy):
         return None
     if _db_has_servers(resolved_db):
         return None

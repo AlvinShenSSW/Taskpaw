@@ -92,5 +92,8 @@ def write_status_md(path, statuses: list[dict[str, Any]], now: str) -> None:
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(render_status_md(statuses, now), encoding="utf-8")
-    os.replace(tmp, p)
+    try:
+        tmp.write_text(render_status_md(statuses, now), encoding="utf-8")
+        os.replace(tmp, p)
+    finally:
+        tmp.unlink(missing_ok=True)   # no .tmp residue if render/write/replace fails
