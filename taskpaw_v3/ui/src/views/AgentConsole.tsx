@@ -148,7 +148,7 @@ function MonitorDetail({
                 <Button size="small" variant="contained" disabled={start.isPending}
                   onClick={() => start.mutate()}>Start</Button>
               )}
-              <Button size="small" variant="text" onClick={onEdit}>Edit config</Button>
+              <Button size="small" variant="outlined" onClick={onEdit}>Edit config</Button>
               <Box sx={{ flex: 1 }} />
               <Button size="small" color="error" variant="text"
                 onClick={() => setConfirmDel(true)}>Delete</Button>

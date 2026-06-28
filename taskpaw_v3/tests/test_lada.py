@@ -118,6 +118,20 @@ def test_cli_not_found_sets_error_and_does_not_raise(monkeypatch):
     assert inst.check(emit).state == "error"
 
 
+def test_cli_path_is_a_folder_gives_actionable_error(tmp_path):
+    # The #1 real misconfig: lada_cli_path points at the install FOLDER, not the
+    # exe → Popen would raise a cryptic "[WinError 5]". Catch it before launch with
+    # a message that names the executable to use (#70).
+    inst = LadaInstance("lada", _cfg(lada_cli_path=str(tmp_path),     # a directory
+                                     lada_input_folder="/in", lada_output_folder="/out"))
+    evs, emit = _events()
+    inst.start(emit)                                # must NOT raise
+    assert inst._launch_error and "is a folder" in inst._launch_error
+    assert "lada-cli.exe" in inst._launch_error      # points at the executable
+    assert evs and evs[0][0] == "alert"
+    assert inst.check(emit).state == "error"
+
+
 def test_managed_requires_input_output_folders():
     import pytest
     from taskpaw_v3.monitors.plugins.lada import LadaConfig

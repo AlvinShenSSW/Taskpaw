@@ -191,9 +191,10 @@ def _cpu_mem() -> dict:
 
 class LadaConfig(BaseMonitorConfig):
     lada_cli_path: str = Field(
-        "", description="Path to lada-cli. Set it → MANAGED mode (TaskPaw launches "
-        "lada-cli, needs the input/output folders below). Leave empty → PASSIVE "
-        "mode (just watch an already-running lada-cli).")
+        "", description="Full path to the lada-cli EXECUTABLE FILE (e.g. "
+        r"C:\Lada\lada-cli.exe) — NOT the folder. Set it → MANAGED mode (TaskPaw "
+        "launches lada-cli, needs the input/output folders below). Leave empty → "
+        "PASSIVE mode (just watch an already-running lada-cli).")
     process_name: str = Field(
         "lada-cli", description="Passive mode only: the process to detect. "
         "Matches with or without a trailing '.exe' (Windows: lada-cli.exe).")
@@ -273,8 +274,25 @@ class LadaInstance(MonitorInstance):
         if cfg.lada_cli_path:
             self._start_managed(emit)
 
+    def _emit_launch_error(self, emit: EventEmitter, msg: str) -> None:
+        cfg: LadaConfig = self.config  # type: ignore[assignment]
+        self._launch_error = msg
+        emit("alert", f"{cfg.name} error", msg, dedupe_key=f"{self.instance_id}:launch")
+
     def _start_managed(self, emit: EventEmitter) -> None:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
+        # Pre-flight the CLI path. The #1 real-world misconfig is pointing it at
+        # the install FOLDER instead of the executable (e.g. "C:\Lada" rather than
+        # "C:\Lada\lada-cli.exe"); subprocess would fail that with a cryptic
+        # "[WinError 5] access denied", so catch it here with an actionable message.
+        cli = Path(cfg.lada_cli_path)
+        if cli.is_dir():
+            self._emit_launch_error(emit,
+                f"lada_cli_path is a folder ({cfg.lada_cli_path}); point it at the "
+                f"lada-cli executable, e.g. {cli / 'lada-cli.exe'}")
+            return
+        # A non-existent path is left to Popen → FileNotFoundError below (one
+        # "not found" path; also keeps mocked-Popen tests exercising the argv).
         cmd = [cfg.lada_cli_path]
         if cfg.lada_input_folder:
             cmd += ["--input", cfg.lada_input_folder]
@@ -299,14 +317,16 @@ class LadaInstance(MonitorInstance):
             # The ONLY start-time event V2 emits. start() must NOT raise (else the
             # supervisor's watchdog would restart-spin on a permanently missing
             # binary) — record the error so check() reports it.
-            self._launch_error = f"lada-cli not found at {cfg.lada_cli_path}"
-            emit("alert", f"{cfg.name} error", self._launch_error,
-                 dedupe_key=f"{self.instance_id}:launch")
+            self._emit_launch_error(emit, f"lada-cli not found at {cfg.lada_cli_path}")
+            return
+        except PermissionError as e:
+            # WinError 5 — usually a non-executable target or an AV/permission block.
+            self._emit_launch_error(emit,
+                f"access denied launching {cfg.lada_cli_path} ({e}); make sure it's "
+                f"the lada-cli executable and isn't blocked by antivirus")
             return
         except Exception as e:
-            self._launch_error = f"failed to launch lada-cli: {e}"
-            emit("alert", f"{cfg.name} error", self._launch_error,
-                 dedupe_key=f"{self.instance_id}:launch")
+            self._emit_launch_error(emit, f"failed to launch lada-cli: {e}")
             return
 
         if capture and self._process.stdout is not None:
