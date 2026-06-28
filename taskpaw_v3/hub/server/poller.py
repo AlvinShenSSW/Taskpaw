@@ -112,10 +112,17 @@ class Poller:
         Best-effort: the server list (DB) and the in-memory snapshot are read
         separately, so a server removed between the two reads may briefly appear
         stale in one status.md render — acceptable for a human-readable snapshot."""
+        servers = self.store.list_servers()
+        current_ids = {s["id"] for s in servers}
         with self._snap_lock:
+            # Drop entries for removed servers so the dict can't grow without
+            # bound under add/remove churn in the long-running poller (Kimi).
+            for k in list(self._status_snapshot):
+                if k not in current_ids:
+                    self._status_snapshot.pop(k, None)
             snaps = {k: dict(v) for k, v in self._status_snapshot.items()}
         out: list[dict] = []
-        for s in self.store.list_servers():
+        for s in servers:
             if not s["enabled"]:
                 continue
             snap = snaps.get(s["id"], {})
