@@ -16,7 +16,7 @@ from taskpaw_v3.monitors.base import (
     MonitorPlugin,
     MonitorStatus,
 )
-from taskpaw_v3.monitors.registry import PluginRegistry
+from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
 from taskpaw_v3.monitors.runtime import build_supervisor, merge_status
 
 
@@ -111,6 +111,20 @@ def test_admin_update_keeps_name(tmp_path):
     assert cfg.monitors[0]["config"]["name"] == "w1"     # name is stable
     with pytest.raises(ValueError):
         admin.update("missing", {"poll_interval": 5})
+
+
+def test_admin_update_merges_partial_config(tmp_path):
+    # PATCH: changing only poll_interval must keep the required plugin field
+    # (process.pattern) and not reset it to a default (Codex #57a).
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, default_registry(), tmp_path / "a.yaml")
+    admin.add({"type_id": "process", "config": {"name": "p", "pattern": "nginx",
+                                                "search_cmdline": False}})
+    admin.update("p", {"poll_interval": 30})         # partial — pattern omitted
+    c = cfg.monitors[0]["config"]
+    assert c["poll_interval"] == 30
+    assert c["pattern"] == "nginx"                    # required field preserved
+    assert c["search_cmdline"] is False              # optional field not reset
 
 
 def test_admin_handle_dispatch(tmp_path):

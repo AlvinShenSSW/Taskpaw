@@ -132,10 +132,13 @@ class MonitorAdmin:
             if not isinstance(config, dict):
                 raise ValueError("monitor config must be an object")
             plugin = self._reg.get(m["type_id"])
-            raw = dict(config)
             iid = monitor_name(m)
-            # Keep the stable id: a config update must not rename the monitor
-            # (that would break Hub grouping); force the existing name.
+            # PATCH semantics: merge the incoming fields OVER the existing config
+            # so a partial update (e.g. just poll_interval) keeps required
+            # plugin fields (folder.path, tcp_check.port, …) and doesn't reset
+            # omitted optional fields to defaults (Codex #57a). Force the stable
+            # id: a config update must not rename the monitor (breaks Hub grouping).
+            raw = {**(m.get("config") or {}), **config}
             raw["name"] = iid
             cfg = plugin.validate_config(raw)        # authoritative validation
             m["config"] = cfg.model_dump()
