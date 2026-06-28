@@ -111,3 +111,75 @@ def test_main_agent_flag_rejected_for_agent_role(home, capsys):
 def test_main_bad_agent_spec_returns_2(home, capsys):
     rc = bootstrap.main(["hub", "--agent", "broken"])
     assert rc == 2
+
+
+# ── --preset moomoo ──────────────────────────────────────────────────────--
+def test_preset_moomoo_injects_four_valid_monitors(home, capsys):
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.monitors.registry import default_registry
+
+    rc = bootstrap.main(["agent", "--preset", "moomoo"])
+    assert rc == 0
+    assert "applied moomoo preset: 4 monitors" in capsys.readouterr().out
+
+    from taskpaw_v3.agent.server import service as agent_service
+    cfg: AgentConfig = load_yaml(AgentConfig, agent_service.default_config_path())
+    assert cfg.machine == "moomoo" and len(cfg.monitors) == 4
+    reg = default_registry()
+    names = sorted(m["config"]["name"] for m in cfg.monitors)
+    assert names == ["moomoo-opend", "moomoo-orchestrator",
+                     "moomoo-orchestrator-heartbeat", "moomoo-pm2-daemon"]
+    for m in cfg.monitors:                     # all validate against real plugins
+        reg.get(m["type_id"]).validate_config(m["config"])
+
+
+def test_preset_rejected_for_hub_role(home, capsys):
+    rc = bootstrap.main(["hub", "--preset", "moomoo"])
+    assert rc == 2
+    assert "only valid for the agent" in capsys.readouterr().err
+
+
+def test_preset_refuses_existing_without_force(home, capsys):
+    bootstrap.main(["agent", "--preset", "moomoo"])          # create + apply
+    rc = bootstrap.main(["agent", "--preset", "moomoo"])     # again, no force
+    assert rc == 2
+    assert "refusing to edit" in capsys.readouterr().err
+
+
+def test_bind_host_sets_lan_address(home):
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.agent.server import service as agent_service
+
+    rc = bootstrap.main(["agent", "--bind-host", "192.168.1.77"])
+    assert rc == 0
+    cfg: AgentConfig = load_yaml(AgentConfig, agent_service.default_config_path())
+    assert cfg.bind_host == "192.168.1.77"
+
+
+def test_preset_with_bind_host_together(home):
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.agent.server import service as agent_service
+
+    rc = bootstrap.main(["agent", "--preset", "moomoo", "--bind-host", "10.0.0.9"])
+    assert rc == 0
+    cfg: AgentConfig = load_yaml(AgentConfig, agent_service.default_config_path())
+    assert cfg.machine == "moomoo" and len(cfg.monitors) == 4
+    assert cfg.bind_host == "10.0.0.9"
+
+
+def test_bind_host_rejected_for_hub(home, capsys):
+    assert bootstrap.main(["hub", "--bind-host", "10.0.0.1"]) == 2
+    assert "only valid for the agent" in capsys.readouterr().err
+
+
+def test_preset_force_reapplies(home):
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.agent.server import service as agent_service
+
+    bootstrap.main(["agent", "--preset", "moomoo"])
+    # user wipes monitors, then re-applies with --force
+    p = agent_service.default_config_path()
+    p.write_text("server_id: x\nmachine: x\nmonitors: []\n")
+    assert bootstrap.main(["agent", "--preset", "moomoo", "--force"]) == 0
+    cfg: AgentConfig = load_yaml(AgentConfig, p)
+    assert len(cfg.monitors) == 4
