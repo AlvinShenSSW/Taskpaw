@@ -28,7 +28,11 @@ The AFK / review gates self-check against this file — a violation is a blocker
   `shell=False`.
 - **Atomic writes** for any file another process reads (config, `status.md`,
   state): write `*.tmp` then `os.replace()`.
-- **No secrets in argv or logs.** Tokens/keys come from config files or env only.
+- **No secrets in argv or logs, and never committed to git.** Tokens / API keys
+  come from **environment variables** (preferred) or **local config files that
+  are gitignored** — never hard-coded or checked in. Only `*.example.*` templates
+  with empty/placeholder values are tracked. (`.gitignore` enforces this for
+  `.env`, `config.json`, `agent.yaml`, `hub.yaml`.)
 - **Network-facing HTTP requires auth.** An agent's `/status` and `/events` must
   be Bearer-gated when a token is set; a `401` must **not** clear the event
   queue. Local control APIs (start/stop, edit config) bind loopback only and are

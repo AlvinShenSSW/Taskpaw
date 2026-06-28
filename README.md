@@ -128,6 +128,11 @@ build.bat          # Build script
 README.md          # This file
 ```
 
+## Author & Copyright
+
+TaskPaw was **initiated, designed, and is maintained by Alvin Shen**.
+Copyright (c) 2026 Alvin Shen.
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

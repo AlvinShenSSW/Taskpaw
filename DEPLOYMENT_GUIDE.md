@@ -286,7 +286,7 @@ cat > ~/Library/LaunchAgents/com.taskpaw.hub.plist << 'EOF'
     <string>com.taskpaw.hub</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/youruser/Documents/Taskpaw/dist/TaskPawHub</string>
+        <string>/Users/youruser/Taskpaw/dist/TaskPawHub</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

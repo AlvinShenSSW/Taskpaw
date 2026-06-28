@@ -15,6 +15,17 @@ dist/
 # Logs / local state
 *.log
 
+# Secrets & local config — NEVER commit tokens/api keys (constitution §2).
+# Real configs live in the platform config dir / env, not the repo; only the
+# *.example.* templates (with empty tokens) are tracked.
+.env
+.env.*
+!.env.example
+*.secret
+config.json
+agent.yaml
+hub.yaml
+
 # V3 frontend / Tauri shell build artifacts
 taskpaw_v3/ui/node_modules/
 taskpaw_v3/ui/dist/
