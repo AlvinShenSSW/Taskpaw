@@ -35,17 +35,17 @@ jobs:
       # leading v); empty on workflow_dispatch → tauri.conf version.
       TASKPAW_BUILD_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false   # release build only needs the source
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
 
       - uses: dtolnay/rust-toolchain@1.96.0   # pinned for reproducible bundles
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
 
       - name: Install Python + build deps
         run: uv sync --frozen --extra build --extra v3
@@ -54,7 +54,7 @@ jobs:
         run: uv run python scripts/build.py
 
       - name: Collect installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: taskpaw-agent-${{ matrix.label }}
           if-no-files-found: error
