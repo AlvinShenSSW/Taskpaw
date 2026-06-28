@@ -36,6 +36,32 @@ def effective_monitors(config: AgentConfig) -> list[dict[str, Any]]:
     return monitors
 
 
+def merge_status(config: AgentConfig, live: dict[str, Any]) -> dict[str, Any]:
+    """Supervisor snapshot + configured monitors that AREN'T running (disabled)
+    as `stopped` stubs — so the console can list and re-enable them instead of
+    them vanishing once stopped (#57, Codex). Each entry also carries `enabled`
+    (and `type_id` for configured ones) for the UI's toggle/edit. Additive to the
+    /status wire shape (constitution §3: V3 only adds optional fields)."""
+    configured = {n: s for s in config.monitors if (n := monitor_name(s))}
+    out: dict[str, Any] = {}
+    for name, snap in live.items():
+        entry = dict(snap)
+        spec = configured.get(name)
+        entry["enabled"] = bool(spec.get("enabled", True)) if spec else True
+        if spec is not None:
+            entry["type_id"] = spec.get("type_id")
+        out[name] = entry
+    for name, spec in configured.items():
+        if name not in out:        # configured but not running → disabled
+            out[name] = {
+                "state": "stopped", "detail": "disabled", "metrics": {},
+                "alive": False, "failures": 0, "degraded": False, "dropped": 0,
+                "enabled": bool(spec.get("enabled", True)),
+                "type_id": spec.get("type_id"),
+            }
+    return out
+
+
 def monitor_name(spec: dict[str, Any]) -> str:
     """Resolve a monitor's name from either canonical shape — top-level `name`
     ({type_id, name, config}) or name-inside-config. Single source of truth so a
@@ -95,6 +121,10 @@ def build_supervisor(
     """
     sup = Supervisor(sink=make_queue_sink(queue, machine))
     for spec in monitors:
+        # An explicitly disabled monitor stays in config but is NOT started (#57).
+        # Default (key absent) = enabled, so existing configs are unaffected.
+        if spec.get("enabled", True) is False:
+            continue
         type_id = spec.get("type_id")
         # str-guard before registry.has() — a malformed YAML type_id (list/null)
         # must raise ValueError, not TypeError that crashes agent startup (Kimi).

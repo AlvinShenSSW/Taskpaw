@@ -49,6 +49,7 @@ def run_agent(
     queue: EventQueue | None = None,
     shutdown: GracefulShutdown | None = None,
     state_path: Optional[Path] = None,
+    config_path: Optional[Path] = None,
     block: bool = True,
 ) -> GracefulShutdown:
     """Claim ports, start the network + control servers, wire shutdown.
@@ -75,18 +76,23 @@ def run_agent(
     # Build + start the monitor supervisor from the effective monitor list
     # (config.monitors + a default host_metrics per §5b), wiring events into the
     # same queue the Hub polls.
+    from taskpaw_v3.agent.server.admin import MonitorAdmin
     from taskpaw_v3.monitors.registry import default_registry
-    from taskpaw_v3.monitors.runtime import build_supervisor
+    from taskpaw_v3.monitors.runtime import build_supervisor, merge_status
 
     # One registry, shared by the supervisor AND /control/plugins, so the endpoint
     # advertises exactly what this agent runs (Kimi).
     registry = default_registry()
     monitors = effective_monitors(config)
-    supervisor = None
-    if monitors:
-        supervisor = build_supervisor(registry, monitors, queue, config.machine)
-        supervisor.start()
-        shutdown.register("supervisor", lambda: supervisor.stop())
+    # Always build the supervisor — even with no monitors — so the control API can
+    # add the FIRST monitor live (#57). build_supervisor validates each spec and
+    # skips ones marked enabled:false.
+    supervisor = build_supervisor(registry, monitors, queue, config.machine)
+    supervisor.start()
+    shutdown.register("supervisor", lambda: supervisor.stop())
+
+    # Live add/remove/update/enable/disable, persisted to config_path (#57).
+    admin = MonitorAdmin(config, supervisor, registry, config_path)
 
     def _status_provider() -> dict:
         import platform
@@ -94,15 +100,19 @@ def run_agent(
             "machine": config.machine,
             "server_id": config.server_id,
             "os": platform.platform(),
-            "monitors": supervisor.snapshot() if supervisor else {},
+            # snapshot (running) + configured-but-disabled stubs, so the console
+            # can list + re-enable stopped monitors (#57).
+            "monitors": merge_status(config, supervisor.snapshot()),
         }
 
     net = uvicorn.Server(
         uvicorn.Config(create_network_app(config, queue, _status_provider), log_level="warning")
     )
     ctl = uvicorn.Server(
-        uvicorn.Config(create_control_app(config, status_provider=_status_provider,
-                                          registry=registry), log_level="warning")
+        uvicorn.Config(create_control_app(config, on_command=admin.handle,
+                                          status_provider=_status_provider,
+                                          registry=registry, admin=admin),
+                       log_level="warning")
     )
 
     def _serve(server, sock, label):

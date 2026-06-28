@@ -29,7 +29,10 @@ def add_ui_cors(app: FastAPI, extra_origins: list[str] | None = None) -> None:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=UI_ORIGINS + (extra_origins or []),
-        allow_methods=["GET", "POST", "OPTIONS"],
+        # PATCH/DELETE for the monitor CRUD control API (#57); GET/POST for the
+        # rest. The browser preflights PATCH/DELETE, so they must be allowed or
+        # the desktop console can't edit/remove monitors.
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type"],
         allow_credentials=False,
     )
