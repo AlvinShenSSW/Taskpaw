@@ -72,11 +72,15 @@ struct JobHandle(Mutex<Option<jobobj::Job>>);
 /// distinct agent and hub installers); else "agent".
 fn ui_role() -> String {
     let nonblank = |s: String| Some(s).filter(|v| !v.trim().is_empty());
-    std::env::var("TASKPAW_UI_ROLE")
+    let raw = std::env::var("TASKPAW_UI_ROLE")
         .ok()
         .and_then(nonblank)
         .or_else(|| option_env!("TASKPAW_BUILD_ROLE").map(str::to_string).and_then(nonblank))
-        .unwrap_or_else(|| "agent".into())
+        .unwrap_or_else(|| "agent".into());
+    // Normalize + validate: the frontend (App.tsx) and backend expect exactly
+    // "agent"/"hub"; anything else (e.g. "AGENT", typo) falls back to agent (Kimi).
+    let role = raw.trim().to_ascii_lowercase();
+    if matches!(role.as_str(), "agent" | "hub") { role } else { "agent".into() }
 }
 
 /// Resolve the backend command: an explicit dev override, else the bundled
@@ -213,8 +217,12 @@ fn loopback_base(raw: &str) -> String {
         host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)
     };
     let host = host.to_ascii_lowercase();
-    // Accept the whole 127.0.0.0/8 loopback block + localhost + IPv6 ::1 (Kimi).
-    let is_loopback = host == "localhost" || host == "::1" || host.starts_with("127.");
+    // Parse the IPv4 form so a *hostname* like "127.0.0.1.evil.com" (which a
+    // browser resolves to a remote IP) is NOT accepted — a prefix check would
+    // leak the api key (Codex/Kimi P1). Accept localhost + IPv6 ::1 + 127.0.0.0/8.
+    let is_loopback = host == "localhost"
+        || host == "::1"
+        || host.parse::<std::net::Ipv4Addr>().map(|ip| ip.is_loopback()).unwrap_or(false);
     if !is_loopback {
         eprintln!("TASKPAW_UI_BASE {v:?} is not loopback — ignoring");
         return String::new();
@@ -237,16 +245,20 @@ fn init_script() -> String {
     let cfg = serde_json::json!({ "baseUrl": base, "apiKey": token, "role": role });
     // Guard by origin so the api key is never exposed if the webview ever
     // navigates away from the local frontend to a non-loopback page (Kimi).
+    // Allowed origins: loopback hosts, the macOS tauri: protocol, AND the
+    // packaged webview host `tauri.localhost` (Windows https://tauri.localhost,
+    // per core/cors.py) — else the injected config is dropped in packaged builds
+    // (Codex).
     format!(
-        "if (['localhost','127.0.0.1','[::1]','::1'].includes(location.hostname) || \
-         location.protocol === 'tauri:') {{ window.__TASKPAW__ = {cfg}; }}"
+        "if (['localhost','127.0.0.1','[::1]','::1','tauri.localhost'].includes(location.hostname) \
+         || location.protocol === 'tauri:') {{ window.__TASKPAW__ = {cfg}; }}"
     )
 }
 
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
-            let child = spawn_backend();
+            let mut child = spawn_backend();
             // Bundled mode (no dev override): a missing/failed sidecar means the
             // UI would open with no backend — fail LOUD rather than silently
             // broken (Kimi). Dev (explicit TASKPAW_BACKEND_CMD) stays lenient.
@@ -263,16 +275,21 @@ fn main() {
                 // If we spawned a backend but couldn't put it in a kill-on-close
                 // Job Object, the "X = exit, no orphan descendants" guarantee is
                 // broken — fail rather than risk leaking a backend tree (Kimi).
-                let job = match child.as_ref() {
-                    Some(c) => match jobobj::assign(c) {
-                        Some(j) => Some(j),
-                        None => {
-                            return Err("could not assign the backend to a Windows Job \
-                                        Object; refusing to launch to avoid orphaned \
-                                        backend processes on exit."
-                                .into());
+                let job = match child.as_ref().map(jobobj::assign) {
+                    Some(Some(j)) => Some(j),
+                    Some(None) => {
+                        // Assignment failed AFTER spawn — kill the backend now,
+                        // else returning Err drops Child WITHOUT terminating it
+                        // (Child has no kill-on-drop) → orphan (Codex).
+                        if let Some(c) = child.as_mut() {
+                            let _ = c.kill();
+                            let _ = c.wait();
                         }
-                    },
+                        return Err("could not assign the backend to a Windows Job \
+                                    Object; refusing to launch to avoid orphaned \
+                                    backend processes on exit."
+                            .into());
+                    }
                     None => None, // dev: backend intentionally disabled
                 };
                 app.manage(JobHandle(Mutex::new(job)));
