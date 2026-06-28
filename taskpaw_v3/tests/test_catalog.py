@@ -68,6 +68,16 @@ def test_add_monitor_rejects_blank_name():
         add_monitor([], {"type_id": "tcp_check", "config": {"name": "   ", "port": 1}})
 
 
+def test_whitespace_name_collision_is_caught(monkeypatch):
+    # A legacy " foo " entry and a new "foo" must be seen as the same name, so the
+    # duplicate is rejected here rather than crashing the supervisor later (Kimi).
+    from taskpaw_v3.monitors.runtime import monitor_name
+    assert monitor_name({"config": {"name": "  foo  "}}) == "foo"
+    legacy = [{"type_id": "tcp_check", "name": " foo ", "config": {"name": " foo ", "port": 1}}]
+    with pytest.raises(ValueError, match="already exists"):
+        add_monitor(legacy, {"type_id": "tcp_check", "config": {"name": "foo", "port": 2}})
+
+
 def test_add_monitor_rejects_unknown_type():
     with pytest.raises(ValueError):
         add_monitor([], {"type_id": "nope", "config": {"name": "x"}})

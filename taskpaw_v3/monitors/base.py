@@ -17,7 +17,7 @@ import abc
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Category = Literal["task", "service", "both"]
 State = Literal["unknown", "ok", "idle", "running", "degraded", "error", "stopped"]
@@ -40,15 +40,25 @@ class EventEmitter(Protocol):
 class BaseMonitorConfig(BaseModel):
     """Common config every monitor carries (design §4.4 resource caps)."""
 
-    # Reject unknown/typo keys instead of silently dropping them; strip incidental
-    # whitespace so " " can't pass as a name and paths/patterns aren't space-padded.
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    # Reject unknown/typo keys instead of silently dropping them.
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1)
     poll_interval: float = Field(10.0, ge=1.0)      # seconds, min 1s
     timeout: float = Field(30.0, gt=0)              # command/HTTP probe timeout
     max_events_per_minute: int = Field(60, ge=1)    # storm → folded summary
     max_line_bytes: int = Field(1_000_000, ge=1024)  # tail line cap
+
+    @field_validator("name")
+    @classmethod
+    def _name_canonical(cls, v: str) -> str:
+        # The name is a stable ID (Hub history/grouping, uniqueness). Strip it
+        # ONLY (not every string field — that would silently rewrite paths /
+        # patterns / commands) and reject a whitespace-only name (Kimi).
+        v = v.strip()
+        if not v:
+            raise ValueError("name must not be blank")
+        return v
 
 
 @dataclass

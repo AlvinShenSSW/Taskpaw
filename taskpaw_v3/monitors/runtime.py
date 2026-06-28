@@ -18,8 +18,14 @@ from taskpaw_v3.monitors.supervisor import Supervisor
 def monitor_name(spec: dict[str, Any]) -> str:
     """Resolve a monitor's name from either canonical shape — top-level `name`
     ({type_id, name, config}) or name-inside-config. Single source of truth so a
-    shape change touches one place (Kimi)."""
-    return str((spec.get("config") or {}).get("name") or spec.get("name") or "")
+    shape change touches one place. Returns the STRIPPED name so collision /
+    duplicate checks on raw specs align with the validated (stripped) name —
+    otherwise " foo " and "foo" slip past has_monitor()/effective_monitors() and
+    then collide at registration (Kimi)."""
+    cfg = spec.get("config")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return str(cfg.get("name") or spec.get("name") or "").strip()
 
 
 def make_queue_sink(queue: EventQueue, machine: str):
