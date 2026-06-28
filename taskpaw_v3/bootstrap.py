@@ -50,6 +50,24 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
     return dst, True
 
 
+def apply_moomoo_preset(config_path: Path) -> int:
+    """Inject the moomoo four-life-signs preset into a scaffolded agent.yaml.
+
+    The preset defaults are the #13-confirmed real values for the moomoo Mac, so
+    after this the agent runs the four monitors with zero hand-editing. Returns
+    the number of monitors written. Uses save_yaml (atomic).
+    """
+    from taskpaw_v3.core.config import AgentConfig, load_yaml, save_yaml
+    from taskpaw_v3.monitors.presets.moomoo import moomoo_preset
+
+    cfg: AgentConfig = load_yaml(AgentConfig, config_path)  # type: ignore[assignment]
+    cfg.machine = "moomoo"
+    cfg.server_id = "moomoo-prod"
+    cfg.monitors = moomoo_preset()
+    save_yaml(cfg, config_path)
+    return len(cfg.monitors)
+
+
 def _parse_agent_spec(spec: str) -> tuple[str, str, int]:
     """`name,ip[,port]` → (name, ip, port). Raises ValueError on bad input."""
     parts = [p.strip() for p in spec.split(",")]
@@ -94,10 +112,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run", action="store_true", help="launch the service after setup")
     ap.add_argument("--agent", action="append", default=[], metavar="name,ip[,port]",
                     help="(hub only, repeatable) register an agent to poll")
+    ap.add_argument("--preset", choices=["moomoo"], default=None,
+                    help="(agent only) fill monitors from a built-in preset")
     args = ap.parse_args(argv)
 
     if args.agent and args.role != "hub":
         print("error: --agent is only valid for the hub role", file=sys.stderr)
+        return 2
+    if args.preset and args.role != "agent":
+        print("error: --preset is only valid for the agent role", file=sys.stderr)
         return 2
 
     try:
@@ -108,6 +131,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{'created' if created else 'kept existing'} config: {path}")
     if not created:
         print("  (use --force to overwrite with the example)")
+
+    if args.preset:
+        if not created and not args.force:
+            print(f"error: {path} already exists — refusing to overwrite its monitors with "
+                  f"the {args.preset} preset; re-run with --force", file=sys.stderr)
+            return 2
+        n = apply_moomoo_preset(path)
+        print(f"applied {args.preset} preset: {n} monitors (machine=moomoo)")
 
     if args.role == "hub" and args.agent:
         try:
@@ -127,8 +158,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Not running — tell the operator exactly what to do next.
     if args.role == "agent":
-        print(f"next: edit {path} (server_id/machine, bind_host for LAN, monitors),")
-        print("      then start it:  python -m taskpaw_v3.agent")
+        if args.preset:
+            print(f"next: {path} is ready (preset monitors set). Start it:")
+            print("      python -m taskpaw_v3.agent")
+        else:
+            print(f"next: edit {path} (server_id/machine, bind_host for LAN, monitors),")
+            print("      then start it:  python -m taskpaw_v3.agent")
     else:
         print(f"next: edit {path} if needed, register agents with")
         print("      python -m taskpaw_v3.bootstrap hub --agent name,ip  (or `hub add-server`),")

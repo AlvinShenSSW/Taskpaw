@@ -43,8 +43,13 @@ scaffold the config, register agents, and start the service:
 | Machine             | Do this |
 |---------------------|---------|
 | **Mac Hub**         | edit the `AGENTS=(…)` list at the top of `scripts/setup-hub.command`, then **double-click** it (or `bash scripts/setup-hub.command`) |
-| **Mac agent**       | **double-click** `scripts/setup-agent.command` |
-| **Windows (moomoo)**| right-click `scripts\setup-agent.ps1` → **Run with PowerShell** (migrates the V2 config, scaffolds, then starts) |
+| **Mac agent** (self)| **double-click** `scripts/setup-agent.command` |
+| **moomoo Mac** (MQT trading box) | **double-click** `scripts/setup-agent-moomoo.command` — fills the four life-signs preset, zero edits |
+| **Windows Lada/ComfyUI box** | right-click `scripts\setup-agent.ps1` → **Run with PowerShell** (migrates the V2 config, scaffolds, then starts) |
+
+> Topology: **moomoo is a Mac** (the MQT trading server — pm2 / orchestrator /
+> OpenD / heartbeat). The **Windows** box(es) run **Lada / ComfyUI** (GPU) and are
+> the ones with a V2 config to migrate. The **Hub** is a separate Mac.
 
 > First double-click on macOS may be blocked by Gatekeeper — right-click → Open
 > once, or `chmod +x scripts/*.command` (already executable in the repo).
@@ -91,10 +96,11 @@ Manage agents anytime: `list-servers`, `enable-server --id N`,
 
 ---
 
-## 2. Mac agent machine
+## 2. Mac agent machine (self-monitor)
 
-If the Mac also monitors itself, run an agent next to the Hub. `host_metrics: true`
-already gives CPU/mem/disk/net with **no** monitors configured.
+If a Mac (e.g. the Hub's own box) should monitor itself, run an agent on it.
+`host_metrics: true` already gives CPU/mem/disk/net with **no** monitors
+configured.
 
 ```bash
 mkdir -p ~/Library/Application\ Support/TaskPaw
@@ -109,15 +115,33 @@ python -m taskpaw_v3.agent             # read API on bind_host:5680
 
 macOS ignores GPU by design (host_metrics reports CPU/mem/disk/net only).
 
-To monitor the dev-agent Claude/Codex activity here, see
+To monitor the dev-agent Claude/Codex activity on a dev Mac, see
 [dev-agent-activity.md](dev-agent-activity.md) and add a `state_file` monitor.
 
 ---
 
-## 3. Windows agent machine (moomoo)
+## 3. moomoo Mac (MQT trading server)
 
-Same agent, Windows config path. This is where GPU/VRAM and the migrated
-Lada/ComfyUI/folder monitors live.
+A **Mac**, not Windows. Monitors the four life-signs (pm2 God Daemon /
+`orchestrator` process / OpenD `:11111` / orchestrator heartbeat). The
+`--preset moomoo` defaults are the #13-confirmed real values, so it needs no
+edits unless this box's heartbeat path or OpenD port differ.
+
+```bash
+python -m taskpaw_v3.bootstrap agent --preset moomoo     # writes the 4-monitor agent.yaml
+python -m taskpaw_v3.agent
+```
+
+- TaskPaw only **alerts**; moomoo's own `orch-watchdog` does the self-healing.
+- If the Hub is on another Mac, set `bind_host` to this Mac's LAN IP and register
+  it: `add-server --name moomoo --ip <that IP>`.
+
+---
+
+## 4. Windows Lada / ComfyUI box (GPU)
+
+Where the V2 `taskpaw.py` ran — so this is the machine with a config to migrate,
+and where GPU/VRAM monitoring lives.
 
 ```powershell
 # 1. migrate the existing V2 config to V3 monitors (read-only preview first)
@@ -127,7 +151,7 @@ python -m taskpaw_v3.migrate --yaml > monitors.yaml
 # 2. config
 mkdir %APPDATA%\TaskPaw
 copy taskpaw_v3\examples\agent.example.yaml %APPDATA%\TaskPaw\agent.yaml
-#    edit server_id/machine, set bind_host to moomoo's LAN IP, and replace the
+#    edit server_id/machine, set bind_host to this box's LAN IP, and replace the
 #    `monitors:` block with the one from monitors.yaml
 
 # 3. run
@@ -135,8 +159,8 @@ python -m taskpaw_v3.agent
 ```
 
 - `host_metrics: true` reports **GPU + VRAM** on Windows (via `nvidia-smi`).
-- Set `bind_host` to moomoo's LAN IP so the Mac Hub can reach it, then register
-  it on the Hub: `add-server --name moomoo --ip <that IP>`.
+- Set `bind_host` to this box's LAN IP so the Mac Hub can reach it, then register
+  it on the Hub: `add-server --name <this box> --ip <that IP>`.
 - Keep everything on a trusted LAN / Tailscale — never expose `bind_host` to the
   public internet (constitution §2). Use `api_token` + matching Hub
   `polling_token` if the network isn't fully trusted.

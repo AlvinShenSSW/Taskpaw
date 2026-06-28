@@ -4,8 +4,8 @@
 #   Linux   : /etc/taskpaw/agent.yaml
 # Run headless with:  python -m taskpaw_v3.agent
 
-server_id: moomoo-agent        # stable unique id for this agent
-machine: moomoo                # display name shown on the Hub
+server_id: my-agent            # stable unique id for this agent
+machine: my-machine            # display name shown on the Hub
 
 # Network read API the Hub polls. Loopback by default (secure). To let the Hub
 # on another machine reach it, set bind_host to THIS machine's LAN IP — never
