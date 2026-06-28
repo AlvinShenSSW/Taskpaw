@@ -15,11 +15,17 @@ Steps:
 
 `--skip-tauri` stops after step 2 (useful where the Tauri CLI/toolchain isn't
 present — e.g. quick sidecar-only checks).
+
+Dev note: the Tauri `externalBin` makes ANY cargo build (incl. `cargo tauri dev`
+/ `cargo check`) require the sidecar to exist first. Run `python scripts/build.py
+--skip-tauri` once on a clean checkout before `cargo tauri dev` (the release
+workflow runs this script, so the sidecar is always present before it builds).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -86,8 +92,18 @@ def place_sidecar(built: Path) -> Path:
 def build_tauri() -> None:
     # `ci` against the committed package-lock.json → reproducible UI dep tree.
     run(["npm", "--prefix", str(ROOT / "taskpaw_v3" / "ui"), "ci"], cwd=ROOT)
+    # Role-specific identifier + name so the agent and hub installers don't
+    # overwrite each other on one machine (Kimi). Role from TASKPAW_BUILD_ROLE
+    # (also baked into the binary via option_env! in main.rs).
+    role = os.environ.get("TASKPAW_BUILD_ROLE", "agent").strip().lower()
+    if role not in ("agent", "hub"):
+        role = "agent"
+    overrides = json.dumps({
+        "identifier": f"com.taskpaw.app.{role}",
+        "productName": f"TaskPaw {role.capitalize()}",
+    })
     # Pin the Tauri CLI for reproducible bundles; beforeBuildCommand builds the UI.
-    run(["npx", "--yes", TAURI_CLI, "build"], cwd=SRC_TAURI)
+    run(["npx", "--yes", TAURI_CLI, "build", "--config", overrides], cwd=SRC_TAURI)
     print("bundle -> " + str(SRC_TAURI / "target" / "release" / "bundle"), flush=True)
 
 

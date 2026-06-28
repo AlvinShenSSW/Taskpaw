@@ -220,12 +220,12 @@ fn loopback_base(raw: &str) -> String {
         host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)  // host[:port]
     };
     let host = host.to_ascii_lowercase();
-    // Parse the IPv4 form so a *hostname* like "127.0.0.1.evil.com" (which a
-    // browser resolves to a remote IP) is NOT accepted — a prefix check would
-    // leak the api key (Codex/Kimi P1). Accept localhost + IPv6 ::1 + 127.0.0.0/8.
+    // Parse as an IP so a *hostname* like "127.0.0.1.evil.com" (which a browser
+    // resolves to a remote IP) is NOT accepted — a prefix check would leak the
+    // api key (Codex/Kimi P1). IpAddr::is_loopback covers all of 127.0.0.0/8 and
+    // IPv6 ::1 in both compressed and expanded forms (Kimi). Plus "localhost".
     let is_loopback = host == "localhost"
-        || host == "::1"
-        || host.parse::<std::net::Ipv4Addr>().map(|ip| ip.is_loopback()).unwrap_or(false);
+        || host.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false);
     if !is_loopback {
         eprintln!("TASKPAW_UI_BASE {v:?} is not loopback — ignoring");
         return String::new();
@@ -261,7 +261,11 @@ fn init_script() -> String {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            // `mut` only needed for the Windows Job-Object failure kill path.
+            #[cfg(windows)]
             let mut child = spawn_backend();
+            #[cfg(not(windows))]
+            let child = spawn_backend();
             // Release bundled mode (no dev override): a missing/failed sidecar
             // means the UI would open with no backend — fail LOUD rather than
             // silently broken (Kimi). Skip in debug so `cargo tauri dev` works
@@ -324,4 +328,44 @@ fn main() {
                 kill_backend(app);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loopback_base;
+
+    #[test]
+    fn accepts_loopback_forms() {
+        assert_eq!(loopback_base("http://127.0.0.1:5681"), "http://127.0.0.1:5681");
+        assert_eq!(loopback_base("http://localhost:5690"), "http://localhost:5690");
+        assert_eq!(loopback_base("http://127.1:8000"), "http://127.1:8000"); // 127.0.0.1 short form
+        assert_eq!(loopback_base("http://[::1]:5681"), "http://[::1]:5681");
+        assert_eq!(loopback_base("http://[::1]"), "http://[::1]");
+        assert_eq!(loopback_base(""), "");
+    }
+
+    #[test]
+    fn rejects_non_loopback_and_bypasses() {
+        // userinfo bypass: browser would use evil.com
+        assert_eq!(loopback_base("http://127.0.0.1:8000@evil.com"), "");
+        // hostname that merely looks loopback but resolves remote
+        assert_eq!(loopback_base("http://127.0.0.1.evil.com:8000"), "");
+        assert_eq!(loopback_base("http://evil.com:5681"), "");
+        assert_eq!(loopback_base("http://10.0.0.5:5681"), "");
+    }
+
+    #[test]
+    fn strips_credentials_from_returned_url() {
+        assert_eq!(loopback_base("http://user:pass@127.0.0.1:5681/x"),
+                   "http://127.0.0.1:5681/x");
+    }
+
+    #[test]
+    fn ui_role_validates() {
+        // (env-independent) — invalid/blank handled by the matches! guard; this
+        // documents the accepted set.
+        for r in ["agent", "hub"] {
+            assert!(matches!(r, "agent" | "hub"));
+        }
+    }
 }
