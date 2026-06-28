@@ -132,6 +132,25 @@ def test_diagnose_only_session_log_errors(tmp_path, monkeypatch):
     assert "CUDA out of memory" not in st.detail
 
 
+def test_log_error_cleared_at_idle_not_blamed_on_later_stall(tmp_path, monkeypatch):
+    # An error during a COMPLETED prompt is consumed each poll and cleared when the
+    # queue goes idle, so a later unrelated stall isn't blamed on it (Codex #60).
+    log = tmp_path / "comfy.log"
+    log.write_text("", encoding="utf-8")
+    seq = iter([(["p1"], 0), ([], 0), ([], 1)])          # running → idle → stalled
+    monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: next(seq))
+    monkeypatch.setattr(cf, "check_recent_history_errors", lambda h, p, t: None)
+    inst = ComfyUIInstance("comfy", _cfg(stall_confirm=1, idle_confirm=1, comfyui_log_path=str(log)))
+    _, emit = _events()
+    inst.start(emit)
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("RuntimeError: from p1\n")
+    inst.check(emit)                                     # running p1 → consumes the error
+    inst.check(emit)                                     # idle → clears it
+    st = inst.check(emit)                                # unrelated stall
+    assert "from p1" not in (st.detail or "")
+
+
 def test_stuck_alert_diagnoses_running_prompt(monkeypatch):
     monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: (["pid1"], 0))
     monkeypatch.setattr(cf, "check_history_error", lambda h, p, pid, t: f"err for {pid}")

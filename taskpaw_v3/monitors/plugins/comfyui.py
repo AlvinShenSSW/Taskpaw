@@ -181,7 +181,8 @@ class ComfyUIInstance(MonitorInstance):
         self._running_count = 0
         self._stuck = False
         self._last_log_position = 0
-        self._diag_error: Optional[str] = None   # diagnosed cause for the current episode
+        self._diag_error: Optional[str] = None        # diagnosed cause for the current episode
+        self._recent_log_error: Optional[str] = None  # latest log error seen this run
 
     def start(self, emit: EventEmitter) -> None:
         # Prime the log offset to the file's current end so diagnostics only ever
@@ -197,6 +198,16 @@ class ComfyUIInstance(MonitorInstance):
 
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: ComfyUIConfig = self.config  # type: ignore[assignment]
+        # Consume the log EVERY poll so its offset advances regardless of whether
+        # we use it for diagnosis — else an error written during a completed
+        # prompt stays unread and gets misattributed to a later unrelated stall
+        # (Codex #60; V2 consumed the log each poll). Remember the latest error of
+        # the current run; it's cleared when the queue goes idle (run boundary).
+        if cfg.comfyui_log_path:
+            log_err, self._last_log_position = tail_log_for_errors(
+                cfg.comfyui_log_path, self._last_log_position)
+            if log_err:
+                self._recent_log_error = log_err
         snap = queue_snapshot(cfg.host, cfg.port, min(cfg.timeout, 10.0))
         if snap is None:
             return MonitorStatus(state="error", detail="ComfyUI unreachable")
@@ -259,6 +270,7 @@ class ComfyUIInstance(MonitorInstance):
 
         # depth == 0 (nothing running, nothing pending)
         self._reset_running()
+        self._recent_log_error = None     # run finished → drop its log error
         if self._was_busy:
             self._idle_count += 1
             if self._idle_count >= cfg.idle_confirm:
@@ -281,8 +293,10 @@ class ComfyUIInstance(MonitorInstance):
         err = check_history_error(cfg.host, cfg.port, prompt_id, to) if prompt_id else None
         if err is None:
             err = check_recent_history_errors(cfg.host, cfg.port, to)
-        if err is None and cfg.comfyui_log_path:
-            err, self._last_log_position = tail_log_for_errors(cfg.comfyui_log_path, self._last_log_position)
+        if err is None:
+            # The log is consumed every poll in check(); use the latest error of
+            # the current run (cleared at the idle boundary) — don't re-read here.
+            err = self._recent_log_error
         return err
 
     def _reset_running(self) -> None:
