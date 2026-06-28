@@ -64,6 +64,19 @@ def test_tail_log_for_errors(tmp_path):
     assert tail_log_for_errors("", 5) == (None, 5)
 
 
+def test_tail_log_handles_rotation(tmp_path):
+    # After the log is rotated/truncated to a SMALLER file, a new error must still
+    # be detected — the saved offset can't stay stuck high (Codex #60).
+    log = tmp_path / "comfy.log"
+    log.write_text("x" * 5000 + "\n", encoding="utf-8")     # big, no error
+    _, pos = tail_log_for_errors(str(log), 0)
+    assert pos == log.stat().st_size and pos > 1000
+    log.write_text("CUDA out of memory\n", encoding="utf-8")  # rotated: smaller, error
+    err, pos2 = tail_log_for_errors(str(log), pos)
+    assert err and "CUDA out of memory" in err
+    assert pos2 == log.stat().st_size
+
+
 # ── diagnostics folded into alerts ──────────────────────────────────────────
 def test_stall_alert_includes_diagnosed_error(monkeypatch):
     monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: ([], 1))           # stalled shape

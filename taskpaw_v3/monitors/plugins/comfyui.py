@@ -140,8 +140,13 @@ def tail_log_for_errors(log_path: str, last_position: int) -> tuple[Optional[str
         if not path.is_file():
             return None, last_position
         size = path.stat().st_size
+        if size < last_position:
+            # Log rotated/truncated since we last read — re-scan from the new
+            # start, else new errors in the smaller file are ignored until it
+            # grows past the old offset (Codex #60).
+            last_position = 0
         if size == 0 or size <= last_position:
-            return None, max(last_position, size)
+            return None, last_position
         read_size = min(size, 8192)
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             if size > read_size:
