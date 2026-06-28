@@ -33,13 +33,10 @@ def effective_monitors(config: AgentConfig) -> list[dict]:
     agent) unless one is already configured or host_metrics is disabled. The
     injected name is made collision-free so it can't clash with an existing
     monitor (which would make register() raise and the agent fail to start)."""
+    from taskpaw_v3.monitors.runtime import monitor_name
     monitors = list(config.monitors)
     if config.host_metrics and not any(m.get("type_id") == "host_metrics" for m in monitors):
-        existing = set()
-        for m in monitors:
-            n = (m.get("config") or {}).get("name") or m.get("name")
-            if n:
-                existing.add(n)
+        existing = {n for m in monitors if (n := monitor_name(m))}
         base = f"{config.machine}-host"
         name, i = base, 1
         while name in existing:

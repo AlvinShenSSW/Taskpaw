@@ -23,10 +23,14 @@ def test_plugin_catalog_lists_all_with_schema():
     # every built-in selectable service is offered
     assert {"host_metrics", "process", "comfyui", "folder", "custom_cmd",
             "state_file", "heartbeat", "tcp_check"} <= set(by_id)
-    # each entry carries a form schema the UI can render
+    # each entry carries a form schema the UI can render + the four-piece bits
     for p in cat:
         assert "properties" in p["json_schema"]
         assert "category" in p and "display_name" in p
+        assert "config_version" in p and "system" in p
+    # host_metrics is flagged system (auto-injected) so the UI won't offer a dup
+    assert by_id["host_metrics"]["system"] is True
+    assert by_id["comfyui"]["system"] is False
 
 
 def test_preset_catalog_has_moomoo_as_an_option():
@@ -42,8 +46,15 @@ def test_add_monitor_validates_and_appends():
     out = add_monitor([], {"type_id": "tcp_check",
                            "config": {"name": "opend", "port": 11111}})
     assert len(out) == 1 and out[0]["type_id"] == "tcp_check"
-    assert out[0]["config"]["name"] == "opend"
+    # canonical {type_id, name, config} shape (matches migration/examples)
+    assert out[0]["name"] == "opend" and out[0]["config"]["name"] == "opend"
+    assert set(out[0]) == {"type_id", "name", "config"}
     assert has_monitor(out, "opend")
+
+
+def test_add_monitor_rejects_non_object_config():
+    with pytest.raises(ValueError):
+        add_monitor([], {"type_id": "tcp_check", "config": [1, 2]})   # not a dict
 
 
 def test_add_monitor_rejects_unknown_type():

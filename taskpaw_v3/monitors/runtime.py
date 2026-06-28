@@ -15,6 +15,13 @@ from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.supervisor import Supervisor
 
 
+def monitor_name(spec: dict[str, Any]) -> str:
+    """Resolve a monitor's name from either canonical shape — top-level `name`
+    ({type_id, name, config}) or name-inside-config. Single source of truth so a
+    shape change touches one place (Kimi)."""
+    return str((spec.get("config") or {}).get("name") or spec.get("name") or "")
+
+
 def make_queue_sink(queue: EventQueue, machine: str):
     """Adapter: Supervisor sink → EventQueue.add (additive level/title/data).
 
@@ -50,11 +57,13 @@ def build_supervisor(
         if not type_id or not registry.has(type_id):
             raise ValueError(f"unknown monitor type_id: {type_id!r}")
         plugin = registry.get(type_id)
-        # Accept both shapes: the V3 source-of-truth / migration shape
-        # {type_id, name, config} (name at top level) AND name-inside-config.
-        raw = dict(spec.get("config", {}))
-        if "name" in spec and "name" not in raw:
-            raw["name"] = spec["name"]
+        # Accept both shapes: {type_id, name, config} (name at top level) AND
+        # name-inside-config. monitor_name() is the shared resolver.
+        raw = dict(spec.get("config") or {})
+        if "name" not in raw:
+            name = monitor_name(spec)
+            if name:
+                raw["name"] = name
         cfg = plugin.validate_config(raw)
         sup.register(plugin, cfg)
     return sup

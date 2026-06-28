@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from taskpaw_v3.core.auth import token_ok
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
+from taskpaw_v3.monitors.runtime import monitor_name
 
 
 def _unauthorized() -> JSONResponse:
@@ -59,11 +60,9 @@ def create_network_app(
             "server_id": config.server_id,
             "os": platform.platform(),
             "monitors": [
-                # name lives inside config in the {type_id, config} shape — resolve
-                # both layouts so this fallback doesn't report name: null (Kimi).
-                {"type_id": m.get("type_id"),
-                 "name": (m.get("config") or {}).get("name") or m.get("name"),
-                 "state": "unknown"}
+                # name can live top-level or in config — monitor_name() resolves
+                # both so this fallback never reports name: null (Kimi).
+                {"type_id": m.get("type_id"), "name": monitor_name(m), "state": "unknown"}
                 for m in config.monitors
             ],
         }
