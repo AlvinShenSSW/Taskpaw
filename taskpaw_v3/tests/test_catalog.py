@@ -135,9 +135,32 @@ def test_effective_monitors_strips_machine_for_collision():
     cfg = AgentConfig(server_id="s", machine="  m  ", monitors=[
         {"type_id": "tcp_check", "config": {"name": "m-host", "port": 1}},
     ])
-    names = [(mm.get("config") or {}).get("name") for mm in effective_monitors(cfg)]
+    eff = effective_monitors(cfg)
+    names = [(mm.get("config") or {}).get("name") for mm in eff]
     assert names.count("m-host") == 1            # the existing one only
     assert any(n and n.startswith("m-host-") for n in names)  # injected got a unique name
+    # injected host_metrics carries the canonical top-level name too (Kimi)
+    hm = next(mm for mm in eff if mm["type_id"] == "host_metrics")
+    assert hm["name"] == hm["config"]["name"]
+
+
+def test_effective_monitors_blank_machine_falls_back_to_server_id():
+    from taskpaw_v3.agent.server.launcher import effective_monitors
+    cfg = AgentConfig(server_id="srv", machine="   ")   # whitespace-only machine
+    eff = effective_monitors(cfg)
+    hm = next(mm for mm in eff if mm["type_id"] == "host_metrics")
+    assert hm["config"]["name"] == "srv-host"           # not "-host"
+
+
+def test_build_supervisor_conflicting_names_raises():
+    from taskpaw_v3.core.protocol import EventQueue
+    from taskpaw_v3.monitors.registry import default_registry
+    from taskpaw_v3.monitors.runtime import build_supervisor
+    with pytest.raises(ValueError, match="conflicting names"):
+        build_supervisor(default_registry(),
+                         [{"type_id": "tcp_check", "name": "a",
+                           "config": {"name": "b", "port": 1}}],
+                         EventQueue(machine="m"), "m")
 
 
 def test_has_remove_monitor_canonicalize_query():

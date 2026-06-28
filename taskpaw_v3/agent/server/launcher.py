@@ -41,11 +41,14 @@ def effective_monitors(config: AgentConfig) -> list[dict]:
         # stripped existing names — else a whitespace-padded machine would miss
         # the collision check and the supervisor would raise a duplicate at
         # register (Kimi). (strip()ing the whole "m -host" would leave inner gaps.)
-        base = f"{config.machine.strip()}-host"
+        # Fall back to server_id if machine is blank, so we never make "-host".
+        stem = config.machine.strip() or config.server_id.strip()
+        base = f"{stem}-host"
         name, i = base, 1
         while name in existing:
             name, i = f"{base}-{i}", i + 1
-        monitors.append({"type_id": "host_metrics", "config": {"name": name}})
+        # Canonical {type_id, name, config} shape (top-level name too) (Kimi).
+        monitors.append({"type_id": "host_metrics", "name": name, "config": {"name": name}})
     return monitors
 
 

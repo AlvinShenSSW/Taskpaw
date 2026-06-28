@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
-from taskpaw_v3.monitors.runtime import monitor_name
+from taskpaw_v3.monitors.runtime import canonical_name, monitor_name
 
 
 def plugin_catalog(registry: Optional[PluginRegistry] = None) -> list[dict[str, Any]]:
@@ -81,13 +81,9 @@ def add_monitor(monitors: list[dict], spec: dict,
     if raw_in is not None and not isinstance(raw_in, dict):
         raise ValueError("monitor config must be an object")  # not list/null (Kimi)
     raw = dict(raw_in or {})
-    top = spec.get("name")
-    if top is not None and "name" in raw and str(top).strip() != str(raw["name"]).strip():
-        # Catch operator confusion instead of silently preferring config.name
-        # (compare stripped, since names are canonicalised on validation) (Kimi).
-        raise ValueError(f"conflicting names: top-level {top!r} vs config {raw['name']!r}")
-    if "name" not in raw and top:
-        raw["name"] = top
+    resolved = canonical_name(spec)   # raises on a top-level/config name conflict
+    if resolved and "name" not in raw:
+        raw["name"] = resolved
     cfg = reg.get(type_id).validate_config(raw)   # authoritative validation
     name = cfg.name
     if has_monitor(monitors, name):

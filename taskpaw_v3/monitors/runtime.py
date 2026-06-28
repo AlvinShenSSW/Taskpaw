@@ -21,11 +21,26 @@ def monitor_name(spec: dict[str, Any]) -> str:
     shape change touches one place. Returns the STRIPPED name so collision /
     duplicate checks on raw specs align with the validated (stripped) name —
     otherwise " foo " and "foo" slip past has_monitor()/effective_monitors() and
-    then collide at registration (Kimi)."""
+    then collide at registration (Kimi). Lenient: never raises (for display)."""
     cfg = spec.get("config")
     if not isinstance(cfg, dict):
         cfg = {}
     return str(cfg.get("name") or spec.get("name") or "").strip()
+
+
+def canonical_name(spec: dict[str, Any]) -> str:
+    """Strict resolver for MUTATION paths (add_monitor / build_supervisor): like
+    monitor_name(), but raises if a top-level `name` and a `config.name` are both
+    present and differ (after strip) — a hand-edited/migrated spec would otherwise
+    start a monitor under an id that mismatches its top-level name, breaking Hub
+    grouping (Kimi)."""
+    cfg = spec.get("config")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    top, cname = spec.get("name"), cfg.get("name")
+    if top is not None and cname is not None and str(top).strip() != str(cname).strip():
+        raise ValueError(f"conflicting names: top-level {top!r} vs config {cname!r}")
+    return str(cname or top or "").strip()
 
 
 def make_queue_sink(queue: EventQueue, machine: str):
@@ -71,10 +86,9 @@ def build_supervisor(
         if raw_in is not None and not isinstance(raw_in, dict):
             raise ValueError("monitor config must be an object")  # list/null → clean error (Kimi)
         raw = dict(raw_in or {})
-        if "name" not in raw:
-            name = monitor_name(spec)
-            if name:
-                raw["name"] = name
+        name = canonical_name(spec)   # raises on a top-level/config name conflict
+        if name and "name" not in raw:
+            raw["name"] = name
         cfg = plugin.validate_config(raw)
         sup.register(plugin, cfg)
     return sup

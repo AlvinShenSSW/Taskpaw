@@ -55,15 +55,17 @@ def create_network_app(
             return _unauthorized()
         if status_provider is not None:
             return status_provider()
+        from taskpaw_v3.agent.server.launcher import effective_monitors
         return {
             "machine": config.machine,
             "server_id": config.server_id,
             "os": platform.platform(),
             "monitors": [
-                # name can live top-level or in config — monitor_name() resolves
-                # both so this fallback never reports name: null (Kimi).
+                # Use effective_monitors so the fallback matches what the agent
+                # actually runs (incl. the auto-injected host_metrics) (Kimi).
+                # name can live top-level or in config — monitor_name() resolves both.
                 {"type_id": m.get("type_id"), "name": monitor_name(m), "state": "unknown"}
-                for m in config.monitors
+                for m in effective_monitors(config)
             ],
         }
 
@@ -80,6 +82,7 @@ def create_control_app(
     config: AgentConfig,
     on_command: Optional[Callable[[str, dict], dict]] = None,
     status_provider: Optional[Callable[[], dict]] = None,
+    registry=None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""
@@ -113,7 +116,9 @@ def create_control_app(
         # a monitor" picker) plus named presets (moomoo is just one of these).
         from taskpaw_v3.agent.catalog import plugin_catalog, preset_catalog
 
-        return {"plugins": plugin_catalog(), "presets": preset_catalog()}
+        # Use the injected registry so the endpoint advertises exactly what this
+        # agent can run (a custom runtime registry won't diverge) (Kimi).
+        return {"plugins": plugin_catalog(registry), "presets": preset_catalog()}
 
     @app.post("/control/command")
     def command(body: dict) -> dict:
