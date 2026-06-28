@@ -64,7 +64,9 @@ def add_monitor(monitors: list[dict], spec: dict,
     monitor name (names must be unique per agent)."""
     reg = registry or default_registry()
     type_id = spec.get("type_id")
-    if not type_id or not reg.has(type_id):
+    # Validate it's a str BEFORE reg.has() — a non-hashable type_id (e.g. a list
+    # from malformed JSON) would otherwise raise TypeError, not ValueError (Kimi).
+    if not isinstance(type_id, str) or not type_id or not reg.has(type_id):
         raise ValueError(f"unknown monitor type_id: {type_id!r}")
     raw = dict(spec.get("config") or {})
     if "name" in spec and "name" not in raw:
@@ -77,7 +79,13 @@ def add_monitor(monitors: list[dict], spec: dict,
 
 
 def remove_monitor(monitors: list[dict], name: str) -> list[dict]:
-    """Return a new list without the monitor named `name`. Raises if absent."""
-    if not has_monitor(monitors, name):
+    """Return a new list without the monitor named `name`. Raises if absent, or
+    if more than one matches — removing several at once (from hand-edited YAML /
+    migration that slipped a duplicate in) would be silent data loss (Kimi)."""
+    matches = [i for i, m in enumerate(monitors) if _name_of(m) == name]
+    if not matches:
         raise ValueError(f"no monitor named {name!r}")
-    return [m for m in monitors if _name_of(m) != name]
+    if len(matches) > 1:
+        raise ValueError(f"multiple monitors named {name!r}; resolve the duplicate first")
+    i = matches[0]
+    return monitors[:i] + monitors[i + 1:]

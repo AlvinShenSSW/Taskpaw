@@ -59,7 +59,11 @@ def create_network_app(
             "server_id": config.server_id,
             "os": platform.platform(),
             "monitors": [
-                {"type_id": m.get("type_id"), "name": m.get("name"), "state": "unknown"}
+                # name lives inside config in the {type_id, config} shape — resolve
+                # both layouts so this fallback doesn't report name: null (Kimi).
+                {"type_id": m.get("type_id"),
+                 "name": (m.get("config") or {}).get("name") or m.get("name"),
+                 "state": "unknown"}
                 for m in config.monitors
             ],
         }

@@ -12,7 +12,7 @@ from taskpaw_v3.agent.catalog import (
     preset_catalog,
     remove_monitor,
 )
-from taskpaw_v3.agent.server.app import create_control_app
+from taskpaw_v3.agent.server.app import create_control_app, create_network_app
 from taskpaw_v3.core.config import AgentConfig
 
 
@@ -75,6 +75,26 @@ def test_remove_monitor():
         remove_monitor(base, "missing")
 
 
+def test_remove_monitor_raises_on_duplicates_not_silent_wipe():
+    # duplicate names shouldn't exist via add_monitor, but a hand-edited/migrated
+    # config could carry them — removing both silently would be data loss (Kimi).
+    dupes = [
+        {"type_id": "tcp_check", "config": {"name": "a", "port": 1}},
+        {"type_id": "tcp_check", "config": {"name": "a", "port": 2}},
+    ]
+    with pytest.raises(ValueError, match="multiple"):
+        remove_monitor(dupes, "a")
+
+
+def test_add_monitor_non_string_type_id_raises_valueerror():
+    # malformed JSON could give a list/None type_id — must be ValueError, not
+    # TypeError from reg.has() (Kimi).
+    with pytest.raises(ValueError):
+        add_monitor([], {"type_id": ["tcp_check"], "config": {"name": "x"}})
+    with pytest.raises(ValueError):
+        add_monitor([], {"config": {"name": "x"}})  # missing type_id
+
+
 def test_name_at_top_level_supported():
     out = add_monitor([], {"type_id": "tcp_check", "name": "top",
                            "config": {"port": 11111}})
@@ -82,6 +102,21 @@ def test_name_at_top_level_supported():
 
 
 # ── /control/plugins endpoint ────────────────────────────────────────────--
+def test_network_status_resolves_name_from_config():
+    # monitors are stored as {type_id, config:{name}} — the /status fallback must
+    # report the real name, not null (Hub reads this) (Kimi).
+    from taskpaw_v3.core.protocol import EventQueue
+
+    cfg = AgentConfig(server_id="a", machine="m", host_metrics=False, monitors=[
+        {"type_id": "tcp_check", "config": {"name": "opend", "port": 11111}},
+    ])
+    client = TestClient(create_network_app(cfg, EventQueue(machine="m")))
+    r = client.get("/status")
+    assert r.status_code == 200
+    mons = r.json()["monitors"]
+    assert mons[0]["name"] == "opend" and mons[0]["type_id"] == "tcp_check"
+
+
 def test_control_plugins_endpoint():
     cfg = AgentConfig(server_id="a", machine="m")
     client = TestClient(create_control_app(cfg))
