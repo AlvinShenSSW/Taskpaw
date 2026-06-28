@@ -32,6 +32,14 @@ from taskpaw_v3.monitors.supervisor import Supervisor
 log = logging.getLogger("taskpaw.agent.admin")
 
 
+def _as_bool(v: Any) -> bool:
+    """Require a real boolean — `bool("false")` is True, so a JSON/form client
+    sending `enabled: "false"` must be rejected, not silently treated as on."""
+    if not isinstance(v, bool):
+        raise ValueError(f"'enabled' must be a boolean, got {type(v).__name__}")
+    return v
+
+
 class MonitorAdmin:
     """Serialized add/remove/update/enable/disable for one agent's monitors."""
 
@@ -98,7 +106,7 @@ class MonitorAdmin:
             # type / system plugin / duplicate name, and emits {type_id,name,config}.
             new_list = catalog.add_monitor(self._config.monitors, spec, self._reg)
             added = dict(new_list[-1])
-            added["enabled"] = bool(spec.get("enabled", True))
+            added["enabled"] = _as_bool(spec.get("enabled", True))
             new_list[-1] = added
             # Register live BEFORE persisting, so a config that can't actually run
             # is never written to agent.yaml (Codex). add_monitor already
@@ -120,6 +128,7 @@ class MonitorAdmin:
             return {"ok": True, "removed": iid}
 
     def set_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
+        enabled = _as_bool(enabled)
         with self._lock:
             m = self._find(name)
             if m is None:
@@ -162,10 +171,14 @@ class MonitorAdmin:
             raw = {**(m.get("config") or {}), **config}
             raw["name"] = iid
             cfg = plugin.validate_config(raw)        # authoritative validation
-            m["config"] = cfg.model_dump()
-            self._persist()
+            # Live-apply BEFORE persisting: if reconfigure() fails (e.g. a wedged
+            # worker that won't stop in time → RuntimeError), don't leave disk
+            # ahead of runtime (Codex). reconfigure rolls back to the old config
+            # on failure, so nothing is half-applied.
             if self._sup is not None and self._sup.has(iid):
                 self._sup.reconfigure(iid, cfg)
+            m["config"] = cfg.model_dump()
+            self._persist()
             return {"ok": True, "name": iid}
 
     # ── command dispatch (wired as create_control_app's on_command) ────────

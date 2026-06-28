@@ -172,7 +172,9 @@ def create_control_app(
             if "config" in body:
                 out = _guard(admin.update, name, body["config"])
             if "enabled" in body:
-                out = _guard(admin.set_enabled, name, bool(body["enabled"]))
+                # pass through raw — admin.set_enabled requires a real boolean
+                # (rejects "false"/0 strings) → 400, not a silent enable.
+                out = _guard(admin.set_enabled, name, body["enabled"])
             return out
 
         # Start/Stop are persisted enable/disable (V2 parity: a stopped monitor

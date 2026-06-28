@@ -143,6 +143,23 @@ def test_enable_invalid_config_does_not_persist(tmp_path):
     assert not path.exists()                         # nothing persisted
 
 
+def test_enabled_must_be_a_real_boolean(tmp_path):
+    # "false"/0 etc. must be rejected, not truthy-coerced to enable (Codex #57a).
+    cfg = _agent_config()
+    reg = _registry()
+    admin = MonitorAdmin(cfg, None, reg, tmp_path / "a.yaml")
+    with pytest.raises(ValueError):
+        admin.add({"type_id": "fake", "config": {"name": "w1"}, "enabled": "false"})
+    admin.add({"type_id": "fake", "config": {"name": "w1"}})
+    with pytest.raises(ValueError):
+        admin.set_enabled("w1", "false")
+    # via the PATCH route → 400
+    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    r = client.patch("/control/monitors", params={"name": "w1"}, json={"enabled": "false"})
+    assert r.status_code == 400
+    assert cfg.monitors[0]["enabled"] is True        # untouched
+
+
 def test_admin_handle_dispatch(tmp_path):
     cfg = _agent_config()
     admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
