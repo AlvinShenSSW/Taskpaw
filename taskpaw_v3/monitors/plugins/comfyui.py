@@ -16,11 +16,17 @@ that into the alert + status so the operator sees WHY, not just "stalled".
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+# urlopen failures: URLError/HTTPError/timeout (OSError), a bad URL (ValueError),
+# and InvalidURL for a host with whitespace/control chars (HTTPException, NOT an
+# OSError) — all must become a clean "unreachable", never a raised check error.
+_NET_ERRORS = (OSError, ValueError, http.client.HTTPException)
 
 from pydantic import Field
 
@@ -66,7 +72,7 @@ def queue_snapshot(host: str, port: int, timeout: float) -> Optional[tuple[list[
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except (OSError, ValueError):
+    except _NET_ERRORS:
         return None
     try:
         running = data.get("queue_running", [])
@@ -110,7 +116,7 @@ def _get_json(url: str, timeout: float):
 def check_history_error(host: str, port: int, prompt_id: str, timeout: float) -> Optional[str]:
     try:
         data = _get_json(f"http://{host}:{port}/history/{prompt_id}", timeout)
-    except (OSError, ValueError):
+    except _NET_ERRORS:
         return None
     return extract_history_error(data.get(prompt_id)) if isinstance(data, dict) else None
 
@@ -118,7 +124,7 @@ def check_history_error(host: str, port: int, prompt_id: str, timeout: float) ->
 def check_recent_history_errors(host: str, port: int, timeout: float) -> Optional[str]:
     try:
         data = _get_json(f"http://{host}:{port}/history?max_items=5", timeout)
-    except (OSError, ValueError):
+    except _NET_ERRORS:
         return None
     if not isinstance(data, dict):
         return None

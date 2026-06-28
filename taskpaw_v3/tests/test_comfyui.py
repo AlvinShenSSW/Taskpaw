@@ -106,6 +106,15 @@ def test_stall_alert_includes_diagnosed_error(monkeypatch):
     assert evs and evs[0][0] == "alert" and "boom" in evs[0][2]
 
 
+def test_bad_host_is_unreachable_not_crash():
+    # A host with whitespace → http.client.InvalidURL (HTTPException, not OSError);
+    # must report a clean unreachable, not raise out of check() (Codex #60).
+    inst = ComfyUIInstance("comfy", _cfg(host="bad host"))
+    _, emit = _events()
+    st = inst.check(emit)
+    assert st.state == "error" and "unreachable" in st.detail
+
+
 def test_stuck_alert_diagnoses_running_prompt(monkeypatch):
     monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: (["pid1"], 0))
     monkeypatch.setattr(cf, "check_history_error", lambda h, p, pid, t: f"err for {pid}")
