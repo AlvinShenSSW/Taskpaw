@@ -92,7 +92,11 @@ def test_examples_bundled_for_scaffold():
 
     spec = Path(__file__).resolve().parents[2] / "taskpaw_v3" / "packaging" / "taskpaw-backend.spec"
     spec_text = spec.read_text(encoding="utf-8")
-    assert '"taskpaw_v3/examples"' in spec_text, \
+    # Match the actual data-binding statement, not the substring — the explanatory
+    # comment above it also mentions "taskpaw_v3/examples", so a plain `in` check
+    # would still pass if the datas.append(...) line were deleted (Kimi P2).
+    import re
+    assert re.search(r'datas\.append\(\([^)]*,\s*"taskpaw_v3/examples"\)\)', spec_text), \
         "taskpaw-backend.spec no longer bundles taskpaw_v3/examples/*.yaml (#53)"
 
 
