@@ -63,16 +63,38 @@ class Poller:
         # In-memory current-poll snapshot per server (reachable + last good
         # status + last_seen) — the source for status.md, like V2's in-memory
         # server_statuses. status_log itself only gets SUCCESSFUL polls (#38).
-        self._status_snapshot: dict[int, dict] = {}
+        self._snap_lock = threading.Lock()
+        self._status_snapshot: dict[int, dict] = self._seed_snapshot()
+
+    def _seed_snapshot(self) -> dict[int, dict]:
+        """Seed from the persisted last-good status so status.md after a restart
+        reflects known state instead of showing every server OFFLINE until the
+        first poll (Kimi). status_log holds only successful rows, so a present
+        row means it was last reachable."""
+        seed: dict[int, dict] = {}
+        try:
+            for row in self.store.latest_statuses():
+                if row.get("status_json") is None:
+                    continue  # never polled
+                seed[row["id"]] = {
+                    "reachable": True,
+                    "status_json": row.get("status_json"),
+                    "last_seen": row.get("last_seen") or row.get("timestamp"),
+                }
+        except Exception as e:
+            log.warning("Could not seed status snapshot: %s", e)
+        return seed
 
     def status_snapshot(self) -> list[dict]:
         """Current status of each ENABLED server for status.md (registration
         order). Servers not yet polled this run show reachable=False/no data."""
+        with self._snap_lock:
+            snaps = {k: dict(v) for k, v in self._status_snapshot.items()}
         out: list[dict] = []
         for s in self.store.list_servers():
             if not s["enabled"]:
                 continue
-            snap = self._status_snapshot.get(s["id"], {})
+            snap = snaps.get(s["id"], {})
             out.append({
                 "name": s["name"],
                 "reachable": bool(snap.get("reachable", False)),
@@ -221,21 +243,23 @@ class Poller:
         # stays fresh for OpenClaw — independent of whether there are new events.
         reachable, status_json = self.fetch_status(server)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        prev = self._status_snapshot.get(server["id"], {})
         if reachable:
             # V2 only wrote status_log on a SUCCESSFUL poll, so OpenClaw reading
             # the latest row directly always sees the last GOOD status — never a
             # failure placeholder during an outage (#38 review).
             self.store.log_status(server["id"], True, status_json)
-            self._status_snapshot[server["id"]] = {
-                "reachable": True, "status_json": status_json, "last_seen": now_str}
-        else:
-            # Keep the last good payload + last_seen for status.md; don't pollute
-            # status_log with an empty row.
-            self._status_snapshot[server["id"]] = {
-                "reachable": False,
-                "status_json": prev.get("status_json"),
-                "last_seen": prev.get("last_seen")}
+        with self._snap_lock:
+            prev = self._status_snapshot.get(server["id"], {})
+            if reachable:
+                self._status_snapshot[server["id"]] = {
+                    "reachable": True, "status_json": status_json, "last_seen": now_str}
+            else:
+                # Keep the last good payload + last_seen for status.md; don't
+                # pollute status_log with an empty row.
+                self._status_snapshot[server["id"]] = {
+                    "reachable": False,
+                    "status_json": prev.get("status_json"),
+                    "last_seen": prev.get("last_seen")}
 
         new_events = self.fetch_events(server)
         if not new_events:

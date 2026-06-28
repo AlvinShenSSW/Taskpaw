@@ -127,6 +127,12 @@ class HubStore:
                 )
                 """
             )
+            # status_log grows one row per server per poll; index the access paths
+            # (latest-per-server + prune-by-time) to avoid full scans (Kimi).
+            c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_server_time "
+                      "ON status_log(server_id, timestamp, id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_time "
+                      "ON status_log(timestamp)")
             self._conn.commit()
 
     def _legacy_event_tables(self) -> list[str]:
@@ -175,8 +181,12 @@ class HubStore:
 
         # An old delivery_outbox without dedupe_key would break the dedupe index.
         ob = cols("delivery_outbox")
-        if ob and "dedupe_key" not in ob:
-            c.execute("ALTER TABLE delivery_outbox ADD COLUMN dedupe_key TEXT")
+        if ob:
+            if "dedupe_key" not in ob:
+                c.execute("ALTER TABLE delivery_outbox ADD COLUMN dedupe_key TEXT")
+            if "dead_letter_alerted" not in ob:
+                c.execute("ALTER TABLE delivery_outbox ADD COLUMN "
+                          "dead_letter_alerted INTEGER NOT NULL DEFAULT 0")
 
     # ── config ────────────────────────────────────────────────────────────
     def get_config(self, key: str, default: str = "") -> str:

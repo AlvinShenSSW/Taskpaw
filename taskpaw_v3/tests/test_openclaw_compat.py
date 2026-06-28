@@ -298,6 +298,18 @@ def test_poll_once_logs_status_for_every_server(tmp_path, monkeypatch):
     s.close()
 
 
+def test_status_snapshot_seeded_from_store_on_init(tmp_path):
+    # After a restart, a fresh poller must reflect the persisted last-good status
+    # (not show every server OFFLINE until first poll) (Kimi).
+    s = HubStore(tmp_path / "hub.db")
+    sid = s.add_server("m", "1.1.1.1")
+    s.log_status(sid, True, json.dumps({"monitors": {"x": {"state": "ok"}}}))
+    p = _poller(s)                                  # constructed fresh (= restart)
+    snap = p.status_snapshot()[0]
+    assert snap["reachable"] is True and "ok" in snap["status_json"]
+    s.close()
+
+
 def test_status_snapshot_offline_keeps_last_good(tmp_path, monkeypatch):
     # status.md source: a failed poll keeps the last good status/last_seen and
     # marks reachable False; status_log only gets the successful poll (#38 review).

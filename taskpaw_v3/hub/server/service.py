@@ -54,10 +54,17 @@ def run_from_config(config_path: Path | None = None, db_path: Path | None = None
     # abandoning servers/acks/outbox (Kimi). The operator can move it or set data_dir.
     legacy_db = default_db_path(path)
     if not resolved_db.exists() and legacy_db.exists() and legacy_db != resolved_db:
-        logging.getLogger("taskpaw.hub").warning(
-            "Hub DB not found at %s but an older one exists at %s — starting empty. "
-            "Move it or set data_dir to keep your servers/history.",
-            resolved_db, legacy_db)
+        # Hard-fail rather than silently start empty (a missed log line would
+        # abandon all servers/acks/outbox after the default DB path moved) (Kimi).
+        print(
+            f"error: hub DB not found at {resolved_db}, but an older one exists at "
+            f"{legacy_db}.\n"
+            f"  Move it:   mv '{legacy_db}' '{resolved_db}'\n"
+            f"  or point data_dir at its folder in {path}.\n"
+            f"  To start fresh, create an empty {resolved_db} (e.g. via "
+            f"`python -m taskpaw_v3.hub add-server ...`).",
+            file=sys.stderr)
+        return 1
     store = HubStore(resolved_db)
     run_hub(config, store, block=True)
     return 0

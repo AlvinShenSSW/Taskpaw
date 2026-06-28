@@ -77,6 +77,17 @@ def test_run_missing_config_returns_1(tmp_path, capsys):
     assert "No hub config" in capsys.readouterr().err
 
 
+def test_run_hard_fails_on_abandoned_legacy_db(tmp_path, capsys):
+    # hub.yaml with a config-adjacent hub.db (old default) but a data_dir whose
+    # db is absent → must hard-fail, not silently start empty (Kimi).
+    cfg = tmp_path / "hub.yaml"
+    cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
+    (tmp_path / "hub.db").write_bytes(b"")          # legacy db beside the config
+    rc = main(["--config", str(cfg), "run"])
+    assert rc == 1
+    assert "older one exists" in capsys.readouterr().err
+
+
 # ── platform config paths ────────────────────────────────────────────────--
 def test_default_paths(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
