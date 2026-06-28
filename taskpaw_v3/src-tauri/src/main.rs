@@ -341,8 +341,8 @@ mod tests {
     #[test]
     fn accepts_loopback_forms() {
         assert_eq!(loopback_base("http://127.0.0.1:5681"), "http://127.0.0.1:5681");
+        assert_eq!(loopback_base("http://127.0.0.5:9000"), "http://127.0.0.5:9000"); // 127/8
         assert_eq!(loopback_base("http://localhost:5690"), "http://localhost:5690");
-        assert_eq!(loopback_base("http://127.1:8000"), "http://127.1:8000"); // 127.0.0.1 short form
         assert_eq!(loopback_base("http://[::1]:5681"), "http://[::1]:5681");
         assert_eq!(loopback_base("http://[::1]"), "http://[::1]");
         assert_eq!(loopback_base(""), "");
@@ -358,6 +358,9 @@ mod tests {
         assert_eq!(loopback_base("http://127.0.0.1.evil.com:8000"), "");
         assert_eq!(loopback_base("http://evil.com:5681"), "");
         assert_eq!(loopback_base("http://10.0.0.5:5681"), "");
+        // abbreviated IPv4 ("127.1") isn't parsed by std Ipv4Addr → rejected
+        // (stricter than a browser, but safe: just falls back to defaults).
+        assert_eq!(loopback_base("http://127.1:8000"), "");
     }
 
     #[test]
