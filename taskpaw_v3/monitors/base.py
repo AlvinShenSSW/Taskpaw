@@ -109,6 +109,9 @@ class MonitorPlugin(abc.ABC):
     display_name: str = ""
     category: Category = "service"
     config_version: int = 1
+    # Auto-injected / not operator-selectable (e.g. host_metrics, §5b). The UI
+    # shows these always-on and won't offer adding a duplicate. Plugins self-declare.
+    system: bool = False
 
     @classmethod
     @abc.abstractmethod

@@ -39,6 +39,16 @@ def test_preset_catalog_has_moomoo_as_an_option():
     mon = presets["moomoo"]["monitors"]
     assert len(mon) == 4                      # moomoo is just a selectable bundle
     assert {m["type_id"] for m in mon} == {"process", "tcp_check", "heartbeat"}
+    # canonical {type_id, name, config} shape — same contract as add_monitor (Kimi)
+    for m in mon:
+        assert set(m) == {"type_id", "name", "config"} and m["name"]
+
+
+def test_has_remove_monitor_reject_non_string_query():
+    base = add_monitor([], {"type_id": "tcp_check", "config": {"name": "a", "port": 1}})
+    assert has_monitor(base, None) is False        # type-safe, no AttributeError
+    with pytest.raises(ValueError):
+        remove_monitor(base, None)
 
 
 # ── config-edit helpers ──────────────────────────────────────────────────--

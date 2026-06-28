@@ -19,10 +19,6 @@ from typing import Any, Optional
 from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
 from taskpaw_v3.monitors.runtime import monitor_name
 
-# host_metrics is auto-injected per agent (design §5b) — flag it `system` so the
-# UI shows it as always-on and doesn't offer a redundant second one (Kimi).
-_SYSTEM_TYPES = {"host_metrics"}
-
 
 def plugin_catalog(registry: Optional[PluginRegistry] = None) -> list[dict[str, Any]]:
     """Every selectable monitor type with its UI form schema."""
@@ -35,7 +31,9 @@ def plugin_catalog(registry: Optional[PluginRegistry] = None) -> list[dict[str, 
             "display_name": p.display_name or p.type_id,
             "category": p.category,
             "config_version": p.config_version,
-            "system": p.type_id in _SYSTEM_TYPES,
+            # plugins self-declare `system` (auto-injected, e.g. host_metrics) so
+            # the UI shows them always-on and won't offer a duplicate (Kimi).
+            "system": p.system,
             "json_schema": p.json_schema(),
             "ui_schema": p.ui_schema(),
         })
@@ -46,18 +44,24 @@ def preset_catalog() -> list[dict[str, Any]]:
     """Named monitor bundles the operator can enable in one click."""
     from taskpaw_v3.monitors.presets.moomoo import moomoo_preset
 
+    # Normalize preset specs to the canonical {type_id, name, config} shape
+    # add_monitor emits, so /control/plugins exposes ONE contract to the UI (Kimi).
+    def _canon(spec: dict) -> dict:
+        return {"type_id": spec["type_id"], "name": monitor_name(spec),
+                "config": dict(spec.get("config") or {})}
+
     return [
         {
             "id": "moomoo",
             "display_name": "moomoo (MQT life-signs)",
             "description": "pm2 daemon, orchestrator, OpenD :11111, heartbeat",
-            "monitors": moomoo_preset(),
+            "monitors": [_canon(m) for m in moomoo_preset()],
         },
     ]
 
 
 def has_monitor(monitors: list[dict], name: str) -> bool:
-    name = name.strip()   # align the query with canonical stored names (Kimi)
+    name = str(name).strip()   # canonical + type-safe query (Kimi)
     return any(monitor_name(m) == name for m in monitors)
 
 
@@ -95,7 +99,7 @@ def remove_monitor(monitors: list[dict], name: str) -> list[dict]:
     """Return a new list without the monitor named `name`. Raises if absent, or
     if more than one matches — removing several at once (from hand-edited YAML /
     migration that slipped a duplicate in) would be silent data loss (Kimi)."""
-    name = name.strip()   # align the query with canonical stored names (Kimi)
+    name = str(name).strip()   # canonical + type-safe query (Kimi)
     matches = [i for i, m in enumerate(monitors) if monitor_name(m) == name]
     if not matches:
         raise ValueError(f"no monitor named {name!r}")
