@@ -22,6 +22,21 @@ for pkg in ("uvicorn", "fastapi", "starlette", "pydantic", "pydantic_core",
         # backend that crashes on import at runtime (Kimi).
         raise SystemExit(f"packaging error: cannot collect required package {pkg!r}: {e}")
 hiddenimports += collect_submodules("taskpaw_v3")
+# Bundle the example config templates that bootstrap.scaffold() reads on first
+# run. collect_submodules grabs .py only, not data files, so without these the
+# packaged backend crashes with FileNotFoundError on a no-config launch (#53).
+# Use explicit REPO_ROOT paths (not collect_data_files, which resolves the
+# package via sys.path at spec-eval time and is fragile if taskpaw_v3 isn't
+# importable). The dest "taskpaw_v3/examples" matches EXAMPLES =
+# Path(__file__).parent/"examples" inside the onefile extraction tree. Check
+# BOTH role templates so a deleted/renamed one fails the build, not a user's
+# first run (Codex+Kimi).
+_examples_src = os.path.join(REPO_ROOT, "taskpaw_v3", "examples")
+for _name in ("agent.example.yaml", "hub.example.yaml"):
+    _path = os.path.join(_examples_src, _name)
+    if not os.path.exists(_path):
+        raise SystemExit(f"packaging error: missing {_path} to bundle (#53)")
+    datas.append((_path, "taskpaw_v3/examples"))
 
 a = Analysis(
     [os.path.join(SPECPATH, "backend_main.py")],

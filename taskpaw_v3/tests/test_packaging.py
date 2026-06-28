@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from taskpaw_v3.packaging import backend_main
 
 
@@ -73,6 +75,25 @@ def test_hub_service_scaffolds_missing_config(tmp_path, monkeypatch):
     assert svc.run_from_config() == 0           # no --config → scaffold default
     assert svc.default_config_path().exists()
     assert ran["ran"]
+
+
+def test_examples_bundled_for_scaffold():
+    # bootstrap.scaffold() reads these templates at runtime; the PyInstaller spec
+    # MUST bundle them or the packaged backend crashes with FileNotFoundError on a
+    # no-config first run (#53). This guards the source contract two ways:
+    #   1. both role templates exist where scaffold reads them (catch rename/delete);
+    #   2. the spec still declares the examples->taskpaw_v3/examples bundling.
+    # (A full in-bundle assertion needs a real PyInstaller run — deferred to a CI
+    # build smoke; this is the proportionate unit-level tripwire.)
+    from taskpaw_v3 import bootstrap
+
+    for name in ("agent.example.yaml", "hub.example.yaml"):
+        assert (bootstrap.EXAMPLES / name).exists(), f"missing scaffold template {name}"
+
+    spec = Path(__file__).resolve().parents[2] / "taskpaw_v3" / "packaging" / "taskpaw-backend.spec"
+    spec_text = spec.read_text(encoding="utf-8")
+    assert '"taskpaw_v3/examples"' in spec_text, \
+        "taskpaw-backend.spec no longer bundles taskpaw_v3/examples/*.yaml (#53)"
 
 
 def test_agent_service_scaffold_oserror_clean_exit(tmp_path, monkeypatch):
