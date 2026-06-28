@@ -29,7 +29,10 @@ struct Backend(Mutex<Option<Child>>);
 // kill_backend() on normal exit.
 impl Drop for Backend {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.0.lock() {
+        // Recover from a poisoned mutex so cleanup still runs (else a panic that
+        // poisoned the lock would let the backend orphan) (Kimi).
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        {
             if let Some(child) = guard.as_mut() {
                 if matches!(child.try_wait(), Ok(None)) {
                     #[cfg(unix)]
@@ -312,9 +315,15 @@ fn init_script() -> String {
     // packaged webview host `tauri.localhost` (Windows https://tauri.localhost,
     // per core/cors.py) — else the injected config is dropped in packaged builds
     // (Codex).
+    // Guard must accept the same set loopback_base() does (all of 127.0.0.0/8,
+    // not just 127.0.0.1) or a custom 127.x base would be validated yet __TASKPAW__
+    // would never be set (Kimi). Plus the packaged webview host tauri.localhost
+    // and the macOS tauri: protocol.
     format!(
-        "if (['localhost','127.0.0.1','[::1]','::1','tauri.localhost'].includes(location.hostname) \
-         || location.protocol === 'tauri:') {{ window.__TASKPAW__ = {cfg}; }}"
+        "{{ const h = location.hostname; \
+         if (h==='localhost'||h==='[::1]'||h==='::1'||h==='tauri.localhost'|| \
+             /^127\\./.test(h) || location.protocol==='tauri:') \
+           {{ window.__TASKPAW__ = {cfg}; }} }}"
     )
 }
 

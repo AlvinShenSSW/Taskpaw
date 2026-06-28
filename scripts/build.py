@@ -20,6 +20,9 @@ Dev note: the Tauri `externalBin` makes ANY cargo build (incl. `cargo tauri dev`
 / `cargo check`) require the sidecar to exist first. Run `python scripts/build.py
 --skip-tauri` once on a clean checkout before `cargo tauri dev` (the release
 workflow runs this script, so the sidecar is always present before it builds).
+The before*Command hooks are intentionally empty (their cwd is ambiguous across
+Tauri versions, see #50) — so for dev, start Vite yourself in another terminal:
+`npm --prefix taskpaw_v3/ui run dev`, then `cargo tauri dev` from src-tauri.
 """
 
 from __future__ import annotations

@@ -16,23 +16,21 @@ jobs:
   bundle:
     strategy:
       fail-fast: false
+      # AGENT installers only. The Hub runs HEADLESS (design §7.1: `python -m
+      # taskpaw_v3.hub run`); a GUI that spawns+kills the Hub backend on window
+      # close would risk silently stopping aggregation — a dashboard-only client
+      # is tracked separately (#52). macOS ARM64 + Intel + Windows.
       matrix:
-        os: [macos-latest, windows-latest]
-        # Distinct installers per role (TASKPAW_BUILD_ROLE is baked at compile
-        # time via option_env! in main.rs). Hub machines usually run headless.
-        role: [agent, hub]
         include:
           - os: macos-latest
-            label: macos
+            label: macos-arm64
+          - os: macos-13
+            label: macos-intel
           - os: windows-latest
             label: windows
-        # The Hub is macOS-only (design §3.2 / AGENTS.md) — no Windows Hub build.
-        exclude:
-          - os: windows-latest
-            role: hub
     runs-on: ${{ matrix.os }}
     env:
-      TASKPAW_BUILD_ROLE: ${{ matrix.role }}
+      TASKPAW_BUILD_ROLE: agent
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,7 +53,7 @@ jobs:
       - name: Collect installers
         uses: actions/upload-artifact@v4
         with:
-          name: taskpaw-${{ matrix.label }}-${{ matrix.role }}
+          name: taskpaw-agent-${{ matrix.label }}
           if-no-files-found: error
           path: |
             taskpaw_v3/src-tauri/target/release/bundle/**/*.dmg
