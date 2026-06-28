@@ -336,12 +336,17 @@ class LadaInstance(MonitorInstance):
     def _build_status(self, state: str) -> MonitorStatus:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
         metrics: dict = {}
-        with self._lock:
-            metrics.update(self._progress)
-        if "current_file" not in metrics:
-            cf = self._detect_current_file()
-            if cf:
-                metrics["current_file"] = cf
+        # "Processing file X" (parsed progress + current-file detection) is only
+        # meaningful while RUNNING — reporting it when idle/exited would tell the
+        # UI/Hub a file is being processed when it isn't (Codex #59).
+        if state == "running":
+            with self._lock:
+                metrics.update(self._progress)
+            if "current_file" not in metrics:
+                cf = self._detect_current_file()
+                if cf:
+                    metrics["current_file"] = cf
+        # Queue counts (folder state) + CPU/GPU are facts at any state.
         completed, total = self._queue_counts()
         if total is not None:
             metrics["queue_completed"] = completed

@@ -152,6 +152,24 @@ def test_stop_terminates_managed_child():
     assert inst._process.poll() is not None          # child terminated, no orphan
 
 
+def test_idle_does_not_report_current_file(tmp_path, monkeypatch):
+    # A passive monitor with queued files but no running process must NOT claim a
+    # current_file (no phantom "idle: a.mp4"); queue facts still report (Codex #59).
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir(); out.mkdir()
+    for n in ["a.mp4", "b.mp4"]:
+        (inp / n).write_bytes(b"x")
+    monkeypatch.setattr("taskpaw_v3.monitors.plugins.lada.process_alive", lambda name: False)
+    inst = LadaInstance("lada", _cfg(lada_input_folder=str(inp), lada_output_folder=str(out)))
+    _, emit = _events()
+    inst.start(emit)
+    st = inst.check(emit)                      # passive, not running → idle
+    assert st.state == "idle"
+    assert "current_file" not in st.metrics    # no phantom processing claim
+    assert st.metrics["queue_total"] == 2      # queue facts still reported
+    assert "idle" in st.detail and ".mp4" not in st.detail
+
+
 def test_restart_resets_per_run_state():
     # A supervisor stop→start (or watchdog respawn) re-calls start() on the SAME
     # instance — it must reset so the new run isn't poisoned by old state (Codex).
