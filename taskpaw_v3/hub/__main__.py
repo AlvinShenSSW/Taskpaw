@@ -18,7 +18,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from taskpaw_v3.hub.server.service import default_config_path, default_db_path, run_from_config
+from taskpaw_v3.core.config import HubConfig, load_yaml
+from taskpaw_v3.hub.server.service import (
+    db_path_for,
+    default_config_path,
+    legacy_db_conflict,
+    run_from_config,
+)
 from taskpaw_v3.hub.server.store import HubStore
 
 
@@ -34,8 +40,45 @@ def _port(value: str) -> int:
 
 
 def _store(args) -> HubStore:
-    db = Path(args.db).expanduser() if args.db else default_db_path(
-        Path(args.config).expanduser() if args.config else default_config_path())
+    if args.db:
+        return HubStore(Path(args.db).expanduser())
+    # Target the SAME db the running hub uses: HubConfig.data_dir/hub.db.
+    cfg_path = Path(args.config).expanduser() if args.config else default_config_path()
+    if not cfg_path.exists():
+        if args.config:
+            # Explicitly requested config is missing → fail, don't silently target
+            # the default db (operator could manage the wrong store) (Kimi).
+            print(f"error: hub config not found: {cfg_path}", file=sys.stderr)
+            raise SystemExit(2)
+        # No --config and none at the default path → use the default data_dir db,
+        # but still honor the legacy guard (a config-adjacent hub.db may exist
+        # even without a hub.yaml) (Kimi).
+        db = db_path_for(HubConfig())
+        legacy = legacy_db_conflict(default_config_path(), db)
+        if legacy:
+            print(f"error: would operate on {db}, but an older hub.db exists at "
+                  f"{legacy}.\n  Move it, set data_dir, or pass --db to target one.",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        return HubStore(db)
+    try:
+        config: HubConfig = load_yaml(HubConfig, cfg_path)  # type: ignore[assignment]
+    except Exception as e:
+        # A malformed config must NOT silently target a different db than the
+        # running hub — surface it and exit (#38 review).
+        print(f"error: cannot read hub config {cfg_path}: {e}", file=sys.stderr)
+        raise SystemExit(2)
+    db = db_path_for(config)
+    # FATAL (consistent with `run`): don't let the operator edit a new empty db
+    # while a real legacy one sits beside the config — they'd manage a db the hub
+    # refuses to start on. Pass --db to target a specific db explicitly (Kimi).
+    legacy = legacy_db_conflict(cfg_path, db)
+    if legacy:
+        print(f"error: would operate on {db}, but an older hub.db exists at {legacy}.\n"
+              f"  Move it:   mv '{legacy}' '{db}'\n"
+              f"  or set data_dir, or pass --db {db} to target it explicitly.",
+              file=sys.stderr)
+        raise SystemExit(2)
     return HubStore(db)
 
 
@@ -54,7 +97,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m taskpaw_v3.hub",
                                  description="Run the TaskPaw V3 Hub and manage polled agents.")
     ap.add_argument("--config", default=None, help="path to hub.yaml (default: platform location)")
-    ap.add_argument("--db", default=None, help="path to hub.db (default: alongside hub.yaml)")
+    ap.add_argument("--db", default=None,
+                    help="path to hub.db (default: HubConfig.data_dir/hub.db)")
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("run", help="start the Hub (poller + API)")
@@ -107,4 +151,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO)   # only when run as a script (Kimi)
     raise SystemExit(main())

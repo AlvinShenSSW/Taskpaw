@@ -79,11 +79,32 @@ class HubConfig(BaseModel):
     openclaw_token: str = ""
     # Run a host_metrics self-monitor for the Hub's own machine (§5b.2).
     self_monitor: bool = True
+    # Local data dir holding hub.db + status.md. Defaults to V2's location so
+    # OpenClaw's scripts (which read these files directly) work unchanged (#38).
+    data_dir: str = "~/.taskpaw-hub"
+    # Write status.md each poll (OpenClaw compat). Disable if not consumed.
+    write_status_md: bool = True
+    # Drop status_log rows older than this many days (bounded history). 0 = keep all.
+    status_log_retention_days: int = Field(7, ge=0)
 
     @field_validator("bind_port")
     @classmethod
     def _ports(cls, v: int) -> int:
         return _valid_port(v)
+
+    @field_validator("data_dir")
+    @classmethod
+    def _data_dir_abs(cls, v: str) -> str:
+        # Must resolve to an absolute, `..`-free path: a relative data_dir would
+        # put hub.db/status.md at a cwd-dependent location, breaking the V2-path
+        # contract and the legacy-db guard (Kimi). `~` is allowed (expanded).
+        v = v.strip()
+        if not v:
+            raise ValueError("data_dir must not be blank")
+        p = Path(v).expanduser()
+        if not p.is_absolute() or ".." in p.parts:
+            raise ValueError("data_dir must be an absolute path (no '..')")
+        return v
 
 
 def load_yaml(model: type[BaseModel], path: Path) -> BaseModel:

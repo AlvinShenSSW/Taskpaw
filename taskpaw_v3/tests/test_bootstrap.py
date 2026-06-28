@@ -11,6 +11,11 @@ from taskpaw_v3.hub.server import service as hub_service
 from taskpaw_v3.hub.server.store import HubStore
 
 
+def load_hub_cfg():
+    from taskpaw_v3.core.config import HubConfig, load_yaml
+    return load_yaml(HubConfig, hub_service.default_config_path())
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     """Point platform config paths at a temp HOME (mac layout)."""
@@ -74,7 +79,8 @@ def test_register_agents_adds_and_skips_dupes(home):
     again = bootstrap.register_agents(["moomoo,192.168.1.50"])
     assert any("already registered" in l for l in again)
 
-    db = hub_service.default_db_path(hub_service.default_config_path())
+    from taskpaw_v3.core.config import HubConfig
+    db = hub_service.db_path_for(load_hub_cfg())
     names = {s["name"] for s in HubStore(db).list_servers()}
     assert names == {"moomoo", "mac"}
 
@@ -83,7 +89,7 @@ def test_register_agents_validates_before_writing(home):
     bootstrap.scaffold("hub")
     with pytest.raises(ValueError):
         bootstrap.register_agents(["good,1.2.3.4", "bad-no-ip"])
-    db = hub_service.default_db_path(hub_service.default_config_path())
+    db = hub_service.db_path_for(load_hub_cfg())
     # nothing persisted — the whole batch is rejected on the bad spec
     assert HubStore(db).list_servers() == []
 
