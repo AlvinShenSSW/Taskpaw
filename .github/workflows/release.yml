@@ -13,14 +13,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        os: [macos-latest, windows-latest]
+        # Distinct installers per role (TASKPAW_BUILD_ROLE is baked at compile
+        # time via option_env! in main.rs). Hub machines usually run headless, but
+        # ship a Hub-dashboard installer too.
+        role: [agent, hub]
         include:
           - os: macos-latest
-            artifact: taskpaw-macos
+            label: macos
           - os: windows-latest
-            artifact: taskpaw-windows
+            label: windows
     runs-on: ${{ matrix.os }}
+    env:
+      TASKPAW_BUILD_ROLE: ${{ matrix.role }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # release build only needs the source
 
       - uses: actions/setup-node@v4
         with:
@@ -39,7 +48,7 @@ jobs:
       - name: Collect installers
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: taskpaw-${{ matrix.label }}-${{ matrix.role }}
           if-no-files-found: error
           path: |
             taskpaw_v3/src-tauri/target/release/bundle/**/*.dmg

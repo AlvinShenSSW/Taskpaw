@@ -31,7 +31,7 @@ SRC_TAURI = ROOT / "taskpaw_v3" / "src-tauri"
 SPEC = ROOT / "taskpaw_v3" / "packaging" / "taskpaw-backend.spec"
 EXE_EXT = ".exe" if os.name == "nt" else ""
 # Pinned for reproducible bundles (Kimi).
-TAURI_CLI = "@tauri-apps/cli@2.1.0"
+TAURI_CLI = "@tauri-apps/cli@2.7.1"
 
 
 def run(cmd: list[str], **kw) -> None:

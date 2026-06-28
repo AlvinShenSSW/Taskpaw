@@ -67,6 +67,16 @@ mod jobobj {
 #[cfg(windows)]
 struct JobHandle(Mutex<Option<jobobj::Job>>);
 
+/// The role this build/run targets: runtime TASKPAW_UI_ROLE wins; else the
+/// compile-time TASKPAW_BUILD_ROLE baked at build (so the release matrix can ship
+/// distinct agent and hub installers); else "agent".
+fn ui_role() -> String {
+    std::env::var("TASKPAW_UI_ROLE")
+        .ok()
+        .or_else(|| option_env!("TASKPAW_BUILD_ROLE").map(str::to_string))
+        .unwrap_or_else(|| "agent".into())
+}
+
 /// Resolve the backend command: an explicit dev override, else the bundled
 /// `taskpaw-backend` sidecar next to this executable run with the UI role (#40).
 fn backend_command() -> Option<(String, Vec<String>)> {
@@ -104,7 +114,7 @@ fn backend_command() -> Option<(String, Vec<String>)> {
         dir.join("binaries").join(name),
     ];
     let found = candidates.iter().find(|p| p.exists())?;
-    let role = std::env::var("TASKPAW_UI_ROLE").unwrap_or_else(|_| "agent".into());
+    let role = ui_role();
     Some((found.to_string_lossy().into_owned(), vec![role]))
 }
 
@@ -186,9 +196,18 @@ fn loopback_base(raw: &str) -> String {
         return String::new();
     }
     let after = v.split("://").nth(1).unwrap_or(v);
-    let host = after.split('/').next().unwrap_or("");
-    let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
-    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+    // Strip ANY userinfo (user:pass@) — else "http://127.0.0.1:8000@evil.com"
+    // would read 127.0.0.1 as host while a browser uses evil.com, leaking the
+    // injected api key to a remote origin (Codex/Kimi P1). rsplit on the LAST '@'.
+    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    // Extract host: bracketed IPv6 "[::1]"/"[::1]:port" → between [ and ]; else
+    // strip a trailing :port (rsplit so it doesn't trip on IPv6 colons).
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)
+    };
     if matches!(host, "127.0.0.1" | "localhost" | "::1") {
         v.to_string()
     } else {
@@ -202,7 +221,7 @@ fn loopback_base(raw: &str) -> String {
 fn init_script() -> String {
     let base = loopback_base(&std::env::var("TASKPAW_UI_BASE").unwrap_or_default());
     let token = std::env::var("TASKPAW_UI_TOKEN").unwrap_or_default();
-    let role = std::env::var("TASKPAW_UI_ROLE").unwrap_or_else(|_| "agent".into());
+    let role = ui_role();
     // serde_json escapes the values safely.
     let cfg = serde_json::json!({ "baseUrl": base, "apiKey": token, "role": role });
     format!("window.__TASKPAW__ = {};", cfg)
@@ -216,10 +235,11 @@ fn main() {
             // UI would open with no backend — fail LOUD rather than silently
             // broken (Kimi). Dev (explicit TASKPAW_BACKEND_CMD) stays lenient.
             if child.is_none() && std::env::var_os("TASKPAW_BACKEND_CMD").is_none() {
-                eprintln!(
-                    "FATAL: bundled backend 'taskpaw-backend' not found/failed to start; \
-                     the app cannot reach a local API. (Reinstall, or set \
-                     TASKPAW_BACKEND_CMD for a dev backend.)"
+                // Abort launch instead of opening a UI with no backend (Kimi).
+                return Err(
+                    "bundled backend 'taskpaw-backend' not found/failed to start; the app \
+                     cannot reach a local API. Reinstall, or set TASKPAW_BACKEND_CMD for dev."
+                        .into(),
                 );
             }
             #[cfg(windows)]
