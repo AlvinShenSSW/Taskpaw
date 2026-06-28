@@ -48,7 +48,17 @@ def run_from_config(config_path: Path | None = None, db_path: Path | None = None
         print(f"No hub config at {path}", file=sys.stderr)
         return 1
     config: HubConfig = load_yaml(HubConfig, path)  # type: ignore[assignment]
-    store = HubStore(db_path or db_path_for(config))
+    resolved_db = db_path or db_path_for(config)
+    # Loud warning if a hub.db sat next to the config (old default) but the
+    # data_dir one doesn't exist yet — we'd otherwise start empty, silently
+    # abandoning servers/acks/outbox (Kimi). The operator can move it or set data_dir.
+    legacy_db = default_db_path(path)
+    if not resolved_db.exists() and legacy_db.exists() and legacy_db != resolved_db:
+        logging.getLogger("taskpaw.hub").warning(
+            "Hub DB not found at %s but an older one exists at %s — starting empty. "
+            "Move it or set data_dir to keep your servers/history.",
+            resolved_db, legacy_db)
+    store = HubStore(resolved_db)
     run_hub(config, store, block=True)
     return 0
 

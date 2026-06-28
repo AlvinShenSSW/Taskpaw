@@ -170,6 +170,25 @@ def test_migrates_v2_events_preserved_as_legacy(tmp_path):
     s.close()
 
 
+def test_remove_server_with_legacy_events_no_fk_error(tmp_path):
+    # After migrating a V2 db with event rows, remove_server must clear the
+    # legacy table too or DELETE servers hits an FK violation (Codex/Kimi).
+    import sqlite3
+    db = tmp_path / "hub.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+                 "port INTEGER, enabled INTEGER)")
+    conn.execute("CREATE TABLE events(id INTEGER PRIMARY KEY, server_id INTEGER "
+                 "REFERENCES servers(id), timestamp TEXT, machine TEXT, monitor TEXT, message TEXT)")
+    conn.execute("INSERT INTO servers VALUES(1,'m','1.1.1.1',5680,1)")
+    conn.execute("INSERT INTO events(server_id,timestamp,machine,monitor,message) "
+                 "VALUES(1,'t','m','x','old')")
+    conn.commit(); conn.close()
+    s = HubStore(db)
+    assert s.remove_server(1) is True          # must not raise FK IntegrityError
+    s.close()
+
+
 def test_migrates_v2_delivery_outbox_without_dedupe_key(tmp_path):
     # An old delivery_outbox lacking dedupe_key must not crash index creation on
     # open (Codex). Simulate it, then confirm the store opens and works.

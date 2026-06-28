@@ -100,6 +100,15 @@ class Poller:
             body = resp.read().decode("utf-8")
             json.loads(body)  # validate it's JSON before persisting
             return True, body
+        except urllib.error.HTTPError as e:
+            # Surface 401/403 distinctly — a token mismatch is a config/security
+            # problem, not a down agent (Kimi).
+            if e.code in (401, 403):
+                log.warning("Auth failed polling %s (HTTP %s) — check polling_token",
+                            server.get("name"), e.code)
+            else:
+                log.warning("HTTP %s fetching status from %s", e.code, server.get("name"))
+            return False, None
         except Exception as e:
             log.warning("Failed to fetch status from %s: %s", server.get("name"), e)
             return False, None

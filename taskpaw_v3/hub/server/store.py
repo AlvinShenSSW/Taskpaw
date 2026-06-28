@@ -116,6 +116,15 @@ class HubStore:
             )
             self._conn.commit()
 
+    def _legacy_event_tables(self) -> list[str]:
+        """Names of preserved V2 event tables (events_v2_legacy[_N]) currently
+        present — they keep an FK to servers and need cleanup on remove_server."""
+        rows = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name LIKE 'events_v2_legacy%'"
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def _migrate(self, c) -> None:
         """Bring EXISTING tables up to the current schema (CREATE IF NOT EXISTS
         won't alter them) — runs before the CREATEs/indexes. data_dir defaults to
@@ -140,12 +149,15 @@ class HubStore:
         # and let the later CREATE rebuild the V3 events table.
         ev = cols("events")
         if ev and "event_id" not in ev:
-            if cols("events_v2_legacy"):
-                c.execute("DROP TABLE events")          # legacy copy already kept
-            else:
-                c.execute("ALTER TABLE events RENAME TO events_v2_legacy")
-                log.warning("Migrated V2 'events' table to 'events_v2_legacy' "
-                            "(V3 uses a new events schema; old rows preserved there)")
+            # Rename to the first FREE legacy name so we never DROP (lose) rows,
+            # even if a prior events_v2_legacy already exists (Codex/Kimi).
+            name, n = "events_v2_legacy", 1
+            while cols(name):
+                n += 1
+                name = f"events_v2_legacy_{n}"
+            c.execute(f"ALTER TABLE events RENAME TO {name}")
+            log.warning("Migrated V2 'events' table to '%s' (V3 uses a new events "
+                        "schema; old rows preserved there)", name)
 
         # An old delivery_outbox without dedupe_key would break the dedupe index.
         ob = cols("delivery_outbox")
@@ -218,6 +230,10 @@ class HubStore:
                     return False
                 self._conn.execute("DELETE FROM status_log WHERE server_id=?", (server_id,))
                 self._conn.execute("DELETE FROM events WHERE server_id=?", (server_id,))
+                # Migrated V2 events_v2_legacy retains an FK to servers — clear its
+                # rows too or DELETE servers raises FK-violation (Codex/Kimi).
+                for legacy in self._legacy_event_tables():
+                    self._conn.execute(f"DELETE FROM {legacy} WHERE server_id=?", (server_id,))
                 self._conn.execute(
                     "DELETE FROM delivery_outbox WHERE server_name=?", (row[0],)
                 )
@@ -256,11 +272,11 @@ class HubStore:
                 SELECT s.id, s.name, sl.reachable, sl.status_json, sl.timestamp,
                     (SELECT timestamp FROM status_log
                      WHERE server_id = s.id AND reachable = 1
-                     ORDER BY id DESC LIMIT 1) AS last_seen
+                     ORDER BY timestamp DESC, id DESC LIMIT 1) AS last_seen
                 FROM servers s
                 LEFT JOIN status_log sl ON sl.id = (
                     SELECT id FROM status_log WHERE server_id = s.id
-                    ORDER BY id DESC LIMIT 1)
+                    ORDER BY timestamp DESC, id DESC LIMIT 1)
                 WHERE s.enabled = 1
                 ORDER BY s.id
                 """
