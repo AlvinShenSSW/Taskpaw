@@ -3,6 +3,10 @@ name: release
 # Build downloadable V3 desktop installers (#40/#41). Trigger manually
 # (Actions → release → Run workflow) or by pushing a v* tag; download the
 # installers from the run's artifacts.
+#
+# NOTE: macOS artifacts are UNSIGNED / un-notarized (signing tracked in #49) —
+# Gatekeeper blocks a double-click; for verification right-click → Open, or
+# `xattr -dr com.apple.quarantine <app>`.
 on:
   workflow_dispatch:
   push:

@@ -40,11 +40,24 @@ def run(cmd: list[str], **kw) -> None:
 
 
 def target_triple() -> str:
-    out = subprocess.run(["rustc", "-vV"], capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        if line.startswith("host:"):
-            return line.split(":", 1)[1].strip()
-    raise SystemExit("could not determine rust target triple (is rustc installed?)")
+    # Prefer rustc's host triple (authoritative). Fall back to a platform-derived
+    # triple so --skip-tauri (sidecar only) works WITHOUT the Rust toolchain (Codex).
+    try:
+        out = subprocess.run(["rustc", "-vV"], capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            if line.startswith("host:"):
+                return line.split(":", 1)[1].strip()
+    except FileNotFoundError:
+        pass
+    import platform
+    mach = platform.machine().lower()
+    arch = {"x86_64": "x86_64", "amd64": "x86_64",
+            "arm64": "aarch64", "aarch64": "aarch64"}.get(mach, mach)
+    if sys.platform == "darwin":
+        return f"{arch}-apple-darwin"
+    if sys.platform == "win32":
+        return f"{arch}-pc-windows-msvc"
+    return f"{arch}-unknown-linux-gnu"
 
 
 def build_backend() -> Path:

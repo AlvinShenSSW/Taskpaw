@@ -47,5 +47,5 @@ jobs:
       - name: Install + build the V3 UI
         working-directory: taskpaw_v3/ui
         run: |
-          npm install
+          npm ci
           npm run build

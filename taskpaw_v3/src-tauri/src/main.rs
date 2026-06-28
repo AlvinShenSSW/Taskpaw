@@ -212,9 +212,12 @@ fn loopback_base(raw: &str) -> String {
     // Extract host: bracketed IPv6 "[::1]"/"[::1]:port" → between [ and ]; else
     // strip a trailing :port (rsplit so it doesn't trip on IPv6 colons).
     let host = if let Some(r) = host_port.strip_prefix('[') {
-        r.split(']').next().unwrap_or("")
+        r.split(']').next().unwrap_or("")          // [ipv6] or [ipv6]:port
+    } else if host_port.matches(':').count() > 1 {
+        host_port                                   // bare IPv6 (must be bracketed
+                                                    // to carry a port) → whole is host
     } else {
-        host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)
+        host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)  // host[:port]
     };
     let host = host.to_ascii_lowercase();
     // Parse the IPv4 form so a *hostname* like "127.0.0.1.evil.com" (which a
@@ -259,10 +262,14 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let mut child = spawn_backend();
-            // Bundled mode (no dev override): a missing/failed sidecar means the
-            // UI would open with no backend — fail LOUD rather than silently
-            // broken (Kimi). Dev (explicit TASKPAW_BACKEND_CMD) stays lenient.
-            if child.is_none() && std::env::var_os("TASKPAW_BACKEND_CMD").is_none() {
+            // Release bundled mode (no dev override): a missing/failed sidecar
+            // means the UI would open with no backend — fail LOUD rather than
+            // silently broken (Kimi). Skip in debug so `cargo tauri dev` works
+            // without a sidecar; dev (explicit TASKPAW_BACKEND_CMD) stays lenient.
+            if !cfg!(debug_assertions)
+                && child.is_none()
+                && std::env::var_os("TASKPAW_BACKEND_CMD").is_none()
+            {
                 // Abort launch instead of opening a UI with no backend (Kimi).
                 return Err(
                     "bundled backend 'taskpaw-backend' not found/failed to start; the app \
