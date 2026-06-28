@@ -104,6 +104,14 @@ def create_control_app(
             data["api_token"] = "***"
         return data
 
+    @app.get("/control/plugins")
+    def plugins() -> dict:
+        # The selectable monitor services + their form schemas (the UI's "enable
+        # a monitor" picker) plus named presets (moomoo is just one of these).
+        from taskpaw_v3.agent.catalog import plugin_catalog, preset_catalog
+
+        return {"plugins": plugin_catalog(), "presets": preset_catalog()}
+
     @app.post("/control/command")
     def command(body: dict) -> dict:
         if on_command is None:
