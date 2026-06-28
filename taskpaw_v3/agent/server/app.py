@@ -22,7 +22,8 @@ from fastapi.responses import JSONResponse
 from taskpaw_v3.core.auth import token_ok
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
-from taskpaw_v3.monitors.runtime import monitor_name
+from taskpaw_v3.monitors.registry import PluginRegistry
+from taskpaw_v3.monitors.runtime import effective_monitors, monitor_name
 
 
 def _unauthorized() -> JSONResponse:
@@ -55,18 +56,17 @@ def create_network_app(
             return _unauthorized()
         if status_provider is not None:
             return status_provider()
-        from taskpaw_v3.agent.server.launcher import effective_monitors
         return {
             "machine": config.machine,
             "server_id": config.server_id,
             "os": platform.platform(),
-            "monitors": [
-                # Use effective_monitors so the fallback matches what the agent
-                # actually runs (incl. the auto-injected host_metrics) (Kimi).
-                # name can live top-level or in config — monitor_name() resolves both.
-                {"type_id": m.get("type_id"), "name": monitor_name(m), "state": "unknown"}
+            # Match the production status_provider shape: a dict keyed by monitor
+            # name (supervisor.snapshot()), NOT a list — same endpoint, one wire
+            # shape (Kimi). effective_monitors so it includes auto-injected ones.
+            "monitors": {
+                monitor_name(m): {"type_id": m.get("type_id"), "state": "unknown"}
                 for m in effective_monitors(config)
-            ],
+            },
         }
 
     @app.get("/events")
@@ -82,7 +82,7 @@ def create_control_app(
     config: AgentConfig,
     on_command: Optional[Callable[[str, dict], dict]] = None,
     status_provider: Optional[Callable[[], dict]] = None,
-    registry=None,
+    registry: Optional[PluginRegistry] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""

@@ -10,9 +10,30 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.supervisor import Supervisor
+
+
+def effective_monitors(config: AgentConfig) -> list[dict[str, Any]]:
+    """config.monitors plus a default host_metrics self-monitor (§5b: every agent)
+    unless one is already configured or host_metrics is disabled. The injected
+    name is collision-free against existing (stripped) names so register() can't
+    raise a duplicate. Lives here (not launcher) so app.py can use it without a
+    circular import (Kimi)."""
+    monitors = list(config.monitors)
+    if config.host_metrics and not any(m.get("type_id") == "host_metrics" for m in monitors):
+        existing = {n for m in monitors if (n := monitor_name(m))}
+        # machine/server_id are stripped+non-blank by AgentConfig validators; the
+        # `or` is defensive so a blank stem can never produce "-host".
+        stem = config.machine.strip() or config.server_id.strip()
+        base = f"{stem}-host"
+        name, i = base, 1
+        while name in existing:
+            name, i = f"{base}-{i}", i + 1
+        monitors.append({"type_id": "host_metrics", "name": name, "config": {"name": name}})
+    return monitors
 
 
 def monitor_name(spec: dict[str, Any]) -> str:

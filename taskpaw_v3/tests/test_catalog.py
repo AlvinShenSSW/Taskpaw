@@ -88,6 +88,12 @@ def test_whitespace_name_collision_is_caught(monkeypatch):
         add_monitor(legacy, {"type_id": "tcp_check", "config": {"name": "foo", "port": 2}})
 
 
+def test_add_monitor_rejects_system_plugin():
+    # host_metrics is auto-injected (system) — can't be added manually (Kimi).
+    with pytest.raises(ValueError, match="system monitor"):
+        add_monitor([], {"type_id": "host_metrics", "config": {"name": "x"}})
+
+
 def test_add_monitor_rejects_unknown_type():
     with pytest.raises(ValueError):
         add_monitor([], {"type_id": "nope", "config": {"name": "x"}})
@@ -144,12 +150,15 @@ def test_effective_monitors_strips_machine_for_collision():
     assert hm["name"] == hm["config"]["name"]
 
 
-def test_effective_monitors_blank_machine_falls_back_to_server_id():
-    from taskpaw_v3.agent.server.launcher import effective_monitors
-    cfg = AgentConfig(server_id="srv", machine="   ")   # whitespace-only machine
-    eff = effective_monitors(cfg)
-    hm = next(mm for mm in eff if mm["type_id"] == "host_metrics")
-    assert hm["config"]["name"] == "srv-host"           # not "-host"
+def test_agentconfig_rejects_blank_machine_and_server_id():
+    # whitespace-only identity strings are rejected at config load, so the
+    # "-host" edge can't arise (Kimi).
+    with pytest.raises(Exception):
+        AgentConfig(server_id="srv", machine="   ")
+    with pytest.raises(Exception):
+        AgentConfig(server_id="  ", machine="m")
+    # and they're stripped when valid
+    assert AgentConfig(server_id=" s ", machine=" m ").machine == "m"
 
 
 def test_build_supervisor_conflicting_names_raises():
@@ -215,8 +224,8 @@ def test_network_status_resolves_name_from_config():
     client = TestClient(create_network_app(cfg, EventQueue(machine="m")))
     r = client.get("/status")
     assert r.status_code == 200
-    mons = r.json()["monitors"]
-    assert mons[0]["name"] == "opend" and mons[0]["type_id"] == "tcp_check"
+    mons = r.json()["monitors"]                 # dict keyed by name (production shape)
+    assert mons["opend"]["type_id"] == "tcp_check"
 
 
 def test_control_plugins_endpoint():

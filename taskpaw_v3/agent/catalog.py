@@ -77,6 +77,9 @@ def add_monitor(monitors: list[dict], spec: dict,
     # from malformed JSON) would otherwise raise TypeError, not ValueError (Kimi).
     if not isinstance(type_id, str) or not type_id or not reg.has(type_id):
         raise ValueError(f"unknown monitor type_id: {type_id!r}")
+    if reg.get(type_id).system:
+        # system plugins (e.g. host_metrics) are auto-injected, not hand-added (Kimi).
+        raise ValueError(f"{type_id!r} is a system monitor and cannot be added manually")
     raw_in = spec.get("config")
     if raw_in is not None and not isinstance(raw_in, dict):
         raise ValueError("monitor config must be an object")  # not list/null (Kimi)

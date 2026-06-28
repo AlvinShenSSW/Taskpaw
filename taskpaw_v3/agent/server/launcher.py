@@ -16,40 +16,18 @@ from taskpaw_v3.core.lifecycle import GracefulShutdown
 from taskpaw_v3.core.net import PortInUseError, claim_port, port_available  # re-export
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.core.state import load_next_id, save_next_id
+from taskpaw_v3.monitors.runtime import effective_monitors  # re-export (moved to runtime)
 
 log = logging.getLogger("taskpaw.agent")
 
-__all__ = ["run_agent", "PortInUseError", "claim_port", "port_available", "ensure_port_free"]
+__all__ = ["run_agent", "PortInUseError", "claim_port", "port_available",
+           "ensure_port_free", "effective_monitors"]
 
 
 def ensure_port_free(host: str, port: int, what: str) -> None:
     """Advisory pre-check (claim_port does the real, race-free bind)."""
     if not port_available(host, port):
         raise PortInUseError(f"{what} port {host}:{port} is already in use.")
-
-
-def effective_monitors(config: AgentConfig) -> list[dict]:
-    """config.monitors plus a default host_metrics self-monitor (§5b: every
-    agent) unless one is already configured or host_metrics is disabled. The
-    injected name is made collision-free so it can't clash with an existing
-    monitor (which would make register() raise and the agent fail to start)."""
-    from taskpaw_v3.monitors.runtime import monitor_name
-    monitors = list(config.monitors)
-    if config.host_metrics and not any(m.get("type_id") == "host_metrics" for m in monitors):
-        existing = {n for m in monitors if (n := monitor_name(m))}
-        # Strip the machine BEFORE composing so the generated name matches the
-        # stripped existing names — else a whitespace-padded machine would miss
-        # the collision check and the supervisor would raise a duplicate at
-        # register (Kimi). (strip()ing the whole "m -host" would leave inner gaps.)
-        # Fall back to server_id if machine is blank, so we never make "-host".
-        stem = config.machine.strip() or config.server_id.strip()
-        base = f"{stem}-host"
-        name, i = base, 1
-        while name in existing:
-            name, i = f"{base}-{i}", i + 1
-        # Canonical {type_id, name, config} shape (top-level name too) (Kimi).
-        monitors.append({"type_id": "host_metrics", "name": name, "config": {"name": name}})
-    return monitors
 
 
 def build_queue(config: AgentConfig, state_path: Optional[Path]) -> EventQueue:
@@ -97,13 +75,16 @@ def run_agent(
     # Build + start the monitor supervisor from the effective monitor list
     # (config.monitors + a default host_metrics per §5b), wiring events into the
     # same queue the Hub polls.
+    from taskpaw_v3.monitors.registry import default_registry
+    from taskpaw_v3.monitors.runtime import build_supervisor
+
+    # One registry, shared by the supervisor AND /control/plugins, so the endpoint
+    # advertises exactly what this agent runs (Kimi).
+    registry = default_registry()
     monitors = effective_monitors(config)
     supervisor = None
     if monitors:
-        from taskpaw_v3.monitors.registry import default_registry
-        from taskpaw_v3.monitors.runtime import build_supervisor
-
-        supervisor = build_supervisor(default_registry(), monitors, queue, config.machine)
+        supervisor = build_supervisor(registry, monitors, queue, config.machine)
         supervisor.start()
         shutdown.register("supervisor", lambda: supervisor.stop())
 
@@ -120,7 +101,8 @@ def run_agent(
         uvicorn.Config(create_network_app(config, queue, _status_provider), log_level="warning")
     )
     ctl = uvicorn.Server(
-        uvicorn.Config(create_control_app(config, status_provider=_status_provider), log_level="warning")
+        uvicorn.Config(create_control_app(config, status_provider=_status_provider,
+                                          registry=registry), log_level="warning")
     )
 
     def _serve(server, sock, label):
