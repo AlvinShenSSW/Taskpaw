@@ -56,6 +56,16 @@ mod jobobj {
     pub struct Job(pub HANDLE);
     unsafe impl Send for Job {}
 
+    // Close the job handle deterministically on drop (don't leak it until process
+    // exit). Dropping the handle is also what triggers KILL_ON_JOB_CLOSE (Kimi).
+    impl Drop for Job {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+
     pub fn assign(child: &Child) -> Option<Job> {
         unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
@@ -144,11 +154,14 @@ fn backend_command() -> Option<(String, Vec<String>)> {
         dir.to_path_buf(),                       // next to the app binary (release)
         dir.join("../Resources"),                // macOS .app resources fallback
     ];
-    // Only probe src-tauri/binaries/ in debug — release bundles place the sidecar
-    // next to the exe, and probing binaries/ could pick up a stale/wrong-arch dev
-    // artifact (Kimi).
+    // Only probe binaries/ in debug — release bundles place the sidecar next to
+    // the exe, and probing binaries/ could pick up a stale/wrong-arch dev artifact
+    // (Kimi). In debug, `cargo tauri dev` runs from target/debug/, so also look up
+    // toward src-tauri/binaries/ where build.py --skip-tauri puts it (Kimi).
     if cfg!(debug_assertions) {
         bases.push(dir.join("binaries"));
+        bases.push(dir.join("../binaries"));
+        bases.push(dir.join("../../binaries"));
     }
     let found = bases
         .iter()

@@ -124,7 +124,14 @@ def run_from_config(config_path: Path | None = None, db_path: Path | None = None
         # Default location missing → self-initialize so a fresh install runs
         # (host_metrics self-monitor baseline) instead of failing (#40 Codex).
         from taskpaw_v3 import bootstrap
-        bootstrap.scaffold("hub")
+        try:
+            bootstrap.scaffold("hub")
+        except OSError as e:
+            # e.g. Linux /etc/taskpaw without root — fail cleanly, don't crash (Kimi).
+            print(f"No hub config at {path} and could not auto-create it: {e}\n"
+                  f"  Create it manually (see taskpaw_v3/examples/hub.example.yaml) "
+                  f"or run with write access to that directory.", file=sys.stderr)
+            return 1
         logging.getLogger("taskpaw.hub").info("created default hub config at %s", path)
     config: HubConfig = load_yaml(HubConfig, path)  # type: ignore[assignment]
     resolved_db = db_path or db_path_for(config)
