@@ -102,7 +102,13 @@ def register_agents(specs: list[str]) -> list[str]:
         cfg: HubConfig = load_yaml(HubConfig, cfg_path)  # type: ignore[assignment]
     else:
         cfg = HubConfig()
-    store = HubStore(hub_service.db_path_for(cfg))
+    db = hub_service.db_path_for(cfg)
+    legacy = hub_service.legacy_db_conflict(cfg_path, db)
+    if legacy:
+        print(f"warning: registering into {db}, but an older hub.db exists at "
+              f"{legacy} (not used). Move it or set data_dir if that's the real one.",
+              file=sys.stderr)
+    store = HubStore(db)
     existing = {s["name"] for s in store.list_servers()}
     lines: list[str] = []
     try:

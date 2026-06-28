@@ -22,6 +22,7 @@ from taskpaw_v3.core.config import HubConfig, load_yaml
 from taskpaw_v3.hub.server.service import (
     db_path_for,
     default_config_path,
+    legacy_db_conflict,
     run_from_config,
 )
 from taskpaw_v3.hub.server.store import HubStore
@@ -53,7 +54,15 @@ def _store(args) -> HubStore:
         # running hub — surface it and exit (#38 review).
         print(f"error: cannot read hub config {cfg_path}: {e}", file=sys.stderr)
         raise SystemExit(2)
-    return HubStore(db_path_for(config))
+    db = db_path_for(config)
+    # Warn loudly if we'd create a NEW empty db while a legacy one sits beside the
+    # config — else the operator adds servers to a db the hub won't run on (Kimi).
+    legacy = legacy_db_conflict(cfg_path, db)
+    if legacy:
+        print(f"warning: operating on {db}, but an older hub.db exists at {legacy} "
+              f"(not used). Move it or set data_dir if that's the real one.",
+              file=sys.stderr)
+    return HubStore(db)
 
 
 def _print_servers(store: HubStore) -> None:

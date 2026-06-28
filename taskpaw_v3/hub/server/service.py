@@ -42,6 +42,18 @@ def db_path_for(config: HubConfig) -> Path:
     return Path(config.data_dir).expanduser() / "hub.db"
 
 
+def legacy_db_conflict(config_path: Path, resolved_db: Path) -> Path | None:
+    """If a config-adjacent hub.db (the OLD default location) exists while the
+    resolved data_dir db is absent, return that legacy path — opening the resolved
+    db would silently abandon the operator's servers/acks/outbox (#38 review).
+    Else None."""
+    legacy = default_db_path(config_path)
+    resolved_db = Path(resolved_db)
+    if not resolved_db.exists() and legacy.exists() and legacy != resolved_db:
+        return legacy
+    return None
+
+
 def run_from_config(config_path: Path | None = None, db_path: Path | None = None) -> int:
     path = config_path or default_config_path()
     if not path.exists():
@@ -49,22 +61,21 @@ def run_from_config(config_path: Path | None = None, db_path: Path | None = None
         return 1
     config: HubConfig = load_yaml(HubConfig, path)  # type: ignore[assignment]
     resolved_db = db_path or db_path_for(config)
-    # Loud warning if a hub.db sat next to the config (old default) but the
-    # data_dir one doesn't exist yet — we'd otherwise start empty, silently
-    # abandoning servers/acks/outbox (Kimi). The operator can move it or set data_dir.
-    legacy_db = default_db_path(path)
-    if not resolved_db.exists() and legacy_db.exists() and legacy_db != resolved_db:
-        # Hard-fail rather than silently start empty (a missed log line would
-        # abandon all servers/acks/outbox after the default DB path moved) (Kimi).
-        print(
-            f"error: hub DB not found at {resolved_db}, but an older one exists at "
-            f"{legacy_db}.\n"
-            f"  Move it:   mv '{legacy_db}' '{resolved_db}'\n"
-            f"  or point data_dir at its folder in {path}.\n"
-            f"  To start fresh, create an empty {resolved_db} (e.g. via "
-            f"`python -m taskpaw_v3.hub add-server ...`).",
-            file=sys.stderr)
-        return 1
+    # Only guard the DEFAULT data_dir path — an explicit --db is the operator
+    # opting into a specific/fresh db, so don't block it (Codex). Hard-fail rather
+    # than silently start empty (a missed log line would abandon servers/acks/
+    # outbox after the default DB path moved) (Kimi).
+    if db_path is None:
+        legacy_db = legacy_db_conflict(path, resolved_db)
+        if legacy_db:
+            print(
+                f"error: hub DB not found at {resolved_db}, but an older one exists at "
+                f"{legacy_db}.\n"
+                f"  Move it:   mv '{legacy_db}' '{resolved_db}'\n"
+                f"  or point data_dir at its folder in {path}.\n"
+                f"  To start fresh, pass --db {resolved_db}.",
+                file=sys.stderr)
+            return 1
     store = HubStore(resolved_db)
     run_hub(config, store, block=True)
     return 0

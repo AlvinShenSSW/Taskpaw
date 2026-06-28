@@ -77,7 +77,7 @@ class Poller:
                 if row.get("status_json") is None:
                     continue  # never polled
                 seed[row["id"]] = {
-                    "reachable": True,
+                    "reachable": bool(row.get("reachable")),   # honor the column, don't assume
                     "status_json": row.get("status_json"),
                     "last_seen": row.get("last_seen") or row.get("timestamp"),
                 }

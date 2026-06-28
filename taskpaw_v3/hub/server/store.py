@@ -133,6 +133,9 @@ class HubStore:
                       "ON status_log(server_id, timestamp, id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_time "
                       "ON status_log(timestamp)")
+            # Partial index for the last_seen (last reachable) subquery.
+            c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_reachable "
+                      "ON status_log(server_id, timestamp, id) WHERE reachable = 1")
             self._conn.commit()
 
     def _legacy_event_tables(self) -> list[str]:
