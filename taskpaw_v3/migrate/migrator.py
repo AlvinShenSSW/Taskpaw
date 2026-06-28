@@ -4,9 +4,8 @@ Pure functions, no I/O of its own beyond reading the two JSON paths handed in.
 The output is a `MigrationPlan` the caller can preview before writing anything.
 
 Type mapping (V2 `watcher_type` → V3 `type_id`):
-    lada       → folder     (Lada is a task: process-exit=done; the faithful V3
-                             signal is its output folder. No output folder →
-                             skip+warn. GPU is covered by host_metrics.)
+    lada       → lada       (full parity: managed/passive, progress, folders,
+                             GPU — carries the lada_* fields straight over)
     process    → process    (generic; process_name → pattern, service-semantics)
     comfyui    → comfyui    (host/port/idle_confirm_count)
     folder     → folder     (watch_folder/stable_seconds/file_extensions)
@@ -97,26 +96,20 @@ _Spec = tuple[str, str, dict]
 
 
 def _map_lada(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
-    # V2 Lada is a TASK: process running = busy, process EXIT = completion (a
-    # success notification), NOT a failure. V3's `process` plugin is service-
-    # semantics (down → alert), so mapping Lada→process would turn every normal
-    # finish into a false "down" alert (Codex #20 P2 r3). The faithful V3 signal
-    # is the OUTPUT folder — a finished file appearing = done. Map to a folder
-    # monitor; if there's no output folder we can't represent it, so skip+warn.
-    warnings: list[str] = []
-    if (w.get("lada_cli_path") or "").strip():
-        warnings.append(
-            f"lada watcher {name!r} ran in managed mode (lada_cli_path set); V3 "
-            f"observes only and will NOT launch lada-cli")
-    out = (w.get("lada_output_folder") or "").strip()
-    if not out:
-        warnings.append(
-            f"lada watcher {name!r} has no lada_output_folder; its process-exit "
-            f"completion can't be represented by a V3 plugin (the process plugin "
-            f"would alert on normal completion) — skipped, configure manually")
-        return [], warnings
-    fcfg: dict[str, Any] = {"name": name, "path": out, "poll_interval": _V2_FOLDER_POLL}
-    return [("folder", name, fcfg)], warnings
+    # V3 now has a full `lada` plugin (#59) — managed/passive, progress parsing,
+    # GPU, folder queue — so carry the lada_* fields straight over (no more
+    # folder-only compromise).
+    cfg: dict[str, Any] = {"name": name}
+    for key in ("lada_cli_path", "process_name", "lada_input_folder",
+                "lada_output_folder", "lada_extra_args"):
+        v = w.get(key)
+        if isinstance(v, str) and v.strip():
+            cfg[key] = v.strip()
+    if "lada_gpu_monitor" in w:
+        cfg["lada_gpu_monitor"] = bool(w["lada_gpu_monitor"])
+    if "lada_capture_progress" in w:
+        cfg["lada_capture_progress"] = bool(w["lada_capture_progress"])
+    return [("lada", name, _carry_common(w, cfg))], []
 
 
 def _map_process(w: dict, name: str) -> tuple[list[_Spec], list[str]]:

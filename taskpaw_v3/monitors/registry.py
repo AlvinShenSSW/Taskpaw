@@ -45,6 +45,7 @@ def default_registry() -> PluginRegistry:
     from taskpaw_v3.monitors.plugins.comfyui import ComfyUIPlugin
     from taskpaw_v3.monitors.plugins.custom_cmd import CustomCmdPlugin
     from taskpaw_v3.monitors.plugins.state_file import StateFilePlugin
+    from taskpaw_v3.monitors.plugins.lada import LadaPlugin
 
     reg = PluginRegistry()
     reg.register(ProcessPlugin())
@@ -55,4 +56,5 @@ def default_registry() -> PluginRegistry:
     reg.register(ComfyUIPlugin())
     reg.register(CustomCmdPlugin())
     reg.register(StateFilePlugin())
+    reg.register(LadaPlugin())
     return reg

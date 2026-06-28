@@ -17,40 +17,45 @@ def _w(**kw):
 
 
 # ── per-type mapping ─────────────────────────────────────────────────────--
-def test_lada_maps_to_output_folder():
-    """Lada is a task (process-exit = done); the faithful V3 signal is the
-    output folder, not a service-semantics process monitor (Codex #20 r3)."""
+def test_lada_maps_to_lada_plugin():
+    """V3 now has a full `lada` plugin (#59) — carry the lada_* fields over,
+    no warning, no folder compromise."""
     plan = migrate_config({"watchers": [_w(watcher_type="lada", name="Lada",
                                            process_name="lada-cli.exe",
                                            lada_output_folder="/out")]})
     assert not plan.warnings
     m = plan.monitors[0]
-    assert m.type_id == "folder"
-    assert m.config["path"] == "/out"
-    assert m.config["poll_interval"] == 1.0  # V2 folder cadence (Codex r9)
+    assert m.type_id == "lada"
+    assert m.config["lada_output_folder"] == "/out"
+    assert m.config["process_name"] == "lada-cli.exe"
     assert m.source_type == "lada"
 
 
-def test_lada_managed_mode_warns_but_still_maps_output_folder():
-    """Managed Lada (lada_cli_path set) → folder monitor on the output folder,
-    plus a warning that V3 won't launch lada (Codex #20 P1)."""
+def test_lada_managed_mode_carries_cli_and_args():
+    """Managed Lada (lada_cli_path set) carries the CLI path + folders + args to
+    the V3 lada plugin (which now actually launches it) — no 'won't launch' warning."""
     plan = migrate_config({"watchers": [_w(
         watcher_type="lada", name="Lada", process_name="lada-cli",
         lada_cli_path="C:/lada/lada-cli.exe",
-        lada_output_folder="D:/out",
-        lada_extra_args="--device cuda:1")]})
-    assert [m.type_id for m in plan.monitors] == ["folder"]
-    assert plan.monitors[0].config["path"] == "D:/out"
-    assert any("managed mode" in w.reason for w in plan.warnings)
+        lada_input_folder="D:/in", lada_output_folder="D:/out",
+        lada_extra_args="--device cuda:1", lada_gpu_monitor=True)]})
+    assert not plan.warnings
+    m = plan.monitors[0]
+    assert m.type_id == "lada"
+    assert m.config["lada_cli_path"] == "C:/lada/lada-cli.exe"
+    assert m.config["lada_input_folder"] == "D:/in"
+    assert m.config["lada_extra_args"] == "--device cuda:1"
+    assert m.config["lada_gpu_monitor"] is True
 
 
-def test_lada_without_output_folder_skipped_with_warning():
-    """No output folder → no faithful V3 signal (process plugin would false-
-    alert on completion); skip + warn rather than emit a wrong monitor."""
+def test_lada_passive_no_output_folder_still_maps():
+    """No output folder is fine now — a passive lada monitor still maps (process
+    detection works without folders)."""
     plan = migrate_config({"watchers": [_w(
         watcher_type="lada", name="Lada", process_name="lada-cli")]})
-    assert not plan.monitors
-    assert any("can't be represented" in w.reason for w in plan.warnings)
+    assert not plan.warnings
+    assert [m.type_id for m in plan.monitors] == ["lada"]
+    assert plan.monitors[0].config["process_name"] == "lada-cli"
 
 
 def test_generic_process_watcher_maps_to_process():
