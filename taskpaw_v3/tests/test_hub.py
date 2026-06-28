@@ -42,6 +42,47 @@ def test_store_event_idempotent(tmp_path):
         s.close()
 
 
+def test_recent_events_filters_and_orders(tmp_path):
+    # The dashboard event log (#44): newest first, joins the server name, filters
+    # by server id and/or level.
+    s = _store(tmp_path)
+    try:
+        a = s.add_server("moomoo", "127.0.0.1", 5680)
+        b = s.add_server("pig", "127.0.0.1", 5681)
+        s.store_event(a, {"id": 1, "monitor": "lada", "message": "older", "level": "info"})
+        s.store_event(a, {"id": 2, "monitor": "lada", "message": "boom", "level": "alert"})
+        s.store_event(b, {"id": 1, "monitor": "comfy", "message": "hi", "level": "info"})
+        allev = s.recent_events()
+        assert len(allev) == 3 and {e["server"] for e in allev} == {"moomoo", "pig"}
+        assert "server" in allev[0]                          # name joined
+        # filter by server
+        assert {e["message"] for e in s.recent_events(server_id=a)} == {"older", "boom"}
+        # filter by level
+        lvl = s.recent_events(level="alert")
+        assert [e["message"] for e in lvl] == ["boom"]
+        # limit
+        assert len(s.recent_events(limit=1)) == 1
+    finally:
+        s.close()
+
+
+def test_hub_events_endpoint(tmp_path):
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+    s = _store(tmp_path)
+    try:
+        a = s.add_server("moomoo", "127.0.0.1", 5680)
+        s.store_event(a, {"id": 1, "monitor": "lada", "message": "done", "level": "done"})
+        app, _svc = create_hub_app(HubConfig(), s)
+        r = TestClient(app).get("/events?level=done&limit=50")
+        assert r.status_code == 200
+        ev = r.json()["events"]
+        assert len(ev) == 1 and ev[0]["server"] == "moomoo" and ev[0]["message"] == "done"
+    finally:
+        s.close()
+
+
 def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
     s = _store(tmp_path)
     try:

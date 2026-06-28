@@ -24,6 +24,22 @@ def test_ping_open_no_auth():
     assert r.status_code == 200 and r.json()["machine"] == "dev"
 
 
+def test_control_events_returns_recent_non_destructive(_=None):
+    # The console's event log reads /control/events (#44): recent local events,
+    # newest last, with a clamped limit — and reading it must NOT drain the queue.
+    cfg = _cfg()
+    q = EventQueue("dev")
+    for i in range(3):
+        q.add("mon", f"e{i}", level="info")
+    client = TestClient(create_control_app(cfg, events_provider=q.recent))
+    r = client.get("/control/events?limit=2")
+    assert r.status_code == 200
+    assert [e["message"] for e in r.json()["events"]] == ["e1", "e2"]   # last 2, newest last
+    assert len(q.payload(ack_id=0)["events"]) == 3                       # not consumed
+    # no provider wired → empty, not an error
+    assert TestClient(create_control_app(cfg)).get("/control/events").json() == {"events": []}
+
+
 def test_status_requires_auth_when_token_set():
     cfg = _cfg(api_token="secret")
     client = TestClient(create_network_app(cfg, EventQueue("dev")))

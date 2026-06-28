@@ -56,6 +56,20 @@ export interface MonitorSpec {
   enabled?: boolean;
 }
 
+// One row in the event log (#44). Agent-local events carry `time`/`machine`;
+// Hub-aggregated events carry `received_at`/`server`. The renderer tolerates both.
+export interface EventItem {
+  id?: number;
+  event_id?: number;
+  time?: string;
+  received_at?: string;
+  machine?: string;
+  server?: string;
+  monitor?: string;
+  message?: string;
+  level?: string;
+}
+
 declare global {
   interface Window {
     // Injected by the Tauri shell on the loopback origin (main.rs init_script).
@@ -133,4 +147,15 @@ export const api = {
     send("agent", "PATCH", `/control/monitors${q(name)}`, patch),
   startMonitor: (name: string) => send("agent", "POST", `/control/monitors/start${q(name)}`),
   stopMonitor: (name: string) => send("agent", "POST", `/control/monitors/stop${q(name)}`),
+  // Event log (#44): agent reads recent local events (non-destructive); the Hub
+  // reads durable aggregated history, filterable by server id + level.
+  agentEvents: (limit = 200) =>
+    get<{ events: EventItem[] }>("agent", `/control/events?limit=${limit}`),
+  hubEvents: (p: { server?: number; level?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    if (p.server != null) qs.set("server", String(p.server));
+    if (p.level) qs.set("level", p.level);
+    qs.set("limit", String(p.limit ?? 200));
+    return get<{ events: EventItem[] }>("hub", `/events?${qs.toString()}`);
+  },
 };

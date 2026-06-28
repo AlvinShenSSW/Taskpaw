@@ -327,6 +327,31 @@ class HubStore:
             return cur.rowcount
 
     # ── events ────────────────────────────────────────────────────────────
+    def recent_events(self, server_id: Optional[int] = None,
+                      level: Optional[str] = None, limit: int = 200) -> list[dict[str, Any]]:
+        """Most-recent events across servers (newest first) for the Hub dashboard's
+        event log (#44). Joins the server name and optionally filters by server
+        and/or level. `limit` is clamped by the caller (the route)."""
+        clauses, params = [], []
+        if server_id is not None:
+            clauses.append("e.server_id = ?")
+            params.append(int(server_id))
+        if level:
+            clauses.append("e.level = ?")
+            params.append(str(level))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(max(1, int(limit)))
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT e.event_id, s.id AS server_id, s.name AS server, e.monitor, "
+                "e.message, e.level, e.received_at "
+                "FROM events e JOIN servers s ON s.id = e.server_id"
+                f"{where} ORDER BY e.received_at DESC, e.id DESC LIMIT ?",
+                params,
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
     def store_event(self, server_id: int, ev: dict) -> None:
         """Idempotent on (server_id, event_id) — at-least-once delivery may
         re-store after a crash; the UNIQUE constraint makes that a no-op."""

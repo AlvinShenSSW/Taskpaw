@@ -40,6 +40,18 @@ def test_eventqueue_clear_on_ack_vs_legacy():
     assert q.payload()["events"] == []
 
 
+def test_eventqueue_recent_is_non_destructive_and_bounded():
+    # The console event log reads recent() — newest last, capped, and it must NOT
+    # drain the queue the Hub polls (#44).
+    q = EventQueue(machine="m")
+    for i in range(5):
+        q.add("mon", f"e{i}", level="info")
+    recent = q.recent(limit=3)
+    assert [e["message"] for e in recent] == ["e2", "e3", "e4"]   # newest last, last 3
+    assert len(q.payload(ack_id=0)["events"]) == 5                # nothing consumed
+    assert q.recent(limit=0) == []
+
+
 def test_eventqueue_persists_counter_before_visible():
     saved = []
     q = EventQueue(machine="m", persist_counter=saved.append)

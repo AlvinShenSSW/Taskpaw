@@ -111,7 +111,8 @@ def run_agent(
     ctl = uvicorn.Server(
         uvicorn.Config(create_control_app(config, on_command=admin.handle,
                                           status_provider=_status_provider,
-                                          registry=registry, admin=admin),
+                                          registry=registry, admin=admin,
+                                          events_provider=queue.recent),
                        log_level="warning")
     )
 

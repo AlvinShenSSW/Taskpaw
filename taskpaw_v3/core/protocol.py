@@ -100,6 +100,16 @@ class EventQueue:
                     self._on_overflow(overflow)
             return dict(evt)
 
+    def recent(self, limit: int = 200) -> list[dict]:
+        """A NON-destructive snapshot of the most recent events (newest last) for
+        the local UI's event log (#44) — unlike payload(), this never clears or
+        trims the queue, so reading it from the console can't steal events from
+        the Hub poll. Returns shallow copies."""
+        limit = max(0, int(limit))
+        with self._lock:
+            tail = self._queue[-limit:] if limit else []
+            return [dict(e) for e in tail]
+
     def payload(self, ack_id: Optional[int] = None) -> dict:
         with self._lock:
             if ack_id is None:
