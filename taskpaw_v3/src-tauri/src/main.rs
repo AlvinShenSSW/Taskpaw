@@ -172,10 +172,12 @@ fn spawn_backend() -> Option<Child> {
     {
         use std::os::windows::process::CommandExt;
         use std::process::Stdio;
-        // CREATE_NO_WINDOW (no console flash for the windowed shell's child) |
-        // CREATE_BREAKAWAY_FROM_JOB (so we can put the backend in OUR Job Object
-        // even when the launcher is already inside one) (Kimi).
-        command.creation_flags(0x08000000 | 0x00080000);
+        // CREATE_NO_WINDOW (0x08000000) | CREATE_BREAKAWAY_FROM_JOB (0x01000000) so
+        // we can put the backend in OUR Job Object even when the launcher is
+        // already inside one. NOTE: 0x00080000 is EXTENDED_STARTUPINFO_PRESENT, NOT
+        // breakaway — using it made CreateProcess fail (os error 87) and crash
+        // every launch (caught by Windows verification, #50).
+        command.creation_flags(0x08000000 | 0x01000000);
         // The windowed shell has no console — instead of nulling (which discards
         // all backend logs), redirect to %APPDATA%\TaskPaw\taskpaw-backend.log so
         // production builds are debuggable; fall back to null if it can't open

@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm --prefix ../ui run dev",
-    "beforeBuildCommand": "npm --prefix ../ui run build"
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build"
   },
     "app": {
     "withGlobalTauri": false,
@@ -18,7 +18,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"],
+    "icon": ["icons/icon.ico", "icons/icon.png"],
     "externalBin": ["binaries/taskpaw-backend"]
   }
 }

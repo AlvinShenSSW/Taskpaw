@@ -42,7 +42,10 @@ TAURI_CLI = "@tauri-apps/cli@2.11.3"
 
 def run(cmd: list[str], **kw) -> None:
     print("+", " ".join(map(str, cmd)), flush=True)
-    subprocess.run(cmd, check=True, **kw)
+    # Resolve the program (npm/npx are .cmd shims on Windows, found via PATHEXT)
+    # so subprocess locates them WITHOUT shell=True (constitution §2) (#50).
+    prog = shutil.which(cmd[0]) or cmd[0]
+    subprocess.run([prog, *cmd[1:]], check=True, **kw)
 
 
 def target_triple() -> str:
