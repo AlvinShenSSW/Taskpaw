@@ -108,6 +108,11 @@ function MonitorDetail({
 }) {
   const [confirmDel, setConfirmDel] = useState(false);
   const running = snap.enabled !== false && snap.state !== "stopped";
+  // Only operator-configured monitors are mutable. The auto-injected host_metrics
+  // self-monitor is live but NOT in config (no type_id from merge_status), so the
+  // control API can't start/stop/edit/delete it — don't show controls that would
+  // always fail (Codex #57b).
+  const manageable = !!snap.type_id;
 
   // Hooks at the top level (rules of hooks) — one mutation per action.
   const start = useMutation({ mutationFn: () => api.startMonitor(name), onSuccess: onChanged, onError });
@@ -133,19 +138,25 @@ function MonitorDetail({
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>{snap.detail}</Typography>
         )}
 
-        <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-          {running ? (
-            <Button size="small" variant="outlined" disabled={stop.isPending}
-              onClick={() => stop.mutate()}>Stop</Button>
-          ) : (
-            <Button size="small" variant="contained" disabled={start.isPending}
-              onClick={() => start.mutate()}>Start</Button>
-          )}
-          <Button size="small" variant="text" onClick={onEdit}>Edit config</Button>
-          <Box sx={{ flex: 1 }} />
-          <Button size="small" color="error" variant="text"
-            onClick={() => setConfirmDel(true)}>Delete</Button>
-        </Stack>
+        {manageable ? (
+          <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+            {running ? (
+              <Button size="small" variant="outlined" disabled={stop.isPending}
+                onClick={() => stop.mutate()}>Stop</Button>
+            ) : (
+              <Button size="small" variant="contained" disabled={start.isPending}
+                onClick={() => start.mutate()}>Start</Button>
+            )}
+            <Button size="small" variant="text" onClick={onEdit}>Edit config</Button>
+            <Box sx={{ flex: 1 }} />
+            <Button size="small" color="error" variant="text"
+              onClick={() => setConfirmDel(true)}>Delete</Button>
+          </Stack>
+        ) : (
+          <Typography variant="caption" color="text.secondary" sx={{ mt: 2, display: "block" }}>
+            Auto-managed system monitor — always on.
+          </Typography>
+        )}
 
         {snap.metrics && Object.keys(snap.metrics).length > 0 && (
           <Box sx={{ mt: 2 }}>
