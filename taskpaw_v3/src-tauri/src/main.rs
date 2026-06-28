@@ -34,15 +34,7 @@ impl Drop for Backend {
         let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
         {
             if let Some(child) = guard.as_mut() {
-                if matches!(child.try_wait(), Ok(None)) {
-                    #[cfg(unix)]
-                    signal_group(child, libc::SIGKILL);
-                    #[cfg(not(unix))]
-                    {
-                        let _ = child.kill();
-                    }
-                    let _ = child.wait();
-                }
+                terminate_child(child); // same graceful path as normal exit
             }
         }
     }
@@ -219,31 +211,40 @@ fn signal_group(child: &Child, sig: libc::c_int) {
     }
 }
 
+/// Terminate the backend GRACEFULLY: SIGTERM (→ its GracefulShutdown stops the
+/// supervisor + managed children), wait up to a deadline, then force-kill. Shared
+/// by normal exit (kill_backend) and the Drop safety net so both honor the same
+/// graceful contract (Kimi).
+fn terminate_child(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return; // already gone
+    }
+    #[cfg(unix)]
+    signal_group(child, libc::SIGTERM);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            _ => break,
+        }
+    }
+    // Force-kill the whole group (Unix) / the process (Windows; the Job Object
+    // reaps the rest of the tree).
+    #[cfg(unix)]
+    signal_group(child, libc::SIGKILL);
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn kill_backend(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Backend>() {
         if let Ok(mut guard) = state.0.lock() {
             if let Some(child) = guard.as_mut() {
-                // Graceful first → the backend's GracefulShutdown stops the
-                // supervisor + managed children.
-                #[cfg(unix)]
-                signal_group(child, libc::SIGTERM);
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_)) => break,
-                        Ok(None) if Instant::now() < deadline => {
-                            std::thread::sleep(Duration::from_millis(100));
-                        }
-                        _ => break,
-                    }
-                }
-                // Force-kill the whole group (Unix) / the process (Windows; the
-                // Job Object reaps the rest of the tree).
-                #[cfg(unix)]
-                signal_group(child, libc::SIGKILL);
-                #[cfg(not(unix))]
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_child(child);
             }
         }
     }
@@ -280,12 +281,13 @@ fn loopback_base(raw: &str) -> String {
         host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)  // host[:port]
     };
     let host = host.to_ascii_lowercase();
-    // Parse as an IP so a *hostname* like "127.0.0.1.evil.com" (which a browser
-    // resolves to a remote IP) is NOT accepted — a prefix check would leak the
-    // api key (Codex/Kimi P1). IpAddr::is_loopback covers all of 127.0.0.0/8 and
-    // IPv6 ::1 in both compressed and expanded forms (Kimi). Plus "localhost".
-    let is_loopback = host == "localhost"
-        || host.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false);
+    // CANONICAL loopback only — keep validation in exact lockstep with the
+    // init-script origin guard AND the CSP connect-src (neither can wildcard
+    // 127.0.0.0/8 or expanded IPv6). Accepting only these three avoids "validated
+    // but blocked by CSP / not injected by the guard" mismatches (Codex/Kimi). A
+    // literal-string match still rejects "127.0.0.1.evil.com" (it isn't equal).
+    // The backend binds 127.0.0.1 by default, so this loses nothing in practice.
+    let is_loopback = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
     if !is_loopback {
         eprintln!("TASKPAW_UI_BASE {v:?} is not loopback — ignoring");
         return String::new();
@@ -319,10 +321,12 @@ fn init_script() -> String {
     // not just 127.0.0.1) or a custom 127.x base would be validated yet __TASKPAW__
     // would never be set (Kimi). Plus the packaged webview host tauri.localhost
     // and the macOS tauri: protocol.
+    // Exact canonical loopback set — matches loopback_base() and the CSP. Plus the
+    // packaged webview host tauri.localhost and the macOS tauri: protocol.
     format!(
         "{{ const h = location.hostname; \
-         if (h==='localhost'||h==='[::1]'||h==='::1'||h==='tauri.localhost'|| \
-             /^127\\./.test(h) || location.protocol==='tauri:') \
+         if (h==='localhost'||h==='127.0.0.1'||h==='[::1]'||h==='::1'||h==='tauri.localhost'|| \
+             location.protocol==='tauri:') \
            {{ window.__TASKPAW__ = {cfg}; }} }}"
     )
 }
@@ -406,7 +410,6 @@ mod tests {
     #[test]
     fn accepts_loopback_forms() {
         assert_eq!(loopback_base("http://127.0.0.1:5681"), "http://127.0.0.1:5681");
-        assert_eq!(loopback_base("http://127.0.0.5:9000"), "http://127.0.0.5:9000"); // 127/8
         assert_eq!(loopback_base("http://localhost:5690"), "http://localhost:5690");
         assert_eq!(loopback_base("http://[::1]:5681"), "http://[::1]:5681");
         assert_eq!(loopback_base("http://[::1]"), "http://[::1]");
@@ -423,6 +426,9 @@ mod tests {
         assert_eq!(loopback_base("http://127.0.0.1.evil.com:8000"), "");
         assert_eq!(loopback_base("http://evil.com:5681"), "");
         assert_eq!(loopback_base("http://10.0.0.5:5681"), "");
+        // non-canonical loopback rejected (canonical-only, lockstep with CSP/guard)
+        assert_eq!(loopback_base("http://127.0.0.5:9000"), "");
+        assert_eq!(loopback_base("ftp://127.0.0.1:5681"), "");
         // abbreviated IPv4 ("127.1") isn't parsed by std Ipv4Addr → rejected
         // (stricter than a browser, but safe: just falls back to defaults).
         assert_eq!(loopback_base("http://127.1:8000"), "");
