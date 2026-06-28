@@ -15,14 +15,18 @@ export const statusColors: Record<string, string> = {
 export const theme = createTheme({
   palette: {
     mode: "dark",
-    primary: { main: "#1E293B", contrastText: "#FFFFFF" },
-    secondary: { main: "#334155" },
-    info: { main: "#0369A1" }, // accent / CTA
+    // Primary = the MASTER Accent/CTA green. The old #1E293B (dark navy) was
+    // nearly invisible on the #0F172A background — contained/outlined buttons
+    // washed out. Green with dark text reads clearly on the dark surface.
+    primary: { main: "#22C55E", contrastText: "#06210F" },
+    secondary: { main: "#94A3B8" },     // visible slate for neutral controls
+    info: { main: "#38BDF8" },          // bright sky accent (was a dark, low-contrast blue)
     background: { default: "#0F172A", paper: "#111827" },
-    error: { main: "#DC2626" },
+    error: { main: "#F87171" },         // lighter red — readable on dark
     warning: { main: "#F59E0B" },
     success: { main: "#22C55E" },
-    divider: "#1F2937",
+    divider: "#334155",                 // lifted so card/outline borders are visible
+    text: { primary: "#F8FAFC", secondary: "#A8B5C7" },
   },
   typography: {
     fontFamily: '"Fira Sans", system-ui, sans-serif',
@@ -33,7 +37,16 @@ export const theme = createTheme({
   },
   shape: { borderRadius: 10 },
   components: {
-    MuiButton: { defaultProps: { disableElevation: true } },
+    MuiButton: {
+      defaultProps: { disableElevation: true },
+      styleOverrides: {
+        // Legible labels: real casing + weight, and a thicker outline so
+        // outlined buttons (Stop / Edit) read clearly on the dark surface.
+        root: { fontWeight: 600, textTransform: "none" },
+        outlined: { borderWidth: "1.5px", "&:hover": { borderWidth: "1.5px" } },
+      },
+    },
+    MuiChip: { styleOverrides: { root: { fontWeight: 500 } } },
     MuiCssBaseline: {
       styleOverrides: { body: { transition: "background 200ms ease" } },
     },

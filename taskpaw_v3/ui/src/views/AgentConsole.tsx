@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type MonitorSnapshot, type PluginInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
 import { StatusDot } from "../components/StatusDot";
+import { MonitorMetrics } from "../components/MonitorMetrics";
 
 // Local control panel for ONE machine (design pages/agent-console.md): left rail
 // of this machine's monitors + an Add button; main pane = the selected monitor's
@@ -85,7 +86,7 @@ export function AgentConsole() {
           name={dialog.mode === "edit" ? dialog.name : undefined}
           plugins={plugins.data?.plugins ?? []}
           onClose={() => setDialog(null)}
-          onDone={() => { setDialog(null); invalidate(); }}
+          onDone={(savedName) => { setDialog(null); if (savedName) setSelected(savedName); invalidate(); }}
           onError={onErr}
         />
       )}
@@ -107,7 +108,10 @@ function MonitorDetail({
   onError: (e: unknown) => void;
 }) {
   const [confirmDel, setConfirmDel] = useState(false);
-  const running = snap.enabled !== false && snap.state !== "stopped";
+  // Live-state, not the persisted `enabled`: a managed Lada is launched per
+  // session (Start) without persisting enabled, so "running" must follow whether
+  // it's actually live (anything but stopped), else it'd show Start while running.
+  const running = snap.state !== "stopped";
   // Only operator-configured monitors are mutable. The auto-injected host_metrics
   // self-monitor is live but NOT in config (no type_id from merge_status), so the
   // control API can't start/stop/edit/delete it — don't show controls that would
@@ -131,7 +135,6 @@ function MonitorDetail({
           <Typography variant="h6" sx={{ flex: 1 }}>{name}</Typography>
           <Chip size="small" label={snap.state} />
           {snap.degraded && <Chip size="small" color="warning" label="degraded" />}
-          {snap.enabled === false && <Chip size="small" label="disabled" />}
         </Stack>
 
         {snap.detail && (
@@ -139,33 +142,33 @@ function MonitorDetail({
         )}
 
         {manageable ? (
-          <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-            {running ? (
-              <Button size="small" variant="outlined" disabled={stop.isPending}
-                onClick={() => stop.mutate()}>Stop</Button>
-            ) : (
-              <Button size="small" variant="contained" disabled={start.isPending}
-                onClick={() => start.mutate()}>Start</Button>
+          <>
+            <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+              {running ? (
+                <Button size="small" variant="outlined" color="inherit" disabled={stop.isPending}
+                  onClick={() => stop.mutate()}>Stop</Button>
+              ) : (
+                <Button size="small" variant="contained" color="primary" disabled={start.isPending}
+                  onClick={() => start.mutate()}>Start</Button>
+              )}
+              <Button size="small" variant="outlined" color="info" onClick={onEdit}>Edit config</Button>
+              <Box sx={{ flex: 1 }} />
+              <Button size="small" color="error" variant="outlined"
+                onClick={() => setConfirmDel(true)}>Delete</Button>
+            </Stack>
+            {!running && (
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
+                Stopped — click <b>Start</b> to run it, or <b>Edit config</b> to change settings.
+              </Typography>
             )}
-            <Button size="small" variant="text" onClick={onEdit}>Edit config</Button>
-            <Box sx={{ flex: 1 }} />
-            <Button size="small" color="error" variant="text"
-              onClick={() => setConfirmDel(true)}>Delete</Button>
-          </Stack>
+          </>
         ) : (
           <Typography variant="caption" color="text.secondary" sx={{ mt: 2, display: "block" }}>
             Auto-managed system monitor — always on.
           </Typography>
         )}
 
-        {snap.metrics && Object.keys(snap.metrics).length > 0 && (
-          <Box sx={{ mt: 2 }}>
-            <Typography variant="overline" color="text.secondary">metrics</Typography>
-            <Box component="pre" sx={{ m: 0, fontFamily: '"Fira Code", monospace', fontSize: 13 }}>
-              {JSON.stringify(snap.metrics, null, 2)}
-            </Box>
-          </Box>
-        )}
+        <MonitorMetrics metrics={snap.metrics} />
       </CardContent>
 
       <Dialog open={confirmDel} onClose={() => setConfirmDel(false)}>
@@ -189,7 +192,7 @@ function MonitorDialog({
   name?: string;
   plugins: PluginInfo[];
   onClose: () => void;
-  onDone: () => void;
+  onDone: (savedName?: string) => void;
   onError: (e: unknown) => void;
 }) {
   // Operator-selectable plugins only (host_metrics etc. are system/auto-injected).
@@ -219,9 +222,25 @@ function MonitorDialog({
       mode === "add"
         ? api.addMonitor({ type_id: typeId, config: formData })
         : api.updateMonitor(name as string, { config: formData }),
-    onSuccess: onDone,
+    // Hand back the saved monitor's name so the console can auto-select it — the
+    // operator lands on its detail pane (Start / Edit config) without hunting.
+    onSuccess: (_res, formData) =>
+      onDone(mode === "add" ? String(formData.name ?? "") || undefined : name),
     onError,
   });
+
+  // Plugin ui_schema + a clear submit label + (edit) lock the stable `name`
+  // (the backend ignores name changes on update; show it read-only) (#70).
+  const formUiSchema = useMemo(() => {
+    const base = (plugin?.ui_schema as Record<string, unknown>) ?? {};
+    return {
+      ...base,
+      "ui:submitButtonOptions": { submitText: mode === "add" ? "Add monitor" : "Save changes" },
+      ...(mode === "edit"
+        ? { name: { ...(base.name as object), "ui:readonly": true } }
+        : {}),
+    };
+  }, [plugin, mode]);
 
   return (
     <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
@@ -239,7 +258,7 @@ function MonitorDialog({
         {plugin ? (
           <SchemaForm
             schema={plugin.json_schema}
-            uiSchema={plugin.ui_schema}
+            uiSchema={formUiSchema}
             formData={mode === "edit" ? existing?.config : undefined}
             onSubmit={(d) => save.mutate(d as Record<string, unknown>)}
           />

@@ -28,9 +28,13 @@ except ImportError:  # pragma: no cover
 
 
 class ProcessConfig(BaseMonitorConfig):
-    pattern: str = Field(..., min_length=1)  # regex matched against name / cmdline
-    search_cmdline: bool = True       # also match the full command line
-    category_label: str = "service"
+    pattern: str = Field(..., min_length=1, description="Regex matched against the "
+                         "process name (and command line if enabled below), e.g. "
+                         "^lada-cli$ or PM2.*God")
+    search_cmdline: bool = Field(True, description="Also match against the full "
+                                 "command line, not just the process name.")
+    category_label: str = Field("service", description="Label shown for this monitor "
+                                "(e.g. service, task).")
 
     @field_validator("pattern")
     @classmethod

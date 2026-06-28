@@ -43,9 +43,13 @@ class BaseMonitorConfig(BaseModel):
     # Reject unknown/typo keys instead of silently dropping them.
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(..., min_length=1)
-    poll_interval: float = Field(10.0, ge=1.0)      # seconds, min 1s
-    timeout: float = Field(30.0, gt=0)              # command/HTTP probe timeout
+    name: str = Field(..., min_length=1,
+                      description="A unique name for this monitor on this machine.")
+    poll_interval: float = Field(10.0, ge=1.0,
+                                 description="How often to check, in seconds (min 1).")
+    timeout: float = Field(30.0, gt=0,
+                           description="Per-check command/HTTP timeout, in seconds.")
+    # Advanced/internal caps — hidden from the form by the base ui-schema (catalog).
     max_events_per_minute: int = Field(60, ge=1)    # storm → folded summary
     max_line_bytes: int = Field(1_000_000, ge=1024)  # tail line cap
 
@@ -136,3 +140,11 @@ class MonitorPlugin(abc.ABC):
     def validate_config(cls, raw: dict) -> BaseMonitorConfig:
         """Validate a raw config dict against this plugin's model."""
         return cls.config_model()(**raw)
+
+    def manual_start(self, config: BaseMonitorConfig) -> bool:
+        """Should this monitor be ADDED stopped — the operator clicks Start to run
+        it — instead of auto-starting the instant the form is saved? True for
+        monitors that LAUNCH a process or have a real side effect on start (e.g.
+        managed Lada spawns lada-cli) so adding doesn't kick off work unbidden
+        (V2 parity). Default False: passive monitors just observe."""
+        return False

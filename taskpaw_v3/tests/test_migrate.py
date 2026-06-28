@@ -58,13 +58,16 @@ def test_managed_lada_carries_cli_but_imported_disabled():
     assert any("imported DISABLED" in w.reason for w in plan.warnings)
 
 
-def test_managed_lada_stays_enabled_when_v2_auto_start_on():
-    """If V2 was set to auto-start, respect that intent — keep it enabled."""
+def test_managed_lada_always_imported_disabled_even_with_auto_start():
+    """V3 managed Lada is operator-started each session (it launches lada-cli), so
+    it's imported DISABLED regardless of V2 auto_start — never auto-starts at boot
+    (#70). This also means migration can't carry an enabled folderless managed Lada
+    that would fail validation."""
     plan = migrate_config({"auto_start": True, "watchers": [_managed_lada()]})
-    assert plan.monitors[0].enabled is True
+    assert plan.monitors[0].enabled is False
     rt = plan.to_runtime_monitors()
-    assert [m["name"] for m in rt] == ["Lada"] and rt[0]["enabled"] is True
-    assert not any("imported DISABLED" in w.reason for w in plan.warnings)
+    assert [m["name"] for m in rt] == ["Lada"] and rt[0]["enabled"] is False
+    assert any("imported DISABLED" in w.reason for w in plan.warnings)
 
 
 def test_lada_passive_no_output_folder_still_maps():

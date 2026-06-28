@@ -109,12 +109,67 @@ def test_cli_not_found_sets_error_and_does_not_raise(monkeypatch):
         raise FileNotFoundError()
 
     monkeypatch.setattr("taskpaw_v3.monitors.plugins.lada.subprocess.Popen", boom)
-    inst = LadaInstance("lada", _cfg(lada_cli_path="/nope/lada-cli"))
+    inst = LadaInstance("lada", _cfg(lada_cli_path="/nope/lada-cli",
+                                     lada_input_folder="/in", lada_output_folder="/out"))
     evs, emit = _events()
     inst.start(emit)                                # must NOT raise
     assert inst._launch_error and "not found" in inst._launch_error
     assert evs and evs[0][0] == "alert"
     assert inst.check(emit).state == "error"
+
+
+def test_cli_path_is_a_folder_gives_actionable_error(tmp_path):
+    # The #1 real misconfig: lada_cli_path points at the install FOLDER, not the
+    # exe → Popen would raise a cryptic "[WinError 5]". Catch it before launch with
+    # a message that names the executable to use (#70).
+    inst = LadaInstance("lada", _cfg(lada_cli_path=str(tmp_path),     # a directory
+                                     lada_input_folder="/in", lada_output_folder="/out"))
+    evs, emit = _events()
+    inst.start(emit)                                # must NOT raise
+    assert inst._launch_error and "is a folder" in inst._launch_error
+    assert "lada-cli.exe" in inst._launch_error      # points at the executable
+    assert evs and evs[0][0] == "alert"
+    assert inst.check(emit).state == "error"
+
+
+def test_managed_requires_input_output_folders():
+    import pytest
+    from taskpaw_v3.monitors.plugins.lada import LadaConfig
+    # managed (cli path set) without folders → rejected with a clear message (#70)
+    with pytest.raises(ValueError) as e:
+        LadaConfig(name="l", lada_cli_path="/bin/lada-cli")
+    assert "input AND output" in str(e.value)
+    # passive (no cli path) needs neither
+    LadaConfig(name="l")
+    # managed WITH folders is fine
+    LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+               lada_input_folder="/in", lada_output_folder="/out")
+    # …or with --input/--output passed through extra args (Codex #70)
+    LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+               lada_extra_args="--input /in --output /out")
+    # …including the --input=… form
+    LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+               lada_extra_args="--input=/in --output=/out")
+    # but LOOKALIKE flags (--input-size / --output-format) must NOT satisfy it —
+    # exact-token match, not substring (Codex #70 r3)
+    with pytest.raises(ValueError):
+        LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+                   lada_extra_args="--input-size 720 --output-format mp4")
+    # …nor a BARE flag / empty value that supplies no actual path (Codex #70 r8)
+    with pytest.raises(ValueError):
+        LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+                   lada_extra_args="--input --output")
+    with pytest.raises(ValueError):
+        LadaConfig(name="l", lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
+                   lada_extra_args="--output=")     # empty =value → output still missing
+
+
+def test_process_name_matches_with_or_without_exe():
+    from taskpaw_v3.monitors.plugins.lada import _proc_name_eq
+    assert _proc_name_eq("lada-cli.exe", "lada-cli")     # actual .exe vs config without
+    assert _proc_name_eq("lada-cli", "lada-cli.exe")     # and vice versa
+    assert _proc_name_eq("LADA-CLI.EXE", "lada-cli")     # case-insensitive
+    assert not _proc_name_eq("other", "lada-cli")
 
 
 def test_passive_mode_does_not_launch(monkeypatch):
@@ -144,6 +199,7 @@ def test_stop_terminates_managed_child():
     # Launch a real long-lived child and confirm stop() kills it (#40 no-orphan).
     inst = LadaInstance("lada", _cfg(
         lada_cli_path=sys.executable, lada_capture_progress=True,
+        lada_input_folder="/in", lada_output_folder="/out",
         lada_extra_args='-c "import time; time.sleep(30)"'))
     _, emit = _events()
     inst.start(emit)

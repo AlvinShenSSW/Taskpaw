@@ -49,12 +49,16 @@ _LOG_TAIL_LINES = 50
 
 
 class ComfyUIConfig(BaseMonitorConfig):
-    host: str = "127.0.0.1"
-    port: int = Field(8188, ge=1, le=65535)
-    idle_confirm: int = Field(2, ge=1)
-    stall_confirm: int = Field(3, ge=1)  # running==0 & pending>0 held this long → stalled
-    stuck_checks: int = Field(0, ge=0)   # same prompt running this many checks → stuck; 0=off
-    comfyui_log_path: str = ""           # optional log file to tail for error diagnostics
+    host: str = Field("127.0.0.1", description="ComfyUI host/IP (the machine running ComfyUI).")
+    port: int = Field(8188, ge=1, le=65535, description="ComfyUI port.")
+    idle_confirm: int = Field(2, ge=1, description="Notify 'done' after the queue is "
+                              "empty this many checks in a row (debounces the gap between prompts).")
+    stall_confirm: int = Field(3, ge=1, description="Alert when nothing is running but "
+                               "prompts stay pending this many checks (a prompt error left them stuck).")
+    stuck_checks: int = Field(0, ge=0, description="Alert when the SAME prompt keeps "
+                              "running this many checks without finishing (0 = off).")
+    comfyui_log_path: str = Field("", description="Optional ComfyUI log file to tail "
+                                  "for the actual error (CUDA OOM / RuntimeError / Traceback) on a stall/stuck.")
 
 
 def _cap(s: str, n: int = 80) -> str:
@@ -320,9 +324,12 @@ class ComfyUIPlugin(MonitorPlugin):
 
     @classmethod
     def ui_schema(cls) -> dict:
+        # Help text comes from the field descriptions; flag the log path for the
+        # file picker widget (#71).
         return {
-            "comfyui_log_path": {"help": "optional ComfyUI log file to tail for CUDA/OOM/Traceback errors"},
-            "stuck_checks": {"help": "same prompt running this many polls → stuck alert (0 = off)"},
+            "ui:order": ["name", "host", "port", "idle_confirm", "stall_confirm",
+                         "stuck_checks", "comfyui_log_path", "poll_interval", "timeout", "*"],
+            "comfyui_log_path": {"ui:options": {"taskpawPath": "file"}},
         }
 
     def create(self, instance_id: str, config: BaseMonitorConfig) -> MonitorInstance:

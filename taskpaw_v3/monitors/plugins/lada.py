@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
@@ -96,24 +96,36 @@ def parse_progress_line(line: str, prev: dict) -> dict:
     return out
 
 
+def _proc_name_eq(a: str, b: str) -> bool:
+    """Process names equal ignoring case AND an optional Windows '.exe' suffix —
+    so a passive `process_name` of "lada-cli" matches the actual "lada-cli.exe"
+    (the common Windows case the default would otherwise miss) (#70)."""
+    def norm(s: str) -> str:
+        s = s.strip().lower()
+        return s[:-4] if s.endswith(".exe") else s
+    return norm(a) == norm(b)
+
+
 def process_alive(name: str) -> bool:
     """True if a process named `name` is running (psutil → tasklist/pgrep
-    fallback). Case-insensitive (V2 taskpaw.py:1194)."""
+    fallback). Case-insensitive, '.exe'-tolerant (V2 taskpaw.py:1194; #70)."""
     try:
         if psutil is not None:
             for proc in psutil.process_iter(["name"]):
                 pn = proc.info.get("name")
-                if pn and pn.lower() == name.lower():
+                if pn and _proc_name_eq(pn, name):
                     return True
             return False
         if sys.platform == "win32":
+            # No IMAGENAME filter (it requires an exact name incl. .exe) — list all
+            # and match '.exe'-tolerantly.
             out = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH", "/FO", "CSV"],
+                ["tasklist", "/NH", "/FO", "CSV"],
                 capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW,
             )
             for line in out.stdout.strip().splitlines():
                 parts = line.split('","')
-                if len(parts) >= 2 and parts[0].replace('"', "").lower() == name.lower():
+                if parts and _proc_name_eq(parts[0].replace('"', ""), name):
                     return True
             return False
         out = subprocess.run(["pgrep", "-x", name], capture_output=True, text=True, timeout=5)
@@ -149,6 +161,32 @@ def _list_videos(folder: str) -> list[str]:
         return []
 
 
+def args_supply_io(extra_args: str) -> tuple[bool, bool]:
+    """Whether `lada_extra_args` explicitly passes --input / --output WITH A VALUE.
+    Tokenize and match the EXACT option — a substring test would wrongly accept
+    `--input-size` / `--output-format` (Codex), and a bare `--input` or empty
+    `--output=` supplies no path so it must NOT count either (Codex). Requires
+    `--opt VALUE` (a following non-flag token) or a non-empty `--opt=VALUE`.
+    Returns (has_input, has_output). Shared by the managed-mode validator AND the
+    migrator so they agree on what counts as "I/O supplied"."""
+    try:
+        toks = shlex.split(extra_args)
+    except ValueError:
+        toks = extra_args.split()
+
+    def has(opt: str) -> bool:
+        for i, t in enumerate(toks):
+            if t == opt:
+                nxt = toks[i + 1] if i + 1 < len(toks) else ""
+                if nxt and not nxt.startswith("-"):   # a real value follows
+                    return True
+            elif t.startswith(opt + "=") and len(t) > len(opt) + 1:  # non-empty =value
+                return True
+        return False
+
+    return has("--input"), has("--output")
+
+
 def _cpu_mem() -> dict:
     if psutil is None:
         return {}
@@ -161,13 +199,51 @@ def _cpu_mem() -> dict:
 
 
 class LadaConfig(BaseMonitorConfig):
-    lada_cli_path: str = ""          # set → managed mode; empty → passive
-    process_name: str = "lada-cli"   # passive-mode process to detect
-    lada_input_folder: str = ""
-    lada_output_folder: str = ""
-    lada_extra_args: str = ""        # e.g. "--device cuda:1 --encoder h264_nvenc"
-    lada_gpu_monitor: bool = True
-    lada_capture_progress: bool = False  # capture stdout + parse progress (vs own console)
+    lada_cli_path: str = Field(
+        "", description="Full path to the lada-cli EXECUTABLE FILE (e.g. "
+        r"C:\Lada\lada-cli.exe) — NOT the folder. Set it → MANAGED mode (TaskPaw "
+        "launches lada-cli, needs the input/output folders below). Leave empty → "
+        "PASSIVE mode (just watch an already-running lada-cli).")
+    process_name: str = Field(
+        "lada-cli", description="Passive mode only: the process to detect. "
+        "Matches with or without a trailing '.exe' (Windows: lada-cli.exe).")
+    lada_input_folder: str = Field(
+        "", description="Folder of videos to process (lada-cli --input). Required in "
+        "managed mode.")
+    lada_output_folder: str = Field(
+        "", description="Folder where lada-cli writes results (--output). Required in "
+        "managed mode; also drives the queue count and completion notice.")
+    lada_extra_args: str = Field(
+        "", description="Extra lada-cli flags passed verbatim, e.g. "
+        "--device cuda:1 --encoder h264_nvenc")
+    lada_gpu_monitor: bool = Field(
+        True, description="Report GPU% / VRAM via nvidia-smi (turn off on a machine "
+        "without an NVIDIA GPU).")
+    lada_capture_progress: bool = Field(
+        False, description="Advanced. Off (default): lada-cli opens its OWN console "
+        "window with its progress bar. On: capture lada's output into TaskPaw "
+        "(no separate window) to show file/%/fps/ETA in the status pane.")
+
+    @model_validator(mode="after")
+    def _managed_needs_folders(self) -> "LadaConfig":
+        # Managed mode (a CLI path) can't process without an input AND an output —
+        # require them up front rather than launch a no-op lada (#70). But the
+        # operator may instead pass them through extra args (e.g.
+        # `--input X --output Y`), so accept those too (Codex). Passive mode (no
+        # CLI path) needs neither.
+        if self.lada_cli_path.strip():
+            args_in, args_out = args_supply_io(self.lada_extra_args)
+            missing = []
+            if not self.lada_input_folder.strip() and not args_in:
+                missing.append("lada_input_folder")
+            if not self.lada_output_folder.strip() and not args_out:
+                missing.append("lada_output_folder")
+            if missing:
+                raise ValueError(
+                    "managed Lada (lada_cli_path set) needs an input AND output "
+                    f"folder (or --input/--output in extra args); missing: "
+                    f"{', '.join(missing)}")
+        return self
 
 
 class LadaInstance(MonitorInstance):
@@ -207,8 +283,25 @@ class LadaInstance(MonitorInstance):
         if cfg.lada_cli_path:
             self._start_managed(emit)
 
+    def _emit_launch_error(self, emit: EventEmitter, msg: str) -> None:
+        cfg: LadaConfig = self.config  # type: ignore[assignment]
+        self._launch_error = msg
+        emit("alert", f"{cfg.name} error", msg, dedupe_key=f"{self.instance_id}:launch")
+
     def _start_managed(self, emit: EventEmitter) -> None:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
+        # Pre-flight the CLI path. The #1 real-world misconfig is pointing it at
+        # the install FOLDER instead of the executable (e.g. "C:\Lada" rather than
+        # "C:\Lada\lada-cli.exe"); subprocess would fail that with a cryptic
+        # "[WinError 5] access denied", so catch it here with an actionable message.
+        cli = Path(cfg.lada_cli_path)
+        if cli.is_dir():
+            self._emit_launch_error(emit,
+                f"lada_cli_path is a folder ({cfg.lada_cli_path}); point it at the "
+                f"lada-cli executable, e.g. {cli / 'lada-cli.exe'}")
+            return
+        # A non-existent path is left to Popen → FileNotFoundError below (one
+        # "not found" path; also keeps mocked-Popen tests exercising the argv).
         cmd = [cfg.lada_cli_path]
         if cfg.lada_input_folder:
             cmd += ["--input", cfg.lada_input_folder]
@@ -233,14 +326,16 @@ class LadaInstance(MonitorInstance):
             # The ONLY start-time event V2 emits. start() must NOT raise (else the
             # supervisor's watchdog would restart-spin on a permanently missing
             # binary) — record the error so check() reports it.
-            self._launch_error = f"lada-cli not found at {cfg.lada_cli_path}"
-            emit("alert", f"{cfg.name} error", self._launch_error,
-                 dedupe_key=f"{self.instance_id}:launch")
+            self._emit_launch_error(emit, f"lada-cli not found at {cfg.lada_cli_path}")
+            return
+        except PermissionError as e:
+            # WinError 5 — usually a non-executable target or an AV/permission block.
+            self._emit_launch_error(emit,
+                f"access denied launching {cfg.lada_cli_path} ({e}); make sure it's "
+                f"the lada-cli executable and isn't blocked by antivirus")
             return
         except Exception as e:
-            self._launch_error = f"failed to launch lada-cli: {e}"
-            emit("alert", f"{cfg.name} error", self._launch_error,
-                 dedupe_key=f"{self.instance_id}:launch")
+            self._emit_launch_error(emit, f"failed to launch lada-cli: {e}")
             return
 
         if capture and self._process.stdout is not None:
@@ -362,6 +457,8 @@ class LadaInstance(MonitorInstance):
         return MonitorStatus(state=state, detail=self._detail(state, metrics), metrics=metrics)
 
     def _detail(self, state: str, m: dict) -> str:
+        # A clean one-line summary (the rich view is the UI metrics dashboard). Use
+        # "·" separators and a bare "N/M done" — not "error | Queue 2/49 done".
         parts = []
         if m.get("current_file"):
             parts.append(f"{state}: {m['current_file']}")
@@ -374,8 +471,8 @@ class LadaInstance(MonitorInstance):
         if m.get("eta"):
             parts.append(f"ETA {m['eta']}")
         if "queue_total" in m:
-            parts.append(f"Queue {m['queue_completed']}/{m['queue_total']} done")
-        return " | ".join(parts)
+            parts.append(f"{m['queue_completed']}/{m['queue_total']} done")
+        return " · ".join(parts)
 
     # ── snapshot / queue (V2:1021-1269) ────────────────────────────────────
     def _reconcile_snapshot(self) -> None:
@@ -435,11 +532,26 @@ class LadaPlugin(MonitorPlugin):
 
     @classmethod
     def ui_schema(cls) -> dict:
+        # Lead with the fields that matter; path fields are flagged for the
+        # file/folder picker widget (#71). Help text comes from the field
+        # descriptions (rjsf renders them) — not a ui:help key.
         return {
-            "lada_cli_path": {"help": "path to lada-cli (set = managed launch; empty = passive monitor only)"},
-            "lada_extra_args": {"help": "e.g. --device cuda:1 --encoder h264_nvenc"},
-            "lada_capture_progress": {"help": "capture lada output to parse %/fps/ETA (vs its own console window)"},
+            "ui:order": [
+                "name", "lada_cli_path", "lada_input_folder", "lada_output_folder",
+                "process_name", "lada_extra_args", "lada_gpu_monitor",
+                "lada_capture_progress", "poll_interval", "timeout", "*",
+            ],
+            "lada_cli_path": {"ui:options": {"taskpawPath": "file"}},
+            "lada_input_folder": {"ui:options": {"taskpawPath": "directory"}},
+            "lada_output_folder": {"ui:options": {"taskpawPath": "directory"}},
         }
+
+    def manual_start(self, config: BaseMonitorConfig) -> bool:
+        # Managed Lada (a CLI path) LAUNCHES lada-cli on start, so add it STOPPED
+        # and let the operator click Start (V2 parity — don't begin video
+        # processing the instant the form is saved). Passive Lada (no CLI path)
+        # only watches an external process, so auto-start on add is fine.
+        return bool(getattr(config, "lada_cli_path", "").strip())
 
     def create(self, instance_id: str, config: BaseMonitorConfig) -> MonitorInstance:
         return LadaInstance(instance_id, config)  # type: ignore[arg-type]

@@ -48,7 +48,8 @@ def split_command(command: str) -> list[str]:
 
 
 class CustomCmdConfig(BaseMonitorConfig):
-    command: str = Field(..., min_length=1)
+    command: str = Field(..., min_length=1, description="Command to run each cycle; "
+                         "exit 0 = ok/idle, non-zero = busy/failed.")
 
 
 class CustomCmdInstance(MonitorInstance):
