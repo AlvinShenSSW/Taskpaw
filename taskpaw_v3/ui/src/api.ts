@@ -28,7 +28,9 @@ export interface HubStatus {
 
 declare global {
   interface Window {
-    __TASKPAW__?: { baseUrl?: string; apiKey?: string };
+    // Injected by the Tauri shell on the loopback origin (main.rs init_script).
+    // `role` drives single-role navigation (App.tsx, #58).
+    __TASKPAW__?: { baseUrl?: string; apiKey?: string; role?: "agent" | "hub" };
   }
 }
 
