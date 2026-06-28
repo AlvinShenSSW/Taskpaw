@@ -78,7 +78,7 @@ def run_agent(
     # same queue the Hub polls.
     from taskpaw_v3.agent.server.admin import MonitorAdmin
     from taskpaw_v3.monitors.registry import default_registry
-    from taskpaw_v3.monitors.runtime import build_supervisor
+    from taskpaw_v3.monitors.runtime import build_supervisor, merge_status
 
     # One registry, shared by the supervisor AND /control/plugins, so the endpoint
     # advertises exactly what this agent runs (Kimi).
@@ -100,7 +100,9 @@ def run_agent(
             "machine": config.machine,
             "server_id": config.server_id,
             "os": platform.platform(),
-            "monitors": supervisor.snapshot(),
+            # snapshot (running) + configured-but-disabled stubs, so the console
+            # can list + re-enable stopped monitors (#57).
+            "monitors": merge_status(config, supervisor.snapshot()),
         }
 
     net = uvicorn.Server(

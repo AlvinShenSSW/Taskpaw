@@ -17,7 +17,7 @@ from taskpaw_v3.monitors.base import (
     MonitorStatus,
 )
 from taskpaw_v3.monitors.registry import PluginRegistry
-from taskpaw_v3.monitors.runtime import build_supervisor
+from taskpaw_v3.monitors.runtime import build_supervisor, merge_status
 
 
 # ── a trivial fake plugin (no psutil / network / files in worker threads) ──
@@ -162,6 +162,22 @@ def test_build_supervisor_skips_disabled():
     sup = build_supervisor(_registry(), monitors, q, "m")
     assert sup.has("on") is True
     assert sup.has("off") is False
+
+
+def test_merge_status_shows_disabled_as_stopped():
+    # A disabled monitor must still appear in /status (as stopped) so the console
+    # can list + re-enable it (Codex #57a).
+    cfg = _agent_config(monitors=[
+        {"type_id": "fake", "name": "on", "config": {"name": "on"}},
+        {"type_id": "fake", "name": "off", "config": {"name": "off"}, "enabled": False},
+    ])
+    live = {"on": {"state": "ok", "metrics": {}, "detail": "", "alive": True,
+                   "failures": 0, "degraded": False, "dropped": 0}}
+    merged = merge_status(cfg, live)
+    assert merged["on"]["state"] == "ok" and merged["on"]["enabled"] is True
+    assert merged["on"]["type_id"] == "fake"
+    assert merged["off"]["state"] == "stopped"
+    assert merged["off"]["enabled"] is False and merged["off"]["alive"] is False
 
 
 # ── supervisor live unregister ────────────────────────────────────────────
