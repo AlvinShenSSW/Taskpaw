@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Locked down (design §3.1): the webview gets NO Tauri IPC/FS/shell permissions. The UI talks only to the local backend over HTTP on the loopback origin.",
+  "description": "Locked down (design §3.1): the webview gets NO Tauri IPC/FS/shell permissions and talks only to the local backend over HTTP on the loopback origin. The ONE exception (#71) is dialog:allow-open — a user-initiated native file/directory picker that returns a path string for the add-monitor form; it grants NO filesystem read/write/IPC, only the open dialog.",
   "windows": ["main"],
-  "permissions": []
+  "permissions": ["dialog:allow-open"]
 }
