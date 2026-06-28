@@ -43,3 +43,19 @@ def test_dispatch_defaults_to_agent(monkeypatch):
 
 def test_dispatch_unknown_role():
     assert backend_main.main(["bogus"]) == 2   # clean exit code, no crash
+
+
+def test_agent_service_scaffolds_missing_config(tmp_path, monkeypatch):
+    # Fresh install / no config → the service self-initializes a default and runs,
+    # instead of exiting and leaving the packaged UI with no backend (#40).
+    import sys
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    import taskpaw_v3.agent.server.service as svc
+
+    ran = {}
+    monkeypatch.setattr(svc, "run_agent", lambda *a, **k: ran.setdefault("ran", True))
+    assert svc.main() == 0
+    assert svc.default_config_path().exists()   # default agent.yaml created
+    assert ran["ran"]

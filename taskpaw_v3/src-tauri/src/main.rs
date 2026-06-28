@@ -140,11 +140,16 @@ fn backend_command() -> Option<(String, Vec<String>)> {
         format!("taskpaw-backend{ext}"),
         format!("taskpaw-backend-{triple}{ext}"),
     ];
-    let bases = [
-        dir.to_path_buf(),                       // next to the app binary
+    let mut bases = vec![
+        dir.to_path_buf(),                       // next to the app binary (release)
         dir.join("../Resources"),                // macOS .app resources fallback
-        dir.join("binaries"),
     ];
+    // Only probe src-tauri/binaries/ in debug — release bundles place the sidecar
+    // next to the exe, and probing binaries/ could pick up a stale/wrong-arch dev
+    // artifact (Kimi).
+    if cfg!(debug_assertions) {
+        bases.push(dir.join("binaries"));
+    }
     let found = bases
         .iter()
         .flat_map(|b| names.iter().map(move |n| b.join(n)))
@@ -314,15 +319,10 @@ fn init_script() -> String {
     // Guard by origin so the api key is never exposed if the webview ever
     // navigates away from the local frontend to a non-loopback page (Kimi).
     // Allowed origins: loopback hosts, the macOS tauri: protocol, AND the
-    // packaged webview host `tauri.localhost` (Windows https://tauri.localhost,
-    // per core/cors.py) — else the injected config is dropped in packaged builds
-    // (Codex).
-    // Guard must accept the same set loopback_base() does (all of 127.0.0.0/8,
-    // not just 127.0.0.1) or a custom 127.x base would be validated yet __TASKPAW__
-    // would never be set (Kimi). Plus the packaged webview host tauri.localhost
-    // and the macOS tauri: protocol.
-    // Exact canonical loopback set — matches loopback_base() and the CSP. Plus the
-    // packaged webview host tauri.localhost and the macOS tauri: protocol.
+    // Exact canonical loopback set — in lockstep with loopback_base() and the CSP
+    // connect-src. Plus the packaged webview host tauri.localhost (Windows
+    // https://tauri.localhost, per core/cors.py) and the macOS tauri: protocol —
+    // else the injected config is dropped in packaged builds (Codex).
     format!(
         "{{ const h = location.hostname; \
          if (h==='localhost'||h==='127.0.0.1'||h==='[::1]'||h==='::1'||h==='tauri.localhost'|| \

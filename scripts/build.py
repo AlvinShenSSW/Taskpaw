@@ -109,10 +109,17 @@ def build_tauri() -> None:
     role = os.environ.get("TASKPAW_BUILD_ROLE", "agent").strip().lower()
     if role not in ("agent", "hub"):
         role = "agent"
-    overrides = json.dumps({
+    cfg = {
         "identifier": f"com.taskpaw.app.{role}",
         "productName": f"TaskPaw {role.capitalize()}",
-    })
+    }
+    # Stamp the release version from the tag (TASKPAW_BUILD_VERSION, leading 'v'
+    # stripped) so a v3.1.0 tag doesn't ship "3.0.0" installers (Kimi). Unset
+    # (e.g. workflow_dispatch) → keep tauri.conf.json's version.
+    ver = os.environ.get("TASKPAW_BUILD_VERSION", "").strip().lstrip("vV")
+    if ver:
+        cfg["version"] = ver
+    overrides = json.dumps(cfg)
     # --ci: never prompt (headless runners would hang). Pin the CLI for
     # reproducible bundles; beforeBuildCommand builds the UI.
     run(["npx", "--yes", TAURI_CLI, "build", "--ci", "--config", overrides], cwd=SRC_TAURI)
