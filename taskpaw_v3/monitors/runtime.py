@@ -60,7 +60,9 @@ def build_supervisor(
     sup = Supervisor(sink=make_queue_sink(queue, machine))
     for spec in monitors:
         type_id = spec.get("type_id")
-        if not type_id or not registry.has(type_id):
+        # str-guard before registry.has() — a malformed YAML type_id (list/null)
+        # must raise ValueError, not TypeError that crashes agent startup (Kimi).
+        if not isinstance(type_id, str) or not type_id or not registry.has(type_id):
             raise ValueError(f"unknown monitor type_id: {type_id!r}")
         plugin = registry.get(type_id)
         # Accept both shapes: {type_id, name, config} (name at top level) AND

@@ -118,6 +118,21 @@ def test_remove_monitor_raises_on_duplicates_not_silent_wipe():
         remove_monitor(dupes, "a")
 
 
+def test_has_remove_monitor_canonicalize_query():
+    base = add_monitor([], {"type_id": "tcp_check", "config": {"name": "foo", "port": 1}})
+    assert has_monitor(base, "  foo  ")              # whitespace query still matches
+    assert remove_monitor(base, " foo ") == []       # and removes
+
+
+def test_build_supervisor_bad_type_id_raises_valueerror():
+    from taskpaw_v3.core.protocol import EventQueue
+    from taskpaw_v3.monitors.registry import default_registry
+    from taskpaw_v3.monitors.runtime import build_supervisor
+    with pytest.raises(ValueError):                  # not TypeError on malformed YAML
+        build_supervisor(default_registry(), [{"type_id": ["process"]}],
+                         EventQueue(machine="m"), "m")
+
+
 def test_add_monitor_non_string_type_id_raises_valueerror():
     # malformed JSON could give a list/None type_id — must be ValueError, not
     # TypeError from reg.has() (Kimi).

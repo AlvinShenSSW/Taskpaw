@@ -57,6 +57,7 @@ def preset_catalog() -> list[dict[str, Any]]:
 
 
 def has_monitor(monitors: list[dict], name: str) -> bool:
+    name = name.strip()   # align the query with canonical stored names (Kimi)
     return any(monitor_name(m) == name for m in monitors)
 
 
@@ -94,6 +95,7 @@ def remove_monitor(monitors: list[dict], name: str) -> list[dict]:
     """Return a new list without the monitor named `name`. Raises if absent, or
     if more than one matches — removing several at once (from hand-edited YAML /
     migration that slipped a duplicate in) would be silent data loss (Kimi)."""
+    name = name.strip()   # align the query with canonical stored names (Kimi)
     matches = [i for i, m in enumerate(monitors) if monitor_name(m) == name]
     if not matches:
         raise ValueError(f"no monitor named {name!r}")
