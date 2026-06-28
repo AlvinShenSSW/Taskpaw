@@ -175,10 +175,32 @@ fn kill_backend(app: &tauri::AppHandle) {
     // descendants when its handle drops as the process exits.
 }
 
+/// Accept only a loopback base URL (design §3.1: the shell loopback-validates the
+/// backend base_url before injecting it). A tampered/non-local TASKPAW_UI_BASE is
+/// dropped so the frontend can't be pointed at a remote backend with the api key.
+/// Empty string (the common bundled case) is allowed → frontend uses its safe
+/// per-role loopback defaults.
+fn loopback_base(raw: &str) -> String {
+    let v = raw.trim();
+    if v.is_empty() {
+        return String::new();
+    }
+    let after = v.split("://").nth(1).unwrap_or(v);
+    let host = after.split('/').next().unwrap_or("");
+    let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        v.to_string()
+    } else {
+        eprintln!("TASKPAW_UI_BASE {v:?} is not loopback — ignoring");
+        String::new()
+    }
+}
+
 /// Runtime config injected on the loopback origin (design §3.1) — packaged
 /// builds can't use compile-time Vite env, so the shell injects it here.
 fn init_script() -> String {
-    let base = std::env::var("TASKPAW_UI_BASE").unwrap_or_default();
+    let base = loopback_base(&std::env::var("TASKPAW_UI_BASE").unwrap_or_default());
     let token = std::env::var("TASKPAW_UI_TOKEN").unwrap_or_default();
     let role = std::env::var("TASKPAW_UI_ROLE").unwrap_or_else(|_| "agent".into());
     // serde_json escapes the values safely.
@@ -190,6 +212,16 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let child = spawn_backend();
+            // Bundled mode (no dev override): a missing/failed sidecar means the
+            // UI would open with no backend — fail LOUD rather than silently
+            // broken (Kimi). Dev (explicit TASKPAW_BACKEND_CMD) stays lenient.
+            if child.is_none() && std::env::var_os("TASKPAW_BACKEND_CMD").is_none() {
+                eprintln!(
+                    "FATAL: bundled backend 'taskpaw-backend' not found/failed to start; \
+                     the app cannot reach a local API. (Reinstall, or set \
+                     TASKPAW_BACKEND_CMD for a dev backend.)"
+                );
+            }
             #[cfg(windows)]
             {
                 let job = child.as_ref().and_then(jobobj::assign);
