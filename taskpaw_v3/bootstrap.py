@@ -37,13 +37,23 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() and not force:
         return dst, False
-    # Atomic write (repo invariant: configs are reader-visible state) — a tmp
-    # file in the same dir + fsync + os.replace, so an interrupted/​power-lost
-    # bootstrap never leaves a truncated config the service would read.
-    data = Path(src).read_bytes()
+    text = Path(src).read_text(encoding="utf-8")
+    if role == "agent":
+        # Give each fresh agent a UNIQUE identity so multiple LAN installs don't
+        # all advertise "my-agent" (display/log collisions) (Kimi). Targeted line
+        # replace keeps the example's comments.
+        import socket
+        import uuid
+        host = (socket.gethostname() or "agent").split(".")[0]
+        text = text.replace("server_id: my-agent",
+                            f"server_id: {host}-{uuid.uuid4().hex[:6]}")
+        text = text.replace("machine: my-machine", f"machine: {host}")
+    # Atomic write (repo invariant: configs are reader-visible state) — a tmp file
+    # in the same dir + fsync + os.replace, so an interrupted/power-lost bootstrap
+    # never leaves a truncated config the service would read.
     tmp = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
-    with open(tmp, "wb") as f:
-        f.write(data)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, dst)

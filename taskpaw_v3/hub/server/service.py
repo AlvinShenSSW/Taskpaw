@@ -117,8 +117,22 @@ def legacy_db_conflict(config_path: Path, resolved_db: Path) -> Path | None:
 def run_from_config(config_path: Path | None = None, db_path: Path | None = None) -> int:
     path = config_path or default_config_path()
     if not path.exists():
-        print(f"No hub config at {path}", file=sys.stderr)
-        return 1
+        if config_path is not None:
+            # An explicitly-requested config that's missing is an error.
+            print(f"No hub config at {path}", file=sys.stderr)
+            return 1
+        # Default location missing → self-initialize so a fresh install runs
+        # (host_metrics self-monitor baseline) instead of failing (#40 Codex).
+        from taskpaw_v3 import bootstrap
+        try:
+            bootstrap.scaffold("hub")
+        except OSError as e:
+            # e.g. Linux /etc/taskpaw without root — fail cleanly, don't crash (Kimi).
+            print(f"No hub config at {path} and could not auto-create it: {e}\n"
+                  f"  Create it manually (see taskpaw_v3/examples/hub.example.yaml) "
+                  f"or run with write access to that directory.", file=sys.stderr)
+            return 1
+        logging.getLogger("taskpaw.hub").info("created default hub config at %s", path)
     config: HubConfig = load_yaml(HubConfig, path)  # type: ignore[assignment]
     resolved_db = db_path or db_path_for(config)
     # Only guard the DEFAULT data_dir path — an explicit --db is the operator

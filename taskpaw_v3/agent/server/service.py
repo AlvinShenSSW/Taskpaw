@@ -31,8 +31,19 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO)
     path = default_config_path()
     if not path.exists():
-        print(f"No agent config at {path}", file=sys.stderr)
-        return 1
+        # Self-initialize a default config so a fresh install / first run "just
+        # works" (host_metrics baseline on loopback) instead of exiting and
+        # leaving the packaged UI with no backend (#40 Codex). Edit afterwards.
+        from taskpaw_v3 import bootstrap
+        try:
+            bootstrap.scaffold("agent")
+        except OSError as e:
+            # e.g. Linux /etc/taskpaw without root — fail cleanly, don't crash (Kimi).
+            print(f"No agent config at {path} and could not auto-create it: {e}\n"
+                  f"  Create it manually (see taskpaw_v3/examples/agent.example.yaml) "
+                  f"or run with write access to that directory.", file=sys.stderr)
+            return 1
+        logging.getLogger("taskpaw.agent").info("created default agent config at %s", path)
     config: AgentConfig = load_yaml(AgentConfig, path)  # type: ignore[assignment]
     # Persist the monotonic event-id counter next to the config.
     state_path = path.with_name("agent.state.json")
