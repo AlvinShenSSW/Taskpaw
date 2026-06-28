@@ -70,9 +70,14 @@ struct JobHandle(Mutex<Option<jobobj::Job>>);
 /// Resolve the backend command: an explicit dev override, else the bundled
 /// `taskpaw-backend` sidecar next to this executable run with the UI role (#40).
 fn backend_command() -> Option<(String, Vec<String>)> {
-    // Dev / explicit override.
-    if let Ok(program) = std::env::var("TASKPAW_BACKEND_CMD") {
-        if !program.trim().is_empty() {
+    // Dev / explicit override. Distinguish UNSET (fall back to the sidecar) from
+    // SET-BUT-EMPTY (explicitly "no backend") so the old disable-via-empty dev
+    // workflow still works (Kimi).
+    match std::env::var("TASKPAW_BACKEND_CMD") {
+        Ok(program) => {
+            if program.trim().is_empty() {
+                return None; // explicitly disabled
+            }
             let args = std::env::var("TASKPAW_BACKEND_ARGS")
                 .ok()
                 .map(|a| {
@@ -83,6 +88,7 @@ fn backend_command() -> Option<(String, Vec<String>)> {
                 .unwrap_or_default();
             return Some((program, args));
         }
+        Err(_) => {} // unset → bundled sidecar below
     }
     // Bundled `externalBin` sidecar, run with the role so one binary serves both
     // agent and hub. Tauri strips the target-triple and places it next to the app

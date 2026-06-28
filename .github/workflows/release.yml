@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.83.0   # pinned for reproducible bundles
 
       - uses: astral-sh/setup-uv@v5
 

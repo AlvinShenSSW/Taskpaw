@@ -17,9 +17,10 @@ for pkg in ("uvicorn", "fastapi", "starlette", "pydantic", "pydantic_core",
         datas += d
         binaries += b
         hiddenimports += h
-    except ImportError as e:
-        # Don't silently ship a backend missing a required lib — surface it.
-        print(f"WARNING: collect_all({pkg!r}) failed: {e}")
+    except Exception as e:
+        # These are REQUIRED runtime libs — fail the build rather than ship a
+        # backend that crashes on import at runtime (Kimi).
+        raise SystemExit(f"packaging error: cannot collect required package {pkg!r}: {e}")
 hiddenimports += collect_submodules("taskpaw_v3")
 
 a = Analysis(

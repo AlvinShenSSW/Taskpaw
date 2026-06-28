@@ -30,6 +30,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC_TAURI = ROOT / "taskpaw_v3" / "src-tauri"
 SPEC = ROOT / "taskpaw_v3" / "packaging" / "taskpaw-backend.spec"
 EXE_EXT = ".exe" if os.name == "nt" else ""
+# Pinned for reproducible bundles (Kimi).
+TAURI_CLI = "@tauri-apps/cli@2.1.0"
 
 
 def run(cmd: list[str], **kw) -> None:
@@ -72,8 +74,8 @@ def build_tauri() -> None:
     # `install` (not `ci`): the UI package-lock.json is gitignored, matching the
     # existing frontend CI job.
     run(["npm", "--prefix", str(ROOT / "taskpaw_v3" / "ui"), "install"], cwd=ROOT)
-    # npx fetches the Tauri CLI v2 if not present; beforeBuildCommand builds the UI.
-    run(["npx", "--yes", "@tauri-apps/cli@^2", "build"], cwd=SRC_TAURI)
+    # Pin the Tauri CLI for reproducible bundles; beforeBuildCommand builds the UI.
+    run(["npx", "--yes", TAURI_CLI, "build"], cwd=SRC_TAURI)
     print("bundle -> " + str(SRC_TAURI / "target" / "release" / "bundle"), flush=True)
 
 
