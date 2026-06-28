@@ -152,6 +152,10 @@ def _map_comfyui(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
     idle = w.get("idle_confirm_count")
     if isinstance(idle, int) and idle >= 1:
         cfg["idle_confirm"] = idle
+    # V3's comfyui plugin tails this log for error diagnostics (#60) — carry it.
+    log_path = (w.get("comfyui_log_path") or "").strip()
+    if log_path:
+        cfg["comfyui_log_path"] = log_path
     return [("comfyui", name, _carry_common(w, cfg))], []
 
 
