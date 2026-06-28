@@ -153,6 +153,7 @@ class HostMetricsPlugin(MonitorPlugin):
     display_name = "Host metrics"
     category = "service"
     config_version = 1
+    system = True   # auto-injected per agent (§5b) — not operator-selectable
 
     @classmethod
     def config_model(cls) -> type[BaseMonitorConfig]:

@@ -22,6 +22,8 @@ from fastapi.responses import JSONResponse
 from taskpaw_v3.core.auth import token_ok
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
+from taskpaw_v3.monitors.registry import PluginRegistry
+from taskpaw_v3.monitors.runtime import effective_monitors, monitor_name
 
 
 def _unauthorized() -> JSONResponse:
@@ -58,10 +60,13 @@ def create_network_app(
             "machine": config.machine,
             "server_id": config.server_id,
             "os": platform.platform(),
-            "monitors": [
-                {"type_id": m.get("type_id"), "name": m.get("name"), "state": "unknown"}
-                for m in config.monitors
-            ],
+            # Match the production status_provider shape: a dict keyed by monitor
+            # name (supervisor.snapshot()), NOT a list — same endpoint, one wire
+            # shape (Kimi). effective_monitors so it includes auto-injected ones.
+            "monitors": {
+                monitor_name(m): {"type_id": m.get("type_id"), "state": "unknown"}
+                for m in effective_monitors(config)
+            },
         }
 
     @app.get("/events")
@@ -77,6 +82,7 @@ def create_control_app(
     config: AgentConfig,
     on_command: Optional[Callable[[str, dict], dict]] = None,
     status_provider: Optional[Callable[[], dict]] = None,
+    registry: Optional[PluginRegistry] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""
@@ -103,6 +109,16 @@ def create_control_app(
         if data.get("api_token"):
             data["api_token"] = "***"
         return data
+
+    @app.get("/control/plugins")
+    def plugins() -> dict:
+        # The selectable monitor services + their form schemas (the UI's "enable
+        # a monitor" picker) plus named presets (moomoo is just one of these).
+        from taskpaw_v3.agent.catalog import plugin_catalog, preset_catalog
+
+        # Use the injected registry so the endpoint advertises exactly what this
+        # agent can run (a custom runtime registry won't diverge) (Kimi).
+        return {"plugins": plugin_catalog(registry), "presets": preset_catalog()}
 
     @app.post("/control/command")
     def command(body: dict) -> dict:

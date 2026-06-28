@@ -17,7 +17,7 @@ import abc
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Category = Literal["task", "service", "both"]
 State = Literal["unknown", "ok", "idle", "running", "degraded", "error", "stopped"]
@@ -48,6 +48,17 @@ class BaseMonitorConfig(BaseModel):
     timeout: float = Field(30.0, gt=0)              # command/HTTP probe timeout
     max_events_per_minute: int = Field(60, ge=1)    # storm → folded summary
     max_line_bytes: int = Field(1_000_000, ge=1024)  # tail line cap
+
+    @field_validator("name")
+    @classmethod
+    def _name_canonical(cls, v: str) -> str:
+        # The name is a stable ID (Hub history/grouping, uniqueness). Strip it
+        # ONLY (not every string field — that would silently rewrite paths /
+        # patterns / commands) and reject a whitespace-only name (Kimi).
+        v = v.strip()
+        if not v:
+            raise ValueError("name must not be blank")
+        return v
 
 
 @dataclass
@@ -98,6 +109,9 @@ class MonitorPlugin(abc.ABC):
     display_name: str = ""
     category: Category = "service"
     config_version: int = 1
+    # Auto-injected / not operator-selectable (e.g. host_metrics, §5b). The UI
+    # shows these always-on and won't offer adding a duplicate. Plugins self-declare.
+    system: bool = False
 
     @classmethod
     @abc.abstractmethod

@@ -40,6 +40,16 @@ class AgentConfig(BaseModel):
     # Auto-run a host_metrics self-monitor on this agent (§5b: every agent).
     host_metrics: bool = True
 
+    @field_validator("server_id", "machine")
+    @classmethod
+    def _ident_not_blank(cls, v: str) -> str:
+        # Stable identity strings — strip and reject whitespace-only so they can't
+        # produce nonsensical derived names (e.g. host_metrics "-host") (Kimi).
+        v = v.strip()
+        if not v:
+            raise ValueError("must not be blank")
+        return v
+
     @field_validator("bind_port", "control_port")
     @classmethod
     def _ports(cls, v: int) -> int:
