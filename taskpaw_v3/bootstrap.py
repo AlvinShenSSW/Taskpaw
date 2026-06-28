@@ -170,7 +170,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "hub" and args.agent:
         try:
             lines = register_agents(args.agent)
-        except (ValueError, RuntimeError) as e:
+        except Exception as e:
+            # incl. bad spec (ValueError), legacy conflict (RuntimeError), and
+            # malformed/unreadable hub.yaml (yaml/OS errors) — clean exit, no
+            # traceback (Kimi).
             print(f"error: {e}", file=sys.stderr)
             return 2
         print("registered agents:")

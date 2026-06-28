@@ -35,6 +35,9 @@ class HubService:
             ),
             get_token=lambda: store.get_config("openclaw_token", config.openclaw_token),
             get_polling_token=lambda: store.get_config("polling_token", config.polling_token),
+            # Seed a restarted Hub's status.md as ONLINE only for agents whose last
+            # success is within ~2 polls; older successes render OFFLINE (#38).
+            seed_fresh_seconds=max(2 * config.poll_interval, 60),
         )
         self._running = threading.Event()
         self._thread: threading.Thread | None = None

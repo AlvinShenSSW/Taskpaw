@@ -47,8 +47,14 @@ class Poller:
         get_token: Callable[[], str],
         get_polling_token: Optional[Callable[[], str]] = None,
         http_timeout: float = 5.0,
+        seed_fresh_seconds: float = 0.0,
     ) -> None:
         self.store = store
+        # On restart, only seed a server as ONLINE if its last successful poll is
+        # newer than this (≈ a poll interval). status_log holds only successes, so
+        # a stale last-success means the agent may have gone down while the Hub
+        # was off — don't render it ONLINE (Kimi). 0 = always trust (tests).
+        self.seed_fresh_seconds = seed_fresh_seconds
         self.openclaw_url = openclaw_url
         self.get_active = get_active   # openclaw_enabled AND token
         self.get_token = get_token     # OpenClaw token
@@ -76,10 +82,22 @@ class Poller:
             for row in self.store.latest_statuses():
                 if row.get("status_json") is None:
                     continue  # never polled
+                ts = row.get("last_seen") or row.get("timestamp")
+                reachable = bool(row.get("reachable"))
+                if reachable and self.seed_fresh_seconds and ts:
+                    # A stale last-success (older than ~a poll) shouldn't seed
+                    # ONLINE — the agent may have stopped while the Hub was off.
+                    try:
+                        age = (datetime.now()
+                               - datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")).total_seconds()
+                        if age > self.seed_fresh_seconds:
+                            reachable = False
+                    except (ValueError, TypeError):
+                        pass
                 seed[row["id"]] = {
-                    "reachable": bool(row.get("reachable")),   # honor the column, don't assume
+                    "reachable": reachable,
                     "status_json": row.get("status_json"),
-                    "last_seen": row.get("last_seen") or row.get("timestamp"),
+                    "last_seen": ts,
                 }
         except Exception as e:
             log.warning("Could not seed status snapshot: %s", e)

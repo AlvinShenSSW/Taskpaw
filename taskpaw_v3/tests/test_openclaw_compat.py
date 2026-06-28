@@ -320,6 +320,23 @@ def test_status_snapshot_seeded_from_store_on_init(tmp_path):
     s.close()
 
 
+def test_seed_marks_stale_success_offline(tmp_path):
+    # A last-success older than seed_fresh_seconds must seed OFFLINE, not ONLINE,
+    # so a restart doesn't render a long-down agent as up (Kimi).
+    from taskpaw_v3.hub.server.poller import Poller
+    s = HubStore(tmp_path / "hub.db")
+    sid = s.add_server("m", "1.1.1.1")
+    # an old success row (2h ago)
+    s._conn.execute("INSERT INTO status_log(server_id,timestamp,reachable,status_json) "
+                    "VALUES(?, datetime('now','localtime','-2 hours'), 1, '{}')", (sid,))
+    s._conn.commit()
+    p = Poller(store=s, openclaw_url="http://x", get_active=lambda: False,
+               get_token=lambda: "", http_timeout=1, seed_fresh_seconds=60)
+    snap = p.status_snapshot()[0]
+    assert snap["reachable"] is False and snap["last_seen"]   # OFFLINE, last seen kept
+    s.close()
+
+
 def test_status_snapshot_offline_keeps_last_good(tmp_path, monkeypatch):
     # status.md source: a failed poll keeps the last good status/last_seen and
     # marks reachable False; status_log only gets the successful poll (#38 review).

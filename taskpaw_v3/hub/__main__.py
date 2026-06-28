@@ -85,8 +85,6 @@ def _print_servers(store: HubStore) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import logging
-    logging.basicConfig(level=logging.INFO)   # so warnings (e.g. legacy-db) show
     ap = argparse.ArgumentParser(prog="python -m taskpaw_v3.hub",
                                  description="Run the TaskPaw V3 Hub and manage polled agents.")
     ap.add_argument("--config", default=None, help="path to hub.yaml (default: platform location)")
@@ -144,4 +142,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO)   # only when run as a script (Kimi)
     raise SystemExit(main())
