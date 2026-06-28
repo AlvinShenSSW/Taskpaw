@@ -79,6 +79,13 @@ class HubConfig(BaseModel):
     openclaw_token: str = ""
     # Run a host_metrics self-monitor for the Hub's own machine (§5b.2).
     self_monitor: bool = True
+    # Local data dir holding hub.db + status.md. Defaults to V2's location so
+    # OpenClaw's scripts (which read these files directly) work unchanged (#38).
+    data_dir: str = "~/.taskpaw-hub"
+    # Write status.md each poll (OpenClaw compat). Disable if not consumed.
+    write_status_md: bool = True
+    # Drop status_log rows older than this many days (bounded history). 0 = keep all.
+    status_log_retention_days: int = 7
 
     @field_validator("bind_port")
     @classmethod

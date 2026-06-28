@@ -79,8 +79,28 @@ class HubService:
                     self.poller.poll_once()
                 except Exception as e:
                     log.error("Poll cycle failed: %s", e)
+                # status.md / pruning are OpenClaw-compat side outputs — a failure
+                # here must never stall or kill the poll loop (#38).
+                try:
+                    self._refresh_compat_outputs()
+                except Exception as e:
+                    log.error("status.md/prune failed: %s", e)
                 next_due = now + max(1, self.config.poll_interval)
             time.sleep(0.5)
+
+    def _refresh_compat_outputs(self) -> None:
+        """Write status.md and prune old status_log rows (OpenClaw compat, #38)."""
+        if self.config.status_log_retention_days:
+            self.store.prune_status_logs(self.config.status_log_retention_days)
+        if self.config.write_status_md:
+            from datetime import datetime
+            from pathlib import Path
+
+            from taskpaw_v3.hub.server.status_md import write_status_md
+
+            path = Path(self.config.data_dir).expanduser() / "status.md"
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            write_status_md(path, self.store.latest_statuses(), now)
 
     def start(self) -> None:
         self._running.set()

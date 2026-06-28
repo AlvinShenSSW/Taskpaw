@@ -90,6 +90,20 @@ class Poller:
         token = self.get_polling_token()
         return {"Authorization": f"Bearer {token}"} if token else {}
 
+    def fetch_status(self, server: dict) -> tuple[bool, Optional[str]]:
+        """GET the agent's /status. Returns (reachable, raw_json_or_None). A bad
+        response / unreachable host → (False, None), not an exception (#38)."""
+        base = _agent_base_url(server["ip"], server["port"])
+        try:
+            req = urllib.request.Request(f"{base}/status", headers=self._auth_headers())
+            resp = urllib.request.urlopen(req, timeout=self.http_timeout)
+            body = resp.read().decode("utf-8")
+            json.loads(body)  # validate it's JSON before persisting
+            return True, body
+        except Exception as e:
+            log.warning("Failed to fetch status from %s: %s", server.get("name"), e)
+            return False, None
+
     def fetch_events(self, server: dict) -> list[dict]:
         base = _agent_base_url(server["ip"], server["port"])
         last_id = self.last_event_ids.get(server["id"], -1)
@@ -159,6 +173,12 @@ class Poller:
         for server in self.store.list_servers():
             if not server["enabled"]:
                 continue
+            # Snapshot the agent's status every poll (reachable + raw /status JSON)
+            # so status_log / status.md stay fresh for OpenClaw — independent of
+            # whether there are new events (#38).
+            reachable, status_json = self.fetch_status(server)
+            self.store.log_status(server["id"], reachable, status_json)
+
             new_events = self.fetch_events(server)
             if not new_events:
                 continue

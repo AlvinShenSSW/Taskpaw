@@ -53,7 +53,7 @@ class HubStore:
                     server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
                     timestamp TEXT NOT NULL,
                     reachable INTEGER NOT NULL,
-                    payload_json TEXT
+                    status_json TEXT
                 )
                 """
             )
@@ -182,6 +182,51 @@ class HubStore:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    # ── status_log (OpenClaw compat: status.md + 24h history, #38) ──────────
+    def log_status(self, server_id: int, reachable: bool,
+                   status_json: Optional[str] = None) -> None:
+        """Append a status snapshot for a server (one row per poll). Timestamp is
+        SQLite localtime to match V2's status_log so OpenClaw's queries work."""
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO status_log(server_id, timestamp, reachable, status_json) "
+                    "VALUES(?, datetime('now','localtime'), ?, ?)",
+                    (server_id, int(reachable), status_json),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def latest_statuses(self) -> list[dict[str, Any]]:
+        """Latest status row per registered server (LEFT JOIN, so never-polled
+        servers appear too) — the source for status.md."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT s.id, s.name, sl.reachable, sl.status_json, sl.timestamp
+                FROM servers s
+                LEFT JOIN status_log sl ON sl.id = (
+                    SELECT id FROM status_log WHERE server_id = s.id
+                    ORDER BY id DESC LIMIT 1)
+                ORDER BY s.name
+                """
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def prune_status_logs(self, days: int = 7) -> int:
+        """Drop status_log rows older than `days` (bounded history). Returns the
+        number deleted."""
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM status_log WHERE timestamp < datetime('now','localtime',?)",
+                (f"-{int(days)} days",),
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     # ── events ────────────────────────────────────────────────────────────
     def store_event(self, server_id: int, ev: dict) -> None:

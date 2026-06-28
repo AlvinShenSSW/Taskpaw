@@ -18,7 +18,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from taskpaw_v3.hub.server.service import default_config_path, default_db_path, run_from_config
+from taskpaw_v3.core.config import HubConfig, load_yaml
+from taskpaw_v3.hub.server.service import (
+    db_path_for,
+    default_config_path,
+    default_db_path,
+    run_from_config,
+)
 from taskpaw_v3.hub.server.store import HubStore
 
 
@@ -34,9 +40,16 @@ def _port(value: str) -> int:
 
 
 def _store(args) -> HubStore:
-    db = Path(args.db).expanduser() if args.db else default_db_path(
-        Path(args.config).expanduser() if args.config else default_config_path())
-    return HubStore(db)
+    if args.db:
+        return HubStore(Path(args.db).expanduser())
+    # Target the SAME db the running hub uses: HubConfig.data_dir/hub.db. Fall
+    # back to next-to-config only if the config can't be read (#38).
+    cfg_path = Path(args.config).expanduser() if args.config else default_config_path()
+    try:
+        config: HubConfig = load_yaml(HubConfig, cfg_path)  # type: ignore[assignment]
+        return HubStore(db_path_for(config))
+    except Exception:
+        return HubStore(default_db_path(cfg_path))
 
 
 def _print_servers(store: HubStore) -> None:

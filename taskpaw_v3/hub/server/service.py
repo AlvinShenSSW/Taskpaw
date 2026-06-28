@@ -31,8 +31,15 @@ def default_config_path() -> Path:
 
 
 def default_db_path(config_path: Path) -> Path:
-    """The Hub's SQLite DB, kept alongside its config."""
+    """The Hub's SQLite DB, kept alongside its config (used when no config is
+    loaded yet, e.g. the admin CLI). Once a HubConfig is loaded, data_dir wins."""
     return config_path.with_name("hub.db")
+
+
+def db_path_for(config: HubConfig) -> Path:
+    """hub.db lives in HubConfig.data_dir (default ~/.taskpaw-hub) so it sits
+    next to status.md where OpenClaw reads both (#38)."""
+    return Path(config.data_dir).expanduser() / "hub.db"
 
 
 def run_from_config(config_path: Path | None = None, db_path: Path | None = None) -> int:
@@ -41,7 +48,7 @@ def run_from_config(config_path: Path | None = None, db_path: Path | None = None
         print(f"No hub config at {path}", file=sys.stderr)
         return 1
     config: HubConfig = load_yaml(HubConfig, path)  # type: ignore[assignment]
-    store = HubStore(db_path or default_db_path(path))
+    store = HubStore(db_path or db_path_for(config))
     run_hub(config, store, block=True)
     return 0
 

@@ -26,3 +26,10 @@ openclaw_token: ""
 
 # Run a host_metrics self-monitor for the Hub's own machine.
 self_monitor: true
+
+# OpenClaw compatibility (#38): the Hub writes hub.db + status.md here each poll,
+# so OpenClaw's scripts (which read these files directly, no API) work unchanged.
+# Default is V2's location; change only if OpenClaw reads elsewhere.
+data_dir: ~/.taskpaw-hub
+write_status_md: true           # status.md (human-readable latest snapshot)
+status_log_retention_days: 7    # prune status_log history older than this (0 = keep all)
