@@ -4,7 +4,7 @@ import {
   MenuItem, Snackbar, Stack, TextField, Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type MonitorSnapshot, type PluginInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
 import { StatusDot } from "../components/StatusDot";
@@ -195,6 +195,12 @@ function MonitorDialog({
   // Operator-selectable plugins only (host_metrics etc. are system/auto-injected).
   const selectable = useMemo(() => plugins.filter((p) => !p.system), [plugins]);
   const [typeId, setTypeId] = useState<string>(selectable[0]?.type_id ?? "");
+  // The dialog can open before /control/plugins resolves (selectable empty →
+  // typeId ""); the useState initializer won't re-run, so select the first type
+  // once the catalog arrives, otherwise the form never appears (Codex #57b).
+  useEffect(() => {
+    if (!typeId && selectable.length > 0) setTypeId(selectable[0].type_id);
+  }, [selectable, typeId]);
 
   // Edit mode: load the current config to pre-fill the form.
   const config = useQuery({
