@@ -10,6 +10,10 @@ export interface MonitorSnapshot {
   detail?: string;
   alive?: boolean;
   degraded?: boolean;
+  // Added by the agent status provider (#57): whether the monitor is enabled
+  // (running) and its plugin type, so the console can toggle + label it.
+  enabled?: boolean;
+  type_id?: string | null;
 }
 
 export interface AgentStatus {
@@ -24,6 +28,32 @@ export interface HubStatus {
   servers: Array<{ id: number; name: string; ip: string; port: number; enabled: number }>;
   acks: Record<string, number>;
   self: Record<string, MonitorSnapshot>;
+}
+
+// A selectable monitor type from /control/plugins (#57): its form schema drives
+// the add/edit dialog.
+export interface PluginInfo {
+  type_id: string;
+  display_name: string;
+  category: string;
+  config_version: number;
+  system: boolean;
+  json_schema: Record<string, unknown>;
+  ui_schema: Record<string, unknown>;
+}
+
+export interface PresetInfo {
+  id: string;
+  display_name: string;
+  description?: string;
+  monitors: Array<{ type_id: string; name: string; config: Record<string, unknown> }>;
+}
+
+export interface MonitorSpec {
+  type_id: string;
+  name?: string;
+  config: Record<string, unknown>;
+  enabled?: boolean;
 }
 
 declare global {
@@ -59,7 +89,48 @@ async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// Non-GET control calls (#57). On error, surface the backend's `detail` (the
+// admin's ValueError message → 400) so the UI can show why an edit was rejected.
+async function send<T>(
+  role: "agent" | "hub",
+  method: "POST" | "DELETE" | "PATCH",
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const { baseUrl, apiKey } = cfg(role);
+  const res = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: {
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let detail = `${path} → ${res.status}`;
+    try {
+      const j = await res.json();
+      if (j?.detail) detail = String(j.detail);
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(detail);
+  }
+  return res.json() as Promise<T>;
+}
+
+const q = (name: string) => `?name=${encodeURIComponent(name)}`;
+
 export const api = {
   agentStatus: () => get<AgentStatus>("agent", "/control/status"),
   hubStatus: () => get<HubStatus>("hub", "/status"),
+  plugins: () => get<{ plugins: PluginInfo[]; presets: PresetInfo[] }>("agent", "/control/plugins"),
+  // Full agent config (secrets masked as "***") — used to pre-fill the edit form.
+  config: () => get<{ monitors: MonitorSpec[] } & Record<string, unknown>>("agent", "/control/config"),
+  addMonitor: (spec: MonitorSpec) => send("agent", "POST", "/control/monitors", spec),
+  removeMonitor: (name: string) => send("agent", "DELETE", `/control/monitors${q(name)}`),
+  updateMonitor: (name: string, patch: { config?: Record<string, unknown>; enabled?: boolean }) =>
+    send("agent", "PATCH", `/control/monitors${q(name)}`, patch),
+  startMonitor: (name: string) => send("agent", "POST", `/control/monitors/start${q(name)}`),
+  stopMonitor: (name: string) => send("agent", "POST", `/control/monitors/stop${q(name)}`),
 };
