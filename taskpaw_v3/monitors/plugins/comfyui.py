@@ -286,16 +286,19 @@ class ComfyUIInstance(MonitorInstance):
                              metrics={"running": running, "pending": pending})
 
     def _diagnose(self, prompt_id: Optional[str] = None) -> Optional[str]:
-        """Find the underlying error: the stuck prompt's /history error first,
-        then any recent errored prompt, then the log tail (V2)."""
+        """Find the underlying error, matching V2's two cases:
+        - STUCK (a specific running prompt): only THAT prompt's /history error —
+          NOT a recent-history scan, else an unrelated recently-errored prompt
+          would be blamed on a prompt that's merely still running (V2:1412).
+        - STALLED (nothing running, pending): scan recent /history (V2:1353).
+        Both fall back to the current run's log error (consumed each poll)."""
         cfg: ComfyUIConfig = self.config  # type: ignore[assignment]
         to = min(cfg.timeout, 10.0)
-        err = check_history_error(cfg.host, cfg.port, prompt_id, to) if prompt_id else None
-        if err is None:
+        if prompt_id:
+            err = check_history_error(cfg.host, cfg.port, prompt_id, to)
+        else:
             err = check_recent_history_errors(cfg.host, cfg.port, to)
         if err is None:
-            # The log is consumed every poll in check(); use the latest error of
-            # the current run (cleared at the idle boundary) — don't re-read here.
             err = self._recent_log_error
         return err
 

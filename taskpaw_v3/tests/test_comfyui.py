@@ -162,6 +162,20 @@ def test_stuck_alert_diagnoses_running_prompt(monkeypatch):
     assert evs and evs[0][0] == "alert"
 
 
+def test_stuck_does_not_scan_recent_history(monkeypatch):
+    # A stuck prompt with no error of its own must NOT borrow an unrelated recent
+    # prompt's error (V2 only scans recent history for the stalled case) (Codex #60).
+    def _must_not_run(*a, **k):
+        raise AssertionError("recent-history scan must not run for a stuck prompt")
+    monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: (["pid1"], 0))
+    monkeypatch.setattr(cf, "check_history_error", lambda h, p, pid, t: None)
+    monkeypatch.setattr(cf, "check_recent_history_errors", _must_not_run)
+    inst = ComfyUIInstance("comfy", _cfg(stuck_checks=1))
+    _, emit = _events()
+    st = inst.check(emit)
+    assert st.state == "error" and "(" not in st.detail   # no borrowed error cause
+
+
 def test_stall_recovers_and_can_realert(monkeypatch):
     # stalled → recovered → stalled again must alert a SECOND time (per-episode
     # one-shot, no permanent dedupe).
