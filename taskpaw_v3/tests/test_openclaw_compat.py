@@ -95,16 +95,19 @@ def test_migrates_early_v3_payload_json(tmp_path):
 def test_offline_last_seen_uses_last_reachable(tmp_path):
     s = HubStore(tmp_path / "hub.db")
     a = s.add_server("m", "1.1.1.1")
-    # reachable, then two failed polls
+    # A reachable success in the PAST (relative to now, so it sorts before the
+    # failure rows on any runner/timezone), then two failed polls at now.
+    seen = s._conn.execute(
+        "SELECT datetime('now','localtime','-1 hour')").fetchone()[0]
     s._conn.execute("INSERT INTO status_log(server_id,timestamp,reachable,status_json) "
-                    "VALUES(?, '2026-06-28 08:00:00', 1, '{}')", (a,)); s._conn.commit()
+                    "VALUES(?, ?, 1, '{}')", (a, seen)); s._conn.commit()
     s.log_status(a, False, None)
     s.log_status(a, False, None)
     row = s.latest_statuses()[0]
     assert row["reachable"] == 0
-    assert row["last_seen"] == "2026-06-28 08:00:00"   # the last GOOD poll, not now
+    assert row["last_seen"] == seen                      # the last GOOD poll, not now
     md = render_status_md(s.latest_statuses(), "now")
-    assert "OFFLINE (last seen 08:00:00)" in md         # HH:MM:SS, V2 format
+    assert f"OFFLINE (last seen {seen[11:]})" in md      # HH:MM:SS, V2 format
     s.close()
 
 
