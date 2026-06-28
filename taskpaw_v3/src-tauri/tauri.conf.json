@@ -18,6 +18,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "icon": ["icons/icon.png"],
+    "externalBin": ["binaries/taskpaw-backend"]
   }
 }

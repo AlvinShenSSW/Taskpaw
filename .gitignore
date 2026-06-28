@@ -22,3 +22,8 @@ taskpaw_v3/src-tauri/target/
 taskpaw_v3/src-tauri/gen/
 taskpaw_v3/ui/package-lock.json
 taskpaw_v3/ui/*.tsbuildinfo
+
+# V3 packaging build artifacts (#40/#41)
+/build/
+taskpaw_v3/src-tauri/binaries/
+taskpaw_v3/src-tauri/target/

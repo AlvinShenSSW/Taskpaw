@@ -67,19 +67,40 @@ mod jobobj {
 #[cfg(windows)]
 struct JobHandle(Mutex<Option<jobobj::Job>>);
 
+/// Resolve the backend command: an explicit dev override, else the bundled
+/// `taskpaw-backend` sidecar next to this executable run with the UI role (#40).
+fn backend_command() -> Option<(String, Vec<String>)> {
+    // Dev / explicit override.
+    if let Ok(program) = std::env::var("TASKPAW_BACKEND_CMD") {
+        if !program.trim().is_empty() {
+            let args = std::env::var("TASKPAW_BACKEND_ARGS")
+                .ok()
+                .map(|a| {
+                    // JSON array (argv-safe for paths with spaces) or whitespace.
+                    serde_json::from_str::<Vec<String>>(&a)
+                        .unwrap_or_else(|_| a.split_whitespace().map(str::to_string).collect())
+                })
+                .unwrap_or_default();
+            return Some((program, args));
+        }
+    }
+    // Bundled sidecar: <app-exe-dir>/taskpaw-backend[.exe], run with the role so
+    // one binary serves both agent and hub.
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let name = if cfg!(windows) { "taskpaw-backend.exe" } else { "taskpaw-backend" };
+    let path = dir.join(name);
+    if path.exists() {
+        let role = std::env::var("TASKPAW_UI_ROLE").unwrap_or_else(|_| "agent".into());
+        return Some((path.to_string_lossy().into_owned(), vec![role]));
+    }
+    None
+}
+
 fn spawn_backend() -> Option<Child> {
-    let program = std::env::var("TASKPAW_BACKEND_CMD").ok()?;
-    if program.trim().is_empty() {
-        return None;
-    }
+    let (program, args) = backend_command()?;
     let mut command = Command::new(&program);
-    if let Ok(args) = std::env::var("TASKPAW_BACKEND_ARGS") {
-        // Prefer a JSON array (argv-safe for paths with spaces, e.g. macOS
-        // "Application Support"); fall back to whitespace split for convenience.
-        let argv: Vec<String> = serde_json::from_str(&args)
-            .unwrap_or_else(|_| args.split_whitespace().map(str::to_string).collect());
-        command.args(argv);
-    }
+    command.args(args);
     // Own process group so we can signal the WHOLE backend tree on exit.
     #[cfg(unix)]
     {

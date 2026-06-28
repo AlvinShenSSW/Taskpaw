@@ -1,0 +1,48 @@
+name: release
+
+# Build downloadable V3 desktop installers (#40/#41). Trigger manually
+# (Actions → release → Run workflow) or by pushing a v* tag; download the
+# installers from the run's artifacts.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: taskpaw-macos
+          - os: windows-latest
+            artifact: taskpaw-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install Python + build deps
+        run: uv sync --extra build --extra v3
+
+      - name: Build backend sidecar + Tauri bundle
+        run: uv run python scripts/build.py
+
+      - name: Collect installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            taskpaw_v3/src-tauri/target/release/bundle/**/*.dmg
+            taskpaw_v3/src-tauri/target/release/bundle/**/*.app
+            taskpaw_v3/src-tauri/target/release/bundle/**/*.msi
+            taskpaw_v3/src-tauri/target/release/bundle/**/*.exe
