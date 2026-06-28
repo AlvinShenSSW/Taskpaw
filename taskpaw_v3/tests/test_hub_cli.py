@@ -77,6 +77,96 @@ def test_run_missing_config_returns_1(tmp_path, capsys):
     assert "No hub config" in capsys.readouterr().err
 
 
+def test_run_hard_fails_on_abandoned_legacy_db(tmp_path, capsys):
+    # hub.yaml with a REAL config-adjacent hub.db (old default) but a data_dir
+    # whose db is absent → must hard-fail, not silently start empty (Kimi).
+    cfg = tmp_path / "hub.yaml"
+    cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
+    HubStore(tmp_path / "hub.db").add_server("m", "1.1.1.1")   # real legacy db
+    rc = main(["--config", str(cfg), "run"])
+    assert rc == 1
+    assert "older one exists" in capsys.readouterr().err
+
+
+def test_zero_byte_legacy_is_not_a_conflict(tmp_path):
+    from taskpaw_v3.hub.server.service import legacy_db_conflict
+    cfg = tmp_path / "hub.yaml"
+    (tmp_path / "hub.db").write_bytes(b"")          # junk, not a real db
+    assert legacy_db_conflict(cfg, tmp_path / "newdir" / "hub.db") is None
+
+
+def test_empty_resolved_db_still_conflicts(tmp_path):
+    # a management command may have created an empty resolved db; while a real
+    # legacy db exists, that's still a conflict so `run` keeps failing (Codex).
+    from taskpaw_v3.hub.server.service import legacy_db_conflict
+    cfg = tmp_path / "hub.yaml"
+    HubStore(tmp_path / "hub.db").add_server("m", "1.1.1.1")   # legacy with data
+    resolved = tmp_path / "newdir" / "hub.db"
+    HubStore(resolved)                                          # empty resolved (0 servers)
+    assert legacy_db_conflict(cfg, resolved) == tmp_path / "hub.db"
+
+
+def test_unrelated_sqlite_at_resolved_still_conflicts(tmp_path):
+    # An unrelated SQLite file (no `servers` table) at the resolved path must NOT
+    # count as real data, so a real legacy db is still protected (Codex).
+    import sqlite3
+    from taskpaw_v3.hub.server.service import legacy_db_conflict
+    cfg = tmp_path / "hub.yaml"
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")     # real legacy
+    resolved = tmp_path / "newdir" / "hub.db"
+    resolved.parent.mkdir()
+    c = sqlite3.connect(resolved); c.execute("CREATE TABLE junk(x)"); c.commit(); c.close()
+    assert legacy_db_conflict(cfg, resolved) == tmp_path / "hub.db"
+
+
+def test_relative_data_dir_rejected():
+    import pytest as _pytest
+    from taskpaw_v3.core.config import HubConfig
+    with _pytest.raises(Exception):
+        HubConfig(data_dir="relative/dir")
+    with _pytest.raises(Exception):
+        HubConfig(data_dir="/abs/../sneaky")
+    assert HubConfig(data_dir="~/x").data_dir == "~/x"     # ~ allowed
+
+
+def test_resolved_with_servers_is_not_a_conflict(tmp_path):
+    from taskpaw_v3.hub.server.service import legacy_db_conflict
+    cfg = tmp_path / "hub.yaml"
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")
+    resolved = tmp_path / "newdir" / "hub.db"
+    HubStore(resolved).add_server("new", "2.2.2.2")            # resolved has data
+    assert legacy_db_conflict(cfg, resolved) is None
+
+
+def test_management_cmd_fatal_on_legacy_conflict(tmp_path, capsys):
+    # add-server must FAIL (like run) when a real legacy db sits beside the config
+    # and the resolved db has no data — consistent safety model (Kimi).
+    cfg = tmp_path / "hub.yaml"
+    cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")   # real legacy db
+    with pytest.raises(SystemExit) as e:
+        main(["--config", str(cfg), "add-server", "--name", "x", "--ip", "2.2.2.2"])
+    assert e.value.code == 2
+    assert "older hub.db exists" in capsys.readouterr().err
+
+
+def test_management_cmd_legacy_bypassed_with_explicit_db(tmp_path):
+    # --db is the explicit opt-in; it bypasses the legacy guard.
+    cfg = tmp_path / "hub.yaml"
+    cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")
+    rc = main(["--config", str(cfg), "--db", str(tmp_path / "explicit.db"),
+               "add-server", "--name", "x", "--ip", "2.2.2.2"])
+    assert rc == 0
+
+
+def test_store_missing_explicit_config_fails(tmp_path, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["--config", str(tmp_path / "nope.yaml"), "list-servers"])
+    assert e.value.code == 2
+    assert "config not found" in capsys.readouterr().err
+
+
 # ── platform config paths ────────────────────────────────────────────────--
 def test_default_paths(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")

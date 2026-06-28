@@ -35,6 +35,9 @@ class HubService:
             ),
             get_token=lambda: store.get_config("openclaw_token", config.openclaw_token),
             get_polling_token=lambda: store.get_config("polling_token", config.polling_token),
+            # Seed a restarted Hub's status.md as ONLINE only for agents whose last
+            # success is within ~2 polls; older successes render OFFLINE (#38).
+            seed_fresh_seconds=max(2 * config.poll_interval, 60),
         )
         self._running = threading.Event()
         self._thread: threading.Thread | None = None
@@ -79,8 +82,30 @@ class HubService:
                     self.poller.poll_once()
                 except Exception as e:
                     log.error("Poll cycle failed: %s", e)
+                # status.md / pruning are OpenClaw-compat side outputs — a failure
+                # here must never stall or kill the poll loop (#38).
+                try:
+                    self._refresh_compat_outputs()
+                except Exception as e:
+                    log.error("status.md/prune failed: %s", e)
                 next_due = now + max(1, self.config.poll_interval)
             time.sleep(0.5)
+
+    def _refresh_compat_outputs(self) -> None:
+        """Write status.md and prune old status_log rows (OpenClaw compat, #38)."""
+        if self.config.status_log_retention_days:
+            self.store.prune_status_logs(self.config.status_log_retention_days)
+        if self.config.write_status_md:
+            from datetime import datetime
+            from pathlib import Path
+
+            from taskpaw_v3.hub.server.status_md import write_status_md
+
+            path = Path(self.config.data_dir).expanduser() / "status.md"
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # From the poller's in-memory snapshot (current reachability + last
+            # good status), like V2 — status_log holds only successful polls.
+            write_status_md(path, self.poller.status_snapshot(), now)
 
     def start(self) -> None:
         self._running.set()

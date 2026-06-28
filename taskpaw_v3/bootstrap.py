@@ -91,13 +91,31 @@ def _parse_agent_spec(spec: str) -> tuple[str, str, int]:
 def register_agents(specs: list[str]) -> list[str]:
     """Register agent specs into the Hub's store. Skips duplicates (by name).
     Returns human-readable lines describing what happened."""
+    from taskpaw_v3.core.config import HubConfig, load_yaml
     from taskpaw_v3.hub.server.store import HubStore
 
     parsed = [_parse_agent_spec(s) for s in specs]  # validate all before opening DB
-    store = HubStore(hub_service.default_db_path(hub_service.default_config_path()))
-    existing = {s["name"] for s in store.list_servers()}
+    # Open the SAME db the running hub uses (HubConfig.data_dir/hub.db), not the
+    # config dir — else registered agents land in a db the hub never reads (Kimi).
+    cfg_path = hub_service.default_config_path()
+    if cfg_path.exists():
+        cfg: HubConfig = load_yaml(HubConfig, cfg_path)  # type: ignore[assignment]
+    else:
+        cfg = HubConfig()
+    db = hub_service.db_path_for(cfg)
+    legacy = hub_service.legacy_db_conflict(cfg_path, db)
+    if legacy:
+        # FATAL (consistent with the hub `run` guard): don't register into a new
+        # empty db while a real legacy one exists beside the config (Kimi).
+        raise RuntimeError(
+            f"would register into {db}, but an older hub.db exists at {legacy}. "
+            f"Move it (mv '{legacy}' '{db}') or set data_dir first.")
+    store = HubStore(db)
     lines: list[str] = []
     try:
+        # Inside the try so a failing list_servers() (corrupt/locked db) still
+        # closes the connection via finally (Kimi).
+        existing = {s["name"] for s in store.list_servers()}
         for name, ip, port in parsed:
             if name in existing:
                 lines.append(f"  · {name} already registered — skipped")
@@ -154,7 +172,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "hub" and args.agent:
         try:
             lines = register_agents(args.agent)
-        except ValueError as e:
+        except Exception as e:
+            # incl. bad spec (ValueError), legacy conflict (RuntimeError), and
+            # malformed/unreadable hub.yaml (yaml/OS errors) — clean exit, no
+            # traceback (Kimi).
             print(f"error: {e}", file=sys.stderr)
             return 2
         print("registered agents:")

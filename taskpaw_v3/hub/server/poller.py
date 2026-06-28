@@ -47,8 +47,14 @@ class Poller:
         get_token: Callable[[], str],
         get_polling_token: Optional[Callable[[], str]] = None,
         http_timeout: float = 5.0,
+        seed_fresh_seconds: float = 0.0,
     ) -> None:
         self.store = store
+        # On restart, only seed a server as ONLINE if its last successful poll is
+        # newer than this (≈ a poll interval). status_log holds only successes, so
+        # a stale last-success means the agent may have gone down while the Hub
+        # was off — don't render it ONLINE (Kimi). 0 = always trust (tests).
+        self.seed_fresh_seconds = seed_fresh_seconds
         self.openclaw_url = openclaw_url
         self.get_active = get_active   # openclaw_enabled AND token
         self.get_token = get_token     # OpenClaw token
@@ -60,6 +66,78 @@ class Poller:
         self.http_timeout = http_timeout
         self._acks_lock = threading.Lock()
         self.last_event_ids: dict[int, int] = self._load_acks()
+        # In-memory current-poll snapshot per server (reachable + last good
+        # status + last_seen) — the source for status.md, like V2's in-memory
+        # server_statuses. status_log itself only gets SUCCESSFUL polls (#38).
+        self._snap_lock = threading.Lock()
+        self._status_snapshot: dict[int, dict] = self._seed_snapshot()
+
+    def _seed_snapshot(self) -> dict[int, dict]:
+        """Seed from the persisted last-good status so status.md after a restart
+        reflects known state instead of showing every server OFFLINE until the
+        first poll (Kimi). status_log holds only successful rows, so a present
+        row means it was last reachable."""
+        seed: dict[int, dict] = {}
+        try:
+            for row in self.store.latest_statuses():
+                if row.get("status_json") is None:
+                    continue  # never polled
+                ts = row.get("last_seen") or row.get("timestamp")
+                reachable = bool(row.get("reachable"))
+                if reachable and self.seed_fresh_seconds and ts:
+                    # A stale last-success (older than ~a poll) shouldn't seed
+                    # ONLINE — the agent may have stopped while the Hub was off.
+                    try:
+                        age = (datetime.now()
+                               - datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")).total_seconds()
+                        if age > self.seed_fresh_seconds:
+                            reachable = False
+                    except (ValueError, TypeError):
+                        pass
+                seed[row["id"]] = {
+                    "reachable": reachable,
+                    "status_json": row.get("status_json"),
+                    "last_seen": ts,
+                }
+        except Exception as e:
+            # Don't fail hub startup on a transient read race, but make a real
+            # corrupt-store/schema problem visible (Kimi).
+            log.error("Could not seed status snapshot: %s", e)
+        return seed
+
+    def status_snapshot(self) -> list[dict]:
+        """Current status of each ENABLED server for status.md (registration
+        order). Servers not yet polled this run show reachable=False/no data.
+
+        Contract: called from the poller thread (HubService._loop after a poll).
+        The DB write in _poll_server and this read use different locks, which is
+        safe only under that single-thread access; if ever exposed to another
+        thread, take _snap_lock around both the DB write and the snapshot update.
+
+        Best-effort: the server list (DB) and the in-memory snapshot are read
+        separately, so a server removed between the two reads may briefly appear
+        stale in one status.md render — acceptable for a human-readable snapshot."""
+        servers = self.store.list_servers()
+        current_ids = {s["id"] for s in servers}
+        with self._snap_lock:
+            # Drop entries for removed servers so the dict can't grow without
+            # bound under add/remove churn in the long-running poller (Kimi).
+            for k in list(self._status_snapshot):
+                if k not in current_ids:
+                    self._status_snapshot.pop(k, None)
+            snaps = {k: dict(v) for k, v in self._status_snapshot.items()}
+        out: list[dict] = []
+        for s in servers:
+            if not s["enabled"]:
+                continue
+            snap = snaps.get(s["id"], {})
+            out.append({
+                "name": s["name"],
+                "reachable": bool(snap.get("reachable", False)),
+                "status_json": snap.get("status_json"),
+                "last_seen": snap.get("last_seen"),
+            })
+        return out
 
     def snapshot_acks(self) -> dict[int, int]:
         """Thread-safe copy of the ack cursor for the API thread (/status)."""
@@ -89,6 +167,36 @@ class Poller:
     def _auth_headers(self) -> dict:
         token = self.get_polling_token()
         return {"Authorization": f"Bearer {token}"} if token else {}
+
+    def fetch_status(self, server: dict) -> tuple[bool, Optional[str]]:
+        """GET the agent's /status. Returns (reachable, raw_json_or_None). A bad
+        response / unreachable host → (False, None), not an exception (#38)."""
+        base = _agent_base_url(server["ip"], server["port"])
+        try:
+            req = urllib.request.Request(f"{base}/status", headers=self._auth_headers())
+            with urllib.request.urlopen(req, timeout=self.http_timeout) as resp:
+                body = resp.read().decode("utf-8")
+            try:
+                json.loads(body)  # validate it's JSON before persisting
+            except json.JSONDecodeError as e:
+                # Reachable but returned junk → a misconfigured agent, not an
+                # outage. Log distinctly with a body snippet (Kimi).
+                log.warning("Bad /status JSON from %s: %s | body[:120]=%r",
+                            server.get("name"), e, body[:120])
+                return False, None
+            return True, body
+        except urllib.error.HTTPError as e:
+            # Surface 401/403 distinctly — a token mismatch is a config/security
+            # problem, not a down agent (Kimi).
+            if e.code in (401, 403):
+                log.warning("Auth failed polling %s (HTTP %s) — check polling_token",
+                            server.get("name"), e.code)
+            else:
+                log.warning("HTTP %s fetching status from %s", e.code, server.get("name"))
+            return False, None
+        except Exception as e:
+            log.warning("Failed to fetch status from %s: %s", server.get("name"), e)
+            return False, None
 
     def fetch_events(self, server: dict) -> list[dict]:
         base = _agent_base_url(server["ip"], server["port"])
@@ -159,33 +267,11 @@ class Poller:
         for server in self.store.list_servers():
             if not server["enabled"]:
                 continue
-            new_events = self.fetch_events(server)
-            if not new_events:
-                continue
-
-            max_id = self.last_event_ids.get(server["id"], -1)
-            for ev in new_events:
-                self.store.store_event(server["id"], ev)
-                if active:
-                    msg = f"TaskPaw Event | {server['name']}: {ev.get('message', 'Unknown event')}"
-                    # Idempotent: a crash before ack-persist re-fetches the same
-                    # event; the dedupe key keeps OpenClaw from being double-sent.
-                    self.store.enqueue_delivery(
-                        server_name=server["name"], kind="event",
-                        payload_json=json.dumps({"text": msg}),
-                        dedupe_key=f"{server['id']}:{ev.get('id')}",
-                    )
-                max_id = max(max_id, ev.get("id", max_id))
-
-            with self._acks_lock:  # serialize vs snapshot_acks() (API thread)
-                prev = self.last_event_ids.get(server["id"])
-                self.last_event_ids[server["id"]] = max_id
-                if not self._persist_acks():
-                    # Roll back the in-memory ack so the next poll re-fetches.
-                    if prev is None:
-                        self.last_event_ids.pop(server["id"], None)
-                    else:
-                        self.last_event_ids[server["id"]] = prev
+            try:
+                self._poll_server(server, active)
+            except Exception as e:
+                # One bad agent must not stall polling for the rest (Kimi).
+                log.error("Polling server %s failed: %s", server.get("name"), e)
 
         if active:
             self.drain_outbox()
@@ -194,3 +280,54 @@ class Poller:
             self.store.prune_dead_letters()
         except Exception as e:
             log.error("Dead-letter prune failed: %s", e)
+
+    def _poll_server(self, server: dict, active: bool) -> None:
+        # Snapshot the agent's status (reachable + raw /status JSON) so status.md
+        # stays fresh for OpenClaw — independent of whether there are new events.
+        reachable, status_json = self.fetch_status(server)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if reachable:
+            # V2 only wrote status_log on a SUCCESSFUL poll, so OpenClaw reading
+            # the latest row directly always sees the last GOOD status — never a
+            # failure placeholder during an outage (#38 review).
+            self.store.log_status(server["id"], True, status_json)
+        with self._snap_lock:
+            prev = self._status_snapshot.get(server["id"], {})
+            if reachable:
+                self._status_snapshot[server["id"]] = {
+                    "reachable": True, "status_json": status_json, "last_seen": now_str}
+            else:
+                # Keep the last good payload + last_seen for status.md; don't
+                # pollute status_log with an empty row.
+                self._status_snapshot[server["id"]] = {
+                    "reachable": False,
+                    "status_json": prev.get("status_json"),
+                    "last_seen": prev.get("last_seen")}
+
+        new_events = self.fetch_events(server)
+        if not new_events:
+            return
+
+        max_id = self.last_event_ids.get(server["id"], -1)
+        for ev in new_events:
+            self.store.store_event(server["id"], ev)
+            if active:
+                msg = f"TaskPaw Event | {server['name']}: {ev.get('message', 'Unknown event')}"
+                # Idempotent: a crash before ack-persist re-fetches the same
+                # event; the dedupe key keeps OpenClaw from being double-sent.
+                self.store.enqueue_delivery(
+                    server_name=server["name"], kind="event",
+                    payload_json=json.dumps({"text": msg}),
+                    dedupe_key=f"{server['id']}:{ev.get('id')}",
+                )
+            max_id = max(max_id, ev.get("id", max_id))
+
+        with self._acks_lock:  # serialize vs snapshot_acks() (API thread)
+            prev = self.last_event_ids.get(server["id"])
+            self.last_event_ids[server["id"]] = max_id
+            if not self._persist_acks():
+                # Roll back the in-memory ack so the next poll re-fetches.
+                if prev is None:
+                    self.last_event_ids.pop(server["id"], None)
+                else:
+                    self.last_event_ids[server["id"]] = prev

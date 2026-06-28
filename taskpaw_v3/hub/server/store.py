@@ -8,11 +8,27 @@ due index), and local-ISO timestamps compared lexically (consistent format).
 from __future__ import annotations
 
 import json
+import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+log = logging.getLogger("taskpaw.hub")
+
+# A SQLite identifier we're willing to splice into SQL (table names are always
+# code-controlled here, but validate so the store never establishes an
+# injection-prone pattern — Kimi).
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_LEGACY_EVENTS_RE = re.compile(r"^events_v2_legacy(_\d+)?$")
+
+
+def _safe_ident(name: str) -> str:
+    if not _IDENT_RE.match(name):
+        raise ValueError(f"unsafe SQL identifier: {name!r}")
+    return name
 
 
 def _dt(value: Optional[datetime] = None) -> str:
@@ -35,6 +51,10 @@ class HubStore:
     def _init_schema(self) -> None:
         with self._lock:
             c = self._conn.cursor()
+            # Migrate existing tables FIRST — before any CREATE INDEX — so an index
+            # (e.g. delivery_outbox.dedupe_key) is never built on a column a
+            # pre-existing V2/old-V3 table doesn't have yet (Codex).
+            self._migrate(c)
             c.execute(
                 """
                 CREATE TABLE IF NOT EXISTS servers (
@@ -53,7 +73,7 @@ class HubStore:
                     server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
                     timestamp TEXT NOT NULL,
                     reachable INTEGER NOT NULL,
-                    payload_json TEXT
+                    status_json TEXT
                 )
                 """
             )
@@ -107,7 +127,69 @@ class HubStore:
                 )
                 """
             )
+            # status_log grows one row per server per poll; index the access paths
+            # (latest-per-server + prune-by-time) to avoid full scans (Kimi).
+            c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_server_time "
+                      "ON status_log(server_id, timestamp, id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_time "
+                      "ON status_log(timestamp)")
+            # Partial index for the last_seen (last reachable) subquery.
+            c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_reachable "
+                      "ON status_log(server_id, timestamp, id) WHERE reachable = 1")
             self._conn.commit()
+
+    def _legacy_event_tables(self) -> list[str]:
+        """Names of preserved V2 event tables (events_v2_legacy[_N]) currently
+        present — they keep an FK to servers and need cleanup on remove_server."""
+        rows = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name LIKE 'events_v2_legacy%'"
+        ).fetchall()
+        # Strict allowlist — never splice an arbitrary sqlite_master name into SQL.
+        return [r[0] for r in rows if _LEGACY_EVENTS_RE.match(r[0])]
+
+    def _migrate(self, c) -> None:
+        """Bring EXISTING tables up to the current schema (CREATE IF NOT EXISTS
+        won't alter them) — runs before the CREATEs/indexes. data_dir defaults to
+        ~/.taskpaw-hub, which may already hold a V2 hub.db or an early-V3 one;
+        without this the first poll/open crashes on a missing/renamed column (#38
+        review). servers is column-compatible with V2, so it needs no change."""
+        def cols(table: str) -> set[str]:
+            return {r[1] for r in c.execute(f"PRAGMA table_info({_safe_ident(table)})").fetchall()}
+
+        slog = cols("status_log")
+        if slog:  # table pre-existed (else the later CREATE makes the right shape)
+            if "payload_json" in slog and "status_json" not in slog:
+                c.execute("ALTER TABLE status_log RENAME COLUMN payload_json TO status_json")
+            if "status_json" not in slog and "payload_json" not in slog:
+                c.execute("ALTER TABLE status_log ADD COLUMN status_json TEXT")
+            if "reachable" not in slog:
+                # V2 only logged reachable agents → legacy rows are reachable=1.
+                c.execute("ALTER TABLE status_log ADD COLUMN reachable INTEGER NOT NULL DEFAULT 1")
+
+        # V2 `events` has a different shape (no event_id) and isn't read by
+        # OpenClaw. PRESERVE it as events_v2_legacy (no silent data loss — Kimi)
+        # and let the later CREATE rebuild the V3 events table.
+        ev = cols("events")
+        if ev and "event_id" not in ev:
+            # Rename to the first FREE legacy name so we never DROP (lose) rows,
+            # even if a prior events_v2_legacy already exists (Codex/Kimi).
+            name, n = "events_v2_legacy", 1
+            while cols(name):
+                n += 1
+                name = f"events_v2_legacy_{n}"
+            c.execute(f"ALTER TABLE events RENAME TO {_safe_ident(name)}")
+            log.warning("Migrated V2 'events' table to '%s' (V3 uses a new events "
+                        "schema; old rows preserved there)", name)
+
+        # An old delivery_outbox without dedupe_key would break the dedupe index.
+        ob = cols("delivery_outbox")
+        if ob:
+            if "dedupe_key" not in ob:
+                c.execute("ALTER TABLE delivery_outbox ADD COLUMN dedupe_key TEXT")
+            if "dead_letter_alerted" not in ob:
+                c.execute("ALTER TABLE delivery_outbox ADD COLUMN "
+                          "dead_letter_alerted INTEGER NOT NULL DEFAULT 0")
 
     # ── config ────────────────────────────────────────────────────────────
     def get_config(self, key: str, default: str = "") -> str:
@@ -162,10 +244,10 @@ class HubStore:
             return cur.rowcount > 0
 
     def remove_server(self, server_id: int) -> bool:
-        """Delete a server, its status_log/events (FK cascade), AND its queued
-        OpenClaw deliveries. `delivery_outbox` keys on server_name with no FK, so
-        cascade misses it — purge those rows explicitly or removed agents keep
-        firing notifications. Returns True if a server row was removed."""
+        """Delete a server and ALL its child rows. We delete status_log/events
+        EXPLICITLY rather than rely on ON DELETE CASCADE, because a migrated V2
+        table has FKs without cascade (→ FK-violation) — and delivery_outbox keys
+        on server_name with no FK at all (Kimi). Returns True if a row was removed."""
         with self._lock:
             try:
                 row = self._conn.execute(
@@ -173,6 +255,13 @@ class HubStore:
                 ).fetchone()
                 if row is None:
                     return False
+                self._conn.execute("DELETE FROM status_log WHERE server_id=?", (server_id,))
+                self._conn.execute("DELETE FROM events WHERE server_id=?", (server_id,))
+                # Migrated V2 events_v2_legacy retains an FK to servers — clear its
+                # rows too or DELETE servers raises FK-violation (Codex/Kimi).
+                for legacy in self._legacy_event_tables():
+                    self._conn.execute(
+                        f"DELETE FROM {_safe_ident(legacy)} WHERE server_id=?", (server_id,))
                 self._conn.execute(
                     "DELETE FROM delivery_outbox WHERE server_name=?", (row[0],)
                 )
@@ -182,6 +271,60 @@ class HubStore:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    # ── status_log (OpenClaw compat: status.md + 24h history, #38) ──────────
+    def log_status(self, server_id: int, reachable: bool,
+                   status_json: Optional[str] = None) -> None:
+        """Append a status snapshot for a server (one row per poll). Timestamp is
+        SQLite localtime to match V2's status_log so OpenClaw's queries work."""
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO status_log(server_id, timestamp, reachable, status_json) "
+                    "VALUES(?, datetime('now','localtime'), ?, ?)",
+                    # Coalesce None→'{}' so a migrated V2 table (status_json NOT NULL)
+                    # doesn't IntegrityError on an unreachable snapshot (Kimi).
+                    (server_id, int(reachable), status_json if status_json is not None else "{}"),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def latest_statuses(self) -> list[dict[str, Any]]:
+        """Latest status row per registered server (LEFT JOIN, so never-polled
+        servers appear too) — the source for status.md."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT s.id, s.name, sl.reachable, sl.status_json, sl.timestamp,
+                    (SELECT timestamp FROM status_log
+                     WHERE server_id = s.id AND reachable = 1
+                     ORDER BY timestamp DESC, id DESC LIMIT 1) AS last_seen
+                FROM servers s
+                LEFT JOIN status_log sl ON sl.id = (
+                    SELECT id FROM status_log WHERE server_id = s.id
+                    ORDER BY timestamp DESC, id DESC LIMIT 1)
+                WHERE s.enabled = 1
+                ORDER BY s.id
+                """
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def prune_status_logs(self, days: int = 7) -> int:
+        """Drop status_log rows older than `days` (bounded history). Returns the
+        number deleted. days <= 0 means keep all (no-op) — matches the config
+        contract, so a stray prune(0) can't wipe history (Kimi)."""
+        if days <= 0:
+            return 0
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM status_log WHERE timestamp < datetime('now','localtime',?)",
+                (f"-{int(days)} days",),
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     # ── events ────────────────────────────────────────────────────────────
     def store_event(self, server_id: int, ev: dict) -> None:
