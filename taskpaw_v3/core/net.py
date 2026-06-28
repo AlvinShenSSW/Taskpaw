@@ -8,11 +8,22 @@ the server actually owns the socket.
 
 from __future__ import annotations
 
+import json
 import socket
 
 
 class PortInUseError(RuntimeError):
     pass
+
+
+def announce_ready(role: str, base_url: str) -> None:
+    """Print the §3.1 readiness handshake line to stdout (#48): one machine-
+    readable JSON object the Tauri shell reads before loading the webview, then
+    injects this base_url (so a custom port works and the UI never races the
+    backend). All logs go to stderr (logging.basicConfig), so stdout carries only
+    this line; flushed so a piped shell sees it immediately."""
+    print(json.dumps({"taskpaw_ready": True, "role": role, "base_url": base_url}),
+          flush=True)
 
 
 def _family(host: str) -> int:

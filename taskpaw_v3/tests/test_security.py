@@ -177,6 +177,42 @@ def test_runtime_binding_separation_and_loopback_control():
         net_sock.close()
 
 
+def test_announce_ready_emits_one_json_line(capsys):
+    # The §3.1 readiness handshake the Tauri shell parses (#48).
+    import json as _json
+    from taskpaw_v3.core.net import announce_ready
+    announce_ready("agent", "http://127.0.0.1:5681")
+    out = capsys.readouterr().out.strip()
+    assert _json.loads(out) == {"taskpaw_ready": True, "role": "agent",
+                                "base_url": "http://127.0.0.1:5681"}
+
+
+def test_run_agent_announces_readiness_with_real_control_port(capsys):
+    # run_agent must print the readiness line (role + the ACTUAL loopback control
+    # base_url) once the servers are up, so the shell can inject the real port (#48).
+    import json as _json
+    from taskpaw_v3.core.config import AgentConfig
+    from taskpaw_v3.core.net import claim_port
+    from taskpaw_v3.agent.server.launcher import run_agent
+
+    # Reserve two distinct free ports, then release them for run_agent to claim.
+    a = claim_port("127.0.0.1", 0, "p-net")
+    b = claim_port("127.0.0.1", 0, "p-ctl")
+    net_port, ctl_port = a.getsockname()[1], b.getsockname()[1]
+    a.close(); b.close()
+
+    cfg = AgentConfig(server_id="s", machine="m", host_metrics=False,
+                      bind_port=net_port, control_port=ctl_port)
+    sd = run_agent(cfg, block=False)
+    try:
+        line = next(l for l in capsys.readouterr().out.splitlines() if "taskpaw_ready" in l)
+        assert _json.loads(line) == {"taskpaw_ready": True, "role": "agent",
+                                     "base_url": f"http://127.0.0.1:{ctl_port}"}
+    finally:
+        sd.shutdown()
+        sd.stopped.wait(timeout=10)
+
+
 def test_no_token_bearing_cli_flags_in_v3_sources():
     """Constitution §2: secrets come from config/env, never argv. Guard against a
     future CLI flag that would put a token on the command line / in ps output."""
