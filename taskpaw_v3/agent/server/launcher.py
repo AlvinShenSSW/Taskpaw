@@ -37,7 +37,11 @@ def effective_monitors(config: AgentConfig) -> list[dict]:
     monitors = list(config.monitors)
     if config.host_metrics and not any(m.get("type_id") == "host_metrics" for m in monitors):
         existing = {n for m in monitors if (n := monitor_name(m))}
-        base = f"{config.machine}-host"
+        # Strip the machine BEFORE composing so the generated name matches the
+        # stripped existing names — else a whitespace-padded machine would miss
+        # the collision check and the supervisor would raise a duplicate at
+        # register (Kimi). (strip()ing the whole "m -host" would leave inner gaps.)
+        base = f"{config.machine.strip()}-host"
         name, i = base, 1
         while name in existing:
             name, i = f"{base}-{i}", i + 1

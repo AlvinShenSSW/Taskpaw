@@ -118,6 +118,18 @@ def test_remove_monitor_raises_on_duplicates_not_silent_wipe():
         remove_monitor(dupes, "a")
 
 
+def test_effective_monitors_strips_machine_for_collision():
+    from taskpaw_v3.agent.server.launcher import effective_monitors
+    # machine padded; an existing monitor already named "m-host" → injected
+    # host_metrics must avoid the collision (stripped compare), not duplicate it.
+    cfg = AgentConfig(server_id="s", machine="  m  ", monitors=[
+        {"type_id": "tcp_check", "config": {"name": "m-host", "port": 1}},
+    ])
+    names = [(mm.get("config") or {}).get("name") for mm in effective_monitors(cfg)]
+    assert names.count("m-host") == 1            # the existing one only
+    assert any(n and n.startswith("m-host-") for n in names)  # injected got a unique name
+
+
 def test_has_remove_monitor_canonicalize_query():
     base = add_monitor([], {"type_id": "tcp_check", "config": {"name": "foo", "port": 1}})
     assert has_monitor(base, "  foo  ")              # whitespace query still matches
@@ -130,6 +142,16 @@ def test_build_supervisor_bad_type_id_raises_valueerror():
     from taskpaw_v3.monitors.runtime import build_supervisor
     with pytest.raises(ValueError):                  # not TypeError on malformed YAML
         build_supervisor(default_registry(), [{"type_id": ["process"]}],
+                         EventQueue(machine="m"), "m")
+
+
+def test_build_supervisor_bad_config_raises_valueerror():
+    from taskpaw_v3.core.protocol import EventQueue
+    from taskpaw_v3.monitors.registry import default_registry
+    from taskpaw_v3.monitors.runtime import build_supervisor
+    with pytest.raises(ValueError):                  # config as a list, not TypeError
+        build_supervisor(default_registry(),
+                         [{"type_id": "tcp_check", "config": [1, 2]}],
                          EventQueue(machine="m"), "m")
 
 

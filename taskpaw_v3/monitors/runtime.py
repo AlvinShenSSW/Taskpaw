@@ -67,7 +67,10 @@ def build_supervisor(
         plugin = registry.get(type_id)
         # Accept both shapes: {type_id, name, config} (name at top level) AND
         # name-inside-config. monitor_name() is the shared resolver.
-        raw = dict(spec.get("config") or {})
+        raw_in = spec.get("config")
+        if raw_in is not None and not isinstance(raw_in, dict):
+            raise ValueError("monitor config must be an object")  # list/null → clean error (Kimi)
+        raw = dict(raw_in or {})
         if "name" not in raw:
             name = monitor_name(spec)
             if name:
