@@ -22,6 +22,29 @@ use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 
 struct Backend(Mutex<Option<Child>>);
 
+// Safety net: if Tauri `setup` fails AFTER the backend is managed (e.g. the
+// window build errors), the managed state is dropped during teardown — kill the
+// child here so it can't outlive the shell as an orphan (Unix child is in its own
+// process group, so it would otherwise survive) (Kimi). Idempotent with
+// kill_backend() on normal exit.
+impl Drop for Backend {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.0.lock() {
+            if let Some(child) = guard.as_mut() {
+                if matches!(child.try_wait(), Ok(None)) {
+                    #[cfg(unix)]
+                    signal_group(child, libc::SIGKILL);
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 mod jobobj {
     // Assign a child to a Job Object that kills the whole tree when the job
@@ -142,9 +165,25 @@ fn spawn_backend() -> Option<Child> {
         // CREATE_BREAKAWAY_FROM_JOB (so we can put the backend in OUR Job Object
         // even when the launcher is already inside one) (Kimi).
         command.creation_flags(0x08000000 | 0x00080000);
-        // The windowed shell has no console; null the backend's std handles so its
-        // logging can't fail writing to a missing console handle (Kimi).
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        // The windowed shell has no console — instead of nulling (which discards
+        // all backend logs), redirect to %APPDATA%\TaskPaw\taskpaw-backend.log so
+        // production builds are debuggable; fall back to null if it can't open
+        // (Kimi). (#48 will switch stdout to a pipe for the readiness handshake.)
+        let log = std::env::var("APPDATA").ok().and_then(|a| {
+            let dir = std::path::Path::new(&a).join("TaskPaw");
+            std::fs::create_dir_all(&dir).ok()?;
+            std::fs::File::create(dir.join("taskpaw-backend.log")).ok()
+        });
+        match log {
+            Some(f) => {
+                let err = f.try_clone().ok();
+                command.stdout(Stdio::from(f));
+                command.stderr(err.map(Stdio::from).unwrap_or_else(Stdio::null));
+            }
+            None => {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
     }
     match command.spawn() {
         Ok(c) => Some(c),
@@ -235,10 +274,14 @@ fn loopback_base(raw: &str) -> String {
         eprintln!("TASKPAW_UI_BASE {v:?} is not loopback — ignoring");
         return String::new();
     }
-    // Reconstruct WITHOUT credentials (host_port already excludes userinfo).
-    // Default to http:// when no scheme was given, so the frontend treats it as
-    // an absolute origin, not a relative path (Kimi).
+    // Only http(s) (or scheme-less → http). Reject e.g. ftp://127.0.0.1 — a
+    // non-HTTP scheme would break the frontend's HTTP client (Kimi).
     let scheme = if scheme.is_empty() { "http" } else { scheme };
+    if !matches!(scheme, "http" | "https") {
+        eprintln!("TASKPAW_UI_BASE {v:?} has a non-http(s) scheme — ignoring");
+        return String::new();
+    }
+    // Reconstruct WITHOUT credentials (host_port already excludes userinfo).
     format!("{scheme}://{host_port}{path}")
 }
 
