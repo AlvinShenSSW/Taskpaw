@@ -194,11 +194,6 @@ _MAPPERS = {
 def migrate_config(config: dict) -> MigrationPlan:
     """Build a `MigrationPlan` from a parsed V2 `config.json` dict."""
     plan = MigrationPlan(machine_name=config.get("machine_name", "") or "")
-    # V2 only auto-started watchers when this GLOBAL flag was set (taskpaw.py:147,
-    # default false); otherwise the user clicked Start per watcher. The V3 agent
-    # starts every enabled monitor on boot, so honor this for the one DANGEROUS
-    # case below (managed Lada).
-    auto_start = bool(config.get("auto_start", False))
     for w in config.get("watchers", []) or []:
         wtype = (w.get("watcher_type") or "").strip()
         name = (w.get("name") or "").strip() or wtype or "unnamed"
@@ -213,29 +208,17 @@ def migrate_config(config: dict) -> MigrationPlan:
             plan.warnings.append(MigrationWarning(sid, wtype, name, reason))
         v2_enabled = bool(w.get("enabled", True))
         enabled = v2_enabled
-        # Managed Lada LAUNCHES lada-cli on start; V2 ran it only when the user
-        # hit Start (auto_start off by default). Importing it ENABLED would auto-
-        # kick video processing on the first V3 agent boot — import it DISABLED
-        # unless V2 was set to auto-start (Codex #59 P1).
         managed_lada = wtype == "lada" and bool((w.get("lada_cli_path") or "").strip())
         if enabled and managed_lada:
-            from taskpaw_v3.monitors.plugins.lada import args_supply_io
-            args_in, args_out = args_supply_io(w.get("lada_extra_args") or "")
-            has_in = bool((w.get("lada_input_folder") or "").strip()) or args_in
-            has_out = bool((w.get("lada_output_folder") or "").strip()) or args_out
-            if not auto_start:
-                plan.warnings.append(MigrationWarning(sid, wtype, name,
-                    "managed Lada imported DISABLED (V2 auto_start was off) so it won't "
-                    "auto-launch lada-cli on agent startup — enable/Start it deliberately"))
-                enabled = False
-            elif not (has_in and has_out):
-                # An enabled managed Lada with no input/output (and none in extra
-                # args) would FAIL the lada config validator and crash agent
-                # startup — import it disabled so the config still loads (Codex #70).
-                plan.warnings.append(MigrationWarning(sid, wtype, name,
-                    "managed Lada imported DISABLED: no input/output folder (it would "
-                    "fail to load) — add the folders, then enable it"))
-                enabled = False
+            # V3 managed Lada LAUNCHES lada-cli and is operator-started each session
+            # (never auto-started at boot), so import it DISABLED regardless of V2
+            # auto_start — the operator clicks Start (#70). This also means a
+            # migrated config can never carry an enabled-but-folderless managed Lada
+            # that would fail validation at boot.
+            plan.warnings.append(MigrationWarning(sid, wtype, name,
+                "managed Lada imported DISABLED — V3 starts it on demand (click "
+                "Start); it never auto-launches lada-cli at boot"))
+            enabled = False
         if specs and not v2_enabled:
             plan.warnings.append(MigrationWarning(sid, wtype, name,
                 "watcher was disabled in V2 — carried into the agent config as "

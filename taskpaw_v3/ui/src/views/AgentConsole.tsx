@@ -108,7 +108,10 @@ function MonitorDetail({
   onError: (e: unknown) => void;
 }) {
   const [confirmDel, setConfirmDel] = useState(false);
-  const running = snap.enabled !== false && snap.state !== "stopped";
+  // Live-state, not the persisted `enabled`: a managed Lada is launched per
+  // session (Start) without persisting enabled, so "running" must follow whether
+  // it's actually live (anything but stopped), else it'd show Start while running.
+  const running = snap.state !== "stopped";
   // Only operator-configured monitors are mutable. The auto-injected host_metrics
   // self-monitor is live but NOT in config (no type_id from merge_status), so the
   // control API can't start/stop/edit/delete it — don't show controls that would
@@ -132,7 +135,6 @@ function MonitorDetail({
           <Typography variant="h6" sx={{ flex: 1 }}>{name}</Typography>
           <Chip size="small" label={snap.state} />
           {snap.degraded && <Chip size="small" color="warning" label="degraded" />}
-          {snap.enabled === false && <Chip size="small" label="disabled" />}
         </Stack>
 
         {snap.detail && (

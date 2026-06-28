@@ -247,20 +247,33 @@ def test_build_supervisor_skips_disabled():
     assert sup.has("off") is False
 
 
-def test_build_supervisor_skips_manual_start_monitors():
-    # A manual-start plugin (managed Lada launches lada-cli) is NOT auto-started
-    # at boot even when enabled — the operator clicks Start each session (#70), so
-    # opening the app doesn't kick off processing.
+def test_manual_start_is_session_only_not_persisted():
+    # Starting a manual-start monitor (managed Lada) LAUNCHES it for this session
+    # but does NOT persist enabled:true — so it stays enabled:false in config and
+    # the next agent boot leaves it stopped (the operator starts it each session,
+    # #70). A passive monitor persists enabled:true and auto-starts at boot.
+    import tempfile, pathlib
+    tmp = pathlib.Path(tempfile.mkdtemp())
     q = EventQueue(machine="m")
     reg = _registry()
     reg.register(_ManualPlugin())
-    monitors = [
-        {"type_id": "manual", "name": "j", "config": {"name": "j"}},   # enabled by default
-        {"type_id": "fake", "name": "f", "config": {"name": "f"}},
-    ]
-    sup = build_supervisor(reg, monitors, q, "m")
-    assert sup.has("j") is False      # manual → skipped at boot
-    assert sup.has("f") is True       # passive → registered
+    sup = build_supervisor(reg, [], q, "m")
+    sup.start()
+    cfg = _agent_config(monitors=[
+        {"type_id": "manual", "name": "j", "config": {"name": "j"}, "enabled": False},
+        {"type_id": "fake", "name": "f", "config": {"name": "f"}, "enabled": False},
+    ])
+    admin = MonitorAdmin(cfg, sup, reg, tmp / "a.yaml")
+    try:
+        admin.set_enabled("j", True)
+        assert sup.has("j") is True                      # launched live this session
+        assert cfg.monitors[0]["enabled"] is False       # but NOT persisted enabled
+        admin.set_enabled("f", True)
+        assert sup.has("f") is True and cfg.monitors[1]["enabled"] is True  # passive persists
+        admin.set_enabled("j", False)
+        assert sup.has("j") is False                     # stop unregisters live
+    finally:
+        sup.stop()
 
 
 def test_merge_status_shows_disabled_as_stopped():

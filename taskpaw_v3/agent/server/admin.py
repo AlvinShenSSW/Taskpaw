@@ -82,14 +82,6 @@ class MonitorAdmin:
         cfg = plugin.validate_config(raw)
         return plugin, cfg
 
-    def _register_live(self, spec: dict) -> None:
-        """Register a fresh instance into the running supervisor (no-op if no
-        supervisor). Fresh instance each time avoids reusing a stopped one."""
-        if self._sup is None:
-            return
-        plugin, cfg = self._validated_config(spec)
-        self._sup.register(plugin, cfg, instance_id=monitor_name(spec))
-
     # ── operations (each: mutate config → persist → live-apply) ────────────
     def add(self, spec: dict) -> dict[str, Any]:
         with self._lock:
@@ -141,18 +133,21 @@ class MonitorAdmin:
                 raise ValueError(f"no monitor named {str(name).strip()!r}")
             iid = monitor_name(m)
             if enabled:
-                # Validate/register BEFORE persisting enabled:true: a monitor
-                # whose stored config no longer validates (e.g. a plugin schema
-                # change while it sat disabled) must not be persisted enabled and
-                # then fail the next boot (Codex). With a supervisor this both
-                # validates and registers; without one we at least validate.
-                if self._sup is not None:
-                    if not self._sup.has(iid):
-                        self._register_live(m)
-                else:
-                    self._validated_config(m)
-                m["enabled"] = True
-                self._persist()
+                # Validate BEFORE registering/persisting: a monitor whose stored
+                # config no longer validates (e.g. a plugin schema change while it
+                # sat disabled) must not be persisted enabled and then fail the
+                # next boot (Codex).
+                plugin, cfg = self._validated_config(m)
+                if self._sup is not None and not self._sup.has(iid):
+                    self._sup.register(plugin, cfg, instance_id=iid)   # launches now
+                # A manual-start monitor (managed Lada LAUNCHES lada-cli) is a
+                # per-SESSION runtime toggle: Start launches it now but enabled
+                # stays false, so it does NOT auto-start on the next boot — the
+                # operator clicks Start each session (#70). Every other monitor
+                # persists enabled:true and auto-starts at boot.
+                if not plugin.manual_start(cfg):
+                    m["enabled"] = True
+                    self._persist()
             else:
                 m["enabled"] = False
                 self._persist()
