@@ -161,6 +161,23 @@ def _list_videos(folder: str) -> list[str]:
         return []
 
 
+def args_supply_io(extra_args: str) -> tuple[bool, bool]:
+    """Whether `lada_extra_args` explicitly passes --input / --output. Tokenize
+    and match the EXACT option (or its `--input=…` form) — a substring test would
+    wrongly accept unrelated flags like `--input-size` / `--output-format`
+    (Codex). Returns (has_input, has_output). Used by the managed-mode validator
+    AND the migrator so they agree on what counts as "I/O supplied"."""
+    try:
+        toks = shlex.split(extra_args)
+    except ValueError:
+        toks = extra_args.split()
+
+    def has(opt: str) -> bool:
+        return any(t == opt or t.startswith(opt + "=") for t in toks)
+
+    return has("--input"), has("--output")
+
+
 def _cpu_mem() -> dict:
     if psutil is None:
         return {}
@@ -205,11 +222,11 @@ class LadaConfig(BaseMonitorConfig):
         # `--input X --output Y`), so accept those too (Codex). Passive mode (no
         # CLI path) needs neither.
         if self.lada_cli_path.strip():
-            args = self.lada_extra_args.lower()
+            args_in, args_out = args_supply_io(self.lada_extra_args)
             missing = []
-            if not self.lada_input_folder.strip() and "--input" not in args:
+            if not self.lada_input_folder.strip() and not args_in:
                 missing.append("lada_input_folder")
-            if not self.lada_output_folder.strip() and "--output" not in args:
+            if not self.lada_output_folder.strip() and not args_out:
                 missing.append("lada_output_folder")
             if missing:
                 raise ValueError(

@@ -219,9 +219,10 @@ def migrate_config(config: dict) -> MigrationPlan:
         # unless V2 was set to auto-start (Codex #59 P1).
         managed_lada = wtype == "lada" and bool((w.get("lada_cli_path") or "").strip())
         if enabled and managed_lada:
-            args = (w.get("lada_extra_args") or "").lower()
-            has_in = bool((w.get("lada_input_folder") or "").strip()) or "--input" in args
-            has_out = bool((w.get("lada_output_folder") or "").strip()) or "--output" in args
+            from taskpaw_v3.monitors.plugins.lada import args_supply_io
+            args_in, args_out = args_supply_io(w.get("lada_extra_args") or "")
+            has_in = bool((w.get("lada_input_folder") or "").strip()) or args_in
+            has_out = bool((w.get("lada_output_folder") or "").strip()) or args_out
             if not auto_start:
                 plan.warnings.append(MigrationWarning(sid, wtype, name,
                     "managed Lada imported DISABLED (V2 auto_start was off) so it won't "

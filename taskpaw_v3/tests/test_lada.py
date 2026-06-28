@@ -133,6 +133,14 @@ def test_managed_requires_input_output_folders():
     # …or with --input/--output passed through extra args (Codex #70)
     LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
                lada_extra_args="--input /in --output /out")
+    # …including the --input=… form
+    LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+               lada_extra_args="--input=/in --output=/out")
+    # but LOOKALIKE flags (--input-size / --output-format) must NOT satisfy it —
+    # exact-token match, not substring (Codex #70 r3)
+    with pytest.raises(ValueError):
+        LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+                   lada_extra_args="--input-size 720 --output-format mp4")
 
 
 def test_process_name_matches_with_or_without_exe():
