@@ -8,11 +8,14 @@ due index), and local-ISO timestamps compared lexically (consistent format).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+log = logging.getLogger("taskpaw.hub")
 
 
 def _dt(value: Optional[datetime] = None) -> str:
@@ -35,6 +38,10 @@ class HubStore:
     def _init_schema(self) -> None:
         with self._lock:
             c = self._conn.cursor()
+            # Migrate existing tables FIRST — before any CREATE INDEX — so an index
+            # (e.g. delivery_outbox.dedupe_key) is never built on a column a
+            # pre-existing V2/old-V3 table doesn't have yet (Codex).
+            self._migrate(c)
             c.execute(
                 """
                 CREATE TABLE IF NOT EXISTS servers (
@@ -107,17 +114,19 @@ class HubStore:
                 )
                 """
             )
-            self._migrate(c)
             self._conn.commit()
 
     def _migrate(self, c) -> None:
         """Bring EXISTING tables up to the current schema (CREATE IF NOT EXISTS
-        won't alter them). data_dir defaults to ~/.taskpaw-hub, which may already
-        hold a V2 hub.db or an early-V3 one — without this, the first poll crashes
-        on a missing/renamed column (#38 review). servers is column-compatible
-        with V2, so it needs no change."""
-        slog = {r[1] for r in c.execute("PRAGMA table_info(status_log)").fetchall()}
-        if slog:  # table pre-existed (else the CREATE above made the right shape)
+        won't alter them) — runs before the CREATEs/indexes. data_dir defaults to
+        ~/.taskpaw-hub, which may already hold a V2 hub.db or an early-V3 one;
+        without this the first poll/open crashes on a missing/renamed column (#38
+        review). servers is column-compatible with V2, so it needs no change."""
+        def cols(table: str) -> set[str]:
+            return {r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+
+        slog = cols("status_log")
+        if slog:  # table pre-existed (else the later CREATE makes the right shape)
             if "payload_json" in slog and "status_json" not in slog:
                 c.execute("ALTER TABLE status_log RENAME COLUMN payload_json TO status_json")
             if "status_json" not in slog and "payload_json" not in slog:
@@ -126,26 +135,22 @@ class HubStore:
                 # V2 only logged reachable agents → legacy rows are reachable=1.
                 c.execute("ALTER TABLE status_log ADD COLUMN reachable INTEGER NOT NULL DEFAULT 1")
 
-        # V2 `events` has a different shape (no event_id / level / received_at) and
-        # is NOT read by OpenClaw — drop + recreate it to the V3 schema so
-        # store_event() works (V2 event history is not migrated).
-        ev = {r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()}
+        # V2 `events` has a different shape (no event_id) and isn't read by
+        # OpenClaw. PRESERVE it as events_v2_legacy (no silent data loss — Kimi)
+        # and let the later CREATE rebuild the V3 events table.
+        ev = cols("events")
         if ev and "event_id" not in ev:
-            c.execute("DROP TABLE events")
-            c.execute(
-                """
-                CREATE TABLE events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-                    event_id INTEGER NOT NULL,
-                    monitor TEXT,
-                    message TEXT,
-                    level TEXT,
-                    received_at TEXT NOT NULL,
-                    UNIQUE(server_id, event_id)
-                )
-                """
-            )
+            if cols("events_v2_legacy"):
+                c.execute("DROP TABLE events")          # legacy copy already kept
+            else:
+                c.execute("ALTER TABLE events RENAME TO events_v2_legacy")
+                log.warning("Migrated V2 'events' table to 'events_v2_legacy' "
+                            "(V3 uses a new events schema; old rows preserved there)")
+
+        # An old delivery_outbox without dedupe_key would break the dedupe index.
+        ob = cols("delivery_outbox")
+        if ob and "dedupe_key" not in ob:
+            c.execute("ALTER TABLE delivery_outbox ADD COLUMN dedupe_key TEXT")
 
     # ── config ────────────────────────────────────────────────────────────
     def get_config(self, key: str, default: str = "") -> str:
@@ -257,7 +262,7 @@ class HubStore:
                     SELECT id FROM status_log WHERE server_id = s.id
                     ORDER BY id DESC LIMIT 1)
                 WHERE s.enabled = 1
-                ORDER BY s.name
+                ORDER BY s.id
                 """
             )
             cols = [d[0] for d in cur.description]

@@ -71,7 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m taskpaw_v3.hub",
                                  description="Run the TaskPaw V3 Hub and manage polled agents.")
     ap.add_argument("--config", default=None, help="path to hub.yaml (default: platform location)")
-    ap.add_argument("--db", default=None, help="path to hub.db (default: alongside hub.yaml)")
+    ap.add_argument("--db", default=None,
+                    help="path to hub.db (default: HubConfig.data_dir/hub.db)")
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("run", help="start the Hub (poller + API)")

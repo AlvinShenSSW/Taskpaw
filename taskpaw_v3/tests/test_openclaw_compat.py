@@ -148,8 +148,9 @@ def test_log_status_unreachable_ok_on_v2_notnull(tmp_path):
     s.close()
 
 
-def test_migrates_and_recreates_v2_events(tmp_path):
-    # V2 events lacks event_id; store_event must work after open (table recreated).
+def test_migrates_v2_events_preserved_as_legacy(tmp_path):
+    # V2 events lacks event_id; store_event must work after open, and the old
+    # rows must be preserved (not silently dropped) as events_v2_legacy (Kimi).
     import sqlite3
     db = tmp_path / "hub.db"
     conn = sqlite3.connect(db)
@@ -158,9 +159,29 @@ def test_migrates_and_recreates_v2_events(tmp_path):
     conn.execute("CREATE TABLE events(id INTEGER PRIMARY KEY, server_id INTEGER, "
                  "timestamp TEXT, machine TEXT, monitor TEXT, message TEXT)")
     conn.execute("INSERT INTO servers VALUES(1,'m','1.1.1.1',5680,1)")
+    conn.execute("INSERT INTO events(server_id,timestamp,machine,monitor,message) "
+                 "VALUES(1,'t','m','x','old event')")
     conn.commit(); conn.close()
     s = HubStore(db)
-    s.store_event(1, {"id": 5, "monitor": "x", "message": "hi", "level": "info"})
+    s.store_event(1, {"id": 5, "monitor": "x", "message": "hi", "level": "info"})  # V3 schema works
+    # old rows preserved
+    legacy = s._conn.execute("SELECT message FROM events_v2_legacy").fetchall()
+    assert legacy and legacy[0][0] == "old event"
+    s.close()
+
+
+def test_migrates_v2_delivery_outbox_without_dedupe_key(tmp_path):
+    # An old delivery_outbox lacking dedupe_key must not crash index creation on
+    # open (Codex). Simulate it, then confirm the store opens and works.
+    import sqlite3
+    db = tmp_path / "hub.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE delivery_outbox(id INTEGER PRIMARY KEY, server_name TEXT, "
+                 "payload_json TEXT, kind TEXT, delivery_state TEXT, attempts INTEGER, "
+                 "last_error TEXT, next_attempt_at TEXT, created_at TEXT)")
+    conn.commit(); conn.close()
+    s = HubStore(db)                       # must not raise on the dedupe index
+    s.add_server("m", "1.1.1.1")
     s.close()
 
 
