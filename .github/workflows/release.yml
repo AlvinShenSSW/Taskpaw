@@ -15,14 +15,17 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
         # Distinct installers per role (TASKPAW_BUILD_ROLE is baked at compile
-        # time via option_env! in main.rs). Hub machines usually run headless, but
-        # ship a Hub-dashboard installer too.
+        # time via option_env! in main.rs). Hub machines usually run headless.
         role: [agent, hub]
         include:
           - os: macos-latest
             label: macos
           - os: windows-latest
             label: windows
+        # The Hub is macOS-only (design §3.2 / AGENTS.md) — no Windows Hub build.
+        exclude:
+          - os: windows-latest
+            role: hub
     runs-on: ${{ matrix.os }}
     env:
       TASKPAW_BUILD_ROLE: ${{ matrix.role }}

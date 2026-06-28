@@ -71,9 +71,11 @@ struct JobHandle(Mutex<Option<jobobj::Job>>);
 /// compile-time TASKPAW_BUILD_ROLE baked at build (so the release matrix can ship
 /// distinct agent and hub installers); else "agent".
 fn ui_role() -> String {
+    let nonblank = |s: String| Some(s).filter(|v| !v.trim().is_empty());
     std::env::var("TASKPAW_UI_ROLE")
         .ok()
-        .or_else(|| option_env!("TASKPAW_BUILD_ROLE").map(str::to_string))
+        .and_then(nonblank)
+        .or_else(|| option_env!("TASKPAW_BUILD_ROLE").map(str::to_string).and_then(nonblank))
         .unwrap_or_else(|| "agent".into())
 }
 
@@ -195,24 +197,33 @@ fn loopback_base(raw: &str) -> String {
     if v.is_empty() {
         return String::new();
     }
-    let after = v.split("://").nth(1).unwrap_or(v);
-    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+    let (scheme, rest) = v.split_once("://").unwrap_or(("", v));
+    // authority = up to the path/query/fragment; the remainder is the path.
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(auth_end);
     // Strip ANY userinfo (user:pass@) — else "http://127.0.0.1:8000@evil.com"
     // would read 127.0.0.1 as host while a browser uses evil.com, leaking the
     // injected api key to a remote origin (Codex/Kimi P1). rsplit on the LAST '@'.
     let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
     // Extract host: bracketed IPv6 "[::1]"/"[::1]:port" → between [ and ]; else
     // strip a trailing :port (rsplit so it doesn't trip on IPv6 colons).
-    let host = if let Some(rest) = host_port.strip_prefix('[') {
-        rest.split(']').next().unwrap_or("")
+    let host = if let Some(r) = host_port.strip_prefix('[') {
+        r.split(']').next().unwrap_or("")
     } else {
         host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)
     };
-    if matches!(host, "127.0.0.1" | "localhost" | "::1") {
-        v.to_string()
-    } else {
+    let host = host.to_ascii_lowercase();
+    // Accept the whole 127.0.0.0/8 loopback block + localhost + IPv6 ::1 (Kimi).
+    let is_loopback = host == "localhost" || host == "::1" || host.starts_with("127.");
+    if !is_loopback {
         eprintln!("TASKPAW_UI_BASE {v:?} is not loopback — ignoring");
-        String::new()
+        return String::new();
+    }
+    // Reconstruct WITHOUT credentials (host_port already excludes userinfo).
+    if scheme.is_empty() {
+        format!("{host_port}{path}")
+    } else {
+        format!("{scheme}://{host_port}{path}")
     }
 }
 
@@ -224,7 +235,12 @@ fn init_script() -> String {
     let role = ui_role();
     // serde_json escapes the values safely.
     let cfg = serde_json::json!({ "baseUrl": base, "apiKey": token, "role": role });
-    format!("window.__TASKPAW__ = {};", cfg)
+    // Guard by origin so the api key is never exposed if the webview ever
+    // navigates away from the local frontend to a non-loopback page (Kimi).
+    format!(
+        "if (['localhost','127.0.0.1','[::1]','::1'].includes(location.hostname) || \
+         location.protocol === 'tauri:') {{ window.__TASKPAW__ = {cfg}; }}"
+    )
 }
 
 fn main() {
@@ -244,7 +260,21 @@ fn main() {
             }
             #[cfg(windows)]
             {
-                let job = child.as_ref().and_then(jobobj::assign);
+                // If we spawned a backend but couldn't put it in a kill-on-close
+                // Job Object, the "X = exit, no orphan descendants" guarantee is
+                // broken — fail rather than risk leaking a backend tree (Kimi).
+                let job = match child.as_ref() {
+                    Some(c) => match jobobj::assign(c) {
+                        Some(j) => Some(j),
+                        None => {
+                            return Err("could not assign the backend to a Windows Job \
+                                        Object; refusing to launch to avoid orphaned \
+                                        backend processes on exit."
+                                .into());
+                        }
+                    },
+                    None => None, // dev: backend intentionally disabled
+                };
                 app.manage(JobHandle(Mutex::new(job)));
             }
             app.manage(Backend(Mutex::new(child)));
