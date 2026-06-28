@@ -183,6 +183,18 @@ class ComfyUIInstance(MonitorInstance):
         self._last_log_position = 0
         self._diag_error: Optional[str] = None   # diagnosed cause for the current episode
 
+    def start(self, emit: EventEmitter) -> None:
+        # Prime the log offset to the file's current end so diagnostics only ever
+        # consider errors written DURING this monitoring session — not a stale
+        # historical OOM/Traceback already in the file when monitoring began
+        # (Codex #60; V2 consumed the log incrementally while running).
+        cfg: ComfyUIConfig = self.config  # type: ignore[assignment]
+        if cfg.comfyui_log_path:
+            try:
+                self._last_log_position = Path(cfg.comfyui_log_path).stat().st_size
+            except OSError:
+                self._last_log_position = 0
+
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: ComfyUIConfig = self.config  # type: ignore[assignment]
         snap = queue_snapshot(cfg.host, cfg.port, min(cfg.timeout, 10.0))

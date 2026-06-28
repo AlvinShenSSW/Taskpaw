@@ -115,6 +115,23 @@ def test_bad_host_is_unreachable_not_crash():
     assert st.state == "error" and "unreachable" in st.detail
 
 
+def test_diagnose_only_session_log_errors(tmp_path, monkeypatch):
+    # An error already in the log BEFORE start() must NOT be blamed for the first
+    # stall; an error written DURING the session is the real cause (Codex #60).
+    log = tmp_path / "comfy.log"
+    log.write_text("CUDA out of memory\n", encoding="utf-8")        # pre-existing
+    monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: ([], 1))
+    monkeypatch.setattr(cf, "check_recent_history_errors", lambda h, p, t: None)
+    inst = ComfyUIInstance("comfy", _cfg(stall_confirm=1, comfyui_log_path=str(log)))
+    _, emit = _events()
+    inst.start(emit)                                               # prime past old error
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("RuntimeError: session boom\n")                    # error during session
+    st = inst.check(emit)                                          # stall → diagnose
+    assert "session boom" in st.detail
+    assert "CUDA out of memory" not in st.detail
+
+
 def test_stuck_alert_diagnoses_running_prompt(monkeypatch):
     monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: (["pid1"], 0))
     monkeypatch.setattr(cf, "check_history_error", lambda h, p, pid, t: f"err for {pid}")
