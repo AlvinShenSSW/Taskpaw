@@ -76,8 +76,12 @@ def add_monitor(monitors: list[dict], spec: dict,
     if raw_in is not None and not isinstance(raw_in, dict):
         raise ValueError("monitor config must be an object")  # not list/null (Kimi)
     raw = dict(raw_in or {})
-    if "name" not in raw and spec.get("name"):
-        raw["name"] = spec["name"]
+    top = spec.get("name")
+    if top is not None and "name" in raw and top != raw["name"]:
+        # Catch operator confusion instead of silently preferring config.name (Kimi).
+        raise ValueError(f"conflicting names: top-level {top!r} vs config {raw['name']!r}")
+    if "name" not in raw and top:
+        raw["name"] = top
     cfg = reg.get(type_id).validate_config(raw)   # authoritative validation
     name = cfg.name
     if has_monitor(monitors, name):

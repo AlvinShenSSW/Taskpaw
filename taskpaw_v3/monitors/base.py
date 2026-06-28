@@ -40,8 +40,9 @@ class EventEmitter(Protocol):
 class BaseMonitorConfig(BaseModel):
     """Common config every monitor carries (design §4.4 resource caps)."""
 
-    # Reject unknown/typo keys instead of silently dropping them.
-    model_config = ConfigDict(extra="forbid")
+    # Reject unknown/typo keys instead of silently dropping them; strip incidental
+    # whitespace so " " can't pass as a name and paths/patterns aren't space-padded.
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     name: str = Field(..., min_length=1)
     poll_interval: float = Field(10.0, ge=1.0)      # seconds, min 1s

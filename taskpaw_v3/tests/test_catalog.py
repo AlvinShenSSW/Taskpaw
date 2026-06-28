@@ -57,6 +57,17 @@ def test_add_monitor_rejects_non_object_config():
         add_monitor([], {"type_id": "tcp_check", "config": [1, 2]})   # not a dict
 
 
+def test_add_monitor_rejects_conflicting_names():
+    with pytest.raises(ValueError, match="conflicting names"):
+        add_monitor([], {"type_id": "tcp_check", "name": "a",
+                         "config": {"name": "b", "port": 1}})
+
+
+def test_add_monitor_rejects_blank_name():
+    with pytest.raises(ValueError):
+        add_monitor([], {"type_id": "tcp_check", "config": {"name": "   ", "port": 1}})
+
+
 def test_add_monitor_rejects_unknown_type():
     with pytest.raises(ValueError):
         add_monitor([], {"type_id": "nope", "config": {"name": "x"}})
