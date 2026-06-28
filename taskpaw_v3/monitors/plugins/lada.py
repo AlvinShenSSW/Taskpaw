@@ -448,6 +448,8 @@ class LadaInstance(MonitorInstance):
         return MonitorStatus(state=state, detail=self._detail(state, metrics), metrics=metrics)
 
     def _detail(self, state: str, m: dict) -> str:
+        # A clean one-line summary (the rich view is the UI metrics dashboard). Use
+        # "·" separators and a bare "N/M done" — not "error | Queue 2/49 done".
         parts = []
         if m.get("current_file"):
             parts.append(f"{state}: {m['current_file']}")
@@ -460,8 +462,8 @@ class LadaInstance(MonitorInstance):
         if m.get("eta"):
             parts.append(f"ETA {m['eta']}")
         if "queue_total" in m:
-            parts.append(f"Queue {m['queue_completed']}/{m['queue_total']} done")
-        return " | ".join(parts)
+            parts.append(f"{m['queue_completed']}/{m['queue_total']} done")
+        return " · ".join(parts)
 
     # ── snapshot / queue (V2:1021-1269) ────────────────────────────────────
     def _reconcile_snapshot(self) -> None:

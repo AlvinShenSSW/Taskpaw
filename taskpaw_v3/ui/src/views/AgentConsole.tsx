@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, type MonitorSnapshot, type PluginInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
 import { StatusDot } from "../components/StatusDot";
+import { MonitorMetrics } from "../components/MonitorMetrics";
 
 // Local control panel for ONE machine (design pages/agent-console.md): left rail
 // of this machine's monitors + an Add button; main pane = the selected monitor's
@@ -165,14 +166,7 @@ function MonitorDetail({
           </Typography>
         )}
 
-        {snap.metrics && Object.keys(snap.metrics).length > 0 && (
-          <Box sx={{ mt: 2 }}>
-            <Typography variant="overline" color="text.secondary">metrics</Typography>
-            <Box component="pre" sx={{ m: 0, fontFamily: '"Fira Code", monospace', fontSize: 13 }}>
-              {JSON.stringify(snap.metrics, null, 2)}
-            </Box>
-          </Box>
-        )}
+        <MonitorMetrics metrics={snap.metrics} />
       </CardContent>
 
       <Dialog open={confirmDel} onClose={() => setConfirmDel(false)}>
