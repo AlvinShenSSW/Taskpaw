@@ -143,7 +143,33 @@ def test_preset_refuses_existing_without_force(home, capsys):
     bootstrap.main(["agent", "--preset", "moomoo"])          # create + apply
     rc = bootstrap.main(["agent", "--preset", "moomoo"])     # again, no force
     assert rc == 2
-    assert "refusing to overwrite" in capsys.readouterr().err
+    assert "refusing to edit" in capsys.readouterr().err
+
+
+def test_bind_host_sets_lan_address(home):
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.agent.server import service as agent_service
+
+    rc = bootstrap.main(["agent", "--bind-host", "192.168.1.77"])
+    assert rc == 0
+    cfg: AgentConfig = load_yaml(AgentConfig, agent_service.default_config_path())
+    assert cfg.bind_host == "192.168.1.77"
+
+
+def test_preset_with_bind_host_together(home):
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.agent.server import service as agent_service
+
+    rc = bootstrap.main(["agent", "--preset", "moomoo", "--bind-host", "10.0.0.9"])
+    assert rc == 0
+    cfg: AgentConfig = load_yaml(AgentConfig, agent_service.default_config_path())
+    assert cfg.machine == "moomoo" and len(cfg.monitors) == 4
+    assert cfg.bind_host == "10.0.0.9"
+
+
+def test_bind_host_rejected_for_hub(home, capsys):
+    assert bootstrap.main(["hub", "--bind-host", "10.0.0.1"]) == 2
+    assert "only valid for the agent" in capsys.readouterr().err
 
 
 def test_preset_force_reapplies(home):
