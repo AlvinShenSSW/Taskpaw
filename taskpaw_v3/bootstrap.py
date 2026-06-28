@@ -111,9 +111,11 @@ def register_agents(specs: list[str]) -> list[str]:
             f"would register into {db}, but an older hub.db exists at {legacy}. "
             f"Move it (mv '{legacy}' '{db}') or set data_dir first.")
     store = HubStore(db)
-    existing = {s["name"] for s in store.list_servers()}
     lines: list[str] = []
     try:
+        # Inside the try so a failing list_servers() (corrupt/locked db) still
+        # closes the connection via finally (Kimi).
+        existing = {s["name"] for s in store.list_servers()}
         for name, ip, port in parsed:
             if name in existing:
                 lines.append(f"  · {name} already registered — skipped")

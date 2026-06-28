@@ -109,6 +109,11 @@ class Poller:
         """Current status of each ENABLED server for status.md (registration
         order). Servers not yet polled this run show reachable=False/no data.
 
+        Contract: called from the poller thread (HubService._loop after a poll).
+        The DB write in _poll_server and this read use different locks, which is
+        safe only under that single-thread access; if ever exposed to another
+        thread, take _snap_lock around both the DB write and the snapshot update.
+
         Best-effort: the server list (DB) and the in-memory snapshot are read
         separately, so a server removed between the two reads may briefly appear
         stale in one status.md render — acceptable for a human-readable snapshot."""
