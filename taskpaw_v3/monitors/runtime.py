@@ -95,6 +95,10 @@ def build_supervisor(
     """
     sup = Supervisor(sink=make_queue_sink(queue, machine))
     for spec in monitors:
+        # An explicitly disabled monitor stays in config but is NOT started (#57).
+        # Default (key absent) = enabled, so existing configs are unaffected.
+        if spec.get("enabled", True) is False:
+            continue
         type_id = spec.get("type_id")
         # str-guard before registry.has() — a malformed YAML type_id (list/null)
         # must raise ValueError, not TypeError that crashes agent startup (Kimi).

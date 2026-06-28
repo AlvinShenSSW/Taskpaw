@@ -1,0 +1,172 @@
+"""Live monitor admin (#57): per-monitor lifecycle + enabled semantics +
+atomic persistence + live-apply to the Supervisor."""
+
+from __future__ import annotations
+
+import pytest
+
+from taskpaw_v3.agent.server.admin import MonitorAdmin
+from taskpaw_v3.core.config import AgentConfig, load_yaml
+from taskpaw_v3.core.protocol import EventQueue
+from taskpaw_v3.monitors.base import (
+    BaseMonitorConfig,
+    MonitorInstance,
+    MonitorPlugin,
+    MonitorStatus,
+)
+from taskpaw_v3.monitors.registry import PluginRegistry
+from taskpaw_v3.monitors.runtime import build_supervisor
+
+
+# ── a trivial fake plugin (no psutil / network / files in worker threads) ──
+class _FakeConfig(BaseMonitorConfig):
+    pass
+
+
+class _FakeInstance(MonitorInstance):
+    def check(self, emit) -> MonitorStatus:
+        return MonitorStatus(state="ok", detail="ok")
+
+
+class _FakePlugin(MonitorPlugin):
+    type_id = "fake"
+    display_name = "Fake"
+
+    @classmethod
+    def config_model(cls):
+        return _FakeConfig
+
+    def create(self, instance_id, config):
+        return _FakeInstance(instance_id, config)
+
+
+def _registry() -> PluginRegistry:
+    r = PluginRegistry()
+    r.register(_FakePlugin())
+    return r
+
+
+def _agent_config(**kw) -> AgentConfig:
+    base = dict(server_id="s", machine="m", host_metrics=False)
+    base.update(kw)
+    return AgentConfig(**base)
+
+
+# ── config + persistence layer (supervisor=None) ──────────────────────────
+def test_admin_add_persists_and_dedupes(tmp_path):
+    cfg = _agent_config()
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+
+    res = admin.add({"type_id": "fake", "config": {"name": "w1"}})
+    assert res["ok"] and res["monitor"]["name"] == "w1"
+    assert res["monitor"]["enabled"] is True
+
+    reloaded = load_yaml(AgentConfig, path)               # atomic round-trip
+    assert [m["name"] for m in reloaded.monitors] == ["w1"]
+    assert reloaded.monitors[0]["enabled"] is True
+
+    with pytest.raises(ValueError):                       # duplicate name
+        admin.add({"type_id": "fake", "config": {"name": "w1"}})
+    with pytest.raises(ValueError):                       # unknown type
+        admin.add({"type_id": "nope", "config": {"name": "w2"}})
+
+
+def test_admin_remove(tmp_path):
+    cfg = _agent_config()
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    admin.add({"type_id": "fake", "config": {"name": "w1"}})
+
+    admin.remove("w1")
+    assert cfg.monitors == []
+    assert load_yaml(AgentConfig, path).monitors == []
+    with pytest.raises(ValueError):
+        admin.remove("missing")
+
+
+def test_admin_enable_disable_persists(tmp_path):
+    cfg = _agent_config()
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    admin.add({"type_id": "fake", "config": {"name": "w1"}})
+
+    admin.set_enabled("w1", False)
+    assert cfg.monitors[0]["enabled"] is False
+    assert load_yaml(AgentConfig, path).monitors[0]["enabled"] is False
+    admin.set_enabled("w1", True)
+    assert cfg.monitors[0]["enabled"] is True
+
+
+def test_admin_update_keeps_name(tmp_path):
+    cfg = _agent_config()
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    admin.add({"type_id": "fake", "config": {"name": "w1", "poll_interval": 10}})
+
+    admin.update("w1", {"poll_interval": 30})
+    assert cfg.monitors[0]["config"]["poll_interval"] == 30
+    assert cfg.monitors[0]["config"]["name"] == "w1"     # name is stable
+    with pytest.raises(ValueError):
+        admin.update("missing", {"poll_interval": 5})
+
+
+def test_admin_handle_dispatch(tmp_path):
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    assert admin.handle("add_monitor",
+                        {"monitor": {"type_id": "fake", "config": {"name": "x"}}})["ok"]
+    assert admin.handle("disable_monitor", {"name": "x"})["enabled"] is False
+    assert admin.handle("nope", {})["ok"] is False
+    # validation errors surface as {ok:false}, not a raised 500.
+    assert admin.handle("remove_monitor", {"name": "missing"})["ok"] is False
+
+
+# ── enabled filtering at build time ────────────────────────────────────────
+def test_build_supervisor_skips_disabled():
+    q = EventQueue(machine="m")
+    monitors = [
+        {"type_id": "fake", "name": "on", "config": {"name": "on"}},
+        {"type_id": "fake", "name": "off", "config": {"name": "off"}, "enabled": False},
+    ]
+    sup = build_supervisor(_registry(), monitors, q, "m")
+    assert sup.has("on") is True
+    assert sup.has("off") is False
+
+
+# ── supervisor live unregister ────────────────────────────────────────────
+def test_supervisor_unregister():
+    q = EventQueue(machine="m")
+    sup = build_supervisor(
+        _registry(), [{"type_id": "fake", "name": "w", "config": {"name": "w"}}], q, "m"
+    )
+    assert sup.has("w")
+    sup.start()
+    try:
+        sup.unregister("w")
+        assert sup.has("w") is False
+    finally:
+        sup.stop()
+    with pytest.raises(KeyError):
+        sup.unregister("w")
+
+
+# ── live-apply: admin drives a running supervisor ─────────────────────────
+def test_admin_live_apply(tmp_path):
+    q = EventQueue(machine="m")
+    reg = _registry()
+    sup = build_supervisor(reg, [], q, "m")     # start empty → add the first live
+    sup.start()
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, sup, reg, tmp_path / "a.yaml")
+    try:
+        admin.add({"type_id": "fake", "config": {"name": "w1"}})
+        assert sup.has("w1")
+        admin.set_enabled("w1", False)
+        assert sup.has("w1") is False           # disabled → unregistered live
+        admin.set_enabled("w1", True)
+        assert sup.has("w1") is True            # re-enabled → re-registered
+        admin.remove("w1")
+        assert sup.has("w1") is False
+    finally:
+        sup.stop()

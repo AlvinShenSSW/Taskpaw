@@ -47,7 +47,8 @@ def main() -> int:
     config: AgentConfig = load_yaml(AgentConfig, path)  # type: ignore[assignment]
     # Persist the monotonic event-id counter next to the config.
     state_path = path.with_name("agent.state.json")
-    run_agent(config, state_path=state_path, block=True)
+    # Pass the config path so the control API can persist add/remove/enable (#57).
+    run_agent(config, state_path=state_path, config_path=path, block=True)
     return 0
 
 

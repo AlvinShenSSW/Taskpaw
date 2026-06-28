@@ -13,10 +13,13 @@ monitors arrive with the plugin supervisor in #17.
 from __future__ import annotations
 
 import platform
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+
+if TYPE_CHECKING:
+    from taskpaw_v3.agent.server.admin import MonitorAdmin
 
 
 from taskpaw_v3.core.auth import token_ok
@@ -83,9 +86,12 @@ def create_control_app(
     on_command: Optional[Callable[[str, dict], dict]] = None,
     status_provider: Optional[Callable[[], dict]] = None,
     registry: Optional[PluginRegistry] = None,
+    admin: Optional["MonitorAdmin"] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""
+    from fastapi import HTTPException
+
     from taskpaw_v3.core.cors import add_ui_cors
 
     app = FastAPI(title="TaskPaw Agent Control", docs_url=None, redoc_url=None)
@@ -126,5 +132,49 @@ def create_control_app(
             return {"ok": False, "error": "no command handler"}
         name = str(body.get("command", ""))
         return on_command(name, body)
+
+    # ── monitor CRUD (#57): add/remove/update/enable/disable, persisted +
+    # live-applied. Loopback-only (this whole app binds control_host). Mounted
+    # only when an admin is wired (the headless/interactive launcher provides it).
+    if admin is not None:
+        def _guard(fn, *a):
+            try:
+                return fn(*a)
+            except ValueError as e:           # unknown type / dup / invalid config
+                raise HTTPException(status_code=400, detail=str(e))
+            except KeyError as e:             # not registered in the supervisor
+                raise HTTPException(status_code=404, detail=str(e))
+
+        @app.post("/control/monitors")
+        def add_monitor(body: dict):
+            # body = {type_id, name?, config, enabled?}
+            return _guard(admin.add, body)
+
+        @app.delete("/control/monitors/{name}")
+        def remove_monitor(name: str):
+            return _guard(admin.remove, name)
+
+        @app.patch("/control/monitors/{name}")
+        def update_monitor(name: str, body: dict):
+            # {config?: {...}, enabled?: bool} — apply enable first, then config.
+            if "config" not in body and "enabled" not in body:
+                raise HTTPException(status_code=400,
+                                    detail="patch needs 'config' and/or 'enabled'")
+            out: dict = {"ok": True, "name": name}
+            if "enabled" in body:
+                out = _guard(admin.set_enabled, name, bool(body["enabled"]))
+            if "config" in body:
+                out = _guard(admin.update, name, body["config"])
+            return out
+
+        # Start/Stop are persisted enable/disable (V2 parity: a stopped monitor
+        # stays stopped across restarts).
+        @app.post("/control/monitors/{name}/start")
+        def start_monitor(name: str):
+            return _guard(admin.set_enabled, name, True)
+
+        @app.post("/control/monitors/{name}/stop")
+        def stop_monitor(name: str):
+            return _guard(admin.set_enabled, name, False)
 
     return app

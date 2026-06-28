@@ -176,6 +176,29 @@ class Supervisor:
             if self._running.is_set():
                 self._start_worker(instance_id)
 
+    def has(self, instance_id: str) -> bool:
+        with self._lock:
+            return instance_id in self._monitors
+
+    def unregister(self, instance_id: str, timeout: float = 10.0) -> None:
+        """Stop + remove ONE monitor live (no agent restart) — used by the control
+        API's remove/disable. Serialized against register/reconfigure/stop via the
+        lifecycle lock. Raises KeyError if the instance isn't registered."""
+        with self._life:
+            with self._lock:
+                m = self._monitors.pop(instance_id, None)
+            if m is None:
+                raise KeyError(instance_id)
+            # Signal the worker, release the instance's resources first (this can
+            # unblock a running check() so the join doesn't burn the budget), then
+            # join. The worker also exits via its `_monitors.get(id) is not m`
+            # guard now that the entry is gone — and the watchdog won't restart a
+            # popped instance (its `m is None` makes `dead` False).
+            m.stop.set()
+            self._cleanup_instance(m.instance, timeout)
+            if m.thread:
+                m.thread.join(timeout=timeout)
+
     @staticmethod
     def _cleanup_instance(instance: MonitorInstance, timeout: float) -> None:
         try:
