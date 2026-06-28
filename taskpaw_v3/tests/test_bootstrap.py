@@ -37,6 +37,16 @@ def test_scaffold_hub_creates_config(home):
     assert created and path.exists() and path.name == "hub.yaml"
 
 
+def test_scaffold_agent_gets_unique_server_id(home):
+    path, _ = bootstrap.scaffold("agent")
+    text = path.read_text()
+    assert "server_id: my-agent" not in text          # placeholder replaced
+    assert "machine: my-machine" not in text
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    sid = load_yaml(AgentConfig, path).server_id
+    assert sid and sid != "my-agent"                  # a real unique id
+
+
 def test_scaffold_does_not_clobber(home):
     path, _ = bootstrap.scaffold("agent")
     path.write_text("server_id: mine\nmachine: mine\n")

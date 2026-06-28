@@ -9,10 +9,10 @@ edition = "2021"
 # declaring one without a src/lib.rs would break cargo build/check.
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "=2.11.3", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -24,4 +24,7 @@ libc = "0.2"
 # Job Object so the whole backend process tree is killed when the shell exits
 # (Windows "X = exit, no residual processes").
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_Foundation", "Win32_Security"] }
+# Win32_System_Threading is REQUIRED here — without it the build fails E0432 on
+# JOBOBJECT_EXTENDED_LIMIT_INFORMATION (empirically confirmed on the Windows
+# build, #50; windows-sys gates parts of that type's deps behind it).
+windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }

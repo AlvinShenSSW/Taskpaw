@@ -1,0 +1,65 @@
+name: release
+
+# Build downloadable V3 desktop installers (#40/#41). Trigger manually
+# (Actions → release → Run workflow) or by pushing a v* tag; download the
+# installers from the run's artifacts.
+#
+# NOTE: macOS artifacts are UNSIGNED / un-notarized (signing tracked in #49) —
+# Gatekeeper blocks a double-click; for verification right-click → Open, or
+# `xattr -dr com.apple.quarantine <app>`.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v[0-9]*"]
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      # AGENT installers only. The Hub runs HEADLESS (design §7.1: `python -m
+      # taskpaw_v3.hub run`); a GUI that spawns+kills the Hub backend on window
+      # close would risk silently stopping aggregation — a dashboard-only client
+      # is tracked separately (#52). macOS ARM64 + Intel + Windows.
+      matrix:
+        include:
+          - os: macos-latest
+            label: macos-arm64
+          - os: macos-13
+            label: macos-intel
+          - os: windows-latest
+            label: windows
+    runs-on: ${{ matrix.os }}
+    env:
+      TASKPAW_BUILD_ROLE: agent
+      # On a v* tag, stamp the bundle version from the tag (build.py strips the
+      # leading v); empty on workflow_dispatch → tauri.conf version.
+      TASKPAW_BUILD_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # release build only needs the source
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@1.96.0   # pinned for reproducible bundles
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install Python + build deps
+        run: uv sync --frozen --extra build --extra v3
+
+      - name: Build backend sidecar + Tauri bundle
+        run: uv run python scripts/build.py
+
+      - name: Collect installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: taskpaw-agent-${{ matrix.label }}
+          if-no-files-found: error
+          path: |
+            taskpaw_v3/src-tauri/target/release/bundle/**/*.dmg
+            taskpaw_v3/src-tauri/target/release/bundle/**/*.app
+            taskpaw_v3/src-tauri/target/release/bundle/**/*.msi
+            taskpaw_v3/src-tauri/target/release/bundle/**/*.exe
