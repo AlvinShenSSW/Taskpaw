@@ -100,7 +100,9 @@ class HubService:
 
             path = Path(self.config.data_dir).expanduser() / "status.md"
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            write_status_md(path, self.store.latest_statuses(), now)
+            # From the poller's in-memory snapshot (current reachability + last
+            # good status), like V2 — status_log holds only successful polls.
+            write_status_md(path, self.poller.status_snapshot(), now)
 
     def start(self) -> None:
         self._running.set()

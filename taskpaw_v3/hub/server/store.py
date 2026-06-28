@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,18 @@ from pathlib import Path
 from typing import Any, Optional
 
 log = logging.getLogger("taskpaw.hub")
+
+# A SQLite identifier we're willing to splice into SQL (table names are always
+# code-controlled here, but validate so the store never establishes an
+# injection-prone pattern — Kimi).
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_LEGACY_EVENTS_RE = re.compile(r"^events_v2_legacy(_\d+)?$")
+
+
+def _safe_ident(name: str) -> str:
+    if not _IDENT_RE.match(name):
+        raise ValueError(f"unsafe SQL identifier: {name!r}")
+    return name
 
 
 def _dt(value: Optional[datetime] = None) -> str:
@@ -123,7 +136,8 @@ class HubStore:
             "SELECT name FROM sqlite_master WHERE type='table' "
             "AND name LIKE 'events_v2_legacy%'"
         ).fetchall()
-        return [r[0] for r in rows]
+        # Strict allowlist — never splice an arbitrary sqlite_master name into SQL.
+        return [r[0] for r in rows if _LEGACY_EVENTS_RE.match(r[0])]
 
     def _migrate(self, c) -> None:
         """Bring EXISTING tables up to the current schema (CREATE IF NOT EXISTS
@@ -132,7 +146,7 @@ class HubStore:
         without this the first poll/open crashes on a missing/renamed column (#38
         review). servers is column-compatible with V2, so it needs no change."""
         def cols(table: str) -> set[str]:
-            return {r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+            return {r[1] for r in c.execute(f"PRAGMA table_info({_safe_ident(table)})").fetchall()}
 
         slog = cols("status_log")
         if slog:  # table pre-existed (else the later CREATE makes the right shape)
@@ -155,7 +169,7 @@ class HubStore:
             while cols(name):
                 n += 1
                 name = f"events_v2_legacy_{n}"
-            c.execute(f"ALTER TABLE events RENAME TO {name}")
+            c.execute(f"ALTER TABLE events RENAME TO {_safe_ident(name)}")
             log.warning("Migrated V2 'events' table to '%s' (V3 uses a new events "
                         "schema; old rows preserved there)", name)
 
@@ -233,7 +247,8 @@ class HubStore:
                 # Migrated V2 events_v2_legacy retains an FK to servers — clear its
                 # rows too or DELETE servers raises FK-violation (Codex/Kimi).
                 for legacy in self._legacy_event_tables():
-                    self._conn.execute(f"DELETE FROM {legacy} WHERE server_id=?", (server_id,))
+                    self._conn.execute(
+                        f"DELETE FROM {_safe_ident(legacy)} WHERE server_id=?", (server_id,))
                 self._conn.execute(
                     "DELETE FROM delivery_outbox WHERE server_name=?", (row[0],)
                 )

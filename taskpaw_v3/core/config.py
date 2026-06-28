@@ -92,6 +92,16 @@ class HubConfig(BaseModel):
     def _ports(cls, v: int) -> int:
         return _valid_port(v)
 
+    @field_validator("data_dir")
+    @classmethod
+    def _data_dir_not_blank(cls, v: str) -> str:
+        # An empty/whitespace data_dir resolves to a relative "./hub.db" — almost
+        # never intended. Require a real path (Kimi).
+        v = v.strip()
+        if not v:
+            raise ValueError("data_dir must not be blank")
+        return v
+
 
 def load_yaml(model: type[BaseModel], path: Path) -> BaseModel:
     """Load + validate a config model from YAML."""

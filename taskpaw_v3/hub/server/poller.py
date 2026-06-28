@@ -60,6 +60,26 @@ class Poller:
         self.http_timeout = http_timeout
         self._acks_lock = threading.Lock()
         self.last_event_ids: dict[int, int] = self._load_acks()
+        # In-memory current-poll snapshot per server (reachable + last good
+        # status + last_seen) — the source for status.md, like V2's in-memory
+        # server_statuses. status_log itself only gets SUCCESSFUL polls (#38).
+        self._status_snapshot: dict[int, dict] = {}
+
+    def status_snapshot(self) -> list[dict]:
+        """Current status of each ENABLED server for status.md (registration
+        order). Servers not yet polled this run show reachable=False/no data."""
+        out: list[dict] = []
+        for s in self.store.list_servers():
+            if not s["enabled"]:
+                continue
+            snap = self._status_snapshot.get(s["id"], {})
+            out.append({
+                "name": s["name"],
+                "reachable": bool(snap.get("reachable", False)),
+                "status_json": snap.get("status_json"),
+                "last_seen": snap.get("last_seen"),
+            })
+        return out
 
     def snapshot_acks(self) -> dict[int, int]:
         """Thread-safe copy of the ack cursor for the API thread (/status)."""
@@ -197,11 +217,25 @@ class Poller:
             log.error("Dead-letter prune failed: %s", e)
 
     def _poll_server(self, server: dict, active: bool) -> None:
-        # Snapshot the agent's status every poll (reachable + raw /status JSON)
-        # so status_log / status.md stay fresh for OpenClaw — independent of
-        # whether there are new events (#38).
+        # Snapshot the agent's status (reachable + raw /status JSON) so status.md
+        # stays fresh for OpenClaw — independent of whether there are new events.
         reachable, status_json = self.fetch_status(server)
-        self.store.log_status(server["id"], reachable, status_json)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        prev = self._status_snapshot.get(server["id"], {})
+        if reachable:
+            # V2 only wrote status_log on a SUCCESSFUL poll, so OpenClaw reading
+            # the latest row directly always sees the last GOOD status — never a
+            # failure placeholder during an outage (#38 review).
+            self.store.log_status(server["id"], True, status_json)
+            self._status_snapshot[server["id"]] = {
+                "reachable": True, "status_json": status_json, "last_seen": now_str}
+        else:
+            # Keep the last good payload + last_seen for status.md; don't pollute
+            # status_log with an empty row.
+            self._status_snapshot[server["id"]] = {
+                "reachable": False,
+                "status_json": prev.get("status_json"),
+                "last_seen": prev.get("last_seen")}
 
         new_events = self.fetch_events(server)
         if not new_events:

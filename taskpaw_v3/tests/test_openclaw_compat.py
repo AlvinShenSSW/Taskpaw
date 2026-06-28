@@ -298,6 +298,32 @@ def test_poll_once_logs_status_for_every_server(tmp_path, monkeypatch):
     s.close()
 
 
+def test_status_snapshot_offline_keeps_last_good(tmp_path, monkeypatch):
+    # status.md source: a failed poll keeps the last good status/last_seen and
+    # marks reachable False; status_log only gets the successful poll (#38 review).
+    s = HubStore(tmp_path / "hub.db")
+    sid = s.add_server("m", "127.0.0.1")
+    p = _poller(s)
+    monkeypatch.setattr(p, "fetch_events", lambda server: [])
+    states = iter([(True, json.dumps({"monitors": {"x": {"state": "ok"}}})), (False, None)])
+    monkeypatch.setattr(p, "fetch_status", lambda server: next(states))
+
+    p.poll_once()                                  # success
+    snap = p.status_snapshot()[0]
+    assert snap["reachable"] and "ok" in snap["status_json"] and snap["last_seen"]
+    good_seen = snap["last_seen"]
+
+    p.poll_once()                                  # failure
+    snap = p.status_snapshot()[0]
+    assert snap["reachable"] is False
+    assert "ok" in snap["status_json"]             # last good payload retained
+    assert snap["last_seen"] == good_seen          # last_seen frozen at last success
+    # status_log got only the ONE successful row (OpenClaw reads last-good)
+    n = s._conn.execute("SELECT COUNT(*) FROM status_log").fetchone()[0]
+    assert n == 1
+    s.close()
+
+
 def test_fetch_status_unreachable_returns_false(tmp_path, monkeypatch):
     import taskpaw_v3.hub.server.poller as mod
     s = HubStore(tmp_path / "hub.db")
