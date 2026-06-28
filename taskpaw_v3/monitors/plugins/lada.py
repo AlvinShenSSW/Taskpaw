@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
@@ -96,24 +96,36 @@ def parse_progress_line(line: str, prev: dict) -> dict:
     return out
 
 
+def _proc_name_eq(a: str, b: str) -> bool:
+    """Process names equal ignoring case AND an optional Windows '.exe' suffix —
+    so a passive `process_name` of "lada-cli" matches the actual "lada-cli.exe"
+    (the common Windows case the default would otherwise miss) (#70)."""
+    def norm(s: str) -> str:
+        s = s.strip().lower()
+        return s[:-4] if s.endswith(".exe") else s
+    return norm(a) == norm(b)
+
+
 def process_alive(name: str) -> bool:
     """True if a process named `name` is running (psutil → tasklist/pgrep
-    fallback). Case-insensitive (V2 taskpaw.py:1194)."""
+    fallback). Case-insensitive, '.exe'-tolerant (V2 taskpaw.py:1194; #70)."""
     try:
         if psutil is not None:
             for proc in psutil.process_iter(["name"]):
                 pn = proc.info.get("name")
-                if pn and pn.lower() == name.lower():
+                if pn and _proc_name_eq(pn, name):
                     return True
             return False
         if sys.platform == "win32":
+            # No IMAGENAME filter (it requires an exact name incl. .exe) — list all
+            # and match '.exe'-tolerantly.
             out = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH", "/FO", "CSV"],
+                ["tasklist", "/NH", "/FO", "CSV"],
                 capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW,
             )
             for line in out.stdout.strip().splitlines():
                 parts = line.split('","')
-                if len(parts) >= 2 and parts[0].replace('"', "").lower() == name.lower():
+                if parts and _proc_name_eq(parts[0].replace('"', ""), name):
                     return True
             return False
         out = subprocess.run(["pgrep", "-x", name], capture_output=True, text=True, timeout=5)
@@ -161,13 +173,44 @@ def _cpu_mem() -> dict:
 
 
 class LadaConfig(BaseMonitorConfig):
-    lada_cli_path: str = ""          # set → managed mode; empty → passive
-    process_name: str = "lada-cli"   # passive-mode process to detect
-    lada_input_folder: str = ""
-    lada_output_folder: str = ""
-    lada_extra_args: str = ""        # e.g. "--device cuda:1 --encoder h264_nvenc"
-    lada_gpu_monitor: bool = True
-    lada_capture_progress: bool = False  # capture stdout + parse progress (vs own console)
+    lada_cli_path: str = Field(
+        "", description="Path to lada-cli. Set it → MANAGED mode (TaskPaw launches "
+        "lada-cli, needs the input/output folders below). Leave empty → PASSIVE "
+        "mode (just watch an already-running lada-cli).")
+    process_name: str = Field(
+        "lada-cli", description="Passive mode only: the process to detect. "
+        "Matches with or without a trailing '.exe' (Windows: lada-cli.exe).")
+    lada_input_folder: str = Field(
+        "", description="Folder of videos to process (lada-cli --input). Required in "
+        "managed mode.")
+    lada_output_folder: str = Field(
+        "", description="Folder where lada-cli writes results (--output). Required in "
+        "managed mode; also drives the queue count and completion notice.")
+    lada_extra_args: str = Field(
+        "", description="Extra lada-cli flags passed verbatim, e.g. "
+        "--device cuda:1 --encoder h264_nvenc")
+    lada_gpu_monitor: bool = Field(
+        True, description="Report GPU% / VRAM via nvidia-smi (turn off on a machine "
+        "without an NVIDIA GPU).")
+    lada_capture_progress: bool = Field(
+        False, description="Advanced. Off (default): lada-cli opens its OWN console "
+        "window with its progress bar. On: capture lada's output into TaskPaw "
+        "(no separate window) to show file/%/fps/ETA in the status pane.")
+
+    @model_validator(mode="after")
+    def _managed_needs_folders(self) -> "LadaConfig":
+        # Managed mode (a CLI path) can't actually process without an input AND an
+        # output folder — require them up front rather than launch a no-op lada
+        # (#70). Passive mode (no CLI path) needs neither.
+        if self.lada_cli_path.strip():
+            missing = [f for f, v in (("lada_input_folder", self.lada_input_folder),
+                                      ("lada_output_folder", self.lada_output_folder))
+                       if not v.strip()]
+            if missing:
+                raise ValueError(
+                    "managed Lada (lada_cli_path set) needs an input AND output "
+                    f"folder; missing: {', '.join(missing)}")
+        return self
 
 
 class LadaInstance(MonitorInstance):
@@ -435,10 +478,18 @@ class LadaPlugin(MonitorPlugin):
 
     @classmethod
     def ui_schema(cls) -> dict:
+        # Lead with the fields that matter; path fields are flagged for the
+        # file/folder picker widget (#71). Help text comes from the field
+        # descriptions (rjsf renders them) — not a ui:help key.
         return {
-            "lada_cli_path": {"help": "path to lada-cli (set = managed launch; empty = passive monitor only)"},
-            "lada_extra_args": {"help": "e.g. --device cuda:1 --encoder h264_nvenc"},
-            "lada_capture_progress": {"help": "capture lada output to parse %/fps/ETA (vs its own console window)"},
+            "ui:order": [
+                "name", "lada_cli_path", "lada_input_folder", "lada_output_folder",
+                "process_name", "lada_extra_args", "lada_gpu_monitor",
+                "lada_capture_progress", "poll_interval", "timeout", "*",
+            ],
+            "lada_cli_path": {"ui:options": {"taskpawPath": "file"}},
+            "lada_input_folder": {"ui:options": {"taskpawPath": "directory"}},
+            "lada_output_folder": {"ui:options": {"taskpawPath": "directory"}},
         }
 
     def create(self, instance_id: str, config: BaseMonitorConfig) -> MonitorInstance:

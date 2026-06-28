@@ -223,6 +223,19 @@ function MonitorDialog({
     onError,
   });
 
+  // Plugin ui_schema + a clear submit label + (edit) lock the stable `name`
+  // (the backend ignores name changes on update; show it read-only) (#70).
+  const formUiSchema = useMemo(() => {
+    const base = (plugin?.ui_schema as Record<string, unknown>) ?? {};
+    return {
+      ...base,
+      "ui:submitButtonOptions": { submitText: mode === "add" ? "Add monitor" : "Save changes" },
+      ...(mode === "edit"
+        ? { name: { ...(base.name as object), "ui:readonly": true } }
+        : {}),
+    };
+  }, [plugin, mode]);
+
   return (
     <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>{mode === "add" ? "Add monitor" : `Edit “${name}”`}</DialogTitle>
@@ -239,7 +252,7 @@ function MonitorDialog({
         {plugin ? (
           <SchemaForm
             schema={plugin.json_schema}
-            uiSchema={plugin.ui_schema}
+            uiSchema={formUiSchema}
             formData={mode === "edit" ? existing?.config : undefined}
             onSubmit={(d) => save.mutate(d as Record<string, unknown>)}
           />

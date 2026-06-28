@@ -109,12 +109,35 @@ def test_cli_not_found_sets_error_and_does_not_raise(monkeypatch):
         raise FileNotFoundError()
 
     monkeypatch.setattr("taskpaw_v3.monitors.plugins.lada.subprocess.Popen", boom)
-    inst = LadaInstance("lada", _cfg(lada_cli_path="/nope/lada-cli"))
+    inst = LadaInstance("lada", _cfg(lada_cli_path="/nope/lada-cli",
+                                     lada_input_folder="/in", lada_output_folder="/out"))
     evs, emit = _events()
     inst.start(emit)                                # must NOT raise
     assert inst._launch_error and "not found" in inst._launch_error
     assert evs and evs[0][0] == "alert"
     assert inst.check(emit).state == "error"
+
+
+def test_managed_requires_input_output_folders():
+    import pytest
+    from taskpaw_v3.monitors.plugins.lada import LadaConfig
+    # managed (cli path set) without folders → rejected with a clear message (#70)
+    with pytest.raises(ValueError) as e:
+        LadaConfig(name="l", lada_cli_path="/bin/lada-cli")
+    assert "input AND output" in str(e.value)
+    # passive (no cli path) needs neither
+    LadaConfig(name="l")
+    # managed WITH folders is fine
+    LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+               lada_input_folder="/in", lada_output_folder="/out")
+
+
+def test_process_name_matches_with_or_without_exe():
+    from taskpaw_v3.monitors.plugins.lada import _proc_name_eq
+    assert _proc_name_eq("lada-cli.exe", "lada-cli")     # actual .exe vs config without
+    assert _proc_name_eq("lada-cli", "lada-cli.exe")     # and vice versa
+    assert _proc_name_eq("LADA-CLI.EXE", "lada-cli")     # case-insensitive
+    assert not _proc_name_eq("other", "lada-cli")
 
 
 def test_passive_mode_does_not_launch(monkeypatch):
@@ -144,6 +167,7 @@ def test_stop_terminates_managed_child():
     # Launch a real long-lived child and confirm stop() kills it (#40 no-orphan).
     inst = LadaInstance("lada", _cfg(
         lada_cli_path=sys.executable, lada_capture_progress=True,
+        lada_input_folder="/in", lada_output_folder="/out",
         lada_extra_args='-c "import time; time.sleep(30)"'))
     _, emit = _events()
     inst.start(emit)

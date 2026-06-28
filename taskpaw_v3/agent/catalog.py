@@ -20,12 +20,24 @@ from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
 from taskpaw_v3.monitors.runtime import canonical_name, monitor_name
 
 
+# Base UI-schema merged into every plugin: the advanced/internal caps every
+# monitor carries (BaseMonitorConfig) are hidden from the add/edit form so they
+# don't clutter it — they keep their defaults and are editable in YAML (#70).
+_BASE_UI_SCHEMA: dict[str, Any] = {
+    "max_events_per_minute": {"ui:widget": "hidden"},
+    "max_line_bytes": {"ui:widget": "hidden"},
+}
+
+
 def plugin_catalog(registry: Optional[PluginRegistry] = None) -> list[dict[str, Any]]:
     """Every selectable monitor type with its UI form schema."""
     reg = registry or default_registry()
     out: list[dict[str, Any]] = []
     for type_id in reg.types():
         p = reg.get(type_id)
+        # Plugin ui_schema overrides the base (e.g. its own ui:order), but the
+        # base field-hiding applies unless a plugin explicitly re-declares it.
+        ui = {**_BASE_UI_SCHEMA, **p.ui_schema()}
         out.append({
             "type_id": p.type_id,
             "display_name": p.display_name or p.type_id,
@@ -35,7 +47,7 @@ def plugin_catalog(registry: Optional[PluginRegistry] = None) -> list[dict[str, 
             # the UI shows them always-on and won't offer a duplicate (Kimi).
             "system": p.system,
             "json_schema": p.json_schema(),
-            "ui_schema": p.ui_schema(),
+            "ui_schema": ui,
         })
     return out
 

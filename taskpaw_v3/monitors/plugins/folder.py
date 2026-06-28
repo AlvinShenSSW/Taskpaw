@@ -24,9 +24,12 @@ from taskpaw_v3.monitors.base import (
 
 
 class FolderConfig(BaseMonitorConfig):
-    path: str = Field(..., min_length=1)
-    extensions: list[str] = []          # e.g. ["mp4","mkv"]; empty = all files
-    stable_seconds: float = Field(30.0, ge=0)
+    path: str = Field(..., min_length=1, description="Folder to watch for new files "
+                      "(e.g. a downloads dir).")
+    extensions: list[str] = Field([], description="Only watch these extensions, e.g. "
+                                  "[\"mp4\",\"mkv\"]; empty = all files.")
+    stable_seconds: float = Field(30.0, ge=0, description="A file counts as done once "
+                                  "its size hasn't changed for this many seconds.")
 
 
 class FolderInstance(MonitorInstance):
