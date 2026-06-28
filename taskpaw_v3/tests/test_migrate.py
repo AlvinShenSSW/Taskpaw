@@ -77,6 +77,17 @@ def test_lada_passive_no_output_folder_still_maps():
     assert plan.monitors[0].config["process_name"] == "lada-cli"
 
 
+def test_comfyui_carries_log_path():
+    """V3's comfyui plugin tails comfyui_log_path for error diagnostics (#60)."""
+    plan = migrate_config({"watchers": [_w(
+        watcher_type="comfyui", name="C", comfyui_host="10.0.0.5",
+        comfyui_port=9000, comfyui_log_path="/var/log/comfy.log")]})
+    m = plan.monitors[0]
+    assert m.type_id == "comfyui"
+    assert m.config["host"] == "10.0.0.5" and m.config["port"] == 9000
+    assert m.config["comfyui_log_path"] == "/var/log/comfy.log"
+
+
 def test_generic_process_watcher_maps_to_process():
     """V2 watcher_type 'process' must migrate, not fall into unknown-type (Codex #20 r2)."""
     plan = migrate_config({"watchers": [_w(watcher_type="process", name="PM2",
