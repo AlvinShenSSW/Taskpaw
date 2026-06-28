@@ -42,6 +42,14 @@ class _FakePlugin(MonitorPlugin):
         return _FakeInstance(instance_id, config)
 
 
+class _ManualPlugin(_FakePlugin):
+    """A plugin that LAUNCHES something on start → added stopped (like managed Lada)."""
+    type_id = "manual"
+
+    def manual_start(self, config):
+        return True
+
+
 def _registry() -> PluginRegistry:
     r = PluginRegistry()
     r.register(_FakePlugin())
@@ -290,6 +298,43 @@ def test_enable_monitor_with_toplevel_name_only(tmp_path):
         assert sup.has("topname")          # registered live, no validation error
     finally:
         sup.stop()
+
+
+# ── manual-start plugins are ADDED STOPPED (V2 parity, #70) ────────────────
+def test_manual_start_plugin_added_stopped(tmp_path):
+    # A monitor whose plugin wants a manual start (managed Lada launches lada-cli)
+    # is added DISABLED + NOT registered, so saving the form doesn't kick off work
+    # — the operator clicks Start. Passive monitors still auto-enable, and an
+    # explicit enabled:true still wins.
+    q = EventQueue(machine="m")
+    reg = _registry()
+    reg.register(_ManualPlugin())
+    sup = build_supervisor(reg, [], q, "m")
+    sup.start()
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, sup, reg, tmp_path / "a.yaml")
+    try:
+        res = admin.add({"type_id": "manual", "config": {"name": "j"}})
+        assert res["monitor"]["enabled"] is False
+        assert sup.has("j") is False              # not registered → nothing launched
+        res2 = admin.add({"type_id": "manual", "config": {"name": "k"}, "enabled": True})
+        assert res2["monitor"]["enabled"] is True and sup.has("k") is True   # explicit wins
+        res3 = admin.add({"type_id": "fake", "config": {"name": "f"}})
+        assert res3["monitor"]["enabled"] is True and sup.has("f") is True   # passive auto-on
+    finally:
+        sup.stop()
+
+
+def test_managed_lada_added_stopped_passive_enabled(tmp_path):
+    # The real Lada plugin: managed (CLI path) → added stopped; passive → enabled.
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, default_registry(), tmp_path / "a.yaml")
+    managed = admin.add({"type_id": "lada", "config": {
+        "name": "L", "lada_cli_path": "C:/lada-cli.exe",
+        "lada_input_folder": "C:/in", "lada_output_folder": "C:/out"}})
+    assert managed["monitor"]["enabled"] is False
+    passive = admin.add({"type_id": "lada", "config": {"name": "P", "process_name": "lada-cli"}})
+    assert passive["monitor"]["enabled"] is True
 
 
 # ── live-apply: admin drives a running supervisor ─────────────────────────

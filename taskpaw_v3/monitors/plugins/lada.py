@@ -498,5 +498,12 @@ class LadaPlugin(MonitorPlugin):
             "lada_output_folder": {"ui:options": {"taskpawPath": "directory"}},
         }
 
+    def manual_start(self, config: BaseMonitorConfig) -> bool:
+        # Managed Lada (a CLI path) LAUNCHES lada-cli on start, so add it STOPPED
+        # and let the operator click Start (V2 parity — don't begin video
+        # processing the instant the form is saved). Passive Lada (no CLI path)
+        # only watches an external process, so auto-start on add is fine.
+        return bool(getattr(config, "lada_cli_path", "").strip())
+
     def create(self, instance_id: str, config: BaseMonitorConfig) -> MonitorInstance:
         return LadaInstance(instance_id, config)  # type: ignore[arg-type]

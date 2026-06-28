@@ -106,13 +106,19 @@ class MonitorAdmin:
             # type / system plugin / duplicate name, and emits {type_id,name,config}.
             new_list = catalog.add_monitor(self._config.monitors, spec, self._reg)
             added = dict(new_list[-1])
-            added["enabled"] = _as_bool(spec.get("enabled", True))
+            # Default-enabled UNLESS the plugin wants a manual start: managed Lada
+            # LAUNCHES lada-cli on start, so (V2 parity) add it STOPPED and let the
+            # operator click Start — adding the monitor must not kick off video
+            # processing unbidden. An explicit `enabled` in the request still wins.
+            plugin, cfg = self._validated_config(added)
+            default_enabled = not plugin.manual_start(cfg)
+            added["enabled"] = _as_bool(spec.get("enabled", default_enabled))
             new_list[-1] = added
             # Register live BEFORE persisting, so a config that can't actually run
             # is never written to agent.yaml (Codex). add_monitor already
             # validated, but registering can still surface a real failure.
-            if added["enabled"]:
-                self._register_live(added)
+            if added["enabled"] and self._sup is not None:
+                self._sup.register(plugin, cfg, instance_id=monitor_name(added))
             self._config.monitors = new_list
             self._persist()
             return {"ok": True, "monitor": added}

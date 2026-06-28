@@ -85,7 +85,7 @@ export function AgentConsole() {
           name={dialog.mode === "edit" ? dialog.name : undefined}
           plugins={plugins.data?.plugins ?? []}
           onClose={() => setDialog(null)}
-          onDone={() => { setDialog(null); invalidate(); }}
+          onDone={(savedName) => { setDialog(null); if (savedName) setSelected(savedName); invalidate(); }}
           onError={onErr}
         />
       )}
@@ -139,19 +139,26 @@ function MonitorDetail({
         )}
 
         {manageable ? (
-          <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-            {running ? (
-              <Button size="small" variant="outlined" disabled={stop.isPending}
-                onClick={() => stop.mutate()}>Stop</Button>
-            ) : (
-              <Button size="small" variant="contained" disabled={start.isPending}
-                onClick={() => start.mutate()}>Start</Button>
+          <>
+            <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+              {running ? (
+                <Button size="small" variant="outlined" disabled={stop.isPending}
+                  onClick={() => stop.mutate()}>Stop</Button>
+              ) : (
+                <Button size="small" variant="contained" disabled={start.isPending}
+                  onClick={() => start.mutate()}>Start</Button>
+              )}
+              <Button size="small" variant="text" onClick={onEdit}>Edit config</Button>
+              <Box sx={{ flex: 1 }} />
+              <Button size="small" color="error" variant="text"
+                onClick={() => setConfirmDel(true)}>Delete</Button>
+            </Stack>
+            {!running && (
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
+                Stopped — click <b>Start</b> to run it, or <b>Edit config</b> to change settings.
+              </Typography>
             )}
-            <Button size="small" variant="text" onClick={onEdit}>Edit config</Button>
-            <Box sx={{ flex: 1 }} />
-            <Button size="small" color="error" variant="text"
-              onClick={() => setConfirmDel(true)}>Delete</Button>
-          </Stack>
+          </>
         ) : (
           <Typography variant="caption" color="text.secondary" sx={{ mt: 2, display: "block" }}>
             Auto-managed system monitor — always on.
@@ -189,7 +196,7 @@ function MonitorDialog({
   name?: string;
   plugins: PluginInfo[];
   onClose: () => void;
-  onDone: () => void;
+  onDone: (savedName?: string) => void;
   onError: (e: unknown) => void;
 }) {
   // Operator-selectable plugins only (host_metrics etc. are system/auto-injected).
@@ -219,7 +226,10 @@ function MonitorDialog({
       mode === "add"
         ? api.addMonitor({ type_id: typeId, config: formData })
         : api.updateMonitor(name as string, { config: formData }),
-    onSuccess: onDone,
+    // Hand back the saved monitor's name so the console can auto-select it — the
+    // operator lands on its detail pane (Start / Edit config) without hunting.
+    onSuccess: (_res, formData) =>
+      onDone(mode === "add" ? String(formData.name ?? "") || undefined : name),
     onError,
   });
 

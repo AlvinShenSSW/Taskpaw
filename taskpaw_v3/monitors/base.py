@@ -140,3 +140,11 @@ class MonitorPlugin(abc.ABC):
     def validate_config(cls, raw: dict) -> BaseMonitorConfig:
         """Validate a raw config dict against this plugin's model."""
         return cls.config_model()(**raw)
+
+    def manual_start(self, config: BaseMonitorConfig) -> bool:
+        """Should this monitor be ADDED stopped — the operator clicks Start to run
+        it — instead of auto-starting the instant the form is saved? True for
+        monitors that LAUNCH a process or have a real side effect on start (e.g.
+        managed Lada spawns lada-cli) so adding doesn't kick off work unbidden
+        (V2 parity). Default False: passive monitors just observe."""
+        return False
