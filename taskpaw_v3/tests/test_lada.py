@@ -155,6 +155,13 @@ def test_managed_requires_input_output_folders():
     with pytest.raises(ValueError):
         LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
                    lada_extra_args="--input-size 720 --output-format mp4")
+    # …nor a BARE flag / empty value that supplies no actual path (Codex #70 r8)
+    with pytest.raises(ValueError):
+        LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+                   lada_extra_args="--input --output")
+    with pytest.raises(ValueError):
+        LadaConfig(name="l", lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
+                   lada_extra_args="--output=")     # empty =value → output still missing
 
 
 def test_process_name_matches_with_or_without_exe():

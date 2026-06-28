@@ -162,18 +162,27 @@ def _list_videos(folder: str) -> list[str]:
 
 
 def args_supply_io(extra_args: str) -> tuple[bool, bool]:
-    """Whether `lada_extra_args` explicitly passes --input / --output. Tokenize
-    and match the EXACT option (or its `--input=…` form) — a substring test would
-    wrongly accept unrelated flags like `--input-size` / `--output-format`
-    (Codex). Returns (has_input, has_output). Used by the managed-mode validator
-    AND the migrator so they agree on what counts as "I/O supplied"."""
+    """Whether `lada_extra_args` explicitly passes --input / --output WITH A VALUE.
+    Tokenize and match the EXACT option — a substring test would wrongly accept
+    `--input-size` / `--output-format` (Codex), and a bare `--input` or empty
+    `--output=` supplies no path so it must NOT count either (Codex). Requires
+    `--opt VALUE` (a following non-flag token) or a non-empty `--opt=VALUE`.
+    Returns (has_input, has_output). Shared by the managed-mode validator AND the
+    migrator so they agree on what counts as "I/O supplied"."""
     try:
         toks = shlex.split(extra_args)
     except ValueError:
         toks = extra_args.split()
 
     def has(opt: str) -> bool:
-        return any(t == opt or t.startswith(opt + "=") for t in toks)
+        for i, t in enumerate(toks):
+            if t == opt:
+                nxt = toks[i + 1] if i + 1 < len(toks) else ""
+                if nxt and not nxt.startswith("-"):   # a real value follows
+                    return True
+            elif t.startswith(opt + "=") and len(t) > len(opt) + 1:  # non-empty =value
+                return True
+        return False
 
     return has("--input"), has("--output")
 
