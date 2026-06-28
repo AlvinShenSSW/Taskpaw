@@ -152,6 +152,24 @@ def test_stop_terminates_managed_child():
     assert inst._process.poll() is not None          # child terminated, no orphan
 
 
+def test_restart_resets_per_run_state():
+    # A supervisor stop→start (or watchdog respawn) re-calls start() on the SAME
+    # instance — it must reset so the new run isn't poisoned by old state (Codex).
+    inst = LadaInstance("lada", _cfg())          # passive (no real process)
+    _, emit = _events()
+    inst.start(emit)
+    inst._done_emitted = True
+    inst._prev_running = True
+    inst._stop.set()
+    with inst._lock:
+        inst._progress = {"percent": 99}
+    inst.start(emit)                             # restart
+    assert inst._done_emitted is False
+    assert inst._prev_running is None
+    assert inst._stop.is_set() is False
+    assert inst._progress == {}
+
+
 # ── registry ───────────────────────────────────────────────────────────────
 def test_lada_registered():
     reg = default_registry()

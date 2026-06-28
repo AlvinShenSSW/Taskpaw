@@ -186,6 +186,23 @@ class LadaInstance(MonitorInstance):
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self, emit: EventEmitter) -> None:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
+        # Idempotent restart (supervisor stop→start, or a watchdog respawn of
+        # this same instance): terminate any process/reader a prior run left so we
+        # never leak a duplicate lada-cli, then RESET per-run state so the new run
+        # starts clean — a stale _stop would kill the new reader, a stale
+        # _done_emitted would suppress the next completion, _prev_running could
+        # emit a phantom completion, _launch_error would mask a healthy relaunch
+        # (Codex #59).
+        if self._process is not None:
+            self.stop()
+        self._stop.clear()
+        self._done_emitted = False
+        self._launch_error = None
+        self._prev_running = None
+        self._process = None
+        self._reader = None
+        with self._lock:
+            self._progress = {}
         self._inputs = _list_videos(cfg.lada_input_folder)
         if cfg.lada_cli_path:
             self._start_managed(emit)
