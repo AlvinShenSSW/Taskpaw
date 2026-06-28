@@ -141,5 +141,12 @@ def build_supervisor(
         if name and "name" not in raw:
             raw["name"] = name
         cfg = plugin.validate_config(raw)
+        # A monitor whose plugin prefers a MANUAL start (managed Lada LAUNCHES
+        # lada-cli) is never auto-started at boot — it stays in config and shows
+        # stopped; the operator clicks Start each session, so opening the app
+        # doesn't kick off video processing (V2 parity, #70). The live control
+        # API still registers + launches it on demand.
+        if plugin.manual_start(cfg):
+            continue
         sup.register(plugin, cfg)
     return sup

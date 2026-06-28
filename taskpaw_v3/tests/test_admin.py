@@ -247,6 +247,22 @@ def test_build_supervisor_skips_disabled():
     assert sup.has("off") is False
 
 
+def test_build_supervisor_skips_manual_start_monitors():
+    # A manual-start plugin (managed Lada launches lada-cli) is NOT auto-started
+    # at boot even when enabled — the operator clicks Start each session (#70), so
+    # opening the app doesn't kick off processing.
+    q = EventQueue(machine="m")
+    reg = _registry()
+    reg.register(_ManualPlugin())
+    monitors = [
+        {"type_id": "manual", "name": "j", "config": {"name": "j"}},   # enabled by default
+        {"type_id": "fake", "name": "f", "config": {"name": "f"}},
+    ]
+    sup = build_supervisor(reg, monitors, q, "m")
+    assert sup.has("j") is False      # manual → skipped at boot
+    assert sup.has("f") is True       # passive → registered
+
+
 def test_merge_status_shows_disabled_as_stopped():
     # A disabled monitor must still appear in /status (as stopped) so the console
     # can list + re-enable it (Codex #57a).

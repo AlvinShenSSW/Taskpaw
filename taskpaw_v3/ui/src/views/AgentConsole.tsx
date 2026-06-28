@@ -143,15 +143,15 @@ function MonitorDetail({
           <>
             <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
               {running ? (
-                <Button size="small" variant="outlined" disabled={stop.isPending}
+                <Button size="small" variant="outlined" color="inherit" disabled={stop.isPending}
                   onClick={() => stop.mutate()}>Stop</Button>
               ) : (
-                <Button size="small" variant="contained" disabled={start.isPending}
+                <Button size="small" variant="contained" color="primary" disabled={start.isPending}
                   onClick={() => start.mutate()}>Start</Button>
               )}
-              <Button size="small" variant="outlined" onClick={onEdit}>Edit config</Button>
+              <Button size="small" variant="outlined" color="info" onClick={onEdit}>Edit config</Button>
               <Box sx={{ flex: 1 }} />
-              <Button size="small" color="error" variant="text"
+              <Button size="small" color="error" variant="outlined"
                 onClick={() => setConfirmDel(true)}>Delete</Button>
             </Stack>
             {!running && (
