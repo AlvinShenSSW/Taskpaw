@@ -58,6 +58,15 @@ def test_managed_lada_carries_cli_but_imported_disabled():
     assert any("imported DISABLED" in w.reason for w in plan.warnings)
 
 
+def test_managed_lada_without_io_imported_disabled_even_with_auto_start():
+    # An enabled managed Lada with no input/output would fail the lada validator
+    # and crash agent startup — import it disabled so the config loads (Codex #70).
+    plan = migrate_config({"auto_start": True, "watchers": [
+        _w(watcher_type="lada", name="Lada", lada_cli_path="C:/lada-cli.exe")]})
+    assert plan.monitors[0].enabled is False
+    assert any("no input/output" in w.reason for w in plan.warnings)
+
+
 def test_managed_lada_stays_enabled_when_v2_auto_start_on():
     """If V2 was set to auto-start, respect that intent — keep it enabled."""
     plan = migrate_config({"auto_start": True, "watchers": [_managed_lada()]})

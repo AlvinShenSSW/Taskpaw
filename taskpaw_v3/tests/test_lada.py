@@ -130,6 +130,9 @@ def test_managed_requires_input_output_folders():
     # managed WITH folders is fine
     LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
                lada_input_folder="/in", lada_output_folder="/out")
+    # …or with --input/--output passed through extra args (Codex #70)
+    LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
+               lada_extra_args="--input /in --output /out")
 
 
 def test_process_name_matches_with_or_without_exe():

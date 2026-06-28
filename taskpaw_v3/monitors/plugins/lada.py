@@ -199,17 +199,23 @@ class LadaConfig(BaseMonitorConfig):
 
     @model_validator(mode="after")
     def _managed_needs_folders(self) -> "LadaConfig":
-        # Managed mode (a CLI path) can't actually process without an input AND an
-        # output folder — require them up front rather than launch a no-op lada
-        # (#70). Passive mode (no CLI path) needs neither.
+        # Managed mode (a CLI path) can't process without an input AND an output —
+        # require them up front rather than launch a no-op lada (#70). But the
+        # operator may instead pass them through extra args (e.g.
+        # `--input X --output Y`), so accept those too (Codex). Passive mode (no
+        # CLI path) needs neither.
         if self.lada_cli_path.strip():
-            missing = [f for f, v in (("lada_input_folder", self.lada_input_folder),
-                                      ("lada_output_folder", self.lada_output_folder))
-                       if not v.strip()]
+            args = self.lada_extra_args.lower()
+            missing = []
+            if not self.lada_input_folder.strip() and "--input" not in args:
+                missing.append("lada_input_folder")
+            if not self.lada_output_folder.strip() and "--output" not in args:
+                missing.append("lada_output_folder")
             if missing:
                 raise ValueError(
                     "managed Lada (lada_cli_path set) needs an input AND output "
-                    f"folder; missing: {', '.join(missing)}")
+                    f"folder (or --input/--output in extra args); missing: "
+                    f"{', '.join(missing)}")
         return self
 
 
