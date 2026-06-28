@@ -145,15 +145,18 @@ def tail_log_for_errors(log_path: str, last_position: int) -> tuple[Optional[str
             # start, else new errors in the smaller file are ignored until it
             # grows past the old offset (Codex #60).
             last_position = 0
-        if size == 0 or size <= last_position:
-            return None, last_position
-        read_size = min(size, 8192)
+        if size <= last_position:
+            return None, last_position           # no new content
+        # Scan ONLY the bytes written since last_position so an already-consumed
+        # error still in the tail window isn't re-reported as a new episode's
+        # cause (Codex #60). Bound the read to the last 8KB of new content.
+        start = max(last_position, size - 8192)
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            if size > read_size:
-                f.seek(size - read_size)
-                f.readline()  # skip the partial first line
-            lines = f.readlines()
-        for line in reversed(lines[-_LOG_TAIL_LINES:]):
+            f.seek(start)
+            if start > last_position:
+                f.readline()                     # capped past the offset → drop partial line
+            new_lines = f.read().splitlines()
+        for line in reversed(new_lines[-_LOG_TAIL_LINES:]):
             if LOG_ERROR_PATTERNS.search(line):
                 return _cap(line), size
         return None, size

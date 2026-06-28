@@ -64,6 +64,24 @@ def test_tail_log_for_errors(tmp_path):
     assert tail_log_for_errors("", 5) == (None, 5)
 
 
+def test_tail_log_does_not_rereport_consumed_error(tmp_path):
+    # An already-consumed error must not be re-reported when the file later grows
+    # with unrelated lines (only NEW bytes after the offset are scanned); a NEW
+    # error after the offset still IS reported (Codex #60).
+    log = tmp_path / "comfy.log"
+    log.write_text("RuntimeError: boom\n", encoding="utf-8")
+    err, pos = tail_log_for_errors(str(log), 0)
+    assert err and "boom" in err
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("step 2\nstep 3\n")                 # unrelated growth
+    err2, pos2 = tail_log_for_errors(str(log), pos)
+    assert err2 is None                              # stale error not re-reported
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("CUDA out of memory\n")              # a genuinely new error
+    err3, _ = tail_log_for_errors(str(log), pos2)
+    assert err3 and "CUDA out of memory" in err3
+
+
 def test_tail_log_handles_rotation(tmp_path):
     # After the log is rotated/truncated to a SMALLER file, a new error must still
     # be detected — the saved offset can't stay stuck high (Codex #60).
