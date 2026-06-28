@@ -173,39 +173,11 @@ class Poller:
         for server in self.store.list_servers():
             if not server["enabled"]:
                 continue
-            # Snapshot the agent's status every poll (reachable + raw /status JSON)
-            # so status_log / status.md stay fresh for OpenClaw — independent of
-            # whether there are new events (#38).
-            reachable, status_json = self.fetch_status(server)
-            self.store.log_status(server["id"], reachable, status_json)
-
-            new_events = self.fetch_events(server)
-            if not new_events:
-                continue
-
-            max_id = self.last_event_ids.get(server["id"], -1)
-            for ev in new_events:
-                self.store.store_event(server["id"], ev)
-                if active:
-                    msg = f"TaskPaw Event | {server['name']}: {ev.get('message', 'Unknown event')}"
-                    # Idempotent: a crash before ack-persist re-fetches the same
-                    # event; the dedupe key keeps OpenClaw from being double-sent.
-                    self.store.enqueue_delivery(
-                        server_name=server["name"], kind="event",
-                        payload_json=json.dumps({"text": msg}),
-                        dedupe_key=f"{server['id']}:{ev.get('id')}",
-                    )
-                max_id = max(max_id, ev.get("id", max_id))
-
-            with self._acks_lock:  # serialize vs snapshot_acks() (API thread)
-                prev = self.last_event_ids.get(server["id"])
-                self.last_event_ids[server["id"]] = max_id
-                if not self._persist_acks():
-                    # Roll back the in-memory ack so the next poll re-fetches.
-                    if prev is None:
-                        self.last_event_ids.pop(server["id"], None)
-                    else:
-                        self.last_event_ids[server["id"]] = prev
+            try:
+                self._poll_server(server, active)
+            except Exception as e:
+                # One bad agent must not stall polling for the rest (Kimi).
+                log.error("Polling server %s failed: %s", server.get("name"), e)
 
         if active:
             self.drain_outbox()
@@ -214,3 +186,38 @@ class Poller:
             self.store.prune_dead_letters()
         except Exception as e:
             log.error("Dead-letter prune failed: %s", e)
+
+    def _poll_server(self, server: dict, active: bool) -> None:
+        # Snapshot the agent's status every poll (reachable + raw /status JSON)
+        # so status_log / status.md stay fresh for OpenClaw — independent of
+        # whether there are new events (#38).
+        reachable, status_json = self.fetch_status(server)
+        self.store.log_status(server["id"], reachable, status_json)
+
+        new_events = self.fetch_events(server)
+        if not new_events:
+            return
+
+        max_id = self.last_event_ids.get(server["id"], -1)
+        for ev in new_events:
+            self.store.store_event(server["id"], ev)
+            if active:
+                msg = f"TaskPaw Event | {server['name']}: {ev.get('message', 'Unknown event')}"
+                # Idempotent: a crash before ack-persist re-fetches the same
+                # event; the dedupe key keeps OpenClaw from being double-sent.
+                self.store.enqueue_delivery(
+                    server_name=server["name"], kind="event",
+                    payload_json=json.dumps({"text": msg}),
+                    dedupe_key=f"{server['id']}:{ev.get('id')}",
+                )
+            max_id = max(max_id, ev.get("id", max_id))
+
+        with self._acks_lock:  # serialize vs snapshot_acks() (API thread)
+            prev = self.last_event_ids.get(server["id"])
+            self.last_event_ids[server["id"]] = max_id
+            if not self._persist_acks():
+                # Roll back the in-memory ack so the next poll re-fetches.
+                if prev is None:
+                    self.last_event_ids.pop(server["id"], None)
+                else:
+                    self.last_event_ids[server["id"]] = prev

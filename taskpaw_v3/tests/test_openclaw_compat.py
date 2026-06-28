@@ -117,6 +117,73 @@ def test_remove_server_cascades_status_log(tmp_path):
     s.close()
 
 
+def test_latest_statuses_excludes_disabled(tmp_path):
+    # disabled servers must not appear in status.md (else OpenClaw alerts on an
+    # intentionally-off agent) (#38 review).
+    s = HubStore(tmp_path / "hub.db")
+    a = s.add_server("on", "1.1.1.1")
+    b = s.add_server("off", "2.2.2.2")
+    s.set_server_enabled(b, False)
+    s.log_status(a, True, "{}")
+    names = {r["name"] for r in s.latest_statuses()}
+    assert names == {"on"}
+    s.close()
+
+
+def test_log_status_unreachable_ok_on_v2_notnull(tmp_path):
+    # Simulate V2's status_json NOT NULL; an unreachable snapshot (None) must not
+    # IntegrityError (we coalesce to '{}') (#38 review).
+    import sqlite3
+    db = tmp_path / "hub.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+                 "port INTEGER, enabled INTEGER)")
+    conn.execute("CREATE TABLE status_log(id INTEGER PRIMARY KEY, server_id INTEGER, "
+                 "timestamp TEXT, status_json TEXT NOT NULL)")
+    conn.execute("INSERT INTO servers VALUES(1,'m','1.1.1.1',5680,1)")
+    conn.commit(); conn.close()
+    s = HubStore(db)
+    s.log_status(1, False, None)               # would IntegrityError without coalesce
+    assert s.latest_statuses()[0]["reachable"] == 0
+    s.close()
+
+
+def test_migrates_and_recreates_v2_events(tmp_path):
+    # V2 events lacks event_id; store_event must work after open (table recreated).
+    import sqlite3
+    db = tmp_path / "hub.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+                 "port INTEGER, enabled INTEGER)")
+    conn.execute("CREATE TABLE events(id INTEGER PRIMARY KEY, server_id INTEGER, "
+                 "timestamp TEXT, machine TEXT, monitor TEXT, message TEXT)")
+    conn.execute("INSERT INTO servers VALUES(1,'m','1.1.1.1',5680,1)")
+    conn.commit(); conn.close()
+    s = HubStore(db)
+    s.store_event(1, {"id": 5, "monitor": "x", "message": "hi", "level": "info"})
+    s.close()
+
+
+def test_poll_once_isolates_one_bad_server(tmp_path, monkeypatch):
+    from taskpaw_v3.hub.server.poller import Poller
+    s = HubStore(tmp_path / "hub.db")
+    bad = s.add_server("bad", "1.1.1.1")
+    good = s.add_server("good", "2.2.2.2")
+    p = Poller(store=s, openclaw_url="http://x", get_active=lambda: False,
+               get_token=lambda: "", http_timeout=1)
+
+    def fetch_status(server):
+        if server["name"] == "bad":
+            raise RuntimeError("boom")
+        return True, json.dumps({"monitors": {}})
+    monkeypatch.setattr(p, "fetch_status", fetch_status)
+    monkeypatch.setattr(p, "fetch_events", lambda server: [])
+    p.poll_once()                              # must NOT raise
+    names = {r["name"] for r in s.latest_statuses()}
+    assert "good" in names                     # good server still polled
+    s.close()
+
+
 # ── status.md rendering (V2 format) ──────────────────────────────────────--
 def test_render_status_md_matches_v2_format():
     rows = [

@@ -107,25 +107,45 @@ class HubStore:
                 )
                 """
             )
-            self._migrate_status_log(c)
+            self._migrate(c)
             self._conn.commit()
 
-    def _migrate_status_log(self, c) -> None:
-        """Bring an EXISTING status_log up to the current schema (CREATE IF NOT
-        EXISTS won't alter it). data_dir defaults to ~/.taskpaw-hub, which may
-        hold a V2 db (status_json, no `reachable`) or an early-V3 db
-        (payload_json) — without this, log_status()/latest_statuses() fail with a
-        missing-column error on the first poll (#38 review)."""
-        cols = {r[1] for r in c.execute("PRAGMA table_info(status_log)").fetchall()}
-        if not cols:
-            return  # table didn't pre-exist; the CREATE above made the right shape
-        if "payload_json" in cols and "status_json" not in cols:
-            c.execute("ALTER TABLE status_log RENAME COLUMN payload_json TO status_json")
-        if "status_json" not in cols and "payload_json" not in cols:
-            c.execute("ALTER TABLE status_log ADD COLUMN status_json TEXT")
-        if "reachable" not in cols:
-            # V2 only logged reachable agents → treat legacy rows as reachable=1.
-            c.execute("ALTER TABLE status_log ADD COLUMN reachable INTEGER NOT NULL DEFAULT 1")
+    def _migrate(self, c) -> None:
+        """Bring EXISTING tables up to the current schema (CREATE IF NOT EXISTS
+        won't alter them). data_dir defaults to ~/.taskpaw-hub, which may already
+        hold a V2 hub.db or an early-V3 one — without this, the first poll crashes
+        on a missing/renamed column (#38 review). servers is column-compatible
+        with V2, so it needs no change."""
+        slog = {r[1] for r in c.execute("PRAGMA table_info(status_log)").fetchall()}
+        if slog:  # table pre-existed (else the CREATE above made the right shape)
+            if "payload_json" in slog and "status_json" not in slog:
+                c.execute("ALTER TABLE status_log RENAME COLUMN payload_json TO status_json")
+            if "status_json" not in slog and "payload_json" not in slog:
+                c.execute("ALTER TABLE status_log ADD COLUMN status_json TEXT")
+            if "reachable" not in slog:
+                # V2 only logged reachable agents → legacy rows are reachable=1.
+                c.execute("ALTER TABLE status_log ADD COLUMN reachable INTEGER NOT NULL DEFAULT 1")
+
+        # V2 `events` has a different shape (no event_id / level / received_at) and
+        # is NOT read by OpenClaw — drop + recreate it to the V3 schema so
+        # store_event() works (V2 event history is not migrated).
+        ev = {r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()}
+        if ev and "event_id" not in ev:
+            c.execute("DROP TABLE events")
+            c.execute(
+                """
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                    event_id INTEGER NOT NULL,
+                    monitor TEXT,
+                    message TEXT,
+                    level TEXT,
+                    received_at TEXT NOT NULL,
+                    UNIQUE(server_id, event_id)
+                )
+                """
+            )
 
     # ── config ────────────────────────────────────────────────────────────
     def get_config(self, key: str, default: str = "") -> str:
@@ -180,10 +200,10 @@ class HubStore:
             return cur.rowcount > 0
 
     def remove_server(self, server_id: int) -> bool:
-        """Delete a server, its status_log/events (FK cascade), AND its queued
-        OpenClaw deliveries. `delivery_outbox` keys on server_name with no FK, so
-        cascade misses it — purge those rows explicitly or removed agents keep
-        firing notifications. Returns True if a server row was removed."""
+        """Delete a server and ALL its child rows. We delete status_log/events
+        EXPLICITLY rather than rely on ON DELETE CASCADE, because a migrated V2
+        table has FKs without cascade (→ FK-violation) — and delivery_outbox keys
+        on server_name with no FK at all (Kimi). Returns True if a row was removed."""
         with self._lock:
             try:
                 row = self._conn.execute(
@@ -191,6 +211,8 @@ class HubStore:
                 ).fetchone()
                 if row is None:
                     return False
+                self._conn.execute("DELETE FROM status_log WHERE server_id=?", (server_id,))
+                self._conn.execute("DELETE FROM events WHERE server_id=?", (server_id,))
                 self._conn.execute(
                     "DELETE FROM delivery_outbox WHERE server_name=?", (row[0],)
                 )
@@ -211,7 +233,9 @@ class HubStore:
                 self._conn.execute(
                     "INSERT INTO status_log(server_id, timestamp, reachable, status_json) "
                     "VALUES(?, datetime('now','localtime'), ?, ?)",
-                    (server_id, int(reachable), status_json),
+                    # Coalesce None→'{}' so a migrated V2 table (status_json NOT NULL)
+                    # doesn't IntegrityError on an unreachable snapshot (Kimi).
+                    (server_id, int(reachable), status_json if status_json is not None else "{}"),
                 )
                 self._conn.commit()
             except Exception:
@@ -232,6 +256,7 @@ class HubStore:
                 LEFT JOIN status_log sl ON sl.id = (
                     SELECT id FROM status_log WHERE server_id = s.id
                     ORDER BY id DESC LIMIT 1)
+                WHERE s.enabled = 1
                 ORDER BY s.name
                 """
             )

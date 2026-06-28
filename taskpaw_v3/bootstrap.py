@@ -91,10 +91,18 @@ def _parse_agent_spec(spec: str) -> tuple[str, str, int]:
 def register_agents(specs: list[str]) -> list[str]:
     """Register agent specs into the Hub's store. Skips duplicates (by name).
     Returns human-readable lines describing what happened."""
+    from taskpaw_v3.core.config import HubConfig, load_yaml
     from taskpaw_v3.hub.server.store import HubStore
 
     parsed = [_parse_agent_spec(s) for s in specs]  # validate all before opening DB
-    store = HubStore(hub_service.default_db_path(hub_service.default_config_path()))
+    # Open the SAME db the running hub uses (HubConfig.data_dir/hub.db), not the
+    # config dir — else registered agents land in a db the hub never reads (Kimi).
+    cfg_path = hub_service.default_config_path()
+    if cfg_path.exists():
+        cfg: HubConfig = load_yaml(HubConfig, cfg_path)  # type: ignore[assignment]
+    else:
+        cfg = HubConfig()
+    store = HubStore(hub_service.db_path_for(cfg))
     existing = {s["name"] for s in store.list_servers()}
     lines: list[str] = []
     try:
