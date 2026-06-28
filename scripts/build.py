@@ -102,8 +102,9 @@ def build_tauri() -> None:
         "identifier": f"com.taskpaw.app.{role}",
         "productName": f"TaskPaw {role.capitalize()}",
     })
-    # Pin the Tauri CLI for reproducible bundles; beforeBuildCommand builds the UI.
-    run(["npx", "--yes", TAURI_CLI, "build", "--config", overrides], cwd=SRC_TAURI)
+    # --ci: never prompt (headless runners would hang). Pin the CLI for
+    # reproducible bundles; beforeBuildCommand builds the UI.
+    run(["npx", "--yes", TAURI_CLI, "build", "--ci", "--config", overrides], cwd=SRC_TAURI)
     print("bundle -> " + str(SRC_TAURI / "target" / "release" / "bundle"), flush=True)
 
 

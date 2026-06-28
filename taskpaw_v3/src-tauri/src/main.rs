@@ -134,12 +134,17 @@ fn spawn_backend() -> Option<Child> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    // Don't pop a console window for the console-subsystem backend exe on Windows
-    // (the Tauri shell is a windowed app) (Kimi).
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        use std::process::Stdio;
+        // CREATE_NO_WINDOW (no console flash for the windowed shell's child) |
+        // CREATE_BREAKAWAY_FROM_JOB (so we can put the backend in OUR Job Object
+        // even when the launcher is already inside one) (Kimi).
+        command.creation_flags(0x08000000 | 0x00080000);
+        // The windowed shell has no console; null the backend's std handles so its
+        // logging can't fail writing to a missing console handle (Kimi).
+        command.stdout(Stdio::null()).stderr(Stdio::null());
     }
     match command.spawn() {
         Ok(c) => Some(c),
@@ -231,11 +236,10 @@ fn loopback_base(raw: &str) -> String {
         return String::new();
     }
     // Reconstruct WITHOUT credentials (host_port already excludes userinfo).
-    if scheme.is_empty() {
-        format!("{host_port}{path}")
-    } else {
-        format!("{scheme}://{host_port}{path}")
-    }
+    // Default to http:// when no scheme was given, so the frontend treats it as
+    // an absolute origin, not a relative path (Kimi).
+    let scheme = if scheme.is_empty() { "http" } else { scheme };
+    format!("{scheme}://{host_port}{path}")
 }
 
 /// Runtime config injected on the loopback origin (design §3.1) — packaged
@@ -342,6 +346,8 @@ mod tests {
         assert_eq!(loopback_base("http://[::1]:5681"), "http://[::1]:5681");
         assert_eq!(loopback_base("http://[::1]"), "http://[::1]");
         assert_eq!(loopback_base(""), "");
+        // scheme-less → default http:// so the frontend sees an absolute origin
+        assert_eq!(loopback_base("127.0.0.1:5681"), "http://127.0.0.1:5681");
     }
 
     #[test]
