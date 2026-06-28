@@ -32,7 +32,7 @@ def test_cli_text_preview(tmp_path, capsys):
     assert rc == 0
     assert "BlackGoldPig" in out
     assert "cursor : 99" in out
-    assert "folder" in out and "comfyui" in out      # mapped monitors
+    assert "lada" in out and "comfyui" in out         # mapped monitors
     assert "DISABLED" in out                          # disabled custom_cmd flagged
     assert "macsubs" in out                           # unknown type warned
 
@@ -43,11 +43,12 @@ def test_cli_yaml_block_is_pasteable(tmp_path, capsys):
     assert rc == 0
     parsed = yaml.safe_load(out)
     assert "monitors" in parsed
-    names = [m["name"] for m in parsed["monitors"]]
-    assert "Lada" in names and "Comfy" in names       # enabled, mapped
-    assert "Off" not in names                          # disabled excluded
+    by_name = {m["name"]: m for m in parsed["monitors"]}
+    assert "Lada" in by_name and "Comfy" in by_name    # enabled, mapped
+    assert by_name["Off"]["enabled"] is False          # disabled CARRIED (not dropped, #59)
+    assert by_name["Comfy"]["enabled"] is True
     for m in parsed["monitors"]:
-        assert set(m) == {"type_id", "name", "config"}
+        assert set(m) == {"type_id", "name", "config", "enabled"}
 
 
 def test_cli_missing_config_errors(tmp_path, capsys):

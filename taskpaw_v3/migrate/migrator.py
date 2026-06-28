@@ -55,14 +55,17 @@ class MigrationPlan:
         return not self.warnings
 
     def to_runtime_monitors(self) -> list[dict]:
-        """Only the ENABLED monitors, in the `{type_id, name, config}` shape the
-        agent's build_supervisor() consumes. Disabled V2 watchers stay in
-        `monitors` for preview but are excluded here so they never start — the
-        supervisor builder does not honor a top-level enabled flag (Codex #20 r4).
+        """ALL migrated monitors in the `{type_id, name, config, enabled}` shape
+        the agent consumes. The V3 supervisor honors `enabled` (#57a: build_
+        supervisor skips enabled:false), so disabled monitors are carried with
+        `enabled: false` — they land in the agent config, show in the console as
+        stopped, and can be Started deliberately later — rather than being silently
+        dropped from the generated config (Codex #59). (Previously the supervisor
+        ignored enabled, so disabled ones were excluded; #57a changed that.)
         """
         return [
-            {"type_id": m.type_id, "name": m.name, "config": m.config}
-            for m in self.monitors if m.enabled
+            {"type_id": m.type_id, "name": m.name, "config": m.config, "enabled": m.enabled}
+            for m in self.monitors
         ]
 
 
@@ -218,8 +221,8 @@ def migrate_config(config: dict) -> MigrationPlan:
             enabled = False
         if specs and not v2_enabled:
             plan.warnings.append(MigrationWarning(sid, wtype, name,
-                "watcher was disabled in V2 — migrated for reference but excluded "
-                "from the runnable set (to_runtime_monitors)"))
+                "watcher was disabled in V2 — carried into the agent config as "
+                "enabled:false (shows stopped; enable it when you want it to run)"))
         for type_id, mname, cfg in specs:
             plan.monitors.append(MigratedMonitor(
                 type_id=type_id, name=mname, config=cfg,
