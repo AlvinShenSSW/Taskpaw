@@ -26,7 +26,7 @@ from typing import Any, Optional
 from taskpaw_v3.agent import catalog
 from taskpaw_v3.core.config import AgentConfig, save_yaml
 from taskpaw_v3.monitors.registry import PluginRegistry
-from taskpaw_v3.monitors.runtime import monitor_name
+from taskpaw_v3.monitors.runtime import canonical_name, effective_monitors, monitor_name
 from taskpaw_v3.monitors.supervisor import Supervisor
 
 log = logging.getLogger("taskpaw.agent.admin")
@@ -78,6 +78,15 @@ class MonitorAdmin:
     # ── operations (each: mutate config → persist → live-apply) ────────────
     def add(self, spec: dict) -> dict[str, Any]:
         with self._lock:
+            # Reject a name that collides with an EFFECTIVE monitor BEFORE
+            # persisting — catalog.add_monitor only checks config.monitors, so the
+            # auto-injected host_metrics ("<machine>-host", not in config.monitors
+            # but a live instance id) would otherwise pass validation, get written
+            # to agent.yaml, and only THEN fail at register() — leaving config
+            # changed after a failed request (Codex #57a).
+            resolved = canonical_name(spec)   # raises on top/config name conflict
+            if resolved and resolved in {monitor_name(m) for m in effective_monitors(self._config)}:
+                raise ValueError(f"a monitor named {resolved!r} already exists")
             # catalog.add_monitor validates against the plugin, rejects unknown
             # type / system plugin / duplicate name, and emits {type_id,name,config}.
             new_list = catalog.add_monitor(self._config.monitors, spec, self._reg)

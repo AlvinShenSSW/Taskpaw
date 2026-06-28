@@ -156,15 +156,19 @@ def create_control_app(
 
         @app.patch("/control/monitors/{name}")
         def update_monitor(name: str, body: dict):
-            # {config?: {...}, enabled?: bool} — apply enable first, then config.
+            # {config?: {...}, enabled?: bool}. Apply CONFIG first: it validates,
+            # so an invalid config fails (400) BEFORE enabled is touched/persisted
+            # — a failed combined edit must not leave the monitor started/stopped
+            # (Codex #57a). A valid config persists, then enabled (which can't fail
+            # once the monitor is found).
             if "config" not in body and "enabled" not in body:
                 raise HTTPException(status_code=400,
                                     detail="patch needs 'config' and/or 'enabled'")
             out: dict = {"ok": True, "name": name}
-            if "enabled" in body:
-                out = _guard(admin.set_enabled, name, bool(body["enabled"]))
             if "config" in body:
                 out = _guard(admin.update, name, body["config"])
+            if "enabled" in body:
+                out = _guard(admin.set_enabled, name, bool(body["enabled"]))
             return out
 
         # Start/Stop are persisted enable/disable (V2 parity: a stopped monitor

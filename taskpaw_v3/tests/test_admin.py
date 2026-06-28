@@ -4,8 +4,10 @@ atomic persistence + live-apply to the Supervisor."""
 from __future__ import annotations
 
 import pytest
+from fastapi.testclient import TestClient
 
 from taskpaw_v3.agent.server.admin import MonitorAdmin
+from taskpaw_v3.agent.server.app import create_control_app
 from taskpaw_v3.core.config import AgentConfig, load_yaml
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.monitors.base import (
@@ -120,6 +122,34 @@ def test_admin_handle_dispatch(tmp_path):
     assert admin.handle("nope", {})["ok"] is False
     # validation errors surface as {ok:false}, not a raised 500.
     assert admin.handle("remove_monitor", {"name": "missing"})["ok"] is False
+
+
+def test_admin_add_rejects_auto_monitor_collision(tmp_path):
+    # host_metrics auto-injects "<machine>-host" (here "m-host"); a user monitor
+    # with that name must be rejected BEFORE persisting — else register() fails
+    # after the write, leaving config changed (Codex #57a).
+    cfg = _agent_config(host_metrics=True)
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    with pytest.raises(ValueError):
+        admin.add({"type_id": "fake", "config": {"name": "m-host"}})
+    assert cfg.monitors == []           # nothing mutated
+    assert not path.exists()            # nothing persisted
+
+
+def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
+    # A combined PATCH with an INVALID config + enabled:false must fail (400)
+    # without having toggled/persisted enabled (Codex #57a).
+    cfg = _agent_config()
+    reg = _registry()
+    admin = MonitorAdmin(cfg, None, reg, tmp_path / "a.yaml")
+    admin.add({"type_id": "fake", "config": {"name": "w1"}})   # enabled True
+    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+
+    r = client.patch("/control/monitors/w1",
+                     json={"config": {"poll_interval": 0}, "enabled": False})
+    assert r.status_code == 400                # poll_interval < 1 → invalid
+    assert cfg.monitors[0].get("enabled", True) is True   # enabled untouched
 
 
 # ── enabled filtering at build time ────────────────────────────────────────
