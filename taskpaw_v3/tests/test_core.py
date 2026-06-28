@@ -52,6 +52,17 @@ def test_eventqueue_recent_is_non_destructive_and_bounded():
     assert q.recent(limit=0) == []
 
 
+def test_eventqueue_recent_survives_hub_ack_drain():
+    # The Events tab must keep showing local history even when the Hub poll has
+    # drained the delivery queue (recent() reads a separate ring, not _queue) (#44).
+    q = EventQueue(machine="m")
+    for i in range(3):
+        q.add("mon", f"e{i}")
+    assert q.payload()["events"]                                   # legacy drain clears _queue
+    assert q.payload(ack_id=0)["events"] == []                     # _queue is now empty
+    assert [e["message"] for e in q.recent()] == ["e0", "e1", "e2"]  # history survived
+
+
 def test_eventqueue_persists_counter_before_visible():
     saved = []
     q = EventQueue(machine="m", persist_counter=saved.append)
