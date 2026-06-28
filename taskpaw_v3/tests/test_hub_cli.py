@@ -78,14 +78,48 @@ def test_run_missing_config_returns_1(tmp_path, capsys):
 
 
 def test_run_hard_fails_on_abandoned_legacy_db(tmp_path, capsys):
-    # hub.yaml with a config-adjacent hub.db (old default) but a data_dir whose
-    # db is absent → must hard-fail, not silently start empty (Kimi).
+    # hub.yaml with a REAL config-adjacent hub.db (old default) but a data_dir
+    # whose db is absent → must hard-fail, not silently start empty (Kimi).
     cfg = tmp_path / "hub.yaml"
     cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
-    (tmp_path / "hub.db").write_bytes(b"")          # legacy db beside the config
+    HubStore(tmp_path / "hub.db").add_server("m", "1.1.1.1")   # real legacy db
     rc = main(["--config", str(cfg), "run"])
     assert rc == 1
     assert "older one exists" in capsys.readouterr().err
+
+
+def test_zero_byte_legacy_is_not_a_conflict(tmp_path):
+    from taskpaw_v3.hub.server.service import legacy_db_conflict
+    cfg = tmp_path / "hub.yaml"
+    (tmp_path / "hub.db").write_bytes(b"")          # junk, not a real db
+    assert legacy_db_conflict(cfg, tmp_path / "newdir" / "hub.db") is None
+
+
+def test_empty_resolved_db_still_conflicts(tmp_path):
+    # a management command may have created an empty resolved db; while a real
+    # legacy db exists, that's still a conflict so `run` keeps failing (Codex).
+    from taskpaw_v3.hub.server.service import legacy_db_conflict
+    cfg = tmp_path / "hub.yaml"
+    HubStore(tmp_path / "hub.db").add_server("m", "1.1.1.1")   # legacy with data
+    resolved = tmp_path / "newdir" / "hub.db"
+    HubStore(resolved)                                          # empty resolved (0 servers)
+    assert legacy_db_conflict(cfg, resolved) == tmp_path / "hub.db"
+
+
+def test_resolved_with_servers_is_not_a_conflict(tmp_path):
+    from taskpaw_v3.hub.server.service import legacy_db_conflict
+    cfg = tmp_path / "hub.yaml"
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")
+    resolved = tmp_path / "newdir" / "hub.db"
+    HubStore(resolved).add_server("new", "2.2.2.2")            # resolved has data
+    assert legacy_db_conflict(cfg, resolved) is None
+
+
+def test_store_missing_explicit_config_fails(tmp_path, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["--config", str(tmp_path / "nope.yaml"), "list-servers"])
+    assert e.value.code == 2
+    assert "config not found" in capsys.readouterr().err
 
 
 # ── platform config paths ────────────────────────────────────────────────--

@@ -45,7 +45,12 @@ def _store(args) -> HubStore:
     # Target the SAME db the running hub uses: HubConfig.data_dir/hub.db.
     cfg_path = Path(args.config).expanduser() if args.config else default_config_path()
     if not cfg_path.exists():
-        # No config yet → use the default data_dir a default hub would use.
+        if args.config:
+            # Explicitly requested config is missing → fail, don't silently target
+            # the default db (operator could manage the wrong store) (Kimi).
+            print(f"error: hub config not found: {cfg_path}", file=sys.stderr)
+            raise SystemExit(2)
+        # No --config and none at the default path → use the default data_dir db.
         return HubStore(db_path_for(HubConfig()))
     try:
         config: HubConfig = load_yaml(HubConfig, cfg_path)  # type: ignore[assignment]

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -42,16 +43,50 @@ def db_path_for(config: HubConfig) -> Path:
     return Path(config.data_dir).expanduser() / "hub.db"
 
 
+def _is_sqlite_db(path: Path) -> bool:
+    """True if `path` is a real, openable SQLite database (not absent / 0-byte /
+    a stray file) — so a junk file beside the config can't block startup (Kimi)."""
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+        conn = sqlite3.connect(str(path))
+        try:
+            conn.execute("PRAGMA schema_version")
+        finally:
+            conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def _db_has_servers(path: Path) -> bool:
+    """True if the resolved db already holds registered servers (real data)."""
+    if not _is_sqlite_db(path):
+        return False
+    try:
+        conn = sqlite3.connect(str(path))
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM servers").fetchone()
+            return bool(row and row[0] > 0)
+        finally:
+            conn.close()
+    except Exception:
+        return False  # no servers table / unreadable → no real data
+
+
 def legacy_db_conflict(config_path: Path, resolved_db: Path) -> Path | None:
-    """If a config-adjacent hub.db (the OLD default location) exists while the
-    resolved data_dir db is absent, return that legacy path — opening the resolved
-    db would silently abandon the operator's servers/acks/outbox (#38 review).
-    Else None."""
+    """Return the config-adjacent hub.db (OLD default) if it's a real db AND the
+    resolved data_dir db has no servers yet — opening/starting the resolved db
+    would silently abandon the operator's data. An EMPTY resolved db (e.g. just
+    created by a management command) still counts as a conflict, so `run` keeps
+    hard-failing afterwards (Codex). Else None."""
     legacy = default_db_path(config_path)
     resolved_db = Path(resolved_db)
-    if not resolved_db.exists() and legacy.exists() and legacy != resolved_db:
-        return legacy
-    return None
+    if legacy == resolved_db or not _is_sqlite_db(legacy):
+        return None
+    if _db_has_servers(resolved_db):
+        return None
+    return legacy
 
 
 def run_from_config(config_path: Path | None = None, db_path: Path | None = None) -> int:

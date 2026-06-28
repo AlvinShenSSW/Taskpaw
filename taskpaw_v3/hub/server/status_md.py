@@ -65,8 +65,9 @@ def _last_seen_hms(ts: Optional[str]) -> str:
 
 
 def render_status_md(statuses: list[dict[str, Any]], now: str) -> str:
-    """Build the status.md text. `statuses` = rows from store.latest_statuses()
-    ({name, reachable, status_json, timestamp}); `now` is a preformatted stamp."""
+    """Build the status.md text. `statuses` = snapshot rows
+    ({name, reachable, status_json, last_seen}); offline servers render last_seen.
+    `now` is a preformatted timestamp."""
     lines = ["# TaskPaw Hub Status", "", f"Last updated: {now}", ""]
     for s in statuses:
         name = s.get("name", "unknown")
