@@ -4,9 +4,8 @@ Pure functions, no I/O of its own beyond reading the two JSON paths handed in.
 The output is a `MigrationPlan` the caller can preview before writing anything.
 
 Type mapping (V2 `watcher_type` → V3 `type_id`):
-    lada       → folder     (Lada is a task: process-exit=done; the faithful V3
-                             signal is its output folder. No output folder →
-                             skip+warn. GPU is covered by host_metrics.)
+    lada       → lada       (full parity: managed/passive, progress, folders,
+                             GPU — carries the lada_* fields straight over)
     process    → process    (generic; process_name → pattern, service-semantics)
     comfyui    → comfyui    (host/port/idle_confirm_count)
     folder     → folder     (watch_folder/stable_seconds/file_extensions)
@@ -56,14 +55,17 @@ class MigrationPlan:
         return not self.warnings
 
     def to_runtime_monitors(self) -> list[dict]:
-        """Only the ENABLED monitors, in the `{type_id, name, config}` shape the
-        agent's build_supervisor() consumes. Disabled V2 watchers stay in
-        `monitors` for preview but are excluded here so they never start — the
-        supervisor builder does not honor a top-level enabled flag (Codex #20 r4).
+        """ALL migrated monitors in the `{type_id, name, config, enabled}` shape
+        the agent consumes. The V3 supervisor honors `enabled` (#57a: build_
+        supervisor skips enabled:false), so disabled monitors are carried with
+        `enabled: false` — they land in the agent config, show in the console as
+        stopped, and can be Started deliberately later — rather than being silently
+        dropped from the generated config (Codex #59). (Previously the supervisor
+        ignored enabled, so disabled ones were excluded; #57a changed that.)
         """
         return [
-            {"type_id": m.type_id, "name": m.name, "config": m.config}
-            for m in self.monitors if m.enabled
+            {"type_id": m.type_id, "name": m.name, "config": m.config, "enabled": m.enabled}
+            for m in self.monitors
         ]
 
 
@@ -97,26 +99,20 @@ _Spec = tuple[str, str, dict]
 
 
 def _map_lada(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
-    # V2 Lada is a TASK: process running = busy, process EXIT = completion (a
-    # success notification), NOT a failure. V3's `process` plugin is service-
-    # semantics (down → alert), so mapping Lada→process would turn every normal
-    # finish into a false "down" alert (Codex #20 P2 r3). The faithful V3 signal
-    # is the OUTPUT folder — a finished file appearing = done. Map to a folder
-    # monitor; if there's no output folder we can't represent it, so skip+warn.
-    warnings: list[str] = []
-    if (w.get("lada_cli_path") or "").strip():
-        warnings.append(
-            f"lada watcher {name!r} ran in managed mode (lada_cli_path set); V3 "
-            f"observes only and will NOT launch lada-cli")
-    out = (w.get("lada_output_folder") or "").strip()
-    if not out:
-        warnings.append(
-            f"lada watcher {name!r} has no lada_output_folder; its process-exit "
-            f"completion can't be represented by a V3 plugin (the process plugin "
-            f"would alert on normal completion) — skipped, configure manually")
-        return [], warnings
-    fcfg: dict[str, Any] = {"name": name, "path": out, "poll_interval": _V2_FOLDER_POLL}
-    return [("folder", name, fcfg)], warnings
+    # V3 now has a full `lada` plugin (#59) — managed/passive, progress parsing,
+    # GPU, folder queue — so carry the lada_* fields straight over (no more
+    # folder-only compromise).
+    cfg: dict[str, Any] = {"name": name}
+    for key in ("lada_cli_path", "process_name", "lada_input_folder",
+                "lada_output_folder", "lada_extra_args"):
+        v = w.get(key)
+        if isinstance(v, str) and v.strip():
+            cfg[key] = v.strip()
+    if "lada_gpu_monitor" in w:
+        cfg["lada_gpu_monitor"] = bool(w["lada_gpu_monitor"])
+    if "lada_capture_progress" in w:
+        cfg["lada_capture_progress"] = bool(w["lada_capture_progress"])
+    return [("lada", name, _carry_common(w, cfg))], []
 
 
 def _map_process(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
@@ -194,6 +190,11 @@ _MAPPERS = {
 def migrate_config(config: dict) -> MigrationPlan:
     """Build a `MigrationPlan` from a parsed V2 `config.json` dict."""
     plan = MigrationPlan(machine_name=config.get("machine_name", "") or "")
+    # V2 only auto-started watchers when this GLOBAL flag was set (taskpaw.py:147,
+    # default false); otherwise the user clicked Start per watcher. The V3 agent
+    # starts every enabled monitor on boot, so honor this for the one DANGEROUS
+    # case below (managed Lada).
+    auto_start = bool(config.get("auto_start", False))
     for w in config.get("watchers", []) or []:
         wtype = (w.get("watcher_type") or "").strip()
         name = (w.get("name") or "").strip() or wtype or "unnamed"
@@ -206,11 +207,22 @@ def migrate_config(config: dict) -> MigrationPlan:
         specs, notes = mapper(w, name)
         for reason in notes:
             plan.warnings.append(MigrationWarning(sid, wtype, name, reason))
-        enabled = bool(w.get("enabled", True))
-        if specs and not enabled:
+        v2_enabled = bool(w.get("enabled", True))
+        enabled = v2_enabled
+        # Managed Lada LAUNCHES lada-cli on start; V2 ran it only when the user
+        # hit Start (auto_start off by default). Importing it ENABLED would auto-
+        # kick video processing on the first V3 agent boot — import it DISABLED
+        # unless V2 was set to auto-start (Codex #59 P1).
+        managed_lada = wtype == "lada" and bool((w.get("lada_cli_path") or "").strip())
+        if enabled and managed_lada and not auto_start:
             plan.warnings.append(MigrationWarning(sid, wtype, name,
-                "watcher was disabled in V2 — migrated for reference but excluded "
-                "from the runnable set (to_runtime_monitors)"))
+                "managed Lada imported DISABLED (V2 auto_start was off) so it won't "
+                "auto-launch lada-cli on agent startup — enable/Start it deliberately"))
+            enabled = False
+        if specs and not v2_enabled:
+            plan.warnings.append(MigrationWarning(sid, wtype, name,
+                "watcher was disabled in V2 — carried into the agent config as "
+                "enabled:false (shows stopped; enable it when you want it to run)"))
         for type_id, mname, cfg in specs:
             plan.monitors.append(MigratedMonitor(
                 type_id=type_id, name=mname, config=cfg,

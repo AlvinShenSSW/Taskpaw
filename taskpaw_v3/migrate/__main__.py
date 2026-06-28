@@ -42,12 +42,14 @@ def _render_text(plan, config_path: Path) -> str:
     if not plan.monitors:
         lines.append("  (none)")
     for m in plan.monitors:
-        flag = "" if m.enabled else "  [DISABLED — excluded from runtime]"
+        flag = "" if m.enabled else "  [DISABLED — in config, not started]"
         lines.append(f"  • {m.type_id:<10} {m.name}{flag}")
         lines.append(f"      from V2 {m.source_type!r}  config={json.dumps(m.config, ensure_ascii=False)}")
     lines.append("")
-    runnable = plan.to_runtime_monitors()
-    lines.append(f"Runnable (enabled) monitors: {len(runnable)}")
+    block = plan.to_runtime_monitors()
+    enabled_n = sum(1 for m in block if m.get("enabled", True))
+    lines.append(f"In agent config: {len(block)} monitors ({enabled_n} enabled, "
+                 f"{len(block) - enabled_n} disabled)")
     if plan.warnings:
         lines.append("")
         lines.append(f"Warnings ({len(plan.warnings)}):")
@@ -60,7 +62,8 @@ def _render_text(plan, config_path: Path) -> str:
 
 
 def _render_yaml(plan) -> str:
-    """The `monitors:` block to paste into an agent config (enabled only)."""
+    """The `monitors:` block to paste into an agent config (each with its
+    `enabled` flag; disabled ones are carried, not dropped)."""
     block = {"monitors": plan.to_runtime_monitors()}
     return yaml.safe_dump(block, sort_keys=False, allow_unicode=True)
 
@@ -73,7 +76,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--state", default=None,
                     help="path to V2 state.json (default: alongside config.json)")
     ap.add_argument("--yaml", action="store_true",
-                    help="emit only the agent `monitors:` YAML block (enabled monitors)")
+                    help="emit only the agent `monitors:` YAML block (with enabled flags)")
     args = ap.parse_args(argv)
 
     config_path = Path(args.config).expanduser() if args.config else _default_config_path()

@@ -17,40 +17,64 @@ def _w(**kw):
 
 
 # ── per-type mapping ─────────────────────────────────────────────────────--
-def test_lada_maps_to_output_folder():
-    """Lada is a task (process-exit = done); the faithful V3 signal is the
-    output folder, not a service-semantics process monitor (Codex #20 r3)."""
+def test_lada_maps_to_lada_plugin():
+    """V3 now has a full `lada` plugin (#59) — carry the lada_* fields over,
+    no warning, no folder compromise."""
     plan = migrate_config({"watchers": [_w(watcher_type="lada", name="Lada",
                                            process_name="lada-cli.exe",
                                            lada_output_folder="/out")]})
     assert not plan.warnings
     m = plan.monitors[0]
-    assert m.type_id == "folder"
-    assert m.config["path"] == "/out"
-    assert m.config["poll_interval"] == 1.0  # V2 folder cadence (Codex r9)
+    assert m.type_id == "lada"
+    assert m.config["lada_output_folder"] == "/out"
+    assert m.config["process_name"] == "lada-cli.exe"
     assert m.source_type == "lada"
 
 
-def test_lada_managed_mode_warns_but_still_maps_output_folder():
-    """Managed Lada (lada_cli_path set) → folder monitor on the output folder,
-    plus a warning that V3 won't launch lada (Codex #20 P1)."""
-    plan = migrate_config({"watchers": [_w(
-        watcher_type="lada", name="Lada", process_name="lada-cli",
-        lada_cli_path="C:/lada/lada-cli.exe",
-        lada_output_folder="D:/out",
-        lada_extra_args="--device cuda:1")]})
-    assert [m.type_id for m in plan.monitors] == ["folder"]
-    assert plan.monitors[0].config["path"] == "D:/out"
-    assert any("managed mode" in w.reason for w in plan.warnings)
+def _managed_lada(**extra):
+    base = dict(watcher_type="lada", name="Lada", process_name="lada-cli",
+                lada_cli_path="C:/lada/lada-cli.exe", lada_input_folder="D:/in",
+                lada_output_folder="D:/out", lada_extra_args="--device cuda:1",
+                lada_gpu_monitor=True)
+    base.update(extra)
+    return _w(**base)
 
 
-def test_lada_without_output_folder_skipped_with_warning():
-    """No output folder → no faithful V3 signal (process plugin would false-
-    alert on completion); skip + warn rather than emit a wrong monitor."""
+def test_managed_lada_carries_cli_but_imported_disabled():
+    """Managed Lada carries the CLI path + folders + args, but (with V2 auto_start
+    off, the default) is imported DISABLED so it doesn't auto-launch lada-cli on
+    the first V3 boot (Codex #59 P1)."""
+    plan = migrate_config({"watchers": [_managed_lada()]})  # no auto_start → off
+    m = plan.monitors[0]
+    assert m.type_id == "lada"
+    assert m.config["lada_cli_path"] == "C:/lada/lada-cli.exe"
+    assert m.config["lada_input_folder"] == "D:/in"
+    assert m.config["lada_extra_args"] == "--device cuda:1"
+    assert m.config["lada_gpu_monitor"] is True
+    assert m.enabled is False                                  # safety-disabled
+    rt = plan.to_runtime_monitors()
+    assert len(rt) == 1 and rt[0]["enabled"] is False          # in config, not started
+    assert rt[0]["config"]["lada_cli_path"] == "C:/lada/lada-cli.exe"
+    assert any("imported DISABLED" in w.reason for w in plan.warnings)
+
+
+def test_managed_lada_stays_enabled_when_v2_auto_start_on():
+    """If V2 was set to auto-start, respect that intent — keep it enabled."""
+    plan = migrate_config({"auto_start": True, "watchers": [_managed_lada()]})
+    assert plan.monitors[0].enabled is True
+    rt = plan.to_runtime_monitors()
+    assert [m["name"] for m in rt] == ["Lada"] and rt[0]["enabled"] is True
+    assert not any("imported DISABLED" in w.reason for w in plan.warnings)
+
+
+def test_lada_passive_no_output_folder_still_maps():
+    """No output folder is fine now — a passive lada monitor still maps (process
+    detection works without folders)."""
     plan = migrate_config({"watchers": [_w(
         watcher_type="lada", name="Lada", process_name="lada-cli")]})
-    assert not plan.monitors
-    assert any("can't be represented" in w.reason for w in plan.warnings)
+    assert not plan.warnings
+    assert [m.type_id for m in plan.monitors] == ["lada"]
+    assert plan.monitors[0].config["process_name"] == "lada-cli"
 
 
 def test_generic_process_watcher_maps_to_process():
@@ -110,17 +134,19 @@ def test_incomplete_watcher_warns():
     assert not plan.monitors and plan.warnings
 
 
-def test_disabled_flag_carried_but_excluded_from_runtime():
+def test_disabled_flag_carried_into_config_as_enabled_false():
     plan = migrate_config({"watchers": [
         _w(watcher_type="custom_cmd", name="off", custom_command="x", enabled=False),
         _w(watcher_type="custom_cmd", name="on", custom_command="y", enabled=True),
     ]})
     assert plan.monitors[0].enabled is False
-    # disabled watcher is in monitors (preview) but NOT in the runnable set
-    runtime = plan.to_runtime_monitors()
-    names = [m["name"] for m in runtime]
-    assert names == ["on"]
-    assert all(set(m) == {"type_id", "name", "config"} for m in runtime)
+    # #59: disabled monitors are CARRIED into the config as enabled:false (not
+    # dropped) — the supervisor skips them, the console shows them stopped.
+    runtime = {m["name"]: m for m in plan.to_runtime_monitors()}
+    assert set(runtime) == {"off", "on"}
+    assert runtime["off"]["enabled"] is False
+    assert runtime["on"]["enabled"] is True
+    assert all(set(m) == {"type_id", "name", "config", "enabled"} for m in runtime.values())
     assert any("disabled in V2" in w.reason for w in plan.warnings)
 
 
