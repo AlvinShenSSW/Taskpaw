@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     if role == "hub":
         from taskpaw_v3.hub.server.service import main as hub_main
         return hub_main()
-    if role in ("agent", ""):
+    if role == "agent":
         from taskpaw_v3.agent.server.service import main as agent_main
         return agent_main()
     print(f"unknown backend role: {role!r} (expected 'agent' or 'hub')", file=sys.stderr)

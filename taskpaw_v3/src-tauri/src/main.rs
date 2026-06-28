@@ -84,17 +84,22 @@ fn backend_command() -> Option<(String, Vec<String>)> {
             return Some((program, args));
         }
     }
-    // Bundled sidecar: <app-exe-dir>/taskpaw-backend[.exe], run with the role so
-    // one binary serves both agent and hub.
+    // Bundled `externalBin` sidecar, run with the role so one binary serves both
+    // agent and hub. Tauri strips the target-triple and places it next to the app
+    // binary, but the exact dir differs by bundle (macOS .app Contents/MacOS,
+    // sometimes ../Resources; Windows next to the .exe), so probe candidates
+    // rather than assume one path (Codex).
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let name = if cfg!(windows) { "taskpaw-backend.exe" } else { "taskpaw-backend" };
-    let path = dir.join(name);
-    if path.exists() {
-        let role = std::env::var("TASKPAW_UI_ROLE").unwrap_or_else(|_| "agent".into());
-        return Some((path.to_string_lossy().into_owned(), vec![role]));
-    }
-    None
+    let candidates = [
+        dir.join(name),                              // next to the app binary
+        dir.join("../Resources").join(name),         // macOS .app resources fallback
+        dir.join("binaries").join(name),
+    ];
+    let found = candidates.iter().find(|p| p.exists())?;
+    let role = std::env::var("TASKPAW_UI_ROLE").unwrap_or_else(|_| "agent".into());
+    Some((found.to_string_lossy().into_owned(), vec![role]))
 }
 
 fn spawn_backend() -> Option<Child> {
@@ -106,6 +111,13 @@ fn spawn_backend() -> Option<Child> {
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+    // Don't pop a console window for the console-subsystem backend exe on Windows
+    // (the Tauri shell is a windowed app) (Kimi).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
     match command.spawn() {
         Ok(c) => Some(c),

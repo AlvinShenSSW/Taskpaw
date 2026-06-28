@@ -17,8 +17,9 @@ for pkg in ("uvicorn", "fastapi", "starlette", "pydantic", "pydantic_core",
         datas += d
         binaries += b
         hiddenimports += h
-    except Exception:
-        pass
+    except ImportError as e:
+        # Don't silently ship a backend missing a required lib — surface it.
+        print(f"WARNING: collect_all({pkg!r}) failed: {e}")
 hiddenimports += collect_submodules("taskpaw_v3")
 
 a = Analysis(
