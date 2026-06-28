@@ -127,6 +127,22 @@ def test_admin_update_merges_partial_config(tmp_path):
     assert c["search_cmdline"] is False              # optional field not reset
 
 
+def test_enable_invalid_config_does_not_persist(tmp_path):
+    # Enabling a disabled monitor whose stored config is invalid (e.g. a plugin
+    # schema change) must fail WITHOUT persisting enabled:true — else the next
+    # boot breaks while the monitor still isn't running (Codex #57a).
+    reg = default_registry()                         # real 'process' (needs pattern)
+    cfg = _agent_config(monitors=[
+        {"type_id": "process", "name": "bad", "config": {"name": "bad"}, "enabled": False},
+    ])
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, reg, path)
+    with pytest.raises(ValueError):
+        admin.set_enabled("bad", True)
+    assert cfg.monitors[0]["enabled"] is False       # not flipped
+    assert not path.exists()                         # nothing persisted
+
+
 def test_admin_handle_dispatch(tmp_path):
     cfg = _agent_config()
     admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")

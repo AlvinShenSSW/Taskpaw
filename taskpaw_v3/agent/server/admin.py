@@ -100,10 +100,13 @@ class MonitorAdmin:
             added = dict(new_list[-1])
             added["enabled"] = bool(spec.get("enabled", True))
             new_list[-1] = added
-            self._config.monitors = new_list
-            self._persist()
+            # Register live BEFORE persisting, so a config that can't actually run
+            # is never written to agent.yaml (Codex). add_monitor already
+            # validated, but registering can still surface a real failure.
             if added["enabled"]:
                 self._register_live(added)
+            self._config.monitors = new_list
+            self._persist()
             return {"ok": True, "monitor": added}
 
     def remove(self, name: str) -> dict[str, Any]:
@@ -121,13 +124,24 @@ class MonitorAdmin:
             m = self._find(name)
             if m is None:
                 raise ValueError(f"no monitor named {str(name).strip()!r}")
-            m["enabled"] = bool(enabled)
-            self._persist()
             iid = monitor_name(m)
-            if self._sup is not None:
-                if enabled and not self._sup.has(iid):
-                    self._register_live(m)
-                elif not enabled and self._sup.has(iid):
+            if enabled:
+                # Validate/register BEFORE persisting enabled:true: a monitor
+                # whose stored config no longer validates (e.g. a plugin schema
+                # change while it sat disabled) must not be persisted enabled and
+                # then fail the next boot (Codex). With a supervisor this both
+                # validates and registers; without one we at least validate.
+                if self._sup is not None:
+                    if not self._sup.has(iid):
+                        self._register_live(m)
+                else:
+                    self._validated_config(m)
+                m["enabled"] = True
+                self._persist()
+            else:
+                m["enabled"] = False
+                self._persist()
+                if self._sup is not None and self._sup.has(iid):
                     self._sup.unregister(iid)
             return {"ok": True, "name": iid, "enabled": bool(enabled)}
 
