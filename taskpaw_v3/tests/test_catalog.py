@@ -33,6 +33,22 @@ def test_plugin_catalog_lists_all_with_schema():
     assert by_id["comfyui"]["system"] is False
 
 
+def test_path_fields_carry_taskpawpath_marker():
+    # Path fields advertise ui:options.taskpawPath ("file"|"directory") so the form
+    # renders the native file/folder picker widget (#71).
+    by_id = {p["type_id"]: p for p in plugin_catalog()}
+
+    def kind(tid: str, field: str):
+        return (by_id[tid]["ui_schema"].get(field, {}) or {}).get("ui:options", {}).get("taskpawPath")
+
+    assert kind("lada", "lada_cli_path") == "file"
+    assert kind("lada", "lada_input_folder") == "directory"
+    assert kind("lada", "lada_output_folder") == "directory"
+    assert kind("comfyui", "comfyui_log_path") == "file"
+    assert kind("folder", "path") == "directory"
+    assert kind("state_file", "path") == "file"
+
+
 def test_preset_catalog_has_moomoo_as_an_option():
     presets = {p["id"]: p for p in preset_catalog()}
     assert "moomoo" in presets

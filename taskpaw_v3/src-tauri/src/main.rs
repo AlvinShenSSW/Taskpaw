@@ -346,6 +346,11 @@ fn init_script() -> String {
 
 fn main() {
     tauri::Builder::default()
+        // Native file/directory picker for the add-monitor path fields (#71). The
+        // ONLY widening of the locked-down shell (§3.1): a user-initiated open
+        // dialog that returns a path string — no FS read/write IPC. Scoped to just
+        // `dialog:allow-open` in capabilities/default.json.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // `mut` only needed for the Windows Job-Object failure kill path.
             #[cfg(windows)]

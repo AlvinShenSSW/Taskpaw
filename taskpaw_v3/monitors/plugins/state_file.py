@@ -179,7 +179,7 @@ class StateFilePlugin(MonitorPlugin):
 
     @classmethod
     def ui_schema(cls) -> dict:
-        return {"path": {"widget": "path"}}
+        return {"path": {"ui:options": {"taskpawPath": "file"}}}
 
     def create(self, instance_id: str, config: BaseMonitorConfig) -> MonitorInstance:
         return StateFileInstance(instance_id, config)  # type: ignore[arg-type]
