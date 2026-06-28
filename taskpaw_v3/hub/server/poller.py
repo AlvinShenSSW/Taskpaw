@@ -144,7 +144,14 @@ class Poller:
             req = urllib.request.Request(f"{base}/status", headers=self._auth_headers())
             resp = urllib.request.urlopen(req, timeout=self.http_timeout)
             body = resp.read().decode("utf-8")
-            json.loads(body)  # validate it's JSON before persisting
+            try:
+                json.loads(body)  # validate it's JSON before persisting
+            except json.JSONDecodeError as e:
+                # Reachable but returned junk → a misconfigured agent, not an
+                # outage. Log distinctly with a body snippet (Kimi).
+                log.warning("Bad /status JSON from %s: %s | body[:120]=%r",
+                            server.get("name"), e, body[:120])
+                return False, None
             return True, body
         except urllib.error.HTTPError as e:
             # Surface 401/403 distinctly — a token mismatch is a config/security

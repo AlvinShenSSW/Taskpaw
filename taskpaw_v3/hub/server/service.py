@@ -69,18 +69,27 @@ def _db_has_servers(path: Path) -> bool:
         try:
             conn = sqlite3.connect(str(path), timeout=2)
             try:
+                # Check the table EXISTS first (via sqlite_master, which never
+                # raises "no such table") — an unrelated SQLite file without a
+                # `servers` table has no TaskPaw data, so it's NOT a real db that
+                # should suppress the legacy guard (Codex).
+                t = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='servers'"
+                ).fetchone()
+                if not t:
+                    return False
                 row = conn.execute("SELECT COUNT(*) FROM servers").fetchone()
                 return bool(row and row[0] > 0)
             finally:
                 conn.close()
         except sqlite3.OperationalError:
+            # Locked/busy — retry; if we still can't tell, assume it HAS data so
+            # we don't wrongly declare "no conflict" and abandon a real db.
             if attempt == 2:
-                # Be conservative: if we can't tell, assume it HAS data so we
-                # don't wrongly declare "no conflict" and abandon a real db.
                 return True
             continue
         except Exception:
-            return False  # no servers table / unreadable → no real data
+            return False
     return True
 
 
@@ -92,7 +101,9 @@ def legacy_db_conflict(config_path: Path, resolved_db: Path) -> Path | None:
     hard-failing afterwards (Codex). Else None."""
     legacy = default_db_path(config_path)
     resolved_db = Path(resolved_db)
-    if legacy == resolved_db or not _is_sqlite_db(legacy):
+    # Normalize before comparing — a relative data_dir resolving to the config
+    # dir is the SAME file and must not be flagged as a conflict (Kimi).
+    if legacy.resolve() == resolved_db.resolve() or not _is_sqlite_db(legacy):
         return None
     if _db_has_servers(resolved_db):
         return None

@@ -94,12 +94,16 @@ class HubConfig(BaseModel):
 
     @field_validator("data_dir")
     @classmethod
-    def _data_dir_not_blank(cls, v: str) -> str:
-        # An empty/whitespace data_dir resolves to a relative "./hub.db" — almost
-        # never intended. Require a real path (Kimi).
+    def _data_dir_abs(cls, v: str) -> str:
+        # Must resolve to an absolute, `..`-free path: a relative data_dir would
+        # put hub.db/status.md at a cwd-dependent location, breaking the V2-path
+        # contract and the legacy-db guard (Kimi). `~` is allowed (expanded).
         v = v.strip()
         if not v:
             raise ValueError("data_dir must not be blank")
+        p = Path(v).expanduser()
+        if not p.is_absolute() or ".." in p.parts:
+            raise ValueError("data_dir must be an absolute path (no '..')")
         return v
 
 

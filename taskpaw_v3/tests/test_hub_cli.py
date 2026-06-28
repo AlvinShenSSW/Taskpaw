@@ -106,6 +106,29 @@ def test_empty_resolved_db_still_conflicts(tmp_path):
     assert legacy_db_conflict(cfg, resolved) == tmp_path / "hub.db"
 
 
+def test_unrelated_sqlite_at_resolved_still_conflicts(tmp_path):
+    # An unrelated SQLite file (no `servers` table) at the resolved path must NOT
+    # count as real data, so a real legacy db is still protected (Codex).
+    import sqlite3
+    from taskpaw_v3.hub.server.service import legacy_db_conflict
+    cfg = tmp_path / "hub.yaml"
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")     # real legacy
+    resolved = tmp_path / "newdir" / "hub.db"
+    resolved.parent.mkdir()
+    c = sqlite3.connect(resolved); c.execute("CREATE TABLE junk(x)"); c.commit(); c.close()
+    assert legacy_db_conflict(cfg, resolved) == tmp_path / "hub.db"
+
+
+def test_relative_data_dir_rejected():
+    import pytest as _pytest
+    from taskpaw_v3.core.config import HubConfig
+    with _pytest.raises(Exception):
+        HubConfig(data_dir="relative/dir")
+    with _pytest.raises(Exception):
+        HubConfig(data_dir="/abs/../sneaky")
+    assert HubConfig(data_dir="~/x").data_dir == "~/x"     # ~ allowed
+
+
 def test_resolved_with_servers_is_not_a_conflict(tmp_path):
     from taskpaw_v3.hub.server.service import legacy_db_conflict
     cfg = tmp_path / "hub.yaml"
