@@ -239,6 +239,26 @@ def test_supervisor_unregister():
         sup.unregister("w")
 
 
+def test_enable_monitor_with_toplevel_name_only(tmp_path):
+    # YAML shape {type_id, name, config:{...}} with NO config.name must still be
+    # enable-able — the validated config gets the resolved name injected, like
+    # build_supervisor() does at boot (Codex #57a).
+    q = EventQueue(machine="m")
+    reg = _registry()
+    sup = build_supervisor(reg, [], q, "m")
+    sup.start()
+    cfg = _agent_config(monitors=[
+        {"type_id": "fake", "name": "topname", "config": {}, "enabled": False},
+    ])
+    admin = MonitorAdmin(cfg, sup, reg, tmp_path / "a.yaml")
+    try:
+        res = admin.set_enabled("topname", True)
+        assert res["enabled"] is True
+        assert sup.has("topname")          # registered live, no validation error
+    finally:
+        sup.stop()
+
+
 # ── live-apply: admin drives a running supervisor ─────────────────────────
 def test_admin_live_apply(tmp_path):
     q = EventQueue(machine="m")

@@ -62,9 +62,16 @@ class MonitorAdmin:
         return None
 
     def _validated_config(self, spec: dict):
-        """Plugin + validated pydantic config for a stored spec dict."""
+        """Plugin + validated pydantic config for a stored spec dict. Mirrors
+        build_supervisor(): inject the resolved name into the raw config when the
+        spec uses the top-level `name` shape (no config.name), so a monitor that
+        starts fine at boot is also re-enable-able from the control API (Codex)."""
         plugin = self._reg.get(spec["type_id"])
-        cfg = plugin.validate_config(dict(spec.get("config") or {}))
+        raw = dict(spec.get("config") or {})
+        name = canonical_name(spec)
+        if name and "name" not in raw:
+            raw["name"] = name
+        cfg = plugin.validate_config(raw)
         return plugin, cfg
 
     def _register_live(self, spec: dict) -> None:
