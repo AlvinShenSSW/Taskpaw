@@ -31,21 +31,37 @@ def test_lada_maps_to_lada_plugin():
     assert m.source_type == "lada"
 
 
-def test_lada_managed_mode_carries_cli_and_args():
-    """Managed Lada (lada_cli_path set) carries the CLI path + folders + args to
-    the V3 lada plugin (which now actually launches it) — no 'won't launch' warning."""
-    plan = migrate_config({"watchers": [_w(
-        watcher_type="lada", name="Lada", process_name="lada-cli",
-        lada_cli_path="C:/lada/lada-cli.exe",
-        lada_input_folder="D:/in", lada_output_folder="D:/out",
-        lada_extra_args="--device cuda:1", lada_gpu_monitor=True)]})
-    assert not plan.warnings
+def _managed_lada(**extra):
+    base = dict(watcher_type="lada", name="Lada", process_name="lada-cli",
+                lada_cli_path="C:/lada/lada-cli.exe", lada_input_folder="D:/in",
+                lada_output_folder="D:/out", lada_extra_args="--device cuda:1",
+                lada_gpu_monitor=True)
+    base.update(extra)
+    return _w(**base)
+
+
+def test_managed_lada_carries_cli_but_imported_disabled():
+    """Managed Lada carries the CLI path + folders + args, but (with V2 auto_start
+    off, the default) is imported DISABLED so it doesn't auto-launch lada-cli on
+    the first V3 boot (Codex #59 P1)."""
+    plan = migrate_config({"watchers": [_managed_lada()]})  # no auto_start → off
     m = plan.monitors[0]
     assert m.type_id == "lada"
     assert m.config["lada_cli_path"] == "C:/lada/lada-cli.exe"
     assert m.config["lada_input_folder"] == "D:/in"
     assert m.config["lada_extra_args"] == "--device cuda:1"
     assert m.config["lada_gpu_monitor"] is True
+    assert m.enabled is False                                  # safety-disabled
+    assert plan.to_runtime_monitors() == []                    # not auto-started
+    assert any("imported DISABLED" in w.reason for w in plan.warnings)
+
+
+def test_managed_lada_stays_enabled_when_v2_auto_start_on():
+    """If V2 was set to auto-start, respect that intent — keep it enabled."""
+    plan = migrate_config({"auto_start": True, "watchers": [_managed_lada()]})
+    assert plan.monitors[0].enabled is True
+    assert [m["name"] for m in plan.to_runtime_monitors()] == ["Lada"]
+    assert not any("imported DISABLED" in w.reason for w in plan.warnings)
 
 
 def test_lada_passive_no_output_folder_still_maps():

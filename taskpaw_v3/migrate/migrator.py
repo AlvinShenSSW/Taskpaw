@@ -187,6 +187,11 @@ _MAPPERS = {
 def migrate_config(config: dict) -> MigrationPlan:
     """Build a `MigrationPlan` from a parsed V2 `config.json` dict."""
     plan = MigrationPlan(machine_name=config.get("machine_name", "") or "")
+    # V2 only auto-started watchers when this GLOBAL flag was set (taskpaw.py:147,
+    # default false); otherwise the user clicked Start per watcher. The V3 agent
+    # starts every enabled monitor on boot, so honor this for the one DANGEROUS
+    # case below (managed Lada).
+    auto_start = bool(config.get("auto_start", False))
     for w in config.get("watchers", []) or []:
         wtype = (w.get("watcher_type") or "").strip()
         name = (w.get("name") or "").strip() or wtype or "unnamed"
@@ -199,8 +204,19 @@ def migrate_config(config: dict) -> MigrationPlan:
         specs, notes = mapper(w, name)
         for reason in notes:
             plan.warnings.append(MigrationWarning(sid, wtype, name, reason))
-        enabled = bool(w.get("enabled", True))
-        if specs and not enabled:
+        v2_enabled = bool(w.get("enabled", True))
+        enabled = v2_enabled
+        # Managed Lada LAUNCHES lada-cli on start; V2 ran it only when the user
+        # hit Start (auto_start off by default). Importing it ENABLED would auto-
+        # kick video processing on the first V3 agent boot — import it DISABLED
+        # unless V2 was set to auto-start (Codex #59 P1).
+        managed_lada = wtype == "lada" and bool((w.get("lada_cli_path") or "").strip())
+        if enabled and managed_lada and not auto_start:
+            plan.warnings.append(MigrationWarning(sid, wtype, name,
+                "managed Lada imported DISABLED (V2 auto_start was off) so it won't "
+                "auto-launch lada-cli on agent startup — enable/Start it deliberately"))
+            enabled = False
+        if specs and not v2_enabled:
             plan.warnings.append(MigrationWarning(sid, wtype, name,
                 "watcher was disabled in V2 — migrated for reference but excluded "
                 "from the runnable set (to_runtime_monitors)"))
