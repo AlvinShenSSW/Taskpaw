@@ -46,6 +46,68 @@ def test_prune_status_logs(tmp_path):
     s.close()
 
 
+def test_migrates_v2_status_log_missing_reachable(tmp_path):
+    # Simulate a V2 hub.db: status_log has status_json but NO reachable column.
+    import sqlite3
+    db = tmp_path / "hub.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+                 "port INTEGER, enabled INTEGER)")
+    conn.execute("CREATE TABLE status_log(id INTEGER PRIMARY KEY, server_id INTEGER, "
+                 "timestamp TEXT, status_json TEXT)")
+    conn.execute("INSERT INTO servers VALUES(1,'m','1.1.1.1',5680,1)")
+    conn.execute("INSERT INTO status_log VALUES(1,1,'2026-06-28 08:00:00','{}')")
+    conn.commit(); conn.close()
+    # Opening with V3 must migrate (add reachable) and keep working.
+    s = HubStore(db)
+    s.log_status(1, True, "{}")            # would fail without the migration
+    rows = s.latest_statuses()
+    assert rows[0]["name"] == "m"
+    s.close()
+
+
+def test_migrates_early_v3_payload_json(tmp_path):
+    import sqlite3
+    db = tmp_path / "hub.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+                 "port INTEGER, enabled INTEGER)")
+    conn.execute("CREATE TABLE status_log(id INTEGER PRIMARY KEY, server_id INTEGER, "
+                 "timestamp TEXT, reachable INTEGER, payload_json TEXT)")
+    conn.commit(); conn.close()
+    s = HubStore(db)                        # should rename payload_json → status_json
+    a = s.add_server("m", "1.1.1.1")
+    s.log_status(a, True, "{}")
+    assert s.latest_statuses()[0]["reachable"] == 1
+    s.close()
+
+
+def test_offline_last_seen_uses_last_reachable(tmp_path):
+    s = HubStore(tmp_path / "hub.db")
+    a = s.add_server("m", "1.1.1.1")
+    # reachable, then two failed polls
+    s._conn.execute("INSERT INTO status_log(server_id,timestamp,reachable,status_json) "
+                    "VALUES(?, '2026-06-28 08:00:00', 1, '{}')", (a,)); s._conn.commit()
+    s.log_status(a, False, None)
+    s.log_status(a, False, None)
+    row = s.latest_statuses()[0]
+    assert row["reachable"] == 0
+    assert row["last_seen"] == "2026-06-28 08:00:00"   # the last GOOD poll, not now
+    md = render_status_md(s.latest_statuses(), "now")
+    assert "OFFLINE (last seen 08:00:00)" in md         # HH:MM:SS, V2 format
+    s.close()
+
+
+def test_render_v2_list_status_field():
+    # V2 agents return monitors as a list with `status`/`enabled`, not `state`.
+    rows = [{"name": "pig", "reachable": 1, "status_json": json.dumps({"monitors": [
+        {"name": "lada", "status": "Running", "enabled": True},
+        {"name": "old", "status": "x", "enabled": False},
+    ]})}]
+    md = render_status_md(rows, "now")
+    assert "- lada: Running" in md and "- old: disabled" in md
+
+
 def test_remove_server_cascades_status_log(tmp_path):
     s = HubStore(tmp_path / "hub.db")
     a = s.add_server("m", "1.1.1.1")
@@ -61,7 +123,8 @@ def test_render_status_md_matches_v2_format():
         {"name": "moomoo", "reachable": 1, "timestamp": "t",
          "status_json": json.dumps({"monitors": {"opend": {"state": "ok"},
                                                   "orch": {"state": "error"}}})},
-        {"name": "pig", "reachable": 0, "timestamp": "09:00:00", "status_json": None},
+        {"name": "pig", "reachable": 0, "last_seen": "2026-06-28 09:00:00",
+         "status_json": None},
     ]
     md = render_status_md(rows, "2026-06-28 09:00:00")
     assert md.startswith("# TaskPaw Hub Status")

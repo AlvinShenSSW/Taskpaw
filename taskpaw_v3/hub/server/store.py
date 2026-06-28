@@ -107,7 +107,25 @@ class HubStore:
                 )
                 """
             )
+            self._migrate_status_log(c)
             self._conn.commit()
+
+    def _migrate_status_log(self, c) -> None:
+        """Bring an EXISTING status_log up to the current schema (CREATE IF NOT
+        EXISTS won't alter it). data_dir defaults to ~/.taskpaw-hub, which may
+        hold a V2 db (status_json, no `reachable`) or an early-V3 db
+        (payload_json) — without this, log_status()/latest_statuses() fail with a
+        missing-column error on the first poll (#38 review)."""
+        cols = {r[1] for r in c.execute("PRAGMA table_info(status_log)").fetchall()}
+        if not cols:
+            return  # table didn't pre-exist; the CREATE above made the right shape
+        if "payload_json" in cols and "status_json" not in cols:
+            c.execute("ALTER TABLE status_log RENAME COLUMN payload_json TO status_json")
+        if "status_json" not in cols and "payload_json" not in cols:
+            c.execute("ALTER TABLE status_log ADD COLUMN status_json TEXT")
+        if "reachable" not in cols:
+            # V2 only logged reachable agents → treat legacy rows as reachable=1.
+            c.execute("ALTER TABLE status_log ADD COLUMN reachable INTEGER NOT NULL DEFAULT 1")
 
     # ── config ────────────────────────────────────────────────────────────
     def get_config(self, key: str, default: str = "") -> str:
@@ -206,7 +224,10 @@ class HubStore:
         with self._lock:
             cur = self._conn.execute(
                 """
-                SELECT s.id, s.name, sl.reachable, sl.status_json, sl.timestamp
+                SELECT s.id, s.name, sl.reachable, sl.status_json, sl.timestamp,
+                    (SELECT timestamp FROM status_log
+                     WHERE server_id = s.id AND reachable = 1
+                     ORDER BY id DESC LIMIT 1) AS last_seen
                 FROM servers s
                 LEFT JOIN status_log sl ON sl.id = (
                     SELECT id FROM status_log WHERE server_id = s.id

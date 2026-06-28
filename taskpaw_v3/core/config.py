@@ -85,7 +85,7 @@ class HubConfig(BaseModel):
     # Write status.md each poll (OpenClaw compat). Disable if not consumed.
     write_status_md: bool = True
     # Drop status_log rows older than this many days (bounded history). 0 = keep all.
-    status_log_retention_days: int = 7
+    status_log_retention_days: int = Field(7, ge=0)
 
     @field_validator("bind_port")
     @classmethod

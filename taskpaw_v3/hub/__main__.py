@@ -22,7 +22,6 @@ from taskpaw_v3.core.config import HubConfig, load_yaml
 from taskpaw_v3.hub.server.service import (
     db_path_for,
     default_config_path,
-    default_db_path,
     run_from_config,
 )
 from taskpaw_v3.hub.server.store import HubStore
@@ -42,14 +41,19 @@ def _port(value: str) -> int:
 def _store(args) -> HubStore:
     if args.db:
         return HubStore(Path(args.db).expanduser())
-    # Target the SAME db the running hub uses: HubConfig.data_dir/hub.db. Fall
-    # back to next-to-config only if the config can't be read (#38).
+    # Target the SAME db the running hub uses: HubConfig.data_dir/hub.db.
     cfg_path = Path(args.config).expanduser() if args.config else default_config_path()
+    if not cfg_path.exists():
+        # No config yet → use the default data_dir a default hub would use.
+        return HubStore(db_path_for(HubConfig()))
     try:
         config: HubConfig = load_yaml(HubConfig, cfg_path)  # type: ignore[assignment]
-        return HubStore(db_path_for(config))
-    except Exception:
-        return HubStore(default_db_path(cfg_path))
+    except Exception as e:
+        # A malformed config must NOT silently target a different db than the
+        # running hub — surface it and exit (#38 review).
+        print(f"error: cannot read hub config {cfg_path}: {e}", file=sys.stderr)
+        raise SystemExit(2)
+    return HubStore(db_path_for(config))
 
 
 def _print_servers(store: HubStore) -> None:
