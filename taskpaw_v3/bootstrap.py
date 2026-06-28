@@ -50,6 +50,30 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
     return dst, True
 
 
+def apply_agent_edits(config_path: Path, preset: str | None = None,
+                      bind_host: str | None = None) -> int:
+    """Apply post-scaffold edits to an agent.yaml (atomic save_yaml).
+
+    - preset="moomoo": set machine/server_id and inject the four life-signs
+      (real #13 defaults) → zero hand-editing.
+    - bind_host: set the LAN address the Hub polls (a separate Hub can't reach a
+      loopback bind — Codex).
+    Returns the monitor count after editing.
+    """
+    from taskpaw_v3.core.config import AgentConfig, load_yaml, save_yaml
+    from taskpaw_v3.monitors.presets.moomoo import moomoo_preset
+
+    cfg: AgentConfig = load_yaml(AgentConfig, config_path)  # type: ignore[assignment]
+    if preset == "moomoo":
+        cfg.machine = "moomoo"
+        cfg.server_id = "moomoo-prod"
+        cfg.monitors = moomoo_preset()
+    if bind_host:
+        cfg.bind_host = bind_host
+    save_yaml(cfg, config_path)
+    return len(cfg.monitors)
+
+
 def _parse_agent_spec(spec: str) -> tuple[str, str, int]:
     """`name,ip[,port]` → (name, ip, port). Raises ValueError on bad input."""
     parts = [p.strip() for p in spec.split(",")]
@@ -94,10 +118,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run", action="store_true", help="launch the service after setup")
     ap.add_argument("--agent", action="append", default=[], metavar="name,ip[,port]",
                     help="(hub only, repeatable) register an agent to poll")
+    ap.add_argument("--preset", choices=["moomoo"], default=None,
+                    help="(agent only) fill monitors from a built-in preset")
+    ap.add_argument("--bind-host", default=None, metavar="IP",
+                    help="(agent only) LAN address the Hub polls (default loopback)")
     args = ap.parse_args(argv)
 
     if args.agent and args.role != "hub":
         print("error: --agent is only valid for the hub role", file=sys.stderr)
+        return 2
+    if (args.preset or args.bind_host) and args.role != "agent":
+        print("error: --preset/--bind-host are only valid for the agent role", file=sys.stderr)
         return 2
 
     try:
@@ -108,6 +139,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{'created' if created else 'kept existing'} config: {path}")
     if not created:
         print("  (use --force to overwrite with the example)")
+
+    if args.preset or args.bind_host:
+        if not created and not args.force:
+            print(f"error: {path} already exists — refusing to edit it "
+                  f"(preset/bind-host); re-run with --force", file=sys.stderr)
+            return 2
+        n = apply_agent_edits(path, preset=args.preset, bind_host=args.bind_host)
+        if args.preset:
+            print(f"applied {args.preset} preset: {n} monitors (machine=moomoo)")
+        if args.bind_host:
+            print(f"set bind_host = {args.bind_host} (Hub polls this address)")
 
     if args.role == "hub" and args.agent:
         try:
@@ -127,8 +169,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Not running — tell the operator exactly what to do next.
     if args.role == "agent":
-        print(f"next: edit {path} (server_id/machine, bind_host for LAN, monitors),")
-        print("      then start it:  python -m taskpaw_v3.agent")
+        if args.preset:
+            print(f"next: {path} is ready (preset monitors set). Start it:")
+            print("      python -m taskpaw_v3.agent")
+        else:
+            print(f"next: edit {path} (server_id/machine, bind_host for LAN, monitors),")
+            print("      then start it:  python -m taskpaw_v3.agent")
     else:
         print(f"next: edit {path} if needed, register agents with")
         print("      python -m taskpaw_v3.bootstrap hub --agent name,ip  (or `hub add-server`),")

@@ -1,6 +1,8 @@
-# Run on Windows (moomoo) to set up + start a TaskPaw V3 agent.
+# Run on the Windows Lada / ComfyUI (GPU) box to set up + start a TaskPaw V3 agent.
 #   Right-click → "Run with PowerShell", or:  powershell -ExecutionPolicy Bypass -File scripts\setup-agent.ps1
-# Migrates the existing V2 config to V3 monitors, scaffolds agent.yaml, and starts.
+# Migrates the existing V2 (taskpaw.py) config to V3 monitors, scaffolds
+# agent.yaml, and starts. (This is NOT moomoo — moomoo is a Mac; use
+# setup-agent-moomoo.command there.)
 $ErrorActionPreference = "Stop"
 
 # Repo root = parent of this script's folder.
@@ -24,9 +26,9 @@ uv run python -m taskpaw_v3.bootstrap agent
 
 Write-Host ""
 Write-Host "ACTION NEEDED before the agent is useful:"
-Write-Host "  1. Edit $cfgDir\agent.yaml -> set server_id/machine and bind_host = moomoo's LAN IP"
+Write-Host "  1. Edit $cfgDir\agent.yaml -> set server_id/machine and bind_host = this box's LAN IP"
 Write-Host "  2. Replace its 'monitors: []' with the contents of $cfgDir\monitors.yaml"
-Write-Host "  3. On the Mac Hub:  python -m taskpaw_v3.hub add-server --name moomoo --ip <that LAN IP>"
+Write-Host "  3. On the Mac Hub:  python -m taskpaw_v3.hub add-server --name <this box> --ip <that LAN IP>"
 Write-Host ""
 Read-Host "Press Enter to start the agent now (Ctrl-C later to stop)"
 
