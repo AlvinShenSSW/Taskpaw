@@ -136,13 +136,24 @@ fn backend_command() -> Option<(String, Vec<String>)> {
     // rather than assume one path (Codex).
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let name = if cfg!(windows) { "taskpaw-backend.exe" } else { "taskpaw-backend" };
-    let candidates = [
-        dir.join(name),                              // next to the app binary
-        dir.join("../Resources").join(name),         // macOS .app resources fallback
-        dir.join("binaries").join(name),
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    // Probe BOTH the stripped name (Tauri normally renames the externalBin to
+    // this next to the app) AND the target-suffixed name produced by build.py,
+    // so we find the backend regardless of how Tauri places it (Codex P1).
+    let triple = option_env!("TASKPAW_TARGET_TRIPLE").unwrap_or("");
+    let names = [
+        format!("taskpaw-backend{ext}"),
+        format!("taskpaw-backend-{triple}{ext}"),
     ];
-    let found = candidates.iter().find(|p| p.exists())?;
+    let bases = [
+        dir.to_path_buf(),                       // next to the app binary
+        dir.join("../Resources"),                // macOS .app resources fallback
+        dir.join("binaries"),
+    ];
+    let found = bases
+        .iter()
+        .flat_map(|b| names.iter().map(move |n| b.join(n)))
+        .find(|p| p.exists())?;
     let role = ui_role();
     Some((found.to_string_lossy().into_owned(), vec![role]))
 }
