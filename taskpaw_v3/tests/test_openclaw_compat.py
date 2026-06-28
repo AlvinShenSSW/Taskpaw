@@ -32,6 +32,16 @@ def test_latest_statuses_includes_never_polled(tmp_path):
     s.close()
 
 
+def test_prune_status_logs_zero_keeps_all(tmp_path):
+    # days<=0 must be a no-op (config contract "0 = keep all"), not wipe (Kimi).
+    s = HubStore(tmp_path / "hub.db")
+    a = s.add_server("m", "1.1.1.1")
+    s.log_status(a, True, "{}")
+    assert s.prune_status_logs(0) == 0
+    assert len(s.latest_statuses()) == 1
+    s.close()
+
+
 def test_prune_status_logs(tmp_path):
     s = HubStore(tmp_path / "hub.db")
     a = s.add_server("m", "1.1.1.1")

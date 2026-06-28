@@ -4,6 +4,23 @@
 
 ---
 
+## V3 未发布 — Hub OpenClaw 兼容 (#38)
+
+- **破坏性变更(仅早期 V3):Hub 的 SQLite 库 + `status.md` 现位于 `HubConfig.data_dir`
+  (默认 `~/.taskpaw-hub/`),不再在 `hub.yaml` 旁边。** 对齐 V2 位置,使 OpenClaw 脚本
+  直接读 `~/.taskpaw-hub/{hub.db,status.md}` 无需改动。若你跑过会在 `hub.yaml` 旁建
+  `hub.db` 的早期 V3 构建,Hub 会**拒绝启动**(管理 CLI / bootstrap 也拒绝注册),
+  而非静默从空库开始。处理:
+  ```
+  mv ~/Library/Application\ Support/TaskPaw/hub.db ~/.taskpaw-hub/hub.db   # macOS
+  ```
+  或在 `hub.yaml` 设 `data_dir` 指向旧目录,或用 `--db <path>` 显式指定。
+- Hub 每轮写 `status.md`(V2 Markdown 格式)+ 每次成功轮询记一行
+  `status_log(server_id, timestamp, status_json)`,OpenClaw 脚本零改动。打开 V2 `hub.db`
+  时就地迁移(status_log 列、events 保留为 `events_v2_legacy`)。
+
+---
+
 ## v2.7 — Claude 第二轮修复（2026-05-06）
 
 > 由 Claude (Kate) 在 Kimi 完成 P0/P1/P2 修复后追加  

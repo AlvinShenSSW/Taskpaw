@@ -105,9 +105,11 @@ def register_agents(specs: list[str]) -> list[str]:
     db = hub_service.db_path_for(cfg)
     legacy = hub_service.legacy_db_conflict(cfg_path, db)
     if legacy:
-        print(f"warning: registering into {db}, but an older hub.db exists at "
-              f"{legacy} (not used). Move it or set data_dir if that's the real one.",
-              file=sys.stderr)
+        # FATAL (consistent with the hub `run` guard): don't register into a new
+        # empty db while a real legacy one exists beside the config (Kimi).
+        raise RuntimeError(
+            f"would register into {db}, but an older hub.db exists at {legacy}. "
+            f"Move it (mv '{legacy}' '{db}') or set data_dir first.")
     store = HubStore(db)
     existing = {s["name"] for s in store.list_servers()}
     lines: list[str] = []
@@ -168,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.role == "hub" and args.agent:
         try:
             lines = register_agents(args.agent)
-        except ValueError as e:
+        except (ValueError, RuntimeError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
         print("registered agents:")

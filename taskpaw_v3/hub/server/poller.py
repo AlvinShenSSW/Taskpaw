@@ -87,7 +87,11 @@ class Poller:
 
     def status_snapshot(self) -> list[dict]:
         """Current status of each ENABLED server for status.md (registration
-        order). Servers not yet polled this run show reachable=False/no data."""
+        order). Servers not yet polled this run show reachable=False/no data.
+
+        Best-effort: the server list (DB) and the in-memory snapshot are read
+        separately, so a server removed between the two reads may briefly appear
+        stale in one status.md render — acceptable for a human-readable snapshot."""
         with self._snap_lock:
             snaps = {k: dict(v) for k, v in self._status_snapshot.items()}
         out: list[dict] = []

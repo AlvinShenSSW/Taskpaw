@@ -60,18 +60,28 @@ def _is_sqlite_db(path: Path) -> bool:
 
 
 def _db_has_servers(path: Path) -> bool:
-    """True if the resolved db already holds registered servers (real data)."""
+    """True if the resolved db already holds registered servers (real data).
+    Retries on SQLITE_BUSY so write pressure doesn't make us miss a real
+    conflict (Kimi)."""
     if not _is_sqlite_db(path):
         return False
-    try:
-        conn = sqlite3.connect(str(path))
+    for attempt in range(3):
         try:
-            row = conn.execute("SELECT COUNT(*) FROM servers").fetchone()
-            return bool(row and row[0] > 0)
-        finally:
-            conn.close()
-    except Exception:
-        return False  # no servers table / unreadable → no real data
+            conn = sqlite3.connect(str(path), timeout=2)
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM servers").fetchone()
+                return bool(row and row[0] > 0)
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            if attempt == 2:
+                # Be conservative: if we can't tell, assume it HAS data so we
+                # don't wrongly declare "no conflict" and abandon a real db.
+                return True
+            continue
+        except Exception:
+            return False  # no servers table / unreadable → no real data
+    return True
 
 
 def legacy_db_conflict(config_path: Path, resolved_db: Path) -> Path | None:

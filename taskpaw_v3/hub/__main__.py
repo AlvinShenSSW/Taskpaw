@@ -60,13 +60,16 @@ def _store(args) -> HubStore:
         print(f"error: cannot read hub config {cfg_path}: {e}", file=sys.stderr)
         raise SystemExit(2)
     db = db_path_for(config)
-    # Warn loudly if we'd create a NEW empty db while a legacy one sits beside the
-    # config — else the operator adds servers to a db the hub won't run on (Kimi).
+    # FATAL (consistent with `run`): don't let the operator edit a new empty db
+    # while a real legacy one sits beside the config — they'd manage a db the hub
+    # refuses to start on. Pass --db to target a specific db explicitly (Kimi).
     legacy = legacy_db_conflict(cfg_path, db)
     if legacy:
-        print(f"warning: operating on {db}, but an older hub.db exists at {legacy} "
-              f"(not used). Move it or set data_dir if that's the real one.",
+        print(f"error: would operate on {db}, but an older hub.db exists at {legacy}.\n"
+              f"  Move it:   mv '{legacy}' '{db}'\n"
+              f"  or set data_dir, or pass --db {db} to target it explicitly.",
               file=sys.stderr)
+        raise SystemExit(2)
     return HubStore(db)
 
 

@@ -314,7 +314,10 @@ class HubStore:
 
     def prune_status_logs(self, days: int = 7) -> int:
         """Drop status_log rows older than `days` (bounded history). Returns the
-        number deleted."""
+        number deleted. days <= 0 means keep all (no-op) — matches the config
+        contract, so a stray prune(0) can't wipe history (Kimi)."""
+        if days <= 0:
+            return 0
         with self._lock:
             cur = self._conn.execute(
                 "DELETE FROM status_log WHERE timestamp < datetime('now','localtime',?)",

@@ -115,6 +115,28 @@ def test_resolved_with_servers_is_not_a_conflict(tmp_path):
     assert legacy_db_conflict(cfg, resolved) is None
 
 
+def test_management_cmd_fatal_on_legacy_conflict(tmp_path, capsys):
+    # add-server must FAIL (like run) when a real legacy db sits beside the config
+    # and the resolved db has no data — consistent safety model (Kimi).
+    cfg = tmp_path / "hub.yaml"
+    cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")   # real legacy db
+    with pytest.raises(SystemExit) as e:
+        main(["--config", str(cfg), "add-server", "--name", "x", "--ip", "2.2.2.2"])
+    assert e.value.code == 2
+    assert "older hub.db exists" in capsys.readouterr().err
+
+
+def test_management_cmd_legacy_bypassed_with_explicit_db(tmp_path):
+    # --db is the explicit opt-in; it bypasses the legacy guard.
+    cfg = tmp_path / "hub.yaml"
+    cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")
+    rc = main(["--config", str(cfg), "--db", str(tmp_path / "explicit.db"),
+               "add-server", "--name", "x", "--ip", "2.2.2.2"])
+    assert rc == 0
+
+
 def test_store_missing_explicit_config_fails(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(["--config", str(tmp_path / "nope.yaml"), "list-servers"])
