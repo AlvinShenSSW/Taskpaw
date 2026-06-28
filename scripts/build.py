@@ -93,8 +93,13 @@ def place_sidecar(built: Path) -> Path:
 
 
 def build_tauri() -> None:
-    # `ci` against the committed package-lock.json → reproducible UI dep tree.
-    run(["npm", "--prefix", str(ROOT / "taskpaw_v3" / "ui"), "ci"], cwd=ROOT)
+    ui = ROOT / "taskpaw_v3" / "ui"
+    # Build the UI HERE with an explicit absolute --prefix (cwd-independent), then
+    # drop tauri's beforeBuildCommand — so the release bundle never depends on
+    # Tauri's hook working directory (which differs from frontendDist's base; see
+    # #50 where the relative-prefix hook broke the build). `ci` = reproducible.
+    run(["npm", "--prefix", str(ui), "ci"], cwd=ROOT)
+    run(["npm", "--prefix", str(ui), "run", "build"], cwd=ROOT)
     # Role-specific identifier + name so the agent and hub installers don't
     # overwrite each other on one machine (Kimi). Role from TASKPAW_BUILD_ROLE
     # (also baked into the binary via option_env! in main.rs).
