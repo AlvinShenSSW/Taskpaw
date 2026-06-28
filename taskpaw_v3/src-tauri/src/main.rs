@@ -228,6 +228,11 @@ fn main() {
                 app.manage(JobHandle(Mutex::new(job)));
             }
             app.manage(Backend(Mutex::new(child)));
+            // NOTE (#48): the design §3.1 readiness handshake (read the backend's
+            // stdout readiness JSON before loading the webview + inject the actual
+            // base_url for custom ports) is tracked separately. For default ports
+            // the frontend's per-role loopback defaults work; base_url is
+            // loopback-validated here.
             // Build the window in code so we can inject the runtime config script
             // BEFORE the page loads (only on this loopback-served origin).
             WebviewWindowBuilder::new(app, "main", WebviewUrl::default())

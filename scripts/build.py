@@ -71,9 +71,8 @@ def place_sidecar(built: Path) -> Path:
 
 
 def build_tauri() -> None:
-    # `install` (not `ci`): the UI package-lock.json is gitignored, matching the
-    # existing frontend CI job.
-    run(["npm", "--prefix", str(ROOT / "taskpaw_v3" / "ui"), "install"], cwd=ROOT)
+    # `ci` against the committed package-lock.json → reproducible UI dep tree.
+    run(["npm", "--prefix", str(ROOT / "taskpaw_v3" / "ui"), "ci"], cwd=ROOT)
     # Pin the Tauri CLI for reproducible bundles; beforeBuildCommand builds the UI.
     run(["npx", "--yes", TAURI_CLI, "build"], cwd=SRC_TAURI)
     print("bundle -> " + str(SRC_TAURI / "target" / "release" / "bundle"), flush=True)

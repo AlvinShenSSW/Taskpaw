@@ -9,10 +9,10 @@ edition = "2021"
 # declaring one without a src/lib.rs would break cargo build/check.
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.1", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2.1", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
