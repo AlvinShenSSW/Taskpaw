@@ -158,11 +158,25 @@ def test_control_cors_allows_patch_delete(tmp_path):
     reg = _registry()
     admin = MonitorAdmin(cfg, None, reg, tmp_path / "a.yaml")
     client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
-    r = client.options("/control/monitors/x",
+    r = client.options("/control/monitors",
                        headers={"Origin": "http://tauri.localhost",
                                 "Access-Control-Request-Method": "DELETE"})
     allowed = r.headers.get("access-control-allow-methods", "")
     assert "DELETE" in allowed and "PATCH" in allowed
+
+
+def test_slash_named_monitor_is_manageable(tmp_path):
+    # A free-form name with '/' must still be addressable for delete/update
+    # (name is a query param, not a path segment) (Codex #57a).
+    cfg = _agent_config()
+    reg = _registry()
+    admin = MonitorAdmin(cfg, None, reg, tmp_path / "a.yaml")
+    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    assert client.post("/control/monitors",
+                       json={"type_id": "fake", "config": {"name": "jobs/foo"}}).status_code == 200
+    # delete it via the query-param route (path routing couldn't match "jobs/foo")
+    r = client.request("DELETE", "/control/monitors", params={"name": "jobs/foo"})
+    assert r.status_code == 200 and cfg.monitors == []
 
 
 def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
@@ -174,7 +188,7 @@ def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
     admin.add({"type_id": "fake", "config": {"name": "w1"}})   # enabled True
     client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
 
-    r = client.patch("/control/monitors/w1",
+    r = client.patch("/control/monitors", params={"name": "w1"},
                      json={"config": {"poll_interval": 0}, "enabled": False})
     assert r.status_code == 400                # poll_interval < 1 → invalid
     assert cfg.monitors[0].get("enabled", True) is True   # enabled untouched

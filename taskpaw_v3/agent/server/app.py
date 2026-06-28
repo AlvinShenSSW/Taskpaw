@@ -145,16 +145,20 @@ def create_control_app(
             except KeyError as e:             # not registered in the supervisor
                 raise HTTPException(status_code=404, detail=str(e))
 
+        # The monitor `name` is a free-form id (V2 parity) that may contain '/',
+        # which a path param can't address even URL-encoded — so the mutation
+        # routes take `name` as a QUERY param, keeping every valid monitor
+        # manageable (Codex #57a).
         @app.post("/control/monitors")
         def add_monitor(body: dict):
             # body = {type_id, name?, config, enabled?}
             return _guard(admin.add, body)
 
-        @app.delete("/control/monitors/{name}")
+        @app.delete("/control/monitors")
         def remove_monitor(name: str):
             return _guard(admin.remove, name)
 
-        @app.patch("/control/monitors/{name}")
+        @app.patch("/control/monitors")
         def update_monitor(name: str, body: dict):
             # {config?: {...}, enabled?: bool}. Apply CONFIG first: it validates,
             # so an invalid config fails (400) BEFORE enabled is touched/persisted
@@ -173,11 +177,11 @@ def create_control_app(
 
         # Start/Stop are persisted enable/disable (V2 parity: a stopped monitor
         # stays stopped across restarts).
-        @app.post("/control/monitors/{name}/start")
+        @app.post("/control/monitors/start")
         def start_monitor(name: str):
             return _guard(admin.set_enabled, name, True)
 
-        @app.post("/control/monitors/{name}/stop")
+        @app.post("/control/monitors/stop")
         def stop_monitor(name: str):
             return _guard(admin.set_enabled, name, False)
 
