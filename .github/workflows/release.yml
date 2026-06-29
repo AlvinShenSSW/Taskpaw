@@ -9,6 +9,11 @@ name: release
 # notarized and open on a double-click. WITHOUT those secrets they're UNSIGNED —
 # Gatekeeper blocks a double-click; verify via right-click → Open, or
 # `xattr -dr com.apple.quarantine <app>` (#49).
+#
+# Windows signing: when the WINDOWS_* repo secrets are configured (see
+# docs/guides/windows-signing.md), the .exe/.msi are Authenticode-signed so the
+# install has no unknown-publisher SmartScreen/UAC warning. WITHOUT them the
+# installers ship UNSIGNED (the prior behaviour) — nothing breaks (#112).
 on:
   workflow_dispatch:
   push:
@@ -69,6 +74,45 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: uv run python scripts/build.py
+
+      - name: Sign Windows installers (gated on secrets)
+        # Authenticode-sign the produced .exe/.msi when the WINDOWS_* secrets are
+        # configured (see docs/guides/windows-signing.md) — removes the unknown-
+        # publisher SmartScreen/UAC warning on install. WITHOUT the secrets the
+        # step is a clean no-op and the installers ship UNSIGNED (parity with the
+        # unsigned-macOS path), so a fork/PR/secret-less run never fails (#112).
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Host "No WINDOWS_CERTIFICATE secret — leaving installers unsigned."
+            exit 0
+          }
+          # Resolve the newest signtool.exe from the Windows SDK on the runner.
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" `
+            -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { Write-Error "signtool.exe not found in the Windows SDK"; exit 1 }
+          # Materialize the PFX from the base64 secret (removed in finally).
+          $pfx = Join-Path $env:RUNNER_TEMP "taskpaw-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          try {
+            $bundle = "taskpaw_v3/src-tauri/target/release/bundle"
+            $artifacts = Get-ChildItem -Path $bundle -Recurse -Include *.exe, *.msi
+            if (-not $artifacts) { Write-Error "no .exe/.msi found under $bundle to sign"; exit 1 }
+            foreach ($a in $artifacts) {
+              & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+                /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $a.FullName
+              if ($LASTEXITCODE -ne 0) { Write-Error "signtool sign failed: $($a.FullName)"; exit 1 }
+              & $signtool.FullName verify /pa $a.FullName
+              if ($LASTEXITCODE -ne 0) { Write-Error "signtool verify failed: $($a.FullName)"; exit 1 }
+              Write-Host "Signed $($a.Name)"
+            }
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Collect installers
         uses: actions/upload-artifact@v7
