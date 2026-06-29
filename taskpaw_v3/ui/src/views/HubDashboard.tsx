@@ -1,22 +1,54 @@
 import {
-  Alert, Box, Card, CardContent, Chip, MenuItem, Stack, Tab, Tabs, TextField, Typography,
+  Alert, Box, Card, CardActionArea, CardContent, Chip, Collapse, MenuItem, Stack, Tab, Tabs,
+  TextField, Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api } from "../api";
+import { api, type HubServer, type MonitorSnapshot } from "../api";
 import { StatusDot } from "../components/StatusDot";
 import { EventLog } from "../components/EventLog";
+import { MonitorMetrics } from "../components/MonitorMetrics";
 import { Settings } from "./Settings";
 
-// Multi-machine observability (design pages/hub-dashboard.md): fleet grid of
-// machines + the Hub's own host-health self-monitor, and an aggregated event log
-// (#44). No marketing hero/CTA.
+// ── fleet health (design pages/hub-dashboard.md "Fleet health") ──────────────
+// Derived from #96's per-server `online` + `snapshot` (NOT `acks`, which is an
+// event-id cursor, not heartbeat freshness — see the #95 design doc).
+type Health = "ok" | "degraded" | "offline";
+const HEALTH_STATE: Record<Health, string> = { ok: "ok", degraded: "degraded", offline: "stopped" };
+
+// Any monitor failure state (theme.statusColors) counts as degraded — not just
+// "alert". Plugins (Lada/ComfyUI/…) emit "error"/"degraded" on service failures,
+// and the worker can be alive while the monitored service is down (Codex 外门).
+const PROBLEM_STATES = new Set(["alert", "error", "degraded"]);
+function monitorProblem(m: MonitorSnapshot): boolean {
+  return m.alive === false || m.degraded === true || PROBLEM_STATES.has(m.state);
+}
+function serverHealth(s: HubServer): Health {
+  if (!s.online) return "offline";
+  const mons = s.snapshot?.monitors ?? {};
+  return Object.values(mons).some(monitorProblem) ? "degraded" : "ok";
+}
+
+// last_seen ISO → locale time, or empty.
+function fmtSeen(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleTimeString();
+}
+
+// Multi-machine observability (design pages/hub-dashboard.md): fleet health
+// summary + grid of drill-down machine cards + the Hub's own host-health
+// self-monitor, and an aggregated event log (#44). No marketing hero/CTA.
 export function HubDashboard() {
   const { t } = useTranslation();
-  const { data, error, isLoading } = useQuery({ queryKey: ["hubStatus"], queryFn: api.hubStatus });
+  const { data, error, isLoading } = useQuery({
+    queryKey: ["hubStatus"], queryFn: api.hubStatus,
+    refetchInterval: 5000, // #95: auto-refresh like the agent console.
+  });
   const [tab, setTab] = useState<"fleet" | "events" | "settings">("fleet");
   const [level, setLevel] = useState<string>("");
+  const [expanded, setExpanded] = useState<number | null>(null);
   // Aggregated durable history from all polled agents; only poll while open.
   const events = useQuery({
     queryKey: ["hubEvents", level],
@@ -28,6 +60,9 @@ export function HubDashboard() {
   // reachable even when the Hub is unreachable (#87/Codex).
   const servers = data?.servers ?? [];
   const self = data?.self ?? {};
+
+  const counts = { ok: 0, degraded: 0, offline: 0 };
+  for (const s of servers) counts[serverHealth(s)] += 1;
 
   return (
     <Stack spacing={1.5}>
@@ -61,28 +96,27 @@ export function HubDashboard() {
         </Card>
       ) : (
         <Stack spacing={2}>
-          <Typography variant="overline" color="text.secondary">
-            {t("hub.fleetTitle", {
-              machine: data?.machine,
-              count: servers.length,
-              unit: t(servers.length === 1 ? "hub.agent" : "hub.agents"),
-            })}
-          </Typography>
+          <Stack direction="row" alignItems="center" spacing={2} sx={{ flexWrap: "wrap" }}>
+            <Typography variant="overline" color="text.secondary">
+              {t("hub.fleetTitle", {
+                machine: data?.machine,
+                count: servers.length,
+                unit: t(servers.length === 1 ? "hub.agent" : "hub.agents"),
+              })}
+            </Typography>
+            {servers.length > 0 && (
+              <Stack direction="row" spacing={2} alignItems="center" aria-label={t("hub.fleetHealth")}>
+                <HealthCount health="ok" label={t("hub.healthOk")} n={counts.ok} />
+                <HealthCount health="degraded" label={t("hub.healthDegraded")} n={counts.degraded} />
+                <HealthCount health="offline" label={t("hub.healthOffline")} n={counts.offline} />
+              </Stack>
+            )}
+          </Stack>
+
           <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
             {servers.map((s) => (
-              <Card key={s.id} sx={{ width: { xs: "100%", sm: 280 } }}>
-                <CardContent>
-                  <Stack direction="row" alignItems="center" spacing={1}>
-                    <StatusDot state={s.enabled ? "ok" : "stopped"} />
-                    <Typography variant="subtitle1">{s.name}</Typography>
-                  </Stack>
-                  <Typography variant="body2" color="text.secondary">
-                    {s.ip}:{s.port}
-                  </Typography>
-                  <Chip size="small" sx={{ mt: 1 }}
-                    label={s.enabled ? t("state.enabled") : t("state.disabled")} />
-                </CardContent>
-              </Card>
+              <MachineCard key={s.id} server={s} expanded={expanded === s.id}
+                onToggle={() => setExpanded((cur) => (cur === s.id ? null : s.id))} />
             ))}
             {servers.length === 0 && (
               <Typography color="text.secondary">{t("hub.noAgents")}</Typography>
@@ -99,11 +133,8 @@ export function HubDashboard() {
                       <StatusDot state={snap.state} />
                       <Typography variant="body2">{name}</Typography>
                     </Stack>
-                    {snap.metrics && (
-                      <Box component="pre" sx={{ m: 0, fontFamily: '"Fira Code", monospace', fontSize: 12 }}>
-                        {JSON.stringify(snap.metrics, null, 2)}
-                      </Box>
-                    )}
+                    {/* #95: metric tiles instead of a raw JSON <pre>. */}
+                    <MonitorMetrics metrics={snap.metrics} />
                   </Box>
                 ))}
               </CardContent>
@@ -111,6 +142,107 @@ export function HubDashboard() {
           )}
         </Stack>
       )}
+    </Stack>
+  );
+}
+
+// Labelled health tally (dot + word + count — never color alone, a11y §1).
+function HealthCount({ health, label, n }: { health: Health; label: string; n: number }) {
+  return (
+    <Stack direction="row" alignItems="center" spacing={0.5} sx={{ opacity: n === 0 ? 0.4 : 1 }}>
+      <StatusDot state={HEALTH_STATE[health]} live={false} />
+      <Typography variant="body2" sx={{ fontVariantNumeric: "tabular-nums" }}>
+        <Box component="span" sx={{ fontWeight: 700 }}>{n}</Box> {label}
+      </Typography>
+    </Stack>
+  );
+}
+
+// One machine: card face (health + name + addr + last-seen + online chip) that
+// drills down into its monitors + recent events. Hover lift uses transform (no
+// reflow / layout shift, #95 acceptance) and degrades under reduced motion.
+function MachineCard({ server: s, expanded, onToggle }:
+  { server: HubServer; expanded: boolean; onToggle: () => void }) {
+  const { t } = useTranslation();
+  const health = serverHealth(s);
+  const online = !!s.online;
+  const disabled = !s.enabled;
+  return (
+    <Card
+      sx={{
+        width: { xs: "100%", sm: 300 }, alignSelf: "flex-start",
+        // Hover lift via transform only → no layout shift / reflow (#95 acceptance);
+        // degrades to no movement under reduced motion.
+        transition: "transform .16s ease, box-shadow .16s ease",
+        "&:hover": { transform: "translateY(-2px)", boxShadow: "0 8px 24px -10px rgba(0,0,0,.5)" },
+        "@media (prefers-reduced-motion: reduce)": { "&:hover": { transform: "none" } },
+      }}
+    >
+      {/* CardActionArea (not CardContent component="button") → the whole face is
+          one focusable control without a <button> wrapping block elements (Kimi). */}
+      <CardActionArea onClick={onToggle} aria-expanded={expanded}>
+        <CardContent>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <StatusDot state={HEALTH_STATE[health]} />
+            <Typography variant="subtitle1" sx={{ flex: 1 }}>{s.name}</Typography>
+            {/* A disabled server is forced offline by the backend; label it as
+                disabled (not just offline) so the two are distinguishable (Kimi). */}
+            <Chip size="small"
+              label={disabled ? t("state.disabled") : online ? t("hub.online") : t("hub.offline")}
+              color={!disabled && online ? "success" : "default"}
+              variant={!disabled && online ? "filled" : "outlined"} />
+          </Stack>
+          <Typography variant="body2" color="text.secondary">{s.ip}:{s.port}</Typography>
+          <Typography variant="caption" color="text.secondary">
+            {s.last_seen ? t("hub.lastSeen", { time: fmtSeen(s.last_seen) }) : t("hub.lastSeenNever")}
+          </Typography>
+        </CardContent>
+      </CardActionArea>
+
+      <Collapse in={expanded} unmountOnExit>
+        <Box sx={{ px: 2, pb: 2 }}>
+          <MachineDetail server={s} />
+        </Box>
+      </Collapse>
+    </Card>
+  );
+}
+
+// Drill-down: the machine's monitors (from its #96 snapshot) + recent events
+// (fetched only while expanded via the existing per-server events filter).
+function MachineDetail({ server: s }: { server: HubServer }) {
+  const { t } = useTranslation();
+  const monitors = s.snapshot?.monitors ?? {};
+  const events = useQuery({
+    queryKey: ["hubEvents", "server", s.id],
+    queryFn: () => api.hubEvents({ server: s.id, limit: 5 }),
+    refetchInterval: 5000,
+  });
+  return (
+    <Stack spacing={1.5}>
+      <Box>
+        <Typography variant="overline" color="text.secondary">{t("hub.machineMonitors")}</Typography>
+        {Object.keys(monitors).length === 0 ? (
+          <Typography variant="body2" color="text.secondary">{t("hub.noMonitors")}</Typography>
+        ) : (
+          <Stack spacing={0.5} sx={{ mt: 0.5 }}>
+            {Object.entries(monitors).map(([name, m]) => (
+              <Stack key={name} direction="row" alignItems="center" spacing={1}>
+                <StatusDot state={m.state} />
+                <Typography variant="body2" sx={{ flex: 1 }}>{name}</Typography>
+                {m.detail && (
+                  <Typography variant="caption" color="text.secondary"
+                    sx={{ textAlign: "right", wordBreak: "break-all" }}>{m.detail}</Typography>
+                )}
+              </Stack>
+            ))}
+          </Stack>
+        )}
+      </Box>
+      <Box>
+        <Typography variant="overline" color="text.secondary">{t("hub.machineEvents")}</Typography>
+        <EventLog events={events.data?.events} />
+      </Box>
     </Stack>
   );
 }
