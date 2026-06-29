@@ -1,4 +1,5 @@
 import { Box, CircularProgress, LinearProgress, Stack, Tooltip, Typography } from "@mui/material";
+import { useTranslation } from "react-i18next";
 
 // Live metrics dashboard for a monitor's status pane (design-system
 // pages/agent-console.md → StatusHeader: "live metric line … file N/M, fps, %").
@@ -79,6 +80,7 @@ const KNOWN = new Set([
 ]);
 
 export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> }) {
+  const { t } = useTranslation();
   const m = metrics ?? {};
   const num = (k: string) => (typeof m[k] === "number" ? (m[k] as number) : undefined);
   const str = (k: string) => (typeof m[k] === "string" ? (m[k] as string) : undefined);
@@ -105,8 +107,8 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
   ].filter(Boolean) as { label: string; pct: number }[];
 
   const tiles: { label: string; value: string }[] = [];
-  if (fps !== undefined) tiles.push({ label: "fps", value: fps.toFixed(fps < 10 ? 1 : 0) });
-  if (eta) tiles.push({ label: "ETA", value: eta });
+  if (fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
+  if (eta) tiles.push({ label: t("events.eta"), value: eta });
   // Unknown keys → tiles (so nothing is silently hidden, nothing is raw JSON).
   for (const [k, val] of Object.entries(m)) {
     if (KNOWN.has(k)) continue;
@@ -123,14 +125,14 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
                    border: "1px solid", borderColor: "rgba(34,197,94,0.25)" }}>
           <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase",
                                               letterSpacing: 0.6, fontSize: 10 }}>
-            Now processing
+            {t("events.nowProcessing")}
           </Typography>
           <Typography sx={{ fontFamily: '"Fira Code", monospace', fontWeight: 600, fontSize: 14,
                             wordBreak: "break-all", mt: 0.25 }}>{currentFile}</Typography>
           {percent !== undefined && (
             <Box sx={{ mt: 1 }}>
               <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
-                <Typography variant="caption" color="text.secondary">current file</Typography>
+                <Typography variant="caption" color="text.secondary">{t("events.currentFile")}</Typography>
                 <Typography variant="caption" sx={{ fontFamily: '"Fira Code", monospace',
                             fontVariantNumeric: "tabular-nums" }}>{Math.round(percent)}%</Typography>
               </Stack>
@@ -147,10 +149,11 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
       {qTotal !== undefined && qTotal > 0 && qDone !== undefined && (
         <Box>
           <Stack direction="row" justifyContent="space-between" alignItems="baseline" sx={{ mb: 0.5 }}>
-            <Typography variant="overline" color="text.secondary">queue</Typography>
+            <Typography variant="overline" color="text.secondary">{t("events.queue")}</Typography>
             <Typography sx={{ fontFamily: '"Fira Code", monospace', fontSize: 13,
                               fontVariantNumeric: "tabular-nums" }}>
-              {qDone} / {qTotal} done{qRem ? ` · ${qRem} left` : ""}
+              {t("events.queueDone", { done: qDone, total: qTotal })}
+              {qRem ? t("events.queueLeft", { n: qRem }) : ""}
             </Typography>
           </Stack>
           <LinearProgress variant="determinate" value={(qDone / qTotal) * 100}
@@ -175,7 +178,7 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
       {vramPct !== undefined && (
         <Box>
           <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
-            <Typography variant="overline" color="text.secondary">vram</Typography>
+            <Typography variant="overline" color="text.secondary">{t("events.vram")}</Typography>
             <Typography sx={{ fontFamily: '"Fira Code", monospace', fontSize: 13,
                               fontVariantNumeric: "tabular-nums" }}>
               {fmtGB(vramUsed!)} / {fmtGB(vramTotal!)}
@@ -193,7 +196,7 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
       {/* Stat tiles (fps / ETA / anything else) */}
       {tiles.length > 0 && (
         <Stack direction="row" spacing={1.5} sx={{ flexWrap: "wrap", gap: 1.5 }}>
-          {tiles.map((t) => <Tile key={t.label} label={t.label} value={t.value} />)}
+          {tiles.map((tile) => <Tile key={tile.label} label={tile.label} value={tile.value} />)}
         </Stack>
       )}
     </Stack>

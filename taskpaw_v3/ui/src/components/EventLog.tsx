@@ -1,4 +1,5 @@
 import { Box, Chip, Stack, Typography } from "@mui/material";
+import { useTranslation } from "react-i18next";
 import type { EventItem } from "../api";
 
 // Shared event-log renderer (#44): a dense, newest-first list the operator can
@@ -20,11 +21,12 @@ function fmtTime(iso?: string): string {
 }
 
 export function EventLog({ events }: { events?: EventItem[] }) {
+  const { t } = useTranslation();
   const rows = events ?? [];
   if (rows.length === 0) {
     return (
       <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
-        No events yet — they appear here as monitors report activity.
+        {t("events.none")}
       </Typography>
     );
   }
