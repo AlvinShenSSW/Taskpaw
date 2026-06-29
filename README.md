@@ -53,19 +53,19 @@ Python 3.10+ via [`uv`](https://docs.astral.sh/uv/), Node 22, and the Rust
 toolchain (for the Tauri shell).
 
 ```bash
+# From the repo root:
 uv sync --group dev          # Python backend + tests
 uv run pytest                # backend test suite
 
-cd taskpaw_v3/ui             # frontend
-npm ci && npm test           # vitest smoke tests
-npm run build
-
-# Headless backend (no GUI):
+# Headless backend, no GUI (still from the repo root):
 uv run python -m taskpaw_v3.bootstrap agent --run     # an agent
 uv run python -m taskpaw_v3.bootstrap hub --run       # the Hub
 
 # Build the packaged desktop app (backend sidecar + Tauri bundle):
 uv run python scripts/build.py
+
+# Frontend tests/build (in its own directory):
+cd taskpaw_v3/ui && npm ci && npm test && npm run build
 ```
 
 ## Architecture
