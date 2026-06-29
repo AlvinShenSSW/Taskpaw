@@ -1,7 +1,7 @@
 import {
   Alert, Box, Button, Card, CardContent, Chip, Dialog, DialogActions,
   DialogContent, DialogContentText, DialogTitle, List, ListItemButton,
-  MenuItem, Snackbar, Stack, TextField, Typography,
+  MenuItem, Snackbar, Stack, Tab, Tabs, TextField, Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
@@ -9,6 +9,7 @@ import { api, type MonitorSnapshot, type PluginInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
 import { StatusDot } from "../components/StatusDot";
 import { MonitorMetrics } from "../components/MonitorMetrics";
+import { EventLog } from "../components/EventLog";
 
 // Local control panel for ONE machine (design pages/agent-console.md): left rail
 // of this machine's monitors + an Add button; main pane = the selected monitor's
@@ -21,6 +22,12 @@ export function AgentConsole() {
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<null | { mode: "add" } | { mode: "edit"; name: string }>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<"monitors" | "events">("monitors");
+  // Recent local events for the event-log tab (#44); only poll while it's open.
+  const events = useQuery({
+    queryKey: ["agentEvents"], queryFn: () => api.agentEvents(),
+    refetchInterval: 5000, enabled: tab === "events",
+  });
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["agentStatus"] });
@@ -36,17 +43,38 @@ export function AgentConsole() {
   const current = selected && monitors[selected] ? selected : names[0];
 
   return (
-    <Stack direction="row" spacing={2} sx={{ minHeight: "70dvh" }}>
-      <Card sx={{ width: 280, flex: "0 0 auto" }}>
-        <CardContent>
-          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
-            <Typography variant="overline" color="text.secondary">
-              {status.data?.machine} — monitors
-            </Typography>
-            <Button size="small" variant="contained" onClick={() => setDialog({ mode: "add" })}>
-              + Add
-            </Button>
-          </Stack>
+    <Stack spacing={1.5}>
+      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ minHeight: 0 }}>
+        <Tab value="monitors" label="Monitors" />
+        <Tab value="events" label="Events" />
+      </Tabs>
+
+      {tab === "events" ? (
+        <Card>
+          <CardContent>
+            <Stack direction="row" alignItems="baseline" justifyContent="space-between">
+              <Typography variant="overline" color="text.secondary">
+                {status.data?.machine} — recent events
+              </Typography>
+              {events.isFetching && (
+                <Typography variant="caption" color="text.secondary">updating…</Typography>
+              )}
+            </Stack>
+            <EventLog events={events.data?.events} />
+          </CardContent>
+        </Card>
+      ) : (
+        <Stack direction="row" spacing={2} sx={{ minHeight: "70dvh" }}>
+          <Card sx={{ width: 280, flex: "0 0 auto" }}>
+            <CardContent>
+              <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
+                <Typography variant="overline" color="text.secondary">
+                  {status.data?.machine} — monitors
+                </Typography>
+                <Button size="small" variant="contained" onClick={() => setDialog({ mode: "add" })}>
+                  + Add
+                </Button>
+              </Stack>
           {names.length === 0 && (
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
               No monitors yet — add one to start watching this machine.
@@ -75,10 +103,12 @@ export function AgentConsole() {
             onChanged={invalidate}
             onError={onErr}
           />
-        ) : (
-          <Typography color="text.secondary">Select or add a monitor.</Typography>
-        )}
-      </Box>
+            ) : (
+              <Typography color="text.secondary">Select or add a monitor.</Typography>
+            )}
+          </Box>
+        </Stack>
+      )}
 
       {dialog && (
         <MonitorDialog

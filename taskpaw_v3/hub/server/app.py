@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from typing import Optional
 
 from fastapi import FastAPI
 
@@ -149,6 +150,14 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             # Hub's own host-health self-monitor (§5b.2).
             "self": service.self_supervisor.snapshot() if service.self_supervisor else {},
         }
+
+    @app.get("/events")
+    def events(server: Optional[int] = None, level: Optional[str] = None,
+               limit: int = 200) -> dict:
+        # Durable event history aggregated from all polled agents (#44), newest
+        # first, optionally filtered by server id / level. Clamp the limit.
+        limit = max(1, min(int(limit), 1000))
+        return {"events": store.recent_events(server_id=server, level=level, limit=limit)}
 
     return app, service
 

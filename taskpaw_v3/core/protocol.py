@@ -9,6 +9,7 @@ only when provided so old consumers are unaffected.
 from __future__ import annotations
 
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -41,10 +42,16 @@ class EventQueue:
         persist_counter: Optional[Callable[[int], None]] = None,
         max_size: int = 10000,
         on_overflow: Optional[Callable[[int], None]] = None,
+        history_size: int = 500,
     ) -> None:
         self.machine = machine
         self._lock = threading.Lock()
         self._queue: list[dict] = []
+        # A bounded ring of recent events for the local UI's event log (#44), kept
+        # SEPARATE from `_queue` so a Hub ack/poll that drains `_queue` doesn't
+        # empty the console's Events tab. In-memory only (the Hub holds the durable
+        # cross-restart history).
+        self._history: "deque[dict]" = deque(maxlen=max(0, int(history_size)))
         self._next_id = max(1, int(start_id))
         self._persist_counter = persist_counter
         self._max_size = max_size
@@ -92,6 +99,7 @@ class EventQueue:
                 self._persist_counter(candidate_id + 1)
 
             self._queue.append(evt)
+            self._history.append(evt)   # UI history — independent of ack trimming
             self._next_id = candidate_id + 1
             overflow = len(self._queue) - self._max_size
             if overflow > 0:
@@ -99,6 +107,16 @@ class EventQueue:
                 if self._on_overflow is not None:
                     self._on_overflow(overflow)
             return dict(evt)
+
+    def recent(self, limit: int = 200) -> list[dict]:
+        """A NON-destructive snapshot of the most recent events (newest last) for
+        the local UI's event log (#44). Reads the separate `_history` ring, so it
+        is unaffected by Hub acks/polls that drain `_queue` — the Events tab keeps
+        showing recent local activity even on a Hub-polled agent. Shallow copies."""
+        limit = max(0, int(limit))
+        with self._lock:
+            items = list(self._history)
+            return [dict(e) for e in (items[-limit:] if limit else [])]
 
     def payload(self, ack_id: Optional[int] = None) -> dict:
         with self._lock:
