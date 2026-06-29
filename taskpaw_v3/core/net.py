@@ -8,11 +8,37 @@ the server actually owns the socket.
 
 from __future__ import annotations
 
+import json
 import socket
 
 
 class PortInUseError(RuntimeError):
     pass
+
+
+def loopback_url(host: str, port: int) -> str:
+    """A loopback http URL the local webview can reach for a server bound to
+    (host, port) (#48). The UI is always local, so a wildcard bind maps to its
+    loopback (0.0.0.0 → 127.0.0.1, :: → ::1) and an IPv6 host is bracketed — e.g.
+    a control server on `::1` is announced as http://[::1]:<port>, not the wrong
+    http://127.0.0.1. The result is one of the canonical loopback forms the shell
+    accepts (loopback_base) and the CSP connect-src allows."""
+    if host in ("0.0.0.0", ""):
+        host = "127.0.0.1"
+    elif host in ("::", "[::]"):
+        host = "::1"
+    bracketed = f"[{host}]" if ":" in host else host
+    return f"http://{bracketed}:{port}"
+
+
+def announce_ready(role: str, base_url: str) -> None:
+    """Print the §3.1 readiness handshake line to stdout (#48): one machine-
+    readable JSON object the Tauri shell reads before loading the webview, then
+    injects this base_url (so a custom port works and the UI never races the
+    backend). All logs go to stderr (logging.basicConfig), so stdout carries only
+    this line; flushed so a piped shell sees it immediately."""
+    print(json.dumps({"taskpaw_ready": True, "role": role, "base_url": base_url}),
+          flush=True)
 
 
 def _family(host: str) -> int:

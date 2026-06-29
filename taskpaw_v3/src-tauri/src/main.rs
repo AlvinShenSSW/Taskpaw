@@ -175,11 +175,16 @@ fn spawn_backend() -> Option<Child> {
     let (program, args) = backend_command()?;
     let mut command = Command::new(&program);
     command.args(args);
+    // Pipe stdout on EVERY platform so the shell can read the §3.1 readiness line
+    // (#48). Backend logs go to STDERR (logging.basicConfig) — kept separate from
+    // the one-line handshake on stdout.
+    command.stdout(std::process::Stdio::piped());
     // Own process group so we can signal the WHOLE backend tree on exit.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+        // stderr inherits (dev terminal); a windowed release Mac has no console.
     }
     #[cfg(windows)]
     {
@@ -191,25 +196,16 @@ fn spawn_backend() -> Option<Child> {
         // breakaway — using it made CreateProcess fail (os error 87) and crash
         // every launch (caught by Windows verification, #50).
         command.creation_flags(0x08000000 | 0x01000000);
-        // The windowed shell has no console — instead of nulling (which discards
-        // all backend logs), redirect to %APPDATA%\TaskPaw\taskpaw-backend.log so
-        // production builds are debuggable; fall back to null if it can't open
-        // (Kimi). (#48 will switch stdout to a pipe for the readiness handshake.)
+        // The windowed shell has no console — route backend STDERR (its logs) to
+        // %APPDATA%\TaskPaw\taskpaw-backend.log so production builds are
+        // debuggable; null if it can't open (Kimi). stdout stays piped (above) for
+        // the readiness handshake.
         let log = std::env::var("APPDATA").ok().and_then(|a| {
             let dir = std::path::Path::new(&a).join("TaskPaw");
             std::fs::create_dir_all(&dir).ok()?;
             std::fs::File::create(dir.join("taskpaw-backend.log")).ok()
         });
-        match log {
-            Some(f) => {
-                let err = f.try_clone().ok();
-                command.stdout(Stdio::from(f));
-                command.stderr(err.map(Stdio::from).unwrap_or_else(Stdio::null));
-            }
-            None => {
-                command.stdout(Stdio::null()).stderr(Stdio::null());
-            }
-        }
+        command.stderr(log.map(Stdio::from).unwrap_or_else(Stdio::null));
     }
     match command.spawn() {
         Ok(c) => Some(c),
@@ -218,6 +214,41 @@ fn spawn_backend() -> Option<Child> {
             None
         }
     }
+}
+
+/// Read the backend's stdout until the §3.1 readiness line (#48) and return its
+/// `base_url`, or None on timeout. A reader thread parses each line as JSON,
+/// sends the base_url from the first `{"taskpaw_ready":true,...}` line, then keeps
+/// draining stdout to EOF so a full pipe can never block the backend. We wait on
+/// the channel with a timeout so a backend that never reports ready can't hang the
+/// shell (the caller fails loud instead of opening a UI that can't reach the API).
+fn read_readiness(stdout: std::process::ChildStdout, timeout: Duration) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let mut found = false;
+        for line in BufReader::new(stdout).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break, // pipe closed (backend exited)
+            };
+            if !found {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if v.get("taskpaw_ready").and_then(|b| b.as_bool()) == Some(true) {
+                        if let Some(b) = v.get("base_url").and_then(|b| b.as_str()) {
+                            let _ = tx.send(b.to_string());
+                            found = true;
+                            continue;
+                        }
+                    }
+                }
+                eprintln!("[backend] {line}"); // stray pre-readiness stdout
+            }
+            // After readiness: keep reading (and discarding) to drain the pipe.
+        }
+    });
+    rx.recv_timeout(timeout).ok()
 }
 
 // Signal the backend's whole process GROUP on Unix (negative pid), so a wedged
@@ -323,8 +354,16 @@ fn loopback_base(raw: &str) -> String {
 
 /// Runtime config injected on the loopback origin (design §3.1) — packaged
 /// builds can't use compile-time Vite env, so the shell injects it here.
-fn init_script() -> String {
-    let base = loopback_base(&std::env::var("TASKPAW_UI_BASE").unwrap_or_default());
+fn init_script(base_url: &str) -> String {
+    // Prefer the backend-reported base_url from the readiness handshake (#48) — it
+    // reflects the ACTUAL (possibly custom) port. Fall back to TASKPAW_UI_BASE for
+    // dev (Vite) when empty. Both are loopback-validated before injection.
+    let raw = if base_url.is_empty() {
+        std::env::var("TASKPAW_UI_BASE").unwrap_or_default()
+    } else {
+        base_url.to_string()
+    };
+    let base = loopback_base(&raw);
     let token = std::env::var("TASKPAW_UI_TOKEN").unwrap_or_default();
     let role = ui_role();
     // serde_json escapes the values safely.
@@ -352,11 +391,9 @@ fn main() {
         // `dialog:allow-open` in capabilities/default.json.
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // `mut` only needed for the Windows Job-Object failure kill path.
-            #[cfg(windows)]
+            // `mut`: the Windows Job-Object failure kill path AND taking the
+            // backend's stdout for the readiness handshake (#48).
             let mut child = spawn_backend();
-            #[cfg(not(windows))]
-            let child = spawn_backend();
             // Release bundled mode (no dev override): a missing/failed sidecar
             // means the UI would open with no backend — fail LOUD rather than
             // silently broken (Kimi). Skip in debug so `cargo tauri dev` works
@@ -372,6 +409,9 @@ fn main() {
                         .into(),
                 );
             }
+            // Take the backend's piped stdout now (before it's moved into managed
+            // state) so we can read the readiness handshake below.
+            let backend_stdout = child.as_mut().and_then(|c| c.stdout.take());
             #[cfg(windows)]
             {
                 // If we spawned a backend but couldn't put it in a kill-on-close
@@ -397,18 +437,33 @@ fn main() {
                 app.manage(JobHandle(Mutex::new(job)));
             }
             app.manage(Backend(Mutex::new(child)));
-            // NOTE (#48): the design §3.1 readiness handshake (read the backend's
-            // stdout readiness JSON before loading the webview + inject the actual
-            // base_url for custom ports) is tracked separately. For default ports
-            // the frontend's per-role loopback defaults work; base_url is
-            // loopback-validated here.
+            // §3.1 readiness handshake (#48): wait for the backend to report its
+            // base_url on stdout BEFORE loading the webview — so the UI never races
+            // the backend and a CUSTOM control/bind port is reflected. If it never
+            // arrives, fail loud rather than open a UI that can't reach the API
+            // (the managed Backend's Drop terminates the child on this Err → no
+            // orphan). With no piped stdout (dev/no-backend) we fall back to the
+            // TASKPAW_UI_BASE / loopback defaults.
+            let base_url = match backend_stdout {
+                Some(out) => match read_readiness(out, Duration::from_secs(30)) {
+                    Some(b) => b,
+                    None => {
+                        return Err("backend did not report readiness within 30s; \
+                                    refusing to open a UI that cannot reach the local \
+                                    API. See %APPDATA%\\TaskPaw\\taskpaw-backend.log."
+                            .into());
+                    }
+                },
+                None => String::new(), // dev: Vite + TASKPAW_UI_BASE fallback
+            };
             // Build the window in code so we can inject the runtime config script
-            // BEFORE the page loads (only on this loopback-served origin).
+            // (the validated base_url) BEFORE the page loads, only on the
+            // loopback-served origin.
             WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("TaskPaw")
                 .inner_size(1100.0, 720.0)
                 .min_inner_size(720.0, 480.0)
-                .initialization_script(&init_script())
+                .initialization_script(&init_script(&base_url))
                 .build()?;
             Ok(())
         })
