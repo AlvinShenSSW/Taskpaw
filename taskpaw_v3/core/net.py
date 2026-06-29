@@ -17,11 +17,20 @@ class PortInUseError(RuntimeError):
     pass
 
 
+def _norm_host(host: str) -> str:
+    """Normalize a bind host for classification: trim whitespace and surrounding
+    brackets so `[::]` / `[0.0.0.0]` can't slip past as a non-wildcard. Centralized
+    here so every caller (agent UI guard, Hub startup guard) classifies the same
+    spelling — no per-caller stripping to forget (Kimi #114)."""
+    return host.strip().strip("[]")
+
+
 def bind_is_wildcard(host: str) -> bool:
     """All-interfaces bind? True for 0.0.0.0, :: and every IPv6 spelling of the
     unspecified address (e.g. 0:0:0:0:0:0:0:0), so an exposure guard can't be
     bypassed by an alternate spelling (Codex #43). Shared by the agent's UI guard
     and the Hub's startup guard (#114)."""
+    host = _norm_host(host)
     if host in ("", "*"):
         return True
     try:
@@ -32,10 +41,23 @@ def bind_is_wildcard(host: str) -> bool:
 
 def bind_is_loopback(host: str) -> bool:
     """On-host only? True for localhost and any loopback IP (127.0.0.0/8, ::1)."""
+    host = _norm_host(host)
     if host == "localhost":
         return True
     try:
         return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def bind_is_global(host: str) -> bool:
+    """True only for a globally-routable (public/WAN) IP literal. Private/LAN,
+    loopback, link-local, and hostnames are False — a hostname can't be classified
+    here, so the token rule still applies to it. Used to refuse public exposure of
+    the Hub API even when a token is set (#114; constitution §2: LAN + Bearer only)."""
+    host = _norm_host(host)
+    try:
+        return ipaddress.ip_address(host).is_global
     except ValueError:
         return False
 

@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from taskpaw_v3.core.auth import token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
-from taskpaw_v3.core.net import bind_is_loopback, bind_is_wildcard
+from taskpaw_v3.core.net import bind_is_global, bind_is_loopback, bind_is_wildcard
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
@@ -42,14 +42,25 @@ def _guard_bind_exposure(config: HubConfig) -> None:
 
     - A wildcard/all-interfaces bind (0.0.0.0, :: and any spelling) is refused
       outright — even with a token — so the Hub never listens on every nic.
+    - A globally-routable (public/WAN) address is refused even WITH a token — the
+      Hub is LAN + Bearer only (constitution §2: no public/WAN exposure) (Codex).
     - A non-loopback bind with an empty api_token is refused: /status (each
       agent's snapshot) and /events would be reachable off-host unauthenticated.
+
+    Host classification + bracket/whitespace normalization live in the shared
+    core.net helpers, so this guard and the agent's stay in lockstep.
     """
-    host = config.bind_host.strip().strip("[]")
+    host = config.bind_host
     if bind_is_wildcard(host):
         raise ValueError(
             f"refusing to bind the Hub API to all interfaces ({config.bind_host!r}) "
             f"— set bind_host to 127.0.0.1 or a specific LAN address in hub.yaml."
+        )
+    if bind_is_global(host):
+        raise ValueError(
+            f"refusing to bind the Hub API to a public/WAN address ({config.bind_host}) "
+            f"— the Hub is LAN + Bearer only. Use a private LAN address (with an "
+            f"api_token) or 127.0.0.1."
         )
     if not bind_is_loopback(host) and not config.api_token.strip():
         raise ValueError(

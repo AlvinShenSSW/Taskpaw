@@ -250,7 +250,9 @@ class MonitorAdmin:
             # leaves config + disk untouched. Normalize via ipaddress so every
             # spelling is caught (e.g. `0:0:0:0:0:0:0:0` == `::`, `127.0.0.2` is
             # still loopback) — not a brittle exact-string set (Codex #43 r3).
-            bh = validated.bind_host.strip().strip("[]")
+            # The shared helpers normalize (trim + strip brackets) internally, so
+            # pass the raw host — no per-caller stripping to drift (#114/Kimi).
+            bh = validated.bind_host
             if _bind_is_wildcard(bh):
                 raise ValueError(
                     f"refusing to bind the network API to all interfaces ({bh!r}) "
