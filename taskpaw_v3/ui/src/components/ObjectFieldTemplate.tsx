@@ -24,6 +24,11 @@ function spansFull(name: string, props: ObjectFieldTemplateProps): boolean {
 
 export function ObjectFieldTemplate(props: ObjectFieldTemplateProps) {
   const { title, description, properties } = props;
+  // Hidden fields (e.g. the base caps `max_events_per_minute`/`max_line_bytes`,
+  // marked `ui:widget: hidden`) render bare so their inputs still submit without
+  // leaving empty grid cells that gap/misalign the visible fields (Codex).
+  const hidden = properties.filter((el) => el.hidden);
+  const visible = properties.filter((el) => !el.hidden);
   return (
     <Box>
       {title && (
@@ -44,7 +49,7 @@ export function ObjectFieldTemplate(props: ObjectFieldTemplateProps) {
           alignItems: "start",
         }}
       >
-        {properties.map((el) => (
+        {visible.map((el) => (
           <Box
             key={el.name}
             sx={{ gridColumn: spansFull(el.name, props) ? "1 / -1" : "auto" }}
@@ -53,6 +58,9 @@ export function ObjectFieldTemplate(props: ObjectFieldTemplateProps) {
           </Box>
         ))}
       </Box>
+      {hidden.map((el) => (
+        <span key={el.name}>{el.content}</span>
+      ))}
     </Box>
   );
 }
