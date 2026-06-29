@@ -123,6 +123,29 @@ describe("MonitorWizard", () => {
     expect(nameInput).toBeDisabled();
   });
 
+  it("clears captured config when switching to a different service", async () => {
+    const comfy: apiModule.PluginInfo = {
+      ...ladaPlugin, type_id: "comfyui", display_name: "ComfyUI",
+      json_schema: { type: "object", required: ["name"],
+        properties: { name: { type: "string", title: "Monitor name" } } },
+    };
+    wrap(<MonitorWizard mode="add" {...baseProps} plugins={[ladaPlugin, comfy]} />);
+
+    // Fill Lada's name, go to review, then Back twice to step 1.
+    fireEvent.click(screen.getByText("Lada"));
+    fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
+    fireEvent.change(screen.getByLabelText(/Monitor name/), { target: { value: "lada-1" } });
+    fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
+    await screen.findByText("lada-1");
+    fireEvent.click(screen.getByRole("button", { name: /Back|返回/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Back|返回/ }));
+
+    // Switch to ComfyUI → its form must NOT carry over "lada-1".
+    fireEvent.click(screen.getByText("ComfyUI"));
+    fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
+    expect((screen.getByLabelText(/Monitor name/) as HTMLInputElement).value).toBe("");
+  });
+
   it("recovers the edit form when the plugin catalog resolves after open", async () => {
     // Edit opens before /control/plugins loaded → no plugins yet.
     const { rerender } = wrap(

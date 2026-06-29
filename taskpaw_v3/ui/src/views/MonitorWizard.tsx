@@ -60,6 +60,17 @@ export function MonitorWizard({
   }, [mode, selectedId, editService]);
 
   const selected = services.find((s) => s.id === selectedId) ?? null;
+
+  // Picking a different service must drop the previous plugin's captured config —
+  // its fields are invalid for the new schema (backend forbids unknown keys) and
+  // would fail the add or carry the wrong name (Codex).
+  const selectService = (id: string) => {
+    if (id !== selectedId) {
+      setFormData({});
+      setError(null);
+    }
+    setSelectedId(id);
+  };
   const serviceName = (s: Service) =>
     s.kind === "plugin" ? (s.plugin.display_name || s.plugin.type_id) : s.preset.display_name;
   const serviceDesc = (s: Service) =>
@@ -175,7 +186,7 @@ export function MonitorWizard({
                       component="button"
                       type="button"
                       aria-pressed={sel}
-                      onClick={() => setSelectedId(s.id)}
+                      onClick={() => selectService(s.id)}
                       sx={{
                         textAlign: "left",
                         cursor: "pointer",
