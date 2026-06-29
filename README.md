@@ -1,137 +1,99 @@
-# 🐾 TaskPaw - Local AI Workflow Monitor
+# 🐾 TaskPaw
 
-TaskPaw is a lightweight Windows desktop app for monitoring AI tasks (Lada, ComfyUI, downloads, etc.) running on multiple machines in your local network, and automatically notifying your OpenClaw assistant when tasks complete.
+TaskPaw watches the AI tasks and services running on your machines — **LADA**
+video restore, **ComfyUI**, download folders, processes — and surfaces their
+status, progress, and events in one place, optionally notifying your **OpenClaw**
+assistant when work completes.
 
-## Features
+**V3** is a cross-platform desktop app (Tauri + React) with a two-role design:
 
-- **Lada Process Monitor** - Detects `lada-cli` process from running to exited, auto-notifies
-- **ComfyUI Queue Monitor** - Polls the `/queue` API, notifies when all tasks complete
-- **Folder Monitor** - Watches download directories, notifies when files stabilize (great for BT/HTTP downloads)
-- **Generic Process Monitor** - Monitors any process by name
-- **Custom Command** - Runs commands on a schedule, determines status by exit code
-- **System Tray** - Minimizes to background when window is closed
-- **OpenClaw Webhook** - Sends HTTP POST notifications directly to your AI assistant
+- **Agent** — runs on each machine; watches that machine's monitors and exposes a
+  small local API. A native console lets you add/edit/start/stop monitors and read
+  recent events without touching config files.
+- **Hub** — a headless aggregator that polls your agents, keeps durable event +
+  status history, and forwards completions to OpenClaw. A dashboard view shows the
+  whole fleet and its event log.
 
-## Installation & Running
+The UI ships **Simplified Chinese (default) and English**, a Settings tab
+(language · agent config · about), a live status dashboard, and native
+file/folder pickers for path fields.
 
-### Option 1: Run Python script directly
+> **V2 is frozen.** The original single-file Windows app (`taskpaw.py`) still
+> works but is no longer developed. All new work lives under
+> [`taskpaw_v3/`](taskpaw_v3/).
 
-```bash
-# 1. Ensure Python 3.10+ is installed
-python --version
+## What it monitors
 
-# 2. Install optional dependencies (system tray support)
-pip install pystray Pillow
+| Monitor | Watches |
+|---------|---------|
+| `lada` | LADA video restore — managed (TaskPaw launches `lada-cli`, parses progress) or passive (detect an external run); file queue, GPU/VRAM, CPU/RAM |
+| `comfyui` | ComfyUI queue (idle = complete) + error diagnostics from its log |
+| `folder` | A downloads dir — a file is "done" once its size is stable |
+| `process` | Any process by name/pattern (running ↔ exited) |
+| `custom_cmd` | Runs a command on a schedule; exit code = status |
+| `tcp_check` | A host:port is listening |
+| `heartbeat` / `state_file` | A status/heartbeat JSON file stays fresh |
+| `host_metrics` | The machine's own CPU/mem/GPU/net (auto-on baseline) |
 
-# 3. Run
-python taskpaw.py
-```
+## Install & run
 
-### Option 2: Package as .exe
+### Desktop app (recommended)
 
-```bash
-# 1. Install packaging tools
-pip install pyinstaller pystray Pillow
+Download the installer for your OS from the project's **Releases** (Windows `.msi`
+/ NSIS `.exe`, macOS `.dmg`). Launch **TaskPaw Agent** on each machine you want to
+watch; it self-creates a default config on first run.
 
-# 2. Run the build script
-build.bat
+- Closing the window fully exits — no orphaned background process (#40).
+- The agent's control API is loopback-only. The network API defaults to
+  `127.0.0.1` (on-host only); **a fresh config has no token, so auth is disabled**
+  — set an API token (Settings → Configuration) before binding it to a LAN address
+  so the Hub reaches it over Bearer-authenticated HTTP.
 
-# 3. The generated exe is at dist/TaskPaw.exe
-```
+### From source (dev)
 
-## Quick Start
-
-1. **Launch TaskPaw** -> Go to the "⚙️ OpenClaw Settings" tab
-2. **Enter your OpenClaw address and Token** -> Click "Test Connection" to verify
-3. **Switch to "📡 Monitors"** -> Click "+ Add Monitor"
-4. **Choose a monitor type**, fill in parameters, and save
-5. **Click "Start"** -> You'll be notified via OpenClaw when tasks complete
-
-## Monitor Types
-
-### Lada (Process Monitor)
-Watches for the `lada-cli` or `lada-cli.exe` process. When you start Lada to process a video from the command line, TaskPaw detects the running process; when processing finishes and the process exits, it automatically notifies OpenClaw.
-
-Parameters:
-- **Process Name**: Default `lada-cli`, on Windows you can use `lada-cli.exe`
-- **Poll Interval**: Check frequency, default 10 seconds
-
-### ComfyUI (Queue Monitor)
-Polls ComfyUI's HTTP API to check queue status. When the queue transitions from having tasks to empty (confirmed multiple consecutive times), it is considered complete.
-
-Parameters:
-- **ComfyUI Address**: Use `127.0.0.1` if on the same machine, or the LAN IP for other machines
-- **Port**: Default `8188`
-- **Idle Confirm Count**: Number of consecutive idle detections before notifying, prevents false positives between tasks
-- **Poll Interval**: Default 10 seconds
-
-### Folder Monitor (Downloads etc.)
-Monitors a specified folder for new files. When a file's size remains unchanged for the configured stable time, it is considered download/write complete.
-
-Parameters:
-- **Watch Directory**: Path to the download folder
-- **File Stable Time**: How long the file size must remain unchanged, default 30 seconds
-- **File Extensions**: Comma-separated, e.g. `mp4,mkv,zip`, leave empty to monitor all files
-- **Poll Interval**: Default 5 seconds
-
-### Generic Process Monitor
-Same principle as the Lada monitor, but you can specify any process name, such as `ffmpeg`, `yt-dlp`, etc.
-
-### Custom Command
-Runs a command on a schedule and determines status by exit code:
-- exit 0 -> idle/complete
-- non-zero -> busy/incomplete
-
-Great for custom detection logic, such as querying remote machines via SSH, calling custom APIs, etc.
-
-## OpenClaw Configuration
-
-Make sure your Mac Mini's OpenClaw has webhooks enabled:
-
-```yaml
-# ~/.openclaw/config.yaml
-hooks:
-  enabled: true
-  token: "your-secure-token-here"  # Must match the token in TaskPaw
-```
-
-And ensure the OpenClaw Gateway is bound to a LAN-accessible address (not 127.0.0.1).
-
-## Config File Location
-
-- Config file: `%APPDATA%\TaskPaw\config.json`
-- Log file: `%APPDATA%\TaskPaw\taskpaw.log`
-
-## Network Architecture
-
-```
-Windows Machine (TaskPaw runs here)
-  ├── Monitors local Lada process
-  ├── Monitors local or LAN ComfyUI queue
-  ├── Monitors local download directory
-  └── HTTP POST ──→ Mac Mini (OpenClaw :18789)
-                        └── Notifies via Telegram / Discord / WhatsApp
-```
-
-TaskPaw can run on multiple Windows machines simultaneously, each monitoring its own tasks, all sending notifications to the same OpenClaw instance.
-
-## Development
+Python 3.10+ via [`uv`](https://docs.astral.sh/uv/), Node 22, and the Rust
+toolchain (for the Tauri shell).
 
 ```bash
-# Run directly
-python taskpaw.py
+# From the repo root:
+uv sync --group dev          # Python backend + tests
+uv run pytest                # backend test suite
 
-# Code structure
-taskpaw.py          # Main program (GUI + all Watcher logic)
-requirements.txt    # Dependencies
-build.bat          # Build script
-README.md          # This file
+# Headless backend, no GUI (still from the repo root):
+uv run python -m taskpaw_v3.bootstrap agent --run     # an agent
+uv run python -m taskpaw_v3.bootstrap hub --run       # the Hub
+
+# Build the packaged desktop app (backend sidecar + Tauri bundle). The build
+# extra provides PyInstaller for the sidecar:
+uv sync --extra build --extra v3
+uv run python scripts/build.py
+
+# Frontend tests/build (in its own directory):
+cd taskpaw_v3/ui && npm ci && npm test && npm run build
 ```
+
+## Architecture
+
+```
+ Machine A ─ TaskPaw Agent ┐
+ Machine B ─ TaskPaw Agent ┼─poll→ TaskPaw Hub ──HTTP POST──→ OpenClaw
+ Machine C ─ TaskPaw Agent ┘        (history + status.md)        (Telegram/…)
+```
+
+Each agent monitors its own machine; the Hub aggregates them, keeps event/status
+history, and notifies OpenClaw on completions. Run as many agents as you like.
+
+## Docs
+
+- **[docs/guides/deployment.md](docs/guides/deployment.md)** — deploy agents + a Hub.
+- **[Design spec](docs/specs/2026-06-27-taskpaw-v3-design.md)** — V3 architecture.
+- **[AGENTS.md](AGENTS.md)** / **[docs/constitution.md](docs/constitution.md)** — repo guide + hard rules (for contributors/agents).
+- **[CHANGELOG.md](CHANGELOG.md)** — release notes.
 
 ## Author & Copyright
 
-TaskPaw was **initiated, designed, and is maintained by Alvin Shen**.
-Copyright (c) 2026 Alvin Shen.
+TaskPaw was **initiated, designed, and is maintained by Alvin Shen (304)**.
+Copyright © 2026 Alvin Shen (304).
 
 ## License
 
