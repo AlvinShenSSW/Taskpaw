@@ -185,6 +185,21 @@ fn spawn_backend() -> Option<Child> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
         // stderr inherits (dev terminal); a windowed release Mac has no console.
+        // If the shell is HARD-killed (SIGKILL / segfault / OOM), neither
+        // RunEvent::ExitRequested nor Backend::Drop runs to reap the backend, so on
+        // its own process group it would orphan and hold ports (#54). On Linux ask
+        // the kernel to SIGTERM the backend when its parent dies (PR_SET_PDEATHSIG)
+        // — its GracefulShutdown then stops cleanly. macOS has no equivalent, so a
+        // hard crash there can still briefly orphan the backend (residual risk;
+        // the normal X-to-exit path is covered by ExitRequested/Drop).
+        #[cfg(target_os = "linux")]
+        unsafe {
+            command.pre_exec(|| {
+                // async-signal-safe; runs in the child between fork and exec.
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong, 0, 0, 0);
+                Ok(())
+            });
+        }
     }
     #[cfg(windows)]
     {
@@ -307,49 +322,58 @@ fn kill_backend(app: &tauri::AppHandle) {
 /// Empty string (the common bundled case) is allowed → frontend uses its safe
 /// per-role loopback defaults.
 fn loopback_base(raw: &str) -> String {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use url::{Host, Url};
+
     let v = raw.trim();
     if v.is_empty() {
         return String::new();
     }
-    let (scheme, rest) = v.split_once("://").unwrap_or(("", v));
-    // authority = up to the path/query/fragment; the remainder is the path.
-    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, path) = rest.split_at(auth_end);
-    // Strip ANY userinfo (user:pass@) — else "http://127.0.0.1:8000@evil.com"
-    // would read 127.0.0.1 as host while a browser uses evil.com, leaking the
-    // injected api key to a remote origin (Codex/Kimi P1). rsplit on the LAST '@'.
-    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
-    // Extract host: bracketed IPv6 "[::1]"/"[::1]:port" → between [ and ]; else
-    // strip a trailing :port (rsplit so it doesn't trip on IPv6 colons).
-    let host = if let Some(r) = host_port.strip_prefix('[') {
-        r.split(']').next().unwrap_or("")          // [ipv6] or [ipv6]:port
-    } else if host_port.matches(':').count() > 1 {
-        host_port                                   // bare IPv6 (must be bracketed
-                                                    // to carry a port) → whole is host
-    } else {
-        host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port)  // host[:port]
+    // Add a scheme for scheme-less input ("127.0.0.1:5681") so a full URL parses;
+    // a real "http(s)://…" is left untouched. Use a real parser (#54) — robust to
+    // IDN/punycode, percent-encoding, and weird authorities, with browser parity.
+    let candidate = if v.contains("://") { v.to_string() } else { format!("http://{v}") };
+    let url = match Url::parse(&candidate) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("TASKPAW_UI_BASE {v:?} is not a valid URL — ignoring");
+            return String::new();
+        }
     };
-    let host = host.to_ascii_lowercase();
-    // CANONICAL loopback only — keep validation in exact lockstep with the
-    // init-script origin guard AND the CSP connect-src (neither can wildcard
-    // 127.0.0.0/8 or expanded IPv6). Accepting only these three avoids "validated
-    // but blocked by CSP / not injected by the guard" mismatches (Codex/Kimi). A
-    // literal-string match still rejects "127.0.0.1.evil.com" (it isn't equal).
-    // The backend binds 127.0.0.1 by default, so this loses nothing in practice.
-    let is_loopback = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1");
+    // Reject ANY credentials: "http://127.0.0.1:8000@evil.com" parses with host
+    // evil.com (a browser would hit evil.com) — refuse rather than strip, so the
+    // injected api key can't leak to a remote origin (Codex/Kimi P1, #54).
+    if !url.username().is_empty() || url.password().is_some() {
+        eprintln!("TASKPAW_UI_BASE {v:?} carries credentials — ignoring");
+        return String::new();
+    }
+    // Only http(s); reject e.g. ftp:// (the frontend speaks HTTP) (Kimi).
+    if !matches!(url.scheme(), "http" | "https") {
+        eprintln!("TASKPAW_UI_BASE {v:?} has a non-http(s) scheme — ignoring");
+        return String::new();
+    }
+    // CANONICAL loopback only — in exact lockstep with the init-script origin guard
+    // AND the CSP connect-src (localhost / 127.0.0.1 / ::1). The parser normalizes
+    // browser forms (e.g. "127.1" → 127.0.0.1), so this matches what the webview
+    // would actually request.
+    let is_loopback = match url.host() {
+        Some(Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip == Ipv4Addr::LOCALHOST,
+        Some(Host::Ipv6(ip)) => ip == Ipv6Addr::LOCALHOST,
+        None => false,
+    };
     if !is_loopback {
         eprintln!("TASKPAW_UI_BASE {v:?} is not loopback — ignoring");
         return String::new();
     }
-    // Only http(s) (or scheme-less → http). Reject e.g. ftp://127.0.0.1 — a
-    // non-HTTP scheme would break the frontend's HTTP client (Kimi).
-    let scheme = if scheme.is_empty() { "http" } else { scheme };
-    if !matches!(scheme, "http" | "https") {
-        eprintln!("TASKPAW_UI_BASE {v:?} has a non-http(s) scheme — ignoring");
-        return String::new();
-    }
-    // Reconstruct WITHOUT credentials (host_port already excludes userinfo).
-    format!("{scheme}://{host_port}{path}")
+    // Reconstruct a clean scheme://host[:port]path (host_str() brackets IPv6); drop
+    // a normalized empty path "/" so the result matches the bare input, and drop
+    // any query/fragment (a base URL carries none).
+    let host = url.host_str().unwrap_or("");
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let path = url.path();
+    let path = if path == "/" { "" } else { path };
+    format!("{}://{}{}{}", url.scheme(), host, port, path)
 }
 
 /// Runtime config injected on the loopback origin (design §3.1) — packaged
@@ -502,15 +526,23 @@ mod tests {
         // non-canonical loopback rejected (canonical-only, lockstep with CSP/guard)
         assert_eq!(loopback_base("http://127.0.0.5:9000"), "");
         assert_eq!(loopback_base("ftp://127.0.0.1:5681"), "");
-        // abbreviated IPv4 ("127.1") isn't parsed by std Ipv4Addr → rejected
-        // (stricter than a browser, but safe: just falls back to defaults).
-        assert_eq!(loopback_base("http://127.1:8000"), "");
     }
 
     #[test]
-    fn strips_credentials_from_returned_url() {
-        assert_eq!(loopback_base("http://user:pass@127.0.0.1:5681/x"),
-                   "http://127.0.0.1:5681/x");
+    fn rejects_credentials_outright() {
+        // A base URL must never carry credentials — refuse it (don't strip), so the
+        // injected api key can't leak to a misread host (#54). The userinfo-bypass
+        // case is also covered by rejects_non_loopback_and_bypasses.
+        assert_eq!(loopback_base("http://user:pass@127.0.0.1:5681/x"), "");
+        assert_eq!(loopback_base("http://user@127.0.0.1:5681"), "");
+    }
+
+    #[test]
+    fn normalizes_browser_ipv4_forms() {
+        // The real parser normalizes browser IPv4 spellings the webview would
+        // actually request (#54 browser/CSP parity): "127.1" == 127.0.0.1.
+        assert_eq!(loopback_base("http://127.1:8000"), "http://127.0.0.1:8000");
+        assert_eq!(loopback_base("http://127.0.0.1/x"), "http://127.0.0.1/x");
     }
 
     #[test]
