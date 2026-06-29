@@ -88,15 +88,18 @@ class MonitorAdmin:
         self._desired = {f: getattr(config, f) for f in self._EDITABLE_CONFIG}
 
     # ── internals ──────────────────────────────────────────────────────────
-    def _persist(self) -> None:
-        # No path (e.g. dev/interactive without a config file) → in-memory only.
+    def _save(self, desired: dict) -> None:
+        """Write the running monitors PLUS the given DESIRED editable scalars. The
+        running _config holds BOOT values for non-live fields, so writing it
+        directly would revert a pending (restart-required) config edit (Codex #43
+        r6). Takes `desired` explicitly so update_config can persist a candidate
+        BEFORE committing it to self._desired (atomic on failure, r7)."""
         if self._path is None:
             return
-        # Persist the running monitors PLUS the DESIRED editable scalars — the
-        # running _config still holds BOOT values for non-live fields, so writing
-        # it directly would revert a pending (restart-required) config edit held in
-        # _desired whenever a monitor op persists (Codex #43 r6).
-        save_yaml(AgentConfig(**{**self._config.model_dump(), **self._desired}), self._path)
+        save_yaml(AgentConfig(**{**self._config.model_dump(), **desired}), self._path)
+
+    def _persist(self) -> None:
+        self._save(self._desired)
 
     def _find(self, name: str) -> Optional[dict]:
         name = str(name).strip()
@@ -281,10 +284,12 @@ class MonitorAdmin:
             restart_required = any(
                 getattr(validated, f) != getattr(self._config, f) for f in self._NON_LIVE_CONFIG
             )
-            # Record the new desired scalars, then persist (monitors + _desired) —
-            # on a write failure nothing else is mutated.
-            self._desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
-            self._persist()
+            # Persist the candidate desired scalars FIRST; commit to self._desired
+            # (and the live token) ONLY if the write succeeds, so a failed save
+            # leaves config + disk untouched — atomic (Codex #43 r7).
+            new_desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
+            self._save(new_desired)
+            self._desired = new_desired
             # Live-apply ONLY the live-safe field: api_token (token_ok reads it per
             # request). Non-live fields stay at their BOOT values in the running
             # _config, so /status & events stay consistent until the restart that

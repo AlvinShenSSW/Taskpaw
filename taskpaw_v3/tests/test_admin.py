@@ -293,6 +293,22 @@ def test_config_view_shows_pending_not_running(tmp_path):
     assert [m["name"] for m in view["monitors"]] == ["w"]              # current monitors
 
 
+def test_update_config_failed_persist_is_atomic(tmp_path, monkeypatch):
+    # If the write fails (disk full / read-only dir), the request must raise AND
+    # leave config + pending state untouched — no leaked "pending" edit (Codex r7).
+    import taskpaw_v3.agent.server.admin as adminmod
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(adminmod, "save_yaml", boom)
+    with pytest.raises(OSError):
+        admin.update_config({"control_port": 6000})
+    assert admin.config_view()["control_port"] == 5681   # not leaked as pending
+    assert cfg.control_port == 5681
+
+
 def test_monitor_op_does_not_revert_pending_config_edit(tmp_path):
     # A monitor mutation persists the config too — it must NOT overwrite a pending
     # (restart-required) config edit with the old running values (Codex #43 r6).
