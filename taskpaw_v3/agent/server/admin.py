@@ -78,13 +78,14 @@ class MonitorAdmin:
         self._reg = registry
         self._path = config_path
         self._lock = threading.Lock()
-        # The non-live fields as the process actually STARTED with — sockets, the
-        # EventQueue machine tag, and supervisor membership are bound at boot and
-        # update_config can't re-apply them live. restart_required compares the
-        # desired config against THIS fixed baseline (not the already-edited
-        # _config), so a pending restart keeps being reported across saves until
-        # the agent is actually restarted (Codex #43).
-        self._boot_config = {f: getattr(config, f) for f in self._NON_LIVE_CONFIG}
+        # The DESIRED editable scalars (what's persisted / will apply on the next
+        # restart). The running `_config` keeps its BOOT values for non-live fields
+        # (sockets, the EventQueue machine tag, supervisor membership are bound at
+        # startup and can't be re-applied live), so `/status` never advertises a
+        # machine the events don't use (Codex #43). Config edits accumulate here so
+        # a pending change isn't lost by a later save, and restart_required is the
+        # difference between desired and running.
+        self._desired = {f: getattr(config, f) for f in self._EDITABLE_CONFIG}
 
     # ── internals ──────────────────────────────────────────────────────────
     def _persist(self) -> None:
@@ -222,22 +223,33 @@ class MonitorAdmin:
     # api_token is read per-request). Used for the restart-required baseline.
     _NON_LIVE_CONFIG = tuple(f for f in _EDITABLE_CONFIG if f != "api_token")
 
+    def config_view(self) -> dict[str, Any]:
+        """The config to SHOW in the editor: current monitors + everything from the
+        running config, but the editable scalars come from the DESIRED (pending)
+        state so the form reflects unsaved-since-restart edits and doesn't send
+        stale running values back (which would revert a pending change). The token
+        is masked by the route, not here."""
+        with self._lock:
+            return {**self._config.model_dump(), **self._desired}
+
     def update_config(self, patch: dict) -> dict[str, Any]:
         """Edit top-level agent config (machine/ports/token) from the Settings UI
-        (#43). Validates the merged result, persists agent.yaml atomically, and
-        hot-applies the live-safe fields (machine/token/host_metrics) onto the
-        running config the servers reference. Port/host changes can't rebind a
-        live socket → reported as restart_required."""
+        (#43). Validates the merged result and persists agent.yaml atomically. Only
+        api_token is live (read per request); machine/ports/host/host_metrics are
+        bound at startup, so they persist for the next restart and the call returns
+        restart_required while they differ from the running config."""
         if not isinstance(patch, dict):
             raise ValueError("config patch must be an object")
         with self._lock:
-            current = self._config.model_dump()
             p = dict(patch)
             # The GET masks the token as "***"; an unchanged/blank token in the
             # patch must NOT clobber the real one.
             if str(p.get("api_token", "")).strip() in ("", "***"):
                 p.pop("api_token", None)
-            merged = {**current, **{k: v for k, v in p.items() if k in self._EDITABLE_CONFIG}}
+            # Merge over the DESIRED scalars (so a pending edit isn't lost by a
+            # later save) on top of the running config's monitors (always current).
+            editables = {**self._desired, **{k: v for k, v in p.items() if k in self._EDITABLE_CONFIG}}
+            merged = {**self._config.model_dump(), **editables}
             validated = AgentConfig(**merged)        # full validation (ports/loopback/blank)
             # Network-exposure guard (constitution: no public/WAN exposure). The
             # network API binds bind_host after restart; from the UI we refuse a
@@ -258,24 +270,22 @@ class MonitorAdmin:
                     f"requires an API token, or /status and /events would be "
                     f"reachable off-host without auth. Set a token first, or keep "
                     f"bind_host on 127.0.0.1.")
-            # Compare the DESIRED non-live fields against the BOOT baseline (what
-            # the process is actually running), not the possibly-already-edited
-            # _config — so a pending restart keeps being reported until the agent
-            # restarts (Codex #43). Only api_token is live (read per request).
+            # A restart is needed if any non-live DESIRED field differs from what
+            # the agent is actually RUNNING (the still-at-boot _config) — this
+            # stays True across saves until the agent restarts (Codex #43).
             restart_required = any(
-                getattr(validated, f) != self._boot_config[f] for f in self._NON_LIVE_CONFIG
+                getattr(validated, f) != getattr(self._config, f) for f in self._NON_LIVE_CONFIG
             )
-            # Persist the validated config FIRST (durable) — if the write fails the
-            # in-memory config is untouched. save_yaml writes the whole config
-            # (monitors carried from `current`), so nothing is dropped.
+            # Persist FIRST (durable) — on a write failure nothing else is mutated.
             if self._path is not None:
                 save_yaml(validated, self._path)
-            # Reflect the saved config in-memory (so GET shows the pending values
-            # and the next save merges over them). api_token also takes effect live
-            # here; the non-live fields apply on the next restart (boot baseline
-            # stays put so restart_required keeps signalling until then).
-            for f in self._EDITABLE_CONFIG:
-                setattr(self._config, f, getattr(validated, f))
+            # Track the new desired scalars (merge base + next-boot values).
+            self._desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
+            # Live-apply ONLY the live-safe field: api_token (token_ok reads it per
+            # request). Non-live fields stay at their BOOT values in the running
+            # _config, so /status & events stay consistent until the restart that
+            # restart_required asks for (Codex #43).
+            self._config.api_token = validated.api_token
             return {"ok": True, "restart_required": restart_required}
 
     # ── command dispatch (wired as create_control_app's on_command) ────────

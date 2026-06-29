@@ -111,8 +111,10 @@ def create_control_app(
 
     @app.get("/control/config")
     def get_config() -> dict:
-        # Mask the secret — never echo the real token (design §4.3).
-        data: dict[str, Any] = config.model_dump()
+        # Show DESIRED (pending) editable scalars over the running config when an
+        # admin is wired, so the Settings form reflects unsaved-since-restart edits
+        # (#43); else the plain running config. Mask the secret either way (§4.3).
+        data: dict[str, Any] = admin.config_view() if admin is not None else config.model_dump()
         if data.get("api_token"):
             data["api_token"] = "***"
         return data
