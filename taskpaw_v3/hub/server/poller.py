@@ -97,6 +97,9 @@ class Poller:
                 seed[row["id"]] = {
                     "reachable": reachable,
                     "status_json": row.get("status_json"),
+                    # Parse once at seed time so the first /status (pre-poll) is
+                    # also parse-free (#107).
+                    "parsed_status": self._parse_status(row.get("status_json")),
                     "last_seen": ts,
                 }
         except Exception as e:
@@ -139,6 +142,19 @@ class Poller:
             })
         return out
 
+    @staticmethod
+    def _parse_status(raw: Optional[str]) -> Optional[dict]:
+        """Parse an agent's /status JSON to a dict, or None if absent/unparseable.
+        Centralizes the dict-only rule so the parse happens once at write time
+        (#107), not on every /status request."""
+        if not raw:
+            return None
+        try:
+            loaded = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
     def snapshot_acks(self) -> dict[int, int]:
         """Thread-safe copy of the ack cursor for the API thread (/status)."""
         with self._acks_lock:
@@ -160,18 +176,11 @@ class Poller:
             snaps = {k: dict(v) for k, v in self._status_snapshot.items()}
         out: dict[int, dict] = {}
         for sid, snap in snaps.items():
-            raw = snap.get("status_json")
-            parsed: Optional[dict] = None
-            if raw:
-                try:
-                    loaded = json.loads(raw)
-                    parsed = loaded if isinstance(loaded, dict) else None
-                except (ValueError, TypeError):
-                    parsed = None
             out[sid] = {
                 "online": bool(snap.get("reachable", False)),
                 "last_seen": snap.get("last_seen"),
-                "snapshot": parsed,
+                # Pre-parsed at write time (#107) — no json.loads on the request path.
+                "snapshot": snap.get("parsed_status"),
             }
         return out
 
@@ -326,13 +335,17 @@ class Poller:
             prev = self._status_snapshot.get(server["id"], {})
             if reachable:
                 self._status_snapshot[server["id"]] = {
-                    "reachable": True, "status_json": status_json, "last_seen": now_str}
+                    "reachable": True, "status_json": status_json,
+                    # Parse once here (#107) so /status reads are parse-free.
+                    "parsed_status": self._parse_status(status_json),
+                    "last_seen": now_str}
             else:
                 # Keep the last good payload + last_seen for status.md; don't
                 # pollute status_log with an empty row.
                 self._status_snapshot[server["id"]] = {
                     "reachable": False,
                     "status_json": prev.get("status_json"),
+                    "parsed_status": prev.get("parsed_status"),
                     "last_seen": prev.get("last_seen")}
 
         new_events = self.fetch_events(server)
