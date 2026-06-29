@@ -24,7 +24,8 @@ const STATUS = {
       snapshot: { machine: "render-02", monitors: { gpu: { state: "error" } } },
     },
     {
-      id: 3, name: "render-03", ip: "10.0.0.3", port: 8765, enabled: 1,
+      // Disabled server: backend forces online=false; counts as offline health.
+      id: 3, name: "render-03", ip: "10.0.0.3", port: 8765, enabled: 0,
       online: false, last_seen: null, snapshot: null,
     },
     {
@@ -71,6 +72,13 @@ describe("HubDashboard (#95)", () => {
     expect(within(row(/offline|离线/)).getByText("1")).toBeInTheDocument();
     // Status conveyed by a labelled dot, not color alone (a11y §1): one per count.
     expect(within(summary).getAllByLabelText(/status:/).length).toBe(3);
+  });
+
+  it("labels a disabled server distinctly from a merely-offline one", async () => {
+    renderHub();
+    // render-03 is enabled:0 → its chip reads "disabled", not just "offline".
+    const card = (await screen.findByText("render-03")).closest("button")!;
+    expect(within(card).getByText(/disabled|已禁用/)).toBeInTheDocument();
   });
 
   it("renders the self-monitor as metric tiles, not raw JSON", async () => {

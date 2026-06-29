@@ -1,5 +1,6 @@
 import {
-  Alert, Box, Card, CardContent, Chip, Collapse, MenuItem, Stack, Tab, Tabs, TextField, Typography,
+  Alert, Box, Card, CardActionArea, CardContent, Chip, Collapse, MenuItem, Stack, Tab, Tabs,
+  TextField, Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -165,6 +166,7 @@ function MachineCard({ server: s, expanded, onToggle }:
   const { t } = useTranslation();
   const health = serverHealth(s);
   const online = !!s.online;
+  const disabled = !s.enabled;
   return (
     <Card
       sx={{
@@ -176,27 +178,26 @@ function MachineCard({ server: s, expanded, onToggle }:
         "@media (prefers-reduced-motion: reduce)": { "&:hover": { transform: "none" } },
       }}
     >
-      <CardContent
-        component="button"
-        type="button"
-        onClick={onToggle}
-        aria-expanded={expanded}
-        sx={{
-          width: "100%", textAlign: "left", display: "block", border: 0, font: "inherit",
-          color: "inherit", bgcolor: "transparent", cursor: "pointer",
-        }}
-      >
-        <Stack direction="row" alignItems="center" spacing={1}>
-          <StatusDot state={HEALTH_STATE[health]} />
-          <Typography variant="subtitle1" sx={{ flex: 1 }}>{s.name}</Typography>
-          <Chip size="small" label={online ? t("hub.online") : t("hub.offline")}
-            color={online ? "success" : "default"} variant={online ? "filled" : "outlined"} />
-        </Stack>
-        <Typography variant="body2" color="text.secondary">{s.ip}:{s.port}</Typography>
-        <Typography variant="caption" color="text.secondary">
-          {s.last_seen ? t("hub.lastSeen", { time: fmtSeen(s.last_seen) }) : t("hub.lastSeenNever")}
-        </Typography>
-      </CardContent>
+      {/* CardActionArea (not CardContent component="button") → the whole face is
+          one focusable control without a <button> wrapping block elements (Kimi). */}
+      <CardActionArea onClick={onToggle} aria-expanded={expanded}>
+        <CardContent>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <StatusDot state={HEALTH_STATE[health]} />
+            <Typography variant="subtitle1" sx={{ flex: 1 }}>{s.name}</Typography>
+            {/* A disabled server is forced offline by the backend; label it as
+                disabled (not just offline) so the two are distinguishable (Kimi). */}
+            <Chip size="small"
+              label={disabled ? t("state.disabled") : online ? t("hub.online") : t("hub.offline")}
+              color={!disabled && online ? "success" : "default"}
+              variant={!disabled && online ? "filled" : "outlined"} />
+          </Stack>
+          <Typography variant="body2" color="text.secondary">{s.ip}:{s.port}</Typography>
+          <Typography variant="caption" color="text.secondary">
+            {s.last_seen ? t("hub.lastSeen", { time: fmtSeen(s.last_seen) }) : t("hub.lastSeenNever")}
+          </Typography>
+        </CardContent>
+      </CardActionArea>
 
       <Collapse in={expanded} unmountOnExit>
         <Box sx={{ px: 2, pb: 2 }}>
