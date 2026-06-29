@@ -11,6 +11,7 @@ import { SchemaForm } from "../components/SchemaForm";
 import { StatusDot } from "../components/StatusDot";
 import { MonitorMetrics } from "../components/MonitorMetrics";
 import { EventLog } from "../components/EventLog";
+import { Settings } from "./Settings";
 
 // Local control panel for ONE machine (design pages/agent-console.md): left rail
 // of this machine's monitors + an Add button; main pane = the selected monitor's
@@ -24,7 +25,7 @@ export function AgentConsole() {
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<null | { mode: "add" } | { mode: "edit"; name: string }>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"monitors" | "events">("monitors");
+  const [tab, setTab] = useState<"monitors" | "events" | "settings">("monitors");
   // Recent local events for the event-log tab (#44); only poll while it's open.
   const events = useQuery({
     queryKey: ["agentEvents"], queryFn: () => api.agentEvents(),
@@ -37,10 +38,9 @@ export function AgentConsole() {
   };
   const onErr = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
 
-  if (status.isLoading) return <Typography>{t("common.loading")}</Typography>;
-  if (status.error)
-    return <Alert severity="error">{t("agent.unreachable", { error: String(status.error) })}</Alert>;
-
+  // NOTE: no early return on status loading/error — Settings must stay reachable
+  // (it holds the config editor needed to FIX a bad host/port/token) even when the
+  // agent is unreachable (#87/Codex). The status states are rendered per-tab below.
   const monitors = status.data?.monitors ?? {};
   const names = Object.keys(monitors);
   const current = selected && monitors[selected] ? selected : names[0];
@@ -50,9 +50,16 @@ export function AgentConsole() {
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ minHeight: 0 }}>
         <Tab value="monitors" label={t("agent.monitors")} />
         <Tab value="events" label={t("agent.events")} />
+        <Tab value="settings" label={t("settings.title")} />
       </Tabs>
 
-      {tab === "events" ? (
+      {tab === "settings" ? (
+        <Settings role="agent" />
+      ) : status.isLoading ? (
+        <Typography>{t("common.loading")}</Typography>
+      ) : status.error ? (
+        <Alert severity="error">{t("agent.unreachable", { error: String(status.error) })}</Alert>
+      ) : tab === "events" ? (
         <Card>
           <CardContent>
             <Stack direction="row" alignItems="baseline" justifyContent="space-between">
