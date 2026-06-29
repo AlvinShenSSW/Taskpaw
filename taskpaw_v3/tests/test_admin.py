@@ -360,6 +360,11 @@ def test_update_config_blocks_unsafe_network_exposure(tmp_path):
     for wild in ("::", "0:0:0:0:0:0:0:0", "[::]"):
         with pytest.raises(ValueError, match="all interfaces"):
             admin.update_config({"bind_host": wild, "api_token": "tok"})
+    # A public/WAN address is refused even WITH a token — LAN + Bearer only, in
+    # lockstep with the Hub guard (#114).
+    for pub in ("8.8.8.8", "[2001:4860:4860::8888]"):
+        with pytest.raises(ValueError, match="public/WAN"):
+            admin.update_config({"bind_host": pub, "api_token": "tok"})
     # LAN bind WITH a token is allowed (Hub-reachable + authenticated); it persists
     # for the next boot while the running bind stays at loopback until restart.
     res = admin.update_config({"bind_host": "192.168.1.50", "api_token": "tok"})

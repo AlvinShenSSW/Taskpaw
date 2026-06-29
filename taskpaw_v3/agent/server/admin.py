@@ -41,7 +41,8 @@ def _as_bool(v: Any) -> bool:
 
 
 # Shared with the Hub's startup exposure guard (#114) — single source of truth for
-# the loopback/wildcard rules so the two guards can't drift.
+# the loopback/wildcard/public rules so the two guards can't drift.
+from taskpaw_v3.core.net import bind_is_global as _bind_is_global
 from taskpaw_v3.core.net import bind_is_loopback as _bind_is_loopback
 from taskpaw_v3.core.net import bind_is_wildcard as _bind_is_wildcard
 
@@ -257,6 +258,12 @@ class MonitorAdmin:
                 raise ValueError(
                     f"refusing to bind the network API to all interfaces ({bh!r}) "
                     f"from the UI — use 127.0.0.1 or a specific LAN address.")
+            # No public/WAN exposure even with a token — LAN + Bearer only, in
+            # lockstep with the Hub guard (constitution §2) (Kimi #114).
+            if _bind_is_global(bh):
+                raise ValueError(
+                    f"refusing to bind the network API to a public/WAN address ({bh}) "
+                    f"from the UI — use a private LAN address (with a token) or 127.0.0.1.")
             if not _bind_is_loopback(bh) and not validated.api_token.strip():
                 raise ValueError(
                     f"binding the network API to a non-loopback address ({bh}) "
