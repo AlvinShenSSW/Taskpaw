@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import { StatusDot } from "../components/StatusDot";
 import { EventLog } from "../components/EventLog";
+import { Settings } from "./Settings";
 
 // Multi-machine observability (design pages/hub-dashboard.md): fleet grid of
 // machines + the Hub's own host-health self-monitor, and an aggregated event log
@@ -14,7 +15,7 @@ import { EventLog } from "../components/EventLog";
 export function HubDashboard() {
   const { t } = useTranslation();
   const { data, error, isLoading } = useQuery({ queryKey: ["hubStatus"], queryFn: api.hubStatus });
-  const [tab, setTab] = useState<"fleet" | "events">("fleet");
+  const [tab, setTab] = useState<"fleet" | "events" | "settings">("fleet");
   const [level, setLevel] = useState<string>("");
   // Aggregated durable history from all polled agents; only poll while open.
   const events = useQuery({
@@ -34,9 +35,12 @@ export function HubDashboard() {
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ minHeight: 0 }}>
         <Tab value="fleet" label={t("hub.fleet")} />
         <Tab value="events" label={t("hub.events")} />
+        <Tab value="settings" label={t("settings.title")} />
       </Tabs>
 
-      {tab === "events" ? (
+      {tab === "settings" ? (
+        <Settings role="hub" />
+      ) : tab === "events" ? (
         <Card>
           <CardContent>
             <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
