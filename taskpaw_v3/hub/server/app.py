@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from taskpaw_v3.core.auth import token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
+from taskpaw_v3.core.net import bind_is_loopback, bind_is_wildcard
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
@@ -32,6 +33,31 @@ def _unauthorized() -> JSONResponse:
         status_code=401,
         headers={"WWW-Authenticate": 'Bearer realm="TaskPaw"'},
     )
+
+
+def _guard_bind_exposure(config: HubConfig) -> None:
+    """Refuse to start an unsafe network exposure (#114), mirroring the agent's
+    UI guard (constitution §2: no public/WAN exposure, never default to all
+    interfaces). Raised BEFORE the socket is claimed so a bad bind never opens.
+
+    - A wildcard/all-interfaces bind (0.0.0.0, :: and any spelling) is refused
+      outright — even with a token — so the Hub never listens on every nic.
+    - A non-loopback bind with an empty api_token is refused: /status (each
+      agent's snapshot) and /events would be reachable off-host unauthenticated.
+    """
+    host = config.bind_host.strip().strip("[]")
+    if bind_is_wildcard(host):
+        raise ValueError(
+            f"refusing to bind the Hub API to all interfaces ({config.bind_host!r}) "
+            f"— set bind_host to 127.0.0.1 or a specific LAN address in hub.yaml."
+        )
+    if not bind_is_loopback(host) and not config.api_token.strip():
+        raise ValueError(
+            f"binding the Hub API to a non-loopback address ({config.bind_host}) "
+            f"requires an api_token, or /status and /events would be reachable "
+            f"off-host without auth. Set api_token in hub.yaml, or keep bind_host "
+            f"on 127.0.0.1."
+        )
 
 
 class HubService:
@@ -207,6 +233,7 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
     from taskpaw_v3.core.net import announce_ready, claim_port, loopback_url
 
     shutdown = shutdown or GracefulShutdown()
+    _guard_bind_exposure(config)  # refuse an unsafe LAN exposure before binding (#114)
     sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
     app, service = create_hub_app(config, store)
     service.start()

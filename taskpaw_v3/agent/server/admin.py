@@ -18,7 +18,6 @@ pydantic config model forbids extra keys, so it can't go inside `config`.
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import threading
 from pathlib import Path
@@ -41,26 +40,10 @@ def _as_bool(v: Any) -> bool:
     return v
 
 
-def _bind_is_wildcard(host: str) -> bool:
-    """All-interfaces bind? True for 0.0.0.0, :: and every IPv6 spelling of the
-    unspecified address (e.g. 0:0:0:0:0:0:0:0), so the exposure guard can't be
-    bypassed by an alternate spelling (Codex #43)."""
-    if host in ("", "*"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_unspecified
-    except ValueError:
-        return False  # a hostname, not an IP literal — the loopback check handles it
-
-
-def _bind_is_loopback(host: str) -> bool:
-    """On-host only? True for localhost and any loopback IP (127.0.0.0/8, ::1)."""
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+# Shared with the Hub's startup exposure guard (#114) — single source of truth for
+# the loopback/wildcard rules so the two guards can't drift.
+from taskpaw_v3.core.net import bind_is_loopback as _bind_is_loopback
+from taskpaw_v3.core.net import bind_is_wildcard as _bind_is_wildcard
 
 
 class MonitorAdmin:

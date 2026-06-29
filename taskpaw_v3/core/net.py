@@ -8,12 +8,36 @@ the server actually owns the socket.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import socket
 
 
 class PortInUseError(RuntimeError):
     pass
+
+
+def bind_is_wildcard(host: str) -> bool:
+    """All-interfaces bind? True for 0.0.0.0, :: and every IPv6 spelling of the
+    unspecified address (e.g. 0:0:0:0:0:0:0:0), so an exposure guard can't be
+    bypassed by an alternate spelling (Codex #43). Shared by the agent's UI guard
+    and the Hub's startup guard (#114)."""
+    if host in ("", "*"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return False  # a hostname, not an IP literal — the loopback check handles it
+
+
+def bind_is_loopback(host: str) -> bool:
+    """On-host only? True for localhost and any loopback IP (127.0.0.0/8, ::1)."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def loopback_url(host: str, port: int) -> str:
