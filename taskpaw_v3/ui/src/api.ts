@@ -142,6 +142,10 @@ export const api = {
   plugins: () => get<{ plugins: PluginInfo[]; presets: PresetInfo[] }>("agent", "/control/plugins"),
   // Full agent config (secrets masked as "***") — used to pre-fill the edit form.
   config: () => get<{ monitors: MonitorSpec[] } & Record<string, unknown>>("agent", "/control/config"),
+  // Edit top-level agent config from the Settings UI (#43). Returns
+  // {ok, restart_required}. A blank/"***" api_token keeps the stored one.
+  updateConfig: (patch: Record<string, unknown>) =>
+    send<{ ok: boolean; restart_required: boolean }>("agent", "PATCH", "/control/config", patch),
   addMonitor: (spec: MonitorSpec) => send("agent", "POST", "/control/monitors", spec),
   removeMonitor: (name: string) => send("agent", "DELETE", `/control/monitors${q(name)}`),
   updateMonitor: (name: string, patch: { config?: Record<string, unknown>; enabled?: boolean }) =>

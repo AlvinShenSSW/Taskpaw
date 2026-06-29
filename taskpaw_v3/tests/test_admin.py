@@ -235,6 +235,138 @@ def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
     assert cfg.monitors[0].get("enabled", True) is True   # enabled untouched
 
 
+# ── config editing (#43) ───────────────────────────────────────────────────
+def test_update_config_token_only_is_live_no_restart(tmp_path):
+    # api_token is read per-request (token_ok), so changing ONLY it applies live
+    # with no restart (#43).
+    cfg = _agent_config(api_token="orig")
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    res = admin.update_config({"api_token": "newtok"})
+    assert res["ok"] and res["restart_required"] is False
+    assert cfg.api_token == "newtok"                               # in place (live)
+    assert load_yaml(AgentConfig, path).api_token == "newtok"
+
+
+def test_update_config_machine_change_persists_but_needs_restart(tmp_path):
+    # machine tags the EventQueue + names host_metrics (baked at startup), so the
+    # change PERSISTS for the next boot but the running config stays put and the
+    # call reports restart_required — no runtime divergence (Codex #43).
+    cfg = _agent_config()
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    res = admin.update_config({"machine": "newname"})
+    assert res["restart_required"] is True
+    assert cfg.machine == "m"                                    # running unchanged
+    assert load_yaml(AgentConfig, path).machine == "newname"     # persisted for next boot
+
+
+def test_update_config_masked_or_blank_token_is_kept(tmp_path):
+    cfg = _agent_config(api_token="secret")
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    admin.update_config({"machine": "m2", "api_token": "***"})   # masked → keep real
+    assert cfg.api_token == "secret"                            # live token unchanged
+    assert load_yaml(AgentConfig, path).machine == "m2"         # machine persisted
+    admin.update_config({"api_token": "   "})                    # blank → keep real
+    assert cfg.api_token == "secret"
+
+
+def test_update_config_port_change_requires_restart(tmp_path):
+    cfg = _agent_config()
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    res = admin.update_config({"control_port": 6000})
+    assert res["restart_required"] is True
+    assert cfg.control_port == 5681                             # running socket unchanged
+    assert load_yaml(AgentConfig, path).control_port == 6000    # persisted; applies next boot
+
+
+def test_config_view_shows_pending_not_running(tmp_path):
+    # The editor reads config_view: pending (desired) editable scalars + the
+    # CURRENT monitors, so it doesn't send stale running values back (#43).
+    cfg = _agent_config(monitors=[{"type_id": "fake", "name": "w", "config": {"name": "w"}}])
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    admin.update_config({"control_port": 6000})
+    view = admin.config_view()
+    assert view["control_port"] == 6000 and cfg.control_port == 5681   # pending vs running
+    assert [m["name"] for m in view["monitors"]] == ["w"]              # current monitors
+
+
+def test_update_config_failed_persist_is_atomic(tmp_path, monkeypatch):
+    # If the write fails (disk full / read-only dir), the request must raise AND
+    # leave config + pending state untouched — no leaked "pending" edit (Codex r7).
+    import taskpaw_v3.agent.server.admin as adminmod
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(adminmod, "save_yaml", boom)
+    with pytest.raises(OSError):
+        admin.update_config({"control_port": 6000})
+    assert admin.config_view()["control_port"] == 5681   # not leaked as pending
+    assert cfg.control_port == 5681
+
+
+def test_monitor_op_does_not_revert_pending_config_edit(tmp_path):
+    # A monitor mutation persists the config too — it must NOT overwrite a pending
+    # (restart-required) config edit with the old running values (Codex #43 r6).
+    cfg = _agent_config()
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    admin.update_config({"control_port": 6000})                   # pending edit
+    admin.add({"type_id": "fake", "config": {"name": "w1"}})      # monitor op → _persist
+    reloaded = load_yaml(AgentConfig, path)
+    assert reloaded.control_port == 6000                          # pending edit preserved
+    assert [m["config"]["name"] for m in reloaded.monitors] == ["w1"]
+
+
+def test_update_config_pending_restart_persists_across_saves(tmp_path):
+    # A pending restart keeps being reported until the agent actually restarts —
+    # comparing against the BOOT baseline, not the already-edited config (Codex r4).
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    assert admin.update_config({"control_port": 6000})["restart_required"] is True
+    # a later, unrelated save must STILL flag the pending (un-restarted) port change
+    assert admin.update_config({"api_token": "tok"})["restart_required"] is True
+    # reverting to the running value clears it (no restart needed)
+    assert admin.update_config({"control_port": 5681})["restart_required"] is False
+
+
+def test_update_config_rejects_invalid(tmp_path):
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    with pytest.raises(ValueError):
+        admin.update_config({"control_port": 0})            # invalid port
+    with pytest.raises(ValueError):
+        admin.update_config({"control_host": "0.0.0.0"})    # control must be loopback
+    assert cfg.control_port == 5681 and cfg.control_host == "127.0.0.1"   # unchanged
+
+
+def test_update_config_blocks_unsafe_network_exposure(tmp_path):
+    # No public/WAN exposure: reject a wildcard bind from the UI, and require a
+    # token for a non-loopback bind (Codex #43 P1).
+    path = tmp_path / "a.yaml"
+    cfg = _agent_config(api_token="")                       # no token
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    with pytest.raises(ValueError, match="all interfaces"):
+        admin.update_config({"bind_host": "0.0.0.0"})       # wildcard refused
+    with pytest.raises(ValueError, match="requires an API token"):
+        admin.update_config({"bind_host": "192.168.1.50"})  # LAN bind needs a token
+    assert cfg.bind_host == "127.0.0.1" and not path.exists()   # nothing persisted
+    # Alternate spellings of the unspecified address are also refused — even WITH
+    # a token (all-interfaces is never allowed from the UI) (Codex #43 r3).
+    for wild in ("::", "0:0:0:0:0:0:0:0", "[::]"):
+        with pytest.raises(ValueError, match="all interfaces"):
+            admin.update_config({"bind_host": wild, "api_token": "tok"})
+    # LAN bind WITH a token is allowed (Hub-reachable + authenticated); it persists
+    # for the next boot while the running bind stays at loopback until restart.
+    res = admin.update_config({"bind_host": "192.168.1.50", "api_token": "tok"})
+    assert res["ok"] and cfg.bind_host == "127.0.0.1"
+    assert load_yaml(AgentConfig, path).bind_host == "192.168.1.50"
+
+
 # ── enabled filtering at build time ────────────────────────────────────────
 def test_build_supervisor_skips_disabled():
     q = EventQueue(machine="m")

@@ -18,6 +18,7 @@ pydantic config model forbids extra keys, so it can't go inside `config`.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import threading
 from pathlib import Path
@@ -40,6 +41,28 @@ def _as_bool(v: Any) -> bool:
     return v
 
 
+def _bind_is_wildcard(host: str) -> bool:
+    """All-interfaces bind? True for 0.0.0.0, :: and every IPv6 spelling of the
+    unspecified address (e.g. 0:0:0:0:0:0:0:0), so the exposure guard can't be
+    bypassed by an alternate spelling (Codex #43)."""
+    if host in ("", "*"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return False  # a hostname, not an IP literal — the loopback check handles it
+
+
+def _bind_is_loopback(host: str) -> bool:
+    """On-host only? True for localhost and any loopback IP (127.0.0.0/8, ::1)."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class MonitorAdmin:
     """Serialized add/remove/update/enable/disable for one agent's monitors."""
 
@@ -55,12 +78,28 @@ class MonitorAdmin:
         self._reg = registry
         self._path = config_path
         self._lock = threading.Lock()
+        # The DESIRED editable scalars (what's persisted / will apply on the next
+        # restart). The running `_config` keeps its BOOT values for non-live fields
+        # (sockets, the EventQueue machine tag, supervisor membership are bound at
+        # startup and can't be re-applied live), so `/status` never advertises a
+        # machine the events don't use (Codex #43). Config edits accumulate here so
+        # a pending change isn't lost by a later save, and restart_required is the
+        # difference between desired and running.
+        self._desired = {f: getattr(config, f) for f in self._EDITABLE_CONFIG}
 
     # ── internals ──────────────────────────────────────────────────────────
+    def _save(self, desired: dict) -> None:
+        """Write the running monitors PLUS the given DESIRED editable scalars. The
+        running _config holds BOOT values for non-live fields, so writing it
+        directly would revert a pending (restart-required) config edit (Codex #43
+        r6). Takes `desired` explicitly so update_config can persist a candidate
+        BEFORE committing it to self._desired (atomic on failure, r7)."""
+        if self._path is None:
+            return
+        save_yaml(AgentConfig(**{**self._config.model_dump(), **desired}), self._path)
+
     def _persist(self) -> None:
-        # No path (e.g. dev/interactive without a config file) → in-memory only.
-        if self._path is not None:
-            save_yaml(self._config, self._path)
+        self._save(self._desired)
 
     def _find(self, name: str) -> Optional[dict]:
         name = str(name).strip()
@@ -181,6 +220,82 @@ class MonitorAdmin:
             m["config"] = cfg.model_dump()
             self._persist()
             return {"ok": True, "name": iid}
+
+    # Editable top-level agent settings (NOT monitors — that's the monitor API —
+    # and NOT server_id, the stable identity used for Hub grouping).
+    _EDITABLE_CONFIG = (
+        "machine", "bind_host", "bind_port", "control_host", "control_port",
+        "api_token", "host_metrics",
+    )
+    # Editable fields that are NOT live-safe: changing them needs a restart (only
+    # api_token is read per-request). Used for the restart-required baseline.
+    _NON_LIVE_CONFIG = tuple(f for f in _EDITABLE_CONFIG if f != "api_token")
+
+    def config_view(self) -> dict[str, Any]:
+        """The config to SHOW in the editor: current monitors + everything from the
+        running config, but the editable scalars come from the DESIRED (pending)
+        state so the form reflects unsaved-since-restart edits and doesn't send
+        stale running values back (which would revert a pending change). The token
+        is masked by the route, not here."""
+        with self._lock:
+            return {**self._config.model_dump(), **self._desired}
+
+    def update_config(self, patch: dict) -> dict[str, Any]:
+        """Edit top-level agent config (machine/ports/token) from the Settings UI
+        (#43). Validates the merged result and persists agent.yaml atomically. Only
+        api_token is live (read per request); machine/ports/host/host_metrics are
+        bound at startup, so they persist for the next restart and the call returns
+        restart_required while they differ from the running config."""
+        if not isinstance(patch, dict):
+            raise ValueError("config patch must be an object")
+        with self._lock:
+            p = dict(patch)
+            # The GET masks the token as "***"; an unchanged/blank token in the
+            # patch must NOT clobber the real one.
+            if str(p.get("api_token", "")).strip() in ("", "***"):
+                p.pop("api_token", None)
+            # Merge over the DESIRED scalars (so a pending edit isn't lost by a
+            # later save) on top of the running config's monitors (always current).
+            editables = {**self._desired, **{k: v for k, v in p.items() if k in self._EDITABLE_CONFIG}}
+            merged = {**self._config.model_dump(), **editables}
+            validated = AgentConfig(**merged)        # full validation (ports/loopback/blank)
+            # Network-exposure guard (constitution: no public/WAN exposure). The
+            # network API binds bind_host after restart; from the UI we refuse a
+            # wildcard/all-interfaces bind outright, and require a token for any
+            # non-loopback bind — else /status and /events would be reachable
+            # off-host unauthenticated (Codex #43 P1). Raised BEFORE save → reject
+            # leaves config + disk untouched. Normalize via ipaddress so every
+            # spelling is caught (e.g. `0:0:0:0:0:0:0:0` == `::`, `127.0.0.2` is
+            # still loopback) — not a brittle exact-string set (Codex #43 r3).
+            bh = validated.bind_host.strip().strip("[]")
+            if _bind_is_wildcard(bh):
+                raise ValueError(
+                    f"refusing to bind the network API to all interfaces ({bh!r}) "
+                    f"from the UI — use 127.0.0.1 or a specific LAN address.")
+            if not _bind_is_loopback(bh) and not validated.api_token.strip():
+                raise ValueError(
+                    f"binding the network API to a non-loopback address ({bh}) "
+                    f"requires an API token, or /status and /events would be "
+                    f"reachable off-host without auth. Set a token first, or keep "
+                    f"bind_host on 127.0.0.1.")
+            # A restart is needed if any non-live DESIRED field differs from what
+            # the agent is actually RUNNING (the still-at-boot _config) — this
+            # stays True across saves until the agent restarts (Codex #43).
+            restart_required = any(
+                getattr(validated, f) != getattr(self._config, f) for f in self._NON_LIVE_CONFIG
+            )
+            # Persist the candidate desired scalars FIRST; commit to self._desired
+            # (and the live token) ONLY if the write succeeds, so a failed save
+            # leaves config + disk untouched — atomic (Codex #43 r7).
+            new_desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
+            self._save(new_desired)
+            self._desired = new_desired
+            # Live-apply ONLY the live-safe field: api_token (token_ok reads it per
+            # request). Non-live fields stay at their BOOT values in the running
+            # _config, so /status & events stay consistent until the restart that
+            # restart_required asks for (Codex #43).
+            self._config.api_token = validated.api_token
+            return {"ok": True, "restart_required": restart_required}
 
     # ── command dispatch (wired as create_control_app's on_command) ────────
     def handle(self, command: str, body: dict) -> dict[str, Any]:

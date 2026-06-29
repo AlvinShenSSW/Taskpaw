@@ -111,8 +111,10 @@ def create_control_app(
 
     @app.get("/control/config")
     def get_config() -> dict:
-        # Mask the secret — never echo the real token (design §4.3).
-        data: dict[str, Any] = config.model_dump()
+        # Show DESIRED (pending) editable scalars over the running config when an
+        # admin is wired, so the Settings form reflects unsaved-since-restart edits
+        # (#43); else the plain running config. Mask the secret either way (§4.3).
+        data: dict[str, Any] = admin.config_view() if admin is not None else config.model_dump()
         if data.get("api_token"):
             data["api_token"] = "***"
         return data
@@ -196,5 +198,12 @@ def create_control_app(
         @app.post("/control/monitors/stop")
         def stop_monitor(name: str):
             return _guard(admin.set_enabled, name, False)
+
+        @app.patch("/control/config")
+        def update_config(body: dict):
+            # Edit agent config (machine/ports/token) from the Settings UI (#43)
+            # instead of hand-editing agent.yaml. Validated + persisted atomically;
+            # returns {ok, restart_required} — port/host changes apply on restart.
+            return _guard(admin.update_config, body)
 
     return app

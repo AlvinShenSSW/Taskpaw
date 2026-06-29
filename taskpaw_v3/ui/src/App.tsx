@@ -69,7 +69,7 @@ export function App() {
         </Toolbar>
       </AppBar>
       <Box sx={{ p: 2 }}>
-        {showSettings ? <Settings /> : role === "agent" ? <AgentConsole /> : <HubDashboard />}
+        {showSettings ? <Settings role={role} /> : role === "agent" ? <AgentConsole /> : <HubDashboard />}
       </Box>
     </Box>
   );
