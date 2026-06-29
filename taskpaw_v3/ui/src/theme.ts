@@ -53,6 +53,23 @@ export const theme = createTheme({
       },
     },
     MuiChip: { styleOverrides: { root: { fontWeight: 500 } } },
+    // Focus glow on form inputs (#94, design preview `.control:focus`): a soft
+    // accent ring so the focused field is unmistakable (a11y: visible focus).
+    MuiOutlinedInput: {
+      styleOverrides: {
+        root: {
+          "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
+            borderColor: "#22C55E",
+            boxShadow: "0 0 0 3px rgba(34,197,94,.18)",
+          },
+        },
+      },
+    },
+    // Field labels: medium weight, and never uppercase (Latin-only) — keeps CJK
+    // labels clean (#89/#94).
+    MuiInputLabel: {
+      styleOverrides: { root: { fontWeight: 500, textTransform: "none" } },
+    },
     // #89: cards get a subtle vertical gradient + a visible border (HUD corner
     // ticks are a selective <HudCard>, added in #90).
     MuiCard: {
