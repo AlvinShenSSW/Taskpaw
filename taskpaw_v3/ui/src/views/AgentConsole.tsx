@@ -38,10 +38,9 @@ export function AgentConsole() {
   };
   const onErr = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
 
-  if (status.isLoading) return <Typography>{t("common.loading")}</Typography>;
-  if (status.error)
-    return <Alert severity="error">{t("agent.unreachable", { error: String(status.error) })}</Alert>;
-
+  // NOTE: no early return on status loading/error — Settings must stay reachable
+  // (it holds the config editor needed to FIX a bad host/port/token) even when the
+  // agent is unreachable (#87/Codex). The status states are rendered per-tab below.
   const monitors = status.data?.monitors ?? {};
   const names = Object.keys(monitors);
   const current = selected && monitors[selected] ? selected : names[0];
@@ -56,6 +55,10 @@ export function AgentConsole() {
 
       {tab === "settings" ? (
         <Settings role="agent" />
+      ) : status.isLoading ? (
+        <Typography>{t("common.loading")}</Typography>
+      ) : status.error ? (
+        <Alert severity="error">{t("agent.unreachable", { error: String(status.error) })}</Alert>
       ) : tab === "events" ? (
         <Card>
           <CardContent>

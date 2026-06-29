@@ -24,9 +24,8 @@ export function HubDashboard() {
     refetchInterval: 5000, enabled: tab === "events",
   });
 
-  if (isLoading) return <Typography>{t("common.loading")}</Typography>;
-  if (error) return <Alert severity="error">{t("hub.unreachable", { error: String(error) })}</Alert>;
-
+  // No early return on loading/error — Settings (language/about) must stay
+  // reachable even when the Hub is unreachable (#87/Codex).
   const servers = data?.servers ?? [];
   const self = data?.self ?? {};
 
@@ -40,6 +39,10 @@ export function HubDashboard() {
 
       {tab === "settings" ? (
         <Settings role="hub" />
+      ) : isLoading ? (
+        <Typography>{t("common.loading")}</Typography>
+      ) : error ? (
+        <Alert severity="error">{t("hub.unreachable", { error: String(error) })}</Alert>
       ) : tab === "events" ? (
         <Card>
           <CardContent>
