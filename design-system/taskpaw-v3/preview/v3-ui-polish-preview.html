@@ -1,0 +1,624 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TaskPaw V3 — UI/UX polish preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --primary:#22C55E; --on-primary:#06210F;
+    --bg:#0B1120; --paper:#111a2e; --paper2:#0d1626; --panel:#0f1b30;
+    --fg:#F8FAFC; --fg2:#A8B5C7; --fg3:#64748B;
+    --divider:#22324a; --divider2:#19273c;
+    --info:#38BDF8; --warn:#F59E0B; --err:#F87171;
+    --ok:#22C55E; --idle:#64748B; --degraded:#F59E0B; --error:#DC2626; --stopped:#475569; --starting:#38BDF8;
+    --r:8px; --glow:0 0 0 1px rgba(34,197,94,.35), 0 0 18px -4px rgba(34,197,94,.5);
+    --sans:"Fira Sans","Noto Sans SC",system-ui,"PingFang SC","Microsoft YaHei",sans-serif;
+    --mono:"Fira Code","Noto Sans SC",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0; height:100%}
+  body{
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(56,189,248,.06), transparent 60%),
+      linear-gradient(transparent 0 31px, rgba(56,189,248,.035) 31px 32px) 0 0/100% 32px,
+      linear-gradient(90deg, transparent 0 31px, rgba(56,189,248,.035) 31px 32px) 0 0/32px 100%,
+      var(--bg);
+    color:var(--fg); font-family:var(--sans); font-size:14px; line-height:1.55; -webkit-font-smoothing:antialiased;
+  }
+  html[lang="zh"] body{line-height:1.7}
+  html[lang="zh"] .overline,html[lang="zh"] .glab,html[lang="zh"] .tile .l,html[lang="zh"] .mini .ml,html[lang="zh"] .step,html[lang="zh"] .seg button,html[lang="zh"] .tabs button{letter-spacing:.2px}
+  .mono{font-family:var(--mono); font-variant-numeric:tabular-nums}
+  .overline{font-size:11px; letter-spacing:1.2px; text-transform:uppercase; color:var(--fg2); font-weight:600}
+  html[lang="zh"] .overline{text-transform:none; font-size:12px}
+  .overline::before{content:""; display:inline-block; width:14px; height:2px; background:var(--primary); vertical-align:middle; margin-right:8px; box-shadow:0 0 8px rgba(34,197,94,.7)}
+  .muted{color:var(--fg2)} .dim{color:var(--fg3)}
+  .glab{font-size:10px; letter-spacing:.8px; text-transform:uppercase; color:var(--fg2)}
+  html[lang="zh"] .glab,html[lang="zh"] .tile .l{text-transform:none; font-size:11px}
+
+  .appbar{position:sticky; top:0; z-index:30; display:flex; align-items:center; gap:18px; height:54px; padding:0 18px;
+    background:linear-gradient(180deg, rgba(13,22,38,.92), rgba(13,22,38,.78)); backdrop-filter:saturate(140%) blur(10px); border-bottom:1px solid var(--divider)}
+  .appbar::after{content:""; position:absolute; left:0; right:0; bottom:-1px; height:1px; background:linear-gradient(90deg, transparent, rgba(34,197,94,.6), rgba(56,189,248,.4), transparent)}
+  .brand{display:flex; align-items:center; gap:9px; font-weight:600; font-size:15px; letter-spacing:.3px}
+  .brand .tag{font-size:9.5px; letter-spacing:1.5px; color:var(--primary); border:1px solid rgba(34,197,94,.4); border-radius:4px; padding:1px 5px; margin-left:2px}
+  .seg{display:inline-flex; background:var(--paper2); border:1px solid var(--divider); border-radius:8px; padding:2px}
+  .seg button{appearance:none; border:0; background:transparent; color:var(--fg2); font:inherit; font-weight:600; font-size:13px; padding:5px 16px; border-radius:6px; cursor:pointer; transition:.18s}
+  .seg.sm button{padding:4px 10px; font-size:12px}
+  .seg button:hover{color:var(--fg)}
+  .seg button[aria-selected="true"]{background:var(--primary); color:var(--on-primary); box-shadow:0 0 14px -3px rgba(34,197,94,.7)}
+  .spacer{flex:1}
+  .health{display:flex; align-items:center; gap:14px; font-size:12px}
+  .pill{display:inline-flex; align-items:center; gap:7px; padding:4px 11px; border-radius:999px; border:1px solid var(--divider); background:var(--paper2)}
+  .ver{font-size:12px; color:var(--fg3)}
+
+  .wrap{padding:18px; max-width:1440px; margin:0 auto}
+  .tabs{display:flex; gap:2px; border-bottom:1px solid var(--divider2); margin-bottom:18px}
+  .tabs button{appearance:none; background:transparent; border:0; border-bottom:2px solid transparent; color:var(--fg2); font:inherit; font-weight:600; font-size:13px; padding:9px 14px; cursor:pointer; transition:.18s; letter-spacing:.3px}
+  .tabs button:hover{color:var(--fg)}
+  .tabs button[aria-selected="true"]{color:var(--primary); border-bottom-color:var(--primary)}
+
+  .card{position:relative; background:linear-gradient(180deg, var(--paper), var(--paper2)); border:1px solid var(--divider2); border-radius:12px}
+  .card.hud::before,.card.hud::after{content:""; position:absolute; width:12px; height:12px; border:1.5px solid rgba(34,197,94,.45); pointer-events:none}
+  .card.hud::before{top:8px; left:8px; border-right:0; border-bottom:0}
+  .card.hud::after{bottom:8px; right:8px; border-left:0; border-top:0}
+  .card-pad{padding:16px}
+
+  .dot{position:relative; width:10px; height:10px; border-radius:50%; flex:0 0 auto; display:inline-block}
+  .dot.glow{box-shadow:0 0 8px 1px currentColor}
+  .dot::after{content:""; position:absolute; inset:-4px; border-radius:50%; border:2px solid currentColor; opacity:0}
+  .dot.live::after{animation:pulse 1.8s ease-out infinite}
+  @keyframes pulse{0%{transform:scale(.6);opacity:.55}100%{transform:scale(1.5);opacity:0}}
+  @media (prefers-reduced-motion: reduce){.dot.live::after{animation:none}}
+
+  .two{display:flex; gap:16px; min-height:72vh}
+  .rail{width:300px; flex:0 0 auto}
+  .rail .card-pad{padding:12px}
+  .rail-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:10px}
+
+  .btn{appearance:none; font:inherit; font-weight:600; font-size:13px; border-radius:8px; cursor:pointer; padding:7px 14px; transition:.18s; border:1.5px solid transparent; display:inline-flex; align-items:center; gap:6px}
+  .btn-primary{background:var(--primary); color:var(--on-primary); border-color:var(--primary)}
+  .btn-primary:hover{filter:brightness(1.07); box-shadow:0 0 16px -4px rgba(34,197,94,.7)}
+  .btn-out{background:transparent; color:var(--fg); border-color:var(--divider)}
+  .btn-out:hover{border-color:var(--fg2); background:rgba(148,163,184,.06)}
+  .btn-info{color:var(--info); border-color:rgba(56,189,248,.5)}
+  .btn-info:hover{background:rgba(56,189,248,.08)}
+  .btn-danger{color:var(--err); border-color:rgba(248,113,113,.5)}
+  .btn-danger:hover{background:rgba(248,113,113,.08)}
+  .btn-ghost{background:transparent; color:var(--fg2); border-color:transparent}
+  .btn-ghost:hover{color:var(--fg)}
+  .btn-sm{padding:5px 11px; font-size:12px}
+
+  .mrow{display:flex; align-items:center; gap:9px; padding:9px 10px; border-radius:8px; cursor:pointer; border-left:2px solid transparent; transition:background .15s}
+  .mrow:hover{background:rgba(148,163,184,.05)}
+  .mrow[aria-selected="true"]{background:rgba(34,197,94,.10); border-left-color:var(--primary)}
+  .mrow .nm{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px}
+  .chip{font-size:10.5px; font-weight:500; padding:2px 7px; border-radius:6px; background:var(--paper2); border:1px solid var(--divider); color:var(--fg2)}
+  .mrow .t{font-size:11px; color:var(--fg3)}
+  .state-chip{display:inline-flex; font-size:11px; font-weight:600; padding:3px 9px; border-radius:6px; text-transform:capitalize}
+  html[lang="zh"] .state-chip{text-transform:none}
+
+  .gauges{display:flex; gap:18px; flex-wrap:wrap}
+  .gauge{display:flex; flex-direction:column; align-items:center; gap:6px; min-width:92px}
+  .gauge .ring{position:relative; width:74px; height:74px}
+  .gauge .val{position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center}
+  .gauge .val b{font-family:var(--mono); font-weight:600; font-size:17px; line-height:1}
+  .gsub{font-family:var(--mono); font-size:11px; color:var(--fg2)}
+  .tiles{display:flex; gap:12px; flex-wrap:wrap}
+  .tile{padding:9px 13px; border-radius:8px; background:rgba(148,163,184,.05); border:1px solid var(--divider2); min-width:84px}
+  .tile .l{font-size:10px; letter-spacing:.7px; text-transform:uppercase; color:var(--fg2); display:block}
+  .tile .v{font-family:var(--mono); font-weight:600; font-size:15px; margin-top:2px}
+  .bar{height:8px; border-radius:4px; background:rgba(148,163,184,.15); overflow:hidden}
+  .bar > i{display:block; height:100%; border-radius:4px; background:var(--ok); box-shadow:0 0 8px -1px rgba(34,197,94,.8)}
+  .nowproc{padding:12px; border-radius:8px; background:rgba(34,197,94,.06); border:1px solid rgba(34,197,94,.25)}
+
+  .summary{display:flex; align-items:center; gap:22px; flex-wrap:wrap}
+  .summary .big{font-family:var(--mono); font-size:28px; font-weight:600; line-height:1; text-shadow:0 0 14px rgba(34,197,94,.35)}
+  .seg-count{display:flex; align-items:center; gap:7px; font-size:13px}
+  .fleet{display:flex; flex-wrap:wrap; gap:14px}
+  .machine{width:304px; cursor:pointer; transition:border-color .18s, transform .18s, box-shadow .18s}
+  .machine:hover{transform:translateY(-2px); border-color:var(--divider); box-shadow:0 8px 26px -14px rgba(0,0,0,.8)}
+  .machine[aria-selected="true"]{border-color:rgba(34,197,94,.55); box-shadow:var(--glow)}
+  .mini{display:flex; gap:12px; margin-top:12px}
+  .mini .m{flex:1}
+  .mini .ml{font-size:10px; letter-spacing:.5px; text-transform:uppercase; color:var(--fg2); display:flex; justify-content:space-between; margin-bottom:4px}
+  .mini .ml b{font-family:var(--mono); font-weight:600; color:var(--fg)}
+
+  .events .ev{display:flex; gap:12px; align-items:baseline; padding:10px 0; border-bottom:1px solid var(--divider2)}
+  .events .ev:last-child{border-bottom:0}
+  .ev .ts{font-family:var(--mono); font-size:12px; color:var(--fg2); min-width:74px}
+  .lvl{font-size:10.5px; font-weight:600; padding:2px 8px; border-radius:6px; border:1px solid; min-width:54px; text-align:center; text-transform:lowercase}
+  .lvl.info{color:var(--info); border-color:rgba(56,189,248,.4)}
+  .lvl.done{color:var(--ok); border-color:rgba(34,197,94,.4)}
+  .lvl.warn{color:var(--warn); border-color:rgba(245,158,11,.4)}
+  .lvl.alert{color:var(--err); border-color:rgba(248,113,113,.4)}
+  .ev .body{flex:1; min-width:0}
+  .ev .sub{font-size:12px; color:var(--fg3)}
+  .hide{display:none !important}
+  h2{font-size:16px; font-weight:600; margin:0}
+  .note{font-size:11px; color:var(--fg3)}
+
+  .overlay{position:fixed; inset:0; z-index:50; background:rgba(5,10,20,.66); backdrop-filter:blur(3px); display:flex; align-items:flex-start; justify-content:center; padding:5vh 16px; overflow:auto}
+  .wiz{width:760px; max-width:100%; background:linear-gradient(180deg,var(--panel),var(--paper2)); border:1px solid var(--divider); border-radius:16px; box-shadow:0 30px 80px -30px #000, var(--glow)}
+  .wiz-head{display:flex; align-items:center; gap:14px; padding:18px 22px; border-bottom:1px solid var(--divider2)}
+  .wiz-head h2{flex:1}
+  .iconbtn{appearance:none; background:transparent; border:0; color:var(--fg2); cursor:pointer; padding:6px; border-radius:8px; line-height:0}
+  .iconbtn:hover{color:var(--fg); background:rgba(148,163,184,.08)}
+  .steps{display:flex; align-items:center; gap:10px; padding:14px 22px; border-bottom:1px solid var(--divider2)}
+  .step{display:flex; align-items:center; gap:9px; color:var(--fg3); font-size:12.5px; font-weight:600}
+  .step .num{width:24px; height:24px; border-radius:50%; border:1.5px solid var(--divider); display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-size:12px}
+  .step.active{color:var(--fg)}
+  .step.active .num{border-color:var(--primary); color:var(--primary); box-shadow:0 0 12px -2px rgba(34,197,94,.7)}
+  .step.done .num{background:var(--primary); border-color:var(--primary); color:var(--on-primary)}
+  .step-line{flex:1; height:1px; background:var(--divider2); max-width:48px}
+  .wiz-body{padding:22px}
+  .wiz-foot{display:flex; align-items:center; gap:10px; padding:16px 22px; border-top:1px solid var(--divider2)}
+
+  .svc-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:12px}
+  .svc{position:relative; text-align:left; appearance:none; cursor:pointer; background:var(--paper); border:1px solid var(--divider2); border-radius:12px; padding:16px; transition:.16s; color:var(--fg); font:inherit}
+  .svc:hover{border-color:rgba(34,197,94,.5); transform:translateY(-2px); box-shadow:0 10px 26px -16px #000}
+  .svc[aria-selected="true"]{border-color:var(--primary); box-shadow:var(--glow)}
+  .svc .ic{width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center; background:rgba(34,197,94,.1); color:var(--primary); margin-bottom:12px}
+  .svc .ic svg{width:21px; height:21px}
+  .svc .nm{font-weight:600; font-size:14px}
+  .svc .ds{font-size:11.5px; color:var(--fg2); margin-top:3px; line-height:1.5}
+
+  .form{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+  .form .full{grid-column:1 / -1}
+  .field{display:flex; flex-direction:column; gap:6px}
+  .field > label{font-size:12px; font-weight:600; color:var(--fg2); letter-spacing:.2px}
+  .field .req{color:var(--err); margin-left:3px}
+  .control{display:flex; align-items:center; background:var(--paper2); border:1px solid var(--divider); border-radius:8px; transition:.15s}
+  .control:focus-within{border-color:var(--primary); box-shadow:0 0 0 3px rgba(34,197,94,.16)}
+  .control input,.control select{flex:1; appearance:none; background:transparent; border:0; outline:0; color:var(--fg); font:inherit; font-size:13.5px; padding:9px 12px}
+  .control input.mono{font-family:var(--mono)}
+  .control .suffix{padding:0 10px; color:var(--fg3); font-size:12px; border-left:1px solid var(--divider)}
+  .control .suffix.btn-like{cursor:pointer; color:var(--fg2)}
+  .control .suffix.btn-like:hover{color:var(--fg)}
+  .control select{cursor:pointer}
+  .help{font-size:11px; color:var(--fg3)}
+  .field.error .control{border-color:var(--err)}
+  .field.error .help{color:var(--err)}
+  .switch{display:inline-flex; align-items:center; gap:10px; cursor:pointer}
+  .switch .track{width:38px; height:22px; border-radius:999px; background:var(--divider); position:relative; transition:.18s}
+  .switch .track::after{content:""; position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#fff; transition:.18s}
+  .switch.on .track{background:var(--primary)}
+  .switch.on .track::after{left:18px}
+
+  .recap{display:flex; flex-direction:column; gap:10px}
+  .recap .row{display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--divider2); font-size:13px}
+  .recap .row .k{color:var(--fg2)}
+  .recap .row .v{font-family:var(--mono)}
+
+  .annot{max-width:1440px; margin:18px auto 36px; padding:0 18px}
+  .annot .card{padding:14px 16px}
+  .annot h3{margin:0 0 8px; font-size:12px; color:var(--primary); letter-spacing:1px; text-transform:uppercase}
+  html[lang="zh"] .annot h3{text-transform:none}
+  .annot ul{margin:0; padding-left:18px}
+  .annot li{margin:5px 0; font-size:12.5px; color:var(--fg2)}
+  .annot b{color:var(--fg)}
+</style>
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="7.5" cy="8" r="1.9" fill="#22C55E"/><circle cx="12" cy="6.4" r="1.9" fill="#22C55E"/>
+      <circle cx="16.5" cy="8" r="1.9" fill="#22C55E"/><circle cx="18.4" cy="12.2" r="1.7" fill="#22C55E"/>
+      <path d="M12 10.4c2.8 0 5 2.1 5 4.4 0 1.9-1.6 3-3.4 2.6-.9-.2-1.4-.2-1.6-.2s-.7 0-1.6.2C8.6 17.8 7 16.7 7 14.8c0-2.3 2.2-4.4 5-4.4Z" fill="#22C55E"/>
+    </svg>
+    TaskPaw <span class="tag">V3</span>
+  </div>
+  <div class="seg" role="tablist" aria-label="role">
+    <button id="role-agent" role="tab" aria-selected="true" onclick="setRole('agent')" data-i="role.agent">Agent</button>
+    <button id="role-hub" role="tab" aria-selected="false" onclick="setRole('hub')" data-i="role.hub">Hub</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="health">
+    <span class="pill" id="hub-conn"><span class="dot glow live" style="color:var(--ok);background:var(--ok)"></span><span data-i="conn">Hub reachable · Bearer OK</span></span>
+    <span class="ver mono">v3.0.0-dev</span>
+    <div class="seg sm" role="tablist" aria-label="language">
+      <button id="lang-en" role="tab" aria-selected="true" onclick="setLang('en')">EN</button>
+      <button id="lang-zh" role="tab" aria-selected="false" onclick="setLang('zh')">中</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="view-agent">
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" onclick="agentTab('monitors',this)" data-i="tab.monitors">Monitors</button>
+      <button role="tab" aria-selected="false" onclick="agentTab('events',this)" data-i="tab.events">Events</button>
+      <button role="tab" aria-selected="false" onclick="agentTab('settings',this)" data-i="tab.settings">Settings</button>
+    </div>
+
+    <div id="agent-monitors" class="two">
+      <aside class="rail card hud">
+        <div class="card-pad">
+          <div class="rail-head">
+            <span class="overline"><span data-i="rail.head">RIG-01 · monitors</span></span>
+            <button class="btn btn-primary btn-sm" onclick="openWizard()">+ <span data-i="add">Add</span></button>
+          </div>
+          <div id="rail-list"></div>
+        </div>
+      </aside>
+      <div style="flex:1; min-width:0"><div class="card hud card-pad" id="detail"></div></div>
+    </div>
+
+    <div id="agent-events" class="card hud card-pad hide events">
+      <div style="display:flex; align-items:baseline; justify-content:space-between; margin-bottom:8px">
+        <span class="overline"><span data-i="ev.recent">RIG-01 · recent events</span></span><span class="note" data-i="updating">updating…</span>
+      </div>
+      <div id="agent-evlist"></div>
+    </div>
+
+    <div id="agent-settings" class="card hud card-pad hide">
+      <span class="overline"><span data-i="set.conn">Connection</span></span>
+      <div class="form" style="margin-top:14px; max-width:640px">
+        <div class="field"><label data-i="set.host">Host</label><div class="control"><input class="mono" value="127.0.0.1"></div></div>
+        <div class="field"><label data-i="set.port">Port</label><div class="control"><input class="mono" value="5678"></div></div>
+        <div class="field"><label data-i="set.token">Bearer token</label><div class="control"><input class="mono" type="password" value="supersecret"><span class="suffix btn-like" onclick="togglePw0(this)" data-i="show">show</span></div></div>
+        <div class="field"><label data-i="set.lang">Language</label><div class="control"><select><option>English</option><option>中文</option></select></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-hub" class="hide">
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" onclick="hubTab('fleet',this)" data-i="tab.fleet">Fleet</button>
+      <button role="tab" aria-selected="false" onclick="hubTab('events',this)" data-i="tab.events">Events</button>
+      <button role="tab" aria-selected="false" onclick="hubTab('settings',this)" data-i="tab.settings">Settings</button>
+    </div>
+
+    <div id="hub-fleet">
+      <div class="card hud card-pad" style="margin-bottom:16px">
+        <div class="summary">
+          <div><div class="overline" style="margin-bottom:6px"><span data-i="fleet.health">Fleet health</span></div>
+            <div><span class="big">4</span> <span class="muted" data-i="machines">machines</span></div></div>
+          <div style="width:1px; height:38px; background:var(--divider2)"></div>
+          <div class="seg-count"><span class="dot glow" style="background:var(--ok);color:var(--ok)"></span> <b class="mono">3</b> <span data-i="healthy">healthy</span></div>
+          <div class="seg-count"><span class="dot glow" style="background:var(--degraded);color:var(--degraded)"></span> <b class="mono">1</b> <span data-i="degraded">degraded</span></div>
+          <div class="seg-count"><span class="dot" style="background:var(--stopped)"></span> <b class="mono">0</b> <span data-i="offline">offline</span></div>
+          <div class="spacer"></div>
+          <span class="note" data-i="refresh">auto-refresh · 5s · last updated just now</span>
+        </div>
+      </div>
+      <span class="overline"><span data-i="fleet.title">Fleet · 4 agents</span></span>
+      <div class="fleet" id="fleet" style="margin-top:12px"></div>
+      <div class="card hud card-pad" style="margin-top:18px; max-width:640px">
+        <span class="overline"><span data-i="self.title">Hub host self-monitor</span></span>
+        <div class="tiles" style="margin-top:12px" id="self-tiles"></div>
+      </div>
+    </div>
+
+    <div id="hub-events" class="card hud card-pad hide events">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px">
+        <span class="overline"><span data-i="ev.history">Event history</span></span>
+        <div class="control" style="width:160px"><select><option data-i="ev.all">All levels</option><option>info</option><option>warn</option><option>alert</option></select></div>
+      </div>
+      <div id="hub-evlist"></div>
+    </div>
+
+    <div id="hub-settings" class="card hud card-pad hide">
+      <span class="overline"><span data-i="about">About</span></span>
+      <p class="muted" style="margin-top:10px" data-i="about.body">TaskPaw Hub · v3.0.0-dev — aggregates fleet status and forwards events to OpenClaw.</p>
+    </div>
+  </section>
+</main>
+
+<div class="overlay hide" id="wizard">
+  <div class="wiz">
+    <div class="wiz-head">
+      <h2 id="wiz-title"></h2>
+      <button class="iconbtn" aria-label="close" onclick="closeWizard()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="steps">
+      <div class="step active" id="st1"><span class="num">1</span> <span data-i="wiz.s1">Choose service</span></div>
+      <div class="step-line"></div>
+      <div class="step" id="st2"><span class="num">2</span> <span data-i="wiz.s2">Configure</span></div>
+      <div class="step-line"></div>
+      <div class="step" id="st3"><span class="num">3</span> <span data-i="wiz.s3">Review</span></div>
+    </div>
+    <div class="wiz-body" id="wiz-body"></div>
+    <div class="wiz-foot" id="wiz-foot"></div>
+  </div>
+</div>
+
+<div class="annot">
+  <div class="card hud">
+    <h3 data-i="annot.h">This pass addresses your notes</h3>
+    <ul id="annot-list"></ul>
+  </div>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+let LANG="en";
+
+const L={
+ en:{
+  "role.agent":"Agent","role.hub":"Hub","conn":"Hub reachable · Bearer OK",
+  "tab.monitors":"Monitors","tab.events":"Events","tab.settings":"Settings","tab.fleet":"Fleet",
+  "rail.head":"RIG-01 · monitors","add":"Add","ev.recent":"RIG-01 · recent events","updating":"updating…",
+  "set.conn":"Connection","set.host":"Host","set.port":"Port","set.token":"Bearer token","set.lang":"Language","show":"show","hide":"hide",
+  "fleet.health":"Fleet health","machines":"machines","healthy":"healthy","degraded":"degraded","offline":"offline",
+  "refresh":"auto-refresh · 5s · last updated just now","fleet.title":"Fleet · 4 agents","self.title":"Hub host self-monitor",
+  "ev.history":"Event history","ev.all":"All levels","about":"About",
+  "about.body":"TaskPaw Hub · v3.0.0-dev — aggregates fleet status and forwards events to OpenClaw.",
+  "wiz.add":"Add a monitor","wiz.s1":"Choose service","wiz.s2":"Configure","wiz.s3":"Review",
+  "wiz.s1.desc":"Pick the kind of service you want to watch on this machine.","continue":"Continue →","back":"← Back","cancel":"Cancel",
+  "review":"Review →","wiz.addbtn":"✓ Add monitor","svctype":"Service type","wiz.adapt1":"Fields adapt to the","wiz.adapt2":"plugin schema. Required fields are marked.",
+  "wiz.recap":"On add, the monitor is created and you land on its detail pane (Start / Edit config).",
+  "browse":"Browse…","enabled":"enabled","start":"Start","stop":"Stop","editcfg":"Edit config","delete":"Delete",
+  "updated":"updated","automng":"Auto-managed system monitor — no operator controls.",
+  "nowproc":"Now processing","curfile":"current file","queue":"Queue","done":"done","left":"left","monitors":"monitors",
+  "annot.h":"This pass addresses your notes",
+  "annot":["<b>More tech feel:</b> blueprint grid backdrop, HUD corner ticks, accent under-glow on the top bar, glowing status dots and gauges — all within the dark-OLED + green tokens.",
+    "<b>Guided “Add monitor” wizard:</b> step 1 service picker → step 2 that service’s config form → step 3 review. Try the green <b>+ Add</b> button.",
+    "<b>Redesigned form:</b> labels above fields, focus-glow inputs, required markers, inline validation, path Browse, password show/hide, on/off switches.",
+    "<b>Bilingual:</b> toggle <b>EN / 中</b> in the top bar. Chinese uses a Noto Sans SC fallback; CJK drops the uppercase + wide tracking that only suit Latin labels."],
+  st:{running:"running",idle:"idle",degraded:"degraded",stopped:"stopped",ok:"ok",unknown:"unknown"},
+ },
+ zh:{
+  "role.agent":"代理端","role.hub":"中枢","conn":"中枢可达 · 鉴权正常",
+  "tab.monitors":"监控项","tab.events":"事件","tab.settings":"设置","tab.fleet":"机群",
+  "rail.head":"RIG-01 · 监控项","add":"添加","ev.recent":"RIG-01 · 最近事件","updating":"更新中…",
+  "set.conn":"连接","set.host":"主机","set.port":"端口","set.token":"鉴权令牌","set.lang":"语言","show":"显示","hide":"隐藏",
+  "fleet.health":"机群健康","machines":"台机器","healthy":"正常","degraded":"降级","offline":"离线",
+  "refresh":"自动刷新 · 5秒 · 最后更新于刚刚","fleet.title":"机群 · 4 个代理","self.title":"中枢主机自监控",
+  "ev.history":"事件历史","ev.all":"全部级别","about":"关于",
+  "about.body":"TaskPaw 中枢 · v3.0.0-dev — 汇总机群状态并将事件转发到 OpenClaw。",
+  "wiz.add":"添加监控项","wiz.s1":"选择服务","wiz.s2":"配置","wiz.s3":"复核",
+  "wiz.s1.desc":"选择你想在这台机器上监控的服务类型。","continue":"继续 →","back":"← 返回","cancel":"取消",
+  "review":"复核 →","wiz.addbtn":"✓ 添加监控","svctype":"服务类型","wiz.adapt1":"字段会随所选的","wiz.adapt2":"插件 schema 变化。必填项已标注。",
+  "wiz.recap":"添加后会创建该监控项，并自动跳转到它的详情页（启动 / 编辑配置）。",
+  "browse":"浏览…","enabled":"已启用","start":"启动","stop":"停止","editcfg":"编辑配置","delete":"删除",
+  "updated":"更新于","automng":"系统自动管理的监控项 — 无操作控件。",
+  "nowproc":"正在处理","curfile":"当前文件","queue":"队列","done":"完成","left":"剩余","monitors":"个监控项",
+  "annot.h":"本轮已处理你的反馈",
+  "annot":["<b>更强科技感：</b>蓝图网格背景、HUD 边角刻线、顶栏发光下划线、状态点与仪表盘辉光 —— 全部沿用暗色 OLED + 绿色 token。",
+    "<b>引导式「添加监控」向导：</b>第 1 步选服务 → 第 2 步该服务的配置表单 → 第 3 步复核。点绿色 <b>+ 添加</b> 试试。",
+    "<b>重做表单：</b>标签在输入框上方、聚焦发光、必填标记、行内校验、路径浏览、密码显示/隐藏、开关。",
+    "<b>中英双语：</b>顶栏切换 <b>EN / 中</b>。中文走 Noto Sans SC 字体回退；CJK 会去掉只适合拉丁字母的大写与宽字距。"],
+  st:{running:"运行中",idle:"空闲",degraded:"降级",stopped:"已停止",ok:"正常",unknown:"未知"},
+ }
+};
+const t=k=>L[LANG][k]??k;
+const tState=s=>L[LANG].st[s]??s;
+
+const SC={ok:"--ok",running:"--ok",idle:"--idle",unknown:"--idle",degraded:"--degraded",error:"--error",stopped:"--stopped",starting:"--starting"};
+const SBG={ok:"rgba(34,197,94,.14)",running:"rgba(34,197,94,.14)",idle:"rgba(100,116,139,.18)",degraded:"rgba(245,158,11,.16)",error:"rgba(220,38,38,.16)",stopped:"rgba(71,85,105,.2)"};
+const isLive=s=>s==="running"||s==="ok"||s==="starting";
+const dot=(s,live)=>{const c=`var(${SC[s]||"--idle"})`;return `<span class="dot glow ${live&&isLive(s)?"live":""}" style="background:${c};color:${c}"></span>`};
+const chipState=s=>{const c=`var(${SC[s]||"--idle"})`;return `<span class="state-chip" style="background:${SBG[s]||"rgba(100,116,139,.18)"};color:${c}">${tState(s)}</span>`};
+
+const monitors=[
+  {name:"Lada · subtitle",type:"lada",state:"running",last:"12:41:08",
+   detail:{en:"Translating batch — 3 files queued",zh:"正在翻译批次 — 队列中 3 个文件"},
+   metrics:{current_file:"ep08_scene12.srt",percent:64,queue_completed:7,queue_total:10,queue_remaining:3,fps:23.5,eta:"4m 12s",gpu_pct:78,cpu_pct:41,mem_pct:55,gpu_mem_used_mb:9300,gpu_mem_total_mb:12288}},
+  {name:"ComfyUI",type:"comfyui",state:"running",last:"12:41:05",detail:{en:"Queue depth 2",zh:"队列深度 2"},
+   metrics:{queue_completed:18,queue_total:20,gpu_pct:91,cpu_pct:33,mem_pct:48,gpu_mem_used_mb:11200,gpu_mem_total_mb:12288}},
+  {name:"moomoo (MQT)",type:"heartbeat",state:"degraded",last:"12:40:51",detail:{en:"1 of 4 life-signs late: quote feed",zh:"4 项生命体征中 1 项延迟：行情推送"},metrics:{cpu_pct:12,mem_pct:30}},
+  {name:"output folder",type:"folder",state:"idle",last:"12:33:20",detail:{en:"No new files in 8m",zh:"8 分钟内无新文件"},metrics:{}},
+  {name:"render.exe",type:"process",state:"stopped",last:"11:58:02",detail:{en:"Process not running",zh:"进程未运行"},metrics:{}},
+  {name:"host metrics",type:"",state:"ok",last:"12:41:09",detail:{en:"Auto-managed self-monitor",zh:"自动管理的自监控"},metrics:{cpu_pct:22,mem_pct:46}},
+];
+
+let selected=0;
+function renderRail(){
+  $("#rail-list").innerHTML=monitors.map((m,i)=>`
+    <div class="mrow" role="option" aria-selected="${i===selected}" onclick="selectMon(${i})">
+      ${dot(m.state,true)}<span class="nm">${m.name}</span>${m.type?`<span class="chip">${m.type}</span>`:""}<span class="t mono">${m.last.slice(0,5)}</span>
+    </div>`).join("");
+}
+function selectMon(i){selected=i;renderRail();renderDetail();}
+function gauge(label,pct,sub){
+  const c=pct>=90?"var(--error)":pct>=70?"var(--degraded)":"var(--ok)",ang=Math.round(pct*3.6);
+  return `<div class="gauge"><div class="ring" style="border-radius:50%;background:conic-gradient(${c} ${ang}deg,rgba(148,163,184,.15) 0);box-shadow:0 0 16px -6px ${c}">
+    <div style="position:absolute;inset:6px;border-radius:50%;background:var(--paper2)"></div>
+    <div class="val"><b>${Math.round(pct)}</b><span class="glab">%</span></div></div>
+    <span class="glab">${label}</span>${sub?`<span class="gsub">${sub}</span>`:""}</div>`;
+}
+const gb=mb=>mb>=1024?(mb/1024).toFixed(1)+" GB":Math.round(mb)+" MB";
+function renderMetrics(m){
+  const x=m.metrics;if(!x||!Object.keys(x).length)return "";let h="";
+  if(x.current_file){h+=`<div class="nowproc"><span class="glab">${t("nowproc")}</span>
+    <div class="mono" style="font-weight:600;font-size:14px;margin-top:2px;word-break:break-all">${x.current_file}</div>`;
+    if(x.percent!=null)h+=`<div style="margin-top:10px"><div style="display:flex;justify-content:space-between;margin-bottom:5px"><span class="note">${t("curfile")}</span><span class="mono note">${x.percent}%</span></div><div class="bar"><i style="width:${x.percent}%"></i></div></div>`;
+    h+=`</div>`;}
+  if(x.queue_total)h+=`<div style="margin-top:16px"><div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px"><span class="overline">${t("queue")}</span><span class="mono" style="font-size:13px">${x.queue_completed} / ${x.queue_total} ${t("done")}${x.queue_remaining?` · ${x.queue_remaining} ${t("left")}`:""}</span></div><div class="bar" style="height:10px"><i style="width:${Math.round(x.queue_completed/x.queue_total*100)}%"></i></div></div>`;
+  const g=[];if(x.gpu_pct!=null)g.push(gauge("GPU",x.gpu_pct,x.gpu_mem_used_mb?`${gb(x.gpu_mem_used_mb)} / ${gb(x.gpu_mem_total_mb)}`:""));
+  if(x.cpu_pct!=null)g.push(gauge("CPU",x.cpu_pct));if(x.mem_pct!=null)g.push(gauge("MEM",x.mem_pct));
+  if(g.length)h+=`<div class="gauges" style="margin-top:18px">${g.join("")}</div>`;
+  const ti=[];if(x.fps!=null)ti.push(["fps",x.fps]);if(x.eta)ti.push(["eta",x.eta]);
+  if(ti.length)h+=`<div class="tiles" style="margin-top:16px">${ti.map(([l,v])=>`<div class="tile"><span class="l">${l}</span><div class="v">${v}</div></div>`).join("")}</div>`;
+  return h;
+}
+function renderDetail(){
+  const m=monitors[selected],manageable=!!m.type,running=m.state!=="stopped";
+  const controls=manageable?`<div style="display:flex;gap:8px;margin-top:16px;align-items:center">
+    ${running?`<button class="btn btn-out btn-sm">${t("stop")}</button>`:`<button class="btn btn-primary btn-sm">${t("start")}</button>`}
+    <button class="btn btn-info btn-sm">${t("editcfg")}</button><div class="spacer"></div>
+    <button class="btn btn-danger btn-sm">${t("delete")}</button></div>`:`<p class="note" style="margin-top:14px">${t("automng")}</p>`;
+  $("#detail").innerHTML=`<div style="display:flex;align-items:center;gap:10px">${dot(m.state,true)}<h2 style="flex:1">${m.name}</h2>${chipState(m.state)}<span class="muted mono" style="font-size:12px">${t("updated")} ${m.last}</span></div>
+    <p class="muted" style="margin-top:8px">${m.detail[LANG]}</p>${controls}${renderMetrics(m)}`;
+}
+
+const events=[
+  {t:"12:41:08",lvl:"info",en:"Lada batch advanced to file 8/10",zh:"Lada 批次推进至文件 8/10",sub:"RIG-01 · Lada"},
+  {t:"12:40:51",lvl:"warn",en:"moomoo quote feed heartbeat late (>30s)",zh:"moomoo 行情推送心跳延迟（>30秒）",sub:"RIG-01 · moomoo"},
+  {t:"12:38:02",lvl:"done",en:"ComfyUI render queue drained (20/20)",zh:"ComfyUI 渲染队列已清空（20/20）",sub:"RIG-01 · ComfyUI"},
+  {t:"12:33:20",lvl:"info",en:"Output folder idle — no new files in 8m",zh:"输出文件夹空闲 — 8 分钟无新文件",sub:"RIG-01 · output folder"},
+  {t:"11:58:02",lvl:"alert",en:"render.exe exited unexpectedly (code 1)",zh:"render.exe 意外退出（代码 1）",sub:"RIG-01 · render.exe"},
+];
+const evHTML=l=>l.map(e=>`<div class="ev"><span class="ts">${e.t}</span><span class="lvl ${e.lvl}">${e.lvl}</span><div class="body"><div>${e[LANG]}</div><div class="sub">${e.sub}</div></div></div>`).join("");
+
+const fleet=[
+  {name:"RIG-01",ip:"192.168.1.21",port:5678,state:"running",cpu:41,mem:55,mons:6},
+  {name:"RIG-02 · ComfyUI",ip:"192.168.1.22",port:5678,state:"running",cpu:88,mem:72,mons:3},
+  {name:"MAC-STUDIO",ip:"192.168.1.10",port:5678,state:"running",cpu:19,mem:38,mons:4},
+  {name:"NUC-trade",ip:"192.168.1.30",port:5678,state:"degraded",cpu:12,mem:30,mons:2},
+];
+let fleetSel=0;
+const miniBar=(l,p)=>{const c=p>=90?"var(--error)":p>=70?"var(--degraded)":"var(--ok)";return `<div class="m"><div class="ml"><span>${l}</span><b>${p}%</b></div><div class="bar" style="height:6px"><i style="width:${p}%;background:${c}"></i></div></div>`};
+function renderFleet(){
+  $("#fleet").innerHTML=fleet.map((f,i)=>`<div class="machine card hud card-pad" role="option" aria-selected="${i===fleetSel}" onclick="fleetSel=${i};renderFleet()">
+    <div style="display:flex;align-items:center;gap:9px">${dot(f.state,true)}<h2 style="flex:1;font-size:15px">${f.name}</h2>${chipState(f.state)}</div>
+    <div class="muted mono" style="font-size:12px;margin-top:6px">${f.ip}:${f.port} · ${f.mons} ${t("monitors")}</div>
+    <div class="mini">${miniBar("CPU",f.cpu)}${miniBar("MEM",f.mem)}</div></div>`).join("");
+}
+function renderSelf(){
+  const up=LANG==="zh"?"6天4小时":"6d 4h";
+  $("#self-tiles").innerHTML=[["cpu","22%"],["mem","46%"],["disk","61%"],[LANG==="zh"?"运行时长":"uptime",up],[LANG==="zh"?"已轮询代理":"agents polled","4"]].map(([l,v])=>`<div class="tile"><span class="l">${l}</span><div class="v">${v}</div></div>`).join("");
+}
+
+function setRole(r){
+  $("#role-agent").setAttribute("aria-selected",r==="agent");$("#role-hub").setAttribute("aria-selected",r==="hub");
+  $("#view-agent").classList.toggle("hide",r!=="agent");$("#view-hub").classList.toggle("hide",r!=="hub");
+  $("#hub-conn").style.display=r==="hub"?"none":"";
+}
+function agentTab(t2,b){[...b.parentNode.children].forEach(x=>x.setAttribute("aria-selected","false"));b.setAttribute("aria-selected","true");
+  $("#agent-monitors").classList.toggle("hide",t2!=="monitors");$("#agent-events").classList.toggle("hide",t2!=="events");$("#agent-settings").classList.toggle("hide",t2!=="settings");}
+function hubTab(t2,b){[...b.parentNode.children].forEach(x=>x.setAttribute("aria-selected","false"));b.setAttribute("aria-selected","true");
+  $("#hub-fleet").classList.toggle("hide",t2!=="fleet");$("#hub-events").classList.toggle("hide",t2!=="events");$("#hub-settings").classList.toggle("hide",t2!=="settings");}
+function togglePw0(el){const i=el.previousElementSibling;const p=i.type==="password";i.type=p?"text":"password";el.textContent=p?t("hide"):t("show");}
+
+const I={
+  lada:'<path d="M4 5h16v14H4z"/><path d="M4 9h16M8 5v14M16 5v14M8 9v4h8V9"/>',
+  comfyui:'<circle cx="6" cy="7" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="12" cy="17" r="2"/><path d="M6 9v2a3 3 0 0 0 3 3M18 9v2a3 3 0 0 1-3 3"/>',
+  folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  process:'<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9zM2 9h2M2 15h2M20 9h2M20 15h2M9 2v2M15 2v2M9 20v2M15 20v2"/>',
+  heartbeat:'<path d="M3 12h4l2-5 4 10 2-5h6"/>',
+  moomoo:'<path d="M4 19V5M4 19h16M8 16l3-4 3 2 4-6"/>',
+  tcp_check:'<rect x="3" y="4" width="18" height="5" rx="1"/><rect x="3" y="15" width="18" height="5" rx="1"/><path d="M7 9v6M12 6.5h.01M12 17.5h.01"/>',
+  state_file:'<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 13h6M9 17h6"/>',
+  custom_cmd:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/>',
+};
+const SERVICES=[
+  {id:"lada",nm:"Lada",en:"Subtitle/translation pipeline — files, fps, GPU.",zh:"字幕/翻译流水线 — 文件、帧率、GPU。"},
+  {id:"comfyui",nm:"ComfyUI",en:"Image render queue depth and progress.",zh:"图像渲染队列深度与进度。"},
+  {id:"moomoo",nm:"moomoo (MQT)",en:"Trading server — 4 life-signs heartbeat.",zh:"交易服务 — 4 项生命体征心跳。"},
+  {id:"folder",nm:l=>l==="zh"?"文件夹监控":"Folder watch",en:"Alert when files arrive or go idle.",zh:"文件到达或长时间空闲时告警。"},
+  {id:"process",nm:l=>l==="zh"?"进程":"Process",en:"Is a named process alive on this host?",zh:"指定进程在本机是否存活？"},
+  {id:"heartbeat",nm:l=>l==="zh"?"心跳":"Heartbeat",en:"Generic liveness ping with max age.",zh:"通用存活心跳，带最大时延。"},
+  {id:"tcp_check",nm:l=>l==="zh"?"TCP 探测":"TCP check",en:"Probe a host:port reachability.",zh:"探测 host:port 可达性。"},
+  {id:"state_file",nm:l=>l==="zh"?"状态文件":"State file",en:"Read status from a JSON/state file.",zh:"从 JSON/状态文件读取状态。"},
+  {id:"custom_cmd",nm:l=>l==="zh"?"自定义命令":"Custom command",en:"Run a shell command, parse its output.",zh:"运行一条命令并解析其输出。"},
+];
+const svcName=s=>typeof s.nm==="function"?s.nm(LANG):s.nm;
+const F={
+  name:{en:"Monitor name",zh:"监控名称"},api_url:{en:"Lada API URL",zh:"Lada API 地址"},watch_dir:{en:"Watch folder",zh:"监控文件夹"},
+  poll:{en:"Poll interval",zh:"轮询间隔"},token:{en:"Bearer token",zh:"鉴权令牌"},starton:{en:"Start on save",zh:"保存后启动"},
+  baseurl:{en:"Base URL",zh:"基础地址"},host:{en:"Host",zh:"主机"},port:{en:"Port",zh:"端口"},account:{en:"Account id",zh:"账户 ID"},
+  path:{en:"Folder path",zh:"文件夹路径"},pattern:{en:"Match pattern",zh:"匹配模式"},idle:{en:"Idle alert after",zh:"空闲告警阈值"},
+  pname:{en:"Process name",zh:"进程名"},match:{en:"Match mode",zh:"匹配方式"},source:{en:"Source label",zh:"来源标签"},
+  maxage:{en:"Max age",zh:"最大时延"},sfpath:{en:"State file path",zh:"状态文件路径"},command:{en:"Command",zh:"命令"},runevery:{en:"Run every",zh:"运行间隔"},
+};
+const sec={en:"sec",zh:"秒"},min={en:"min",zh:"分钟"};
+const SCHEMA={
+  lada:[{k:"name",lk:"name",t:"text",req:1,full:1,ph:"Lada · subtitle"},
+    {k:"api_url",lk:"api_url",t:"text",ph:"http://127.0.0.1:7860",help:{en:"Where the Lada agent exposes status.",zh:"Lada 暴露状态的地址。"}},
+    {k:"watch_dir",lk:"watch_dir",t:"path",ph:"D:\\subs\\out"},
+    {k:"poll",lk:"poll",t:"number",val:5,sfx:sec},
+    {k:"token",lk:"token",t:"password",help:{en:"Stored encrypted; shown as •••• once saved.",zh:"加密保存；保存后显示为 ••••。"}},
+    {k:"enabled",lk:"starton",t:"switch",val:1}],
+  comfyui:[{k:"name",lk:"name",t:"text",req:1,full:1,ph:"ComfyUI"},
+    {k:"base_url",lk:"baseurl",t:"text",full:1,ph:"http://127.0.0.1:8188"},
+    {k:"poll",lk:"poll",t:"number",val:5,sfx:sec},{k:"enabled",lk:"starton",t:"switch",val:1}],
+  moomoo:[{k:"name",lk:"name",t:"text",req:1,full:1,ph:"moomoo (MQT)"},
+    {k:"host",lk:"host",t:"text",ph:"127.0.0.1"},{k:"port",lk:"port",t:"number",val:11111},
+    {k:"account",lk:"account",t:"text",full:1,ph:"optional"},{k:"enabled",lk:"starton",t:"switch",val:1}],
+  folder:[{k:"name",lk:"name",t:"text",req:1,full:1,ph:"output folder"},
+    {k:"path",lk:"path",t:"path",req:1,full:1,ph:"D:\\render\\out"},
+    {k:"pattern",lk:"pattern",t:"text",val:"*.mp4"},{k:"idle",lk:"idle",t:"number",val:10,sfx:min}],
+  process:[{k:"name",lk:"name",t:"text",req:1,full:1,ph:"render.exe"},
+    {k:"pname",lk:"pname",t:"text",req:1,ph:"render.exe"},{k:"match",lk:"match",t:"select",opts:["exact","contains"]}],
+  heartbeat:[{k:"name",lk:"name",t:"text",req:1,full:1},
+    {k:"source",lk:"source",t:"text",ph:"quote-feed"},{k:"maxage",lk:"maxage",t:"number",val:30,sfx:sec}],
+  tcp_check:[{k:"name",lk:"name",t:"text",req:1,full:1},
+    {k:"host",lk:"host",t:"text",req:1,ph:"192.168.1.30"},{k:"port",lk:"port",t:"number",req:1,val:8080}],
+  state_file:[{k:"name",lk:"name",t:"text",req:1,full:1},{k:"sfpath",lk:"sfpath",t:"path",req:1,full:1,ph:"C:\\app\\state.json"}],
+  custom_cmd:[{k:"name",lk:"name",t:"text",req:1,full:1},
+    {k:"command",lk:"command",t:"text",req:1,full:1,ph:"python check.py --json"},{k:"runevery",lk:"runevery",t:"number",val:15,sfx:sec}],
+};
+let wPick=null;
+function openWizard(){$("#wizard").classList.remove("hide");goStep(1);}
+function closeWizard(){$("#wizard").classList.add("hide");wPick=null;}
+function setStepUI(n){[1,2,3].forEach(i=>{const e=$("#st"+i);e.classList.toggle("active",i===n);e.classList.toggle("done",i<n);});}
+function goStep(n){
+  setStepUI(n);
+  if(n===1){
+    $("#wiz-title").textContent=t("wiz.add");
+    $("#wiz-body").innerHTML=`<p class="muted" style="margin:-4px 0 16px">${t("wiz.s1.desc")}</p>
+      <div class="svc-grid">${SERVICES.map(s=>`<button class="svc" aria-selected="${wPick===s.id}" onclick="pick('${s.id}')">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${I[s.id]}</svg></div>
+        <div class="nm">${svcName(s)}</div><div class="ds">${s[LANG]}</div></button>`).join("")}</div>`;
+    $("#wiz-foot").innerHTML=`<div class="spacer"></div><button class="btn btn-ghost" onclick="closeWizard()">${t("cancel")}</button>
+      <button class="btn btn-primary" id="next1" ${wPick?"":'disabled style="opacity:.45;cursor:not-allowed"'} onclick="goStep(2)">${t("continue")}</button>`;
+  }
+  if(n===2){
+    const svc=SERVICES.find(s=>s.id===wPick);
+    $("#wiz-title").textContent=t("wiz.s2")+" · "+svcName(svc);
+    $("#wiz-body").innerHTML=`<p class="muted" style="margin:-4px 0 18px">${t("wiz.adapt1")} <b style="color:var(--fg)">${svcName(svc)}</b> ${t("wiz.adapt2")}</p>
+      <div class="form">${SCHEMA[wPick].map(fieldHTML).join("")}</div>`;
+    $("#wiz-foot").innerHTML=`<button class="btn btn-out" onclick="goStep(1)">${t("back")}</button><div class="spacer"></div>
+      <button class="btn btn-ghost" onclick="closeWizard()">${t("cancel")}</button><button class="btn btn-primary" onclick="goStep(3)">${t("review")}</button>`;
+  }
+  if(n===3){
+    const svc=SERVICES.find(s=>s.id===wPick);
+    $("#wiz-title").textContent=t("wiz.s3")+" · "+svcName(svc);
+    const rows=SCHEMA[wPick].filter(f=>f.t!=="switch").map(f=>{
+      let v=f.t==="password"?"••••••••":(document.getElementById("f_"+f.k)?.value||f.val||"—");
+      return `<div class="row"><span class="k">${F[f.lk][LANG]}</span><span class="v">${v}${f.sfx?" "+f.sfx[LANG]:""}</span></div>`;
+    }).join("");
+    $("#wiz-body").innerHTML=`<div class="recap"><div class="row"><span class="k">${t("svctype")}</span><span class="v">${svc.id}</span></div>${rows}</div>
+      <p class="note" style="margin-top:16px">${t("wiz.recap")}</p>`;
+    $("#wiz-foot").innerHTML=`<button class="btn btn-out" onclick="goStep(2)">${t("back")}</button><div class="spacer"></div>
+      <button class="btn btn-primary" onclick="closeWizard()">${t("wiz.addbtn")}</button>`;
+  }
+}
+function pick(id){wPick=id;
+  document.querySelectorAll(".svc").forEach(b=>b.setAttribute("aria-selected","false"));
+  event.currentTarget.setAttribute("aria-selected","true");
+  const n=$("#next1"); if(n){n.removeAttribute("disabled");n.removeAttribute("style");}
+}
+function fieldHTML(f){
+  const id="f_"+f.k, lbl=F[f.lk][LANG], req=f.req?'<span class="req">*</span>':"";
+  let ctl="";
+  if(f.t==="text"||f.t==="number")
+    ctl=`<div class="control"><input id="${id}" class="mono" type="${f.t==="number"?"number":"text"}" value="${f.val??""}" placeholder="${f.ph||""}">${f.sfx?`<span class="suffix">${f.sfx[LANG]}</span>`:""}</div>`;
+  else if(f.t==="path")
+    ctl=`<div class="control"><input id="${id}" class="mono" value="${f.val??""}" placeholder="${f.ph||""}"><span class="suffix btn-like">${t("browse")}</span></div>`;
+  else if(f.t==="password")
+    ctl=`<div class="control"><input id="${id}" class="mono" type="password" value="secret-token"><span class="suffix btn-like" onclick="togglePwF('${id}',this)">${t("show")}</span></div>`;
+  else if(f.t==="select")
+    ctl=`<div class="control"><select id="${id}">${f.opts.map(o=>`<option>${o}</option>`).join("")}</select></div>`;
+  else if(f.t==="switch")
+    return `<div class="field full"><label>${lbl}</label><span class="switch ${f.val?"on":""}" onclick="this.classList.toggle('on')"><span class="track"></span><span class="muted" style="font-size:12px">${t("enabled")}</span></span></div>`;
+  const isErr=f.k==="api_url";
+  const help=isErr?`<span class="help">${LANG==="zh"?"似乎不可达 — 请检查主机/端口。":"Looks unreachable — check host/port."}</span>`:(f.help?`<span class="help">${f.help[LANG]}</span>`:"");
+  return `<div class="field${f.full?" full":""}${isErr?" error":""}"><label>${lbl}${req}</label>${ctl}${help}</div>`;
+}
+function togglePwF(id,el){const i=document.getElementById(id);const p=i.type==="password";i.type=p?"text":"password";el.textContent=p?t("hide"):t("show");}
+
+function applyStatic(){
+  document.querySelectorAll("[data-i]").forEach(el=>{const k=el.getAttribute("data-i");if(L[LANG][k]!=null)el.textContent=L[LANG][k];});
+  $("#annot-list").innerHTML=L[LANG].annot.map(x=>`<li>${x}</li>`).join("");
+}
+function setLang(lng){
+  LANG=lng; document.documentElement.lang=lng;
+  $("#lang-en").setAttribute("aria-selected",lng==="en");$("#lang-zh").setAttribute("aria-selected",lng==="zh");
+  applyStatic(); renderRail(); renderDetail(); renderFleet(); renderSelf();
+  $("#agent-evlist").innerHTML=evHTML(events);
+  $("#hub-evlist").innerHTML=evHTML([events[1],events[2],{t:"12:35:44",lvl:"info",en:"MAC-STUDIO joined fleet",zh:"MAC-STUDIO 已加入机群",sub:"MAC-STUDIO"},events[4]]);
+  if(!$("#wizard").classList.contains("hide")) goStep([...document.querySelectorAll(".step")].findIndex(s=>s.classList.contains("active"))+1);
+}
+
+setLang("en");
+</script>
+</body>
+</html>
