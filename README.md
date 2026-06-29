@@ -61,7 +61,9 @@ uv run pytest                # backend test suite
 uv run python -m taskpaw_v3.bootstrap agent --run     # an agent
 uv run python -m taskpaw_v3.bootstrap hub --run       # the Hub
 
-# Build the packaged desktop app (backend sidecar + Tauri bundle):
+# Build the packaged desktop app (backend sidecar + Tauri bundle). The build
+# extra provides PyInstaller for the sidecar:
+uv sync --extra build --extra v3
 uv run python scripts/build.py
 
 # Frontend tests/build (in its own directory):
