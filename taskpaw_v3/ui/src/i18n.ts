@@ -140,6 +140,19 @@ function initialLang(): Lang {
   return saved === "en" || saved === "zh-CN" ? saved : "zh-CN"; // default Chinese
 }
 
+// Tell the Tauri shell the current UI language so the native close-confirm
+// dialog follows it (#108). No-op in the browser/dev (no shell): guarded by the
+// injected __TASKPAW__, then a dynamic import so the bundle doesn't hard-require
+// the Tauri API (same pattern as PathWidget). Fire-and-forget.
+function syncLangToShell(l: Lang): void {
+  if (typeof window === "undefined" || !window.__TASKPAW__) return;
+  import("@tauri-apps/api/core")
+    .then(({ invoke }) => invoke("set_ui_lang", { lang: l }))
+    .catch(() => {
+      /* not in a Tauri shell, or command unavailable — ignore */
+    });
+}
+
 const lng = initialLang();
 i18n.use(initReactI18next).init({
   resources: { en: { translation: en }, "zh-CN": { translation: zh } },
@@ -148,6 +161,7 @@ i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false }, // React already escapes
 });
 if (typeof document !== "undefined") document.documentElement.lang = lng;
+syncLangToShell(lng); // report the initial language to the shell (#108)
 
 export function setLang(l: Lang): void {
   try {
@@ -157,6 +171,7 @@ export function setLang(l: Lang): void {
   }
   i18n.changeLanguage(l);
   if (typeof document !== "undefined") document.documentElement.lang = l;
+  syncLangToShell(l); // keep the shell's close dialog in the chosen language (#108)
 }
 
 export function currentLang(): Lang {

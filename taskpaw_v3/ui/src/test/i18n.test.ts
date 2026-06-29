@@ -22,4 +22,14 @@ describe("i18n", () => {
     setLang("en");
     expect(i18n.t("agent.monitorsTitle", { machine: "box1" })).toContain("box1");
   });
+
+  it("does not throw when reporting the language outside a Tauri shell (#108)", () => {
+    // No window.__TASKPAW__ in the test env → the shell sync (set_ui_lang) must
+    // be a safe no-op rather than blowing up the browser/dev path.
+    expect(window.__TASKPAW__).toBeUndefined();
+    expect(() => {
+      setLang("en");
+      setLang("zh-CN");
+    }).not.toThrow();
+  });
 });

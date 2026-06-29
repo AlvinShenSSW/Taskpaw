@@ -21,21 +21,53 @@ use std::time::{Duration, Instant};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
-/// Bilingual title + body for the close-confirmation (#52). The native dialog
-/// can't read the webview's chosen language, so show both. Role-tailored: a Hub
-/// loss is aggregation/notifications; an agent loss is this machine's monitoring.
-fn close_confirm_text(role: &str) -> (String, String) {
-    let title = "TaskPaw — 确认关闭 / Confirm close".to_string();
-    let msg = if role == "hub" {
-        "关闭窗口会停止后台 Hub —— 聚合与 OpenClaw 通知都会停止。确定关闭吗?\n\n\
-         Closing this window stops the background Hub — aggregation and OpenClaw \
-         notifications will stop. Close anyway?"
+/// The webview's chosen UI language, pushed from the frontend via `set_ui_lang`
+/// (#108). Defaults to the i18n default (zh-CN) until the page reports its choice.
+struct UiLang(Mutex<String>);
+
+/// Store the webview's current UI language so the native close dialog can follow
+/// it (#108). Unknown values are ignored (keep the prior language).
+#[tauri::command]
+fn set_ui_lang(lang: String, state: tauri::State<'_, UiLang>) {
+    if lang == "zh-CN" || lang == "en" {
+        if let Ok(mut g) = state.0.lock() {
+            *g = lang;
+        }
+    }
+}
+
+/// Title / body / OK / Cancel labels for the close-confirmation (#52), in the
+/// app's chosen language (#108) — no longer bilingual. Role-tailored: a Hub loss
+/// is aggregation/notifications; an agent loss is this machine's monitoring.
+/// Any non-"en" language uses Chinese (the i18n default).
+fn close_confirm_text(role: &str, lang: &str) -> (String, String, String, String) {
+    if lang == "en" {
+        let msg = if role == "hub" {
+            "Closing this window stops the background Hub — aggregation and \
+             OpenClaw notifications will stop. Close anyway?"
+        } else {
+            "Closing this window stops this machine's background monitoring. \
+             Close anyway?"
+        };
+        (
+            "TaskPaw — Confirm close".to_string(),
+            msg.to_string(),
+            "Close".to_string(),
+            "Cancel".to_string(),
+        )
     } else {
-        "关闭窗口会停止本机的后台监控。确定关闭吗?\n\n\
-         Closing this window stops this machine's background monitoring. \
-         Close anyway?"
-    };
-    (title, msg.to_string())
+        let msg = if role == "hub" {
+            "关闭窗口会停止后台 Hub —— 聚合与 OpenClaw 通知都会停止。确定关闭吗?"
+        } else {
+            "关闭窗口会停止本机的后台监控。确定关闭吗?"
+        };
+        (
+            "TaskPaw — 确认关闭".to_string(),
+            msg.to_string(),
+            "关闭".to_string(),
+            "取消".to_string(),
+        )
+    }
 }
 
 struct Backend(Mutex<Option<Child>>);
@@ -432,6 +464,10 @@ fn main() {
         // dialog that returns a path string — no FS read/write IPC. Scoped to just
         // `dialog:allow-open` in capabilities/default.json.
         .plugin(tauri_plugin_dialog::init())
+        // The webview reports its UI language so the native close dialog can
+        // follow it (#108). Default = zh-CN (the i18n default) until it does.
+        .manage(UiLang(Mutex::new("zh-CN".to_string())))
+        .invoke_handler(tauri::generate_handler![set_ui_lang])
         .setup(|app| {
             // `mut`: the Windows Job-Object failure kill path AND taking the
             // backend's stdout for the readiness handshake (#48).
@@ -517,7 +553,7 @@ fn main() {
             // actually spawned. The OK button is debounced via a flag so the
             // post-confirm close isn't re-intercepted.
             if has_backend {
-                let (title, msg) = close_confirm_text(&ui_role());
+                let role = ui_role();
                 let confirmed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let app_handle = app.handle().clone();
                 win.on_window_event(move |event| {
@@ -529,14 +565,21 @@ fn main() {
                         api.prevent_close();
                         let confirmed = confirmed.clone();
                         let app_handle = app_handle.clone();
+                        // Read the current UI language AT CLOSE TIME so an in-session
+                        // language switch is honored without a restart (#108).
+                        let lang = app_handle
+                            .state::<UiLang>()
+                            .0
+                            .lock()
+                            .map(|g| g.clone())
+                            .unwrap_or_else(|_| "zh-CN".to_string());
+                        let (title, msg, ok_label, cancel_label) =
+                            close_confirm_text(&role, &lang);
                         app_handle
                             .dialog()
-                            .message(msg.clone())
-                            .title(title.clone())
-                            .buttons(MessageDialogButtons::OkCancelCustom(
-                                "关闭 / Close".into(),
-                                "取消 / Cancel".into(),
-                            ))
+                            .message(msg)
+                            .title(title)
+                            .buttons(MessageDialogButtons::OkCancelCustom(ok_label, cancel_label))
                             .show(move |ok| {
                                 if ok {
                                     confirmed.store(true, SeqCst);
@@ -561,7 +604,41 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::loopback_base;
+    use super::{close_confirm_text, loopback_base};
+
+    #[test]
+    fn close_confirm_is_single_language_per_choice() {
+        // English: no Chinese, no bilingual "/" separator in the title.
+        let (title, msg, ok, cancel) = close_confirm_text("agent", "en");
+        assert!(title.contains("Confirm close") && !title.contains('/'));
+        assert!(msg.contains("background monitoring"));
+        assert!(!msg.contains("关闭"));
+        assert_eq!((ok.as_str(), cancel.as_str()), ("Close", "Cancel"));
+
+        // Chinese: no English body, localized buttons.
+        let (title, msg, ok, cancel) = close_confirm_text("agent", "zh-CN");
+        assert!(title.contains("确认关闭") && !title.contains('/'));
+        assert!(msg.contains("后台监控"));
+        assert!(!msg.contains("Closing"));
+        assert_eq!((ok.as_str(), cancel.as_str()), ("关闭", "取消"));
+    }
+
+    #[test]
+    fn close_confirm_is_role_tailored() {
+        // Hub mentions aggregation; agent mentions this machine — in each language.
+        assert!(close_confirm_text("hub", "en").1.contains("aggregation"));
+        assert!(close_confirm_text("agent", "en").1.contains("this machine"));
+        assert!(close_confirm_text("hub", "zh-CN").1.contains("聚合"));
+        assert!(close_confirm_text("agent", "zh-CN").1.contains("本机"));
+    }
+
+    #[test]
+    fn close_confirm_unknown_lang_falls_back_to_chinese() {
+        // Any non-"en" value (incl. junk) uses the i18n default language.
+        let (title, _msg, ok, _cancel) = close_confirm_text("agent", "fr");
+        assert!(title.contains("确认关闭"));
+        assert_eq!(ok, "关闭");
+    }
 
     #[test]
     fn accepts_loopback_forms() {
