@@ -1,17 +1,17 @@
 import {
   Alert, Box, Button, Card, CardContent, Chip, Dialog, DialogActions,
   DialogContent, DialogContentText, DialogTitle, List, ListItemButton,
-  MenuItem, Snackbar, Stack, Tab, Tabs, TextField, Typography,
+  Snackbar, Stack, Tab, Tabs, Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type MonitorSnapshot, type PluginInfo } from "../api";
-import { SchemaForm } from "../components/SchemaForm";
+import { api, type MonitorSnapshot, type PluginInfo, type PresetInfo } from "../api";
 import { StatusDot } from "../components/StatusDot";
 import { SkeletonRows } from "../components/SkeletonRows";
 import { MonitorMetrics } from "../components/MonitorMetrics";
 import { EventLog } from "../components/EventLog";
+import { MonitorWizard } from "./MonitorWizard";
 import { Settings } from "./Settings";
 
 // HH:MM:SS in 24h, from a react-query dataUpdatedAt epoch (ms). Empty until the
@@ -152,10 +152,10 @@ export function AgentConsole() {
       )}
 
       {dialog && (
-        <MonitorDialog
+        <WizardLauncher
           mode={dialog.mode}
           name={dialog.mode === "edit" ? dialog.name : undefined}
-          plugins={plugins.data?.plugins ?? []}
+          pluginsData={plugins.data}
           onClose={() => setDialog(null)}
           onDone={(savedName) => { setDialog(null); if (savedName) setSelected(savedName); invalidate(); }}
           onError={onErr}
@@ -263,91 +263,48 @@ function MonitorDetail({
   );
 }
 
-function MonitorDialog({
-  mode, name, plugins, onClose, onDone, onError,
+// Bridges the console's add/edit triggers to the MonitorWizard (#93). In edit
+// mode it loads the agent config to pre-fill the form (and to know the locked
+// type) before showing the wizard; add mode opens straight on step 1.
+function WizardLauncher({
+  mode, name, pluginsData, onClose, onDone, onError,
 }: {
   mode: "add" | "edit";
   name?: string;
-  plugins: PluginInfo[];
+  pluginsData?: { plugins: PluginInfo[]; presets: PresetInfo[] };
   onClose: () => void;
   onDone: (savedName?: string) => void;
   onError: (e: unknown) => void;
 }) {
   const { t } = useTranslation();
-  // Operator-selectable plugins only (host_metrics etc. are system/auto-injected).
-  const selectable = useMemo(() => plugins.filter((p) => !p.system), [plugins]);
-  const [typeId, setTypeId] = useState<string>(selectable[0]?.type_id ?? "");
-  // The dialog can open before /control/plugins resolves (selectable empty →
-  // typeId ""); the useState initializer won't re-run, so select the first type
-  // once the catalog arrives, otherwise the form never appears (Codex #57b).
-  useEffect(() => {
-    if (!typeId && selectable.length > 0) setTypeId(selectable[0].type_id);
-  }, [selectable, typeId]);
-
-  // Edit mode: load the current config to pre-fill the form.
   const config = useQuery({
-    queryKey: ["agentConfig"],
-    queryFn: api.config,
-    enabled: mode === "edit",
+    queryKey: ["agentConfig"], queryFn: api.config, enabled: mode === "edit",
   });
   const existing = mode === "edit"
     ? config.data?.monitors?.find((m) => (m.config?.name ?? m.name) === name)
     : undefined;
-  const editType = existing?.type_id;
-  const plugin = plugins.find((p) => p.type_id === (mode === "edit" ? editType : typeId));
 
-  const save = useMutation({
-    mutationFn: (formData: Record<string, unknown>) =>
-      mode === "add"
-        ? api.addMonitor({ type_id: typeId, config: formData })
-        : api.updateMonitor(name as string, { config: formData }),
-    // Hand back the saved monitor's name so the console can auto-select it — the
-    // operator lands on its detail pane (Start / Edit config) without hunting.
-    onSuccess: (_res, formData) =>
-      onDone(mode === "add" ? String(formData.name ?? "") || undefined : name),
-    onError,
-  });
-
-  // Plugin ui_schema + a clear submit label + (edit) lock the stable `name`
-  // (the backend ignores name changes on update; show it read-only) (#70).
-  const formUiSchema = useMemo(() => {
-    const base = (plugin?.ui_schema as Record<string, unknown>) ?? {};
-    return {
-      ...base,
-      "ui:submitButtonOptions": { submitText: mode === "add" ? t("agent.addMonitor") : t("agent.saveChanges") },
-      ...(mode === "edit"
-        ? { name: { ...(base.name as object), "ui:readonly": true } }
-        : {}),
-    };
-  }, [plugin, mode, t]);
+  // Wait for the edit config so the form prefills + the type is known.
+  if (mode === "edit" && config.isLoading) {
+    return (
+      <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
+        <DialogTitle>{t("agent.editMonitor", { name })}</DialogTitle>
+        <DialogContent><Typography>{t("agent.loadingConfig")}</Typography></DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
-    <Dialog open onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>{mode === "add" ? t("agent.addMonitor") : t("agent.editMonitor", { name })}</DialogTitle>
-      <DialogContent>
-        {mode === "add" && (
-          <TextField select fullWidth label={t("common.type")} value={typeId} sx={{ my: 1 }}
-            onChange={(e) => setTypeId(e.target.value)}>
-            {selectable.map((p) => (
-              <MenuItem key={p.type_id} value={p.type_id}>{p.display_name}</MenuItem>
-            ))}
-          </TextField>
-        )}
-        {mode === "edit" && config.isLoading && <Typography>{t("agent.loadingConfig")}</Typography>}
-        {plugin ? (
-          <SchemaForm
-            schema={plugin.json_schema}
-            uiSchema={formUiSchema}
-            formData={mode === "edit" ? existing?.config : undefined}
-            onSubmit={(d) => save.mutate(d as Record<string, unknown>)}
-          />
-        ) : (
-          mode === "add" && <Typography color="text.secondary">{t("agent.noSelectableTypes")}</Typography>
-        )}
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-      </DialogActions>
-    </Dialog>
+    <MonitorWizard
+      mode={mode}
+      name={name}
+      existingConfig={existing?.config}
+      existingType={existing?.type_id ?? undefined}
+      plugins={pluginsData?.plugins ?? []}
+      presets={pluginsData?.presets ?? []}
+      onClose={onClose}
+      onDone={onDone}
+      onError={onError}
+    />
   );
 }
