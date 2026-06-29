@@ -4,7 +4,7 @@ import {
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import CheckIcon from "@mui/icons-material/Check";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type PluginInfo, type PresetInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
@@ -51,6 +51,13 @@ export function MonitorWizard({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
+
+  // Edit can open before /control/plugins resolves (services empty → editService
+  // undefined → selectedId stays null, leaving step 2 blank). Sync the selection
+  // once the catalog arrives (Codex). The useState initializer alone can't.
+  useEffect(() => {
+    if (mode === "edit" && selectedId === null && editService) setSelectedId(editService.id);
+  }, [mode, selectedId, editService]);
 
   const selected = services.find((s) => s.id === selectedId) ?? null;
   const serviceName = (s: Service) =>

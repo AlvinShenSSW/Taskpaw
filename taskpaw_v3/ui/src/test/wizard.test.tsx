@@ -123,6 +123,31 @@ describe("MonitorWizard", () => {
     expect(nameInput).toBeDisabled();
   });
 
+  it("recovers the edit form when the plugin catalog resolves after open", async () => {
+    // Edit opens before /control/plugins loaded → no plugins yet.
+    const { rerender } = wrap(
+      <MonitorWizard
+        mode="edit" name="lada-1" existingType="lada"
+        existingConfig={{ name: "lada-1" }}
+        plugins={[]} presets={[]}
+        onClose={vi.fn()} onDone={vi.fn()} onError={vi.fn()}
+      />,
+    );
+    expect(screen.queryByLabelText(/Monitor name/)).not.toBeInTheDocument();
+    // Catalog arrives → the config form appears (no reopen needed).
+    rerender(
+      <ThemeProvider theme={theme}>
+        <MonitorWizard
+          mode="edit" name="lada-1" existingType="lada"
+          existingConfig={{ name: "lada-1" }}
+          plugins={[ladaPlugin]} presets={[]}
+          onClose={vi.fn()} onDone={vi.fn()} onError={vi.fn()}
+        />
+      </ThemeProvider>,
+    );
+    expect(await screen.findByLabelText(/Monitor name/)).toBeInTheDocument();
+  });
+
   it("surfaces a backend error on a failed add (not silent)", async () => {
     vi.spyOn(apiModule.api, "addMonitor").mockRejectedValue(new Error("a monitor named 'lada-1' already exists"));
     wrap(<MonitorWizard mode="add" {...baseProps} />);
