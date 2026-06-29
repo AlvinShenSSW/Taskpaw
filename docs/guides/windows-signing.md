@@ -24,12 +24,14 @@ DigiCert / Sectigo, or an org-internal CA). That's why it's operator-provided.
 The `Sign Windows installers (gated on secrets)` step (Windows job only):
 
 1. Skips cleanly if `WINDOWS_CERTIFICATE` is empty (unsigned build).
-2. Resolves the newest `signtool.exe` from the Windows SDK on the runner.
-3. Writes the `.pfx` from the base64 secret to `$RUNNER_TEMP` (deleted in a
-   `finally`).
+2. Resolves `signtool.exe` from `PATH`, else from any installed Windows SDK.
+3. Writes the `.pfx` from the base64 secret to `$RUNNER_TEMP`, then imports it into
+   the ephemeral runner's `Cert:\CurrentUser\My` store. Both the file and the
+   imported cert are removed in a `finally`.
 4. For every `.exe`/`.msi` under `taskpaw_v3/src-tauri/target/release/bundle`:
-   `signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256`, then
-   `signtool verify /pa`.
+   `signtool sign /sha1 <thumbprint> /fd SHA256 /tr https://timestamp.digicert.com
+   /td SHA256`, then `signtool verify /pa`. Signing **by thumbprint** (not `/p
+   <password>`) keeps the PFX password off the process command line.
 
 Verify a downloaded installer locally: right-click → Properties → **Digital
 Signatures**, or `signtool verify /pa /v <installer>`.

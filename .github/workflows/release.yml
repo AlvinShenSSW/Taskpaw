@@ -91,27 +91,38 @@ jobs:
             Write-Host "No WINDOWS_CERTIFICATE secret — leaving installers unsigned."
             exit 0
           }
-          # Resolve the newest signtool.exe from the Windows SDK on the runner.
-          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" `
-            -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $signtool) { Write-Error "signtool.exe not found in the Windows SDK"; exit 1 }
+          # Resolve signtool: PATH first, then any installed Windows SDK (not a single
+          # hardcoded SDK version/dir, which can break if the runner image changes) (Kimi).
+          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+          if (-not $signtool) {
+            $signtool = Get-ChildItem "C:\Program Files*\Windows Kits\*\bin\*\x64\signtool.exe" `
+              -ErrorAction SilentlyContinue | Sort-Object FullName -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $signtool) { Write-Error "signtool.exe not found on PATH or in any Windows SDK"; exit 1 }
           # Materialize the PFX from the base64 secret (removed in finally).
           $pfx = Join-Path $env:RUNNER_TEMP "taskpaw-signing.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = $null
           try {
+            # Import into the ephemeral runner's user store and sign BY THUMBPRINT so
+            # the PFX password never appears on a native command line / process list (Kimi).
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
             $bundle = "taskpaw_v3/src-tauri/target/release/bundle"
             $artifacts = Get-ChildItem -Path $bundle -Recurse -Include *.exe, *.msi
             if (-not $artifacts) { Write-Error "no .exe/.msi found under $bundle to sign"; exit 1 }
             foreach ($a in $artifacts) {
-              & $signtool.FullName sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD `
-                /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $a.FullName
+              & $signtool sign /sha1 $cert.Thumbprint `
+                /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 $a.FullName
               if ($LASTEXITCODE -ne 0) { Write-Error "signtool sign failed: $($a.FullName)"; exit 1 }
-              & $signtool.FullName verify /pa $a.FullName
+              & $signtool verify /pa $a.FullName
               if ($LASTEXITCODE -ne 0) { Write-Error "signtool verify failed: $($a.FullName)"; exit 1 }
               Write-Host "Signed $($a.Name)"
             }
           } finally {
             Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+            if ($cert) { Remove-Item ("Cert:\CurrentUser\My\" + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue }
           }
 
       - name: Collect installers
