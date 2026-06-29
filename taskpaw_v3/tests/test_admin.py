@@ -293,6 +293,19 @@ def test_config_view_shows_pending_not_running(tmp_path):
     assert [m["name"] for m in view["monitors"]] == ["w"]              # current monitors
 
 
+def test_monitor_op_does_not_revert_pending_config_edit(tmp_path):
+    # A monitor mutation persists the config too — it must NOT overwrite a pending
+    # (restart-required) config edit with the old running values (Codex #43 r6).
+    cfg = _agent_config()
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    admin.update_config({"control_port": 6000})                   # pending edit
+    admin.add({"type_id": "fake", "config": {"name": "w1"}})      # monitor op → _persist
+    reloaded = load_yaml(AgentConfig, path)
+    assert reloaded.control_port == 6000                          # pending edit preserved
+    assert [m["config"]["name"] for m in reloaded.monitors] == ["w1"]
+
+
 def test_update_config_pending_restart_persists_across_saves(tmp_path):
     # A pending restart keeps being reported until the agent actually restarts —
     # comparing against the BOOT baseline, not the already-edited config (Codex r4).

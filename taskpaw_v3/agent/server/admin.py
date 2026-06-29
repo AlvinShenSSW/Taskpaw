@@ -90,8 +90,13 @@ class MonitorAdmin:
     # ── internals ──────────────────────────────────────────────────────────
     def _persist(self) -> None:
         # No path (e.g. dev/interactive without a config file) → in-memory only.
-        if self._path is not None:
-            save_yaml(self._config, self._path)
+        if self._path is None:
+            return
+        # Persist the running monitors PLUS the DESIRED editable scalars — the
+        # running _config still holds BOOT values for non-live fields, so writing
+        # it directly would revert a pending (restart-required) config edit held in
+        # _desired whenever a monitor op persists (Codex #43 r6).
+        save_yaml(AgentConfig(**{**self._config.model_dump(), **self._desired}), self._path)
 
     def _find(self, name: str) -> Optional[dict]:
         name = str(name).strip()
@@ -276,11 +281,10 @@ class MonitorAdmin:
             restart_required = any(
                 getattr(validated, f) != getattr(self._config, f) for f in self._NON_LIVE_CONFIG
             )
-            # Persist FIRST (durable) — on a write failure nothing else is mutated.
-            if self._path is not None:
-                save_yaml(validated, self._path)
-            # Track the new desired scalars (merge base + next-boot values).
+            # Record the new desired scalars, then persist (monitors + _desired) —
+            # on a write failure nothing else is mutated.
             self._desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
+            self._persist()
             # Live-apply ONLY the live-safe field: api_token (token_ok reads it per
             # request). Non-live fields stay at their BOOT values in the running
             # _config, so /status & events stay consistent until the restart that
