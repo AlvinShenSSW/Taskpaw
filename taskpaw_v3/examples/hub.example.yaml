@@ -15,6 +15,11 @@ bind_port: 5690
 
 poll_interval: 60              # seconds between polling each agent
 
+# Bearer token for the Hub's OWN read API (/status, /events). Empty = open
+# (V2 parity, fine on loopback). If set (recommended when bind_host is a LAN
+# address), the dashboard's TASKPAW_UI_TOKEN must match it.
+api_token: ""
+
 # Bearer sent to agents when polling. Must match each agent's api_token (leave
 # empty if the agents have no token).
 polling_token: ""

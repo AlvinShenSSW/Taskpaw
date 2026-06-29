@@ -72,6 +72,10 @@ class HubConfig(BaseModel):
     bind_host: str = "127.0.0.1"
     bind_port: int = 5690
     poll_interval: int = 60
+    # Inbound Bearer for the Hub's OWN read API (/status, /events); empty = auth
+    # disabled (V2 parity, like AgentConfig.api_token). Distinct from
+    # polling_token below (#106).
+    api_token: str = ""
     # Bearer sent to agents when polling (must match each agent's api_token).
     polling_token: str = ""
     openclaw_enabled: bool = False

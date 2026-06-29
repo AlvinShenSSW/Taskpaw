@@ -12,15 +12,26 @@ import threading
 import time
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 
+from taskpaw_v3.core.auth import token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
 log = logging.getLogger("taskpaw.hub")
+
+
+def _unauthorized() -> JSONResponse:
+    # Mirror the agent's network app: 401 + WWW-Authenticate, no body leakage (#106).
+    return JSONResponse(
+        {"error": "unauthorized"},
+        status_code=401,
+        headers={"WWW-Authenticate": 'Bearer realm="TaskPaw"'},
+    )
 
 
 class HubService:
@@ -136,12 +147,20 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
     add_ui_cors(app)  # the Hub dashboard UI talks to this API (design §3.2)
     service = HubService(config, store)
 
+    def _auth(request: Request) -> bool:
+        # Bearer-gate the read API (#106). Empty api_token = auth disabled (V2
+        # parity), mirroring the agent's network app.
+        return token_ok(config.api_token, request.headers.get("Authorization"))
+
     @app.get("/ping")
     def ping() -> dict:
+        # Open by design — trivial reachability probe, no sensitive data.
         return {"ok": True, "machine": config.machine, "version": "3.0.0-dev"}
 
     @app.get("/status")
-    def status() -> dict:
+    def status(request: Request):
+        if not _auth(request):
+            return _unauthorized()
         # Attach each server's latest poll snapshot (#96) so the dashboard can show
         # per-machine state + metrics + last_seen. Additive: the existing
         # id/name/ip/port/enabled keys are preserved; `online`/`last_seen`/`snapshot`
@@ -169,8 +188,10 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         }
 
     @app.get("/events")
-    def events(server: Optional[int] = None, level: Optional[str] = None,
-               limit: int = 200) -> dict:
+    def events(request: Request, server: Optional[int] = None, level: Optional[str] = None,
+               limit: int = 200):
+        if not _auth(request):
+            return _unauthorized()
         # Durable event history aggregated from all polled agents (#44), newest
         # first, optionally filtered by server id / level. Clamp the limit.
         limit = max(1, min(int(limit), 1000))
