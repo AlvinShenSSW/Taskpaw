@@ -40,11 +40,9 @@ def _as_bool(v: Any) -> bool:
     return v
 
 
-# Shared with the Hub's startup exposure guard (#114) — single source of truth for
-# the loopback/wildcard/public rules so the two guards can't drift.
-from taskpaw_v3.core.net import bind_is_global as _bind_is_global
-from taskpaw_v3.core.net import bind_is_loopback as _bind_is_loopback
-from taskpaw_v3.core.net import bind_is_wildcard as _bind_is_wildcard
+# Shared network-exposure guard (#114) — single source of truth used by the agent
+# UI (here), the agent startup, and the Hub, so the rules can't drift.
+from taskpaw_v3.core.net import guard_bind_exposure
 
 
 class MonitorAdmin:
@@ -251,25 +249,9 @@ class MonitorAdmin:
             # leaves config + disk untouched. Normalize via ipaddress so every
             # spelling is caught (e.g. `0:0:0:0:0:0:0:0` == `::`, `127.0.0.2` is
             # still loopback) — not a brittle exact-string set (Codex #43 r3).
-            # The shared helpers normalize (trim + strip brackets) internally, so
-            # pass the raw host — no per-caller stripping to drift (#114/Kimi).
-            bh = validated.bind_host
-            if _bind_is_wildcard(bh):
-                raise ValueError(
-                    f"refusing to bind the network API to all interfaces ({bh!r}) "
-                    f"from the UI — use 127.0.0.1 or a specific LAN address.")
-            # No public/WAN exposure even with a token — LAN + Bearer only, in
-            # lockstep with the Hub guard (constitution §2) (Kimi #114).
-            if _bind_is_global(bh):
-                raise ValueError(
-                    f"refusing to bind the network API to a public/WAN address ({bh}) "
-                    f"from the UI — use a private LAN address (with a token) or 127.0.0.1.")
-            if not _bind_is_loopback(bh) and not validated.api_token.strip():
-                raise ValueError(
-                    f"binding the network API to a non-loopback address ({bh}) "
-                    f"requires an API token, or /status and /events would be "
-                    f"reachable off-host without auth. Set a token first, or keep "
-                    f"bind_host on 127.0.0.1.")
+            # Shared guard (wildcard / public / non-loopback-without-token), the
+            # single source used by the agent startup and the Hub too (#114/Kimi).
+            guard_bind_exposure(validated.bind_host, validated.api_token, label="network API")
             # A restart is needed if any non-live DESIRED field differs from what
             # the agent is actually RUNNING (the still-at-boot _config) — this
             # stays True across saves until the agent restarts (Codex #43).

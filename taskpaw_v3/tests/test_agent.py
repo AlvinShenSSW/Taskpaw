@@ -109,3 +109,17 @@ def test_claim_port_refuses_second_binder():
             claim_port(host, port, "second")  # SO_REUSEADDR no longer masks this
     finally:
         s.close()
+
+
+def test_run_agent_guards_bind_exposure_before_binding():
+    """run_agent runs the shared exposure guard BEFORE claiming any socket, so a
+    hand-edited agent.yaml binding wildcard/public/non-loopback-without-token is
+    refused at startup — not just from the UI (#114)."""
+    from taskpaw_v3.agent.server.launcher import run_agent
+
+    with pytest.raises(ValueError, match="all interfaces"):
+        run_agent(_cfg(bind_host="0.0.0.0"), block=False)
+    with pytest.raises(ValueError, match="public/WAN"):
+        run_agent(_cfg(bind_host="8.8.8.8", api_token="tok"), block=False)
+    with pytest.raises(ValueError, match="requires an api_token"):
+        run_agent(_cfg(bind_host="192.168.1.9"), block=False)

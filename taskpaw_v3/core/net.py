@@ -62,6 +62,33 @@ def bind_is_global(host: str) -> bool:
         return False
 
 
+def guard_bind_exposure(host: str, api_token: str, *, label: str) -> None:
+    """Refuse an unsafe network exposure for a Bearer-gated read API (#114) —
+    constitution §2: LAN + Bearer only, never default to all interfaces. Raised
+    BEFORE the socket is claimed. Single source of truth so the agent UI guard,
+    the agent startup, and the Hub startup can't drift (Kimi):
+
+    - wildcard/all-interfaces (0.0.0.0, :: and any spelling) → refused outright;
+    - globally-routable (public/WAN) address → refused even WITH a token;
+    - non-loopback address with an empty token → refused (would be reachable
+      off-host unauthenticated).
+    """
+    if bind_is_wildcard(host):
+        raise ValueError(
+            f"refusing to bind the {label} to all interfaces ({host!r}) — use "
+            f"127.0.0.1 or a specific LAN address.")
+    if bind_is_global(host):
+        raise ValueError(
+            f"refusing to bind the {label} to a public/WAN address ({host}) — the "
+            f"API is LAN + Bearer only. Use a private LAN address (with a token) "
+            f"or 127.0.0.1.")
+    if not bind_is_loopback(host) and not (api_token or "").strip():
+        raise ValueError(
+            f"binding the {label} to a non-loopback address ({host}) requires an "
+            f"api_token, or /status and /events would be reachable off-host without "
+            f"auth. Set a token, or keep the bind on 127.0.0.1.")
+
+
 def loopback_url(host: str, port: int) -> str:
     """A loopback http URL the local webview can reach for a server bound to
     (host, port) (#48). The UI is always local, so a wildcard bind maps to its

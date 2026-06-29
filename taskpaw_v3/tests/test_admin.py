@@ -352,7 +352,7 @@ def test_update_config_blocks_unsafe_network_exposure(tmp_path):
     admin = MonitorAdmin(cfg, None, _registry(), path)
     with pytest.raises(ValueError, match="all interfaces"):
         admin.update_config({"bind_host": "0.0.0.0"})       # wildcard refused
-    with pytest.raises(ValueError, match="requires an API token"):
+    with pytest.raises(ValueError, match="requires an api_token"):
         admin.update_config({"bind_host": "192.168.1.50"})  # LAN bind needs a token
     assert cfg.bind_host == "127.0.0.1" and not path.exists()   # nothing persisted
     # Alternate spellings of the unspecified address are also refused — even WITH
