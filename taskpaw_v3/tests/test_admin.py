@@ -236,17 +236,28 @@ def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
 
 
 # ── config editing (#43) ───────────────────────────────────────────────────
-def test_update_config_persists_and_hot_applies(tmp_path):
-    # Editing machine/token from the Settings UI persists to agent.yaml AND
-    # hot-applies onto the live config (no restart needed for those) (#43).
+def test_update_config_token_only_is_live_no_restart(tmp_path):
+    # api_token is read per-request (token_ok), so changing ONLY it applies live
+    # with no restart (#43).
     cfg = _agent_config(api_token="orig")
     path = tmp_path / "agent.yaml"
     admin = MonitorAdmin(cfg, None, _registry(), path)
-    res = admin.update_config({"machine": "newname", "api_token": "newtok"})
+    res = admin.update_config({"api_token": "newtok"})
     assert res["ok"] and res["restart_required"] is False
-    assert cfg.machine == "newname" and cfg.api_token == "newtok"   # in place
-    reloaded = load_yaml(AgentConfig, path)
-    assert reloaded.machine == "newname" and reloaded.api_token == "newtok"
+    assert cfg.api_token == "newtok"                               # in place (live)
+    assert load_yaml(AgentConfig, path).api_token == "newtok"
+
+
+def test_update_config_machine_change_persists_but_needs_restart(tmp_path):
+    # machine tags the EventQueue + names host_metrics (baked at startup), so the
+    # change persists + applies to config but is reported restart_required (Codex).
+    cfg = _agent_config()
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    res = admin.update_config({"machine": "newname"})
+    assert res["restart_required"] is True
+    assert cfg.machine == "newname"
+    assert load_yaml(AgentConfig, path).machine == "newname"
 
 
 def test_update_config_masked_or_blank_token_is_kept(tmp_path):

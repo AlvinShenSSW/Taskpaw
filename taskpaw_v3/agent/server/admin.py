@@ -206,9 +206,14 @@ class MonitorAdmin:
                 p.pop("api_token", None)
             merged = {**current, **{k: v for k, v in p.items() if k in self._EDITABLE_CONFIG}}
             validated = AgentConfig(**merged)        # full validation (ports/loopback/blank)
+            # Only `api_token` is truly live (token_ok reads config.api_token per
+            # request). Everything else is baked at startup and NOT reconfigured
+            # here: ports/hosts bind sockets, `machine` tags the EventQueue +
+            # names the host_metrics monitor, and `host_metrics` decides supervisor
+            # membership — so any of those changing needs a restart (Codex #43).
             restart_required = any(
                 getattr(validated, f) != getattr(self._config, f)
-                for f in ("bind_host", "bind_port", "control_host", "control_port")
+                for f in self._EDITABLE_CONFIG if f != "api_token"
             )
             # Persist the validated config FIRST (durable) — if the write fails the
             # in-memory config is untouched. save_yaml writes the whole config
