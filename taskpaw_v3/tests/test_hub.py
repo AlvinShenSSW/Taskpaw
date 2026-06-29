@@ -267,6 +267,41 @@ def test_poller_keeps_latest_status_snapshot(tmp_path, monkeypatch):
         s.close()
 
 
+def test_snapshot_statuses_parsed_at_write_not_on_read(tmp_path, monkeypatch):
+    """The snapshot is parsed once at poll time and cached; snapshot_statuses()
+    must not call json.loads on the request path (#107)."""
+    s = _store(tmp_path)
+    try:
+        sid = s.add_server("agent", "127.0.0.1", 5680)
+        p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
+        agent_status = {"machine": "box1", "monitors": {"host": {"state": "ok"}}}
+
+        def ok_urlopen(req, timeout):
+            if "/status" in req.full_url:
+                return FakeResp(agent_status)
+            return FakeResp({"events": []})
+
+        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", ok_urlopen)
+        p.poll_once()  # parses once, here
+
+        # After the poll, reads must not re-parse — trip json.loads if they do.
+        calls = {"n": 0}
+        real_loads = poller_mod.json.loads
+
+        def counting_loads(*a, **k):
+            calls["n"] += 1
+            return real_loads(*a, **k)
+
+        monkeypatch.setattr(poller_mod.json, "loads", counting_loads)
+        snaps = p.snapshot_statuses()
+        snaps2 = p.snapshot_statuses()
+        assert calls["n"] == 0                              # no parse on read
+        assert snaps[sid]["snapshot"] == agent_status        # cached value served
+        assert snaps2[sid]["snapshot"] == agent_status
+    finally:
+        s.close()
+
+
 def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypatch):
     """/status augments each server with online/last_seen/snapshot while keeping
     the existing servers/acks/self contract intact (#96 regression guard)."""
