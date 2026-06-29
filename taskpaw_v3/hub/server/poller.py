@@ -144,6 +144,37 @@ class Poller:
         with self._acks_lock:
             return dict(self.last_event_ids)
 
+    def snapshot_statuses(self) -> dict[int, dict]:
+        """Thread-safe per-server status snapshot for the API thread (/status).
+
+        Returns `{server_id: {online, last_seen, snapshot}}` where `snapshot` is
+        the agent's last good /status parsed to a dict (None if never polled or
+        unparseable). Reads under `_snap_lock`, the same lock the poller takes when
+        it writes `_status_snapshot` (#96), so it's safe from the API thread.
+
+        Degrades gracefully: a currently-unreachable agent keeps its last good
+        snapshot + last_seen with `online=False` (the poller preserves them), so
+        the dashboard shows last-known metrics + a stale marker rather than erroring.
+        """
+        with self._snap_lock:
+            snaps = {k: dict(v) for k, v in self._status_snapshot.items()}
+        out: dict[int, dict] = {}
+        for sid, snap in snaps.items():
+            raw = snap.get("status_json")
+            parsed: Optional[dict] = None
+            if raw:
+                try:
+                    loaded = json.loads(raw)
+                    parsed = loaded if isinstance(loaded, dict) else None
+                except (ValueError, TypeError):
+                    parsed = None
+            out[sid] = {
+                "online": bool(snap.get("reachable", False)),
+                "last_seen": snap.get("last_seen"),
+                "snapshot": parsed,
+            }
+        return out
+
     # ── ack cursor persistence ───────────────────────────────────────────
     def _load_acks(self) -> dict[int, int]:
         raw = self.store.get_config("last_event_ids", "")
