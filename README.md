@@ -44,8 +44,10 @@ Download the installer for your OS from the project's **Releases** (Windows `.ms
 watch; it self-creates a default config on first run.
 
 - Closing the window fully exits — no orphaned background process (#40).
-- The agent's control API is loopback-only; the network API is Bearer-gated and
-  defaults to `127.0.0.1`.
+- The agent's control API is loopback-only. The network API defaults to
+  `127.0.0.1` (on-host only); **a fresh config has no token, so auth is disabled**
+  — set an API token (Settings → Configuration) before binding it to a LAN address
+  so the Hub reaches it over Bearer-authenticated HTTP.
 
 ### From source (dev)
 
