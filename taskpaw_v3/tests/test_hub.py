@@ -225,3 +225,85 @@ def test_agent_base_url_brackets_ipv6():
     from taskpaw_v3.hub.server.poller import _agent_base_url
     assert _agent_base_url("127.0.0.1", 5680) == "http://127.0.0.1:5680"
     assert _agent_base_url("::1", 5680) == "http://[::1]:5680"
+
+
+def test_poller_keeps_latest_status_snapshot(tmp_path, monkeypatch):
+    """After a poll the poller exposes each server's parsed /status snapshot +
+    last_seen via snapshot_statuses() (#96), and keeps the last good snapshot
+    (online=False) when the agent later goes unreachable."""
+    s = _store(tmp_path)
+    try:
+        sid = s.add_server("agent", "127.0.0.1", 5680)
+        p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
+
+        agent_status = {"machine": "box1",
+                        "monitors": {"host": {"state": "ok", "metrics": {"cpu": 12}}}}
+
+        def ok_urlopen(req, timeout):
+            if "/status" in req.full_url:
+                return FakeResp(agent_status)
+            return FakeResp({"events": []})
+
+        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", ok_urlopen)
+        p.poll_once()
+
+        snaps = p.snapshot_statuses()
+        assert snaps[sid]["online"] is True
+        assert snaps[sid]["snapshot"] == agent_status
+        assert snaps[sid]["last_seen"]  # a timestamp was recorded
+        first_seen = snaps[sid]["last_seen"]
+
+        # Agent goes down → keep last good snapshot, mark offline.
+        def down_urlopen(req, timeout):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", down_urlopen)
+        p.poll_once()
+        snaps = p.snapshot_statuses()
+        assert snaps[sid]["online"] is False
+        assert snaps[sid]["snapshot"] == agent_status      # last good preserved
+        assert snaps[sid]["last_seen"] == first_seen        # not refreshed
+    finally:
+        s.close()
+
+
+def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypatch):
+    """/status augments each server with online/last_seen/snapshot while keeping
+    the existing servers/acks/self contract intact (#96 regression guard)."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        sid = s.add_server("box1", "127.0.0.1", 5680)
+        # self_monitor off → deterministic empty `self`, no host probing in tests.
+        app, svc = create_hub_app(HubConfig(self_monitor=False), s)
+
+        agent_status = {"machine": "box1", "monitors": {"h": {"state": "ok"}}}
+
+        def ok_urlopen(req, timeout):
+            if "/status" in req.full_url:
+                return FakeResp(agent_status)
+            return FakeResp({"events": []})
+
+        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", ok_urlopen)
+        svc.poller.poll_once()
+
+        r = TestClient(app).get("/status")
+        assert r.status_code == 200
+        body = r.json()
+        # Existing contract preserved.
+        assert body["machine"] == HubConfig().machine
+        assert "acks" in body and "self" in body and body["self"] == {}
+        srv = body["servers"][0]
+        for key in ("id", "name", "ip", "port", "enabled"):
+            assert key in srv
+        assert srv["name"] == "box1"
+        # New fields (#96).
+        assert srv["online"] is True
+        assert srv["snapshot"] == agent_status
+        assert srv["last_seen"]
+        assert srv["id"] == sid
+    finally:
+        s.close()

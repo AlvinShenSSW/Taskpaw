@@ -142,9 +142,23 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
 
     @app.get("/status")
     def status() -> dict:
+        # Attach each server's latest poll snapshot (#96) so the dashboard can show
+        # per-machine state + metrics + last_seen. Additive: the existing
+        # id/name/ip/port/enabled keys are preserved; `online`/`last_seen`/`snapshot`
+        # are added. `snapshot` is the agent's parsed /status (None if never polled).
+        snaps = service.poller.snapshot_statuses()
+        servers = []
+        for s in store.list_servers():
+            snap = snaps.get(s["id"], {})
+            servers.append({
+                **s,
+                "online": bool(snap.get("online", False)),
+                "last_seen": snap.get("last_seen"),
+                "snapshot": snap.get("snapshot"),
+            })
         return {
             "machine": config.machine,
-            "servers": store.list_servers(),
+            "servers": servers,
             # Locked snapshot — the poller thread mutates this concurrently.
             "acks": service.poller.snapshot_acks(),
             # Hub's own host-health self-monitor (§5b.2).
