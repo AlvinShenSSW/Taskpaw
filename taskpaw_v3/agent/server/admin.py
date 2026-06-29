@@ -182,6 +182,45 @@ class MonitorAdmin:
             self._persist()
             return {"ok": True, "name": iid}
 
+    # Editable top-level agent settings (NOT monitors — that's the monitor API —
+    # and NOT server_id, the stable identity used for Hub grouping).
+    _EDITABLE_CONFIG = (
+        "machine", "bind_host", "bind_port", "control_host", "control_port",
+        "api_token", "host_metrics",
+    )
+
+    def update_config(self, patch: dict) -> dict[str, Any]:
+        """Edit top-level agent config (machine/ports/token) from the Settings UI
+        (#43). Validates the merged result, persists agent.yaml atomically, and
+        hot-applies the live-safe fields (machine/token/host_metrics) onto the
+        running config the servers reference. Port/host changes can't rebind a
+        live socket → reported as restart_required."""
+        if not isinstance(patch, dict):
+            raise ValueError("config patch must be an object")
+        with self._lock:
+            current = self._config.model_dump()
+            p = dict(patch)
+            # The GET masks the token as "***"; an unchanged/blank token in the
+            # patch must NOT clobber the real one.
+            if str(p.get("api_token", "")).strip() in ("", "***"):
+                p.pop("api_token", None)
+            merged = {**current, **{k: v for k, v in p.items() if k in self._EDITABLE_CONFIG}}
+            validated = AgentConfig(**merged)        # full validation (ports/loopback/blank)
+            restart_required = any(
+                getattr(validated, f) != getattr(self._config, f)
+                for f in ("bind_host", "bind_port", "control_host", "control_port")
+            )
+            # Persist the validated config FIRST (durable) — if the write fails the
+            # in-memory config is untouched. save_yaml writes the whole config
+            # (monitors carried from `current`), so nothing is dropped.
+            if self._path is not None:
+                save_yaml(validated, self._path)
+            # Hot-apply onto the SAME object the running servers close over, so
+            # machine/token take effect immediately (ports need a restart).
+            for f in self._EDITABLE_CONFIG:
+                setattr(self._config, f, getattr(validated, f))
+            return {"ok": True, "restart_required": restart_required}
+
     # ── command dispatch (wired as create_control_app's on_command) ────────
     def handle(self, command: str, body: dict) -> dict[str, Any]:
         """Map a {command, ...} control message to an operation. Validation

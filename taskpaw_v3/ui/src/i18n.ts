@@ -65,6 +65,12 @@ const en = {
       "each machine and aggregate them on a Hub.",
     author: "Author: 304",
     copyright: "© 2026 304. All rights reserved.",
+    config: "Agent configuration",
+    configHint: "Edit this machine's settings instead of hand-editing agent.yaml. Port/host changes apply after a restart.",
+    machine: "Machine name", bindHost: "Network bind host", bindPort: "Network port",
+    controlHost: "Control host (loopback)", controlPort: "Control port",
+    apiToken: "API token", apiTokenHint: "Leave blank to keep the current token.",
+    save: "Save", saved: "Saved.", restartNeeded: "Saved — restart the agent for port/host changes to take effect.",
   },
 };
 
@@ -118,6 +124,12 @@ const zh: typeof en = {
       "再用 Hub 汇总。",
     author: "发起人:304",
     copyright: "© 2026 304. 保留所有权利。",
+    config: "Agent 配置",
+    configHint: "在这里改本机设置,不用手编 agent.yaml。端口/主机的改动需重启 agent 后生效。",
+    machine: "机器名称", bindHost: "网络绑定地址", bindPort: "网络端口",
+    controlHost: "控制地址(回环)", controlPort: "控制端口",
+    apiToken: "API 令牌", apiTokenHint: "留空则保留当前令牌。",
+    save: "保存", saved: "已保存。", restartNeeded: "已保存 —— 端口/主机改动需重启 agent 才生效。",
   },
 };
 

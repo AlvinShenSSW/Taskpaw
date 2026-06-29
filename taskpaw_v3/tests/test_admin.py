@@ -235,6 +235,47 @@ def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
     assert cfg.monitors[0].get("enabled", True) is True   # enabled untouched
 
 
+# ── config editing (#43) ───────────────────────────────────────────────────
+def test_update_config_persists_and_hot_applies(tmp_path):
+    # Editing machine/token from the Settings UI persists to agent.yaml AND
+    # hot-applies onto the live config (no restart needed for those) (#43).
+    cfg = _agent_config(api_token="orig")
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    res = admin.update_config({"machine": "newname", "api_token": "newtok"})
+    assert res["ok"] and res["restart_required"] is False
+    assert cfg.machine == "newname" and cfg.api_token == "newtok"   # in place
+    reloaded = load_yaml(AgentConfig, path)
+    assert reloaded.machine == "newname" and reloaded.api_token == "newtok"
+
+
+def test_update_config_masked_or_blank_token_is_kept(tmp_path):
+    cfg = _agent_config(api_token="secret")
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    admin.update_config({"machine": "m2", "api_token": "***"})   # masked → keep real
+    assert cfg.api_token == "secret" and cfg.machine == "m2"
+    admin.update_config({"api_token": "   "})                    # blank → keep real
+    assert cfg.api_token == "secret"
+
+
+def test_update_config_port_change_requires_restart(tmp_path):
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    res = admin.update_config({"control_port": 6000})
+    assert res["restart_required"] is True
+    assert cfg.control_port == 6000          # applied; takes effect next boot
+
+
+def test_update_config_rejects_invalid(tmp_path):
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    with pytest.raises(ValueError):
+        admin.update_config({"control_port": 0})            # invalid port
+    with pytest.raises(ValueError):
+        admin.update_config({"control_host": "0.0.0.0"})    # control must be loopback
+    assert cfg.control_port == 5681 and cfg.control_host == "127.0.0.1"   # unchanged
+
+
 # ── enabled filtering at build time ────────────────────────────────────────
 def test_build_supervisor_skips_disabled():
     q = EventQueue(machine="m")

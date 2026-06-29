@@ -197,4 +197,11 @@ def create_control_app(
         def stop_monitor(name: str):
             return _guard(admin.set_enabled, name, False)
 
+        @app.patch("/control/config")
+        def update_config(body: dict):
+            # Edit agent config (machine/ports/token) from the Settings UI (#43)
+            # instead of hand-editing agent.yaml. Validated + persisted atomically;
+            # returns {ok, restart_required} — port/host changes apply on restart.
+            return _guard(admin.update_config, body)
+
     return app
