@@ -314,3 +314,46 @@ def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypa
         assert srv2["snapshot"] == agent_status  # last-known reference kept
     finally:
         s.close()
+
+
+def test_read_api_bearer_gated_when_token_set(tmp_path):
+    """With api_token set, /status and /events require a matching Bearer; /ping
+    stays open (#106)."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="s3cret"), s)
+        client = TestClient(app)
+        good = {"Authorization": "Bearer s3cret"}
+
+        for path in ("/status", "/events"):
+            assert client.get(path).status_code == 401                       # no header
+            assert client.get(path, headers={"Authorization": "Bearer nope"}).status_code == 401
+            r = client.get(path, headers=good)
+            assert r.status_code == 200
+            assert "WWW-Authenticate" in client.get(path).headers
+
+        # /ping is open even with a token configured and no header.
+        assert client.get("/ping").status_code == 200
+    finally:
+        s.close()
+
+
+def test_read_api_open_when_token_empty(tmp_path):
+    """Empty api_token (default) = auth disabled (V2 parity): /status and /events
+    answer without a header (#106)."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False), s)  # api_token=""
+        client = TestClient(app)
+        assert client.get("/status").status_code == 200
+        assert client.get("/events").status_code == 200
+    finally:
+        s.close()
