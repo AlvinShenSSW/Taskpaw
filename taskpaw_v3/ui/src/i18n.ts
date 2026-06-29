@@ -18,7 +18,7 @@ const en = {
   common: {
     add: "Add", start: "Start", stop: "Stop", editConfig: "Edit config", delete: "Delete",
     cancel: "Cancel", loading: "Loading…", updating: "updating…", type: "Type", level: "Level",
-    allLevels: "All levels",
+    allLevels: "All levels", show: "show", hide: "hide",
   },
   state: {
     ok: "ok", idle: "idle", running: "running", degraded: "degraded",
@@ -79,7 +79,7 @@ const zh: typeof en = {
   common: {
     add: "添加", start: "启动", stop: "停止", editConfig: "编辑配置", delete: "删除",
     cancel: "取消", loading: "加载中…", updating: "更新中…", type: "类型", level: "级别",
-    allLevels: "全部级别",
+    allLevels: "全部级别", show: "显示", hide: "隐藏",
   },
   state: {
     ok: "正常", idle: "空闲", running: "运行中", degraded: "降级",
