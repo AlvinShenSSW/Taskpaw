@@ -1,6 +1,6 @@
 import {
-  Alert, Box, Card, CardActionArea, CardContent, Chip, Collapse, MenuItem, Stack, Tab, Tabs,
-  TextField, Typography,
+  Alert, Box, Card, CardActionArea, CardContent, Chip, Collapse, LinearProgress, MenuItem,
+  Stack, Tab, Tabs, TextField, Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { api, type HubServer, type MonitorSnapshot } from "../api";
 import { StatusDot } from "../components/StatusDot";
 import { EventLog } from "../components/EventLog";
-import { MonitorMetrics } from "../components/MonitorMetrics";
+import { MonitorMetrics, utilTint } from "../components/MonitorMetrics";
 import { Settings } from "./Settings";
 
 // ── fleet health (design pages/hub-dashboard.md "Fleet health") ──────────────
@@ -28,6 +28,20 @@ function serverHealth(s: HubServer): Health {
   if (!s.online) return "offline";
   const mons = s.snapshot?.monitors ?? {};
   return Object.values(mons).some(monitorProblem) ? "degraded" : "ok";
+}
+
+// Per-machine CPU/MEM from the agent's host_metrics monitor in its snapshot (#113):
+// find the monitor whose metrics carry cpu_pct/mem_pct (host_metrics). null when
+// the agent reports no such metrics (older agent / offline) → no mini-bars.
+function hostMetrics(s: HubServer): { cpu?: number; mem?: number } | null {
+  const mons = s.snapshot?.monitors ?? {};
+  for (const m of Object.values(mons)) {
+    const met = m.metrics as Record<string, unknown> | undefined;
+    const cpu = typeof met?.cpu_pct === "number" ? met.cpu_pct : undefined;
+    const mem = typeof met?.mem_pct === "number" ? met.mem_pct : undefined;
+    if (cpu !== undefined || mem !== undefined) return { cpu, mem };
+  }
+  return null;
 }
 
 // last_seen ISO → locale time, or empty.
@@ -167,6 +181,8 @@ function MachineCard({ server: s, expanded, onToggle }:
   const health = serverHealth(s);
   const online = !!s.online;
   const disabled = !s.enabled;
+  // Mini CPU/MEM bars only for a live machine that actually reports host metrics.
+  const metrics = online ? hostMetrics(s) : null;
   return (
     <Card
       sx={{
@@ -196,6 +212,12 @@ function MachineCard({ server: s, expanded, onToggle }:
           <Typography variant="caption" color="text.secondary">
             {s.last_seen ? t("hub.lastSeen", { time: fmtSeen(s.last_seen) }) : t("hub.lastSeenNever")}
           </Typography>
+          {metrics && (metrics.cpu !== undefined || metrics.mem !== undefined) && (
+            <Stack spacing={0.75} sx={{ mt: 1.25 }}>
+              {metrics.cpu !== undefined && <MiniBar label={t("hub.cpu")} pct={metrics.cpu} />}
+              {metrics.mem !== undefined && <MiniBar label={t("hub.mem")} pct={metrics.mem} />}
+            </Stack>
+          )}
         </CardContent>
       </CardActionArea>
 
@@ -205,6 +227,27 @@ function MachineCard({ server: s, expanded, onToggle }:
         </Box>
       </Collapse>
     </Card>
+  );
+}
+
+// Compact CPU/MEM utilization bar for a machine card (#113): label + thin bar +
+// %, coloured by the shared 70/90 ramp. Status is conveyed by the number too, not
+// colour alone (a11y §1).
+function MiniBar({ label, pct }: { label: string; pct: number }) {
+  const v = Math.max(0, Math.min(100, pct));
+  const tint = utilTint(v);
+  return (
+    <Box>
+      <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.25 }}>
+        <Typography variant="caption" color="text.secondary"
+          sx={{ textTransform: "uppercase", letterSpacing: 0.5, fontSize: 10 }}>{label}</Typography>
+        <Typography variant="caption" sx={{ fontFamily: '"Fira Code", monospace',
+          fontVariantNumeric: "tabular-nums", fontSize: 11 }}>{Math.round(v)}%</Typography>
+      </Stack>
+      <LinearProgress variant="determinate" value={v}
+        sx={{ height: 5, borderRadius: 3, bgcolor: "rgba(148,163,184,0.15)",
+              "& .MuiLinearProgress-bar": { bgcolor: tint, borderRadius: 3 } }} />
+    </Box>
   );
 }
 

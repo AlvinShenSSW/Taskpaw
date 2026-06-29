@@ -8,15 +8,16 @@ import { useTranslation } from "react-i18next";
 // circular utilization gauges, a VRAM bar, stat tiles — and degrade any unknown
 // keys to labelled tiles rather than dumping raw JSON.
 
-const TINT = {
+export const TINT = {
   ok: "#22C55E",      // success green — design Accent
   warn: "#F59E0B",    // amber
   crit: "#EF4444",    // destructive
   idle: "#64748B",    // slate
 } as const;
 
-// Utilization colour ramp (CPU/GPU/MEM/VRAM): green → amber → red.
-function utilTint(pct: number): string {
+// Utilization colour ramp (CPU/GPU/MEM/VRAM): green → amber → red. Exported so the
+// Hub card mini-bars (#113) share the exact 70/90 thresholds + colours.
+export function utilTint(pct: number): string {
   if (pct >= 90) return TINT.crit;
   if (pct >= 70) return TINT.warn;
   return TINT.ok;

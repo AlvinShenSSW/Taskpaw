@@ -15,7 +15,10 @@ const STATUS = {
     {
       id: 1, name: "render-01", ip: "10.0.0.1", port: 8765, enabled: 1,
       online: true, last_seen: "2026-06-29T10:00:00Z",
-      snapshot: { machine: "render-01", monitors: { "lada-main": { state: "running" } } },
+      snapshot: { machine: "render-01", monitors: {
+        "lada-main": { state: "running" },
+        "render-01-host": { state: "ok", metrics: { cpu_pct: 37, mem_pct: 72 } },
+      } },
     },
     {
       id: 2, name: "render-02", ip: "10.0.0.2", port: 8765, enabled: 1,
@@ -74,6 +77,20 @@ describe("HubDashboard (#95)", () => {
     expect(within(summary).getAllByLabelText(/status:/).length).toBe(3);
   });
 
+  it("shows CPU/MEM mini-bars for a live machine that reports host metrics (#113)", async () => {
+    renderHub();
+    const card = (await screen.findByText("render-01")).closest("button")!;
+    // host_metrics → cpu_pct 37 / mem_pct 72 render as labelled % on the card face.
+    expect(within(card).getByText("37%")).toBeInTheDocument();
+    expect(within(card).getByText("72%")).toBeInTheDocument();
+  });
+
+  it("omits mini-bars for an offline machine with no metrics (#113)", async () => {
+    renderHub();
+    const card = (await screen.findByText("render-03")).closest("button")!;
+    expect(within(card).queryByText(/%$/)).not.toBeInTheDocument();
+  });
+
   it("labels a disabled server distinctly from a merely-offline one", async () => {
     renderHub();
     // render-03 is enabled:0 → its chip reads "disabled", not just "offline".
@@ -84,8 +101,9 @@ describe("HubDashboard (#95)", () => {
   it("renders the self-monitor as metric tiles, not raw JSON", async () => {
     renderHub();
     await screen.findByText("hub-host");
-    // The host metrics render as labelled tiles (cpu/mem), not a JSON.stringify blob.
-    expect(screen.getByText(/CPU/i)).toBeInTheDocument();
+    // The host metrics render as labelled tiles/gauges (CPU appears for the self
+    // monitor and the #113 card mini-bars), never a raw JSON.stringify blob.
+    expect(screen.getAllByText(/CPU/i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/"cpu_pct"/)).not.toBeInTheDocument();
   });
 
