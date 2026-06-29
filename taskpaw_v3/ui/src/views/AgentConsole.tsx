@@ -9,9 +9,16 @@ import { useTranslation } from "react-i18next";
 import { api, type MonitorSnapshot, type PluginInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
 import { StatusDot } from "../components/StatusDot";
+import { SkeletonRows } from "../components/SkeletonRows";
 import { MonitorMetrics } from "../components/MonitorMetrics";
 import { EventLog } from "../components/EventLog";
 import { Settings } from "./Settings";
+
+// HH:MM:SS in 24h, from a react-query dataUpdatedAt epoch (ms). Empty until the
+// first successful fetch. en-GB is a stable 24h format (the digits are mono via
+// body2 anyway, so they stay tabular).
+const fmtTime = (ms?: number) =>
+  ms ? new Date(ms).toLocaleTimeString("en-GB", { hour12: false }) : "";
 
 // Local control panel for ONE machine (design pages/agent-console.md): left rail
 // of this machine's monitors + an Add button; main pane = the selected monitor's
@@ -56,7 +63,7 @@ export function AgentConsole() {
       {tab === "settings" ? (
         <Settings role="agent" />
       ) : status.isLoading ? (
-        <Typography>{t("common.loading")}</Typography>
+        <Card><CardContent><SkeletonRows rows={5} /></CardContent></Card>
       ) : status.error ? (
         <Alert severity="error">{t("agent.unreachable", { error: String(status.error) })}</Alert>
       ) : tab === "events" ? (
@@ -77,7 +84,7 @@ export function AgentConsole() {
         <Stack direction="row" spacing={2} sx={{ minHeight: "70dvh" }}>
           <Card sx={{ width: 280, flex: "0 0 auto" }}>
             <CardContent>
-              <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
+              <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.5 }}>
                 <Typography variant="overline" color="text.secondary">
                   {t("agent.monitorsTitle", { machine: status.data?.machine })}
                 </Typography>
@@ -85,6 +92,13 @@ export function AgentConsole() {
                   + {t("common.add")}
                 </Button>
               </Stack>
+              {/* Freshness for the whole list (single poll updates every row). Real
+                  per-monitor last-EVENT times need a backend field — deferred. */}
+              {status.dataUpdatedAt > 0 && (
+                <Typography variant="body2" color="text.secondary" sx={{ display: "block", mb: 1, fontSize: 11 }}>
+                  {t("agent.updated", { time: fmtTime(status.dataUpdatedAt) })}
+                </Typography>
+              )}
           {names.length === 0 && (
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
               {t("agent.noMonitors")}
@@ -92,7 +106,23 @@ export function AgentConsole() {
           )}
           <List dense>
             {names.map((n) => (
-              <ListItemButton key={n} selected={n === current} onClick={() => setSelected(n)}>
+              <ListItemButton
+                key={n}
+                selected={n === current}
+                aria-current={n === current}
+                onClick={() => setSelected(n)}
+                sx={{
+                  borderRadius: 1,
+                  borderLeft: "3px solid transparent",
+                  // Selected row: accent left border + faint green wash (paired with
+                  // aria-current + the dot, so it's not color-only).
+                  "&.Mui-selected": {
+                    borderLeftColor: "primary.main",
+                    bgcolor: "rgba(34,197,94,.08)",
+                  },
+                  "&.Mui-selected:hover": { bgcolor: "rgba(34,197,94,.13)" },
+                }}
+              >
                 <StatusDot state={monitors[n].state} />
                 <Typography variant="body2" noWrap sx={{ flex: 1 }}>{n}</Typography>
                 {monitors[n].type_id && (
@@ -109,6 +139,7 @@ export function AgentConsole() {
           <MonitorDetail
             name={current}
             snap={monitors[current]}
+            updatedAt={status.dataUpdatedAt}
             onEdit={() => setDialog({ mode: "edit", name: current })}
             onChanged={invalidate}
             onError={onErr}
@@ -139,10 +170,11 @@ export function AgentConsole() {
 }
 
 function MonitorDetail({
-  name, snap, onEdit, onChanged, onError,
+  name, snap, updatedAt, onEdit, onChanged, onError,
 }: {
   name: string;
   snap: MonitorSnapshot;
+  updatedAt?: number;
   onEdit: () => void;
   onChanged: () => void;
   onError: (e: unknown) => void;
@@ -176,6 +208,11 @@ function MonitorDetail({
           <Typography variant="h6" sx={{ flex: 1 }}>{name}</Typography>
           <Chip size="small" label={t(`state.${snap.state}`, { defaultValue: snap.state })} />
           {snap.degraded && <Chip size="small" color="warning" label={t("state.degraded")} />}
+          {updatedAt ? (
+            <Typography variant="body2" color="text.secondary" sx={{ ml: 0.5 }}>
+              {t("agent.updated", { time: fmtTime(updatedAt) })}
+            </Typography>
+          ) : null}
         </Stack>
 
         {snap.detail && (

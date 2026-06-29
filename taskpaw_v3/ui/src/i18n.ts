@@ -39,6 +39,7 @@ const en = {
     deleteTitle: "Delete monitor “{{name}}”?",
     deleteBody: "This removes it from this agent's config. It can't be undone.",
     unreachable: "Agent unreachable: {{error}}",
+    updated: "Updated {{time}}",
   },
   hub: {
     fleet: "Fleet", events: "Events",
@@ -99,6 +100,7 @@ const zh: typeof en = {
     deleteTitle: "删除监控「{{name}}」?",
     deleteBody: "这会把它从本 agent 的配置中移除,无法撤销。",
     unreachable: "无法连接 Agent:{{error}}",
+    updated: "更新于 {{time}}",
   },
   hub: {
     fleet: "机群", events: "事件",
