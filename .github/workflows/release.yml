@@ -87,10 +87,14 @@ jobs:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          if (-not $env:WINDOWS_CERTIFICATE) {
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
             Write-Host "No WINDOWS_CERTIFICATE secret — leaving installers unsigned."
             exit 0
           }
+          # NB: this job runs on GitHub-hosted, EPHEMERAL windows-latest runners, so the
+          # imported key container dies with the VM. On a PERSISTENT/self-hosted runner
+          # the imported private key could outlive the job — don't run release there
+          # without additional key hygiene (Kimi).
           # Resolve signtool: PATH first, then any installed Windows SDK (not a single
           # hardcoded SDK version/dir, which can break if the runner image changes) (Kimi).
           $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
@@ -116,8 +120,12 @@ jobs:
               & $signtool sign /sha1 $cert.Thumbprint `
                 /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 $a.FullName
               if ($LASTEXITCODE -ne 0) { Write-Error "signtool sign failed: $($a.FullName)"; exit 1 }
+              # Advisory: /pa needs the cert's full chain in the runner's trusted root,
+              # which an org-internal CA won't have — don't fail a successful sign on it (Kimi).
               & $signtool verify /pa $a.FullName
-              if ($LASTEXITCODE -ne 0) { Write-Error "signtool verify failed: $($a.FullName)"; exit 1 }
+              if ($LASTEXITCODE -ne 0) {
+                Write-Warning "verify /pa failed for $($a.Name) (expected for an internal-CA cert whose root isn't trusted on the runner); the file was signed."
+              }
               Write-Host "Signed $($a.Name)"
             }
           } finally {

@@ -16,7 +16,7 @@ DigiCert / Sectigo, or an org-internal CA). That's why it's operator-provided.
 
 | Secret | What it is | How to get it |
 |--------|------------|---------------|
-| `WINDOWS_CERTIFICATE` | base64 of your code-signing cert as a password-protected `.pfx` (PKCS#12, cert + private key) | export from `certmgr`/your CA as `cert.pfx`, then `base64 -w0 cert.pfx` (Linux) or `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx"))` (PowerShell) |
+| `WINDOWS_CERTIFICATE` | base64 of your code-signing cert as a password-protected `.pfx` (PKCS#12, cert + private key) | export from `certmgr`/your CA as `cert.pfx`, then `base64 -w0 cert.pfx` (Linux), `base64 cert.pfx \| tr -d '\n' \| pbcopy` (macOS), or `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx"))` (PowerShell) |
 | `WINDOWS_CERTIFICATE_PASSWORD` | the password set on that `.pfx` | — |
 
 ## How it works
@@ -42,6 +42,12 @@ Signatures**, or `signtool verify /pa /v <installer>`.
   SmartScreen-relevant surface). Signing the inner `taskpaw.exe` *inside* the
   bundle via Tauri's native `bundle.windows.certificateThumbprint` is a possible
   follow-up.
+- `verify /pa` is **advisory** (a warning, not a failure): it needs the cert's
+  full chain in the runner's trusted root, which an org-internal CA won't have —
+  the sign step itself is the gate.
+- The release job runs on **GitHub-hosted, ephemeral** `windows-latest` runners,
+  so the PFX file and the imported key container are destroyed with the VM. Do
+  **not** run this on a persistent / self-hosted runner without extra key hygiene.
 - A brand-new certificate still accrues SmartScreen reputation over time; an EV
   certificate gets reputation immediately but needs a hardware token / a cloud
   signing service (e.g. Azure Trusted Signing) — out of scope here.
