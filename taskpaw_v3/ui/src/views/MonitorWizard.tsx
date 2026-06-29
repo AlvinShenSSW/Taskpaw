@@ -95,8 +95,11 @@ export function MonitorWizard({
     }
     return keys;
   }, [selected]);
-  const mask = (k: string, v: unknown) =>
-    secretKeys.has(k) || /token|password|secret/i.test(k) ? "••••••••" : String(v);
+  const mask = (k: string, v: unknown) => {
+    if (secretKeys.has(k) || /token|password|secret/i.test(k)) return "••••••••";
+    // Objects/arrays would render as "[object Object]" via String() — show JSON (Kimi).
+    return v !== null && typeof v === "object" ? JSON.stringify(v) : String(v);
+  };
 
   const formUiSchema = useMemo(() => {
     if (selected?.kind !== "plugin") return {};
