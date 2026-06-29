@@ -3,6 +3,7 @@ import {
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import { StatusDot } from "../components/StatusDot";
 import { EventLog } from "../components/EventLog";
@@ -11,6 +12,7 @@ import { EventLog } from "../components/EventLog";
 // machines + the Hub's own host-health self-monitor, and an aggregated event log
 // (#44). No marketing hero/CTA.
 export function HubDashboard() {
+  const { t } = useTranslation();
   const { data, error, isLoading } = useQuery({ queryKey: ["hubStatus"], queryFn: api.hubStatus });
   const [tab, setTab] = useState<"fleet" | "events">("fleet");
   const [level, setLevel] = useState<string>("");
@@ -21,8 +23,8 @@ export function HubDashboard() {
     refetchInterval: 5000, enabled: tab === "events",
   });
 
-  if (isLoading) return <Typography>Loading…</Typography>;
-  if (error) return <Alert severity="error">Hub unreachable: {String(error)}</Alert>;
+  if (isLoading) return <Typography>{t("common.loading")}</Typography>;
+  if (error) return <Alert severity="error">{t("hub.unreachable", { error: String(error) })}</Alert>;
 
   const servers = data?.servers ?? [];
   const self = data?.self ?? {};
@@ -30,20 +32,20 @@ export function HubDashboard() {
   return (
     <Stack spacing={1.5}>
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ minHeight: 0 }}>
-        <Tab value="fleet" label="Fleet" />
-        <Tab value="events" label="Events" />
+        <Tab value="fleet" label={t("hub.fleet")} />
+        <Tab value="events" label={t("hub.events")} />
       </Tabs>
 
       {tab === "events" ? (
         <Card>
           <CardContent>
             <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
-              <Typography variant="overline" color="text.secondary">event history</Typography>
-              <TextField select size="small" label="Level" value={level}
+              <Typography variant="overline" color="text.secondary">{t("hub.eventHistory")}</Typography>
+              <TextField select size="small" label={t("common.level")} value={level}
                 onChange={(e) => setLevel(e.target.value)} sx={{ minWidth: 140 }}>
-                <MenuItem value="">All levels</MenuItem>
+                <MenuItem value="">{t("common.allLevels")}</MenuItem>
                 {["info", "done", "warn", "alert"].map((l) => (
-                  <MenuItem key={l} value={l}>{l}</MenuItem>
+                  <MenuItem key={l} value={l}>{t(`state.${l}`, { defaultValue: l })}</MenuItem>
                 ))}
               </TextField>
             </Stack>
@@ -53,7 +55,11 @@ export function HubDashboard() {
       ) : (
         <Stack spacing={2}>
           <Typography variant="overline" color="text.secondary">
-            {data?.machine} — fleet ({servers.length} {servers.length === 1 ? "agent" : "agents"})
+            {t("hub.fleetTitle", {
+              machine: data?.machine,
+              count: servers.length,
+              unit: t(servers.length === 1 ? "hub.agent" : "hub.agents"),
+            })}
           </Typography>
           <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
             {servers.map((s) => (
@@ -66,19 +72,20 @@ export function HubDashboard() {
                   <Typography variant="body2" color="text.secondary">
                     {s.ip}:{s.port}
                   </Typography>
-                  <Chip size="small" sx={{ mt: 1 }} label={s.enabled ? "enabled" : "disabled"} />
+                  <Chip size="small" sx={{ mt: 1 }}
+                    label={s.enabled ? t("state.enabled") : t("state.disabled")} />
                 </CardContent>
               </Card>
             ))}
             {servers.length === 0 && (
-              <Typography color="text.secondary">No agents registered yet.</Typography>
+              <Typography color="text.secondary">{t("hub.noAgents")}</Typography>
             )}
           </Box>
 
           {Object.keys(self).length > 0 && (
             <Card>
               <CardContent>
-                <Typography variant="overline" color="text.secondary">Hub host (self-monitor)</Typography>
+                <Typography variant="overline" color="text.secondary">{t("hub.selfMonitor")}</Typography>
                 {Object.entries(self).map(([name, snap]) => (
                   <Box key={name} sx={{ mt: 1 }}>
                     <Stack direction="row" alignItems="center" spacing={1}>
