@@ -77,9 +77,11 @@ export const theme = createTheme({
           transition: "background 200ms ease",
         },
         // Chinese is first-class: raise line-height, and drop uppercase + wide
-        // tracking (Latin-only treatments) on label variants under lang=zh (#89/§8).
-        'html[lang="zh"] body': { lineHeight: 1.7 },
-        'html[lang="zh"] .MuiTypography-overline': {
+        // tracking (Latin-only treatments) on label variants under Chinese (#89/§8).
+        // `|="zh"` matches the real document lang "zh-CN" (exactly "zh" or "zh-*"),
+        // not just bare "zh" (Codex).
+        'html[lang|="zh"] body': { lineHeight: 1.7 },
+        'html[lang|="zh"] .MuiTypography-overline': {
           textTransform: "none",
           letterSpacing: "0.2px",
         },

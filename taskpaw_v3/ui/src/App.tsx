@@ -35,7 +35,9 @@ export function App() {
   // A packaged agent build must NOT expose the Hub tab (and vice versa) (#58).
   const showSwitcher = INJECTED_ROLE === null;
   return (
-    <Box sx={{ minHeight: "100dvh", bgcolor: "background.default" }}>
+    // Transparent so the body blueprint grid + radial glow (theme.ts #89) shows
+    // through; cards/appbar paint their own surfaces over it.
+    <Box sx={{ minHeight: "100dvh", bgcolor: "transparent" }}>
       <AppBar position="sticky" color="primary" elevation={0}
         sx={{ borderBottom: 1, borderColor: "divider" }}>
         <Toolbar variant="dense">

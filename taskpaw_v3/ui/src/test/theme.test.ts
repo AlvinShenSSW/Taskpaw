@@ -22,7 +22,8 @@ describe("theme", () => {
 
   it("resets uppercase/tracking for Chinese label variants", () => {
     const css = theme.components?.MuiCssBaseline?.styleOverrides as Record<string, any>;
-    const zhOverline = css?.['html[lang="zh"] .MuiTypography-overline'];
+    // `|="zh"` so it matches the real document lang "zh-CN", not just bare "zh".
+    const zhOverline = css?.['html[lang|="zh"] .MuiTypography-overline'];
     expect(zhOverline?.textTransform).toBe("none");
   });
 });
