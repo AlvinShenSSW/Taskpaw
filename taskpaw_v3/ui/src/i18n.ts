@@ -14,7 +14,7 @@ export const LANGS: { value: Lang; label: string }[] = [
 const STORE_KEY = "taskpaw.lang";
 
 const en = {
-  app: { agent: "Agent Console", hub: "Hub Dashboard", settings: "Settings", openSettings: "Settings" },
+  app: { agent: "Agent Console", hub: "Hub Dashboard", settings: "Settings", openSettings: "Settings", online: "Online" },
   common: {
     add: "Add", start: "Start", stop: "Stop", editConfig: "Edit config", delete: "Delete",
     cancel: "Cancel", loading: "Loading…", updating: "updating…", type: "Type", level: "Level",
@@ -75,7 +75,7 @@ const en = {
 };
 
 const zh: typeof en = {
-  app: { agent: "Agent 控制台", hub: "Hub 仪表盘", settings: "设置", openSettings: "设置" },
+  app: { agent: "Agent 控制台", hub: "Hub 仪表盘", settings: "设置", openSettings: "设置", online: "在线" },
   common: {
     add: "添加", start: "启动", stop: "停止", editConfig: "编辑配置", delete: "删除",
     cancel: "取消", loading: "加载中…", updating: "更新中…", type: "类型", level: "级别",
