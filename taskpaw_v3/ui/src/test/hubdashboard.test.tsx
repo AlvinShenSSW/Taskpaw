@@ -20,7 +20,8 @@ const STATUS = {
     {
       id: 2, name: "render-02", ip: "10.0.0.2", port: 8765, enabled: 1,
       online: true, last_seen: "2026-06-29T10:00:00Z",
-      snapshot: { machine: "render-02", monitors: { gpu: { state: "alert" } } },
+      // "error" (not "alert") — health must treat all failure states as degraded.
+      snapshot: { machine: "render-02", monitors: { gpu: { state: "error" } } },
     },
     {
       id: 3, name: "render-03", ip: "10.0.0.3", port: 8765, enabled: 1,

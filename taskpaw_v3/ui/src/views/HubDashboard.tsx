@@ -16,8 +16,12 @@ import { Settings } from "./Settings";
 type Health = "ok" | "degraded" | "offline";
 const HEALTH_STATE: Record<Health, string> = { ok: "ok", degraded: "degraded", offline: "stopped" };
 
+// Any monitor failure state (theme.statusColors) counts as degraded — not just
+// "alert". Plugins (Lada/ComfyUI/…) emit "error"/"degraded" on service failures,
+// and the worker can be alive while the monitored service is down (Codex 外门).
+const PROBLEM_STATES = new Set(["alert", "error", "degraded"]);
 function monitorProblem(m: MonitorSnapshot): boolean {
-  return m.alive === false || m.degraded === true || m.state === "alert";
+  return m.alive === false || m.degraded === true || PROBLEM_STATES.has(m.state);
 }
 function serverHealth(s: HubServer): Health {
   if (!s.online) return "offline";
