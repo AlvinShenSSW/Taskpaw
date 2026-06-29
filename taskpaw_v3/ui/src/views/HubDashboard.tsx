@@ -37,17 +37,21 @@ function serverHealth(s: HubServer): Health {
 // Only legacy agents that report no type_id at all fall back to the key-scan.
 function hostMetrics(s: HubServer): { cpu?: number; mem?: number } | null {
   const mons = Object.values(s.snapshot?.monitors ?? {});
+  // Number.isFinite, not just typeof number — a malformed NaN metric must not slip
+  // through and render as "NaN%" (Kimi).
+  const pct = (met: Record<string, unknown> | undefined, k: string) =>
+    typeof met?.[k] === "number" && Number.isFinite(met[k]) ? (met[k] as number) : undefined;
   const hasMetric = (m: MonitorSnapshot) => {
     const met = m.metrics as Record<string, unknown> | undefined;
-    return typeof met?.cpu_pct === "number" || typeof met?.mem_pct === "number";
+    return pct(met, "cpu_pct") !== undefined || pct(met, "mem_pct") !== undefined;
   };
   const host =
     mons.find((m) => m.type_id === "host_metrics") ??
     (mons.every((m) => m.type_id == null) ? mons.find(hasMetric) : undefined);
   const met = host?.metrics as Record<string, unknown> | undefined;
   if (!met) return null;
-  const cpu = typeof met.cpu_pct === "number" ? met.cpu_pct : undefined;
-  const mem = typeof met.mem_pct === "number" ? met.mem_pct : undefined;
+  const cpu = pct(met, "cpu_pct");
+  const mem = pct(met, "mem_pct");
   return cpu !== undefined || mem !== undefined ? { cpu, mem } : null;
 }
 

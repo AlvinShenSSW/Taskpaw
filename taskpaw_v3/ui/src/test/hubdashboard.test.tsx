@@ -35,7 +35,9 @@ const STATUS = {
     {
       id: 4, name: "render-04", ip: "10.0.0.4", port: 8765, enabled: 1,
       online: true, last_seen: "2026-06-29T10:00:00Z",
-      snapshot: { machine: "render-04", monitors: { "lada-main": { state: "ok" } } },
+      // Legacy agent: monitors carry NO type_id → hostMetrics falls back to a
+      // cpu_pct/mem_pct key-scan (Kimi #113).
+      snapshot: { machine: "render-04", monitors: { host: { state: "ok", metrics: { cpu_pct: 55 } } } },
     },
   ],
   acks: {},
@@ -88,6 +90,13 @@ describe("HubDashboard (#95)", () => {
     expect(within(card).queryByText("99%")).not.toBeInTheDocument();
   });
 
+  it("falls back to a key-scan for a legacy agent with no type_id (#113)", async () => {
+    renderHub();
+    // render-04's monitor has no type_id but reports cpu_pct → bar still renders.
+    const card = (await screen.findByText("render-04")).closest("button")!;
+    expect(within(card).getByText("55%")).toBeInTheDocument();
+  });
+
   it("omits mini-bars for an offline machine with no metrics (#113)", async () => {
     renderHub();
     const card = (await screen.findByText("render-03")).closest("button")!;
@@ -104,10 +113,11 @@ describe("HubDashboard (#95)", () => {
   it("renders the self-monitor as metric tiles, not raw JSON", async () => {
     renderHub();
     await screen.findByText("hub-host");
-    // The host metrics render as labelled tiles/gauges (CPU appears for the self
-    // monitor and the #113 card mini-bars), never a raw JSON.stringify blob.
-    expect(screen.getAllByText(/CPU/i).length).toBeGreaterThan(0);
-    expect(screen.queryByText(/"cpu_pct"/)).not.toBeInTheDocument();
+    // Scope to the self-monitor card (its overline label) so card mini-bars don't
+    // satisfy this — verifies the self monitor specifically renders gauges, not raw JSON.
+    const selfCard = screen.getByText(/self-monitor|自监控/).closest(".MuiCard-root") as HTMLElement;
+    expect(within(selfCard).getByText(/CPU/i)).toBeInTheDocument();
+    expect(within(selfCard).queryByText(/"cpu_pct"/)).not.toBeInTheDocument();
   });
 
   it("drills down into a machine's monitors when its card is clicked", async () => {
