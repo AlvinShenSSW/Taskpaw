@@ -18,6 +18,7 @@ pydantic config model forbids extra keys, so it can't go inside `config`.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import threading
 from pathlib import Path
@@ -38,6 +39,28 @@ def _as_bool(v: Any) -> bool:
     if not isinstance(v, bool):
         raise ValueError(f"'enabled' must be a boolean, got {type(v).__name__}")
     return v
+
+
+def _bind_is_wildcard(host: str) -> bool:
+    """All-interfaces bind? True for 0.0.0.0, :: and every IPv6 spelling of the
+    unspecified address (e.g. 0:0:0:0:0:0:0:0), so the exposure guard can't be
+    bypassed by an alternate spelling (Codex #43)."""
+    if host in ("", "*"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return False  # a hostname, not an IP literal — the loopback check handles it
+
+
+def _bind_is_loopback(host: str) -> bool:
+    """On-host only? True for localhost and any loopback IP (127.0.0.0/8, ::1)."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 class MonitorAdmin:
@@ -211,14 +234,15 @@ class MonitorAdmin:
             # wildcard/all-interfaces bind outright, and require a token for any
             # non-loopback bind — else /status and /events would be reachable
             # off-host unauthenticated (Codex #43 P1). Raised BEFORE save → reject
-            # leaves config + disk untouched.
-            _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
-            bh = validated.bind_host.strip()
-            if bh in ("0.0.0.0", "::", "*", ""):
+            # leaves config + disk untouched. Normalize via ipaddress so every
+            # spelling is caught (e.g. `0:0:0:0:0:0:0:0` == `::`, `127.0.0.2` is
+            # still loopback) — not a brittle exact-string set (Codex #43 r3).
+            bh = validated.bind_host.strip().strip("[]")
+            if _bind_is_wildcard(bh):
                 raise ValueError(
                     f"refusing to bind the network API to all interfaces ({bh!r}) "
                     f"from the UI — use 127.0.0.1 or a specific LAN address.")
-            if bh not in _LOOPBACK and not validated.api_token.strip():
+            if not _bind_is_loopback(bh) and not validated.api_token.strip():
                 raise ValueError(
                     f"binding the network API to a non-loopback address ({bh}) "
                     f"requires an API token, or /status and /events would be "

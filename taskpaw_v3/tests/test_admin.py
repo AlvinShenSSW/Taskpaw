@@ -298,6 +298,11 @@ def test_update_config_blocks_unsafe_network_exposure(tmp_path):
     with pytest.raises(ValueError, match="requires an API token"):
         admin.update_config({"bind_host": "192.168.1.50"})  # LAN bind needs a token
     assert cfg.bind_host == "127.0.0.1" and not path.exists()   # nothing persisted
+    # Alternate spellings of the unspecified address are also refused — even WITH
+    # a token (all-interfaces is never allowed from the UI) (Codex #43 r3).
+    for wild in ("::", "0:0:0:0:0:0:0:0", "[::]"):
+        with pytest.raises(ValueError, match="all interfaces"):
+            admin.update_config({"bind_host": wild, "api_token": "tok"})
     # LAN bind WITH a token is allowed (Hub-reachable + authenticated).
     res = admin.update_config({"bind_host": "192.168.1.50", "api_token": "tok"})
     assert res["ok"] and cfg.bind_host == "192.168.1.50"
