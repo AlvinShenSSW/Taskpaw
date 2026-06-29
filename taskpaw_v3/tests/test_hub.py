@@ -305,5 +305,12 @@ def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypa
         assert srv["snapshot"] == agent_status
         assert srv["last_seen"]
         assert srv["id"] == sid
+
+        # Disabling a server after a good poll must force online=False even though
+        # the stale snapshot still says reachable (Codex).
+        s.set_server_enabled(sid, False)
+        srv2 = TestClient(app).get("/status").json()["servers"][0]
+        assert srv2["online"] is False
+        assert srv2["snapshot"] == agent_status  # last-known reference kept
     finally:
         s.close()

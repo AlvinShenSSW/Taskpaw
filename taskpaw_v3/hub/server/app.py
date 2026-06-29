@@ -150,9 +150,12 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         servers = []
         for s in store.list_servers():
             snap = snaps.get(s["id"], {})
+            # A disabled server isn't polled, so its snapshot goes stale — force
+            # online=False so the dashboard never shows a disabled machine as live
+            # (Codex). last_seen/snapshot stay for last-known reference.
             servers.append({
                 **s,
-                "online": bool(snap.get("online", False)),
+                "online": bool(snap.get("online", False)) and bool(s["enabled"]),
                 "last_seen": snap.get("last_seen"),
                 "snapshot": snap.get("snapshot"),
             })
