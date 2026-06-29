@@ -19,6 +19,24 @@ use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+
+/// Bilingual title + body for the close-confirmation (#52). The native dialog
+/// can't read the webview's chosen language, so show both. Role-tailored: a Hub
+/// loss is aggregation/notifications; an agent loss is this machine's monitoring.
+fn close_confirm_text(role: &str) -> (String, String) {
+    let title = "TaskPaw — 确认关闭 / Confirm close".to_string();
+    let msg = if role == "hub" {
+        "关闭窗口会停止后台 Hub —— 聚合与 OpenClaw 通知都会停止。确定关闭吗?\n\n\
+         Closing this window stops the background Hub — aggregation and OpenClaw \
+         notifications will stop. Close anyway?"
+    } else {
+        "关闭窗口会停止本机的后台监控。确定关闭吗?\n\n\
+         Closing this window stops this machine's background monitoring. \
+         Close anyway?"
+    };
+    (title, msg.to_string())
+}
 
 struct Backend(Mutex<Option<Child>>);
 
@@ -460,6 +478,10 @@ fn main() {
                 };
                 app.manage(JobHandle(Mutex::new(job)));
             }
+            // Whether closing the window will actually kill a spawned backend —
+            // only then do we ask for confirmation (#52). Dev with no backend just
+            // closes.
+            let has_backend = child.is_some();
             app.manage(Backend(Mutex::new(child)));
             // §3.1 readiness handshake (#48): wait for the backend to report its
             // base_url on stdout BEFORE loading the webview — so the UI never races
@@ -483,12 +505,49 @@ fn main() {
             // Build the window in code so we can inject the runtime config script
             // (the validated base_url) BEFORE the page loads, only on the
             // loopback-served origin.
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("TaskPaw")
                 .inner_size(1100.0, 720.0)
                 .min_inner_size(720.0, 480.0)
                 .initialization_script(&init_script(&base_url))
                 .build()?;
+            // Closing the window kills the backend; warn first so the operator
+            // doesn't accidentally stop background monitoring — and, for a Hub,
+            // aggregation + OpenClaw notifications (#52). Only when a backend was
+            // actually spawned. The OK button is debounced via a flag so the
+            // post-confirm close isn't re-intercepted.
+            if has_backend {
+                let (title, msg) = close_confirm_text(&ui_role());
+                let confirmed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let app_handle = app.handle().clone();
+                win.on_window_event(move |event| {
+                    use std::sync::atomic::Ordering::SeqCst;
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        if confirmed.load(SeqCst) {
+                            return; // already confirmed → allow the close through
+                        }
+                        api.prevent_close();
+                        let confirmed = confirmed.clone();
+                        let app_handle = app_handle.clone();
+                        app_handle
+                            .dialog()
+                            .message(msg.clone())
+                            .title(title.clone())
+                            .buttons(MessageDialogButtons::OkCancelCustom(
+                                "关闭 / Close".into(),
+                                "取消 / Cancel".into(),
+                            ))
+                            .show(move |ok| {
+                                if ok {
+                                    confirmed.store(true, SeqCst);
+                                    if let Some(w) = app_handle.get_webview_window("main") {
+                                        let _ = w.close();
+                                    }
+                                }
+                            });
+                    }
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
