@@ -122,7 +122,14 @@ def build_tauri() -> None:
     overrides = json.dumps(cfg)
     # --ci: never prompt (headless runners would hang). Pin the CLI for
     # reproducible bundles; beforeBuildCommand builds the UI.
-    run(["npx", "--yes", TAURI_CLI, "build", "--ci", "--config", overrides], cwd=SRC_TAURI)
+    cmd = ["npx", "--yes", TAURI_CLI, "build", "--ci", "--config", overrides]
+    # Optional target restriction (#54 bundle smoke): e.g. TASKPAW_BUNDLE_TARGETS=deb
+    # builds only a .deb on a Linux PR smoke (no AppImage tooling), without
+    # affecting release.yml (which leaves it unset → tauri.conf "all").
+    targets = os.environ.get("TASKPAW_BUNDLE_TARGETS", "").strip()
+    if targets:
+        cmd += ["--bundles", targets]
+    run(cmd, cwd=SRC_TAURI)
     print("bundle -> " + str(SRC_TAURI / "target" / "release" / "bundle"), flush=True)
 
 

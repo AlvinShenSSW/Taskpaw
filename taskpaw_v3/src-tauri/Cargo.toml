@@ -18,6 +18,9 @@ tauri = { version = "=2.11.3", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Robust URL parsing for the loopback base_url guard (#54) — handles IDN/punycode,
+# percent-encoded delimiters, scheme-relative inputs with browser/CSP parity.
+url = "2"
 
 # SIGTERM for graceful backend shutdown (so the backend's GracefulShutdown can
 # stop its supervisor + managed child processes before we force-kill).
