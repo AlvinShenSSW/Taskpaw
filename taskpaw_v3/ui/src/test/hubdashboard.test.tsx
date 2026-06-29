@@ -16,8 +16,9 @@ const STATUS = {
       id: 1, name: "render-01", ip: "10.0.0.1", port: 8765, enabled: 1,
       online: true, last_seen: "2026-06-29T10:00:00Z",
       snapshot: { machine: "render-01", monitors: {
-        "lada-main": { state: "running" },
-        "render-01-host": { state: "ok", metrics: { cpu_pct: 37, mem_pct: 72 } },
+        // lada emits cpu_pct/mem_pct too — must NOT be mistaken for the host (Kimi #113).
+        "lada-main": { state: "running", type_id: "lada", metrics: { cpu_pct: 99, mem_pct: 99 } },
+        "render-01-host": { state: "ok", type_id: "host_metrics", metrics: { cpu_pct: 37, mem_pct: 72 } },
       } },
     },
     {
@@ -80,9 +81,11 @@ describe("HubDashboard (#95)", () => {
   it("shows CPU/MEM mini-bars for a live machine that reports host metrics (#113)", async () => {
     renderHub();
     const card = (await screen.findByText("render-01")).closest("button")!;
-    // host_metrics → cpu_pct 37 / mem_pct 72 render as labelled % on the card face.
+    // The host_metrics monitor (37/72) drives the bars — NOT the lada monitor that
+    // also reports cpu_pct/mem_pct (99) (Kimi #113 attribution fix).
     expect(within(card).getByText("37%")).toBeInTheDocument();
     expect(within(card).getByText("72%")).toBeInTheDocument();
+    expect(within(card).queryByText("99%")).not.toBeInTheDocument();
   });
 
   it("omits mini-bars for an offline machine with no metrics (#113)", async () => {

@@ -30,18 +30,25 @@ function serverHealth(s: HubServer): Health {
   return Object.values(mons).some(monitorProblem) ? "degraded" : "ok";
 }
 
-// Per-machine CPU/MEM from the agent's host_metrics monitor in its snapshot (#113):
-// find the monitor whose metrics carry cpu_pct/mem_pct (host_metrics). null when
-// the agent reports no such metrics (older agent / offline) → no mini-bars.
+// Per-machine CPU/MEM from the agent's host_metrics monitor in its snapshot (#113).
+// Select by type_id === "host_metrics", NOT by scanning for cpu_pct/mem_pct — other
+// plugins (e.g. lada) emit those same keys, so a key-scan would mis-attribute the
+// Lada worker's sample to the host or show bars when host_metrics is off (Kimi).
+// Only legacy agents that report no type_id at all fall back to the key-scan.
 function hostMetrics(s: HubServer): { cpu?: number; mem?: number } | null {
-  const mons = s.snapshot?.monitors ?? {};
-  for (const m of Object.values(mons)) {
+  const mons = Object.values(s.snapshot?.monitors ?? {});
+  const hasMetric = (m: MonitorSnapshot) => {
     const met = m.metrics as Record<string, unknown> | undefined;
-    const cpu = typeof met?.cpu_pct === "number" ? met.cpu_pct : undefined;
-    const mem = typeof met?.mem_pct === "number" ? met.mem_pct : undefined;
-    if (cpu !== undefined || mem !== undefined) return { cpu, mem };
-  }
-  return null;
+    return typeof met?.cpu_pct === "number" || typeof met?.mem_pct === "number";
+  };
+  const host =
+    mons.find((m) => m.type_id === "host_metrics") ??
+    (mons.every((m) => m.type_id == null) ? mons.find(hasMetric) : undefined);
+  const met = host?.metrics as Record<string, unknown> | undefined;
+  if (!met) return null;
+  const cpu = typeof met.cpu_pct === "number" ? met.cpu_pct : undefined;
+  const mem = typeof met.mem_pct === "number" ? met.mem_pct : undefined;
+  return cpu !== undefined || mem !== undefined ? { cpu, mem } : null;
 }
 
 // last_seen ISO → locale time, or empty.
@@ -234,7 +241,8 @@ function MachineCard({ server: s, expanded, onToggle }:
 // %, coloured by the shared 70/90 ramp. Status is conveyed by the number too, not
 // colour alone (a11y §1).
 function MiniBar({ label, pct }: { label: string; pct: number }) {
-  const v = Math.max(0, Math.min(100, pct));
+  // One rounded value drives both the bar and the label so they can't disagree (Kimi).
+  const v = Math.round(Math.max(0, Math.min(100, pct)));
   const tint = utilTint(v);
   return (
     <Box>
@@ -242,7 +250,7 @@ function MiniBar({ label, pct }: { label: string; pct: number }) {
         <Typography variant="caption" color="text.secondary"
           sx={{ textTransform: "uppercase", letterSpacing: 0.5, fontSize: 10 }}>{label}</Typography>
         <Typography variant="caption" sx={{ fontFamily: '"Fira Code", monospace',
-          fontVariantNumeric: "tabular-nums", fontSize: 11 }}>{Math.round(v)}%</Typography>
+          fontVariantNumeric: "tabular-nums", fontSize: 11 }}>{v}%</Typography>
       </Stack>
       <LinearProgress variant="determinate" value={v}
         sx={{ height: 5, borderRadius: 3, bgcolor: "rgba(148,163,184,0.15)",
