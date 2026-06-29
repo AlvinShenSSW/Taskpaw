@@ -4,9 +4,11 @@ name: release
 # (Actions → release → Run workflow) or by pushing a v* tag; download the
 # installers from the run's artifacts.
 #
-# NOTE: macOS artifacts are UNSIGNED / un-notarized (signing tracked in #49) —
-# Gatekeeper blocks a double-click; for verification right-click → Open, or
-# `xattr -dr com.apple.quarantine <app>`.
+# macOS signing: when the APPLE_* repo secrets are configured (see
+# docs/guides/macos-signing.md), the macOS artifacts are Developer ID signed +
+# notarized and open on a double-click. WITHOUT those secrets they're UNSIGNED —
+# Gatekeeper blocks a double-click; verify via right-click → Open, or
+# `xattr -dr com.apple.quarantine <app>` (#49).
 on:
   workflow_dispatch:
   push:
@@ -51,6 +53,21 @@ jobs:
         run: uv sync --frozen --extra build --extra v3
 
       - name: Build backend sidecar + Tauri bundle
+        # macOS Developer ID signing + notarization (#49). When these secrets are
+        # configured, `tauri build` (run by build.py) signs the .app/.dmg with the
+        # imported certificate and notarizes it, so Gatekeeper opens it on a
+        # double-click. When the secrets are ABSENT the vars are empty and the
+        # build is unsigned (the prior behaviour) — nothing breaks on a fork/PR.
+        # Non-macOS runners ignore the APPLE_* vars. See docs/guides/macos-signing.md.
+        env:
+          # Developer ID Application cert (base64 of the .p12) + its password.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Notarization via an Apple ID + app-specific password + team id.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: uv run python scripts/build.py
 
       - name: Collect installers
