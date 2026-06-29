@@ -277,6 +277,18 @@ def test_update_config_port_change_requires_restart(tmp_path):
     assert cfg.control_port == 6000          # applied; takes effect next boot
 
 
+def test_update_config_pending_restart_persists_across_saves(tmp_path):
+    # A pending restart keeps being reported until the agent actually restarts —
+    # comparing against the BOOT baseline, not the already-edited config (Codex r4).
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    assert admin.update_config({"control_port": 6000})["restart_required"] is True
+    # a later, unrelated save must STILL flag the pending (un-restarted) port change
+    assert admin.update_config({"api_token": "tok"})["restart_required"] is True
+    # reverting to the running value clears it (no restart needed)
+    assert admin.update_config({"control_port": 5681})["restart_required"] is False
+
+
 def test_update_config_rejects_invalid(tmp_path):
     cfg = _agent_config()
     admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")

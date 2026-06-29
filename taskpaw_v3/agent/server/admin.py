@@ -78,6 +78,13 @@ class MonitorAdmin:
         self._reg = registry
         self._path = config_path
         self._lock = threading.Lock()
+        # The non-live fields as the process actually STARTED with — sockets, the
+        # EventQueue machine tag, and supervisor membership are bound at boot and
+        # update_config can't re-apply them live. restart_required compares the
+        # desired config against THIS fixed baseline (not the already-edited
+        # _config), so a pending restart keeps being reported across saves until
+        # the agent is actually restarted (Codex #43).
+        self._boot_config = {f: getattr(config, f) for f in self._NON_LIVE_CONFIG}
 
     # ── internals ──────────────────────────────────────────────────────────
     def _persist(self) -> None:
@@ -211,6 +218,9 @@ class MonitorAdmin:
         "machine", "bind_host", "bind_port", "control_host", "control_port",
         "api_token", "host_metrics",
     )
+    # Editable fields that are NOT live-safe: changing them needs a restart (only
+    # api_token is read per-request). Used for the restart-required baseline.
+    _NON_LIVE_CONFIG = tuple(f for f in _EDITABLE_CONFIG if f != "api_token")
 
     def update_config(self, patch: dict) -> dict[str, Any]:
         """Edit top-level agent config (machine/ports/token) from the Settings UI
@@ -248,22 +258,22 @@ class MonitorAdmin:
                     f"requires an API token, or /status and /events would be "
                     f"reachable off-host without auth. Set a token first, or keep "
                     f"bind_host on 127.0.0.1.")
-            # Only `api_token` is truly live (token_ok reads config.api_token per
-            # request). Everything else is baked at startup and NOT reconfigured
-            # here: ports/hosts bind sockets, `machine` tags the EventQueue +
-            # names the host_metrics monitor, and `host_metrics` decides supervisor
-            # membership — so any of those changing needs a restart (Codex #43).
+            # Compare the DESIRED non-live fields against the BOOT baseline (what
+            # the process is actually running), not the possibly-already-edited
+            # _config — so a pending restart keeps being reported until the agent
+            # restarts (Codex #43). Only api_token is live (read per request).
             restart_required = any(
-                getattr(validated, f) != getattr(self._config, f)
-                for f in self._EDITABLE_CONFIG if f != "api_token"
+                getattr(validated, f) != self._boot_config[f] for f in self._NON_LIVE_CONFIG
             )
             # Persist the validated config FIRST (durable) — if the write fails the
             # in-memory config is untouched. save_yaml writes the whole config
             # (monitors carried from `current`), so nothing is dropped.
             if self._path is not None:
                 save_yaml(validated, self._path)
-            # Hot-apply onto the SAME object the running servers close over, so
-            # machine/token take effect immediately (ports need a restart).
+            # Reflect the saved config in-memory (so GET shows the pending values
+            # and the next save merges over them). api_token also takes effect live
+            # here; the non-live fields apply on the next restart (boot baseline
+            # stays put so restart_required keeps signalling until then).
             for f in self._EDITABLE_CONFIG:
                 setattr(self._config, f, getattr(validated, f))
             return {"ok": True, "restart_required": restart_required}
