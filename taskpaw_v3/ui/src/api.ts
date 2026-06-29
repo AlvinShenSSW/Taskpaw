@@ -23,9 +23,23 @@ export interface AgentStatus {
   monitors: Record<string, MonitorSnapshot>;
 }
 
+export interface HubServer {
+  id: number;
+  name: string;
+  ip: string;
+  port: number;
+  enabled: number;
+  // Per-server poll snapshot (#96): live reachability, last good poll time, and
+  // the agent's last parsed /status (null if never polled). A disabled server is
+  // forced online=false. Optional so older Hub builds (pre-#96) still type-check.
+  online?: boolean;
+  last_seen?: string | null;
+  snapshot?: AgentStatus | null;
+}
+
 export interface HubStatus {
   machine: string;
-  servers: Array<{ id: number; name: string; ip: string; port: number; enabled: number }>;
+  servers: HubServer[];
   acks: Record<string, number>;
   self: Record<string, MonitorSnapshot>;
 }
