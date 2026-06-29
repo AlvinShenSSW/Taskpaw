@@ -206,6 +206,24 @@ class MonitorAdmin:
                 p.pop("api_token", None)
             merged = {**current, **{k: v for k, v in p.items() if k in self._EDITABLE_CONFIG}}
             validated = AgentConfig(**merged)        # full validation (ports/loopback/blank)
+            # Network-exposure guard (constitution: no public/WAN exposure). The
+            # network API binds bind_host after restart; from the UI we refuse a
+            # wildcard/all-interfaces bind outright, and require a token for any
+            # non-loopback bind — else /status and /events would be reachable
+            # off-host unauthenticated (Codex #43 P1). Raised BEFORE save → reject
+            # leaves config + disk untouched.
+            _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+            bh = validated.bind_host.strip()
+            if bh in ("0.0.0.0", "::", "*", ""):
+                raise ValueError(
+                    f"refusing to bind the network API to all interfaces ({bh!r}) "
+                    f"from the UI — use 127.0.0.1 or a specific LAN address.")
+            if bh not in _LOOPBACK and not validated.api_token.strip():
+                raise ValueError(
+                    f"binding the network API to a non-loopback address ({bh}) "
+                    f"requires an API token, or /status and /events would be "
+                    f"reachable off-host without auth. Set a token first, or keep "
+                    f"bind_host on 127.0.0.1.")
             # Only `api_token` is truly live (token_ok reads config.api_token per
             # request). Everything else is baked at startup and NOT reconfigured
             # here: ports/hosts bind sockets, `machine` tags the EventQueue +

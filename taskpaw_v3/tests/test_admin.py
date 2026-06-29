@@ -287,6 +287,22 @@ def test_update_config_rejects_invalid(tmp_path):
     assert cfg.control_port == 5681 and cfg.control_host == "127.0.0.1"   # unchanged
 
 
+def test_update_config_blocks_unsafe_network_exposure(tmp_path):
+    # No public/WAN exposure: reject a wildcard bind from the UI, and require a
+    # token for a non-loopback bind (Codex #43 P1).
+    path = tmp_path / "a.yaml"
+    cfg = _agent_config(api_token="")                       # no token
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    with pytest.raises(ValueError, match="all interfaces"):
+        admin.update_config({"bind_host": "0.0.0.0"})       # wildcard refused
+    with pytest.raises(ValueError, match="requires an API token"):
+        admin.update_config({"bind_host": "192.168.1.50"})  # LAN bind needs a token
+    assert cfg.bind_host == "127.0.0.1" and not path.exists()   # nothing persisted
+    # LAN bind WITH a token is allowed (Hub-reachable + authenticated).
+    res = admin.update_config({"bind_host": "192.168.1.50", "api_token": "tok"})
+    assert res["ok"] and cfg.bind_host == "192.168.1.50"
+
+
 # ── enabled filtering at build time ────────────────────────────────────────
 def test_build_supervisor_skips_disabled():
     q = EventQueue(machine="m")
