@@ -44,10 +44,11 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-      - name: Install + build the V3 UI
+      - name: Install + test + build the V3 UI
         working-directory: taskpaw_v3/ui
         run: |
           npm ci
+          npm test
           npm run build
 
   shell:
