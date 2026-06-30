@@ -191,9 +191,13 @@ backend's stderr — where the logs go — to a file per OS:
 
 | OS      | Backend log file |
 | ------- | ---------------- |
-| macOS   | `~/Library/Logs/TaskPaw/taskpaw-backend.log` |
-| Windows | `%APPDATA%\TaskPaw\taskpaw-backend.log` |
+| macOS   | `~/Library/Logs/TaskPaw/taskpaw-backend-<role>.log` |
+| Windows | `%APPDATA%\TaskPaw\taskpaw-backend-<role>.log` |
 | Linux   | inherited stderr (run under `systemd`/terminal, read via `journalctl`) |
+
+`<role>` is `agent` or `hub`, so running both on one account keeps separate logs.
+The file appends across relaunches and rolls to `…-<role>.log.1` past ~5 MB. (Dev
+builds — `cargo tauri dev` — inherit stderr to the terminal instead.)
 
 If the UI loads but shows no data, tail that file first — a backend that exits on
 a bad config or a port clash reports it there.
@@ -203,5 +207,6 @@ a bad config or a port clash reports it there.
 > (SIGKILL, OOM, force-quit), macOS has no `PR_SET_PDEATHSIG` equivalent (Linux
 > does, Windows uses a Job Object). The backend is a long-running server, so it
 > does **not** exit on its own — it gets reparented to `launchd` and keeps running,
-> holding its port. Clear it manually with `pkill -f taskpaw-backend` before
-> relaunching (a relaunch that can't bind its port is the symptom).
+> holding its port. Find it with `pgrep -fl taskpaw-backend` and clear the right one
+> with `pkill -f "taskpaw-backend.*<role>"` (e.g. `…agent`) before relaunching — a
+> relaunch that can't bind its port is the symptom.

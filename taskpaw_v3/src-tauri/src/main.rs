@@ -221,51 +221,63 @@ fn backend_command() -> Option<(String, Vec<String>)> {
     Some((found.to_string_lossy().into_owned(), vec![role]))
 }
 
-/// Human-readable location of the backend log, for user-facing messages. The
-/// packaged (console-less) shell redirects the backend's stderr to this file;
+/// Human-readable location of the backend log, for user-facing messages —
 /// centralized so the spawn redirect and any hint we print can never name
-/// different paths (Kimi). Linux inherits stderr, so it points there instead.
-fn backend_log_hint() -> &'static str {
+/// different paths (Kimi). Role-scoped so an agent and a Hub on the same account
+/// point at distinct files. Dev builds inherit stderr (see spawn_backend), so the
+/// hint names the terminal there; Linux always inherits.
+fn backend_log_hint() -> String {
+    #[cfg(any(target_os = "macos", windows))]
+    if cfg!(debug_assertions) {
+        return "the launching terminal (dev builds inherit backend stderr)".to_string();
+    }
     #[cfg(target_os = "macos")]
-    {
-        "~/Library/Logs/TaskPaw/taskpaw-backend.log"
-    }
+    return format!("~/Library/Logs/TaskPaw/taskpaw-backend-{}.log", ui_role());
     #[cfg(windows)]
-    {
-        "%APPDATA%\\TaskPaw\\taskpaw-backend.log"
-    }
+    return format!("%APPDATA%\\TaskPaw\\taskpaw-backend-{}.log", ui_role());
     #[cfg(not(any(target_os = "macos", windows)))]
-    {
-        "the backend's stderr (journalctl, or the launching terminal)"
-    }
+    return "the backend's stderr (journalctl, or the launching terminal)".to_string();
 }
 
+/// Pure mapping from $HOME + role to the macOS backend log path, factored out so
+/// it's unit-testable without mutating the process environment.
 #[cfg(target_os = "macos")]
-fn macos_backend_log_path(home: &std::path::Path) -> std::path::PathBuf {
-    home.join("Library/Logs/TaskPaw/taskpaw-backend.log")
+fn macos_backend_log_path(home: &std::path::Path, role: &str) -> std::path::PathBuf {
+    home.join("Library/Logs/TaskPaw")
+        .join(format!("taskpaw-backend-{role}.log"))
 }
 
-/// Open the per-OS backend log for APPEND so crash logs accumulate across
-/// relaunches instead of being truncated on every start (Kimi). Creates the dir;
-/// on failure warns to the shell's own stderr (captured by the OS log) rather than
-/// silently discarding the backend's logs. None on Linux (stderr is inherited).
+/// Open the per-OS, per-role backend log for APPEND so crash logs accumulate
+/// across relaunches instead of being truncated on every start (Kimi). Creates the
+/// dir, rolls the file to `.1` once it passes ~5 MB to bound growth, and warns to
+/// the shell's own stderr (captured by the OS log) rather than silently discarding
+/// the backend's logs. None on Linux (stderr is inherited). Callers only invoke
+/// this in release builds; dev keeps stderr on the inherited terminal.
 #[cfg(any(target_os = "macos", windows))]
 fn open_backend_log() -> Option<std::fs::File> {
+    let role = ui_role();
     #[cfg(target_os = "macos")]
     let path = {
         let home = std::env::var_os("HOME")?;
-        macos_backend_log_path(std::path::Path::new(&home))
+        macos_backend_log_path(std::path::Path::new(&home), &role)
     };
     #[cfg(windows)]
     let path = {
         let appdata = std::env::var_os("APPDATA")?;
-        std::path::Path::new(&appdata).join("TaskPaw").join("taskpaw-backend.log")
+        std::path::Path::new(&appdata)
+            .join("TaskPaw")
+            .join(format!("taskpaw-backend-{role}.log"))
     };
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("taskpaw: cannot create backend log dir {dir:?}: {e}; backend stderr discarded");
             return None;
         }
+    }
+    // Bound growth: roll to a single .1 backup once the live file passes ~5 MB,
+    // so append doesn't accumulate without limit on a long-lived deployment (Kimi).
+    if std::fs::metadata(&path).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false) {
+        let _ = std::fs::rename(&path, path.with_file_name(format!("taskpaw-backend-{role}.log.1")));
     }
     match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(f) => Some(f),
@@ -304,14 +316,14 @@ fn spawn_backend() -> Option<Child> {
                 Ok(())
             });
         }
-        // A windowed macOS .app has no console (the same problem the Windows block
-        // below solves with %APPDATA%), so the backend's STDERR — its logs — would
-        // vanish in a packaged build. Route it to ~/Library/Logs/TaskPaw/ (see
-        // open_backend_log) so production failures are debuggable. stdout stays
-        // piped (above) for the §3.1 readiness handshake. Linux is left inheriting:
-        // the headless Hub runs under a terminal / systemd that already captures it.
+        // A windowed (packaged) macOS .app has no console (the same problem the
+        // Windows block below solves with %APPDATA%), so the backend's STDERR — its
+        // logs — would vanish. In RELEASE route it to ~/Library/Logs/TaskPaw/ (see
+        // open_backend_log) so production failures are debuggable; in DEBUG leave it
+        // inherited so `cargo tauri dev` still shows backend logs in the terminal
+        // (Kimi). stdout stays piped (above) for the §3.1 readiness handshake.
         #[cfg(target_os = "macos")]
-        {
+        if !cfg!(debug_assertions) {
             use std::process::Stdio;
             command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
         }
@@ -319,18 +331,21 @@ fn spawn_backend() -> Option<Child> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        use std::process::Stdio;
         // CREATE_NO_WINDOW (0x08000000) | CREATE_BREAKAWAY_FROM_JOB (0x01000000) so
         // we can put the backend in OUR Job Object even when the launcher is
         // already inside one. NOTE: 0x00080000 is EXTENDED_STARTUPINFO_PRESENT, NOT
         // breakaway — using it made CreateProcess fail (os error 87) and crash
         // every launch (caught by Windows verification, #50).
         command.creation_flags(0x08000000 | 0x01000000);
-        // The windowed shell has no console — route backend STDERR (its logs) to
-        // %APPDATA%\TaskPaw\taskpaw-backend.log so production builds are debuggable
-        // (see open_backend_log: append, with a warning if it can't open). stdout
-        // stays piped (above) for the readiness handshake.
-        command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
+        // The windowed (packaged) shell has no console — in RELEASE route backend
+        // STDERR (its logs) to %APPDATA%\TaskPaw\taskpaw-backend-<role>.log so
+        // production builds are debuggable (see open_backend_log: append, rolls at
+        // ~5 MB, warns if it can't open). In DEBUG leave stderr inherited so dev
+        // sees logs. stdout stays piped (above) for the readiness handshake.
+        if !cfg!(debug_assertions) {
+            use std::process::Stdio;
+            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
+        }
     }
     match command.spawn() {
         Ok(c) => Some(c),
@@ -669,25 +684,26 @@ mod tests {
     use super::{backend_log_hint, close_confirm_text, loopback_base};
 
     #[test]
-    fn backend_log_hint_is_platform_specific_and_nonempty() {
-        let h = backend_log_hint();
-        assert!(!h.is_empty());
-        #[cfg(target_os = "macos")]
-        assert!(h.contains("Library/Logs/TaskPaw"), "macOS hint should point at ~/Library/Logs: {h}");
-        #[cfg(windows)]
-        assert!(h.contains("APPDATA"), "Windows hint should point at %APPDATA%: {h}");
+    fn backend_log_hint_is_nonempty() {
+        // Tests build with debug_assertions, so on macOS/Windows the hint names the
+        // dev terminal; the per-OS file path is exercised via macos_backend_log_path.
+        assert!(!backend_log_hint().is_empty());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_backend_log_path_under_library_logs() {
-        // Pure path mapping (no env mutation) — the spawn redirect and the
-        // readiness-error hint must resolve to this same location.
-        let p = super::macos_backend_log_path(std::path::Path::new("/Users/example"));
+    fn macos_backend_log_path_is_role_scoped_under_library_logs() {
+        // Pure path mapping (no env mutation). Agent and Hub must resolve to
+        // DISTINCT files so co-located roles don't interleave logs (Kimi).
+        let home = std::path::Path::new("/Users/example");
+        let hub = super::macos_backend_log_path(home, "hub");
+        let agent = super::macos_backend_log_path(home, "agent");
         assert_eq!(
-            p,
-            std::path::Path::new("/Users/example/Library/Logs/TaskPaw/taskpaw-backend.log")
+            hub,
+            std::path::Path::new("/Users/example/Library/Logs/TaskPaw/taskpaw-backend-hub.log")
         );
+        assert!(agent.to_string_lossy().ends_with("taskpaw-backend-agent.log"));
+        assert_ne!(hub, agent);
     }
 
     #[test]
