@@ -15,7 +15,11 @@ const STATUS = {
     {
       id: 1, name: "render-01", ip: "10.0.0.1", port: 8765, enabled: 1,
       online: true, last_seen: "2026-06-29T10:00:00Z",
-      snapshot: { machine: "render-01", monitors: { "lada-main": { state: "running" } } },
+      snapshot: { machine: "render-01", monitors: {
+        // lada emits cpu_pct/mem_pct too — must NOT be mistaken for the host (Kimi #113).
+        "lada-main": { state: "running", type_id: "lada", metrics: { cpu_pct: 99, mem_pct: 99 } },
+        "render-01-host": { state: "ok", type_id: "host_metrics", metrics: { cpu_pct: 37, mem_pct: 72 } },
+      } },
     },
     {
       id: 2, name: "render-02", ip: "10.0.0.2", port: 8765, enabled: 1,
@@ -31,7 +35,9 @@ const STATUS = {
     {
       id: 4, name: "render-04", ip: "10.0.0.4", port: 8765, enabled: 1,
       online: true, last_seen: "2026-06-29T10:00:00Z",
-      snapshot: { machine: "render-04", monitors: { "lada-main": { state: "ok" } } },
+      // Legacy agent: monitors carry NO type_id → hostMetrics falls back to a
+      // cpu_pct/mem_pct key-scan (Kimi #113).
+      snapshot: { machine: "render-04", monitors: { host: { state: "ok", metrics: { cpu_pct: 55 } } } },
     },
   ],
   acks: {},
@@ -74,6 +80,29 @@ describe("HubDashboard (#95)", () => {
     expect(within(summary).getAllByLabelText(/status:/).length).toBe(3);
   });
 
+  it("shows CPU/MEM mini-bars for a live machine that reports host metrics (#113)", async () => {
+    renderHub();
+    const card = (await screen.findByText("render-01")).closest("button")!;
+    // The host_metrics monitor (37/72) drives the bars — NOT the lada monitor that
+    // also reports cpu_pct/mem_pct (99) (Kimi #113 attribution fix).
+    expect(within(card).getByText("37%")).toBeInTheDocument();
+    expect(within(card).getByText("72%")).toBeInTheDocument();
+    expect(within(card).queryByText("99%")).not.toBeInTheDocument();
+  });
+
+  it("falls back to a key-scan for a legacy agent with no type_id (#113)", async () => {
+    renderHub();
+    // render-04's monitor has no type_id but reports cpu_pct → bar still renders.
+    const card = (await screen.findByText("render-04")).closest("button")!;
+    expect(within(card).getByText("55%")).toBeInTheDocument();
+  });
+
+  it("omits mini-bars for an offline machine with no metrics (#113)", async () => {
+    renderHub();
+    const card = (await screen.findByText("render-03")).closest("button")!;
+    expect(within(card).queryByText(/%$/)).not.toBeInTheDocument();
+  });
+
   it("labels a disabled server distinctly from a merely-offline one", async () => {
     renderHub();
     // render-03 is enabled:0 → its chip reads "disabled", not just "offline".
@@ -84,9 +113,11 @@ describe("HubDashboard (#95)", () => {
   it("renders the self-monitor as metric tiles, not raw JSON", async () => {
     renderHub();
     await screen.findByText("hub-host");
-    // The host metrics render as labelled tiles (cpu/mem), not a JSON.stringify blob.
-    expect(screen.getByText(/CPU/i)).toBeInTheDocument();
-    expect(screen.queryByText(/"cpu_pct"/)).not.toBeInTheDocument();
+    // Scope to the self-monitor card (its overline label) so card mini-bars don't
+    // satisfy this — verifies the self monitor specifically renders gauges, not raw JSON.
+    const selfCard = screen.getByText(/self-monitor|自监控/).closest(".MuiCard-root") as HTMLElement;
+    expect(within(selfCard).getByText(/CPU/i)).toBeInTheDocument();
+    expect(within(selfCard).queryByText(/"cpu_pct"/)).not.toBeInTheDocument();
   });
 
   it("drills down into a machine's monitors when its card is clicked", async () => {

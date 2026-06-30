@@ -78,6 +78,7 @@ const en = {
     lastSeen: "last seen {{time}}", lastSeenNever: "never polled",
     machineMonitors: "monitors", machineEvents: "recent events",
     noMonitors: "No monitors reported.",
+    cpu: "CPU", mem: "MEM",
   },
   events: {
     none: "No events yet — they appear here as monitors report activity.",
@@ -168,6 +169,7 @@ const zh: typeof en = {
     lastSeen: "最后心跳 {{time}}", lastSeenNever: "从未轮询",
     machineMonitors: "监控项", machineEvents: "最近事件",
     noMonitors: "未上报监控项。",
+    cpu: "CPU", mem: "内存",
   },
   events: {
     none: "暂无事件 —— 监控产生活动时会显示在这里。",
