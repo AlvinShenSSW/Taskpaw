@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from taskpaw_v3.core.auth import token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
+from taskpaw_v3.core.net import guard_bind_exposure
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
@@ -32,6 +33,25 @@ def _unauthorized() -> JSONResponse:
         status_code=401,
         headers={"WWW-Authenticate": 'Bearer realm="TaskPaw"'},
     )
+
+
+def _guard_bind_exposure(config: HubConfig) -> None:
+    """Refuse to start an unsafe network exposure (#114), mirroring the agent's
+    UI guard (constitution §2: no public/WAN exposure, never default to all
+    interfaces). Raised BEFORE the socket is claimed so a bad bind never opens.
+
+    - A wildcard/all-interfaces bind (0.0.0.0, :: and any spelling) is refused
+      outright — even with a token — so the Hub never listens on every nic.
+    - A globally-routable (public/WAN) address is refused even WITH a token — the
+      Hub is LAN + Bearer only (constitution §2: no public/WAN exposure) (Codex).
+    - A non-loopback bind with an empty api_token is refused: /status (each
+      agent's snapshot) and /events would be reachable off-host unauthenticated.
+
+    The actual rules + host normalization live in the shared
+    core.net.guard_bind_exposure, so the Hub startup, agent startup, and agent UI
+    guards can't drift.
+    """
+    guard_bind_exposure(config.bind_host, config.api_token, label="Hub API")
 
 
 class HubService:
@@ -207,6 +227,7 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
     from taskpaw_v3.core.net import announce_ready, claim_port, loopback_url
 
     shutdown = shutdown or GracefulShutdown()
+    _guard_bind_exposure(config)  # refuse an unsafe LAN exposure before binding (#114)
     sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
     app, service = create_hub_app(config, store)
     service.start()

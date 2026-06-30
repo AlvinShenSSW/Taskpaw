@@ -50,6 +50,14 @@ class AgentConfig(BaseModel):
             raise ValueError("must not be blank")
         return v
 
+    @field_validator("bind_host")
+    @classmethod
+    def _norm_bind_host(cls, v: str) -> str:
+        # Normalize what's persisted and handed to claim_port/loopback_url: trim
+        # whitespace + surrounding brackets so "  192.168.1.10  " / "[::1]" don't
+        # pass the exposure guard but then fail socket.bind/getaddrinfo (#114/Kimi).
+        return v.strip().strip("[]")
+
     @field_validator("bind_port", "control_port")
     @classmethod
     def _ports(cls, v: int) -> int:
@@ -90,6 +98,13 @@ class HubConfig(BaseModel):
     write_status_md: bool = True
     # Drop status_log rows older than this many days (bounded history). 0 = keep all.
     status_log_retention_days: int = Field(7, ge=0)
+
+    @field_validator("bind_host")
+    @classmethod
+    def _norm_bind_host(cls, v: str) -> str:
+        # Same normalization as the agent: trim whitespace + brackets so the value
+        # the guard classifies is the value handed to claim_port/loopback_url (#114).
+        return v.strip().strip("[]")
 
     @field_validator("bind_port")
     @classmethod

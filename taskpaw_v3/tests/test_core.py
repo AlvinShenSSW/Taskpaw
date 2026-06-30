@@ -188,3 +188,12 @@ def test_build_queue_persists_across_restart(tmp_path):
     # New queue (simulated restart) resumes from the persisted counter.
     q2 = build_queue(cfg, state)
     assert q2.add("mon", "c")["id"] == 3
+
+
+def test_bind_host_normalized_on_both_configs():
+    """bind_host is trimmed + de-bracketed so the value persisted and handed to
+    claim_port/loopback_url matches what the exposure guard classified (#114)."""
+    assert AgentConfig(server_id="s", machine="m", bind_host="  192.168.1.10  ").bind_host == "192.168.1.10"
+    assert AgentConfig(server_id="s", machine="m", bind_host="[::1]").bind_host == "::1"
+    assert HubConfig(bind_host="  10.0.0.5 ").bind_host == "10.0.0.5"
+    assert HubConfig(bind_host="[::1]").bind_host == "::1"

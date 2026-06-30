@@ -392,3 +392,51 @@ def test_read_api_open_when_token_empty(tmp_path):
         assert client.get("/events").status_code == 200
     finally:
         s.close()
+
+
+def test_bind_guard_refuses_wildcard_even_with_token():
+    """A wildcard/all-interfaces bind is refused outright, even with a token (#114)."""
+    import pytest
+    from taskpaw_v3.hub.server.app import _guard_bind_exposure
+    from taskpaw_v3.core.config import HubConfig
+
+    # Raw, bracketed, and string wildcard spellings must all be caught (Kimi).
+    for host in ("0.0.0.0", "::", "0:0:0:0:0:0:0:0", "[::]", "[0.0.0.0]", "", "*", "  ::  "):
+        with pytest.raises(ValueError, match="all interfaces"):
+            _guard_bind_exposure(HubConfig(bind_host=host, api_token="s3cret"))
+
+
+def test_bind_guard_refuses_public_even_with_token():
+    """A globally-routable (public/WAN) bind is refused even WITH a token — the Hub
+    is LAN + Bearer only (#114/Codex)."""
+    import pytest
+    from taskpaw_v3.hub.server.app import _guard_bind_exposure
+    from taskpaw_v3.core.config import HubConfig
+
+    for host in ("8.8.8.8", "1.1.1.1", "[2001:4860:4860::8888]"):
+        with pytest.raises(ValueError, match="public/WAN"):
+            _guard_bind_exposure(HubConfig(bind_host=host, api_token="s3cret"))
+
+
+def test_bind_guard_refuses_nonloopback_without_token():
+    """Non-loopback bind + empty api_token is refused (would expose /status,
+    /events off-host unauthenticated) (#114)."""
+    import pytest
+    from taskpaw_v3.hub.server.app import _guard_bind_exposure
+    from taskpaw_v3.core.config import HubConfig
+
+    with pytest.raises(ValueError, match="requires an api_token"):
+        _guard_bind_exposure(HubConfig(bind_host="192.168.1.10", api_token=""))
+
+
+def test_bind_guard_allows_loopback_and_authed_lan():
+    """Loopback (any token) and a token-protected LAN bind start fine (#114)."""
+    from taskpaw_v3.hub.server.app import _guard_bind_exposure
+    from taskpaw_v3.core.config import HubConfig
+
+    # Loopback (numeric, localhost, bracketed v6), no token → fine (local default).
+    for host in ("127.0.0.1", "::1", "[::1]", "localhost", "127.0.0.2"):
+        _guard_bind_exposure(HubConfig(bind_host=host, api_token=""))
+    # Private LAN WITH a token → fine (10/8, 172.16/12, 192.168/16).
+    for host in ("192.168.1.10", "10.0.0.5", "172.16.0.1"):
+        _guard_bind_exposure(HubConfig(bind_host=host, api_token="s3cret"))

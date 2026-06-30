@@ -18,7 +18,6 @@ pydantic config model forbids extra keys, so it can't go inside `config`.
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import threading
 from pathlib import Path
@@ -41,26 +40,9 @@ def _as_bool(v: Any) -> bool:
     return v
 
 
-def _bind_is_wildcard(host: str) -> bool:
-    """All-interfaces bind? True for 0.0.0.0, :: and every IPv6 spelling of the
-    unspecified address (e.g. 0:0:0:0:0:0:0:0), so the exposure guard can't be
-    bypassed by an alternate spelling (Codex #43)."""
-    if host in ("", "*"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_unspecified
-    except ValueError:
-        return False  # a hostname, not an IP literal — the loopback check handles it
-
-
-def _bind_is_loopback(host: str) -> bool:
-    """On-host only? True for localhost and any loopback IP (127.0.0.0/8, ::1)."""
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+# Shared network-exposure guard (#114) — single source of truth used by the agent
+# UI (here), the agent startup, and the Hub, so the rules can't drift.
+from taskpaw_v3.core.net import guard_bind_exposure
 
 
 class MonitorAdmin:
@@ -267,17 +249,9 @@ class MonitorAdmin:
             # leaves config + disk untouched. Normalize via ipaddress so every
             # spelling is caught (e.g. `0:0:0:0:0:0:0:0` == `::`, `127.0.0.2` is
             # still loopback) — not a brittle exact-string set (Codex #43 r3).
-            bh = validated.bind_host.strip().strip("[]")
-            if _bind_is_wildcard(bh):
-                raise ValueError(
-                    f"refusing to bind the network API to all interfaces ({bh!r}) "
-                    f"from the UI — use 127.0.0.1 or a specific LAN address.")
-            if not _bind_is_loopback(bh) and not validated.api_token.strip():
-                raise ValueError(
-                    f"binding the network API to a non-loopback address ({bh}) "
-                    f"requires an API token, or /status and /events would be "
-                    f"reachable off-host without auth. Set a token first, or keep "
-                    f"bind_host on 127.0.0.1.")
+            # Shared guard (wildcard / public / non-loopback-without-token), the
+            # single source used by the agent startup and the Hub too (#114/Kimi).
+            guard_bind_exposure(validated.bind_host, validated.api_token, label="network API")
             # A restart is needed if any non-live DESIRED field differs from what
             # the agent is actually RUNNING (the still-at-boot _config) — this
             # stays True across saves until the agent restarts (Codex #43).

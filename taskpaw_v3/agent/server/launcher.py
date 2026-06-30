@@ -17,6 +17,7 @@ from taskpaw_v3.core.net import (  # re-export
     PortInUseError,
     announce_ready,
     claim_port,
+    guard_bind_exposure,
     loopback_url,
     port_available,
 )
@@ -67,6 +68,11 @@ def run_agent(
     import uvicorn
 
     from .app import create_control_app, create_network_app
+
+    # Refuse an unsafe network exposure at startup too — not just from the UI guard
+    # — so a hand-edited agent.yaml / bootstrap can't bind wildcard/public/non-
+    # loopback-without-token unguarded (#114/Kimi). Raised BEFORE any socket claim.
+    guard_bind_exposure(config.bind_host, config.api_token, label="agent network API")
 
     # Race-free claim: hold the sockets, hand them to uvicorn.
     net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
