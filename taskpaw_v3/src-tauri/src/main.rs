@@ -221,22 +221,50 @@ fn backend_command() -> Option<(String, Vec<String>)> {
     Some((found.to_string_lossy().into_owned(), vec![role]))
 }
 
-/// Human-readable location of the backend log, for user-facing messages —
-/// centralized so the spawn redirect and any hint we print can never name
-/// different paths (Kimi). Role-scoped so an agent and a Hub on the same account
-/// point at distinct files. Dev builds inherit stderr (see spawn_backend), so the
-/// hint names the terminal there; Linux always inherits.
+/// The real, role-scoped backend log path for this OS, or None if its base env
+/// var is unset / the platform inherits stderr (Linux). Single source of truth so
+/// the spawn redirect and the user-facing hint can never name different files
+/// (Kimi). Role-scoped so an agent and a Hub on the same account stay distinct.
+#[cfg(any(target_os = "macos", windows))]
+fn backend_log_path() -> Option<std::path::PathBuf> {
+    let role = ui_role();
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(macos_backend_log_path(std::path::Path::new(&home), &role))
+    }
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var_os("APPDATA")?;
+        Some(
+            std::path::Path::new(&appdata)
+                .join("TaskPaw")
+                .join(format!("taskpaw-backend-{role}.log")),
+        )
+    }
+}
+
+/// Human-readable location of the backend log, for user-facing messages. Dev
+/// builds inherit stderr (see spawn_backend), so the hint names the terminal;
+/// Linux always inherits. In release it names the real per-role file — but only if
+/// that file actually exists, since the redirect creates it at spawn: an absent
+/// file means open_backend_log() failed and stderr went to null, so we point at
+/// the OS app log instead of a file that was never written (Kimi).
 fn backend_log_hint() -> String {
     #[cfg(any(target_os = "macos", windows))]
-    if cfg!(debug_assertions) {
-        return "the launching terminal (dev builds inherit backend stderr)".to_string();
+    {
+        if cfg!(debug_assertions) {
+            return "the launching terminal (dev builds inherit backend stderr)".to_string();
+        }
+        match backend_log_path() {
+            Some(p) if p.exists() => p.display().to_string(),
+            _ => "the OS app log (Console.app / Event Viewer) — the backend log \
+                  file could not be opened, so its stderr was discarded"
+                .to_string(),
+        }
     }
-    #[cfg(target_os = "macos")]
-    return format!("~/Library/Logs/TaskPaw/taskpaw-backend-{}.log", ui_role());
-    #[cfg(windows)]
-    return format!("%APPDATA%\\TaskPaw\\taskpaw-backend-{}.log", ui_role());
     #[cfg(not(any(target_os = "macos", windows)))]
-    return "the backend's stderr (journalctl, or the launching terminal)".to_string();
+    "the backend's stderr (journalctl, or the launching terminal)".to_string()
 }
 
 /// Pure mapping from $HOME + role to the macOS backend log path, factored out so
@@ -267,35 +295,37 @@ fn roll_log_if_oversized(path: &std::path::Path, max_bytes: u64) {
 
 /// Open the per-OS, per-role backend log for APPEND so crash logs accumulate
 /// across relaunches instead of being truncated on every start (Kimi). Creates the
-/// dir, rolls the file to `.1` once it passes ~5 MB to bound growth, and warns to
-/// the shell's own stderr (captured by the OS log) rather than silently discarding
-/// the backend's logs. None on Linux (stderr is inherited). Callers only invoke
-/// this in release builds; dev keeps stderr on the inherited terminal.
+/// dir, rolls the file to `.1` if it's already >~5 MB *at launch* (see
+/// roll_log_if_oversized — there is no mid-session cap), and warns to the shell's
+/// own stderr (captured by the OS log) rather than silently discarding the
+/// backend's logs. None on Linux (stderr is inherited). Callers only invoke this in
+/// release builds; dev keeps stderr on the inherited terminal.
 #[cfg(any(target_os = "macos", windows))]
 fn open_backend_log() -> Option<std::fs::File> {
-    let role = ui_role();
-    #[cfg(target_os = "macos")]
-    let path = {
-        let home = std::env::var_os("HOME")?;
-        macos_backend_log_path(std::path::Path::new(&home), &role)
-    };
-    #[cfg(windows)]
-    let path = {
-        let appdata = std::env::var_os("APPDATA")?;
-        std::path::Path::new(&appdata)
-            .join("TaskPaw")
-            .join(format!("taskpaw-backend-{role}.log"))
-    };
+    let path = backend_log_path()?;
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("taskpaw: cannot create backend log dir {dir:?}: {e}; backend stderr discarded");
             return None;
         }
     }
-    // Bound growth: roll to a single .1 backup once the live file passes ~5 MB,
-    // so append doesn't accumulate without limit on a long-lived deployment (Kimi).
+    // Bound growth: at launch, roll to a single .1 backup if the live file is
+    // already past ~5 MB. This is a per-restart cap, not a mid-session one — the
+    // child holds the fd, so we can't rotate underneath it without a proxy pipe,
+    // which is overkill for a sparse status-poll log (Kimi).
     roll_log_if_oversized(&path, 5 * 1024 * 1024);
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    // Don't follow a symlink planted at the log path — append to the real file in
+    // our own dir or fail, rather than be redirected elsewhere (Kimi). macOS only;
+    // the Windows reparse-point equivalent is a low-risk follow-up (the dir is
+    // user-owned).
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    match opts.open(&path) {
         Ok(f) => Some(f),
         Err(e) => {
             eprintln!("taskpaw: cannot open backend log {path:?}: {e}; backend stderr discarded");
