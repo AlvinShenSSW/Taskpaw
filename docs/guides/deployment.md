@@ -183,3 +183,24 @@ These are plain foreground processes. For always-on operation wrap each in your
 OS service manager — `launchd` (macOS), a Scheduled Task / NSSM (Windows), or
 `systemd` (Linux) — invoking the same `python -m …` command. The processes
 handle SIGTERM for a graceful shutdown.
+
+## Logs & troubleshooting
+
+The packaged desktop app (Tauri shell) has no console, so it routes the bundled
+backend's stderr — where the logs go — to a file per OS:
+
+| OS      | Backend log file |
+| ------- | ---------------- |
+| macOS   | `~/Library/Logs/TaskPaw/taskpaw-backend.log` |
+| Windows | `%APPDATA%\TaskPaw\taskpaw-backend.log` |
+| Linux   | inherited stderr (run under `systemd`/terminal, read via `journalctl`) |
+
+If the UI loads but shows no data, tail that file first — a backend that exits on
+a bad config or a port clash reports it there.
+
+> **macOS residual risk (orphan backend).** When you quit normally (window close
+> / Cmd-Q) the shell reaps the backend. But if the shell is *hard*-killed
+> (SIGKILL, OOM, force-quit), macOS has no `PR_SET_PDEATHSIG` equivalent (Linux
+> does, Windows uses a Job Object), so the backend can briefly outlive the shell
+> and hold its port. It exits on its own shortly after; if a relaunch ever fails
+> to bind, `pkill -f taskpaw-backend` clears it.

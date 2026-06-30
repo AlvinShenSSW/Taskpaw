@@ -234,7 +234,6 @@ fn spawn_backend() -> Option<Child> {
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
-        // stderr inherits (dev terminal); a windowed release Mac has no console.
         // If the shell is HARD-killed (SIGKILL / segfault / OOM), neither
         // RunEvent::ExitRequested nor Backend::Drop runs to reap the backend, so on
         // its own process group it would orphan and hold ports (#54). On Linux ask
@@ -250,6 +249,24 @@ fn spawn_backend() -> Option<Child> {
                 Ok(())
             });
         }
+        // A windowed macOS .app has no console (the same problem the Windows block
+        // below solves with %APPDATA%), so the backend's STDERR — its logs — would
+        // vanish in a packaged build. Route it to ~/Library/Logs/TaskPaw/
+        // taskpaw-backend.log (the macOS convention) so production failures are
+        // debuggable; null if it can't open. stdout stays piped (above) for the
+        // §3.1 readiness handshake. Linux is left inheriting: the headless Hub runs
+        // under a terminal / systemd that already captures stderr.
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Stdio;
+            let log = std::env::var("HOME").ok().and_then(|h| {
+                let dir = std::path::Path::new(&h).join("Library/Logs/TaskPaw");
+                std::fs::create_dir_all(&dir).ok()?;
+                std::fs::File::create(dir.join("taskpaw-backend.log")).ok()
+            });
+            command.stderr(log.map(Stdio::from).unwrap_or_else(Stdio::null));
+        }
+        // Linux dev keeps stderr on the inherited terminal (no override here).
     }
     #[cfg(windows)]
     {
