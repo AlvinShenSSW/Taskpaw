@@ -196,8 +196,9 @@ backend's stderr — where the logs go — to a file per OS:
 | Linux   | inherited stderr (run under `systemd`/terminal, read via `journalctl`) |
 
 `<role>` is `agent` or `hub`, so running both on one account keeps separate logs.
-The file appends across relaunches and rolls to `…-<role>.log.1` past ~5 MB. (Dev
-builds — `cargo tauri dev` — inherit stderr to the terminal instead.)
+The file appends across relaunches; at each launch, if it already exceeds ~5 MB it
+is rolled to `…-<role>.log.1` (one backup). (Dev builds — `cargo tauri dev` —
+inherit stderr to the terminal instead.)
 
 If the UI loads but shows no data, tail that file first — a backend that exits on
 a bad config or a port clash reports it there.

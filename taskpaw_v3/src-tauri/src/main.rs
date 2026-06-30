@@ -247,6 +247,24 @@ fn macos_backend_log_path(home: &std::path::Path, role: &str) -> std::path::Path
         .join(format!("taskpaw-backend-{role}.log"))
 }
 
+/// Roll `path` to a single `<name>.1` backup when it exceeds `max_bytes`, bounding
+/// the appended log's growth. Removes any stale `.1` FIRST: std::fs::rename
+/// overwrites on Unix but FAILS on Windows when the destination exists, which would
+/// otherwise silently disable rotation after the first roll and let the log grow
+/// unbounded (Codex + Kimi). Best-effort — an I/O error just means the log keeps
+/// appending this session; evaluated at open (launch) time. Path-injectable so the
+/// rotation logic is unit-testable without the env-derived per-OS path.
+#[cfg(any(target_os = "macos", windows, test))]
+fn roll_log_if_oversized(path: &std::path::Path, max_bytes: u64) {
+    if std::fs::metadata(path).map(|m| m.len() > max_bytes).unwrap_or(false) {
+        let mut rotated = path.as_os_str().to_owned();
+        rotated.push(".1");
+        let rotated = std::path::PathBuf::from(rotated);
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::rename(path, &rotated);
+    }
+}
+
 /// Open the per-OS, per-role backend log for APPEND so crash logs accumulate
 /// across relaunches instead of being truncated on every start (Kimi). Creates the
 /// dir, rolls the file to `.1` once it passes ~5 MB to bound growth, and warns to
@@ -276,9 +294,7 @@ fn open_backend_log() -> Option<std::fs::File> {
     }
     // Bound growth: roll to a single .1 backup once the live file passes ~5 MB,
     // so append doesn't accumulate without limit on a long-lived deployment (Kimi).
-    if std::fs::metadata(&path).map(|m| m.len() > 5 * 1024 * 1024).unwrap_or(false) {
-        let _ = std::fs::rename(&path, path.with_file_name(format!("taskpaw-backend-{role}.log.1")));
-    }
+    roll_log_if_oversized(&path, 5 * 1024 * 1024);
     match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(f) => Some(f),
         Err(e) => {
@@ -681,7 +697,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_log_hint, close_confirm_text, loopback_base};
+    use super::{backend_log_hint, close_confirm_text, loopback_base, roll_log_if_oversized};
+
+    #[test]
+    fn roll_log_rotates_oversized_and_overwrites_stale_backup() {
+        // Reproduces the cross-platform rotation bug: a stale `.1` must not block
+        // the roll (std::fs::rename fails on Windows if the dest exists).
+        let dir = std::env::temp_dir().join(format!("taskpaw-roll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("taskpaw-backend-agent.log");
+        let backup = dir.join("taskpaw-backend-agent.log.1");
+
+        std::fs::write(&backup, b"stale-old-backup").unwrap(); // pre-existing .1
+        std::fs::write(&log, vec![b'x'; 11]).unwrap();         // 11 bytes > max 10
+        roll_log_if_oversized(&log, 10);
+        assert!(!log.exists(), "oversized live log should be rolled away");
+        assert_eq!(std::fs::read(&backup).unwrap(), vec![b'x'; 11], "stale .1 overwritten by the rolled log");
+
+        // Under threshold: left in place, no spurious roll.
+        std::fs::write(&log, b"tiny").unwrap();
+        roll_log_if_oversized(&log, 10);
+        assert!(log.exists() && std::fs::read(&log).unwrap() == b"tiny");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn backend_log_hint_is_nonempty() {
