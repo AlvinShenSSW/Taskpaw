@@ -221,6 +221,61 @@ fn backend_command() -> Option<(String, Vec<String>)> {
     Some((found.to_string_lossy().into_owned(), vec![role]))
 }
 
+/// Human-readable location of the backend log, for user-facing messages. The
+/// packaged (console-less) shell redirects the backend's stderr to this file;
+/// centralized so the spawn redirect and any hint we print can never name
+/// different paths (Kimi). Linux inherits stderr, so it points there instead.
+fn backend_log_hint() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "~/Library/Logs/TaskPaw/taskpaw-backend.log"
+    }
+    #[cfg(windows)]
+    {
+        "%APPDATA%\\TaskPaw\\taskpaw-backend.log"
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        "the backend's stderr (journalctl, or the launching terminal)"
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_backend_log_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("Library/Logs/TaskPaw/taskpaw-backend.log")
+}
+
+/// Open the per-OS backend log for APPEND so crash logs accumulate across
+/// relaunches instead of being truncated on every start (Kimi). Creates the dir;
+/// on failure warns to the shell's own stderr (captured by the OS log) rather than
+/// silently discarding the backend's logs. None on Linux (stderr is inherited).
+#[cfg(any(target_os = "macos", windows))]
+fn open_backend_log() -> Option<std::fs::File> {
+    #[cfg(target_os = "macos")]
+    let path = {
+        let home = std::env::var_os("HOME")?;
+        macos_backend_log_path(std::path::Path::new(&home))
+    };
+    #[cfg(windows)]
+    let path = {
+        let appdata = std::env::var_os("APPDATA")?;
+        std::path::Path::new(&appdata).join("TaskPaw").join("taskpaw-backend.log")
+    };
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("taskpaw: cannot create backend log dir {dir:?}: {e}; backend stderr discarded");
+            return None;
+        }
+    }
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("taskpaw: cannot open backend log {path:?}: {e}; backend stderr discarded");
+            None
+        }
+    }
+}
+
 fn spawn_backend() -> Option<Child> {
     let (program, args) = backend_command()?;
     let mut command = Command::new(&program);
@@ -251,22 +306,15 @@ fn spawn_backend() -> Option<Child> {
         }
         // A windowed macOS .app has no console (the same problem the Windows block
         // below solves with %APPDATA%), so the backend's STDERR — its logs — would
-        // vanish in a packaged build. Route it to ~/Library/Logs/TaskPaw/
-        // taskpaw-backend.log (the macOS convention) so production failures are
-        // debuggable; null if it can't open. stdout stays piped (above) for the
-        // §3.1 readiness handshake. Linux is left inheriting: the headless Hub runs
-        // under a terminal / systemd that already captures stderr.
+        // vanish in a packaged build. Route it to ~/Library/Logs/TaskPaw/ (see
+        // open_backend_log) so production failures are debuggable. stdout stays
+        // piped (above) for the §3.1 readiness handshake. Linux is left inheriting:
+        // the headless Hub runs under a terminal / systemd that already captures it.
         #[cfg(target_os = "macos")]
         {
             use std::process::Stdio;
-            let log = std::env::var("HOME").ok().and_then(|h| {
-                let dir = std::path::Path::new(&h).join("Library/Logs/TaskPaw");
-                std::fs::create_dir_all(&dir).ok()?;
-                std::fs::File::create(dir.join("taskpaw-backend.log")).ok()
-            });
-            command.stderr(log.map(Stdio::from).unwrap_or_else(Stdio::null));
+            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
         }
-        // Linux dev keeps stderr on the inherited terminal (no override here).
     }
     #[cfg(windows)]
     {
@@ -279,15 +327,10 @@ fn spawn_backend() -> Option<Child> {
         // every launch (caught by Windows verification, #50).
         command.creation_flags(0x08000000 | 0x01000000);
         // The windowed shell has no console — route backend STDERR (its logs) to
-        // %APPDATA%\TaskPaw\taskpaw-backend.log so production builds are
-        // debuggable; null if it can't open (Kimi). stdout stays piped (above) for
-        // the readiness handshake.
-        let log = std::env::var("APPDATA").ok().and_then(|a| {
-            let dir = std::path::Path::new(&a).join("TaskPaw");
-            std::fs::create_dir_all(&dir).ok()?;
-            std::fs::File::create(dir.join("taskpaw-backend.log")).ok()
-        });
-        command.stderr(log.map(Stdio::from).unwrap_or_else(Stdio::null));
+        // %APPDATA%\TaskPaw\taskpaw-backend.log so production builds are debuggable
+        // (see open_backend_log: append, with a warning if it can't open). stdout
+        // stays piped (above) for the readiness handshake.
+        command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
     }
     match command.spawn() {
         Ok(c) => Some(c),
@@ -547,10 +590,12 @@ fn main() {
                 Some(out) => match read_readiness(out, Duration::from_secs(30)) {
                     Some(b) => b,
                     None => {
-                        return Err("backend did not report readiness within 30s; \
-                                    refusing to open a UI that cannot reach the local \
-                                    API. See %APPDATA%\\TaskPaw\\taskpaw-backend.log."
-                            .into());
+                        return Err(format!(
+                            "backend did not report readiness within 30s; refusing to \
+                             open a UI that cannot reach the local API. See {}.",
+                            backend_log_hint()
+                        )
+                        .into());
                     }
                 },
                 None => String::new(), // dev: Vite + TASKPAW_UI_BASE fallback
@@ -621,7 +666,29 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{close_confirm_text, loopback_base};
+    use super::{backend_log_hint, close_confirm_text, loopback_base};
+
+    #[test]
+    fn backend_log_hint_is_platform_specific_and_nonempty() {
+        let h = backend_log_hint();
+        assert!(!h.is_empty());
+        #[cfg(target_os = "macos")]
+        assert!(h.contains("Library/Logs/TaskPaw"), "macOS hint should point at ~/Library/Logs: {h}");
+        #[cfg(windows)]
+        assert!(h.contains("APPDATA"), "Windows hint should point at %APPDATA%: {h}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_backend_log_path_under_library_logs() {
+        // Pure path mapping (no env mutation) — the spawn redirect and the
+        // readiness-error hint must resolve to this same location.
+        let p = super::macos_backend_log_path(std::path::Path::new("/Users/example"));
+        assert_eq!(
+            p,
+            std::path::Path::new("/Users/example/Library/Logs/TaskPaw/taskpaw-backend.log")
+        );
+    }
 
     #[test]
     fn close_confirm_is_single_language_per_choice() {

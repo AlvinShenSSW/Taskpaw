@@ -201,6 +201,7 @@ a bad config or a port clash reports it there.
 > **macOS residual risk (orphan backend).** When you quit normally (window close
 > / Cmd-Q) the shell reaps the backend. But if the shell is *hard*-killed
 > (SIGKILL, OOM, force-quit), macOS has no `PR_SET_PDEATHSIG` equivalent (Linux
-> does, Windows uses a Job Object), so the backend can briefly outlive the shell
-> and hold its port. It exits on its own shortly after; if a relaunch ever fails
-> to bind, `pkill -f taskpaw-backend` clears it.
+> does, Windows uses a Job Object). The backend is a long-running server, so it
+> does **not** exit on its own — it gets reparented to `launchd` and keeps running,
+> holding its port. Clear it manually with `pkill -f taskpaw-backend` before
+> relaunching (a relaunch that can't bind its port is the symptom).
