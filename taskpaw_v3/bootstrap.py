@@ -22,6 +22,36 @@ from taskpaw_v3.hub.server import service as hub_service
 EXAMPLES = Path(__file__).resolve().parent / "examples"
 
 
+def _friendly_machine_name() -> str:
+    """The human-facing computer name to seed a fresh agent's `machine` — what the
+    user calls this box, not the network hostname. On macOS that's the OS
+    `ComputerName` (e.g. "ThunderPig"); on Windows `%COMPUTERNAME%`. Both differ
+    from socket.gethostname(), which returns the network host (macOS gives
+    'Mac.localdomain' -> 'Mac'). Falls back to the short hostname when the friendly
+    name is unavailable/blank (e.g. Linux, or scutil missing)."""
+    import socket
+
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+
+            # shell=False (list argv) per constitution §2 — no shell injection.
+            out = subprocess.run(
+                ["scutil", "--get", "ComputerName"],
+                capture_output=True, text=True, timeout=2,
+            )
+            name = out.stdout.strip()
+            if name:
+                return name
+        except (OSError, subprocess.SubprocessError):
+            pass
+    elif sys.platform == "win32":
+        name = (os.environ.get("COMPUTERNAME") or "").strip()
+        if name:
+            return name
+    return (socket.gethostname() or "agent").split(".")[0]
+
+
 def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
     """Copy the example config for `role` to its platform path.
 
@@ -40,14 +70,18 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
     text = Path(src).read_text(encoding="utf-8")
     if role == "agent":
         # Give each fresh agent a UNIQUE identity so multiple LAN installs don't
-        # all advertise "my-agent" (display/log collisions) (Kimi). Targeted line
-        # replace keeps the example's comments.
-        import socket
+        # all advertise "my-agent" (display/log collisions) (Kimi). `machine` is the
+        # human display name (the OS friendly computer name, e.g. "ThunderPig") so
+        # the Hub and the auto host_metrics monitor ("<machine>-host") read the way
+        # the user names the box; `server_id` is a slug of it + a short uuid (a
+        # stable, space-free technical id). Targeted line replace keeps the comments.
+        import re
         import uuid
-        host = (socket.gethostname() or "agent").split(".")[0]
+        friendly = _friendly_machine_name()
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", friendly).strip("-").lower() or "agent"
         text = text.replace("server_id: my-agent",
-                            f"server_id: {host}-{uuid.uuid4().hex[:6]}")
-        text = text.replace("machine: my-machine", f"machine: {host}")
+                            f"server_id: {slug}-{uuid.uuid4().hex[:6]}")
+        text = text.replace("machine: my-machine", f"machine: {friendly}")
     # Atomic write (repo invariant: configs are reader-visible state) — a tmp file
     # in the same dir + fsync + os.replace, so an interrupted/power-lost bootstrap
     # never leaves a truncated config the service would read.

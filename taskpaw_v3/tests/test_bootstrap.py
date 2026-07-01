@@ -53,6 +53,27 @@ def test_scaffold_agent_gets_unique_server_id(home):
     assert sid and sid != "my-agent"                  # a real unique id
 
 
+def test_scaffold_agent_machine_uses_friendly_computer_name(home, monkeypatch):
+    # `machine` should seed from the OS friendly computer name (macOS ComputerName /
+    # Windows %COMPUTERNAME%), NOT socket.gethostname() — so the auto host_metrics
+    # monitor reads "<ComputerName>-host" (e.g. "ThunderPig-host"), the name the
+    # user set for the box, not "Mac".
+    monkeypatch.setattr(bootstrap, "_friendly_machine_name", lambda: "ThunderPig")
+    path, _ = bootstrap.scaffold("agent")
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    cfg = load_yaml(AgentConfig, path)
+    assert cfg.machine == "ThunderPig"
+    # server_id is a space-free slug of it + a short uuid
+    assert cfg.server_id.startswith("thunderpig-") and len(cfg.server_id) > len("thunderpig-")
+
+
+def test_friendly_machine_name_falls_back_to_hostname(monkeypatch):
+    # No friendly name available (e.g. Linux) → short hostname, never a crash.
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("socket.gethostname", lambda: "buildbox.lan")
+    assert bootstrap._friendly_machine_name() == "buildbox"
+
+
 def test_scaffold_does_not_clobber(home):
     path, _ = bootstrap.scaffold("agent")
     path.write_text("server_id: mine\nmachine: mine\n")
