@@ -515,14 +515,19 @@ fn kill_backend(app: &tauri::AppHandle) {
 /// out of the osascript string.
 #[cfg(any(target_os = "macos", test))]
 fn applescript_escape(s: &str) -> String {
-    // Backslash first, then quotes, then newlines → an AppleScript string literal
-    // can't span physical lines, so a message with "\n\n" (the readiness-timeout
-    // text) must render them as the two-char \n escape or osascript won't compile
-    // and the dialog is silently dropped on a fatal path (Kimi).
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
+    // Escape backslash/quote, and replace ANY control char (newline/tab/etc.) with a
+    // space — an AppleScript literal can't span physical lines, and other control
+    // bytes in a log path shouldn't reach osascript. Cap length so a pathological
+    // message can't build a huge script (Kimi).
+    s.chars()
+        .take(1000)
+        .map(|c| match c {
+            '\\' => "\\\\".to_string(),
+            '"' => "\\\"".to_string(),
+            c if c.is_control() => " ".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 /// Fatal startup failure: show a best-effort native error dialog, then exit
@@ -841,8 +846,11 @@ mod tests {
         // multi-line literal).
         assert_eq!(applescript_escape(r#"a"b\c"#), r#"a\"b\\c"#);
         assert_eq!(applescript_escape("plain text"), "plain text");
-        assert_eq!(applescript_escape("line1\n\nline2"), "line1\\n\\nline2");
-        assert!(!applescript_escape("a\nb").contains('\n')); // no raw newline survives
+        // control chars (newline/tab) become spaces so the literal stays one line
+        assert_eq!(applescript_escape("line1\n\tline2"), "line1  line2");
+        assert!(!applescript_escape("a\nb\tc").contains(|c: char| c.is_control()));
+        // length is capped
+        assert!(applescript_escape(&"x".repeat(5000)).chars().count() <= 1000);
     }
 
     #[test]

@@ -22,6 +22,15 @@ from datetime import datetime
 from typing import Any, Optional
 
 
+def _inline(s: str, cap: int = 200) -> str:
+    """Sanitize a free-form string (e.g. a filename) for a single status.md line:
+    replace control chars (newlines/tabs) with a space so it can't break the
+    line-oriented format OpenClaw parses or inject fake monitor lines, and cap the
+    length (Kimi)."""
+    cleaned = "".join(c if c.isprintable() else " " for c in s).strip()
+    return cleaned[:cap]
+
+
 def _is_num(v: Any) -> bool:
     # Reject bool (an int subclass) and non-finite floats — a backend metric like
     # gpu_pct: NaN (nvidia-smi "nan") must not render as "GPU nan%" (Kimi).
@@ -89,8 +98,8 @@ def _status_text(snap: Any) -> str:
         left = (max(0, int(m["queue_remaining"])) if _is_num(m.get("queue_remaining"))
                 else max(0, total - done))
         seg = f"{done}/{total} done ({left} left)"
-        if isinstance(m.get("current_file"), str) and m["current_file"]:
-            seg += f" | {m['current_file']} |"
+        if isinstance(m.get("current_file"), str) and (cf := _inline(m["current_file"])):
+            seg += f" | {cf} |"
         parts.append(seg)
 
     # comfyui-style depth: "N running, M pending".

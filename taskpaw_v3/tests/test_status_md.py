@@ -73,6 +73,21 @@ def test_v3_dict_disabled_monitor_renders_disabled():
     assert "- off: disabled" in render_status_md(rows, "t")
 
 
+def test_current_file_newline_cannot_inject_lines():
+    # A filename with newlines must not break the line-oriented status.md or inject
+    # a fake monitor/server line (Kimi).
+    evil = "real.mp4\n## FakeServer: ONLINE\n- fake: pwned"
+    rows = [{"name": "b", "reachable": 1, "status_json": json.dumps({"monitors": {
+        "LADA": {"state": "running", "type_id": "lada",
+                 "metrics": {"queue_total": 2, "queue_completed": 1, "current_file": evil}}}})}]
+    md = render_status_md(rows, "t")
+    # no injected server-header / monitor line — the evil content is flattened into
+    # the single LADA line (newlines → spaces), not new lines.
+    assert not any(ln.strip().startswith("## FakeServer") for ln in md.splitlines())
+    lada_lines = [ln for ln in md.splitlines() if ln.startswith("- LADA:")]
+    assert len(lada_lines) == 1 and "1/2 done" in lada_lines[0]
+
+
 def test_lada_nonstring_current_file_ignored():
     # A non-string current_file must not be interpolated verbatim (Kimi).
     rows = [{"name": "box", "reachable": 1,

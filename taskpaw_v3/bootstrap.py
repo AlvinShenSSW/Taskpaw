@@ -44,10 +44,14 @@ def _friendly_machine_name() -> str:
                 capture_output=True, text=True, timeout=2, errors="replace",
             )
             name = out.stdout.strip()
-            if name:
+            # Only trust stdout on a clean exit — on failure scutil writes to stderr
+            # and stdout is empty (or, if it printed an error, we must NOT adopt it
+            # as the machine name). Non-silent (constitution §4) either way (Kimi).
+            if out.returncode == 0 and name:
                 return name
+            print(f"taskpaw: scutil ComputerName unavailable (rc={out.returncode}); using hostname",
+                  file=sys.stderr)
         except (OSError, subprocess.SubprocessError) as e:
-            # Not silent (constitution §4): note why, then fall back to the hostname.
             print(f"taskpaw: could not read macOS ComputerName ({e}); using hostname",
                   file=sys.stderr)
     elif sys.platform == "win32":
