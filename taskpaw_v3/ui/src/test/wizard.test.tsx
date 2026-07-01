@@ -78,7 +78,7 @@ describe("MonitorWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
 
     // Step 2: fill the required name, submit the form (its button = "Review").
-    fireEvent.change(screen.getByLabelText(/Monitor name/), { target: { value: "lada-1" } });
+    fireEvent.change(screen.getByLabelText(/名称|Monitor name/), { target: { value: "lada-1" } });
     fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
 
     // Step 3: review shows the entered name; Add monitor submits.
@@ -118,7 +118,7 @@ describe("MonitorWizard", () => {
     expect(screen.queryByText("moomoo (MQT life-signs)")).not.toBeInTheDocument();
     // The name field is prefilled and locked (RJSF/mui renders ui:readonly as a
     // disabled input).
-    const nameInput = screen.getByLabelText(/Monitor name/) as HTMLInputElement;
+    const nameInput = screen.getByLabelText(/名称|Monitor name/) as HTMLInputElement;
     expect(nameInput.value).toBe("lada-1");
     expect(nameInput).toBeDisabled();
   });
@@ -134,7 +134,7 @@ describe("MonitorWizard", () => {
     // Fill Lada's name, go to review, then Back twice to step 1.
     fireEvent.click(screen.getByText("Lada"));
     fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
-    fireEvent.change(screen.getByLabelText(/Monitor name/), { target: { value: "lada-1" } });
+    fireEvent.change(screen.getByLabelText(/名称|Monitor name/), { target: { value: "lada-1" } });
     fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
     await screen.findByText("lada-1");
     fireEvent.click(screen.getByRole("button", { name: /Back|返回/ }));
@@ -143,7 +143,7 @@ describe("MonitorWizard", () => {
     // Switch to ComfyUI → its form must NOT carry over "lada-1".
     fireEvent.click(screen.getByText("ComfyUI"));
     fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
-    expect((screen.getByLabelText(/Monitor name/) as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText(/名称|Monitor name/) as HTMLInputElement).value).toBe("");
   });
 
   it("recovers the edit form when the plugin catalog resolves after open", async () => {
@@ -156,7 +156,7 @@ describe("MonitorWizard", () => {
         onClose={vi.fn()} onDone={vi.fn()} onError={vi.fn()}
       />,
     );
-    expect(screen.queryByLabelText(/Monitor name/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/名称|Monitor name/)).not.toBeInTheDocument();
     // Catalog arrives → the config form appears (no reopen needed).
     rerender(
       <ThemeProvider theme={theme}>
@@ -168,7 +168,7 @@ describe("MonitorWizard", () => {
         />
       </ThemeProvider>,
     );
-    expect(await screen.findByLabelText(/Monitor name/)).toBeInTheDocument();
+    expect(await screen.findByLabelText(/名称|Monitor name/)).toBeInTheDocument();
   });
 
   it("surfaces a backend error on a failed add (not silent)", async () => {
@@ -176,7 +176,7 @@ describe("MonitorWizard", () => {
     wrap(<MonitorWizard mode="add" {...baseProps} />);
     fireEvent.click(screen.getByText("Lada"));
     fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
-    fireEvent.change(screen.getByLabelText(/Monitor name/), { target: { value: "lada-1" } });
+    fireEvent.change(screen.getByLabelText(/名称|Monitor name/), { target: { value: "lada-1" } });
     fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
     await screen.findByText("lada-1");
     fireEvent.click(screen.getByRole("button", { name: /Add monitor|添加监控/ }));

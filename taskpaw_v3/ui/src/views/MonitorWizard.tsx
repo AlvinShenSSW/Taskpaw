@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type PluginInfo, type PresetInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
+import { fieldLabel } from "../schemaI18n";
 import { ServiceIcon } from "../components/ServiceIcon";
 
 // A selectable service is either a plugin type or a preset bundle (e.g. moomoo).
@@ -34,7 +35,7 @@ export function MonitorWizard({
   onDone: (savedName?: string) => void;
   onError: (e: unknown) => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   const services: Service[] = useMemo(() => [
     ...plugins.filter((p) => !p.system).map((p) => ({ kind: "plugin" as const, id: p.type_id, plugin: p })),
@@ -228,6 +229,7 @@ export function MonitorWizard({
               uiSchema={formUiSchema}
               formData={mode === "edit" ? existingConfig : formData}
               onSubmit={onFormSubmit}
+              typeId={selected.plugin.type_id}
             />
           </>
         )}
@@ -259,7 +261,13 @@ export function MonitorWizard({
               {selected.kind === "plugin"
                 ? Object.entries(formData)
                     .filter(([, v]) => typeof v !== "boolean")
-                    .map(([k, v]) => <ReviewRow key={k} k={k} v={mask(k, v)} />)
+                    .map(([k, v]) => {
+                      // English fallback = the schema's own title, matching the form.
+                      const props = selected.plugin.json_schema.properties as
+                        | Record<string, { title?: string }> | undefined;
+                      const label = fieldLabel(k, selected.plugin.type_id, i18n.language, props?.[k]?.title);
+                      return <ReviewRow key={k} k={label} v={mask(k, v)} />;
+                    })
                 : selected.preset.monitors.map((m) => <ReviewRow key={m.name} k={m.name} v={m.type_id} />)}
             </Box>
             <Typography variant="caption" color="text.secondary" sx={{ mt: 2, display: "block" }}>
