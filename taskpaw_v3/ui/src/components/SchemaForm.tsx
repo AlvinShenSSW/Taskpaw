@@ -6,9 +6,12 @@ import type {
   TemplatesType,
   UiSchema,
 } from "@rjsf/utils";
+import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { PathWidget } from "./PathWidget";
 import { PasswordWidget } from "./PasswordWidget";
 import { ObjectFieldTemplate } from "./ObjectFieldTemplate";
+import { localizeSchema } from "../schemaI18n";
 
 const widgets: RegistryWidgetsType = {
   TaskpawPath: PathWidget,
@@ -56,15 +59,25 @@ export function SchemaForm({
   uiSchema,
   formData,
   onSubmit,
+  typeId,
 }: {
   schema: RJSFSchema;
   uiSchema?: UiSchema;
   formData?: unknown;
   onSubmit?: (data: unknown) => void;
+  // The plugin type_id, so field labels/help can be localized (#121).
+  typeId?: string;
 }) {
+  const { i18n } = useTranslation();
+  // Overlay zh field labels/help onto the backend English schema when the UI is in
+  // Chinese; untranslated fields keep their English (#121). Recompute on lang switch.
+  const localizedSchema = useMemo(
+    () => localizeSchema(schema, typeId, i18n.language),
+    [schema, typeId, i18n.language],
+  );
   return (
     <Form
-      schema={schema}
+      schema={localizedSchema}
       uiSchema={withPathWidgets(uiSchema)}
       widgets={widgets}
       templates={templates}
