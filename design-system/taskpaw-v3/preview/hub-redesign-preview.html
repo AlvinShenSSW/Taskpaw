@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskPaw Hub — 重新布局设计稿</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #e2e8f0;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 32px 16px 64px;
+  }
+
+  /* ── Existing color tokens (unchanged from taskpaw_hub.py COLORS) ── */
+  :root {
+    --bg: #f0f4f8;
+    --surface: #ffffff;
+    --surface2: #e8edf2;
+    --border: #c8d1dc;
+    --accent: #4a9ede;
+    --accent-light: #6bb5f0;
+    --success: #2eaa6f;
+    --warning: #e6a817;
+    --error: #d94f3d;
+    --stuck: #FF8C00;
+    --text: #2d3748;
+    --text-dim: #718096;
+    --text-bright: #1a202c;
+  }
+
+  /* ── Toggle ── */
+  .switcher { display: flex; gap: 12px; margin-bottom: 20px; }
+  .switch-btn {
+    padding: 8px 22px; border: 2px solid var(--accent); border-radius: 20px;
+    background: transparent; color: var(--accent); font-size: 13px; cursor: pointer;
+    font-family: inherit; font-weight: 600; transition: all .15s;
+  }
+  .switch-btn.active { background: var(--accent); color: #fff; }
+  .caption { color: var(--text-dim); font-size: 12px; margin-bottom: 24px; text-align: center; max-width: 760px; line-height: 1.6; }
+
+  /* ── Window chrome ── */
+  .window {
+    width: 780px; background: var(--bg); border-radius: 8px; overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.15); border: 1px solid var(--border);
+  }
+  .titlebar { background: var(--surface); padding: 8px 16px; display: flex; align-items: center; border-bottom: 1px solid var(--border); }
+  .titlebar-dots { display: flex; gap: 6px; margin-right: 12px; }
+  .titlebar-dots span { width: 12px; height: 12px; border-radius: 50%; }
+  .dot-close { background: var(--error); }
+  .dot-min { background: var(--warning); }
+  .dot-max { background: var(--success); }
+  .titlebar-text { color: var(--text-dim); font-size: 13px; }
+
+  .main { padding: 16px; }
+
+  /* ── Top bar: title + fleet health summary ── */
+  .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .topbar-left { display: flex; align-items: baseline; gap: 10px; }
+  .topbar h1 { font-size: 20px; font-weight: 700; color: var(--text-bright); display: flex; align-items: center; gap: 8px; }
+  .paw { width: 22px; height: 22px; }
+  .topbar .ver { font-size: 12px; color: var(--text-dim); }
+  .health { display: flex; align-items: center; gap: 14px; font-size: 12px; }
+  .health .pill { display: flex; align-items: center; gap: 5px; color: var(--text-dim); }
+  .health .pill b { color: var(--text-bright); font-weight: 700; }
+  .health .swatch { width: 9px; height: 9px; border-radius: 50%; }
+  .refresh { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
+
+  /* ── Tabs (kept, same style) ── */
+  .tabs { display: flex; gap: 0; margin: 10px 0 0; }
+  .tab { padding: 9px 18px; font-size: 13px; cursor: pointer; border: none; background: var(--surface2); color: var(--text-dim); border-radius: 6px 6px 0 0; transition: all .15s; }
+  .tab.active { background: var(--accent); color: #fff; font-weight: 600; }
+  .tab-content { background: var(--bg); border-top: 2px solid var(--accent); padding: 14px 0 4px; }
+
+  /* ════════════════════════════════════════════════════════════════
+     NEW LAYOUT — one full-width row-block per server.
+     Monitors sit flush with the header text: no nested gray box,
+     no double indentation. Only the Events feed stays boxed/indented.
+     ════════════════════════════════════════════════════════════════ */
+  .srv {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px 14px; margin-bottom: 8px;
+  }
+  /* Row 1 — status dot + name + address on the left; status + last seen on the right */
+  .srv-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .srv-id { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .srv-dot { width: 11px; height: 11px; border-radius: 50%; flex: none; }
+  .srv-name { font-size: 14px; font-weight: 700; color: var(--text-bright); white-space: nowrap; }
+  .srv-addr { font-size: 12px; color: var(--text-dim); }
+  .srv-meta { display: flex; align-items: center; gap: 12px; flex: none; }
+  .srv-state { font-size: 12px; font-weight: 600; }
+  .srv-seen { font-size: 11px; color: var(--text-dim); }
+
+  /* Monitors — flush list directly under the header. NO indent, NO box. */
+  .mon-list { margin-top: 8px; border-top: 1px solid var(--surface2); }
+  .mon {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 0; border-bottom: 1px solid var(--surface2);
+    font-size: 12.5px;
+  }
+  .mon:last-child { border-bottom: none; }
+  .mon-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .mon-name { color: var(--text-bright); font-weight: 600; min-width: 150px; }
+  .mon-status { color: var(--text); }
+  .mon-detail { color: var(--text-dim); margin-left: auto; font-size: 11.5px; }
+
+  /* status colors */
+  .c-success { color: var(--success); } .bg-success { background: var(--success); }
+  .c-warning { color: var(--warning); } .bg-warning { background: var(--warning); }
+  .c-error   { color: var(--error);   } .bg-error   { background: var(--error); }
+  .c-stuck   { color: var(--stuck);   } .bg-stuck   { background: var(--stuck); }
+  .c-dim     { color: var(--text-dim);} .bg-dim     { background: var(--text-dim); }
+
+  /* offline server — no monitors, single line only */
+  .srv.offline { opacity: .82; }
+
+  /* Monitors — HORIZONTAL variant: wrap inline under the header, no indent/box */
+  .mon-row {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px;
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--surface2);
+  }
+  .monh { display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+  .monh-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .monh-name { color: var(--text-bright); font-weight: 600; }
+  .monh-status { font-weight: 500; }
+  .monh-detail { color: var(--text-dim); font-size: 11.5px; }
+
+  /* ── Events feed — the ONE place indentation/boxing is kept ── */
+  .events-title { font-size: 13px; font-weight: 700; color: var(--accent); margin: 16px 4px 6px; }
+  .events {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 4px; font-family: 'Consolas','Courier New',monospace; font-size: 12px;
+  }
+  .ev { display: flex; gap: 8px; padding: 4px 12px; color: var(--text); line-height: 1.5; }
+  .ev .t { color: var(--text-dim); flex: none; }
+  .ev .s { color: var(--accent); flex: none; }
+
+  /* ════════════ OLD LAYOUT (for comparison) ════════════ */
+  .old-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; }
+  .old-head { display: flex; align-items: center; gap: 8px; padding: 10px; }
+  .old-dot { width: 12px; height: 12px; border-radius: 50%; }
+  .old-name { font-size: 13px; font-weight: 700; color: var(--text-bright); }
+  .old-seen { font-size: 11px; color: var(--text-dim); }
+  .old-mons { background: var(--surface2); margin: 0 10px 10px; padding: 6px 5px; border-radius: 4px; }
+  .old-mon { font-size: 12px; color: var(--text); padding: 3px 5px 3px 5px; }
+  .old-note { font-size: 11px; color: var(--error); margin: 4px 4px 0; }
+
+  .view { display: none; }
+  .view.active { display: block; }
+</style>
+</head>
+<body>
+
+  <div class="switcher">
+    <button class="switch-btn active" id="btn-vert" onclick="show('vert')">纵向监控</button>
+    <button class="switch-btn" id="btn-horiz" onclick="show('horiz')">横向监控</button>
+    <button class="switch-btn" id="btn-old" onclick="show('old')">当前布局（对比）</button>
+  </div>
+  <div class="caption" id="cap">
+    纵向版：每台服务器占满整行的一个区块，监控每个占一行、平铺在名称下方，与标题左对齐——去掉了原来那层灰色缩进小盒子。只有底部「事件流」保留独立的盒子/缩进。
+  </div>
+
+  <!-- ═══════════════ NEW — VERTICAL MONITORS ═══════════════ -->
+  <div class="view active" id="view-vert">
+    <div class="window">
+      <div class="titlebar">
+        <div class="titlebar-dots"><span class="dot-close"></span><span class="dot-min"></span><span class="dot-max"></span></div>
+        <span class="titlebar-text">TaskPaw Hub v2.0.0</span>
+      </div>
+      <div class="main">
+        <!-- Top bar -->
+        <div class="topbar">
+          <div class="topbar-left">
+            <h1><svg class="paw" viewBox="0 0 24 24" fill="var(--accent)"><ellipse cx="12" cy="16" rx="5" ry="4"/><circle cx="6" cy="10" r="2.1"/><circle cx="10" cy="6.5" r="2.1"/><circle cx="14" cy="6.5" r="2.1"/><circle cx="18" cy="10" r="2.1"/></svg>TaskPaw Hub</h1>
+            <span class="ver">v2.0.0</span>
+          </div>
+          <div class="health">
+            <span class="pill"><span class="swatch bg-success"></span><b>2</b>&nbsp;运行</span>
+            <span class="pill"><span class="swatch bg-warning"></span><b>1</b>&nbsp;空闲</span>
+            <span class="pill"><span class="swatch bg-error"></span><b>1</b>&nbsp;离线</span>
+            <span class="refresh">↻ 10s 前刷新</span>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <button class="tab active">仪表盘</button>
+          <button class="tab">服务器</button>
+          <button class="tab">设置</button>
+        </div>
+
+        <div class="tab-content">
+
+          <!-- Server 1: running -->
+          <div class="srv">
+            <div class="srv-head">
+              <div class="srv-id">
+                <span class="srv-dot bg-success"></span>
+                <span class="srv-name">GPU-Server-01</span>
+                <span class="srv-addr">192.168.1.20:8760</span>
+              </div>
+              <div class="srv-meta">
+                <span class="srv-state c-success">运行中</span>
+                <span class="srv-seen">刚刚</span>
+              </div>
+            </div>
+            <div class="mon-list">
+              <div class="mon"><span class="mon-dot bg-warning"></span><span class="mon-name">ComfyUI Workflow</span><span class="mon-status c-warning">Processing</span><span class="mon-detail">running:1 · queued:4</span></div>
+              <div class="mon"><span class="mon-dot bg-success"></span><span class="mon-name">Lada Video Upscale</span><span class="mon-status c-success">Listening</span><span class="mon-detail">lada-cli.exe</span></div>
+              <div class="mon"><span class="mon-dot bg-success"></span><span class="mon-name">Downloads Folder</span><span class="mon-status c-success">Listening</span><span class="mon-detail">D:\Downloads</span></div>
+            </div>
+          </div>
+
+          <!-- Server 2: running with a stuck monitor -->
+          <div class="srv">
+            <div class="srv-head">
+              <div class="srv-id">
+                <span class="srv-dot bg-success"></span>
+                <span class="srv-name">Render-Node-02</span>
+                <span class="srv-addr">192.168.1.21:8760</span>
+              </div>
+              <div class="srv-meta">
+                <span class="srv-state c-success">运行中</span>
+                <span class="srv-seen">1m 前</span>
+              </div>
+            </div>
+            <div class="mon-list">
+              <div class="mon"><span class="mon-dot bg-stuck"></span><span class="mon-name">FFmpeg Encoder</span><span class="mon-status c-stuck">Stuck</span><span class="mon-detail">no progress 12m</span></div>
+              <div class="mon"><span class="mon-dot bg-success"></span><span class="mon-name">Blender Farm</span><span class="mon-status c-success">Rendering</span><span class="mon-detail">frame 240/500</span></div>
+            </div>
+          </div>
+
+          <!-- Server 3: idle -->
+          <div class="srv">
+            <div class="srv-head">
+              <div class="srv-id">
+                <span class="srv-dot bg-warning"></span>
+                <span class="srv-name">Edit-Bay-03</span>
+                <span class="srv-addr">192.168.1.22:8760</span>
+              </div>
+              <div class="srv-meta">
+                <span class="srv-state c-warning">空闲</span>
+                <span class="srv-seen">2m 前</span>
+              </div>
+            </div>
+            <div class="mon-list">
+              <div class="mon"><span class="mon-dot bg-dim"></span><span class="mon-name">Premiere Export</span><span class="mon-status c-dim">Stopped</span><span class="mon-detail">—</span></div>
+            </div>
+          </div>
+
+          <!-- Server 4: offline — single line, no monitors -->
+          <div class="srv offline">
+            <div class="srv-head">
+              <div class="srv-id">
+                <span class="srv-dot bg-error"></span>
+                <span class="srv-name">Backup-Box-04</span>
+                <span class="srv-addr">192.168.1.23:8760</span>
+              </div>
+              <div class="srv-meta">
+                <span class="srv-state c-error">离线</span>
+                <span class="srv-seen">14m 前</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Events feed — indentation kept here on purpose -->
+          <div class="events-title">最近事件</div>
+          <div class="events">
+            <div class="ev"><span class="t">[14:32:07]</span><span class="s">GPU-Server-01</span><span>ComfyUI 队列完成 — SDXL batch (12 张)</span></div>
+            <div class="ev"><span class="t">[14:30:55]</span><span class="s">Render-Node-02</span><span>FFmpeg 检测到卡住，已标记 Stuck</span></div>
+            <div class="ev"><span class="t">[14:28:19]</span><span class="s">GPU-Server-01</span><span>Downloads 文件夹稳定 — 移动 3 个文件</span></div>
+            <div class="ev"><span class="t">[14:21:02]</span><span class="s">Backup-Box-04</span><span>连接丢失 — 服务器无响应</span></div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ NEW — HORIZONTAL MONITORS ═══════════════ -->
+  <div class="view" id="view-horiz">
+    <div class="window">
+      <div class="titlebar">
+        <div class="titlebar-dots"><span class="dot-close"></span><span class="dot-min"></span><span class="dot-max"></span></div>
+        <span class="titlebar-text">TaskPaw Hub v2.0.0</span>
+      </div>
+      <div class="main">
+        <div class="topbar">
+          <div class="topbar-left">
+            <h1><svg class="paw" viewBox="0 0 24 24" fill="var(--accent)"><ellipse cx="12" cy="16" rx="5" ry="4"/><circle cx="6" cy="10" r="2.1"/><circle cx="10" cy="6.5" r="2.1"/><circle cx="14" cy="6.5" r="2.1"/><circle cx="18" cy="10" r="2.1"/></svg>TaskPaw Hub</h1>
+            <span class="ver">v2.0.0</span>
+          </div>
+          <div class="health">
+            <span class="pill"><span class="swatch bg-success"></span><b>2</b>&nbsp;运行</span>
+            <span class="pill"><span class="swatch bg-warning"></span><b>1</b>&nbsp;空闲</span>
+            <span class="pill"><span class="swatch bg-error"></span><b>1</b>&nbsp;离线</span>
+            <span class="refresh">↻ 10s 前刷新</span>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <button class="tab active">仪表盘</button>
+          <button class="tab">服务器</button>
+          <button class="tab">设置</button>
+        </div>
+
+        <div class="tab-content">
+
+          <!-- Server 1 -->
+          <div class="srv">
+            <div class="srv-head">
+              <div class="srv-id">
+                <span class="srv-dot bg-success"></span>
+                <span class="srv-name">GPU-Server-01</span>
+                <span class="srv-addr">192.168.1.20:8760</span>
+              </div>
+              <div class="srv-meta"><span class="srv-state c-success">运行中</span><span class="srv-seen">刚刚</span></div>
+            </div>
+            <div class="mon-row">
+              <span class="monh"><span class="monh-dot bg-warning"></span><span class="monh-name">ComfyUI Workflow</span><span class="monh-status c-warning">Processing</span><span class="monh-detail">(running:1 · queued:4)</span></span>
+              <span class="monh"><span class="monh-dot bg-success"></span><span class="monh-name">Lada Video Upscale</span><span class="monh-status c-success">Listening</span></span>
+              <span class="monh"><span class="monh-dot bg-success"></span><span class="monh-name">Downloads Folder</span><span class="monh-status c-success">Listening</span></span>
+            </div>
+          </div>
+
+          <!-- Server 2 -->
+          <div class="srv">
+            <div class="srv-head">
+              <div class="srv-id">
+                <span class="srv-dot bg-success"></span>
+                <span class="srv-name">Render-Node-02</span>
+                <span class="srv-addr">192.168.1.21:8760</span>
+              </div>
+              <div class="srv-meta"><span class="srv-state c-success">运行中</span><span class="srv-seen">1m 前</span></div>
+            </div>
+            <div class="mon-row">
+              <span class="monh"><span class="monh-dot bg-stuck"></span><span class="monh-name">FFmpeg Encoder</span><span class="monh-status c-stuck">Stuck</span><span class="monh-detail">(no progress 12m)</span></span>
+              <span class="monh"><span class="monh-dot bg-success"></span><span class="monh-name">Blender Farm</span><span class="monh-status c-success">Rendering</span><span class="monh-detail">(frame 240/500)</span></span>
+            </div>
+          </div>
+
+          <!-- Server 3 -->
+          <div class="srv">
+            <div class="srv-head">
+              <div class="srv-id">
+                <span class="srv-dot bg-warning"></span>
+                <span class="srv-name">Edit-Bay-03</span>
+                <span class="srv-addr">192.168.1.22:8760</span>
+              </div>
+              <div class="srv-meta"><span class="srv-state c-warning">空闲</span><span class="srv-seen">2m 前</span></div>
+            </div>
+            <div class="mon-row">
+              <span class="monh"><span class="monh-dot bg-dim"></span><span class="monh-name">Premiere Export</span><span class="monh-status c-dim">Stopped</span></span>
+            </div>
+          </div>
+
+          <!-- Server 4 offline -->
+          <div class="srv offline">
+            <div class="srv-head">
+              <div class="srv-id">
+                <span class="srv-dot bg-error"></span>
+                <span class="srv-name">Backup-Box-04</span>
+                <span class="srv-addr">192.168.1.23:8760</span>
+              </div>
+              <div class="srv-meta"><span class="srv-state c-error">离线</span><span class="srv-seen">14m 前</span></div>
+            </div>
+          </div>
+
+          <div class="events-title">最近事件</div>
+          <div class="events">
+            <div class="ev"><span class="t">[14:32:07]</span><span class="s">GPU-Server-01</span><span>ComfyUI 队列完成 — SDXL batch (12 张)</span></div>
+            <div class="ev"><span class="t">[14:30:55]</span><span class="s">Render-Node-02</span><span>FFmpeg 检测到卡住，已标记 Stuck</span></div>
+            <div class="ev"><span class="t">[14:28:19]</span><span class="s">GPU-Server-01</span><span>Downloads 文件夹稳定 — 移动 3 个文件</span></div>
+            <div class="ev"><span class="t">[14:21:02]</span><span class="s">Backup-Box-04</span><span>连接丢失 — 服务器无响应</span></div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════ OLD ═══════════════ -->
+  <div class="view" id="view-old">
+    <div class="window">
+      <div class="titlebar">
+        <div class="titlebar-dots"><span class="dot-close"></span><span class="dot-min"></span><span class="dot-max"></span></div>
+        <span class="titlebar-text">TaskPaw Hub v2.0.0</span>
+      </div>
+      <div class="main">
+        <div class="topbar"><div class="topbar-left"><h1>TaskPaw Hub</h1></div><span class="ver">v2.0.0</span></div>
+        <div class="tab-content" style="border-top:2px solid var(--accent); margin-top:10px;">
+
+          <div class="old-card">
+            <div class="old-head">
+              <span class="old-dot bg-success"></span>
+              <div>
+                <div class="old-name">GPU-Server-01 (192.168.1.20:8760)</div>
+                <div class="old-seen">Last seen: now</div>
+              </div>
+            </div>
+            <div class="old-mons">
+              <div class="old-mon">ComfyUI Workflow: Processing</div>
+              <div class="old-mon">Lada Video Upscale: Listening</div>
+              <div class="old-mon">Downloads Folder: Listening</div>
+            </div>
+          </div>
+
+          <div class="old-card">
+            <div class="old-head">
+              <span class="old-dot bg-stuck"></span>
+              <div>
+                <div class="old-name">Render-Node-02 (192.168.1.21:8760)</div>
+                <div class="old-seen">Last seen: 1m ago</div>
+              </div>
+            </div>
+            <div class="old-mons">
+              <div class="old-mon">FFmpeg Encoder: Stuck</div>
+              <div class="old-mon">Blender Farm: Rendering</div>
+            </div>
+          </div>
+
+          <div class="old-card">
+            <div class="old-head">
+              <span class="old-dot bg-warning"></span>
+              <div>
+                <div class="old-name">Edit-Bay-03 (192.168.1.22:8760)</div>
+                <div class="old-seen">Last seen: 2m ago</div>
+              </div>
+            </div>
+            <div class="old-mons">
+              <div class="old-mon">Premiere Export: Stopped</div>
+            </div>
+          </div>
+
+          <p class="old-note">↑ 问题：监控被塞进一层灰色缩进小盒子里，标题、时间、监控三级缩进，视觉很碎、很挤。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const CAP = {
+    vert:  '纵向版：监控每个占一行、平铺在名称下方，与标题左对齐。监控名较长或想逐条扫读时更清晰。只有底部「事件流」保留盒子/缩进。',
+    horiz: '横向版：同一台服务器的监控在名称下方一行内左右排开、自动换行，更紧凑、每台服务器更矮。监控数量少、名称短时最省空间。',
+    old:   '当前布局：服务器名称是一级，时间是二级，监控又被裹进灰盒子里再缩进——层层嵌套，这就是显得「奇怪」的原因。'
+  };
+  function show(which){
+    ['vert','horiz','old'].forEach(v=>{
+      document.getElementById('view-'+v).classList.toggle('active', which===v);
+      document.getElementById('btn-'+v).classList.toggle('active', which===v);
+    });
+    document.getElementById('cap').textContent = CAP[which];
+  }
+</script>
+</body>
+</html>

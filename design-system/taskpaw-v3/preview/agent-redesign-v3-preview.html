@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskPaw Agent 控制台 V3 — 单监控优化设计稿</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0B1120; --paper: #111A2E; --paper2: #0D1626; --card-border: #19273C;
+    --divider: #22324A; --text: #F8FAFC; --text-dim: #A8B5C7;
+    --ok: #22C55E; --starting: #38BDF8; --idle: #64748B; --degraded: #F59E0B;
+    --error: #F87171; --stopped: #475569;
+    --sans: 'Fira Sans','Noto Sans SC',system-ui,'PingFang SC','Microsoft YaHei',sans-serif;
+    --mono: 'Fira Code','Noto Sans SC',ui-monospace,monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--sans); color: var(--text); line-height: 1.7;
+    min-height: 100vh; padding: 28px 16px 64px;
+    display: flex; flex-direction: column; align-items: center;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(56,189,248,.06), transparent 60%),
+      linear-gradient(transparent 0 31px, rgba(56,189,248,.035) 31px 32px) 0 0/100% 32px,
+      linear-gradient(90deg, transparent 0 31px, rgba(56,189,248,.035) 31px 32px) 0 0/32px 100%,
+      var(--bg);
+  }
+  .switcher { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; justify-content: center; }
+  .switch-btn { padding: 7px 20px; border: 1.5px solid var(--ok); border-radius: 20px; background: transparent; color: var(--ok); font-size: 13px; cursor: pointer; font-family: inherit; font-weight: 600; transition: all .16s; }
+  .switch-btn.active { background: var(--ok); color: #06210F; }
+  .caption { color: var(--text-dim); font-size: 12.5px; margin-bottom: 22px; text-align: center; max-width: 820px; }
+
+  .app { width: 880px; max-width: 100%; background: rgba(11,17,32,.55); border: 1px solid var(--card-border); border-radius: 12px; overflow: hidden; box-shadow: 0 24px 60px -20px rgba(0,0,0,.7); }
+  .titlebar { padding: 10px 16px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--card-border); }
+  .dots { display: flex; gap: 6px; }
+  .dots span { width: 11px; height: 11px; border-radius: 50%; }
+  .dots .r{background:#F87171}.dots .y{background:#F59E0B}.dots .g{background:#22C55E}
+  .titlebar b { font-weight: 600; font-size: 13px; margin-left: 4px; }
+  .titlebar .dim { color: var(--text-dim); font-size: 12px; font-family: var(--mono); }
+  .titlebar .conn { margin-left: auto; font-size: 11.5px; color: var(--ok); display: flex; align-items: center; gap: 5px; }
+  .main { padding: 16px 18px 20px; }
+  .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--divider); margin-bottom: 14px; }
+  .tab { padding: 8px 4px; margin-right: 14px; font-size: 14px; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab.active { color: var(--ok); border-bottom-color: var(--ok); font-weight: 600; }
+
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.lg { width: 13px; height: 13px; }
+  .dot.xl { width: 16px; height: 16px; }
+  .d-ok{background:var(--ok)}.d-deg{background:var(--degraded)}.d-idle{background:var(--idle)}
+  .d-stop{background:var(--stopped)}.d-err{background:var(--error)}
+  .c-ok{color:var(--ok)}.c-deg{color:var(--degraded)}.c-idle{color:var(--idle)}.c-dim{color:var(--text-dim)}
+  .chip { font-size: 11px; padding: 2px 10px; border-radius: 11px; font-weight: 500; border: 1px solid var(--divider); color: var(--text-dim); }
+  .chip.state { background: rgba(34,197,94,.14); color: var(--ok); border-color: transparent; }
+  .chip.type { font-family: var(--mono); }
+
+  /* Multi-monitor: horizontal selector (replaces the tall skinny sidebar) */
+  .selector { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .segpill { display: flex; align-items: center; gap: 7px; padding: 7px 13px; border-radius: 9px; border: 1px solid var(--divider); background: rgba(148,163,184,.04); cursor: pointer; font-size: 13px; }
+  .segpill.active { border-color: var(--ok); background: rgba(34,197,94,.08); }
+  .segpill .nm { font-weight: 600; }
+  .segpill .ty { font-size: 11px; color: var(--text-dim); font-family: var(--mono); }
+  .segpill.add { color: var(--ok); border-style: dashed; border-color: var(--ok); font-weight: 600; }
+
+  /* Hero card */
+  .hero { background: linear-gradient(180deg, var(--paper), var(--paper2)); border: 1px solid var(--card-border); border-radius: 10px; padding: 18px 20px; }
+  .hero-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .hero-name { font-size: 20px; font-weight: 600; }
+  .hero-upd { margin-left: auto; font-size: 11.5px; color: var(--text-dim); font-family: var(--mono); }
+  .hero-detail { font-size: 13px; color: var(--text-dim); margin-top: 6px; }
+  .ctrls { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .btn { border-radius: 7px; font-weight: 600; padding: 7px 16px; cursor: pointer; font-family: inherit; font-size: 13px; border: 1.5px solid transparent; }
+  .btn.stop { background: transparent; border-color: var(--divider); color: var(--text); }
+  .btn.start { background: var(--ok); color: #06210F; }
+  .btn.edit { background: transparent; border-color: var(--starting); color: var(--starting); }
+  .btn.del { background: transparent; border-color: var(--error); color: var(--error); }
+
+  /* metrics + events two-column so a single monitor fills the width */
+  .hero-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 16px; margin-top: 18px; }
+  @media (max-width: 720px) { .hero-grid { grid-template-columns: 1fr; } }
+  .panel { border-top: 1px solid var(--divider); padding-top: 14px; }
+  .panel-t { font-size: 11px; letter-spacing: .3px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 10px; }
+
+  .now { padding: 10px 13px; border-radius: 8px; background: rgba(34,197,94,.06); border: 1px solid rgba(34,197,94,.25); margin-bottom: 14px; }
+  .now .lab { font-size: 10px; letter-spacing: .6px; text-transform: uppercase; color: var(--text-dim); }
+  .now .file { font-family: var(--mono); font-weight: 600; font-size: 13px; word-break: break-all; margin-top: 3px; }
+  .qbar { margin-bottom: 14px; }
+  .qbar .lab { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 5px; }
+  .qbar .lab .v { font-family: var(--mono); color: var(--text); }
+  .bar { height: 9px; border-radius: 5px; background: rgba(148,163,184,.15); overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 5px; }
+
+  .gauges { display: flex; gap: 22px; flex-wrap: wrap; }
+  .gauge-wrap { text-align: center; }
+  .gauge { --v: 0; --tint: var(--ok); position: relative; width: 84px; height: 84px; border-radius: 50%; background: conic-gradient(var(--tint) calc(var(--v)*1%), rgba(148,163,184,.16) 0); display: grid; place-items: center; margin: 0 auto; }
+  .gauge::before { content:""; position:absolute; inset:8px; border-radius:50%; background: var(--paper2); }
+  .gauge .g-num { position: relative; font-family: var(--mono); font-weight: 600; font-size: 22px; }
+  .g-lab { font-size: 10px; letter-spacing: .6px; color: var(--text-dim); text-transform: uppercase; margin-top: 6px; }
+  .g-sub { font-size: 10.5px; color: var(--text-dim); font-family: var(--mono); margin-top: 2px; }
+  .tiles { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+  .tile { padding: 8px 13px; border-radius: 8px; background: rgba(148,163,184,.06); border: 1px solid var(--divider); min-width: 84px; }
+  .tile .t-lab { font-size: 10px; letter-spacing: .6px; text-transform: uppercase; color: var(--text-dim); }
+  .tile .t-val { font-family: var(--mono); font-weight: 600; font-size: 16px; margin-top: 3px; }
+
+  /* inline recent-events fills the right column */
+  .evs { display: flex; flex-direction: column; gap: 2px; }
+  .ev { display: flex; gap: 8px; padding: 5px 0; font-family: var(--mono); font-size: 11.5px; align-items: baseline; border-bottom: 1px solid var(--divider); }
+  .ev:last-child { border-bottom: none; }
+  .ev .t { color: var(--text-dim); flex: none; }
+  .ev .badge { font-size: 9.5px; padding: 1px 7px; border-radius: 9px; flex: none; }
+  .b-done{ background: rgba(34,197,94,.15); color: var(--ok);}
+  .b-warn{ background: rgba(245,158,11,.15); color: var(--degraded);}
+  .b-info{ background: rgba(56,189,248,.15); color: var(--starting);}
+  .ev .msg { color: var(--text); }
+
+  /* ═══ current layout (comparison): tall skinny sidebar + empty pane ═══ */
+  .old-wrap { display: flex; gap: 16px; min-height: 340px; }
+  .old-rail { width: 280px; flex: none; background: linear-gradient(180deg, var(--paper), var(--paper2)); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; }
+  .old-rail .ov { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .3px; margin-bottom: 10px; display: flex; justify-content: space-between; }
+  .old-item { display: flex; align-items: center; gap: 8px; padding: 9px 8px; border-radius: 6px; border-left: 3px solid var(--ok); background: rgba(34,197,94,.08); font-size: 13px; }
+  .old-main { flex: 1; background: linear-gradient(180deg, var(--paper), var(--paper2)); border: 1px solid var(--card-border); border-radius: 10px; padding: 16px; position: relative; }
+  .old-empty-note { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--error); font-size: 12.5px; text-align: center; padding: 20px; }
+  .oldnote { font-size: 11.5px; color: var(--error); margin-top: 12px; }
+
+  .view { display: none; } .view.active { display: block; }
+</style>
+</head>
+<body>
+
+  <div class="switcher">
+    <button class="switch-btn active" id="btn-one" onclick="show('one')">单监控（常见）</button>
+    <button class="switch-btn" id="btn-multi" onclick="show('multi')">多监控</button>
+    <button class="switch-btn" id="btn-old" onclick="show('old')">当前布局（对比）</button>
+  </div>
+  <div class="caption" id="cap"></div>
+
+  <!-- ═══════════ SINGLE MONITOR (hero) ═══════════ -->
+  <div class="view active" id="view-one">
+    <div class="app">
+      <div class="titlebar">
+        <div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <b>TaskPaw Agent</b><span class="dim">v3 · GPU-Server-01</span>
+        <span class="conn"><span class="dot d-ok"></span>已连接 Hub</span>
+      </div>
+      <div class="main">
+        <div class="tabs"><span class="tab active">监控</span><span class="tab">事件</span><span class="tab">设置</span></div>
+
+        <!-- no sidebar: the single monitor becomes a full-width hero -->
+        <div class="hero">
+          <div class="hero-head">
+            <span class="dot xl d-ok"></span>
+            <span class="hero-name">Lada Video Upscale</span>
+            <span class="chip type">lada</span>
+            <span class="chip state">运行中</span>
+            <span class="hero-upd">更新于 14:32:07</span>
+          </div>
+          <div class="hero-detail">正在处理第 3 / 8 个文件 · GPU 74% · 已运行 42 分钟</div>
+
+          <div class="ctrls">
+            <button class="btn stop">停止</button>
+            <button class="btn edit">编辑配置</button>
+            <span style="flex:1"></span>
+            <button class="btn del">删除</button>
+          </div>
+
+          <div class="hero-grid">
+            <!-- left: live metrics fill the space -->
+            <div class="panel" style="border-top:none;padding-top:0">
+              <div class="now">
+                <div class="lab">正在处理</div>
+                <div class="file">S01E04_1080p_upscaled.mkv</div>
+              </div>
+              <div class="qbar">
+                <div class="lab"><span>文件进度</span><span class="v">3 / 8 · 62%</span></div>
+                <div class="bar"><i style="width:62%;background:var(--ok)"></i></div>
+              </div>
+              <div class="gauges">
+                <div class="gauge-wrap">
+                  <div class="gauge" style="--v:74;--tint:var(--degraded)"><span class="g-num">74</span></div>
+                  <div class="g-lab">GPU</div><div class="g-sub">17.8 / 24 GB</div>
+                </div>
+                <div class="gauge-wrap">
+                  <div class="gauge" style="--v:38;--tint:var(--ok)"><span class="g-num">38</span></div>
+                  <div class="g-lab">CPU</div>
+                </div>
+                <div class="gauge-wrap">
+                  <div class="gauge" style="--v:56;--tint:var(--ok)"><span class="g-num">56</span></div>
+                  <div class="g-lab">MEM</div><div class="g-sub">18 / 32 GB</div>
+                </div>
+              </div>
+              <div class="tiles">
+                <div class="tile"><div class="t-lab">FPS</div><div class="t-val">23.6</div></div>
+                <div class="tile"><div class="t-lab">ETA</div><div class="t-val">12:40</div></div>
+                <div class="tile"><div class="t-lab">已完成</div><div class="t-val">2</div></div>
+              </div>
+            </div>
+
+            <!-- right: inline recent events (was hidden in a separate empty tab) -->
+            <div class="panel">
+              <div class="panel-t">最近事件</div>
+              <div class="evs">
+                <div class="ev"><span class="t">14:32</span><span class="badge b-info">info</span><span class="msg">开始处理 S01E04</span></div>
+                <div class="ev"><span class="t">14:20</span><span class="badge b-done">done</span><span class="msg">S01E03 完成 · 8m12s</span></div>
+                <div class="ev"><span class="t">14:12</span><span class="badge b-info">info</span><span class="msg">开始处理 S01E03</span></div>
+                <div class="ev"><span class="t">14:01</span><span class="badge b-done">done</span><span class="msg">S01E02 完成 · 9m03s</span></div>
+                <div class="ev"><span class="t">13:52</span><span class="badge b-warn">warn</span><span class="msg">GPU 温度 82°C</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ MULTI MONITOR ═══════════ -->
+  <div class="view" id="view-multi">
+    <div class="app">
+      <div class="titlebar">
+        <div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <b>TaskPaw Agent</b><span class="dim">v3 · GPU-Server-01</span>
+        <span class="conn"><span class="dot d-ok"></span>已连接 Hub</span>
+      </div>
+      <div class="main">
+        <div class="tabs"><span class="tab active">监控</span><span class="tab">事件</span><span class="tab">设置</span></div>
+
+        <!-- horizontal selector instead of the tall sidebar -->
+        <div class="selector">
+          <div class="segpill active"><span class="dot d-ok"></span><span class="nm">Lada Video Upscale</span><span class="ty">lada</span></div>
+          <div class="segpill"><span class="dot d-deg"></span><span class="nm">ComfyUI Queue</span><span class="ty">comfyui</span></div>
+          <div class="segpill"><span class="dot d-idle"></span><span class="nm">Downloads</span><span class="ty">folder</span></div>
+          <div class="segpill add">+ 添加监控</div>
+        </div>
+
+        <div class="hero">
+          <div class="hero-head">
+            <span class="dot xl d-ok"></span>
+            <span class="hero-name">Lada Video Upscale</span>
+            <span class="chip type">lada</span>
+            <span class="chip state">运行中</span>
+            <span class="hero-upd">更新于 14:32:07</span>
+          </div>
+          <div class="hero-detail">正在处理第 3 / 8 个文件 · GPU 74%</div>
+          <div class="ctrls">
+            <button class="btn stop">停止</button>
+            <button class="btn edit">编辑配置</button>
+            <span style="flex:1"></span>
+            <button class="btn del">删除</button>
+          </div>
+          <div class="hero-grid">
+            <div class="panel" style="border-top:none;padding-top:0">
+              <div class="now"><div class="lab">正在处理</div><div class="file">S01E04_1080p_upscaled.mkv</div></div>
+              <div class="qbar"><div class="lab"><span>文件进度</span><span class="v">3 / 8 · 62%</span></div><div class="bar"><i style="width:62%;background:var(--ok)"></i></div></div>
+              <div class="gauges">
+                <div class="gauge-wrap"><div class="gauge" style="--v:74;--tint:var(--degraded)"><span class="g-num">74</span></div><div class="g-lab">GPU</div><div class="g-sub">17.8 / 24 GB</div></div>
+                <div class="gauge-wrap"><div class="gauge" style="--v:38;--tint:var(--ok)"><span class="g-num">38</span></div><div class="g-lab">CPU</div></div>
+                <div class="gauge-wrap"><div class="gauge" style="--v:56;--tint:var(--ok)"><span class="g-num">56</span></div><div class="g-lab">MEM</div></div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-t">最近事件</div>
+              <div class="evs">
+                <div class="ev"><span class="t">14:32</span><span class="badge b-info">info</span><span class="msg">开始处理 S01E04</span></div>
+                <div class="ev"><span class="t">14:20</span><span class="badge b-done">done</span><span class="msg">S01E03 完成</span></div>
+                <div class="ev"><span class="t">14:12</span><span class="badge b-info">info</span><span class="msg">开始处理 S01E03</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ CURRENT LAYOUT ═══════════ -->
+  <div class="view" id="view-old">
+    <div class="app">
+      <div class="titlebar">
+        <div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <b>TaskPaw Agent</b><span class="dim">v3 · GPU-Server-01（当前）</span>
+      </div>
+      <div class="main">
+        <div class="tabs"><span class="tab active">监控</span><span class="tab">事件</span><span class="tab">设置</span></div>
+        <div class="old-wrap">
+          <div class="old-rail">
+            <div class="ov"><span>本机监控</span><span class="c-ok">+ 添加</span></div>
+            <div class="old-item"><span class="dot d-ok"></span><span style="flex:1">Lada Video Upscale</span><span class="chip type">lada</span></div>
+          </div>
+          <div class="old-main">
+            <div class="hero-head" style="opacity:.6">
+              <span class="dot lg d-ok"></span><span class="hero-name" style="font-size:16px">Lada Video Upscale</span>
+              <span class="chip state">运行中</span>
+            </div>
+            <div class="old-empty-note">↑ 只有一个监控时：左侧细长列表只占一行，<br>右侧大面积留白 —— 页面显得很空旷。</div>
+          </div>
+        </div>
+        <p class="oldnote">当前两栏 master-detail 是为「多监控」设计的；单进程场景下侧栏和详情区都撑不满，信息密度低。</p>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const CAP = {
+    one:   '单监控（常见）：去掉细长侧栏，把这一个监控提升为占满整宽的「主视图」——大号状态头 + 控制按钮 + 实时指标仪表（GPU/CPU/MEM、进度、FPS/ETA）+ 右侧内联最近事件。原本空旷的地方用有用的实时信息填满。',
+    multi: '多监控：侧栏改成顶部横向选择器（一排药丸，带状态点+类型），选中的监控在下方用同一套主视图展示。既不为单监控留大侧栏，也能容纳多个。',
+    old:   '当前布局：左侧 280px 监控列表 + 右侧详情的两栏。为多监控设计，单进程时侧栏只有一行、右侧大片留白，显得空旷、信息密度低。'
+  };
+  function show(which){
+    ['one','multi','old'].forEach(v=>{
+      document.getElementById('view-'+v).classList.toggle('active', which===v);
+      document.getElementById('btn-'+v).classList.toggle('active', which===v);
+    });
+    document.getElementById('cap').textContent = CAP[which];
+  }
+  show('one');
+</script>
+</body>
+</html>

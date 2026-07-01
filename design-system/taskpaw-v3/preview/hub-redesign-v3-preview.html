@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TaskPaw Hub V3 — 重新布局设计稿</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  /* ── Real V3 tokens (taskpaw_v3/ui/src/theme.ts) ── */
+  :root {
+    --bg: #0B1120;
+    --paper: #111A2E;
+    --paper2: #0D1626;
+    --card-border: #19273C;
+    --divider: #22324A;
+    --text: #F8FAFC;
+    --text-dim: #A8B5C7;
+    --ok: #22C55E;
+    --starting: #38BDF8;
+    --idle: #64748B;
+    --degraded: #F59E0B;
+    --error: #F87171;
+    --stopped: #475569;
+    --sans: 'Fira Sans','Noto Sans SC',system-ui,'PingFang SC','Microsoft YaHei',sans-serif;
+    --mono: 'Fira Code','Noto Sans SC',ui-monospace,monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--sans); color: var(--text); line-height: 1.7;
+    min-height: 100vh; padding: 28px 16px 64px;
+    display: flex; flex-direction: column; align-items: center;
+    /* blueprint grid + cool radial glow (theme.ts MuiCssBaseline) */
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(56,189,248,.06), transparent 60%),
+      linear-gradient(transparent 0 31px, rgba(56,189,248,.035) 31px 32px) 0 0/100% 32px,
+      linear-gradient(90deg, transparent 0 31px, rgba(56,189,248,.035) 31px 32px) 0 0/32px 100%,
+      var(--bg);
+  }
+
+  /* ── Toggle ── */
+  .switcher { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; justify-content: center; }
+  .switch-btn {
+    padding: 7px 20px; border: 1.5px solid var(--ok); border-radius: 20px;
+    background: transparent; color: var(--ok); font-size: 13px; cursor: pointer;
+    font-family: inherit; font-weight: 600; transition: all .16s;
+  }
+  .switch-btn.active { background: var(--ok); color: #06210F; }
+  .caption { color: var(--text-dim); font-size: 12.5px; margin-bottom: 22px; text-align: center; max-width: 780px; }
+
+  /* ── App frame ── */
+  .app {
+    width: 820px; max-width: 100%; background: rgba(11,17,32,.55);
+    border: 1px solid var(--card-border); border-radius: 12px; overflow: hidden;
+    box-shadow: 0 24px 60px -20px rgba(0,0,0,.7);
+  }
+  .titlebar { padding: 10px 16px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--card-border); }
+  .dots { display: flex; gap: 6px; }
+  .dots span { width: 11px; height: 11px; border-radius: 50%; }
+  .dots .r{background:#F87171}.dots .y{background:#F59E0B}.dots .g{background:#22C55E}
+  .titlebar b { font-weight: 600; font-size: 13px; margin-left: 4px; }
+  .titlebar .dim { color: var(--text-dim); font-size: 12px; font-family: var(--mono); }
+  .main { padding: 16px 18px 20px; }
+
+  /* ── Tabs ── */
+  .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--divider); margin-bottom: 14px; }
+  .tab { padding: 8px 4px; margin-right: 14px; font-size: 14px; color: var(--text-dim); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab.active { color: var(--ok); border-bottom-color: var(--ok); font-weight: 600; }
+
+  /* ── Fleet health summary ── */
+  .fleet-bar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 14px; }
+  .overline { font-size: 11px; letter-spacing: .2px; color: var(--text-dim); }
+  .tally { display: flex; align-items: center; gap: 16px; }
+  .tally .item { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .tally b { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.lg { width: 11px; height: 11px; }
+  .d-ok{background:var(--ok)}.d-deg{background:var(--degraded)}.d-off{background:var(--stopped)}
+  .d-idle{background:var(--idle)}.d-run{background:var(--ok)}.d-err{background:var(--error)}
+
+  /* ════════════════════════════════════════════════════════════════
+     NEW LAYOUT — one full-width server row. Monitors + their metrics
+     render directly (no click-to-expand) and FLUSH (no pl:3 indent).
+     Only the events feed keeps its own box.
+     ════════════════════════════════════════════════════════════════ */
+  .srv {
+    background: linear-gradient(180deg, var(--paper), var(--paper2));
+    border: 1px solid var(--card-border); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 10px;
+  }
+  .srv-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .srv-name { font-size: 15px; font-weight: 600; }
+  .srv-addr { font-size: 12.5px; color: var(--text-dim); font-family: var(--mono); }
+  .chip { font-size: 11px; padding: 2px 9px; border-radius: 11px; font-weight: 500; }
+  .chip.on { background: var(--ok); color: #06210F; }
+  .chip.off { background: transparent; border: 1px solid var(--stopped); color: var(--text-dim); }
+  .srv-spacer { flex: 1; }
+  .srv-seen { font-size: 11.5px; color: var(--text-dim); font-family: var(--mono); }
+  /* host CPU/MEM mini bars inline in the header */
+  .host { display: flex; gap: 14px; align-items: center; }
+  .mini { width: 118px; }
+  .mini .lab { display: flex; justify-content: space-between; font-size: 10px; letter-spacing: .5px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 3px; }
+  .mini .lab .v { font-family: var(--mono); }
+  .bar { height: 5px; border-radius: 3px; background: rgba(148,163,184,.15); overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 3px; }
+
+  /* Monitor list — flush under header, no indentation, no nested box */
+  .mons { margin-top: 12px; border-top: 1px solid var(--divider); }
+  .mon { padding: 10px 0; border-bottom: 1px solid var(--divider); }
+  .mon:last-child { border-bottom: none; }
+  .mon-top { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .mon-name { font-size: 13.5px; font-weight: 600; }
+  .mon-state { font-size: 12px; font-weight: 500; }
+  .mon-detail { font-size: 11.5px; color: var(--text-dim); font-family: var(--mono); margin-left: auto; word-break: break-all; }
+  .s-run{color:var(--ok)}.s-deg{color:var(--degraded)}.s-idle{color:var(--idle)}.s-stop{color:var(--text-dim)}
+
+  /* metrics rendered FLUSH (contrast old pl:3) — gauges + bars + tiles inline */
+  .metrics { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-top: 10px; }
+  .gauge { --v: 0; --tint: var(--ok); position: relative; width: 62px; height: 62px; border-radius: 50%;
+    background: conic-gradient(var(--tint) calc(var(--v)*1%), rgba(148,163,184,.16) 0);
+    display: grid; place-items: center; }
+  .gauge::before { content:""; position:absolute; inset:6px; border-radius:50%; background: var(--paper2); }
+  .gauge .g-num { position: relative; font-family: var(--mono); font-weight: 600; font-size: 15px; }
+  .gauge .g-lab { position: absolute; bottom: -18px; left: 0; right: 0; text-align: center; font-size: 10px; letter-spacing: .6px; color: var(--text-dim); text-transform: uppercase; }
+  .gauge-wrap { padding-bottom: 16px; }
+  .tile { padding: 7px 12px; border-radius: 8px; background: rgba(148,163,184,.06); border: 1px solid var(--divider); min-width: 82px; }
+  .tile .t-lab { font-size: 10px; letter-spacing: .6px; text-transform: uppercase; color: var(--text-dim); }
+  .tile .t-val { font-family: var(--mono); font-weight: 600; font-size: 15px; margin-top: 2px; }
+  .qbar { flex: 1; min-width: 200px; }
+  .qbar .lab { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+  .qbar .lab .v { font-family: var(--mono); color: var(--text); }
+  .now { padding: 8px 12px; border-radius: 8px; background: rgba(34,197,94,.06); border: 1px solid rgba(34,197,94,.25); flex: 1; min-width: 240px; }
+  .now .lab { font-size: 10px; letter-spacing: .6px; text-transform: uppercase; color: var(--text-dim); }
+  .now .file { font-family: var(--mono); font-weight: 600; font-size: 13px; word-break: break-all; margin-top: 2px; }
+
+  /* Horizontal-monitor variant: monitors become side-by-side columns */
+  .mon-cols { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; border-top: 1px solid var(--divider); padding-top: 12px; }
+  .mcol { flex: 1; min-width: 210px; background: rgba(148,163,184,.04); border: 1px solid var(--divider); border-radius: 8px; padding: 10px 12px; }
+  .mcol .mon-top { margin-bottom: 8px; }
+  .mcol .mon-detail { margin-left: 0; margin-top: 4px; width: 100%; }
+
+  /* Events feed — the ONE place a box/indent is kept */
+  .events-title { font-size: 11px; letter-spacing: .2px; color: var(--text-dim); margin: 18px 2px 6px; }
+  .ev-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .ev-spacer { flex: 1; }
+  .ev-select { background: var(--paper2); color: var(--text); border: 1px solid var(--divider); border-radius: 6px; padding: 6px 10px; font-family: var(--sans); font-size: 12.5px; }
+  .ev-select:focus { outline: none; border-color: var(--ok); box-shadow: 0 0 0 3px rgba(34,197,94,.18); }
+  .events { background: linear-gradient(180deg, var(--paper), var(--paper2)); border: 1px solid var(--card-border); border-radius: 10px; padding: 6px 4px; }
+  .ev { display: flex; gap: 10px; padding: 5px 12px; font-family: var(--mono); font-size: 12px; align-items: baseline; }
+  .ev .t { color: var(--text-dim); flex: none; }
+  .ev .badge { font-size: 10px; padding: 1px 7px; border-radius: 9px; flex: none; }
+  .ev .b-done{ background: rgba(34,197,94,.15); color: var(--ok);}
+  .ev .b-warn{ background: rgba(245,158,11,.15); color: var(--degraded);}
+  .ev .b-info{ background: rgba(56,189,248,.15); color: var(--starting);}
+  .ev .b-alert{ background: rgba(248,113,113,.15); color: var(--error);}
+  .ev .s { color: var(--text-dim); flex: none; }
+
+  /* ════════════ CURRENT 3.0 (comparison) ════════════ */
+  .grid30 { display: flex; flex-wrap: wrap; gap: 14px; }
+  .card30 { width: 240px; background: linear-gradient(180deg, var(--paper), var(--paper2)); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; align-self: flex-start; }
+  .card30 .row { display: flex; align-items: center; gap: 8px; }
+  .card30 .nm { font-size: 14px; font-weight: 600; flex: 1; }
+  .card30 .ad { font-size: 12px; color: var(--text-dim); font-family: var(--mono); margin-top: 2px; }
+  .card30 .sn { font-size: 11px; color: var(--text-dim); font-family: var(--mono); }
+  .card30 .exp { margin-top: 8px; font-size: 11px; color: var(--starting); cursor: pointer; }
+  .oldnote { font-size: 11.5px; color: var(--error); margin-top: 12px; max-width: 640px; }
+
+  /* ── Manage page (增删改查) ── */
+  .mrow { display: flex; align-items: center; gap: 10px; border: 1px solid var(--divider); border-radius: 8px; padding: 9px 12px; margin-bottom: 8px; }
+  .mrow.editing { background: rgba(56,189,248,.05); border-color: rgba(56,189,248,.35); }
+  .mname { font-size: 13.5px; font-weight: 600; }
+  .maddr { font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
+  .toggle { width: 34px; height: 18px; border-radius: 10px; position: relative; flex: none; }
+  .toggle.on { background: var(--ok); } .toggle.off { background: var(--stopped); }
+  .toggle i { position: absolute; top: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left .15s; }
+  .toggle.on i { left: 18px; } .toggle.off i { left: 2px; }
+  .icobtn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--divider); background: transparent; color: var(--text-dim); cursor: pointer; font-size: 13px; }
+  .icobtn:hover { color: var(--text); border-color: var(--text-dim); }
+  .icobtn.del:hover { color: var(--error); border-color: var(--error); }
+  .icobtn.ok { color: var(--ok); border-color: var(--ok); }
+  .minput { background: var(--paper2); border: 1px solid var(--divider); border-radius: 6px; color: var(--text); font-family: var(--mono); font-size: 12.5px; padding: 6px 9px; }
+  .minput:focus { outline: none; border-color: var(--ok); box-shadow: 0 0 0 3px rgba(34,197,94,.18); }
+  .addrow { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--divider); }
+  .addbtn { background: var(--ok); color: #06210F; border: none; border-radius: 6px; font-weight: 600; padding: 7px 18px; cursor: pointer; font-family: inherit; }
+  .ghostbtn { background: transparent; border: 1.5px solid var(--divider); color: var(--text); border-radius: 6px; font-weight: 600; padding: 6px 14px; cursor: pointer; font-family: inherit; }
+  .ghostbtn.muted { border-color: transparent; color: var(--text-dim); }
+  .delbtn { background: var(--error); color: #2a0808; border: none; border-radius: 6px; font-weight: 600; padding: 6px 16px; cursor: pointer; font-family: inherit; }
+  .dlg-wrap { margin-top: 16px; border-top: 1px dashed var(--divider); padding-top: 14px; }
+  .dlg { background: linear-gradient(180deg, var(--paper), var(--paper2)); border: 1px solid var(--card-border); border-radius: 10px; padding: 16px; max-width: 380px; box-shadow: 0 20px 50px -20px rgba(0,0,0,.7); }
+  .dlg-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .dlg-body { font-size: 12.5px; color: var(--text-dim); margin-bottom: 14px; }
+  .dlg-acts { display: flex; justify-content: flex-end; gap: 8px; }
+
+  .view { display: none; } .view.active { display: block; }
+</style>
+</head>
+<body>
+
+  <div class="switcher">
+    <button class="switch-btn active" id="btn-vert" onclick="show('vert')">仪表盘（纵向）</button>
+    <button class="switch-btn" id="btn-events" onclick="show('events')">事件页</button>
+    <button class="switch-btn" id="btn-manage" onclick="show('manage')">管理页（增删改查）</button>
+    <button class="switch-btn" id="btn-old" onclick="show('old')">当前 3.0（对比）</button>
+  </div>
+  <div class="caption" id="cap"></div>
+
+  <!-- ═══════════ VERTICAL ═══════════ -->
+  <div class="view active" id="view-vert">
+    <div class="app">
+      <div class="titlebar">
+        <div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <b>TaskPaw Hub</b><span class="dim">v3</span>
+      </div>
+      <div class="main">
+        <div class="tabs"><span class="tab active">机群</span><span class="tab" onclick="show('manage')" style="cursor:pointer">管理</span><span class="tab" onclick="show('events')" style="cursor:pointer">事件</span><span class="tab">设置</span></div>
+
+        <div class="fleet-bar">
+          <span class="overline">MAC-HUB · 4 个 AGENT</span>
+          <div class="tally">
+            <span class="item"><span class="dot d-ok"></span><b>2</b> 正常</span>
+            <span class="item"><span class="dot d-deg"></span><b>1</b> 异常</span>
+            <span class="item"><span class="dot d-off"></span><b>1</b> 离线</span>
+          </div>
+        </div>
+
+        <!-- Server 1: ok, full metrics shown flush -->
+        <div class="srv">
+          <div class="srv-head">
+            <span class="dot lg d-ok"></span>
+            <span class="srv-name">GPU-Server-01</span>
+            <span class="srv-addr">192.168.1.20:8760</span>
+            <span class="chip on">在线</span>
+            <span class="srv-spacer"></span>
+            <div class="host">
+              <div class="mini"><div class="lab"><span>CPU</span><span class="v">42%</span></div><div class="bar"><i style="width:42%;background:var(--ok)"></i></div></div>
+              <div class="mini"><div class="lab"><span>MEM</span><span class="v">61%</span></div><div class="bar"><i style="width:61%;background:var(--ok)"></i></div></div>
+              <span class="srv-seen">14:32:07</span>
+            </div>
+          </div>
+          <div class="mons">
+            <div class="mon">
+              <div class="mon-top"><span class="dot d-run"></span><span class="mon-name">ComfyUI Workflow</span><span class="mon-state s-run">Running</span><span class="mon-detail">running:1 · queued:4</span></div>
+              <div class="metrics">
+                <div class="now"><div class="lab">正在处理</div><div class="file">product_shot_0042.png</div></div>
+                <div class="qbar"><div class="lab"><span>队列</span><span class="v">8 / 12 · 剩 4</span></div><div class="bar" style="height:9px"><i style="width:66%;background:var(--ok)"></i></div></div>
+                <div class="gauge-wrap"><div class="gauge" style="--v:74;--tint:var(--degraded)"><span class="g-num">74</span><span class="g-lab">GPU</span></div></div>
+                <div class="tile"><div class="t-lab">VRAM</div><div class="t-val">17.8 / 24 GB</div></div>
+              </div>
+            </div>
+            <div class="mon">
+              <div class="mon-top"><span class="dot d-run"></span><span class="mon-name">Lada Video Upscale</span><span class="mon-state s-run">Listening</span><span class="mon-detail">lada-cli.exe · poll 10s</span></div>
+            </div>
+            <div class="mon">
+              <div class="mon-top"><span class="dot d-run"></span><span class="mon-name">Downloads Folder</span><span class="mon-state s-run">Listening</span><span class="mon-detail">D:\Downloads · stable 30s</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Server 2: degraded -->
+        <div class="srv">
+          <div class="srv-head">
+            <span class="dot lg d-deg"></span>
+            <span class="srv-name">Render-Node-02</span>
+            <span class="srv-addr">192.168.1.21:8760</span>
+            <span class="chip on">在线</span>
+            <span class="srv-spacer"></span>
+            <div class="host">
+              <div class="mini"><div class="lab"><span>CPU</span><span class="v">88%</span></div><div class="bar"><i style="width:88%;background:var(--degraded)"></i></div></div>
+              <div class="mini"><div class="lab"><span>MEM</span><span class="v">73%</span></div><div class="bar"><i style="width:73%;background:var(--degraded)"></i></div></div>
+              <span class="srv-seen">14:31:50</span>
+            </div>
+          </div>
+          <div class="mons">
+            <div class="mon">
+              <div class="mon-top"><span class="dot d-err"></span><span class="mon-name">FFmpeg Encoder</span><span class="mon-state s-deg">Degraded</span><span class="mon-detail">无进度 12m — 疑似卡住</span></div>
+            </div>
+            <div class="mon">
+              <div class="mon-top"><span class="dot d-run"></span><span class="mon-name">Blender Farm</span><span class="mon-state s-run">Rendering</span><span class="mon-detail">frame 240/500</span></div>
+              <div class="metrics">
+                <div class="qbar"><div class="lab"><span>进度</span><span class="v">48%</span></div><div class="bar" style="height:9px"><i style="width:48%;background:var(--ok)"></i></div></div>
+                <div class="tile"><div class="t-lab">FPS</div><div class="t-val">3.2</div></div>
+                <div class="tile"><div class="t-lab">ETA</div><div class="t-val">18:20</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Server 3: idle -->
+        <div class="srv">
+          <div class="srv-head">
+            <span class="dot lg d-idle"></span>
+            <span class="srv-name">Edit-Bay-03</span>
+            <span class="srv-addr">192.168.1.22:8760</span>
+            <span class="chip on">在线</span>
+            <span class="srv-spacer"></span>
+            <span class="srv-seen">14:30:12</span>
+          </div>
+          <div class="mons">
+            <div class="mon"><div class="mon-top"><span class="dot d-idle"></span><span class="mon-name">Premiere Export</span><span class="mon-state s-idle">Stopped</span><span class="mon-detail">—</span></div></div>
+          </div>
+        </div>
+
+        <!-- Server 4: offline, single line -->
+        <div class="srv">
+          <div class="srv-head">
+            <span class="dot lg d-off"></span>
+            <span class="srv-name">Backup-Box-04</span>
+            <span class="srv-addr">192.168.1.23:8760</span>
+            <span class="chip off">离线</span>
+            <span class="srv-spacer"></span>
+            <span class="srv-seen">last seen 14:18</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ EVENTS (事件页) ═══════════ -->
+  <div class="view" id="view-events">
+    <div class="app">
+      <div class="titlebar">
+        <div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <b>TaskPaw Hub</b><span class="dim">v3</span>
+      </div>
+      <div class="main">
+        <div class="tabs"><span class="tab" onclick="show('vert')" style="cursor:pointer">机群</span><span class="tab" onclick="show('manage')" style="cursor:pointer">管理</span><span class="tab active">事件</span><span class="tab">设置</span></div>
+
+        <!-- Filter bar: level + server -->
+        <div class="ev-toolbar">
+          <span class="overline">事件历史 · 全机群聚合</span>
+          <span class="ev-spacer"></span>
+          <select class="ev-select"><option>全部级别</option><option>info</option><option>done</option><option>warn</option><option>alert</option></select>
+          <select class="ev-select"><option>全部服务器</option><option>GPU-Server-01</option><option>Render-Node-02</option><option>Backup-Box-04</option></select>
+        </div>
+
+        <div class="events">
+          <div class="ev"><span class="t">14:32:07</span><span class="badge b-done">done</span><span class="s">GPU-Server-01</span><span>ComfyUI 队列完成 — SDXL batch (12 张)</span></div>
+          <div class="ev"><span class="t">14:31:50</span><span class="badge b-warn">warn</span><span class="s">Render-Node-02</span><span>FFmpeg 无进度 12 分钟，标记为 degraded</span></div>
+          <div class="ev"><span class="t">14:30:12</span><span class="badge b-info">info</span><span class="s">Render-Node-02</span><span>Blender 渲染 frame 240/500</span></div>
+          <div class="ev"><span class="t">14:28:19</span><span class="badge b-info">info</span><span class="s">GPU-Server-01</span><span>Downloads 稳定 — 移动 3 个文件</span></div>
+          <div class="ev"><span class="t">14:24:40</span><span class="badge b-done">done</span><span class="s">GPU-Server-01</span><span>Lada 完成 S01E03 · 8m12s</span></div>
+          <div class="ev"><span class="t">14:21:02</span><span class="badge b-alert">alert</span><span class="s">Backup-Box-04</span><span>连接丢失 — 服务器无响应</span></div>
+          <div class="ev"><span class="t">14:18:55</span><span class="badge b-info">info</span><span class="s">GPU-Server-01</span><span>ComfyUI 队列 +6 (SDXL batch)</span></div>
+          <div class="ev"><span class="t">14:12:03</span><span class="badge b-warn">warn</span><span class="s">Render-Node-02</span><span>GPU 温度 84°C</span></div>
+          <div class="ev"><span class="t">14:05:31</span><span class="badge b-done">done</span><span class="s">GPU-Server-01</span><span>Lada 完成 S01E02 · 9m03s</span></div>
+          <div class="ev"><span class="t">13:58:47</span><span class="badge b-info">info</span><span class="s">Edit-Bay-03</span><span>Premiere Export 已停止</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ MANAGE (增删改查) ═══════════ -->
+  <div class="view" id="view-manage">
+    <div class="app">
+      <div class="titlebar">
+        <div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <b>TaskPaw Hub</b><span class="dim">v3</span>
+      </div>
+      <div class="main">
+        <div class="tabs"><span class="tab" onclick="show('vert')" style="cursor:pointer">机群</span><span class="tab active">管理</span><span class="tab" onclick="show('events')" style="cursor:pointer">事件</span><span class="tab">设置</span></div>
+
+        <div style="font-size:11px;letter-spacing:.2px;color:var(--text-dim);margin:2px 2px 10px">管理 AGENT · 增删改查</div>
+
+        <!-- Agent list rows: enable toggle + edit + delete -->
+        <div class="mrow">
+          <span class="mname">GPU-Server-01</span>
+          <span class="maddr">192.168.1.20:8760</span>
+          <span class="srv-spacer"></span>
+          <span class="toggle on" title="已启用"><i></i></span>
+          <button class="icobtn" title="编辑">✎</button>
+          <button class="icobtn del" title="删除">🗑</button>
+        </div>
+        <div class="mrow">
+          <span class="mname">Render-Node-02</span>
+          <span class="maddr">192.168.1.21:8760</span>
+          <span class="srv-spacer"></span>
+          <span class="toggle on" title="已启用"><i></i></span>
+          <button class="icobtn" title="编辑">✎</button>
+          <button class="icobtn del" title="删除">🗑</button>
+        </div>
+        <!-- one row shown in edit mode -->
+        <div class="mrow editing">
+          <input class="minput" value="Edit-Bay-03" style="flex:1">
+          <input class="minput" value="192.168.1.22" style="flex:1">
+          <input class="minput" value="8760" style="width:70px">
+          <button class="icobtn ok" title="保存">✓</button>
+          <button class="icobtn" title="取消">✕</button>
+        </div>
+        <div class="mrow">
+          <span class="mname">Backup-Box-04</span>
+          <span class="maddr">192.168.1.23:8760</span>
+          <span class="srv-spacer"></span>
+          <span class="toggle off" title="已禁用"><i></i></span>
+          <button class="icobtn" title="编辑">✎</button>
+          <button class="icobtn del" title="删除">🗑</button>
+        </div>
+
+        <!-- Add agent -->
+        <div class="addrow">
+          <input class="minput" placeholder="名称" style="flex:1">
+          <input class="minput" placeholder="192.168.1.80" style="flex:1">
+          <input class="minput" placeholder="端口" style="width:70px">
+          <button class="addbtn">添加</button>
+        </div>
+
+        <!-- Polling token -->
+        <div class="addrow" style="margin-top:10px">
+          <input class="minput" type="password" value="••••••••••" style="flex:1">
+          <button class="ghostbtn">保存令牌</button>
+          <button class="ghostbtn muted">清除</button>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin:6px 2px">轮询令牌需与各 agent 的 API 令牌一致。</div>
+
+        <!-- Delete confirm dialog (overlay) -->
+        <div class="dlg-wrap">
+          <div class="dlg">
+            <div class="dlg-title">删除 agent「Backup-Box-04」?</div>
+            <div class="dlg-body">Hub 会停止轮询它并清除其历史记录，无法撤销。</div>
+            <div class="dlg-acts"><button class="ghostbtn">取消</button><button class="delbtn">删除</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ CURRENT 3.0 ═══════════ -->
+  <div class="view" id="view-old">
+    <div class="app">
+      <div class="titlebar">
+        <div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+        <b>TaskPaw Hub</b><span class="dim">v3 (当前)</span>
+      </div>
+      <div class="main">
+        <div class="tabs"><span class="tab active">机群</span><span class="tab">事件</span><span class="tab">设置</span></div>
+        <div class="fleet-bar">
+          <span class="overline">MAC-HUB · 4 个 AGENT</span>
+          <div class="tally">
+            <span class="item"><span class="dot d-ok"></span><b>2</b> 正常</span>
+            <span class="item"><span class="dot d-deg"></span><b>1</b> 异常</span>
+            <span class="item"><span class="dot d-off"></span><b>1</b> 离线</span>
+          </div>
+        </div>
+        <div class="grid30">
+          <div class="card30">
+            <div class="row"><span class="dot d-ok"></span><span class="nm">GPU-Server-01</span><span class="chip on">在线</span></div>
+            <div class="ad">192.168.1.20:8760</div><div class="sn">last seen 14:32:07</div>
+            <div class="mini" style="margin-top:10px"><div class="lab"><span>CPU</span><span class="v">42%</span></div><div class="bar"><i style="width:42%;background:var(--ok)"></i></div></div>
+            <div class="mini" style="margin-top:6px"><div class="lab"><span>MEM</span><span class="v">61%</span></div><div class="bar"><i style="width:61%;background:var(--ok)"></i></div></div>
+            <div class="exp">▸ 展开查看监控</div>
+          </div>
+          <div class="card30">
+            <div class="row"><span class="dot d-deg"></span><span class="nm">Render-Node-02</span><span class="chip on">在线</span></div>
+            <div class="ad">192.168.1.21:8760</div><div class="sn">last seen 14:31:50</div>
+            <div class="mini" style="margin-top:10px"><div class="lab"><span>CPU</span><span class="v">88%</span></div><div class="bar"><i style="width:88%;background:var(--degraded)"></i></div></div>
+            <div class="mini" style="margin-top:6px"><div class="lab"><span>MEM</span><span class="v">73%</span></div><div class="bar"><i style="width:73%;background:var(--degraded)"></i></div></div>
+            <div class="exp">▸ 展开查看监控</div>
+          </div>
+          <div class="card30">
+            <div class="row"><span class="dot d-idle"></span><span class="nm">Edit-Bay-03</span><span class="chip on">在线</span></div>
+            <div class="ad">192.168.1.22:8760</div><div class="sn">last seen 14:30:12</div>
+            <div class="exp">▸ 展开查看监控</div>
+          </div>
+          <div class="card30">
+            <div class="row"><span class="dot d-off"></span><span class="nm">Backup-Box-04</span><span class="chip off">离线</span></div>
+            <div class="ad">192.168.1.23:8760</div><div class="sn">last seen 14:18</div>
+            <div class="exp">▸ 展开查看监控</div>
+          </div>
+        </div>
+        <p class="oldnote">↑ 当前 3.0：机器卡片是 300px 宽的自动换行网格，一行挤 2–3 台；监控和指标默认收在「展开」里，展开后指标还要缩进（pl:3）。所以整屏很碎、看不到全貌——这就是「奇怪」的地方。</p>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const CAP = {
+    vert:   '仪表盘（纵向）：纯观测页，每台服务器占满一整行，监控直接平铺、无需点击展开，指标齐平不缩进。事件已移到「事件」页，仪表盘只保留机群状态。',
+    events: '事件页：把原来放在仪表盘底部的最近事件搬到这里，作为全机群聚合的事件历史——顶部可按级别（info/done/warn/alert）和服务器筛选，下面是完整时间线。',
+    manage: '管理页：从仪表盘拆出来的独立标签页，专做增删改查——启用开关、编辑（改名称/IP/端口）、删除（二次确认）、添加 agent、轮询令牌。仪表盘只看不改，误操作被隔离到这里。',
+    old:    '当前 3.0：300px 卡片自动换行成网格，监控藏在「展开」里；而且增删改查也塞在同一页——信息被折叠又被切碎，管理和观测混在一起。'
+  };
+  function show(which){
+    ['vert','events','manage','old'].forEach(v=>{
+      document.getElementById('view-'+v).classList.toggle('active', which===v);
+      document.getElementById('btn-'+v).classList.toggle('active', which===v);
+    });
+    document.getElementById('cap').textContent = CAP[which];
+  }
+  show('vert');
+</script>
+</body>
+</html>
