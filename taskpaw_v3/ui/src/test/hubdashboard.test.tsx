@@ -120,6 +120,16 @@ describe("HubDashboard (#95)", () => {
     expect(within(selfCard).queryByText(/"cpu_pct"/)).not.toBeInTheDocument();
   });
 
+  it("keeps agent management on its own Manage tab, not the Fleet page (#132)", async () => {
+    renderHub();
+    await screen.findByLabelText(/Fleet health|机群健康/); // fleet loaded
+    // The Fleet (dashboard) page is observation-only — no agent manager here.
+    expect(screen.queryByText(/Manage agents|管理 agent/)).not.toBeInTheDocument();
+    // Switching to the Manage tab reveals the CRUD manager.
+    fireEvent.click(screen.getByRole("tab", { name: /^Manage$|^管理$/ }));
+    expect(await screen.findByText(/Manage agents|管理 agent/)).toBeInTheDocument();
+  });
+
   it("drills down into a machine's monitors when its card is clicked", async () => {
     renderHub();
     const card = await screen.findByRole("button", { name: /render-02/ });

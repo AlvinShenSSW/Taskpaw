@@ -72,7 +72,7 @@ export function HubDashboard() {
     queryKey: ["hubStatus"], queryFn: api.hubStatus,
     refetchInterval: 5000, // #95: auto-refresh like the agent console.
   });
-  const [tab, setTab] = useState<"fleet" | "events" | "settings">("fleet");
+  const [tab, setTab] = useState<"fleet" | "manage" | "events" | "settings">("fleet");
   const [level, setLevel] = useState<string>("");
   const [expanded, setExpanded] = useState<number | null>(null);
   // Aggregated durable history from all polled agents; only poll while open.
@@ -94,12 +94,18 @@ export function HubDashboard() {
     <Stack spacing={1.5}>
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ minHeight: 0 }}>
         <Tab value="fleet" label={t("hub.fleet")} />
+        <Tab value="manage" label={t("hub.manage")} />
         <Tab value="events" label={t("hub.events")} />
         <Tab value="settings" label={t("settings.title")} />
       </Tabs>
 
       {tab === "settings" ? (
         <Settings role="hub" />
+      ) : tab === "manage" ? (
+        // Managing agents is separate from observing (design: 4 tabs). Like
+        // Settings, it stays reachable when the Hub is unreachable — the agent
+        // list may be empty but the add form still shows (#87 rationale).
+        <HubAgentManager servers={servers} />
       ) : isLoading ? (
         <Typography>{t("common.loading")}</Typography>
       ) : error ? (
@@ -148,9 +154,6 @@ export function HubDashboard() {
               <Typography color="text.secondary">{t("hub.noAgents")}</Typography>
             )}
           </Box>
-
-          {/* #124: add/edit/remove polled agents + set the polling token. */}
-          <HubAgentManager servers={servers} />
 
           {Object.keys(self).length > 0 && (
             <Card>

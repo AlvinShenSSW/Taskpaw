@@ -65,7 +65,7 @@ const en = {
     custom_cmd: "Run a command and parse its output.",
   },
   hub: {
-    fleet: "Fleet", events: "Events",
+    fleet: "Fleet", manage: "Manage", events: "Events",
     fleetTitle: "{{machine}} — fleet ({{count}} {{unit}})",
     agent: "agent", agents: "agents",
     noAgents: "No agents registered yet.",
@@ -162,7 +162,7 @@ const zh: typeof en = {
     custom_cmd: "运行一条命令并解析其输出。",
   },
   hub: {
-    fleet: "机群", events: "事件",
+    fleet: "机群", manage: "管理", events: "事件",
     fleetTitle: "{{machine}} — 机群({{count}} {{unit}})",
     agent: "台", agents: "台",
     noAgents: "还没有注册任何 agent。",
