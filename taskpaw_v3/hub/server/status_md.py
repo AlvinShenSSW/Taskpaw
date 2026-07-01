@@ -157,10 +157,11 @@ def _monitor_lines(status_json: Optional[str]) -> list[str]:
             if not isinstance(m, dict):
                 continue
             name = m.get("name", "unknown")
-            # A V2 running monitor carries a rich `status` string; a disabled one has
-            # none. So "disabled" only when flagged disabled AND no live status to
-            # show — a running-but-flagged-disabled monitor still shows its status.
-            if m.get("enabled") is False and not m.get("status"):
+            # V2 contract: enabled:false ALWAYS renders "disabled" — a V2 agent
+            # includes a `status` field (default "Stopped") even when disabled, so we
+            # can't use status-presence to detect "running" here (Codex + Kimi). The
+            # live-over-stale-flag fix is V3-dict-only (state/metrics are separate).
+            if m.get("enabled") is False:
                 lines.append(f"- {_inline(str(name))}: disabled")
             else:
                 status = m.get("status") or m.get("state") or "unknown"
