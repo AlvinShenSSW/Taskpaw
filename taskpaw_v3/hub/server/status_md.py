@@ -50,7 +50,9 @@ def _status_text(snap: Any) -> str:
     # (older/pre-type agents) — so a *typed* plugin is never misclassified, e.g. a
     # folder monitor that emits `pending` isn't rendered as a ComfyUI queue, nor a
     # lada worker's cpu_pct mistaken for the host (Codex + Kimi).
-    tid = snap.get("type_id")
+    # Treat an empty type_id as absent so a stub with type_id:"" still uses the
+    # metric-signature fallback rather than being seen as a typed monitor (Kimi).
+    tid = snap.get("type_id") or None
 
     # host_metrics — CPU / RAM / GPU / VRAM. Each field guarded individually: a
     # host monitor can be typed yet carry empty/partial metrics (startup / disabled

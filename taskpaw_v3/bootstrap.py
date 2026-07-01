@@ -52,7 +52,8 @@ def _friendly_machine_name() -> str:
         name = (os.environ.get("COMPUTERNAME") or "").strip()
         if name:
             return name
-    return (socket.gethostname() or "agent").split(".")[0]
+    # Guard the split result too: gethostname() == "." would yield "" (Kimi).
+    return (socket.gethostname() or "agent").split(".")[0] or "agent"
 
 
 def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
