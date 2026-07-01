@@ -26,10 +26,11 @@ const renderApp = () => {
 
 // App shell & top bar (#91).
 describe("App shell", () => {
-  it("uses an SVG paw mark, not the 🐾 emoji", () => {
+  it("shows the brand logo image, not the 🐾 emoji", () => {
     const { container } = renderApp();
     expect(container.textContent ?? "").not.toContain("🐾");
-    expect(container.querySelector("svg")).toBeInTheDocument(); // the paw logo
+    // The top-bar brand mark is the logo image (#120), not an emoji.
+    expect(container.querySelector('img[src*="logo"]')).toBeInTheDocument();
   });
 
   it("shows a health badge with text (status not color-only)", () => {
