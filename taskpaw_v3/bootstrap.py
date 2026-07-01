@@ -46,8 +46,10 @@ def _friendly_machine_name() -> str:
             name = out.stdout.strip()
             if name:
                 return name
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError) as e:
+            # Not silent (constitution §4): note why, then fall back to the hostname.
+            print(f"taskpaw: could not read macOS ComputerName ({e}); using hostname",
+                  file=sys.stderr)
     elif sys.platform == "win32":
         name = (os.environ.get("COMPUTERNAME") or "").strip()
         if name:

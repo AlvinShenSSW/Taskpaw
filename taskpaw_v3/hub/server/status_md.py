@@ -74,14 +74,14 @@ def _status_text(snap: Any) -> str:
     # A task plugin in a bad state must surface that state, not a (possibly stale)
     # queue sample — the plugins emit metrics even in error states, so rendering
     # "X/Y done" / "N running" would hide the outage from OpenClaw (Kimi).
-    bad_state = str(state) in {"error", "stopped", "degraded", "unreachable"}
+    bad_state = str(state).lower() in {"error", "stopped", "degraded", "unreachable"}
 
     # lada-style queue: "X/Y done (Z left)" + the current task between pipes.
     is_lada = tid == "lada" or (tid is None and _is_num(m.get("queue_total")))
     if is_lada and not bad_state and _is_num(m.get("queue_total")):
         done = int(m.get("queue_completed") or 0)
         total = int(m["queue_total"])
-        left = int(m.get("queue_remaining", max(0, total - done)))
+        left = max(0, int(m.get("queue_remaining", max(0, total - done))))
         seg = f"{done}/{total} done ({left} left)"
         if isinstance(m.get("current_file"), str) and m["current_file"]:
             seg += f" | {m['current_file']} |"

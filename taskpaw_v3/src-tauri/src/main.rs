@@ -517,10 +517,14 @@ fn applescript_escape(s: &str) -> String {
 /// these — Tauri `.expect()`s a setup Err into a panic, and on macOS that panic
 /// can't unwind across the ObjC `did_finish_launching` callback, so it aborts with
 /// SIGABRT and a crash report (e.g. on a mere port conflict). A clean exit shows a
-/// friendly message instead. NOTE: process::exit skips Drop, so the managed
-/// Backend's kill-on-drop never runs — callers that already spawned a backend MUST
-/// kill_backend() first, or it orphans.
-fn fatal_startup(message: &str) -> ! {
+/// friendly message instead. process::exit skips Drop, so the managed Backend's
+/// kill-on-drop never runs — pass the AppHandle when a backend has been managed and
+/// this kills it first (centralizing the no-orphan invariant so a future call site
+/// can't forget it — Kimi); pass None when nothing is managed yet.
+fn fatal_startup(message: &str, app: Option<&tauri::AppHandle>) -> ! {
+    if let Some(app) = app {
+        kill_backend(app);
+    }
     eprintln!("taskpaw: fatal startup error: {message}");
     #[cfg(target_os = "macos")]
     if std::env::var_os("TASKPAW_NO_STARTUP_DIALOG").is_none() {
@@ -676,6 +680,7 @@ fn main() {
                     "TaskPaw's bundled backend 'taskpaw-backend' was not found or \
                      failed to start, so the app cannot reach its local API. Try \
                      reinstalling the app.",
+                    None, // nothing managed yet
                 );
             }
             // Take the backend's piped stdout now (before it's moved into managed
@@ -702,6 +707,7 @@ fn main() {
                             "TaskPaw could not assign its backend to a Windows Job \
                              Object, so it can't guarantee the backend stops when you \
                              quit. Refusing to launch to avoid orphaned processes.",
+                            None, // child already killed inline above
                         );
                     }
                     None => None, // dev: backend intentionally disabled
@@ -726,17 +732,19 @@ fn main() {
                     None => {
                         // The backend was spawned but never reported readiness —
                         // most often its local API port is already taken (another
-                        // instance, a V2 agent, or another service). Kill it first
-                        // (process::exit skips the managed Backend's Drop → else it
-                        // orphans), then exit cleanly with a friendly dialog rather
-                        // than a setup-Err panic/abort (see fatal_startup).
+                        // instance, a V2 agent, or another service). fatal_startup
+                        // kills the managed backend first (process::exit skips Drop),
+                        // then exits cleanly with a friendly dialog rather than a
+                        // setup-Err panic/abort.
                         let hint = backend_log_hint();
-                        kill_backend(app.handle());
-                        fatal_startup(&format!(
-                            "TaskPaw's backend did not start within 30s. Its local \
-                             API port may be in use by another TaskPaw instance, a \
-                             V2 agent, or another service.\n\nDetails: {hint}"
-                        ));
+                        fatal_startup(
+                            &format!(
+                                "TaskPaw's backend did not start within 30s. Its local \
+                                 API port may be in use by another TaskPaw instance, a \
+                                 V2 agent, or another service.\n\nDetails: {hint}"
+                            ),
+                            Some(app.handle()),
+                        );
                     }
                 },
                 None => String::new(), // dev: Vite + TASKPAW_UI_BASE fallback
