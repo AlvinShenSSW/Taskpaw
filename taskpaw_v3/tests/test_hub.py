@@ -547,3 +547,26 @@ def test_manage_validation_and_atomicity(tmp_path):
         assert r.status_code == 401 and "WWW-Authenticate" in r.headers
     finally:
         s2.close()
+
+
+def test_manage_port_and_token_edgecases(tmp_path):
+    """#124 review r2: unicode-digit port → 400 (not 500); null polling_token
+    clears rather than storing the string 'None'."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(app)
+        # A Unicode-digit string is isdigit()=True but int() rejects it → must 400.
+        assert c.post("/servers", json={"name": "u", "ip": "1.1.1.1", "port": "⁵"}).status_code == 400
+        # JSON null token clears it (never the literal "None").
+        s.set_config("polling_token", "old")
+        assert c.patch("/config", json={"polling_token": None}).status_code == 200
+        assert s.get_config("polling_token") == ""
+        # non-string token rejected.
+        assert c.patch("/config", json={"polling_token": 123}).status_code == 400
+    finally:
+        s.close()

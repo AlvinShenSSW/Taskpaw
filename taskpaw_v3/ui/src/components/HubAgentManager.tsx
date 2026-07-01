@@ -53,6 +53,9 @@ export function HubAgentManager({ servers }: { servers: HubServer[] }) {
     setEditId(s.id);
     setEdit({ name: s.name, ip: s.ip, port: String(s.port) });
   };
+  // A port field is valid only as a 1–65535 integer — gate the buttons so the UI
+  // doesn't fire a request it already knows the backend will 400 (Kimi).
+  const validPort = (v: string) => /^\d+$/.test(v.trim()) && +v >= 1 && +v <= 65535;
 
   return (
     <Card>
@@ -73,7 +76,8 @@ export function HubAgentManager({ servers }: { servers: HubServer[] }) {
                   <TextField size="small" label={t("hub.mPort")} value={edit.port} inputMode="numeric"
                     onChange={(e) => setEdit({ ...edit, port: e.target.value })} sx={{ width: 96 }} />
                   <Tooltip title={t("common.save")}>
-                    <span><IconButton size="small" color="primary" disabled={updMut.isPending}
+                    <span><IconButton size="small" color="primary"
+                      disabled={updMut.isPending || !edit.name.trim() || !edit.ip.trim() || !validPort(edit.port)}
                       onClick={() => updMut.mutate({ id: s.id,
                         patch: { name: edit.name.trim(), ip: edit.ip.trim(), port: Number(edit.port) } })}>
                       <CheckIcon fontSize="small" />
@@ -114,7 +118,8 @@ export function HubAgentManager({ servers }: { servers: HubServer[] }) {
             onChange={(e) => setAdd({ ...add, ip: e.target.value })} sx={{ flex: 1 }} />
           <TextField size="small" label={t("hub.mPort")} value={add.port} inputMode="numeric"
             onChange={(e) => setAdd({ ...add, port: e.target.value })} sx={{ width: 96 }} />
-          <Button variant="contained" disabled={addMut.isPending || !add.name.trim() || !add.ip.trim()}
+          <Button variant="contained"
+            disabled={addMut.isPending || !add.name.trim() || !add.ip.trim() || !validPort(add.port)}
             onClick={() => addMut.mutate()}>{t("common.add")}</Button>
         </Stack>
 

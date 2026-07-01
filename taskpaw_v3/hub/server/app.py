@@ -235,14 +235,19 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         return s
 
     def _valid_port(v) -> int:
-        # Reject bool (a subclass of int) and non-integers (e.g. 3.14) — silently
-        # truncating them would store a port the wire value never named (Kimi).
+        # Reject bool (an int subclass) and non-integers (3.14) — silently
+        # truncating them would store a port the wire value never named. Parse via
+        # int() (NOT str.isdigit(), which accepts Unicode digits like "⁵" that
+        # int() then rejects → 500 instead of 400) (Kimi).
         if isinstance(v, bool):
             raise HTTPException(status_code=400, detail="port must be an integer")
         if isinstance(v, int):
             p = v
-        elif isinstance(v, str) and v.strip().lstrip("+-").isdigit():
-            p = int(v)
+        elif isinstance(v, str):
+            try:
+                p = int(v.strip())
+            except ValueError:
+                raise HTTPException(status_code=400, detail="port must be an integer")
         else:
             raise HTTPException(status_code=400, detail="port must be an integer")
         if not (1 <= p <= 65535):
@@ -290,7 +295,12 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             raise HTTPException(status_code=400, detail="that name is already in use")
         if enabled is not None:
             store.set_server_enabled(sid, enabled)
-        return {"ok": True, **(store.get_server(sid) or {})}
+        # Re-read: if the row was removed concurrently, report 404 rather than a
+        # misleading 200 with an empty body (Kimi).
+        srv = store.get_server(sid)
+        if srv is None:
+            raise HTTPException(status_code=404, detail=f"no server with id {sid}")
+        return {"ok": True, **srv}
 
     @app.delete("/servers/{sid}")
     def delete_server(request: Request, sid: int):
@@ -305,9 +315,14 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         if not _auth(request):
             return _unauthorized()
         if "polling_token" in body:
+            tok = body["polling_token"]
+            if tok is None:
+                tok = ""            # JSON null = clear; never store the string "None" (Kimi)
+            if not isinstance(tok, str):
+                raise HTTPException(status_code=400, detail="polling_token must be a string")
             # Live: the poller reads polling_token per cycle (get_polling_token),
             # so no Hub restart is needed to apply it (#124).
-            store.set_config("polling_token", str(body["polling_token"]))
+            store.set_config("polling_token", tok)
         return {"ok": True}
 
     return app, service
