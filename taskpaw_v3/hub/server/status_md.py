@@ -69,9 +69,14 @@ def _status_text(snap: Any) -> str:
         if _is_num(m.get("gpu_mem_used_mb")) and _is_num(m.get("gpu_mem_total_mb")) and m["gpu_mem_total_mb"] > 0:
             parts.append(f"VRAM {m['gpu_mem_used_mb'] / 1024:.1f}/{m['gpu_mem_total_mb'] / 1024:.1f}GB")
 
+    # A task plugin in a bad state must surface that state, not a (possibly stale)
+    # queue sample — the plugins emit metrics even in error states, so rendering
+    # "X/Y done" / "N running" would hide the outage from OpenClaw (Kimi).
+    bad_state = str(state) in {"error", "stopped", "degraded", "unreachable"}
+
     # lada-style queue: "X/Y done (Z left)" + the current task between pipes.
     is_lada = tid == "lada" or (tid is None and _is_num(m.get("queue_total")))
-    if is_lada and _is_num(m.get("queue_total")):
+    if is_lada and not bad_state and _is_num(m.get("queue_total")):
         done = int(m.get("queue_completed") or 0)
         total = int(m["queue_total"])
         left = int(m.get("queue_remaining", max(0, total - done)))
@@ -87,7 +92,7 @@ def _status_text(snap: Any) -> str:
     # Only when a queue metric is actually present — a typed-but-down ComfyUI
     # (state "error", empty metrics) must show its state, not "0 running, 0
     # pending", which would hide the outage from OpenClaw (Codex + Kimi).
-    if is_comfyui and (_is_num(m.get("running")) or _is_num(m.get("pending"))):
+    if is_comfyui and not bad_state and (_is_num(m.get("running")) or _is_num(m.get("pending"))):
         parts.append(f"{int(m.get('running', 0))} running, {int(m.get('pending', 0))} pending")
 
     return " | ".join(parts) if parts else str(state)

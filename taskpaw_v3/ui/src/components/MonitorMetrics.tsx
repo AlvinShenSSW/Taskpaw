@@ -78,6 +78,8 @@ function Tile({ label, value }: { label: string; value: string }) {
 const KNOWN = new Set([
   "current_file", "queue_completed", "queue_total", "queue_remaining", "percent",
   "fps", "eta", "cpu_pct", "mem_pct", "gpu_pct", "gpu_mem_used_mb", "gpu_mem_total_mb",
+  // absolute RAM (shown as the MEM gauge's GB sub-label, not raw tiles)
+  "mem_used_mb", "mem_total_mb",
 ]);
 
 export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> }) {
@@ -103,6 +105,8 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
   const gpu = num("gpu_pct");
   const vramUsed = num("gpu_mem_used_mb");
   const vramTotal = num("gpu_mem_total_mb");
+  const ramUsed = num("mem_used_mb");
+  const ramTotal = num("mem_total_mb");
 
   const gauges = [
     gpu !== undefined ? { label: "GPU", pct: gpu } : null,
@@ -173,7 +177,9 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
           {gauges.map((g) => (
             <Gauge key={g.label} label={g.label} pct={g.pct}
               sub={g.label === "GPU" && vramUsed !== undefined && vramTotal
-                ? `${fmtGB(vramUsed)} / ${fmtGB(vramTotal)}` : undefined} />
+                ? `${fmtGB(vramUsed)} / ${fmtGB(vramTotal)}`
+                : g.label === "MEM" && ramUsed !== undefined && ramTotal
+                  ? `${fmtGB(ramUsed)} / ${fmtGB(ramTotal)}` : undefined} />
           ))}
         </Stack>
       )}

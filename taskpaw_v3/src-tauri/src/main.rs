@@ -381,7 +381,7 @@ fn spawn_backend() -> Option<Child> {
         #[cfg(target_os = "macos")]
         if !cfg!(debug_assertions) {
             use std::process::Stdio;
-            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
+            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::inherit));
         }
     }
     #[cfg(windows)]
@@ -400,7 +400,7 @@ fn spawn_backend() -> Option<Child> {
         // sees logs. stdout stays piped (above) for the readiness handshake.
         if !cfg!(debug_assertions) {
             use std::process::Stdio;
-            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
+            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::inherit));
         }
     }
     match command.spawn() {

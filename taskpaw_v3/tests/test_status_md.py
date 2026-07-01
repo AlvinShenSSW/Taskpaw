@@ -104,6 +104,21 @@ def test_comfyui_down_shows_state_not_empty_queue():
     assert "- ComfyUI: error" in md and "running" not in md
 
 
+def test_task_error_state_with_stale_metrics_shows_state():
+    # Plugins emit metrics even in error states; a bad state must surface as the
+    # state, not a stale queue sample, so the outage isn't masked (Kimi).
+    rows = [{"name": "box", "reachable": 1,
+             "status_json": json.dumps({"monitors": {
+                 "LADA": {"state": "error", "type_id": "lada",
+                          "metrics": {"queue_total": 10, "queue_completed": 3}},
+                 "ComfyUI": {"state": "error", "type_id": "comfyui",
+                             "metrics": {"running": 0, "pending": 5}},
+             }})}]
+    md = render_status_md(rows, "t")
+    assert "- LADA: error" in md and "done" not in md
+    assert "- ComfyUI: error" in md and "pending" not in md
+
+
 def test_v2_list_shape_renders_disabled_monitor():
     # V2 agents report a list with `enabled: False` for stopped monitors → status.md
     # shows them as "disabled" rather than their (stale) state.
