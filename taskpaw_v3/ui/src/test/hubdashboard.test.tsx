@@ -82,7 +82,7 @@ describe("HubDashboard (#95)", () => {
 
   it("shows CPU/MEM mini-bars for a live machine that reports host metrics (#113)", async () => {
     renderHub();
-    const card = (await screen.findByText("render-01")).closest("button")!;
+    const card = await screen.findByRole("button", { name: /render-01/ });
     // The host_metrics monitor (37/72) drives the bars — NOT the lada monitor that
     // also reports cpu_pct/mem_pct (99) (Kimi #113 attribution fix).
     expect(within(card).getByText("37%")).toBeInTheDocument();
@@ -93,20 +93,20 @@ describe("HubDashboard (#95)", () => {
   it("falls back to a key-scan for a legacy agent with no type_id (#113)", async () => {
     renderHub();
     // render-04's monitor has no type_id but reports cpu_pct → bar still renders.
-    const card = (await screen.findByText("render-04")).closest("button")!;
+    const card = await screen.findByRole("button", { name: /render-04/ });
     expect(within(card).getByText("55%")).toBeInTheDocument();
   });
 
   it("omits mini-bars for an offline machine with no metrics (#113)", async () => {
     renderHub();
-    const card = (await screen.findByText("render-03")).closest("button")!;
+    const card = await screen.findByRole("button", { name: /render-03/ });
     expect(within(card).queryByText(/%$/)).not.toBeInTheDocument();
   });
 
   it("labels a disabled server distinctly from a merely-offline one", async () => {
     renderHub();
     // render-03 is enabled:0 → its chip reads "disabled", not just "offline".
-    const card = (await screen.findByText("render-03")).closest("button")!;
+    const card = await screen.findByRole("button", { name: /render-03/ });
     expect(within(card).getByText(/disabled|已禁用/)).toBeInTheDocument();
   });
 
@@ -122,7 +122,7 @@ describe("HubDashboard (#95)", () => {
 
   it("drills down into a machine's monitors when its card is clicked", async () => {
     renderHub();
-    const card = (await screen.findByText("render-02")).closest("button")!;
+    const card = await screen.findByRole("button", { name: /render-02/ });
     expect(card.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(card);
     expect(card.getAttribute("aria-expanded")).toBe("true");

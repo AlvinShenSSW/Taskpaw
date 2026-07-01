@@ -177,4 +177,13 @@ export const api = {
     qs.set("limit", String(p.limit ?? 200));
     return get<{ events: EventItem[] }>("hub", `/events?${qs.toString()}`);
   },
+  // Manage the agents the Hub polls, from the dashboard (#124). Bearer-gated like
+  // the rest of the Hub API (#106); errors surface the backend `detail`.
+  hubAddServer: (s: { name: string; ip: string; port: number }) =>
+    send<HubServer & { ok: boolean }>("hub", "POST", "/servers", s),
+  hubUpdateServer: (id: number, patch: { name?: string; ip?: string; port?: number; enabled?: boolean }) =>
+    send<HubServer & { ok: boolean }>("hub", "PATCH", `/servers/${id}`, patch),
+  hubRemoveServer: (id: number) => send<{ ok: boolean }>("hub", "DELETE", `/servers/${id}`),
+  hubSetPollingToken: (polling_token: string) =>
+    send<{ ok: boolean }>("hub", "PATCH", "/config", { polling_token }),
 };

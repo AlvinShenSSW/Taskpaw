@@ -8,6 +8,7 @@ Tauri dashboard (#19) and richer endpoints come later.
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
 import time
 from typing import Optional
@@ -216,6 +217,82 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         # first, optionally filtered by server id / level. Clamp the limit.
         limit = max(1, min(int(limit), 1000))
         return {"events": store.recent_events(server_id=server, level=level, limit=limit)}
+
+    # ── manage the polled agents from the dashboard (#124) — same Bearer gate as
+    # the read API (#106): open on loopback, token-required on a LAN Hub (#114). ──
+    from fastapi import HTTPException
+
+    def _guard(request: Request):
+        if not _auth(request):
+            # Raise so it short-circuits before touching the store.
+            raise HTTPException(status_code=401, detail="unauthorized")
+
+    def _valid_name(v) -> str:
+        s = str(v or "").strip()
+        if not s:
+            raise HTTPException(status_code=400, detail="name must not be blank")
+        return s
+
+    def _valid_ip(v) -> str:
+        s = str(v or "").strip()
+        if not s:
+            raise HTTPException(status_code=400, detail="ip/host must not be blank")
+        return s
+
+    def _valid_port(v) -> int:
+        try:
+            p = int(v)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="port must be an integer")
+        if not (1 <= p <= 65535):
+            raise HTTPException(status_code=400, detail="port must be between 1 and 65535")
+        return p
+
+    @app.post("/servers")
+    def add_server(request: Request, body: dict):
+        _guard(request)
+        name = _valid_name(body.get("name"))
+        ip = _valid_ip(body.get("ip"))
+        port = _valid_port(body.get("port", 5680))
+        try:
+            sid = store.add_server(name, ip, port)
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail=f"a server named {name!r} already exists")
+        return {"ok": True, "id": sid, **(store.get_server(sid) or {})}
+
+    @app.patch("/servers/{sid}")
+    def update_server(request: Request, sid: int, body: dict):
+        _guard(request)
+        if store.get_server(sid) is None:
+            raise HTTPException(status_code=404, detail=f"no server with id {sid}")
+        name = _valid_name(body["name"]) if "name" in body else None
+        ip = _valid_ip(body["ip"]) if "ip" in body else None
+        port = _valid_port(body["port"]) if "port" in body else None
+        try:
+            store.update_server(sid, name=name, ip=ip, port=port)
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="that name is already in use")
+        if "enabled" in body:
+            if not isinstance(body["enabled"], bool):
+                raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
+            store.set_server_enabled(sid, body["enabled"])
+        return {"ok": True, **(store.get_server(sid) or {})}
+
+    @app.delete("/servers/{sid}")
+    def delete_server(request: Request, sid: int):
+        _guard(request)
+        if not store.remove_server(sid):
+            raise HTTPException(status_code=404, detail=f"no server with id {sid}")
+        return {"ok": True}
+
+    @app.patch("/config")
+    def update_config(request: Request, body: dict):
+        _guard(request)
+        if "polling_token" in body:
+            # Live: the poller reads polling_token per cycle (get_polling_token),
+            # so no Hub restart is needed to apply it (#124).
+            store.set_config("polling_token", str(body["polling_token"]))
+        return {"ok": True}
 
     return app, service
 

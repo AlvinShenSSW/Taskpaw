@@ -243,6 +243,41 @@ class HubStore:
             self._conn.commit()
             return cur.rowcount > 0
 
+    def update_server(self, server_id: int, *, name: Optional[str] = None,
+                      ip: Optional[str] = None, port: Optional[int] = None) -> bool:
+        """Edit a server's name/ip/port from the dashboard (#124). Only the given
+        fields change (enabled stays on set_server_enabled). Returns True if the
+        row exists; raises sqlite3.IntegrityError on a duplicate name (UNIQUE) so
+        the API can surface a 400."""
+        sets, params = [], []
+        if name is not None:
+            sets.append("name=?"); params.append(name)
+        if ip is not None:
+            sets.append("ip=?"); params.append(ip)
+        if port is not None:
+            sets.append("port=?"); params.append(int(port))
+        if not sets:
+            return self.get_server(server_id) is not None
+        params.append(server_id)
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    f"UPDATE servers SET {', '.join(sets)} WHERE id=?", params
+                )
+                self._conn.commit()
+                return cur.rowcount > 0
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def get_server(self, server_id: int) -> Optional[dict[str, Any]]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, name, ip, port, enabled FROM servers WHERE id=?", (server_id,)
+            )
+            row = cur.fetchone()
+            return dict(zip([d[0] for d in cur.description], row)) if row else None
+
     def remove_server(self, server_id: int) -> bool:
         """Delete a server and ALL its child rows. We delete status_log/events
         EXPLICITLY rather than rely on ON DELETE CASCADE, because a migrated V2

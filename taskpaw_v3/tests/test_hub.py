@@ -440,3 +440,73 @@ def test_bind_guard_allows_loopback_and_authed_lan():
     # Private LAN WITH a token → fine (10/8, 172.16/12, 192.168/16).
     for host in ("192.168.1.10", "10.0.0.5", "172.16.0.1"):
         _guard_bind_exposure(HubConfig(bind_host=host, api_token="s3cret"))
+
+
+def test_manage_servers_add_update_delete(tmp_path):
+    """Dashboard CRUD for polled agents (#124): add/edit/toggle/delete + validation."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(app)
+
+        # add
+        r = c.post("/servers", json={"name": "box1", "ip": "192.168.1.80", "port": 5678})
+        assert r.status_code == 200 and r.json()["name"] == "box1"
+        sid = r.json()["id"]
+        assert s.get_server(sid)["port"] == 5678
+
+        # add invalid → 400
+        assert c.post("/servers", json={"name": "", "ip": "1.2.3.4"}).status_code == 400
+        assert c.post("/servers", json={"name": "x", "ip": "1.2.3.4", "port": 0}).status_code == 400
+        # duplicate name → 400
+        assert c.post("/servers", json={"name": "box1", "ip": "9.9.9.9"}).status_code == 400
+
+        # edit ip/port + toggle
+        r = c.patch(f"/servers/{sid}", json={"ip": "10.0.0.9", "port": 5680, "enabled": False})
+        assert r.status_code == 200
+        srv = s.get_server(sid)
+        assert srv["ip"] == "10.0.0.9" and srv["port"] == 5680 and srv["enabled"] == 0
+
+        # edit unknown id → 404
+        assert c.patch("/servers/9999", json={"port": 5680}).status_code == 404
+        # bad enabled → 400
+        assert c.patch(f"/servers/{sid}", json={"enabled": "false"}).status_code == 400
+
+        # delete
+        assert c.delete(f"/servers/{sid}").status_code == 200
+        assert s.get_server(sid) is None
+        assert c.delete(f"/servers/{sid}").status_code == 404  # already gone
+    finally:
+        s.close()
+
+
+def test_manage_set_polling_token_and_auth(tmp_path):
+    """PATCH /config persists polling_token; mutations are Bearer-gated (#124/#106)."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(app)
+        assert c.patch("/config", json={"polling_token": "tok123"}).status_code == 200
+        assert s.get_config("polling_token") == "tok123"
+    finally:
+        s.close()
+
+    # With api_token set, the mutation endpoints require the Bearer.
+    s2 = _store(tmp_path / "b")
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="sek"), s2)
+        c = TestClient(app)
+        assert c.post("/servers", json={"name": "x", "ip": "1.1.1.1"}).status_code == 401
+        r = c.post("/servers", json={"name": "x", "ip": "1.1.1.1"},
+                   headers={"Authorization": "Bearer sek"})
+        assert r.status_code == 200
+    finally:
+        s2.close()
