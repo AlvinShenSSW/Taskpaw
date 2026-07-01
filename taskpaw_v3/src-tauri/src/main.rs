@@ -487,6 +487,43 @@ fn kill_backend(app: &tauri::AppHandle) {
     // descendants when its handle drops as the process exits.
 }
 
+/// Escape a string for safe interpolation into an AppleScript double-quoted
+/// literal (backslash and double-quote), so a log path in the message can't break
+/// out of the osascript string.
+#[cfg(any(target_os = "macos", test))]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Fatal startup failure: show a best-effort native error dialog, then exit
+/// cleanly with code 1. We deliberately do NOT return Err from the setup hook for
+/// these — Tauri `.expect()`s a setup Err into a panic, and on macOS that panic
+/// can't unwind across the ObjC `did_finish_launching` callback, so it aborts with
+/// SIGABRT and a crash report (e.g. on a mere port conflict). A clean exit shows a
+/// friendly message instead. NOTE: process::exit skips Drop, so the managed
+/// Backend's kill-on-drop never runs — callers that already spawned a backend MUST
+/// kill_backend() first, or it orphans.
+fn fatal_startup(message: &str) -> ! {
+    eprintln!("taskpaw: fatal startup error: {message}");
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("TASKPAW_NO_STARTUP_DIALOG").is_none() {
+        // A separate osascript process shows the alert reliably without depending
+        // on our half-initialized NSApp; best-effort — ignore if it can't run.
+        let script = format!(
+            "display dialog \"{}\" with title \"TaskPaw\" buttons {{\"OK\"}} \
+             default button \"OK\" with icon caution",
+            applescript_escape(message)
+        );
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .status();
+    }
+    // Windows/Linux: the message is already on stderr (→ OS log / journal); a
+    // native Windows dialog is a low-risk follow-up.
+    std::process::exit(1);
+}
+
 /// Accept only a loopback base URL (design §3.1: the shell loopback-validates the
 /// backend base_url before injecting it). A tampered/non-local TASKPAW_UI_BASE is
 /// dropped so the frontend can't be pointed at a remote backend with the api key.
@@ -601,11 +638,13 @@ fn main() {
                 && child.is_none()
                 && std::env::var_os("TASKPAW_BACKEND_CMD").is_none()
             {
-                // Abort launch instead of opening a UI with no backend (Kimi).
-                return Err(
-                    "bundled backend 'taskpaw-backend' not found/failed to start; the app \
-                     cannot reach a local API. Reinstall, or set TASKPAW_BACKEND_CMD for dev."
-                        .into(),
+                // Abort launch instead of opening a UI with no backend (Kimi) —
+                // but exit cleanly, not via a setup-Err panic (see fatal_startup).
+                // No child spawned here, so nothing to kill.
+                fatal_startup(
+                    "TaskPaw's bundled backend 'taskpaw-backend' was not found or \
+                     failed to start, so the app cannot reach its local API. Try \
+                     reinstalling the app.",
                 );
             }
             // Take the backend's piped stdout now (before it's moved into managed
@@ -626,10 +665,13 @@ fn main() {
                             let _ = c.kill();
                             let _ = c.wait();
                         }
-                        return Err("could not assign the backend to a Windows Job \
-                                    Object; refusing to launch to avoid orphaned \
-                                    backend processes on exit."
-                            .into());
+                        // Backend already killed above; exit cleanly (see
+                        // fatal_startup) rather than via a setup-Err panic.
+                        fatal_startup(
+                            "TaskPaw could not assign its backend to a Windows Job \
+                             Object, so it can't guarantee the backend stops when you \
+                             quit. Refusing to launch to avoid orphaned processes.",
+                        );
                     }
                     None => None, // dev: backend intentionally disabled
                 };
@@ -651,12 +693,19 @@ fn main() {
                 Some(out) => match read_readiness(out, Duration::from_secs(30)) {
                     Some(b) => b,
                     None => {
-                        return Err(format!(
-                            "backend did not report readiness within 30s; refusing to \
-                             open a UI that cannot reach the local API. See {}.",
-                            backend_log_hint()
-                        )
-                        .into());
+                        // The backend was spawned but never reported readiness —
+                        // most often its local API port is already taken (another
+                        // instance, a V2 agent, or another service). Kill it first
+                        // (process::exit skips the managed Backend's Drop → else it
+                        // orphans), then exit cleanly with a friendly dialog rather
+                        // than a setup-Err panic/abort (see fatal_startup).
+                        let hint = backend_log_hint();
+                        kill_backend(app.handle());
+                        fatal_startup(&format!(
+                            "TaskPaw's backend did not start within 30s. Its local \
+                             API port may be in use by another TaskPaw instance, a \
+                             V2 agent, or another service.\n\nDetails: {hint}"
+                        ));
                     }
                 },
                 None => String::new(), // dev: Vite + TASKPAW_UI_BASE fallback
@@ -727,7 +776,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_log_hint, close_confirm_text, loopback_base, roll_log_if_oversized};
+    use super::{
+        applescript_escape, backend_log_hint, close_confirm_text, loopback_base,
+        roll_log_if_oversized,
+    };
+
+    #[test]
+    fn applescript_escape_neutralizes_quotes_and_backslashes() {
+        // A log path with a quote/backslash must not break out of the osascript
+        // string literal in fatal_startup.
+        assert_eq!(applescript_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(applescript_escape("plain text"), "plain text");
+    }
 
     #[test]
     fn roll_log_rotates_oversized_and_overwrites_stale_backup() {
