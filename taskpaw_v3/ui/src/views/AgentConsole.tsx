@@ -80,7 +80,37 @@ export function AgentConsole() {
             <EventLog events={events.data?.events} />
           </CardContent>
         </Card>
+      ) : names.length === 0 ? (
+        // Empty state: the one place a prominent CTA appears (design).
+        <Card><CardContent>
+          <Stack alignItems="center" spacing={2} sx={{ py: 6 }}>
+            <Typography color="text.secondary">{t("agent.noMonitors")}</Typography>
+            <Button variant="contained" onClick={() => setDialog({ mode: "add" })}>
+              + {t("common.add")}
+            </Button>
+          </Stack>
+        </CardContent></Card>
+      ) : names.length === 1 ? (
+        // Single monitor (the common case): a full-width hero, no rail — the one
+        // monitor fills the window instead of a near-empty 280px rail (design).
+        <Stack spacing={1}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between">
+            <Typography variant="overline" color="text.secondary">
+              {t("agent.monitorsTitle", { machine: status.data?.machine })}
+            </Typography>
+            <Button size="small" variant="outlined" onClick={() => setDialog({ mode: "add" })}>
+              + {t("common.add")}
+            </Button>
+          </Stack>
+          <MonitorDetail
+            name={names[0]} snap={monitors[names[0]]} updatedAt={status.dataUpdatedAt}
+            onEdit={() => setDialog({ mode: "edit", name: names[0] })}
+            onChanged={invalidate} onError={onErr}
+          />
+        </Stack>
       ) : (
+        // Multiple monitors: the existing rail + detail (the horizontal selector
+        // that replaces this rail is a separate issue, #135).
         <Stack direction="row" spacing={2} sx={{ minHeight: "70dvh" }}>
           <Card sx={{ width: 280, flex: "0 0 auto" }}>
             <CardContent>

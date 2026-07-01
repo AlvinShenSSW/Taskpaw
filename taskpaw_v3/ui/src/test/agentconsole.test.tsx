@@ -69,4 +69,26 @@ describe("AgentConsole", () => {
       expect(screen.getAllByText(/Updated|更新于/).length).toBeGreaterThan(0),
     );
   });
+
+  const stubStatus = (monitors: Record<string, unknown>) =>
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      const body = url.includes("/control/status") ? { machine: "box1", monitors }
+        : url.includes("/control/plugins") ? { plugins: [], presets: [] } : { events: [] };
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+    }));
+
+  it("renders a single monitor as a full-width hero, no rail (#134)", async () => {
+    stubStatus({ "lada-main": { state: "running", type_id: "lada" } });
+    renderConsole();
+    await screen.findByText("lada-main");
+    // The hero is not a selectable rail list → no aria-current row.
+    expect(document.querySelector('[aria-current="true"]')).toBeNull();
+  });
+
+  it("shows an empty-state Add CTA when there are no monitors (#134)", async () => {
+    stubStatus({});
+    renderConsole();
+    await screen.findByText(/No monitors yet|还没有监控/);
+    expect(screen.getByRole("button", { name: /Add|添加/ })).toBeInTheDocument();
+  });
 });
