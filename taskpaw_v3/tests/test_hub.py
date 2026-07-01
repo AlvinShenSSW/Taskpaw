@@ -570,3 +570,20 @@ def test_manage_port_and_token_edgecases(tmp_path):
         assert c.patch("/config", json={"polling_token": 123}).status_code == 400
     finally:
         s.close()
+
+
+def test_manage_rejects_non_string_name_ip(tmp_path):
+    """#124 review r3: name/ip must be strings — a list/dict is rejected, not
+    stored as its Python repr."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
+        assert c.post("/servers", json={"name": [1, 2], "ip": "1.1.1.1"}).status_code == 400
+        assert c.post("/servers", json={"name": "ok", "ip": {"h": "x"}}).status_code == 400
+        assert len(s.list_servers()) == 0                    # nothing corrupt stored
+    finally:
+        s.close()

@@ -244,11 +244,12 @@ class HubStore:
             return cur.rowcount > 0
 
     def update_server(self, server_id: int, *, name: Optional[str] = None,
-                      ip: Optional[str] = None, port: Optional[int] = None) -> bool:
-        """Edit a server's name/ip/port from the dashboard (#124). Only the given
-        fields change (enabled stays on set_server_enabled). Returns True if the
-        row exists; raises sqlite3.IntegrityError on a duplicate name (UNIQUE) so
-        the API can surface a 400."""
+                      ip: Optional[str] = None, port: Optional[int] = None,
+                      enabled: Optional[bool] = None) -> bool:
+        """Edit a server's name/ip/port/enabled from the dashboard (#124), all in
+        ONE UPDATE (one transaction) so a partial edit can't be left behind (Kimi).
+        Only the given fields change. Returns True if the row exists; raises
+        sqlite3.IntegrityError on a duplicate name (UNIQUE) → the API 400s."""
         sets, params = [], []
         if name is not None:
             sets.append("name=?"); params.append(name)
@@ -256,6 +257,8 @@ class HubStore:
             sets.append("ip=?"); params.append(ip)
         if port is not None:
             sets.append("port=?"); params.append(int(port))
+        if enabled is not None:
+            sets.append("enabled=?"); params.append(int(enabled))
         if not sets:
             return self.get_server(server_id) is not None
         params.append(server_id)

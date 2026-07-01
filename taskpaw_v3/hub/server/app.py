@@ -223,16 +223,15 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
     from fastapi import HTTPException
 
     def _valid_name(v) -> str:
-        s = str(v or "").strip()
-        if not s:
-            raise HTTPException(status_code=400, detail="name must not be blank")
-        return s
+        # Must be a string — don't str()-coerce a list/dict into its repr (Kimi).
+        if not isinstance(v, str) or not v.strip():
+            raise HTTPException(status_code=400, detail="name must be a non-blank string")
+        return v.strip()
 
     def _valid_ip(v) -> str:
-        s = str(v or "").strip()
-        if not s:
-            raise HTTPException(status_code=400, detail="ip/host must not be blank")
-        return s
+        if not isinstance(v, str) or not v.strip():
+            raise HTTPException(status_code=400, detail="ip/host must be a non-blank string")
+        return v.strip()
 
     def _valid_port(v) -> int:
         # Reject bool (an int subclass) and non-integers (3.14) — silently
@@ -275,6 +274,7 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             sid = store.add_server(name, ip, port)
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail=f"a server named {name!r} already exists")
+        log.info("hub: registered agent %r at %s:%s (#124)", name, ip, port)
         return {"ok": True, "id": sid, **(store.get_server(sid) or {})}
 
     @app.patch("/servers/{sid}")
@@ -290,16 +290,18 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         port = _valid_port(body["port"]) if "port" in body else None
         enabled = _valid_enabled(body["enabled"]) if "enabled" in body else None
         try:
-            store.update_server(sid, name=name, ip=ip, port=port)
+            # One transactional UPDATE (name/ip/port/enabled together) — no partial
+            # edit if something fails between writes (Kimi).
+            store.update_server(sid, name=name, ip=ip, port=port, enabled=enabled)
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail="that name is already in use")
-        if enabled is not None:
-            store.set_server_enabled(sid, enabled)
         # Re-read: if the row was removed concurrently, report 404 rather than a
         # misleading 200 with an empty body (Kimi).
         srv = store.get_server(sid)
         if srv is None:
             raise HTTPException(status_code=404, detail=f"no server with id {sid}")
+        log.info("hub: updated agent id=%s → %s:%s enabled=%s (#124)",
+                 sid, srv["ip"], srv["port"], bool(srv["enabled"]))
         return {"ok": True, **srv}
 
     @app.delete("/servers/{sid}")
@@ -308,6 +310,7 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             return _unauthorized()
         if not store.remove_server(sid):
             raise HTTPException(status_code=404, detail=f"no server with id {sid}")
+        log.info("hub: removed agent id=%s (#124)", sid)
         return {"ok": True}
 
     @app.patch("/config")
@@ -323,6 +326,7 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             # Live: the poller reads polling_token per cycle (get_polling_token),
             # so no Hub restart is needed to apply it (#124).
             store.set_config("polling_token", tok)
+            log.info("hub: polling_token %s via dashboard (#124)", "set" if tok else "cleared")
         return {"ok": True}
 
     return app, service
