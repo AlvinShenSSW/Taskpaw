@@ -38,18 +38,20 @@ def _status_text(snap: Any) -> str:
     if not isinstance(m, dict):
         return str(state)
     parts: list[str] = []
+    # Classify by the monitor's type_id (the discriminator the dashboard uses).
+    # Fall back to a metric signature ONLY when the snapshot has no type_id at all
+    # (older/pre-type agents) — so a *typed* plugin is never misclassified, e.g. a
+    # folder monitor that emits `pending` isn't rendered as a ComfyUI queue, nor a
+    # lada worker's cpu_pct mistaken for the host (Codex + Kimi).
+    tid = snap.get("type_id")
 
-    # host_metrics block — keyed on the monitor's type_id (the same discriminator
-    # the dashboard uses), so a plugin that also carries cpu_pct (e.g. lada) can't be
-    # mistaken for the host. Fall back to the system-RAM signature for older/V2
-    # agents whose snapshot omits type_id (Kimi).
-    is_host = snap.get("type_id") == "host_metrics" or (
-        _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb"))
-    )
-    # Each field is guarded individually — a host_metrics monitor can be true via
-    # type_id yet carry empty/partial metrics (a startup stub or a disabled-monitor
+    # host_metrics — CPU / RAM / GPU / VRAM. Each field guarded individually: a
+    # host monitor can be typed yet carry empty/partial metrics (startup / disabled
     # stub with metrics={}), so unconditional indexing would KeyError and stop
     # status.md from updating (Codex + Kimi).
+    is_host = tid == "host_metrics" or (
+        tid is None and _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb"))
+    )
     if is_host:
         if _is_num(m.get("cpu_pct")):
             parts.append(f"CPU {m['cpu_pct']:.0f}%")
@@ -61,17 +63,21 @@ def _status_text(snap: Any) -> str:
             parts.append(f"VRAM {m['gpu_mem_used_mb'] / 1024:.1f}/{m['gpu_mem_total_mb'] / 1024:.1f}GB")
 
     # lada-style queue: "X/Y done (Z left)" + the current task between pipes.
-    if _is_num(m.get("queue_total")):
+    is_lada = tid == "lada" or (tid is None and _is_num(m.get("queue_total")))
+    if is_lada and _is_num(m.get("queue_total")):
         done = int(m.get("queue_completed") or 0)
         total = int(m["queue_total"])
         left = int(m.get("queue_remaining", max(0, total - done)))
         seg = f"{done}/{total} done ({left} left)"
-        if m.get("current_file"):
+        if isinstance(m.get("current_file"), str) and m["current_file"]:
             seg += f" | {m['current_file']} |"
         parts.append(seg)
 
     # comfyui-style depth: "N running, M pending".
-    if _is_num(m.get("running")) or _is_num(m.get("pending")):
+    is_comfyui = tid == "comfyui" or (
+        tid is None and (_is_num(m.get("running")) or _is_num(m.get("pending")))
+    )
+    if is_comfyui:
         parts.append(f"{int(m.get('running', 0))} running, {int(m.get('pending', 0))} pending")
 
     return " | ".join(parts) if parts else str(state)
@@ -92,7 +98,13 @@ def _monitor_lines(status_json: Optional[str]) -> list[str]:
     lines: list[str] = []
     if isinstance(monitors, dict):
         for name, snap in monitors.items():
-            lines.append(f"- {name}: {_status_text(snap)}")
+            # V3 also carries enabled:False stubs for intentionally-stopped monitors
+            # (merge_status); render them "disabled", matching the V2 list branch,
+            # instead of their stale "stopped" state (Kimi).
+            if isinstance(snap, dict) and snap.get("enabled") is False:
+                lines.append(f"- {name}: disabled")
+            else:
+                lines.append(f"- {name}: {_status_text(snap)}")
     elif isinstance(monitors, list):
         for m in monitors:
             if not isinstance(m, dict):

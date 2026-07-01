@@ -55,6 +55,34 @@ def test_v3_host_metrics_missing_mem_fields_falls_back_to_state():
     assert "- box-host: CPU 20%" in md and "RAM" not in md
 
 
+def test_folder_pending_not_rendered_as_comfyui_queue():
+    # A folder monitor emits metrics={"pending": N} while files stabilize; type_id
+    # keeps it from being classified as a ComfyUI queue (Codex).
+    rows = [{"name": "box", "reachable": 1,
+             "status_json": json.dumps({"monitors": {
+                 "dl": {"state": "ok", "type_id": "folder", "metrics": {"pending": 3}}}})}]
+    md = render_status_md(rows, "t")
+    assert "- dl: ok" in md and "running" not in md
+
+
+def test_v3_dict_disabled_monitor_renders_disabled():
+    # V3 dict snapshot with enabled:False → "disabled", not its stale state (Kimi).
+    rows = [{"name": "box", "reachable": 1,
+             "status_json": json.dumps({"monitors": {
+                 "off": {"state": "stopped", "type_id": "process", "enabled": False}}})}]
+    assert "- off: disabled" in render_status_md(rows, "t")
+
+
+def test_lada_nonstring_current_file_ignored():
+    # A non-string current_file must not be interpolated verbatim (Kimi).
+    rows = [{"name": "box", "reachable": 1,
+             "status_json": json.dumps({"monitors": {
+                 "LADA": {"state": "running", "type_id": "lada",
+                          "metrics": {"queue_total": 4, "queue_completed": 1, "current_file": 123}}}})}]
+    md = render_status_md(rows, "t")
+    assert "1/4 done (3 left)" in md and "123" not in md
+
+
 def test_v2_list_shape_renders_disabled_monitor():
     # V2 agents report a list with `enabled: False` for stopped monitors → status.md
     # shows them as "disabled" rather than their (stale) state.
