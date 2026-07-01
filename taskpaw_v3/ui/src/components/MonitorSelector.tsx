@@ -29,7 +29,7 @@ export function MonitorSelector({
           <Button
             key={n}
             onClick={() => onSelect(n)}
-            aria-current={on ? "true" : undefined}
+            aria-pressed={on}
             variant="outlined"
             size="small"
             startIcon={<StatusDot state={m.state} />}

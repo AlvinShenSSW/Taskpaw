@@ -54,11 +54,11 @@ describe("AgentConsole", () => {
     expect(screen.getAllByText("lada-main").length).toBeGreaterThan(0);
   });
 
-  it("marks the selected monitor row with aria-current", async () => {
+  it("marks the selected monitor row with aria-pressed", async () => {
     renderConsole();
     await screen.findByText("downloads");
     // The first monitor is auto-selected; scope to that row.
-    const selected = document.querySelector('[aria-current="true"]');
+    const selected = document.querySelector('[aria-pressed="true"]');
     expect(selected).toBeTruthy();
     expect(within(selected as HTMLElement).getByText("lada-main")).toBeInTheDocument();
   });
@@ -81,8 +81,8 @@ describe("AgentConsole", () => {
     stubStatus({ "lada-main": { state: "running", type_id: "lada" } });
     renderConsole();
     await screen.findByText("lada-main");
-    // The hero is not a selectable rail list → no aria-current row.
-    expect(document.querySelector('[aria-current="true"]')).toBeNull();
+    // The hero is not a selectable rail list → no aria-pressed row.
+    expect(document.querySelector('[aria-pressed="true"]')).toBeNull();
   });
 
   it("uses a horizontal pill selector for multiple monitors, and swaps the hero (#135)", async () => {
@@ -90,9 +90,9 @@ describe("AgentConsole", () => {
     await screen.findByText("downloads");
     // A trailing "+ Add monitor" pill exists.
     expect(screen.getByRole("button", { name: /Add monitor|添加监控/ })).toBeInTheDocument();
-    // Selecting the "downloads" pill marks it current (paired with aria-current).
+    // Selecting the "downloads" pill marks it current (paired with aria-pressed).
     fireEvent.click(screen.getByText("downloads"));
-    const sel = document.querySelector('[aria-current="true"]');
+    const sel = document.querySelector('[aria-pressed="true"]');
     expect(within(sel as HTMLElement).getByText("downloads")).toBeInTheDocument();
   });
 
