@@ -192,6 +192,22 @@ def test_task_error_state_with_stale_metrics_shows_state():
     assert "- ComfyUI: error" in md and "pending" not in md
 
 
+def test_running_monitor_with_stale_disabled_flag_shows_data_not_disabled():
+    # A LADA that's actually running (live state + queue metrics) but whose config
+    # `enabled` flag is false must show its queue, NOT "disabled" — status.md has to
+    # match the DB/UI live view (the "LADA shows disabled while running" bug).
+    rows = [{"name": "BlackGoldPig", "reachable": 1, "status_json": json.dumps({"monitors": {
+        "LADA": {"state": "running", "type_id": "lada", "enabled": False,
+                 "metrics": {"queue_total": 12, "queue_completed": 0, "queue_remaining": 12,
+                             "current_file": "SSNI-456-C.wmv"}}}})}]
+    md = render_status_md(rows, "t")
+    assert "- LADA: 0/12 done (12 left)" in md and "disabled" not in md
+    # a genuinely not-running stub (state stopped, no metrics) still shows disabled
+    stub = [{"name": "b", "reachable": 1, "status_json": json.dumps({"monitors": {
+        "LADA": {"state": "stopped", "type_id": "lada", "enabled": False, "metrics": {}}}})}]
+    assert "- LADA: disabled" in render_status_md(stub, "t")
+
+
 def test_v2_list_shape_renders_disabled_monitor():
     # V2 agents report a list with `enabled: False` for stopped monitors → status.md
     # shows them as "disabled" rather than their (stale) state.

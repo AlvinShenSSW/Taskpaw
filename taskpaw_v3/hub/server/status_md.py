@@ -137,12 +137,18 @@ def _monitor_lines(status_json: Optional[str]) -> list[str]:
     # Every name/status is _inline()-sanitized: a malicious/misconfigured agent
     # could otherwise put newlines in a monitor name/status and inject fake
     # `## server` / `- monitor` lines into the line-oriented status.md (Kimi).
+    #
+    # "disabled" is rendered ONLY for a monitor that is NOT actually running — a
+    # merge_status stub for a configured-but-unstarted monitor (state "stopped",
+    # empty metrics). A monitor that IS reporting live data (metrics, or a running
+    # state / V2 status string) must show that data even if its config `enabled`
+    # flag is stale/false — otherwise a running LADA whose config says enabled:false
+    # shows "disabled" in status.md while the DB/UI show it running (fleet bug).
     if isinstance(monitors, dict):
         for name, snap in monitors.items():
-            # V3 also carries enabled:False stubs for intentionally-stopped monitors
-            # (merge_status); render them "disabled", matching the V2 list branch,
-            # instead of their stale "stopped" state (Kimi).
-            if isinstance(snap, dict) and snap.get("enabled") is False:
+            s = snap if isinstance(snap, dict) else {}
+            not_running = str(s.get("state", "")).lower() in ("", "stopped", "unknown", "none")
+            if s.get("enabled") is False and not_running and not s.get("metrics"):
                 lines.append(f"- {_inline(str(name))}: disabled")
             else:
                 lines.append(f"- {_inline(str(name))}: {_status_text(snap)}")
@@ -151,10 +157,12 @@ def _monitor_lines(status_json: Optional[str]) -> list[str]:
             if not isinstance(m, dict):
                 continue
             name = m.get("name", "unknown")
-            if m.get("enabled") is False:           # V2 rendered disabled monitors
+            # A V2 running monitor carries a rich `status` string; a disabled one has
+            # none. So "disabled" only when flagged disabled AND no live status to
+            # show — a running-but-flagged-disabled monitor still shows its status.
+            if m.get("enabled") is False and not m.get("status"):
                 lines.append(f"- {_inline(str(name))}: disabled")
             else:
-                # V2 already stored a rich status string; keep it verbatim.
                 status = m.get("status") or m.get("state") or "unknown"
                 lines.append(f"- {_inline(str(name))}: {_inline(str(status))}")
     return lines
