@@ -80,9 +80,13 @@ describe("HubDashboard (#95)", () => {
     expect(within(summary).getAllByLabelText(/status:/).length).toBe(3);
   });
 
+  // Each machine is now a full-width row (a Card), not a click-to-expand button (#131).
+  const rowOf = async (name: string) =>
+    (await screen.findByText(name)).closest(".MuiCard-root") as HTMLElement;
+
   it("shows CPU/MEM mini-bars for a live machine that reports host metrics (#113)", async () => {
     renderHub();
-    const card = await screen.findByRole("button", { name: /render-01/ });
+    const card = await rowOf("render-01");
     // The host_metrics monitor (37/72) drives the bars — NOT the lada monitor that
     // also reports cpu_pct/mem_pct (99) (Kimi #113 attribution fix).
     expect(within(card).getByText("37%")).toBeInTheDocument();
@@ -93,20 +97,20 @@ describe("HubDashboard (#95)", () => {
   it("falls back to a key-scan for a legacy agent with no type_id (#113)", async () => {
     renderHub();
     // render-04's monitor has no type_id but reports cpu_pct → bar still renders.
-    const card = await screen.findByRole("button", { name: /render-04/ });
+    const card = await rowOf("render-04");
     expect(within(card).getByText("55%")).toBeInTheDocument();
   });
 
   it("omits mini-bars for an offline machine with no metrics (#113)", async () => {
     renderHub();
-    const card = await screen.findByRole("button", { name: /render-03/ });
+    const card = await rowOf("render-03");
     expect(within(card).queryByText(/%$/)).not.toBeInTheDocument();
   });
 
   it("labels a disabled server distinctly from a merely-offline one", async () => {
     renderHub();
     // render-03 is enabled:0 → its chip reads "disabled", not just "offline".
-    const card = await screen.findByRole("button", { name: /render-03/ });
+    const card = await rowOf("render-03");
     expect(within(card).getByText(/disabled|已禁用/)).toBeInTheDocument();
   });
 
@@ -148,14 +152,13 @@ describe("HubDashboard (#95)", () => {
     );
   });
 
-  it("drills down into a machine's monitors when its card is clicked", async () => {
+  it("shows each machine's monitors inline, flush, with no click-to-expand (#131)", async () => {
     renderHub();
-    const card = await screen.findByRole("button", { name: /render-02/ });
-    expect(card.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(card);
-    expect(card.getAttribute("aria-expanded")).toBe("true");
-    // The expanded detail lists that machine's monitor from its snapshot.
-    expect(await screen.findByText("gpu")).toBeInTheDocument();
+    // render-02's monitor is listed directly on its row — no expand needed.
+    const card = await rowOf("render-02");
+    expect(within(card).getByText("gpu")).toBeInTheDocument();
+    // No drill-down affordance: the row is not an expandable button.
+    expect(within(card).queryByRole("button", { name: /render-02/ })).not.toBeInTheDocument();
   });
 });
 

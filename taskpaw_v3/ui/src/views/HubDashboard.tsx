@@ -1,5 +1,5 @@
 import {
-  Alert, Box, Card, CardActionArea, CardContent, Chip, Collapse, LinearProgress, MenuItem,
+  Alert, Box, Card, CardContent, Chip, Divider, LinearProgress, MenuItem,
   Stack, Tab, Tabs, TextField, Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
@@ -75,7 +75,6 @@ export function HubDashboard() {
   const [tab, setTab] = useState<"fleet" | "manage" | "events" | "settings">("fleet");
   const [level, setLevel] = useState<string>("");
   const [serverFilter, setServerFilter] = useState<string>(""); // "" = all servers
-  const [expanded, setExpanded] = useState<number | null>(null);
   // Aggregated durable history from all polled agents; only poll while open.
   const events = useQuery({
     queryKey: ["hubEvents", level, serverFilter],
@@ -169,15 +168,12 @@ export function HubDashboard() {
             )}
           </Stack>
 
-          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
-            {servers.map((s) => (
-              <MachineCard key={s.id} server={s} expanded={expanded === s.id}
-                onToggle={() => setExpanded((cur) => (cur === s.id ? null : s.id))} />
-            ))}
+          <Stack spacing={1.5}>
+            {servers.map((s) => <MachineRow key={s.id} server={s} />)}
             {servers.length === 0 && (
               <Typography color="text.secondary">{t("hub.noAgents")}</Typography>
             )}
-          </Box>
+          </Stack>
 
           {Object.keys(self).length > 0 && (
             <Card>
@@ -214,60 +210,72 @@ function HealthCount({ health, label, n }: { health: Health; label: string; n: n
   );
 }
 
-// One machine: card face (health + name + addr + last-seen + online chip) that
-// drills down into its monitors + recent events. Hover lift uses transform (no
-// reflow / layout shift, #95 acceptance) and degrades under reduced motion.
-function MachineCard({ server: s, expanded, onToggle }:
-  { server: HubServer; expanded: boolean; onToggle: () => void }) {
+// One machine = one full-width row (design pages/hub-dashboard.md): a single
+// wrapping header line (health + name + addr + chip + CPU/MEM mini-bars + last-seen)
+// with its monitors + full metric gauges rendered FLUSH directly beneath — no
+// click-to-expand, no indent. Offline machines show the header only. Management and
+// the events feed live on their own tabs (#132/#133).
+function MachineRow({ server: s }: { server: HubServer }) {
   const { t } = useTranslation();
   const health = serverHealth(s);
   const online = !!s.online;
   const disabled = !s.enabled;
-  // Mini CPU/MEM bars only for a live machine that actually reports host metrics.
   const metrics = online ? hostMetrics(s) : null;
+  const monitors = online ? (s.snapshot?.monitors ?? {}) : {};
+  const monitorNames = Object.keys(monitors);
   return (
-    <Card
-      sx={{
-        width: { xs: "100%", sm: 300 }, alignSelf: "flex-start",
-        // Hover lift via transform only → no layout shift / reflow (#95 acceptance);
-        // degrades to no movement under reduced motion.
-        transition: "transform .16s ease, box-shadow .16s ease",
-        "&:hover": { transform: "translateY(-2px)", boxShadow: "0 8px 24px -10px rgba(0,0,0,.5)" },
-        "@media (prefers-reduced-motion: reduce)": { "&:hover": { transform: "none" } },
-      }}
-    >
-      {/* CardActionArea (not CardContent component="button") → the whole face is
-          one focusable control without a <button> wrapping block elements (Kimi). */}
-      <CardActionArea onClick={onToggle} aria-expanded={expanded}>
-        <CardContent>
-          <Stack direction="row" alignItems="center" spacing={1}>
-            <StatusDot state={HEALTH_STATE[health]} />
-            <Typography variant="subtitle1" sx={{ flex: 1 }}>{s.name}</Typography>
-            {/* A disabled server is forced offline by the backend; label it as
-                disabled (not just offline) so the two are distinguishable (Kimi). */}
-            <Chip size="small"
-              label={disabled ? t("state.disabled") : online ? t("hub.online") : t("hub.offline")}
-              color={!disabled && online ? "success" : "default"}
-              variant={!disabled && online ? "filled" : "outlined"} />
-          </Stack>
-          <Typography variant="body2" color="text.secondary">{s.ip}:{s.port}</Typography>
-          <Typography variant="caption" color="text.secondary">
+    <Card>
+      <CardContent>
+        {/* Header — a single wrapping line. */}
+        <Stack direction="row" alignItems="center" spacing={1} sx={{ flexWrap: "wrap", rowGap: 0.5 }}>
+          <StatusDot state={HEALTH_STATE[health]} />
+          <Typography variant="subtitle1">{s.name}</Typography>
+          <Typography variant="body2" color="text.secondary"
+            sx={{ fontFamily: '"Fira Code", monospace' }}>{s.ip}:{s.port}</Typography>
+          {/* A disabled server is forced offline by the backend; label it disabled
+              (not just offline) so the two are distinguishable (Kimi). */}
+          <Chip size="small"
+            label={disabled ? t("state.disabled") : online ? t("hub.online") : t("hub.offline")}
+            color={!disabled && online ? "success" : "default"}
+            variant={!disabled && online ? "filled" : "outlined"} />
+          <Box sx={{ flex: 1 }} />
+          {metrics?.cpu !== undefined && (
+            <Box sx={{ minWidth: 96 }}><MiniBar label={t("hub.cpu")} pct={metrics.cpu} /></Box>
+          )}
+          {metrics?.mem !== undefined && (
+            <Box sx={{ minWidth: 96 }}><MiniBar label={t("hub.mem")} pct={metrics.mem} /></Box>
+          )}
+          <Typography variant="caption" color="text.secondary"
+            sx={{ fontVariantNumeric: "tabular-nums" }}>
             {s.last_seen ? t("hub.lastSeen", { time: fmtSeen(s.last_seen) }) : t("hub.lastSeenNever")}
           </Typography>
-          {metrics && (metrics.cpu !== undefined || metrics.mem !== undefined) && (
-            <Stack spacing={0.75} sx={{ mt: 1.25 }}>
-              {metrics.cpu !== undefined && <MiniBar label={t("hub.cpu")} pct={metrics.cpu} />}
-              {metrics.mem !== undefined && <MiniBar label={t("hub.mem")} pct={metrics.mem} />}
-            </Stack>
-          )}
-        </CardContent>
-      </CardActionArea>
+        </Stack>
 
-      <Collapse in={expanded} unmountOnExit>
-        <Box sx={{ px: 2, pb: 2 }}>
-          <MachineDetail server={s} />
-        </Box>
-      </Collapse>
+        {/* Monitors flush beneath — no indent, thin dividers between (online only). */}
+        {online && monitorNames.length > 0 && (
+          <Stack sx={{ mt: 1.5 }} divider={<Divider flexItem />} spacing={1}>
+            {monitorNames.map((name) => {
+              const m = monitors[name];
+              return (
+                <Box key={name}>
+                  <Stack direction="row" alignItems="center" spacing={1}>
+                    <StatusDot state={m.state} />
+                    <Typography variant="body2" sx={{ flex: 1 }}>{name}</Typography>
+                    {m.detail && (
+                      <Typography variant="caption" color="text.secondary"
+                        sx={{ textAlign: "right", wordBreak: "break-all" }}>{m.detail}</Typography>
+                    )}
+                  </Stack>
+                  {/* Full metric gauges (CPU/GPU/VRAM/queue/fps), flush (no indent). */}
+                  {m.metrics && Object.keys(m.metrics).length > 0 && (
+                    <MonitorMetrics metrics={m.metrics} />
+                  )}
+                </Box>
+              );
+            })}
+          </Stack>
+        )}
+      </CardContent>
     </Card>
   );
 }
@@ -294,50 +302,3 @@ function MiniBar({ label, pct }: { label: string; pct: number }) {
   );
 }
 
-// Drill-down: the machine's monitors (from its #96 snapshot) + recent events
-// (fetched only while expanded via the existing per-server events filter).
-function MachineDetail({ server: s }: { server: HubServer }) {
-  const { t } = useTranslation();
-  const monitors = s.snapshot?.monitors ?? {};
-  const events = useQuery({
-    queryKey: ["hubEvents", "server", s.id],
-    queryFn: () => api.hubEvents({ server: s.id, limit: 5 }),
-    refetchInterval: 5000,
-  });
-  return (
-    <Stack spacing={1.5}>
-      <Box>
-        <Typography variant="overline" color="text.secondary">{t("hub.machineMonitors")}</Typography>
-        {Object.keys(monitors).length === 0 ? (
-          <Typography variant="body2" color="text.secondary">{t("hub.noMonitors")}</Typography>
-        ) : (
-          <Stack spacing={0.5} sx={{ mt: 0.5 }}>
-            {Object.entries(monitors).map(([name, m]) => (
-              <Box key={name}>
-                <Stack direction="row" alignItems="center" spacing={1}>
-                  <StatusDot state={m.state} />
-                  <Typography variant="body2" sx={{ flex: 1 }}>{name}</Typography>
-                  {m.detail && (
-                    <Typography variant="caption" color="text.secondary"
-                      sx={{ textAlign: "right", wordBreak: "break-all" }}>{m.detail}</Typography>
-                  )}
-                </Stack>
-                {/* Full metric gauges (CPU/GPU/VRAM/queue/fps) per monitor, same as
-                    the Agent console — so the Hub shows everything OpenClaw does. */}
-                {m.metrics && Object.keys(m.metrics).length > 0 && (
-                  <Box sx={{ pl: 3, pb: 0.5 }}>
-                    <MonitorMetrics metrics={m.metrics} />
-                  </Box>
-                )}
-              </Box>
-            ))}
-          </Stack>
-        )}
-      </Box>
-      <Box>
-        <Typography variant="overline" color="text.secondary">{t("hub.machineEvents")}</Typography>
-        <EventLog events={events.data?.events} />
-      </Box>
-    </Stack>
-  );
-}
