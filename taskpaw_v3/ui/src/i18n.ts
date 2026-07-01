@@ -40,6 +40,7 @@ const en = {
     deleteBody: "This removes it from this agent's config. It can't be undone.",
     unreachable: "Agent unreachable: {{error}}",
     updated: "Updated {{time}}",
+    lastEvent: "Last event {{time}}",
   },
   wizard: {
     add: "Add a monitor", s1: "Choose service", s2: "Configure", s3: "Review",
@@ -138,6 +139,7 @@ const zh: typeof en = {
     deleteBody: "这会把它从本 agent 的配置中移除,无法撤销。",
     unreachable: "无法连接 Agent:{{error}}",
     updated: "更新于 {{time}}",
+    lastEvent: "最近事件 {{time}}",
   },
   wizard: {
     add: "添加监控项", s1: "选择服务", s2: "配置", s3: "复核",

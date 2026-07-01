@@ -14,6 +14,9 @@ export interface MonitorSnapshot {
   // (running) and its plugin type, so the console can toggle + label it.
   enabled?: boolean;
   type_id?: string | null;
+  // ISO time of this monitor's most recent local event (#130), stamped by the
+  // agent status provider. Absent when the monitor has emitted no events yet.
+  last_event_at?: string;
 }
 
 export interface AgentStatus {
@@ -168,8 +171,13 @@ export const api = {
   stopMonitor: (name: string) => send("agent", "POST", `/control/monitors/stop${q(name)}`),
   // Event log (#44): agent reads recent local events (non-destructive); the Hub
   // reads durable aggregated history, filterable by server id + level.
-  agentEvents: (limit = 200) =>
-    get<{ events: EventItem[] }>("agent", `/control/events?limit=${limit}`),
+  // `monitor` (optional) filters to one monitor's events for the console's
+  // per-monitor inline panel (#130); the name is URL-encoded (it may contain '/').
+  agentEvents: (limit = 200, monitor?: string) => {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (monitor) qs.set("monitor", monitor);
+    return get<{ events: EventItem[] }>("agent", `/control/events?${qs}`);
+  },
   hubEvents: (p: { server?: number; level?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
     if (p.server != null) qs.set("server", String(p.server));

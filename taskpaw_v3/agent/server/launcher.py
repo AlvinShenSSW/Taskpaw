@@ -108,13 +108,22 @@ def run_agent(
 
     def _status_provider() -> dict:
         import platform
+        # snapshot (running) + configured-but-disabled stubs, so the console
+        # can list + re-enable stopped monitors (#57).
+        monitors = merge_status(config, supervisor.snapshot())
+        # Additively stamp each monitor with the time of its most recent local
+        # event (#130) so the console's pill selector can show per-monitor
+        # freshness without a second round-trip. Only monitors present in the
+        # status get stamped; a monitor with no events keeps no key.
+        last_seen = queue.last_event_times()
+        for name, entry in monitors.items():
+            if isinstance(entry, dict) and name in last_seen:
+                entry["last_event_at"] = last_seen[name]
         return {
             "machine": config.machine,
             "server_id": config.server_id,
             "os": platform.platform(),
-            # snapshot (running) + configured-but-disabled stubs, so the console
-            # can list + re-enable stopped monitors (#57).
-            "monitors": merge_status(config, supervisor.snapshot()),
+            "monitors": monitors,
         }
 
     net = uvicorn.Server(

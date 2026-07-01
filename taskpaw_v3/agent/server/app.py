@@ -87,7 +87,7 @@ def create_control_app(
     status_provider: Optional[Callable[[], dict]] = None,
     registry: Optional[PluginRegistry] = None,
     admin: Optional["MonitorAdmin"] = None,
-    events_provider: Optional[Callable[[int], list[dict]]] = None,
+    events_provider: Optional[Callable[..., list[dict]]] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""
@@ -120,12 +120,15 @@ def create_control_app(
         return data
 
     @app.get("/control/events")
-    def control_events(limit: int = 200) -> dict:
+    def control_events(limit: int = 200, monitor: Optional[str] = None) -> dict:
         # Recent LOCAL events for the console's event log (#44) — a non-destructive
         # read (never drains the queue the Hub polls). Clamp the limit so a bad
-        # query can't ask for an unbounded copy.
+        # query can't ask for an unbounded copy. An optional `monitor` filters to
+        # one monitor's events for the console's per-monitor inline panel (#130).
         limit = max(1, min(int(limit), 1000))
-        events = events_provider(limit) if events_provider is not None else []
+        if events_provider is None:
+            return {"events": []}
+        events = events_provider(limit, monitor) if monitor else events_provider(limit)
         return {"events": events}
 
     @app.get("/control/plugins")

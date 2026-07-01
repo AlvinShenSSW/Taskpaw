@@ -40,6 +40,23 @@ def test_control_events_returns_recent_non_destructive(_=None):
     assert TestClient(create_control_app(cfg)).get("/control/events").json() == {"events": []}
 
 
+def test_control_events_filters_by_monitor():
+    # #130: an optional `monitor` query param scopes the console's inline panel to
+    # one monitor's events; without it the whole agent's stream is returned.
+    cfg = _cfg()
+    q = EventQueue("dev")
+    q.add("lada", "l0")
+    q.add("folder", "f0")
+    q.add("lada", "l1")
+    client = TestClient(create_control_app(cfg, events_provider=q.recent))
+    both = client.get("/control/events").json()["events"]
+    assert [e["message"] for e in both] == ["l0", "f0", "l1"]
+    only = client.get("/control/events?monitor=lada").json()["events"]
+    assert [e["message"] for e in only] == ["l0", "l1"]      # folder filtered out
+    # an unknown monitor is simply empty, not an error
+    assert client.get("/control/events?monitor=nope").json() == {"events": []}
+
+
 def test_status_requires_auth_when_token_set():
     cfg = _cfg(api_token="secret")
     client = TestClient(create_network_app(cfg, EventQueue("dev")))

@@ -52,6 +52,33 @@ def test_eventqueue_recent_is_non_destructive_and_bounded():
     assert q.recent(limit=0) == []
 
 
+def test_eventqueue_recent_filters_by_monitor():
+    # #130: recent(monitor=...) returns only that monitor's events, filtered BEFORE
+    # the limit slice so a chatty neighbour can't crowd out a quiet monitor.
+    q = EventQueue(machine="m")
+    for i in range(5):
+        q.add("noisy", f"n{i}")
+    q.add("quiet", "q0")
+    # last 2 overall would be n4 + q0; filtered to "quiet" we still see q0.
+    assert [e["message"] for e in q.recent(limit=2, monitor="quiet")] == ["q0"]
+    assert [e["message"] for e in q.recent(monitor="noisy")] == [f"n{i}" for i in range(5)]
+    assert q.recent(monitor="ghost") == []
+    # unfiltered behaviour is unchanged (monitor defaults to None)
+    assert len(q.recent()) == 6
+
+
+def test_eventqueue_last_event_times():
+    # #130: map of monitor -> most-recent event time, for per-monitor freshness.
+    q = EventQueue(machine="m")
+    assert q.last_event_times() == {}
+    a0 = q.add("a", "a0")
+    q.add("b", "b0")
+    a1 = q.add("a", "a1")
+    times = q.last_event_times()
+    assert set(times) == {"a", "b"}
+    assert times["a"] == a1["time"] and times["a"] >= a0["time"]  # newest wins per monitor
+
+
 def test_eventqueue_recent_survives_hub_ack_drain():
     # The Events tab must keep showing local history even when the Hub poll has
     # drained the delivery queue (recent() reads a separate ring, not _queue) (#44).

@@ -109,4 +109,15 @@ describe("AgentConsole", () => {
     // The hero carries an inline "Recent events" panel beside the metrics.
     expect(screen.getByText(/^Recent events$|^最近事件$/)).toBeInTheDocument();
   });
+
+  it("scopes the inline events panel to the selected monitor (#130)", async () => {
+    renderConsole(); // lada-main auto-selected
+    await screen.findByText("downloads");
+    // The inline panel fetches /control/events filtered to the current monitor.
+    await waitFor(() => {
+      const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const urls = calls.map((c) => String(c[0]));
+      expect(urls.some((u) => /\/control\/events\?.*monitor=lada-main/.test(u))).toBe(true);
+    });
+  });
 });

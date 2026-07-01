@@ -21,6 +21,14 @@ import { Settings } from "./Settings";
 const fmtTime = (ms?: number) =>
   ms ? new Date(ms).toLocaleTimeString("en-GB", { hour12: false }) : "";
 
+// Same HH:MM:SS but from an ISO string (the per-monitor `last_event_at`, #130).
+// Returns "" for a missing/unparseable value so the caller renders nothing.
+const fmtIso = (iso?: string) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString("en-GB", { hour12: false });
+};
+
 // Local control panel for ONE machine (design pages/agent-console.md): left rail
 // of this machine's monitors + an Add button; main pane = the selected monitor's
 // live status + Start/Stop/Edit/Delete; an Add/Edit dialog renders the plugin's
@@ -117,8 +125,8 @@ export function AgentConsole() {
             <Typography variant="overline" color="text.secondary">
               {t("agent.monitorsTitle", { machine: status.data?.machine })}
             </Typography>
-            {/* Freshness for the whole list (a single poll updates every monitor);
-                real per-monitor last-EVENT times need a backend field — deferred. */}
+            {/* Poll freshness for the whole list (a single poll updates every
+                monitor); per-monitor last-EVENT time is shown in each hero (#130). */}
             {status.dataUpdatedAt > 0 && (
               <Typography variant="caption" color="text.secondary">
                 {t("agent.updated", { time: fmtTime(status.dataUpdatedAt) })}
@@ -158,14 +166,14 @@ export function AgentConsole() {
 }
 
 // Inline recent-events panel shown beside the hero metrics (#136): the hero has
-// room, and recent events are the most useful fill. Agent-wide for now; a
-// per-monitor feed needs a backend field (#130) — until then this shows the whole
-// agent's recent events.
-function InlineEvents() {
+// room, and recent events are the most useful fill. Scoped to the hero's monitor
+// via the backend `monitor` filter (#130), so the panel shows what's happening on
+// the monitor you're looking at rather than the whole agent's stream.
+function InlineEvents({ monitor }: { monitor: string }) {
   const { t } = useTranslation();
   const events = useQuery({
-    queryKey: ["agentEvents", "inline"],
-    queryFn: () => api.agentEvents(8),
+    queryKey: ["agentEvents", "inline", monitor],
+    queryFn: () => api.agentEvents(8, monitor),
     refetchInterval: 5000,
   });
   return (
@@ -195,7 +203,7 @@ function MonitorHero(props: MonitorDetailProps) {
   return (
     <Stack direction={{ xs: "column", lg: "row" }} spacing={2} alignItems="stretch">
       <Box sx={{ flex: 2, minWidth: 0 }}><MonitorDetail {...props} /></Box>
-      <Box sx={{ flex: 1, minWidth: 0 }}><InlineEvents /></Box>
+      <Box sx={{ flex: 1, minWidth: 0 }}><InlineEvents monitor={props.name} /></Box>
     </Stack>
   );
 }
@@ -232,6 +240,11 @@ function MonitorDetail({
           <Typography variant="h6" sx={{ flex: 1 }}>{name}</Typography>
           <Chip size="small" label={t(`state.${snap.state}`, { defaultValue: snap.state })} />
           {snap.degraded && <Chip size="small" color="warning" label={t("state.degraded")} />}
+          {snap.last_event_at && fmtIso(snap.last_event_at) ? (
+            <Typography variant="body2" color="text.secondary" sx={{ ml: 0.5 }}>
+              {t("agent.lastEvent", { time: fmtIso(snap.last_event_at) })}
+            </Typography>
+          ) : null}
           {updatedAt ? (
             <Typography variant="body2" color="text.secondary" sx={{ ml: 0.5 }}>
               {t("agent.updated", { time: fmtTime(updatedAt) })}

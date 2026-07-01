@@ -108,15 +108,37 @@ class EventQueue:
                     self._on_overflow(overflow)
             return dict(evt)
 
-    def recent(self, limit: int = 200) -> list[dict]:
+    def recent(self, limit: int = 200, monitor: Optional[str] = None) -> list[dict]:
         """A NON-destructive snapshot of the most recent events (newest last) for
         the local UI's event log (#44). Reads the separate `_history` ring, so it
         is unaffected by Hub acks/polls that drain `_queue` — the Events tab keeps
-        showing recent local activity even on a Hub-polled agent. Shallow copies."""
+        showing recent local activity even on a Hub-polled agent. Shallow copies.
+
+        When `monitor` is given, only that monitor's events are returned (#130, the
+        console's per-monitor inline event panel). The filter is applied BEFORE the
+        `limit` slice, so a chatty neighbour can't crowd a quiet monitor's recent
+        events out of the returned window."""
         limit = max(0, int(limit))
         with self._lock:
             items = list(self._history)
-            return [dict(e) for e in (items[-limit:] if limit else [])]
+        if monitor is not None:
+            items = [e for e in items if e.get("monitor") == monitor]
+        return [dict(e) for e in (items[-limit:] if limit else [])]
+
+    def last_event_times(self) -> dict[str, str]:
+        """Map of monitor name → the `time` of its most recent event in the local
+        history ring (#130). Feeds per-monitor freshness in the agent console's
+        pill selector. Only monitors with at least one event in the ring appear;
+        callers merge this additively onto the status monitors dict."""
+        out: dict[str, str] = {}
+        with self._lock:
+            items = list(self._history)
+        for e in items:  # newest last → the final write per monitor wins
+            name = e.get("monitor")
+            time = e.get("time")
+            if isinstance(name, str) and isinstance(time, str):
+                out[name] = time
+        return out
 
     def payload(self, ack_id: Optional[int] = None) -> dict:
         with self._lock:
