@@ -37,6 +37,14 @@ describe("MonitorMetrics", () => {
     expect(screen.getByText(/2 \/ 49/)).toBeInTheDocument();    // queue progress
     expect(screen.getByText("GPU")).toBeInTheDocument();        // utilization gauge
   });
+
+  it("shows system RAM as used/total GB under the MEM gauge (#128)", () => {
+    render(<MonitorMetrics metrics={{ mem_pct: 47, mem_used_mb: 7680, mem_total_mb: 16384 }} />);
+    expect(screen.getByText("MEM")).toBeInTheDocument();
+    // 7680 MB = 7.5 GB, 16384 MB = 16.0 GB → GB sub-label, not a raw tile.
+    expect(screen.getByText("7.5 GB / 16.0 GB")).toBeInTheDocument();
+    expect(screen.queryByText(/mem used|mem_used_mb/)).not.toBeInTheDocument();
+  });
 });
 
 describe("Settings · About", () => {

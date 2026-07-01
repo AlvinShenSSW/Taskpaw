@@ -77,7 +77,8 @@ function Tile({ label, value }: { label: string; value: string }) {
 
 const KNOWN = new Set([
   "current_file", "queue_completed", "queue_total", "queue_remaining", "percent",
-  "fps", "eta", "cpu_pct", "mem_pct", "gpu_pct", "gpu_mem_used_mb", "gpu_mem_total_mb",
+  "fps", "eta", "cpu_pct", "mem_pct", "mem_used_mb", "mem_total_mb",
+  "gpu_pct", "gpu_mem_used_mb", "gpu_mem_total_mb",
 ]);
 
 export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> }) {
@@ -97,15 +98,22 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
   const eta = str("eta");
   const cpu = num("cpu_pct");
   const mem = num("mem_pct");
+  const memUsed = num("mem_used_mb");
+  const memTotal = num("mem_total_mb");
   const gpu = num("gpu_pct");
   const vramUsed = num("gpu_mem_used_mb");
   const vramTotal = num("gpu_mem_total_mb");
 
+  // A "used / total GB" sub-label when both amounts are present (#128 for RAM,
+  // mirrors GPU's VRAM sub).
+  const gbSub = (used?: number, total?: number) =>
+    used !== undefined && total ? `${fmtGB(used)} / ${fmtGB(total)}` : undefined;
+
   const gauges = [
-    gpu !== undefined ? { label: "GPU", pct: gpu } : null,
+    gpu !== undefined ? { label: "GPU", pct: gpu, sub: gbSub(vramUsed, vramTotal) } : null,
     cpu !== undefined ? { label: "CPU", pct: cpu } : null,
-    mem !== undefined ? { label: "MEM", pct: mem } : null,
-  ].filter(Boolean) as { label: string; pct: number }[];
+    mem !== undefined ? { label: "MEM", pct: mem, sub: gbSub(memUsed, memTotal) } : null,
+  ].filter(Boolean) as { label: string; pct: number; sub?: string }[];
 
   const tiles: { label: string; value: string }[] = [];
   if (fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
@@ -168,9 +176,7 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
       {gauges.length > 0 && (
         <Stack direction="row" spacing={2} sx={{ flexWrap: "wrap", justifyContent: "flex-start" }}>
           {gauges.map((g) => (
-            <Gauge key={g.label} label={g.label} pct={g.pct}
-              sub={g.label === "GPU" && vramUsed !== undefined && vramTotal
-                ? `${fmtGB(vramUsed)} / ${fmtGB(vramTotal)}` : undefined} />
+            <Gauge key={g.label} label={g.label} pct={g.pct} sub={g.sub} />
           ))}
         </Stack>
       )}

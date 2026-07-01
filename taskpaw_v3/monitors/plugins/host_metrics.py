@@ -99,7 +99,8 @@ class HostMetricsInstance(MonitorInstance):
         cfg: HostMetricsConfig = self.config  # type: ignore[assignment]
 
         cpu = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory().percent
+        vm = psutil.virtual_memory()
+        mem = vm.percent
         disk = psutil.disk_usage(cfg.disk_path).percent
 
         # network throughput (bytes/s) from the delta since the last check
@@ -138,6 +139,10 @@ class HostMetricsInstance(MonitorInstance):
         metrics = {
             "cpu_pct": round(cpu, 1),
             "mem_pct": round(mem, 1),
+            # System RAM as GB amounts (used/total) too, not just % (#128) — flows
+            # to the Hub via the same /status snapshot as every other metric.
+            "mem_used_mb": round(vm.used / 1048576),
+            "mem_total_mb": round(vm.total / 1048576),
             "disk_pct": round(disk, 1),
             "net_in_bps": round(net_in),
             "net_out_bps": round(net_out),
