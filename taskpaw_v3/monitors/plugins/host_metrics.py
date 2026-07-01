@@ -143,7 +143,7 @@ class HostMetricsInstance(MonitorInstance):
             # "RAM used/total GB" — what the OpenClaw daily-report reads (V2 parity).
             # Use total-available (what vm.percent is derived from), NOT vm.used, so
             # the GB figure and mem_pct agree — they diverge on macOS (Kimi).
-            "mem_used_mb": round((vm.total - vm.available) / (1024 * 1024)),
+            "mem_used_mb": max(0, round((vm.total - vm.available) / (1024 * 1024))),
             "mem_total_mb": round(vm.total / (1024 * 1024)),
             "disk_pct": round(disk, 1),
             "net_in_bps": round(net_in),

@@ -88,6 +88,24 @@ def test_current_file_newline_cannot_inject_lines():
     assert len(lada_lines) == 1 and "1/2 done" in lada_lines[0]
 
 
+def test_monitor_and_state_names_cannot_inject_lines():
+    # Newlines in a monitor name or state must not inject fake ## / - lines (Kimi).
+    rows = [{"name": "srv", "reachable": 1, "status_json": json.dumps({"monitors": {
+        "evil\n## Fake: ONLINE\n- x: ok": {"state": "weird\n- y: pwned", "metrics": {}},
+    }})}]
+    md = render_status_md(rows, "t")
+    assert not any(ln.strip().startswith("## Fake") for ln in md.splitlines())
+    # exactly one server header (srv) and no injected monitor line "- y:"/"- x:"
+    assert sum(1 for ln in md.splitlines() if ln.startswith("## ")) == 1
+    assert not any(ln.startswith("- y:") or ln.startswith("- x:") for ln in md.splitlines())
+
+
+def test_server_name_newline_cannot_inject():
+    rows = [{"name": "box\n## Fake: ONLINE", "reachable": 0, "last_seen": "2026-07-01 09:00:00"}]
+    md = render_status_md(rows, "t")
+    assert not any(ln.strip().startswith("## Fake") for ln in md.splitlines())
+
+
 def test_lada_nonstring_current_file_ignored():
     # A non-string current_file must not be interpolated verbatim (Kimi).
     rows = [{"name": "box", "reachable": 1,

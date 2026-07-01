@@ -47,12 +47,14 @@ def _status_text(snap: Any) -> str:
     idle-detector) get CPU/RAM/GPU/VRAM and queue counts, not just "ok" (V2 parity).
     V3 keeps state + a structured `metrics` dict; V2 baked it all into one string,
     so we rebuild that string here."""
+    # State is free-form from a plugin → _inline() the fallback returns so a
+    # multi-line state can't break the line-oriented status.md (Kimi).
     if not isinstance(snap, dict):
-        return str(snap)
+        return _inline(str(snap))
     state = snap.get("state") or snap.get("status") or "unknown"
     m = snap.get("metrics") or {}
     if not isinstance(m, dict):
-        return str(state)
+        return _inline(str(state))
     parts: list[str] = []
     # Classify by the monitor's type_id (the discriminator the dashboard uses).
     # Fall back to a metric signature ONLY when the snapshot has no type_id at all
@@ -116,7 +118,7 @@ def _status_text(snap: Any) -> str:
         pending = int(m["pending"]) if _is_num(m.get("pending")) else 0
         parts.append(f"{running} running, {pending} pending")
 
-    return " | ".join(parts) if parts else str(state)
+    return " | ".join(parts) if parts else _inline(str(state))
 
 
 def _monitor_lines(status_json: Optional[str]) -> list[str]:
@@ -132,26 +134,29 @@ def _monitor_lines(status_json: Optional[str]) -> list[str]:
         return []
     monitors = data.get("monitors") if isinstance(data, dict) else None
     lines: list[str] = []
+    # Every name/status is _inline()-sanitized: a malicious/misconfigured agent
+    # could otherwise put newlines in a monitor name/status and inject fake
+    # `## server` / `- monitor` lines into the line-oriented status.md (Kimi).
     if isinstance(monitors, dict):
         for name, snap in monitors.items():
             # V3 also carries enabled:False stubs for intentionally-stopped monitors
             # (merge_status); render them "disabled", matching the V2 list branch,
             # instead of their stale "stopped" state (Kimi).
             if isinstance(snap, dict) and snap.get("enabled") is False:
-                lines.append(f"- {name}: disabled")
+                lines.append(f"- {_inline(str(name))}: disabled")
             else:
-                lines.append(f"- {name}: {_status_text(snap)}")
+                lines.append(f"- {_inline(str(name))}: {_status_text(snap)}")
     elif isinstance(monitors, list):
         for m in monitors:
             if not isinstance(m, dict):
                 continue
             name = m.get("name", "unknown")
             if m.get("enabled") is False:           # V2 rendered disabled monitors
-                lines.append(f"- {name}: disabled")
+                lines.append(f"- {_inline(str(name))}: disabled")
             else:
                 # V2 already stored a rich status string; keep it verbatim.
                 status = m.get("status") or m.get("state") or "unknown"
-                lines.append(f"- {name}: {status}")
+                lines.append(f"- {_inline(str(name))}: {_inline(str(status))}")
     return lines
 
 
@@ -172,14 +177,14 @@ def render_status_md(statuses: list[dict[str, Any]], now: str) -> str:
     `now` is a preformatted timestamp."""
     lines = ["# TaskPaw Hub Status", "", f"Last updated: {now}", ""]
     for s in statuses:
-        name = s.get("name", "unknown")
+        name = _inline(str(s.get("name", "unknown")))  # sanitized: no line injection
         if s.get("reachable"):
             lines.append(f"## {name}: ONLINE")
             lines.extend(_monitor_lines(s.get("status_json")))
         else:
             # last seen = the last time it was actually reachable (not this failed
             # poll), so the time doesn't advance during an outage (#38 review).
-            seen = _last_seen_hms(s.get("last_seen"))
+            seen = _inline(_last_seen_hms(s.get("last_seen")))
             lines.append(f"## {name}: OFFLINE (last seen {seen})" if seen
                          else f"## {name}: OFFLINE")
         lines.append("")
