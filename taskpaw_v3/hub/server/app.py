@@ -7,7 +7,10 @@ Tauri dashboard (#19) and richer endpoints come later.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
+import sqlite3
 import threading
 import time
 from typing import Optional
@@ -24,6 +27,13 @@ from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
 log = logging.getLogger("taskpaw.hub")
+
+# A DNS hostname: dot-separated labels of alnum/hyphen (no scheme, port, path, or
+# URL metacharacters). IP literals are validated separately via ipaddress (#124).
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*$"
+)
 
 
 def _unauthorized() -> JSONResponse:
@@ -216,6 +226,134 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         # first, optionally filtered by server id / level. Clamp the limit.
         limit = max(1, min(int(limit), 1000))
         return {"events": store.recent_events(server_id=server, level=level, limit=limit)}
+
+    # ── manage the polled agents from the dashboard (#124) — same Bearer gate as
+    # the read API (#106): open on loopback, token-required on a LAN Hub (#114). ──
+    from fastapi import HTTPException
+
+    def _valid_name(v) -> str:
+        # Must be a string — don't str()-coerce a list/dict into its repr (Kimi).
+        if not isinstance(v, str) or not v.strip():
+            raise HTTPException(status_code=400, detail="name must be a non-blank string")
+        return v.strip()
+
+    def _valid_ip(v) -> str:
+        # Must be an IP literal or a plain hostname — NOT a URL, host:port, or a
+        # path. Otherwise poller._agent_base_url builds a malformed/unintended URL
+        # (e.g. "192.168.1.80:5678" → http://[192.168.1.80:5678]:5680) — a
+        # correctness bug and a mild SSRF vector (Kimi).
+        if not isinstance(v, str) or not v.strip():
+            raise HTTPException(status_code=400, detail="ip/host must be a non-blank string")
+        h = v.strip().strip("[]")  # allow a bracketed IPv6 literal
+        try:
+            ipaddress.ip_address(h)
+            return h
+        except ValueError:
+            pass
+        if _HOSTNAME_RE.match(h):
+            return h
+        raise HTTPException(status_code=400,
+                            detail="ip/host must be an IP address or hostname (no port, path, or scheme)")
+
+    def _valid_port(v) -> int:
+        # Reject bool (an int subclass) and non-integers (3.14) — silently
+        # truncating them would store a port the wire value never named. Parse via
+        # int() (NOT str.isdigit(), which accepts Unicode digits like "⁵" that
+        # int() then rejects → 500 instead of 400) (Kimi).
+        if isinstance(v, bool):
+            raise HTTPException(status_code=400, detail="port must be an integer")
+        if isinstance(v, int):
+            p = v
+        elif isinstance(v, str):
+            try:
+                p = int(v.strip())
+            except ValueError:
+                raise HTTPException(status_code=400, detail="port must be an integer")
+        else:
+            raise HTTPException(status_code=400, detail="port must be an integer")
+        if not (1 <= p <= 65535):
+            raise HTTPException(status_code=400, detail="port must be between 1 and 65535")
+        return p
+
+    def _valid_enabled(v) -> bool:
+        if not isinstance(v, bool):
+            raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
+        return v
+
+    @app.post("/servers")
+    def add_server(request: Request, body: dict):
+        if not _auth(request):
+            return _unauthorized()  # same 401 shape as the read API (Kimi)
+        name = _valid_name(body.get("name"))
+        ip = _valid_ip(body.get("ip"))
+        port = _valid_port(body.get("port", 5680))
+        # Explicit name-exists precheck → a clear 400 that doesn't rely on which
+        # constraint IntegrityError happens to be (Kimi); the UNIQUE index is still
+        # the authoritative backstop against a race.
+        if any(s["name"] == name for s in store.list_servers()):
+            raise HTTPException(status_code=400, detail=f"a server named {name!r} already exists")
+        try:
+            sid = store.add_server(name, ip, port)
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail=f"a server named {name!r} already exists")
+        log.info("hub: registered agent %r at %s:%s (#124)", name, ip, port)
+        return {"ok": True, "id": sid, **(store.get_server(sid) or {})}
+
+    @app.patch("/servers/{sid}")
+    def update_server(request: Request, sid: int, body: dict):
+        if not _auth(request):
+            return _unauthorized()
+        if store.get_server(sid) is None:
+            raise HTTPException(status_code=404, detail=f"no server with id {sid}")
+        # Validate EVERYTHING (incl. enabled) before any store write, so a rejected
+        # request never leaves a partial edit persisted (Codex/Kimi).
+        name = _valid_name(body["name"]) if "name" in body else None
+        ip = _valid_ip(body["ip"]) if "ip" in body else None
+        port = _valid_port(body["port"]) if "port" in body else None
+        enabled = _valid_enabled(body["enabled"]) if "enabled" in body else None
+        try:
+            # One transactional UPDATE (name/ip/port/enabled together) — no partial
+            # edit if something fails between writes (Kimi).
+            store.update_server(sid, name=name, ip=ip, port=port, enabled=enabled)
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="that name is already in use")
+        # Re-read: if the row was removed concurrently, report 404 rather than a
+        # misleading 200 with an empty body (Kimi).
+        srv = store.get_server(sid)
+        if srv is None:
+            raise HTTPException(status_code=404, detail=f"no server with id {sid}")
+        log.info("hub: updated agent id=%s → %s:%s enabled=%s (#124)",
+                 sid, srv["ip"], srv["port"], bool(srv["enabled"]))
+        return {"ok": True, **srv}
+
+    @app.delete("/servers/{sid}")
+    def delete_server(request: Request, sid: int):
+        if not _auth(request):
+            return _unauthorized()
+        if not store.remove_server(sid):
+            raise HTTPException(status_code=404, detail=f"no server with id {sid}")
+        log.info("hub: removed agent id=%s (#124)", sid)
+        return {"ok": True}
+
+    @app.patch("/config")
+    def update_config(request: Request, body: dict):
+        if not _auth(request):
+            return _unauthorized()
+        if "polling_token" in body:
+            tok = body["polling_token"]
+            if tok is None:
+                tok = ""            # JSON null = clear; never store the string "None" (Kimi)
+            if not isinstance(tok, str):
+                raise HTTPException(status_code=400, detail="polling_token must be a string")
+            # No control chars (\r \n \t …) — they'd be injected into the poller's
+            # Authorization header, corrupting the request / enabling injection (Kimi).
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in tok):
+                raise HTTPException(status_code=400, detail="polling_token must not contain control characters")
+            # Live: the poller reads polling_token per cycle (get_polling_token),
+            # so no Hub restart is needed to apply it (#124).
+            store.set_config("polling_token", tok)
+            log.info("hub: polling_token %s via dashboard (#124)", "set" if tok else "cleared")
+        return {"ok": True}
 
     return app, service
 

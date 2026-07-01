@@ -9,6 +9,7 @@ import { api, type HubServer, type MonitorSnapshot } from "../api";
 import { StatusDot } from "../components/StatusDot";
 import { EventLog } from "../components/EventLog";
 import { MonitorMetrics, utilTint } from "../components/MonitorMetrics";
+import { HubAgentManager } from "../components/HubAgentManager";
 import { Settings } from "./Settings";
 
 // ── fleet health (design pages/hub-dashboard.md "Fleet health") ──────────────
@@ -147,6 +148,9 @@ export function HubDashboard() {
               <Typography color="text.secondary">{t("hub.noAgents")}</Typography>
             )}
           </Box>
+
+          {/* #124: add/edit/remove polled agents + set the polling token. */}
+          <HubAgentManager servers={servers} />
 
           {Object.keys(self).length > 0 && (
             <Card>

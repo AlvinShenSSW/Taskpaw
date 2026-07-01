@@ -18,7 +18,7 @@ const en = {
   common: {
     add: "Add", start: "Start", stop: "Stop", editConfig: "Edit config", delete: "Delete",
     cancel: "Cancel", loading: "Loading…", updating: "updating…", type: "Type", level: "Level",
-    allLevels: "All levels", show: "show", hide: "hide",
+    allLevels: "All levels", show: "show", hide: "hide", save: "Save",
   },
   state: {
     ok: "ok", idle: "idle", running: "running", degraded: "degraded",
@@ -79,6 +79,12 @@ const en = {
     machineMonitors: "monitors", machineEvents: "recent events",
     noMonitors: "No monitors reported.",
     cpu: "CPU", mem: "MEM",
+    manageAgents: "Manage agents",
+    mName: "Name", mIp: "IP / host", mPort: "Port",
+    pollingToken: "Polling token", pollingTokenHint: "Must match each agent's API token. Save blank to clear it (unauthenticated polling).",
+    clearToken: "Clear",
+    deleteAgentTitle: 'Remove agent "{{name}}"?',
+    deleteAgentBody: "The Hub will stop polling it and forget its history. This can't be undone.",
   },
   events: {
     none: "No events yet — they appear here as monitors report activity.",
@@ -110,7 +116,7 @@ const zh: typeof en = {
   common: {
     add: "添加", start: "启动", stop: "停止", editConfig: "编辑配置", delete: "删除",
     cancel: "取消", loading: "加载中…", updating: "更新中…", type: "类型", level: "级别",
-    allLevels: "全部级别", show: "显示", hide: "隐藏",
+    allLevels: "全部级别", show: "显示", hide: "隐藏", save: "保存",
   },
   state: {
     ok: "正常", idle: "空闲", running: "运行中", degraded: "降级",
@@ -170,6 +176,12 @@ const zh: typeof en = {
     machineMonitors: "监控项", machineEvents: "最近事件",
     noMonitors: "未上报监控项。",
     cpu: "CPU", mem: "内存",
+    manageAgents: "管理 agent",
+    mName: "名称", mIp: "IP / 主机", mPort: "端口",
+    pollingToken: "轮询令牌", pollingTokenHint: "需与各 agent 的 API 令牌一致。保存空值 = 清除（不鉴权轮询）。",
+    clearToken: "清除",
+    deleteAgentTitle: "删除 agent「{{name}}」?",
+    deleteAgentBody: "Hub 会停止轮询它并清除其历史记录，无法撤销。",
   },
   events: {
     none: "暂无事件 —— 监控产生活动时会显示在这里。",

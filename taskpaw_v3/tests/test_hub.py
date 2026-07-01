@@ -440,3 +440,175 @@ def test_bind_guard_allows_loopback_and_authed_lan():
     # Private LAN WITH a token → fine (10/8, 172.16/12, 192.168/16).
     for host in ("192.168.1.10", "10.0.0.5", "172.16.0.1"):
         _guard_bind_exposure(HubConfig(bind_host=host, api_token="s3cret"))
+
+
+def test_manage_servers_add_update_delete(tmp_path):
+    """Dashboard CRUD for polled agents (#124): add/edit/toggle/delete + validation."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(app)
+
+        # add
+        r = c.post("/servers", json={"name": "box1", "ip": "192.168.1.80", "port": 5678})
+        assert r.status_code == 200 and r.json()["name"] == "box1"
+        sid = r.json()["id"]
+        assert s.get_server(sid)["port"] == 5678
+
+        # add invalid → 400
+        assert c.post("/servers", json={"name": "", "ip": "1.2.3.4"}).status_code == 400
+        assert c.post("/servers", json={"name": "x", "ip": "1.2.3.4", "port": 0}).status_code == 400
+        # duplicate name → 400
+        assert c.post("/servers", json={"name": "box1", "ip": "9.9.9.9"}).status_code == 400
+
+        # edit ip/port + toggle
+        r = c.patch(f"/servers/{sid}", json={"ip": "10.0.0.9", "port": 5680, "enabled": False})
+        assert r.status_code == 200
+        srv = s.get_server(sid)
+        assert srv["ip"] == "10.0.0.9" and srv["port"] == 5680 and srv["enabled"] == 0
+
+        # edit unknown id → 404
+        assert c.patch("/servers/9999", json={"port": 5680}).status_code == 404
+        # bad enabled → 400
+        assert c.patch(f"/servers/{sid}", json={"enabled": "false"}).status_code == 400
+
+        # delete
+        assert c.delete(f"/servers/{sid}").status_code == 200
+        assert s.get_server(sid) is None
+        assert c.delete(f"/servers/{sid}").status_code == 404  # already gone
+    finally:
+        s.close()
+
+
+def test_manage_set_polling_token_and_auth(tmp_path):
+    """PATCH /config persists polling_token; mutations are Bearer-gated (#124/#106)."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(app)
+        assert c.patch("/config", json={"polling_token": "tok123"}).status_code == 200
+        assert s.get_config("polling_token") == "tok123"
+    finally:
+        s.close()
+
+    # With api_token set, the mutation endpoints require the Bearer.
+    s2 = _store(tmp_path / "b")
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="sek"), s2)
+        c = TestClient(app)
+        assert c.post("/servers", json={"name": "x", "ip": "1.1.1.1"}).status_code == 401
+        r = c.post("/servers", json={"name": "x", "ip": "1.1.1.1"},
+                   headers={"Authorization": "Bearer sek"})
+        assert r.status_code == 200
+    finally:
+        s2.close()
+
+
+def test_manage_validation_and_atomicity(tmp_path):
+    """#124 review fixes: port rejects bool/float, a rejected PATCH leaves no
+    partial edit, and 401s carry WWW-Authenticate like the read API."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(app)
+        sid = c.post("/servers", json={"name": "a", "ip": "1.1.1.1", "port": 5678}).json()["id"]
+
+        # port: bool and float are rejected (not silently 1 / 3).
+        assert c.post("/servers", json={"name": "b", "ip": "1.1.1.1", "port": True}).status_code == 400
+        assert c.post("/servers", json={"name": "b", "ip": "1.1.1.1", "port": 3.14}).status_code == 400
+
+        # PATCH with a valid name but a bad `enabled` → 400 AND name unchanged (atomic).
+        r = c.patch(f"/servers/{sid}", json={"name": "renamed", "enabled": "false"})
+        assert r.status_code == 400
+        assert s.get_server(sid)["name"] == "a"        # not partially applied
+
+        # duplicate-name add rejected clearly.
+        assert c.post("/servers", json={"name": "a", "ip": "9.9.9.9"}).status_code == 400
+    finally:
+        s.close()
+
+    # 401 shape: WWW-Authenticate header, same as /status (mutation endpoints).
+    s2 = _store(tmp_path / "c")
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="k"), s2)
+        r = TestClient(app).post("/servers", json={"name": "x", "ip": "1.1.1.1"})
+        assert r.status_code == 401 and "WWW-Authenticate" in r.headers
+    finally:
+        s2.close()
+
+
+def test_manage_port_and_token_edgecases(tmp_path):
+    """#124 review r2: unicode-digit port → 400 (not 500); null polling_token
+    clears rather than storing the string 'None'."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(app)
+        # A Unicode-digit string is isdigit()=True but int() rejects it → must 400.
+        assert c.post("/servers", json={"name": "u", "ip": "1.1.1.1", "port": "⁵"}).status_code == 400
+        # JSON null token clears it (never the literal "None").
+        s.set_config("polling_token", "old")
+        assert c.patch("/config", json={"polling_token": None}).status_code == 200
+        assert s.get_config("polling_token") == ""
+        # non-string token rejected.
+        assert c.patch("/config", json={"polling_token": 123}).status_code == 400
+    finally:
+        s.close()
+
+
+def test_manage_rejects_non_string_name_ip(tmp_path):
+    """#124 review r3: name/ip must be strings — a list/dict is rejected, not
+    stored as its Python repr."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
+        assert c.post("/servers", json={"name": [1, 2], "ip": "1.1.1.1"}).status_code == 400
+        assert c.post("/servers", json={"name": "ok", "ip": {"h": "x"}}).status_code == 400
+        assert len(s.list_servers()) == 0                    # nothing corrupt stored
+    finally:
+        s.close()
+
+
+def test_manage_ip_and_token_sanitization(tmp_path):
+    """#124 review r4: ip must be a bare IP/hostname (a host:port or path is
+    rejected — catches the common 'ip:port in the IP field' mistake); the polling
+    token rejects control characters (header-injection)."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
+        # host:port / path / scheme in the IP field → 400.
+        for bad in ("192.168.1.80:5678", "foo/bar", "http://1.2.3.4", "a b", "x@y"):
+            assert c.post("/servers", json={"name": f"n{bad}", "ip": bad}).status_code == 400
+        # bare IPv4 / IPv6 / hostname are accepted.
+        assert c.post("/servers", json={"name": "v4", "ip": "192.168.1.80"}).status_code == 200
+        assert c.post("/servers", json={"name": "v6", "ip": "::1"}).status_code == 200
+        assert c.post("/servers", json={"name": "host", "ip": "moomoo.local"}).status_code == 200
+        # control chars in the polling token → 400.
+        assert c.patch("/config", json={"polling_token": "abc\r\ndef"}).status_code == 400
+        assert c.patch("/config", json={"polling_token": "good-token"}).status_code == 200
+    finally:
+        s.close()
