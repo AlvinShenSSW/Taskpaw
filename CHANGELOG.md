@@ -4,6 +4,27 @@
 
 ---
 
+## V3 未发布 — Mac 打包 parity + OpenClaw 富指标 (afk/mac-parity)
+
+- **OpenClaw:`status.md` 恢复 V2 的富指标**,`status_log` 的 `status_json` 也带全字段 ——
+  CPU%、内存(新增 `mem_used_mb`/`mem_total_mb`,已用/总量 GB)、GPU%、显存、LADA 队列
+  (`queue_completed/total/remaining` + `current_file`)、ComfyUI(`running`/`pending`)。
+  新增 **[docs/guides/openclaw-integration.md](docs/guides/openclaw-integration.md)**:如何从
+  `hub.db`/`status.md` 读取,字段对照表,以及"用 `state` 不用 `enabled` 判断运行"等规则。
+- **修复:运行中的监控不再错显 `disabled`。** 一个正在跑(有实时 `state`/`metrics`)但配置
+  `enabled:false` 的监控,`status.md` 现按实时状态渲染,与数据库/UI 一致;仅未启动的桩显示
+  `disabled`。无 `type_id` 的旧 agent 主机按 `disk_pct` 识别,CPU/GPU/显存照常输出。
+- **Hub 面板:下钻显示每个监控的完整指标**(CPU/GPU/显存/队列/fps 仪表),与 Agent 控制台一致。
+- **status.md 加固**:所有名字/状态/文件名 sanitize(控制字符→空格、限长),防止行注入;
+  数值 NaN/inf 过滤;错误态不再被陈旧指标掩盖。
+- **打包 / 桌面外壳(Mac)**:端口冲突等启动失败**不再崩溃**(友好原生弹窗 + 干净退出,先杀后端
+  防孤儿);后端日志按角色写 `~/Library/Logs/TaskPaw/taskpaw-backend-<role>.log`(append + 滚动
+  + `O_NOFOLLOW`);真实品牌图标 `.icns`;全新安装的 `machine` 默认取系统友好电脑名
+  (macOS `ComputerName` / Windows `%COMPUTERNAME%`)而非网络 hostname。
+- 遗留硬化项(非阻塞)记入 issue #127;Windows `.exe` 构建见 issue #126。
+
+---
+
 ## V3 未发布 — Hub OpenClaw 兼容 (#38)
 
 - **破坏性变更(仅早期 V3):Hub 的 SQLite 库 + `status.md` 现位于 `HubConfig.data_dir`

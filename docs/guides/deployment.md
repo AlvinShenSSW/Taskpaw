@@ -177,6 +177,11 @@ curl -s http://127.0.0.1:5690/status | python -m json.tool   # on the Hub
 fans completion events to OpenClaw if enabled. The Tauri UI (#19) renders the
 same data — point it at the Hub for the dashboard.
 
+The Hub also writes `~/.taskpaw-hub/hub.db` (SQLite `status_log`) and
+`~/.taskpaw-hub/status.md` each poll for OpenClaw to read without an API — see
+**[openclaw-integration.md](openclaw-integration.md)** for the schema, the metric
+field reference, and the `state`-not-`enabled` rule.
+
 ## Running as a background service
 
 These are plain foreground processes. For always-on operation wrap each in your

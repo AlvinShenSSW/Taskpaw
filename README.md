@@ -86,6 +86,7 @@ history, and notifies OpenClaw on completions. Run as many agents as you like.
 ## Docs
 
 - **[docs/guides/deployment.md](docs/guides/deployment.md)** — deploy agents + a Hub.
+- **[docs/guides/openclaw-integration.md](docs/guides/openclaw-integration.md)** — read fleet status (CPU/RAM/GPU/queue) from `hub.db` / `status.md`.
 - **[Design spec](docs/specs/2026-06-27-taskpaw-v3-design.md)** — V3 architecture.
 - **[AGENTS.md](AGENTS.md)** / **[docs/constitution.md](docs/constitution.md)** — repo guide + hard rules (for contributors/agents).
 - **[CHANGELOG.md](CHANGELOG.md)** — release notes.
