@@ -79,10 +79,13 @@ export function HubDashboard() {
   // Aggregated durable history from all polled agents; only poll while open.
   const events = useQuery({
     queryKey: ["hubEvents", level, serverFilter],
-    queryFn: () => api.hubEvents({
-      level: level || undefined,
-      server: serverFilter ? Number(serverFilter) : undefined,
-    }),
+    queryFn: () => {
+      const id = serverFilter ? Number(serverFilter) : NaN;
+      return api.hubEvents({
+        level: level || undefined,
+        server: Number.isFinite(id) ? id : undefined, // never ?server=NaN (Kimi)
+      });
+    },
     refetchInterval: 5000, enabled: tab === "events",
   });
 
