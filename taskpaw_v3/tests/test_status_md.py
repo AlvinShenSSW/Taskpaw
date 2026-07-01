@@ -104,6 +104,20 @@ def test_comfyui_down_shows_state_not_empty_queue():
     assert "- ComfyUI: error" in md and "running" not in md
 
 
+def test_host_error_shows_state_but_degraded_keeps_metrics():
+    # A host_metrics monitor in a hard-bad state (error/unreachable) surfaces the
+    # state, not stale CPU/RAM; but "degraded" (its normal threshold alert) keeps
+    # rendering metrics (Kimi).
+    def row(state):
+        return [{"name": "b", "reachable": 1, "status_json": json.dumps({"monitors": {
+            "b-host": {"state": state, "type_id": "host_metrics",
+                       "metrics": {"cpu_pct": 95.0, "mem_used_mb": 8000, "mem_total_mb": 16000}}}})}]
+    assert "- b-host: error" in render_status_md(row("error"), "t")
+    assert "CPU" not in render_status_md(row("error"), "t")
+    # degraded keeps the metrics
+    assert "CPU 95%" in render_status_md(row("degraded"), "t")
+
+
 def test_task_error_state_with_stale_metrics_shows_state():
     # Plugins emit metrics even in error states; a bad state must surface as the
     # state, not a stale queue sample, so the outage isn't masked (Kimi).

@@ -53,6 +53,14 @@ def _status_text(snap: Any) -> str:
     # Treat an empty type_id as absent so a stub with type_id:"" still uses the
     # metric-signature fallback rather than being seen as a typed monitor (Kimi).
     tid = snap.get("type_id") or None
+    st = str(state).lower()
+    # A monitor in a bad state must surface that state, not a (possibly stale)
+    # metric sample — plugins emit metrics even in error states, so rendering them
+    # would hide the outage from OpenClaw (Kimi). `degraded` is host_metrics' NORMAL
+    # threshold-alert state, so it keeps rendering CPU/RAM; only hard-bad states
+    # suppress metrics.
+    bad_state = st in {"error", "stopped", "degraded", "unreachable"}
+    host_bad = st in {"error", "stopped", "unreachable"}  # not "degraded"
 
     # host_metrics — CPU / RAM / GPU / VRAM. Each field guarded individually: a
     # host monitor can be typed yet carry empty/partial metrics (startup / disabled
@@ -61,7 +69,7 @@ def _status_text(snap: Any) -> str:
     is_host = tid == "host_metrics" or (
         tid is None and _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb"))
     )
-    if is_host:
+    if is_host and not host_bad:
         if _is_num(m.get("cpu_pct")):
             parts.append(f"CPU {m['cpu_pct']:.0f}%")
         if _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb")) and m["mem_total_mb"] > 0:
@@ -70,11 +78,6 @@ def _status_text(snap: Any) -> str:
             parts.append(f"GPU {m['gpu_pct']:.0f}%")
         if _is_num(m.get("gpu_mem_used_mb")) and _is_num(m.get("gpu_mem_total_mb")) and m["gpu_mem_total_mb"] > 0:
             parts.append(f"VRAM {m['gpu_mem_used_mb'] / 1024:.1f}/{m['gpu_mem_total_mb'] / 1024:.1f}GB")
-
-    # A task plugin in a bad state must surface that state, not a (possibly stale)
-    # queue sample — the plugins emit metrics even in error states, so rendering
-    # "X/Y done" / "N running" would hide the outage from OpenClaw (Kimi).
-    bad_state = str(state).lower() in {"error", "stopped", "degraded", "unreachable"}
 
     # lada-style queue: "X/Y done (Z left)" + the current task between pipes.
     is_lada = tid == "lada" or (tid is None and _is_num(m.get("queue_total")))

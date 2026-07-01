@@ -256,8 +256,12 @@ fn backend_log_hint() -> String {
         if cfg!(debug_assertions) {
             return "the launching terminal (dev builds inherit backend stderr)".to_string();
         }
+        // Point at the real file only if THIS launch actually opened it (not a
+        // stale prior-run log) — see BACKEND_LOG_OPENED (Kimi).
         match backend_log_path() {
-            Some(p) if p.exists() => p.display().to_string(),
+            Some(p) if BACKEND_LOG_OPENED.load(std::sync::atomic::Ordering::Relaxed) => {
+                p.display().to_string()
+            }
             _ => "the OS app log (Console.app / Event Viewer) — the backend log \
                   file could not be opened, so its stderr was discarded"
                 .to_string(),
@@ -310,6 +314,12 @@ fn roll_log_if_oversized(path: &std::path::Path, max_bytes: u64) {
 /// own stderr (captured by the OS log) rather than silently discarding the
 /// backend's logs. None on Linux (stderr is inherited). Callers only invoke this in
 /// release builds; dev keeps stderr on the inherited terminal.
+/// Set once open_backend_log() actually opens the file THIS launch, so
+/// backend_log_hint() points at the real log only when it exists AND we wrote to it
+/// — never at a stale log left by a prior run when this run's open failed (Kimi).
+#[cfg(any(target_os = "macos", windows))]
+static BACKEND_LOG_OPENED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(any(target_os = "macos", windows))]
 fn open_backend_log() -> Option<std::fs::File> {
     let path = backend_log_path()?;
@@ -336,7 +346,10 @@ fn open_backend_log() -> Option<std::fs::File> {
         opts.custom_flags(libc::O_NOFOLLOW);
     }
     match opts.open(&path) {
-        Ok(f) => Some(f),
+        Ok(f) => {
+            BACKEND_LOG_OPENED.store(true, std::sync::atomic::Ordering::Relaxed);
+            Some(f)
+        }
         Err(e) => {
             eprintln!("taskpaw: cannot open backend log {path:?}: {e}; backend stderr discarded");
             None
