@@ -76,8 +76,12 @@ def _status_text(snap: Any) -> str:
     # host monitor can be typed yet carry empty/partial metrics (startup / disabled
     # stub with metrics={}), so unconditional indexing would KeyError and stop
     # status.md from updating (Codex + Kimi).
+    # Fallback signature for agents whose host monitor snapshot omits type_id
+    # (older V3): disk_pct / mem_used_mb are reported ONLY by host_metrics —
+    # lada/comfyui carry cpu_pct/mem_pct/gpu_pct too (so those can't distinguish),
+    # but never disk_pct or system RAM totals.
     is_host = tid == "host_metrics" or (
-        tid is None and _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb"))
+        tid is None and (_is_num(m.get("disk_pct")) or _is_num(m.get("mem_used_mb")))
     )
     if is_host and not bad_state:
         if _is_num(m.get("cpu_pct")):

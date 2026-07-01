@@ -192,6 +192,18 @@ def test_task_error_state_with_stale_metrics_shows_state():
     assert "- ComfyUI: error" in md and "pending" not in md
 
 
+def test_host_without_type_id_still_renders_metrics():
+    # Older V3 agents omit type_id on the host monitor; detect host by its
+    # exclusive disk_pct signature so CPU/GPU/VRAM still render (real fleet data).
+    rows = [{"name": "BGP", "reachable": 1, "status_json": json.dumps({"monitors": {
+        "BGP-host": {"state": "ok", "metrics": {  # NO type_id
+            "cpu_pct": 21.8, "mem_pct": 62.9, "disk_pct": 35.3,
+            "gpu_pct": 33.0, "gpu_mem_used_mb": 2955, "gpu_mem_total_mb": 8151}}}})}]
+    md = render_status_md(rows, "t")
+    assert "CPU 22%" in md and "GPU 33%" in md and "VRAM 2.9/8.0GB" in md
+    assert "- BGP-host: ok" not in md  # not the bare state
+
+
 def test_running_monitor_with_stale_disabled_flag_shows_data_not_disabled():
     # A LADA that's actually running (live state + queue metrics) but whose config
     # `enabled` flag is false must show its queue, NOT "disabled" — status.md has to
