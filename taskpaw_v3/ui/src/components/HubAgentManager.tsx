@@ -122,7 +122,8 @@ export function HubAgentManager({ servers }: { servers: HubServer[] }) {
         <Stack direction="row" spacing={1} sx={{ mt: 1.5 }} alignItems="flex-start">
           <TextField size="small" type="password" label={t("hub.pollingToken")} value={token}
             onChange={(e) => setToken(e.target.value)} helperText={t("hub.pollingTokenHint")} sx={{ flex: 1 }} />
-          <Button variant="outlined" disabled={tokMut.isPending || !token} sx={{ mt: 0.25 }}
+          {/* Enabled even when blank so the token can be CLEARED (blank = no auth) (Codex). */}
+          <Button variant="outlined" disabled={tokMut.isPending} sx={{ mt: 0.25 }}
             onClick={() => tokMut.mutate()}>{t("common.save")}</Button>
         </Stack>
       </CardContent>

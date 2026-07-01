@@ -510,3 +510,40 @@ def test_manage_set_polling_token_and_auth(tmp_path):
         assert r.status_code == 200
     finally:
         s2.close()
+
+
+def test_manage_validation_and_atomicity(tmp_path):
+    """#124 review fixes: port rejects bool/float, a rejected PATCH leaves no
+    partial edit, and 401s carry WWW-Authenticate like the read API."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(app)
+        sid = c.post("/servers", json={"name": "a", "ip": "1.1.1.1", "port": 5678}).json()["id"]
+
+        # port: bool and float are rejected (not silently 1 / 3).
+        assert c.post("/servers", json={"name": "b", "ip": "1.1.1.1", "port": True}).status_code == 400
+        assert c.post("/servers", json={"name": "b", "ip": "1.1.1.1", "port": 3.14}).status_code == 400
+
+        # PATCH with a valid name but a bad `enabled` → 400 AND name unchanged (atomic).
+        r = c.patch(f"/servers/{sid}", json={"name": "renamed", "enabled": "false"})
+        assert r.status_code == 400
+        assert s.get_server(sid)["name"] == "a"        # not partially applied
+
+        # duplicate-name add rejected clearly.
+        assert c.post("/servers", json={"name": "a", "ip": "9.9.9.9"}).status_code == 400
+    finally:
+        s.close()
+
+    # 401 shape: WWW-Authenticate header, same as /status (mutation endpoints).
+    s2 = _store(tmp_path / "c")
+    try:
+        app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="k"), s2)
+        r = TestClient(app).post("/servers", json={"name": "x", "ip": "1.1.1.1"})
+        assert r.status_code == 401 and "WWW-Authenticate" in r.headers
+    finally:
+        s2.close()

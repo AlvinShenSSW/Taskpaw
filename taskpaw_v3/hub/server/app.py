@@ -222,11 +222,6 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
     # the read API (#106): open on loopback, token-required on a LAN Hub (#114). ──
     from fastapi import HTTPException
 
-    def _guard(request: Request):
-        if not _auth(request):
-            # Raise so it short-circuits before touching the store.
-            raise HTTPException(status_code=401, detail="unauthorized")
-
     def _valid_name(v) -> str:
         s = str(v or "").strip()
         if not s:
@@ -240,20 +235,37 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         return s
 
     def _valid_port(v) -> int:
-        try:
+        # Reject bool (a subclass of int) and non-integers (e.g. 3.14) — silently
+        # truncating them would store a port the wire value never named (Kimi).
+        if isinstance(v, bool):
+            raise HTTPException(status_code=400, detail="port must be an integer")
+        if isinstance(v, int):
+            p = v
+        elif isinstance(v, str) and v.strip().lstrip("+-").isdigit():
             p = int(v)
-        except (TypeError, ValueError):
+        else:
             raise HTTPException(status_code=400, detail="port must be an integer")
         if not (1 <= p <= 65535):
             raise HTTPException(status_code=400, detail="port must be between 1 and 65535")
         return p
 
+    def _valid_enabled(v) -> bool:
+        if not isinstance(v, bool):
+            raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
+        return v
+
     @app.post("/servers")
     def add_server(request: Request, body: dict):
-        _guard(request)
+        if not _auth(request):
+            return _unauthorized()  # same 401 shape as the read API (Kimi)
         name = _valid_name(body.get("name"))
         ip = _valid_ip(body.get("ip"))
         port = _valid_port(body.get("port", 5680))
+        # Explicit name-exists precheck → a clear 400 that doesn't rely on which
+        # constraint IntegrityError happens to be (Kimi); the UNIQUE index is still
+        # the authoritative backstop against a race.
+        if any(s["name"] == name for s in store.list_servers()):
+            raise HTTPException(status_code=400, detail=f"a server named {name!r} already exists")
         try:
             sid = store.add_server(name, ip, port)
         except sqlite3.IntegrityError:
@@ -262,32 +274,36 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
 
     @app.patch("/servers/{sid}")
     def update_server(request: Request, sid: int, body: dict):
-        _guard(request)
+        if not _auth(request):
+            return _unauthorized()
         if store.get_server(sid) is None:
             raise HTTPException(status_code=404, detail=f"no server with id {sid}")
+        # Validate EVERYTHING (incl. enabled) before any store write, so a rejected
+        # request never leaves a partial edit persisted (Codex/Kimi).
         name = _valid_name(body["name"]) if "name" in body else None
         ip = _valid_ip(body["ip"]) if "ip" in body else None
         port = _valid_port(body["port"]) if "port" in body else None
+        enabled = _valid_enabled(body["enabled"]) if "enabled" in body else None
         try:
             store.update_server(sid, name=name, ip=ip, port=port)
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=400, detail="that name is already in use")
-        if "enabled" in body:
-            if not isinstance(body["enabled"], bool):
-                raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
-            store.set_server_enabled(sid, body["enabled"])
+        if enabled is not None:
+            store.set_server_enabled(sid, enabled)
         return {"ok": True, **(store.get_server(sid) or {})}
 
     @app.delete("/servers/{sid}")
     def delete_server(request: Request, sid: int):
-        _guard(request)
+        if not _auth(request):
+            return _unauthorized()
         if not store.remove_server(sid):
             raise HTTPException(status_code=404, detail=f"no server with id {sid}")
         return {"ok": True}
 
     @app.patch("/config")
     def update_config(request: Request, body: dict):
-        _guard(request)
+        if not _auth(request):
+            return _unauthorized()
         if "polling_token" in body:
             # Live: the poller reads polling_token per cycle (get_polling_token),
             # so no Hub restart is needed to apply it (#124).
