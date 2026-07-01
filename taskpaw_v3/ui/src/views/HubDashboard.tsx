@@ -3,7 +3,7 @@ import {
   Stack, Tab, Tabs, TextField, Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type HubServer, type MonitorSnapshot } from "../api";
 import { StatusDot } from "../components/StatusDot";
@@ -90,6 +90,14 @@ export function HubDashboard() {
   // reachable even when the Hub is unreachable (#87/Codex).
   const servers = data?.servers ?? [];
   const self = data?.self ?? {};
+
+  // Reset the events server filter if the selected server is removed, so the
+  // Select can't hold a stale id that yields an empty feed (Kimi #133).
+  useEffect(() => {
+    if (serverFilter && !servers.some((s) => String(s.id) === serverFilter)) {
+      setServerFilter("");
+    }
+  }, [servers, serverFilter]);
 
   const counts = { ok: 0, degraded: 0, offline: 0 };
   for (const s of servers) counts[serverHealth(s)] += 1;
