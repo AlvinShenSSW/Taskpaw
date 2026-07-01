@@ -1,4 +1,5 @@
 import { Button, Chip, Stack } from "@mui/material";
+import { alpha } from "@mui/material/styles";
 import { useTranslation } from "react-i18next";
 import { StatusDot } from "./StatusDot";
 import type { MonitorSnapshot } from "../api";
@@ -20,7 +21,7 @@ export function MonitorSelector({
   const { t } = useTranslation();
   return (
     <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap", rowGap: 1 }}
-      aria-label={t("agent.monitors")}>
+      role="group" aria-label={t("agent.monitors")}>
       {names.map((n) => {
         const m = monitors[n];
         const on = n === selected;
@@ -32,12 +33,15 @@ export function MonitorSelector({
             variant="outlined"
             size="small"
             startIcon={<StatusDot state={m.state} />}
-            sx={{
+            sx={(th) => ({
               textTransform: "none",
+              whiteSpace: "nowrap", // keep pills on one line — no wrapping mid-name
               borderColor: on ? "primary.main" : "divider",
-              bgcolor: on ? "rgba(34,197,94,.08)" : "transparent",
-              "&:hover": { bgcolor: on ? "rgba(34,197,94,.13)" : "action.hover" },
-            }}
+              bgcolor: on ? alpha(th.palette.success.main, 0.08) : "transparent",
+              "&:hover": {
+                bgcolor: on ? alpha(th.palette.success.main, 0.13) : "action.hover",
+              },
+            })}
           >
             {n}
             {m.type_id && <Chip size="small" label={m.type_id} sx={{ ml: 0.75 }} />}
