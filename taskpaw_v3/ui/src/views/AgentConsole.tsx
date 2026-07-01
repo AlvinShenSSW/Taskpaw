@@ -103,7 +103,7 @@ export function AgentConsole() {
               + {t("common.add")}
             </Button>
           </Stack>
-          <MonitorDetail
+          <MonitorHero
             name={names[0]} snap={monitors[names[0]]} updatedAt={status.dataUpdatedAt}
             onEdit={() => setDialog({ mode: "edit", name: names[0] })}
             onChanged={invalidate} onError={onErr}
@@ -130,7 +130,7 @@ export function AgentConsole() {
             onSelect={setSelected} onAdd={() => setDialog({ mode: "add" })}
           />
           {current && monitors[current] && (
-            <MonitorDetail
+            <MonitorHero
               name={current} snap={monitors[current]} updatedAt={status.dataUpdatedAt}
               onEdit={() => setDialog({ mode: "edit", name: current })}
               onChanged={invalidate} onError={onErr}
@@ -157,16 +157,52 @@ export function AgentConsole() {
   );
 }
 
-function MonitorDetail({
-  name, snap, updatedAt, onEdit, onChanged, onError,
-}: {
+// Inline recent-events panel shown beside the hero metrics (#136): the hero has
+// room, and recent events are the most useful fill. Agent-wide for now; a
+// per-monitor feed needs a backend field (#130) — until then this shows the whole
+// agent's recent events.
+function InlineEvents() {
+  const { t } = useTranslation();
+  const events = useQuery({
+    queryKey: ["agentEvents", "inline"],
+    queryFn: () => api.agentEvents(8),
+    refetchInterval: 5000,
+  });
+  return (
+    <Card sx={{ height: "100%" }}>
+      <CardContent>
+        <Typography variant="overline" color="text.secondary">
+          {t("agent.recentEventsShort")}
+        </Typography>
+        <EventLog events={events.data?.events} />
+      </CardContent>
+    </Card>
+  );
+}
+
+type MonitorDetailProps = {
   name: string;
   snap: MonitorSnapshot;
   updatedAt?: number;
   onEdit: () => void;
   onChanged: () => void;
   onError: (e: unknown) => void;
-}) {
+};
+
+// The hero: the monitor's detail (metrics) with the inline recent-events column
+// beside it on wide screens, stacked on narrow (#136).
+function MonitorHero(props: MonitorDetailProps) {
+  return (
+    <Stack direction={{ xs: "column", lg: "row" }} spacing={2} alignItems="stretch">
+      <Box sx={{ flex: 2, minWidth: 0 }}><MonitorDetail {...props} /></Box>
+      <Box sx={{ flex: 1, minWidth: 0 }}><InlineEvents /></Box>
+    </Stack>
+  );
+}
+
+function MonitorDetail({
+  name, snap, updatedAt, onEdit, onChanged, onError,
+}: MonitorDetailProps) {
   const { t } = useTranslation();
   const [confirmDel, setConfirmDel] = useState(false);
   // Live-state, not the persisted `enabled`: a managed Lada is launched per

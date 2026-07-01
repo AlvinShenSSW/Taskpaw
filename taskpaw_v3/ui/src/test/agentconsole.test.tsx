@@ -102,4 +102,11 @@ describe("AgentConsole", () => {
     await screen.findByText(/No monitors yet|还没有监控/);
     expect(screen.getByRole("button", { name: /Add|添加/ })).toBeInTheDocument();
   });
+
+  it("shows an inline recent-events panel on the monitor dashboard (#136)", async () => {
+    renderConsole(); // monitors tab (default), 2 monitors → hero + inline events
+    await screen.findByText("downloads");
+    // The hero carries an inline "Recent events" panel beside the metrics.
+    expect(screen.getByText(/^Recent events$|^最近事件$/)).toBeInTheDocument();
+  });
 });
