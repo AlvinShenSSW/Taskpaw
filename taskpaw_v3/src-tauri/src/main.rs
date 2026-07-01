@@ -531,10 +531,24 @@ fn fatal_startup(message: &str) -> ! {
              default button \"OK\" with icon caution",
             applescript_escape(message)
         );
-        let _ = std::process::Command::new("osascript")
+        // Poll with a deadline so a hung/broken osascript can't block the exit
+        // forever — the dialog is best-effort; exit(1) must always run (Kimi).
+        if let Ok(mut child) = std::process::Command::new("osascript")
             .arg("-e")
             .arg(script)
-            .status();
+            .spawn()
+        {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,                 // user dismissed
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(100))
+                    }
+                    _ => break, // timed out or errored → stop waiting, proceed to exit
+                }
+            }
+        }
     }
     // Windows/Linux: the message is already on stderr (→ OS log / journal); a
     // native Windows dialog is a low-risk follow-up.

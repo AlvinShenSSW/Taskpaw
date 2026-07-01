@@ -83,6 +83,17 @@ def test_lada_nonstring_current_file_ignored():
     assert "1/4 done (3 left)" in md and "123" not in md
 
 
+def test_nan_metric_not_rendered():
+    # A non-finite metric (e.g. nvidia-smi "nan" gpu_pct) must not render "GPU nan%".
+    rows = [{"name": "box", "reachable": 1,
+             "status_json": json.dumps({"monitors": {
+                 "box-host": {"state": "ok", "type_id": "host_metrics",
+                              "metrics": {"cpu_pct": 10.0, "mem_used_mb": 8000, "mem_total_mb": 16000,
+                                          "gpu_pct": float("nan")}}}})}]
+    md = render_status_md(rows, "t")
+    assert "CPU 10%" in md and "nan" not in md.lower() and "GPU" not in md
+
+
 def test_comfyui_down_shows_state_not_empty_queue():
     # A typed ComfyUI monitor that's down (state error, empty metrics) must show its
     # state, not "0 running, 0 pending" — else the outage is hidden (Codex + Kimi).

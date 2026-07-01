@@ -16,13 +16,20 @@ parse it unchanged:
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime
 from typing import Any, Optional
 
 
 def _is_num(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    # Reject bool (an int subclass) and non-finite floats — a backend metric like
+    # gpu_pct: NaN (nvidia-smi "nan") must not render as "GPU nan%" (Kimi).
+    return (
+        isinstance(v, (int, float))
+        and not isinstance(v, bool)
+        and not (isinstance(v, float) and (math.isnan(v) or math.isinf(v)))
+    )
 
 
 def _status_text(snap: Any) -> str:

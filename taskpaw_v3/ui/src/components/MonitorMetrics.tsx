@@ -83,7 +83,10 @@ const KNOWN = new Set([
 export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> }) {
   const { t } = useTranslation();
   const m = metrics ?? {};
-  const num = (k: string) => (typeof m[k] === "number" ? (m[k] as number) : undefined);
+  // Finite only — a malformed metric (NaN/Infinity) must not render as "NaN" in a
+  // gauge/bar, matching the Number.isFinite guard used elsewhere (Kimi).
+  const num = (k: string) =>
+    typeof m[k] === "number" && Number.isFinite(m[k] as number) ? (m[k] as number) : undefined;
   const str = (k: string) => (typeof m[k] === "string" ? (m[k] as string) : undefined);
 
   if (Object.keys(m).length === 0) return null;

@@ -36,14 +36,17 @@ def _friendly_machine_name() -> str:
             import subprocess
 
             # shell=False (list argv) per constitution §2 — no shell injection.
+            # errors="replace" so a ComputerName with non-UTF-8 bytes can't raise
+            # UnicodeDecodeError (a ValueError, not caught below) and crash scaffold;
+            # broad except is deliberate — any failure falls back to the hostname.
             out = subprocess.run(
                 ["scutil", "--get", "ComputerName"],
-                capture_output=True, text=True, timeout=2,
+                capture_output=True, text=True, timeout=2, errors="replace",
             )
             name = out.stdout.strip()
             if name:
                 return name
-        except (OSError, subprocess.SubprocessError):
+        except Exception:
             pass
     elif sys.platform == "win32":
         name = (os.environ.get("COMPUTERNAME") or "").strip()
