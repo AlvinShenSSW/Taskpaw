@@ -46,13 +46,18 @@ def _status_text(snap: Any) -> str:
     is_host = snap.get("type_id") == "host_metrics" or (
         _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb"))
     )
+    # Each field is guarded individually — a host_metrics monitor can be true via
+    # type_id yet carry empty/partial metrics (a startup stub or a disabled-monitor
+    # stub with metrics={}), so unconditional indexing would KeyError and stop
+    # status.md from updating (Codex + Kimi).
     if is_host:
         if _is_num(m.get("cpu_pct")):
             parts.append(f"CPU {m['cpu_pct']:.0f}%")
-        parts.append(f"RAM {m['mem_used_mb'] / 1024:.1f}/{m['mem_total_mb'] / 1024:.1f}GB")
+        if _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb")) and m["mem_total_mb"] > 0:
+            parts.append(f"RAM {m['mem_used_mb'] / 1024:.1f}/{m['mem_total_mb'] / 1024:.1f}GB")
         if _is_num(m.get("gpu_pct")):
             parts.append(f"GPU {m['gpu_pct']:.0f}%")
-        if _is_num(m.get("gpu_mem_used_mb")) and _is_num(m.get("gpu_mem_total_mb")):
+        if _is_num(m.get("gpu_mem_used_mb")) and _is_num(m.get("gpu_mem_total_mb")) and m["gpu_mem_total_mb"] > 0:
             parts.append(f"VRAM {m['gpu_mem_used_mb'] / 1024:.1f}/{m['gpu_mem_total_mb'] / 1024:.1f}GB")
 
     # lada-style queue: "X/Y done (Z left)" + the current task between pipes.

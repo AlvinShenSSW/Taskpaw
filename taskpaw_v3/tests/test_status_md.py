@@ -39,6 +39,22 @@ def test_v3_no_metrics_falls_back_to_state():
     assert "- heartbeat: ok" in render_status_md(rows, "t")
 
 
+def test_v3_host_metrics_missing_mem_fields_falls_back_to_state():
+    # A host_metrics monitor identified by type_id but with empty/partial metrics
+    # (startup stub, disabled stub) must NOT KeyError on the RAM fields — it renders
+    # its state instead, so status.md keeps updating (Codex + Kimi).
+    rows = [{"name": "box", "reachable": 1,
+             "status_json": json.dumps({"monitors": {
+                 "box-host": {"state": "unknown", "type_id": "host_metrics", "metrics": {}}}})}]
+    assert "- box-host: unknown" in render_status_md(rows, "t")
+    # partial metrics: CPU present, RAM absent → CPU renders, no crash, no RAM seg.
+    rows2 = [{"name": "box", "reachable": 1,
+              "status_json": json.dumps({"monitors": {
+                  "box-host": {"state": "ok", "type_id": "host_metrics", "metrics": {"cpu_pct": 20.0}}}})}]
+    md = render_status_md(rows2, "t")
+    assert "- box-host: CPU 20%" in md and "RAM" not in md
+
+
 def test_v2_list_shape_renders_disabled_monitor():
     # V2 agents report a list with `enabled: False` for stopped monitors → status.md
     # shows them as "disabled" rather than their (stale) state.
