@@ -286,14 +286,23 @@ function MachineDetail({ server: s }: { server: HubServer }) {
         ) : (
           <Stack spacing={0.5} sx={{ mt: 0.5 }}>
             {Object.entries(monitors).map(([name, m]) => (
-              <Stack key={name} direction="row" alignItems="center" spacing={1}>
-                <StatusDot state={m.state} />
-                <Typography variant="body2" sx={{ flex: 1 }}>{name}</Typography>
-                {m.detail && (
-                  <Typography variant="caption" color="text.secondary"
-                    sx={{ textAlign: "right", wordBreak: "break-all" }}>{m.detail}</Typography>
+              <Box key={name}>
+                <Stack direction="row" alignItems="center" spacing={1}>
+                  <StatusDot state={m.state} />
+                  <Typography variant="body2" sx={{ flex: 1 }}>{name}</Typography>
+                  {m.detail && (
+                    <Typography variant="caption" color="text.secondary"
+                      sx={{ textAlign: "right", wordBreak: "break-all" }}>{m.detail}</Typography>
+                  )}
+                </Stack>
+                {/* Full metric gauges (CPU/GPU/VRAM/queue/fps) per monitor, same as
+                    the Agent console — so the Hub shows everything OpenClaw does. */}
+                {m.metrics && Object.keys(m.metrics).length > 0 && (
+                  <Box sx={{ pl: 3, pb: 0.5 }}>
+                    <MonitorMetrics metrics={m.metrics} />
+                  </Box>
                 )}
-              </Stack>
+              </Box>
             ))}
           </Stack>
         )}

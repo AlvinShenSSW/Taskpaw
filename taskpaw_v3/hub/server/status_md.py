@@ -39,10 +39,14 @@ def _status_text(snap: Any) -> str:
         return str(state)
     parts: list[str] = []
 
-    # host_metrics block — identified by system RAM used/total (only host_metrics
-    # reports it), so a plugin that also carries cpu_pct (e.g. lada) isn't mistaken
-    # for the host and doesn't override its CPU/RAM column.
-    if _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb")):
+    # host_metrics block — keyed on the monitor's type_id (the same discriminator
+    # the dashboard uses), so a plugin that also carries cpu_pct (e.g. lada) can't be
+    # mistaken for the host. Fall back to the system-RAM signature for older/V2
+    # agents whose snapshot omits type_id (Kimi).
+    is_host = snap.get("type_id") == "host_metrics" or (
+        _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb"))
+    )
+    if is_host:
         if _is_num(m.get("cpu_pct")):
             parts.append(f"CPU {m['cpu_pct']:.0f}%")
         parts.append(f"RAM {m['mem_used_mb'] / 1024:.1f}/{m['mem_total_mb'] / 1024:.1f}GB")

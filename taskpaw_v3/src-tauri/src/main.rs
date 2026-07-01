@@ -288,8 +288,18 @@ fn roll_log_if_oversized(path: &std::path::Path, max_bytes: u64) {
         let mut rotated = path.as_os_str().to_owned();
         rotated.push(".1");
         let rotated = std::path::PathBuf::from(rotated);
-        let _ = std::fs::remove_file(&rotated);
-        let _ = std::fs::rename(path, &rotated);
+        // A stale .1 blocks rename on Windows, so remove it first. NotFound is the
+        // normal case (no prior backup) — only warn on a real removal failure.
+        if let Err(e) = std::fs::remove_file(&rotated) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("taskpaw: cannot remove stale log backup {rotated:?}: {e}; rotation may stall");
+            }
+        }
+        // If the roll itself fails, the live log keeps growing unbounded — surface
+        // it so an operator can notice rather than silently swallowing (Kimi).
+        if let Err(e) = std::fs::rename(path, &rotated) {
+            eprintln!("taskpaw: cannot roll backend log {path:?} -> {rotated:?}: {e}; it may grow unbounded");
+        }
     }
 }
 
@@ -492,7 +502,14 @@ fn kill_backend(app: &tauri::AppHandle) {
 /// out of the osascript string.
 #[cfg(any(target_os = "macos", test))]
 fn applescript_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    // Backslash first, then quotes, then newlines → an AppleScript string literal
+    // can't span physical lines, so a message with "\n\n" (the readiness-timeout
+    // text) must render them as the two-char \n escape or osascript won't compile
+    // and the dialog is silently dropped on a fatal path (Kimi).
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 /// Fatal startup failure: show a best-effort native error dialog, then exit
@@ -784,9 +801,13 @@ mod tests {
     #[test]
     fn applescript_escape_neutralizes_quotes_and_backslashes() {
         // A log path with a quote/backslash must not break out of the osascript
-        // string literal in fatal_startup.
+        // string literal in fatal_startup; newlines must become the \n escape so
+        // the literal stays on one physical line (osascript won't compile a
+        // multi-line literal).
         assert_eq!(applescript_escape(r#"a"b\c"#), r#"a\"b\\c"#);
         assert_eq!(applescript_escape("plain text"), "plain text");
+        assert_eq!(applescript_escape("line1\n\nline2"), "line1\\n\\nline2");
+        assert!(!applescript_escape("a\nb").contains('\n')); // no raw newline survives
     }
 
     #[test]
