@@ -75,13 +75,21 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
         # the Hub and the auto host_metrics monitor ("<machine>-host") read the way
         # the user names the box; `server_id` is a slug of it + a short uuid (a
         # stable, space-free technical id). Targeted line replace keeps the comments.
+        import json
         import re
         import uuid
         friendly = _friendly_machine_name()
         slug = re.sub(r"[^A-Za-z0-9]+", "-", friendly).strip("-").lower() or "agent"
+        # `machine` is a free-form OS name that can contain YAML metacharacters
+        # (spaces, '#', ':', "'s", non-ASCII) — emit it as a quoted scalar so a name
+        # like "Studio #1" or "我的电脑" can't corrupt/invalidate the config (Codex,
+        # Kimi). json.dumps yields a YAML-valid double-quoted string; ensure_ascii=
+        # False keeps unicode names readable in the file. `server_id` is already a
+        # [a-z0-9-] slug, so it needs no quoting.
         text = text.replace("server_id: my-agent",
                             f"server_id: {slug}-{uuid.uuid4().hex[:6]}")
-        text = text.replace("machine: my-machine", f"machine: {friendly}")
+        text = text.replace("machine: my-machine",
+                            f"machine: {json.dumps(friendly, ensure_ascii=False)}")
     # Atomic write (repo invariant: configs are reader-visible state) — a tmp file
     # in the same dir + fsync + os.replace, so an interrupted/power-lost bootstrap
     # never leaves a truncated config the service would read.

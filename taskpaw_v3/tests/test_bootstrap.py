@@ -67,6 +67,17 @@ def test_scaffold_agent_machine_uses_friendly_computer_name(home, monkeypatch):
     assert cfg.server_id.startswith("thunderpig-") and len(cfg.server_id) > len("thunderpig-")
 
 
+@pytest.mark.parametrize("name", ["Studio #1", "Office: Mac", "Alvin's MacBook", "我的电脑"])
+def test_scaffold_machine_name_survives_yaml_metacharacters(home, monkeypatch, name):
+    # A friendly name with YAML-significant chars (#, :, quote, unicode) must not
+    # corrupt or invalidate the config — it round-trips exactly (Codex/Kimi P2).
+    monkeypatch.setattr(bootstrap, "_friendly_machine_name", lambda: name)
+    path, _ = bootstrap.scaffold("agent")
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    cfg = load_yaml(AgentConfig, path)   # must parse
+    assert cfg.machine == name           # value preserved verbatim
+
+
 def test_friendly_machine_name_falls_back_to_hostname(monkeypatch):
     # No friendly name available (e.g. Linux) → short hostname, never a crash.
     monkeypatch.setattr(sys, "platform", "linux")
