@@ -24,6 +24,7 @@ import shlex
 import subprocess
 import sys
 import threading
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -61,6 +62,9 @@ _RE_FPS = re.compile(r"(?:速度|Speed)[:：]\s*([\d.]+)", re.IGNORECASE)
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+_RECENT_OUTPUT_LINES = 20
+_CRASH_DETAIL_LINES = 10
+_CRASH_DETAIL_CHARS = 800
 
 
 def parse_progress_line(line: str, prev: dict) -> dict:
@@ -257,6 +261,7 @@ class LadaInstance(MonitorInstance):
         self._reader: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._progress: dict = {}
+        self._recent_output: deque[str] = deque(maxlen=_RECENT_OUTPUT_LINES)
         self._lock = threading.Lock()
         self._inputs: list[str] = []          # start-of-run input snapshot
         self._launch_error: Optional[str] = None
@@ -283,6 +288,7 @@ class LadaInstance(MonitorInstance):
         self._reader = None
         with self._lock:
             self._progress = {}
+            self._recent_output.clear()
         self._inputs = _list_videos(cfg.lada_input_folder)
         if cfg.lada_cli_path:
             self._start_managed(emit)
@@ -380,17 +386,33 @@ class LadaInstance(MonitorInstance):
                 if ch == b"":
                     break                  # EOF — process exited
                 if ch in (b"\r", b"\n"):
-                    if buf:
-                        line = buf.decode("utf-8", "replace")
-                        with self._lock:
-                            self._progress = parse_progress_line(line, self._progress)
-                        buf = b""
+                    self._consume_output(buf)
+                    buf = b""
                 else:
                     buf += ch
+            # A crash line printed right before exit may arrive without a trailing
+            # \r/\n before the pipe closes — flush it so the reason isn't lost.
+            self._consume_output(buf)
         except (OSError, ValueError):
             # Pipe closed / read on a terminated process as the child exits —
             # expected; the reader simply ends.
             pass
+
+    def _consume_output(self, buf: bytes) -> None:
+        """Classify one decoded output line: a recognized progress update advances
+        `_progress`; any other non-empty line is retained as recent output (so a
+        non-zero exit can report the crash reason)."""
+        if not buf:
+            return
+        line = buf.decode("utf-8", "replace")
+        with self._lock:
+            new_progress = parse_progress_line(line, self._progress)
+            # A new dict means a recognized progress update, even when repeated
+            # tqdm values are content-equal.
+            if new_progress is not self._progress:
+                self._progress = new_progress
+            elif line.strip():
+                self._recent_output.append(line.strip())
 
     # ── check (one observation) ────────────────────────────────────────────
     def check(self, emit: EventEmitter) -> MonitorStatus:
@@ -409,6 +431,7 @@ class LadaInstance(MonitorInstance):
         if retcode is None:
             return self._build_status("running")
         # exited — emit completion/failure once (the V2 events).
+        detail = self._managed_exit_detail(retcode)
         if not self._done_emitted:
             self._done_emitted = True
             q = self._queue_str()
@@ -417,8 +440,21 @@ class LadaInstance(MonitorInstance):
                      f"Lada processing complete{(' | ' + q) if q else ''}"
                      f" | {datetime.now():%Y-%m-%d %H:%M:%S}")
             else:
-                emit("alert", f"{cfg.name} failed", f"Lada exited with code {retcode}")
-        return self._build_status("idle" if retcode == 0 else "error")
+                emit("alert", f"{cfg.name} failed", detail)
+        return self._build_status("idle" if retcode == 0 else "error",
+                                  detail=None if retcode == 0 else detail)
+
+    def _managed_exit_detail(self, retcode: int) -> str:
+        detail = f"Lada exited with code {retcode}"
+        if retcode == 0:
+            return detail
+        with self._lock:
+            tail = "\n".join(list(self._recent_output)[-_CRASH_DETAIL_LINES:]).strip()
+        if not tail:
+            return detail
+        if len(tail) > _CRASH_DETAIL_CHARS:
+            tail = tail[-_CRASH_DETAIL_CHARS:].lstrip()
+        return f"{detail}\n{tail}"
 
     def _check_passive(self, emit: EventEmitter) -> MonitorStatus:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
@@ -432,7 +468,7 @@ class LadaInstance(MonitorInstance):
         return self._build_status("running" if running else "idle")
 
     # ── status assembly ────────────────────────────────────────────────────
-    def _build_status(self, state: str) -> MonitorStatus:
+    def _build_status(self, state: str, detail: Optional[str] = None) -> MonitorStatus:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
         metrics: dict = {}
         # "Processing file X" (parsed progress + current-file detection) is only
@@ -458,7 +494,8 @@ class LadaInstance(MonitorInstance):
                 metrics["gpu_pct"] = gpu["util_pct"]
                 metrics["gpu_mem_used_mb"] = gpu["mem_used_mb"]
                 metrics["gpu_mem_total_mb"] = gpu["mem_total_mb"]
-        return MonitorStatus(state=state, detail=self._detail(state, metrics), metrics=metrics)
+        return MonitorStatus(state=state, detail=detail or self._detail(state, metrics),
+                             metrics=metrics)
 
     def _detail(self, state: str, m: dict) -> str:
         # A clean one-line summary (the rich view is the UI metrics dashboard). Use
