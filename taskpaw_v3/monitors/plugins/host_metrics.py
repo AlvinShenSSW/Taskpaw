@@ -141,7 +141,9 @@ class HostMetricsInstance(MonitorInstance):
             "mem_pct": round(mem, 1),
             # Absolute RAM too (not just %) so the Hub's status.md can render
             # "RAM used/total GB" — what the OpenClaw daily-report reads (V2 parity).
-            "mem_used_mb": round(vm.used / (1024 * 1024)),
+            # Use total-available (what vm.percent is derived from), NOT vm.used, so
+            # the GB figure and mem_pct agree — they diverge on macOS (Kimi).
+            "mem_used_mb": round((vm.total - vm.available) / (1024 * 1024)),
             "mem_total_mb": round(vm.total / (1024 * 1024)),
             "disk_pct": round(disk, 1),
             "net_in_bps": round(net_in),

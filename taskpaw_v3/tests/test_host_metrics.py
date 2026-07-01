@@ -18,7 +18,10 @@ def fake_psutil(cpu=10.0, mem=20.0, disk=30.0, sent=0, recv=0,
     used = mem_used if mem_used is not None else int(mem_total * mem / 100)
     return ns(
         cpu_percent=lambda interval=None: cpu,
-        virtual_memory=lambda: ns(percent=mem, used=used, total=mem_total),
+        # available = total - used, since host_metrics derives used from
+        # total - available (to match vm.percent).
+        virtual_memory=lambda: ns(percent=mem, used=used, total=mem_total,
+                                  available=mem_total - used),
         disk_usage=lambda path: ns(percent=disk),
         net_io_counters=lambda: ns(bytes_sent=sent, bytes_recv=recv),
     )

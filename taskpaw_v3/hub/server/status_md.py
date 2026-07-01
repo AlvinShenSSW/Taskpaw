@@ -77,7 +77,10 @@ def _status_text(snap: Any) -> str:
     is_comfyui = tid == "comfyui" or (
         tid is None and (_is_num(m.get("running")) or _is_num(m.get("pending")))
     )
-    if is_comfyui:
+    # Only when a queue metric is actually present — a typed-but-down ComfyUI
+    # (state "error", empty metrics) must show its state, not "0 running, 0
+    # pending", which would hide the outage from OpenClaw (Codex + Kimi).
+    if is_comfyui and (_is_num(m.get("running")) or _is_num(m.get("pending"))):
         parts.append(f"{int(m.get('running', 0))} running, {int(m.get('pending', 0))} pending")
 
     return " | ".join(parts) if parts else str(state)

@@ -83,6 +83,16 @@ def test_lada_nonstring_current_file_ignored():
     assert "1/4 done (3 left)" in md and "123" not in md
 
 
+def test_comfyui_down_shows_state_not_empty_queue():
+    # A typed ComfyUI monitor that's down (state error, empty metrics) must show its
+    # state, not "0 running, 0 pending" — else the outage is hidden (Codex + Kimi).
+    rows = [{"name": "box", "reachable": 1,
+             "status_json": json.dumps({"monitors": {
+                 "ComfyUI": {"state": "error", "type_id": "comfyui", "metrics": {}}}})}]
+    md = render_status_md(rows, "t")
+    assert "- ComfyUI: error" in md and "running" not in md
+
+
 def test_v2_list_shape_renders_disabled_monitor():
     # V2 agents report a list with `enabled: False` for stopped monitors → status.md
     # shows them as "disabled" rather than their (stale) state.
