@@ -10,6 +10,35 @@ import json
 from taskpaw_v3.hub.server.status_md import render_status_md
 
 
+def test_v3_metrics_render_in_v2_format_for_openclaw():
+    # V3 keeps state + a structured metrics dict; status.md must re-embed the
+    # metrics as V2-format strings so the OpenClaw daily-report regexes (CPU %, RAM
+    # used/total GB, GPU %, VRAM, "X/Y done (Z left)", "N running, M pending") match.
+    rows = [{
+        "name": "PinkPig", "reachable": 1,
+        "status_json": json.dumps({"monitors": {
+            "PinkPig-host": {"state": "ok", "metrics": {
+                "cpu_pct": 45.0, "mem_pct": 51.0, "mem_used_mb": 8393, "mem_total_mb": 16384,
+                "gpu_pct": 78, "gpu_mem_used_mb": 12595, "gpu_mem_total_mb": 24576}},
+            "LADA": {"state": "running", "metrics": {
+                "queue_completed": 5, "queue_total": 10, "queue_remaining": 5,
+                "current_file": "video_q3.mp4"}},
+            "ComfyUI": {"state": "running", "metrics": {"running": 2, "pending": 100}},
+        }}),
+    }]
+    md = render_status_md(rows, "2026-07-01 16:00:00")
+    assert "- PinkPig-host: CPU 45% | RAM 8.2/16.0GB | GPU 78% | VRAM 12.3/24.0GB" in md
+    assert "- LADA: 5/10 done (5 left) | video_q3.mp4 |" in md
+    assert "- ComfyUI: 2 running, 100 pending" in md
+
+
+def test_v3_no_metrics_falls_back_to_state():
+    # A monitor with no numeric metrics still renders its state (no crash / no "").
+    rows = [{"name": "box", "reachable": 1,
+             "status_json": json.dumps({"monitors": {"heartbeat": {"state": "ok", "metrics": {}}}})}]
+    assert "- heartbeat: ok" in render_status_md(rows, "t")
+
+
 def test_v2_list_shape_renders_disabled_monitor():
     # V2 agents report a list with `enabled: False` for stopped monitors → status.md
     # shows them as "disabled" rather than their (stale) state.

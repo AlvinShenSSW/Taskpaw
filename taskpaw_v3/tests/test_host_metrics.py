@@ -12,11 +12,13 @@ from taskpaw_v3.monitors.plugins.host_metrics import HostMetricsConfig, HostMetr
 from taskpaw_v3.monitors.registry import default_registry
 
 
-def fake_psutil(cpu=10.0, mem=20.0, disk=30.0, sent=0, recv=0):
+def fake_psutil(cpu=10.0, mem=20.0, disk=30.0, sent=0, recv=0,
+                mem_total=16 * 1024**3, mem_used=None):
     ns = types.SimpleNamespace
+    used = mem_used if mem_used is not None else int(mem_total * mem / 100)
     return ns(
         cpu_percent=lambda interval=None: cpu,
-        virtual_memory=lambda: ns(percent=mem),
+        virtual_memory=lambda: ns(percent=mem, used=used, total=mem_total),
         disk_usage=lambda path: ns(percent=disk),
         net_io_counters=lambda: ns(bytes_sent=sent, bytes_recv=recv),
     )
@@ -36,9 +38,12 @@ def test_metrics_keys_and_gpu_na(monkeypatch):
     inst = _inst(monkeypatch, cpu=12.0, mem=34.0, disk=56.0)
     st = inst.check(lambda *a, **k: None)
     m = st.metrics
-    assert set(m) == {"cpu_pct", "mem_pct", "disk_pct", "net_in_bps", "net_out_bps",
+    assert set(m) == {"cpu_pct", "mem_pct", "mem_used_mb", "mem_total_mb", "disk_pct",
+                      "net_in_bps", "net_out_bps",
                       "gpu_pct", "gpu_mem_used_mb", "gpu_mem_total_mb"}
     assert m["cpu_pct"] == 12.0 and m["mem_pct"] == 34.0 and m["disk_pct"] == 56.0
+    # absolute RAM too (for status.md "RAM used/total GB") — 34% of 16 GiB
+    assert m["mem_total_mb"] == 16 * 1024 and m["mem_used_mb"] == round(16 * 1024 * 0.34)
     assert m["gpu_pct"] == "n/a" and m["gpu_mem_used_mb"] == "n/a"  # macOS: GPU ignored
     assert st.state == "ok"
 

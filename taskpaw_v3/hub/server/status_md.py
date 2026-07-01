@@ -21,9 +21,57 @@ from datetime import datetime
 from typing import Any, Optional
 
 
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _status_text(snap: Any) -> str:
+    """The human status string for one monitor — the V3 `state` enriched with its
+    measured metrics in V2's exact format, so the OpenClaw readers (daily-report /
+    idle-detector) get CPU/RAM/GPU/VRAM and queue counts, not just "ok" (V2 parity).
+    V3 keeps state + a structured `metrics` dict; V2 baked it all into one string,
+    so we rebuild that string here."""
+    if not isinstance(snap, dict):
+        return str(snap)
+    state = snap.get("state") or snap.get("status") or "unknown"
+    m = snap.get("metrics") or {}
+    if not isinstance(m, dict):
+        return str(state)
+    parts: list[str] = []
+
+    # host_metrics block — identified by system RAM used/total (only host_metrics
+    # reports it), so a plugin that also carries cpu_pct (e.g. lada) isn't mistaken
+    # for the host and doesn't override its CPU/RAM column.
+    if _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb")):
+        if _is_num(m.get("cpu_pct")):
+            parts.append(f"CPU {m['cpu_pct']:.0f}%")
+        parts.append(f"RAM {m['mem_used_mb'] / 1024:.1f}/{m['mem_total_mb'] / 1024:.1f}GB")
+        if _is_num(m.get("gpu_pct")):
+            parts.append(f"GPU {m['gpu_pct']:.0f}%")
+        if _is_num(m.get("gpu_mem_used_mb")) and _is_num(m.get("gpu_mem_total_mb")):
+            parts.append(f"VRAM {m['gpu_mem_used_mb'] / 1024:.1f}/{m['gpu_mem_total_mb'] / 1024:.1f}GB")
+
+    # lada-style queue: "X/Y done (Z left)" + the current task between pipes.
+    if _is_num(m.get("queue_total")):
+        done = int(m.get("queue_completed") or 0)
+        total = int(m["queue_total"])
+        left = int(m.get("queue_remaining", max(0, total - done)))
+        seg = f"{done}/{total} done ({left} left)"
+        if m.get("current_file"):
+            seg += f" | {m['current_file']} |"
+        parts.append(seg)
+
+    # comfyui-style depth: "N running, M pending".
+    if _is_num(m.get("running")) or _is_num(m.get("pending")):
+        parts.append(f"{int(m.get('running', 0))} running, {int(m.get('pending', 0))} pending")
+
+    return " | ".join(parts) if parts else str(state)
+
+
 def _monitor_lines(status_json: Optional[str]) -> list[str]:
-    """`- name: state` lines from an agent /status payload. Tolerates the V3 dict
-    shape (name → {state}) AND the V2 list shape ([{name, status, enabled}]) so
+    """`- name: <status>` lines from an agent /status payload, where <status> is the
+    metric-rich V2-format string (see _status_text). Tolerates the V3 dict shape
+    (name → {state, metrics}) AND the V2 list shape ([{name, status, enabled}]) so
     status.md is correct for both agent versions (#38 review)."""
     if not status_json:
         return []
@@ -35,11 +83,7 @@ def _monitor_lines(status_json: Optional[str]) -> list[str]:
     lines: list[str] = []
     if isinstance(monitors, dict):
         for name, snap in monitors.items():
-            if isinstance(snap, dict):
-                state = snap.get("state") or snap.get("status") or "unknown"
-            else:
-                state = snap
-            lines.append(f"- {name}: {state}")
+            lines.append(f"- {name}: {_status_text(snap)}")
     elif isinstance(monitors, list):
         for m in monitors:
             if not isinstance(m, dict):
@@ -48,8 +92,9 @@ def _monitor_lines(status_json: Optional[str]) -> list[str]:
             if m.get("enabled") is False:           # V2 rendered disabled monitors
                 lines.append(f"- {name}: disabled")
             else:
-                state = m.get("state") or m.get("status") or "unknown"
-                lines.append(f"- {name}: {state}")
+                # V2 already stored a rich status string; keep it verbatim.
+                status = m.get("status") or m.get("state") or "unknown"
+                lines.append(f"- {name}: {status}")
     return lines
 
 

@@ -99,7 +99,8 @@ class HostMetricsInstance(MonitorInstance):
         cfg: HostMetricsConfig = self.config  # type: ignore[assignment]
 
         cpu = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory().percent
+        vm = psutil.virtual_memory()
+        mem = vm.percent
         disk = psutil.disk_usage(cfg.disk_path).percent
 
         # network throughput (bytes/s) from the delta since the last check
@@ -138,6 +139,10 @@ class HostMetricsInstance(MonitorInstance):
         metrics = {
             "cpu_pct": round(cpu, 1),
             "mem_pct": round(mem, 1),
+            # Absolute RAM too (not just %) so the Hub's status.md can render
+            # "RAM used/total GB" — what the OpenClaw daily-report reads (V2 parity).
+            "mem_used_mb": round(vm.used / (1024 * 1024)),
+            "mem_total_mb": round(vm.total / (1024 * 1024)),
             "disk_pct": round(disk, 1),
             "net_in_bps": round(net_in),
             "net_out_bps": round(net_out),
