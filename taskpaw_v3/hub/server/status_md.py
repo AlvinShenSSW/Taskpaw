@@ -54,13 +54,12 @@ def _status_text(snap: Any) -> str:
     # metric-signature fallback rather than being seen as a typed monitor (Kimi).
     tid = snap.get("type_id") or None
     st = str(state).lower()
-    # A monitor in a bad state must surface that state, not a (possibly stale)
+    # A monitor in a HARD-bad state must surface that state, not a (possibly stale)
     # metric sample — plugins emit metrics even in error states, so rendering them
-    # would hide the outage from OpenClaw (Kimi). `degraded` is host_metrics' NORMAL
-    # threshold-alert state, so it keeps rendering CPU/RAM; only hard-bad states
-    # suppress metrics.
-    bad_state = st in {"error", "stopped", "degraded", "unreachable"}
-    host_bad = st in {"error", "stopped", "unreachable"}  # not "degraded"
+    # would hide the outage from OpenClaw (Kimi). `degraded` is an active-alert
+    # state (host over-threshold, state_file stale, …), NOT an outage, so it keeps
+    # rendering metrics — same rule for every monitor type.
+    bad_state = st in {"error", "stopped", "unreachable"}
 
     # host_metrics — CPU / RAM / GPU / VRAM. Each field guarded individually: a
     # host monitor can be typed yet carry empty/partial metrics (startup / disabled
@@ -69,7 +68,7 @@ def _status_text(snap: Any) -> str:
     is_host = tid == "host_metrics" or (
         tid is None and _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb"))
     )
-    if is_host and not host_bad:
+    if is_host and not bad_state:
         if _is_num(m.get("cpu_pct")):
             parts.append(f"CPU {m['cpu_pct']:.0f}%")
         if _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb")) and m["mem_total_mb"] > 0:
@@ -82,9 +81,13 @@ def _status_text(snap: Any) -> str:
     # lada-style queue: "X/Y done (Z left)" + the current task between pipes.
     is_lada = tid == "lada" or (tid is None and _is_num(m.get("queue_total")))
     if is_lada and not bad_state and _is_num(m.get("queue_total")):
-        done = int(m.get("queue_completed") or 0)
+        # Validate each optional field before int() — a malformed queue_completed/
+        # queue_remaining (NaN / "n/a" / "abc") would raise and stop status.md from
+        # updating (Codex + Kimi).
         total = int(m["queue_total"])
-        left = max(0, int(m.get("queue_remaining", max(0, total - done))))
+        done = int(m["queue_completed"]) if _is_num(m.get("queue_completed")) else 0
+        left = (max(0, int(m["queue_remaining"])) if _is_num(m.get("queue_remaining"))
+                else max(0, total - done))
         seg = f"{done}/{total} done ({left} left)"
         if isinstance(m.get("current_file"), str) and m["current_file"]:
             seg += f" | {m['current_file']} |"
@@ -98,7 +101,11 @@ def _status_text(snap: Any) -> str:
     # (state "error", empty metrics) must show its state, not "0 running, 0
     # pending", which would hide the outage from OpenClaw (Codex + Kimi).
     if is_comfyui and not bad_state and (_is_num(m.get("running")) or _is_num(m.get("pending"))):
-        parts.append(f"{int(m.get('running', 0))} running, {int(m.get('pending', 0))} pending")
+        # Validate each side before int() — one valid + one non-finite must not
+        # crash the render (Codex + Kimi).
+        running = int(m["running"]) if _is_num(m.get("running")) else 0
+        pending = int(m["pending"]) if _is_num(m.get("pending")) else 0
+        parts.append(f"{running} running, {pending} pending")
 
     return " | ".join(parts) if parts else str(state)
 

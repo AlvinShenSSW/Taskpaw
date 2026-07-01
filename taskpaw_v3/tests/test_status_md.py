@@ -104,6 +104,32 @@ def test_comfyui_down_shows_state_not_empty_queue():
     assert "- ComfyUI: error" in md and "running" not in md
 
 
+def test_malformed_queue_metrics_do_not_crash():
+    # A valid queue_total with a NaN/"abc" queue_completed/remaining (or one of
+    # running/pending non-finite) must not raise and stop status.md (Codex + Kimi).
+    rows = [{"name": "b", "reachable": 1, "status_json": json.dumps({"monitors": {
+        "LADA": {"state": "running", "type_id": "lada",
+                 "metrics": {"queue_total": 10, "queue_completed": float("nan"), "queue_remaining": "abc"}},
+        "ComfyUI": {"state": "running", "type_id": "comfyui",
+                    "metrics": {"running": 2, "pending": float("nan")}},
+    }})}]
+    md = render_status_md(rows, "t")  # must not raise
+    assert "0/10 done (10 left)" in md and "2 running, 0 pending" in md
+
+
+def test_degraded_keeps_metrics():
+    # `degraded` is an active-alert state (not an outage) → metrics still render,
+    # for host and task plugins alike.
+    host = [{"name": "b", "reachable": 1, "status_json": json.dumps({"monitors": {
+        "b-host": {"state": "degraded", "type_id": "host_metrics",
+                   "metrics": {"cpu_pct": 95.0, "mem_used_mb": 8000, "mem_total_mb": 16000}}}})}]
+    assert "CPU 95%" in render_status_md(host, "t")
+    lada = [{"name": "b", "reachable": 1, "status_json": json.dumps({"monitors": {
+        "LADA": {"state": "degraded", "type_id": "lada",
+                 "metrics": {"queue_total": 4, "queue_completed": 1}}}})}]
+    assert "1/4 done (3 left)" in render_status_md(lada, "t")
+
+
 def test_host_error_shows_state_but_degraded_keeps_metrics():
     # A host_metrics monitor in a hard-bad state (error/unreachable) surfaces the
     # state, not stale CPU/RAM; but "degraded" (its normal threshold alert) keeps

@@ -394,7 +394,7 @@ fn spawn_backend() -> Option<Child> {
         #[cfg(target_os = "macos")]
         if !cfg!(debug_assertions) {
             use std::process::Stdio;
-            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::inherit));
+            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
         }
     }
     #[cfg(windows)]
@@ -413,7 +413,7 @@ fn spawn_backend() -> Option<Child> {
         // sees logs. stdout stays piped (above) for the readiness handshake.
         if !cfg!(debug_assertions) {
             use std::process::Stdio;
-            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::inherit));
+            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
         }
     }
     match command.spawn() {
@@ -555,7 +555,7 @@ fn fatal_startup(message: &str, app: Option<&tauri::AppHandle>) -> ! {
             .arg(script)
             .spawn()
         {
-            let deadline = Instant::now() + Duration::from_secs(120);
+            let deadline = Instant::now() + Duration::from_secs(15);
             loop {
                 match child.try_wait() {
                     Ok(Some(_)) => break,                 // user dismissed
