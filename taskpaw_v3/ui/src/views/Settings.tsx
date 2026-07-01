@@ -5,6 +5,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../api";
+import { Logo } from "../components/Logo";
 import { LANGS, type Lang, currentLang, setLang } from "../i18n";
 
 // Settings tab (#79 Language + About, #43 agent config). Config editing shows for
@@ -38,9 +39,13 @@ export function Settings({ role }: { role: "agent" | "hub" }) {
       <Card>
         <CardContent>
           <Typography variant="subtitle1" sx={{ mb: 1 }}>{t("settings.about")}</Typography>
-          <Stack direction="row" alignItems="baseline" spacing={1} sx={{ mb: 1 }}>
-            <Typography variant="h6">🐾 TaskPaw</Typography>
-            <Typography variant="caption" color="text.secondary">v3.0.0-dev</Typography>
+          <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 1 }}>
+            {/* #120: the brand logo replaces the old 🐾 emoji (MASTER.md: no emoji). */}
+            <Logo size={44} alt="TaskPaw" />
+            <Stack direction="row" alignItems="baseline" spacing={1}>
+              <Typography variant="h6">TaskPaw</Typography>
+              <Typography variant="caption" color="text.secondary">v3.0.0-dev</Typography>
+            </Stack>
           </Stack>
           <Typography variant="body2" sx={{ mb: 1.5 }}>{t("settings.aboutBody")}</Typography>
           <Typography variant="body2" color="text.secondary">{t("settings.author")}</Typography>
