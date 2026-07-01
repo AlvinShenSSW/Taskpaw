@@ -261,9 +261,13 @@ export function MonitorWizard({
               {selected.kind === "plugin"
                 ? Object.entries(formData)
                     .filter(([, v]) => typeof v !== "boolean")
-                    .map(([k, v]) => (
-                      <ReviewRow key={k} k={fieldLabel(k, selected.plugin.type_id, i18n.language)} v={mask(k, v)} />
-                    ))
+                    .map(([k, v]) => {
+                      // English fallback = the schema's own title, matching the form.
+                      const props = selected.plugin.json_schema.properties as
+                        | Record<string, { title?: string }> | undefined;
+                      const label = fieldLabel(k, selected.plugin.type_id, i18n.language, props?.[k]?.title);
+                      return <ReviewRow key={k} k={label} v={mask(k, v)} />;
+                    })
                 : selected.preset.monitors.map((m) => <ReviewRow key={m.name} k={m.name} v={m.type_id} />)}
             </Box>
             <Typography variant="caption" color="text.secondary" sx={{ mt: 2, display: "block" }}>

@@ -137,10 +137,13 @@ function zhField(typeId: string | undefined, field: string): FieldT | undefined 
 }
 
 // A display label for a config field key (used by the wizard review step, #121):
-// the zh title when the UI is Chinese and we have a translation, else the raw key.
-export function fieldLabel(field: string, typeId?: string, lang?: string): string {
+// the zh title when the UI is Chinese and we have a translation, else the schema's
+// own English `title` (so it matches what the FORM shows — localizeSchema uses the
+// same fallback), else the raw key.
+export function fieldLabel(field: string, typeId?: string, lang?: string, englishTitle?: string): string {
   const zh = zhField(typeId, field);
-  return lang && lang.startsWith("zh") && zh ? zh.title : field;
+  if (lang && lang.startsWith("zh") && zh) return zh.title;
+  return englishTitle || field;
 }
 
 // Overlay Chinese title/description onto a plugin json_schema's properties when the
@@ -151,7 +154,9 @@ export function fieldLabel(field: string, typeId?: string, lang?: string): strin
 export function localizeSchema(schema: RJSFSchema, typeId?: string, lang?: string): RJSFSchema {
   if (!lang || !lang.startsWith("zh") || typeof schema !== "object" || !schema) return schema;
   const props = (schema as { properties?: Record<string, unknown> }).properties;
-  if (!props) return schema;
+  // Only a plain object of properties is localizable — guard a malformed schema
+  // (properties as a primitive/array) rather than throwing on Object.entries (Kimi).
+  if (!props || typeof props !== "object" || Array.isArray(props)) return schema;
   const nextProps: Record<string, unknown> = {};
   for (const [field, spec] of Object.entries(props)) {
     const zh = zhField(typeId, field);

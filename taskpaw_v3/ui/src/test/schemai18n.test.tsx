@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import type { RJSFSchema } from "@rjsf/utils";
 import { SchemaForm } from "../components/SchemaForm";
-import { localizeSchema } from "../schemaI18n";
+import { fieldLabel, localizeSchema } from "../schemaI18n";
 import { theme } from "../theme";
 import i18n from "../i18n";
 
@@ -35,6 +35,22 @@ describe("localizeSchema (#121)", () => {
     expect(zh).not.toBe(SCHEMA);                                // new object
     // original untouched
     expect((SCHEMA.properties as Record<string, { title: string }>).name.title).toBe("Name");
+  });
+
+  it("returns the schema unchanged for a malformed properties value", () => {
+    const bad = { type: "object", properties: "nope" } as unknown as RJSFSchema;
+    expect(localizeSchema(bad, "lada", "zh-CN")).toBe(bad); // no throw, same ref
+    const arr = { type: "object", properties: [] } as unknown as RJSFSchema;
+    expect(localizeSchema(arr, "lada", "zh-CN")).toBe(arr);
+  });
+
+  it("fieldLabel: zh title, else the schema English title (matching the form), else the key", () => {
+    expect(fieldLabel("lada_cli_path", "lada", "zh-CN")).toBe("lada-cli 路径");
+    // Untranslated field: zh falls back to the English title, NOT the raw key —
+    // consistent with what localizeSchema shows in the form (Kimi).
+    expect(fieldLabel("some_new_field", "lada", "zh-CN", "Some New Field")).toBe("Some New Field");
+    expect(fieldLabel("some_new_field", "lada", "en", "Some New Field")).toBe("Some New Field");
+    expect(fieldLabel("some_new_field", "lada", "zh-CN")).toBe("some_new_field"); // no title → key
   });
 
   it("does not cross-attribute a same-named field across plugins", () => {
