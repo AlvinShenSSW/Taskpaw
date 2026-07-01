@@ -66,6 +66,7 @@ const en = {
   },
   hub: {
     fleet: "Fleet", manage: "Manage", events: "Events",
+    server: "Server", allServers: "All servers",
     fleetTitle: "{{machine}} — fleet ({{count}} {{unit}})",
     agent: "agent", agents: "agents",
     noAgents: "No agents registered yet.",
@@ -163,6 +164,7 @@ const zh: typeof en = {
   },
   hub: {
     fleet: "机群", manage: "管理", events: "事件",
+    server: "服务器", allServers: "全部服务器",
     fleetTitle: "{{machine}} — 机群({{count}} {{unit}})",
     agent: "台", agents: "台",
     noAgents: "还没有注册任何 agent。",

@@ -74,11 +74,15 @@ export function HubDashboard() {
   });
   const [tab, setTab] = useState<"fleet" | "manage" | "events" | "settings">("fleet");
   const [level, setLevel] = useState<string>("");
+  const [serverFilter, setServerFilter] = useState<string>(""); // "" = all servers
   const [expanded, setExpanded] = useState<number | null>(null);
   // Aggregated durable history from all polled agents; only poll while open.
   const events = useQuery({
-    queryKey: ["hubEvents", level],
-    queryFn: () => api.hubEvents({ level: level || undefined }),
+    queryKey: ["hubEvents", level, serverFilter],
+    queryFn: () => api.hubEvents({
+      level: level || undefined,
+      server: serverFilter ? Number(serverFilter) : undefined,
+    }),
     refetchInterval: 5000, enabled: tab === "events",
   });
 
@@ -115,13 +119,22 @@ export function HubDashboard() {
           <CardContent>
             <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
               <Typography variant="overline" color="text.secondary">{t("hub.eventHistory")}</Typography>
-              <TextField select size="small" label={t("common.level")} value={level}
-                onChange={(e) => setLevel(e.target.value)} sx={{ minWidth: 140 }}>
-                <MenuItem value="">{t("common.allLevels")}</MenuItem>
-                {["info", "done", "warn", "alert"].map((l) => (
-                  <MenuItem key={l} value={l}>{t(`state.${l}`, { defaultValue: l })}</MenuItem>
-                ))}
-              </TextField>
+              <Stack direction="row" spacing={1}>
+                <TextField select size="small" label={t("hub.server")} value={serverFilter}
+                  onChange={(e) => setServerFilter(e.target.value)} sx={{ minWidth: 140 }}>
+                  <MenuItem value="">{t("hub.allServers")}</MenuItem>
+                  {servers.map((s) => (
+                    <MenuItem key={s.id} value={String(s.id)}>{s.name}</MenuItem>
+                  ))}
+                </TextField>
+                <TextField select size="small" label={t("common.level")} value={level}
+                  onChange={(e) => setLevel(e.target.value)} sx={{ minWidth: 140 }}>
+                  <MenuItem value="">{t("common.allLevels")}</MenuItem>
+                  {["info", "done", "warn", "alert"].map((l) => (
+                    <MenuItem key={l} value={l}>{t(`state.${l}`, { defaultValue: l })}</MenuItem>
+                  ))}
+                </TextField>
+              </Stack>
             </Stack>
             <EventLog events={events.data?.events} />
           </CardContent>

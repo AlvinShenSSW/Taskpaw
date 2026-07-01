@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { HubDashboard } from "../views/HubDashboard";
@@ -128,6 +128,24 @@ describe("HubDashboard (#95)", () => {
     // Switching to the Manage tab reveals the CRUD manager.
     fireEvent.click(screen.getByRole("tab", { name: /^Manage$|^管理$/ }));
     expect(await screen.findByText(/Manage agents|管理 agent/)).toBeInTheDocument();
+  });
+
+  it("filters the events feed by server on the Events tab (#133)", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      const body = url.includes("/status") ? STATUS : { events: [] };
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderHub();
+    fireEvent.click(screen.getByRole("tab", { name: /^Events$|^事件$/ }));
+    // pick a specific server in the new filter → the query gains ?server=1
+    fireEvent.mouseDown(await screen.findByRole("combobox", { name: /Server|服务器/i }));
+    fireEvent.click(await screen.findByRole("option", { name: "render-01" }));
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(
+        ([u]) => String(u).includes("/events") && String(u).includes("server=1"),
+      )).toBe(true),
+    );
   });
 
   it("drills down into a machine's monitors when its card is clicked", async () => {
