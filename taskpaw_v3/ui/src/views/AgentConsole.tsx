@@ -129,11 +129,6 @@ export function AgentConsole() {
                   {t("agent.updated", { time: fmtTime(status.dataUpdatedAt) })}
                 </Typography>
               )}
-          {names.length === 0 && (
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              {t("agent.noMonitors")}
-            </Typography>
-          )}
           <List dense>
             {names.map((n) => (
               <ListItemButton
