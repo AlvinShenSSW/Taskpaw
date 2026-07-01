@@ -7,7 +7,9 @@ Tauri dashboard (#19) and richer endpoints come later.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -25,6 +27,13 @@ from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
 log = logging.getLogger("taskpaw.hub")
+
+# A DNS hostname: dot-separated labels of alnum/hyphen (no scheme, port, path, or
+# URL metacharacters). IP literals are validated separately via ipaddress (#124).
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*$"
+)
 
 
 def _unauthorized() -> JSONResponse:
@@ -229,9 +238,22 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         return v.strip()
 
     def _valid_ip(v) -> str:
+        # Must be an IP literal or a plain hostname — NOT a URL, host:port, or a
+        # path. Otherwise poller._agent_base_url builds a malformed/unintended URL
+        # (e.g. "192.168.1.80:5678" → http://[192.168.1.80:5678]:5680) — a
+        # correctness bug and a mild SSRF vector (Kimi).
         if not isinstance(v, str) or not v.strip():
             raise HTTPException(status_code=400, detail="ip/host must be a non-blank string")
-        return v.strip()
+        h = v.strip().strip("[]")  # allow a bracketed IPv6 literal
+        try:
+            ipaddress.ip_address(h)
+            return h
+        except ValueError:
+            pass
+        if _HOSTNAME_RE.match(h):
+            return h
+        raise HTTPException(status_code=400,
+                            detail="ip/host must be an IP address or hostname (no port, path, or scheme)")
 
     def _valid_port(v) -> int:
         # Reject bool (an int subclass) and non-integers (3.14) — silently
@@ -323,6 +345,10 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
                 tok = ""            # JSON null = clear; never store the string "None" (Kimi)
             if not isinstance(tok, str):
                 raise HTTPException(status_code=400, detail="polling_token must be a string")
+            # No control chars (\r \n \t …) — they'd be injected into the poller's
+            # Authorization header, corrupting the request / enabling injection (Kimi).
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in tok):
+                raise HTTPException(status_code=400, detail="polling_token must not contain control characters")
             # Live: the poller reads polling_token per cycle (get_polling_token),
             # so no Hub restart is needed to apply it (#124).
             store.set_config("polling_token", tok)

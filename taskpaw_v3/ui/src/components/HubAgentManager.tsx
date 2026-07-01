@@ -44,7 +44,7 @@ export function HubAgentManager({ servers }: { servers: HubServer[] }) {
     onError: onErr,
   });
   const tokMut = useMutation({
-    mutationFn: () => api.hubSetPollingToken(token),
+    mutationFn: (v: string) => api.hubSetPollingToken(v),
     onSuccess: () => { setToken(""); setErr(null); },
     onError: onErr,
   });
@@ -127,9 +127,13 @@ export function HubAgentManager({ servers }: { servers: HubServer[] }) {
         <Stack direction="row" spacing={1} sx={{ mt: 1.5 }} alignItems="flex-start">
           <TextField size="small" type="password" label={t("hub.pollingToken")} value={token}
             onChange={(e) => setToken(e.target.value)} helperText={t("hub.pollingTokenHint")} sx={{ flex: 1 }} />
-          {/* Enabled even when blank so the token can be CLEARED (blank = no auth) (Codex). */}
-          <Button variant="outlined" disabled={tokMut.isPending} sx={{ mt: 0.25 }}
-            onClick={() => tokMut.mutate()}>{t("common.save")}</Button>
+          {/* Save only when non-blank (no accidental clear); a separate Clear button
+              is the explicit way to remove the token (Codex wants clearable; Kimi
+              wants no accidental clear). */}
+          <Button variant="outlined" disabled={tokMut.isPending || !token} sx={{ mt: 0.25 }}
+            onClick={() => tokMut.mutate(token)}>{t("common.save")}</Button>
+          <Button variant="text" color="inherit" disabled={tokMut.isPending} sx={{ mt: 0.25 }}
+            onClick={() => tokMut.mutate("")}>{t("hub.clearToken")}</Button>
         </Stack>
       </CardContent>
 

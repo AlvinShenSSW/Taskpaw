@@ -587,3 +587,28 @@ def test_manage_rejects_non_string_name_ip(tmp_path):
         assert len(s.list_servers()) == 0                    # nothing corrupt stored
     finally:
         s.close()
+
+
+def test_manage_ip_and_token_sanitization(tmp_path):
+    """#124 review r4: ip must be a bare IP/hostname (a host:port or path is
+    rejected — catches the common 'ip:port in the IP field' mistake); the polling
+    token rejects control characters (header-injection)."""
+    from fastapi.testclient import TestClient
+    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.core.config import HubConfig
+
+    s = _store(tmp_path)
+    try:
+        c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
+        # host:port / path / scheme in the IP field → 400.
+        for bad in ("192.168.1.80:5678", "foo/bar", "http://1.2.3.4", "a b", "x@y"):
+            assert c.post("/servers", json={"name": f"n{bad}", "ip": bad}).status_code == 400
+        # bare IPv4 / IPv6 / hostname are accepted.
+        assert c.post("/servers", json={"name": "v4", "ip": "192.168.1.80"}).status_code == 200
+        assert c.post("/servers", json={"name": "v6", "ip": "::1"}).status_code == 200
+        assert c.post("/servers", json={"name": "host", "ip": "moomoo.local"}).status_code == 200
+        # control chars in the polling token → 400.
+        assert c.patch("/config", json={"polling_token": "abc\r\ndef"}).status_code == 400
+        assert c.patch("/config", json={"polling_token": "good-token"}).status_code == 200
+    finally:
+        s.close()
