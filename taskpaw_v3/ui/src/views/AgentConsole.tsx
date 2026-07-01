@@ -1,6 +1,6 @@
 import {
   Alert, Box, Button, Card, CardContent, Chip, Dialog, DialogActions,
-  DialogContent, DialogContentText, DialogTitle, List, ListItemButton,
+  DialogContent, DialogContentText, DialogTitle,
   Snackbar, Stack, Tab, Tabs, Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -11,6 +11,7 @@ import { StatusDot } from "../components/StatusDot";
 import { SkeletonRows } from "../components/SkeletonRows";
 import { MonitorMetrics } from "../components/MonitorMetrics";
 import { EventLog } from "../components/EventLog";
+import { MonitorSelector } from "../components/MonitorSelector";
 import { MonitorWizard } from "./MonitorWizard";
 import { Settings } from "./Settings";
 
@@ -109,70 +110,32 @@ export function AgentConsole() {
           />
         </Stack>
       ) : (
-        // Multiple monitors: the existing rail + detail (the horizontal selector
-        // that replaces this rail is a separate issue, #135).
-        <Stack direction="row" spacing={2} sx={{ minHeight: "70dvh" }}>
-          <Card sx={{ width: 280, flex: "0 0 auto" }}>
-            <CardContent>
-              <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 0.5 }}>
-                <Typography variant="overline" color="text.secondary">
-                  {t("agent.monitorsTitle", { machine: status.data?.machine })}
-                </Typography>
-                <Button size="small" variant="contained" onClick={() => setDialog({ mode: "add" })}>
-                  + {t("common.add")}
-                </Button>
-              </Stack>
-              {/* Freshness for the whole list (single poll updates every row). Real
-                  per-monitor last-EVENT times need a backend field — deferred. */}
-              {status.dataUpdatedAt > 0 && (
-                <Typography variant="body2" color="text.secondary" sx={{ display: "block", mb: 1, fontSize: 11 }}>
-                  {t("agent.updated", { time: fmtTime(status.dataUpdatedAt) })}
-                </Typography>
-              )}
-          <List dense>
-            {names.map((n) => (
-              <ListItemButton
-                key={n}
-                selected={n === current}
-                aria-current={n === current}
-                onClick={() => setSelected(n)}
-                sx={{
-                  borderRadius: 1,
-                  borderLeft: "3px solid transparent",
-                  // Selected row: accent left border + faint green wash (paired with
-                  // aria-current + the dot, so it's not color-only).
-                  "&.Mui-selected": {
-                    borderLeftColor: "primary.main",
-                    bgcolor: "rgba(34,197,94,.08)",
-                  },
-                  "&.Mui-selected:hover": { bgcolor: "rgba(34,197,94,.13)" },
-                }}
-              >
-                <StatusDot state={monitors[n].state} />
-                <Typography variant="body2" noWrap sx={{ flex: 1 }}>{n}</Typography>
-                {monitors[n].type_id && (
-                  <Chip size="small" label={monitors[n].type_id} sx={{ ml: 0.5 }} />
-                )}
-              </ListItemButton>
-            ))}
-          </List>
-        </CardContent>
-      </Card>
-
-      <Box sx={{ flex: 1 }}>
-        {current && monitors[current] ? (
-          <MonitorDetail
-            name={current}
-            snap={monitors[current]}
-            updatedAt={status.dataUpdatedAt}
-            onEdit={() => setDialog({ mode: "edit", name: current })}
-            onChanged={invalidate}
-            onError={onErr}
-          />
-            ) : (
-              <Typography color="text.secondary">{t("agent.selectPrompt")}</Typography>
+        // Multiple monitors: a horizontal pill selector (replacing the tall rail)
+        // + the selected monitor in the same hero as the single-monitor case (#135).
+        <Stack spacing={1.5}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between">
+            <Typography variant="overline" color="text.secondary">
+              {t("agent.monitorsTitle", { machine: status.data?.machine })}
+            </Typography>
+            {/* Freshness for the whole list (a single poll updates every monitor);
+                real per-monitor last-EVENT times need a backend field — deferred. */}
+            {status.dataUpdatedAt > 0 && (
+              <Typography variant="caption" color="text.secondary">
+                {t("agent.updated", { time: fmtTime(status.dataUpdatedAt) })}
+              </Typography>
             )}
-          </Box>
+          </Stack>
+          <MonitorSelector
+            names={names} monitors={monitors} selected={current}
+            onSelect={setSelected} onAdd={() => setDialog({ mode: "add" })}
+          />
+          {current && monitors[current] && (
+            <MonitorDetail
+              name={current} snap={monitors[current]} updatedAt={status.dataUpdatedAt}
+              onEdit={() => setDialog({ mode: "edit", name: current })}
+              onChanged={invalidate} onError={onErr}
+            />
+          )}
         </Stack>
       )}
 

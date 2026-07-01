@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AgentConsole } from "../views/AgentConsole";
@@ -83,6 +83,17 @@ describe("AgentConsole", () => {
     await screen.findByText("lada-main");
     // The hero is not a selectable rail list → no aria-current row.
     expect(document.querySelector('[aria-current="true"]')).toBeNull();
+  });
+
+  it("uses a horizontal pill selector for multiple monitors, and swaps the hero (#135)", async () => {
+    renderConsole(); // 2 monitors (lada-main auto-selected)
+    await screen.findByText("downloads");
+    // A trailing "+ Add monitor" pill exists.
+    expect(screen.getByRole("button", { name: /Add monitor|添加监控/ })).toBeInTheDocument();
+    // Selecting the "downloads" pill marks it current (paired with aria-current).
+    fireEvent.click(screen.getByText("downloads"));
+    const sel = document.querySelector('[aria-current="true"]');
+    expect(within(sel as HTMLElement).getByText("downloads")).toBeInTheDocument();
   });
 
   it("shows an empty-state Add CTA when there are no monitors (#134)", async () => {
