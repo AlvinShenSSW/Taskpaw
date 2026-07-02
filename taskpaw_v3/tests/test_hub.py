@@ -268,6 +268,76 @@ def test_outbox_dedupe_key_idempotent(tmp_path):
         s.close()
 
 
+# ── #152: Hub time authority (host receipt clock; UTC for absolute compares) ──
+def test_prune_dead_letters_uses_utc_not_naive_local(tmp_path, monkeypatch):
+    """prune_dead_letters must compare created_at (UTC-aware ISO) against a UTC
+    cutoff — NOT a naive host-local one. On a non-UTC host (e.g. JST, UTC+9) a
+    naive-local cutoff is off by the offset and wrongly prunes rows younger than
+    `days`. Cross-platform: we fake the module datetime to simulate a +9 host
+    instead of calling time.tzset() (absent on Windows)."""
+    from datetime import datetime, timedelta, timezone
+
+    from taskpaw_v3.hub.server import store as store_mod
+
+    instant = datetime(2026, 7, 2, 9, 0, 0, tzinfo=timezone.utc)  # 18:00 in JST
+    jst = timezone(timedelta(hours=9))
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # aware in the requested tz (UTC path), else naive host-local (+9 wall).
+            return (
+                instant.astimezone(tz)
+                if tz is not None
+                else instant.astimezone(jst).replace(tzinfo=None)
+            )
+
+    monkeypatch.setattr(store_mod, "datetime", _FakeDT)
+
+    s = _store(tmp_path)
+    try:
+        s.enqueue_delivery("a", "event", "{}")
+        # A dead letter created 6.75 days ago (UTC) — younger than 7 days → KEEP.
+        young = (instant - timedelta(days=6, hours=18)).isoformat(timespec="seconds")
+        s._conn.execute(
+            "UPDATE delivery_outbox SET delivery_state='dead_letter', created_at=?",
+            (young,),
+        )
+        s._conn.commit()
+        s.prune_dead_letters(days=7)
+        kept = s._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0]
+        assert kept == 1, (
+            "a 6.75-day-old dead letter must survive prune(7) on any host tz"
+        )
+
+        # A clearly-old one (8 days) IS pruned — prune still works.
+        old = (instant - timedelta(days=8)).isoformat(timespec="seconds")
+        s._conn.execute("UPDATE delivery_outbox SET created_at=?", (old,))
+        s._conn.commit()
+        s.prune_dead_letters(days=7)
+        assert (
+            s._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+        )
+    finally:
+        s.close()
+
+
+def test_no_hardcoded_timezone_offset_in_hub_and_core():
+    """#152 invariant: the time authority follows the Hub *host* clock — no source
+    may pin a timezone/offset (that would break when the Hub is deployed elsewhere)."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    banned = re.compile(r"Asia/|America/|Europe/|\+0[0-9]:00|pytz|ZoneInfo\(")
+    offenders = []
+    for sub in ("hub", "core"):
+        for py in (root / sub).rglob("*.py"):
+            if banned.search(py.read_text(encoding="utf-8")):
+                offenders.append(str(py.relative_to(root)))
+    assert not offenders, f"hardcoded timezone/offset in: {offenders}"
+
+
 def test_agent_base_url_brackets_ipv6():
     from taskpaw_v3.hub.server.poller import _agent_base_url
 
