@@ -414,10 +414,21 @@ def run_hub(
 ) -> GracefulShutdown:
     import uvicorn
 
-    from taskpaw_v3.core.net import announce_ready, claim_port, loopback_url
+    from taskpaw_v3.core.net import (
+        announce_ready,
+        claim_port,
+        loopback_url,
+        reclaim_port_from_stale_instance,
+    )
 
     shutdown = shutdown or GracefulShutdown()
     _guard_bind_exposure(config)  # refuse an unsafe LAN exposure before binding (#114)
+    # Seamless updates: reclaim the port from OUR OWN stale hub backend if one is
+    # still running (e.g. right after installing a new version); foreign services
+    # are left untouched (claim_port then fails loudly).
+    reclaim_port_from_stale_instance(
+        config.bind_host, config.bind_port, role="hub", what="hub API"
+    )
     sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
     # Auth-disabled visibility (#145): the guard already refuses a non-loopback
     # bind with no token, so reaching here with auth off means a loopback-only API.
