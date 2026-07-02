@@ -60,6 +60,18 @@ def test_aggregate_most_busy_wins():
     assert aggregate([t("claude"), t("codex")]) == ("none", [])
 
 
+def test_vscode_alone_is_not_ai_present(tmp_path, monkeypatch):
+    # #154 / Codex 外门: VS Code open but no AI CLI/state → "none", not present_only.
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude", "vscode"]
+    )
+    _, st, _ = _check(cfg, monkeypatch, {"claude": False, "vscode": True})
+    assert st.metrics["ai_state"] == "none"
+    # vscode is still shown as present (context), it just doesn't drive the headline.
+    vs = next(x for x in st.metrics["tools"] if x["tool"] == "vscode")
+    assert vs["present"] is True and vs["ai"] is False
+
+
 def test_invalid_process_pattern_rejected_at_config_time():
     import pytest
     from pydantic import ValidationError

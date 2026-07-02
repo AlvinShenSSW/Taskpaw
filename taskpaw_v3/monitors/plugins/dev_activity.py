@@ -56,6 +56,12 @@ _DEFAULT_PATTERNS: dict[str, str] = {
 # The state values activity_writer.py emits that count as "an AI task is active".
 _ACTIVE = {"busy", "waiting"}
 
+# Context/host tools whose mere presence does NOT mean "AI is running" — VS Code is
+# the editor, not an AI CLI. They're still shown (as context), but their presence
+# alone can't make the headline "present_only" (Codex 外门). AI CLIs
+# (claude/codex/kimi/custom) do count.
+_CONTEXT_TOOLS = {"vscode"}
+
 
 class DevActivityConfig(BaseMonitorConfig):
     # Which tools to watch. Unknown names still work for state files; only names in
@@ -147,7 +153,8 @@ def aggregate(tools: list[dict]) -> tuple[str, list[str]]:
         return "waiting", []
     if any(t["state"] == "idle" for t in tools):
         return "idle", []
-    if any(t["present"] for t in tools):
+    # Presence only counts for AI tools — a lone VS Code (context) isn't "AI".
+    if any(t["present"] and t.get("ai", True) for t in tools):
         return "present_only", []
     return "none", []
 
@@ -203,6 +210,8 @@ class DevActivityInstance(MonitorInstance):
                     "state": state,  # busy|waiting|idle when fresh, else None
                     "present": bool(present.get(tool, False)),
                     "age_s": None if age is None else round(age, 1),
+                    # VS Code (context) presence doesn't count as "AI running".
+                    "ai": tool not in _CONTEXT_TOOLS,
                 }
             )
 
