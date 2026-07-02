@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from taskpaw_v3.monitors.plugins import dev_activity as da
 from taskpaw_v3.monitors.plugins.dev_activity import (
     DevActivityConfig,
@@ -13,6 +15,18 @@ from taskpaw_v3.monitors.plugins.dev_activity import (
     read_tool_state,
 )
 from taskpaw_v3.monitors.registry import default_registry
+
+
+@pytest.fixture(autouse=True)
+def _no_real_cpu_probe(monkeypatch):
+    """#163: the observe probe defaults on, so keep the real psutil CPU scan out of
+    every test (the CI/dev host may itself run claude/code) — report nothing present.
+    Observation tests override da.scan_activity with their own sample."""
+    monkeypatch.setattr(
+        da,
+        "scan_activity",
+        lambda compiled: {t: {"present": False, "cpu_seconds": 0.0} for t in compiled},
+    )
 
 
 def _write(tmp_path, tool, state, ts):
