@@ -18,6 +18,7 @@ from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from taskpaw_v3 import __version__
 from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
@@ -198,7 +199,7 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
     @app.get("/ping")
     def ping() -> dict:
         # Open by design — trivial reachability probe, no sensitive data.
-        return {"ok": True, "machine": config.machine, "version": "3.0.0-dev"}
+        return {"ok": True, "machine": config.machine, "version": __version__}
 
     @app.get("/status")
     def status(request: Request):

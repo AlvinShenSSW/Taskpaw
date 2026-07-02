@@ -22,10 +22,14 @@ def _cfg(**kw):
 
 
 def test_ping_open_no_auth():
+    from taskpaw_v3 import __version__
+
     cfg = _cfg(api_token="secret")
     client = TestClient(create_network_app(cfg, EventQueue("dev")))
     r = client.get("/ping")
     assert r.status_code == 200 and r.json()["machine"] == "dev"
+    # /ping reports the real app version (single source), not a stale hardcoded string.
+    assert r.json()["version"] == __version__
 
 
 def test_control_events_returns_recent_non_destructive(_=None):
