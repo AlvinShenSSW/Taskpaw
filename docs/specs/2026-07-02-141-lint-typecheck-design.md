@@ -68,6 +68,18 @@ to `taskpaw_v3/`), and **ESLint** (the V3 UI). V2 is frozen and never touched.
 - §5 Testing: suite green; lockfiles (`uv.lock`, `package-lock.json`) authoritative
   and in sync.
 
+## Kimi 终审 triage (round 1)
+- **[P2] `enqueue_delivery` return invariant** — Kimi correctly caught that my
+  uniform `assert cur.lastrowid is not None` was wrong for this function: it uses
+  `INSERT OR IGNORE`, so a dedupe-key collision inserts no row and `lastrowid` is
+  meaningless. Fixed properly: return type → `Optional[int]`, `return cur.lastrowid
+  if cur.rowcount else None`, docstring updated. No caller uses the return value
+  (verified), so no cascade. The plain-INSERT `add_server` keeps its assert.
+- **[minor] AGENTS.md commands** — added `ruff check` / `ruff format --check` /
+  `mypy` / `npm run lint` to the Commands section.
+- **[minor] CI job name** — renamed the matrix job "lint + test" → "test" (linting
+  now lives in the dedicated `lint` job).
+
 ## Cross-PR note
 This branch and #145 both branch off origin/main; the V3 reformat may textually
 conflict with #145's `auth.py` edits at merge — flagged for the operator (merge

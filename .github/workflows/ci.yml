@@ -39,7 +39,7 @@ jobs:
         run: uv run mypy
 
   test:
-    name: lint + test (py${{ matrix.python-version }})
+    name: test (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

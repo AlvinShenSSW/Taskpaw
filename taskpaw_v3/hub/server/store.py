@@ -475,10 +475,13 @@ class HubStore:
         last_error: Optional[str] = None,
         next_attempt_at: Optional[datetime] = None,
         dedupe_key: Optional[str] = None,
-    ) -> int:
+    ) -> Optional[int]:
         """Insert a delivery. When `dedupe_key` is given, the insert is
         idempotent (INSERT OR IGNORE on the unique partial index), so an
         at-least-once replay after a crash does not double-deliver to OpenClaw.
+
+        Returns the new row id, or ``None`` when a dedupe_key collision made the
+        INSERT OR IGNORE a no-op (no row inserted → ``lastrowid`` is meaningless).
         """
         verb = "INSERT OR IGNORE INTO" if dedupe_key is not None else "INSERT INTO"
         with self._lock:
@@ -501,8 +504,9 @@ class HubStore:
                     ),
                 )
                 self._conn.commit()
-                assert cur.lastrowid is not None  # set by INSERT
-                return cur.lastrowid
+                # INSERT OR IGNORE that hit the dedupe index inserts no row
+                # (rowcount == 0) → lastrowid is stale/meaningless; report None.
+                return cur.lastrowid if cur.rowcount else None
             except Exception:
                 self._conn.rollback()
                 raise
