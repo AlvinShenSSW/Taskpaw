@@ -61,8 +61,8 @@ silently drop a reviewer.
 
 design doc (`docs/specs/YYYY-MM-DD-<topic>-design.md`) → multi-round adversarial
 debate until clean → TDD (RED→GREEN) → adversarial sweep → full
-`uv lock --check` + `uv run --locked --extra web pytest` (本项目用 pytest, 非 unittest;
-涉 server 需 `--extra web`) → constitution-gate self-check (见 `docs/constitution.md`) → commit →
+`uv lock --check` + `uv run --locked pytest` (本项目用 pytest, 非 unittest) →
+constitution-gate self-check (见 `docs/constitution.md`) → commit →
 push early → open PR → watch CI (fix red) → CTO self-review (`cto-pr-review`) → fix
 every finding → **external review — runs automatically in AFK mode** (no
 operator is present to invoke it). **The reviewers follow the Driver variant above**
