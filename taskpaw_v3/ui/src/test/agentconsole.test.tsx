@@ -120,4 +120,34 @@ describe("AgentConsole", () => {
       expect(urls.some((u) => /\/control\/events\?.*monitor=lada-main/.test(u))).toBe(true);
     });
   });
+
+  // #145: auth-disabled banner is driven by /control/config { auth_disabled }.
+  const stubConfig = (authDisabled: boolean) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const body =
+          url.includes("/control/status") ? STATUS
+          : url.includes("/control/config") ? { monitors: [], auth_disabled: authDisabled }
+          : url.includes("/control/plugins") ? { plugins: [], presets: [] }
+          : { events: [] };
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+      }),
+    );
+
+  // Language is non-deterministic in tests (i18n detector), so match either locale.
+  const BANNER = /Auth is disabled|鉴权已禁用/;
+
+  it("shows the auth-disabled banner when the API has no token (#145)", async () => {
+    stubConfig(true);
+    renderConsole();
+    expect(await screen.findByText(BANNER)).toBeInTheDocument();
+  });
+
+  it("hides the auth-disabled banner when a token is set (#145)", async () => {
+    stubConfig(false);
+    renderConsole();
+    await screen.findByText("downloads"); // console loaded
+    expect(screen.queryByText(BANNER)).not.toBeInTheDocument();
+  });
 });

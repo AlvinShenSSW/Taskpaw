@@ -39,6 +39,8 @@ const en = {
     deleteTitle: "Delete monitor “{{name}}”?",
     deleteBody: "This removes it from this agent's config. It can't be undone.",
     unreachable: "Agent unreachable: {{error}}",
+    authDisabled:
+      "Auth is disabled — no API token is set, so /status and /events accept any request. The bind guard keeps this loopback-only; set a token in Settings to require a Bearer token or to bind a LAN address.",
     updated: "Updated {{time}}",
     lastEvent: "Last event {{time}}",
   },
@@ -138,6 +140,8 @@ const zh: typeof en = {
     deleteTitle: "删除监控「{{name}}」?",
     deleteBody: "这会把它从本 agent 的配置中移除,无法撤销。",
     unreachable: "无法连接 Agent:{{error}}",
+    authDisabled:
+      "鉴权已禁用——未设置 API 令牌,/status 与 /events 接受任意请求。绑定守卫已将其限制在仅回环地址;请在「设置」中设置令牌以启用 Bearer 鉴权,或用于绑定 LAN 地址。",
     updated: "更新于 {{time}}",
     lastEvent: "最近事件 {{time}}",
   },

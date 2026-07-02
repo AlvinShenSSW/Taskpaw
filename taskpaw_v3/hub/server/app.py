@@ -19,7 +19,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 
-from taskpaw_v3.core.auth import token_ok
+from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
 from taskpaw_v3.core.net import guard_bind_exposure
@@ -366,6 +366,15 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
 
     shutdown = shutdown or GracefulShutdown()
     _guard_bind_exposure(config)  # refuse an unsafe LAN exposure before binding (#114)
+    # Auth-disabled visibility (#145): the guard already refuses a non-loopback
+    # bind with no token, so reaching here with auth off means a loopback-only API.
+    if auth_disabled(config.api_token):
+        log.warning(
+            "hub API auth is DISABLED (no api_token set) — /status and /events "
+            "accept any request. The bind guard keeps this loopback-only (%s); set "
+            "an api_token to require a Bearer token or to bind a LAN address.",
+            config.bind_host,
+        )
     sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
     app, service = create_hub_app(config, store)
     service.start()

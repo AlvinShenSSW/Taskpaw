@@ -132,6 +132,55 @@ def test_auth_disabled_when_token_empty_is_explicit():
     assert client.get("/status").status_code == 200
 
 
+# ── auth-disabled visibility (#145) ─────────────────────────────────────────
+def test_auth_disabled_helper_is_exact_negation_of_token_ok_shortcircuit():
+    from taskpaw_v3.core.auth import auth_disabled, token_ok
+
+    assert auth_disabled("") is True
+    assert auth_disabled("   ") is True
+    assert auth_disabled("tok") is False
+    # Whenever auth_disabled is True, token_ok accepts any request; and vice versa.
+    assert token_ok("", None) is True and auth_disabled("") is True
+    assert token_ok("tok", None) is False and auth_disabled("tok") is False
+
+
+def test_control_config_reports_auth_disabled_and_still_masks_token():
+    # #145: the console reads the auth posture from /control/config to show a banner.
+    open_cr = TestClient(
+        create_control_app(AgentConfig(server_id="s", machine="m", api_token=""))
+    ).get("/control/config")
+    assert open_cr.status_code == 200 and open_cr.json()["auth_disabled"] is True
+
+    tok_cr = TestClient(
+        create_control_app(AgentConfig(server_id="s", machine="m", api_token=SECRET))
+    ).get("/control/config")
+    body = tok_cr.json()
+    assert body["auth_disabled"] is False
+    assert body["api_token"] == "***" and SECRET not in tok_cr.text  # never leaked
+
+
+def test_run_agent_warns_loudly_when_auth_disabled(caplog):
+    # #145: starting with no token must emit a loud warning (the bind guard keeps
+    # this loopback-only, but the operator should know auth is off).
+    from taskpaw_v3.agent.server.launcher import run_agent
+    from taskpaw_v3.core.net import claim_port
+
+    a = claim_port("127.0.0.1", 0, "p-net")
+    b = claim_port("127.0.0.1", 0, "p-ctl")
+    net_port, ctl_port = a.getsockname()[1], b.getsockname()[1]
+    a.close()
+    b.close()
+    cfg = AgentConfig(server_id="s", machine="m", host_metrics=False, api_token="",
+                      bind_port=net_port, control_port=ctl_port)
+    with caplog.at_level(logging.WARNING):
+        sd = run_agent(cfg, block=False)
+        try:
+            assert any("auth is DISABLED" in r.message for r in caplog.records)
+        finally:
+            sd.shutdown()
+            sd.stopped.wait(timeout=10)
+
+
 # ── Hub forwarding secret handling ─────────────────────────────────────────
 def test_hub_status_endpoint_never_returns_tokens(tmp_path):
     """Exercise the REAL Hub /status: even with secrets in config + a server
