@@ -45,7 +45,29 @@ scans shell scripts / repo shape, unaffected). No behavioural test to add — th
 the documented exception to "every change ships a test" (constitution §5 targets
 *behavioural* change; there is none here).
 
+## Kimi 终审 triage (round 1)
+Kimi correctly flagged that fixing AGENTS/CLAUDE/constitution but leaving the
+**V3 source-of-truth design doc** hyphenated only half-fixes the drift. Extended
+the same path-drift fix (docs/comment only, on-theme, zero behavioural risk):
+- `docs/specs/2026-06-27-taskpaw-v3-design.md:375` (the source-of-truth layout block)
+  `taskpaw-v3/` → `taskpaw_v3/`.
+- `docs/specs/2026-06-27-v3-backend-15-design.md:10,32` same.
+- `pyproject.toml:25` stale comment `taskpaw-v3/` → `taskpaw_v3/`.
+
+Rejected / not actioned (with evidence):
+- **"23 backend test files"** — the design doc says **22** (matches `ls
+  taskpaw_v3/tests/test_*.py` = 22 and AGENTS.md). Misread; no change.
+- **untracked `scripts/create-review-issues.sh` bash syntax error** — the operator's
+  untracked WIP, **not in this PR's diff**; CI is green (it never reaches CI).
+  Deleting it is out-of-scope + destructive, so left untouched and flagged to the
+  operator. Does not block this PR.
+- `taskpaw_v3/ui/package.json` name `taskpaw-v3-ui` — an npm package identifier
+  (hyphen is idiomatic), not a path. Left as-is.
+- Component names like `taskpaw-agent` in prose are product names, not paths — kept.
+
 ## Constitution gate
-- §1 Scope: docs only; no V2/V3 code touched; audit-row left to #146 to avoid
-  cross-PR conflict.
-- §5 Testing: no behavioural change → no new test; suite must stay green.
+- §1 Scope: docs + one pyproject comment; no V2/V3 code touched; audit-row left to
+  #146 to avoid cross-PR conflict. The extended fixes are the same drift the issue
+  names, not a widening.
+- §5 Testing: no behavioural change → no new test; suite green; `uv lock --check`
+  clean (comment-only pyproject edit).
