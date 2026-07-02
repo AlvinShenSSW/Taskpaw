@@ -53,7 +53,7 @@ _DEFAULT_PATTERNS: dict[str, str] = {
     "claude": r"\bclaude\b",
     "codex": r"\bcodex\b",
     "kimi": r"\bkimi\b",
-    "vscode": r"Code Helper|Code\.exe|Visual Studio Code|[/\\]code[/\\]|\bvscode\b",
+    "vscode": r"Code Helper|Code\.exe|Visual Studio Code|\bvscode\b",
 }
 
 # The state values activity_writer.py emits that count as "an AI task is active".
@@ -149,22 +149,21 @@ def read_tool_state(
     return state, age
 
 
-def _detect_present(patterns: dict[str, str]) -> dict[str, bool]:
-    """ONE psutil sweep → {tool: present} for the given {tool: regex} (via
+def _detect_present(compiled: dict[str, "re.Pattern[str]"]) -> dict[str, bool]:
+    """ONE psutil sweep → {tool: present} for pre-compiled {tool: regex} (via
     process_util.scan_matches). Presence is best-effort: enumeration can raise
     PermissionError/OSError (restricted macOS/service env) or RuntimeError (psutil
     missing) — log it (§4, not silent) and degrade every tool to absent rather than
     abort the check, so file-based activity is still read."""
-    if not patterns:
+    if not compiled:
         return {}
-    compiled = {t: re.compile(p, re.IGNORECASE) for t, p in patterns.items()}
     try:
         return scan_matches(compiled, search_cmdline=True)
     except (OSError, RuntimeError) as e:
         # PermissionError/OSError (restricted enumeration) or RuntimeError (psutil
         # missing) → degrade all tools to absent; never abort the check.
         log.warning("dev_activity: process presence scan failed: %s", e)
-        return {tool: False for tool in patterns}
+        return {tool: False for tool in compiled}
 
 
 def aggregate(tools: list[dict]) -> tuple[str, list[str]]:
@@ -198,8 +197,16 @@ class DevActivityInstance(MonitorInstance):
         super().__init__(instance_id, config)
         # Active class of the previous check: "busy" | "waiting" | "off".
         self._prev_class: Optional[str] = None
-        # (ts, is_busy) samples for the duty bar; bounded by the window on read.
-        self._samples: deque[tuple[float, bool]] = deque(maxlen=10_000)
+        # Precompile process patterns ONCE (like ProcessInstance) — not per check().
+        self._compiled: dict[str, "re.Pattern[str]"] = {
+            tool: re.compile(pat, re.IGNORECASE)
+            for tool, pat in self._patterns(config).items()
+        }
+        # (ts, is_busy) samples for the duty bar. Size the ring to actually hold the
+        # configured window at the configured cadence (+margin), so a low
+        # poll_interval + large window isn't silently truncated (Kimi 终审).
+        max_samples = max(1000, int(config.window_seconds / config.poll_interval) + 100)
+        self._samples: deque[tuple[float, bool]] = deque(maxlen=max_samples)
 
     def _patterns(self, cfg: DevActivityConfig) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -222,7 +229,7 @@ class DevActivityInstance(MonitorInstance):
     def check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: DevActivityConfig = self.config  # type: ignore[assignment]
         now = time.time()
-        present = _detect_present(self._patterns(cfg))
+        present = _detect_present(self._compiled)
         tools: list[dict] = []
         for tool in cfg.tools:
             state, age = read_tool_state(
