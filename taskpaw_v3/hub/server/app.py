@@ -18,7 +18,6 @@ from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-
 from taskpaw_v3.core.auth import token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
@@ -72,11 +71,16 @@ class HubService:
             store=store,
             openclaw_url=config.openclaw_url,
             get_active=lambda: (
-                store.get_config("openclaw_enabled", "1" if config.openclaw_enabled else "0") == "1"
+                store.get_config(
+                    "openclaw_enabled", "1" if config.openclaw_enabled else "0"
+                )
+                == "1"
                 and bool(store.get_config("openclaw_token", config.openclaw_token))
             ),
             get_token=lambda: store.get_config("openclaw_token", config.openclaw_token),
-            get_polling_token=lambda: store.get_config("polling_token", config.polling_token),
+            get_polling_token=lambda: store.get_config(
+                "polling_token", config.polling_token
+            ),
             # Seed a restarted Hub's status.md as ONLINE only for agents whose last
             # success is within ~2 polls; older successes render OFFLINE (#38).
             seed_fresh_seconds=max(2 * config.poll_interval, 60),
@@ -86,27 +90,34 @@ class HubService:
         # Hub self-monitor (§5b.2): watch the Hub's OWN host. Its events go to the
         # outbox (forwarded to OpenClaw when active) tagged with the hub machine;
         # its snapshot is exposed in /status. No separate agent needed.
-        self.self_supervisor = self._build_self_supervisor() if config.self_monitor else None
+        self.self_supervisor = (
+            self._build_self_supervisor() if config.self_monitor else None
+        )
 
     def _build_self_supervisor(self):
         from taskpaw_v3.monitors.registry import default_registry
         from taskpaw_v3.monitors.supervisor import Supervisor
 
         def sink(instance_id, level, title, message, data=None, dedupe_key=None):
-            active = (
-                self.store.get_config("openclaw_enabled", "1" if self.config.openclaw_enabled else "0") == "1"
-                and bool(self.store.get_config("openclaw_token", self.config.openclaw_token))
+            active = self.store.get_config(
+                "openclaw_enabled", "1" if self.config.openclaw_enabled else "0"
+            ) == "1" and bool(
+                self.store.get_config("openclaw_token", self.config.openclaw_token)
             )
             if not active:
                 return
             import json
+
             # No dedupe_key: these are edge-triggered incidents (alert on breach,
             # done on recovery). A stable title-based key would let the permanent
             # outbox unique index suppress every future recurrence of the same
             # metric. Each transition is a distinct delivery.
             self.store.enqueue_delivery(
-                server_name=self.config.machine, kind="event",
-                payload_json=json.dumps({"text": f"TaskPaw Event | {self.config.machine}: {message}"}),
+                server_name=self.config.machine,
+                kind="event",
+                payload_json=json.dumps(
+                    {"text": f"TaskPaw Event | {self.config.machine}: {message}"}
+                ),
             )
 
         sup = Supervisor(sink=sink)
@@ -151,7 +162,9 @@ class HubService:
 
     def start(self) -> None:
         self._running.set()
-        self._thread = threading.Thread(target=self._loop, name="hub-poller", daemon=True)
+        self._thread = threading.Thread(
+            target=self._loop, name="hub-poller", daemon=True
+        )
         self._thread.start()
         if self.self_supervisor:
             self.self_supervisor.start()
@@ -202,30 +215,40 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             # A disabled server isn't polled, so its snapshot goes stale — force
             # online=False so the dashboard never shows a disabled machine as live
             # (Codex). last_seen/snapshot stay for last-known reference.
-            servers.append({
-                **s,
-                "online": bool(snap.get("online", False)) and bool(s["enabled"]),
-                "last_seen": snap.get("last_seen"),
-                "snapshot": snap.get("snapshot"),
-            })
+            servers.append(
+                {
+                    **s,
+                    "online": bool(snap.get("online", False)) and bool(s["enabled"]),
+                    "last_seen": snap.get("last_seen"),
+                    "snapshot": snap.get("snapshot"),
+                }
+            )
         return {
             "machine": config.machine,
             "servers": servers,
             # Locked snapshot — the poller thread mutates this concurrently.
             "acks": service.poller.snapshot_acks(),
             # Hub's own host-health self-monitor (§5b.2).
-            "self": service.self_supervisor.snapshot() if service.self_supervisor else {},
+            "self": service.self_supervisor.snapshot()
+            if service.self_supervisor
+            else {},
         }
 
     @app.get("/events")
-    def events(request: Request, server: Optional[int] = None, level: Optional[str] = None,
-               limit: int = 200):
+    def events(
+        request: Request,
+        server: Optional[int] = None,
+        level: Optional[str] = None,
+        limit: int = 200,
+    ):
         if not _auth(request):
             return _unauthorized()
         # Durable event history aggregated from all polled agents (#44), newest
         # first, optionally filtered by server id / level. Clamp the limit.
         limit = max(1, min(int(limit), 1000))
-        return {"events": store.recent_events(server_id=server, level=level, limit=limit)}
+        return {
+            "events": store.recent_events(server_id=server, level=level, limit=limit)
+        }
 
     # ── manage the polled agents from the dashboard (#124) — same Bearer gate as
     # the read API (#106): open on loopback, token-required on a LAN Hub (#114). ──
@@ -234,7 +257,9 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
     def _valid_name(v) -> str:
         # Must be a string — don't str()-coerce a list/dict into its repr (Kimi).
         if not isinstance(v, str) or not v.strip():
-            raise HTTPException(status_code=400, detail="name must be a non-blank string")
+            raise HTTPException(
+                status_code=400, detail="name must be a non-blank string"
+            )
         return v.strip()
 
     def _valid_ip(v) -> str:
@@ -243,7 +268,9 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         # (e.g. "192.168.1.80:5678" → http://[192.168.1.80:5678]:5680) — a
         # correctness bug and a mild SSRF vector (Kimi).
         if not isinstance(v, str) or not v.strip():
-            raise HTTPException(status_code=400, detail="ip/host must be a non-blank string")
+            raise HTTPException(
+                status_code=400, detail="ip/host must be a non-blank string"
+            )
         h = v.strip().strip("[]")  # allow a bracketed IPv6 literal
         try:
             ipaddress.ip_address(h)
@@ -252,8 +279,10 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             pass
         if _HOSTNAME_RE.match(h):
             return h
-        raise HTTPException(status_code=400,
-                            detail="ip/host must be an IP address or hostname (no port, path, or scheme)")
+        raise HTTPException(
+            status_code=400,
+            detail="ip/host must be an IP address or hostname (no port, path, or scheme)",
+        )
 
     def _valid_port(v) -> int:
         # Reject bool (an int subclass) and non-integers (3.14) — silently
@@ -272,7 +301,9 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         else:
             raise HTTPException(status_code=400, detail="port must be an integer")
         if not (1 <= p <= 65535):
-            raise HTTPException(status_code=400, detail="port must be between 1 and 65535")
+            raise HTTPException(
+                status_code=400, detail="port must be between 1 and 65535"
+            )
         return p
 
     def _valid_enabled(v) -> bool:
@@ -291,11 +322,15 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         # constraint IntegrityError happens to be (Kimi); the UNIQUE index is still
         # the authoritative backstop against a race.
         if any(s["name"] == name for s in store.list_servers()):
-            raise HTTPException(status_code=400, detail=f"a server named {name!r} already exists")
+            raise HTTPException(
+                status_code=400, detail=f"a server named {name!r} already exists"
+            )
         try:
             sid = store.add_server(name, ip, port)
         except sqlite3.IntegrityError:
-            raise HTTPException(status_code=400, detail=f"a server named {name!r} already exists")
+            raise HTTPException(
+                status_code=400, detail=f"a server named {name!r} already exists"
+            )
         log.info("hub: registered agent %r at %s:%s (#124)", name, ip, port)
         return {"ok": True, "id": sid, **(store.get_server(sid) or {})}
 
@@ -322,8 +357,13 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         srv = store.get_server(sid)
         if srv is None:
             raise HTTPException(status_code=404, detail=f"no server with id {sid}")
-        log.info("hub: updated agent id=%s → %s:%s enabled=%s (#124)",
-                 sid, srv["ip"], srv["port"], bool(srv["enabled"]))
+        log.info(
+            "hub: updated agent id=%s → %s:%s enabled=%s (#124)",
+            sid,
+            srv["ip"],
+            srv["port"],
+            bool(srv["enabled"]),
+        )
         return {"ok": True, **srv}
 
     @app.delete("/servers/{sid}")
@@ -342,24 +382,36 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         if "polling_token" in body:
             tok = body["polling_token"]
             if tok is None:
-                tok = ""            # JSON null = clear; never store the string "None" (Kimi)
+                tok = ""  # JSON null = clear; never store the string "None" (Kimi)
             if not isinstance(tok, str):
-                raise HTTPException(status_code=400, detail="polling_token must be a string")
+                raise HTTPException(
+                    status_code=400, detail="polling_token must be a string"
+                )
             # No control chars (\r \n \t …) — they'd be injected into the poller's
             # Authorization header, corrupting the request / enabling injection (Kimi).
-            if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in tok):
-                raise HTTPException(status_code=400, detail="polling_token must not contain control characters")
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in tok):
+                raise HTTPException(
+                    status_code=400,
+                    detail="polling_token must not contain control characters",
+                )
             # Live: the poller reads polling_token per cycle (get_polling_token),
             # so no Hub restart is needed to apply it (#124).
             store.set_config("polling_token", tok)
-            log.info("hub: polling_token %s via dashboard (#124)", "set" if tok else "cleared")
+            log.info(
+                "hub: polling_token %s via dashboard (#124)",
+                "set" if tok else "cleared",
+            )
         return {"ok": True}
 
     return app, service
 
 
-def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | None = None,
-            block: bool = True) -> GracefulShutdown:
+def run_hub(
+    config: HubConfig,
+    store: HubStore,
+    shutdown: GracefulShutdown | None = None,
+    block: bool = True,
+) -> GracefulShutdown:
     import uvicorn
 
     from taskpaw_v3.core.net import announce_ready, claim_port, loopback_url
@@ -394,7 +446,9 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
         if stopped and not server_thread.is_alive():
             store.close()
         else:
-            log.error("A hub thread is still alive; leaving the DB connection open to avoid a race")
+            log.error(
+                "A hub thread is still alive; leaving the DB connection open to avoid a race"
+            )
 
     shutdown.register("hub", _stop)
     shutdown.install_signal_handlers()

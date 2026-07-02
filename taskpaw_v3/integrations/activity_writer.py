@@ -60,8 +60,13 @@ def state_from_stdin(raw: str) -> tuple[Optional[str], Optional[str]]:
     return _CLAUDE_EVENT_STATE.get(str(event)), (str(session) if session else None)
 
 
-def write_activity(path: str, tool: str, state: str,
-                   session: Optional[str] = None, ts: Optional[float] = None) -> Path:
+def write_activity(
+    path: str,
+    tool: str,
+    state: str,
+    session: Optional[str] = None,
+    ts: Optional[float] = None,
+) -> Path:
     """Atomically write the activity file (tmp in same dir + os.replace)."""
     p = Path(path).expanduser()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -80,10 +85,15 @@ def write_activity(path: str, tool: str, state: str,
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Write dev-agent activity state.")
     ap.add_argument("--tool", default="agent", help="agent label (claude|codex|...)")
-    ap.add_argument("--state", default=None,
-                    help="busy|idle|waiting; omit to auto-detect from stdin hook payload")
+    ap.add_argument(
+        "--state",
+        default=None,
+        help="busy|idle|waiting; omit to auto-detect from stdin hook payload",
+    )
     ap.add_argument("--session", default=None, help="optional session id")
-    ap.add_argument("--path", default=DEFAULT_PATH, help=f"output file (default {DEFAULT_PATH})")
+    ap.add_argument(
+        "--path", default=DEFAULT_PATH, help=f"output file (default {DEFAULT_PATH})"
+    )
     args = ap.parse_args(argv)
 
     state, session = args.state, args.session

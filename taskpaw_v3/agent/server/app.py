@@ -107,14 +107,20 @@ def create_control_app(
         # The agent console reads status from the loopback control API.
         if status_provider is not None:
             return status_provider()
-        return {"machine": config.machine, "server_id": config.server_id, "monitors": {}}
+        return {
+            "machine": config.machine,
+            "server_id": config.server_id,
+            "monitors": {},
+        }
 
     @app.get("/control/config")
     def get_config() -> dict:
         # Show DESIRED (pending) editable scalars over the running config when an
         # admin is wired, so the Settings form reflects unsaved-since-restart edits
         # (#43); else the plain running config. Mask the secret either way (§4.3).
-        data: dict[str, Any] = admin.config_view() if admin is not None else config.model_dump()
+        data: dict[str, Any] = (
+            admin.config_view() if admin is not None else config.model_dump()
+        )
         if data.get("api_token"):
             data["api_token"] = "***"
         return data
@@ -152,12 +158,13 @@ def create_control_app(
     # live-applied. Loopback-only (this whole app binds control_host). Mounted
     # only when an admin is wired (the headless/interactive launcher provides it).
     if admin is not None:
+
         def _guard(fn, *a):
             try:
                 return fn(*a)
-            except ValueError as e:           # unknown type / dup / invalid config
+            except ValueError as e:  # unknown type / dup / invalid config
                 raise HTTPException(status_code=400, detail=str(e))
-            except KeyError as e:             # not registered in the supervisor
+            except KeyError as e:  # not registered in the supervisor
                 raise HTTPException(status_code=404, detail=str(e))
 
         # The monitor `name` is a free-form id (V2 parity) that may contain '/',
@@ -181,8 +188,9 @@ def create_control_app(
             # (Codex #57a). A valid config persists, then enabled (which can't fail
             # once the monitor is found).
             if "config" not in body and "enabled" not in body:
-                raise HTTPException(status_code=400,
-                                    detail="patch needs 'config' and/or 'enabled'")
+                raise HTTPException(
+                    status_code=400, detail="patch needs 'config' and/or 'enabled'"
+                )
             out: dict = {"ok": True, "name": name}
             if "config" in body:
                 out = _guard(admin.update, name, body["config"])

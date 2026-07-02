@@ -42,7 +42,7 @@ def _as_bool(v: Any) -> bool:
 
 # Shared network-exposure guard (#114) — single source of truth used by the agent
 # UI (here), the agent startup, and the Hub, so the rules can't drift.
-from taskpaw_v3.core.net import guard_bind_exposure
+from taskpaw_v3.core.net import guard_bind_exposure  # noqa: E402
 
 
 class MonitorAdmin:
@@ -112,8 +112,10 @@ class MonitorAdmin:
             # but a live instance id) would otherwise pass validation, get written
             # to agent.yaml, and only THEN fail at register() — leaving config
             # changed after a failed request (Codex #57a).
-            resolved = canonical_name(spec)   # raises on top/config name conflict
-            if resolved and resolved in {monitor_name(m) for m in effective_monitors(self._config)}:
+            resolved = canonical_name(spec)  # raises on top/config name conflict
+            if resolved and resolved in {
+                monitor_name(m) for m in effective_monitors(self._config)
+            }:
                 raise ValueError(f"a monitor named {resolved!r} already exists")
             # catalog.add_monitor validates against the plugin, rejects unknown
             # type / system plugin / duplicate name, and emits {type_id,name,config}.
@@ -160,7 +162,7 @@ class MonitorAdmin:
                 # next boot (Codex).
                 plugin, cfg = self._validated_config(m)
                 if self._sup is not None and not self._sup.has(iid):
-                    self._sup.register(plugin, cfg, instance_id=iid)   # launches now
+                    self._sup.register(plugin, cfg, instance_id=iid)  # launches now
                 # A manual-start monitor (managed Lada LAUNCHES lada-cli) is a
                 # per-SESSION runtime toggle: Start launches it now but enabled
                 # stays false, so it does NOT auto-start on the next boot — the
@@ -192,7 +194,7 @@ class MonitorAdmin:
             # id: a config update must not rename the monitor (breaks Hub grouping).
             raw = {**(m.get("config") or {}), **config}
             raw["name"] = iid
-            cfg = plugin.validate_config(raw)        # authoritative validation
+            cfg = plugin.validate_config(raw)  # authoritative validation
             # Live-apply BEFORE persisting: if reconfigure() fails (e.g. a wedged
             # worker that won't stop in time → RuntimeError), don't leave disk
             # ahead of runtime (Codex). reconfigure rolls back to the old config
@@ -206,8 +208,13 @@ class MonitorAdmin:
     # Editable top-level agent settings (NOT monitors — that's the monitor API —
     # and NOT server_id, the stable identity used for Hub grouping).
     _EDITABLE_CONFIG = (
-        "machine", "bind_host", "bind_port", "control_host", "control_port",
-        "api_token", "host_metrics",
+        "machine",
+        "bind_host",
+        "bind_port",
+        "control_host",
+        "control_port",
+        "api_token",
+        "host_metrics",
     )
     # Editable fields that are NOT live-safe: changing them needs a restart (only
     # api_token is read per-request). Used for the restart-required baseline.
@@ -238,9 +245,12 @@ class MonitorAdmin:
                 p.pop("api_token", None)
             # Merge over the DESIRED scalars (so a pending edit isn't lost by a
             # later save) on top of the running config's monitors (always current).
-            editables = {**self._desired, **{k: v for k, v in p.items() if k in self._EDITABLE_CONFIG}}
+            editables = {
+                **self._desired,
+                **{k: v for k, v in p.items() if k in self._EDITABLE_CONFIG},
+            }
             merged = {**self._config.model_dump(), **editables}
-            validated = AgentConfig(**merged)        # full validation (ports/loopback/blank)
+            validated = AgentConfig(**merged)  # full validation (ports/loopback/blank)
             # Network-exposure guard (constitution: no public/WAN exposure). The
             # network API binds bind_host after restart; from the UI we refuse a
             # wildcard/all-interfaces bind outright, and require a token for any
@@ -251,12 +261,15 @@ class MonitorAdmin:
             # still loopback) — not a brittle exact-string set (Codex #43 r3).
             # Shared guard (wildcard / public / non-loopback-without-token), the
             # single source used by the agent startup and the Hub too (#114/Kimi).
-            guard_bind_exposure(validated.bind_host, validated.api_token, label="network API")
+            guard_bind_exposure(
+                validated.bind_host, validated.api_token, label="network API"
+            )
             # A restart is needed if any non-live DESIRED field differs from what
             # the agent is actually RUNNING (the still-at-boot _config) — this
             # stays True across saves until the agent restarts (Codex #43).
             restart_required = any(
-                getattr(validated, f) != getattr(self._config, f) for f in self._NON_LIVE_CONFIG
+                getattr(validated, f) != getattr(self._config, f)
+                for f in self._NON_LIVE_CONFIG
             )
             # Persist the candidate desired scalars FIRST; commit to self._desired
             # (and the live token) ONLY if the write succeeds, so a failed save

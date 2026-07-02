@@ -76,9 +76,12 @@ def _resolve_functional_bash() -> str | None:
     if exe is None:
         return None
     try:
-        ok = subprocess.run(
-            [exe, "-c", "exit 0"], capture_output=True, timeout=30
-        ).returncode == 0
+        ok = (
+            subprocess.run(
+                [exe, "-c", "exit 0"], capture_output=True, timeout=30
+            ).returncode
+            == 0
+        )
     except (OSError, subprocess.SubprocessError):
         return None
     return exe if ok else None
@@ -87,7 +90,9 @@ def _resolve_functional_bash() -> str | None:
 # Short-circuit on Windows: the test is skipped there anyway, so don't spawn the
 # WSL-launcher bash at import time (avoids the "install a distribution" notice +
 # collection latency).
-_FUNCTIONAL_BASH = None if platform.system() == "Windows" else _resolve_functional_bash()
+_FUNCTIONAL_BASH = (
+    None if platform.system() == "Windows" else _resolve_functional_bash()
+)
 
 
 # These are POSIX (macOS/Linux) setup scripts — never executed on Windows. A

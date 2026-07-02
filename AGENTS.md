@@ -53,6 +53,15 @@ uv sync --group dev              # create/refresh the dev environment
 uv lock --check                  # lockfile must be current (CI enforces this)
 uv run pytest                    # run tests  ← canonical test command for THIS repo
 uv run python -m py_compile taskpaw.py taskpaw_hub.py macsubs.py   # syntax gate
+uv run ruff check .              # lint (taskpaw_v3 + tests + scripts; V2 excluded)
+uv run ruff format --check .     # formatting gate
+uv run mypy                      # type-check (scoped to taskpaw_v3/)
+```
+
+Frontend (V3 UI) lint lives in `taskpaw_v3/ui`:
+
+```bash
+cd taskpaw_v3/ui && npm run lint  # ESLint (React + TS)
 ```
 
 > `uv run pytest` is the whole story here — there is no `web` extra. Optional

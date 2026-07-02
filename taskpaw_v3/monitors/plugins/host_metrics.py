@@ -22,6 +22,7 @@ from taskpaw_v3.monitors.base import (
     MonitorInstance,
     MonitorPlugin,
     MonitorStatus,
+    State,
 )
 
 try:
@@ -49,10 +50,14 @@ def read_gpu() -> Optional[dict]:
         return None
     try:
         out = subprocess.run(
-            ["nvidia-smi",
-             "--query-gpu=utilization.gpu,memory.used,memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
+            [
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if out.returncode != 0 or not out.stdout.strip():
@@ -69,7 +74,7 @@ def read_gpu() -> Optional[dict]:
             return None
         return {
             "util_pct": round(sum(utils) / len(utils), 1),  # avg utilization
-            "mem_used_mb": round(used),                     # summed VRAM
+            "mem_used_mb": round(used),  # summed VRAM
             "mem_total_mb": round(total),
         }
     except Exception:
@@ -79,19 +84,33 @@ def read_gpu() -> Optional[dict]:
 class HostMetricsInstance(MonitorInstance):
     def __init__(self, instance_id: str, config: HostMetricsConfig) -> None:
         super().__init__(instance_id, config)
-        self._prev_net: Optional[tuple[float, int, int]] = None  # (ts, bytes_sent, bytes_recv)
+        self._prev_net: Optional[tuple[float, int, int]] = (
+            None  # (ts, bytes_sent, bytes_recv)
+        )
         self._cpu_breaches = 0
         self._alerted: set[str] = set()  # which metrics are currently in alert
 
-    def _emit_threshold(self, emit, metric: str, breached: bool, breach_msg: str, recover_msg: str) -> None:
+    def _emit_threshold(
+        self, emit, metric: str, breached: bool, breach_msg: str, recover_msg: str
+    ) -> None:
         """Edge-triggered alert/recovery per metric (separate messages so the
         recovery 'done' doesn't claim the threshold is still exceeded)."""
         if breached and metric not in self._alerted:
             self._alerted.add(metric)
-            emit("alert", f"{self.config.name}: {metric} high", breach_msg, dedupe_key=None)
+            emit(
+                "alert",
+                f"{self.config.name}: {metric} high",
+                breach_msg,
+                dedupe_key=None,
+            )
         elif not breached and metric in self._alerted:
             self._alerted.discard(metric)
-            emit("done", f"{self.config.name}: {metric} recovered", recover_msg, dedupe_key=None)
+            emit(
+                "done",
+                f"{self.config.name}: {metric} recovered",
+                recover_msg,
+                dedupe_key=None,
+            )
 
     def check(self, emit: EventEmitter) -> MonitorStatus:
         if psutil is None:
@@ -121,21 +140,30 @@ class HostMetricsInstance(MonitorInstance):
         else:
             self._cpu_breaches = 0
         self._emit_threshold(
-            emit, "cpu", self._cpu_breaches >= cfg.cpu_sustained_cycles,
+            emit,
+            "cpu",
+            self._cpu_breaches >= cfg.cpu_sustained_cycles,
             f"CPU {cpu:.0f}% ≥ {cfg.cpu_alert_pct:.0f}% for {self._cpu_breaches} cycles",
-            f"CPU back to {cpu:.0f}% (< {cfg.cpu_alert_pct:.0f}%)")
+            f"CPU back to {cpu:.0f}% (< {cfg.cpu_alert_pct:.0f}%)",
+        )
         self._emit_threshold(
-            emit, "memory", mem >= cfg.mem_alert_pct,
+            emit,
+            "memory",
+            mem >= cfg.mem_alert_pct,
             f"memory {mem:.0f}% ≥ {cfg.mem_alert_pct:.0f}%",
-            f"memory back to {mem:.0f}% (< {cfg.mem_alert_pct:.0f}%)")
+            f"memory back to {mem:.0f}% (< {cfg.mem_alert_pct:.0f}%)",
+        )
         self._emit_threshold(
-            emit, "disk", disk >= cfg.disk_alert_pct,
+            emit,
+            "disk",
+            disk >= cfg.disk_alert_pct,
             f"disk {disk:.0f}% ≥ {cfg.disk_alert_pct:.0f}%",
-            f"disk back to {disk:.0f}% (< {cfg.disk_alert_pct:.0f}%)")
+            f"disk back to {disk:.0f}% (< {cfg.disk_alert_pct:.0f}%)",
+        )
 
         # A breached threshold is a "degraded" status (a valid MonitorStatus
         # state); "warn"/"alert" are EVENT levels, not statuses.
-        state = "degraded" if self._alerted else "ok"
+        state: State = "degraded" if self._alerted else "ok"
         metrics = {
             "cpu_pct": round(cpu, 1),
             "mem_pct": round(mem, 1),
@@ -152,7 +180,9 @@ class HostMetricsInstance(MonitorInstance):
             "gpu_mem_used_mb": gpu["mem_used_mb"] if gpu else "n/a",
             "gpu_mem_total_mb": gpu["mem_total_mb"] if gpu else "n/a",
         }
-        return MonitorStatus(state=state, detail=",".join(sorted(self._alerted)) or "ok", metrics=metrics)
+        return MonitorStatus(
+            state=state, detail=",".join(sorted(self._alerted)) or "ok", metrics=metrics
+        )
 
 
 class HostMetricsPlugin(MonitorPlugin):
@@ -160,7 +190,7 @@ class HostMetricsPlugin(MonitorPlugin):
     display_name = "Host metrics"
     category = "service"
     config_version = 1
-    system = True   # auto-injected per agent (§5b) — not operator-selectable
+    system = True  # auto-injected per agent (§5b) — not operator-selectable
 
     @classmethod
     def config_model(cls) -> type[BaseMonitorConfig]:

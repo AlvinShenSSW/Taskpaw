@@ -43,14 +43,17 @@ class BaseMonitorConfig(BaseModel):
     # Reject unknown/typo keys instead of silently dropping them.
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(..., min_length=1,
-                      description="A unique name for this monitor on this machine.")
-    poll_interval: float = Field(10.0, ge=1.0,
-                                 description="How often to check, in seconds (min 1).")
-    timeout: float = Field(30.0, gt=0,
-                           description="Per-check command/HTTP timeout, in seconds.")
+    name: str = Field(
+        ..., min_length=1, description="A unique name for this monitor on this machine."
+    )
+    poll_interval: float = Field(
+        10.0, ge=1.0, description="How often to check, in seconds (min 1)."
+    )
+    timeout: float = Field(
+        30.0, gt=0, description="Per-check command/HTTP timeout, in seconds."
+    )
     # Advanced/internal caps — hidden from the form by the base ui-schema (catalog).
-    max_events_per_minute: int = Field(60, ge=1)    # storm → folded summary
+    max_events_per_minute: int = Field(60, ge=1)  # storm → folded summary
     max_line_bytes: int = Field(1_000_000, ge=1024)  # tail line cap
 
     @field_validator("name")

@@ -99,7 +99,7 @@ class EventQueue:
                 self._persist_counter(candidate_id + 1)
 
             self._queue.append(evt)
-            self._history.append(evt)   # UI history — independent of ack trimming
+            self._history.append(evt)  # UI history — independent of ack trimming
             self._next_id = candidate_id + 1
             overflow = len(self._queue) - self._max_size
             if overflow > 0:

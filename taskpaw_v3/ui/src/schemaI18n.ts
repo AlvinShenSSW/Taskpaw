@@ -170,5 +170,7 @@ export function localizeSchema(schema: RJSFSchema, typeId?: string, lang?: strin
       nextProps[field] = spec;
     }
   }
-  return { ...schema, properties: nextProps };
+  // nextProps mirrors the input property shapes (open-ended JSON Schema); assert
+  // back to RJSFSchema rather than widen every field to JSONSchema7Definition.
+  return { ...schema, properties: nextProps } as RJSFSchema;
 }

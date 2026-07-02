@@ -26,9 +26,9 @@ def _coverage_config() -> dict:
 
 def test_pytest_cov_available() -> None:
     """pytest-cov must be in the dev group so `pytest --cov` works in CI."""
-    assert (
-        importlib.util.find_spec("pytest_cov") is not None
-    ), "pytest-cov missing — add it to the [dependency-groups] dev list"
+    assert importlib.util.find_spec("pytest_cov") is not None, (
+        "pytest-cov missing — add it to the [dependency-groups] dev list"
+    )
 
 
 def test_coverage_scoped_to_v3_only() -> None:

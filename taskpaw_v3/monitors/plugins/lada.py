@@ -37,6 +37,7 @@ from taskpaw_v3.monitors.base import (
     MonitorInstance,
     MonitorPlugin,
     MonitorStatus,
+    State,
 )
 from taskpaw_v3.monitors.plugins.host_metrics import read_gpu
 
@@ -45,7 +46,17 @@ try:
 except ImportError:  # pragma: no cover
     psutil = None
 
-VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".ts", ".m4v"}
+VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".webm",
+    ".ts",
+    ".m4v",
+}
 
 # tqdm-style progress regexes. lada-cli localizes its labels via gettext but ships
 # no zh translation, so its DEFAULT output is English; the labels are matched
@@ -54,10 +65,16 @@ VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".t
 #   ABF-346.mp4:
 #   Processing video:  15%|███ |Processed: 06:09 (36703f) | Remaining: 30:47 (207454f) | Speed: 112.3fps
 #   正在处理视频： 27%|███ |已处理： 26:58 (84163帧) | 剩余： 1:45:32 (230599帧) | 速度：36.4 帧/秒
-_RE_FILENAME = re.compile(r"^(.+\.(?:mp4|mkv|avi|mov|wmv|flv|webm|ts|m4v))\s*[:：]\s*$", re.IGNORECASE)
+_RE_FILENAME = re.compile(
+    r"^(.+\.(?:mp4|mkv|avi|mov|wmv|flv|webm|ts|m4v))\s*[:：]\s*$", re.IGNORECASE
+)
 _RE_PCT = re.compile(r"(\d+)\s*%")
-_RE_ELAPSED = re.compile(r"(?:已处理|Processed)[:：]\s*([\d:]+)\s*\((\d+)\s*(?:帧|f)\)", re.IGNORECASE)
-_RE_REMAINING = re.compile(r"(?:剩余|Remaining)[:：]\s*([\d:]+)\s*\((\d+)\s*(?:帧|f)\)", re.IGNORECASE)
+_RE_ELAPSED = re.compile(
+    r"(?:已处理|Processed)[:：]\s*([\d:]+)\s*\((\d+)\s*(?:帧|f)\)", re.IGNORECASE
+)
+_RE_REMAINING = re.compile(
+    r"(?:剩余|Remaining)[:：]\s*([\d:]+)\s*\((\d+)\s*(?:帧|f)\)", re.IGNORECASE
+)
 _RE_FPS = re.compile(r"(?:速度|Speed)[:：]\s*([\d.]+)", re.IGNORECASE)
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -77,7 +94,7 @@ def parse_progress_line(line: str, prev: dict) -> dict:
     if m:
         new_file = m.group(1)
         if prev.get("current_file") != new_file:
-            return {"current_file": new_file}   # reset stale %/fps on a new file
+            return {"current_file": new_file}  # reset stale %/fps on a new file
         return prev
     m_pct = _RE_PCT.search(line)
     if not m_pct:
@@ -108,9 +125,11 @@ def _proc_name_eq(a: str, b: str) -> bool:
     """Process names equal ignoring case AND an optional Windows '.exe' suffix —
     so a passive `process_name` of "lada-cli" matches the actual "lada-cli.exe"
     (the common Windows case the default would otherwise miss) (#70)."""
+
     def norm(s: str) -> str:
         s = s.strip().lower()
         return s[:-4] if s.endswith(".exe") else s
+
     return norm(a) == norm(b)
 
 
@@ -129,14 +148,19 @@ def process_alive(name: str) -> bool:
             # and match '.exe'-tolerantly.
             out = subprocess.run(
                 ["tasklist", "/NH", "/FO", "CSV"],
-                capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=_NO_WINDOW,
             )
             for line in out.stdout.strip().splitlines():
                 parts = line.split('","')
                 if parts and _proc_name_eq(parts[0].replace('"', ""), name):
                     return True
             return False
-        out = subprocess.run(["pgrep", "-x", name], capture_output=True, text=True, timeout=5)
+        out = subprocess.run(
+            ["pgrep", "-x", name], capture_output=True, text=True, timeout=5
+        )
         return out.returncode == 0
     except Exception:
         # Defensive liveness scan: ANY failure (psutil error, subprocess hiccup,
@@ -152,7 +176,11 @@ def _count_videos(folder: str) -> Optional[int]:
         p = Path(folder)
         if not p.exists():
             return None
-        return sum(1 for f in p.iterdir() if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS)
+        return sum(
+            1
+            for f in p.iterdir()
+            if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+        )
     except OSError:
         return None
 
@@ -164,7 +192,11 @@ def _list_videos(folder: str) -> list[str]:
         p = Path(folder)
         if not p.exists():
             return []
-        return sorted(f.name for f in p.iterdir() if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS)
+        return sorted(
+            f.name
+            for f in p.iterdir()
+            if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+        )
     except OSError:
         return []
 
@@ -186,7 +218,7 @@ def args_supply_io(extra_args: str) -> tuple[bool, bool]:
         for i, t in enumerate(toks):
             if t == opt:
                 nxt = toks[i + 1] if i + 1 < len(toks) else ""
-                if nxt and not nxt.startswith("-"):   # a real value follows
+                if nxt and not nxt.startswith("-"):  # a real value follows
                     return True
             elif t.startswith(opt + "=") and len(t) > len(opt) + 1:  # non-empty =value
                 return True
@@ -199,8 +231,10 @@ def _cpu_mem() -> dict:
     if psutil is None:
         return {}
     try:
-        return {"cpu_pct": round(psutil.cpu_percent(interval=None), 1),
-                "mem_pct": round(psutil.virtual_memory().percent, 1)}
+        return {
+            "cpu_pct": round(psutil.cpu_percent(interval=None), 1),
+            "mem_pct": round(psutil.virtual_memory().percent, 1),
+        }
     except Exception:
         # Best-effort metrics: a psutil failure shouldn't sink the status update.
         return {}
@@ -208,29 +242,43 @@ def _cpu_mem() -> dict:
 
 class LadaConfig(BaseMonitorConfig):
     lada_cli_path: str = Field(
-        "", description="Full path to the lada-cli EXECUTABLE FILE (e.g. "
+        "",
+        description="Full path to the lada-cli EXECUTABLE FILE (e.g. "
         r"C:\Lada\lada-cli.exe) — NOT the folder. Set it → MANAGED mode (TaskPaw "
         "launches lada-cli, needs the input/output folders below). Leave empty → "
-        "PASSIVE mode (just watch an already-running lada-cli).")
+        "PASSIVE mode (just watch an already-running lada-cli).",
+    )
     process_name: str = Field(
-        "lada-cli", description="Passive mode only: the process to detect. "
-        "Matches with or without a trailing '.exe' (Windows: lada-cli.exe).")
+        "lada-cli",
+        description="Passive mode only: the process to detect. "
+        "Matches with or without a trailing '.exe' (Windows: lada-cli.exe).",
+    )
     lada_input_folder: str = Field(
-        "", description="Folder of videos to process (lada-cli --input). Required in "
-        "managed mode.")
+        "",
+        description="Folder of videos to process (lada-cli --input). Required in "
+        "managed mode.",
+    )
     lada_output_folder: str = Field(
-        "", description="Folder where lada-cli writes results (--output). Required in "
-        "managed mode; also drives the queue count and completion notice.")
+        "",
+        description="Folder where lada-cli writes results (--output). Required in "
+        "managed mode; also drives the queue count and completion notice.",
+    )
     lada_extra_args: str = Field(
-        "", description="Extra lada-cli flags passed verbatim, e.g. "
-        "--device cuda:1 --encoder h264_nvenc")
+        "",
+        description="Extra lada-cli flags passed verbatim, e.g. "
+        "--device cuda:1 --encoder h264_nvenc",
+    )
     lada_gpu_monitor: bool = Field(
-        True, description="Report GPU% / VRAM via nvidia-smi (turn off on a machine "
-        "without an NVIDIA GPU).")
+        True,
+        description="Report GPU% / VRAM via nvidia-smi (turn off on a machine "
+        "without an NVIDIA GPU).",
+    )
     lada_capture_progress: bool = Field(
-        False, description="Advanced. Off (default): lada-cli opens its OWN console "
+        False,
+        description="Advanced. Off (default): lada-cli opens its OWN console "
         "window with its progress bar. On: capture lada's output into TaskPaw "
-        "(no separate window) to show file/%/fps/ETA in the status pane.")
+        "(no separate window) to show file/%/fps/ETA in the status pane.",
+    )
 
     @model_validator(mode="after")
     def _managed_needs_folders(self) -> "LadaConfig":
@@ -250,7 +298,8 @@ class LadaConfig(BaseMonitorConfig):
                 raise ValueError(
                     "managed Lada (lada_cli_path set) needs an input AND output "
                     f"folder (or --input/--output in extra args); missing: "
-                    f"{', '.join(missing)}")
+                    f"{', '.join(missing)}"
+                )
         return self
 
 
@@ -263,10 +312,10 @@ class LadaInstance(MonitorInstance):
         self._progress: dict = {}
         self._recent_output: deque[str] = deque(maxlen=_RECENT_OUTPUT_LINES)
         self._lock = threading.Lock()
-        self._inputs: list[str] = []          # start-of-run input snapshot
+        self._inputs: list[str] = []  # start-of-run input snapshot
         self._launch_error: Optional[str] = None
         self._done_emitted = False
-        self._prev_running: Optional[bool] = None   # passive transition
+        self._prev_running: Optional[bool] = None  # passive transition
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self, emit: EventEmitter) -> None:
@@ -306,9 +355,11 @@ class LadaInstance(MonitorInstance):
         # "[WinError 5] access denied", so catch it here with an actionable message.
         cli = Path(cfg.lada_cli_path)
         if cli.is_dir():
-            self._emit_launch_error(emit,
+            self._emit_launch_error(
+                emit,
                 f"lada_cli_path is a folder ({cfg.lada_cli_path}); point it at the "
-                f"lada-cli executable, e.g. {cli / 'lada-cli.exe'}")
+                f"lada-cli executable, e.g. {cli / 'lada-cli.exe'}",
+            )
             return
         # A non-existent path is left to Popen → FileNotFoundError below (one
         # "not found" path; also keeps mocked-Popen tests exercising the argv).
@@ -328,7 +379,11 @@ class LadaInstance(MonitorInstance):
             flags = _NO_WINDOW if capture else _NEW_CONSOLE
         else:
             flags = 0
-        kw: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0) if capture else {}
+        kw: dict = (
+            dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+            if capture
+            else {}
+        )
         try:
             # shell=False (list argv) — constitution §2.
             self._process = subprocess.Popen(cmd, creationflags=flags, **kw)
@@ -340,17 +395,22 @@ class LadaInstance(MonitorInstance):
             return
         except PermissionError as e:
             # WinError 5 — usually a non-executable target or an AV/permission block.
-            self._emit_launch_error(emit,
+            self._emit_launch_error(
+                emit,
                 f"access denied launching {cfg.lada_cli_path} ({e}); make sure it's "
-                f"the lada-cli executable and isn't blocked by antivirus")
+                f"the lada-cli executable and isn't blocked by antivirus",
+            )
             return
         except Exception as e:
             self._emit_launch_error(emit, f"failed to launch lada-cli: {e}")
             return
 
         if capture and self._process.stdout is not None:
-            self._reader = threading.Thread(target=self._reader_loop,
-                                            name=f"lada-reader-{self.instance_id}", daemon=True)
+            self._reader = threading.Thread(
+                target=self._reader_loop,
+                name=f"lada-reader-{self.instance_id}",
+                daemon=True,
+            )
             self._reader.start()
 
     def stop(self, timeout: float = 5.0) -> None:
@@ -358,11 +418,11 @@ class LadaInstance(MonitorInstance):
         p = self._process
         if p is not None and p.poll() is None:
             try:
-                p.terminate()                       # graceful first
+                p.terminate()  # graceful first
                 try:
                     p.wait(timeout=max(0.1, timeout))
                 except subprocess.TimeoutExpired:
-                    p.kill()                        # then force
+                    p.kill()  # then force
                     try:
                         p.wait(timeout=2)
                     except subprocess.TimeoutExpired:
@@ -382,9 +442,9 @@ class LadaInstance(MonitorInstance):
         buf = b""
         try:
             while not self._stop.is_set():
-                ch = stdout.read(1)        # byte at a time: lada uses \r in-place updates
+                ch = stdout.read(1)  # byte at a time: lada uses \r in-place updates
                 if ch == b"":
-                    break                  # EOF — process exited
+                    break  # EOF — process exited
                 if ch in (b"\r", b"\n"):
                     self._consume_output(buf)
                     buf = b""
@@ -436,13 +496,17 @@ class LadaInstance(MonitorInstance):
             self._done_emitted = True
             q = self._queue_str()
             if retcode == 0:
-                emit("done", f"{cfg.name} complete",
-                     f"Lada processing complete{(' | ' + q) if q else ''}"
-                     f" | {datetime.now():%Y-%m-%d %H:%M:%S}")
+                emit(
+                    "done",
+                    f"{cfg.name} complete",
+                    f"Lada processing complete{(' | ' + q) if q else ''}"
+                    f" | {datetime.now():%Y-%m-%d %H:%M:%S}",
+                )
             else:
                 emit("alert", f"{cfg.name} failed", detail)
-        return self._build_status("idle" if retcode == 0 else "error",
-                                  detail=None if retcode == 0 else detail)
+        return self._build_status(
+            "idle" if retcode == 0 else "error", detail=None if retcode == 0 else detail
+        )
 
     def _managed_exit_detail(self, retcode: int) -> str:
         detail = f"Lada exited with code {retcode}"
@@ -459,16 +523,21 @@ class LadaInstance(MonitorInstance):
     def _check_passive(self, emit: EventEmitter) -> MonitorStatus:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
         running = process_alive(cfg.process_name or "lada-cli")
-        if self._prev_running is True and not running:   # exited → completion
+        if self._prev_running is True and not running:  # exited → completion
             q = self._queue_str()
-            emit("done", f"{cfg.name} complete",
-                 f"Lada processing complete{(' | ' + q) if q else ''}"
-                 f" | {datetime.now():%Y-%m-%d %H:%M:%S}")
+            emit(
+                "done",
+                f"{cfg.name} complete",
+                f"Lada processing complete{(' | ' + q) if q else ''}"
+                f" | {datetime.now():%Y-%m-%d %H:%M:%S}",
+            )
         self._prev_running = running
         return self._build_status("running" if running else "idle")
 
     # ── status assembly ────────────────────────────────────────────────────
-    def _build_status(self, state: str, detail: Optional[str] = None) -> MonitorStatus:
+    def _build_status(
+        self, state: State, detail: Optional[str] = None
+    ) -> MonitorStatus:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
         metrics: dict = {}
         # "Processing file X" (parsed progress + current-file detection) is only
@@ -494,8 +563,9 @@ class LadaInstance(MonitorInstance):
                 metrics["gpu_pct"] = gpu["util_pct"]
                 metrics["gpu_mem_used_mb"] = gpu["mem_used_mb"]
                 metrics["gpu_mem_total_mb"] = gpu["mem_total_mb"]
-        return MonitorStatus(state=state, detail=detail or self._detail(state, metrics),
-                             metrics=metrics)
+        return MonitorStatus(
+            state=state, detail=detail or self._detail(state, metrics), metrics=metrics
+        )
 
     def _detail(self, state: str, m: dict) -> str:
         # A clean one-line summary (the rich view is the UI metrics dashboard). Use
@@ -521,8 +591,11 @@ class LadaInstance(MonitorInstance):
         if not self._inputs or not cfg.lada_input_folder:
             return
         try:
-            cur = {f.name for f in Path(cfg.lada_input_folder).iterdir()
-                   if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS}
+            cur = {
+                f.name
+                for f in Path(cfg.lada_input_folder).iterdir()
+                if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+            }
         except OSError:
             return
         out = _count_videos(cfg.lada_output_folder) or 0
@@ -578,9 +651,17 @@ class LadaPlugin(MonitorPlugin):
         # descriptions (rjsf renders them) — not a ui:help key.
         return {
             "ui:order": [
-                "name", "lada_cli_path", "lada_input_folder", "lada_output_folder",
-                "process_name", "lada_extra_args", "lada_gpu_monitor",
-                "lada_capture_progress", "poll_interval", "timeout", "*",
+                "name",
+                "lada_cli_path",
+                "lada_input_folder",
+                "lada_output_folder",
+                "process_name",
+                "lada_extra_args",
+                "lada_gpu_monitor",
+                "lada_capture_progress",
+                "poll_interval",
+                "timeout",
+                "*",
             ],
             "lada_cli_path": {"ui:options": {"taskpawPath": "file"}},
             "lada_input_folder": {"ui:options": {"taskpawPath": "directory"}},

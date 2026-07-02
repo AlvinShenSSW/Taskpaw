@@ -12,7 +12,7 @@ import logging
 import signal
 import subprocess
 import threading
-from typing import Callable, Optional
+from typing import Callable
 
 log = logging.getLogger("taskpaw.lifecycle")
 
@@ -38,6 +38,7 @@ class GracefulShutdown:
 
     def install_signal_handlers(self) -> None:
         """Trigger shutdown on SIGTERM/SIGINT (service mode / Ctrl-C)."""
+
         def _handler(signum, _frame):
             log.info("Received signal %s → graceful shutdown", signum)
             self.shutdown()

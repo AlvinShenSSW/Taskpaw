@@ -38,13 +38,17 @@ def _parse_dt(s: str) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def evaluate_heartbeat(cfg: HeartbeatConfig, now: Optional[datetime] = None) -> MonitorStatus:
+def evaluate_heartbeat(
+    cfg: HeartbeatConfig, now: Optional[datetime] = None
+) -> MonitorStatus:
     """Pure evaluation (testable): returns the heartbeat status."""
     now = now or datetime.now(timezone.utc)
     # expanduser so a `~/...` path in agent.yaml resolves (Path() alone doesn't).
     p = Path(cfg.path).expanduser()
     if not p.exists():
-        return MonitorStatus(state="error", detail=f"heartbeat file missing: {cfg.path}")
+        return MonitorStatus(
+            state="error", detail=f"heartbeat file missing: {cfg.path}"
+        )
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception as e:
@@ -54,7 +58,9 @@ def evaluate_heartbeat(cfg: HeartbeatConfig, now: Optional[datetime] = None) -> 
 
     status = str(data.get(cfg.status_field, "")).lower()
     if status in {s.lower() for s in cfg.hibernating_states}:
-        return MonitorStatus(state="ok", detail=f"{status} (not stale)", metrics={"status": status})
+        return MonitorStatus(
+            state="ok", detail=f"{status} (not stale)", metrics={"status": status}
+        )
 
     due_raw = data.get(cfg.due_field)
     if due_raw:
@@ -64,15 +70,20 @@ def evaluate_heartbeat(cfg: HeartbeatConfig, now: Optional[datetime] = None) -> 
             return MonitorStatus(state="error", detail=f"bad {cfg.due_field}: {e}")
         overdue = (now - due).total_seconds() - cfg.grace_seconds
         if overdue > 0:
-            return MonitorStatus(state="error", detail=f"HUNG: {int(overdue)}s past due+grace",
-                                 metrics={"status": status, "overdue_s": int(overdue)})
+            return MonitorStatus(
+                state="error",
+                detail=f"HUNG: {int(overdue)}s past due+grace",
+                metrics={"status": status, "overdue_s": int(overdue)},
+            )
         return MonitorStatus(state="ok", detail="fresh", metrics={"status": status})
 
     # Fallback: file mtime + grace.
     mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
     overdue = (now - mtime).total_seconds() - cfg.grace_seconds
     if overdue > 0:
-        return MonitorStatus(state="error", detail=f"stale mtime: {int(overdue)}s past grace")
+        return MonitorStatus(
+            state="error", detail=f"stale mtime: {int(overdue)}s past grace"
+        )
     return MonitorStatus(state="ok", detail="fresh (mtime)")
 
 

@@ -86,12 +86,24 @@ def _status_text(snap: Any) -> str:
     if is_host and not bad_state:
         if _is_num(m.get("cpu_pct")):
             parts.append(f"CPU {m['cpu_pct']:.0f}%")
-        if _is_num(m.get("mem_used_mb")) and _is_num(m.get("mem_total_mb")) and m["mem_total_mb"] > 0:
-            parts.append(f"RAM {m['mem_used_mb'] / 1024:.1f}/{m['mem_total_mb'] / 1024:.1f}GB")
+        if (
+            _is_num(m.get("mem_used_mb"))
+            and _is_num(m.get("mem_total_mb"))
+            and m["mem_total_mb"] > 0
+        ):
+            parts.append(
+                f"RAM {m['mem_used_mb'] / 1024:.1f}/{m['mem_total_mb'] / 1024:.1f}GB"
+            )
         if _is_num(m.get("gpu_pct")):
             parts.append(f"GPU {m['gpu_pct']:.0f}%")
-        if _is_num(m.get("gpu_mem_used_mb")) and _is_num(m.get("gpu_mem_total_mb")) and m["gpu_mem_total_mb"] > 0:
-            parts.append(f"VRAM {m['gpu_mem_used_mb'] / 1024:.1f}/{m['gpu_mem_total_mb'] / 1024:.1f}GB")
+        if (
+            _is_num(m.get("gpu_mem_used_mb"))
+            and _is_num(m.get("gpu_mem_total_mb"))
+            and m["gpu_mem_total_mb"] > 0
+        ):
+            parts.append(
+                f"VRAM {m['gpu_mem_used_mb'] / 1024:.1f}/{m['gpu_mem_total_mb'] / 1024:.1f}GB"
+            )
 
     # lada-style queue: "X/Y done (Z left)" + the current task between pipes.
     is_lada = tid == "lada" or (tid is None and _is_num(m.get("queue_total")))
@@ -101,10 +113,15 @@ def _status_text(snap: Any) -> str:
         # updating (Codex + Kimi).
         total = int(m["queue_total"])
         done = int(m["queue_completed"]) if _is_num(m.get("queue_completed")) else 0
-        left = (max(0, int(m["queue_remaining"])) if _is_num(m.get("queue_remaining"))
-                else max(0, total - done))
+        left = (
+            max(0, int(m["queue_remaining"]))
+            if _is_num(m.get("queue_remaining"))
+            else max(0, total - done)
+        )
         seg = f"{done}/{total} done ({left} left)"
-        if isinstance(m.get("current_file"), str) and (cf := _inline(m["current_file"])):
+        if isinstance(m.get("current_file"), str) and (
+            cf := _inline(m["current_file"])
+        ):
             seg += f" | {cf} |"
         parts.append(seg)
 
@@ -115,7 +132,11 @@ def _status_text(snap: Any) -> str:
     # Only when a queue metric is actually present — a typed-but-down ComfyUI
     # (state "error", empty metrics) must show its state, not "0 running, 0
     # pending", which would hide the outage from OpenClaw (Codex + Kimi).
-    if is_comfyui and not bad_state and (_is_num(m.get("running")) or _is_num(m.get("pending"))):
+    if (
+        is_comfyui
+        and not bad_state
+        and (_is_num(m.get("running")) or _is_num(m.get("pending")))
+    ):
         # Validate each side before int() — one valid + one non-finite must not
         # crash the render (Codex + Kimi).
         running = int(m["running"]) if _is_num(m.get("running")) else 0
@@ -151,7 +172,12 @@ def _monitor_lines(status_json: Optional[str]) -> list[str]:
     if isinstance(monitors, dict):
         for name, snap in monitors.items():
             s = snap if isinstance(snap, dict) else {}
-            not_running = str(s.get("state", "")).lower() in ("", "stopped", "unknown", "none")
+            not_running = str(s.get("state", "")).lower() in (
+                "",
+                "stopped",
+                "unknown",
+                "none",
+            )
             if s.get("enabled") is False and not_running and not s.get("metrics"):
                 lines.append(f"- {_inline(str(name))}: disabled")
             else:
@@ -198,8 +224,11 @@ def render_status_md(statuses: list[dict[str, Any]], now: str) -> str:
             # last seen = the last time it was actually reachable (not this failed
             # poll), so the time doesn't advance during an outage (#38 review).
             seen = _inline(_last_seen_hms(s.get("last_seen")))
-            lines.append(f"## {name}: OFFLINE (last seen {seen})" if seen
-                         else f"## {name}: OFFLINE")
+            lines.append(
+                f"## {name}: OFFLINE (last seen {seen})"
+                if seen
+                else f"## {name}: OFFLINE"
+            )
         lines.append("")
     return "\n".join(lines)
 
@@ -216,4 +245,4 @@ def write_status_md(path, statuses: list[dict[str, Any]], now: str) -> None:
         tmp.write_text(render_status_md(statuses, now), encoding="utf-8")
         os.replace(tmp, p)
     finally:
-        tmp.unlink(missing_ok=True)   # no .tmp residue if render/write/replace fails
+        tmp.unlink(missing_ok=True)  # no .tmp residue if render/write/replace fails

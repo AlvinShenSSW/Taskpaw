@@ -41,7 +41,10 @@ def _friendly_machine_name() -> str:
             # broad except is deliberate — any failure falls back to the hostname.
             out = subprocess.run(
                 ["scutil", "--get", "ComputerName"],
-                capture_output=True, text=True, timeout=2, errors="replace",
+                capture_output=True,
+                text=True,
+                timeout=2,
+                errors="replace",
             )
             name = out.stdout.strip()
             # Only trust stdout on a clean exit — on failure scutil writes to stderr
@@ -49,11 +52,15 @@ def _friendly_machine_name() -> str:
             # as the machine name). Non-silent (constitution §4) either way (Kimi).
             if out.returncode == 0 and name:
                 return name
-            print(f"taskpaw: scutil ComputerName unavailable (rc={out.returncode}); using hostname",
-                  file=sys.stderr)
+            print(
+                f"taskpaw: scutil ComputerName unavailable (rc={out.returncode}); using hostname",
+                file=sys.stderr,
+            )
         except (OSError, subprocess.SubprocessError) as e:
-            print(f"taskpaw: could not read macOS ComputerName ({e}); using hostname",
-                  file=sys.stderr)
+            print(
+                f"taskpaw: could not read macOS ComputerName ({e}); using hostname",
+                file=sys.stderr,
+            )
     elif sys.platform == "win32":
         name = (os.environ.get("COMPUTERNAME") or "").strip()
         if name:
@@ -88,6 +95,7 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
         import json
         import re
         import uuid
+
         friendly = _friendly_machine_name()
         slug = re.sub(r"[^A-Za-z0-9]+", "-", friendly).strip("-").lower() or "agent"
         # `machine` is a free-form OS name that can contain YAML metacharacters
@@ -96,10 +104,13 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
         # Kimi). json.dumps yields a YAML-valid double-quoted string; ensure_ascii=
         # False keeps unicode names readable in the file. `server_id` is already a
         # [a-z0-9-] slug, so it needs no quoting.
-        text = text.replace("server_id: my-agent",
-                            f"server_id: {slug}-{uuid.uuid4().hex[:6]}")
-        text = text.replace("machine: my-machine",
-                            f"machine: {json.dumps(friendly, ensure_ascii=False)}")
+        text = text.replace(
+            "server_id: my-agent", f"server_id: {slug}-{uuid.uuid4().hex[:6]}"
+        )
+        text = text.replace(
+            "machine: my-machine",
+            f"machine: {json.dumps(friendly, ensure_ascii=False)}",
+        )
     # Atomic write (repo invariant: configs are reader-visible state) — a tmp file
     # in the same dir + fsync + os.replace, so an interrupted/power-lost bootstrap
     # never leaves a truncated config the service would read.
@@ -112,8 +123,9 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
     return dst, True
 
 
-def apply_agent_edits(config_path: Path, preset: str | None = None,
-                      bind_host: str | None = None) -> int:
+def apply_agent_edits(
+    config_path: Path, preset: str | None = None, bind_host: str | None = None
+) -> int:
     """Apply post-scaffold edits to an agent.yaml (atomic save_yaml).
 
     - preset="moomoo": set machine/server_id and inject the four life-signs
@@ -171,7 +183,8 @@ def register_agents(specs: list[str]) -> list[str]:
         # empty db while a real legacy one exists beside the config (Kimi).
         raise RuntimeError(
             f"would register into {db}, but an older hub.db exists at {legacy}. "
-            f"Move it (mv '{legacy}' '{db}') or set data_dir first.")
+            f"Move it (mv '{legacy}' '{db}') or set data_dir first."
+        )
     store = HubStore(db)
     lines: list[str] = []
     try:
@@ -191,24 +204,42 @@ def register_agents(specs: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m taskpaw_v3.bootstrap",
-                                 description="Scaffold + launch a V3 Hub or agent.")
+    ap = argparse.ArgumentParser(
+        prog="python -m taskpaw_v3.bootstrap",
+        description="Scaffold + launch a V3 Hub or agent.",
+    )
     ap.add_argument("role", choices=["agent", "hub"])
     ap.add_argument("--force", action="store_true", help="overwrite an existing config")
     ap.add_argument("--run", action="store_true", help="launch the service after setup")
-    ap.add_argument("--agent", action="append", default=[], metavar="name,ip[,port]",
-                    help="(hub only, repeatable) register an agent to poll")
-    ap.add_argument("--preset", choices=["moomoo"], default=None,
-                    help="(agent only) fill monitors from a built-in preset")
-    ap.add_argument("--bind-host", default=None, metavar="IP",
-                    help="(agent only) LAN address the Hub polls (default loopback)")
+    ap.add_argument(
+        "--agent",
+        action="append",
+        default=[],
+        metavar="name,ip[,port]",
+        help="(hub only, repeatable) register an agent to poll",
+    )
+    ap.add_argument(
+        "--preset",
+        choices=["moomoo"],
+        default=None,
+        help="(agent only) fill monitors from a built-in preset",
+    )
+    ap.add_argument(
+        "--bind-host",
+        default=None,
+        metavar="IP",
+        help="(agent only) LAN address the Hub polls (default loopback)",
+    )
     args = ap.parse_args(argv)
 
     if args.agent and args.role != "hub":
         print("error: --agent is only valid for the hub role", file=sys.stderr)
         return 2
     if (args.preset or args.bind_host) and args.role != "agent":
-        print("error: --preset/--bind-host are only valid for the agent role", file=sys.stderr)
+        print(
+            "error: --preset/--bind-host are only valid for the agent role",
+            file=sys.stderr,
+        )
         return 2
 
     try:
@@ -222,8 +253,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.preset or args.bind_host:
         if not created and not args.force:
-            print(f"error: {path} already exists — refusing to edit it "
-                  f"(preset/bind-host); re-run with --force", file=sys.stderr)
+            print(
+                f"error: {path} already exists — refusing to edit it "
+                f"(preset/bind-host); re-run with --force",
+                file=sys.stderr,
+            )
             return 2
         n = apply_agent_edits(path, preset=args.preset, bind_host=args.bind_host)
         if args.preset:
@@ -256,11 +290,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"next: {path} is ready (preset monitors set). Start it:")
             print("      python -m taskpaw_v3.agent")
         else:
-            print(f"next: edit {path} (server_id/machine, bind_host for LAN, monitors),")
+            print(
+                f"next: edit {path} (server_id/machine, bind_host for LAN, monitors),"
+            )
             print("      then start it:  python -m taskpaw_v3.agent")
     else:
         print(f"next: edit {path} if needed, register agents with")
-        print("      python -m taskpaw_v3.bootstrap hub --agent name,ip  (or `hub add-server`),")
+        print(
+            "      python -m taskpaw_v3.bootstrap hub --agent name,ip  (or `hub add-server`),"
+        )
         print("      then start it:  python -m taskpaw_v3.hub run")
     return 0
 

@@ -62,9 +62,14 @@ def target_triple() -> str:
     except FileNotFoundError:
         pass
     import platform
+
     mach = platform.machine().lower()
-    arch = {"x86_64": "x86_64", "amd64": "x86_64",
-            "arm64": "aarch64", "aarch64": "aarch64"}.get(mach, mach)
+    arch = {
+        "x86_64": "x86_64",
+        "amd64": "x86_64",
+        "arm64": "aarch64",
+        "aarch64": "aarch64",
+    }.get(mach, mach)
     if sys.platform == "darwin":
         return f"{arch}-apple-darwin"
     if sys.platform == "win32":
@@ -75,8 +80,20 @@ def target_triple() -> str:
 def build_backend() -> Path:
     """PyInstaller → build/backend/taskpaw-backend[.exe]."""
     dist = ROOT / "build" / "backend"
-    run([sys.executable, "-m", "PyInstaller", str(SPEC),
-         "--distpath", str(dist), "--workpath", str(ROOT / "build" / "pyi"), "-y"], cwd=ROOT)
+    run(
+        [
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            str(SPEC),
+            "--distpath",
+            str(dist),
+            "--workpath",
+            str(ROOT / "build" / "pyi"),
+            "-y",
+        ],
+        cwd=ROOT,
+    )
     built = dist / f"taskpaw-backend{EXE_EXT}"
     if not built.exists():
         raise SystemExit(f"PyInstaller did not produce {built}")
@@ -135,8 +152,11 @@ def build_tauri() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Build the V3 desktop bundle.")
-    ap.add_argument("--skip-tauri", action="store_true",
-                    help="stop after building + placing the backend sidecar")
+    ap.add_argument(
+        "--skip-tauri",
+        action="store_true",
+        help="stop after building + placing the backend sidecar",
+    )
     args = ap.parse_args(argv)
 
     place_sidecar(build_backend())

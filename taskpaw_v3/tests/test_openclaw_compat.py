@@ -19,7 +19,7 @@ def test_log_status_and_latest(tmp_path):
     s.log_status(b, False, None)
     latest = {r["name"]: r for r in s.latest_statuses()}
     assert latest["moomoo"]["reachable"] == 1
-    assert "error" in latest["moomoo"]["status_json"]    # the latest row, not the first
+    assert "error" in latest["moomoo"]["status_json"]  # the latest row, not the first
     assert latest["pig"]["reachable"] == 0
     s.close()
 
@@ -48,10 +48,12 @@ def test_prune_status_logs(tmp_path):
     # insert an old row directly (bypass the now() insert)
     s._conn.execute(
         "INSERT INTO status_log(server_id, timestamp, reachable, status_json) "
-        "VALUES(?, datetime('now','localtime','-30 days'), 1, '{}')", (a,))
+        "VALUES(?, datetime('now','localtime','-30 days'), 1, '{}')",
+        (a,),
+    )
     s._conn.commit()
-    s.log_status(a, True, "{}")                # a fresh one
-    assert s.prune_status_logs(7) == 1         # only the 30-day-old row dropped
+    s.log_status(a, True, "{}")  # a fresh one
+    assert s.prune_status_logs(7) == 1  # only the 30-day-old row dropped
     assert len(s.latest_statuses()) == 1
     s.close()
 
@@ -59,18 +61,24 @@ def test_prune_status_logs(tmp_path):
 def test_migrates_v2_status_log_missing_reachable(tmp_path):
     # Simulate a V2 hub.db: status_log has status_json but NO reachable column.
     import sqlite3
+
     db = tmp_path / "hub.db"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
-                 "port INTEGER, enabled INTEGER)")
-    conn.execute("CREATE TABLE status_log(id INTEGER PRIMARY KEY, server_id INTEGER, "
-                 "timestamp TEXT, status_json TEXT)")
+    conn.execute(
+        "CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+        "port INTEGER, enabled INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE status_log(id INTEGER PRIMARY KEY, server_id INTEGER, "
+        "timestamp TEXT, status_json TEXT)"
+    )
     conn.execute("INSERT INTO servers VALUES(1,'m','1.1.1.1',5680,1)")
     conn.execute("INSERT INTO status_log VALUES(1,1,'2026-06-28 08:00:00','{}')")
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     # Opening with V3 must migrate (add reachable) and keep working.
     s = HubStore(db)
-    s.log_status(1, True, "{}")            # would fail without the migration
+    s.log_status(1, True, "{}")  # would fail without the migration
     rows = s.latest_statuses()
     assert rows[0]["name"] == "m"
     s.close()
@@ -78,14 +86,20 @@ def test_migrates_v2_status_log_missing_reachable(tmp_path):
 
 def test_migrates_early_v3_payload_json(tmp_path):
     import sqlite3
+
     db = tmp_path / "hub.db"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
-                 "port INTEGER, enabled INTEGER)")
-    conn.execute("CREATE TABLE status_log(id INTEGER PRIMARY KEY, server_id INTEGER, "
-                 "timestamp TEXT, reachable INTEGER, payload_json TEXT)")
-    conn.commit(); conn.close()
-    s = HubStore(db)                        # should rename payload_json → status_json
+    conn.execute(
+        "CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+        "port INTEGER, enabled INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE status_log(id INTEGER PRIMARY KEY, server_id INTEGER, "
+        "timestamp TEXT, reachable INTEGER, payload_json TEXT)"
+    )
+    conn.commit()
+    conn.close()
+    s = HubStore(db)  # should rename payload_json → status_json
     a = s.add_server("m", "1.1.1.1")
     s.log_status(a, True, "{}")
     assert s.latest_statuses()[0]["reachable"] == 1
@@ -97,26 +111,39 @@ def test_offline_last_seen_uses_last_reachable(tmp_path):
     a = s.add_server("m", "1.1.1.1")
     # A reachable success in the PAST (relative to now, so it sorts before the
     # failure rows on any runner/timezone), then two failed polls at now.
-    seen = s._conn.execute(
-        "SELECT datetime('now','localtime','-1 hour')").fetchone()[0]
-    s._conn.execute("INSERT INTO status_log(server_id,timestamp,reachable,status_json) "
-                    "VALUES(?, ?, 1, '{}')", (a, seen)); s._conn.commit()
+    seen = s._conn.execute("SELECT datetime('now','localtime','-1 hour')").fetchone()[0]
+    s._conn.execute(
+        "INSERT INTO status_log(server_id,timestamp,reachable,status_json) "
+        "VALUES(?, ?, 1, '{}')",
+        (a, seen),
+    )
+    s._conn.commit()
     s.log_status(a, False, None)
     s.log_status(a, False, None)
     row = s.latest_statuses()[0]
     assert row["reachable"] == 0
-    assert row["last_seen"] == seen                      # the last GOOD poll, not now
+    assert row["last_seen"] == seen  # the last GOOD poll, not now
     md = render_status_md(s.latest_statuses(), "now")
-    assert f"OFFLINE (last seen {seen[11:]})" in md      # HH:MM:SS, V2 format
+    assert f"OFFLINE (last seen {seen[11:]})" in md  # HH:MM:SS, V2 format
     s.close()
 
 
 def test_render_v2_list_status_field():
     # V2 agents return monitors as a list with `status`/`enabled`, not `state`.
-    rows = [{"name": "pig", "reachable": 1, "status_json": json.dumps({"monitors": [
-        {"name": "lada", "status": "Running", "enabled": True},
-        {"name": "old", "status": "x", "enabled": False},
-    ]})}]
+    rows = [
+        {
+            "name": "pig",
+            "reachable": 1,
+            "status_json": json.dumps(
+                {
+                    "monitors": [
+                        {"name": "lada", "status": "Running", "enabled": True},
+                        {"name": "old", "status": "x", "enabled": False},
+                    ]
+                }
+            ),
+        }
+    ]
     md = render_status_md(rows, "now")
     assert "- lada: Running" in md and "- old: disabled" in md
 
@@ -147,16 +174,22 @@ def test_log_status_unreachable_ok_on_v2_notnull(tmp_path):
     # Simulate V2's status_json NOT NULL; an unreachable snapshot (None) must not
     # IntegrityError (we coalesce to '{}') (#38 review).
     import sqlite3
+
     db = tmp_path / "hub.db"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
-                 "port INTEGER, enabled INTEGER)")
-    conn.execute("CREATE TABLE status_log(id INTEGER PRIMARY KEY, server_id INTEGER, "
-                 "timestamp TEXT, status_json TEXT NOT NULL)")
+    conn.execute(
+        "CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+        "port INTEGER, enabled INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE status_log(id INTEGER PRIMARY KEY, server_id INTEGER, "
+        "timestamp TEXT, status_json TEXT NOT NULL)"
+    )
     conn.execute("INSERT INTO servers VALUES(1,'m','1.1.1.1',5680,1)")
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     s = HubStore(db)
-    s.log_status(1, False, None)               # would IntegrityError without coalesce
+    s.log_status(1, False, None)  # would IntegrityError without coalesce
     assert s.latest_statuses()[0]["reachable"] == 0
     s.close()
 
@@ -165,18 +198,28 @@ def test_migrates_v2_events_preserved_as_legacy(tmp_path):
     # V2 events lacks event_id; store_event must work after open, and the old
     # rows must be preserved (not silently dropped) as events_v2_legacy (Kimi).
     import sqlite3
+
     db = tmp_path / "hub.db"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
-                 "port INTEGER, enabled INTEGER)")
-    conn.execute("CREATE TABLE events(id INTEGER PRIMARY KEY, server_id INTEGER, "
-                 "timestamp TEXT, machine TEXT, monitor TEXT, message TEXT)")
+    conn.execute(
+        "CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+        "port INTEGER, enabled INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE events(id INTEGER PRIMARY KEY, server_id INTEGER, "
+        "timestamp TEXT, machine TEXT, monitor TEXT, message TEXT)"
+    )
     conn.execute("INSERT INTO servers VALUES(1,'m','1.1.1.1',5680,1)")
-    conn.execute("INSERT INTO events(server_id,timestamp,machine,monitor,message) "
-                 "VALUES(1,'t','m','x','old event')")
-    conn.commit(); conn.close()
+    conn.execute(
+        "INSERT INTO events(server_id,timestamp,machine,monitor,message) "
+        "VALUES(1,'t','m','x','old event')"
+    )
+    conn.commit()
+    conn.close()
     s = HubStore(db)
-    s.store_event(1, {"id": 5, "monitor": "x", "message": "hi", "level": "info"})  # V3 schema works
+    s.store_event(
+        1, {"id": 5, "monitor": "x", "message": "hi", "level": "info"}
+    )  # V3 schema works
     # old rows preserved
     legacy = s._conn.execute("SELECT message FROM events_v2_legacy").fetchall()
     assert legacy and legacy[0][0] == "old event"
@@ -187,18 +230,26 @@ def test_remove_server_with_legacy_events_no_fk_error(tmp_path):
     # After migrating a V2 db with event rows, remove_server must clear the
     # legacy table too or DELETE servers hits an FK violation (Codex/Kimi).
     import sqlite3
+
     db = tmp_path / "hub.db"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
-                 "port INTEGER, enabled INTEGER)")
-    conn.execute("CREATE TABLE events(id INTEGER PRIMARY KEY, server_id INTEGER "
-                 "REFERENCES servers(id), timestamp TEXT, machine TEXT, monitor TEXT, message TEXT)")
+    conn.execute(
+        "CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, ip TEXT, "
+        "port INTEGER, enabled INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE events(id INTEGER PRIMARY KEY, server_id INTEGER "
+        "REFERENCES servers(id), timestamp TEXT, machine TEXT, monitor TEXT, message TEXT)"
+    )
     conn.execute("INSERT INTO servers VALUES(1,'m','1.1.1.1',5680,1)")
-    conn.execute("INSERT INTO events(server_id,timestamp,machine,monitor,message) "
-                 "VALUES(1,'t','m','x','old')")
-    conn.commit(); conn.close()
+    conn.execute(
+        "INSERT INTO events(server_id,timestamp,machine,monitor,message) "
+        "VALUES(1,'t','m','x','old')"
+    )
+    conn.commit()
+    conn.close()
     s = HubStore(db)
-    assert s.remove_server(1) is True          # must not raise FK IntegrityError
+    assert s.remove_server(1) is True  # must not raise FK IntegrityError
     s.close()
 
 
@@ -206,45 +257,65 @@ def test_migrates_v2_delivery_outbox_without_dedupe_key(tmp_path):
     # An old delivery_outbox lacking dedupe_key must not crash index creation on
     # open (Codex). Simulate it, then confirm the store opens and works.
     import sqlite3
+
     db = tmp_path / "hub.db"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE delivery_outbox(id INTEGER PRIMARY KEY, server_name TEXT, "
-                 "payload_json TEXT, kind TEXT, delivery_state TEXT, attempts INTEGER, "
-                 "last_error TEXT, next_attempt_at TEXT, created_at TEXT)")
-    conn.commit(); conn.close()
-    s = HubStore(db)                       # must not raise on the dedupe index
+    conn.execute(
+        "CREATE TABLE delivery_outbox(id INTEGER PRIMARY KEY, server_name TEXT, "
+        "payload_json TEXT, kind TEXT, delivery_state TEXT, attempts INTEGER, "
+        "last_error TEXT, next_attempt_at TEXT, created_at TEXT)"
+    )
+    conn.commit()
+    conn.close()
+    s = HubStore(db)  # must not raise on the dedupe index
     s.add_server("m", "1.1.1.1")
     s.close()
 
 
 def test_poll_once_isolates_one_bad_server(tmp_path, monkeypatch):
     from taskpaw_v3.hub.server.poller import Poller
+
     s = HubStore(tmp_path / "hub.db")
-    bad = s.add_server("bad", "1.1.1.1")
-    good = s.add_server("good", "2.2.2.2")
-    p = Poller(store=s, openclaw_url="http://x", get_active=lambda: False,
-               get_token=lambda: "", http_timeout=1)
+    s.add_server("bad", "1.1.1.1")
+    s.add_server("good", "2.2.2.2")
+    p = Poller(
+        store=s,
+        openclaw_url="http://x",
+        get_active=lambda: False,
+        get_token=lambda: "",
+        http_timeout=1,
+    )
 
     def fetch_status(server):
         if server["name"] == "bad":
             raise RuntimeError("boom")
         return True, json.dumps({"monitors": {}})
+
     monkeypatch.setattr(p, "fetch_status", fetch_status)
     monkeypatch.setattr(p, "fetch_events", lambda server: [])
-    p.poll_once()                              # must NOT raise
+    p.poll_once()  # must NOT raise
     names = {r["name"] for r in s.latest_statuses()}
-    assert "good" in names                     # good server still polled
+    assert "good" in names  # good server still polled
     s.close()
 
 
 # ── status.md rendering (V2 format) ──────────────────────────────────────--
 def test_render_status_md_matches_v2_format():
     rows = [
-        {"name": "moomoo", "reachable": 1, "timestamp": "t",
-         "status_json": json.dumps({"monitors": {"opend": {"state": "ok"},
-                                                  "orch": {"state": "error"}}})},
-        {"name": "pig", "reachable": 0, "last_seen": "2026-06-28 09:00:00",
-         "status_json": None},
+        {
+            "name": "moomoo",
+            "reachable": 1,
+            "timestamp": "t",
+            "status_json": json.dumps(
+                {"monitors": {"opend": {"state": "ok"}, "orch": {"state": "error"}}}
+            ),
+        },
+        {
+            "name": "pig",
+            "reachable": 0,
+            "last_seen": "2026-06-28 09:00:00",
+            "status_json": None,
+        },
     ]
     md = render_status_md(rows, "2026-06-28 09:00:00")
     assert md.startswith("# TaskPaw Hub Status")
@@ -256,14 +327,17 @@ def test_render_status_md_matches_v2_format():
 
 def test_render_handles_list_shape_and_bad_json():
     rows = [
-        {"name": "a", "reachable": 1, "status_json":
-            json.dumps({"monitors": [{"name": "m1", "state": "ok"}]})},
+        {
+            "name": "a",
+            "reachable": 1,
+            "status_json": json.dumps({"monitors": [{"name": "m1", "state": "ok"}]}),
+        },
         {"name": "b", "reachable": 1, "status_json": "not json"},
         {"name": "c", "reachable": 1, "status_json": None},
     ]
     md = render_status_md(rows, "now")
-    assert "- m1: ok" in md          # list shape handled
-    assert "## b: ONLINE" in md      # bad json → online, no monitor lines (no crash)
+    assert "- m1: ok" in md  # list shape handled
+    assert "## b: ONLINE" in md  # bad json → online, no monitor lines (no crash)
     assert "## c: ONLINE" in md
 
 
@@ -272,8 +346,8 @@ def test_write_status_md_atomic(tmp_path):
     rows = [{"name": "m", "reachable": 1, "status_json": json.dumps({"monitors": {}})}]
     write_status_md(out, rows, "now")
     assert out.exists() and "## m: ONLINE" in out.read_text()
-    assert list(tmp_path.glob(".*.tmp")) == []           # no temp residue
-    write_status_md(out, rows, "later")                  # overwrite ok
+    assert list(tmp_path.glob(".*.tmp")) == []  # no temp residue
+    write_status_md(out, rows, "later")  # overwrite ok
     assert "later" in out.read_text()
 
 
@@ -286,7 +360,9 @@ def test_hubconfig_data_dir_default():
 
 def test_db_path_for_uses_data_dir(tmp_path):
     from pathlib import Path
+
     from taskpaw_v3.hub.server.service import db_path_for
+
     # tmp_path is an absolute path on every OS; a literal "/tmp/..." isn't absolute
     # on Windows and the data_dir validator would reject it (#68).
     cfg = HubConfig(data_dir=str(tmp_path))
@@ -296,21 +372,30 @@ def test_db_path_for_uses_data_dir(tmp_path):
 # ── poller: fetch_status + poll logs status_log ──────────────────────────--
 def _poller(store):
     from taskpaw_v3.hub.server.poller import Poller
-    return Poller(store=store, openclaw_url="http://x", get_active=lambda: False,
-                  get_token=lambda: "", http_timeout=1)
+
+    return Poller(
+        store=store,
+        openclaw_url="http://x",
+        get_active=lambda: False,
+        get_token=lambda: "",
+        http_timeout=1,
+    )
 
 
 def test_poll_once_logs_status_for_every_server(tmp_path, monkeypatch):
     s = HubStore(tmp_path / "hub.db")
-    sid = s.add_server("moomoo", "127.0.0.1")
+    s.add_server("moomoo", "127.0.0.1")
     p = _poller(s)
-    monkeypatch.setattr(p, "fetch_status",
-                        lambda server: (True, json.dumps({"monitors": {"x": {"state": "ok"}}})))
-    monkeypatch.setattr(p, "fetch_events", lambda server: [])   # no events
+    monkeypatch.setattr(
+        p,
+        "fetch_status",
+        lambda server: (True, json.dumps({"monitors": {"x": {"state": "ok"}}})),
+    )
+    monkeypatch.setattr(p, "fetch_events", lambda server: [])  # no events
     p.poll_once()
     latest = s.latest_statuses()
     assert latest[0]["name"] == "moomoo" and latest[0]["reachable"] == 1
-    assert "ok" in latest[0]["status_json"]               # logged even with no events
+    assert "ok" in latest[0]["status_json"]  # logged even with no events
     s.close()
 
 
@@ -320,7 +405,7 @@ def test_status_snapshot_seeded_from_store_on_init(tmp_path):
     s = HubStore(tmp_path / "hub.db")
     sid = s.add_server("m", "1.1.1.1")
     s.log_status(sid, True, json.dumps({"monitors": {"x": {"state": "ok"}}}))
-    p = _poller(s)                                  # constructed fresh (= restart)
+    p = _poller(s)  # constructed fresh (= restart)
     snap = p.status_snapshot()[0]
     assert snap["reachable"] is True and "ok" in snap["status_json"]
     s.close()
@@ -330,16 +415,26 @@ def test_seed_marks_stale_success_offline(tmp_path):
     # A last-success older than seed_fresh_seconds must seed OFFLINE, not ONLINE,
     # so a restart doesn't render a long-down agent as up (Kimi).
     from taskpaw_v3.hub.server.poller import Poller
+
     s = HubStore(tmp_path / "hub.db")
     sid = s.add_server("m", "1.1.1.1")
     # an old success row (2h ago)
-    s._conn.execute("INSERT INTO status_log(server_id,timestamp,reachable,status_json) "
-                    "VALUES(?, datetime('now','localtime','-2 hours'), 1, '{}')", (sid,))
+    s._conn.execute(
+        "INSERT INTO status_log(server_id,timestamp,reachable,status_json) "
+        "VALUES(?, datetime('now','localtime','-2 hours'), 1, '{}')",
+        (sid,),
+    )
     s._conn.commit()
-    p = Poller(store=s, openclaw_url="http://x", get_active=lambda: False,
-               get_token=lambda: "", http_timeout=1, seed_fresh_seconds=60)
+    p = Poller(
+        store=s,
+        openclaw_url="http://x",
+        get_active=lambda: False,
+        get_token=lambda: "",
+        http_timeout=1,
+        seed_fresh_seconds=60,
+    )
     snap = p.status_snapshot()[0]
-    assert snap["reachable"] is False and snap["last_seen"]   # OFFLINE, last seen kept
+    assert snap["reachable"] is False and snap["last_seen"]  # OFFLINE, last seen kept
     s.close()
 
 
@@ -347,22 +442,24 @@ def test_status_snapshot_offline_keeps_last_good(tmp_path, monkeypatch):
     # status.md source: a failed poll keeps the last good status/last_seen and
     # marks reachable False; status_log only gets the successful poll (#38 review).
     s = HubStore(tmp_path / "hub.db")
-    sid = s.add_server("m", "127.0.0.1")
+    s.add_server("m", "127.0.0.1")
     p = _poller(s)
     monkeypatch.setattr(p, "fetch_events", lambda server: [])
-    states = iter([(True, json.dumps({"monitors": {"x": {"state": "ok"}}})), (False, None)])
+    states = iter(
+        [(True, json.dumps({"monitors": {"x": {"state": "ok"}}})), (False, None)]
+    )
     monkeypatch.setattr(p, "fetch_status", lambda server: next(states))
 
-    p.poll_once()                                  # success
+    p.poll_once()  # success
     snap = p.status_snapshot()[0]
     assert snap["reachable"] and "ok" in snap["status_json"] and snap["last_seen"]
     good_seen = snap["last_seen"]
 
-    p.poll_once()                                  # failure
+    p.poll_once()  # failure
     snap = p.status_snapshot()[0]
     assert snap["reachable"] is False
-    assert "ok" in snap["status_json"]             # last good payload retained
-    assert snap["last_seen"] == good_seen          # last_seen frozen at last success
+    assert "ok" in snap["status_json"]  # last good payload retained
+    assert snap["last_seen"] == good_seen  # last_seen frozen at last success
     # status_log got only the ONE successful row (OpenClaw reads last-good)
     n = s._conn.execute("SELECT COUNT(*) FROM status_log").fetchone()[0]
     assert n == 1
@@ -371,11 +468,13 @@ def test_status_snapshot_offline_keeps_last_good(tmp_path, monkeypatch):
 
 def test_fetch_status_unreachable_returns_false(tmp_path, monkeypatch):
     import taskpaw_v3.hub.server.poller as mod
+
     s = HubStore(tmp_path / "hub.db")
     p = _poller(s)
 
     def boom(*a, **k):
         raise OSError("connection refused")
+
     monkeypatch.setattr(mod.urllib.request, "urlopen", boom)
     reachable, body = p.fetch_status({"name": "x", "ip": "10.0.0.9", "port": 5680})
     assert reachable is False and body is None

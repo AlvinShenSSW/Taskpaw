@@ -11,6 +11,30 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from taskpaw_v3.monitors import supervisor as sup_mod
+from taskpaw_v3.monitors.base import (
+    BaseMonitorConfig,
+    MonitorInstance,
+    MonitorPlugin,
+    MonitorStatus,
+)
+from taskpaw_v3.monitors.plugins.heartbeat import (
+    HeartbeatConfig,
+    evaluate_heartbeat,
+)
+from taskpaw_v3.monitors.plugins.process import (
+    ProcessConfig,
+    ProcessPlugin,
+    process_matches,
+)
+from taskpaw_v3.monitors.plugins.tcp_check import (
+    TcpCheckConfig,
+    TcpCheckPlugin,
+    tcp_listening,
+)
+from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
+from taskpaw_v3.monitors.supervisor import Supervisor
+
 
 @contextlib.contextmanager
 def _expect_thread_death():
@@ -25,19 +49,6 @@ def _expect_thread_death():
         yield caught
     finally:
         threading.excepthook = prev_hook
-
-from taskpaw_v3.monitors import supervisor as sup_mod
-from taskpaw_v3.monitors.base import (
-    BaseMonitorConfig,
-    MonitorInstance,
-    MonitorPlugin,
-    MonitorStatus,
-)
-from taskpaw_v3.monitors.plugins.heartbeat import HeartbeatConfig, HeartbeatPlugin, evaluate_heartbeat
-from taskpaw_v3.monitors.plugins.process import ProcessConfig, ProcessPlugin, process_matches
-from taskpaw_v3.monitors.plugins.tcp_check import TcpCheckConfig, TcpCheckPlugin, tcp_listening
-from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
-from taskpaw_v3.monitors.supervisor import Supervisor
 
 
 # ── registry ────────────────────────────────────────────────────────────--
@@ -78,8 +89,10 @@ def _write(tmp_path, obj):
 
 def test_heartbeat_hibernating_is_not_stale(tmp_path):
     # due far in the future + hibernating → OK (the #13 finding)
-    p = _write(tmp_path, {"status": "hibernating",
-                          "next_check_due_utc": "2099-01-01T00:00:00+00:00"})
+    p = _write(
+        tmp_path,
+        {"status": "hibernating", "next_check_due_utc": "2099-01-01T00:00:00+00:00"},
+    )
     cfg = HeartbeatConfig(name="hb", path=str(p))
     assert evaluate_heartbeat(cfg).state == "ok"
 
@@ -130,10 +143,17 @@ def test_process_instance_emits_on_transition(monkeypatch):
     plugin = ProcessPlugin()
     inst = plugin.create("p", ProcessConfig(name="p", pattern="x"))
     events = []
-    emit = lambda *a, **k: events.append((a, k))
-    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process._scan", lambda *a, **k: True)
+
+    def emit(*a, **k):
+        events.append((a, k))
+
+    monkeypatch.setattr(
+        "taskpaw_v3.monitors.plugins.process._scan", lambda *a, **k: True
+    )
     inst.check(emit)  # first observation, prev=None → no emit
-    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process._scan", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "taskpaw_v3.monitors.plugins.process._scan", lambda *a, **k: False
+    )
     st = inst.check(emit)  # transition alive→down → alert
     assert st.state == "error" and events and events[-1][0][0] == "alert"
 
@@ -154,11 +174,14 @@ class _FakeInstance(MonitorInstance):
 
 class _FakePlugin(MonitorPlugin):
     type_id = "fake"
+
     def __init__(self, behavior):
         self.behavior = behavior
+
     @classmethod
     def config_model(cls):
         return _FakeConfig
+
     def create(self, instance_id, config):
         return _FakeInstance(instance_id, config, self.behavior)
 
@@ -167,8 +190,10 @@ def test_supervisor_emit_throttle_and_dedupe():
     sink = []
     clock = [0.0]
     sup = Supervisor(sink=lambda *a: sink.append(a), clock=lambda: clock[0])
-    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")),
-                 _FakeConfig(name="f", max_events_per_minute=2))
+    sup.register(
+        _FakePlugin(lambda e: MonitorStatus(state="ok")),
+        _FakeConfig(name="f", max_events_per_minute=2),
+    )
     # dedupe: same key emitted twice → one delivery
     sup._emit("f", "info", "t", "m", None, "k1")
     sup._emit("f", "info", "t", "m", None, "k1")
@@ -186,10 +211,12 @@ def test_supervisor_runs_check_and_snapshot():
     sink = []
     sup = Supervisor(sink=lambda *a: sink.append(a))
     calls = []
+
     def behavior(emit):
         calls.append(1)
         emit("done", "t", "m")
         return MonitorStatus(state="ok")
+
     sup.register(_FakePlugin(behavior), _FakeConfig(name="f", poll_interval=1))
     sup.start()
     try:
@@ -207,8 +234,10 @@ def test_supervisor_degrades_after_failures(monkeypatch):
     monkeypatch.setattr(sup_mod, "DEGRADE_AFTER", 2)
     sink = []
     sup = Supervisor(sink=lambda *a: sink.append(a))
+
     def boom(emit):
         raise RuntimeError("nope")
+
     sup.register(_FakePlugin(boom), _FakeConfig(name="f", poll_interval=1))
     sup.start()
     try:
@@ -229,13 +258,15 @@ def test_supervisor_throttled_keyed_event_not_permanently_suppressed():
     sink = []
     clock = [0.0]
     sup = Supervisor(sink=lambda *a: sink.append(a), clock=lambda: clock[0])
-    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")),
-                 _FakeConfig(name="f", max_events_per_minute=1))
-    sup._emit("f", "info", "first", "m", None, "kA")   # delivered (cap=1)
-    sup._emit("f", "alert", "boom", "m", None, "kB")   # over cap → dropped, not recorded
+    sup.register(
+        _FakePlugin(lambda e: MonitorStatus(state="ok")),
+        _FakeConfig(name="f", max_events_per_minute=1),
+    )
+    sup._emit("f", "info", "first", "m", None, "kA")  # delivered (cap=1)
+    sup._emit("f", "alert", "boom", "m", None, "kB")  # over cap → dropped, not recorded
     assert [s[3] for s in sink] == ["m"]  # only first delivered
     clock[0] = 120.0
-    sup._emit("f", "alert", "boom", "m", None, "kB")   # new window → now delivered
+    sup._emit("f", "alert", "boom", "m", None, "kB")  # new window → now delivered
     assert any(s[2] == "boom" for s in sink)  # the alert eventually got through
 
 
@@ -245,14 +276,17 @@ def test_supervisor_reconfigure_stops_old_instance():
     class _StopInstance(MonitorInstance):
         def check(self, emit):
             return MonitorStatus(state="ok")
+
         def stop(self, timeout=5.0):
             stopped.append(self.instance_id)
 
     class _StopPlugin(MonitorPlugin):
         type_id = "stoppy"
+
         @classmethod
         def config_model(cls):
             return _FakeConfig
+
         def create(self, instance_id, config):
             return _StopInstance(instance_id, config)
 
@@ -265,17 +299,19 @@ def test_supervisor_reconfigure_stops_old_instance():
 
 def test_process_config_rejects_invalid_regex():
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         ProcessConfig(name="p", pattern="(unclosed[")  # invalid regex at config time
 
 
 def test_supervisor_degraded_key_cleared_on_recovery():
     """After recovery, a later re-degrade must alert again (dedupe key cleared)."""
-    import taskpaw_v3.monitors.supervisor as sm
     sink = []
     sup = Supervisor(sink=lambda *a: sink.append(a))
     # emit a degraded alert (keyed), then simulate recovery clearing the key
-    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")), _FakeConfig(name="f"))
+    sup.register(
+        _FakePlugin(lambda e: MonitorStatus(state="ok")), _FakeConfig(name="f")
+    )
     sup._emit("f", "alert", "f degraded", "x", None, "f:degraded")
     sup._emit("f", "alert", "f degraded", "x", None, "f:degraded")  # deduped
     assert sum(1 for s in sink if s[2] == "f degraded") == 1
@@ -286,6 +322,7 @@ def test_supervisor_degraded_key_cleared_on_recovery():
 
 def test_bounded_key_set_evicts_oldest():
     from taskpaw_v3.monitors.supervisor import _BoundedKeySet
+
     s = _BoundedKeySet(cap=3)
     for k in ["a", "b", "c", "d"]:
         s.add(k)
@@ -296,11 +333,15 @@ def test_supervisor_sink_exception_isolated_and_not_recorded():
     """A throwing sink must not propagate (no false degrade) and a failed delivery
     must not record the dedupe key (so it can be retried)."""
     calls = []
+
     def bad_sink(*a):
         calls.append(a)
         raise RuntimeError("sink down")
+
     sup = Supervisor(sink=bad_sink)
-    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")), _FakeConfig(name="f"))
+    sup.register(
+        _FakePlugin(lambda e: MonitorStatus(state="ok")), _FakeConfig(name="f")
+    )
     sup._emit("f", "alert", "t", "m", None, "k1")  # must not raise
     assert "k1" not in sup._monitors["f"].seen_dedupe  # not recorded → retryable
     assert len(calls) == 1
@@ -308,7 +349,10 @@ def test_supervisor_sink_exception_isolated_and_not_recorded():
 
 def test_start_is_idempotent():
     sup = Supervisor(sink=lambda *a: None)
-    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")), _FakeConfig(name="f", poll_interval=1))
+    sup.register(
+        _FakePlugin(lambda e: MonitorStatus(state="ok")),
+        _FakeConfig(name="f", poll_interval=1),
+    )
     sup.start()
     wd1 = sup._watchdog
     sup.start()  # second call must not spawn a new watchdog
@@ -319,7 +363,9 @@ def test_start_is_idempotent():
 
 
 def test_process_emits_alert_on_unhealthy_startup(monkeypatch):
-    monkeypatch.setattr("taskpaw_v3.monitors.plugins.process._scan", lambda *a, **k: False)
+    monkeypatch.setattr(
+        "taskpaw_v3.monitors.plugins.process._scan", lambda *a, **k: False
+    )
     inst = ProcessPlugin().create("p", ProcessConfig(name="p", pattern="x"))
     events = []
     inst.check(lambda *a, **k: events.append(a))  # first check, already down → alert
@@ -327,7 +373,9 @@ def test_process_emits_alert_on_unhealthy_startup(monkeypatch):
 
 
 def test_tcp_emits_alert_on_unhealthy_startup():
-    inst = TcpCheckPlugin().create("t", TcpCheckConfig(name="t", host="127.0.0.1", port=1, timeout=0.2))
+    inst = TcpCheckPlugin().create(
+        "t", TcpCheckConfig(name="t", host="127.0.0.1", port=1, timeout=0.2)
+    )
     events = []
     inst.check(lambda *a, **k: events.append(a))  # nothing listening on :1 → alert
     assert events and events[0][0] == "alert"
@@ -341,6 +389,7 @@ def test_heartbeat_non_dict_json_is_clean_error(tmp_path):
 
 def test_config_forbids_unknown_keys():
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         TcpCheckConfig(name="t", port=1, typoo_field=123)
 
@@ -348,11 +397,13 @@ def test_config_forbids_unknown_keys():
 def test_supervisor_watchdog_restarts_dead_worker():
     """A worker that dies unexpectedly is restarted by the watchdog."""
     starts = []
+
     def behavior(emit):
         starts.append(1)
         if len(starts) == 1:
             raise SystemExit("simulate unexpected thread death")  # kills the worker
         return MonitorStatus(state="ok")
+
     # SystemExit isn't caught by the check try/except (BaseException) → thread dies.
     # The death is intentional, so swallow it via threading.excepthook to keep the
     # suite warning-clean (an unhandled thread exception otherwise surfaces as a
@@ -374,6 +425,7 @@ def test_supervisor_watchdog_restarts_dead_worker():
 
 def test_config_validators_grace_and_pattern():
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         HeartbeatConfig(name="h", path="/x", grace_seconds=-1)
     with pytest.raises(ValidationError):
@@ -400,7 +452,9 @@ def test_reconfigure_abort_keeps_old_monitor_running():
         assert entered.wait(timeout=3)  # worker is inside the blocking check
         old = sup._monitors["f"]
         with pytest.raises(RuntimeError):
-            sup.reconfigure("f", _FakeConfig(name="f", poll_interval=2), stop_timeout=0.3)
+            sup.reconfigure(
+                "f", _FakeConfig(name="f", poll_interval=2), stop_timeout=0.3
+            )
         # Old entry preserved, stop cleared, worker still alive.
         assert sup._monitors["f"] is old
         assert not old.stop.is_set()
@@ -416,28 +470,35 @@ def test_folded_summary_flushed_when_quiet_after_burst():
     sink = []
     clock = [0.0]
     sup = Supervisor(sink=lambda *a: sink.append(a), clock=lambda: clock[0])
-    sup.register(_FakePlugin(lambda e: MonitorStatus(state="ok")),
-                 _FakeConfig(name="f", max_events_per_minute=1))
-    sup._emit("f", "info", "t", "m")   # delivered
-    sup._emit("f", "info", "t", "m")   # dropped (over cap)
+    sup.register(
+        _FakePlugin(lambda e: MonitorStatus(state="ok")),
+        _FakeConfig(name="f", max_events_per_minute=1),
+    )
+    sup._emit("f", "info", "t", "m")  # delivered
+    sup._emit("f", "info", "t", "m")  # dropped (over cap)
     assert not any("suppressed" in s[2] for s in sink)  # not yet
     clock[0] = 120.0
-    sup._flush_folded("f")             # periodic flush in a new, quiet window
+    sup._flush_folded("f")  # periodic flush in a new, quiet window
     assert any("suppressed" in s[2] for s in sink)
 
 
 def test_reconfigure_bad_config_preserves_old_monitor():
     """If building the replacement fails (bad config), the old monitor must stay
     installed and running — a failed update must not kill it."""
+
     class _PickyPlugin(MonitorPlugin):
         type_id = "picky"
+
         @classmethod
         def config_model(cls):
             return _FakeConfig
+
         def create(self, instance_id, config):
             if config.name == "bad":
                 raise ValueError("nope")
-            return _FakeInstance(instance_id, config, lambda e: MonitorStatus(state="ok"))
+            return _FakeInstance(
+                instance_id, config, lambda e: MonitorStatus(state="ok")
+            )
 
     sup = Supervisor(sink=lambda *a: None)
     sup.register(_PickyPlugin(), _FakeConfig(name="ok-cfg"), instance_id="f")
@@ -446,8 +507,8 @@ def test_reconfigure_bad_config_preserves_old_monitor():
         old = sup._monitors["f"]
         with pytest.raises(ValueError):
             sup.reconfigure("f", _FakeConfig(name="bad"))
-        assert sup._monitors["f"] is old          # old entry preserved
-        assert not old.stop.is_set()              # old worker untouched
+        assert sup._monitors["f"] is old  # old entry preserved
+        assert not old.stop.is_set()  # old worker untouched
         assert old.thread.is_alive()
     finally:
         sup.stop()
@@ -460,8 +521,14 @@ def test_heartbeat_expands_user_path(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     (tmp_path / "hb.json").write_text(
-        json.dumps({"status": "cycling",
-                    "next_check_due_utc": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()}),
+        json.dumps(
+            {
+                "status": "cycling",
+                "next_check_due_utc": (
+                    datetime.now(timezone.utc) + timedelta(minutes=10)
+                ).isoformat(),
+            }
+        ),
         encoding="utf-8",
     )
     st = evaluate_heartbeat(HeartbeatConfig(name="hb", path="~/hb.json"))

@@ -47,8 +47,8 @@ def test_eventqueue_recent_is_non_destructive_and_bounded():
     for i in range(5):
         q.add("mon", f"e{i}", level="info")
     recent = q.recent(limit=3)
-    assert [e["message"] for e in recent] == ["e2", "e3", "e4"]   # newest last, last 3
-    assert len(q.payload(ack_id=0)["events"]) == 5                # nothing consumed
+    assert [e["message"] for e in recent] == ["e2", "e3", "e4"]  # newest last, last 3
+    assert len(q.payload(ack_id=0)["events"]) == 5  # nothing consumed
     assert q.recent(limit=0) == []
 
 
@@ -61,7 +61,9 @@ def test_eventqueue_recent_filters_by_monitor():
     q.add("quiet", "q0")
     # last 2 overall would be n4 + q0; filtered to "quiet" we still see q0.
     assert [e["message"] for e in q.recent(limit=2, monitor="quiet")] == ["q0"]
-    assert [e["message"] for e in q.recent(monitor="noisy")] == [f"n{i}" for i in range(5)]
+    assert [e["message"] for e in q.recent(monitor="noisy")] == [
+        f"n{i}" for i in range(5)
+    ]
     assert q.recent(monitor="ghost") == []
     # unfiltered behaviour is unchanged (monitor defaults to None)
     assert len(q.recent()) == 6
@@ -76,7 +78,9 @@ def test_eventqueue_last_event_times():
     a1 = q.add("a", "a1")
     times = q.last_event_times()
     assert set(times) == {"a", "b"}
-    assert times["a"] == a1["time"] and times["a"] >= a0["time"]  # newest wins per monitor
+    assert (
+        times["a"] == a1["time"] and times["a"] >= a0["time"]
+    )  # newest wins per monitor
 
 
 def test_eventqueue_recent_survives_hub_ack_drain():
@@ -85,8 +89,8 @@ def test_eventqueue_recent_survives_hub_ack_drain():
     q = EventQueue(machine="m")
     for i in range(3):
         q.add("mon", f"e{i}")
-    assert q.payload()["events"]                                   # legacy drain clears _queue
-    assert q.payload(ack_id=0)["events"] == []                     # _queue is now empty
+    assert q.payload()["events"]  # legacy drain clears _queue
+    assert q.payload(ack_id=0)["events"] == []  # _queue is now empty
     assert [e["message"] for e in q.recent()] == ["e0", "e1", "e2"]  # history survived
 
 
@@ -100,6 +104,7 @@ def test_eventqueue_persists_counter_before_visible():
 def test_eventqueue_persist_failure_keeps_event_invisible():
     """If the counter persist raises, nothing is mutated: the event is not
     appended and the id is not advanced (durable-before-visible)."""
+
     def boom(_next_id):
         raise OSError("disk full")
 
@@ -220,7 +225,10 @@ def test_build_queue_persists_across_restart(tmp_path):
 def test_bind_host_normalized_on_both_configs():
     """bind_host is trimmed + de-bracketed so the value persisted and handed to
     claim_port/loopback_url matches what the exposure guard classified (#114)."""
-    assert AgentConfig(server_id="s", machine="m", bind_host="  192.168.1.10  ").bind_host == "192.168.1.10"
+    assert (
+        AgentConfig(server_id="s", machine="m", bind_host="  192.168.1.10  ").bind_host
+        == "192.168.1.10"
+    )
     assert AgentConfig(server_id="s", machine="m", bind_host="[::1]").bind_host == "::1"
     assert HubConfig(bind_host="  10.0.0.5 ").bind_host == "10.0.0.5"
     assert HubConfig(bind_host="[::1]").bind_host == "::1"

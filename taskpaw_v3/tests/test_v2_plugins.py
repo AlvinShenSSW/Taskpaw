@@ -6,15 +6,20 @@ import sys
 
 import pytest
 
-from taskpaw_v3.monitors.plugins.comfyui import ComfyUIConfig, ComfyUIInstance, ComfyUIPlugin
 from taskpaw_v3.monitors.plugins import custom_cmd as custom_cmd_mod
+from taskpaw_v3.monitors.plugins.comfyui import (
+    ComfyUIConfig,
+    ComfyUIInstance,
+)
 from taskpaw_v3.monitors.plugins.custom_cmd import (
     CustomCmdConfig,
     CustomCmdInstance,
-    CustomCmdPlugin,
     split_command,
 )
-from taskpaw_v3.monitors.plugins.folder import FolderConfig, FolderInstance, FolderPlugin
+from taskpaw_v3.monitors.plugins.folder import (
+    FolderConfig,
+    FolderInstance,
+)
 from taskpaw_v3.monitors.registry import default_registry
 
 
@@ -33,7 +38,12 @@ def test_v2_plugins_registered():
 
 # ── custom_cmd ───────────────────────────────────────────────────────────--
 def test_custom_cmd_uses_no_shell_and_reports_exit():
-    inst = CustomCmdInstance("c1", CustomCmdConfig(name="c", command=f"{sys.executable} -c \"import sys;sys.exit(0)\""))
+    inst = CustomCmdInstance(
+        "c1",
+        CustomCmdConfig(
+            name="c", command=f'{sys.executable} -c "import sys;sys.exit(0)"'
+        ),
+    )
     events, emit = _collector()
     st = inst.check(emit)
     assert st.state == "ok"
@@ -41,8 +51,8 @@ def test_custom_cmd_uses_no_shell_and_reports_exit():
 
 
 def test_custom_cmd_emits_alert_then_recovery():
-    fail = f"{sys.executable} -c \"import sys;sys.exit(1)\""
-    ok = f"{sys.executable} -c \"import sys;sys.exit(0)\""
+    fail = f'{sys.executable} -c "import sys;sys.exit(1)"'
+    ok = f'{sys.executable} -c "import sys;sys.exit(0)"'
     inst = CustomCmdInstance("c1", CustomCmdConfig(name="job", command=fail))
     events, emit = _collector()
     st = inst.check(emit)
@@ -86,18 +96,22 @@ def test_split_command_posix_mode(monkeypatch):
 def test_folder_completes_when_stable(tmp_path):
     f = tmp_path / "video.mp4"
     f.write_bytes(b"abc")
-    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    inst = FolderInstance(
+        "f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0)
+    )
     events, emit = _collector()
     # stable_seconds=0 → completes on the very next check after it's first seen
-    inst.check(emit)        # first sight, records
-    st = inst.check(emit)   # now stable
+    inst.check(emit)  # first sight, records
+    st = inst.check(emit)  # now stable
     assert any(a[0] == "done" for a, _ in events)
     assert st.state == "ok"
 
 
 def test_folder_skips_zero_byte(tmp_path):
     (tmp_path / "empty.mp4").write_bytes(b"")
-    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    inst = FolderInstance(
+        "f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0)
+    )
     events, emit = _collector()
     inst.check(emit)
     inst.check(emit)
@@ -107,8 +121,12 @@ def test_folder_skips_zero_byte(tmp_path):
 def test_folder_extension_filter(tmp_path):
     (tmp_path / "keep.mp4").write_bytes(b"x")
     (tmp_path / "skip.txt").write_bytes(b"x")
-    inst = FolderInstance("f1", FolderConfig(
-        name="dl", path=str(tmp_path), extensions=["mp4"], stable_seconds=0))
+    inst = FolderInstance(
+        "f1",
+        FolderConfig(
+            name="dl", path=str(tmp_path), extensions=["mp4"], stable_seconds=0
+        ),
+    )
     events, emit = _collector()
     inst.check(emit)
     inst.check(emit)
@@ -119,13 +137,15 @@ def test_folder_extension_filter(tmp_path):
 def test_folder_resets_on_size_change(tmp_path):
     f = tmp_path / "video.mp4"
     f.write_bytes(b"abc")
-    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    inst = FolderInstance(
+        "f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0)
+    )
     events, emit = _collector()
-    inst.check(emit)            # first sight
-    f.write_bytes(b"abcdef")    # grew → resets clock
-    inst.check(emit)            # size changed, not done
+    inst.check(emit)  # first sight
+    f.write_bytes(b"abcdef")  # grew → resets clock
+    inst.check(emit)  # size changed, not done
     assert not [a for a, _ in events if a[0] == "done"]
-    inst.check(emit)            # now stable
+    inst.check(emit)  # now stable
     assert [a for a, _ in events if a[0] == "done"]
 
 
@@ -134,9 +154,11 @@ def test_folder_baselines_existing_files_on_start(tmp_path):
     arrivals fire (Codex #20 r4)."""
     (tmp_path / "old1.mp4").write_bytes(b"abc")
     (tmp_path / "old2.mp4").write_bytes(b"def")
-    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    inst = FolderInstance(
+        "f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0)
+    )
     events, emit = _collector()
-    inst.start(emit)            # baseline the two existing files
+    inst.start(emit)  # baseline the two existing files
     inst.check(emit)
     inst.check(emit)
     assert not [a for a, _ in events if a[0] == "done"]  # no replay
@@ -153,13 +175,15 @@ def test_folder_baselined_file_still_growing_completes(tmp_path):
     finishes — baselining suppresses only files that never change (Codex #20 r5)."""
     f = tmp_path / "active.mp4"
     f.write_bytes(b"partial")
-    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    inst = FolderInstance(
+        "f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0)
+    )
     events, emit = _collector()
-    inst.start(emit)            # baselined as completed at current size
+    inst.start(emit)  # baselined as completed at current size
     f.write_bytes(b"partial+more")  # download continues → size changes
-    inst.check(emit)            # size changed → reactivated, not done yet
+    inst.check(emit)  # size changed → reactivated, not done yet
     assert not [a for a, _ in events if a[0] == "done"]
-    inst.check(emit)            # now stable → completes
+    inst.check(emit)  # now stable → completes
     assert [a for a, _ in events if a[0] == "done"]
 
 
@@ -167,10 +191,12 @@ def test_folder_start_zero_byte_not_baselined(tmp_path):
     """A 0-byte placeholder present at start fires once it gets real content."""
     f = tmp_path / "dl.mp4"
     f.write_bytes(b"")
-    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    inst = FolderInstance(
+        "f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0)
+    )
     events, emit = _collector()
     inst.start(emit)
-    f.write_bytes(b"data")      # download fills in
+    f.write_bytes(b"data")  # download fills in
     inst.check(emit)
     inst.check(emit)
     assert [a for a, _ in events if a[0] == "done"]
@@ -181,16 +207,18 @@ def test_folder_reused_filename_refires(tmp_path):
     fire again, not be skipped by a stale completed record (Codex #20)."""
     f = tmp_path / "video.mp4"
     f.write_bytes(b"abc")
-    inst = FolderInstance("f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0))
+    inst = FolderInstance(
+        "f1", FolderConfig(name="dl", path=str(tmp_path), stable_seconds=0)
+    )
     events, emit = _collector()
-    inst.check(emit)            # first sight
-    inst.check(emit)            # complete
+    inst.check(emit)  # first sight
+    inst.check(emit)  # complete
     assert len([a for a, _ in events if a[0] == "done"]) == 1
     f.unlink()
-    inst.check(emit)            # gone → record purged
-    f.write_bytes(b"xyz")       # same name, new download
-    inst.check(emit)            # first sight again
-    inst.check(emit)            # complete again
+    inst.check(emit)  # gone → record purged
+    f.write_bytes(b"xyz")  # same name, new download
+    inst.check(emit)  # first sight again
+    inst.check(emit)  # complete again
     assert len([a for a, _ in events if a[0] == "done"]) == 2
 
 
@@ -208,10 +236,10 @@ def test_comfyui_done_after_idle_confirm(monkeypatch):
     monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: next(snaps))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", idle_confirm=2))
     events, emit = _collector()
-    assert inst.check(emit).state == "running"   # busy
-    inst.check(emit)                             # idle 1/2, no fire
+    assert inst.check(emit).state == "running"  # busy
+    inst.check(emit)  # idle 1/2, no fire
     assert not events
-    inst.check(emit)                             # idle 2/2, fire
+    inst.check(emit)  # idle 2/2, fire
     assert events and events[0][0][0] == "done"
 
 
@@ -242,13 +270,13 @@ def test_comfyui_detects_stalled_queue(monkeypatch):
     monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: ([], 2))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", stall_confirm=2))
     events, emit = _collector()
-    assert inst.check(emit).state == "running"   # stall 1/2, still running
+    assert inst.check(emit).state == "running"  # stall 1/2, still running
     assert not events
-    st = inst.check(emit)                         # stall 2/2 → error + alert
+    st = inst.check(emit)  # stall 2/2 → error + alert
     assert st.state == "error" and st.metrics["pending"] == 2
     alerts = [a for a, _ in events if a[0] == "alert"]
     assert len(alerts) == 1
-    inst.check(emit)                             # still stalled, no duplicate alert
+    inst.check(emit)  # still stalled, no duplicate alert
     assert len([a for a, _ in events if a[0] == "alert"]) == 1
 
 
@@ -257,11 +285,15 @@ def test_comfyui_realerts_on_second_stall_after_recovery(monkeypatch):
     earlier permanent dedupe_key suppressed it forever (Codex #20 r9)."""
     import taskpaw_v3.monitors.plugins.comfyui as mod
 
-    seq = iter([
-        ([], 1), ([], 1),     # stall episode 1 (stall_confirm=2) → alert
-        (["p"], 0),           # recover (running)
-        ([], 1), ([], 1),     # stall episode 2 → must alert again
-    ])
+    seq = iter(
+        [
+            ([], 1),
+            ([], 1),  # stall episode 1 (stall_confirm=2) → alert
+            (["p"], 0),  # recover (running)
+            ([], 1),
+            ([], 1),  # stall episode 2 → must alert again
+        ]
+    )
     monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: next(seq))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", stall_confirm=2))
     events, emit = _collector()
@@ -275,11 +307,13 @@ def test_comfyui_stall_clears_then_completes(monkeypatch):
 
     seq = iter([([], 1), (["p1"], 0), ([], 0)])  # stalled-ish → running → empty
     monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: next(seq))
-    inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", idle_confirm=1, stall_confirm=2))
+    inst = ComfyUIInstance(
+        "q1", ComfyUIConfig(name="comfy", idle_confirm=1, stall_confirm=2)
+    )
     events, emit = _collector()
-    inst.check(emit)   # pending only, stall 1/2 (not yet error)
-    inst.check(emit)   # running now → stall reset, busy
-    inst.check(emit)   # empty → done
+    inst.check(emit)  # pending only, stall 1/2 (not yet error)
+    inst.check(emit)  # running now → stall reset, busy
+    inst.check(emit)  # empty → done
     assert any(a[0] == "done" for a, _ in events)
 
 
@@ -290,12 +324,12 @@ def test_comfyui_detects_stuck_prompt(monkeypatch):
     monkeypatch.setattr(mod, "queue_snapshot", lambda *a, **k: (["hung-prompt"], 0))
     inst = ComfyUIInstance("q1", ComfyUIConfig(name="comfy", stuck_checks=3))
     events, emit = _collector()
-    assert inst.check(emit).state == "running"   # 1/3
-    assert inst.check(emit).state == "running"   # 2/3
-    st = inst.check(emit)                         # 3/3 → stuck
+    assert inst.check(emit).state == "running"  # 1/3
+    assert inst.check(emit).state == "running"  # 2/3
+    st = inst.check(emit)  # 3/3 → stuck
     assert st.state == "error"
     assert len([a for a, _ in events if a[0] == "alert"]) == 1
-    inst.check(emit)                             # still stuck, no duplicate alert
+    inst.check(emit)  # still stuck, no duplicate alert
     assert len([a for a, _ in events if a[0] == "alert"]) == 1
 
 

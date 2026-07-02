@@ -19,7 +19,10 @@ def _db(tmp_path) -> str:
 # ── add / list / enable / disable / remove ───────────────────────────────--
 def test_add_and_list(tmp_path, capsys):
     db = _db(tmp_path)
-    assert main(["--db", db, "add-server", "--name", "moomoo", "--ip", "192.168.1.50"]) == 0
+    assert (
+        main(["--db", db, "add-server", "--name", "moomoo", "--ip", "192.168.1.50"])
+        == 0
+    )
     assert main(["--db", db, "list-servers"]) == 0
     out = capsys.readouterr().out
     assert "moomoo" in out and "192.168.1.50:5680" in out
@@ -65,8 +68,10 @@ def test_add_server_rejects_invalid_port(tmp_path, bad):
     """Out-of-range/non-int ports must be rejected at parse time, not persisted
     (an invalid port makes the agent permanently unpollable) — Codex."""
     db = _db(tmp_path)
-    with pytest.raises(SystemExit):   # argparse exits non-zero on bad type
-        main(["--db", db, "add-server", "--name", "p", "--ip", "1.1.1.1", "--port", bad])
+    with pytest.raises(SystemExit):  # argparse exits non-zero on bad type
+        main(
+            ["--db", db, "add-server", "--name", "p", "--ip", "1.1.1.1", "--port", bad]
+        )
     assert HubStore(Path(db)).list_servers() == []
 
 
@@ -82,7 +87,7 @@ def test_run_hard_fails_on_abandoned_legacy_db(tmp_path, capsys):
     # whose db is absent → must hard-fail, not silently start empty (Kimi).
     cfg = tmp_path / "hub.yaml"
     cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
-    HubStore(tmp_path / "hub.db").add_server("m", "1.1.1.1")   # real legacy db
+    HubStore(tmp_path / "hub.db").add_server("m", "1.1.1.1")  # real legacy db
     rc = main(["--config", str(cfg), "run"])
     assert rc == 1
     assert "older one exists" in capsys.readouterr().err
@@ -90,8 +95,9 @@ def test_run_hard_fails_on_abandoned_legacy_db(tmp_path, capsys):
 
 def test_zero_byte_legacy_is_not_a_conflict(tmp_path):
     from taskpaw_v3.hub.server.service import legacy_db_conflict
+
     cfg = tmp_path / "hub.yaml"
-    (tmp_path / "hub.db").write_bytes(b"")          # junk, not a real db
+    (tmp_path / "hub.db").write_bytes(b"")  # junk, not a real db
     assert legacy_db_conflict(cfg, tmp_path / "newdir" / "hub.db") is None
 
 
@@ -99,10 +105,11 @@ def test_empty_resolved_db_still_conflicts(tmp_path):
     # a management command may have created an empty resolved db; while a real
     # legacy db exists, that's still a conflict so `run` keeps failing (Codex).
     from taskpaw_v3.hub.server.service import legacy_db_conflict
+
     cfg = tmp_path / "hub.yaml"
-    HubStore(tmp_path / "hub.db").add_server("m", "1.1.1.1")   # legacy with data
+    HubStore(tmp_path / "hub.db").add_server("m", "1.1.1.1")  # legacy with data
     resolved = tmp_path / "newdir" / "hub.db"
-    HubStore(resolved)                                          # empty resolved (0 servers)
+    HubStore(resolved)  # empty resolved (0 servers)
     assert legacy_db_conflict(cfg, resolved) == tmp_path / "hub.db"
 
 
@@ -110,31 +117,39 @@ def test_unrelated_sqlite_at_resolved_still_conflicts(tmp_path):
     # An unrelated SQLite file (no `servers` table) at the resolved path must NOT
     # count as real data, so a real legacy db is still protected (Codex).
     import sqlite3
+
     from taskpaw_v3.hub.server.service import legacy_db_conflict
+
     cfg = tmp_path / "hub.yaml"
-    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")     # real legacy
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")  # real legacy
     resolved = tmp_path / "newdir" / "hub.db"
     resolved.parent.mkdir()
-    c = sqlite3.connect(resolved); c.execute("CREATE TABLE junk(x)"); c.commit(); c.close()
+    c = sqlite3.connect(resolved)
+    c.execute("CREATE TABLE junk(x)")
+    c.commit()
+    c.close()
     assert legacy_db_conflict(cfg, resolved) == tmp_path / "hub.db"
 
 
 def test_relative_data_dir_rejected():
     import pytest as _pytest
+
     from taskpaw_v3.core.config import HubConfig
+
     with _pytest.raises(Exception):
         HubConfig(data_dir="relative/dir")
     with _pytest.raises(Exception):
         HubConfig(data_dir="/abs/../sneaky")
-    assert HubConfig(data_dir="~/x").data_dir == "~/x"     # ~ allowed
+    assert HubConfig(data_dir="~/x").data_dir == "~/x"  # ~ allowed
 
 
 def test_resolved_with_servers_is_not_a_conflict(tmp_path):
     from taskpaw_v3.hub.server.service import legacy_db_conflict
+
     cfg = tmp_path / "hub.yaml"
     HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")
     resolved = tmp_path / "newdir" / "hub.db"
-    HubStore(resolved).add_server("new", "2.2.2.2")            # resolved has data
+    HubStore(resolved).add_server("new", "2.2.2.2")  # resolved has data
     assert legacy_db_conflict(cfg, resolved) is None
 
 
@@ -143,7 +158,7 @@ def test_management_cmd_fatal_on_legacy_conflict(tmp_path, capsys):
     # and the resolved db has no data — consistent safety model (Kimi).
     cfg = tmp_path / "hub.yaml"
     cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
-    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")   # real legacy db
+    HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")  # real legacy db
     with pytest.raises(SystemExit) as e:
         main(["--config", str(cfg), "add-server", "--name", "x", "--ip", "2.2.2.2"])
     assert e.value.code == 2
@@ -155,8 +170,19 @@ def test_management_cmd_legacy_bypassed_with_explicit_db(tmp_path):
     cfg = tmp_path / "hub.yaml"
     cfg.write_text(f"machine: h\ndata_dir: {tmp_path / 'newdir'}\n")
     HubStore(tmp_path / "hub.db").add_server("old", "1.1.1.1")
-    rc = main(["--config", str(cfg), "--db", str(tmp_path / "explicit.db"),
-               "add-server", "--name", "x", "--ip", "2.2.2.2"])
+    rc = main(
+        [
+            "--config",
+            str(cfg),
+            "--db",
+            str(tmp_path / "explicit.db"),
+            "add-server",
+            "--name",
+            "x",
+            "--ip",
+            "2.2.2.2",
+        ]
+    )
     assert rc == 0
 
 
