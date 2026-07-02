@@ -28,7 +28,7 @@ MacSubs (macsubs.py, :5679)  ──poll─────────────�
 | `docs/constitution.md` | Hard rules every change is checked against. |
 | `design-system/taskpaw-v3/` | Generated UI/UX design system (MASTER + page overrides) for the V3 frontend. |
 | `skill/` | In-repo skills shipped with the code: `afk`, `codex-review`, `kimi-review`, `cto-pr-review`, `implementation-pilot`, `spec-planner`, `ui-ux-pro-max`. Each `SKILL.md` is self-contained. |
-| `BUG_AUDIT.md`, `CODE_AUDIT_REPORT.md`, `CODEX_AUDIT_FINDINGS.md`, `CHANGELOG.md` | Audit history; most P0/P1/P2 fixed in v2.7. |
+| `docs/audits/` (`BUG_AUDIT.md`, `CODE_AUDIT_REPORT.md`, `CODEX_AUDIT_FINDINGS.md`), `CHANGELOG.md` | Audit history; most P0/P1/P2 fixed in v2.7. |
 | `tests/` | pytest suite (smoke-level today; grow per-issue). |
 
 ## Status: V2 vs V3
