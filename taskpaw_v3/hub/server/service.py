@@ -114,7 +114,9 @@ def legacy_db_conflict(config_path: Path, resolved_db: Path) -> Path | None:
     return legacy
 
 
-def run_from_config(config_path: Path | None = None, db_path: Path | None = None) -> int:
+def run_from_config(
+    config_path: Path | None = None, db_path: Path | None = None
+) -> int:
     path = config_path or default_config_path()
     if not path.exists():
         if config_path is not None:
@@ -124,13 +126,17 @@ def run_from_config(config_path: Path | None = None, db_path: Path | None = None
         # Default location missing → self-initialize so a fresh install runs
         # (host_metrics self-monitor baseline) instead of failing (#40 Codex).
         from taskpaw_v3 import bootstrap
+
         try:
             bootstrap.scaffold("hub")
         except OSError as e:
             # e.g. Linux /etc/taskpaw without root — fail cleanly, don't crash (Kimi).
-            print(f"No hub config at {path} and could not auto-create it: {e}\n"
-                  f"  Create it manually (see taskpaw_v3/examples/hub.example.yaml) "
-                  f"or run with write access to that directory.", file=sys.stderr)
+            print(
+                f"No hub config at {path} and could not auto-create it: {e}\n"
+                f"  Create it manually (see taskpaw_v3/examples/hub.example.yaml) "
+                f"or run with write access to that directory.",
+                file=sys.stderr,
+            )
             return 1
         logging.getLogger("taskpaw.hub").info("created default hub config at %s", path)
     config: HubConfig = load_yaml(HubConfig, path)  # type: ignore[assignment]
@@ -148,7 +154,8 @@ def run_from_config(config_path: Path | None = None, db_path: Path | None = None
                 f"  Move it:   mv '{legacy_db}' '{resolved_db}'\n"
                 f"  or point data_dir at its folder in {path}.\n"
                 f"  To start fresh, pass --db {resolved_db}.",
-                file=sys.stderr)
+                file=sys.stderr,
+            )
             return 1
     store = HubStore(resolved_db)
     run_hub(config, store, block=True)

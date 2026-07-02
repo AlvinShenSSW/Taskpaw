@@ -24,12 +24,20 @@ from taskpaw_v3.core.net import (  # re-export
 )
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.core.state import load_next_id, save_next_id
-from taskpaw_v3.monitors.runtime import effective_monitors  # re-export (moved to runtime)
+from taskpaw_v3.monitors.runtime import (
+    effective_monitors,  # re-export (moved to runtime)
+)
 
 log = logging.getLogger("taskpaw.agent")
 
-__all__ = ["run_agent", "PortInUseError", "claim_port", "port_available",
-           "ensure_port_free", "effective_monitors"]
+__all__ = [
+    "run_agent",
+    "PortInUseError",
+    "claim_port",
+    "port_available",
+    "ensure_port_free",
+    "effective_monitors",
+]
 
 
 def ensure_port_free(host: str, port: int, what: str) -> None:
@@ -78,7 +86,9 @@ def run_agent(
     # Race-free claim: hold the sockets, hand them to uvicorn.
     net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
     try:
-        ctl_sock = claim_port(config.control_host, config.control_port, "agent control API")
+        ctl_sock = claim_port(
+            config.control_host, config.control_port, "agent control API"
+        )
     except PortInUseError:
         net_sock.close()
         raise
@@ -123,6 +133,7 @@ def run_agent(
 
     def _status_provider() -> dict:
         import platform
+
         # snapshot (running) + configured-but-disabled stubs, so the console
         # can list + re-enable stopped monitors (#57).
         monitors = merge_status(config, supervisor.snapshot())
@@ -142,14 +153,22 @@ def run_agent(
         }
 
     net = uvicorn.Server(
-        uvicorn.Config(create_network_app(config, queue, _status_provider), log_level="warning")
+        uvicorn.Config(
+            create_network_app(config, queue, _status_provider), log_level="warning"
+        )
     )
     ctl = uvicorn.Server(
-        uvicorn.Config(create_control_app(config, on_command=admin.handle,
-                                          status_provider=_status_provider,
-                                          registry=registry, admin=admin,
-                                          events_provider=queue.recent),
-                       log_level="warning")
+        uvicorn.Config(
+            create_control_app(
+                config,
+                on_command=admin.handle,
+                status_provider=_status_provider,
+                registry=registry,
+                admin=admin,
+                events_provider=queue.recent,
+            ),
+            log_level="warning",
+        )
     )
 
     def _serve(server, sock, label):
@@ -159,8 +178,12 @@ def run_agent(
             log.error("Agent %s server crashed: %s", label, e)
             shutdown.shutdown()
 
-    net_thread = threading.Thread(target=lambda: _serve(net, net_sock, "network"), name="agent-net", daemon=True)
-    ctl_thread = threading.Thread(target=lambda: _serve(ctl, ctl_sock, "control"), name="agent-ctl", daemon=True)
+    net_thread = threading.Thread(
+        target=lambda: _serve(net, net_sock, "network"), name="agent-net", daemon=True
+    )
+    ctl_thread = threading.Thread(
+        target=lambda: _serve(ctl, ctl_sock, "control"), name="agent-ctl", daemon=True
+    )
 
     def _stop_servers() -> None:
         net.should_exit = True
@@ -180,7 +203,10 @@ def run_agent(
     ctl_thread.start()
     log.info(
         "Agent up: network %s:%s, control %s:%s",
-        config.bind_host, config.bind_port, config.control_host, config.control_port,
+        config.bind_host,
+        config.bind_port,
+        config.control_host,
+        config.control_port,
     )
     # Readiness handshake (design §3.1, #48): ONE machine-readable line on stdout
     # once the sockets are bound + servers started — the Tauri shell reads it

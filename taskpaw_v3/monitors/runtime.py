@@ -23,7 +23,9 @@ def effective_monitors(config: AgentConfig) -> list[dict[str, Any]]:
     raise a duplicate. Lives here (not launcher) so app.py can use it without a
     circular import (Kimi)."""
     monitors = list(config.monitors)
-    if config.host_metrics and not any(m.get("type_id") == "host_metrics" for m in monitors):
+    if config.host_metrics and not any(
+        m.get("type_id") == "host_metrics" for m in monitors
+    ):
         existing = {n for m in monitors if (n := monitor_name(m))}
         # machine/server_id are stripped+non-blank by AgentConfig validators; the
         # `or` is defensive so a blank stem can never produce "-host".
@@ -32,7 +34,9 @@ def effective_monitors(config: AgentConfig) -> list[dict[str, Any]]:
         name, i = base, 1
         while name in existing:
             name, i = f"{base}-{i}", i + 1
-        monitors.append({"type_id": "host_metrics", "name": name, "config": {"name": name}})
+        monitors.append(
+            {"type_id": "host_metrics", "name": name, "config": {"name": name}}
+        )
     return monitors
 
 
@@ -52,10 +56,15 @@ def merge_status(config: AgentConfig, live: dict[str, Any]) -> dict[str, Any]:
             entry["type_id"] = spec.get("type_id")
         out[name] = entry
     for name, spec in configured.items():
-        if name not in out:        # configured but not running → disabled
+        if name not in out:  # configured but not running → disabled
             out[name] = {
-                "state": "stopped", "detail": "disabled", "metrics": {},
-                "alive": False, "failures": 0, "degraded": False, "dropped": 0,
+                "state": "stopped",
+                "detail": "disabled",
+                "metrics": {},
+                "alive": False,
+                "failures": 0,
+                "degraded": False,
+                "dropped": 0,
                 "enabled": bool(spec.get("enabled", True)),
                 "type_id": spec.get("type_id"),
             }
@@ -96,14 +105,24 @@ def make_queue_sink(queue: EventQueue, machine: str):
     `monitor` is the STABLE instance id (so Hub history/grouping is consistent
     across a monitor's state changes); `title` carries the display text.
     """
-    def sink(instance_id: str, level: str, title: str, message: str,
-             data=None, dedupe_key=None) -> None:
+
+    def sink(
+        instance_id: str,
+        level: str,
+        title: str,
+        message: str,
+        data=None,
+        dedupe_key=None,
+    ) -> None:
         lvl = level if level in {"info", "warn", "alert", "done"} else None
         # Do NOT swallow: if enqueue fails (e.g. the counter persist errors), let
         # it propagate to Supervisor._safe_sink, which logs it and returns failure
         # so the dedupe key is NOT recorded and the keyed alert can retry. Catching
         # here would make a never-queued alert look delivered → permanent suppression.
-        queue.add(monitor=instance_id, message=message, level=lvl, title=title, data=data)
+        queue.add(
+            monitor=instance_id, message=message, level=lvl, title=title, data=data
+        )
+
     return sink
 
 
@@ -135,9 +154,11 @@ def build_supervisor(
         # name-inside-config. monitor_name() is the shared resolver.
         raw_in = spec.get("config")
         if raw_in is not None and not isinstance(raw_in, dict):
-            raise ValueError("monitor config must be an object")  # list/null → clean error (Kimi)
+            raise ValueError(
+                "monitor config must be an object"
+            )  # list/null → clean error (Kimi)
         raw = dict(raw_in or {})
-        name = canonical_name(spec)   # raises on a top-level/config name conflict
+        name = canonical_name(spec)  # raises on a top-level/config name conflict
         if name and "name" not in raw:
             raw["name"] = name
         cfg = plugin.validate_config(raw)

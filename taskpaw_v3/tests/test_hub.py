@@ -49,12 +49,18 @@ def test_recent_events_filters_and_orders(tmp_path):
     try:
         a = s.add_server("moomoo", "127.0.0.1", 5680)
         b = s.add_server("pig", "127.0.0.1", 5681)
-        s.store_event(a, {"id": 1, "monitor": "lada", "message": "older", "level": "info"})
-        s.store_event(a, {"id": 2, "monitor": "lada", "message": "boom", "level": "alert"})
-        s.store_event(b, {"id": 1, "monitor": "comfy", "message": "hi", "level": "info"})
+        s.store_event(
+            a, {"id": 1, "monitor": "lada", "message": "older", "level": "info"}
+        )
+        s.store_event(
+            a, {"id": 2, "monitor": "lada", "message": "boom", "level": "alert"}
+        )
+        s.store_event(
+            b, {"id": 1, "monitor": "comfy", "message": "hi", "level": "info"}
+        )
         allev = s.recent_events()
         assert len(allev) == 3 and {e["server"] for e in allev} == {"moomoo", "pig"}
-        assert "server" in allev[0]                          # name joined
+        assert "server" in allev[0]  # name joined
         # filter by server
         assert {e["message"] for e in s.recent_events(server_id=a)} == {"older", "boom"}
         # filter by level
@@ -68,17 +74,23 @@ def test_recent_events_filters_and_orders(tmp_path):
 
 def test_hub_events_endpoint(tmp_path):
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
+
     s = _store(tmp_path)
     try:
         a = s.add_server("moomoo", "127.0.0.1", 5680)
-        s.store_event(a, {"id": 1, "monitor": "lada", "message": "done", "level": "done"})
+        s.store_event(
+            a, {"id": 1, "monitor": "lada", "message": "done", "level": "done"}
+        )
         app, _svc = create_hub_app(HubConfig(), s)
         r = TestClient(app).get("/events?level=done&limit=50")
         assert r.status_code == 200
         ev = r.json()["events"]
-        assert len(ev) == 1 and ev[0]["server"] == "moomoo" and ev[0]["message"] == "done"
+        assert (
+            len(ev) == 1 and ev[0]["server"] == "moomoo" and ev[0]["message"] == "done"
+        )
     finally:
         s.close()
 
@@ -88,7 +100,9 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
     try:
         sid = s.add_server("agent", "127.0.0.1", 5680)
         s.set_config("openclaw_token", "tok")
-        p = Poller(s, "http://oc/hook", get_active=lambda: True, get_token=lambda: "tok")
+        p = Poller(
+            s, "http://oc/hook", get_active=lambda: True, get_token=lambda: "tok"
+        )
         p.last_event_ids = {sid: 2}
 
         seen = []
@@ -97,9 +111,15 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
         def fake_urlopen(req, timeout):
             if "/events" in req.full_url:
                 seen.append(req.full_url)
-                return FakeResp({"events": [{"id": 2, "message": "seen"},
-                                            {"id": 3, "message": "new"},
-                                            {"id": 4, "message": "newer"}]})
+                return FakeResp(
+                    {
+                        "events": [
+                            {"id": 2, "message": "seen"},
+                            {"id": 3, "message": "new"},
+                            {"id": 4, "message": "newer"},
+                        ]
+                    }
+                )
             sent.append(json.loads(req.data.decode()))
             return FakeResp({"ok": True})
 
@@ -109,11 +129,20 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
         assert seen == ["http://127.0.0.1:5680/events?ack=2"]
         assert p.last_event_ids[sid] == 4
         assert json.loads(s.get_config("last_event_ids")) == {str(sid): 4}
-        msgs = [r[0] for r in s._conn.execute("SELECT message FROM events ORDER BY event_id").fetchall()]
+        msgs = [
+            r[0]
+            for r in s._conn.execute(
+                "SELECT message FROM events ORDER BY event_id"
+            ).fetchall()
+        ]
         assert msgs == ["new", "newer"]
-        assert sent == [{"text": "TaskPaw Event | agent: new"},
-                        {"text": "TaskPaw Event | agent: newer"}]
-        assert s._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+        assert sent == [
+            {"text": "TaskPaw Event | agent: new"},
+            {"text": "TaskPaw Event | agent: newer"},
+        ]
+        assert (
+            s._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+        )
     finally:
         s.close()
 
@@ -137,8 +166,10 @@ def test_poller_404_fallback_for_legacy_agent(tmp_path, monkeypatch):
         monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
         evs = p.fetch_events(s.list_servers()[0])
         assert [e["id"] for e in evs] == [3]
-        assert seen == ["http://127.0.0.1:5680/events?ack=2",
-                        "http://127.0.0.1:5680/events"]
+        assert seen == [
+            "http://127.0.0.1:5680/events?ack=2",
+            "http://127.0.0.1:5680/events",
+        ]
     finally:
         s.close()
 
@@ -156,7 +187,9 @@ def test_poller_disabled_stores_without_outbox(tmp_path, monkeypatch):
         monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
         p.poll_once()
         assert s._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
-        assert s._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+        assert (
+            s._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+        )
         assert json.loads(s.get_config("last_event_ids")) == {str(sid): 3}
     finally:
         s.close()
@@ -170,11 +203,16 @@ def test_outbox_dead_letters_once(tmp_path, monkeypatch):
     try:
         s.set_config("openclaw_token", "tok")
         s.enqueue_delivery(
-            "agent", "event", json.dumps({"text": "x"}),
-            delivery_state="failed", attempts=9,
+            "agent",
+            "event",
+            json.dumps({"text": "x"}),
+            delivery_state="failed",
+            attempts=9,
             next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         )
-        p = Poller(s, "http://oc/hook", get_active=lambda: True, get_token=lambda: "tok")
+        p = Poller(
+            s, "http://oc/hook", get_active=lambda: True, get_token=lambda: "tok"
+        )
         alerts = []
         monkeypatch.setattr(p, "emit_local_alert", alerts.append)
 
@@ -198,8 +236,13 @@ def test_poller_uses_configured_polling_token(tmp_path):
     only a SQLite row — an authed agent must not silently 401."""
     s = _store(tmp_path)
     try:
-        p = Poller(s, "http://oc/hook", get_active=lambda: False,
-                   get_token=lambda: "", get_polling_token=lambda: "polltok")
+        p = Poller(
+            s,
+            "http://oc/hook",
+            get_active=lambda: False,
+            get_token=lambda: "",
+            get_polling_token=lambda: "polltok",
+        )
         assert p._auth_headers() == {"Authorization": "Bearer polltok"}
         # default (no override) reads the SQLite row
         p2 = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
@@ -213,8 +256,12 @@ def test_poller_uses_configured_polling_token(tmp_path):
 def test_outbox_dedupe_key_idempotent(tmp_path):
     s = _store(tmp_path)
     try:
-        s.enqueue_delivery("agent", "event", json.dumps({"text": "x"}), dedupe_key="1:5")
-        s.enqueue_delivery("agent", "event", json.dumps({"text": "x"}), dedupe_key="1:5")
+        s.enqueue_delivery(
+            "agent", "event", json.dumps({"text": "x"}), dedupe_key="1:5"
+        )
+        s.enqueue_delivery(
+            "agent", "event", json.dumps({"text": "x"}), dedupe_key="1:5"
+        )
         n = s._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0]
         assert n == 1  # replay didn't double-enqueue
     finally:
@@ -223,6 +270,7 @@ def test_outbox_dedupe_key_idempotent(tmp_path):
 
 def test_agent_base_url_brackets_ipv6():
     from taskpaw_v3.hub.server.poller import _agent_base_url
+
     assert _agent_base_url("127.0.0.1", 5680) == "http://127.0.0.1:5680"
     assert _agent_base_url("::1", 5680) == "http://[::1]:5680"
 
@@ -236,8 +284,10 @@ def test_poller_keeps_latest_status_snapshot(tmp_path, monkeypatch):
         sid = s.add_server("agent", "127.0.0.1", 5680)
         p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
 
-        agent_status = {"machine": "box1",
-                        "monitors": {"host": {"state": "ok", "metrics": {"cpu": 12}}}}
+        agent_status = {
+            "machine": "box1",
+            "monitors": {"host": {"state": "ok", "metrics": {"cpu": 12}}},
+        }
 
         def ok_urlopen(req, timeout):
             if "/status" in req.full_url:
@@ -261,8 +311,8 @@ def test_poller_keeps_latest_status_snapshot(tmp_path, monkeypatch):
         p.poll_once()
         snaps = p.snapshot_statuses()
         assert snaps[sid]["online"] is False
-        assert snaps[sid]["snapshot"] == agent_status      # last good preserved
-        assert snaps[sid]["last_seen"] == first_seen        # not refreshed
+        assert snaps[sid]["snapshot"] == agent_status  # last good preserved
+        assert snaps[sid]["last_seen"] == first_seen  # not refreshed
     finally:
         s.close()
 
@@ -295,8 +345,8 @@ def test_snapshot_statuses_parsed_at_write_not_on_read(tmp_path, monkeypatch):
         monkeypatch.setattr(poller_mod.json, "loads", counting_loads)
         snaps = p.snapshot_statuses()
         snaps2 = p.snapshot_statuses()
-        assert calls["n"] == 0                              # no parse on read
-        assert snaps[sid]["snapshot"] == agent_status        # cached value served
+        assert calls["n"] == 0  # no parse on read
+        assert snaps[sid]["snapshot"] == agent_status  # cached value served
         assert snaps2[sid]["snapshot"] == agent_status
     finally:
         s.close()
@@ -306,8 +356,9 @@ def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypa
     """/status augments each server with online/last_seen/snapshot while keeping
     the existing servers/acks/self contract intact (#96 regression guard)."""
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
 
     s = _store(tmp_path)
     try:
@@ -355,8 +406,9 @@ def test_read_api_bearer_gated_when_token_set(tmp_path):
     """With api_token set, /status and /events require a matching Bearer; /ping
     stays open (#106)."""
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
 
     s = _store(tmp_path)
     try:
@@ -365,8 +417,11 @@ def test_read_api_bearer_gated_when_token_set(tmp_path):
         good = {"Authorization": "Bearer s3cret"}
 
         for path in ("/status", "/events"):
-            assert client.get(path).status_code == 401                       # no header
-            assert client.get(path, headers={"Authorization": "Bearer nope"}).status_code == 401
+            assert client.get(path).status_code == 401  # no header
+            assert (
+                client.get(path, headers={"Authorization": "Bearer nope"}).status_code
+                == 401
+            )
             r = client.get(path, headers=good)
             assert r.status_code == 200
             assert "WWW-Authenticate" in client.get(path).headers
@@ -381,8 +436,9 @@ def test_read_api_open_when_token_empty(tmp_path):
     """Empty api_token (default) = auth disabled (V2 parity): /status and /events
     answer without a header (#106)."""
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
 
     s = _store(tmp_path)
     try:
@@ -396,12 +452,20 @@ def test_read_api_open_when_token_empty(tmp_path):
 
 def test_bind_guard_refuses_wildcard_even_with_token():
     """A wildcard/all-interfaces bind is refused outright, even with a token (#114)."""
-    import pytest
-    from taskpaw_v3.hub.server.app import _guard_bind_exposure
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import _guard_bind_exposure
 
     # Raw, bracketed, and string wildcard spellings must all be caught (Kimi).
-    for host in ("0.0.0.0", "::", "0:0:0:0:0:0:0:0", "[::]", "[0.0.0.0]", "", "*", "  ::  "):
+    for host in (
+        "0.0.0.0",
+        "::",
+        "0:0:0:0:0:0:0:0",
+        "[::]",
+        "[0.0.0.0]",
+        "",
+        "*",
+        "  ::  ",
+    ):
         with pytest.raises(ValueError, match="all interfaces"):
             _guard_bind_exposure(HubConfig(bind_host=host, api_token="s3cret"))
 
@@ -409,9 +473,8 @@ def test_bind_guard_refuses_wildcard_even_with_token():
 def test_bind_guard_refuses_public_even_with_token():
     """A globally-routable (public/WAN) bind is refused even WITH a token — the Hub
     is LAN + Bearer only (#114/Codex)."""
-    import pytest
-    from taskpaw_v3.hub.server.app import _guard_bind_exposure
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import _guard_bind_exposure
 
     for host in ("8.8.8.8", "1.1.1.1", "[2001:4860:4860::8888]"):
         with pytest.raises(ValueError, match="public/WAN"):
@@ -421,9 +484,8 @@ def test_bind_guard_refuses_public_even_with_token():
 def test_bind_guard_refuses_nonloopback_without_token():
     """Non-loopback bind + empty api_token is refused (would expose /status,
     /events off-host unauthenticated) (#114)."""
-    import pytest
-    from taskpaw_v3.hub.server.app import _guard_bind_exposure
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import _guard_bind_exposure
 
     with pytest.raises(ValueError, match="requires an api_token"):
         _guard_bind_exposure(HubConfig(bind_host="192.168.1.10", api_token=""))
@@ -431,8 +493,8 @@ def test_bind_guard_refuses_nonloopback_without_token():
 
 def test_bind_guard_allows_loopback_and_authed_lan():
     """Loopback (any token) and a token-protected LAN bind start fine (#114)."""
-    from taskpaw_v3.hub.server.app import _guard_bind_exposure
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import _guard_bind_exposure
 
     # Loopback (numeric, localhost, bracketed v6), no token → fine (local default).
     for host in ("127.0.0.1", "::1", "[::1]", "localhost", "127.0.0.2"):
@@ -445,8 +507,9 @@ def test_bind_guard_allows_loopback_and_authed_lan():
 def test_manage_servers_add_update_delete(tmp_path):
     """Dashboard CRUD for polled agents (#124): add/edit/toggle/delete + validation."""
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
 
     s = _store(tmp_path)
     try:
@@ -454,19 +517,31 @@ def test_manage_servers_add_update_delete(tmp_path):
         c = TestClient(app)
 
         # add
-        r = c.post("/servers", json={"name": "box1", "ip": "192.168.1.80", "port": 5678})
+        r = c.post(
+            "/servers", json={"name": "box1", "ip": "192.168.1.80", "port": 5678}
+        )
         assert r.status_code == 200 and r.json()["name"] == "box1"
         sid = r.json()["id"]
         assert s.get_server(sid)["port"] == 5678
 
         # add invalid → 400
         assert c.post("/servers", json={"name": "", "ip": "1.2.3.4"}).status_code == 400
-        assert c.post("/servers", json={"name": "x", "ip": "1.2.3.4", "port": 0}).status_code == 400
+        assert (
+            c.post(
+                "/servers", json={"name": "x", "ip": "1.2.3.4", "port": 0}
+            ).status_code
+            == 400
+        )
         # duplicate name → 400
-        assert c.post("/servers", json={"name": "box1", "ip": "9.9.9.9"}).status_code == 400
+        assert (
+            c.post("/servers", json={"name": "box1", "ip": "9.9.9.9"}).status_code
+            == 400
+        )
 
         # edit ip/port + toggle
-        r = c.patch(f"/servers/{sid}", json={"ip": "10.0.0.9", "port": 5680, "enabled": False})
+        r = c.patch(
+            f"/servers/{sid}", json={"ip": "10.0.0.9", "port": 5680, "enabled": False}
+        )
         assert r.status_code == 200
         srv = s.get_server(sid)
         assert srv["ip"] == "10.0.0.9" and srv["port"] == 5680 and srv["enabled"] == 0
@@ -487,8 +562,9 @@ def test_manage_servers_add_update_delete(tmp_path):
 def test_manage_set_polling_token_and_auth(tmp_path):
     """PATCH /config persists polling_token; mutations are Bearer-gated (#124/#106)."""
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
 
     s = _store(tmp_path)
     try:
@@ -504,9 +580,14 @@ def test_manage_set_polling_token_and_auth(tmp_path):
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="sek"), s2)
         c = TestClient(app)
-        assert c.post("/servers", json={"name": "x", "ip": "1.1.1.1"}).status_code == 401
-        r = c.post("/servers", json={"name": "x", "ip": "1.1.1.1"},
-                   headers={"Authorization": "Bearer sek"})
+        assert (
+            c.post("/servers", json={"name": "x", "ip": "1.1.1.1"}).status_code == 401
+        )
+        r = c.post(
+            "/servers",
+            json={"name": "x", "ip": "1.1.1.1"},
+            headers={"Authorization": "Bearer sek"},
+        )
         assert r.status_code == 200
     finally:
         s2.close()
@@ -516,26 +597,41 @@ def test_manage_validation_and_atomicity(tmp_path):
     """#124 review fixes: port rejects bool/float, a rejected PATCH leaves no
     partial edit, and 401s carry WWW-Authenticate like the read API."""
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
         c = TestClient(app)
-        sid = c.post("/servers", json={"name": "a", "ip": "1.1.1.1", "port": 5678}).json()["id"]
+        sid = c.post(
+            "/servers", json={"name": "a", "ip": "1.1.1.1", "port": 5678}
+        ).json()["id"]
 
         # port: bool and float are rejected (not silently 1 / 3).
-        assert c.post("/servers", json={"name": "b", "ip": "1.1.1.1", "port": True}).status_code == 400
-        assert c.post("/servers", json={"name": "b", "ip": "1.1.1.1", "port": 3.14}).status_code == 400
+        assert (
+            c.post(
+                "/servers", json={"name": "b", "ip": "1.1.1.1", "port": True}
+            ).status_code
+            == 400
+        )
+        assert (
+            c.post(
+                "/servers", json={"name": "b", "ip": "1.1.1.1", "port": 3.14}
+            ).status_code
+            == 400
+        )
 
         # PATCH with a valid name but a bad `enabled` → 400 AND name unchanged (atomic).
         r = c.patch(f"/servers/{sid}", json={"name": "renamed", "enabled": "false"})
         assert r.status_code == 400
-        assert s.get_server(sid)["name"] == "a"        # not partially applied
+        assert s.get_server(sid)["name"] == "a"  # not partially applied
 
         # duplicate-name add rejected clearly.
-        assert c.post("/servers", json={"name": "a", "ip": "9.9.9.9"}).status_code == 400
+        assert (
+            c.post("/servers", json={"name": "a", "ip": "9.9.9.9"}).status_code == 400
+        )
     finally:
         s.close()
 
@@ -553,15 +649,21 @@ def test_manage_port_and_token_edgecases(tmp_path):
     """#124 review r2: unicode-digit port → 400 (not 500); null polling_token
     clears rather than storing the string 'None'."""
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
         c = TestClient(app)
         # A Unicode-digit string is isdigit()=True but int() rejects it → must 400.
-        assert c.post("/servers", json={"name": "u", "ip": "1.1.1.1", "port": "⁵"}).status_code == 400
+        assert (
+            c.post(
+                "/servers", json={"name": "u", "ip": "1.1.1.1", "port": "⁵"}
+            ).status_code
+            == 400
+        )
         # JSON null token clears it (never the literal "None").
         s.set_config("polling_token", "old")
         assert c.patch("/config", json={"polling_token": None}).status_code == 200
@@ -576,15 +678,21 @@ def test_manage_rejects_non_string_name_ip(tmp_path):
     """#124 review r3: name/ip must be strings — a list/dict is rejected, not
     stored as its Python repr."""
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
 
     s = _store(tmp_path)
     try:
         c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
-        assert c.post("/servers", json={"name": [1, 2], "ip": "1.1.1.1"}).status_code == 400
-        assert c.post("/servers", json={"name": "ok", "ip": {"h": "x"}}).status_code == 400
-        assert len(s.list_servers()) == 0                    # nothing corrupt stored
+        assert (
+            c.post("/servers", json={"name": [1, 2], "ip": "1.1.1.1"}).status_code
+            == 400
+        )
+        assert (
+            c.post("/servers", json={"name": "ok", "ip": {"h": "x"}}).status_code == 400
+        )
+        assert len(s.list_servers()) == 0  # nothing corrupt stored
     finally:
         s.close()
 
@@ -594,21 +702,35 @@ def test_manage_ip_and_token_sanitization(tmp_path):
     rejected — catches the common 'ip:port in the IP field' mistake); the polling
     token rejects control characters (header-injection)."""
     from fastapi.testclient import TestClient
-    from taskpaw_v3.hub.server.app import create_hub_app
+
     from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server.app import create_hub_app
 
     s = _store(tmp_path)
     try:
         c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
         # host:port / path / scheme in the IP field → 400.
         for bad in ("192.168.1.80:5678", "foo/bar", "http://1.2.3.4", "a b", "x@y"):
-            assert c.post("/servers", json={"name": f"n{bad}", "ip": bad}).status_code == 400
+            assert (
+                c.post("/servers", json={"name": f"n{bad}", "ip": bad}).status_code
+                == 400
+            )
         # bare IPv4 / IPv6 / hostname are accepted.
-        assert c.post("/servers", json={"name": "v4", "ip": "192.168.1.80"}).status_code == 200
+        assert (
+            c.post("/servers", json={"name": "v4", "ip": "192.168.1.80"}).status_code
+            == 200
+        )
         assert c.post("/servers", json={"name": "v6", "ip": "::1"}).status_code == 200
-        assert c.post("/servers", json={"name": "host", "ip": "moomoo.local"}).status_code == 200
+        assert (
+            c.post("/servers", json={"name": "host", "ip": "moomoo.local"}).status_code
+            == 200
+        )
         # control chars in the polling token → 400.
-        assert c.patch("/config", json={"polling_token": "abc\r\ndef"}).status_code == 400
-        assert c.patch("/config", json={"polling_token": "good-token"}).status_code == 200
+        assert (
+            c.patch("/config", json={"polling_token": "abc\r\ndef"}).status_code == 400
+        )
+        assert (
+            c.patch("/config", json={"polling_token": "good-token"}).status_code == 200
+        )
     finally:
         s.close()

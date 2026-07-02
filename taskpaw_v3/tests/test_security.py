@@ -20,7 +20,6 @@ from taskpaw_v3.agent.server.app import create_control_app, create_network_app
 from taskpaw_v3.core.config import AgentConfig, HubConfig
 from taskpaw_v3.core.protocol import EventQueue
 
-
 SECRET = "super-secret-token"
 
 
@@ -103,7 +102,9 @@ def test_token_not_logged(caplog, tmp_path):
         try:
             store.set_config("openclaw_token", SECRET)
             store.set_config("polling_token", SECRET)
-            hub_app, _ = create_hub_app(HubConfig(openclaw_token=SECRET, polling_token=SECRET), store)
+            hub_app, _ = create_hub_app(
+                HubConfig(openclaw_token=SECRET, polling_token=SECRET), store
+            )
             hub_client = TestClient(hub_app)
             hub_client.get("/ping")
             hub_client.get("/status")
@@ -121,7 +122,9 @@ def test_control_host_must_be_numeric_loopback():
     AgentConfig(server_id="s", machine="m", control_host="127.0.0.1")
     AgentConfig(server_id="s", machine="m", control_host="::1")
     for bad in ("0.0.0.0", "192.168.1.5", "localhost", "example.com"):
-        with pytest.raises(ValidationError):  # precise: the loopback validator, not any error
+        with pytest.raises(
+            ValidationError
+        ):  # precise: the loopback validator, not any error
             AgentConfig(server_id="s", machine="m", control_host=bad)
 
 
@@ -170,8 +173,14 @@ def test_run_agent_warns_loudly_when_auth_disabled(caplog):
     net_port, ctl_port = a.getsockname()[1], b.getsockname()[1]
     a.close()
     b.close()
-    cfg = AgentConfig(server_id="s", machine="m", host_metrics=False, api_token="",
-                      bind_port=net_port, control_port=ctl_port)
+    cfg = AgentConfig(
+        server_id="s",
+        machine="m",
+        host_metrics=False,
+        api_token="",
+        bind_port=net_port,
+        control_port=ctl_port,
+    )
     with caplog.at_level(logging.WARNING):
         sd = run_agent(cfg, block=False)
         try:
@@ -229,44 +238,62 @@ def test_runtime_binding_separation_and_loopback_control():
 def test_announce_ready_emits_one_json_line(capsys):
     # The §3.1 readiness handshake the Tauri shell parses (#48).
     import json as _json
+
     from taskpaw_v3.core.net import announce_ready
+
     announce_ready("agent", "http://127.0.0.1:5681")
     out = capsys.readouterr().out.strip()
-    assert _json.loads(out) == {"taskpaw_ready": True, "role": "agent",
-                                "base_url": "http://127.0.0.1:5681"}
+    assert _json.loads(out) == {
+        "taskpaw_ready": True,
+        "role": "agent",
+        "base_url": "http://127.0.0.1:5681",
+    }
 
 
 def test_loopback_url_maps_wildcard_and_brackets_ipv6():
     # The readiness base_url must reach the socket that's actually bound (#48):
     # wildcard → loopback, IPv6 bracketed (Codex).
     from taskpaw_v3.core.net import loopback_url
+
     assert loopback_url("127.0.0.1", 5681) == "http://127.0.0.1:5681"
-    assert loopback_url("0.0.0.0", 5690) == "http://127.0.0.1:5690"   # UI is local
-    assert loopback_url("::1", 5681) == "http://[::1]:5681"           # IPv6 bracketed
-    assert loopback_url("::", 5690) == "http://[::1]:5690"            # IPv6 wildcard
+    assert loopback_url("0.0.0.0", 5690) == "http://127.0.0.1:5690"  # UI is local
+    assert loopback_url("::1", 5681) == "http://[::1]:5681"  # IPv6 bracketed
+    assert loopback_url("::", 5690) == "http://[::1]:5690"  # IPv6 wildcard
 
 
 def test_run_agent_announces_readiness_with_real_control_port(capsys):
     # run_agent must print the readiness line (role + the ACTUAL loopback control
     # base_url) once the servers are up, so the shell can inject the real port (#48).
     import json as _json
+
+    from taskpaw_v3.agent.server.launcher import run_agent
     from taskpaw_v3.core.config import AgentConfig
     from taskpaw_v3.core.net import claim_port
-    from taskpaw_v3.agent.server.launcher import run_agent
 
     # Reserve two distinct free ports, then release them for run_agent to claim.
     a = claim_port("127.0.0.1", 0, "p-net")
     b = claim_port("127.0.0.1", 0, "p-ctl")
     net_port, ctl_port = a.getsockname()[1], b.getsockname()[1]
-    a.close(); b.close()
+    a.close()
+    b.close()
 
-    cfg = AgentConfig(server_id="s", machine="m", host_metrics=False,
-                      bind_port=net_port, control_port=ctl_port)
+    cfg = AgentConfig(
+        server_id="s",
+        machine="m",
+        host_metrics=False,
+        bind_port=net_port,
+        control_port=ctl_port,
+    )
     sd = run_agent(cfg, block=False)
     try:
-        line = next(l for l in capsys.readouterr().out.splitlines() if "taskpaw_ready" in l)
-        assert _json.loads(line) == {"taskpaw_ready": True, "role": "agent",
-                                     "base_url": f"http://127.0.0.1:{ctl_port}"}
+        line = next(
+            ln for ln in capsys.readouterr().out.splitlines() if "taskpaw_ready" in ln
+        )
+        assert _json.loads(line) == {
+            "taskpaw_ready": True,
+            "role": "agent",
+            "base_url": f"http://127.0.0.1:{ctl_port}",
+        }
     finally:
         sd.shutdown()
         sd.stopped.wait(timeout=10)
@@ -296,12 +323,20 @@ def test_control_api_has_cors_for_ui_origin():
 
 def test_control_status_served_from_provider():
     cfg = AgentConfig(server_id="s", machine="dev")
-    client = TestClient(create_control_app(cfg, status_provider=lambda: {"machine": "dev", "monitors": {"x": {"state": "ok"}}}))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            status_provider=lambda: {
+                "machine": "dev",
+                "monitors": {"x": {"state": "ok"}},
+            },
+        )
+    )
     r = client.get("/control/status")
     assert r.status_code == 200 and r.json()["monitors"]["x"]["state"] == "ok"
 
 
-def test_network_api_has_NO_cors(  ):
+def test_network_api_has_NO_cors():
     # The agent network API must stay CORS-free (design §3.2: agent doesn't open CORS).
     cfg = AgentConfig(server_id="s", machine="dev")
     client = TestClient(create_network_app(cfg, EventQueue("dev")))
@@ -313,6 +348,7 @@ def test_hub_api_has_cors_for_ui_origin(tmp_path):
     from taskpaw_v3.core.config import HubConfig
     from taskpaw_v3.hub.server.app import create_hub_app
     from taskpaw_v3.hub.server.store import HubStore
+
     store = HubStore(tmp_path / "hub.db")
     try:
         app, _svc = create_hub_app(HubConfig(machine="hub"), store)

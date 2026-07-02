@@ -9,8 +9,8 @@ decides. MacSubs (macsubs.py) is intentionally excluded (being retired).
 from __future__ import annotations
 
 from taskpaw_v3.migrate.migrator import (
-    MigrationPlan,
     MigratedMonitor,
+    MigrationPlan,
     MigrationWarning,
     migrate_config,
     migrate_state,

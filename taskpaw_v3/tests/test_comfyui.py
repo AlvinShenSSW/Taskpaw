@@ -29,22 +29,39 @@ def _cfg(**kw) -> ComfyUIConfig:
 
 # ── history error extraction (pure) ────────────────────────────────────────
 def test_extract_history_error_from_execution_error():
-    entry = {"status": {"completed": False, "status_str": "error", "messages": [
-        ["execution_start", {}],
-        ["execution_error", {"exception_message": "CUDA out of memory: tried to allocate 2GB"}],
-    ]}}
+    entry = {
+        "status": {
+            "completed": False,
+            "status_str": "error",
+            "messages": [
+                ["execution_start", {}],
+                [
+                    "execution_error",
+                    {"exception_message": "CUDA out of memory: tried to allocate 2GB"},
+                ],
+            ],
+        }
+    }
     assert "CUDA out of memory" in extract_history_error(entry)
 
 
 def test_extract_history_error_clean_entry_is_none():
-    assert extract_history_error({"status": {"completed": True, "status_str": "success"}}) is None
+    assert (
+        extract_history_error({"status": {"completed": True, "status_str": "success"}})
+        is None
+    )
     assert extract_history_error(None) is None
     assert extract_history_error({}) is None
 
 
 def test_extract_history_error_caps_long_message():
-    entry = {"status": {"completed": False, "status_str": "error", "messages": [
-        ["execution_error", {"exception_message": "E" * 200}]]}}
+    entry = {
+        "status": {
+            "completed": False,
+            "status_str": "error",
+            "messages": [["execution_error", {"exception_message": "E" * 200}]],
+        }
+    }
     out = extract_history_error(entry)
     assert len(out) == 80 and out.endswith("...")
 
@@ -52,7 +69,9 @@ def test_extract_history_error_caps_long_message():
 # ── log tail ────────────────────────────────────────────────────────────────
 def test_tail_log_for_errors(tmp_path):
     log = tmp_path / "comfy.log"
-    log.write_text("loading model\nstep 1/20\nRuntimeError: CUDA out of memory\n", encoding="utf-8")
+    log.write_text(
+        "loading model\nstep 1/20\nRuntimeError: CUDA out of memory\n", encoding="utf-8"
+    )
     err, pos = tail_log_for_errors(str(log), 0)
     assert err and "CUDA out of memory" in err
     assert pos == log.stat().st_size
@@ -73,11 +92,11 @@ def test_tail_log_does_not_rereport_consumed_error(tmp_path):
     err, pos = tail_log_for_errors(str(log), 0)
     assert err and "boom" in err
     with open(log, "a", encoding="utf-8") as f:
-        f.write("step 2\nstep 3\n")                 # unrelated growth
+        f.write("step 2\nstep 3\n")  # unrelated growth
     err2, pos2 = tail_log_for_errors(str(log), pos)
-    assert err2 is None                              # stale error not re-reported
+    assert err2 is None  # stale error not re-reported
     with open(log, "a", encoding="utf-8") as f:
-        f.write("CUDA out of memory\n")              # a genuinely new error
+        f.write("CUDA out of memory\n")  # a genuinely new error
     err3, _ = tail_log_for_errors(str(log), pos2)
     assert err3 and "CUDA out of memory" in err3
 
@@ -86,7 +105,7 @@ def test_tail_log_handles_rotation(tmp_path):
     # After the log is rotated/truncated to a SMALLER file, a new error must still
     # be detected — the saved offset can't stay stuck high (Codex #60).
     log = tmp_path / "comfy.log"
-    log.write_text("x" * 5000 + "\n", encoding="utf-8")     # big, no error
+    log.write_text("x" * 5000 + "\n", encoding="utf-8")  # big, no error
     _, pos = tail_log_for_errors(str(log), 0)
     assert pos == log.stat().st_size and pos > 1000
     log.write_text("CUDA out of memory\n", encoding="utf-8")  # rotated: smaller, error
@@ -97,8 +116,10 @@ def test_tail_log_handles_rotation(tmp_path):
 
 # ── diagnostics folded into alerts ──────────────────────────────────────────
 def test_stall_alert_includes_diagnosed_error(monkeypatch):
-    monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: ([], 1))           # stalled shape
-    monkeypatch.setattr(cf, "check_recent_history_errors", lambda h, p, t: "RuntimeError: boom")
+    monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: ([], 1))  # stalled shape
+    monkeypatch.setattr(
+        cf, "check_recent_history_errors", lambda h, p, t: "RuntimeError: boom"
+    )
     inst = ComfyUIInstance("comfy", _cfg(stall_confirm=1))
     evs, emit = _events()
     st = inst.check(emit)
@@ -119,15 +140,15 @@ def test_diagnose_only_session_log_errors(tmp_path, monkeypatch):
     # An error already in the log BEFORE start() must NOT be blamed for the first
     # stall; an error written DURING the session is the real cause (Codex #60).
     log = tmp_path / "comfy.log"
-    log.write_text("CUDA out of memory\n", encoding="utf-8")        # pre-existing
+    log.write_text("CUDA out of memory\n", encoding="utf-8")  # pre-existing
     monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: ([], 1))
     monkeypatch.setattr(cf, "check_recent_history_errors", lambda h, p, t: None)
     inst = ComfyUIInstance("comfy", _cfg(stall_confirm=1, comfyui_log_path=str(log)))
     _, emit = _events()
-    inst.start(emit)                                               # prime past old error
+    inst.start(emit)  # prime past old error
     with open(log, "a", encoding="utf-8") as f:
-        f.write("RuntimeError: session boom\n")                    # error during session
-    st = inst.check(emit)                                          # stall → diagnose
+        f.write("RuntimeError: session boom\n")  # error during session
+    st = inst.check(emit)  # stall → diagnose
     assert "session boom" in st.detail
     assert "CUDA out of memory" not in st.detail
 
@@ -137,23 +158,27 @@ def test_log_error_cleared_at_idle_not_blamed_on_later_stall(tmp_path, monkeypat
     # queue goes idle, so a later unrelated stall isn't blamed on it (Codex #60).
     log = tmp_path / "comfy.log"
     log.write_text("", encoding="utf-8")
-    seq = iter([(["p1"], 0), ([], 0), ([], 1)])          # running → idle → stalled
+    seq = iter([(["p1"], 0), ([], 0), ([], 1)])  # running → idle → stalled
     monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: next(seq))
     monkeypatch.setattr(cf, "check_recent_history_errors", lambda h, p, t: None)
-    inst = ComfyUIInstance("comfy", _cfg(stall_confirm=1, idle_confirm=1, comfyui_log_path=str(log)))
+    inst = ComfyUIInstance(
+        "comfy", _cfg(stall_confirm=1, idle_confirm=1, comfyui_log_path=str(log))
+    )
     _, emit = _events()
     inst.start(emit)
     with open(log, "a", encoding="utf-8") as f:
         f.write("RuntimeError: from p1\n")
-    inst.check(emit)                                     # running p1 → consumes the error
-    inst.check(emit)                                     # idle → clears it
-    st = inst.check(emit)                                # unrelated stall
+    inst.check(emit)  # running p1 → consumes the error
+    inst.check(emit)  # idle → clears it
+    st = inst.check(emit)  # unrelated stall
     assert "from p1" not in (st.detail or "")
 
 
 def test_stuck_alert_diagnoses_running_prompt(monkeypatch):
     monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: (["pid1"], 0))
-    monkeypatch.setattr(cf, "check_history_error", lambda h, p, pid, t: f"err for {pid}")
+    monkeypatch.setattr(
+        cf, "check_history_error", lambda h, p, pid, t: f"err for {pid}"
+    )
     monkeypatch.setattr(cf, "check_recent_history_errors", lambda h, p, t: None)
     inst = ComfyUIInstance("comfy", _cfg(stuck_checks=1))
     evs, emit = _events()
@@ -167,24 +192,25 @@ def test_stuck_does_not_scan_recent_history(monkeypatch):
     # prompt's error (V2 only scans recent history for the stalled case) (Codex #60).
     def _must_not_run(*a, **k):
         raise AssertionError("recent-history scan must not run for a stuck prompt")
+
     monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: (["pid1"], 0))
     monkeypatch.setattr(cf, "check_history_error", lambda h, p, pid, t: None)
     monkeypatch.setattr(cf, "check_recent_history_errors", _must_not_run)
     inst = ComfyUIInstance("comfy", _cfg(stuck_checks=1))
     _, emit = _events()
     st = inst.check(emit)
-    assert st.state == "error" and "(" not in st.detail   # no borrowed error cause
+    assert st.state == "error" and "(" not in st.detail  # no borrowed error cause
 
 
 def test_stall_recovers_and_can_realert(monkeypatch):
     # stalled → recovered → stalled again must alert a SECOND time (per-episode
     # one-shot, no permanent dedupe).
-    seq = iter([([], 1), ([], 0), ([], 1)])   # stalled, empty(recover), stalled
+    seq = iter([([], 1), ([], 0), ([], 1)])  # stalled, empty(recover), stalled
     monkeypatch.setattr(cf, "queue_snapshot", lambda h, p, t: next(seq))
     monkeypatch.setattr(cf, "check_recent_history_errors", lambda h, p, t: None)
     inst = ComfyUIInstance("comfy", _cfg(stall_confirm=1, idle_confirm=1))
     evs, emit = _events()
-    inst.check(emit)   # stall #1 → alert
-    inst.check(emit)   # empty → recover (clears _stalled)
-    inst.check(emit)   # stall #2 → alert again
+    inst.check(emit)  # stall #1 → alert
+    inst.check(emit)  # empty → recover (clears _stalled)
+    inst.check(emit)  # stall #2 → alert again
     assert sum(1 for e in evs if "stalled" in e[1]) == 2

@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -222,7 +221,11 @@ def test_hub_poll_stores_enqueues_then_advances_ack_and_drains_outbox(
         monkeypatch.setattr(
             engine,
             "poll_server",
-            lambda server: {"reachable": True, "last_seen": datetime.now(), "monitors": []},
+            lambda server: {
+                "reachable": True,
+                "last_seen": datetime.now(),
+                "monitors": [],
+            },
         )
 
         def fake_urlopen(req, timeout):
@@ -246,12 +249,10 @@ def test_hub_poll_stores_enqueues_then_advances_ack_and_drains_outbox(
 
         engine.poll_all_servers()
 
-        assert seen_event_urls == [f"http://127.0.0.1:5678/events?ack=2"]
+        assert seen_event_urls == ["http://127.0.0.1:5678/events?ack=2"]
         assert engine.last_event_ids[server_id] == 4
         assert json.loads(db.get_config("last_event_ids")) == {str(server_id): 4}
-        rows = db._conn.execute(
-            "SELECT message FROM events ORDER BY id"
-        ).fetchall()
+        rows = db._conn.execute("SELECT message FROM events ORDER BY id").fetchall()
         assert [row[0] for row in rows] == ["new", "newer"]
         assert sent_payloads == [
             {"text": "TaskPaw Event | agent: new"},
@@ -286,7 +287,11 @@ def test_hub_poll_crash_before_ack_persist_refetches_events(tmp_path, monkeypatc
         monkeypatch.setattr(
             engine,
             "poll_server",
-            lambda server: {"reachable": True, "last_seen": datetime.now(), "monitors": []},
+            lambda server: {
+                "reachable": True,
+                "last_seen": datetime.now(),
+                "monitors": [],
+            },
         )
 
         def fake_urlopen(req, timeout):
@@ -323,8 +328,8 @@ def test_hub_poll_crash_before_ack_persist_refetches_events(tmp_path, monkeypatc
         engine.poll_all_servers()
 
         assert seen_event_urls == [
-            f"http://127.0.0.1:5678/events?ack=2",
-            f"http://127.0.0.1:5678/events?ack=2",
+            "http://127.0.0.1:5678/events?ack=2",
+            "http://127.0.0.1:5678/events?ack=2",
         ]
         assert engine.last_event_ids[server_id] == 3
         assert json.loads(db.get_config("last_event_ids")) == {str(server_id): 3}
@@ -339,7 +344,12 @@ def test_hub_write_status_file_writes_atomically(tmp_path, monkeypatch):
     try:
         engine = hub.PollingEngine(db, lambda _: None)
         engine.write_status_file(
-            {"agent": {"reachable": True, "monitors": [{"name": "Lada", "status": "idle"}]}}
+            {
+                "agent": {
+                    "reachable": True,
+                    "monitors": [{"name": "Lada", "status": "idle"}],
+                }
+            }
         )
         content = hub.STATUS_FILE.read_text(encoding="utf-8")
         assert "# TaskPaw Hub Status" in content
@@ -516,7 +526,9 @@ def test_agent_event_queue_capped(tmp_path, monkeypatch):
     assert ids == [4, 5, 6, 7, 8]  # first 3 dropped, ids still monotonic
 
 
-def test_hub_poll_disabled_openclaw_stores_history_without_outbox(tmp_path, monkeypatch):
+def test_hub_poll_disabled_openclaw_stores_history_without_outbox(
+    tmp_path, monkeypatch
+):
     """With OpenClaw forwarding disabled, events are still stored (history) and
     the ack advances, but nothing is enqueued — the outbox must not accumulate
     undeliverable rows."""
@@ -534,13 +546,19 @@ def test_hub_poll_disabled_openclaw_stores_history_without_outbox(tmp_path, monk
         monkeypatch.setattr(
             engine,
             "poll_server",
-            lambda server: {"reachable": True, "last_seen": datetime.now(), "monitors": []},
+            lambda server: {
+                "reachable": True,
+                "last_seen": datetime.now(),
+                "monitors": [],
+            },
         )
 
         def fake_urlopen(req, timeout):
             if req.full_url.startswith("http://127.0.0.1:5678/events"):
                 return FakeHTTPResponse({"events": [{"id": 3, "message": "new"}]})
-            raise AssertionError(f"no OpenClaw call expected when disabled: {req.full_url}")
+            raise AssertionError(
+                f"no OpenClaw call expected when disabled: {req.full_url}"
+            )
 
         monkeypatch.setattr(hub.urllib.request, "urlopen", fake_urlopen)
         engine.poll_all_servers()
@@ -548,7 +566,9 @@ def test_hub_poll_disabled_openclaw_stores_history_without_outbox(tmp_path, monk
         rows = db._conn.execute("SELECT message FROM events ORDER BY id").fetchall()
         assert [row[0] for row in rows] == ["new"]
         assert json.loads(db.get_config("last_event_ids")) == {str(server_id): 3}
-        assert db._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+        assert (
+            db._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+        )
     finally:
         db._conn.close()
 
@@ -570,13 +590,19 @@ def test_hub_poll_enabled_without_token_does_not_enqueue(tmp_path, monkeypatch):
         monkeypatch.setattr(
             engine,
             "poll_server",
-            lambda server: {"reachable": True, "last_seen": datetime.now(), "monitors": []},
+            lambda server: {
+                "reachable": True,
+                "last_seen": datetime.now(),
+                "monitors": [],
+            },
         )
 
         def fake_urlopen(req, timeout):
             if req.full_url.startswith("http://127.0.0.1:5678/events"):
                 return FakeHTTPResponse({"events": [{"id": 3, "message": "new"}]})
-            raise AssertionError(f"no OpenClaw call expected without token: {req.full_url}")
+            raise AssertionError(
+                f"no OpenClaw call expected without token: {req.full_url}"
+            )
 
         monkeypatch.setattr(hub.urllib.request, "urlopen", fake_urlopen)
         engine.poll_all_servers()
@@ -584,6 +610,8 @@ def test_hub_poll_enabled_without_token_does_not_enqueue(tmp_path, monkeypatch):
         rows = db._conn.execute("SELECT message FROM events ORDER BY id").fetchall()
         assert [row[0] for row in rows] == ["new"]
         assert json.loads(db.get_config("last_event_ids")) == {str(server_id): 3}
-        assert db._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+        assert (
+            db._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone()[0] == 0
+        )
     finally:
         db._conn.close()

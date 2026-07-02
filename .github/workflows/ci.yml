@@ -12,13 +12,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: lint + test (py${{ matrix.python-version }})
+  lint:
+    name: lint + typecheck (ruff, mypy · taskpaw_v3)
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Verify lockfile is up to date
+        run: uv lock --check
+
+      - name: Sync dev environment
+        run: uv sync --group dev
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Mypy (scoped to taskpaw_v3)
+        run: uv run mypy
+
+  test:
+    name: test (py${{ matrix.python-version }} · ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.12"]
+        # Windows is the PRIMARY agent target (#143), so run the suite there too —
+        # a single cheap entry (latest supported py) to catch path-separator /
+        # encoding / process-handling regressions. Packaging (#126) stays separate.
+        include:
+          - os: windows-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v5
 
@@ -33,8 +66,8 @@ jobs:
       - name: Sync dev environment
         run: uv sync --group dev --python ${{ matrix.python-version }}
 
-      - name: Run tests
-        run: uv run --python ${{ matrix.python-version }} pytest
+      - name: Run tests (with V3 coverage report; no hard threshold yet)
+        run: uv run --python ${{ matrix.python-version }} pytest --cov=taskpaw_v3 --cov-report=term-missing
 
   frontend:
     name: frontend build (V3 UI)
@@ -44,10 +77,11 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
-      - name: Install + test + build the V3 UI
+      - name: Install + lint + test + build the V3 UI
         working-directory: taskpaw_v3/ui
         run: |
           npm ci
+          npm run lint
           npm test
           npm run build
 

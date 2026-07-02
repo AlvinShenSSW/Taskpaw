@@ -20,9 +20,18 @@ def _w(**kw):
 def test_lada_maps_to_lada_plugin():
     """V3 now has a full `lada` plugin (#59) — carry the lada_* fields over,
     no warning, no folder compromise."""
-    plan = migrate_config({"watchers": [_w(watcher_type="lada", name="Lada",
-                                           process_name="lada-cli.exe",
-                                           lada_output_folder="/out")]})
+    plan = migrate_config(
+        {
+            "watchers": [
+                _w(
+                    watcher_type="lada",
+                    name="Lada",
+                    process_name="lada-cli.exe",
+                    lada_output_folder="/out",
+                )
+            ]
+        }
+    )
     assert not plan.warnings
     m = plan.monitors[0]
     assert m.type_id == "lada"
@@ -32,10 +41,16 @@ def test_lada_maps_to_lada_plugin():
 
 
 def _managed_lada(**extra):
-    base = dict(watcher_type="lada", name="Lada", process_name="lada-cli",
-                lada_cli_path="C:/lada/lada-cli.exe", lada_input_folder="D:/in",
-                lada_output_folder="D:/out", lada_extra_args="--device cuda:1",
-                lada_gpu_monitor=True)
+    base = dict(
+        watcher_type="lada",
+        name="Lada",
+        process_name="lada-cli",
+        lada_cli_path="C:/lada/lada-cli.exe",
+        lada_input_folder="D:/in",
+        lada_output_folder="D:/out",
+        lada_extra_args="--device cuda:1",
+        lada_gpu_monitor=True,
+    )
     base.update(extra)
     return _w(**base)
 
@@ -51,9 +66,9 @@ def test_managed_lada_carries_cli_but_imported_disabled():
     assert m.config["lada_input_folder"] == "D:/in"
     assert m.config["lada_extra_args"] == "--device cuda:1"
     assert m.config["lada_gpu_monitor"] is True
-    assert m.enabled is False                                  # safety-disabled
+    assert m.enabled is False  # safety-disabled
     rt = plan.to_runtime_monitors()
-    assert len(rt) == 1 and rt[0]["enabled"] is False          # in config, not started
+    assert len(rt) == 1 and rt[0]["enabled"] is False  # in config, not started
     assert rt[0]["config"]["lada_cli_path"] == "C:/lada/lada-cli.exe"
     assert any("imported DISABLED" in w.reason for w in plan.warnings)
 
@@ -73,8 +88,9 @@ def test_managed_lada_always_imported_disabled_even_with_auto_start():
 def test_lada_passive_no_output_folder_still_maps():
     """No output folder is fine now — a passive lada monitor still maps (process
     detection works without folders)."""
-    plan = migrate_config({"watchers": [_w(
-        watcher_type="lada", name="Lada", process_name="lada-cli")]})
+    plan = migrate_config(
+        {"watchers": [_w(watcher_type="lada", name="Lada", process_name="lada-cli")]}
+    )
     assert not plan.warnings
     assert [m.type_id for m in plan.monitors] == ["lada"]
     assert plan.monitors[0].config["process_name"] == "lada-cli"
@@ -82,9 +98,19 @@ def test_lada_passive_no_output_folder_still_maps():
 
 def test_comfyui_carries_log_path():
     """V3's comfyui plugin tails comfyui_log_path for error diagnostics (#60)."""
-    plan = migrate_config({"watchers": [_w(
-        watcher_type="comfyui", name="C", comfyui_host="10.0.0.5",
-        comfyui_port=9000, comfyui_log_path="/var/log/comfy.log")]})
+    plan = migrate_config(
+        {
+            "watchers": [
+                _w(
+                    watcher_type="comfyui",
+                    name="C",
+                    comfyui_host="10.0.0.5",
+                    comfyui_port=9000,
+                    comfyui_log_path="/var/log/comfy.log",
+                )
+            ]
+        }
+    )
     m = plan.monitors[0]
     assert m.type_id == "comfyui"
     assert m.config["host"] == "10.0.0.5" and m.config["port"] == 9000
@@ -93,8 +119,9 @@ def test_comfyui_carries_log_path():
 
 def test_generic_process_watcher_maps_to_process():
     """V2 watcher_type 'process' must migrate, not fall into unknown-type (Codex #20 r2)."""
-    plan = migrate_config({"watchers": [_w(watcher_type="process", name="PM2",
-                                           process_name="pm2 God")]})
+    plan = migrate_config(
+        {"watchers": [_w(watcher_type="process", name="PM2", process_name="pm2 God")]}
+    )
     m = plan.monitors[0]
     # anchored exact-name match, no cmdline search — preserves V2 semantics (Codex r8)
     assert m.type_id == "process" and m.config["pattern"] == r"^pm2\ God$"
@@ -105,9 +132,19 @@ def test_generic_process_watcher_maps_to_process():
 
 
 def test_comfyui_maps_host_port_idle():
-    plan = migrate_config({"watchers": [_w(watcher_type="comfyui", name="Comfy",
-                                           comfyui_host="10.0.0.5", comfyui_port=9000,
-                                           idle_confirm_count=4)]})
+    plan = migrate_config(
+        {
+            "watchers": [
+                _w(
+                    watcher_type="comfyui",
+                    name="Comfy",
+                    comfyui_host="10.0.0.5",
+                    comfyui_port=9000,
+                    idle_confirm_count=4,
+                )
+            ]
+        }
+    )
     m = plan.monitors[0]
     assert m.type_id == "comfyui"
     assert m.config["host"] == "10.0.0.5" and m.config["port"] == 9000
@@ -115,10 +152,19 @@ def test_comfyui_maps_host_port_idle():
 
 
 def test_folder_maps_extensions_and_stable():
-    plan = migrate_config({"watchers": [_w(watcher_type="folder", name="DL",
-                                           watch_folder="/data/out",
-                                           file_extensions="mp4, .mkv ,avi",
-                                           stable_seconds=45)]})
+    plan = migrate_config(
+        {
+            "watchers": [
+                _w(
+                    watcher_type="folder",
+                    name="DL",
+                    watch_folder="/data/out",
+                    file_extensions="mp4, .mkv ,avi",
+                    stable_seconds=45,
+                )
+            ]
+        }
+    )
     m = plan.monitors[0]
     assert m.type_id == "folder"
     assert m.config["path"] == "/data/out"
@@ -130,8 +176,13 @@ def test_folder_maps_extensions_and_stable():
 
 
 def test_custom_cmd_maps_command():
-    plan = migrate_config({"watchers": [_w(watcher_type="custom_cmd", name="C",
-                                           custom_command="check.sh --all")]})
+    plan = migrate_config(
+        {
+            "watchers": [
+                _w(watcher_type="custom_cmd", name="C", custom_command="check.sh --all")
+            ]
+        }
+    )
     m = plan.monitors[0]
     assert m.type_id == "custom_cmd" and m.config["command"] == "check.sh --all"
 
@@ -144,15 +195,31 @@ def test_unknown_type_warns_and_skips():
 
 
 def test_incomplete_watcher_warns():
-    plan = migrate_config({"watchers": [_w(watcher_type="folder", name="x", watch_folder="")]})
+    plan = migrate_config(
+        {"watchers": [_w(watcher_type="folder", name="x", watch_folder="")]}
+    )
     assert not plan.monitors and plan.warnings
 
 
 def test_disabled_flag_carried_into_config_as_enabled_false():
-    plan = migrate_config({"watchers": [
-        _w(watcher_type="custom_cmd", name="off", custom_command="x", enabled=False),
-        _w(watcher_type="custom_cmd", name="on", custom_command="y", enabled=True),
-    ]})
+    plan = migrate_config(
+        {
+            "watchers": [
+                _w(
+                    watcher_type="custom_cmd",
+                    name="off",
+                    custom_command="x",
+                    enabled=False,
+                ),
+                _w(
+                    watcher_type="custom_cmd",
+                    name="on",
+                    custom_command="y",
+                    enabled=True,
+                ),
+            ]
+        }
+    )
     assert plan.monitors[0].enabled is False
     # #59: disabled monitors are CARRIED into the config as enabled:false (not
     # dropped) — the supervisor skips them, the console shows them stopped.
@@ -160,13 +227,25 @@ def test_disabled_flag_carried_into_config_as_enabled_false():
     assert set(runtime) == {"off", "on"}
     assert runtime["off"]["enabled"] is False
     assert runtime["on"]["enabled"] is True
-    assert all(set(m) == {"type_id", "name", "config", "enabled"} for m in runtime.values())
+    assert all(
+        set(m) == {"type_id", "name", "config", "enabled"} for m in runtime.values()
+    )
     assert any("disabled in V2" in w.reason for w in plan.warnings)
 
 
 def test_poll_interval_carried_when_sane():
-    plan = migrate_config({"watchers": [_w(watcher_type="custom_cmd", name="c",
-                                           custom_command="x", poll_interval=20)]})
+    plan = migrate_config(
+        {
+            "watchers": [
+                _w(
+                    watcher_type="custom_cmd",
+                    name="c",
+                    custom_command="x",
+                    poll_interval=20,
+                )
+            ]
+        }
+    )
     assert plan.monitors[0].config["poll_interval"] == 20.0
 
 
@@ -178,14 +257,25 @@ def test_machine_name_preserved():
 # ── migrated configs validate against the real plugins ───────────────────--
 def test_migrated_configs_validate_against_plugins():
     reg = default_registry()
-    cfg = {"watchers": [
-        _w(watcher_type="lada", name="Lada", process_name="lada-cli",
-           lada_output_folder="/out"),
-        _w(watcher_type="process", name="PM2", process_name="pm2"),
-        _w(watcher_type="comfyui", name="Comfy"),
-        _w(watcher_type="folder", name="DL", watch_folder="/tmp", file_extensions="mp4"),
-        _w(watcher_type="custom_cmd", name="C", custom_command="echo hi"),
-    ]}
+    cfg = {
+        "watchers": [
+            _w(
+                watcher_type="lada",
+                name="Lada",
+                process_name="lada-cli",
+                lada_output_folder="/out",
+            ),
+            _w(watcher_type="process", name="PM2", process_name="pm2"),
+            _w(watcher_type="comfyui", name="Comfy"),
+            _w(
+                watcher_type="folder",
+                name="DL",
+                watch_folder="/tmp",
+                file_extensions="mp4",
+            ),
+            _w(watcher_type="custom_cmd", name="C", custom_command="echo hi"),
+        ]
+    }
     plan = migrate_config(cfg)
     assert len(plan.monitors) == 5
     for m in plan.monitors:
@@ -205,8 +295,16 @@ def test_migrate_state_reads_next_event_id():
 # ── end-to-end from files ────────────────────────────────────────────────--
 def test_plan_migration_from_files(tmp_path):
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"machine_name": "M", "watchers": [
-        _w(watcher_type="folder", name="DL", watch_folder="/data")]}))
+    cfg.write_text(
+        json.dumps(
+            {
+                "machine_name": "M",
+                "watchers": [
+                    _w(watcher_type="folder", name="DL", watch_folder="/data")
+                ],
+            }
+        )
+    )
     state = tmp_path / "state.json"
     state.write_text(json.dumps({"next_event_id": 7}))
     plan = plan_migration(cfg, state)

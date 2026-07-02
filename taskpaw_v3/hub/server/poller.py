@@ -32,8 +32,9 @@ def _agent_base_url(ip: str, port: int) -> str:
     host = f"[{ip}]" if ":" in ip else ip
     return f"http://{host}:{port}"
 
-from .openclaw import send_payload
-from .store import HubStore
+
+from .openclaw import send_payload  # noqa: E402
+from .store import HubStore  # noqa: E402
 
 log = logging.getLogger("taskpaw.hub.poller")
 
@@ -56,8 +57,8 @@ class Poller:
         # was off — don't render it ONLINE (Kimi). 0 = always trust (tests).
         self.seed_fresh_seconds = seed_fresh_seconds
         self.openclaw_url = openclaw_url
-        self.get_active = get_active   # openclaw_enabled AND token
-        self.get_token = get_token     # OpenClaw token
+        self.get_active = get_active  # openclaw_enabled AND token
+        self.get_token = get_token  # OpenClaw token
         # Bearer sent to agents when polling. Falls back to the SQLite config row
         # for back-compat; callers should pass one that also honors HubConfig.
         self.get_polling_token = get_polling_token or (
@@ -88,8 +89,9 @@ class Poller:
                     # A stale last-success (older than ~a poll) shouldn't seed
                     # ONLINE — the agent may have stopped while the Hub was off.
                     try:
-                        age = (datetime.now()
-                               - datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")).total_seconds()
+                        age = (
+                            datetime.now() - datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                        ).total_seconds()
                         if age > self.seed_fresh_seconds:
                             reachable = False
                     except (ValueError, TypeError):
@@ -134,12 +136,14 @@ class Poller:
             if not s["enabled"]:
                 continue
             snap = snaps.get(s["id"], {})
-            out.append({
-                "name": s["name"],
-                "reachable": bool(snap.get("reachable", False)),
-                "status_json": snap.get("status_json"),
-                "last_seen": snap.get("last_seen"),
-            })
+            out.append(
+                {
+                    "name": s["name"],
+                    "reachable": bool(snap.get("reachable", False)),
+                    "status_json": snap.get("status_json"),
+                    "last_seen": snap.get("last_seen"),
+                }
+            )
         return out
 
     @staticmethod
@@ -221,18 +225,27 @@ class Poller:
             except json.JSONDecodeError as e:
                 # Reachable but returned junk → a misconfigured agent, not an
                 # outage. Log distinctly with a body snippet (Kimi).
-                log.warning("Bad /status JSON from %s: %s | body[:120]=%r",
-                            server.get("name"), e, body[:120])
+                log.warning(
+                    "Bad /status JSON from %s: %s | body[:120]=%r",
+                    server.get("name"),
+                    e,
+                    body[:120],
+                )
                 return False, None
             return True, body
         except urllib.error.HTTPError as e:
             # Surface 401/403 distinctly — a token mismatch is a config/security
             # problem, not a down agent (Kimi).
             if e.code in (401, 403):
-                log.warning("Auth failed polling %s (HTTP %s) — check polling_token",
-                            server.get("name"), e.code)
+                log.warning(
+                    "Auth failed polling %s (HTTP %s) — check polling_token",
+                    server.get("name"),
+                    e.code,
+                )
             else:
-                log.warning("HTTP %s fetching status from %s", e.code, server.get("name"))
+                log.warning(
+                    "HTTP %s fetching status from %s", e.code, server.get("name")
+                )
             return False, None
         except Exception as e:
             log.warning("Failed to fetch status from %s: %s", server.get("name"), e)
@@ -244,12 +257,16 @@ class Poller:
         q = urllib.parse.urlencode({"ack": last_id})
         try:
             try:
-                req = urllib.request.Request(f"{base}/events?{q}", headers=self._auth_headers())
+                req = urllib.request.Request(
+                    f"{base}/events?{q}", headers=self._auth_headers()
+                )
                 resp = urllib.request.urlopen(req, timeout=self.http_timeout)
             except urllib.error.HTTPError as e:
                 if e.code != 404:
                     raise
-                req = urllib.request.Request(f"{base}/events", headers=self._auth_headers())
+                req = urllib.request.Request(
+                    f"{base}/events", headers=self._auth_headers()
+                )
                 resp = urllib.request.urlopen(req, timeout=self.http_timeout)
             events = json.loads(resp.read().decode("utf-8")).get("events", [])
             return [e for e in events if e.get("id", -1) > last_id]
@@ -282,20 +299,31 @@ class Poller:
             if attempts >= 10 or now - created_at > timedelta(hours=24):
                 reason = "attempt cap" if attempts >= 10 else "age>24h"
                 if self.store.mark_delivery_dead_letter(row["id"], attempts, reason):
-                    self.emit_local_alert(f"OpenClaw delivery dead-lettered id={row['id']}: {reason}")
+                    self.emit_local_alert(
+                        f"OpenClaw delivery dead-lettered id={row['id']}: {reason}"
+                    )
                 continue
 
             try:
-                send_payload(self.openclaw_url, self.get_token(), payload, self.http_timeout)
+                send_payload(
+                    self.openclaw_url, self.get_token(), payload, self.http_timeout
+                )
                 self.store.delete_delivery(row["id"])
             except Exception as e:
                 attempts += 1
                 if attempts >= 10:
-                    if self.store.mark_delivery_dead_letter(row["id"], attempts, str(e)):
-                        self.emit_local_alert(f"OpenClaw delivery dead-lettered id={row['id']}: {e}")
+                    if self.store.mark_delivery_dead_letter(
+                        row["id"], attempts, str(e)
+                    ):
+                        self.emit_local_alert(
+                            f"OpenClaw delivery dead-lettered id={row['id']}: {e}"
+                        )
                 else:
                     self.store.mark_delivery_failed(
-                        row["id"], attempts, str(e), now + timedelta(seconds=self._retry_delay(attempts))
+                        row["id"],
+                        attempts,
+                        str(e),
+                        now + timedelta(seconds=self._retry_delay(attempts)),
                     )
 
     # ── one poll cycle ───────────────────────────────────────────────────
@@ -335,10 +363,12 @@ class Poller:
             prev = self._status_snapshot.get(server["id"], {})
             if reachable:
                 self._status_snapshot[server["id"]] = {
-                    "reachable": True, "status_json": status_json,
+                    "reachable": True,
+                    "status_json": status_json,
                     # Parse once here (#107) so /status reads are parse-free.
                     "parsed_status": self._parse_status(status_json),
-                    "last_seen": now_str}
+                    "last_seen": now_str,
+                }
             else:
                 # Keep the last good payload + last_seen for status.md; don't
                 # pollute status_log with an empty row.
@@ -346,7 +376,8 @@ class Poller:
                     "reachable": False,
                     "status_json": prev.get("status_json"),
                     "parsed_status": prev.get("parsed_status"),
-                    "last_seen": prev.get("last_seen")}
+                    "last_seen": prev.get("last_seen"),
+                }
 
         new_events = self.fetch_events(server)
         if not new_events:
@@ -360,18 +391,19 @@ class Poller:
                 # Idempotent: a crash before ack-persist re-fetches the same
                 # event; the dedupe key keeps OpenClaw from being double-sent.
                 self.store.enqueue_delivery(
-                    server_name=server["name"], kind="event",
+                    server_name=server["name"],
+                    kind="event",
                     payload_json=json.dumps({"text": msg}),
                     dedupe_key=f"{server['id']}:{ev.get('id')}",
                 )
             max_id = max(max_id, ev.get("id", max_id))
 
         with self._acks_lock:  # serialize vs snapshot_acks() (API thread)
-            prev = self.last_event_ids.get(server["id"])
+            prev_ack = self.last_event_ids.get(server["id"])
             self.last_event_ids[server["id"]] = max_id
             if not self._persist_acks():
                 # Roll back the in-memory ack so the next poll re-fetches.
-                if prev is None:
+                if prev_ack is None:
                     self.last_event_ids.pop(server["id"], None)
                 else:
-                    self.last_event_ids[server["id"]] = prev
+                    self.last_event_ids[server["id"]] = prev_ack

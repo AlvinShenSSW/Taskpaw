@@ -11,7 +11,6 @@ from taskpaw_v3.integrations import activity_writer as aw
 from taskpaw_v3.monitors.plugins.state_file import (
     StateFileConfig,
     StateFileInstance,
-    StateFilePlugin,
 )
 from taskpaw_v3.monitors.registry import default_registry
 
@@ -42,7 +41,7 @@ def test_busy_idle_waiting_states(tmp_path):
     events, emit = _collector()
 
     _write(f, "busy", ts=time.time())
-    assert inst.check(emit).state == "running"   # busy → running (baseline, no emit)
+    assert inst.check(emit).state == "running"  # busy → running (baseline, no emit)
     _write(f, "waiting", ts=time.time())
     st = inst.check(emit)
     assert st.state == "idle" and "waiting" in st.detail
@@ -59,9 +58,9 @@ def test_transition_busy_to_idle_emits_done(tmp_path):
     inst = StateFileInstance("a1", StateFileConfig(name="agent", path=str(f)))
     events, emit = _collector()
     _write(f, "busy", ts=time.time())
-    inst.check(emit)            # baseline busy
+    inst.check(emit)  # baseline busy
     _write(f, "idle", ts=time.time())
-    inst.check(emit)            # busy → idle
+    inst.check(emit)  # busy → idle
     done = [a for a, _ in events if a[0] == "done"]
     assert len(done) == 1
 
@@ -78,10 +77,11 @@ def test_first_observation_no_event(tmp_path):
 # ── watchdogs ────────────────────────────────────────────────────────────--
 def test_busy_too_long_alerts_once(tmp_path):
     f = tmp_path / "act.json"
-    inst = StateFileInstance("a1", StateFileConfig(
-        name="agent", path=str(f), busy_alert_seconds=60))
+    inst = StateFileInstance(
+        "a1", StateFileConfig(name="agent", path=str(f), busy_alert_seconds=60)
+    )
     events, emit = _collector()
-    _write(f, "busy", ts=time.time() - 120)   # busy started 2 min ago
+    _write(f, "busy", ts=time.time() - 120)  # busy started 2 min ago
     inst.check(emit)
     inst.check(emit)
     alerts = [a for a, _ in events if a[0] == "alert"]
@@ -92,13 +92,14 @@ def test_busy_duration_survives_refresh(tmp_path):
     """Repeated busy writes (fresh ts) must not reset the busy-start clock — the
     watchdog measures continuous busy time, not time-since-last-write (Codex #22)."""
     f = tmp_path / "act.json"
-    inst = StateFileInstance("a1", StateFileConfig(
-        name="agent", path=str(f), busy_alert_seconds=9999))
+    inst = StateFileInstance(
+        "a1", StateFileConfig(name="agent", path=str(f), busy_alert_seconds=9999)
+    )
     _, emit = _collector()
     _write(f, "busy", ts=time.time() - 30)
     inst.check(emit)
     start1 = inst._busy_start_ts
-    _write(f, "busy", ts=time.time())          # producer refreshes ts mid-turn
+    _write(f, "busy", ts=time.time())  # producer refreshes ts mid-turn
     inst.check(emit)
     start2 = inst._busy_start_ts
     assert start1 is not None and start1 == start2  # busy-start NOT reset by refresh
@@ -107,22 +108,24 @@ def test_busy_duration_survives_refresh(tmp_path):
 def test_busy_alerts_despite_refreshes(tmp_path):
     """A long busy episode still alerts even when the file ts keeps refreshing."""
     f = tmp_path / "act.json"
-    inst = StateFileInstance("a1", StateFileConfig(
-        name="agent", path=str(f), busy_alert_seconds=60))
+    inst = StateFileInstance(
+        "a1", StateFileConfig(name="agent", path=str(f), busy_alert_seconds=60)
+    )
     events, emit = _collector()
-    _write(f, "busy", ts=time.time() - 120)   # episode began 2 min ago
+    _write(f, "busy", ts=time.time() - 120)  # episode began 2 min ago
     inst.check(emit)
-    _write(f, "busy", ts=time.time())          # refresh with a brand-new ts
-    inst.check(emit)                           # still flagged busy-too-long
+    _write(f, "busy", ts=time.time())  # refresh with a brand-new ts
+    inst.check(emit)  # still flagged busy-too-long
     assert len([a for a, _ in events if a[0] == "alert"]) == 1
 
 
 def test_stale_file_degrades(tmp_path):
     f = tmp_path / "act.json"
-    inst = StateFileInstance("a1", StateFileConfig(
-        name="agent", path=str(f), stale_seconds=30))
+    inst = StateFileInstance(
+        "a1", StateFileConfig(name="agent", path=str(f), stale_seconds=30)
+    )
     events, emit = _collector()
-    _write(f, "busy", ts=time.time() - 300)   # not updated for 5 min
+    _write(f, "busy", ts=time.time() - 300)  # not updated for 5 min
     st = inst.check(emit)
     assert st.state == "degraded"
     assert any(a[0] == "alert" for a, _ in events)
@@ -130,28 +133,35 @@ def test_stale_file_degrades(tmp_path):
 
 def test_busy_watchdog_resets_after_idle(tmp_path):
     f = tmp_path / "act.json"
-    inst = StateFileInstance("a1", StateFileConfig(
-        name="agent", path=str(f), busy_alert_seconds=60))
+    inst = StateFileInstance(
+        "a1", StateFileConfig(name="agent", path=str(f), busy_alert_seconds=60)
+    )
     events, emit = _collector()
     _write(f, "busy", ts=time.time() - 120)
-    inst.check(emit)                          # alert 1
+    inst.check(emit)  # alert 1
     _write(f, "idle", ts=time.time())
-    inst.check(emit)                          # reset
+    inst.check(emit)  # reset
     _write(f, "busy", ts=time.time() - 120)
-    inst.check(emit)                          # alert 2 (new busy episode)
+    inst.check(emit)  # alert 2 (new busy episode)
     assert len([a for a, _ in events if a[0] == "alert"]) == 2
 
 
 # ── missing / malformed ──────────────────────────────────────────────────--
 def test_missing_file_is_idle_by_default(tmp_path):
-    inst = StateFileInstance("a1", StateFileConfig(name="agent", path=str(tmp_path / "none.json")))
+    inst = StateFileInstance(
+        "a1", StateFileConfig(name="agent", path=str(tmp_path / "none.json"))
+    )
     _, emit = _collector()
     assert inst.check(emit).state == "idle"
 
 
 def test_missing_file_unknown_when_configured(tmp_path):
-    inst = StateFileInstance("a1", StateFileConfig(
-        name="agent", path=str(tmp_path / "none.json"), missing_is_idle=False))
+    inst = StateFileInstance(
+        "a1",
+        StateFileConfig(
+            name="agent", path=str(tmp_path / "none.json"), missing_is_idle=False
+        ),
+    )
     _, emit = _collector()
     assert inst.check(emit).state == "unknown"
 
@@ -176,7 +186,7 @@ def test_writer_explicit_state(tmp_path):
 def test_writer_atomic_replace(tmp_path):
     out = tmp_path / "a.json"
     aw.write_activity(str(out), "claude", "busy")
-    aw.write_activity(str(out), "claude", "idle")   # overwrite
+    aw.write_activity(str(out), "claude", "idle")  # overwrite
     assert json.loads(out.read_text())["state"] == "idle"
     # no leftover temp files
     assert list(tmp_path.glob(".*.tmp")) == []
@@ -188,17 +198,21 @@ def test_writer_creates_parent_dir(tmp_path):
     assert out.exists()
 
 
-@pytest.mark.parametrize("event,expected", [
-    ("UserPromptSubmit", "busy"),
-    ("SessionStart", "busy"),
-    ("Notification", "waiting"),
-    ("Stop", "idle"),
-    ("SubagentStop", "idle"),
-    ("UnknownEvent", None),
-])
+@pytest.mark.parametrize(
+    "event,expected",
+    [
+        ("UserPromptSubmit", "busy"),
+        ("SessionStart", "busy"),
+        ("Notification", "waiting"),
+        ("Stop", "idle"),
+        ("SubagentStop", "idle"),
+        ("UnknownEvent", None),
+    ],
+)
 def test_writer_maps_claude_hook_events(event, expected):
-    state, session = aw.state_from_stdin(json.dumps(
-        {"hook_event_name": event, "session_id": "sess1"}))
+    state, session = aw.state_from_stdin(
+        json.dumps({"hook_event_name": event, "session_id": "sess1"})
+    )
     assert state == expected
     if expected:
         assert session == "sess1"

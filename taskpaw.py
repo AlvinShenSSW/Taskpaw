@@ -2581,7 +2581,7 @@ class TaskPawApp:
                 s.connect(("8.8.8.8", 80))
                 local_ip = s.getsockname()[0]
                 s.close()
-            except:
+            except OSError:
                 local_ip = "127.0.0.1"
 
             url = f"http://{local_ip}:{self.config.api_port}"

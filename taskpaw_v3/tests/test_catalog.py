@@ -21,8 +21,16 @@ def test_plugin_catalog_lists_all_with_schema():
     cat = plugin_catalog()
     by_id = {p["type_id"]: p for p in cat}
     # every built-in selectable service is offered
-    assert {"host_metrics", "process", "comfyui", "folder", "custom_cmd",
-            "state_file", "heartbeat", "tcp_check"} <= set(by_id)
+    assert {
+        "host_metrics",
+        "process",
+        "comfyui",
+        "folder",
+        "custom_cmd",
+        "state_file",
+        "heartbeat",
+        "tcp_check",
+    } <= set(by_id)
     # each entry carries a form schema the UI can render + the four-piece bits
     for p in cat:
         assert "properties" in p["json_schema"]
@@ -39,7 +47,11 @@ def test_path_fields_carry_taskpawpath_marker():
     by_id = {p["type_id"]: p for p in plugin_catalog()}
 
     def kind(tid: str, field: str):
-        return (by_id[tid]["ui_schema"].get(field, {}) or {}).get("ui:options", {}).get("taskpawPath")
+        return (
+            (by_id[tid]["ui_schema"].get(field, {}) or {})
+            .get("ui:options", {})
+            .get("taskpawPath")
+        )
 
     assert kind("lada", "lada_cli_path") == "file"
     assert kind("lada", "lada_input_folder") == "directory"
@@ -53,7 +65,7 @@ def test_preset_catalog_has_moomoo_as_an_option():
     presets = {p["id"]: p for p in preset_catalog()}
     assert "moomoo" in presets
     mon = presets["moomoo"]["monitors"]
-    assert len(mon) == 4                      # moomoo is just a selectable bundle
+    assert len(mon) == 4  # moomoo is just a selectable bundle
     assert {m["type_id"] for m in mon} == {"process", "tcp_check", "heartbeat"}
     # canonical {type_id, name, config} shape — same contract as add_monitor (Kimi)
     for m in mon:
@@ -62,15 +74,16 @@ def test_preset_catalog_has_moomoo_as_an_option():
 
 def test_has_remove_monitor_reject_non_string_query():
     base = add_monitor([], {"type_id": "tcp_check", "config": {"name": "a", "port": 1}})
-    assert has_monitor(base, None) is False        # type-safe, no AttributeError
+    assert has_monitor(base, None) is False  # type-safe, no AttributeError
     with pytest.raises(ValueError):
         remove_monitor(base, None)
 
 
 # ── config-edit helpers ──────────────────────────────────────────────────--
 def test_add_monitor_validates_and_appends():
-    out = add_monitor([], {"type_id": "tcp_check",
-                           "config": {"name": "opend", "port": 11111}})
+    out = add_monitor(
+        [], {"type_id": "tcp_check", "config": {"name": "opend", "port": 11111}}
+    )
     assert len(out) == 1 and out[0]["type_id"] == "tcp_check"
     # canonical {type_id, name, config} shape (matches migration/examples)
     assert out[0]["name"] == "opend" and out[0]["config"]["name"] == "opend"
@@ -80,13 +93,15 @@ def test_add_monitor_validates_and_appends():
 
 def test_add_monitor_rejects_non_object_config():
     with pytest.raises(ValueError):
-        add_monitor([], {"type_id": "tcp_check", "config": [1, 2]})   # not a dict
+        add_monitor([], {"type_id": "tcp_check", "config": [1, 2]})  # not a dict
 
 
 def test_add_monitor_rejects_conflicting_names():
     with pytest.raises(ValueError, match="conflicting names"):
-        add_monitor([], {"type_id": "tcp_check", "name": "a",
-                         "config": {"name": "b", "port": 1}})
+        add_monitor(
+            [],
+            {"type_id": "tcp_check", "name": "a", "config": {"name": "b", "port": 1}},
+        )
 
 
 def test_add_monitor_rejects_blank_name():
@@ -98,10 +113,19 @@ def test_whitespace_name_collision_is_caught(monkeypatch):
     # A legacy " foo " entry and a new "foo" must be seen as the same name, so the
     # duplicate is rejected here rather than crashing the supervisor later (Kimi).
     from taskpaw_v3.monitors.runtime import monitor_name
+
     assert monitor_name({"config": {"name": "  foo  "}}) == "foo"
-    legacy = [{"type_id": "tcp_check", "name": " foo ", "config": {"name": " foo ", "port": 1}}]
+    legacy = [
+        {
+            "type_id": "tcp_check",
+            "name": " foo ",
+            "config": {"name": " foo ", "port": 1},
+        }
+    ]
     with pytest.raises(ValueError, match="already exists"):
-        add_monitor(legacy, {"type_id": "tcp_check", "config": {"name": "foo", "port": 2}})
+        add_monitor(
+            legacy, {"type_id": "tcp_check", "config": {"name": "foo", "port": 2}}
+        )
 
 
 def test_add_monitor_rejects_system_plugin():
@@ -129,7 +153,7 @@ def test_add_monitor_rejects_duplicate_name():
 def test_add_monitor_is_pure():
     src: list = []
     add_monitor(src, {"type_id": "tcp_check", "config": {"name": "a", "port": 1}})
-    assert src == []                          # original untouched
+    assert src == []  # original untouched
 
 
 def test_remove_monitor():
@@ -152,15 +176,22 @@ def test_remove_monitor_raises_on_duplicates_not_silent_wipe():
 
 def test_effective_monitors_strips_machine_for_collision():
     from taskpaw_v3.agent.server.launcher import effective_monitors
+
     # machine padded; an existing monitor already named "m-host" → injected
     # host_metrics must avoid the collision (stripped compare), not duplicate it.
-    cfg = AgentConfig(server_id="s", machine="  m  ", monitors=[
-        {"type_id": "tcp_check", "config": {"name": "m-host", "port": 1}},
-    ])
+    cfg = AgentConfig(
+        server_id="s",
+        machine="  m  ",
+        monitors=[
+            {"type_id": "tcp_check", "config": {"name": "m-host", "port": 1}},
+        ],
+    )
     eff = effective_monitors(cfg)
     names = [(mm.get("config") or {}).get("name") for mm in eff]
-    assert names.count("m-host") == 1            # the existing one only
-    assert any(n and n.startswith("m-host-") for n in names)  # injected got a unique name
+    assert names.count("m-host") == 1  # the existing one only
+    assert any(
+        n and n.startswith("m-host-") for n in names
+    )  # injected got a unique name
     # injected host_metrics carries the canonical top-level name too (Kimi)
     hm = next(mm for mm in eff if mm["type_id"] == "host_metrics")
     assert hm["name"] == hm["config"]["name"]
@@ -181,36 +212,47 @@ def test_build_supervisor_conflicting_names_raises():
     from taskpaw_v3.core.protocol import EventQueue
     from taskpaw_v3.monitors.registry import default_registry
     from taskpaw_v3.monitors.runtime import build_supervisor
+
     with pytest.raises(ValueError, match="conflicting names"):
-        build_supervisor(default_registry(),
-                         [{"type_id": "tcp_check", "name": "a",
-                           "config": {"name": "b", "port": 1}}],
-                         EventQueue(machine="m"), "m")
+        build_supervisor(
+            default_registry(),
+            [{"type_id": "tcp_check", "name": "a", "config": {"name": "b", "port": 1}}],
+            EventQueue(machine="m"),
+            "m",
+        )
 
 
 def test_has_remove_monitor_canonicalize_query():
-    base = add_monitor([], {"type_id": "tcp_check", "config": {"name": "foo", "port": 1}})
-    assert has_monitor(base, "  foo  ")              # whitespace query still matches
-    assert remove_monitor(base, " foo ") == []       # and removes
+    base = add_monitor(
+        [], {"type_id": "tcp_check", "config": {"name": "foo", "port": 1}}
+    )
+    assert has_monitor(base, "  foo  ")  # whitespace query still matches
+    assert remove_monitor(base, " foo ") == []  # and removes
 
 
 def test_build_supervisor_bad_type_id_raises_valueerror():
     from taskpaw_v3.core.protocol import EventQueue
     from taskpaw_v3.monitors.registry import default_registry
     from taskpaw_v3.monitors.runtime import build_supervisor
-    with pytest.raises(ValueError):                  # not TypeError on malformed YAML
-        build_supervisor(default_registry(), [{"type_id": ["process"]}],
-                         EventQueue(machine="m"), "m")
+
+    with pytest.raises(ValueError):  # not TypeError on malformed YAML
+        build_supervisor(
+            default_registry(), [{"type_id": ["process"]}], EventQueue(machine="m"), "m"
+        )
 
 
 def test_build_supervisor_bad_config_raises_valueerror():
     from taskpaw_v3.core.protocol import EventQueue
     from taskpaw_v3.monitors.registry import default_registry
     from taskpaw_v3.monitors.runtime import build_supervisor
-    with pytest.raises(ValueError):                  # config as a list, not TypeError
-        build_supervisor(default_registry(),
-                         [{"type_id": "tcp_check", "config": [1, 2]}],
-                         EventQueue(machine="m"), "m")
+
+    with pytest.raises(ValueError):  # config as a list, not TypeError
+        build_supervisor(
+            default_registry(),
+            [{"type_id": "tcp_check", "config": [1, 2]}],
+            EventQueue(machine="m"),
+            "m",
+        )
 
 
 def test_add_monitor_non_string_type_id_raises_valueerror():
@@ -223,8 +265,9 @@ def test_add_monitor_non_string_type_id_raises_valueerror():
 
 
 def test_name_at_top_level_supported():
-    out = add_monitor([], {"type_id": "tcp_check", "name": "top",
-                           "config": {"port": 11111}})
+    out = add_monitor(
+        [], {"type_id": "tcp_check", "name": "top", "config": {"port": 11111}}
+    )
     assert has_monitor(out, "top")
 
 
@@ -234,13 +277,18 @@ def test_network_status_resolves_name_from_config():
     # report the real name, not null (Hub reads this) (Kimi).
     from taskpaw_v3.core.protocol import EventQueue
 
-    cfg = AgentConfig(server_id="a", machine="m", host_metrics=False, monitors=[
-        {"type_id": "tcp_check", "config": {"name": "opend", "port": 11111}},
-    ])
+    cfg = AgentConfig(
+        server_id="a",
+        machine="m",
+        host_metrics=False,
+        monitors=[
+            {"type_id": "tcp_check", "config": {"name": "opend", "port": 11111}},
+        ],
+    )
     client = TestClient(create_network_app(cfg, EventQueue(machine="m")))
     r = client.get("/status")
     assert r.status_code == 200
-    mons = r.json()["monitors"]                 # dict keyed by name (production shape)
+    mons = r.json()["monitors"]  # dict keyed by name (production shape)
     assert mons["opend"]["type_id"] == "tcp_check"
 
 

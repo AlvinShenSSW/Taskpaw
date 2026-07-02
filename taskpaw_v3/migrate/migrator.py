@@ -32,8 +32,8 @@ class MigratedMonitor:
     name: str
     config: dict[str, Any]
     enabled: bool = True
-    source_id: str = ""           # original V2 watcher id, for traceability
-    source_type: str = ""         # original V2 watcher_type
+    source_id: str = ""  # original V2 watcher id, for traceability
+    source_type: str = ""  # original V2 watcher_type
 
 
 @dataclass
@@ -48,7 +48,7 @@ class MigrationWarning:
 class MigrationPlan:
     monitors: list[MigratedMonitor] = field(default_factory=list)
     warnings: list[MigrationWarning] = field(default_factory=list)
-    cursor: int = 1               # V3 event-id cursor (from V2 next_event_id)
+    cursor: int = 1  # V3 event-id cursor (from V2 next_event_id)
     machine_name: str = ""
 
     def is_clean(self) -> bool:
@@ -64,7 +64,12 @@ class MigrationPlan:
         ignored enabled, so disabled ones were excluded; #57a changed that.)
         """
         return [
-            {"type_id": m.type_id, "name": m.name, "config": m.config, "enabled": m.enabled}
+            {
+                "type_id": m.type_id,
+                "name": m.name,
+                "config": m.config,
+                "enabled": m.enabled,
+            }
             for m in self.monitors
         ]
 
@@ -103,8 +108,13 @@ def _map_lada(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
     # GPU, folder queue — so carry the lada_* fields straight over (no more
     # folder-only compromise).
     cfg: dict[str, Any] = {"name": name}
-    for key in ("lada_cli_path", "process_name", "lada_input_folder",
-                "lada_output_folder", "lada_extra_args"):
+    for key in (
+        "lada_cli_path",
+        "process_name",
+        "lada_input_folder",
+        "lada_output_folder",
+        "lada_extra_args",
+    ):
         v = w.get(key)
         if isinstance(v, str) and v.strip():
             cfg[key] = v.strip()
@@ -137,9 +147,11 @@ def _map_process(w: dict, name: str) -> tuple[list[_Spec], list[str]]:
         "search_cmdline": False,
         "category_label": "service",
     }
-    warn = (f"process watcher {name!r}: V2 sent neutral start/exit notifications; "
-            f"V3 treats the process being absent as an alert (and recovery as "
-            f"done). Review severity, or disable if it was a short-lived task.")
+    warn = (
+        f"process watcher {name!r}: V2 sent neutral start/exit notifications; "
+        f"V3 treats the process being absent as an alert (and recovery as "
+        f"done). Review severity, or disable if it was a short-lived task."
+    )
     return [("process", name, _carry_common(w, cfg))], [warn]
 
 
@@ -200,8 +212,11 @@ def migrate_config(config: dict) -> MigrationPlan:
         sid = w.get("id", "") or ""
         mapper = _MAPPERS.get(wtype)
         if mapper is None:
-            plan.warnings.append(MigrationWarning(sid, wtype, name,
-                f"no V3 plugin maps watcher_type {wtype!r}"))
+            plan.warnings.append(
+                MigrationWarning(
+                    sid, wtype, name, f"no V3 plugin maps watcher_type {wtype!r}"
+                )
+            )
             continue
         specs, notes = mapper(w, name)
         for reason in notes:
@@ -215,19 +230,37 @@ def migrate_config(config: dict) -> MigrationPlan:
             # auto_start — the operator clicks Start (#70). This also means a
             # migrated config can never carry an enabled-but-folderless managed Lada
             # that would fail validation at boot.
-            plan.warnings.append(MigrationWarning(sid, wtype, name,
-                "managed Lada imported DISABLED — V3 starts it on demand (click "
-                "Start); it never auto-launches lada-cli at boot"))
+            plan.warnings.append(
+                MigrationWarning(
+                    sid,
+                    wtype,
+                    name,
+                    "managed Lada imported DISABLED — V3 starts it on demand (click "
+                    "Start); it never auto-launches lada-cli at boot",
+                )
+            )
             enabled = False
         if specs and not v2_enabled:
-            plan.warnings.append(MigrationWarning(sid, wtype, name,
-                "watcher was disabled in V2 — carried into the agent config as "
-                "enabled:false (shows stopped; enable it when you want it to run)"))
+            plan.warnings.append(
+                MigrationWarning(
+                    sid,
+                    wtype,
+                    name,
+                    "watcher was disabled in V2 — carried into the agent config as "
+                    "enabled:false (shows stopped; enable it when you want it to run)",
+                )
+            )
         for type_id, mname, cfg in specs:
-            plan.monitors.append(MigratedMonitor(
-                type_id=type_id, name=mname, config=cfg,
-                enabled=enabled, source_id=sid, source_type=wtype,
-            ))
+            plan.monitors.append(
+                MigratedMonitor(
+                    type_id=type_id,
+                    name=mname,
+                    config=cfg,
+                    enabled=enabled,
+                    source_id=sid,
+                    source_type=wtype,
+                )
+            )
     return plan
 
 
@@ -239,8 +272,9 @@ def migrate_state(state: dict) -> int:
         return 1
 
 
-def plan_migration(config_path: str | Path,
-                   state_path: Optional[str | Path] = None) -> MigrationPlan:
+def plan_migration(
+    config_path: str | Path, state_path: Optional[str | Path] = None
+) -> MigrationPlan:
     """Read V2 config.json (+ optional state.json) and return a read-only plan.
 
     Raises FileNotFoundError if config_path is missing; a missing/invalid

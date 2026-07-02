@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Optional
 
 from pydantic import Field
 
@@ -24,12 +23,22 @@ from taskpaw_v3.monitors.base import (
 
 
 class FolderConfig(BaseMonitorConfig):
-    path: str = Field(..., min_length=1, description="Folder to watch for new files "
-                      "(e.g. a downloads dir).")
-    extensions: list[str] = Field([], description="Only watch these extensions, e.g. "
-                                  "[\"mp4\",\"mkv\"]; empty = all files.")
-    stable_seconds: float = Field(30.0, ge=0, description="A file counts as done once "
-                                  "its size hasn't changed for this many seconds.")
+    path: str = Field(
+        ...,
+        min_length=1,
+        description="Folder to watch for new files (e.g. a downloads dir).",
+    )
+    extensions: list[str] = Field(
+        [],
+        description="Only watch these extensions, e.g. "
+        '["mp4","mkv"]; empty = all files.',
+    )
+    stable_seconds: float = Field(
+        30.0,
+        ge=0,
+        description="A file counts as done once "
+        "its size hasn't changed for this many seconds.",
+    )
 
 
 class FolderInstance(MonitorInstance):
@@ -112,8 +121,11 @@ class FolderInstance(MonitorInstance):
             else:
                 pending += 1
 
-        return MonitorStatus(state="ok", detail=f"{pending} in progress",
-                             metrics={"pending": pending, "tracked": len(self._files)})
+        return MonitorStatus(
+            state="ok",
+            detail=f"{pending} in progress",
+            metrics={"pending": pending, "tracked": len(self._files)},
+        )
 
 
 class FolderPlugin(MonitorPlugin):

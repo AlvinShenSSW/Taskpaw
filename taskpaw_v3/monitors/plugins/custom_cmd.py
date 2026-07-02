@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
-import sys
 from typing import Optional
 
 from pydantic import Field
@@ -48,8 +47,12 @@ def split_command(command: str) -> list[str]:
 
 
 class CustomCmdConfig(BaseMonitorConfig):
-    command: str = Field(..., min_length=1, description="Command to run each cycle; "
-                         "exit 0 = ok/idle, non-zero = busy/failed.")
+    command: str = Field(
+        ...,
+        min_length=1,
+        description="Command to run each cycle; "
+        "exit 0 = ok/idle, non-zero = busy/failed.",
+    )
 
 
 class CustomCmdInstance(MonitorInstance):
@@ -64,8 +67,12 @@ class CustomCmdInstance(MonitorInstance):
             return MonitorStatus(state="error", detail="empty command")
         try:
             result = subprocess.run(
-                argv, shell=False, capture_output=True, text=True,
-                timeout=cfg.timeout, creationflags=_CREATE_NO_WINDOW,
+                argv,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=cfg.timeout,
+                creationflags=_CREATE_NO_WINDOW,
             )
             ok = result.returncode == 0
             detail = f"exit {result.returncode}"

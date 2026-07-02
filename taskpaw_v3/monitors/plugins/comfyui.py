@@ -28,9 +28,9 @@ from typing import Optional
 # OSError) — all must become a clean "unreachable", never a raised check error.
 _NET_ERRORS = (OSError, ValueError, http.client.HTTPException)
 
-from pydantic import Field
+from pydantic import Field  # noqa: E402
 
-from taskpaw_v3.monitors.base import (
+from taskpaw_v3.monitors.base import (  # noqa: E402
     BaseMonitorConfig,
     EventEmitter,
     MonitorInstance,
@@ -49,16 +49,33 @@ _LOG_TAIL_LINES = 50
 
 
 class ComfyUIConfig(BaseMonitorConfig):
-    host: str = Field("127.0.0.1", description="ComfyUI host/IP (the machine running ComfyUI).")
+    host: str = Field(
+        "127.0.0.1", description="ComfyUI host/IP (the machine running ComfyUI)."
+    )
     port: int = Field(8188, ge=1, le=65535, description="ComfyUI port.")
-    idle_confirm: int = Field(2, ge=1, description="Notify 'done' after the queue is "
-                              "empty this many checks in a row (debounces the gap between prompts).")
-    stall_confirm: int = Field(3, ge=1, description="Alert when nothing is running but "
-                               "prompts stay pending this many checks (a prompt error left them stuck).")
-    stuck_checks: int = Field(0, ge=0, description="Alert when the SAME prompt keeps "
-                              "running this many checks without finishing (0 = off).")
-    comfyui_log_path: str = Field("", description="Optional ComfyUI log file to tail "
-                                  "for the actual error (CUDA OOM / RuntimeError / Traceback) on a stall/stuck.")
+    idle_confirm: int = Field(
+        2,
+        ge=1,
+        description="Notify 'done' after the queue is "
+        "empty this many checks in a row (debounces the gap between prompts).",
+    )
+    stall_confirm: int = Field(
+        3,
+        ge=1,
+        description="Alert when nothing is running but "
+        "prompts stay pending this many checks (a prompt error left them stuck).",
+    )
+    stuck_checks: int = Field(
+        0,
+        ge=0,
+        description="Alert when the SAME prompt keeps "
+        "running this many checks without finishing (0 = off).",
+    )
+    comfyui_log_path: str = Field(
+        "",
+        description="Optional ComfyUI log file to tail "
+        "for the actual error (CUDA OOM / RuntimeError / Traceback) on a stall/stuck.",
+    )
 
 
 def _cap(s: str, n: int = 80) -> str:
@@ -66,7 +83,9 @@ def _cap(s: str, n: int = 80) -> str:
     return s if len(s) <= n else s[: n - 3] + "..."
 
 
-def queue_snapshot(host: str, port: int, timeout: float) -> Optional[tuple[list[str], int]]:
+def queue_snapshot(
+    host: str, port: int, timeout: float
+) -> Optional[tuple[list[str], int]]:
     """(running_prompt_ids, pending_count), or None if unreachable / not JSON.
 
     ComfyUI /queue entries are `[number, prompt_id, prompt, extra, outputs]`; we
@@ -117,12 +136,16 @@ def _get_json(url: str, timeout: float):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def check_history_error(host: str, port: int, prompt_id: str, timeout: float) -> Optional[str]:
+def check_history_error(
+    host: str, port: int, prompt_id: str, timeout: float
+) -> Optional[str]:
     try:
         data = _get_json(f"http://{host}:{port}/history/{prompt_id}", timeout)
     except _NET_ERRORS:
         return None
-    return extract_history_error(data.get(prompt_id)) if isinstance(data, dict) else None
+    return (
+        extract_history_error(data.get(prompt_id)) if isinstance(data, dict) else None
+    )
 
 
 def check_recent_history_errors(host: str, port: int, timeout: float) -> Optional[str]:
@@ -156,7 +179,7 @@ def tail_log_for_errors(log_path: str, last_position: int) -> tuple[Optional[str
             # grows past the old offset (Codex #60).
             last_position = 0
         if size <= last_position:
-            return None, last_position           # no new content
+            return None, last_position  # no new content
         # Scan ONLY the bytes written since last_position so an already-consumed
         # error still in the tail window isn't re-reported as a new episode's
         # cause (Codex #60). Bound the read to the last 8KB of new content.
@@ -164,7 +187,7 @@ def tail_log_for_errors(log_path: str, last_position: int) -> tuple[Optional[str
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             f.seek(start)
             if start > last_position:
-                f.readline()                     # capped past the offset → drop partial line
+                f.readline()  # capped past the offset → drop partial line
             new_lines = f.read().splitlines()
         for line in reversed(new_lines[-_LOG_TAIL_LINES:]):
             if LOG_ERROR_PATTERNS.search(line):
@@ -185,7 +208,9 @@ class ComfyUIInstance(MonitorInstance):
         self._running_count = 0
         self._stuck = False
         self._last_log_position = 0
-        self._diag_error: Optional[str] = None        # diagnosed cause for the current episode
+        self._diag_error: Optional[str] = (
+            None  # diagnosed cause for the current episode
+        )
         self._recent_log_error: Optional[str] = None  # latest log error seen this run
 
     def start(self, emit: EventEmitter) -> None:
@@ -209,7 +234,8 @@ class ComfyUIInstance(MonitorInstance):
         # the current run; it's cleared when the queue goes idle (run boundary).
         if cfg.comfyui_log_path:
             log_err, self._last_log_position = tail_log_for_errors(
-                cfg.comfyui_log_path, self._last_log_position)
+                cfg.comfyui_log_path, self._last_log_position
+            )
             if log_err:
                 self._recent_log_error = log_err
         snap = queue_snapshot(cfg.host, cfg.port, min(cfg.timeout, 10.0))
@@ -235,15 +261,21 @@ class ComfyUIInstance(MonitorInstance):
                     # recovery) prevents duplicates within one episode (Codex r9).
                     self._diag_error = self._diagnose()
                     extra = f" — {self._diag_error}" if self._diag_error else ""
-                    emit("alert", f"{cfg.name}: queue stalled",
-                         f"{pending} pending but nothing running{extra}")
+                    emit(
+                        "alert",
+                        f"{cfg.name}: queue stalled",
+                        f"{pending} pending but nothing running{extra}",
+                    )
                     self._stalled = True
                 return self._err_status("stalled", pending, 0, pending)
-            return MonitorStatus(state="running", detail=f"{pending} pending",
-                                 metrics={"running": 0, "pending": pending})
+            return MonitorStatus(
+                state="running",
+                detail=f"{pending} pending",
+                metrics={"running": 0, "pending": pending},
+            )
 
         self._stall_count = 0
-        if self._stalled:                 # recovered from a stall episode
+        if self._stalled:  # recovered from a stall episode
             self._stalled = False
             self._diag_error = None
 
@@ -263,31 +295,46 @@ class ComfyUIInstance(MonitorInstance):
             if cfg.stuck_checks and self._running_count >= cfg.stuck_checks:
                 if not self._stuck:
                     # Diagnose the stuck prompt by id (then recent history / log).
-                    self._diag_error = self._diagnose(running_ids[0] if running_ids else None)
+                    self._diag_error = self._diagnose(
+                        running_ids[0] if running_ids else None
+                    )
                     extra = f" — {self._diag_error}" if self._diag_error else ""
-                    emit("alert", f"{cfg.name}: prompt stuck",
-                         f"prompt running for {self._running_count} polls without finishing{extra}")
+                    emit(
+                        "alert",
+                        f"{cfg.name}: prompt stuck",
+                        f"prompt running for {self._running_count} polls without finishing{extra}",
+                    )
                     self._stuck = True
                 return self._err_status("stuck", self._running_count, running, pending)
-            return MonitorStatus(state="running", detail=f"{depth} queued",
-                                 metrics={"running": running, "pending": pending})
+            return MonitorStatus(
+                state="running",
+                detail=f"{depth} queued",
+                metrics={"running": running, "pending": pending},
+            )
 
         # depth == 0 (nothing running, nothing pending)
         self._reset_running()
-        self._recent_log_error = None     # run finished → drop its log error
+        self._recent_log_error = None  # run finished → drop its log error
         if self._was_busy:
             self._idle_count += 1
             if self._idle_count >= cfg.idle_confirm:
                 emit("done", f"{cfg.name}: queue empty", "all ComfyUI tasks complete")
                 self._was_busy = False
                 self._idle_count = 0
-        return MonitorStatus(state="ok", detail="idle", metrics={"running": 0, "pending": 0})
+        return MonitorStatus(
+            state="ok", detail="idle", metrics={"running": 0, "pending": 0}
+        )
 
-    def _err_status(self, kind: str, count: int, running: int, pending: int) -> MonitorStatus:
+    def _err_status(
+        self, kind: str, count: int, running: int, pending: int
+    ) -> MonitorStatus:
         base = f"{kind}: {count} {'pending' if kind == 'stalled' else 'polls'}"
         detail = f"{base} ({self._diag_error})" if self._diag_error else base
-        return MonitorStatus(state="error", detail=detail,
-                             metrics={"running": running, "pending": pending})
+        return MonitorStatus(
+            state="error",
+            detail=detail,
+            metrics={"running": running, "pending": pending},
+        )
 
     def _diagnose(self, prompt_id: Optional[str] = None) -> Optional[str]:
         """Find the underlying error, matching V2's two cases:
@@ -327,8 +374,18 @@ class ComfyUIPlugin(MonitorPlugin):
         # Help text comes from the field descriptions; flag the log path for the
         # file picker widget (#71).
         return {
-            "ui:order": ["name", "host", "port", "idle_confirm", "stall_confirm",
-                         "stuck_checks", "comfyui_log_path", "poll_interval", "timeout", "*"],
+            "ui:order": [
+                "name",
+                "host",
+                "port",
+                "idle_confirm",
+                "stall_confirm",
+                "stuck_checks",
+                "comfyui_log_path",
+                "poll_interval",
+                "timeout",
+                "*",
+            ],
             "comfyui_log_path": {"ui:options": {"taskpawPath": "file"}},
         }
 

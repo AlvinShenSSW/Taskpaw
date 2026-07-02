@@ -8,7 +8,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from taskpaw_v3.agent.server.app import create_control_app, create_network_app
-from taskpaw_v3.agent.server.launcher import ensure_port_free, port_available, PortInUseError
+from taskpaw_v3.agent.server.launcher import (
+    PortInUseError,
+    ensure_port_free,
+    port_available,
+)
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
 
@@ -34,10 +38,15 @@ def test_control_events_returns_recent_non_destructive(_=None):
     client = TestClient(create_control_app(cfg, events_provider=q.recent))
     r = client.get("/control/events?limit=2")
     assert r.status_code == 200
-    assert [e["message"] for e in r.json()["events"]] == ["e1", "e2"]   # last 2, newest last
-    assert len(q.payload(ack_id=0)["events"]) == 3                       # not consumed
+    assert [e["message"] for e in r.json()["events"]] == [
+        "e1",
+        "e2",
+    ]  # last 2, newest last
+    assert len(q.payload(ack_id=0)["events"]) == 3  # not consumed
     # no provider wired → empty, not an error
-    assert TestClient(create_control_app(cfg)).get("/control/events").json() == {"events": []}
+    assert TestClient(create_control_app(cfg)).get("/control/events").json() == {
+        "events": []
+    }
 
 
 def test_control_events_filters_by_monitor():
@@ -52,7 +61,7 @@ def test_control_events_filters_by_monitor():
     both = client.get("/control/events").json()["events"]
     assert [e["message"] for e in both] == ["l0", "f0", "l1"]
     only = client.get("/control/events?monitor=lada").json()["events"]
-    assert [e["message"] for e in only] == ["l0", "l1"]      # folder filtered out
+    assert [e["message"] for e in only] == ["l0", "l1"]  # folder filtered out
     # an unknown monitor is simply empty, not an error
     assert client.get("/control/events?monitor=nope").json() == {"events": []}
 
@@ -119,6 +128,7 @@ def test_bind_host_defaults_to_loopback():
 
 def test_claim_port_refuses_second_binder():
     from taskpaw_v3.core.net import claim_port
+
     s = claim_port("127.0.0.1", 0, "first")
     try:
         host, port = s.getsockname()

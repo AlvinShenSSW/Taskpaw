@@ -8,7 +8,7 @@ and testable.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -69,7 +69,9 @@ class AgentConfig(BaseModel):
         # Numeric loopback only — "localhost" can resolve to a family that
         # mismatches the bind probe, so reject it to avoid a false port-free.
         if v not in {"127.0.0.1", "::1"}:
-            raise ValueError("control_host must be a numeric loopback address (127.0.0.1 / ::1)")
+            raise ValueError(
+                "control_host must be a numeric loopback address (127.0.0.1 / ::1)"
+            )
         return v
 
 

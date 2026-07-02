@@ -33,10 +33,13 @@ def test_loopback_url_brackets_ipv6_literal():
 def test_announce_ready_emits_single_json_handshake_line(capsys):
     announce_ready("agent", "http://127.0.0.1:5681")
     out = capsys.readouterr().out.strip().splitlines()
-    assert len(out) == 1                      # exactly one line on stdout
+    assert len(out) == 1  # exactly one line on stdout
     obj = json.loads(out[0])
-    assert obj == {"taskpaw_ready": True, "role": "agent",
-                   "base_url": "http://127.0.0.1:5681"}
+    assert obj == {
+        "taskpaw_ready": True,
+        "role": "agent",
+        "base_url": "http://127.0.0.1:5681",
+    }
 
 
 def test_announce_ready_role_passthrough(capsys):

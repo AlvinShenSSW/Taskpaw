@@ -56,9 +56,11 @@ def _store(args) -> HubStore:
         db = db_path_for(HubConfig())
         legacy = legacy_db_conflict(default_config_path(), db)
         if legacy:
-            print(f"error: would operate on {db}, but an older hub.db exists at "
-                  f"{legacy}.\n  Move it, set data_dir, or pass --db to target one.",
-                  file=sys.stderr)
+            print(
+                f"error: would operate on {db}, but an older hub.db exists at "
+                f"{legacy}.\n  Move it, set data_dir, or pass --db to target one.",
+                file=sys.stderr,
+            )
             raise SystemExit(2)
         return HubStore(db)
     try:
@@ -74,10 +76,12 @@ def _store(args) -> HubStore:
     # refuses to start on. Pass --db to target a specific db explicitly (Kimi).
     legacy = legacy_db_conflict(cfg_path, db)
     if legacy:
-        print(f"error: would operate on {db}, but an older hub.db exists at {legacy}.\n"
-              f"  Move it:   mv '{legacy}' '{db}'\n"
-              f"  or set data_dir, or pass --db {db} to target it explicitly.",
-              file=sys.stderr)
+        print(
+            f"error: would operate on {db}, but an older hub.db exists at {legacy}.\n"
+            f"  Move it:   mv '{legacy}' '{db}'\n"
+            f"  or set data_dir, or pass --db {db} to target it explicitly.",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
     return HubStore(db)
 
@@ -90,15 +94,22 @@ def _print_servers(store: HubStore) -> None:
     print(f"{'id':>3}  {'name':<20} {'address':<24} enabled")
     for s in servers:
         addr = f"{s['ip']}:{s['port']}"
-        print(f"{s['id']:>3}  {s['name']:<20} {addr:<24} {'yes' if s['enabled'] else 'no'}")
+        print(
+            f"{s['id']:>3}  {s['name']:<20} {addr:<24} {'yes' if s['enabled'] else 'no'}"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m taskpaw_v3.hub",
-                                 description="Run the TaskPaw V3 Hub and manage polled agents.")
-    ap.add_argument("--config", default=None, help="path to hub.yaml (default: platform location)")
-    ap.add_argument("--db", default=None,
-                    help="path to hub.db (default: HubConfig.data_dir/hub.db)")
+    ap = argparse.ArgumentParser(
+        prog="python -m taskpaw_v3.hub",
+        description="Run the TaskPaw V3 Hub and manage polled agents.",
+    )
+    ap.add_argument(
+        "--config", default=None, help="path to hub.yaml (default: platform location)"
+    )
+    ap.add_argument(
+        "--db", default=None, help="path to hub.db (default: HubConfig.data_dir/hub.db)"
+    )
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("run", help="start the Hub (poller + API)")
@@ -107,8 +118,12 @@ def main(argv: list[str] | None = None) -> int:
     p_add = sub.add_parser("add-server", help="register an agent to poll")
     p_add.add_argument("--name", required=True)
     p_add.add_argument("--ip", required=True, help="agent LAN IP (its bind_host)")
-    p_add.add_argument("--port", type=_port, default=5680, help="agent bind_port (default 5680)")
-    p_add.add_argument("--disabled", action="store_true", help="register but don't poll yet")
+    p_add.add_argument(
+        "--port", type=_port, default=5680, help="agent bind_port (default 5680)"
+    )
+    p_add.add_argument(
+        "--disabled", action="store_true", help="register but don't poll yet"
+    )
 
     for name in ("enable-server", "disable-server", "remove-server"):
         p = sub.add_parser(name)
@@ -129,12 +144,19 @@ def main(argv: list[str] | None = None) -> int:
             _print_servers(store)
         elif cmd == "add-server":
             try:
-                sid = store.add_server(args.name, args.ip, args.port, enabled=not args.disabled)
+                sid = store.add_server(
+                    args.name, args.ip, args.port, enabled=not args.disabled
+                )
             except Exception as e:
-                print(f"error: could not add server (duplicate name?): {e}", file=sys.stderr)
+                print(
+                    f"error: could not add server (duplicate name?): {e}",
+                    file=sys.stderr,
+                )
                 return 2
-            print(f"added agent #{sid}: {args.name} @ {args.ip}:{args.port}"
-                  f"{' (disabled)' if args.disabled else ''}")
+            print(
+                f"added agent #{sid}: {args.name} @ {args.ip}:{args.port}"
+                f"{' (disabled)' if args.disabled else ''}"
+            )
         elif cmd in ("enable-server", "disable-server"):
             ok = store.set_server_enabled(args.id, cmd == "enable-server")
             print(f"{'updated' if ok else 'no such server id'}: #{args.id}")
@@ -152,5 +174,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     import logging
-    logging.basicConfig(level=logging.INFO)   # only when run as a script (Kimi)
+
+    logging.basicConfig(level=logging.INFO)  # only when run as a script (Kimi)
     raise SystemExit(main())

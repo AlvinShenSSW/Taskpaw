@@ -32,7 +32,7 @@ def _default_config_path() -> Path:
 
 def _render_text(plan, config_path: Path) -> str:
     lines = [
-        f"V2→V3 migration preview  (read-only)",
+        "V2→V3 migration preview  (read-only)",
         f"  source : {config_path}",
         f"  machine: {plan.machine_name or '(unset)'}",
         f"  cursor : {plan.cursor}  (V3 next event id)",
@@ -44,12 +44,16 @@ def _render_text(plan, config_path: Path) -> str:
     for m in plan.monitors:
         flag = "" if m.enabled else "  [DISABLED — in config, not started]"
         lines.append(f"  • {m.type_id:<10} {m.name}{flag}")
-        lines.append(f"      from V2 {m.source_type!r}  config={json.dumps(m.config, ensure_ascii=False)}")
+        lines.append(
+            f"      from V2 {m.source_type!r}  config={json.dumps(m.config, ensure_ascii=False)}"
+        )
     lines.append("")
     block = plan.to_runtime_monitors()
     enabled_n = sum(1 for m in block if m.get("enabled", True))
-    lines.append(f"In agent config: {len(block)} monitors ({enabled_n} enabled, "
-                 f"{len(block) - enabled_n} disabled)")
+    lines.append(
+        f"In agent config: {len(block)} monitors ({enabled_n} enabled, "
+        f"{len(block) - enabled_n} disabled)"
+    )
     if plan.warnings:
         lines.append("")
         lines.append(f"Warnings ({len(plan.warnings)}):")
@@ -69,24 +73,44 @@ def _render_yaml(plan) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(prog="python -m taskpaw_v3.migrate",
-                                 description="Preview a V2→V3 migration (read-only).")
-    ap.add_argument("config", nargs="?", default=None,
-                    help="path to V2 config.json (default: V2 standard location)")
-    ap.add_argument("--state", default=None,
-                    help="path to V2 state.json (default: alongside config.json)")
-    ap.add_argument("--yaml", action="store_true",
-                    help="emit only the agent `monitors:` YAML block (with enabled flags)")
+    ap = argparse.ArgumentParser(
+        prog="python -m taskpaw_v3.migrate",
+        description="Preview a V2→V3 migration (read-only).",
+    )
+    ap.add_argument(
+        "config",
+        nargs="?",
+        default=None,
+        help="path to V2 config.json (default: V2 standard location)",
+    )
+    ap.add_argument(
+        "--state",
+        default=None,
+        help="path to V2 state.json (default: alongside config.json)",
+    )
+    ap.add_argument(
+        "--yaml",
+        action="store_true",
+        help="emit only the agent `monitors:` YAML block (with enabled flags)",
+    )
     args = ap.parse_args(argv)
 
-    config_path = Path(args.config).expanduser() if args.config else _default_config_path()
+    config_path = (
+        Path(args.config).expanduser() if args.config else _default_config_path()
+    )
     if not config_path.exists():
         print(f"error: V2 config not found: {config_path}", file=sys.stderr)
-        print("       pass the path explicitly: python -m taskpaw_v3.migrate /path/to/config.json",
-              file=sys.stderr)
+        print(
+            "       pass the path explicitly: python -m taskpaw_v3.migrate /path/to/config.json",
+            file=sys.stderr,
+        )
         return 2
 
-    state_path = Path(args.state).expanduser() if args.state else config_path.with_name("state.json")
+    state_path = (
+        Path(args.state).expanduser()
+        if args.state
+        else config_path.with_name("state.json")
+    )
     plan = plan_migration(config_path, state_path)
 
     if args.yaml:

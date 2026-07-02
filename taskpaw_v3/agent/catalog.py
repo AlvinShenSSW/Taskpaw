@@ -19,7 +19,6 @@ from typing import Any, Optional
 from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
 from taskpaw_v3.monitors.runtime import canonical_name, monitor_name
 
-
 # Base UI-schema merged into every plugin: the advanced/internal caps every
 # monitor carries (BaseMonitorConfig) are hidden from the add/edit form so they
 # don't clutter it — they keep their defaults and are editable in YAML (#70).
@@ -38,17 +37,19 @@ def plugin_catalog(registry: Optional[PluginRegistry] = None) -> list[dict[str, 
         # Plugin ui_schema overrides the base (e.g. its own ui:order), but the
         # base field-hiding applies unless a plugin explicitly re-declares it.
         ui = {**_BASE_UI_SCHEMA, **p.ui_schema()}
-        out.append({
-            "type_id": p.type_id,
-            "display_name": p.display_name or p.type_id,
-            "category": p.category,
-            "config_version": p.config_version,
-            # plugins self-declare `system` (auto-injected, e.g. host_metrics) so
-            # the UI shows them always-on and won't offer a duplicate (Kimi).
-            "system": p.system,
-            "json_schema": p.json_schema(),
-            "ui_schema": ui,
-        })
+        out.append(
+            {
+                "type_id": p.type_id,
+                "display_name": p.display_name or p.type_id,
+                "category": p.category,
+                "config_version": p.config_version,
+                # plugins self-declare `system` (auto-injected, e.g. host_metrics) so
+                # the UI shows them always-on and won't offer a duplicate (Kimi).
+                "system": p.system,
+                "json_schema": p.json_schema(),
+                "ui_schema": ui,
+            }
+        )
     return out
 
 
@@ -59,8 +60,11 @@ def preset_catalog() -> list[dict[str, Any]]:
     # Normalize preset specs to the canonical {type_id, name, config} shape
     # add_monitor emits, so /control/plugins exposes ONE contract to the UI (Kimi).
     def _canon(spec: dict) -> dict:
-        return {"type_id": spec["type_id"], "name": monitor_name(spec),
-                "config": dict(spec.get("config") or {})}
+        return {
+            "type_id": spec["type_id"],
+            "name": monitor_name(spec),
+            "config": dict(spec.get("config") or {}),
+        }
 
     return [
         {
@@ -73,12 +77,13 @@ def preset_catalog() -> list[dict[str, Any]]:
 
 
 def has_monitor(monitors: list[dict], name: str) -> bool:
-    name = str(name).strip()   # canonical + type-safe query (Kimi)
+    name = str(name).strip()  # canonical + type-safe query (Kimi)
     return any(monitor_name(m) == name for m in monitors)
 
 
-def add_monitor(monitors: list[dict], spec: dict,
-                registry: Optional[PluginRegistry] = None) -> list[dict]:
+def add_monitor(
+    monitors: list[dict], spec: dict, registry: Optional[PluginRegistry] = None
+) -> list[dict]:
     """Return a new list with `spec` appended, after validating it against its
     plugin. Emits the canonical {type_id, name, config} shape (matches migration
     / examples / source-of-truth — Kimi). Raises ValueError on unknown type,
@@ -91,15 +96,17 @@ def add_monitor(monitors: list[dict], spec: dict,
         raise ValueError(f"unknown monitor type_id: {type_id!r}")
     if reg.get(type_id).system:
         # system plugins (e.g. host_metrics) are auto-injected, not hand-added (Kimi).
-        raise ValueError(f"{type_id!r} is a system monitor and cannot be added manually")
+        raise ValueError(
+            f"{type_id!r} is a system monitor and cannot be added manually"
+        )
     raw_in = spec.get("config")
     if raw_in is not None and not isinstance(raw_in, dict):
         raise ValueError("monitor config must be an object")  # not list/null (Kimi)
     raw = dict(raw_in or {})
-    resolved = canonical_name(spec)   # raises on a top-level/config name conflict
+    resolved = canonical_name(spec)  # raises on a top-level/config name conflict
     if resolved and "name" not in raw:
         raw["name"] = resolved
-    cfg = reg.get(type_id).validate_config(raw)   # authoritative validation
+    cfg = reg.get(type_id).validate_config(raw)  # authoritative validation
     name = cfg.name
     if has_monitor(monitors, name):
         raise ValueError(f"a monitor named {name!r} already exists")
@@ -110,11 +117,13 @@ def remove_monitor(monitors: list[dict], name: str) -> list[dict]:
     """Return a new list without the monitor named `name`. Raises if absent, or
     if more than one matches — removing several at once (from hand-edited YAML /
     migration that slipped a duplicate in) would be silent data loss (Kimi)."""
-    name = str(name).strip()   # canonical + type-safe query (Kimi)
+    name = str(name).strip()  # canonical + type-safe query (Kimi)
     matches = [i for i, m in enumerate(monitors) if monitor_name(m) == name]
     if not matches:
         raise ValueError(f"no monitor named {name!r}")
     if len(matches) > 1:
-        raise ValueError(f"multiple monitors named {name!r}; resolve the duplicate first")
+        raise ValueError(
+            f"multiple monitors named {name!r}; resolve the duplicate first"
+        )
     i = matches[0]
-    return monitors[:i] + monitors[i + 1:]
+    return monitors[:i] + monitors[i + 1 :]

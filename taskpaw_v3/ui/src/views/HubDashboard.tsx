@@ -3,7 +3,7 @@ import {
   Stack, Tab, Tabs, TextField, Typography,
 } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type HubServer, type MonitorSnapshot } from "../api";
 import { StatusDot } from "../components/StatusDot";
@@ -90,7 +90,9 @@ export function HubDashboard() {
 
   // No early return on loading/error — Settings (language/about) must stay
   // reachable even when the Hub is unreachable (#87/Codex).
-  const servers = data?.servers ?? [];
+  // useMemo keeps a stable reference so the serverFilter effect below only re-runs
+  // when the fleet actually changes, not on every render (react-hooks/exhaustive-deps).
+  const servers = useMemo(() => data?.servers ?? [], [data]);
   const self = data?.self ?? {};
 
   // Reset the events server filter if the selected server is removed, so the

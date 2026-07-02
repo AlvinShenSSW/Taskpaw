@@ -22,7 +22,7 @@ tray = [
 build = [
     "pyinstaller>=6.0.0,<7.0.0",
 ]
-# V3 headless backend (taskpaw-v3/): FastAPI agent + Hub.
+# V3 headless backend (taskpaw_v3/): FastAPI agent + Hub.
 v3 = [
     "fastapi>=0.110,<1.0",
     "uvicorn>=0.27,<1.0",
@@ -37,6 +37,10 @@ v3 = [
 # group remains for installing just the V3 app at runtime.
 dev = [
     "pytest>=8.0.0,<9.0.0",
+    "pytest-cov>=5.0,<8.0",
+    "ruff>=0.6,<1.0",
+    "mypy>=1.11,<2.0",
+    "types-PyYAML>=6.0,<7.0",
     "fastapi>=0.110,<1.0",
     "uvicorn>=0.27,<1.0",
     "pydantic>=2.5,<3.0",
@@ -52,3 +56,47 @@ package = false
 [tool.pytest.ini_options]
 testpaths = ["tests", "taskpaw_v3/tests"]
 addopts = "-q"
+
+# ── Ruff (lint + format) — #141 ──────────────────────────────────────────────
+# V2 is frozen: the three flat V2 scripts are excluded so linting/formatting never
+# churns them. Ruff runs on the V3 monorepo, the shared test suite, and scripts/.
+# A pragmatic first gate: pyflakes (real bugs) + pycodestyle + import sorting.
+# Line length is owned by `ruff format`; E501 is ignored so intentional long
+# strings/URLs don't fail the gate. Richer rule sets (UP/B/…) can be added later.
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+# V2 scripts are frozen; skill/ is vendored, self-contained tooling — neither is
+# part of the V3 codebase this gate targets.
+extend-exclude = ["taskpaw.py", "taskpaw_hub.py", "macsubs.py", "skill/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+# ── mypy — #141 (scoped to taskpaw_v3 ONLY; V2 is frozen and never type-checked) ─
+# Source-level checking of the V3 monorepo. Tests/examples are excluded — the value
+# is in the supervisor/lifecycle/hub code. A pragmatic first gate (not --strict).
+[tool.mypy]
+files = ["taskpaw_v3"]
+exclude = ["taskpaw_v3/tests/", "taskpaw_v3/examples/"]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+plugins = ["pydantic.mypy"]
+
+# Coverage (#144) — measurement only, NO hard threshold yet.
+# Scoped to the V3 monorepo: the frozen V2 scripts (taskpaw.py / taskpaw_hub.py /
+# macsubs.py) are deliberately out of `source` so coverage never pressures V2 churn.
+# CI opts in with `pytest --cov` (see .github/workflows/ci.yml); a bare
+# `uv run pytest` stays fast and uninstrumented.
+[tool.coverage.run]
+branch = true
+source = ["taskpaw_v3"]
+omit = ["taskpaw_v3/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# fail_under intentionally unset — add a threshold in a later issue once the V3
+# supervisor/lifecycle gaps are triaged.
