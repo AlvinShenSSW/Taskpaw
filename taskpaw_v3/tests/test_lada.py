@@ -42,6 +42,35 @@ def test_parse_filename_then_progress():
     assert p["fps"] == 36.4
 
 
+def test_parse_english_filename_then_progress():
+    stale = {"current_file": "old.mp4", "percent": 90, "fps": 10.0}
+    p = parse_progress_line("ABF-346.mp4:", stale)
+    assert p == {"current_file": "ABF-346.mp4"}
+    line = ("Processing video:  15%|███▍      |Processed: 06:09 (36703f) | "
+            "Remaining: 30:47 (207454f) | Speed: 112.3fps")
+    p = parse_progress_line(line, p)
+    assert p["current_file"] == "ABF-346.mp4"
+    assert p["percent"] == 15
+    assert p["elapsed"] == "06:09"
+    assert p["processed_frames"] == 36703
+    assert p["eta"] == "30:47"
+    assert p["remaining_frames"] == 207454
+    assert p["fps"] == 112.3
+
+
+def test_parse_english_estimating_progress_leaves_prior_eta_and_fps():
+    p = {"eta": "10:00", "remaining_frames": 1000, "fps": 20.0}
+    line = ("Processing video:  0%|          |Processed: 00:01 (5f) | "
+            "Remaining: ? | Speed: ?")
+    p = parse_progress_line(line, p)
+    assert p["percent"] == 0
+    assert p["elapsed"] == "00:01"
+    assert p["processed_frames"] == 5
+    assert p["eta"] == "10:00"
+    assert p["remaining_frames"] == 1000
+    assert p["fps"] == 20.0
+
+
 def test_parse_new_file_resets_stale_progress():
     p = {"current_file": "a.mp4", "percent": 90, "fps": 10.0}
     assert parse_progress_line("b.mp4:", p) == {"current_file": "b.mp4"}

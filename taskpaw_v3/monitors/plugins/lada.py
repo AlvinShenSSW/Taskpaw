@@ -46,14 +46,18 @@ except ImportError:  # pragma: no cover
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".ts", ".m4v"}
 
-# tqdm-style progress regexes (V2 taskpaw.py:666-673). Sample:
-#   sample-video.mp4:
+# tqdm-style progress regexes. lada-cli localizes its labels via gettext but ships
+# no zh translation, so its DEFAULT output is English; the labels are matched
+# bilingually (Chinese kept for back-compat) while %/frames("f"/"帧")/fps are literal.
+# Samples:
+#   ABF-346.mp4:
+#   Processing video:  15%|███ |Processed: 06:09 (36703f) | Remaining: 30:47 (207454f) | Speed: 112.3fps
 #   正在处理视频： 27%|███ |已处理： 26:58 (84163帧) | 剩余： 1:45:32 (230599帧) | 速度：36.4 帧/秒
 _RE_FILENAME = re.compile(r"^(.+\.(?:mp4|mkv|avi|mov|wmv|flv|webm|ts|m4v))\s*[:：]\s*$", re.IGNORECASE)
 _RE_PCT = re.compile(r"(\d+)\s*%")
-_RE_ELAPSED = re.compile(r"已处理[:：]\s*([\d:]+)\s*\((\d+)\s*帧\)")
-_RE_REMAINING = re.compile(r"剩余[:：]\s*([\d:]+)\s*\((\d+)\s*帧\)")
-_RE_FPS = re.compile(r"速度[:：]\s*([\d.]+)")
+_RE_ELAPSED = re.compile(r"(?:已处理|Processed)[:：]\s*([\d:]+)\s*\((\d+)\s*(?:帧|f)\)", re.IGNORECASE)
+_RE_REMAINING = re.compile(r"(?:剩余|Remaining)[:：]\s*([\d:]+)\s*\((\d+)\s*(?:帧|f)\)", re.IGNORECASE)
+_RE_FPS = re.compile(r"(?:速度|Speed)[:：]\s*([\d.]+)", re.IGNORECASE)
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
