@@ -165,6 +165,81 @@ def test_check_none_when_absent_and_no_files(tmp_path, monkeypatch):
     assert st.metrics["ai_state"] == "none" and st.state == "unknown"
 
 
+def _check_obs(cfg, monkeypatch, present, cpu):
+    """A check() where the external CPU probe is stubbed to return `cpu` (a
+    {tool: percent} dict), so observation is deterministic (no real timing)."""
+    monkeypatch.setattr(da, "_detect_present", lambda patterns: present)
+    inst = DevActivityPlugin().create("ai", cfg)
+    monkeypatch.setattr(inst, "_observe", lambda: cpu)
+    events: list = []
+    st = inst.check(lambda *a, **k: events.append((a, k)))
+    return inst, st, events
+
+
+def test_observe_high_cpu_reports_busy(tmp_path, monkeypatch):
+    # #163: present + no hook state + subtree CPU ≥ threshold → observed busy.
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude"], busy_cpu_percent=8.0
+    )
+    _, st, _ = _check_obs(cfg, monkeypatch, {"claude": True}, {"claude": 42.0})
+    assert st.metrics["ai_state"] == "busy"
+    claude = next(t for t in st.metrics["tools"] if t["tool"] == "claude")
+    assert claude["state"] == "busy" and claude["observed"] is True
+    assert claude["cpu"] == 42.0
+
+
+def test_observe_low_cpu_reports_idle(tmp_path, monkeypatch):
+    # present + no hook state + low CPU → observed idle (not just present_only).
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude"], busy_cpu_percent=8.0
+    )
+    _, st, _ = _check_obs(cfg, monkeypatch, {"claude": True}, {"claude": 0.3})
+    assert st.metrics["ai_state"] == "idle"
+    claude = next(t for t in st.metrics["tools"] if t["tool"] == "claude")
+    assert claude["state"] == "idle" and claude["observed"] is True
+
+
+def test_hook_state_wins_over_observation(tmp_path, monkeypatch):
+    # A fresh hook state must take precedence over the CPU probe (hooks are truth).
+    _write(tmp_path, "claude", "idle", time.time())
+    cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
+    _, st, _ = _check_obs(cfg, monkeypatch, {"claude": True}, {"claude": 99.0})
+    claude = next(t for t in st.metrics["tools"] if t["tool"] == "claude")
+    assert claude["state"] == "idle" and claude["observed"] is False
+
+
+def test_no_cpu_reading_stays_present_only(tmp_path, monkeypatch):
+    # First sample (no CPU% yet) → observation unavailable → present_only, not idle.
+    cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
+    _, st, _ = _check_obs(cfg, monkeypatch, {"claude": True}, {})  # no cpu for claude
+    assert st.metrics["ai_state"] == "present_only"
+
+
+def test_observed_vscode_busy_does_not_drive_ai_headline(tmp_path, monkeypatch):
+    # VS Code observed busy shows in its row but must NOT make the machine "AI busy"
+    # (it's a context editor, ai=false) (#163).
+    cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["vscode"])
+    _, st, _ = _check_obs(cfg, monkeypatch, {"vscode": True}, {"vscode": 80.0})
+    assert st.metrics["ai_state"] == "none"  # not "busy"
+    vs = next(t for t in st.metrics["tools"] if t["tool"] == "vscode")
+    assert vs["state"] == "busy" and vs["ai"] is False and vs["observed"] is True
+
+
+def test_observe_disabled_is_presence_only(tmp_path, monkeypatch):
+    # observe=False → no CPU probe; present + no state → present_only (old behavior).
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude"], observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    monkeypatch.setattr(da, "_detect_present", lambda patterns: {"claude": True})
+    # If observe were on, _observe would be called; assert it is NOT.
+    monkeypatch.setattr(
+        inst, "_observe", lambda: (_ for _ in ()).throw(AssertionError("probed"))
+    )
+    st = inst.check(lambda *a, **k: None)
+    assert st.metrics["ai_state"] == "present_only"
+
+
 def test_check_emits_on_busy_edge_only(tmp_path, monkeypatch):
     cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
     monkeypatch.setattr(da, "_detect_present", lambda patterns: {"claude": True})

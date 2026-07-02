@@ -8,6 +8,10 @@ export type Tool = {
   state: string | null;
   present: boolean;
   age_s: number | null;
+  // #163 external CPU probe: state was inferred from observed CPU (not a hook), and
+  // the subtree CPU% at that check. Absent/false for hook-reported or presence-only rows.
+  observed?: boolean;
+  cpu?: number | null;
 };
 
 export type AiMetrics = {

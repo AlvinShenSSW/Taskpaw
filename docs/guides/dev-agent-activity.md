@@ -11,8 +11,18 @@ prompt), or just **present** (the tool is running but not reporting activity). T
 - **present** — config-free: the tool's process (VS Code + the CLI) is running,
   detected via psutil. Coarse: "the tool is open", not "it's working". This alone
   already stops a busy dev box from showing as *idle*.
+- **observed** — config-free (#163): when a tool is present but has no hook state,
+  TaskPaw infers **busy/idle from the CPU of the tool's process subtree** — a pure
+  external `psutil` read that does **not** write to, wrap, or otherwise affect the
+  tool. This is what makes Kimi (which has no hooks) and an un-wired Claude/Codex/VS
+  Code show *real* busy/idle instead of "present (unreported)". Observed rows are
+  marked with `~<cpu>%` in the UI. Enabled by default (`observe: true`,
+  `busy_cpu_percent: 8`). *Caveat:* while a tool is purely waiting on the model
+  (network, low local CPU) it can briefly read idle — the hook signal below closes
+  that gap, so the two are complementary.
 - **state** — precise busy/idle/waiting from a small JSON file each CLI writes
-  through the `activity_writer.py` wrapper (below).
+  through the `activity_writer.py` wrapper (below). Most accurate (covers the
+  model-thinking phase); takes precedence over the observed signal.
 
 > **Privacy:** only the tool name, state (`busy`/`idle`/`waiting`), and a timestamp
 > are ever written/read — never your prompts, code, or session content. TaskPaw

@@ -10,8 +10,14 @@ never conflated:
   hook/notify writes via `integrations/activity_writer.py`
   (`{tool, state, ts}`). A stale/missing file → `unknown` (never silently `idle`),
   so a crashed "busy" can't stick.
+- **observed** (P-obs, #163): when a tool is present but has NO fresh hook state, infer
+  busy/idle from the CPU of its process subtree (external `psutil` read — no writes to
+  / no impact on the tool). This gives real busy/idle even for tools with no hooks
+  (Kimi) or before hooks are wired. Precedence: hook state › observed › presence.
 
-Aggregation (`最忙者胜`): busy › waiting › idle › present_only › none. Freshness is
+Aggregation (`最忙者胜`): busy › waiting › idle › present_only › none — busy/waiting/idle
+count AI tools only, so a busy VS Code (context editor) shows in its row but never makes
+the machine "AI busy". Freshness is
 judged on THIS agent with its own clock (`time.time() - ts`) — never a cross-machine
 comparison (#152). Privacy: reports only tool + state + timestamps; it never reads
 prompts, code, or session content.

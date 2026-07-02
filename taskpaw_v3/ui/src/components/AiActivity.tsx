@@ -67,6 +67,15 @@ export function AiActivity({ metrics }: { metrics: AiMetrics }) {
               <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
                 {toolLabel(tl, t)}
               </Typography>
+              {/* #163: observed rows are CPU-probe-derived (not hook-reported) —
+                  mark with "~" + the subtree CPU% so it reads distinctly from a hook. */}
+              {tl.observed && tl.cpu != null && (
+                <Typography variant="caption" color="text.secondary"
+                  sx={{ fontVariantNumeric: "tabular-nums" }}
+                  title={t("ai.observedHint", { defaultValue: "inferred from CPU usage" })}>
+                  ~{Math.round(tl.cpu)}%
+                </Typography>
+              )}
               {tl.age_s != null && (
                 <Typography variant="caption" color="text.secondary"
                   sx={{ fontVariantNumeric: "tabular-nums" }}>
