@@ -506,6 +506,50 @@ def test_spoofed_name_with_foreign_exe_not_matched(monkeypatch):
     assert log == []
 
 
+def test_foreign_lookalike_module_not_matched(monkeypatch):
+    # A foreign `python -m my.taskpaw_v3.agent` must NOT match our anchored module check
+    # (it only contains, not equals/prefixes, taskpaw_v3.agent) (Kimi 终审).
+    port = _free_port()
+    log = _install(
+        monkeypatch, port, 111, "python3", ["python3", "-m", "my.taskpaw_v3.agent"]
+    )
+    assert not net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert log == []
+
+
+def test_multiport_distinct_loopbacks_are_bindable(monkeypatch):
+    # network on 127.0.0.1, control on 127.0.0.2 — distinct, both bindable. This must
+    # NOT be judged a duplicate; our stale backend on both is reclaimed (Kimi 终审).
+    p = _free_port()
+    log: list = []
+    proc = _FakeProc(
+        112,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(p, 112, ip="127.0.0.1"), _Conn(p, 112, ip="127.0.0.2")],
+    )
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
+    _fake_ports_free(monkeypatch)
+    assert net.reclaim_ports_from_stale_instance(
+        [("127.0.0.1", p, "agent network API"), ("127.0.0.2", p, "agent control API")],
+        role="agent",
+    )
+    assert ("terminate", 112) in log
+
+
+def test_same_bind_target_predicate():
+    assert net._same_bind_target("127.0.0.1", "127.0.0.1") is True
+    assert (
+        net._same_bind_target("127.0.0.1", "127.0.0.2") is False
+    )  # distinct loopbacks
+    assert net._same_bind_target("localhost", "127.0.0.1") is True
+    assert net._same_bind_target("localhost", "127.0.0.2") is False
+    assert net._same_bind_target("0.0.0.0", "192.168.1.5") is True  # wildcard
+
+
 def test_bare_module_string_in_argv_not_matched(monkeypatch):
     # The backend_main module appearing in argv but NOT as a `-m` value (e.g. a random
     # positional arg) must not identify a foreign process as ours (Kimi 终审).

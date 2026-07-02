@@ -191,17 +191,19 @@ def _role_from_module(cmd: list[str]) -> str | None:
     'agent'/'hub', or None."""
     for i, a in enumerate(cmd):
         norm = a.replace("\\", "/")
-        after_m = i > 0 and cmd[i - 1] == "-m"
-        is_pkg_path = norm.endswith(".py") and (
-            "/taskpaw_v3/agent/" in norm or "/taskpaw_v3/hub/" in norm
-        )
-        if not (after_m or is_pkg_path):
-            continue
-        token = "." + norm.replace("/", ".") + "."
-        if ".taskpaw_v3.agent." in token:
-            return "agent"
-        if ".taskpaw_v3.hub." in token:
-            return "hub"
+        if i > 0 and cmd[i - 1] == "-m":
+            # `-m` value: the module must BE taskpaw_v3.agent|hub or a submodule of it —
+            # anchored, so a foreign `-m my.taskpaw_v3.agent` can't match (Kimi 终审).
+            for role, mod in (("agent", "taskpaw_v3.agent"), ("hub", "taskpaw_v3.hub")):
+                if a == mod or a.startswith(mod + "."):
+                    return role
+        elif norm.endswith(".py"):
+            # resolved script path: `.../taskpaw_v3/agent/….py` (leading slash anchors
+            # it, so `.../mytaskpaw_v3/agent/…` doesn't match).
+            if "/taskpaw_v3/agent/" in norm:
+                return "agent"
+            if "/taskpaw_v3/hub/" in norm:
+                return "hub"
     return None
 
 
@@ -295,6 +297,29 @@ def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
         return want == have
 
 
+def _same_bind_target(h1: str, h2: str) -> bool:
+    """True only if binding `h1` and `h2` to the SAME port would actually collide: a
+    wildcard on either side, the same literal address, or `localhost` vs a canonical
+    loopback (127.0.0.1/::1). Distinct numeric loopbacks (127.0.0.1 vs 127.0.0.2) do
+    NOT collide — stricter than `_addr_conflicts` so a valid two-loopback agent config
+    isn't wrongly judged non-bindable (Kimi 终审)."""
+    a, b = _norm_host(h1), _norm_host(h2)
+    if bind_is_wildcard(a) or bind_is_wildcard(b):
+        return True
+    canon = {"localhost": {"127.0.0.1", "::1"}}
+    sa = canon.get(a, {a})
+    sb = canon.get(b, {b})
+    for x in sa:
+        for y in sb:
+            try:
+                if ipaddress.ip_address(x) == ipaddress.ip_address(y):
+                    return True
+            except ValueError:
+                if x == y:
+                    return True
+    return False
+
+
 def _proc_listen_conns(proc: "psutil.Process") -> list:
     """A process's own LISTENing inet sockets. Uses PER-PROCESS enumeration, which —
     unlike the system-wide `psutil.net_connections()` — works for a same-user process
@@ -384,7 +409,7 @@ def reclaim_ports_from_stale_instance(
     # (Codex 外门).
     for i, (h1, p1, _w1) in enumerate(specs):
         for h2, p2, _w2 in specs[i + 1 :]:
-            if p1 == p2 and _addr_conflicts(h1, h2):
+            if p1 == p2 and _same_bind_target(h1, h2):
                 log.warning(
                     "not reclaiming the %s ports: required ports are not mutually "
                     "bindable (%s:%d conflicts with %s:%d) — leaving any stale backend "
