@@ -619,6 +619,22 @@ def test_lada_per_task_progress_renders_after_queue():
     assert "112" in line  # fps
 
 
+def test_lada_progress_renders_without_queue_counts():
+    # #161 (Codex 外门): a managed Lada that supplies I/O via lada_extra_args has
+    # capture-mode progress but no queue_total (_queue_counts reads the folder
+    # fields). Progress must still render — not fall back to bare "running".
+    md = render_status_md(
+        _lada_row(
+            {"current_file": "clip.mp4", "percent": 47, "eta": "30:47", "fps": 112.3}
+        ),
+        "t",
+    )
+    line = _lada_line(md)
+    assert "| clip.mp4 |" in line
+    assert "47%" in line and "ETA 30:47" in line and "112fps" in line
+    assert "done" not in line and line != "- LADA: running"
+
+
 def test_lada_capture_off_renders_queue_only_byte_identical():
     # Default (capture off): no per-task fields → the line is exactly today's.
     md = render_status_md(

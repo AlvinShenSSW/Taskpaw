@@ -89,6 +89,16 @@ Fields chosen for `status.md`: `percent`, `eta`, `fps` — the eyeball essential
 `elapsed` / `processed_frames` / `remaining_frames` stay hub.db-only (documented)
 to keep the human line short; openclaw reads the DB for the full set.
 
+**Decoupled from queue counts (Codex 外门 finding).** A managed Lada may supply
+I/O via `lada_extra_args` (`--input X --output Y`) instead of the folder fields;
+the config validator accepts that, but `_queue_counts()` reads only the folder
+fields, so `queue_total` is absent while capture-mode progress is present.
+Progress rendering must therefore NOT be nested under `queue_total` — the Lada
+line is assembled from three independent, space-joined pieces (queue seg, current
+file, progress), each emitted only when its data is present. When all three are
+present the output is byte-identical to the queue-first layout; when only progress
+is present it still renders (instead of falling back to bare `running`).
+
 ### 3. Document every field (`openclaw-integration.md`)
 
 - Extend the reader example's `lada` branch to pull the new fields via the
