@@ -11,6 +11,7 @@ stability, etc.) should be added per-issue as the V3 work lands.
 
 from __future__ import annotations
 
+import platform
 import py_compile
 import shutil
 import subprocess
@@ -63,13 +64,11 @@ BASH_SCRIPTS = sorted(
 def _functional_bash() -> bool:
     """True only if `bash` on PATH can actually run a command.
 
-    On Windows, `shutil.which("bash")` often resolves to the WSL launcher
-    `C:\\Windows\\System32\\bash.exe`, which — with no WSL distro installed —
-    prints an "install a distribution" notice and exits non-zero for *every*
-    invocation, so `bash -n` never really checks syntax. Probe with a trivial
-    command and only treat bash as usable if it succeeds. (These are macOS/Linux
-    setup scripts; they are never executed on Windows, so skipping their syntax
-    check on a runner without a real bash is safe.)
+    Guards Linux/macOS runners that somehow lack a working bash. Note this is a
+    separate concern from Windows (see the skip below): on Windows the exe that
+    `shutil.which` finds (often Git Bash) and the one `subprocess.run(["bash", ...])`
+    launches via CreateProcess (`C:\\Windows\\System32\\bash.exe`, the WSL stub)
+    can differ, so probing one does not predict the other.
     """
     exe = shutil.which("bash")
     if exe is None:
@@ -82,7 +81,16 @@ def _functional_bash() -> bool:
         return False
 
 
-@pytest.mark.skipif(not _functional_bash(), reason="no functional bash (e.g. Windows WSL stub)")
+# These are POSIX (macOS/Linux) setup scripts — never executed on Windows. A
+# Windows runner's `bash` is unreliable here: `subprocess.run(["bash", ...])`
+# resolves to the WSL launcher `System32\bash.exe`, which with no distro prints an
+# "install a distribution" notice and exits non-zero for every call (and even Git
+# Bash mishandles the Windows-path argument). Syntax-check them where a real POSIX
+# bash exists; skip on Windows and where bash is non-functional.
+@pytest.mark.skipif(
+    platform.system() == "Windows" or not _functional_bash(),
+    reason="POSIX-only scripts; bash -n unreliable on Windows / no functional bash",
+)
 @pytest.mark.parametrize("rel_path", BASH_SCRIPTS or ["<none>"])
 def test_shell_script_parses(rel_path: str) -> None:
     """Each bash script (by shebang) must parse under `bash -n` (syntax gate)."""

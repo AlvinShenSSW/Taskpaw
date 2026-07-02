@@ -43,12 +43,19 @@ launcher `C:\Windows\System32\bash.exe`, which with no WSL distro installed prin
 "install a distribution" notice (UTF-16) and exits non-zero for every call, so
 `bash -n` never actually parses.
 
-Fix (test-robustness, in `tests/test_smoke.py` — a test file, not frozen V2): replace
-the `shutil.which("bash") is None` skip with a `_functional_bash()` probe that runs
-`bash -c "exit 0"` and only treats bash as usable if it succeeds. On a runner with a
-real bash (ubuntu, macOS, Windows+Git Bash) the check still runs; on the WSL-stub
-runner it skips. These are macOS/Linux setup scripts never executed on Windows, so
-skipping their syntax check where no real bash exists is safe. Verified locally on
+The first fix attempt (a `_functional_bash()` probe running `bash -c "exit 0"`) still
+failed on Windows: `shutil.which("bash")` resolves to Git Bash (probe passes), but
+`subprocess.run(["bash", ...])` launches a *different* exe via CreateProcess —
+`C:\Windows\System32\bash.exe`, the WSL launcher — which with no distro prints the
+"install a distribution" notice (UTF-16) and exits non-zero. Probing one bash does
+not predict the other.
+
+Final fix (test-robustness in `tests/test_smoke.py` — a test file, not frozen V2):
+these are **POSIX (macOS/Linux) setup scripts, never executed on Windows**, so skip
+`test_shell_script_parses` on Windows outright (`platform.system() == "Windows"`),
+and keep the `_functional_bash()` guard for non-Windows runners. The product/V3 test
+suite (433 tests) still runs on windows-latest — that is the coverage #143 wants;
+syntax-checking POSIX shell scripts on Windows adds nothing. Verified locally on
 macOS: the test still runs and passes (not skipped).
 
 ## Constitution gate
