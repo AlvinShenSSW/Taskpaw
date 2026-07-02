@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import time
 
@@ -25,10 +26,15 @@ log = logging.getLogger("taskpaw.net")
 # Our PyInstaller sidecar's process name (agent + hub share one binary, dispatched
 # by the role argv). The Tauri shell may launch either the stripped basename
 # (`taskpaw-backend[.exe]`) or the target-triple-suffixed sidecar
-# (`taskpaw-backend-<triple>[.exe]`, backend_command's fallback), so we match by
-# prefix. Used to identify a *stale instance of THIS app* so we only ever reclaim a
-# port from ourselves — never from a foreign service.
-_BACKEND_NAME_PREFIX = "taskpaw-backend"
+# (`taskpaw-backend-<triple>[.exe]`, backend_command's fallback). Match EXACTLY those
+# two shapes — base name, or base + a target triple (arch-vendor-os[-abi], 3–4 parts,
+# underscores allowed e.g. `x86_64`), optional `.exe` — NOT a loose prefix, so a
+# foreign helper like `taskpaw-backend-logger` can't be mistaken for ours (Kimi 终审).
+# Used to identify a *stale instance of THIS app* so we only ever reclaim a port from
+# ourselves — never from a foreign service.
+_BACKEND_NAME_RE = re.compile(
+    r"taskpaw-backend(?:-[a-z0-9_]+(?:-[a-z0-9_]+){2,3})?(?:\.exe)?"
+)
 
 # A from-source run (dev) is `python .../taskpaw_v3/packaging/backend_main.py <role>`
 # or `python -m taskpaw_v3.packaging.backend_main <role>`. Match the FULL package
@@ -178,6 +184,18 @@ def _role_from_module(cmd: list[str]) -> str | None:
     return None
 
 
+def _explicit_role(cmd: list[str]) -> str:
+    """The role token from a dispatched backend's argv (sidecar / backend_main): the
+    first argument that is EXACTLY 'agent' or 'hub', else 'agent' (backend_main's
+    default). Matching whole tokens — not substrings — means a path or flag that merely
+    contains 'hub'/'agent' (e.g. /Users/hubert/…, hub.yaml) can't be read as the role
+    (Kimi 终审)."""
+    for a in cmd:
+        if a in ("agent", "hub"):
+            return a
+    return "agent"
+
+
 def _backend_role(name: str, cmd: list[str]) -> str | None:
     """The role ('agent'|'hub') THIS app's backend is running, or None if the process
     isn't ours. Recognizes the bundled sidecar and the from-source packaging
@@ -185,14 +203,12 @@ def _backend_role(name: str, cmd: list[str]) -> str | None:
     headless module entrypoints (Codex 外门)."""
     norm = [a.replace("\\", "/") for a in cmd]
     dispatched = (
-        name.startswith(_BACKEND_NAME_PREFIX)
+        _BACKEND_NAME_RE.fullmatch(name) is not None
         or any(a.endswith(_BACKEND_SOURCE_SUFFIX) for a in norm)
         or _BACKEND_MODULE in cmd
     )
     if dispatched:
-        # The shell passes the role explicitly; a no-arg invocation defaults to agent
-        # (backend_main). hub requires an explicit "hub".
-        return "hub" if "hub" in cmd else "agent"
+        return _explicit_role(cmd)
     return _role_from_module(cmd)
 
 

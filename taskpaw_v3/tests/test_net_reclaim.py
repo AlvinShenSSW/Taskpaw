@@ -257,6 +257,58 @@ def test_reclaims_target_triple_suffixed_sidecar(monkeypatch):
     assert ("terminate", 4444) in log
 
 
+def test_reclaims_windows_x86_64_triple_sidecar(monkeypatch):
+    # A target triple with an underscore (x86_64) + .exe must still match (Kimi 终审).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        4445,
+        "taskpaw-backend-x86_64-pc-windows-msvc.exe",
+        ["C:/x/taskpaw-backend-x86_64-pc-windows-msvc.exe", "hub"],
+    )
+    assert net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="hub", what="hub API"
+    )
+    assert ("terminate", 4445) in log
+
+
+def test_foreign_helper_binary_name_not_matched(monkeypatch):
+    # `taskpaw-backend-logger` is NOT one of our sidecar names (base or triple) — the
+    # tightened match must treat it as foreign (Kimi 终审).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        4446,
+        "taskpaw-backend-logger",
+        ["/x/taskpaw-backend-logger", "agent"],
+    )
+    assert not net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert log == []
+
+
+def test_path_containing_hub_not_read_as_role(monkeypatch):
+    # An agent backend under a path that contains the word "hub" must NOT be
+    # misclassified as a hub (role is an exact argv token, not a substring; Kimi 终审).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        4447,
+        "taskpaw-backend",
+        ["/Users/hubert/app/taskpaw-backend", "agent"],
+    )
+    assert net._is_our_backend(net.psutil.Process(4447), "agent") is True
+    assert net._is_our_backend(net.psutil.Process(4447), "hub") is False
+    assert net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert ("terminate", 4447) in log
+
+
 def test_stuck_process_wait_timeout_does_not_crash(monkeypatch):
     # A process that won't exit even after kill() (wait raises TimeoutExpired) must
     # NOT abort startup — reclaim logs + returns without raising (Codex 外门).
