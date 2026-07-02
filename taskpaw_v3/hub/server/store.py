@@ -581,7 +581,10 @@ class HubStore:
                 raise
 
     def prune_dead_letters(self, days: int = 7) -> None:
-        cutoff = _dt(datetime.now() - timedelta(days=days))
+        # created_at is UTC-aware ISO (_dt), so the cutoff MUST be UTC too — a naive
+        # host-local cutoff would be off by the host's UTC offset and mis-prune on a
+        # non-UTC Hub (#152). UTC follows no fixed tz; it's the Hub's absolute clock.
+        cutoff = _dt(datetime.now(timezone.utc) - timedelta(days=days))
         with self._lock:
             try:
                 self._conn.execute(
