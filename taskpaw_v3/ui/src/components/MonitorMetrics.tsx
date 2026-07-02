@@ -1,5 +1,6 @@
 import { Box, CircularProgress, LinearProgress, Stack, Tooltip, Typography } from "@mui/material";
 import { useTranslation } from "react-i18next";
+import { AiActivity, isAiMetrics } from "./AiActivity";
 
 // Live metrics dashboard for a monitor's status pane (design-system
 // pages/agent-console.md → StatusHeader: "live metric line … file N/M, fps, %").
@@ -84,6 +85,9 @@ const KNOWN = new Set([
 
 export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> }) {
   const { t } = useTranslation();
+  // The dev_activity monitor (#154) carries an `ai` block, not gauges — render its
+  // dedicated view instead of the generic metric tiles.
+  if (isAiMetrics(metrics)) return <AiActivity metrics={metrics} />;
   const m = metrics ?? {};
   // Finite only — a malformed metric (NaN/Infinity) must not render as "NaN" in a
   // gauge/bar, matching the Number.isFinite guard used elsewhere (Kimi).
