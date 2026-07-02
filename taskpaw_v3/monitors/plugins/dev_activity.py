@@ -128,7 +128,11 @@ def _detect_present(patterns: dict[str, str]) -> dict[str, bool]:
     for tool, rx in compiled.items():
         try:
             present[tool] = _scan(rx, search_cmdline=True)
-        except RuntimeError:  # psutil missing mid-call
+        except Exception:
+            # Presence is a best-effort signal: process enumeration can raise
+            # PermissionError/OSError (restricted macOS/service env), RuntimeError
+            # (psutil missing), etc. Degrade that tool to absent — never abort the
+            # check, so file-based activity is still reported (Codex 外门).
             present[tool] = False
     return present
 

@@ -141,6 +141,21 @@ def test_busy_to_waiting_emits_waiting_not_idle(tmp_path, monkeypatch):
     )
 
 
+def test_present_scan_error_degrades_not_crash(tmp_path, monkeypatch):
+    # A psutil PermissionError/OSError during enumeration must not abort check();
+    # presence degrades to absent and file-based activity is still reported.
+    def boom(rx, search_cmdline):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(da, "_scan", boom)
+    _write(tmp_path, "claude", "busy", time.time())
+    cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
+    inst = DevActivityPlugin().create("ai", cfg)
+    st = inst.check(lambda *a, **k: None)
+    assert st.metrics["ai_state"] == "busy"  # state file still read
+    assert st.metrics["tools"][0]["present"] is False  # presence degraded
+
+
 def test_duty_ratio_accumulates(tmp_path, monkeypatch):
     cfg = DevActivityConfig(
         name="ai", state_dir=str(tmp_path), tools=["claude"], window_seconds=3600
