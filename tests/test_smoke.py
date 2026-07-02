@@ -84,7 +84,10 @@ def _resolve_functional_bash() -> str | None:
     return exe if ok else None
 
 
-_FUNCTIONAL_BASH = _resolve_functional_bash()
+# Short-circuit on Windows: the test is skipped there anyway, so don't spawn the
+# WSL-launcher bash at import time (avoids the "install a distribution" notice +
+# collection latency).
+_FUNCTIONAL_BASH = None if platform.system() == "Windows" else _resolve_functional_bash()
 
 
 # These are POSIX (macOS/Linux) setup scripts — never executed on Windows. A
