@@ -21,7 +21,7 @@ from taskpaw_v3.core.net import (  # re-export
     guard_bind_exposure,
     loopback_url,
     port_available,
-    reclaim_port_from_stale_instance,
+    reclaim_ports_from_stale_instance,
 )
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.core.state import load_next_id, save_next_id
@@ -86,14 +86,17 @@ def run_agent(
 
     # Seamless updates/restarts: if OUR OWN previous agent backend is still holding
     # these ports (common right after installing a new version), terminate that
-    # stale instance and reclaim the ports. Only ever kills a positively-identified
-    # TaskPaw agent backend — a foreign service is left alone (claim_port then fails
+    # stale instance and reclaim BOTH ports. Only ever kills a positively-identified
+    # TaskPaw agent backend, and only if BOTH the network AND control ports are free
+    # or ours — a foreign service on either port aborts the whole reclaim so we never
+    # kill the old agent when startup would fail here anyway (claim_port then fails
     # loudly as before).
-    reclaim_port_from_stale_instance(
-        config.bind_host, config.bind_port, role="agent", what="agent network API"
-    )
-    reclaim_port_from_stale_instance(
-        config.control_host, config.control_port, role="agent", what="agent control API"
+    reclaim_ports_from_stale_instance(
+        [
+            (config.bind_host, config.bind_port, "agent network API"),
+            (config.control_host, config.control_port, "agent control API"),
+        ],
+        role="agent",
     )
 
     # Race-free claim: hold the sockets, hand them to uvicorn.

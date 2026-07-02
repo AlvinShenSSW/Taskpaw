@@ -204,6 +204,90 @@ def _listener_pids(port: int) -> list[int]:
     return pids
 
 
+def _terminate_backend(proc: "psutil.Process", pid: int, wait: float) -> bool:
+    """terminate() → wait → kill() only if it won't exit. Returns True if it exited,
+    False if termination couldn't be confirmed (logged) — including a stuck process
+    that survives kill(); the caller's bounded wait + claim_port still fail loudly if
+    the port stays held."""
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=max(1.0, wait * 0.6))
+        except psutil.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=max(1.0, wait * 0.4))
+    except (
+        psutil.NoSuchProcess,
+        psutil.AccessDenied,
+        psutil.TimeoutExpired,
+        OSError,
+    ) as e:
+        log.warning("could not terminate stale backend pid %d: %s", pid, e)
+        return False
+    return True
+
+
+def reclaim_ports_from_stale_instance(
+    specs: list[tuple[str, int, str]], *, role: str, wait: float = 8.0
+) -> bool:
+    """Reclaim SEVERAL required ports for `role` from this app's own stale backend —
+    but only if EVERY port is free or held solely by our backend. If ANY port is held
+    by a foreign/unidentified process, reclaim NOTHING and return False: we must not
+    kill our previous instance when startup would fail anyway on the foreign-held port
+    (Codex 外门). claim_port then fails loudly on the real conflict. `specs` is a list
+    of (host, port, what). Used by the agent, which needs BOTH its network and control
+    ports viable before it supersedes the old agent.
+    """
+    if psutil is None:
+        return False
+    # Phase 1 — inspect every port; a single foreign holder anywhere aborts the whole
+    # reclaim (so we leave the old, still-serving agent alone).
+    to_kill: dict[int, "psutil.Process"] = {}
+    for host, port, what in specs:
+        for pid in _listener_pids(port):
+            if pid == os.getpid():
+                continue
+            try:
+                proc = psutil.Process(pid)
+            except (psutil.NoSuchProcess, OSError):
+                continue
+            if not _is_our_backend(proc, role):
+                log.warning(
+                    "not reclaiming the %s ports: %s (%s:%d) is held by a foreign "
+                    "process (pid %d) — leaving any stale %s backend running rather "
+                    "than killing it when startup can't succeed here; claim_port will "
+                    "fail loudly.",
+                    role,
+                    what,
+                    host,
+                    port,
+                    pid,
+                    role,
+                )
+                return False
+            to_kill[pid] = proc
+    if not to_kill:
+        return False
+    # Phase 2 — every holder is ours: terminate them, then wait for the OS to release
+    # each socket before the caller binds.
+    reclaimed = False
+    for pid, proc in to_kill.items():
+        log.warning(
+            "reclaiming the %s ports from a stale TaskPaw %s backend (pid %d)",
+            role,
+            role,
+            pid,
+        )
+        if _terminate_backend(proc, pid, wait):
+            reclaimed = True
+    if reclaimed:
+        deadline = time.monotonic() + wait
+        for host, port, _what in specs:
+            while time.monotonic() < deadline and not port_available(host, port):
+                time.sleep(0.2)
+    return reclaimed
+
+
 def reclaim_port_from_stale_instance(
     host: str, port: int, *, role: str, what: str, wait: float = 8.0
 ) -> bool:
@@ -245,25 +329,8 @@ def reclaim_port_from_stale_instance(
             role,
             pid,
         )
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=max(1.0, wait * 0.6))
-            except psutil.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=max(1.0, wait * 0.4))
-        except (
-            psutil.NoSuchProcess,
-            psutil.AccessDenied,
-            psutil.TimeoutExpired,
-            OSError,
-        ) as e:
-            # Includes a stuck process that won't exit even after kill() — log and
-            # move on; the bounded claim_port below still fails loudly if the port
-            # is genuinely still held.
-            log.warning("could not terminate stale backend pid %d: %s", pid, e)
-            continue
-        reclaimed = True
+        if _terminate_backend(proc, pid, wait):
+            reclaimed = True
     if reclaimed:
         # Wait for the OS to actually release the socket before the caller binds.
         deadline = time.monotonic() + wait

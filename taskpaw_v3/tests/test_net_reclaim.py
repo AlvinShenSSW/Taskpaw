@@ -187,10 +187,50 @@ def test_no_role_arg_counts_as_agent(monkeypatch):
     assert ("terminate", 88) in log
 
 
+def test_multiport_reclaims_when_both_ours(monkeypatch):
+    # Both agent ports held by our own stale backend (one pid on both) → reclaim both.
+    p1, p2 = _free_port(), _free_port()
+    log: list = []
+    proc = _FakeProc(300, "taskpaw-backend", ["/x/taskpaw-backend", "agent"], log)
+    fake = _FakePsutil([_Conn(p1, 300), _Conn(p2, 300)], {300: proc})
+    monkeypatch.setattr(net, "psutil", fake)
+    assert net.reclaim_ports_from_stale_instance(
+        [
+            ("127.0.0.1", p1, "agent network API"),
+            ("127.0.0.1", p2, "agent control API"),
+        ],
+        role="agent",
+    )
+    assert ("terminate", 300) in log
+
+
+def test_multiport_foreign_on_one_port_reclaims_nothing(monkeypatch):
+    # Old agent on the control port, a FOREIGN service (nginx) on the network port.
+    # We must NOT kill the old agent — startup can't succeed on the nginx port anyway
+    # (Codex 外门). Reclaim nothing; claim_port later fails loud.
+    p1, p2 = _free_port(), _free_port()
+    log: list = []
+    ours = _FakeProc(301, "taskpaw-backend", ["/x/taskpaw-backend", "agent"], log)
+    foreign = _FakeProc(302, "nginx", ["nginx", "-g", "daemon off;"], log)
+    fake = _FakePsutil([_Conn(p1, 302), _Conn(p2, 301)], {301: ours, 302: foreign})
+    monkeypatch.setattr(net, "psutil", fake)
+    assert not net.reclaim_ports_from_stale_instance(
+        [
+            ("127.0.0.1", p1, "agent network API"),
+            ("127.0.0.1", p2, "agent control API"),
+        ],
+        role="agent",
+    )
+    assert log == []  # the old agent was left running, nothing terminated
+
+
 def test_no_psutil_is_noop(monkeypatch):
     monkeypatch.setattr(net, "psutil", None)
     assert not net.reclaim_port_from_stale_instance(
         "127.0.0.1", 5680, role="agent", what="agent API"
+    )
+    assert not net.reclaim_ports_from_stale_instance(
+        [("127.0.0.1", 5680, "agent API")], role="agent"
     )
 
 
