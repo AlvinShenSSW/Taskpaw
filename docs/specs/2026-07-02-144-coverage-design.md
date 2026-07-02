@@ -38,6 +38,14 @@ threshold/triage issue.
 - `uv lock --check` clean; `uv run pytest` (no cov) still green.
 - New guard tests pass on 3.10 and 3.12.
 
+## Kimi 终审 triage (round 1)
+Kimi flagged the guard test's string-splitting as fragile. Adopted its fix: parse
+pyproject.toml with a real parser (`tomllib` on 3.11+, `tomli` on 3.10 — confirmed
+present transitively via `pytest-cov → coverage[toml] → tomli`, marker
+`python_full_version < '3.11'` in uv.lock) and assert the actual structure. Added a
+third guard (`test_coverage_has_no_hard_threshold_yet`) so a future `fail_under`
+must be introduced deliberately. Verified on both 3.13 and 3.10.
+
 ## Constitution gate
 - §1 Scope: tooling/CI + config only; no V2 touched; V3 code unchanged.
 - §5 Testing: the behavioural surface (coverage wiring) is guarded by
