@@ -125,12 +125,62 @@ def test_wrong_role_not_reclaimed(monkeypatch):
 def test_from_source_backend_matched(monkeypatch):
     port = _free_port()
     log = _install(
-        monkeypatch, port, 77, "python3", ["python3", "/x/backend_main.py", "hub"]
+        monkeypatch,
+        port,
+        77,
+        "python3",
+        ["python3", "/x/taskpaw_v3/packaging/backend_main.py", "hub"],
     )
     assert net.reclaim_port_from_stale_instance(
         "127.0.0.1", port, role="hub", what="hub API"
     )
     assert ("terminate", 77) in log
+
+
+def test_foreign_generic_backend_main_not_matched(monkeypatch):
+    # A DIFFERENT project's backend_main.py must NOT be treated as ours (Codex 外门).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        78,
+        "python3",
+        ["python3", "/other/app/backend_main.py", "hub"],
+    )
+    assert not net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="hub", what="hub API"
+    )
+    assert log == []
+
+
+def test_from_source_module_form_matched(monkeypatch):
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        79,
+        "python3",
+        ["python3", "-m", "taskpaw_v3.packaging.backend_main", "agent"],
+    )
+    assert net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert ("terminate", 79) in log
+
+
+def test_localhost_matches_numeric_loopback_listener(monkeypatch):
+    # A stale backend bound to `localhost` is reported by psutil as 127.0.0.1; a new
+    # instance also configured for `localhost` must still reclaim it (Codex 外门).
+    port = _free_port()
+    log: list = []
+    proc = _FakeProc(80, "taskpaw-backend", ["/x/taskpaw-backend", "hub"], log)
+    fake = _FakePsutil([_Conn(port, 80, ip="127.0.0.1")], {80: proc})
+    monkeypatch.setattr(net, "psutil", fake)
+    assert net._addr_conflicts("localhost", "127.0.0.1") is True
+    assert net.reclaim_port_from_stale_instance(
+        "localhost", port, role="hub", what="hub API"
+    )
+    assert ("terminate", 80) in log
 
 
 def test_reclaims_target_triple_suffixed_sidecar(monkeypatch):

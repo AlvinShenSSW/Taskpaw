@@ -30,6 +30,13 @@ log = logging.getLogger("taskpaw.net")
 # port from ourselves — never from a foreign service.
 _BACKEND_NAME_PREFIX = "taskpaw-backend"
 
+# A from-source run (dev) is `python .../taskpaw_v3/packaging/backend_main.py <role>`
+# or `python -m taskpaw_v3.packaging.backend_main <role>`. Match the FULL package
+# path/module — not a bare `backend_main.py`, which an unrelated service could also
+# use — so we never mistake a foreign process for ours (Codex 外门).
+_BACKEND_SOURCE_SUFFIX = "taskpaw_v3/packaging/backend_main.py"
+_BACKEND_MODULE = "taskpaw_v3.packaging.backend_main"
+
 
 class PortInUseError(RuntimeError):
     pass
@@ -166,7 +173,8 @@ def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
     except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
         return False
     is_backend = name.startswith(_BACKEND_NAME_PREFIX) or any(
-        a.replace("\\", "/").endswith("backend_main.py") for a in cmd
+        a.replace("\\", "/").endswith(_BACKEND_SOURCE_SUFFIX) or a == _BACKEND_MODULE
+        for a in cmd
     )
     if not is_backend:
         return False
@@ -193,6 +201,11 @@ def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
     if (":" in want) != (":" in have):  # IPv4 vs IPv6 — separate stacks
         return False
     if bind_is_wildcard(want) or bind_is_wildcard(have):
+        return True
+    # `localhost` (allowed by the Hub exposure guard) binds a loopback address, but
+    # psutil reports the listener as a numeric 127.x/::1 — treat any two loopbacks as
+    # conflicting so a stale localhost-bound backend is still reclaimed (Codex 外门).
+    if bind_is_loopback(want) and bind_is_loopback(have):
         return True
     try:
         return ipaddress.ip_address(want) == ipaddress.ip_address(have)
