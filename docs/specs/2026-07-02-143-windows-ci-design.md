@@ -35,6 +35,22 @@ targets behavioural change). The verification *is* the new job going green on
   Windows with a comment + flag it to the operator, rather than widen the V2 change.
 Any such triage will be recorded here and in the PR before the job is declared green.
 
+## Windows triage (round 1 — surfaced by the new job)
+The new `windows-latest` job immediately caught a real gap (as intended):
+`test_shell_script_parses` failed on `scripts/recon/moomoo_probe.sh`. Root cause is
+**not** a script bug — on windows-latest `shutil.which("bash")` resolves to the WSL
+launcher `C:\Windows\System32\bash.exe`, which with no WSL distro installed prints an
+"install a distribution" notice (UTF-16) and exits non-zero for every call, so
+`bash -n` never actually parses.
+
+Fix (test-robustness, in `tests/test_smoke.py` — a test file, not frozen V2): replace
+the `shutil.which("bash") is None` skip with a `_functional_bash()` probe that runs
+`bash -c "exit 0"` and only treats bash as usable if it succeeds. On a runner with a
+real bash (ubuntu, macOS, Windows+Git Bash) the check still runs; on the WSL-stub
+runner it skips. These are macOS/Linux setup scripts never executed on Windows, so
+skipping their syntax check where no real bash exists is safe. Verified locally on
+macOS: the test still runs and passes (not skipped).
+
 ## Constitution gate
 - §1 Scope: CI config only; no source touched.
 - §5 Testing: suite must pass on the new runner before the PR is green.

@@ -60,7 +60,29 @@ BASH_SCRIPTS = sorted(
 )
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def _functional_bash() -> bool:
+    """True only if `bash` on PATH can actually run a command.
+
+    On Windows, `shutil.which("bash")` often resolves to the WSL launcher
+    `C:\\Windows\\System32\\bash.exe`, which — with no WSL distro installed —
+    prints an "install a distribution" notice and exits non-zero for *every*
+    invocation, so `bash -n` never really checks syntax. Probe with a trivial
+    command and only treat bash as usable if it succeeds. (These are macOS/Linux
+    setup scripts; they are never executed on Windows, so skipping their syntax
+    check on a runner without a real bash is safe.)
+    """
+    exe = shutil.which("bash")
+    if exe is None:
+        return False
+    try:
+        return subprocess.run(
+            [exe, "-c", "exit 0"], capture_output=True, timeout=30
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+@pytest.mark.skipif(not _functional_bash(), reason="no functional bash (e.g. Windows WSL stub)")
 @pytest.mark.parametrize("rel_path", BASH_SCRIPTS or ["<none>"])
 def test_shell_script_parses(rel_path: str) -> None:
     """Each bash script (by shebang) must parse under `bash -n` (syntax gate)."""
