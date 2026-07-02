@@ -419,6 +419,23 @@ def test_multiport_foreign_on_one_port_reclaims_nothing(monkeypatch):
     assert log == []  # the old agent was left running, nothing terminated
 
 
+def test_multiport_duplicate_ports_reclaims_nothing(monkeypatch):
+    # A misconfig where control_port == bind_port (same host) can never start; reclaim
+    # must NOT kill our old agent even though it holds the port (Codex 外门).
+    port = _free_port()
+    log = _install(
+        monkeypatch, port, 305, "taskpaw-backend", ["/x/taskpaw-backend", "agent"]
+    )
+    assert not net.reclaim_ports_from_stale_instance(
+        [
+            ("127.0.0.1", port, "agent network API"),
+            ("127.0.0.1", port, "agent control API"),  # same host:port → not bindable
+        ],
+        role="agent",
+    )
+    assert log == []  # old agent left running; claim_port will fail loudly
+
+
 def test_addr_conflicts_predicate():
     # Wildcard on either side, or same address, or both loopback → conflict.
     assert net._addr_conflicts("192.168.1.5", "0.0.0.0") is True  # wildcard listener

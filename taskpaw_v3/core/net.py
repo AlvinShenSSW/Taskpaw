@@ -376,6 +376,26 @@ def reclaim_ports_from_stale_instance(
     """
     if psutil is None:
         return False
+    # A config whose required ports aren't mutually bindable (e.g. control_port ==
+    # bind_port on the same/overlapping host — accepted by AgentConfig, editable in the
+    # UI) can NEVER start: the new process would bind the first socket then self-collide
+    # on the second. Reclaiming would kill our old, still-working instance for a startup
+    # that cannot succeed. Detect it and reclaim NOTHING; claim_port then fails loudly
+    # (Codex 外门).
+    for i, (h1, p1, _w1) in enumerate(specs):
+        for h2, p2, _w2 in specs[i + 1 :]:
+            if p1 == p2 and _addr_conflicts(h1, h2):
+                log.warning(
+                    "not reclaiming the %s ports: required ports are not mutually "
+                    "bindable (%s:%d conflicts with %s:%d) — leaving any stale backend "
+                    "running; claim_port will fail loudly.",
+                    role,
+                    h1,
+                    p1,
+                    h2,
+                    p2,
+                )
+                return False
     # Phase 1 — classify every port as ours / free / foreign. We can only see OUR OWN
     # sockets without root (macOS), so a port that is neither ours nor bindable is
     # treated as foreign — and a single foreign holder anywhere aborts the whole
