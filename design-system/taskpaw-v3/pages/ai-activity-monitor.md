@@ -135,24 +135,32 @@ dashboard; status blink/pulse for busy; no layout shift on hover; a11y tab order
 
 ## 5. Data contract (what the agent's status provider exposes)
 
-The agent computes the aggregation locally and adds an additive `ai` block to its
-`/status` snapshot (Hub stores + forwards; UI renders — no client-side timezone
-math, per #152):
+The agent computes the aggregation locally and exposes it as **flat keys inside the
+`dev_activity` monitor's `metrics`** (the standard monitor snapshot the Hub stores +
+forwards and the UI renders — no client-side timezone math, per #152). The UI's
+`isAiMetrics` keys off `metrics.ai_state`:
 
 ```jsonc
-"ai": {
-  "state": "busy",                 // busy|waiting|idle|present_only|none
+"metrics": {
+  "ai_state": "busy",              // busy|waiting|idle|present_only|none
   "busy_tools": ["claude"],        // tools currently busy (for the label)
   "tools": [
-    {"tool":"claude","state":"busy","present":true,"age_s":180},
-    {"tool":"codex","state":"idle","present":true,"age_s":720},
-    {"tool":"kimi","state":"unknown","present":true,"age_s":null},
-    {"tool":"vscode","state":"present","present":true,"age_s":null}
+    {"tool":"claude","state":"busy","present":true,"age_s":180,"ai":true},
+    {"tool":"codex","state":"idle","present":true,"age_s":720,"ai":true},
+    {"tool":"kimi","state":null,"present":true,"age_s":null,"ai":true},
+    {"tool":"vscode","state":null,"present":true,"age_s":null,"ai":false}
   ],
-  "window_s": 1800,                 // 30m
-  "duty": {"busy_s": 1080, "ratio": 0.60, "segments": [[t0,t1],...]}
+  "window_s": 1800,                 // duty window (s)
+  "duty": {"busy_s": 1080.0, "ratio": 0.60}
 }
 ```
+Notes on the shipped contract: `state` is `busy|waiting|idle` when fresh, else
+`null` (stale/missing → unknown). `ai` is false for context tools (VS Code) whose
+presence alone must not read as "AI running". **`duty` is an in-memory, sampled
+approximation** (busy-sample fraction over `window_s`, computed each poll); it
+resets on agent restart and carries no `segments` — a persisted, segment-accurate
+duty (from stored transitions) is a possible later enhancement.
+
 `age_s` (seconds since that tool's last event, computed on the agent) drives the
 relative-time labels; the UI formats "忙 3m" / "12m 前". Duty is derived on the Hub
 from stored transitions (or precomputed by the agent for the current window).

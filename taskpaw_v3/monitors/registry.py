@@ -39,6 +39,7 @@ def default_registry() -> PluginRegistry:
     host_metrics) plus the V2-parity plugins (folder / comfyui / custom_cmd)."""
     from taskpaw_v3.monitors.plugins.comfyui import ComfyUIPlugin
     from taskpaw_v3.monitors.plugins.custom_cmd import CustomCmdPlugin
+    from taskpaw_v3.monitors.plugins.dev_activity import DevActivityPlugin
     from taskpaw_v3.monitors.plugins.folder import FolderPlugin
     from taskpaw_v3.monitors.plugins.heartbeat import HeartbeatPlugin
     from taskpaw_v3.monitors.plugins.host_metrics import HostMetricsPlugin
@@ -57,4 +58,5 @@ def default_registry() -> PluginRegistry:
     reg.register(CustomCmdPlugin())
     reg.register(StateFilePlugin())
     reg.register(LadaPlugin())
+    reg.register(DevActivityPlugin())
     return reg

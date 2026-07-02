@@ -9,6 +9,8 @@ import { api, type HubServer, type MonitorSnapshot } from "../api";
 import { StatusDot } from "../components/StatusDot";
 import { EventLog } from "../components/EventLog";
 import { MonitorMetrics, utilTint } from "../components/MonitorMetrics";
+import { AiBadge } from "../components/AiActivity";
+import { isAiMetrics } from "../components/aiActivity.helpers";
 import { HubAgentManager } from "../components/HubAgentManager";
 import { Settings } from "./Settings";
 
@@ -225,6 +227,11 @@ function MachineRow({ server: s }: { server: HubServer }) {
   const metrics = online ? hostMetrics(s) : null;
   const monitors = online ? (s.snapshot?.monitors ?? {}) : {};
   const monitorNames = Object.keys(monitors);
+  // The dev_activity monitor's `ai` block, surfaced as a header badge (#154) so the
+  // fleet view shows at a glance which machines are actively running AI.
+  const aiMon = online
+    ? Object.values(monitors).find((mm) => isAiMetrics(mm.metrics))
+    : undefined;
   return (
     <Card>
       <CardContent>
@@ -240,6 +247,7 @@ function MachineRow({ server: s }: { server: HubServer }) {
             label={disabled ? t("state.disabled") : online ? t("hub.online") : t("hub.offline")}
             color={!disabled && online ? "success" : "default"}
             variant={!disabled && online ? "filled" : "outlined"} />
+          {aiMon && isAiMetrics(aiMon.metrics) && <AiBadge metrics={aiMon.metrics} />}
           <Box sx={{ flex: 1 }} />
           {metrics?.cpu !== undefined && (
             <Box sx={{ minWidth: 96 }}><MiniBar label={t("hub.cpu")} pct={metrics.cpu} /></Box>

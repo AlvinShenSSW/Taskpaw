@@ -25,6 +25,14 @@ const en = {
     error: "error", stopped: "stopped", unknown: "unknown", disabled: "disabled",
     enabled: "enabled",
   },
+  ai: {
+    busy: "Running AI · {{tools}}", waiting: "Waiting for input", idle: "AI idle",
+    presentOnly: "AI present · not reported", none: "No AI activity",
+    presentUnreported: "present · not reported", unknown: "not reported",
+    ago: "{{s}}s ago",
+    duty: "busy {{busy}}/{{win}} min · {{pct}}%",
+    tool: { busy: "busy", idle: "idle", waiting: "waiting" },
+  },
   agent: {
     monitors: "Monitors", events: "Events",
     monitorsTitle: "{{machine}} — monitors",
@@ -125,6 +133,14 @@ const zh: typeof en = {
   state: {
     ok: "正常", idle: "空闲", running: "运行中", degraded: "降级",
     error: "错误", stopped: "已停止", unknown: "未知", disabled: "已禁用", enabled: "已启用",
+  },
+  ai: {
+    busy: "在跑 AI · {{tools}}", waiting: "等待输入", idle: "AI 空闲",
+    presentOnly: "AI 在场 · 未上报", none: "无 AI 活动",
+    presentUnreported: "在场 · 未上报", unknown: "未上报",
+    ago: "{{s}}s 前",
+    duty: "忙 {{busy}}/{{win}} 分 · {{pct}}%",
+    tool: { busy: "忙", idle: "空闲", waiting: "等待" },
   },
   agent: {
     monitors: "监控", events: "事件",
