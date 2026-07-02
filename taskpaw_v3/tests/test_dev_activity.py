@@ -61,6 +61,24 @@ def test_read_tool_state_ignores_malformed(tmp_path):
     assert read_tool_state(str(tmp_path), "x", 300, time.time()) == (None, None)
 
 
+def test_read_tool_state_rejects_nonfinite_ts(tmp_path):
+    # NaN/Infinity ts (json allows them) would make age non-finite → NaN in /status
+    # JSON, breaking the browser parse. Must be rejected (Kimi 终审).
+    for bad in ("NaN", "Infinity", "-Infinity"):
+        (tmp_path / "agent-activity-c.json").write_text(
+            f'{{"tool": "c", "state": "busy", "ts": {bad}}}', encoding="utf-8"
+        )
+        assert read_tool_state(str(tmp_path), "c", 300, time.time()) == (None, None)
+
+
+def test_empty_process_pattern_rejected_at_config_time():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        DevActivityConfig(name="ai", process_patterns={"claude": ""})
+
+
 def test_aggregate_most_busy_wins():
     def t(tool, state=None, present=False):
         return {"tool": tool, "state": state, "present": present, "age_s": None}

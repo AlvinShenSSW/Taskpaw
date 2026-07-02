@@ -28,7 +28,9 @@ export const HEADLINE_DOT: Record<string, string> = {
 };
 
 export function isAiMetrics(m: Record<string, unknown> | undefined): m is AiMetrics {
-  return !!m && typeof (m as AiMetrics).ai_state === "string";
+  // Require both keys so a monitor that merely emits an `ai_state` metric isn't
+  // mistaken for the dev_activity block.
+  return !!m && typeof m.ai_state === "string" && Array.isArray(m.tools);
 }
 
 export function aiHeadlineLabel(m: AiMetrics, t: TFunction): string {

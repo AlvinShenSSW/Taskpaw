@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from collections import deque
@@ -53,7 +54,10 @@ _DEFAULT_PATTERNS: dict[str, str] = {
     "claude": r"\bclaude\b",
     "codex": r"\bcodex\b",
     "kimi": r"\bkimi\b",
-    "vscode": r"Code Helper|Code\.exe|Visual Studio Code|\bvscode\b",
+    # Linux binary is `code`; macOS "Code Helper"/"Visual Studio Code"; Windows
+    # Code.exe. `\bcode\b` also matches paths like ~/code/ in a cmdline, but VS Code
+    # is a context tool (ai=false) so a false-positive only affects its display row.
+    "vscode": r"Code Helper|Code\.exe|Visual Studio Code|\bcode\b|\bvscode\b",
 }
 
 # The state values activity_writer.py emits that count as "an AI task is active".
@@ -88,6 +92,9 @@ class DevActivityConfig(BaseMonitorConfig):
         # Reject a bad override at config time (like ProcessConfig) — else it would
         # raise re.error on every check() and degrade the monitor (Codex 外门).
         for tool, pat in v.items():
+            if not pat:
+                # An empty regex matches every process → every tool false-present.
+                raise ValueError(f"process pattern for tool {tool!r} must not be empty")
             try:
                 re.compile(pat)
             except re.error as e:
@@ -135,7 +142,14 @@ def read_tool_state(
         return None, None
     ts = data.get("ts")
     state = data.get("state")
-    if not isinstance(ts, (int, float)) or not isinstance(state, str):
+    # Reject non-finite ts (NaN/±inf): it would make `age` non-finite and FastAPI
+    # would emit NaN/Infinity JSON tokens, breaking the browser JSON parse (Kimi 终审).
+    if (
+        not isinstance(ts, (int, float))
+        or isinstance(ts, bool)
+        or not math.isfinite(ts)
+        or not isinstance(state, str)
+    ):
         return None, None
     age = now - float(ts)
     if age < -freshness_seconds:
@@ -159,9 +173,10 @@ def _detect_present(compiled: dict[str, "re.Pattern[str]"]) -> dict[str, bool]:
         return {}
     try:
         return scan_matches(compiled, search_cmdline=True)
-    except (OSError, RuntimeError) as e:
-        # PermissionError/OSError (restricted enumeration) or RuntimeError (psutil
-        # missing) → degrade all tools to absent; never abort the check.
+    except Exception as e:
+        # Presence is best-effort: ANY enumeration fault (PermissionError/OSError,
+        # RuntimeError for missing psutil, or a psutil.Error) must degrade all tools
+        # to absent — never abort the check. Logged, so it's not silent (§4).
         log.warning("dev_activity: process presence scan failed: %s", e)
         return {tool: False for tool in compiled}
 

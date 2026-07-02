@@ -18,8 +18,9 @@ const RE = {
 };
 
 describe("AiActivity (#154)", () => {
-  it("isAiMetrics detects the ai block", () => {
-    expect(isAiMetrics({ ai_state: "busy" })).toBe(true);
+  it("isAiMetrics detects the ai block (needs ai_state + tools)", () => {
+    expect(isAiMetrics({ ai_state: "busy", tools: [] })).toBe(true);
+    expect(isAiMetrics({ ai_state: "busy" })).toBe(false); // no tools → not it
     expect(isAiMetrics({ cpu_pct: 12 })).toBe(false);
     expect(isAiMetrics(undefined)).toBe(false);
   });
