@@ -142,10 +142,11 @@ def build_tauri() -> None:
     # APPLE_SIGNING_IDENTITY (release.yml #49) must win so Developer-ID signing +
     # notarization still happen. Kept out of tauri.conf so the release path is
     # untouched.
-    if (
+    adhoc = (
         sys.platform == "darwin"
         and not os.environ.get("APPLE_SIGNING_IDENTITY", "").strip()
-    ):
+    )
+    if adhoc:
         cfg["bundle"] = {"macOS": {"signingIdentity": "-"}}
     overrides = json.dumps(cfg)
     # --ci: never prompt (headless runners would hang). Pin the CLI for
@@ -155,10 +156,99 @@ def build_tauri() -> None:
     # builds only a .deb on a Linux PR smoke (no AppImage tooling), without
     # affecting release.yml (which leaves it unset → tauri.conf "all").
     targets = os.environ.get("TASKPAW_BUNDLE_TARGETS", "").strip()
-    if targets:
-        cmd += ["--bundles", targets]
-    run(cmd, cwd=SRC_TAURI)
+    if adhoc:
+        # Build the .app ONLY (Tauri deletes the .app right after it makes the DMG, and
+        # would ad-hoc-sign the sidecar WITHOUT the library-validation entitlement it
+        # needs to load its bundled libpython on another mac). We post-process the .app
+        # and build the DMG ourselves (_adhoc_finalize_macos).
+        run(cmd + ["--bundles", "app"], cwd=SRC_TAURI)
+        _adhoc_finalize_macos(cfg, targets)
+    else:
+        if targets:
+            cmd += ["--bundles", targets]
+        run(cmd, cwd=SRC_TAURI)
     print("bundle -> " + str(SRC_TAURI / "target" / "release" / "bundle"), flush=True)
+
+
+def _adhoc_finalize_macos(cfg: dict, targets: str) -> None:
+    """After an ad-hoc `--bundles app` build: re-sign the PyInstaller sidecar with the
+    library-validation-disabling entitlement, re-seal the .app, then build the DMG.
+
+    Why: the onefile backend extracts its bundled libpython at runtime and dlopen()s it;
+    that dylib's code-signature Team ID differs from the ad-hoc exe, so macOS library
+    validation refuses it ("different Team IDs") and the backend never starts on any mac
+    but the build host. The entitlement lets the process load its own differently-signed
+    libraries. Tauri's own signing can't carry this (it doesn't apply the app
+    entitlements to the nested sidecar), so we do it here.
+    """
+    bundle_dir = SRC_TAURI / "target" / "release" / "bundle"
+    macos_dir = bundle_dir / "macos"
+    # Select THIS role's app by productName — `--bundles app` doesn't delete the .app,
+    # so a prior role's bundle (e.g. "TaskPaw Agent.app") can still sit alongside it and
+    # a naive sorted()[0] would grab the wrong one.
+    app = macos_dir / f"{cfg['productName']}.app"
+    if not app.is_dir():
+        raise SystemExit(f"ad-hoc build produced no {app.name} under {macos_dir}")
+    entitlements = SRC_TAURI / "macos-adhoc-entitlements.plist"
+
+    sidecars = [p for p in app.rglob("taskpaw-backend*") if p.is_file()]
+    if not sidecars:
+        raise SystemExit(f"no taskpaw-backend sidecar found inside {app}")
+    for side in sidecars:
+        # Re-sign the sidecar ad-hoc WITH the entitlement (disable library validation).
+        run(
+            [
+                "codesign",
+                "--force",
+                "--sign",
+                "-",
+                "--entitlements",
+                str(entitlements),
+                "--timestamp=none",
+                str(side),
+            ]
+        )
+    # Re-seal the app WITHOUT --deep, so the sidecar's fresh entitlement survives (a
+    # deep re-sign would re-sign the sidecar and strip it). Tauri already ad-hoc-signed
+    # the other nested code (frameworks/helpers); this just re-computes the outer seal
+    # over the now-entitled sidecar.
+    run(["codesign", "--force", "--sign", "-", str(app)])
+    run(["codesign", "--verify", "--strict", str(app)])
+
+    # Build the DMG ourselves (Tauri would have; we deferred it). UDZO = compressed.
+    if targets and "dmg" not in {t.strip() for t in targets.split(",")}:
+        return  # caller only wanted the .app (e.g. a smoke build)
+    dmg_dir = bundle_dir / "dmg"
+    dmg_dir.mkdir(parents=True, exist_ok=True)
+    triple = target_triple()
+    arch = "aarch64" if triple.startswith("aarch64") else "x64"
+    ver = cfg.get("version") or "3.0.0"
+    dmg = dmg_dir / f"{cfg['productName']}_{ver}_{arch}.dmg"
+    if dmg.exists():
+        dmg.unlink()
+    # Stage the .app + an /Applications symlink so the DMG is drag-to-install.
+    staging = bundle_dir / "_dmg_staging"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    shutil.copytree(app, staging / app.name, symlinks=True)
+    os.symlink("/Applications", staging / "Applications")
+    run(
+        [
+            "hdiutil",
+            "create",
+            "-volname",
+            cfg["productName"],
+            "-srcfolder",
+            str(staging),
+            "-ov",
+            "-format",
+            "UDZO",
+            str(dmg),
+        ]
+    )
+    shutil.rmtree(staging)
+    print(f"dmg -> {dmg}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
