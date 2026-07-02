@@ -75,10 +75,19 @@ def run_agent(
     # loopback-without-token unguarded (#114/Kimi). Raised BEFORE any socket claim.
     guard_bind_exposure(config.bind_host, config.api_token, label="agent network API")
 
+    # Race-free claim: hold the sockets, hand them to uvicorn.
+    net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
+    try:
+        ctl_sock = claim_port(config.control_host, config.control_port, "agent control API")
+    except PortInUseError:
+        net_sock.close()
+        raise
+
     # Auth-disabled visibility (#145): the guard above already refuses a
     # non-loopback bind with no token, so reaching here with auth off means a
-    # loopback-only API. Still warn loudly so an operator knows /status and
-    # /events are unauthenticated and can set a token before binding a LAN address.
+    # loopback-only API. Warn loudly (only now the service is actually starting —
+    # after the ports are claimed) so an operator knows /status and /events are
+    # unauthenticated and can set a token before binding a LAN address.
     if auth_disabled(config.api_token):
         log.warning(
             "agent network API auth is DISABLED (no api_token set) — /status and "
@@ -87,14 +96,6 @@ def run_agent(
             "address.",
             config.bind_host,
         )
-
-    # Race-free claim: hold the sockets, hand them to uvicorn.
-    net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
-    try:
-        ctl_sock = claim_port(config.control_host, config.control_port, "agent control API")
-    except PortInUseError:
-        net_sock.close()
-        raise
 
     queue = queue or build_queue(config, state_path)
     shutdown = shutdown or GracefulShutdown()

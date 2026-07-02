@@ -366,8 +366,10 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
 
     shutdown = shutdown or GracefulShutdown()
     _guard_bind_exposure(config)  # refuse an unsafe LAN exposure before binding (#114)
+    sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
     # Auth-disabled visibility (#145): the guard already refuses a non-loopback
     # bind with no token, so reaching here with auth off means a loopback-only API.
+    # Warn only now the port is claimed (the service is actually starting).
     if auth_disabled(config.api_token):
         log.warning(
             "hub API auth is DISABLED (no api_token set) — /status and /events "
@@ -375,7 +377,6 @@ def run_hub(config: HubConfig, store: HubStore, shutdown: GracefulShutdown | Non
             "an api_token to require a Bearer token or to bind a LAN address.",
             config.bind_host,
         )
-    sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
     app, service = create_hub_app(config, store)
     service.start()
 

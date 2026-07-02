@@ -49,6 +49,17 @@ Option 2 (warn + banner) is additive and reversible, and pairs with the existing
   still refuses non-loopback+empty, so that path raises, unchanged.)
 - UI: a vitest asserting the banner shows when `auth_disabled` and hides otherwise.
 
+## Review triage
+- **Codex 外门 [P2]** — the banner could go stale after setting a token in Settings
+  (the shared `["agentConfig"]` query wasn't invalidated on save). Fixed: Settings'
+  save `onSuccess` now invalidates it (refreshes banner + form). New
+  `settings.test.tsx` asserts the invalidation. Codex round-2: CLEAN.
+- **Kimi 终审 [minor, APPROVE]** — the startup warning sat between the bind guard
+  and `claim_port`, so a port-claim failure would still print an auth warning for a
+  service that never started. Moved the warning to *after* the ports are claimed
+  (agent launcher + hub startup). Kimi's other note was a non-issue (confirmed the
+  `auth_disabled` derivation ordering is correct).
+
 ## Constitution gate
 - §1 Scope: V3 only; V2 untouched; #114 guard untouched.
 - §2 Security: strictly additive visibility; `token_ok`/guard unchanged — no
