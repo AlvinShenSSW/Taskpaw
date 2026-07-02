@@ -168,7 +168,18 @@ def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
     is_backend = name.startswith(_BACKEND_NAME_PREFIX) or any(
         a.replace("\\", "/").endswith("backend_main.py") for a in cmd
     )
-    return is_backend and role in cmd
+    if not is_backend:
+        return False
+    # Match the role. The bundled shell always passes it explicitly, but a no-arg
+    # invocation defaults to agent (backend_main), so an agent must also reclaim a
+    # role-less backend; hub requires an explicit "hub" (Codex 外门).
+    has_agent = "agent" in cmd
+    has_hub = "hub" in cmd
+    if role == "agent":
+        return has_agent or not (has_agent or has_hub)
+    if role == "hub":
+        return has_hub
+    return False
 
 
 def _listener_pids(port: int) -> list[int]:

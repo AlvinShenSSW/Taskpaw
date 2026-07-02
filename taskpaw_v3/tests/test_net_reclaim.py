@@ -174,6 +174,19 @@ def test_stuck_process_wait_timeout_does_not_crash(monkeypatch):
     assert ("terminate", 7) in log and ("kill", 7) in log
 
 
+def test_no_role_arg_counts_as_agent(monkeypatch):
+    # A backend launched with no role arg defaults to agent (backend_main); the
+    # agent must reclaim it, the hub must NOT (Codex 外门).
+    port = _free_port()
+    log = _install(monkeypatch, port, 88, "taskpaw-backend", ["/x/taskpaw-backend"])
+    assert net._is_our_backend(net.psutil.Process(88), "agent") is True
+    assert net._is_our_backend(net.psutil.Process(88), "hub") is False
+    assert net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert ("terminate", 88) in log
+
+
 def test_no_psutil_is_noop(monkeypatch):
     monkeypatch.setattr(net, "psutil", None)
     assert not net.reclaim_port_from_stale_instance(
