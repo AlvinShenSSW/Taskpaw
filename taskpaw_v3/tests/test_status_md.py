@@ -581,7 +581,11 @@ def _lada_row(metrics: dict, state: str = "running") -> list[dict]:
             "name": "box",
             "reachable": 1,
             "status_json": json.dumps(
-                {"monitors": {"LADA": {"state": state, "type_id": "lada", "metrics": metrics}}}
+                {
+                    "monitors": {
+                        "LADA": {"state": state, "type_id": "lada", "metrics": metrics}
+                    }
+                }
             ),
         }
     ]
@@ -647,7 +651,12 @@ def test_lada_nonfinite_percent_and_fps_omitted_queue_survives():
     )
     line = _lada_line(md)
     assert "5/10 done (5 left) | clip.mp4 |" in line
-    assert "nan" not in line and "n/a" not in line and "%" not in line and "fps" not in line
+    assert (
+        "nan" not in line
+        and "n/a" not in line
+        and "%" not in line
+        and "fps" not in line
+    )
     assert "ETA 30:47" in line  # a valid field still renders
 
 
