@@ -103,21 +103,30 @@ def scan_activity(
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
 
-    # Roots per tool: any process whose name/cmdline matches the tool's regex.
+    # Roots per tool: every process whose name/cmdline matches the tool's regex.
+    roots: dict[str, list[int]] = {k: [] for k in patterns}
     for pid, meta in info.items():
         for key, rx in patterns.items():
             if rx.search(meta["name"]) or (meta["cmd"] and rx.search(meta["cmd"])):
-                result[key]["present"] = True
-                # Sum cpu over this root's subtree (BFS, bounded, cycle-safe).
-                seen: set[int] = set()
-                queue = [pid]
-                while queue and len(seen) < _MAX_SUBTREE:
-                    cur = queue.pop()
-                    if cur in seen or cur not in info:
-                        continue
-                    seen.add(cur)
-                    result[key]["cpu_seconds"] += info[cur]["cpu"]
-                    queue.extend(children.get(cur, ()))
+                roots[key].append(pid)
+
+    # Sum cpu over the UNION of each tool's roots' subtrees, counting every pid ONCE —
+    # so a matching descendant (e.g. `claude` → `claude-worker`) isn't double-counted
+    # through both its own root and its parent's subtree (Codex 外门). BFS is bounded +
+    # cycle-safe via the shared `seen` set.
+    for key, root_pids in roots.items():
+        if not root_pids:
+            continue
+        result[key]["present"] = True
+        seen: set[int] = set()
+        queue = list(root_pids)
+        while queue and len(seen) < _MAX_SUBTREE:
+            cur = queue.pop()
+            if cur in seen or cur not in info:
+                continue
+            seen.add(cur)
+            result[key]["cpu_seconds"] += info[cur]["cpu"]
+            queue.extend(children.get(cur, ()))
     return result
 
 

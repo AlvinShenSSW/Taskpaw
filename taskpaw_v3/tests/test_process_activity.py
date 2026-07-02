@@ -86,6 +86,21 @@ def test_scan_activity_subtree_is_cycle_safe(monkeypatch):
     assert out["claude"]["cpu_seconds"] == pytest.approx(3.0)  # each counted once
 
 
+def test_scan_activity_matching_descendant_counted_once(monkeypatch):
+    # Both a `claude` parent and its `claude-worker` child match the regex — every
+    # pid's CPU must be summed ONCE (union of subtrees), not double-counted through
+    # both its own root and its parent's subtree (Codex 外门).
+    procs = [
+        _Proc(10, 1, "claude", ["claude"], user=1.0),  # 1.0
+        _Proc(11, 10, "claude-worker", ["claude-worker"], user=2.0),  # 2.0
+        _Proc(12, 11, "bash", ["bash"], user=4.0),  # 4.0
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity(_pat(claude=r"claude"))
+    assert out["claude"]["present"] is True
+    assert out["claude"]["cpu_seconds"] == pytest.approx(7.0)  # 1+2+4, each once
+
+
 def test_cpu_percents_first_sample_is_zero():
     sample = {"claude": {"present": True, "cpu_seconds": 4.0}}
     pct, new_prev = pu.cpu_percents({}, 0.0, sample, 2.0)
