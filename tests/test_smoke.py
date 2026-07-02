@@ -61,24 +61,30 @@ BASH_SCRIPTS = sorted(
 )
 
 
-def _functional_bash() -> bool:
-    """True only if `bash` on PATH can actually run a command.
+def _resolve_functional_bash() -> str | None:
+    """Return a `bash` executable that actually runs a command, else None.
 
-    Guards Linux/macOS runners that somehow lack a working bash. Note this is a
-    separate concern from Windows (see the skip below): on Windows the exe that
-    `shutil.which` finds (often Git Bash) and the one `subprocess.run(["bash", ...])`
-    launches via CreateProcess (`C:\\Windows\\System32\\bash.exe`, the WSL stub)
-    can differ, so probing one does not predict the other.
+    Guards Linux/macOS runners that somehow lack a working bash, and — crucially —
+    returns the *same* resolved path the test then invokes, so the probe and the
+    real call can't hit different executables under unusual PATH ordering. (On
+    Windows the exe `shutil.which` finds, often Git Bash, and the one
+    `subprocess.run(["bash", ...])` launches via CreateProcess,
+    `C:\\Windows\\System32\\bash.exe` — the WSL stub — can differ; that case is
+    handled by the explicit Windows skip below.)
     """
     exe = shutil.which("bash")
     if exe is None:
-        return False
+        return None
     try:
-        return subprocess.run(
+        ok = subprocess.run(
             [exe, "-c", "exit 0"], capture_output=True, timeout=30
         ).returncode == 0
     except (OSError, subprocess.SubprocessError):
-        return False
+        return None
+    return exe if ok else None
+
+
+_FUNCTIONAL_BASH = _resolve_functional_bash()
 
 
 # These are POSIX (macOS/Linux) setup scripts — never executed on Windows. A
@@ -88,7 +94,7 @@ def _functional_bash() -> bool:
 # Bash mishandles the Windows-path argument). Syntax-check them where a real POSIX
 # bash exists; skip on Windows and where bash is non-functional.
 @pytest.mark.skipif(
-    platform.system() == "Windows" or not _functional_bash(),
+    platform.system() == "Windows" or _FUNCTIONAL_BASH is None,
     reason="POSIX-only scripts; bash -n unreliable on Windows / no functional bash",
 )
 @pytest.mark.parametrize("rel_path", BASH_SCRIPTS or ["<none>"])
@@ -98,7 +104,7 @@ def test_shell_script_parses(rel_path: str) -> None:
         pytest.skip("no bash scripts to check")
     script = REPO_ROOT / rel_path
     result = subprocess.run(
-        ["bash", "-n", str(script)],
+        [_FUNCTIONAL_BASH, "-n", str(script)],
         capture_output=True,
         text=True,
     )

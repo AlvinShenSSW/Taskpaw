@@ -58,6 +58,12 @@ suite (433 tests) still runs on windows-latest — that is the coverage #143 wan
 syntax-checking POSIX shell scripts on Windows adds nothing. Verified locally on
 macOS: the test still runs and passes (not skipped).
 
+## Kimi 终审 triage (round 1)
+Kimi noted the probe and the test invoked `bash` by two independent resolutions
+(`shutil.which` vs bare-name CreateProcess) — the exact mismatch class behind the
+Windows failure. Adopted: `_resolve_functional_bash()` now returns the working
+bash *path*, and the test invokes that same path, so probe and call can't diverge.
+
 ## Constitution gate
 - §1 Scope: CI config only; no source touched.
 - §5 Testing: suite must pass on the new runner before the PR is green.
