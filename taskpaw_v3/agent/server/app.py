@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from taskpaw_v3.agent.server.admin import MonitorAdmin
 
 
+from taskpaw_v3 import __version__
 from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
@@ -51,7 +52,7 @@ def create_network_app(
     @app.get("/ping")
     def ping() -> dict:
         # Open by design — trivial reachability probe, no sensitive data.
-        return {"ok": True, "machine": config.machine, "version": "3.0.0-dev"}
+        return {"ok": True, "machine": config.machine, "version": __version__}
 
     @app.get("/status")
     def status(request: Request):

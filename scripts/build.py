@@ -132,10 +132,13 @@ def build_tauri() -> None:
     }
     # Stamp the release version from the tag (TASKPAW_BUILD_VERSION, leading 'v'
     # stripped) so a v3.1.0 tag doesn't ship "3.0.0" installers (Kimi). Unset
-    # (e.g. workflow_dispatch) → keep tauri.conf.json's version.
+    # (e.g. workflow_dispatch) → fall back to tauri.conf.json's version. Always set it
+    # in cfg so the ad-hoc DMG filename (_adhoc_finalize_macos) matches the app version
+    # even when the env var is absent.
     ver = os.environ.get("TASKPAW_BUILD_VERSION", "").strip().lstrip("vV")
-    if ver:
-        cfg["version"] = ver
+    if not ver:
+        ver = json.loads((SRC_TAURI / "tauri.conf.json").read_text())["version"]
+    cfg["version"] = ver
     # macOS: ad-hoc sign local/unsigned builds so the .app + .dmg aren't rejected as
     # "damaged" on Apple Silicon (an unsigned/inconsistently-signed bundle fails
     # Gatekeeper). ONLY when no release identity is configured — a real
