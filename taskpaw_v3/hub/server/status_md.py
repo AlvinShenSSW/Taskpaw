@@ -105,25 +105,45 @@ def _status_text(snap: Any) -> str:
                 f"VRAM {m['gpu_mem_used_mb'] / 1024:.1f}/{m['gpu_mem_total_mb'] / 1024:.1f}GB"
             )
 
-    # lada-style queue: "X/Y done (Z left)" + the current task between pipes.
+    # lada: "X/Y done (Z left)" + current task + per-task progress (#161). Each
+    # piece is independent — a managed Lada that supplies I/O via `lada_extra_args`
+    # (not the folder fields) has capture-mode progress but NO queue count
+    # (`_queue_counts` reads the folder fields), so gating progress on queue_total
+    # would hide it for that supported config (Codex 外门). Space-joined so the
+    # legacy "X/Y done (Z left)" / "| file |" substrings the V2 scrapers match stay
+    # byte-identical when present. hub.db carries the full set (elapsed /
+    # processed_frames / remaining_frames) for programmatic reads.
     is_lada = tid == "lada" or (tid is None and _is_num(m.get("queue_total")))
-    if is_lada and not bad_state and _is_num(m.get("queue_total")):
-        # Validate each optional field before int() — a malformed queue_completed/
-        # queue_remaining (NaN / "n/a" / "abc") would raise and stop status.md from
-        # updating (Codex + Kimi).
-        total = int(m["queue_total"])
-        done = int(m["queue_completed"]) if _is_num(m.get("queue_completed")) else 0
-        left = (
-            max(0, int(m["queue_remaining"]))
-            if _is_num(m.get("queue_remaining"))
-            else max(0, total - done)
-        )
-        seg = f"{done}/{total} done ({left} left)"
+    if is_lada and not bad_state:
+        lada_parts: list[str] = []
+        if _is_num(m.get("queue_total")):
+            # Validate each optional field before int() — a malformed
+            # queue_completed/queue_remaining (NaN / "n/a" / "abc") would raise and
+            # stop status.md from updating (Codex + Kimi).
+            total = int(m["queue_total"])
+            done = int(m["queue_completed"]) if _is_num(m.get("queue_completed")) else 0
+            left = (
+                max(0, int(m["queue_remaining"]))
+                if _is_num(m.get("queue_remaining"))
+                else max(0, total - done)
+            )
+            lada_parts.append(f"{done}/{total} done ({left} left)")
         if isinstance(m.get("current_file"), str) and (
             cf := _inline(m["current_file"])
         ):
-            seg += f" | {cf} |"
-        parts.append(seg)
+            lada_parts.append(f"| {cf} |")
+        # Per-task progress — capture-mode-only fields, each guarded.
+        prog: list[str] = []
+        if _is_num(m.get("percent")) and 0 <= m["percent"] <= 100:
+            prog.append(f"{m['percent']:.0f}%")
+        if isinstance(m.get("eta"), str) and (eta := _inline(m["eta"])):
+            prog.append(f"ETA {eta}")
+        if _is_num(m.get("fps")):
+            prog.append(f"{m['fps']:.0f}fps")
+        if prog:
+            lada_parts.append(" · ".join(prog))
+        if lada_parts:
+            parts.append(" ".join(lada_parts))
 
     # comfyui-style depth: "N running, M pending".
     is_comfyui = tid == "comfyui" or (
