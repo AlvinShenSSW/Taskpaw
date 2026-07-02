@@ -33,8 +33,8 @@ jobs:
       - name: Sync dev environment
         run: uv sync --group dev --python ${{ matrix.python-version }}
 
-      - name: Run tests
-        run: uv run --python ${{ matrix.python-version }} pytest
+      - name: Run tests (with V3 coverage report; no hard threshold yet)
+        run: uv run --python ${{ matrix.python-version }} pytest --cov=taskpaw_v3 --cov-report=term-missing
 
   frontend:
     name: frontend build (V3 UI)
