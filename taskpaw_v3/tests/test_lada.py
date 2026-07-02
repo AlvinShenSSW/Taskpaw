@@ -129,6 +129,18 @@ def test_running_metrics_expose_all_per_task_fields_to_hub():
     assert isinstance(m["fps"], float) and m["fps"] == 112.3
     assert isinstance(m["elapsed"], str) and m["elapsed"] == "06:09"
     assert isinstance(m["eta"], str) and m["eta"] == "30:47"
+    # Lock the EXACT parsed key set (Kimi 终审): a rename (e.g. percent→pct) must
+    # fail here, not silently drop a field from the Hub. Asserted on the pure
+    # parse output (_progress) to exclude best-effort cpu/mem noise in metrics.
+    assert set(inst._progress) == {
+        "current_file",
+        "percent",
+        "elapsed",
+        "processed_frames",
+        "eta",
+        "remaining_frames",
+        "fps",
+    }
 
 
 def test_idle_snapshot_omits_per_task_progress():
