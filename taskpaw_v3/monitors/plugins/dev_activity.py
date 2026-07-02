@@ -96,17 +96,34 @@ def _state_file(state_dir: str, tool: str) -> Path:
     return Path(state_dir).expanduser() / f"agent-activity-{tool}.json"
 
 
-def read_tool_state(
-    state_dir: str, tool: str, freshness_seconds: float, now: float
-) -> tuple[Optional[str], Optional[float]]:
-    """Return (state, age_seconds) for a tool's state file, or (None, None) if
-    missing/unparseable/stale. `state` is one of busy|waiting|idle when fresh."""
-    p = _state_file(state_dir, tool)
+def _shared_file(state_dir: str) -> Path:
+    # activity_writer.py's DEFAULT_PATH (no per-tool suffix) — a legacy/default hook
+    # that omits --path writes here, tagging the row with its own `tool` field.
+    return Path(state_dir).expanduser() / "agent-activity.json"
+
+
+def _load(p: Path) -> Optional[dict]:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None, None
-    if not isinstance(data, dict):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def read_tool_state(
+    state_dir: str, tool: str, freshness_seconds: float, now: float
+) -> tuple[Optional[str], Optional[float]]:
+    """Return (state, age_seconds) for a tool, or (None, None) if missing/unparseable/
+    stale. Reads the per-tool file `agent-activity-<tool>.json` first, then falls back
+    to the writer's shared default `agent-activity.json` when its `tool` field matches
+    — so a default/legacy hook (no `--path`) still feeds this monitor (Codex 外门).
+    `state` is one of busy|waiting|idle when fresh."""
+    data = _load(_state_file(state_dir, tool))
+    if data is None:
+        shared = _load(_shared_file(state_dir))
+        if shared is not None and shared.get("tool") == tool:
+            data = shared
+    if data is None:
         return None, None
     ts = data.get("ts")
     state = data.get("state")

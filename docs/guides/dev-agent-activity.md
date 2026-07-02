@@ -109,3 +109,7 @@ dashboard render (see `design-system/taskpaw-v3/pages/ai-activity-monitor.md`).
 - The wrapper exits 0 on unknown events so it never breaks the host hook chain.
 - The legacy single-file `state_file` monitor still works for a single tool, but
   `dev_activity` is preferred (aggregates + process fallback).
+- Compatibility: if a hook omits `--path`, the writer's default
+  `~/.taskpaw/agent-activity.json` is also read (matched by its `tool` field), so a
+  single-tool default setup still feeds the monitor — but per-tool `--path` is
+  recommended when watching more than one tool.

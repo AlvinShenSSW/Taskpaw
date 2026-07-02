@@ -41,6 +41,21 @@ def test_read_tool_state_fresh_stale_missing(tmp_path):
     assert state is None and age is None
 
 
+def test_read_tool_state_falls_back_to_shared_default_file(tmp_path):
+    # A legacy/default hook writes ~/.taskpaw/agent-activity.json (no --path), tagged
+    # with its own tool. The monitor must still read it (Codex 外门).
+    now = 2_000_000.0
+    (tmp_path / "agent-activity.json").write_text(
+        json.dumps({"tool": "claude", "state": "busy", "ts": now - 5}), encoding="utf-8"
+    )
+    assert read_tool_state(str(tmp_path), "claude", 300, now)[0] == "busy"
+    # ...but only for the matching tool.
+    assert read_tool_state(str(tmp_path), "codex", 300, now) == (None, None)
+    # A per-tool file takes precedence over the shared default.
+    _write(tmp_path, "claude", "idle", now)
+    assert read_tool_state(str(tmp_path), "claude", 300, now)[0] == "idle"
+
+
 def test_read_tool_state_ignores_malformed(tmp_path):
     (tmp_path / "agent-activity-x.json").write_text("not json", encoding="utf-8")
     assert read_tool_state(str(tmp_path), "x", 300, time.time()) == (None, None)
