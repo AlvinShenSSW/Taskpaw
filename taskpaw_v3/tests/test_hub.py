@@ -174,6 +174,52 @@ def test_poller_404_fallback_for_legacy_agent(tmp_path, monkeypatch):
         s.close()
 
 
+def test_events_from_payload_shapes():
+    from taskpaw_v3.hub.server.poller import _events_from_payload
+
+    assert _events_from_payload({"events": [{"id": 1}]}) == [{"id": 1}]
+    assert _events_from_payload({"events": "nope"}) == []  # non-list events → empty
+    assert _events_from_payload({}) == []
+    assert _events_from_payload([{"id": 1}]) == [{"id": 1}]  # tolerate a bare list
+    assert _events_from_payload("oops") is None  # unexpected → caller logs + skips
+    assert _events_from_payload(5) is None
+
+
+def test_fetch_events_tolerates_bare_list(tmp_path, monkeypatch):
+    # A foreign/older agent that returns a bare JSON list (not {"events": [...]}) must
+    # not crash with "'list' object has no attribute 'get'" — the events are ingested.
+    s = _store(tmp_path)
+    try:
+        sid = s.add_server("SnowLeopard", "127.0.0.1", 5680)
+        p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
+        p.last_event_ids = {sid: 2}
+        monkeypatch.setattr(
+            poller_mod.urllib.request,
+            "urlopen",
+            lambda req, timeout: FakeResp([{"id": 3, "message": "new"}, {"id": 2}]),
+        )
+        evs = p.fetch_events(s.list_servers()[0])
+        assert [e["id"] for e in evs] == [3]  # id>last_id filter still applies
+    finally:
+        s.close()
+
+
+def test_fetch_events_skips_unexpected_shape(tmp_path, monkeypatch):
+    # A non-dict/non-list JSON body (e.g. a bare string) → skipped, not crashed.
+    s = _store(tmp_path)
+    try:
+        s.add_server("Weird", "127.0.0.1", 5680)
+        p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
+        monkeypatch.setattr(
+            poller_mod.urllib.request,
+            "urlopen",
+            lambda req, timeout: FakeResp("not an events object"),
+        )
+        assert p.fetch_events(s.list_servers()[0]) == []
+    finally:
+        s.close()
+
+
 def test_poller_disabled_stores_without_outbox(tmp_path, monkeypatch):
     s = _store(tmp_path)
     try:
