@@ -33,6 +33,22 @@ def _agent_base_url(ip: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
+def _events_from_payload(data: object) -> Optional[list]:
+    """Extract the events array from an agent's /events JSON, tolerant of shape.
+
+    The V3 agent returns the canonical `{"events": [...]}`, but a foreign/older agent
+    (or one behind a proxy) may return a bare JSON list. Accept both; return None for
+    any other shape so the caller can log a clear diagnostic instead of crashing on
+    `list.get` (the "'list' object has no attribute 'get'" report). Element validation
+    (dict, id) is left to the caller."""
+    if isinstance(data, dict):
+        events = data.get("events", [])
+        return events if isinstance(events, list) else []
+    if isinstance(data, list):
+        return data
+    return None
+
+
 from .openclaw import send_payload  # noqa: E402
 from .store import HubStore  # noqa: E402
 
@@ -268,8 +284,18 @@ class Poller:
                     f"{base}/events", headers=self._auth_headers()
                 )
                 resp = urllib.request.urlopen(req, timeout=self.http_timeout)
-            events = json.loads(resp.read().decode("utf-8")).get("events", [])
-            return [e for e in events if e.get("id", -1) > last_id]
+            data = json.loads(resp.read().decode("utf-8"))
+            events = _events_from_payload(data)
+            if events is None:
+                log.warning(
+                    "Unexpected /events response shape from %s (%s) — skipping",
+                    server.get("name"),
+                    type(data).__name__,
+                )
+                return []
+            return [
+                e for e in events if isinstance(e, dict) and e.get("id", -1) > last_id
+            ]
         except Exception as e:
             log.warning("Failed to fetch events from %s: %s", server.get("name"), e)
             return []
