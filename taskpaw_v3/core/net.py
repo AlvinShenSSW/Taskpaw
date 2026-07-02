@@ -10,7 +10,38 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
+import os
+import re
 import socket
+import time
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover — psutil is a base dependency
+    psutil = None
+
+log = logging.getLogger("taskpaw.net")
+
+# Our PyInstaller sidecar's process name (agent + hub share one binary, dispatched
+# by the role argv). The Tauri shell may launch either the stripped basename
+# (`taskpaw-backend[.exe]`) or the target-triple-suffixed sidecar
+# (`taskpaw-backend-<triple>[.exe]`, backend_command's fallback). Match EXACTLY those
+# two shapes — base name, or base + a target triple (arch-vendor-os[-abi], 3–4 parts,
+# underscores allowed e.g. `x86_64`), optional `.exe` — NOT a loose prefix, so a
+# foreign helper like `taskpaw-backend-logger` can't be mistaken for ours (Kimi 终审).
+# Used to identify a *stale instance of THIS app* so we only ever reclaim a port from
+# ourselves — never from a foreign service.
+_BACKEND_NAME_RE = re.compile(
+    r"taskpaw-backend(?:-[a-z0-9_]+(?:-[a-z0-9_]+){2,3})?(?:\.exe)?"
+)
+
+# A from-source run (dev) is `python .../taskpaw_v3/packaging/backend_main.py <role>`
+# or `python -m taskpaw_v3.packaging.backend_main <role>`. Match the FULL package
+# path/module — not a bare `backend_main.py`, which an unrelated service could also
+# use — so we never mistake a foreign process for ours (Codex 外门).
+_BACKEND_SOURCE_SUFFIX = "taskpaw_v3/packaging/backend_main.py"
+_BACKEND_MODULE = "taskpaw_v3.packaging.backend_main"
 
 
 class PortInUseError(RuntimeError):
@@ -136,6 +167,366 @@ def port_available(host: str, port: int) -> bool:
             return True
         except OSError:
             return False
+
+
+def _has_m_module(cmd: list[str], module: str) -> bool:
+    """True if argv contains `-m <module>` (or `-m <module>.<sub>`) as an actual flag +
+    value PAIR — not merely the module string appearing somewhere in argv, which a
+    foreign process could carry incidentally (Kimi 终审)."""
+    for i, a in enumerate(cmd):
+        if a == "-m" and i + 1 < len(cmd):
+            val = cmd[i + 1]
+            if val == module or val.startswith(module + "."):
+                return True
+    return False
+
+
+def _role_from_module(cmd: list[str]) -> str | None:
+    """Role for a documented headless `python -m taskpaw_v3.<role>[...]` launch
+    (deployment.md: `python -m taskpaw_v3.agent`, `python -m taskpaw_v3.hub run`,
+    `python -m taskpaw_v3.agent.server.service`), whose process name is just `python`.
+    Only accepts the module as an actual `-m` value, or its resolved
+    `.../taskpaw_v3/{agent,hub}/….py` script path — not a bare arg that merely contains
+    the string, so a foreign python process can't be misidentified (Kimi 终审). Returns
+    'agent'/'hub', or None."""
+    for i, a in enumerate(cmd):
+        norm = a.replace("\\", "/")
+        if i > 0 and cmd[i - 1] == "-m":
+            # `-m` value: the module must BE taskpaw_v3.agent|hub or a submodule of it —
+            # anchored, so a foreign `-m my.taskpaw_v3.agent` can't match (Kimi 终审).
+            for role, mod in (("agent", "taskpaw_v3.agent"), ("hub", "taskpaw_v3.hub")):
+                if a == mod or a.startswith(mod + "."):
+                    return role
+        elif norm.endswith(".py"):
+            # resolved script path: match the package COMPONENTS `taskpaw_v3/agent` or
+            # `taskpaw_v3/hub`, not a substring — so `.../mytaskpaw_v3/agent/…` or a
+            # `taskpaw_v3_fork/agent` dir can't be misidentified as ours (Kimi 终审).
+            parts = norm.split("/")
+            for j in range(len(parts) - 1):
+                if parts[j] == "taskpaw_v3" and parts[j + 1] in ("agent", "hub"):
+                    return parts[j + 1]
+    return None
+
+
+def _explicit_role(cmd: list[str]) -> str:
+    """The role token from a dispatched backend's argv (sidecar / backend_main): the
+    first argument that is EXACTLY 'agent' or 'hub', else 'agent' (backend_main's
+    default). Matching whole tokens — not substrings — means a path or flag that merely
+    contains 'hub'/'agent' (e.g. /Users/hubert/…, hub.yaml) can't be read as the role
+    (Kimi 终审)."""
+    for a in cmd:
+        if a in ("agent", "hub"):
+            return a
+    return "agent"
+
+
+def _backend_role(name: str, cmd: list[str], exe_base: str | None = None) -> str | None:
+    """The role ('agent'|'hub') THIS app's backend is running, or None if the process
+    isn't ours. Recognizes the bundled sidecar and the from-source packaging entrypoint
+    (both dispatched by a role argv, default agent), plus the documented headless module
+    entrypoints (Codex 外门).
+
+    Positive identification (Kimi 终审): the sidecar must match the name regex AND, when
+    the real executable path is available (`exe_base`), that on-disk basename must match
+    too — argv[0]/`proc.name()` are mutable, but `proc.exe()` is the actual binary, so a
+    foreign process can't pass just by spoofing its reported name. (We deliberately do
+    NOT require a specific install directory: PyInstaller onefile runs the server from a
+    `_MEI` temp path, so a dir check would miss our own stale backend and reintroduce
+    the very port-in-use failure this fixes.)"""
+    norm = [a.replace("\\", "/") for a in cmd]
+    is_sidecar = _BACKEND_NAME_RE.fullmatch(name) is not None and (
+        exe_base is None or _BACKEND_NAME_RE.fullmatch(exe_base) is not None
+    )
+    # Anchor the source-path match to a `/` boundary (or the exact relative path) so a
+    # foreign `.../clonetaskpaw_v3/packaging/backend_main.py` can't match (Kimi 终审).
+    is_source = any(
+        a == _BACKEND_SOURCE_SUFFIX or a.endswith("/" + _BACKEND_SOURCE_SUFFIX)
+        for a in norm
+    ) or _has_m_module(cmd, _BACKEND_MODULE)
+    if is_sidecar or is_source:
+        return _explicit_role(cmd)
+    return _role_from_module(cmd)
+
+
+def _proc_identity(proc: "psutil.Process") -> tuple[str, list[str], str | None] | None:
+    """(lowercased name, argv, lowercased exe basename) for `proc`, or None if it can't
+    be inspected. Catches the full `psutil.Error` hierarchy — including ZombieProcess,
+    whose name()/cmdline() raise — so a zombie degrades to "not ours" instead of
+    crashing startup (Kimi 终审). exe() is best-effort (None if denied/zombie)."""
+    try:
+        name = (proc.name() or "").lower()
+        cmd = [str(a) for a in (proc.cmdline() or [])]
+    except (psutil.Error, OSError):
+        return None
+    try:
+        exe = proc.exe() or ""
+    except (psutil.Error, OSError):
+        exe = ""
+    exe_base = os.path.basename(exe).lower() if exe else None
+    return name, cmd, exe_base
+
+
+def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
+    """True only if `proc` is THIS app's own backend for `role` (agent|hub) — the
+    PyInstaller sidecar, the from-source packaging entrypoint, or the documented
+    `python -m taskpaw_v3.agent|hub` headless command — so we never mistake a foreign
+    service for ours."""
+    ident = _proc_identity(proc)
+    if ident is None:
+        return False
+    name, cmd, exe_base = ident
+    return _backend_role(name, cmd, exe_base) == role
+
+
+def _loopback_equiv(a: str, b: str) -> bool:
+    """For two already-normalized loopback hosts: are they the SAME loopback target?
+    `localhost` equates with any loopback (it resolves to one), 127.0.0.1 and ::1 are
+    the canonical cross-family pair, and every other numeric loopback matches only
+    itself — so 127.0.0.1 and 127.0.0.2 are NOT equated (Kimi 终审)."""
+    if a == "localhost" or b == "localhost":
+        return True
+    pair = {"127.0.0.1", "::1"}
+    if a in pair and b in pair:
+        return True
+    try:
+        return ipaddress.ip_address(a) == ipaddress.ip_address(b)
+    except ValueError:
+        return a == b
+
+
+def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
+    """Would a bind to `want_host` collide with an existing listener on `laddr_ip`
+    (same port assumed)? True if either side is a wildcard (all-interfaces), the two are
+    equivalent loopbacks, or the same address. A foreign `127.0.0.1:P` listener never
+    blocks an agent configured for a distinct `192.168.x.y:P` (Codex 外门)."""
+    want = _norm_host(want_host)
+    have = _norm_host(laddr_ip or "")
+    if bind_is_wildcard(want) or bind_is_wildcard(have):
+        return True
+    # Loopback equivalence, checked BEFORE the IPv4/IPv6 family split: `localhost` (Hub
+    # guard allows it) may be reported by psutil as 127.x OR ::1, and 127.0.0.1/::1 are
+    # the canonical loopback pair — but distinct numeric loopbacks (127.0.0.1 vs .2) can
+    # coexist, so they must NOT be equated (Kimi 终审). Safe either way: we only ever kill
+    # our OWN role backend.
+    if bind_is_loopback(want) and bind_is_loopback(have):
+        return _loopback_equiv(want, have)
+    if (":" in want) != (":" in have):  # IPv4 vs IPv6 — otherwise separate stacks
+        return False
+    try:
+        return ipaddress.ip_address(want) == ipaddress.ip_address(have)
+    except ValueError:
+        return want == have
+
+
+def _same_bind_target(h1: str, h2: str) -> bool:
+    """True only if binding `h1` and `h2` to the SAME port would actually collide: a
+    wildcard on either side, the same literal address, or `localhost` vs a canonical
+    loopback (127.0.0.1/::1). Distinct numeric loopbacks (127.0.0.1 vs 127.0.0.2) do
+    NOT collide — stricter than `_addr_conflicts` so a valid two-loopback agent config
+    isn't wrongly judged non-bindable (Kimi 终审)."""
+    a, b = _norm_host(h1), _norm_host(h2)
+    if bind_is_wildcard(a) or bind_is_wildcard(b):
+        return True
+    canon = {"localhost": {"127.0.0.1", "::1"}}
+    sa = canon.get(a, {a})
+    sb = canon.get(b, {b})
+    for x in sa:
+        for y in sb:
+            try:
+                if ipaddress.ip_address(x) == ipaddress.ip_address(y):
+                    return True
+            except ValueError:
+                if x == y:
+                    return True
+    return False
+
+
+def _proc_listen_conns(proc: "psutil.Process") -> list:
+    """A process's own LISTENing inet sockets. Uses PER-PROCESS enumeration, which —
+    unlike the system-wide `psutil.net_connections()` — works for a same-user process
+    WITHOUT root on macOS (there the system-wide call raises AccessDenied, so the
+    takeover would silently no-op; Codex 外门). Handles the psutil 6 rename
+    Process.connections → Process.net_connections."""
+    getter = getattr(proc, "net_connections", None) or proc.connections
+    return getter(kind="inet")
+
+
+def _find_stale_backends(host: str, port: int, role: str):
+    """Yield THIS app's own `role` backend processes that hold a bind-conflicting
+    LISTEN on (host, port). Scans OUR OWN processes (process_iter → per-process
+    sockets) rather than doing a system-wide socket scan, so it needs no root on macOS
+    where the stale instance runs as the same logged-in user (Codex 外门)."""
+    if psutil is None:
+        return
+    try:
+        procs = list(psutil.process_iter())
+    except (psutil.Error, OSError) as e:
+        log.warning("could not enumerate processes to reclaim a port: %s", e)
+        return
+    me = os.getpid()
+    for proc in procs:
+        if proc.pid == me:
+            continue
+        ident = _proc_identity(proc)
+        if ident is None:
+            continue  # denied / zombie / vanished — can't inspect, so not ours
+        name, cmd, exe_base = ident
+        if _backend_role(name, cmd, exe_base) != role:
+            continue
+        try:
+            conns = _proc_listen_conns(proc)
+        except (psutil.Error, OSError):
+            continue
+        for c in conns:
+            if (
+                getattr(c, "status", None) == psutil.CONN_LISTEN
+                and c.laddr
+                and c.laddr.port == port
+                and _addr_conflicts(host, c.laddr.ip)
+            ):
+                yield proc
+                break
+
+
+def _terminate_backend(proc: "psutil.Process", pid: int, wait: float) -> bool:
+    """terminate() → wait → kill() only if it won't exit. Returns True if it exited,
+    False if termination couldn't be confirmed (logged) — including a stuck process
+    that survives kill(); the caller's bounded wait + claim_port still fail loudly if
+    the port stays held."""
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=max(1.0, wait * 0.6))
+        except psutil.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=max(1.0, wait * 0.4))
+    except (psutil.Error, OSError) as e:
+        # psutil.Error covers NoSuchProcess / AccessDenied / TimeoutExpired / Zombie —
+        # a stuck or zombie process is logged and skipped, never crashes startup; the
+        # bounded claim_port below still fails loudly if the port stays held (Kimi 终审).
+        log.warning("could not terminate stale backend pid %d: %s", pid, e)
+        return False
+    return True
+
+
+def reclaim_ports_from_stale_instance(
+    specs: list[tuple[str, int, str]], *, role: str, wait: float = 8.0
+) -> bool:
+    """Reclaim SEVERAL required ports for `role` from this app's own stale backend —
+    but only if EVERY port is free or held solely by our backend. If ANY port is held
+    by a foreign/unidentified process, reclaim NOTHING and return False: we must not
+    kill our previous instance when startup would fail anyway on the foreign-held port
+    (Codex 外门). claim_port then fails loudly on the real conflict. `specs` is a list
+    of (host, port, what). Used by the agent, which needs BOTH its network and control
+    ports viable before it supersedes the old agent.
+    """
+    if psutil is None:
+        return False
+    # A config whose required ports aren't mutually bindable (e.g. control_port ==
+    # bind_port on the same/overlapping host — accepted by AgentConfig, editable in the
+    # UI) can NEVER start: the new process would bind the first socket then self-collide
+    # on the second. Reclaiming would kill our old, still-working instance for a startup
+    # that cannot succeed. Detect it and reclaim NOTHING; claim_port then fails loudly
+    # (Codex 外门).
+    for i, (h1, p1, _w1) in enumerate(specs):
+        for h2, p2, _w2 in specs[i + 1 :]:
+            if p1 == p2 and _same_bind_target(h1, h2):
+                log.warning(
+                    "not reclaiming the %s ports: required ports are not mutually "
+                    "bindable (%s:%d conflicts with %s:%d) — leaving any stale backend "
+                    "running; claim_port will fail loudly.",
+                    role,
+                    h1,
+                    p1,
+                    h2,
+                    p2,
+                )
+                return False
+    # Phase 1 — classify every port as ours / free / foreign. We can only see OUR OWN
+    # sockets without root (macOS), so a port that is neither ours nor bindable is
+    # treated as foreign — and a single foreign holder anywhere aborts the whole
+    # reclaim (leave the old, still-serving agent alone; claim_port fails loudly).
+    to_kill: dict[int, "psutil.Process"] = {}
+    for host, port, what in specs:
+        ours = list(_find_stale_backends(host, port, role))
+        if ours:
+            for proc in ours:
+                to_kill[proc.pid] = proc
+        elif not port_available(host, port):
+            log.warning(
+                "not reclaiming the %s ports: %s (%s:%d) is held by a foreign process "
+                "— leaving any stale %s backend running rather than killing it when "
+                "startup can't succeed here; claim_port will fail loudly.",
+                role,
+                what,
+                host,
+                port,
+                role,
+            )
+            return False
+    if not to_kill:
+        return False
+    # Phase 2 — every holder is ours: terminate them, then wait for the OS to release
+    # each socket before the caller binds.
+    reclaimed = False
+    for pid, proc in to_kill.items():
+        log.warning(
+            "reclaiming the %s ports from a stale TaskPaw %s backend (pid %d)",
+            role,
+            role,
+            pid,
+        )
+        if _terminate_backend(proc, pid, wait):
+            reclaimed = True
+    if reclaimed:
+        deadline = time.monotonic() + wait
+        for host, port, _what in specs:
+            while time.monotonic() < deadline and not port_available(host, port):
+                time.sleep(0.2)
+    return reclaimed
+
+
+def reclaim_port_from_stale_instance(
+    host: str, port: int, *, role: str, what: str, wait: float = 8.0
+) -> bool:
+    """If `port` is held by THIS app's own backend of the same role, terminate it and
+    wait for the port to free, so a relaunch/update "just works". Returns True if it
+    reclaimed one.
+
+    Semantics: **last launch wins** for a single-agent/single-hub-per-machine box
+    (the design invariant — one agent, one port per machine). The holder of *this
+    configured port* is by definition the previous instance of *this* agent/hub, so
+    a new launch supersedes it (the exact behavior needed for in-place updates,
+    where the old version is still running). It does NOT try to distinguish "stale"
+    from "actively serving" — on a single-instance box they're the same instance.
+    Preventing an *accidental* double-launch of the same version is the Tauri shell's
+    single-instance responsibility (a separate follow-up), not this port logic.
+
+    Safety: it only ever terminates a process it can positively identify as this
+    app's backend for this role (name/module + role). A **foreign** service on the
+    port is left untouched — `claim_port` then fails loudly as before. Never binds, so
+    there's no TOCTOU with the subsequent claim_port.
+    """
+    if psutil is None:
+        return False
+    reclaimed = False
+    for proc in _find_stale_backends(host, port, role):
+        log.warning(
+            "reclaiming %s (%s:%s) from a stale TaskPaw %s backend (pid %d)",
+            what,
+            host,
+            port,
+            role,
+            proc.pid,
+        )
+        if _terminate_backend(proc, proc.pid, wait):
+            reclaimed = True
+    if reclaimed:
+        # Wait for the OS to actually release the socket before the caller binds.
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and not port_available(host, port):
+            time.sleep(0.2)
+    return reclaimed
 
 
 def claim_port(host: str, port: int, what: str) -> socket.socket:
