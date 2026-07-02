@@ -168,6 +168,48 @@ def test_from_source_module_form_matched(monkeypatch):
     assert ("terminate", 79) in log
 
 
+def test_module_entrypoint_agent_matched(monkeypatch):
+    # Documented headless launch `python -m taskpaw_v3.agent` (deployment.md): process
+    # name is `python`, role is implicit in the module (Codex 外门).
+    port = _free_port()
+    log = _install(
+        monkeypatch, port, 91, "python3", ["python3", "-m", "taskpaw_v3.agent"]
+    )
+    assert net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert ("terminate", 91) in log
+
+
+def test_module_entrypoint_hub_run_matched(monkeypatch):
+    # `python -m taskpaw_v3.hub run` — the `run` subcommand doesn't change the role.
+    port = _free_port()
+    log = _install(
+        monkeypatch, port, 92, "python3", ["python3", "-m", "taskpaw_v3.hub", "run"]
+    )
+    assert net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="hub", what="hub API"
+    )
+    assert ("terminate", 92) in log
+
+
+def test_module_entrypoint_service_path_form_matched(monkeypatch):
+    # `python -m taskpaw_v3.agent.server.service` (2026-06-27 spec) → agent.
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        93,
+        "python3",
+        ["python3", "-m", "taskpaw_v3.agent.server.service"],
+    )
+    assert net._is_our_backend(net.psutil.Process(93), "agent") is True
+    assert net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert ("terminate", 93) in log
+
+
 def test_localhost_matches_numeric_loopback_listener(monkeypatch):
     # A stale backend bound to `localhost` is reported by psutil as 127.0.0.1; a new
     # instance also configured for `localhost` must still reclaim it (Codex 外门).

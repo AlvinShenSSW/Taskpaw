@@ -19,11 +19,22 @@ It must **never** kill a foreign process that merely happens to sit on the port
 (that would be dangerous). So the takeover only fires when the holder is
 **positively identified as this app's own backend of the same role**:
 
-- `net._listener_pids(port)` — psutil enumerates LISTEN sockets on the port.
-- `net._is_our_backend(proc, role)` — true only if the process name is the
-  PyInstaller sidecar (`taskpaw-backend[.exe]`) **or** a from-source
-  `backend_main.py`, **AND** the `role` (`agent`/`hub`) is in its argv. A different
-  role (agent must not kill a hub) or any other process → not ours → **left alone**.
+- `net._listener_pids(host, port)` — psutil enumerates LISTEN sockets on the port,
+  filtered to those whose address would actually conflict with our bind (same
+  address, or a wildcard on either side, same IP family; `localhost` ≡ loopback).
+  A foreign `127.0.0.1:P` listener therefore never blocks an agent on `192.168.x.y:P`.
+- `net._is_our_backend(proc, role)` (via `_backend_role`) — true only if the process
+  is positively one of OUR backends **for this role**: the PyInstaller sidecar
+  (`taskpaw-backend[-<triple>][.exe]`), the from-source packaging entrypoint
+  (`taskpaw_v3/packaging/backend_main.py` / `-m taskpaw_v3.packaging.backend_main`,
+  role from argv, no-arg → agent), or a documented headless module launch
+  (`python -m taskpaw_v3.agent|hub`, role implicit in the module). A different role
+  (agent must not kill a hub), a bare `backend_main.py` from another project, or any
+  other process → not ours → **left alone**.
+- The agent needs BOTH its network and control ports, so it reclaims them
+  **all-or-nothing**: if ANY required port is held by a foreign process, it reclaims
+  nothing (leaving the old agent running) rather than kill the old instance and then
+  fail `claim_port` on the foreign-held port.
 - If the holder is foreign/unidentifiable, `reclaim_*` is a no-op and the existing
   `claim_port` still **fails loudly** — the "refuse to start if a real conflict
   exists" contract (constitution §3) is preserved for everything that isn't us.

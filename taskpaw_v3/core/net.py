@@ -163,31 +163,50 @@ def port_available(host: str, port: int) -> bool:
             return False
 
 
+def _role_from_module(cmd: list[str]) -> str | None:
+    """Role for a documented headless `python -m taskpaw_v3.<role>[...]` launch
+    (deployment.md: `python -m taskpaw_v3.agent`, `python -m taskpaw_v3.hub run`,
+    `python -m taskpaw_v3.agent.server.service`), whose process name is just `python`.
+    Recognizes both the `-m` module string and its resolved `.../taskpaw_v3/agent/…py`
+    path form. Returns 'agent'/'hub', or None if no such module appears."""
+    for a in cmd:
+        token = "." + a.replace("\\", "/").replace("/", ".") + "."
+        if ".taskpaw_v3.agent." in token:
+            return "agent"
+        if ".taskpaw_v3.hub." in token:
+            return "hub"
+    return None
+
+
+def _backend_role(name: str, cmd: list[str]) -> str | None:
+    """The role ('agent'|'hub') THIS app's backend is running, or None if the process
+    isn't ours. Recognizes the bundled sidecar and the from-source packaging
+    entrypoint (both dispatched by a role argv, default agent), plus the documented
+    headless module entrypoints (Codex 外门)."""
+    norm = [a.replace("\\", "/") for a in cmd]
+    dispatched = (
+        name.startswith(_BACKEND_NAME_PREFIX)
+        or any(a.endswith(_BACKEND_SOURCE_SUFFIX) for a in norm)
+        or _BACKEND_MODULE in cmd
+    )
+    if dispatched:
+        # The shell passes the role explicitly; a no-arg invocation defaults to agent
+        # (backend_main). hub requires an explicit "hub".
+        return "hub" if "hub" in cmd else "agent"
+    return _role_from_module(cmd)
+
+
 def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
-    """True only if `proc` is THIS app's own backend for `role` (agent|hub). Matches
-    the PyInstaller sidecar name, or a from-source run (`backend_main.py`), AND the
-    role argv — so we never mistake a foreign service for ours."""
+    """True only if `proc` is THIS app's own backend for `role` (agent|hub) — the
+    PyInstaller sidecar, the from-source packaging entrypoint, or the documented
+    `python -m taskpaw_v3.agent|hub` headless command — so we never mistake a foreign
+    service for ours."""
     try:
         name = (proc.name() or "").lower()
         cmd = [str(a) for a in (proc.cmdline() or [])]
     except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
         return False
-    is_backend = name.startswith(_BACKEND_NAME_PREFIX) or any(
-        a.replace("\\", "/").endswith(_BACKEND_SOURCE_SUFFIX) or a == _BACKEND_MODULE
-        for a in cmd
-    )
-    if not is_backend:
-        return False
-    # Match the role. The bundled shell always passes it explicitly, but a no-arg
-    # invocation defaults to agent (backend_main), so an agent must also reclaim a
-    # role-less backend; hub requires an explicit "hub" (Codex 外门).
-    has_agent = "agent" in cmd
-    has_hub = "hub" in cmd
-    if role == "agent":
-        return has_agent or not (has_agent or has_hub)
-    if role == "hub":
-        return has_hub
-    return False
+    return _backend_role(name, cmd) == role
 
 
 def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
