@@ -60,6 +60,14 @@ def test_aggregate_most_busy_wins():
     assert aggregate([t("claude"), t("codex")]) == ("none", [])
 
 
+def test_invalid_process_pattern_rejected_at_config_time():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        DevActivityConfig(name="ai", process_patterns={"claude": "("})  # bad regex
+
+
 def _check(cfg, monkeypatch, present):
     monkeypatch.setattr(da, "_detect_present", lambda patterns: present)
     inst = DevActivityPlugin().create("ai", cfg)

@@ -31,7 +31,7 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
@@ -72,6 +72,18 @@ class DevActivityConfig(BaseMonitorConfig):
     window_seconds: float = Field(1800.0, ge=60.0)
     # Optional per-tool process-pattern overrides (regex).
     process_patterns: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("process_patterns")
+    @classmethod
+    def _compilable(cls, v: dict[str, str]) -> dict[str, str]:
+        # Reject a bad override at config time (like ProcessConfig) — else it would
+        # raise re.error on every check() and degrade the monitor (Codex 外门).
+        for tool, pat in v.items():
+            try:
+                re.compile(pat)
+            except re.error as e:
+                raise ValueError(f"invalid regex for tool {tool!r}: {e}") from e
+        return v
 
 
 def _state_file(state_dir: str, tool: str) -> Path:
