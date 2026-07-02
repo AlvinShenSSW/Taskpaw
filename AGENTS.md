@@ -24,21 +24,25 @@ MacSubs (macsubs.py, :5679)  ──poll─────────────�
 | `taskpaw.py` | V2 agent — tkinter GUI + all watcher logic. Entry: `python taskpaw.py`. Config: `%APPDATA%\TaskPaw\config.json` (Win) / `~/Library/...` fallback. `APP_VERSION` 2.7.1. |
 | `taskpaw_hub.py` | V2 Hub (macOS) — polling, SQLite, OpenClaw forwarding, tkinter dashboard. Data: `~/.taskpaw-hub/hub.db`. |
 | `macsubs.py` | macOS subtitle-translation microservice exposing the same poll API. **Dropped from V3 monitoring.** |
+| `taskpaw_v3/` | **V3 monorepo (greenfield, scaffolded).** FastAPI backend + agent (`agent/`) + hub (`hub/`) + `core/` + monitors-as-plugins (`monitors/`) + React/Vite UI (`ui/`) + Tauri shell (`src-tauri/`) + migration tooling (`migrate/`) + `integrations/`, `packaging/`. Tests in `taskpaw_v3/tests/` (22 files). |
 | `docs/specs/` | Design docs. **`2026-06-27-taskpaw-v3-design.md` is the V3 source of truth.** |
+| `docs/guides/` | Operational guides — deployment, macOS/Windows signing, OpenClaw integration, dev-agent activity. |
 | `docs/constitution.md` | Hard rules every change is checked against. |
+| `scripts/` | Agent/Hub setup helpers (`setup-agent*`, `setup-hub*`), `build.py`, misc tooling. |
 | `design-system/taskpaw-v3/` | Generated UI/UX design system (MASTER + page overrides) for the V3 frontend. |
 | `skill/` | In-repo skills shipped with the code: `afk`, `codex-review`, `kimi-review`, `cto-pr-review`, `implementation-pilot`, `spec-planner`, `ui-ux-pro-max`. Each `SKILL.md` is self-contained. |
-| `BUG_AUDIT.md`, `CODE_AUDIT_REPORT.md`, `CODEX_AUDIT_FINDINGS.md`, `CHANGELOG.md` | Audit history; most P0/P1/P2 fixed in v2.7. |
+| `docs/audits/` (`BUG_AUDIT.md`, `CODE_AUDIT_REPORT.md`, `CODEX_AUDIT_FINDINGS.md`), `CHANGELOG.md` | Audit history; most P0/P1/P2 fixed in v2.7. |
 | `tests/` | pytest suite (smoke-level today; grow per-issue). |
 
 ## Status: V2 vs V3
 
 - **V2 = frozen** (critical fixes only). Don't add features or refactor V2 for taste.
-- **V3 = greenfield** under `taskpaw-v3/` (monorepo, not yet created): Tauri v2 +
-  React 19/Vite/MUI + FastAPI backend; monitors become self-describing plugins;
-  agent↔Hub poll protocol is **kept and only optimized**, not rewritten. First new
-  scenario: monitor the moomoo (MQT) trading server's four life-signs. See the V3
-  design doc.
+- **V3 = greenfield** under `taskpaw_v3/` (monorepo, now scaffolded): Tauri v2 +
+  React 19/Vite/MUI + FastAPI backend; monitors are self-describing plugins;
+  agent↔Hub poll protocol is **kept and only optimized**, not rewritten. The tree
+  already carries agent/hub/UI/Tauri shell, migration tooling, and a backend test
+  suite; work continues per the V3 design doc. First new scenario: monitor the
+  moomoo (MQT) trading server's four life-signs.
 
 ## Commands
 
@@ -60,11 +64,8 @@ Frontend (V3 UI) lint lives in `taskpaw_v3/ui`:
 cd taskpaw_v3/ui && npm run lint  # ESLint (React + TS)
 ```
 
-> **Note for the AFK / review skills:** the `afk` SKILL.md mentions
-> `uv run --locked --extra web pytest` — that `--extra web` is specific to a
-> *different* project (MDCX304). **In TaskPaw the test command is plain
-> `uv run pytest`** (there is no `web` extra). Optional extras here are `tray`
-> (GUI) and `build` (PyInstaller), neither needed for tests.
+> `uv run pytest` is the whole story here — there is no `web` extra. Optional
+> extras are `tray` (GUI) and `build` (PyInstaller), neither needed for tests.
 
 Run the apps (manual / desktop):
 

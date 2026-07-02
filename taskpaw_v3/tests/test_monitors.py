@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import threading
@@ -33,6 +34,21 @@ from taskpaw_v3.monitors.plugins.tcp_check import (
 )
 from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
 from taskpaw_v3.monitors.supervisor import Supervisor
+
+
+@contextlib.contextmanager
+def _expect_thread_death():
+    """Capture (and swallow) exceptions raised in worker threads for the duration
+    of the block. Used by tests that intentionally kill a worker so the death does
+    not leak out as a PytestUnhandledThreadExceptionWarning. Yields the list of
+    captured ``threading.ExceptHookArgs`` for assertions."""
+    caught: list = []
+    prev_hook = threading.excepthook
+    threading.excepthook = caught.append
+    try:
+        yield caught
+    finally:
+        threading.excepthook = prev_hook
 
 
 # ── registry ────────────────────────────────────────────────────────────--
@@ -389,16 +405,22 @@ def test_supervisor_watchdog_restarts_dead_worker():
         return MonitorStatus(state="ok")
 
     # SystemExit isn't caught by the check try/except (BaseException) → thread dies.
+    # The death is intentional, so swallow it via threading.excepthook to keep the
+    # suite warning-clean (an unhandled thread exception otherwise surfaces as a
+    # PytestUnhandledThreadExceptionWarning).
     sup = Supervisor(sink=lambda *a: None)
     sup.register(_FakePlugin(behavior), _FakeConfig(name="f", poll_interval=1))
-    sup.start()
-    try:
-        deadline = time.monotonic() + 6
-        while time.monotonic() < deadline and len(starts) < 2:
-            time.sleep(0.1)
-        assert len(starts) >= 2  # watchdog restarted it
-    finally:
-        sup.stop()
+    with _expect_thread_death() as caught:
+        sup.start()
+        try:
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline and len(starts) < 2:
+                time.sleep(0.1)
+            assert len(starts) >= 2  # watchdog restarted it
+        finally:
+            sup.stop()
+    # exactly the simulated death was swallowed, nothing unexpected
+    assert [e.exc_type for e in caught] == [SystemExit]
 
 
 def test_config_validators_grace_and_pattern():

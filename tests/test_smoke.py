@@ -11,6 +11,7 @@ stability, etc.) should be added per-issue as the V3 work lands.
 
 from __future__ import annotations
 
+import platform
 import py_compile
 import shutil
 import subprocess
@@ -60,7 +61,50 @@ BASH_SCRIPTS = sorted(
 )
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def _resolve_functional_bash() -> str | None:
+    """Return a `bash` executable that actually runs a command, else None.
+
+    Guards Linux/macOS runners that somehow lack a working bash, and — crucially —
+    returns the *same* resolved path the test then invokes, so the probe and the
+    real call can't hit different executables under unusual PATH ordering. (On
+    Windows the exe `shutil.which` finds, often Git Bash, and the one
+    `subprocess.run(["bash", ...])` launches via CreateProcess,
+    `C:\\Windows\\System32\\bash.exe` — the WSL stub — can differ; that case is
+    handled by the explicit Windows skip below.)
+    """
+    exe = shutil.which("bash")
+    if exe is None:
+        return None
+    try:
+        ok = (
+            subprocess.run(
+                [exe, "-c", "exit 0"], capture_output=True, timeout=30
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return exe if ok else None
+
+
+# Short-circuit on Windows: the test is skipped there anyway, so don't spawn the
+# WSL-launcher bash at import time (avoids the "install a distribution" notice +
+# collection latency).
+_FUNCTIONAL_BASH = (
+    None if platform.system() == "Windows" else _resolve_functional_bash()
+)
+
+
+# These are POSIX (macOS/Linux) setup scripts — never executed on Windows. A
+# Windows runner's `bash` is unreliable here: `subprocess.run(["bash", ...])`
+# resolves to the WSL launcher `System32\bash.exe`, which with no distro prints an
+# "install a distribution" notice and exits non-zero for every call (and even Git
+# Bash mishandles the Windows-path argument). Syntax-check them where a real POSIX
+# bash exists; skip on Windows and where bash is non-functional.
+@pytest.mark.skipif(
+    platform.system() == "Windows" or _FUNCTIONAL_BASH is None,
+    reason="POSIX-only scripts; bash -n unreliable on Windows / no functional bash",
+)
 @pytest.mark.parametrize("rel_path", BASH_SCRIPTS or ["<none>"])
 def test_shell_script_parses(rel_path: str) -> None:
     """Each bash script (by shebang) must parse under `bash -n` (syntax gate)."""
@@ -68,7 +112,7 @@ def test_shell_script_parses(rel_path: str) -> None:
         pytest.skip("no bash scripts to check")
     script = REPO_ROOT / rel_path
     result = subprocess.run(
-        ["bash", "-n", str(script)],
+        [_FUNCTIONAL_BASH, "-n", str(script)],
         capture_output=True,
         text=True,
     )

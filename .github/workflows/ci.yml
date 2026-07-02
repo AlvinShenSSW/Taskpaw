@@ -39,12 +39,19 @@ jobs:
         run: uv run mypy
 
   test:
-    name: test (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: test (py${{ matrix.python-version }} · ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.12"]
+        # Windows is the PRIMARY agent target (#143), so run the suite there too —
+        # a single cheap entry (latest supported py) to catch path-separator /
+        # encoding / process-handling regressions. Packaging (#126) stays separate.
+        include:
+          - os: windows-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v5
 
@@ -59,8 +66,8 @@ jobs:
       - name: Sync dev environment
         run: uv sync --group dev --python ${{ matrix.python-version }}
 
-      - name: Run tests
-        run: uv run --python ${{ matrix.python-version }} pytest
+      - name: Run tests (with V3 coverage report; no hard threshold yet)
+        run: uv run --python ${{ matrix.python-version }} pytest --cov=taskpaw_v3 --cov-report=term-missing
 
   frontend:
     name: frontend build (V3 UI)
