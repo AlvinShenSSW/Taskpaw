@@ -31,19 +31,20 @@ from taskpaw_v3.monitors.base import (
     MonitorInstance,
     MonitorPlugin,
     MonitorStatus,
+    State,
 )
 
 
 class StateFileConfig(BaseMonitorConfig):
     path: str = Field(..., min_length=1)
     state_field: str = "state"
-    ts_field: str = "ts"                    # epoch seconds or ISO8601; else mtime
+    ts_field: str = "ts"  # epoch seconds or ISO8601; else mtime
     busy_states: list[str] = ["busy", "running"]
     waiting_states: list[str] = ["waiting", "blocked"]
     idle_states: list[str] = ["idle", "done", "ok"]
-    busy_alert_seconds: float = Field(0.0, ge=0)   # 0 = no busy-too-long watchdog
-    stale_seconds: float = Field(0.0, ge=0)        # 0 = no staleness watchdog
-    missing_is_idle: bool = True            # no file yet = idle (agent not started)
+    busy_alert_seconds: float = Field(0.0, ge=0)  # 0 = no busy-too-long watchdog
+    stale_seconds: float = Field(0.0, ge=0)  # 0 = no staleness watchdog
+    missing_is_idle: bool = True  # no file yet = idle (agent not started)
 
 
 def _classify(value: str, cfg: StateFileConfig) -> str:
@@ -74,13 +75,18 @@ def _parse_ts(raw, fallback_mtime: float) -> float:
         return fallback_mtime
 
 
-_STATE_MAP = {"busy": "running", "waiting": "idle", "idle": "idle", "unknown": "unknown"}
+_STATE_MAP: dict[str, State] = {
+    "busy": "running",
+    "waiting": "idle",
+    "idle": "idle",
+    "unknown": "unknown",
+}
 
 
 class StateFileInstance(MonitorInstance):
     def __init__(self, instance_id: str, config: StateFileConfig) -> None:
         super().__init__(instance_id, config)
-        self._prev: Optional[str] = None   # busy|waiting|idle|unknown|missing
+        self._prev: Optional[str] = None  # busy|waiting|idle|unknown|missing
         self._busy_alerted = False
         self._stale_alerted = False
         # When the CURRENT busy episode began (file ts at first busy sighting).
@@ -126,10 +132,15 @@ class StateFileInstance(MonitorInstance):
         # Watchdog: file no longer being updated → producer likely stopped.
         if cfg.stale_seconds and age > cfg.stale_seconds:
             if not self._stale_alerted:
-                emit("alert", f"{cfg.name}: activity stale",
-                     f"{tool} state file not updated for {int(age)}s")
+                emit(
+                    "alert",
+                    f"{cfg.name}: activity stale",
+                    f"{tool} state file not updated for {int(age)}s",
+                )
                 self._stale_alerted = True
-            return MonitorStatus(state="degraded", detail=f"stale {int(age)}s", metrics=metrics)
+            return MonitorStatus(
+                state="degraded", detail=f"stale {int(age)}s", metrics=metrics
+            )
         self._stale_alerted = False
 
         # Watchdog: busy for too long → possibly stuck / waiting unnoticed.
@@ -142,8 +153,11 @@ class StateFileInstance(MonitorInstance):
             metrics["busy_s"] = int(busy_elapsed)
             if cfg.busy_alert_seconds and busy_elapsed > cfg.busy_alert_seconds:
                 if not self._busy_alerted:
-                    emit("alert", f"{cfg.name}: busy too long",
-                         f"{tool} has been busy for {int(busy_elapsed)}s")
+                    emit(
+                        "alert",
+                        f"{cfg.name}: busy too long",
+                        f"{tool} has been busy for {int(busy_elapsed)}s",
+                    )
                     self._busy_alerted = True
         else:
             self._busy_start_ts = None
@@ -151,8 +165,9 @@ class StateFileInstance(MonitorInstance):
 
         return MonitorStatus(state=state, detail=detail, metrics=metrics)
 
-    def _maybe_emit_transition(self, emit: EventEmitter, kind: str,
-                               cfg: StateFileConfig, tool: str = "agent") -> None:
+    def _maybe_emit_transition(
+        self, emit: EventEmitter, kind: str, cfg: StateFileConfig, tool: str = "agent"
+    ) -> None:
         if kind == self._prev:
             return
         prev = self._prev

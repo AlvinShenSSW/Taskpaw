@@ -76,17 +76,20 @@ def guard_bind_exposure(host: str, api_token: str, *, label: str) -> None:
     if bind_is_wildcard(host):
         raise ValueError(
             f"refusing to bind the {label} to all interfaces ({host!r}) — use "
-            f"127.0.0.1 or a specific LAN address.")
+            f"127.0.0.1 or a specific LAN address."
+        )
     if bind_is_global(host):
         raise ValueError(
             f"refusing to bind the {label} to a public/WAN address ({host}) — the "
             f"API is LAN + Bearer only. Use a private LAN address (with a token) "
-            f"or 127.0.0.1.")
+            f"or 127.0.0.1."
+        )
     if not bind_is_loopback(host) and not (api_token or "").strip():
         raise ValueError(
             f"binding the {label} to a non-loopback address ({host}) requires an "
             f"api_token, or /status and /events would be reachable off-host without "
-            f"auth. Set a token, or keep the bind on 127.0.0.1.")
+            f"auth. Set a token, or keep the bind on 127.0.0.1."
+        )
 
 
 def loopback_url(host: str, port: int) -> str:
@@ -110,8 +113,10 @@ def announce_ready(role: str, base_url: str) -> None:
     injects this base_url (so a custom port works and the UI never races the
     backend). All logs go to stderr (logging.basicConfig), so stdout carries only
     this line; flushed so a piped shell sees it immediately."""
-    print(json.dumps({"taskpaw_ready": True, "role": role, "base_url": base_url}),
-          flush=True)
+    print(
+        json.dumps({"taskpaw_ready": True, "role": role, "base_url": base_url}),
+        flush=True,
+    )
 
 
 def _family(host: str) -> int:

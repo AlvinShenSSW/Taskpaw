@@ -7,7 +7,6 @@ due index), and local-ISO timestamps compared lexically (consistent format).
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import sqlite3
@@ -42,7 +41,9 @@ class HubStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10)
+        self._conn = sqlite3.connect(
+            str(self.db_path), check_same_thread=False, timeout=10
+        )
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
@@ -129,13 +130,19 @@ class HubStore:
             )
             # status_log grows one row per server per poll; index the access paths
             # (latest-per-server + prune-by-time) to avoid full scans (Kimi).
-            c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_server_time "
-                      "ON status_log(server_id, timestamp, id)")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_time "
-                      "ON status_log(timestamp)")
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_status_log_server_time "
+                "ON status_log(server_id, timestamp, id)"
+            )
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_status_log_time "
+                "ON status_log(timestamp)"
+            )
             # Partial index for the last_seen (last reachable) subquery.
-            c.execute("CREATE INDEX IF NOT EXISTS idx_status_log_reachable "
-                      "ON status_log(server_id, timestamp, id) WHERE reachable = 1")
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_status_log_reachable "
+                "ON status_log(server_id, timestamp, id) WHERE reachable = 1"
+            )
             self._conn.commit()
 
     def _legacy_event_tables(self) -> list[str]:
@@ -154,18 +161,28 @@ class HubStore:
         ~/.taskpaw-hub, which may already hold a V2 hub.db or an early-V3 one;
         without this the first poll/open crashes on a missing/renamed column (#38
         review). servers is column-compatible with V2, so it needs no change."""
+
         def cols(table: str) -> set[str]:
-            return {r[1] for r in c.execute(f"PRAGMA table_info({_safe_ident(table)})").fetchall()}
+            return {
+                r[1]
+                for r in c.execute(
+                    f"PRAGMA table_info({_safe_ident(table)})"
+                ).fetchall()
+            }
 
         slog = cols("status_log")
         if slog:  # table pre-existed (else the later CREATE makes the right shape)
             if "payload_json" in slog and "status_json" not in slog:
-                c.execute("ALTER TABLE status_log RENAME COLUMN payload_json TO status_json")
+                c.execute(
+                    "ALTER TABLE status_log RENAME COLUMN payload_json TO status_json"
+                )
             if "status_json" not in slog and "payload_json" not in slog:
                 c.execute("ALTER TABLE status_log ADD COLUMN status_json TEXT")
             if "reachable" not in slog:
                 # V2 only logged reachable agents → legacy rows are reachable=1.
-                c.execute("ALTER TABLE status_log ADD COLUMN reachable INTEGER NOT NULL DEFAULT 1")
+                c.execute(
+                    "ALTER TABLE status_log ADD COLUMN reachable INTEGER NOT NULL DEFAULT 1"
+                )
 
         # V2 `events` has a different shape (no event_id) and isn't read by
         # OpenClaw. PRESERVE it as events_v2_legacy (no silent data loss — Kimi)
@@ -179,8 +196,11 @@ class HubStore:
                 n += 1
                 name = f"events_v2_legacy_{n}"
             c.execute(f"ALTER TABLE events RENAME TO {_safe_ident(name)}")
-            log.warning("Migrated V2 'events' table to '%s' (V3 uses a new events "
-                        "schema; old rows preserved there)", name)
+            log.warning(
+                "Migrated V2 'events' table to '%s' (V3 uses a new events "
+                "schema; old rows preserved there)",
+                name,
+            )
 
         # An old delivery_outbox without dedupe_key would break the dedupe index.
         ob = cols("delivery_outbox")
@@ -188,8 +208,10 @@ class HubStore:
             if "dedupe_key" not in ob:
                 c.execute("ALTER TABLE delivery_outbox ADD COLUMN dedupe_key TEXT")
             if "dead_letter_alerted" not in ob:
-                c.execute("ALTER TABLE delivery_outbox ADD COLUMN "
-                          "dead_letter_alerted INTEGER NOT NULL DEFAULT 0")
+                c.execute(
+                    "ALTER TABLE delivery_outbox ADD COLUMN "
+                    "dead_letter_alerted INTEGER NOT NULL DEFAULT 0"
+                )
 
     # ── config ────────────────────────────────────────────────────────────
     def get_config(self, key: str, default: str = "") -> str:
@@ -213,7 +235,9 @@ class HubStore:
                 raise
 
     # ── servers ───────────────────────────────────────────────────────────
-    def add_server(self, name: str, ip: str, port: int = 5680, enabled: bool = True) -> int:
+    def add_server(
+        self, name: str, ip: str, port: int = 5680, enabled: bool = True
+    ) -> int:
         with self._lock:
             try:
                 cur = self._conn.execute(
@@ -221,6 +245,7 @@ class HubStore:
                     (name, ip, port, int(enabled)),
                 )
                 self._conn.commit()
+                assert cur.lastrowid is not None  # set by INSERT
                 return cur.lastrowid
             except Exception:
                 self._conn.rollback()
@@ -243,22 +268,33 @@ class HubStore:
             self._conn.commit()
             return cur.rowcount > 0
 
-    def update_server(self, server_id: int, *, name: Optional[str] = None,
-                      ip: Optional[str] = None, port: Optional[int] = None,
-                      enabled: Optional[bool] = None) -> bool:
+    def update_server(
+        self,
+        server_id: int,
+        *,
+        name: Optional[str] = None,
+        ip: Optional[str] = None,
+        port: Optional[int] = None,
+        enabled: Optional[bool] = None,
+    ) -> bool:
         """Edit a server's name/ip/port/enabled from the dashboard (#124), all in
         ONE UPDATE (one transaction) so a partial edit can't be left behind (Kimi).
         Only the given fields change. Returns True if the row exists; raises
         sqlite3.IntegrityError on a duplicate name (UNIQUE) → the API 400s."""
-        sets, params = [], []
+        sets: list[str] = []
+        params: list[Any] = []
         if name is not None:
-            sets.append("name=?"); params.append(name)
+            sets.append("name=?")
+            params.append(name)
         if ip is not None:
-            sets.append("ip=?"); params.append(ip)
+            sets.append("ip=?")
+            params.append(ip)
         if port is not None:
-            sets.append("port=?"); params.append(int(port))
+            sets.append("port=?")
+            params.append(int(port))
         if enabled is not None:
-            sets.append("enabled=?"); params.append(int(enabled))
+            sets.append("enabled=?")
+            params.append(int(enabled))
         if not sets:
             return self.get_server(server_id) is not None
         params.append(server_id)
@@ -276,7 +312,8 @@ class HubStore:
     def get_server(self, server_id: int) -> Optional[dict[str, Any]]:
         with self._lock:
             cur = self._conn.execute(
-                "SELECT id, name, ip, port, enabled FROM servers WHERE id=?", (server_id,)
+                "SELECT id, name, ip, port, enabled FROM servers WHERE id=?",
+                (server_id,),
             )
             row = cur.fetchone()
             return dict(zip([d[0] for d in cur.description], row)) if row else None
@@ -293,13 +330,17 @@ class HubStore:
                 ).fetchone()
                 if row is None:
                     return False
-                self._conn.execute("DELETE FROM status_log WHERE server_id=?", (server_id,))
+                self._conn.execute(
+                    "DELETE FROM status_log WHERE server_id=?", (server_id,)
+                )
                 self._conn.execute("DELETE FROM events WHERE server_id=?", (server_id,))
                 # Migrated V2 events_v2_legacy retains an FK to servers — clear its
                 # rows too or DELETE servers raises FK-violation (Codex/Kimi).
                 for legacy in self._legacy_event_tables():
                     self._conn.execute(
-                        f"DELETE FROM {_safe_ident(legacy)} WHERE server_id=?", (server_id,))
+                        f"DELETE FROM {_safe_ident(legacy)} WHERE server_id=?",
+                        (server_id,),
+                    )
                 self._conn.execute(
                     "DELETE FROM delivery_outbox WHERE server_name=?", (row[0],)
                 )
@@ -311,8 +352,9 @@ class HubStore:
                 raise
 
     # ── status_log (OpenClaw compat: status.md + 24h history, #38) ──────────
-    def log_status(self, server_id: int, reachable: bool,
-                   status_json: Optional[str] = None) -> None:
+    def log_status(
+        self, server_id: int, reachable: bool, status_json: Optional[str] = None
+    ) -> None:
         """Append a status snapshot for a server (one row per poll). Timestamp is
         SQLite localtime to match V2's status_log so OpenClaw's queries work."""
         with self._lock:
@@ -322,7 +364,11 @@ class HubStore:
                     "VALUES(?, datetime('now','localtime'), ?, ?)",
                     # Coalesce None→'{}' so a migrated V2 table (status_json NOT NULL)
                     # doesn't IntegrityError on an unreachable snapshot (Kimi).
-                    (server_id, int(reachable), status_json if status_json is not None else "{}"),
+                    (
+                        server_id,
+                        int(reachable),
+                        status_json if status_json is not None else "{}",
+                    ),
                 )
                 self._conn.commit()
             except Exception:
@@ -365,12 +411,17 @@ class HubStore:
             return cur.rowcount
 
     # ── events ────────────────────────────────────────────────────────────
-    def recent_events(self, server_id: Optional[int] = None,
-                      level: Optional[str] = None, limit: int = 200) -> list[dict[str, Any]]:
+    def recent_events(
+        self,
+        server_id: Optional[int] = None,
+        level: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
         """Most-recent events across servers (newest first) for the Hub dashboard's
         event log (#44). Joins the server name and optionally filters by server
         and/or level. `limit` is clamped by the caller (the route)."""
-        clauses, params = [], []
+        clauses: list[str] = []
+        params: list[Any] = []
         if server_id is not None:
             clauses.append("e.server_id = ?")
             params.append(int(server_id))
@@ -438,17 +489,27 @@ class HubStore:
                     " last_error, next_attempt_at, created_at, dedupe_key) "
                     "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        server_name, payload_json, kind, delivery_state, attempts,
-                        last_error, _dt(next_attempt_at), _dt(), dedupe_key,
+                        server_name,
+                        payload_json,
+                        kind,
+                        delivery_state,
+                        attempts,
+                        last_error,
+                        _dt(next_attempt_at),
+                        _dt(),
+                        dedupe_key,
                     ),
                 )
                 self._conn.commit()
+                assert cur.lastrowid is not None  # set by INSERT
                 return cur.lastrowid
             except Exception:
                 self._conn.rollback()
                 raise
 
-    def due_deliveries(self, now: Optional[datetime] = None, limit: int = 10) -> list[dict]:
+    def due_deliveries(
+        self, now: Optional[datetime] = None, limit: int = 10
+    ) -> list[dict]:
         with self._lock:
             cur = self._conn.execute(
                 "SELECT id, server_name, payload_json, kind, delivery_state, attempts, "
@@ -463,14 +524,20 @@ class HubStore:
     def delete_delivery(self, delivery_id: int) -> None:
         with self._lock:
             try:
-                self._conn.execute("DELETE FROM delivery_outbox WHERE id=?", (delivery_id,))
+                self._conn.execute(
+                    "DELETE FROM delivery_outbox WHERE id=?", (delivery_id,)
+                )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
                 raise
 
     def mark_delivery_failed(
-        self, delivery_id: int, attempts: int, last_error: str, next_attempt_at: datetime
+        self,
+        delivery_id: int,
+        attempts: int,
+        last_error: str,
+        next_attempt_at: datetime,
     ) -> None:
         with self._lock:
             try:
@@ -484,7 +551,9 @@ class HubStore:
                 self._conn.rollback()
                 raise
 
-    def mark_delivery_dead_letter(self, delivery_id: int, attempts: int, last_error: str) -> bool:
+    def mark_delivery_dead_letter(
+        self, delivery_id: int, attempts: int, last_error: str
+    ) -> bool:
         """Mark dead-lettered; return True if a local alert is due (once)."""
         with self._lock:
             try:

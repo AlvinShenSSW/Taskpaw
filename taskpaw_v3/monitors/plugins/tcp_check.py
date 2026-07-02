@@ -10,6 +10,8 @@ from __future__ import annotations
 import socket
 from typing import Optional
 
+from pydantic import Field
+
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -17,9 +19,6 @@ from taskpaw_v3.monitors.base import (
     MonitorPlugin,
     MonitorStatus,
 )
-
-
-from pydantic import Field
 
 
 class TcpCheckConfig(BaseMonitorConfig):

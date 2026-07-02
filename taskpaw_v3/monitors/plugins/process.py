@@ -28,13 +28,21 @@ except ImportError:  # pragma: no cover
 
 
 class ProcessConfig(BaseMonitorConfig):
-    pattern: str = Field(..., min_length=1, description="Regex matched against the "
-                         "process name (and command line if enabled below), e.g. "
-                         "^lada-cli$ or PM2.*God")
-    search_cmdline: bool = Field(True, description="Also match against the full "
-                                 "command line, not just the process name.")
-    category_label: str = Field("service", description="Label shown for this monitor "
-                                "(e.g. service, task).")
+    pattern: str = Field(
+        ...,
+        min_length=1,
+        description="Regex matched against the "
+        "process name (and command line if enabled below), e.g. "
+        "^lada-cli$ or PM2.*God",
+    )
+    search_cmdline: bool = Field(
+        True,
+        description="Also match against the full "
+        "command line, not just the process name.",
+    )
+    category_label: str = Field(
+        "service", description="Label shown for this monitor (e.g. service, task)."
+    )
 
     @field_validator("pattern")
     @classmethod
@@ -87,11 +95,19 @@ class ProcessInstance(MonitorInstance):
         # Alert on a down state at startup (prev is None) too, not only on a
         # healthy→down transition.
         if not alive and self._prev_alive in (None, True):
-            emit("alert", f"{cfg.name} down", f"no process matching /{cfg.pattern}/",
-                 dedupe_key=None)
+            emit(
+                "alert",
+                f"{cfg.name} down",
+                f"no process matching /{cfg.pattern}/",
+                dedupe_key=None,
+            )
         elif alive and self._prev_alive is False:
-            emit("done", f"{cfg.name} recovered", f"process matching /{cfg.pattern}/ is back",
-                 dedupe_key=None)
+            emit(
+                "done",
+                f"{cfg.name} recovered",
+                f"process matching /{cfg.pattern}/ is back",
+                dedupe_key=None,
+            )
         self._prev_alive = alive
         return MonitorStatus(
             state="ok" if alive else "error",
@@ -112,7 +128,12 @@ class ProcessPlugin(MonitorPlugin):
 
     @classmethod
     def ui_schema(cls) -> dict:
-        return {"pattern": {"widget": "regex", "help": "regex matched against process name/cmdline"}}
+        return {
+            "pattern": {
+                "widget": "regex",
+                "help": "regex matched against process name/cmdline",
+            }
+        }
 
     def create(self, instance_id: str, config: BaseMonitorConfig) -> MonitorInstance:
         return ProcessInstance(instance_id, config)  # type: ignore[arg-type]

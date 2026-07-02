@@ -35,7 +35,7 @@ class _FakeStdout:
     def read(self, n: int) -> bytes:
         if self._pos >= len(self._data):
             return b""
-        chunk = self._data[self._pos:self._pos + n]
+        chunk = self._data[self._pos : self._pos + n]
         self._pos += n
         return chunk
 
@@ -53,8 +53,10 @@ class _ExitedProcess:
 def test_parse_filename_then_progress():
     p = parse_progress_line("sample-video.mp4:", {})
     assert p == {"current_file": "sample-video.mp4"}
-    line = ("正在处理视频： 27%|███ |已处理： 26:58 (84163帧) | "
-            "剩余： 1:45:32 (230599帧) | 速度：36.4 帧/秒")
+    line = (
+        "正在处理视频： 27%|███ |已处理： 26:58 (84163帧) | "
+        "剩余： 1:45:32 (230599帧) | 速度：36.4 帧/秒"
+    )
     p = parse_progress_line(line, p)
     assert p["current_file"] == "sample-video.mp4"
     assert p["percent"] == 27
@@ -68,8 +70,10 @@ def test_parse_english_filename_then_progress():
     stale = {"current_file": "old.mp4", "percent": 90, "fps": 10.0}
     p = parse_progress_line("ABF-346.mp4:", stale)
     assert p == {"current_file": "ABF-346.mp4"}
-    line = ("Processing video:  15%|███▍      |Processed: 06:09 (36703f) | "
-            "Remaining: 30:47 (207454f) | Speed: 112.3fps")
+    line = (
+        "Processing video:  15%|███▍      |Processed: 06:09 (36703f) | "
+        "Remaining: 30:47 (207454f) | Speed: 112.3fps"
+    )
     p = parse_progress_line(line, p)
     assert p["current_file"] == "ABF-346.mp4"
     assert p["percent"] == 15
@@ -82,8 +86,10 @@ def test_parse_english_filename_then_progress():
 
 def test_parse_english_estimating_progress_leaves_prior_eta_and_fps():
     p = {"eta": "10:00", "remaining_frames": 1000, "fps": 20.0}
-    line = ("Processing video:  0%|          |Processed: 00:01 (5f) | "
-            "Remaining: ? | Speed: ?")
+    line = (
+        "Processing video:  0%|          |Processed: 00:01 (5f) | "
+        "Remaining: ? | Speed: ?"
+    )
     p = parse_progress_line(line, p)
     assert p["percent"] == 0
     assert p["elapsed"] == "00:01"
@@ -100,35 +106,41 @@ def test_parse_new_file_resets_stale_progress():
 
 def test_parse_ignores_noise():
     assert parse_progress_line("", {"x": 1}) == {"x": 1}
-    assert parse_progress_line("loading model...", {}) == {}   # no % → unchanged
+    assert parse_progress_line("loading model...", {}) == {}  # no % → unchanged
 
 
 # ── snapshot / queue / current-file ────────────────────────────────────────
 def test_queue_counts_and_current_file(tmp_path):
     inp, out = tmp_path / "in", tmp_path / "out"
-    inp.mkdir(); out.mkdir()
+    inp.mkdir()
+    out.mkdir()
     for n in ["a.mp4", "b.mp4", "c.mp4"]:
         (inp / n).write_bytes(b"x")
-    (out / "a_restored.mp4").write_bytes(b"x")   # 1 done (renamed output)
-    inst = LadaInstance("lada", _cfg(lada_input_folder=str(inp), lada_output_folder=str(out)))
+    (out / "a_restored.mp4").write_bytes(b"x")  # 1 done (renamed output)
+    inst = LadaInstance(
+        "lada", _cfg(lada_input_folder=str(inp), lada_output_folder=str(out))
+    )
     _, emit = _events()
-    inst.start(emit)   # passive (no cli_path) → snapshots inputs
+    inst.start(emit)  # passive (no cli_path) → snapshots inputs
     assert inst._queue_counts() == (1, 3)
-    assert inst._detect_current_file() == "b.mp4"   # idx = output_count(1) → inputs[1]
+    assert inst._detect_current_file() == "b.mp4"  # idx = output_count(1) → inputs[1]
 
 
 def test_reconcile_drops_user_removed_pending(tmp_path):
     inp, out = tmp_path / "in", tmp_path / "out"
-    inp.mkdir(); out.mkdir()
+    inp.mkdir()
+    out.mkdir()
     for n in ["a.mp4", "b.mp4", "c.mp4"]:
         (inp / n).write_bytes(b"x")
-    inst = LadaInstance("lada", _cfg(lada_input_folder=str(inp), lada_output_folder=str(out)))
+    inst = LadaInstance(
+        "lada", _cfg(lada_input_folder=str(inp), lada_output_folder=str(out))
+    )
     _, emit = _events()
     inst.start(emit)
     assert inst._inputs == ["a.mp4", "b.mp4", "c.mp4"]
-    (inp / "c.mp4").unlink()                        # user removes a pending file
+    (inp / "c.mp4").unlink()  # user removes a pending file
     inst._reconcile_snapshot()
-    assert inst._inputs == ["a.mp4", "b.mp4"]       # total shrinks, not stuck at 3
+    assert inst._inputs == ["a.mp4", "b.mp4"]  # total shrinks, not stuck at 3
 
 
 # ── managed launch / errors / cleanup ──────────────────────────────────────
@@ -144,14 +156,27 @@ def test_managed_launch_builds_argv_no_shell(monkeypatch):
             return None
 
     monkeypatch.setattr("taskpaw_v3.monitors.plugins.lada.subprocess.Popen", FakePopen)
-    inst = LadaInstance("lada", _cfg(
-        lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
-        lada_output_folder="/out", lada_extra_args="--device cuda:1"))
+    inst = LadaInstance(
+        "lada",
+        _cfg(
+            lada_cli_path="/bin/lada-cli",
+            lada_input_folder="/in",
+            lada_output_folder="/out",
+            lada_extra_args="--device cuda:1",
+        ),
+    )
     _, emit = _events()
     inst.start(emit)
     # list argv (shell=False) with input/output/extra args in order
-    assert captured["cmd"] == ["/bin/lada-cli", "--input", "/in",
-                               "--output", "/out", "--device", "cuda:1"]
+    assert captured["cmd"] == [
+        "/bin/lada-cli",
+        "--input",
+        "/in",
+        "--output",
+        "/out",
+        "--device",
+        "cuda:1",
+    ]
     assert inst._launch_error is None
 
 
@@ -160,10 +185,16 @@ def test_cli_not_found_sets_error_and_does_not_raise(monkeypatch):
         raise FileNotFoundError()
 
     monkeypatch.setattr("taskpaw_v3.monitors.plugins.lada.subprocess.Popen", boom)
-    inst = LadaInstance("lada", _cfg(lada_cli_path="/nope/lada-cli",
-                                     lada_input_folder="/in", lada_output_folder="/out"))
+    inst = LadaInstance(
+        "lada",
+        _cfg(
+            lada_cli_path="/nope/lada-cli",
+            lada_input_folder="/in",
+            lada_output_folder="/out",
+        ),
+    )
     evs, emit = _events()
-    inst.start(emit)                                # must NOT raise
+    inst.start(emit)  # must NOT raise
     assert inst._launch_error and "not found" in inst._launch_error
     assert evs and evs[0][0] == "alert"
     assert inst.check(emit).state == "error"
@@ -173,20 +204,32 @@ def test_cli_path_is_a_folder_gives_actionable_error(tmp_path):
     # The #1 real misconfig: lada_cli_path points at the install FOLDER, not the
     # exe → Popen would raise a cryptic "[WinError 5]". Catch it before launch with
     # a message that names the executable to use (#70).
-    inst = LadaInstance("lada", _cfg(lada_cli_path=str(tmp_path),     # a directory
-                                     lada_input_folder="/in", lada_output_folder="/out"))
+    inst = LadaInstance(
+        "lada",
+        _cfg(
+            lada_cli_path=str(tmp_path),  # a directory
+            lada_input_folder="/in",
+            lada_output_folder="/out",
+        ),
+    )
     evs, emit = _events()
-    inst.start(emit)                                # must NOT raise
+    inst.start(emit)  # must NOT raise
     assert inst._launch_error and "is a folder" in inst._launch_error
-    assert "lada-cli.exe" in inst._launch_error      # points at the executable
+    assert "lada-cli.exe" in inst._launch_error  # points at the executable
     assert evs and evs[0][0] == "alert"
     assert inst.check(emit).state == "error"
 
 
 def test_managed_nonzero_capture_reports_recent_error_output():
-    inst = LadaInstance("lada", _cfg(
-        lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
-        lada_output_folder="/out", lada_capture_progress=True))
+    inst = LadaInstance(
+        "lada",
+        _cfg(
+            lada_cli_path="/bin/lada-cli",
+            lada_input_folder="/in",
+            lada_output_folder="/out",
+            lada_capture_progress=True,
+        ),
+    )
     inst._process = _ExitedProcess(
         "sample.mp4:\n"
         "Processing video:  15%|Processed: 00:01 (1f) | Remaining: 00:09 (9f) | Speed: 1.0fps\r"
@@ -210,11 +253,18 @@ def test_managed_nonzero_capture_reports_recent_error_output():
 def test_managed_nonzero_capture_flushes_unterminated_final_line():
     # A crash line printed right before exit may reach us without a trailing
     # newline before the pipe closes — it must still be captured (Kimi 终审).
-    inst = LadaInstance("lada", _cfg(
-        lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
-        lada_output_folder="/out", lada_capture_progress=True))
+    inst = LadaInstance(
+        "lada",
+        _cfg(
+            lada_cli_path="/bin/lada-cli",
+            lada_input_folder="/in",
+            lada_output_folder="/out",
+            lada_capture_progress=True,
+        ),
+    )
     inst._process = _ExitedProcess(
-        "Error on export: frame restorer stopped prematurely", 1)  # no trailing \n
+        "Error on export: frame restorer stopped prematurely", 1
+    )  # no trailing \n
     inst._reader_loop()
 
     evs, emit = _events()
@@ -226,9 +276,15 @@ def test_managed_nonzero_capture_flushes_unterminated_final_line():
 
 
 def test_managed_nonzero_non_capture_detail_has_no_tail():
-    inst = LadaInstance("lada", _cfg(
-        lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
-        lada_output_folder="/out", lada_capture_progress=False))
+    inst = LadaInstance(
+        "lada",
+        _cfg(
+            lada_cli_path="/bin/lada-cli",
+            lada_input_folder="/in",
+            lada_output_folder="/out",
+            lada_capture_progress=False,
+        ),
+    )
     inst._process = _ExitedProcess("", 9)
 
     evs, emit = _events()
@@ -241,9 +297,15 @@ def test_managed_nonzero_non_capture_detail_has_no_tail():
 
 def test_managed_nonzero_capture_error_tail_is_bounded():
     lines = [f"error line {i:03d}: " + ("x" * 80) for i in range(100)]
-    inst = LadaInstance("lada", _cfg(
-        lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
-        lada_output_folder="/out", lada_capture_progress=True))
+    inst = LadaInstance(
+        "lada",
+        _cfg(
+            lada_cli_path="/bin/lada-cli",
+            lada_input_folder="/in",
+            lada_output_folder="/out",
+            lada_capture_progress=True,
+        ),
+    )
     inst._process = _ExitedProcess("\n".join(lines) + "\n", 3)
     inst._reader_loop()
 
@@ -260,7 +322,9 @@ def test_managed_nonzero_capture_error_tail_is_bounded():
 
 def test_managed_requires_input_output_folders():
     import pytest
+
     from taskpaw_v3.monitors.plugins.lada import LadaConfig
+
     # managed (cli path set) without folders → rejected with a clear message (#70)
     with pytest.raises(ValueError) as e:
         LadaConfig(name="l", lada_cli_path="/bin/lada-cli")
@@ -268,41 +332,62 @@ def test_managed_requires_input_output_folders():
     # passive (no cli path) needs neither
     LadaConfig(name="l")
     # managed WITH folders is fine
-    LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
-               lada_input_folder="/in", lada_output_folder="/out")
+    LadaConfig(
+        name="l",
+        lada_cli_path="/bin/lada-cli",
+        lada_input_folder="/in",
+        lada_output_folder="/out",
+    )
     # …or with --input/--output passed through extra args (Codex #70)
-    LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
-               lada_extra_args="--input /in --output /out")
+    LadaConfig(
+        name="l",
+        lada_cli_path="/bin/lada-cli",
+        lada_extra_args="--input /in --output /out",
+    )
     # …including the --input=… form
-    LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
-               lada_extra_args="--input=/in --output=/out")
+    LadaConfig(
+        name="l",
+        lada_cli_path="/bin/lada-cli",
+        lada_extra_args="--input=/in --output=/out",
+    )
     # but LOOKALIKE flags (--input-size / --output-format) must NOT satisfy it —
     # exact-token match, not substring (Codex #70 r3)
     with pytest.raises(ValueError):
-        LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
-                   lada_extra_args="--input-size 720 --output-format mp4")
+        LadaConfig(
+            name="l",
+            lada_cli_path="/bin/lada-cli",
+            lada_extra_args="--input-size 720 --output-format mp4",
+        )
     # …nor a BARE flag / empty value that supplies no actual path (Codex #70 r8)
     with pytest.raises(ValueError):
-        LadaConfig(name="l", lada_cli_path="/bin/lada-cli",
-                   lada_extra_args="--input --output")
+        LadaConfig(
+            name="l", lada_cli_path="/bin/lada-cli", lada_extra_args="--input --output"
+        )
     with pytest.raises(ValueError):
-        LadaConfig(name="l", lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
-                   lada_extra_args="--output=")     # empty =value → output still missing
+        LadaConfig(
+            name="l",
+            lada_cli_path="/bin/lada-cli",
+            lada_input_folder="/in",
+            lada_extra_args="--output=",
+        )  # empty =value → output still missing
 
 
 def test_process_name_matches_with_or_without_exe():
     from taskpaw_v3.monitors.plugins.lada import _proc_name_eq
-    assert _proc_name_eq("lada-cli.exe", "lada-cli")     # actual .exe vs config without
-    assert _proc_name_eq("lada-cli", "lada-cli.exe")     # and vice versa
-    assert _proc_name_eq("LADA-CLI.EXE", "lada-cli")     # case-insensitive
+
+    assert _proc_name_eq("lada-cli.exe", "lada-cli")  # actual .exe vs config without
+    assert _proc_name_eq("lada-cli", "lada-cli.exe")  # and vice versa
+    assert _proc_name_eq("LADA-CLI.EXE", "lada-cli")  # case-insensitive
     assert not _proc_name_eq("other", "lada-cli")
 
 
 def test_passive_mode_does_not_launch(monkeypatch):
     called = {"popen": False}
-    monkeypatch.setattr("taskpaw_v3.monitors.plugins.lada.subprocess.Popen",
-                        lambda *a, **k: called.__setitem__("popen", True))
-    inst = LadaInstance("lada", _cfg())             # no cli_path → passive
+    monkeypatch.setattr(
+        "taskpaw_v3.monitors.plugins.lada.subprocess.Popen",
+        lambda *a, **k: called.__setitem__("popen", True),
+    )
+    inst = LadaInstance("lada", _cfg())  # no cli_path → passive
     _, emit = _events()
     inst.start(emit)
     assert called["popen"] is False
@@ -310,52 +395,64 @@ def test_passive_mode_does_not_launch(monkeypatch):
 
 def test_passive_completion_emits_done(monkeypatch):
     seq = iter([True, True, False])
-    monkeypatch.setattr("taskpaw_v3.monitors.plugins.lada.process_alive",
-                        lambda name: next(seq))
+    monkeypatch.setattr(
+        "taskpaw_v3.monitors.plugins.lada.process_alive", lambda name: next(seq)
+    )
     inst = LadaInstance("lada", _cfg())
     evs, emit = _events()
     inst.start(emit)
-    inst.check(emit)   # running
-    inst.check(emit)   # running
-    inst.check(emit)   # exited → completion
+    inst.check(emit)  # running
+    inst.check(emit)  # running
+    inst.check(emit)  # exited → completion
     assert any(e[0] == "done" for e in evs)
 
 
 def test_stop_terminates_managed_child():
     # Launch a real long-lived child and confirm stop() kills it (#40 no-orphan).
-    inst = LadaInstance("lada", _cfg(
-        lada_cli_path=sys.executable, lada_capture_progress=True,
-        lada_input_folder="/in", lada_output_folder="/out",
-        lada_extra_args='-c "import time; time.sleep(30)"'))
+    inst = LadaInstance(
+        "lada",
+        _cfg(
+            lada_cli_path=sys.executable,
+            lada_capture_progress=True,
+            lada_input_folder="/in",
+            lada_output_folder="/out",
+            lada_extra_args='-c "import time; time.sleep(30)"',
+        ),
+    )
     _, emit = _events()
     inst.start(emit)
     assert inst._process is not None and inst._process.poll() is None
     inst.stop(timeout=3)
-    assert inst._process.poll() is not None          # child terminated, no orphan
+    assert inst._process.poll() is not None  # child terminated, no orphan
 
 
 def test_idle_does_not_report_current_file(tmp_path, monkeypatch):
     # A passive monitor with queued files but no running process must NOT claim a
     # current_file (no phantom "idle: a.mp4"); queue facts still report (Codex #59).
     inp, out = tmp_path / "in", tmp_path / "out"
-    inp.mkdir(); out.mkdir()
+    inp.mkdir()
+    out.mkdir()
     for n in ["a.mp4", "b.mp4"]:
         (inp / n).write_bytes(b"x")
-    monkeypatch.setattr("taskpaw_v3.monitors.plugins.lada.process_alive", lambda name: False)
-    inst = LadaInstance("lada", _cfg(lada_input_folder=str(inp), lada_output_folder=str(out)))
+    monkeypatch.setattr(
+        "taskpaw_v3.monitors.plugins.lada.process_alive", lambda name: False
+    )
+    inst = LadaInstance(
+        "lada", _cfg(lada_input_folder=str(inp), lada_output_folder=str(out))
+    )
     _, emit = _events()
     inst.start(emit)
-    st = inst.check(emit)                      # passive, not running → idle
+    st = inst.check(emit)  # passive, not running → idle
     assert st.state == "idle"
-    assert "current_file" not in st.metrics    # no phantom processing claim
-    assert st.metrics["queue_total"] == 2      # queue facts still reported
+    assert "current_file" not in st.metrics  # no phantom processing claim
+    assert st.metrics["queue_total"] == 2  # queue facts still reported
     assert "idle" in st.detail and ".mp4" not in st.detail
 
 
 def test_restart_resets_per_run_state():
     # A supervisor stop→start (or watchdog respawn) re-calls start() on the SAME
     # instance — it must reset so the new run isn't poisoned by old state (Codex).
-    inst = LadaInstance("lada", _cfg())          # passive (no real process)
+    inst = LadaInstance("lada", _cfg())  # passive (no real process)
     _, emit = _events()
     inst.start(emit)
     inst._done_emitted = True
@@ -364,7 +461,7 @@ def test_restart_resets_per_run_state():
     with inst._lock:
         inst._progress = {"percent": 99}
         inst._recent_output.append("old crash output")
-    inst.start(emit)                             # restart
+    inst.start(emit)  # restart
     assert inst._done_emitted is False
     assert inst._prev_running is None
     assert inst._stop.is_set() is False
