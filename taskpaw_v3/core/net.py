@@ -169,14 +169,35 @@ def port_available(host: str, port: int) -> bool:
             return False
 
 
+def _has_m_module(cmd: list[str], module: str) -> bool:
+    """True if argv contains `-m <module>` (or `-m <module>.<sub>`) as an actual flag +
+    value PAIR — not merely the module string appearing somewhere in argv, which a
+    foreign process could carry incidentally (Kimi 终审)."""
+    for i, a in enumerate(cmd):
+        if a == "-m" and i + 1 < len(cmd):
+            val = cmd[i + 1]
+            if val == module or val.startswith(module + "."):
+                return True
+    return False
+
+
 def _role_from_module(cmd: list[str]) -> str | None:
     """Role for a documented headless `python -m taskpaw_v3.<role>[...]` launch
     (deployment.md: `python -m taskpaw_v3.agent`, `python -m taskpaw_v3.hub run`,
     `python -m taskpaw_v3.agent.server.service`), whose process name is just `python`.
-    Recognizes both the `-m` module string and its resolved `.../taskpaw_v3/agent/…py`
-    path form. Returns 'agent'/'hub', or None if no such module appears."""
-    for a in cmd:
-        token = "." + a.replace("\\", "/").replace("/", ".") + "."
+    Only accepts the module as an actual `-m` value, or its resolved
+    `.../taskpaw_v3/{agent,hub}/….py` script path — not a bare arg that merely contains
+    the string, so a foreign python process can't be misidentified (Kimi 终审). Returns
+    'agent'/'hub', or None."""
+    for i, a in enumerate(cmd):
+        norm = a.replace("\\", "/")
+        after_m = i > 0 and cmd[i - 1] == "-m"
+        is_pkg_path = norm.endswith(".py") and (
+            "/taskpaw_v3/agent/" in norm or "/taskpaw_v3/hub/" in norm
+        )
+        if not (after_m or is_pkg_path):
+            continue
+        token = "." + norm.replace("/", ".") + "."
         if ".taskpaw_v3.agent." in token:
             return "agent"
         if ".taskpaw_v3.hub." in token:
@@ -196,20 +217,47 @@ def _explicit_role(cmd: list[str]) -> str:
     return "agent"
 
 
-def _backend_role(name: str, cmd: list[str]) -> str | None:
+def _backend_role(name: str, cmd: list[str], exe_base: str | None = None) -> str | None:
     """The role ('agent'|'hub') THIS app's backend is running, or None if the process
-    isn't ours. Recognizes the bundled sidecar and the from-source packaging
-    entrypoint (both dispatched by a role argv, default agent), plus the documented
-    headless module entrypoints (Codex 外门)."""
+    isn't ours. Recognizes the bundled sidecar and the from-source packaging entrypoint
+    (both dispatched by a role argv, default agent), plus the documented headless module
+    entrypoints (Codex 外门).
+
+    Positive identification (Kimi 终审): the sidecar must match the name regex AND, when
+    the real executable path is available (`exe_base`), that on-disk basename must match
+    too — argv[0]/`proc.name()` are mutable, but `proc.exe()` is the actual binary, so a
+    foreign process can't pass just by spoofing its reported name. (We deliberately do
+    NOT require a specific install directory: PyInstaller onefile runs the server from a
+    `_MEI` temp path, so a dir check would miss our own stale backend and reintroduce
+    the very port-in-use failure this fixes.)"""
     norm = [a.replace("\\", "/") for a in cmd]
-    dispatched = (
-        _BACKEND_NAME_RE.fullmatch(name) is not None
-        or any(a.endswith(_BACKEND_SOURCE_SUFFIX) for a in norm)
-        or _BACKEND_MODULE in cmd
+    is_sidecar = _BACKEND_NAME_RE.fullmatch(name) is not None and (
+        exe_base is None or _BACKEND_NAME_RE.fullmatch(exe_base) is not None
     )
-    if dispatched:
+    is_source = any(a.endswith(_BACKEND_SOURCE_SUFFIX) for a in norm) or _has_m_module(
+        cmd, _BACKEND_MODULE
+    )
+    if is_sidecar or is_source:
         return _explicit_role(cmd)
     return _role_from_module(cmd)
+
+
+def _proc_identity(proc: "psutil.Process") -> tuple[str, list[str], str | None] | None:
+    """(lowercased name, argv, lowercased exe basename) for `proc`, or None if it can't
+    be inspected. Catches the full `psutil.Error` hierarchy — including ZombieProcess,
+    whose name()/cmdline() raise — so a zombie degrades to "not ours" instead of
+    crashing startup (Kimi 终审). exe() is best-effort (None if denied/zombie)."""
+    try:
+        name = (proc.name() or "").lower()
+        cmd = [str(a) for a in (proc.cmdline() or [])]
+    except (psutil.Error, OSError):
+        return None
+    try:
+        exe = proc.exe() or ""
+    except (psutil.Error, OSError):
+        exe = ""
+    exe_base = os.path.basename(exe).lower() if exe else None
+    return name, cmd, exe_base
 
 
 def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
@@ -217,31 +265,30 @@ def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
     PyInstaller sidecar, the from-source packaging entrypoint, or the documented
     `python -m taskpaw_v3.agent|hub` headless command — so we never mistake a foreign
     service for ours."""
-    try:
-        name = (proc.name() or "").lower()
-        cmd = [str(a) for a in (proc.cmdline() or [])]
-    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+    ident = _proc_identity(proc)
+    if ident is None:
         return False
-    return _backend_role(name, cmd) == role
+    name, cmd, exe_base = ident
+    return _backend_role(name, cmd, exe_base) == role
 
 
 def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
     """Would a bind to `want_host` collide with an existing listener on `laddr_ip`
-    (same port assumed)? True if either side is a wildcard (all-interfaces) or the
-    two are the same address. Different IP families don't collide, so a foreign
-    `127.0.0.1:P` listener never blocks an agent configured for `192.168.x.y:P`
-    (Codex 外门)."""
+    (same port assumed)? True if either side is a wildcard (all-interfaces), both are
+    loopback, or the two are the same address. A foreign `127.0.0.1:P` listener never
+    blocks an agent configured for a distinct `192.168.x.y:P` (Codex 外门)."""
     want = _norm_host(want_host)
     have = _norm_host(laddr_ip or "")
-    if (":" in want) != (":" in have):  # IPv4 vs IPv6 — separate stacks
-        return False
     if bind_is_wildcard(want) or bind_is_wildcard(have):
         return True
-    # `localhost` (allowed by the Hub exposure guard) binds a loopback address, but
-    # psutil reports the listener as a numeric 127.x/::1 — treat any two loopbacks as
-    # conflicting so a stale localhost-bound backend is still reclaimed (Codex 外门).
+    # Any loopback ≈ any loopback, checked BEFORE the IPv4/IPv6 family split: `localhost`
+    # (allowed by the Hub guard) binds loopback but psutil may report the stale listener
+    # as 127.x OR ::1, so a stale ::1 backend must still be reclaimed for a `localhost`
+    # start — and we only ever kill our OWN role backend, so this is safe (Kimi 终审).
     if bind_is_loopback(want) and bind_is_loopback(have):
         return True
+    if (":" in want) != (":" in have):  # IPv4 vs IPv6 — otherwise separate stacks
+        return False
     try:
         return ipaddress.ip_address(want) == ipaddress.ip_address(have)
     except ValueError:
@@ -267,23 +314,22 @@ def _find_stale_backends(host: str, port: int, role: str):
         return
     try:
         procs = list(psutil.process_iter())
-    except (psutil.AccessDenied, OSError) as e:
+    except (psutil.Error, OSError) as e:
         log.warning("could not enumerate processes to reclaim a port: %s", e)
         return
     me = os.getpid()
     for proc in procs:
-        try:
-            if proc.pid == me:
-                continue
-            name = (proc.name() or "").lower()
-            cmd = [str(a) for a in (proc.cmdline() or [])]
-        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-            continue  # a foreign / other-user process we can't inspect — not ours
-        if _backend_role(name, cmd) != role:
+        if proc.pid == me:
+            continue
+        ident = _proc_identity(proc)
+        if ident is None:
+            continue  # denied / zombie / vanished — can't inspect, so not ours
+        name, cmd, exe_base = ident
+        if _backend_role(name, cmd, exe_base) != role:
             continue
         try:
             conns = _proc_listen_conns(proc)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+        except (psutil.Error, OSError):
             continue
         for c in conns:
             if (
@@ -308,12 +354,10 @@ def _terminate_backend(proc: "psutil.Process", pid: int, wait: float) -> bool:
         except psutil.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=max(1.0, wait * 0.4))
-    except (
-        psutil.NoSuchProcess,
-        psutil.AccessDenied,
-        psutil.TimeoutExpired,
-        OSError,
-    ) as e:
+    except (psutil.Error, OSError) as e:
+        # psutil.Error covers NoSuchProcess / AccessDenied / TimeoutExpired / Zombie —
+        # a stuck or zombie process is logged and skipped, never crashes startup; the
+        # bounded claim_port below still fails loudly if the port stays held (Kimi 终审).
         log.warning("could not terminate stale backend pid %d: %s", pid, e)
         return False
     return True

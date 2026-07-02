@@ -33,19 +33,40 @@ class _Conn:
 
 
 class _FakeProc:
-    def __init__(self, pid, name, cmdline, log, conns=None, wait_exc=None):
+    def __init__(
+        self,
+        pid,
+        name,
+        cmdline,
+        log,
+        conns=None,
+        wait_exc=None,
+        exe=None,
+        info_exc=None,
+    ):
         self.pid = pid
         self._name = name
         self._cmd = cmdline
         self._log = log
         self._conns = conns or []  # this process's own LISTEN sockets
         self._wait_exc = wait_exc  # exception class to raise from wait(), or None
+        self._exe = exe if exe is not None else f"/x/{name}"
+        self._info_exc = info_exc  # e.g. ZombieProcess raised by name()/cmdline()
 
     def name(self):
+        if self._info_exc is not None:
+            raise self._info_exc()
         return self._name
 
     def cmdline(self):
+        if self._info_exc is not None:
+            raise self._info_exc()
         return self._cmd
+
+    def exe(self):
+        if self._info_exc is not None:
+            raise self._info_exc()
+        return self._exe
 
     def connections(self, kind="inet"):
         # psutil 5.9.x per-process API (no Process.net_connections yet)
@@ -66,13 +87,17 @@ class _FakeProc:
 class _FakePsutil:
     CONN_LISTEN = "LISTEN"
 
-    class NoSuchProcess(Exception): ...
-
-    class AccessDenied(Exception): ...
-
-    class TimeoutExpired(Exception): ...
-
+    # Mirror the real psutil hierarchy: every process exception subclasses Error, so
+    # `except (psutil.Error, OSError)` catches them all (incl. ZombieProcess).
     class Error(Exception): ...
+
+    class NoSuchProcess(Error): ...
+
+    class AccessDenied(Error): ...
+
+    class ZombieProcess(Error): ...
+
+    class TimeoutExpired(Error): ...
 
     def __init__(self, procs):
         self._procs = {p.pid: p for p in procs}
@@ -86,10 +111,10 @@ class _FakePsutil:
         return self._procs[pid]
 
 
-def _install(monkeypatch, port, pid, name, cmdline, ip="0.0.0.0"):
+def _install(monkeypatch, port, pid, name, cmdline, ip="0.0.0.0", exe=None):
     """One fake process listening on `port` — the common single-holder setup."""
     log: list = []
-    proc = _FakeProc(pid, name, cmdline, log, conns=[_Conn(port, pid, ip=ip)])
+    proc = _FakeProc(pid, name, cmdline, log, conns=[_Conn(port, pid, ip=ip)], exe=exe)
     monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
     return log
 
@@ -395,12 +420,90 @@ def test_multiport_foreign_on_one_port_reclaims_nothing(monkeypatch):
 
 
 def test_addr_conflicts_predicate():
-    # Wildcard on either side, or same address → conflict; different addr / family → not.
+    # Wildcard on either side, or same address, or both loopback → conflict.
     assert net._addr_conflicts("192.168.1.5", "0.0.0.0") is True  # wildcard listener
     assert net._addr_conflicts("0.0.0.0", "127.0.0.1") is True  # wildcard bind
     assert net._addr_conflicts("192.168.1.5", "192.168.1.5") is True
     assert net._addr_conflicts("192.168.1.5", "127.0.0.1") is False  # different addr
-    assert net._addr_conflicts("127.0.0.1", "::1") is False  # different family
+    # loopback ≈ loopback across families: localhost/127.x must match a stale ::1 too.
+    assert net._addr_conflicts("127.0.0.1", "::1") is True  # both loopback (Kimi 终审)
+    assert net._addr_conflicts("localhost", "::1") is True
+    # a genuinely different, non-loopback cross-family pair does NOT conflict.
+    assert net._addr_conflicts("192.168.1.5", "2001:db8::1") is False
+
+
+def test_localhost_reclaims_ipv6_loopback_backend(monkeypatch):
+    # A stale backend on ::1 must be reclaimed for a `localhost` start (Kimi 终审).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        96,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "hub"],
+        ip="::1",
+    )
+    assert net.reclaim_port_from_stale_instance(
+        "localhost", port, role="hub", what="hub API"
+    )
+    assert ("terminate", 96) in log
+
+
+def test_zombie_process_does_not_crash(monkeypatch):
+    # A zombie's name()/cmdline()/exe() raise ZombieProcess — must degrade to "not
+    # ours" and never crash startup (Kimi 终审).
+    port = _free_port()
+    log: list = []
+    zombie = _FakeProc(
+        97,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(port, 97)],
+        info_exc=_FakePsutil.ZombieProcess,
+    )
+    monkeypatch.setattr(net, "psutil", _FakePsutil([zombie]))
+    assert net._is_our_backend(net.psutil.Process(97), "agent") is False
+    assert not net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert log == []
+
+
+def test_spoofed_name_with_foreign_exe_not_matched(monkeypatch):
+    # A foreign process reporting name "taskpaw-backend" but whose real executable is
+    # something else must NOT be treated as ours (Kimi 终审 — exe() is the positive ID).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        98,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        exe="/usr/bin/evil-daemon",
+    )
+    assert net._is_our_backend(net.psutil.Process(98), "agent") is False
+    assert not net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert log == []
+
+
+def test_bare_module_string_in_argv_not_matched(monkeypatch):
+    # The backend_main module appearing in argv but NOT as a `-m` value (e.g. a random
+    # positional arg) must not identify a foreign process as ours (Kimi 终审).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        99,
+        "python3",
+        ["python3", "other.py", "taskpaw_v3.packaging.backend_main", "agent"],
+    )
+    assert not net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert log == []
 
 
 def test_find_stale_backends_filters_by_bind_address(monkeypatch):
