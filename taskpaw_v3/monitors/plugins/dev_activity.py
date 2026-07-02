@@ -161,7 +161,8 @@ _STATE_MAP: dict[str, State] = {
 class DevActivityInstance(MonitorInstance):
     def __init__(self, instance_id: str, config: DevActivityConfig) -> None:
         super().__init__(instance_id, config)
-        self._prev_busy: Optional[bool] = None
+        # Active class of the previous check: "busy" | "waiting" | "off".
+        self._prev_class: Optional[str] = None
         # (ts, is_busy) samples for the duty bar; bounded by the window on read.
         self._samples: deque[tuple[float, bool]] = deque(maxlen=10_000)
 
@@ -205,13 +206,26 @@ class DevActivityInstance(MonitorInstance):
         is_busy = headline == "busy"
         self._samples.append((now, is_busy))
 
-        # Emit only on the busy edge (enter/leave) so the console log isn't noisy.
-        if self._prev_busy is not None and is_busy != self._prev_busy:
-            if is_busy:
+        active = [t["tool"] for t in tools if t["state"] in _ACTIVE]
+        waiting_tools = [t["tool"] for t in tools if t["state"] == "waiting"]
+
+        # Emit only when the active class changes (busy / waiting / off), so the log
+        # isn't noisy AND a busy→waiting transition surfaces the actionable
+        # "needs input" signal instead of a misleading "idle" (Codex 外门).
+        cls = "busy" if is_busy else "waiting" if headline == "waiting" else "off"
+        if self._prev_class is not None and cls != self._prev_class:
+            if cls == "busy":
                 emit(
                     "info",
                     f"{cfg.name}: AI busy",
                     f"running AI: {', '.join(busy_tools)}",
+                    dedupe_key=None,
+                )
+            elif cls == "waiting":
+                emit(
+                    "info",
+                    f"{cfg.name}: AI waiting for input",
+                    f"waiting: {', '.join(waiting_tools)}",
                     dedupe_key=None,
                 )
             else:
@@ -221,9 +235,8 @@ class DevActivityInstance(MonitorInstance):
                     "no AI task running",
                     dedupe_key=None,
                 )
-        self._prev_busy = is_busy
+        self._prev_class = cls
 
-        active = [t["tool"] for t in tools if t["state"] in _ACTIVE]
         detail = (
             f"running AI: {', '.join(busy_tools)}"
             if busy_tools

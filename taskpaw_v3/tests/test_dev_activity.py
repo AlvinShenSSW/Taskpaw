@@ -121,6 +121,26 @@ def test_check_emits_on_busy_edge_only(tmp_path, monkeypatch):
     assert len(events) == 1 and events[0][0] == "info"
 
 
+def test_busy_to_waiting_emits_waiting_not_idle(tmp_path, monkeypatch):
+    # busy→waiting (Claude Notification) must surface "waiting for input", not "idle".
+    cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
+    monkeypatch.setattr(da, "_detect_present", lambda patterns: {"claude": True})
+    inst = DevActivityPlugin().create("ai", cfg)
+    events: list = []
+    emit = lambda *a, **k: events.append(a)  # noqa: E731
+
+    _write(tmp_path, "claude", "busy", time.time())
+    inst.check(emit)  # prev None → no emit
+    _write(tmp_path, "claude", "waiting", time.time())
+    st = inst.check(emit)  # busy→waiting edge
+    assert st.metrics["ai_state"] == "waiting"
+    assert (
+        events
+        and "waiting" in events[-1][1].lower()
+        and "idle" not in events[-1][1].lower()
+    )
+
+
 def test_duty_ratio_accumulates(tmp_path, monkeypatch):
     cfg = DevActivityConfig(
         name="ai", state_dir=str(tmp_path), tools=["claude"], window_seconds=3600
