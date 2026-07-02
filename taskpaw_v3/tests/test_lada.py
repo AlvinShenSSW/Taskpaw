@@ -27,6 +27,28 @@ def _cfg(**kw) -> LadaConfig:
     return LadaConfig(**base)
 
 
+class _FakeStdout:
+    def __init__(self, text: str) -> None:
+        self._data = text.encode("utf-8")
+        self._pos = 0
+
+    def read(self, n: int) -> bytes:
+        if self._pos >= len(self._data):
+            return b""
+        chunk = self._data[self._pos:self._pos + n]
+        self._pos += n
+        return chunk
+
+
+class _ExitedProcess:
+    def __init__(self, text: str, retcode: int) -> None:
+        self.stdout = _FakeStdout(text)
+        self._retcode = retcode
+
+    def poll(self) -> int:
+        return self._retcode
+
+
 # ── progress parsing (the 5 V2 regexes) ───────────────────────────────────
 def test_parse_filename_then_progress():
     p = parse_progress_line("sample-video.mp4:", {})
@@ -161,6 +183,81 @@ def test_cli_path_is_a_folder_gives_actionable_error(tmp_path):
     assert inst.check(emit).state == "error"
 
 
+def test_managed_nonzero_capture_reports_recent_error_output():
+    inst = LadaInstance("lada", _cfg(
+        lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
+        lada_output_folder="/out", lada_capture_progress=True))
+    inst._process = _ExitedProcess(
+        "sample.mp4:\n"
+        "Processing video:  15%|Processed: 00:01 (1f) | Remaining: 00:09 (9f) | Speed: 1.0fps\r"
+        "RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB\n",
+        7,
+    )
+    inst._reader_loop()
+
+    evs, emit = _events()
+    st = inst.check(emit)
+
+    assert st.state == "error"
+    assert "Lada exited with code 7" in st.detail
+    assert "RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB" in st.detail
+    alert = next(e for e in evs if e[0] == "alert")
+    assert "Lada exited with code 7" in alert[2]
+    assert "RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB" in alert[2]
+    assert "Processing video" not in alert[2]
+
+
+def test_managed_nonzero_capture_flushes_unterminated_final_line():
+    # A crash line printed right before exit may reach us without a trailing
+    # newline before the pipe closes — it must still be captured (Kimi 终审).
+    inst = LadaInstance("lada", _cfg(
+        lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
+        lada_output_folder="/out", lada_capture_progress=True))
+    inst._process = _ExitedProcess(
+        "Error on export: frame restorer stopped prematurely", 1)  # no trailing \n
+    inst._reader_loop()
+
+    evs, emit = _events()
+    st = inst.check(emit)
+
+    assert "Error on export: frame restorer stopped prematurely" in st.detail
+    alert = next(e for e in evs if e[0] == "alert")
+    assert "Error on export: frame restorer stopped prematurely" in alert[2]
+
+
+def test_managed_nonzero_non_capture_detail_has_no_tail():
+    inst = LadaInstance("lada", _cfg(
+        lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
+        lada_output_folder="/out", lada_capture_progress=False))
+    inst._process = _ExitedProcess("", 9)
+
+    evs, emit = _events()
+    st = inst.check(emit)
+
+    assert st.state == "error"
+    assert st.detail == "Lada exited with code 9"
+    assert evs == [("alert", "lada failed", "Lada exited with code 9")]
+
+
+def test_managed_nonzero_capture_error_tail_is_bounded():
+    lines = [f"error line {i:03d}: " + ("x" * 80) for i in range(100)]
+    inst = LadaInstance("lada", _cfg(
+        lada_cli_path="/bin/lada-cli", lada_input_folder="/in",
+        lada_output_folder="/out", lada_capture_progress=True))
+    inst._process = _ExitedProcess("\n".join(lines) + "\n", 3)
+    inst._reader_loop()
+
+    evs, emit = _events()
+    st = inst.check(emit)
+
+    assert "Lada exited with code 3" in st.detail
+    assert "error line 099" in st.detail
+    assert "error line 000" not in st.detail
+    assert len(st.detail) <= 850
+    alert = next(e for e in evs if e[0] == "alert")
+    assert alert[2] == st.detail
+
+
 def test_managed_requires_input_output_folders():
     import pytest
     from taskpaw_v3.monitors.plugins.lada import LadaConfig
@@ -266,11 +363,13 @@ def test_restart_resets_per_run_state():
     inst._stop.set()
     with inst._lock:
         inst._progress = {"percent": 99}
+        inst._recent_output.append("old crash output")
     inst.start(emit)                             # restart
     assert inst._done_emitted is False
     assert inst._prev_running is None
     assert inst._stop.is_set() is False
     assert inst._progress == {}
+    assert list(inst._recent_output) == []
 
 
 # ── registry ───────────────────────────────────────────────────────────────
