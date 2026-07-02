@@ -10,7 +10,25 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
+import os
 import socket
+import time
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover — psutil is a base dependency
+    psutil = None
+
+log = logging.getLogger("taskpaw.net")
+
+# Our PyInstaller sidecar's process name (agent + hub share one binary, dispatched
+# by the role argv). The Tauri shell may launch either the stripped basename
+# (`taskpaw-backend[.exe]`) or the target-triple-suffixed sidecar
+# (`taskpaw-backend-<triple>[.exe]`, backend_command's fallback), so we match by
+# prefix. Used to identify a *stale instance of THIS app* so we only ever reclaim a
+# port from ourselves — never from a foreign service.
+_BACKEND_NAME_PREFIX = "taskpaw-backend"
 
 
 class PortInUseError(RuntimeError):
@@ -136,6 +154,122 @@ def port_available(host: str, port: int) -> bool:
             return True
         except OSError:
             return False
+
+
+def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
+    """True only if `proc` is THIS app's own backend for `role` (agent|hub). Matches
+    the PyInstaller sidecar name, or a from-source run (`backend_main.py`), AND the
+    role argv — so we never mistake a foreign service for ours."""
+    try:
+        name = (proc.name() or "").lower()
+        cmd = [str(a) for a in (proc.cmdline() or [])]
+    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+        return False
+    is_backend = name.startswith(_BACKEND_NAME_PREFIX) or any(
+        a.replace("\\", "/").endswith("backend_main.py") for a in cmd
+    )
+    if not is_backend:
+        return False
+    # Match the role. The bundled shell always passes it explicitly, but a no-arg
+    # invocation defaults to agent (backend_main), so an agent must also reclaim a
+    # role-less backend; hub requires an explicit "hub" (Codex 外门).
+    has_agent = "agent" in cmd
+    has_hub = "hub" in cmd
+    if role == "agent":
+        return has_agent or not (has_agent or has_hub)
+    if role == "hub":
+        return has_hub
+    return False
+
+
+def _listener_pids(port: int) -> list[int]:
+    """PIDs LISTENing on `port` (any local address). Best-effort; [] if psutil is
+    unavailable or enumeration is denied."""
+    if psutil is None:
+        return []
+    try:
+        conns = psutil.net_connections(kind="inet")
+    except (psutil.AccessDenied, RuntimeError, OSError) as e:
+        log.warning("could not enumerate connections to reclaim a port: %s", e)
+        return []
+    pids = []
+    for c in conns:
+        if (
+            c.status == psutil.CONN_LISTEN
+            and c.laddr
+            and c.laddr.port == port
+            and c.pid
+        ):
+            pids.append(c.pid)
+    return pids
+
+
+def reclaim_port_from_stale_instance(
+    host: str, port: int, *, role: str, what: str, wait: float = 8.0
+) -> bool:
+    """If `port` is held by THIS app's own backend of the same role, terminate it and
+    wait for the port to free, so a relaunch/update "just works". Returns True if it
+    reclaimed one.
+
+    Semantics: **last launch wins** for a single-agent/single-hub-per-machine box
+    (the design invariant — one agent, one port per machine). The holder of *this
+    configured port* is by definition the previous instance of *this* agent/hub, so
+    a new launch supersedes it (the exact behavior needed for in-place updates,
+    where the old version is still running). It does NOT try to distinguish "stale"
+    from "actively serving" — on a single-instance box they're the same instance.
+    Preventing an *accidental* double-launch of the same version is the Tauri shell's
+    single-instance responsibility (a separate follow-up), not this port logic.
+
+    Safety: it only ever terminates a process it can positively identify as this
+    app's backend for this role (name prefix + role argv). A **foreign** service on
+    the port is left untouched — `claim_port` then fails loudly as before. Never
+    binds, so there's no TOCTOU with the subsequent claim_port.
+    """
+    if psutil is None:
+        return False
+    reclaimed = False
+    for pid in _listener_pids(port):
+        if pid == os.getpid():
+            continue
+        try:
+            proc = psutil.Process(pid)
+        except (psutil.NoSuchProcess, OSError):
+            continue
+        if not _is_our_backend(proc, role):
+            continue  # foreign process on our port → do NOT kill; fail loud later
+        log.warning(
+            "reclaiming %s (%s:%s) from a stale TaskPaw %s backend (pid %d)",
+            what,
+            host,
+            port,
+            role,
+            pid,
+        )
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=max(1.0, wait * 0.6))
+            except psutil.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=max(1.0, wait * 0.4))
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            psutil.TimeoutExpired,
+            OSError,
+        ) as e:
+            # Includes a stuck process that won't exit even after kill() — log and
+            # move on; the bounded claim_port below still fails loudly if the port
+            # is genuinely still held.
+            log.warning("could not terminate stale backend pid %d: %s", pid, e)
+            continue
+        reclaimed = True
+    if reclaimed:
+        # Wait for the OS to actually release the socket before the caller binds.
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and not port_available(host, port):
+            time.sleep(0.2)
+    return reclaimed
 
 
 def claim_port(host: str, port: int, what: str) -> socket.socket:

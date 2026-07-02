@@ -21,6 +21,7 @@ from taskpaw_v3.core.net import (  # re-export
     guard_bind_exposure,
     loopback_url,
     port_available,
+    reclaim_port_from_stale_instance,
 )
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.core.state import load_next_id, save_next_id
@@ -82,6 +83,18 @@ def run_agent(
     # — so a hand-edited agent.yaml / bootstrap can't bind wildcard/public/non-
     # loopback-without-token unguarded (#114/Kimi). Raised BEFORE any socket claim.
     guard_bind_exposure(config.bind_host, config.api_token, label="agent network API")
+
+    # Seamless updates/restarts: if OUR OWN previous agent backend is still holding
+    # these ports (common right after installing a new version), terminate that
+    # stale instance and reclaim the ports. Only ever kills a positively-identified
+    # TaskPaw agent backend — a foreign service is left alone (claim_port then fails
+    # loudly as before).
+    reclaim_port_from_stale_instance(
+        config.bind_host, config.bind_port, role="agent", what="agent network API"
+    )
+    reclaim_port_from_stale_instance(
+        config.control_host, config.control_port, role="agent", what="agent control API"
+    )
 
     # Race-free claim: hold the sockets, hand them to uvicorn.
     net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
