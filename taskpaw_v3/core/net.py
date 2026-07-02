@@ -23,9 +23,12 @@ except ImportError:  # pragma: no cover — psutil is a base dependency
 log = logging.getLogger("taskpaw.net")
 
 # Our PyInstaller sidecar's process name (agent + hub share one binary, dispatched
-# by the role argv). Used to identify a *stale instance of THIS app* so we only
-# ever reclaim a port from ourselves — never from a foreign service.
-_BACKEND_NAMES = {"taskpaw-backend", "taskpaw-backend.exe"}
+# by the role argv). The Tauri shell may launch either the stripped basename
+# (`taskpaw-backend[.exe]`) or the target-triple-suffixed sidecar
+# (`taskpaw-backend-<triple>[.exe]`, backend_command's fallback), so we match by
+# prefix. Used to identify a *stale instance of THIS app* so we only ever reclaim a
+# port from ourselves — never from a foreign service.
+_BACKEND_NAME_PREFIX = "taskpaw-backend"
 
 
 class PortInUseError(RuntimeError):
@@ -162,7 +165,7 @@ def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
         cmd = [str(a) for a in (proc.cmdline() or [])]
     except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
         return False
-    is_backend = name in _BACKEND_NAMES or any(
+    is_backend = name.startswith(_BACKEND_NAME_PREFIX) or any(
         a.replace("\\", "/").endswith("backend_main.py") for a in cmd
     )
     return is_backend and role in cmd
@@ -229,7 +232,15 @@ def reclaim_port_from_stale_instance(
             except psutil.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=max(1.0, wait * 0.4))
-        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError) as e:
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            psutil.TimeoutExpired,
+            OSError,
+        ) as e:
+            # Includes a stuck process that won't exit even after kill() — log and
+            # move on; the bounded claim_port below still fails loudly if the port
+            # is genuinely still held.
             log.warning("could not terminate stale backend pid %d: %s", pid, e)
             continue
         reclaimed = True

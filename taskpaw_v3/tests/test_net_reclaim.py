@@ -20,11 +20,12 @@ def _free_port() -> int:
 
 
 class _FakeProc:
-    def __init__(self, pid, name, cmdline, log):
+    def __init__(self, pid, name, cmdline, log, wait_exc=None):
         self.pid = pid
         self._name = name
         self._cmd = cmdline
         self._log = log
+        self._wait_exc = wait_exc  # exception class to raise from wait(), or None
 
     def name(self):
         return self._name
@@ -39,6 +40,8 @@ class _FakeProc:
         self._log.append(("kill", self.pid))
 
     def wait(self, timeout=None):
+        if self._wait_exc is not None:
+            raise self._wait_exc()
         return 0
 
 
@@ -128,6 +131,47 @@ def test_from_source_backend_matched(monkeypatch):
         "127.0.0.1", port, role="hub", what="hub API"
     )
     assert ("terminate", 77) in log
+
+
+def test_reclaims_target_triple_suffixed_sidecar(monkeypatch):
+    # The Tauri shell may launch taskpaw-backend-<triple>[.exe] (backend_command
+    # fallback) — must still be recognized as ours (Codex 外门).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        4444,
+        "taskpaw-backend-aarch64-apple-darwin",
+        ["/x/taskpaw-backend-aarch64-apple-darwin", "agent"],
+    )
+    assert net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert ("terminate", 4444) in log
+
+
+def test_stuck_process_wait_timeout_does_not_crash(monkeypatch):
+    # A process that won't exit even after kill() (wait raises TimeoutExpired) must
+    # NOT abort startup — reclaim logs + returns without raising (Codex 外门).
+    port = _free_port()
+    log: list = []
+    proc = _FakeProc(
+        7,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        wait_exc=_FakePsutil.TimeoutExpired,
+    )
+    fake = _FakePsutil([_Conn(port, 7)], {7: proc})
+    monkeypatch.setattr(net, "psutil", fake)
+    # Must not raise; the port wasn't freed → returns False (claim_port fails loud).
+    assert (
+        net.reclaim_port_from_stale_instance(
+            "127.0.0.1", port, role="agent", what="agent API"
+        )
+        is False
+    )
+    assert ("terminate", 7) in log and ("kill", 7) in log
 
 
 def test_no_psutil_is_noop(monkeypatch):
