@@ -198,12 +198,13 @@ def _role_from_module(cmd: list[str]) -> str | None:
                 if a == mod or a.startswith(mod + "."):
                     return role
         elif norm.endswith(".py"):
-            # resolved script path: `.../taskpaw_v3/agent/….py` (leading slash anchors
-            # it, so `.../mytaskpaw_v3/agent/…` doesn't match).
-            if "/taskpaw_v3/agent/" in norm:
-                return "agent"
-            if "/taskpaw_v3/hub/" in norm:
-                return "hub"
+            # resolved script path: match the package COMPONENTS `taskpaw_v3/agent` or
+            # `taskpaw_v3/hub`, not a substring — so `.../mytaskpaw_v3/agent/…` or a
+            # `taskpaw_v3_fork/agent` dir can't be misidentified as ours (Kimi 终审).
+            parts = norm.split("/")
+            for j in range(len(parts) - 1):
+                if parts[j] == "taskpaw_v3" and parts[j + 1] in ("agent", "hub"):
+                    return parts[j + 1]
     return None
 
 
@@ -236,9 +237,12 @@ def _backend_role(name: str, cmd: list[str], exe_base: str | None = None) -> str
     is_sidecar = _BACKEND_NAME_RE.fullmatch(name) is not None and (
         exe_base is None or _BACKEND_NAME_RE.fullmatch(exe_base) is not None
     )
-    is_source = any(a.endswith(_BACKEND_SOURCE_SUFFIX) for a in norm) or _has_m_module(
-        cmd, _BACKEND_MODULE
-    )
+    # Anchor the source-path match to a `/` boundary (or the exact relative path) so a
+    # foreign `.../clonetaskpaw_v3/packaging/backend_main.py` can't match (Kimi 终审).
+    is_source = any(
+        a == _BACKEND_SOURCE_SUFFIX or a.endswith("/" + _BACKEND_SOURCE_SUFFIX)
+        for a in norm
+    ) or _has_m_module(cmd, _BACKEND_MODULE)
     if is_sidecar or is_source:
         return _explicit_role(cmd)
     return _role_from_module(cmd)
@@ -274,21 +278,38 @@ def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
     return _backend_role(name, cmd, exe_base) == role
 
 
+def _loopback_equiv(a: str, b: str) -> bool:
+    """For two already-normalized loopback hosts: are they the SAME loopback target?
+    `localhost` equates with any loopback (it resolves to one), 127.0.0.1 and ::1 are
+    the canonical cross-family pair, and every other numeric loopback matches only
+    itself — so 127.0.0.1 and 127.0.0.2 are NOT equated (Kimi 终审)."""
+    if a == "localhost" or b == "localhost":
+        return True
+    pair = {"127.0.0.1", "::1"}
+    if a in pair and b in pair:
+        return True
+    try:
+        return ipaddress.ip_address(a) == ipaddress.ip_address(b)
+    except ValueError:
+        return a == b
+
+
 def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
     """Would a bind to `want_host` collide with an existing listener on `laddr_ip`
-    (same port assumed)? True if either side is a wildcard (all-interfaces), both are
-    loopback, or the two are the same address. A foreign `127.0.0.1:P` listener never
+    (same port assumed)? True if either side is a wildcard (all-interfaces), the two are
+    equivalent loopbacks, or the same address. A foreign `127.0.0.1:P` listener never
     blocks an agent configured for a distinct `192.168.x.y:P` (Codex 外门)."""
     want = _norm_host(want_host)
     have = _norm_host(laddr_ip or "")
     if bind_is_wildcard(want) or bind_is_wildcard(have):
         return True
-    # Any loopback ≈ any loopback, checked BEFORE the IPv4/IPv6 family split: `localhost`
-    # (allowed by the Hub guard) binds loopback but psutil may report the stale listener
-    # as 127.x OR ::1, so a stale ::1 backend must still be reclaimed for a `localhost`
-    # start — and we only ever kill our OWN role backend, so this is safe (Kimi 终审).
+    # Loopback equivalence, checked BEFORE the IPv4/IPv6 family split: `localhost` (Hub
+    # guard allows it) may be reported by psutil as 127.x OR ::1, and 127.0.0.1/::1 are
+    # the canonical loopback pair — but distinct numeric loopbacks (127.0.0.1 vs .2) can
+    # coexist, so they must NOT be equated (Kimi 终审). Safe either way: we only ever kill
+    # our OWN role backend.
     if bind_is_loopback(want) and bind_is_loopback(have):
-        return True
+        return _loopback_equiv(want, have)
     if (":" in want) != (":" in have):  # IPv4 vs IPv6 — otherwise separate stacks
         return False
     try:

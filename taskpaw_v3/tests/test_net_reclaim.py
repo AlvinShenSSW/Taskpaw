@@ -437,16 +437,52 @@ def test_multiport_duplicate_ports_reclaims_nothing(monkeypatch):
 
 
 def test_addr_conflicts_predicate():
-    # Wildcard on either side, or same address, or both loopback → conflict.
+    # Wildcard on either side, or same address → conflict.
     assert net._addr_conflicts("192.168.1.5", "0.0.0.0") is True  # wildcard listener
     assert net._addr_conflicts("0.0.0.0", "127.0.0.1") is True  # wildcard bind
     assert net._addr_conflicts("192.168.1.5", "192.168.1.5") is True
     assert net._addr_conflicts("192.168.1.5", "127.0.0.1") is False  # different addr
-    # loopback ≈ loopback across families: localhost/127.x must match a stale ::1 too.
-    assert net._addr_conflicts("127.0.0.1", "::1") is True  # both loopback (Kimi 终审)
+    # loopback equivalence: localhost ≡ any loopback; 127.0.0.1 ≡ ::1 (canonical pair);
+    # distinct numeric loopbacks do NOT collide (Kimi 终审).
+    assert net._addr_conflicts("127.0.0.1", "::1") is True
     assert net._addr_conflicts("localhost", "::1") is True
+    assert net._addr_conflicts("localhost", "127.0.0.2") is True
+    assert net._addr_conflicts("127.0.0.1", "127.0.0.2") is False  # distinct loopbacks
     # a genuinely different, non-loopback cross-family pair does NOT conflict.
     assert net._addr_conflicts("192.168.1.5", "2001:db8::1") is False
+
+
+def test_foreign_clone_source_path_not_matched(monkeypatch):
+    # A path whose basename tail equals our source suffix but is NOT at a `/` boundary
+    # (clonetaskpaw_v3/…) must not be identified as ours (Kimi 终审).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        113,
+        "python3",
+        ["python3", "/opt/clonetaskpaw_v3/packaging/backend_main.py", "agent"],
+    )
+    assert not net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert log == []
+
+
+def test_foreign_lookalike_script_path_not_matched(monkeypatch):
+    # `.../mytaskpaw_v3/agent/server.py` — component match must reject it (Kimi 终审).
+    port = _free_port()
+    log = _install(
+        monkeypatch,
+        port,
+        114,
+        "python3",
+        ["python3", "/not/our/mytaskpaw_v3/agent/server.py"],
+    )
+    assert not net.reclaim_port_from_stale_instance(
+        "127.0.0.1", port, role="agent", what="agent API"
+    )
+    assert log == []
 
 
 def test_localhost_reclaims_ipv6_loopback_backend(monkeypatch):
