@@ -21,3 +21,14 @@ def token_ok(configured_token: str, auth_header: Optional[str]) -> bool:
         return True
     expected = f"Bearer {token}"
     return hmac.compare_digest(expected, auth_header or "")
+
+
+def auth_disabled(configured_token: str) -> bool:
+    """True when no token is configured, i.e. `token_ok` will accept any request
+    (V2 parity). Used to warn loudly at startup and to drive a UI banner (#145) —
+    the network bind guard (`core.net.guard_bind_exposure`) still refuses a
+    non-loopback bind in this state, so a running auth-disabled API is loopback
+    only. Intentionally the exact negation of the `token_ok` short-circuit, so the
+    two can never disagree about what "auth is off" means.
+    """
+    return not (configured_token or "").strip()

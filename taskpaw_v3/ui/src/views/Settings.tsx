@@ -1,7 +1,7 @@
 import {
   Alert, Button, Card, CardContent, MenuItem, Stack, TextField, Typography,
 } from "@mui/material";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../api";
@@ -63,6 +63,7 @@ type Form = {
 
 function ConfigSection() {
   const { t } = useTranslation();
+  const qc = useQueryClient();
   const cfg = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
   const [form, setForm] = useState<Form | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -89,7 +90,12 @@ function ConfigSection() {
       if (f.api_token.trim()) patch.api_token = f.api_token; // blank → keep current
       return api.updateConfig(patch);
     },
-    onSuccess: (res) => setMsg({ kind: "ok", text: res.restart_required ? t("settings.restartNeeded") : t("settings.saved") }),
+    onSuccess: (res) => {
+      // Refresh the shared config cache so the auth-disabled banner (#145) and this
+      // form reflect a just-set/changed token immediately, not a stale cached one.
+      qc.invalidateQueries({ queryKey: ["agentConfig"] });
+      setMsg({ kind: "ok", text: res.restart_required ? t("settings.restartNeeded") : t("settings.saved") });
+    },
     onError: (e) => setMsg({ kind: "err", text: e instanceof Error ? e.message : String(e) }),
   });
 

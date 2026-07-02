@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
 from taskpaw_v3.core.net import (  # re-export
@@ -91,6 +92,20 @@ def run_agent(
     except PortInUseError:
         net_sock.close()
         raise
+
+    # Auth-disabled visibility (#145): the guard above already refuses a
+    # non-loopback bind with no token, so reaching here with auth off means a
+    # loopback-only API. Warn loudly (only now the service is actually starting —
+    # after the ports are claimed) so an operator knows /status and /events are
+    # unauthenticated and can set a token before binding a LAN address.
+    if auth_disabled(config.api_token):
+        log.warning(
+            "agent network API auth is DISABLED (no api_token set) — /status and "
+            "/events accept any request. The bind guard keeps this loopback-only "
+            "(%s); set an api_token to require a Bearer token or to bind a LAN "
+            "address.",
+            config.bind_host,
+        )
 
     queue = queue or build_queue(config, state_path)
     shutdown = shutdown or GracefulShutdown()

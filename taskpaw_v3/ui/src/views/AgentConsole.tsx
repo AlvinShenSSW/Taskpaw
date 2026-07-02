@@ -38,6 +38,9 @@ export function AgentConsole() {
   const qc = useQueryClient();
   const status = useQuery({ queryKey: ["agentStatus"], queryFn: api.agentStatus, refetchInterval: 5000 });
   const plugins = useQuery({ queryKey: ["agentPlugins"], queryFn: api.plugins });
+  // #145: surface when the network API has no token (auth disabled). The backend's
+  // bind guard keeps this loopback-only, but the operator should see it.
+  const config = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<null | { mode: "add" } | { mode: "edit"; name: string }>(null);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +71,10 @@ export function AgentConsole() {
         <Tab value="events" label={t("agent.events")} />
         <Tab value="settings" label={t("settings.title")} />
       </Tabs>
+
+      {Boolean(config.data?.auth_disabled) && (
+        <Alert severity="warning">{t("agent.authDisabled")}</Alert>
+      )}
 
       {tab === "settings" ? (
         <Settings role="agent" />

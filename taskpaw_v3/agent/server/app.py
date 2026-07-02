@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from taskpaw_v3.agent.server.admin import MonitorAdmin
 
 
-from taskpaw_v3.core.auth import token_ok
+from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.monitors.registry import PluginRegistry
@@ -121,6 +121,10 @@ def create_control_app(
         data: dict[str, Any] = (
             admin.config_view() if admin is not None else config.model_dump()
         )
+        # Surface the auth posture (#145) so the console can show a banner, derived
+        # BEFORE masking. api_token is live-applied, so this reflects what token_ok
+        # enforces per request. The token itself is still masked below.
+        data["auth_disabled"] = auth_disabled(str(data.get("api_token", "")))
         if data.get("api_token"):
             data["api_token"] = "***"
         return data
