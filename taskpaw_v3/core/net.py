@@ -182,9 +182,28 @@ def _is_our_backend(proc: "psutil.Process", role: str) -> bool:
     return False
 
 
-def _listener_pids(port: int) -> list[int]:
-    """PIDs LISTENing on `port` (any local address). Best-effort; [] if psutil is
-    unavailable or enumeration is denied."""
+def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
+    """Would a bind to `want_host` collide with an existing listener on `laddr_ip`
+    (same port assumed)? True if either side is a wildcard (all-interfaces) or the
+    two are the same address. Different IP families don't collide, so a foreign
+    `127.0.0.1:P` listener never blocks an agent configured for `192.168.x.y:P`
+    (Codex 外门)."""
+    want = _norm_host(want_host)
+    have = _norm_host(laddr_ip or "")
+    if (":" in want) != (":" in have):  # IPv4 vs IPv6 — separate stacks
+        return False
+    if bind_is_wildcard(want) or bind_is_wildcard(have):
+        return True
+    try:
+        return ipaddress.ip_address(want) == ipaddress.ip_address(have)
+    except ValueError:
+        return want == have
+
+
+def _listener_pids(host: str, port: int) -> list[int]:
+    """PIDs LISTENing on `port` at an address that would actually conflict with a bind
+    to `host` (same address, or a wildcard on either side). Best-effort; [] if psutil
+    is unavailable or enumeration is denied."""
     if psutil is None:
         return []
     try:
@@ -199,6 +218,7 @@ def _listener_pids(port: int) -> list[int]:
             and c.laddr
             and c.laddr.port == port
             and c.pid
+            and _addr_conflicts(host, c.laddr.ip)
         ):
             pids.append(c.pid)
     return pids
@@ -244,7 +264,7 @@ def reclaim_ports_from_stale_instance(
     # reclaim (so we leave the old, still-serving agent alone).
     to_kill: dict[int, "psutil.Process"] = {}
     for host, port, what in specs:
-        for pid in _listener_pids(port):
+        for pid in _listener_pids(host, port):
             if pid == os.getpid():
                 continue
             try:
@@ -312,7 +332,7 @@ def reclaim_port_from_stale_instance(
     if psutil is None:
         return False
     reclaimed = False
-    for pid in _listener_pids(port):
+    for pid in _listener_pids(host, port):
         if pid == os.getpid():
             continue
         try:

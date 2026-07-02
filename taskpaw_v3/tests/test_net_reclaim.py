@@ -52,9 +52,9 @@ class _Laddr:
 
 
 class _Conn:
-    def __init__(self, port, pid, status="LISTEN"):
+    def __init__(self, port, pid, status="LISTEN", ip="0.0.0.0"):
         self.status = status
-        self.laddr = _Laddr("0.0.0.0", port)
+        self.laddr = _Laddr(ip, port)
         self.pid = pid
 
 
@@ -222,6 +222,38 @@ def test_multiport_foreign_on_one_port_reclaims_nothing(monkeypatch):
         role="agent",
     )
     assert log == []  # the old agent was left running, nothing terminated
+
+
+def test_addr_conflicts_predicate():
+    # Wildcard on either side, or same address → conflict; different addr / family → not.
+    assert net._addr_conflicts("192.168.1.5", "0.0.0.0") is True  # wildcard listener
+    assert net._addr_conflicts("0.0.0.0", "127.0.0.1") is True  # wildcard bind
+    assert net._addr_conflicts("192.168.1.5", "192.168.1.5") is True
+    assert net._addr_conflicts("192.168.1.5", "127.0.0.1") is False  # different addr
+    assert net._addr_conflicts("127.0.0.1", "::1") is False  # different family
+
+
+def test_multiport_foreign_on_nonconflicting_addr_still_reclaims(monkeypatch):
+    # Agent configured for 192.168.1.5; a foreign service sits on 127.0.0.1:<net port>
+    # (does NOT conflict), our stale agent holds the control port. The bind to
+    # 192.168.1.5 would succeed, so we SHOULD reclaim the stale control port (Codex 外门).
+    p1, p2 = _free_port(), _free_port()
+    log: list = []
+    ours = _FakeProc(401, "taskpaw-backend", ["/x/taskpaw-backend", "agent"], log)
+    foreign = _FakeProc(402, "nginx", ["nginx"], log)
+    fake = _FakePsutil(
+        [_Conn(p1, 402, ip="127.0.0.1"), _Conn(p2, 401, ip="192.168.1.5")],
+        {401: ours, 402: foreign},
+    )
+    monkeypatch.setattr(net, "psutil", fake)
+    assert net.reclaim_ports_from_stale_instance(
+        [
+            ("192.168.1.5", p1, "agent network API"),
+            ("192.168.1.5", p2, "agent control API"),
+        ],
+        role="agent",
+    )
+    assert ("terminate", 401) in log and ("terminate", 402) not in log
 
 
 def test_no_psutil_is_noop(monkeypatch):
