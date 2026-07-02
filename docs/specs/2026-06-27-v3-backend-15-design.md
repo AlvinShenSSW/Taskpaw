@@ -7,7 +7,7 @@ shutdown primitive that #5's "X = exit" and the headless service mode both reuse
 
 ## Scope (this issue)
 
-- `taskpaw-v3/` monorepo backend skeleton (`core/`, `agent/`, `hub/`).
+- `taskpaw_v3/` monorepo backend skeleton (`core/`, `agent/`, `hub/`).
 - **Agent** FastAPI app: network-facing read API `/ping /status /events` (Bearer);
   a **loopback-only** control API (`/control/*`) on a separate port. Default
   network port **5680**; refuse to start (clear message) if the port is in use
@@ -29,7 +29,7 @@ shutdown primitive that #5's "X = exit" and the headless service mode both reuse
 ## Layout
 
 ```
-taskpaw-v3/
+taskpaw_v3/
 ├── core/
 │   ├── config.py       # pydantic AgentConfig / HubConfig (+ load/save YAML)
 │   ├── auth.py         # Bearer check (empty token = disabled, like V2)

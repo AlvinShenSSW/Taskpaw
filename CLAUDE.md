@@ -10,9 +10,8 @@ Claude-specific notes:
   on a fresh shell's PATH. Prefix with `export PATH="$HOME/.local/bin:$PATH"` (or
   use full paths) when a command isn't found. Python 3.10+ comes from `uv`
   (system `python3` is 3.9).
-- **Canonical test command is `uv run pytest`** — not the `--extra web` variant
-  the afk SKILL.md mentions (that's for a different project). See AGENTS.md.
-- **V2 is frozen, V3 is greenfield under `taskpaw-v3/`.** Don't refactor V2 for
+- **Canonical test command is `uv run pytest`** (there is no `web` extra). See AGENTS.md.
+- **V2 is frozen, V3 is greenfield under `taskpaw_v3/`.** Don't refactor V2 for
   taste; new work follows [docs/specs/2026-06-27-taskpaw-v3-design.md](docs/specs/2026-06-27-taskpaw-v3-design.md).
 - The V3 UI design system lives in
   [design-system/taskpaw-v3/](design-system/taskpaw-v3/) — read `MASTER.md` and

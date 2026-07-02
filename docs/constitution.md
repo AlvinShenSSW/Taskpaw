@@ -16,8 +16,8 @@ The AFK / review gates self-check against this file — a violation is a blocker
     and §10 #1 scopes it as optimizing the *current* protocol implementation.
     These changes are backward-compatible. V3 inherits them. This is the only
     sanctioned V2 feature work; it does not reopen V2 for anything else.
-- **V3 is greenfield** and lives under `taskpaw-v3/` (a monorepo, not yet
-  created). New capability goes there, per
+- **V3 is greenfield** and lives under `taskpaw_v3/` (a scaffolded monorepo). New
+  capability goes there, per
   [docs/specs/2026-06-27-taskpaw-v3-design.md](specs/2026-06-27-taskpaw-v3-design.md).
 - **Never widen an operator-given scope.** In AFK mode, touch only the issues /
   files handed to you. Out-of-scope work → stop and report, don't do it.

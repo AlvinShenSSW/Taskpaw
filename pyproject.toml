@@ -22,7 +22,7 @@ tray = [
 build = [
     "pyinstaller>=6.0.0,<7.0.0",
 ]
-# V3 headless backend (taskpaw-v3/): FastAPI agent + Hub.
+# V3 headless backend (taskpaw_v3/): FastAPI agent + Hub.
 v3 = [
     "fastapi>=0.110,<1.0",
     "uvicorn>=0.27,<1.0",

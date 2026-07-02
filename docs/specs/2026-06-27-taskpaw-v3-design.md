@@ -372,7 +372,7 @@ Hub 与 OpenClaw 不认识新字段时按老逻辑处理 → 天然兼容。
 - **Hub** = 后端跑成常驻服务 + Tauri 仪表盘客户端。
 
 ```
-taskpaw-v3/                  # monorepo
+taskpaw_v3/                  # monorepo
 ├── core/                    # 共享：events/config/auth/protocol/schema
 ├── monitors/                # 插件 + registry + supervisor
 ├── agent/                   # taskpaw-agent 后端 —— 监控 + 本机控制 API + /events
