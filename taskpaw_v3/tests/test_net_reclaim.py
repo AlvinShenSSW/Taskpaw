@@ -19,12 +19,26 @@ def _free_port() -> int:
     return port
 
 
+class _Laddr:
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
+
+
+class _Conn:
+    def __init__(self, port, pid=None, status="LISTEN", ip="0.0.0.0"):
+        self.status = status
+        self.laddr = _Laddr(ip, port)
+        self.pid = pid
+
+
 class _FakeProc:
-    def __init__(self, pid, name, cmdline, log, wait_exc=None):
+    def __init__(self, pid, name, cmdline, log, conns=None, wait_exc=None):
         self.pid = pid
         self._name = name
         self._cmd = cmdline
         self._log = log
+        self._conns = conns or []  # this process's own LISTEN sockets
         self._wait_exc = wait_exc  # exception class to raise from wait(), or None
 
     def name(self):
@@ -32,6 +46,10 @@ class _FakeProc:
 
     def cmdline(self):
         return self._cmd
+
+    def connections(self, kind="inet"):
+        # psutil 5.9.x per-process API (no Process.net_connections yet)
+        return self._conns
 
     def terminate(self):
         self._log.append(("terminate", self.pid))
@@ -45,19 +63,6 @@ class _FakeProc:
         return 0
 
 
-class _Laddr:
-    def __init__(self, ip, port):
-        self.ip = ip
-        self.port = port
-
-
-class _Conn:
-    def __init__(self, port, pid, status="LISTEN", ip="0.0.0.0"):
-        self.status = status
-        self.laddr = _Laddr(ip, port)
-        self.pid = pid
-
-
 class _FakePsutil:
     CONN_LISTEN = "LISTEN"
 
@@ -69,12 +74,11 @@ class _FakePsutil:
 
     class Error(Exception): ...
 
-    def __init__(self, conns, procs):
-        self._conns = conns
-        self._procs = procs
+    def __init__(self, procs):
+        self._procs = {p.pid: p for p in procs}
 
-    def net_connections(self, kind="inet"):
-        return self._conns
+    def process_iter(self, attrs=None):
+        return list(self._procs.values())
 
     def Process(self, pid):
         if pid not in self._procs:
@@ -82,12 +86,18 @@ class _FakePsutil:
         return self._procs[pid]
 
 
-def _install(monkeypatch, port, pid, name, cmdline):
+def _install(monkeypatch, port, pid, name, cmdline, ip="0.0.0.0"):
+    """One fake process listening on `port` — the common single-holder setup."""
     log: list = []
-    proc = _FakeProc(pid, name, cmdline, log)
-    fake = _FakePsutil([_Conn(port, pid)], {pid: proc})
-    monkeypatch.setattr(net, "psutil", fake)
+    proc = _FakeProc(pid, name, cmdline, log, conns=[_Conn(port, pid, ip=ip)])
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
     return log
+
+
+def _fake_ports_free(monkeypatch, occupied=()):
+    """Make net.port_available report only `occupied` ports as taken (foreign)."""
+    occ = set(occupied)
+    monkeypatch.setattr(net, "port_available", lambda host, port: port not in occ)
 
 
 def test_reclaims_stale_same_role_backend(monkeypatch):
@@ -215,9 +225,14 @@ def test_localhost_matches_numeric_loopback_listener(monkeypatch):
     # instance also configured for `localhost` must still reclaim it (Codex 外门).
     port = _free_port()
     log: list = []
-    proc = _FakeProc(80, "taskpaw-backend", ["/x/taskpaw-backend", "hub"], log)
-    fake = _FakePsutil([_Conn(port, 80, ip="127.0.0.1")], {80: proc})
-    monkeypatch.setattr(net, "psutil", fake)
+    proc = _FakeProc(
+        80,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "hub"],
+        log,
+        conns=[_Conn(port, 80, ip="127.0.0.1")],
+    )
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
     assert net._addr_conflicts("localhost", "127.0.0.1") is True
     assert net.reclaim_port_from_stale_instance(
         "localhost", port, role="hub", what="hub API"
@@ -252,10 +267,10 @@ def test_stuck_process_wait_timeout_does_not_crash(monkeypatch):
         "taskpaw-backend",
         ["/x/taskpaw-backend", "agent"],
         log,
+        conns=[_Conn(port, 7)],
         wait_exc=_FakePsutil.TimeoutExpired,
     )
-    fake = _FakePsutil([_Conn(port, 7)], {7: proc})
-    monkeypatch.setattr(net, "psutil", fake)
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
     # Must not raise; the port wasn't freed → returns False (claim_port fails loud).
     assert (
         net.reclaim_port_from_stale_instance(
@@ -283,9 +298,15 @@ def test_multiport_reclaims_when_both_ours(monkeypatch):
     # Both agent ports held by our own stale backend (one pid on both) → reclaim both.
     p1, p2 = _free_port(), _free_port()
     log: list = []
-    proc = _FakeProc(300, "taskpaw-backend", ["/x/taskpaw-backend", "agent"], log)
-    fake = _FakePsutil([_Conn(p1, 300), _Conn(p2, 300)], {300: proc})
-    monkeypatch.setattr(net, "psutil", fake)
+    proc = _FakeProc(
+        300,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(p1, 300), _Conn(p2, 300)],
+    )
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
+    _fake_ports_free(monkeypatch)  # both bindable after the kill
     assert net.reclaim_ports_from_stale_instance(
         [
             ("127.0.0.1", p1, "agent network API"),
@@ -297,15 +318,20 @@ def test_multiport_reclaims_when_both_ours(monkeypatch):
 
 
 def test_multiport_foreign_on_one_port_reclaims_nothing(monkeypatch):
-    # Old agent on the control port, a FOREIGN service (nginx) on the network port.
-    # We must NOT kill the old agent — startup can't succeed on the nginx port anyway
-    # (Codex 外门). Reclaim nothing; claim_port later fails loud.
+    # Old agent on the control port (p2), a FOREIGN service on the network port (p1).
+    # We can't see the foreign socket without root, but the port is unbindable, so it's
+    # classified foreign → we must NOT kill the old agent (Codex 外门). Reclaim nothing.
     p1, p2 = _free_port(), _free_port()
     log: list = []
-    ours = _FakeProc(301, "taskpaw-backend", ["/x/taskpaw-backend", "agent"], log)
-    foreign = _FakeProc(302, "nginx", ["nginx", "-g", "daemon off;"], log)
-    fake = _FakePsutil([_Conn(p1, 302), _Conn(p2, 301)], {301: ours, 302: foreign})
-    monkeypatch.setattr(net, "psutil", fake)
+    ours = _FakeProc(
+        301,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(p2, 301)],
+    )
+    monkeypatch.setattr(net, "psutil", _FakePsutil([ours]))
+    _fake_ports_free(monkeypatch, occupied=[p1])  # p1 held by a foreign process
     assert not net.reclaim_ports_from_stale_instance(
         [
             ("127.0.0.1", p1, "agent network API"),
@@ -325,27 +351,23 @@ def test_addr_conflicts_predicate():
     assert net._addr_conflicts("127.0.0.1", "::1") is False  # different family
 
 
-def test_multiport_foreign_on_nonconflicting_addr_still_reclaims(monkeypatch):
-    # Agent configured for 192.168.1.5; a foreign service sits on 127.0.0.1:<net port>
-    # (does NOT conflict), our stale agent holds the control port. The bind to
-    # 192.168.1.5 would succeed, so we SHOULD reclaim the stale control port (Codex 外门).
-    p1, p2 = _free_port(), _free_port()
+def test_find_stale_backends_filters_by_bind_address(monkeypatch):
+    # Our backend LISTENs on 127.0.0.1; a new instance wanting 192.168.1.5 must not
+    # consider it a conflict, but one wanting 127.0.0.1 must (Codex 外门).
+    port = _free_port()
     log: list = []
-    ours = _FakeProc(401, "taskpaw-backend", ["/x/taskpaw-backend", "agent"], log)
-    foreign = _FakeProc(402, "nginx", ["nginx"], log)
-    fake = _FakePsutil(
-        [_Conn(p1, 402, ip="127.0.0.1"), _Conn(p2, 401, ip="192.168.1.5")],
-        {401: ours, 402: foreign},
+    proc = _FakeProc(
+        410,
+        "taskpaw-backend",
+        ["/x/taskpaw-backend", "agent"],
+        log,
+        conns=[_Conn(port, 410, ip="127.0.0.1")],
     )
-    monkeypatch.setattr(net, "psutil", fake)
-    assert net.reclaim_ports_from_stale_instance(
-        [
-            ("192.168.1.5", p1, "agent network API"),
-            ("192.168.1.5", p2, "agent control API"),
-        ],
-        role="agent",
-    )
-    assert ("terminate", 401) in log and ("terminate", 402) not in log
+    monkeypatch.setattr(net, "psutil", _FakePsutil([proc]))
+    assert list(net._find_stale_backends("192.168.1.5", port, "agent")) == []
+    assert [p.pid for p in net._find_stale_backends("127.0.0.1", port, "agent")] == [
+        410
+    ]
 
 
 def test_no_psutil_is_noop(monkeypatch):
@@ -359,8 +381,7 @@ def test_no_psutil_is_noop(monkeypatch):
 
 
 def test_is_our_backend_matches_name_and_role(monkeypatch):
-    fake = _FakePsutil([], {})
-    monkeypatch.setattr(net, "psutil", fake)
+    monkeypatch.setattr(net, "psutil", _FakePsutil([]))
     log: list = []
     ours = _FakeProc(1, "taskpaw-backend", ["/x/taskpaw-backend", "agent"], log)
     foreign = _FakeProc(2, "node", ["node", "server.js", "agent"], log)

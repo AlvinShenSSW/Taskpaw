@@ -19,10 +19,14 @@ It must **never** kill a foreign process that merely happens to sit on the port
 (that would be dangerous). So the takeover only fires when the holder is
 **positively identified as this app's own backend of the same role**:
 
-- `net._listener_pids(host, port)` — psutil enumerates LISTEN sockets on the port,
-  filtered to those whose address would actually conflict with our bind (same
-  address, or a wildcard on either side, same IP family; `localhost` ≡ loopback).
-  A foreign `127.0.0.1:P` listener therefore never blocks an agent on `192.168.x.y:P`.
+- `net._find_stale_backends(host, port, role)` — scans OUR OWN processes
+  (`process_iter` → each process's own sockets), **not** a system-wide socket scan:
+  on macOS `psutil.net_connections()` is root-only and would `AccessDenied` for the
+  logged-in-user desktop app (silently no-op the whole feature), whereas per-process
+  socket enumeration works for a same-user process without root. It yields only our
+  `role` backends whose LISTEN address would actually conflict with our bind (same
+  address, or a wildcard on either side, same IP family; `localhost` ≡ loopback), so
+  a foreign `127.0.0.1:P` listener never blocks an agent on `192.168.x.y:P`.
 - `net._is_our_backend(proc, role)` (via `_backend_role`) — true only if the process
   is positively one of OUR backends **for this role**: the PyInstaller sidecar
   (`taskpaw-backend[-<triple>][.exe]`), the from-source packaging entrypoint
@@ -32,9 +36,10 @@ It must **never** kill a foreign process that merely happens to sit on the port
   (agent must not kill a hub), a bare `backend_main.py` from another project, or any
   other process → not ours → **left alone**.
 - The agent needs BOTH its network and control ports, so it reclaims them
-  **all-or-nothing**: if ANY required port is held by a foreign process, it reclaims
-  nothing (leaving the old agent running) rather than kill the old instance and then
-  fail `claim_port` on the foreign-held port.
+  **all-or-nothing**: each port is classified ours / free (`port_available`) / foreign
+  (occupied but not ours — the only foreign signal available without root). A single
+  foreign port aborts the whole reclaim (leaving the old agent running) rather than
+  kill the old instance and then fail `claim_port` on the foreign-held port.
 - If the holder is foreign/unidentifiable, `reclaim_*` is a no-op and the existing
   `claim_port` still **fails loudly** — the "refuse to start if a real conflict
   exists" contract (constitution §3) is preserved for everything that isn't us.

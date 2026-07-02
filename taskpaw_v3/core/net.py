@@ -232,28 +232,52 @@ def _addr_conflicts(want_host: str, laddr_ip: str) -> bool:
         return want == have
 
 
-def _listener_pids(host: str, port: int) -> list[int]:
-    """PIDs LISTENing on `port` at an address that would actually conflict with a bind
-    to `host` (same address, or a wildcard on either side). Best-effort; [] if psutil
-    is unavailable or enumeration is denied."""
+def _proc_listen_conns(proc: "psutil.Process") -> list:
+    """A process's own LISTENing inet sockets. Uses PER-PROCESS enumeration, which —
+    unlike the system-wide `psutil.net_connections()` — works for a same-user process
+    WITHOUT root on macOS (there the system-wide call raises AccessDenied, so the
+    takeover would silently no-op; Codex 外门). Handles the psutil 6 rename
+    Process.connections → Process.net_connections."""
+    getter = getattr(proc, "net_connections", None) or proc.connections
+    return getter(kind="inet")
+
+
+def _find_stale_backends(host: str, port: int, role: str):
+    """Yield THIS app's own `role` backend processes that hold a bind-conflicting
+    LISTEN on (host, port). Scans OUR OWN processes (process_iter → per-process
+    sockets) rather than doing a system-wide socket scan, so it needs no root on macOS
+    where the stale instance runs as the same logged-in user (Codex 外门)."""
     if psutil is None:
-        return []
+        return
     try:
-        conns = psutil.net_connections(kind="inet")
-    except (psutil.AccessDenied, RuntimeError, OSError) as e:
-        log.warning("could not enumerate connections to reclaim a port: %s", e)
-        return []
-    pids = []
-    for c in conns:
-        if (
-            c.status == psutil.CONN_LISTEN
-            and c.laddr
-            and c.laddr.port == port
-            and c.pid
-            and _addr_conflicts(host, c.laddr.ip)
-        ):
-            pids.append(c.pid)
-    return pids
+        procs = list(psutil.process_iter())
+    except (psutil.AccessDenied, OSError) as e:
+        log.warning("could not enumerate processes to reclaim a port: %s", e)
+        return
+    me = os.getpid()
+    for proc in procs:
+        try:
+            if proc.pid == me:
+                continue
+            name = (proc.name() or "").lower()
+            cmd = [str(a) for a in (proc.cmdline() or [])]
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue  # a foreign / other-user process we can't inspect — not ours
+        if _backend_role(name, cmd) != role:
+            continue
+        try:
+            conns = _proc_listen_conns(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+        for c in conns:
+            if (
+                getattr(c, "status", None) == psutil.CONN_LISTEN
+                and c.laddr
+                and c.laddr.port == port
+                and _addr_conflicts(host, c.laddr.ip)
+            ):
+                yield proc
+                break
 
 
 def _terminate_backend(proc: "psutil.Process", pid: int, wait: float) -> bool:
@@ -292,32 +316,28 @@ def reclaim_ports_from_stale_instance(
     """
     if psutil is None:
         return False
-    # Phase 1 — inspect every port; a single foreign holder anywhere aborts the whole
-    # reclaim (so we leave the old, still-serving agent alone).
+    # Phase 1 — classify every port as ours / free / foreign. We can only see OUR OWN
+    # sockets without root (macOS), so a port that is neither ours nor bindable is
+    # treated as foreign — and a single foreign holder anywhere aborts the whole
+    # reclaim (leave the old, still-serving agent alone; claim_port fails loudly).
     to_kill: dict[int, "psutil.Process"] = {}
     for host, port, what in specs:
-        for pid in _listener_pids(host, port):
-            if pid == os.getpid():
-                continue
-            try:
-                proc = psutil.Process(pid)
-            except (psutil.NoSuchProcess, OSError):
-                continue
-            if not _is_our_backend(proc, role):
-                log.warning(
-                    "not reclaiming the %s ports: %s (%s:%d) is held by a foreign "
-                    "process (pid %d) — leaving any stale %s backend running rather "
-                    "than killing it when startup can't succeed here; claim_port will "
-                    "fail loudly.",
-                    role,
-                    what,
-                    host,
-                    port,
-                    pid,
-                    role,
-                )
-                return False
-            to_kill[pid] = proc
+        ours = list(_find_stale_backends(host, port, role))
+        if ours:
+            for proc in ours:
+                to_kill[proc.pid] = proc
+        elif not port_available(host, port):
+            log.warning(
+                "not reclaiming the %s ports: %s (%s:%d) is held by a foreign process "
+                "— leaving any stale %s backend running rather than killing it when "
+                "startup can't succeed here; claim_port will fail loudly.",
+                role,
+                what,
+                host,
+                port,
+                role,
+            )
+            return False
     if not to_kill:
         return False
     # Phase 2 — every holder is ours: terminate them, then wait for the OS to release
@@ -357,31 +377,23 @@ def reclaim_port_from_stale_instance(
     single-instance responsibility (a separate follow-up), not this port logic.
 
     Safety: it only ever terminates a process it can positively identify as this
-    app's backend for this role (name prefix + role argv). A **foreign** service on
-    the port is left untouched — `claim_port` then fails loudly as before. Never
-    binds, so there's no TOCTOU with the subsequent claim_port.
+    app's backend for this role (name/module + role). A **foreign** service on the
+    port is left untouched — `claim_port` then fails loudly as before. Never binds, so
+    there's no TOCTOU with the subsequent claim_port.
     """
     if psutil is None:
         return False
     reclaimed = False
-    for pid in _listener_pids(host, port):
-        if pid == os.getpid():
-            continue
-        try:
-            proc = psutil.Process(pid)
-        except (psutil.NoSuchProcess, OSError):
-            continue
-        if not _is_our_backend(proc, role):
-            continue  # foreign process on our port → do NOT kill; fail loud later
+    for proc in _find_stale_backends(host, port, role):
         log.warning(
             "reclaiming %s (%s:%s) from a stale TaskPaw %s backend (pid %d)",
             what,
             host,
             port,
             role,
-            pid,
+            proc.pid,
         )
-        if _terminate_backend(proc, pid, wait):
+        if _terminate_backend(proc, proc.pid, wait):
             reclaimed = True
     if reclaimed:
         # Wait for the OS to actually release the socket before the caller binds.
