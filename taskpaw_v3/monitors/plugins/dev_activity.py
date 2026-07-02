@@ -10,8 +10,14 @@ never conflated:
   hook/notify writes via `integrations/activity_writer.py`
   (`{tool, state, ts}`). A stale/missing file → `unknown` (never silently `idle`),
   so a crashed "busy" can't stick.
+- **observed** (P-obs, #163): when a tool is present but has NO fresh hook state, infer
+  busy/idle from the CPU of its process subtree (external `psutil` read — no writes to
+  / no impact on the tool). This gives real busy/idle even for tools with no hooks
+  (Kimi) or before hooks are wired. Precedence: hook state › observed › presence.
 
-Aggregation (`最忙者胜`): busy › waiting › idle › present_only › none. Freshness is
+Aggregation (`最忙者胜`): busy › waiting › idle › present_only › none — busy/waiting/idle
+count AI tools only, so a busy VS Code (context editor) shows in its row but never makes
+the machine "AI busy". Freshness is
 judged on THIS agent with its own clock (`time.time() - ts`) — never a cross-machine
 comparison (#152). Privacy: reports only tool + state + timestamps; it never reads
 prompts, code, or session content.
@@ -43,7 +49,7 @@ from taskpaw_v3.monitors.base import (
     MonitorStatus,
     State,
 )
-from taskpaw_v3.monitors.process_util import scan_matches
+from taskpaw_v3.monitors.process_util import cpu_percents, scan_activity, scan_matches
 
 log = logging.getLogger("taskpaw.monitors.dev_activity")
 
@@ -83,6 +89,12 @@ class DevActivityConfig(BaseMonitorConfig):
     freshness_seconds: float = Field(300.0, gt=0)
     # Duty window for the "% busy over the last N seconds" bar.
     window_seconds: float = Field(1800.0, ge=60.0)
+    # External CPU probe (#163): when a tool is present but has no fresh hook state,
+    # infer busy/idle from the CPU of its process subtree. Pure observation — no writes
+    # to / no impact on the tool. Off → presence-only for un-hooked tools.
+    observe: bool = True
+    # Subtree CPU% (of one core) at/above which the probe reports the tool busy.
+    busy_cpu_percent: float = Field(8.0, gt=0)
     # Optional per-tool process-pattern overrides (regex).
     process_patterns: dict[str, str] = Field(default_factory=dict)
 
@@ -183,13 +195,18 @@ def _detect_present(compiled: dict[str, "re.Pattern[str]"]) -> dict[str, bool]:
 
 def aggregate(tools: list[dict]) -> tuple[str, list[str]]:
     """Machine headline (最忙者胜) + the list of currently-busy tools.
-    tools = [{tool,state,present,age_s}]; state is busy|waiting|idle|None(unknown)."""
-    busy = [t["tool"] for t in tools if t["state"] == "busy"]
+    tools = [{tool,state,present,age_s,ai}]; state is busy|waiting|idle|None(unknown).
+
+    The headline reflects **AI activity**, so busy/waiting/idle count AI tools only
+    (`ai` truthy) — a busy VS Code (context/editor, `ai=false`) shows its own state in
+    its row but never makes the machine "AI busy" (#163). `present_only` was already
+    AI-gated."""
+    busy = [t["tool"] for t in tools if t["state"] == "busy" and t.get("ai", True)]
     if busy:
         return "busy", busy
-    if any(t["state"] == "waiting" for t in tools):
+    if any(t["state"] == "waiting" and t.get("ai", True) for t in tools):
         return "waiting", []
-    if any(t["state"] == "idle" for t in tools):
+    if any(t["state"] == "idle" and t.get("ai", True) for t in tools):
         return "idle", []
     # Presence only counts for AI tools — a lone VS Code (context) isn't "AI".
     if any(t["present"] and t.get("ai", True) for t in tools):
@@ -222,6 +239,27 @@ class DevActivityInstance(MonitorInstance):
         # poll_interval + large window isn't silently truncated (Kimi 终审).
         max_samples = max(1000, int(config.window_seconds / config.poll_interval) + 100)
         self._samples: deque[tuple[float, bool]] = deque(maxlen=max_samples)
+        # External CPU probe (#163): previous per-tool subtree cpu_seconds + the
+        # monotonic timestamp of that sample, for the busy/idle CPU% delta.
+        self._prev_cpu: dict[str, float] = {}
+        self._prev_mono: Optional[float] = None
+
+    def _observe(self) -> dict[str, float]:
+        """Per-tool subtree CPU% since the last check (empty if the probe is off,
+        psutil is unavailable, or this is the first sample). Best-effort: any psutil
+        fault degrades to no observation (falls back to presence), never crashes the
+        check (§4)."""
+        try:
+            sample = scan_activity(self._compiled)
+        except Exception as e:
+            log.warning("dev_activity: CPU activity probe failed: %s", e)
+            return {}
+        now_mono = time.monotonic()
+        prev_mono = self._prev_mono if self._prev_mono is not None else now_mono
+        percents, new_prev = cpu_percents(self._prev_cpu, prev_mono, sample, now_mono)
+        self._prev_cpu = new_prev
+        self._prev_mono = now_mono
+        return percents
 
     def _patterns(self, cfg: DevActivityConfig) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -245,19 +283,34 @@ class DevActivityInstance(MonitorInstance):
         cfg: DevActivityConfig = self.config  # type: ignore[assignment]
         now = time.time()
         present = _detect_present(self._compiled)
+        # External CPU probe: only sample when enabled (keeps the sweep + delta state
+        # off entirely when observe is disabled).
+        cpu = self._observe() if cfg.observe else {}
         tools: list[dict] = []
         for tool in cfg.tools:
             state, age = read_tool_state(
                 cfg.state_dir, tool, cfg.freshness_seconds, now
             )
+            is_present = bool(present.get(tool, False))
+            observed = False
+            cpu_pct: Optional[float] = None
+            # Observation fills in busy/idle ONLY when there's no fresh hook state
+            # (hook state always wins) and the tool is present with a CPU% reading.
+            if state is None and is_present and tool in cpu:
+                cpu_pct = round(cpu[tool], 1)
+                state = "busy" if cpu[tool] >= cfg.busy_cpu_percent else "idle"
+                observed = True
             tools.append(
                 {
                     "tool": tool,
-                    "state": state,  # busy|waiting|idle when fresh, else None
-                    "present": bool(present.get(tool, False)),
+                    "state": state,  # busy|waiting|idle when fresh/observed, else None
+                    "present": is_present,
                     "age_s": None if age is None else round(age, 1),
                     # VS Code (context) presence doesn't count as "AI running".
                     "ai": tool not in _CONTEXT_TOOLS,
+                    # Probe provenance (#163): observed=True → CPU-derived, not hook.
+                    "observed": observed,
+                    "cpu": cpu_pct,
                 }
             )
 
