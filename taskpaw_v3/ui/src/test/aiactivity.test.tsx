@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
-import { AiActivity, AiBadge, isAiMetrics } from "../components/AiActivity";
+import { AiActivity, AiBadge } from "../components/AiActivity";
+import { isAiMetrics } from "../components/aiActivity.helpers";
 import { MonitorMetrics } from "../components/MonitorMetrics";
 import { theme } from "../theme";
 import "../i18n";

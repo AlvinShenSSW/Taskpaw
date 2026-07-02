@@ -2,58 +2,22 @@ import { Box, LinearProgress, Stack, Typography } from "@mui/material";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { StatusDot } from "./StatusDot";
+import { type AiMetrics, type Tool, HEADLINE_DOT, aiHeadlineLabel } from "./aiActivity.helpers";
 
 // Renders the dev_activity monitor's `ai` metrics block (#154) — machine headline,
-// per-tool busy/idle/present rows, and a 30-min duty bar. Used on the agent console
-// (via MonitorMetrics) and the Hub. Design: pages/ai-activity-monitor.md.
-// Status is never colour-only: every dot is paired with a text label.
-
-type Tool = { tool: string; state: string | null; present: boolean; age_s: number | null };
-type AiMetrics = {
-  ai_state?: string;
-  busy_tools?: string[];
-  tools?: Tool[];
-  window_s?: number;
-  duty?: { busy_s?: number; ratio?: number };
-};
-
-// headline → the StatusDot state token (busy/waiting are "live" = pulse).
-const HEADLINE_DOT: Record<string, string> = {
-  busy: "running",
-  waiting: "starting",
-  idle: "idle",
-  present_only: "idle",
-  none: "unknown",
-};
-
-export function isAiMetrics(m: Record<string, unknown> | undefined): m is AiMetrics {
-  return !!m && typeof (m as AiMetrics).ai_state === "string";
-}
-
-export function aiHeadlineLabel(m: AiMetrics, t: TFunction): string {
-  const tools = (m.busy_tools ?? []).join(", ");
-  switch (m.ai_state) {
-    case "busy":
-      return t("ai.busy", { tools });
-    case "waiting":
-      return t("ai.waiting");
-    case "idle":
-      return t("ai.idle");
-    case "present_only":
-      return t("ai.presentOnly");
-    default:
-      return t("ai.none");
-  }
-}
+// per-tool busy/idle/present rows, and a duty bar. Used on the agent console (via
+// MonitorMetrics) and the Hub. Design: pages/ai-activity-monitor.md. Status is
+// never colour-only: every dot is paired with a text label. Types + pure helpers
+// live in ./aiActivity.helpers.
 
 // Compact badge for the Hub machine-row header (the fleet glance).
 export function AiBadge({ metrics }: { metrics: AiMetrics }) {
   const { t } = useTranslation();
   const state = HEADLINE_DOT[metrics.ai_state ?? "none"] ?? "unknown";
   return (
-    <Stack direction="row" alignItems="center" spacing={0.5} component="span">
+    <Stack direction="row" alignItems="center" spacing={0.5}>
       <StatusDot state={state} live={metrics.ai_state === "busy" || metrics.ai_state === "waiting"} />
-      <Typography variant="caption" color="text.secondary">
+      <Typography component="span" variant="caption" color="text.secondary">
         {aiHeadlineLabel(metrics, t)}
       </Typography>
     </Stack>

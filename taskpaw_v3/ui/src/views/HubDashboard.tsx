@@ -9,7 +9,8 @@ import { api, type HubServer, type MonitorSnapshot } from "../api";
 import { StatusDot } from "../components/StatusDot";
 import { EventLog } from "../components/EventLog";
 import { MonitorMetrics, utilTint } from "../components/MonitorMetrics";
-import { AiBadge, isAiMetrics } from "../components/AiActivity";
+import { AiBadge } from "../components/AiActivity";
+import { isAiMetrics } from "../components/aiActivity.helpers";
 import { HubAgentManager } from "../components/HubAgentManager";
 import { Settings } from "./Settings";
 

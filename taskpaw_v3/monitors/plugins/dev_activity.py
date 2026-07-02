@@ -25,6 +25,7 @@ themselves.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from collections import deque
@@ -42,6 +43,8 @@ from taskpaw_v3.monitors.base import (
     State,
 )
 from taskpaw_v3.monitors.plugins.process import _scan
+
+log = logging.getLogger("taskpaw.monitors.dev_activity")
 
 # Built-in process patterns per tool (case-insensitive, matched against name +
 # cmdline). VS Code's process is named differently per OS (Code.exe / Code Helper /
@@ -144,18 +147,19 @@ def _detect_present(patterns: dict[str, str]) -> dict[str, bool]:
     if not patterns:
         return present
     try:
-        import psutil  # noqa: F401
+        import psutil
     except ImportError:  # pragma: no cover
         return present
     compiled = {t: re.compile(p, re.IGNORECASE) for t, p in patterns.items()}
     for tool, rx in compiled.items():
         try:
             present[tool] = _scan(rx, search_cmdline=True)
-        except Exception:
-            # Presence is a best-effort signal: process enumeration can raise
-            # PermissionError/OSError (restricted macOS/service env), RuntimeError
-            # (psutil missing), etc. Degrade that tool to absent — never abort the
-            # check, so file-based activity is still reported (Codex 外门).
+        except (OSError, RuntimeError, psutil.Error) as e:
+            # Presence is best-effort: process enumeration can raise PermissionError/
+            # OSError (restricted macOS/service env), RuntimeError (psutil missing),
+            # or a psutil.Error. Log it (not silent, §4) and degrade that tool to
+            # absent — never abort the check, so file-based activity is still read.
+            log.warning("dev_activity: presence scan for %r failed: %s", tool, e)
             present[tool] = False
     return present
 

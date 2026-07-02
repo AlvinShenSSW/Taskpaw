@@ -1,6 +1,7 @@
 import { Box, CircularProgress, LinearProgress, Stack, Tooltip, Typography } from "@mui/material";
 import { useTranslation } from "react-i18next";
-import { AiActivity, isAiMetrics } from "./AiActivity";
+import { AiActivity } from "./AiActivity";
+import { isAiMetrics } from "./aiActivity.helpers";
 
 // Live metrics dashboard for a monitor's status pane (design-system
 // pages/agent-console.md → StatusHeader: "live metric line … file N/M, fps, %").

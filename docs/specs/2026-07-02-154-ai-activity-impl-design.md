@@ -9,8 +9,10 @@ monitor plugin, so no core/UI plumbing changes.
 
 ## Backend — `dev_activity` plugin (`taskpaw_v3/monitors/plugins/dev_activity.py`)
 Registered in the default registry (operator-selectable, `system=False`, passive →
-auto-starts). `check()` produces a `MonitorStatus` whose `metrics` carry the `ai`
-block the UI renders.
+auto-starts). `check()` produces a `MonitorStatus` whose `metrics` carry **flat**
+`ai_*` keys the UI renders (`ai_state`, `busy_tools`, `tools[]`, `window_s`,
+`duty{ratio,busy_s}`) — see the data contract in the design-system page. `duty` is
+an in-memory sampled approximation (resets on restart; no `segments`).
 
 - **P1 — process presence (config-free):** one psutil sweep (reusing
   `process._scan`) matches each tool's pattern (claude/codex/kimi + a broad VS Code
