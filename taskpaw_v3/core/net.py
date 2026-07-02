@@ -196,14 +196,23 @@ def _listener_pids(port: int) -> list[int]:
 def reclaim_port_from_stale_instance(
     host: str, port: int, *, role: str, what: str, wait: float = 8.0
 ) -> bool:
-    """If `port` is held by a STALE instance of THIS app's own backend (same role) —
-    e.g. an old version still running after an update — terminate it and wait for the
-    port to free, so a relaunch "just works". Returns True if it reclaimed one.
+    """If `port` is held by THIS app's own backend of the same role, terminate it and
+    wait for the port to free, so a relaunch/update "just works". Returns True if it
+    reclaimed one.
+
+    Semantics: **last launch wins** for a single-agent/single-hub-per-machine box
+    (the design invariant — one agent, one port per machine). The holder of *this
+    configured port* is by definition the previous instance of *this* agent/hub, so
+    a new launch supersedes it (the exact behavior needed for in-place updates,
+    where the old version is still running). It does NOT try to distinguish "stale"
+    from "actively serving" — on a single-instance box they're the same instance.
+    Preventing an *accidental* double-launch of the same version is the Tauri shell's
+    single-instance responsibility (a separate follow-up), not this port logic.
 
     Safety: it only ever terminates a process it can positively identify as this
-    app's backend for this role (name + role argv). A **foreign** service on the
-    port is left untouched — `claim_port` then fails loudly as before. Never binds,
-    so there's no TOCTOU with the subsequent claim_port.
+    app's backend for this role (name prefix + role argv). A **foreign** service on
+    the port is left untouched — `claim_port` then fails loudly as before. Never
+    binds, so there's no TOCTOU with the subsequent claim_port.
     """
     if psutil is None:
         return False

@@ -136,6 +136,17 @@ def build_tauri() -> None:
     ver = os.environ.get("TASKPAW_BUILD_VERSION", "").strip().lstrip("vV")
     if ver:
         cfg["version"] = ver
+    # macOS: ad-hoc sign local/unsigned builds so the .app + .dmg aren't rejected as
+    # "damaged" on Apple Silicon (an unsigned/inconsistently-signed bundle fails
+    # Gatekeeper). ONLY when no release identity is configured — a real
+    # APPLE_SIGNING_IDENTITY (release.yml #49) must win so Developer-ID signing +
+    # notarization still happen. Kept out of tauri.conf so the release path is
+    # untouched.
+    if (
+        sys.platform == "darwin"
+        and not os.environ.get("APPLE_SIGNING_IDENTITY", "").strip()
+    ):
+        cfg["bundle"] = {"macOS": {"signingIdentity": "-"}}
     overrides = json.dumps(cfg)
     # --ci: never prompt (headless runners would hang). Pin the CLI for
     # reproducible bundles; beforeBuildCommand builds the UI.

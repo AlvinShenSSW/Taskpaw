@@ -27,9 +27,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/taskpaw-backend"],
-    "macOS": {
-      "signingIdentity": "-"
-    }
+    "externalBin": ["binaries/taskpaw-backend"]
   }
 }
