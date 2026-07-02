@@ -42,7 +42,7 @@ from taskpaw_v3.monitors.base import (
     MonitorStatus,
     State,
 )
-from taskpaw_v3.monitors.plugins.process import _scan
+from taskpaw_v3.monitors.process_util import scan_matches
 
 log = logging.getLogger("taskpaw.monitors.dev_activity")
 
@@ -108,7 +108,12 @@ def _shared_file(state_dir: str) -> Path:
 def _load(p: Path) -> Optional[dict]:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return None  # expected: the tool isn't wired / not installed
+    except (OSError, ValueError) as e:
+        # A permission-denied dir or corrupt file is worth surfacing (§4), not
+        # silently reading as "none".
+        log.warning("dev_activity: could not read %s: %s", p, e)
         return None
     return data if isinstance(data, dict) else None
 
@@ -133,7 +138,11 @@ def read_tool_state(
     if not isinstance(ts, (int, float)) or not isinstance(state, str):
         return None, None
     age = now - float(ts)
-    if age < 0:  # clock skew / future stamp — treat as fresh (age 0)
+    if age < -freshness_seconds:
+        # Implausibly future-dated (beyond a small skew) → invalid, not "fresh
+        # forever" (Kimi 终审): a bad/far-future write can't pin the state live.
+        return None, None
+    if age < 0:  # small clock skew — treat as just-written
         age = 0.0
     if age > freshness_seconds:
         return None, age  # stale → unknown, but report the age for display
@@ -141,27 +150,21 @@ def read_tool_state(
 
 
 def _detect_present(patterns: dict[str, str]) -> dict[str, bool]:
-    """One psutil sweep → {tool: present} for the given {tool: regex}. If psutil is
-    unavailable, every tool is reported absent (present detection degrades off)."""
-    present = {tool: False for tool in patterns}
+    """ONE psutil sweep → {tool: present} for the given {tool: regex} (via
+    process_util.scan_matches). Presence is best-effort: enumeration can raise
+    PermissionError/OSError (restricted macOS/service env) or RuntimeError (psutil
+    missing) — log it (§4, not silent) and degrade every tool to absent rather than
+    abort the check, so file-based activity is still read."""
     if not patterns:
-        return present
-    try:
-        import psutil
-    except ImportError:  # pragma: no cover
-        return present
+        return {}
     compiled = {t: re.compile(p, re.IGNORECASE) for t, p in patterns.items()}
-    for tool, rx in compiled.items():
-        try:
-            present[tool] = _scan(rx, search_cmdline=True)
-        except (OSError, RuntimeError, psutil.Error) as e:
-            # Presence is best-effort: process enumeration can raise PermissionError/
-            # OSError (restricted macOS/service env), RuntimeError (psutil missing),
-            # or a psutil.Error. Log it (not silent, §4) and degrade that tool to
-            # absent — never abort the check, so file-based activity is still read.
-            log.warning("dev_activity: presence scan for %r failed: %s", tool, e)
-            present[tool] = False
-    return present
+    try:
+        return scan_matches(compiled, search_cmdline=True)
+    except (OSError, RuntimeError) as e:
+        # PermissionError/OSError (restricted enumeration) or RuntimeError (psutil
+        # missing) → degrade all tools to absent; never abort the check.
+        log.warning("dev_activity: process presence scan failed: %s", e)
+        return {tool: False for tool in patterns}
 
 
 def aggregate(tools: list[dict]) -> tuple[str, list[str]]:

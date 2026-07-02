@@ -168,13 +168,23 @@ def test_busy_to_waiting_emits_waiting_not_idle(tmp_path, monkeypatch):
     )
 
 
+def test_read_tool_state_rejects_far_future_ts(tmp_path):
+    # A far-future timestamp must NOT read as "fresh forever" (Kimi 终审).
+    now = 1000.0
+    _write(tmp_path, "claude", "busy", now + 10_000)
+    assert read_tool_state(str(tmp_path), "claude", 300, now) == (None, None)
+    # ...but a few seconds of clock skew is tolerated as just-written.
+    _write(tmp_path, "codex", "busy", now + 2)
+    assert read_tool_state(str(tmp_path), "codex", 300, now)[0] == "busy"
+
+
 def test_present_scan_error_degrades_not_crash(tmp_path, monkeypatch):
     # A psutil PermissionError/OSError during enumeration must not abort check();
     # presence degrades to absent and file-based activity is still reported.
-    def boom(rx, search_cmdline):
+    def boom(patterns, search_cmdline=True):
         raise PermissionError("denied")
 
-    monkeypatch.setattr(da, "_scan", boom)
+    monkeypatch.setattr(da, "scan_matches", boom)
     _write(tmp_path, "claude", "busy", time.time())
     cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
     inst = DevActivityPlugin().create("ai", cfg)

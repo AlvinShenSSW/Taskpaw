@@ -20,11 +20,7 @@ from taskpaw_v3.monitors.base import (
     MonitorPlugin,
     MonitorStatus,
 )
-
-try:
-    import psutil
-except ImportError:  # pragma: no cover
-    psutil = None
+from taskpaw_v3.monitors.process_util import scan_one
 
 
 class ProcessConfig(BaseMonitorConfig):
@@ -56,25 +52,9 @@ class ProcessConfig(BaseMonitorConfig):
 
 
 def _scan(rx: "re.Pattern[str]", search_cmdline: bool) -> bool:
-    """True if any running process matches the precompiled regex."""
-    if psutil is None:
-        raise RuntimeError("psutil not available")
-    fields = ["name", "cmdline"] if search_cmdline else ["name"]
-    for proc in psutil.process_iter(fields):
-        try:
-            info = proc.info
-            name = info.get("name") or ""
-            if rx.search(name):
-                return True
-            if search_cmdline:
-                cmd = " ".join(info.get("cmdline") or [])
-                if cmd and rx.search(cmd):
-                    return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            # Process vanished or is inaccessible mid-iteration — skip, don't let
-            # a transient race degrade a healthy monitor.
-            continue
-    return False
+    """True if any running process matches the precompiled regex. Thin wrapper over
+    the shared one-sweep scanner (process_util.scan_one)."""
+    return scan_one(rx, search_cmdline)
 
 
 def process_matches(pattern: str, search_cmdline: bool) -> bool:

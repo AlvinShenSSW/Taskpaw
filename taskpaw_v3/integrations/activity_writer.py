@@ -2,7 +2,8 @@
 
 A tiny, dependency-free wrapper that a Claude Code hook or Codex notify program
 invokes to record whether the agent is busy / idle / waiting. It atomically
-writes a small JSON file the `state_file` monitor reads:
+writes a small JSON file the `dev_activity` monitor reads (#154; the legacy
+single-file `state_file` monitor can read it too):
 
     {"tool": "claude", "state": "busy", "session": "abc", "ts": 1750000000.0}
 
