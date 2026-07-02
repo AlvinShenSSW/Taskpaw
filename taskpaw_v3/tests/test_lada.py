@@ -109,6 +109,39 @@ def test_parse_ignores_noise():
     assert parse_progress_line("loading model...", {}) == {}  # no % → unchanged
 
 
+def test_running_metrics_expose_all_per_task_fields_to_hub():
+    # #161: the FULL per-task progress set must ride `metrics` (→ /status →
+    # supervisor snapshot → hub.db → openclaw). Lock the exact field names/types
+    # via the real reader path (_consume_output) so a future rename can't silently
+    # drop a field from the Hub. No folders + gpu off → metrics carries only the
+    # parsed progress (+ best-effort cpu/mem), so we can assert the per-task keys.
+    inst = LadaInstance("lada", _cfg(lada_gpu_monitor=False))  # passive, no IO
+    inst._consume_output(b"ABF-346.mp4:")  # filename header
+    inst._consume_output(
+        b"Processing video:  15%|@@@ |Processed: 06:09 (36703f) | "
+        b"Remaining: 30:47 (207454f) | Speed: 112.3fps"
+    )
+    m = inst._build_status("running").metrics
+    assert m["current_file"] == "ABF-346.mp4"
+    assert isinstance(m["percent"], int) and m["percent"] == 15
+    assert isinstance(m["processed_frames"], int) and m["processed_frames"] == 36703
+    assert isinstance(m["remaining_frames"], int) and m["remaining_frames"] == 207454
+    assert isinstance(m["fps"], float) and m["fps"] == 112.3
+    assert isinstance(m["elapsed"], str) and m["elapsed"] == "06:09"
+    assert isinstance(m["eta"], str) and m["eta"] == "30:47"
+
+
+def test_idle_snapshot_omits_per_task_progress():
+    # Per-task progress is meaningful only while RUNNING — an idle/exited snapshot
+    # must not leak stale %/ETA/frames to the Hub (Codex #59 parity).
+    inst = LadaInstance("lada", _cfg(lada_gpu_monitor=False))
+    inst._consume_output(b"ABF-346.mp4:")
+    inst._consume_output(b"Processing video: 15%|@@ |Speed: 112.3fps")
+    m = inst._build_status("idle").metrics
+    for k in ("current_file", "percent", "fps", "eta", "processed_frames"):
+        assert k not in m
+
+
 # ── snapshot / queue / current-file ────────────────────────────────────────
 def test_queue_counts_and_current_file(tmp_path):
     inp, out = tmp_path / "in", tmp_path / "out"

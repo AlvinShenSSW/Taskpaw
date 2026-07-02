@@ -123,6 +123,21 @@ def _status_text(snap: Any) -> str:
             cf := _inline(m["current_file"])
         ):
             seg += f" | {cf} |"
+        # Per-task progress (#161): capture-mode-only fields (percent/ETA/fps).
+        # Appended to the SAME segment (never a new pipe-part → no `| |`) so the
+        # legacy "X/Y done (Z left)" / "| file |" substrings the V2 scrapers match
+        # stay byte-identical. Each field is guarded, so capture-off Lada (none of
+        # them present) renders exactly as before. hub.db carries the full set
+        # (elapsed / processed_frames / remaining_frames) for programmatic reads.
+        prog: list[str] = []
+        if _is_num(m.get("percent")) and 0 <= m["percent"] <= 100:
+            prog.append(f"{m['percent']:.0f}%")
+        if isinstance(m.get("eta"), str) and (eta := _inline(m["eta"])):
+            prog.append(f"ETA {eta}")
+        if _is_num(m.get("fps")):
+            prog.append(f"{m['fps']:.0f}fps")
+        if prog:
+            seg += (" " if seg.endswith("|") else " · ") + " · ".join(prog)
         parts.append(seg)
 
     # comfyui-style depth: "N running, M pending".

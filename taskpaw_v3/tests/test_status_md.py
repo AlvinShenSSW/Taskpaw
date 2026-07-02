@@ -572,3 +572,117 @@ def test_offline_without_last_seen_omits_the_parenthetical():
     md = render_status_md(rows, "now")
     assert "## box: OFFLINE" in md
     assert "last seen" not in md
+
+
+# ── #161: lada per-task progress in status.md ─────────────────────────────────
+def _lada_row(metrics: dict, state: str = "running") -> list[dict]:
+    return [
+        {
+            "name": "box",
+            "reachable": 1,
+            "status_json": json.dumps(
+                {"monitors": {"LADA": {"state": state, "type_id": "lada", "metrics": metrics}}}
+            ),
+        }
+    ]
+
+
+def _lada_line(md: str) -> str:
+    return next(ln for ln in md.splitlines() if ln.startswith("- LADA:"))
+
+
+def test_lada_per_task_progress_renders_after_queue():
+    # #161: percent / ETA / fps appended after the queue+file segment, additively.
+    md = render_status_md(
+        _lada_row(
+            {
+                "queue_completed": 5,
+                "queue_total": 10,
+                "queue_remaining": 5,
+                "current_file": "clip.mp4",
+                "percent": 47,
+                "eta": "30:47",
+                "fps": 112.3,
+            }
+        ),
+        "t",
+    )
+    line = _lada_line(md)
+    # Legacy substrings stay byte-identical (V2 scrapers must keep matching).
+    assert "5/10 done (5 left) | clip.mp4 |" in line
+    assert "47%" in line
+    assert "ETA 30:47" in line
+    assert "112" in line  # fps
+
+
+def test_lada_capture_off_renders_queue_only_byte_identical():
+    # Default (capture off): no per-task fields → the line is exactly today's.
+    md = render_status_md(
+        _lada_row(
+            {
+                "queue_completed": 5,
+                "queue_total": 10,
+                "queue_remaining": 5,
+                "current_file": "clip.mp4",
+            }
+        ),
+        "t",
+    )
+    assert _lada_line(md) == "- LADA: 5/10 done (5 left) | clip.mp4 |"
+
+
+def test_lada_nonfinite_percent_and_fps_omitted_queue_survives():
+    md = render_status_md(
+        _lada_row(
+            {
+                "queue_total": 10,
+                "queue_completed": 5,
+                "current_file": "clip.mp4",
+                "percent": float("nan"),
+                "fps": "n/a",
+                "eta": "30:47",
+            }
+        ),
+        "t",
+    )
+    line = _lada_line(md)
+    assert "5/10 done (5 left) | clip.mp4 |" in line
+    assert "nan" not in line and "n/a" not in line and "%" not in line and "fps" not in line
+    assert "ETA 30:47" in line  # a valid field still renders
+
+
+def test_lada_out_of_range_percent_dropped():
+    md = render_status_md(
+        _lada_row({"queue_total": 4, "queue_completed": 1, "percent": 150}), "t"
+    )
+    line = _lada_line(md)
+    assert "1/4 done (3 left)" in line
+    assert "150%" not in line and "%" not in line
+
+
+def test_lada_eta_control_chars_cannot_inject_lines():
+    md = render_status_md(
+        _lada_row(
+            {"queue_total": 2, "queue_completed": 1, "eta": "30:47\n## HACKED: ONLINE"}
+        ),
+        "t",
+    )
+    # _inline() collapses the newline to a space, so the payload stays INLINE on
+    # the single LADA line — it never becomes its own injected "## …" server line.
+    lada_lines = [ln for ln in md.splitlines() if ln.startswith("- LADA:")]
+    assert len(lada_lines) == 1
+    assert not any(ln.startswith("##") and "HACKED" in ln for ln in md.splitlines())
+
+
+def test_lada_error_state_hides_stale_progress():
+    # A hard-bad state must surface the state, not stale per-task progress.
+    md = render_status_md(
+        _lada_row(
+            {"queue_total": 10, "queue_completed": 3, "percent": 47, "fps": 100.0},
+            state="error",
+        ),
+        "t",
+    )
+    line = _lada_line(md)
+    assert "error" in line
+    assert "47%" not in line and "done" not in line

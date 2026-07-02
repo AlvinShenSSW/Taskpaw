@@ -52,6 +52,14 @@ for r in rows:
             done, total = num(met, "queue_completed"), num(met, "queue_total")
             left, cur   = num(met, "queue_remaining"), met.get("current_file")
             running     = state == "running"          # ← judge by state, NOT enabled
+            # Per-task progress — CAPTURE MODE ONLY (lada_capture_progress: true);
+            # all None with capture off. Select whichever you need:
+            pct         = num(met, "percent")          # 0..100, current file
+            eta         = met.get("eta")               # str "MM:SS" / "H:MM:SS"
+            elapsed     = met.get("elapsed")           # str, same format
+            done_frames = num(met, "processed_frames")
+            left_frames = num(met, "remaining_frames")
+            fps         = num(met, "fps")
 
         # comfyui: type_id == "comfyui", or BOTH running and pending present
         if tid == "comfyui" or (num(met, "running") is not None and num(met, "pending") is not None):
@@ -68,11 +76,24 @@ for r in rows:
 | GPU % | `gpu_pct` | host | Windows (`"n/a"` on macOS) |
 | VRAM used / total (MB) | `gpu_mem_used_mb` / `gpu_mem_total_mb` | host | ÷1024 = GB |
 | Lada done / total / left | `queue_completed` / `queue_total` / `queue_remaining` | lada | |
-| Lada current task | `current_file` | lada | string |
+| Lada current task | `current_file` | lada | string; capture mode or folder-derived |
+| Lada current-file % | `percent` | lada | 0..100; **capture mode only** |
+| Lada ETA / elapsed | `eta` / `elapsed` | lada | string `MM:SS`/`H:MM:SS`; **capture mode only** |
+| Lada frames done / left | `processed_frames` / `remaining_frames` | lada | int; **capture mode only** |
+| Lada speed (fps) | `fps` | lada | float; **capture mode only** |
 | ComfyUI running / pending | `running` / `pending` | comfyui | |
 | **Running?** | top-level **`state`** (`running`/`idle`/`ok`/`error`/`stopped`) | any | **use this, not `enabled`** |
 
 Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
+
+> **Lada per-task progress needs capture mode.** `percent` / `eta` / `elapsed` /
+> `processed_frames` / `remaining_frames` / `fps` describe the *current file* and
+> are populated only when the agent captures lada-cli's output
+> (`lada_capture_progress: true`). With capture off (the default) lada runs in its
+> own console window and only the folder-derived fields — `queue_*` and
+> `current_file` — are available. They also appear only while the monitor `state`
+> is `running`; an idle/finished snapshot omits them. Always guard each with
+> `num()` / a `None` check.
 
 ## Three rules that bite
 
@@ -95,7 +116,7 @@ Last updated: YYYY-MM-DD HH:MM:SS
 
 ## PinkPig: ONLINE
 - PinkPig-host: CPU 45% | RAM 8.2/16.0GB | GPU 78% | VRAM 12.3/24.0GB
-- LADA: 5/10 done (5 left) | clip.mp4 |
+- LADA: 5/10 done (5 left) | clip.mp4 | 47% · ETA 30:47 · 112fps
 - ComfyUI: 2 running, 100 pending
 ## SkyPig: OFFLINE (last seen 09:15:30)
 ```
