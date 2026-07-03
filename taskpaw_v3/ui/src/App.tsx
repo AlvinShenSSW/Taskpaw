@@ -148,7 +148,7 @@ export function App() {
             <StatusDot state="ok" live />
             <Typography variant="body2">{t("app.online")}</Typography>
           </Box>
-          <Typography variant="body2" sx={{ ml: 1.5, color: "text.secondary" }}>v3.0.0-dev</Typography>
+          <Typography variant="body2" sx={{ ml: 1.5, color: "text.secondary" }}>{`v${__APP_VERSION__}`}</Typography>
         </Toolbar>
       </AppBar>
       <Box sx={{ p: 2 }}>
