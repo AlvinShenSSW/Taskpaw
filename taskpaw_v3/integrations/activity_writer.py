@@ -95,7 +95,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument(
         "--path", default=DEFAULT_PATH, help=f"output file (default {DEFAULT_PATH})"
     )
-    args = ap.parse_args(argv)
+    # parse_known_args (not parse_args): a Codex `notify` program is invoked with
+    # its event JSON appended as a trailing argv, which strict parsing would reject
+    # (exit 2 → nothing written). A hook shim must tolerate extra args and never
+    # break the host's notify/hook chain (#168). The trade-off — a mistyped flag is
+    # silently ignored rather than erroring — is acceptable for a fire-and-forget
+    # writer whose contract is "never disrupt the caller".
+    args, _ = ap.parse_known_args(argv)
 
     state, session = args.state, args.session
     if state is None and not sys.stdin.isatty():

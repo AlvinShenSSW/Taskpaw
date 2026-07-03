@@ -222,6 +222,27 @@ def test_writer_stdin_garbage_is_none():
     assert aw.state_from_stdin("not json") == (None, None)
 
 
+def test_writer_main_ignores_codex_notify_extra_arg(tmp_path):
+    # Codex's `notify` program appends its event JSON as a trailing argv. The writer
+    # must IGNORE that extra arg (not argparse-error out) so the notify actually
+    # records state — otherwise the documented Codex config writes nothing (#168).
+    out = tmp_path / "a.json"
+    rc = aw.main(
+        [
+            "--tool",
+            "codex",
+            "--path",
+            str(out),
+            "--state",
+            "idle",
+            '{"type":"agent-turn-complete","turn-id":"x"}',
+        ]
+    )
+    assert rc == 0
+    data = json.loads(out.read_text())
+    assert data["tool"] == "codex" and data["state"] == "idle"
+
+
 # ── end-to-end: writer → plugin reads it ─────────────────────────────────--
 def test_writer_then_plugin_reads_state(tmp_path):
     out = tmp_path / "a.json"
