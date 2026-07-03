@@ -44,7 +44,7 @@ export function Settings({ role }: { role: "agent" | "hub" }) {
             <Logo size={44} alt="TaskPaw" />
             <Stack direction="row" alignItems="baseline" spacing={1}>
               <Typography variant="h6">TaskPaw</Typography>
-              <Typography variant="caption" color="text.secondary">v3.0.0-dev</Typography>
+              <Typography variant="caption" color="text.secondary">{`v${__APP_VERSION__}`}</Typography>
             </Stack>
           </Stack>
           <Typography variant="body2" sx={{ mb: 1.5 }}>{t("settings.aboutBody")}</Typography>

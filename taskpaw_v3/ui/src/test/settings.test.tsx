@@ -43,4 +43,21 @@ describe("Settings config save", () => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["agentConfig"] }),
     );
   });
+
+  it("shows the app version from the single injected source (#170)", async () => {
+    vi.spyOn(apiModule.api, "config").mockResolvedValue({
+      monitors: [], machine: "m", bind_host: "127.0.0.1", bind_port: 5680,
+      control_host: "127.0.0.1", control_port: 5699, auth_disabled: true,
+    } as never);
+    render(
+      <ThemeProvider theme={theme}>
+        <QueryClientProvider client={new QueryClient()}>
+          <Settings role="agent" />
+        </QueryClientProvider>
+      </ThemeProvider>,
+    );
+    // Asserted against __APP_VERSION__ itself (not a literal), so it can never drift
+    // from the packaged version — the whole point of the fix.
+    expect(await screen.findByText(`v${__APP_VERSION__}`)).toBeTruthy();
+  });
 });

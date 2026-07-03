@@ -108,11 +108,15 @@ const en = {
     title: "Settings", language: "Language", languageHint: "Choose the interface language.",
     about: "About",
     aboutBody:
-      "TaskPaw is a lightweight monitoring companion for your machines. It watches " +
-      "local tasks and services — LADA video restore, ComfyUI, folders, processes — " +
-      "and surfaces their status, progress, and events in one place. Run an agent on " +
-      "each machine and aggregate them on a Hub.",
-    author: "Author: 304",
+      "TaskPaw is a lightweight companion for monitoring a fleet of your own " +
+      "machines. Run an agent on each box and aggregate them on a Hub — watch " +
+      "CPU / RAM / GPU / VRAM, long-running task progress (LADA 4K video restore " +
+      "with live percentage and ETA, ComfyUI queues), processes, folders, and " +
+      "services, with their status and events in one place. It even observes your " +
+      "AI coding tools — Claude Code, Codex, Kimi — so you can tell at a glance " +
+      "which machines are busy. Privacy-first: it reports state only, never your " +
+      "content.",
+    author: "Designed & developed by 304",
     copyright: "© 2026 304. All rights reserved.",
     config: "Agent configuration",
     configHint: "Edit this machine's settings instead of hand-editing agent.yaml. Port/host changes apply after a restart.",
@@ -217,10 +221,12 @@ const zh: typeof en = {
     title: "设置", language: "语言", languageHint: "选择界面语言。",
     about: "关于",
     aboutBody:
-      "TaskPaw 是一款轻量的机器监控助手。它盯着本机的任务与服务 —— LADA 视频修复、" +
-      "ComfyUI、文件夹、进程 —— 把状态、进度和事件集中呈现。每台机器跑一个 agent," +
-      "再用 Hub 汇总。",
-    author: "发起人:304",
+      "TaskPaw 是一款轻量的机器监控助手,为「一人多机」而生。在每台机器上运行一个 " +
+      "agent,由 Hub 统一汇总 —— 实时掌握 CPU / 内存 / GPU / 显存,长任务进度(LADA " +
+      "4K 视频修复的实时百分比与预估时间、ComfyUI 队列),以及进程、文件夹与服务的" +
+      "状态和事件。它还能观测 Claude Code、Codex、Kimi 等 AI 编程工具的忙碌 / 空闲," +
+      "让你一眼看清整个机队谁在干活。隐私优先:只上报状态,绝不读取任何内容。",
+    author: "由 304 独立设计与开发",
     copyright: "© 2026 304. 保留所有权利。",
     config: "Agent 配置",
     configHint: "在这里改本机设置,不用手编 agent.yaml。端口/主机的改动需重启 agent 后生效。",
