@@ -77,6 +77,10 @@ notify = ["python3", "/path/to/taskpaw_v3/integrations/activity_writer.py",
           "--tool", "codex", "--path", "~/.taskpaw/agent-activity-codex.json", "--state", "idle"]
 ```
 
+Codex invokes `notify` with its event JSON appended as a trailing argument; the
+writer ignores unrecognized args (`parse_known_args`), so the command above records
+`idle` without erroring (#168).
+
 To also flip Codex to **busy** at turn start, wrap your Codex launch (or a shell
 alias) to call the wrapper with `--state busy --path ~/.taskpaw/agent-activity-codex.json`
 before starting Codex. With only `notify` wired you still get idle-after-completion
