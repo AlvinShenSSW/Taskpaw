@@ -443,8 +443,25 @@ def test_plan_queue_collision_is_casefolded(tmp_path):
     assert len(pending) == 1 and collisions == []
 
 
-def test_plan_queue_on_a_missing_folder_is_empty(tmp_path):
-    assert plan_queue(str(tmp_path / "nope"), str(tmp_path)) == ([], 0, [])
+def test_plan_queue_on_a_missing_folder_raises(tmp_path):
+    # Codex 外门 C-2: an unreadable input folder is an error, not an empty queue.
+    with pytest.raises(OSError):
+        plan_queue(str(tmp_path / "nope"), str(tmp_path))
+
+
+def test_unreadable_input_folder_is_an_error_not_idle(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    inp.rmdir()  # the folder vanished between saving the config and Start
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)  # never raises
+    st = inst.check(emit)
+    assert st.state == "error"
+    assert "cannot scan jasna_input_folder" in st.detail
+    assert [e for e in evs if e[0] == "alert" and e[3] == "j1:launch"]
+    assert launcher.n == 0
 
 
 def test_sweep_orphan_staging(tmp_path):
@@ -545,6 +562,28 @@ def test_unet_failure_degrades_only_that_tier(tmp_path, monkeypatch):
     assert degrade[0][3] == "j1:unet:1080p"
     assert "not enough VRAM" in degrade[0][2]
     assert inst._done == 3 and inst._failed == 0
+
+
+def test_secondary_override_in_extra_args_disables_the_degrade(tmp_path, monkeypatch):
+    # Codex 外门 C-1: with `--secondary-restoration` in the extra args the launch
+    # is not a unet-4x launch (argparse last-wins), so a failure takes the plain
+    # retry path and never produces a false license/VRAM alert.
+    cfg, inp, _out, _home = _managed(
+        tmp_path, jasna_extra_args="--secondary-restoration none"
+    )
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([1, 0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    inst.check(emit)
+    inst.check(emit)
+    assert launcher.inputs() == ["a.mp4", "a.mp4"]  # plain retry, then done
+    assert not [e for e in evs if "unet-4x disabled" in e[1]]
+    assert inst._done == 1 and inst._failed == 0
+    assert J.secondary_overridden("--secondary-restoration=tvai")
+    assert not J.secondary_overridden("--secondary-restoration-x 1 --device cuda:1")
 
 
 def test_always_failing_file_costs_exactly_three_launches(tmp_path, monkeypatch):

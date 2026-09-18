@@ -206,19 +206,20 @@ def plan_queue(
     overwrite each other; they are excluded from `pending` and reported once.
     No name-based exclusion: the validator guarantees input != output, so the
     plugin's own outputs can never be scanned, and a source library may legitimately
-    contain a file called `foo_restored.mp4`."""
-    try:
-        entries = sorted(
-            (
-                f
-                for f in Path(input_folder).iterdir()
-                if f.is_file() and f.suffix.lower() in JASNA_VIDEO_EXTENSIONS
-            ),
-            key=lambda p: p.name,
-        )
-    except OSError as e:
-        log.warning("jasna: cannot scan input folder %s: %s", input_folder, e)
-        return [], 0, []
+    contain a file called `foo_restored.mp4`.
+
+    Raises `OSError` when the input folder cannot be scanned (missing, not a
+    directory, permission denied): an unreadable folder is an ERROR the operator
+    must see, not an empty queue that leaves the task silently idle
+    (constitution §4; Codex 外门 C-2)."""
+    entries = sorted(
+        (
+            f
+            for f in Path(input_folder).iterdir()
+            if f.is_file() and f.suffix.lower() in JASNA_VIDEO_EXTENSIONS
+        ),
+        key=lambda p: p.name,
+    )
     pending: list[Path] = []
     done = 0
     collisions: list[tuple[Path, Path]] = []
@@ -324,6 +325,16 @@ def owned_flags_in(extra: str) -> list[str]:
         if any(t == flag or t.startswith(flag + "=") for t in toks):
             found.append(flag)
     return found
+
+
+def secondary_overridden(extra: str) -> bool:
+    """Whether `extra` carries the documented `--secondary-restoration` override
+    (exact token or `--secondary-restoration=`), which disables the automatic
+    unet-4x degrade because the relaunch would carry the same flag."""
+    return any(
+        t == "--secondary-restoration" or t.startswith("--secondary-restoration=")
+        for t in _split_args(extra)
+    )
 
 
 def _same_folder(a: str, b: str) -> bool:
@@ -666,9 +677,19 @@ class JasnaInstance(MonitorInstance):
                 dedupe_key=f"{self.instance_id}:ffprobe",
             )
 
-        pending, done, collisions = plan_queue(
-            cfg.jasna_input_folder, cfg.jasna_output_folder
-        )
+        try:
+            pending, done, collisions = plan_queue(
+                cfg.jasna_input_folder, cfg.jasna_output_folder
+            )
+        except OSError as e:
+            # Scanning happens only at Start: an unreadable input folder would
+            # otherwise leave the task "idle · nothing to process" forever.
+            self._emit_launch_error(
+                emit,
+                f"cannot scan jasna_input_folder {cfg.jasna_input_folder} ({e}); "
+                "fix the folder and Start again",
+            )
+            return
         self._pending = list(pending)
         self._done = done
         self._failed = len(collisions)
@@ -777,7 +798,11 @@ class JasnaInstance(MonitorInstance):
                 and not self._run_unet_disabled.get(tier, False)
                 and not self._unet_retry_pending
             )
-            self._current_unet = unet
+            # An operator `--secondary-restoration` in the extra args wins
+            # (argparse last-wins), so the launch is NOT a unet-4x launch in the
+            # sense of AC 4: a failure must take the plain retry path, never the
+            # "retry without unet → degrade" path (Codex 外门 C-1).
+            self._current_unet = unet and not secondary_overridden(cfg.jasna_extra_args)
             argv = build_argv(
                 cfg,
                 cfg.jasna_exe_path,
