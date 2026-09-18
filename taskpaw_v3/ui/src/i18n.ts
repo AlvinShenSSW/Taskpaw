@@ -66,6 +66,7 @@ const en = {
   },
   services: {
     lada: "Subtitle/translation pipeline — files, fps, GPU.",
+    jasna: "Jasna video restore — per-file queue, unet-4x by resolution, GPU.",
     comfyui: "Image render queue depth and progress.",
     moomoo: "Trading server — life-signs heartbeat.",
     folder_watch: "Alert when files arrive or go idle.",
@@ -110,8 +111,8 @@ const en = {
     aboutBody:
       "TaskPaw is a lightweight companion for monitoring a fleet of your own " +
       "machines. Run an agent on each box and aggregate them on a Hub — watch " +
-      "CPU / RAM / GPU / VRAM, long-running task progress (LADA 4K video restore " +
-      "with live percentage and ETA, ComfyUI queues), processes, folders, and " +
+      "CPU / RAM / GPU / VRAM, long-running task progress (LADA / Jasna 4K video " +
+      "restore with live percentage and ETA, ComfyUI queues), processes, folders, and " +
       "services, with their status and events in one place. It even observes your " +
       "AI coding tools — Claude Code, Codex, Kimi — so you can tell at a glance " +
       "which machines are busy. Privacy-first: it reports state only, never your " +
@@ -179,6 +180,7 @@ const zh: typeof en = {
   },
   services: {
     lada: "字幕/翻译流水线 —— 文件、帧率、GPU。",
+    jasna: "Jasna 视频修复 —— 逐文件队列、按分辨率启用 unet-4x、GPU。",
     comfyui: "图像渲染队列深度与进度。",
     moomoo: "交易服务 —— 生命体征心跳。",
     folder_watch: "文件到达或长时间空闲时告警。",
@@ -222,8 +224,8 @@ const zh: typeof en = {
     about: "关于",
     aboutBody:
       "TaskPaw 是一款轻量的机器监控助手,为「一人多机」而生。在每台机器上运行一个 " +
-      "agent,由 Hub 统一汇总 —— 实时掌握 CPU / 内存 / GPU / 显存,长任务进度(LADA " +
-      "4K 视频修复的实时百分比与预估时间、ComfyUI 队列),以及进程、文件夹与服务的" +
+      "agent,由 Hub 统一汇总 —— 实时掌握 CPU / 内存 / GPU / 显存,长任务进度(LADA / " +
+      "Jasna 4K 视频修复的实时百分比与预估时间、ComfyUI 队列),以及进程、文件夹与服务的" +
       "状态和事件。它还能观测 Claude Code、Codex、Kimi 等 AI 编程工具的忙碌 / 空闲," +
       "让你一眼看清整个机队谁在干活。隐私优先:只上报状态,绝不读取任何内容。",
     author: "由 304 独立设计与开发",

@@ -4,6 +4,35 @@
 
 ---
 
+## V3 3.2.0 — Jasna 任务类型 (#173)
+
+- **新增 `jasna` 任务类型（Jasna 视频修复）**。托管模式下 TaskPaw **逐个文件**启动
+  `jasna.exe`（不用文件夹批处理），因此可以断点续跑（已有最终输出 `<原名>_restored.mp4`
+  的文件直接跳过）、逐文件重试，并能按文件分别给参数。被动模式仍然只监视已在运行的进程。
+- **按分辨率分档**：ffprobe 探测每个视频的分辨率，像素数 > 1920×1080×1.5（约 3.1 MP，即
+  2560×1440 及以上）归为 **4K 档**，其余为 **1080p 档**；两档各自有片段长度
+  （默认 90 / 60）和一个 **unet-4x 二次修复勾选框：1080p 默认开、4K 默认关**（8 GB 显存放不下
+  4K 的 unet-4x）。
+- **失败重试与自动降级**：带 unet-4x 的启动失败会自动不带 unet-4x 重跑；若重跑成功，告警一次
+  （未在 Jasna 图形界面激活赞助者授权，或显存不足）并在本次运行中**仅对该档位**关闭 unet-4x。
+  普通启动失败重试一次后告警并跳过该文件；连续 3 个文件失败则中止整批（状态 `degraded`）。
+- **输出原子发布**：Jasna 先写暂存名 `<原名>_restored.tmp.mp4`，只有退出码 0 才改名为最终名，
+  被杀/崩溃的一次运行不会留下被误认为“已完成”的文件。
+- **队列指标与 lada 对齐**：`queue_completed/total/remaining`（新增 `queue_failed`）、`current_file`、
+  捕获模式下的 `percent/elapsed/processed_frames/remaining_frames/eta/fps`，以及 CPU/内存/GPU；
+  `status.md` 按 lada 的格式渲染 jasna 快照，[docs/guides/openclaw-integration.md](docs/guides/openclaw-integration.md)
+  的字段对照表已含 jasna。
+- **所有字段都有中文标题与说明**（向导/配置表单），新增服务图标，“关于”文案同时提到 LADA / Jasna。
+- **托管 Jasna 不会开机自启**（需手动点“启动”），`jasna_capture_progress` 默认关（每个文件自己开一个
+  控制台窗口显示进度）。
+- **版本号 3.1.0 → 3.2.0**（`taskpaw_v3/__init__.py`、`tauri.conf.json`、`Cargo.toml`、`Cargo.lock`、
+  `ui/package.json`、`ui/package-lock.json` 六处），并新增 `taskpaw_v3/tests/test_version.py` 断言六处一致，
+  以后不会再漏改。
+- **Lada 不受影响**：`lada` 任务类型、它的配置与行为完全未改，也没有任何自动迁移；
+  两个类型可以共存。
+
+---
+
 ## V3 未发布 — Mac 打包 parity + OpenClaw 富指标 (afk/mac-parity)
 
 - **OpenClaw:`status.md` 恢复 V2 的富指标**,`status_log` 的 `status_json` 也带全字段 ——

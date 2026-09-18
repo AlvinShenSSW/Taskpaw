@@ -113,7 +113,13 @@ def _status_text(snap: Any) -> str:
     # legacy "X/Y done (Z left)" / "| file |" substrings the V2 scrapers match stay
     # byte-identical when present. hub.db carries the full set (elapsed /
     # processed_frames / remaining_frames) for programmatic reads.
-    is_lada = tid == "lada" or (tid is None and _is_num(m.get("queue_total")))
+    # `jasna` (#173) reports the SAME queue/progress metric names as lada, so it
+    # renders through this exact block — the lada line stays byte-identical.
+    # Tuple membership (==), not a set: a malformed agent can send a list/dict as
+    # type_id and a set lookup would raise TypeError and stall status.md (Codex).
+    is_lada = tid in ("lada", "jasna") or (
+        tid is None and _is_num(m.get("queue_total"))
+    )
     if is_lada and not bad_state:
         lada_parts: list[str] = []
         if _is_num(m.get("queue_total")):
