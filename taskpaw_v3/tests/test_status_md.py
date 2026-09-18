@@ -767,3 +767,34 @@ def test_jasna_degraded_still_renders_metrics():
     )
     line = next(ln for ln in md.splitlines() if ln.startswith("- JASNA:"))
     assert "2/6 done (1 left)" in line
+
+
+def test_malformed_unhashable_type_id_does_not_crash_rendering():
+    # Codex 外门 (#173): a malformed agent may send a list/dict as `type_id`. The
+    # lada/jasna discriminator must tolerate it (tuple membership, not a set
+    # lookup that raises TypeError) — one bad monitor must never stall status.md.
+    rows = [
+        {
+            "name": "box",
+            "reachable": 1,
+            "status_json": json.dumps(
+                {
+                    "monitors": {
+                        "WEIRD": {
+                            "state": "running",
+                            "type_id": ["lada"],
+                            "metrics": {"queue_completed": 1, "queue_total": 2},
+                        },
+                        "JASNA": {
+                            "state": "running",
+                            "type_id": "jasna",
+                            "metrics": {"queue_completed": 5, "queue_total": 10},
+                        },
+                    }
+                }
+            ),
+        }
+    ]
+    md = render_status_md(rows, "t")
+    assert "- JASNA: 5/10 done (5 left)" in md  # the good monitor still renders
+    assert "- WEIRD:" in md  # the bad one degrades to a state line, no crash
