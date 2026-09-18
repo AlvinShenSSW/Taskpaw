@@ -535,14 +535,16 @@ def build_argv(
 class JasnaInstance(MonitorInstance):
     """One managed (or passive) Jasna queue.
 
-    Locks: `_launch_lock` (RLock) guards launch / exit handling / stop — it is
-    re-entrant because the exit branch calls `_launch_next` while holding it.
-    `_lock` (lada's) guards `_progress` / `_recent_output`, which the reader
-    thread writes per line. Lock order is `_launch_lock` → `_lock` only; nothing
-    holding `_lock` ever takes `_launch_lock`; `stop()` joins the reader holding
-    neither; and the only waits under `_launch_lock` are the non-blocking `Popen`,
-    the `os.replace`, and `stop()`'s own terminate/kill, bounded by the caller's
-    timeout (+2 s for the kill reap)."""
+    Locks: `_launch_lock` (RLock) guards launch / exit handling / stop. The exit
+    branch releases it BEFORE advancing to the next file, so the ffprobe probe
+    (up to 5 s) never runs under it; it is re-entrant only so `start()`'s
+    idempotent `stop()` and same-thread re-checks can't self-deadlock. `_lock`
+    (lada's) guards `_progress` / `_recent_output`, which the reader thread writes
+    per line. Lock order is `_launch_lock` → `_lock` only; nothing holding `_lock`
+    ever takes `_launch_lock`; `stop()` joins the reader holding neither; and the
+    only waits under `_launch_lock` are the non-blocking `Popen`, the
+    `os.replace`, and `_terminate_child`, bounded by its timeout (+2 s for the
+    kill reap)."""
 
     def __init__(self, instance_id: str, config: JasnaConfig) -> None:
         super().__init__(instance_id, config)
@@ -922,7 +924,10 @@ class JasnaInstance(MonitorInstance):
                 self._handle_success(emit)
             else:
                 self._handle_failure(retcode, emit)
-            self._advance(emit)
+        # Advance OUTSIDE the lock: _launch_next probes the next file (up to 5 s)
+        # before taking the lock, so a concurrent stop() is never held behind the
+        # probe. _launch_next re-checks _stopping under the lock before popping.
+        self._advance(emit)
 
     def _handle_success(self, emit: EventEmitter) -> None:
         cfg = self._cfg

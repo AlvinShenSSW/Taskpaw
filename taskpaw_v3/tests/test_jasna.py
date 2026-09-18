@@ -644,6 +644,43 @@ def test_relaunch_of_the_same_file_does_not_probe_again(tmp_path, monkeypatch):
     assert probe.calls == ["a.mp4"]  # one probe per distinct file
 
 
+def test_next_launch_after_an_exit_probes_outside_the_launch_lock(
+    tmp_path, monkeypatch
+):
+    # Internal review I-1: the exit branch must release _launch_lock before
+    # _launch_next probes the next file, or a concurrent stop() waits behind a
+    # 5 s ffprobe. Another thread must be able to take the lock DURING the probe.
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4", "b.mp4")
+    launcher = _Launcher([0, None])
+    lock_free: list[bool] = []
+    holder: dict = {}
+
+    def probe(video, ffprobe):
+        got: list[bool] = []
+
+        def grab():
+            ok = holder["inst"]._launch_lock.acquire(timeout=0.5)
+            got.append(ok)
+            if ok:
+                holder["inst"]._launch_lock.release()
+
+        t = threading.Thread(target=grab, daemon=True)
+        t.start()
+        t.join(timeout=5)
+        lock_free.append(bool(got and got[0]))
+        return (1920, 1080)
+
+    _patch(monkeypatch, launcher, probe)
+    inst = JasnaInstance("j1", cfg)
+    holder["inst"] = inst
+    _evs, emit = _events()
+    inst.start(emit)  # probe #1 from start()
+    inst.check(emit)  # a.mp4 exits 0 → b.mp4 probed on the exit path (probe #2)
+    assert launcher.inputs() == ["a.mp4", "b.mp4"]
+    assert lock_free == [True, True]
+
+
 def test_empty_folder_is_idle_with_a_detail_and_no_event(tmp_path, monkeypatch):
     cfg, _inp, _out, _home = _managed(tmp_path)
     launcher = _Launcher([])
