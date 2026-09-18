@@ -53,6 +53,31 @@ describe("localizeSchema (#121)", () => {
     expect(fieldLabel("some_new_field", "lada", "zh-CN")).toBe("some_new_field"); // no title → key
   });
 
+  it("translates the jasna fields, including the unet-4x tickboxes (#173)", () => {
+    const s: RJSFSchema = {
+      type: "object",
+      properties: {
+        unet4x_1080p: { type: "boolean", title: "Unet4X 1080P" },
+        unet4x_4k: { type: "boolean", title: "Unet4X 4K" },
+        jasna_exe_path: { type: "string", title: "Jasna Exe Path" },
+      },
+    };
+    const p = localizeSchema(s, "jasna", "zh-CN").properties as Record<
+      string,
+      { title: string; description?: string }
+    >;
+    expect(fieldLabel("unet4x_1080p", "jasna", "zh-CN")).toBe("1080p 档：使用 unet-4x 二次修复");
+    expect(p.unet4x_1080p.title).toBe("1080p 档：使用 unet-4x 二次修复");
+    expect(p.unet4x_1080p.description).toContain("默认开");
+    expect(p.unet4x_4k.title).toBe("4K 档：使用 unet-4x 二次修复");
+    expect(p.unet4x_4k.description).toContain("默认关");
+    expect(p.jasna_exe_path.title).toBe("jasna.exe 路径");
+    // Same field name, different plugin → no lada wording leaks in.
+    expect(localizeSchema(s, "lada", "zh-CN").properties).toMatchObject({
+      unet4x_1080p: { title: "Unet4X 1080P" },
+    });
+  });
+
   it("does not cross-attribute a same-named field across plugins", () => {
     const s: RJSFSchema = { type: "object", properties: { host: { type: "string", title: "Host" } } };
     // comfyui.host has a description; tcp_check.host is just 主机 (no ComfyUI wording).

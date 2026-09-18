@@ -1,0 +1,1130 @@
+"""V3 `jasna` plugin — per-file Jasna queue, per-resolution unet-4x (#173).
+
+`jasna.exe` and `ffprobe` are NEVER executed here: `subprocess.Popen` is replaced
+by a scripted `_Launcher` and `probe_resolution` / `subprocess.run` are mocked.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from taskpaw_v3.monitors.plugins import jasna as J
+from taskpaw_v3.monitors.plugins.jasna import (
+    JasnaConfig,
+    JasnaInstance,
+    JasnaPlugin,
+    build_argv,
+    engines_present,
+    find_ffprobe,
+    is_license_failure,
+    large_detector_available,
+    output_path_for,
+    owned_flags_in,
+    plan_queue,
+    probe_resolution,
+    staging_path_for,
+    sweep_orphan_staging,
+    tier_for,
+)
+from taskpaw_v3.monitors.registry import default_registry
+
+_PROBE_NAME = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+
+
+# ── harness ───────────────────────────────────────────────────────────────
+def _events():
+    evs: list[tuple] = []
+
+    def emit(level, title, message, data=None, dedupe_key=None):
+        evs.append((level, title, message, dedupe_key))
+
+    return evs, emit
+
+
+def _cfg(**kw) -> JasnaConfig:
+    base: dict = dict(name="jasna")
+    base.update(kw)
+    return JasnaConfig(**base)
+
+
+def _managed(tmp_path: Path, **kw):
+    """(cfg, input_folder, output_folder, jasna_home) for a managed instance."""
+    inp, out, home = tmp_path / "in", tmp_path / "out", tmp_path / "jasna"
+    for d in (inp, out, home / "tools"):
+        d.mkdir(parents=True, exist_ok=True)
+    exe = home / "jasna.exe"
+    exe.write_bytes(b"MZ")
+    (home / "tools" / _PROBE_NAME).write_bytes(b"x")
+    base: dict = dict(
+        name="JASNA",
+        jasna_exe_path=str(exe),
+        jasna_input_folder=str(inp),
+        jasna_output_folder=str(out),
+        jasna_gpu_monitor=False,
+    )
+    base.update(kw)
+    return JasnaConfig(**base), inp, out, home
+
+
+def _videos(folder: Path, *names: str) -> None:
+    for n in names:
+        (folder / n).write_bytes(b"video")
+
+
+class _FakeStdout:
+    def __init__(self, text: str) -> None:
+        self._data = text.encode("utf-8")
+        self._pos = 0
+
+    def read(self, n: int) -> bytes:
+        if self._pos >= len(self._data):
+            return b""
+        chunk = self._data[self._pos : self._pos + n]
+        self._pos += n
+        return chunk
+
+
+class _FakePopen:
+    """A Jasna stand-in: writes the staging file it was told to produce (so the
+    rc-0 rename has something to move) and exposes a scripted return code.
+    `rc=None` means "still running"."""
+
+    def __init__(self, argv: list[str], rc, output: str, capture: bool) -> None:
+        self.argv = list(argv)
+        self._rc = rc
+        self.pid = 4242
+        self.terminated = False
+        self.killed = False
+        self.stdout = _FakeStdout(output) if capture else None
+        staging = Path(argv[argv.index("--output") + 1])
+        staging.write_bytes(b"partial")
+
+    def poll(self):
+        return self._rc
+
+    def terminate(self) -> None:
+        self.terminated = True
+        if self._rc is None:
+            self._rc = -15
+
+    def kill(self) -> None:
+        self.killed = True
+        if self._rc is None:
+            self._rc = -9
+
+    def wait(self, timeout=None):
+        if self._rc is None:
+            raise subprocess.TimeoutExpired("jasna", timeout or 0)
+        return self._rc
+
+
+class _Launcher:
+    """subprocess.Popen replacement with a per-launch return-code script."""
+
+    def __init__(self, rcs, output: str = "", on_init=None) -> None:
+        self._rcs = list(rcs)
+        self._output = output
+        self._on_init = on_init
+        self.launches: list[list[str]] = []
+        self.procs: list[_FakePopen] = []
+
+    def __call__(self, argv, creationflags=0, **kw):
+        self.launches.append(list(argv))
+        rc = self._rcs.pop(0) if self._rcs else 0
+        if self._on_init is not None:
+            self._on_init(len(self.launches))
+        proc = _FakePopen(argv, rc, self._output, kw.get("stdout") is not None)
+        self.procs.append(proc)
+        return proc
+
+    @property
+    def n(self) -> int:
+        return len(self.launches)
+
+    def arg(self, i: int, flag: str) -> str:
+        argv = self.launches[i]
+        return argv[argv.index(flag) + 1]
+
+    def secondary(self, i: int) -> str:
+        return self.arg(i, "--secondary-restoration")
+
+    def inputs(self) -> list[str]:
+        return [Path(self.arg(i, "--input")).name for i in range(self.n)]
+
+
+def _probe(mapping=None, default=(1920, 1080)):
+    calls: list[str] = []
+    table = mapping or {}
+
+    def probe(video, ffprobe):
+        calls.append(Path(video).name)
+        return table.get(Path(video).name, default)
+
+    probe.calls = calls  # type: ignore[attr-defined]
+    return probe
+
+
+def _patch(monkeypatch, launcher, probe=None):
+    monkeypatch.setattr(J.subprocess, "Popen", launcher)
+    monkeypatch.setattr(J, "probe_resolution", probe or _probe())
+
+
+# ── config ────────────────────────────────────────────────────────────────
+def test_defaults_match_the_owner_rules():
+    c = _cfg()
+    assert c.unet4x_1080p is True and c.unet4x_4k is False
+    assert c.clip_size_1080p == 90 and c.clip_size_4k == 60
+    assert c.temporal_overlap == 8
+    assert c.codec == "hevc" and c.cq == 24
+    assert c.detection_model == "rfdetr-v6"
+    assert c.jasna_capture_progress is False
+    assert c.jasna_gpu_monitor is True
+    assert c.process_name == "jasna"
+
+
+def test_json_schema_exposes_the_tickbox_defaults():
+    props = JasnaPlugin.json_schema()["properties"]
+    assert props["unet4x_1080p"]["default"] is True
+    assert props["unet4x_4k"]["default"] is False
+    assert props["clip_size_1080p"]["default"] == 90
+    assert props["clip_size_4k"]["default"] == 60
+    assert props["cq"]["default"] == 24
+    # every jasna-owned field carries a description (rjsf renders it as help text)
+    own = set(JasnaConfig.model_fields) - set(
+        JasnaConfig.__bases__[0].model_fields  # type: ignore[attr-defined]
+    )
+    assert len(own) == 15
+    for name in own:
+        assert props[name].get("description"), f"{name} has no description"
+
+
+def test_passive_needs_no_folders():
+    assert _cfg().jasna_exe_path == ""  # passive: valid with nothing else set
+
+
+def test_managed_needs_both_folders(tmp_path):
+    with pytest.raises(ValueError, match="jasna_input_folder"):
+        _cfg(jasna_exe_path=str(tmp_path / "jasna.exe"))
+    with pytest.raises(ValueError, match="jasna_output_folder"):
+        _cfg(
+            jasna_exe_path=str(tmp_path / "jasna.exe"),
+            jasna_input_folder=str(tmp_path),
+        )
+
+
+def test_managed_rejects_identical_folders(tmp_path):
+    same = tmp_path / "videos"
+    same.mkdir()
+    with pytest.raises(ValueError, match="different"):
+        _cfg(
+            jasna_exe_path=str(tmp_path / "jasna.exe"),
+            jasna_input_folder=str(same),
+            jasna_output_folder=str(same) + os.sep,  # resolves to the same folder
+        )
+
+
+def test_owned_flags_rejected_in_extra_args():
+    for bad in (
+        "--input C:/x",
+        "--output=C:/y",
+        "--max-clip-size 40",
+        "--temporal-overlap=2",
+        "--codec h264",
+        "--cq 30",
+        "--detection-model rfdetr-v6-large",
+        "--output-pattern {original}",
+    ):
+        with pytest.raises(ValueError, match="TaskPaw owns"):
+            _cfg(jasna_extra_args=bad)
+
+
+def test_lookalike_flags_and_secondary_restoration_are_accepted():
+    # a substring test would wrongly reject these
+    assert owned_flags_in("--input-size 512 --output-format mkv") == []
+    c = _cfg(jasna_extra_args="--secondary-restoration tvai --device cuda:1")
+    assert "tvai" in c.jasna_extra_args
+
+
+def test_clip_overlap_cross_validation():
+    with pytest.raises(ValueError, match="temporal_overlap"):
+        _cfg(temporal_overlap=30)  # 60 >= min(90, 60)
+    with pytest.raises(ValueError, match="temporal_overlap"):
+        _cfg(clip_size_4k=16, temporal_overlap=8)  # 16 >= 16
+    assert _cfg(clip_size_4k=17, temporal_overlap=8).clip_size_4k == 17
+
+
+def test_numeric_bounds():
+    with pytest.raises(ValueError):
+        _cfg(cq=64)
+    with pytest.raises(ValueError):
+        _cfg(cq=-1)
+    with pytest.raises(ValueError):
+        _cfg(clip_size_1080p=7)
+    with pytest.raises(ValueError):
+        _cfg(temporal_overlap=-1)
+    with pytest.raises(ValueError):
+        _cfg(codec="vp9")  # not in the Literal
+    with pytest.raises(ValueError):
+        _cfg(unknown_field=1)  # extra="forbid"
+
+
+def test_extra_args_description_documents_the_override():
+    desc = JasnaConfig.model_fields["jasna_extra_args"].description or ""
+    assert "--secondary-restoration" in desc
+    assert "overrides the tickboxes" in desc
+    assert "disables the automatic unet-4x degrade" in desc
+    cap = JasnaConfig.model_fields["jasna_capture_progress"].description or ""
+    assert "OWN console window" in cap
+    assert "model_weights/*.engine" in cap
+
+
+# ── pure helpers ──────────────────────────────────────────────────────────
+def test_tier_for_uses_the_pixel_count_rule():
+    assert tier_for(1920, 1080) == "1080p"
+    assert tier_for(1920, 1200) == "1080p"  # cinematic 1080p stays 1080p
+    assert tier_for(2560, 1080) == "1080p"
+    assert tier_for(2560, 1440) == "4k"
+    assert tier_for(3840, 2160) == "4k"
+
+
+def test_output_and_staging_paths(tmp_path):
+    v = tmp_path / "Clip 01.mkv"
+    assert output_path_for(str(tmp_path), v).name == "Clip 01_restored.mp4"
+    assert staging_path_for(str(tmp_path), v).name == "Clip 01_restored.tmp.mp4"
+
+
+def test_build_argv_1080p_with_unet(tmp_path):
+    cfg = _cfg()
+    argv = build_argv(
+        cfg, "C:/J/jasna.exe", Path("a.mp4"), Path("out/a.tmp.mp4"), "1080p", True, True
+    )
+    assert argv == [
+        "C:/J/jasna.exe",
+        "--input",
+        "a.mp4",
+        "--output",
+        str(Path("out/a.tmp.mp4")),
+        "--max-clip-size",
+        "90",
+        "--temporal-overlap",
+        "8",
+        "--secondary-restoration",
+        "unet-4x",
+        "--codec",
+        "hevc",
+        "--cq",
+        "24",
+        "--detection-model",
+        "rfdetr-v6",  # large detector is 4K-only
+    ]
+
+
+def test_build_argv_4k_upgrades_the_detector_only_when_available():
+    cfg = _cfg()
+    with_large = build_argv(cfg, "j", Path("a.mp4"), Path("s.mp4"), "4k", False, True)
+    assert with_large[with_large.index("--max-clip-size") + 1] == "60"
+    assert with_large[with_large.index("--secondary-restoration") + 1] == "none"
+    assert with_large[with_large.index("--detection-model") + 1] == "rfdetr-v6-large"
+    without = build_argv(cfg, "j", Path("a.mp4"), Path("s.mp4"), "4k", True, False)
+    assert without[without.index("--detection-model") + 1] == "rfdetr-v6"
+    assert without[without.index("--secondary-restoration") + 1] == "unet-4x"
+
+
+def test_build_argv_respects_an_explicit_detection_model_and_appends_extra_args():
+    cfg = _cfg(detection_model="rtdetr", jasna_extra_args="--device cuda:1")
+    argv = build_argv(cfg, "j", Path("a.mp4"), Path("s.mp4"), "4k", False, True)
+    assert argv[argv.index("--detection-model") + 1] == "rtdetr"
+    assert argv[-2:] == ["--device", "cuda:1"]  # extra args come LAST (last-wins)
+
+
+def test_find_ffprobe_lookup_order(tmp_path, monkeypatch):
+    home = tmp_path / "jasna"
+    (home / "tools").mkdir(parents=True)
+    monkeypatch.setattr(J.shutil, "which", lambda _n: None)
+    assert find_ffprobe(str(home)) is None
+    beside = home / _PROBE_NAME
+    beside.write_bytes(b"x")
+    assert find_ffprobe(str(home)) == str(beside)  # 3rd choice
+    monkeypatch.setattr(J.shutil, "which", lambda _n: "/usr/bin/ffprobe")
+    assert find_ffprobe(str(home)) == "/usr/bin/ffprobe"  # 2nd choice wins
+    tools = home / "tools" / _PROBE_NAME
+    tools.write_bytes(b"x")
+    assert find_ffprobe(str(home)) == str(tools)  # 1st choice wins
+    assert find_ffprobe(None) == "/usr/bin/ffprobe"
+
+
+class _Run:
+    def __init__(self, stdout="", returncode=0):
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def test_probe_resolution_parses_the_csv(monkeypatch):
+    seen: dict = {}
+
+    def run(argv, **kw):
+        seen["argv"] = argv
+        seen["kw"] = kw
+        return _Run("1920,1080\n")
+
+    monkeypatch.setattr(J.subprocess, "run", run)
+    assert probe_resolution(Path("a.mp4"), "ffprobe") == (1920, 1080)
+    assert seen["argv"][:8] == [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+    ]
+    assert seen["kw"]["timeout"] == 5.0
+
+
+def test_probe_resolution_failures_return_none(monkeypatch):
+    assert probe_resolution(Path("a.mp4"), None) is None
+    monkeypatch.setattr(J.subprocess, "run", lambda *a, **k: _Run("", 1))
+    assert probe_resolution(Path("a.mp4"), "ffprobe") is None
+    monkeypatch.setattr(J.subprocess, "run", lambda *a, **k: _Run("garbage\n"))
+    assert probe_resolution(Path("a.mp4"), "ffprobe") is None
+    monkeypatch.setattr(J.subprocess, "run", lambda *a, **k: _Run("0,0\n"))
+    assert probe_resolution(Path("a.mp4"), "ffprobe") is None
+    monkeypatch.setattr(J.subprocess, "run", lambda *a, **k: _Run("N/A,1080\n"))
+    assert probe_resolution(Path("a.mp4"), "ffprobe") is None
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("ffprobe", 5)
+
+    monkeypatch.setattr(J.subprocess, "run", boom)
+    assert probe_resolution(Path("a.mp4"), "ffprobe") is None
+
+
+def test_plan_queue_skips_done_sorts_and_ignores_staging(tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "c.mp4", "a.mp4", "b.mp4", "notes.txt", "d_restored.mp4")
+    (out / "a_restored.mp4").write_bytes(b"done")
+    (out / "b_restored.tmp.mp4").write_bytes(b"partial")  # staging is NOT done
+    pending, done, collisions = plan_queue(str(inp), str(out))
+    assert done == 1 and collisions == []
+    # sorted, a skipped as done, a source literally named *_restored.mp4 is queued
+    assert [p.name for p in pending] == ["b.mp4", "c.mp4", "d_restored.mp4"]
+
+
+def test_plan_queue_reports_output_collisions(tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "a.mp4", "a.mkv")
+    pending, done, collisions = plan_queue(str(inp), str(out))
+    assert [p.name for p in pending] == ["a.mkv"]  # sorted: .mkv first
+    assert done == 0
+    assert [(a.name, b.name) for a, b in collisions] == [("a.mp4", "a.mkv")]
+
+
+def test_plan_queue_collision_is_casefolded(tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "A.mp4")
+    pending, _done, collisions = plan_queue(str(inp), str(out))
+    # On a case-insensitive FS "a.MP4" IS "A.mp4"; emulate the pair explicitly.
+    key = str(output_path_for(str(out), Path("a.MP4"))).casefold()
+    assert key == str(output_path_for(str(out), Path("A.mp4"))).casefold()
+    assert len(pending) == 1 and collisions == []
+
+
+def test_plan_queue_on_a_missing_folder_is_empty(tmp_path):
+    assert plan_queue(str(tmp_path / "nope"), str(tmp_path)) == ([], 0, [])
+
+
+def test_sweep_orphan_staging(tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "keep.mp4")
+    orphan = out / "gone_restored.tmp.mp4"
+    kept = out / "keep_restored.tmp.mp4"
+    fresh = out / "other_restored.tmp.mp4"
+    final = out / "gone_restored.mp4"
+    for p in (orphan, kept, fresh, final):
+        p.write_bytes(b"x")
+    old = time.time() - 600
+    for p in (orphan, kept, final):
+        os.utime(p, (old, old))
+    removed = sweep_orphan_staging(str(inp), str(out))
+    assert [p.name for p in removed] == ["gone_restored.tmp.mp4"]
+    assert not orphan.exists()
+    assert kept.exists()  # its source is still in the queue
+    assert fresh.exists()  # too recent — something may be writing it
+    assert final.exists()  # a published output is never swept
+
+
+def test_license_and_weights_helpers(tmp_path):
+    assert is_license_failure("RuntimeError: unet-4x is a Supporter Feature. …")
+    assert not is_license_failure("CUDA out of memory")
+    assert not is_license_failure("")
+    assert large_detector_available(str(tmp_path)) is False
+    assert engines_present(str(tmp_path)) is False
+    weights = tmp_path / "model_weights"
+    weights.mkdir()
+    (weights / "rfdetr-v6-large.onnx").write_bytes(b"x")
+    (weights / "restore.engine").write_bytes(b"x")
+    assert large_detector_available(str(tmp_path)) is True
+    assert engines_present(str(tmp_path)) is True
+    assert large_detector_available(None) is False
+    assert engines_present(None) is False
+
+
+# ── lifecycle ─────────────────────────────────────────────────────────────
+def test_sequential_batch_renames_on_success_and_emits_one_done(tmp_path, monkeypatch):
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4", "b.mp4")
+    launcher = _Launcher([0, 0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+
+    inst.start(emit)
+    assert launcher.n == 1 and launcher.inputs() == ["a.mp4"]
+    assert launcher.arg(0, "--output").endswith("a_restored.tmp.mp4")
+
+    st = inst.check(emit)  # a exits 0 → renamed, b launched
+    assert st.state == "running"
+    assert (out / "a_restored.mp4").exists()
+    assert not (out / "a_restored.tmp.mp4").exists()
+    assert launcher.inputs() == ["a.mp4", "b.mp4"]
+
+    st = inst.check(emit)  # b exits 0 → batch complete
+    assert st.state == "idle"
+    assert (out / "b_restored.mp4").exists()
+    done = [e for e in evs if e[0] == "done"]
+    assert len(done) == 1
+    assert "Jasna processing complete | Queue: 2/2 done, 0 failed" in done[0][2]
+
+    # post-batch stability: nothing relaunches and the counters hold
+    before = launcher.n
+    for _ in range(3):
+        st = inst.check(emit)
+        assert st.state == "idle"
+        assert st.metrics["queue_completed"] == 2
+        assert st.metrics["queue_remaining"] == 0
+    assert launcher.n == before
+    assert len([e for e in evs if e[0] == "done"]) == 1
+
+
+def test_unet_failure_degrades_only_that_tier(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path, unet4x_4k=True)
+    _videos(inp, "a.mp4", "b.mp4", "c.mp4")
+    probe = _probe({"c.mp4": (3840, 2160)})
+    launcher = _Launcher([1, 0, 0, 0])
+    _patch(monkeypatch, launcher, probe)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+
+    inst.start(emit)  # launch 1: a, 1080p, unet-4x → fails
+    for _ in range(4):
+        inst.check(emit)
+
+    assert launcher.inputs() == ["a.mp4", "a.mp4", "b.mp4", "c.mp4"]
+    assert launcher.secondary(0) == "unet-4x"
+    assert launcher.secondary(1) == "none"  # the plain relaunch
+    assert launcher.secondary(2) == "none"  # 1080p stays degraded
+    assert launcher.secondary(3) == "unet-4x"  # the 4K tier is untouched
+    degrade = [e for e in evs if "unet-4x disabled" in e[1]]
+    assert len(degrade) == 1
+    assert degrade[0][3] == "j1:unet:1080p"
+    assert "not enough VRAM" in degrade[0][2]
+    assert inst._done == 3 and inst._failed == 0
+
+
+def test_always_failing_file_costs_exactly_three_launches(tmp_path, monkeypatch):
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([1, 1, 1])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+
+    inst.start(emit)
+    for _ in range(4):
+        inst.check(emit)
+
+    assert launcher.n == 3  # unet → plain → plain; no unbounded relaunch loop
+    assert launcher.inputs() == ["a.mp4"] * 3
+    assert launcher.secondary(0) == "unet-4x"
+    assert launcher.secondary(1) == "none"  # the retry argv
+    assert launcher.secondary(2) == "none"
+    fails = [e for e in evs if e[1].endswith("a.mp4 failed")]
+    assert len(fails) == 1 and "exit code 1" in fails[0][2]
+    assert inst._failed == 1 and inst._done == 0
+    assert not (out / "a_restored.tmp.mp4").exists()  # staging cleaned up
+    assert not (out / "a_restored.mp4").exists()  # never published
+
+
+def test_next_file_gets_a_fresh_retry_budget(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4", "b.mp4")
+    launcher = _Launcher([1, 1, 1, 0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    for _ in range(5):
+        inst.check(emit)
+    assert launcher.inputs() == ["a.mp4", "a.mp4", "a.mp4", "b.mp4"]
+    assert launcher.secondary(3) == "unet-4x"  # b starts with unet again
+    assert inst._failed == 1 and inst._done == 1
+
+
+def test_three_consecutive_failed_files_abort_the_batch(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path, unet4x_1080p=False)
+    _videos(inp, "a.mp4", "b.mp4", "c.mp4", "d.mp4")
+    launcher = _Launcher([1] * 8)
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+
+    inst.start(emit)
+    for _ in range(8):
+        st = inst.check(emit)
+
+    assert launcher.n == 6  # 2 launches per file, d never launched
+    assert "d.mp4" not in launcher.inputs()
+    aborts = [e for e in evs if "aborted" in e[1]]
+    assert len(aborts) == 1
+    assert st.state == "degraded"
+    assert "3 consecutive failures" in st.detail
+    assert not [e for e in evs if e[0] == "done"]
+    # degraded is terminal for this run: still renders metrics, launches nothing
+    st2 = inst.check(emit)
+    assert st2.state == "degraded" and launcher.n == 6
+    assert st2.metrics["queue_failed"] == 3
+
+
+def test_rename_failure_counts_as_a_file_failure(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+
+    def boom(_src, _dst):
+        raise OSError("output is read-only")
+
+    monkeypatch.setattr(J.os, "replace", boom)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    inst.check(emit)
+    assert inst._done == 0 and inst._failed == 1
+    assert any("could not publish" in e[2] for e in evs)
+
+
+def test_relaunch_of_the_same_file_does_not_probe_again(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    probe = _probe()
+    launcher = _Launcher([1, 0])
+    _patch(monkeypatch, launcher, probe)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    inst.check(emit)
+    inst.check(emit)
+    assert launcher.n == 2
+    assert probe.calls == ["a.mp4"]  # one probe per distinct file
+
+
+def test_empty_folder_is_idle_with_a_detail_and_no_event(tmp_path, monkeypatch):
+    cfg, _inp, _out, _home = _managed(tmp_path)
+    launcher = _Launcher([])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    st = inst.check(emit)
+    assert st.state == "idle"
+    assert st.detail == "nothing to process (0 already restored)"
+    assert evs == [] and launcher.n == 0
+
+
+def test_drained_folder_is_idle_with_the_done_count(tmp_path, monkeypatch):
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    (out / "a_restored.mp4").write_bytes(b"done")
+    launcher = _Launcher([])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    st = inst.check(emit)
+    assert st.state == "idle"
+    assert st.detail == "nothing to process (1 already restored)"
+    assert evs == [] and launcher.n == 0
+
+
+def test_a_killed_runs_staging_file_is_not_counted_as_done(tmp_path, monkeypatch):
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    (out / "a_restored.tmp.mp4").write_bytes(b"partial")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    assert launcher.n == 1  # re-queued, not skipped
+    assert inst._done == 0 and inst._total == 1
+
+
+def test_start_sweeps_only_orphaned_staging_files(tmp_path, monkeypatch):
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    orphan = out / "gone_restored.tmp.mp4"
+    orphan.write_bytes(b"x")
+    old = time.time() - 600
+    os.utime(orphan, (old, old))
+    mine = out / "a_restored.tmp.mp4"
+    mine.write_bytes(b"x")
+    os.utime(mine, (old, old))
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    assert not orphan.exists()
+    assert mine.exists()  # recreated by the launch for the pending source
+    inst.stop(timeout=0.5)
+
+
+def test_collisions_are_alerted_counted_and_skipped(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4", "a.mkv", "b.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    alerts = [e for e in evs if "collision" in e[1]]
+    assert len(alerts) == 1 and alerts[0][3] == "j1:collisions"
+    st = inst.check(emit)
+    assert st.metrics["queue_total"] == 3
+    assert st.metrics["queue_failed"] == 1
+    assert st.metrics["queue_remaining"] == 2
+    inst.stop(timeout=0.5)
+
+
+# ── stop / races ──────────────────────────────────────────────────────────
+def test_stop_terminates_a_live_child_and_removes_its_staging(tmp_path, monkeypatch):
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    assert (out / "a_restored.tmp.mp4").exists()
+    inst.stop(timeout=0.5)
+    assert launcher.procs[0].terminated is True
+    assert not (out / "a_restored.tmp.mp4").exists()
+
+
+def test_stop_after_the_child_exited_leaves_the_staging_file(tmp_path, monkeypatch):
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])  # already exited 0, not yet handled
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    inst.stop(timeout=0.5)
+    assert launcher.procs[0].terminated is False
+    assert (out / "a_restored.tmp.mp4").exists()  # left for the exit branch
+
+
+def test_stopping_set_inside_popen_is_caught_by_the_post_launch_recheck(
+    tmp_path, monkeypatch
+):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    holder: dict = {}
+
+    def on_init(_n):
+        holder["inst"]._stopping.set()
+
+    launcher = _Launcher([None], on_init=on_init)
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    holder["inst"] = inst
+    _evs, emit = _events()
+    inst.start(emit)
+    assert launcher.procs[0].terminated is True
+    assert inst._process is None
+
+
+def test_stop_from_another_thread_does_not_deadlock(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launched = threading.Event()
+    holder: dict = {}
+
+    def on_init(_n):
+        launched.set()
+        time.sleep(0.05)  # give the stopper thread time to set _stopping
+
+    launcher = _Launcher([None], on_init=on_init)
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    holder["inst"] = inst
+    _evs, emit = _events()
+
+    def stopper():
+        launched.wait(timeout=5)
+        inst.stop(timeout=1)
+
+    t = threading.Thread(target=stopper, daemon=True)
+    t.start()
+    inst.start(emit)
+    t.join(timeout=5)
+    assert not t.is_alive()  # no deadlock
+    assert launcher.procs[0].poll() is not None  # no child left running
+    assert inst._process is None or inst._process.poll() is not None
+
+
+def test_stop_returns_within_budget_when_the_launch_lock_is_held(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with inst._launch_lock:
+            held.set()
+            release.wait(timeout=5)
+
+    t = threading.Thread(target=hold, daemon=True)
+    t.start()
+    assert held.wait(timeout=5)
+    started = time.monotonic()
+    inst.stop(timeout=0.2)
+    elapsed = time.monotonic() - started
+    release.set()
+    t.join(timeout=5)
+    assert elapsed < 3.0  # did not wait on the lock forever
+    assert launcher.procs[0].terminated is True  # child killed anyway (#40)
+
+
+def test_terminate_child_tolerates_a_reaped_or_missing_child():
+    J._terminate_child(None)
+
+    class _Reaped:
+        def poll(self):
+            return 0
+
+        def terminate(self):  # pragma: no cover - must not be reached
+            raise AssertionError("must not terminate a reaped child")
+
+    J._terminate_child(_Reaped())  # no raise
+
+    class _Vanishing:
+        pid = 1
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            raise ProcessLookupError()
+
+    J._terminate_child(_Vanishing())  # OSError guard
+
+
+def test_restart_resets_every_per_run_field(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([1, 1, 1, 0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    for _ in range(4):
+        inst.check(emit)
+    assert inst._failed == 1
+
+    (inp / "a_restored.mp4").unlink(missing_ok=True)
+    inst.start(emit)  # second run
+    assert inst._failed == 0 and inst._done == 0
+    assert inst._batch_done_emitted is False and inst._batch_aborted is False
+    assert inst._run_unet_disabled == {} and inst._last_failure_tail == ""
+    assert inst._launch_error is None
+    inst.stop(timeout=0.5)
+
+
+# ── launch errors ─────────────────────────────────────────────────────────
+def test_exe_path_is_a_folder_gives_an_actionable_error(tmp_path):
+    cfg, _inp, _out, home = _managed(tmp_path)
+    cfg = cfg.model_copy(update={"jasna_exe_path": str(home)})
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)  # must NOT raise
+    assert inst._launch_error and "is a folder" in inst._launch_error
+    assert "jasna.exe" in inst._launch_error
+    assert evs and evs[0][0] == "alert" and evs[0][3] == "j1:launch"
+    assert inst.check(emit).state == "error"
+
+
+def test_missing_exe_sets_an_error_and_does_not_raise(tmp_path):
+    cfg, _inp, _out, home = _managed(tmp_path)
+    cfg = cfg.model_copy(update={"jasna_exe_path": str(home / "nope.exe")})
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    assert inst._launch_error and "not found" in inst._launch_error
+    assert evs and evs[0][0] == "alert"
+    assert inst.check(emit).state == "error"
+
+
+def test_popen_failure_is_recorded_not_raised(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+
+    def boom(*a, **k):
+        raise PermissionError("WinError 5")
+
+    _patch(monkeypatch, boom)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)  # must NOT raise
+    assert inst._launch_error and "access denied" in inst._launch_error
+    assert evs and evs[0][0] == "alert"
+    assert inst.check(emit).state == "error"
+
+
+def test_missing_ffprobe_alerts_once_and_falls_back_to_the_1080p_tier(
+    tmp_path, monkeypatch
+):
+    cfg, inp, _out, home = _managed(tmp_path)
+    (home / "tools" / _PROBE_NAME).unlink()
+    _videos(inp, "a.mp4")
+    monkeypatch.setattr(J.shutil, "which", lambda _n: None)
+    launcher = _Launcher([None])
+    monkeypatch.setattr(J.subprocess, "Popen", launcher)  # real probe_resolution
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    probe_alerts = [e for e in evs if "ffprobe" in e[1]]
+    assert len(probe_alerts) == 1 and probe_alerts[0][3] == "j1:ffprobe"
+    assert inst._ffprobe is None
+    assert launcher.arg(0, "--max-clip-size") == "90"  # 1080p tier
+    inst.stop(timeout=0.5)
+
+
+# ── capture mode / metrics ────────────────────────────────────────────────
+_PROGRESS = (
+    b"Processing video:  47%|@@@@      |Processed: 06:09 (36703f) | "
+    b"Remaining: 30:47 (207454f) | Speed: 112.3fps"
+)
+
+
+def test_running_metrics_expose_all_per_task_fields_to_hub(tmp_path):
+    # #161: the FULL per-task set must ride `metrics` (→ /status → hub.db →
+    # openclaw). Lock the exact names/types so a rename can't silently drop one.
+    cfg, _inp, _out, _home = _managed(tmp_path, jasna_capture_progress=True)
+    inst = JasnaInstance("j1", cfg)
+    inst._started = True
+    inst._current = Path("X.mp4")
+    inst._current_tier = "4k"
+    inst._current_dims = (3840, 2160)
+    inst._current_unet = True
+    inst._total, inst._done, inst._failed = 5, 2, 0
+    inst._consume_output(_PROGRESS)
+
+    st = inst._build_status("running")
+    m = st.metrics
+    assert m["current_file"] == "X.mp4"
+    assert isinstance(m["percent"], int) and m["percent"] == 47
+    assert isinstance(m["processed_frames"], int) and m["processed_frames"] == 36703
+    assert isinstance(m["remaining_frames"], int) and m["remaining_frames"] == 207454
+    assert isinstance(m["fps"], float) and m["fps"] == 112.3
+    assert isinstance(m["elapsed"], str) and m["elapsed"] == "06:09"
+    assert isinstance(m["eta"], str) and m["eta"] == "30:47"
+    assert m["queue_completed"] == 2 and m["queue_total"] == 5
+    assert m["queue_failed"] == 0 and m["queue_remaining"] == 3
+    assert set(inst._progress) == {
+        "percent",
+        "elapsed",
+        "processed_frames",
+        "eta",
+        "remaining_frames",
+        "fps",
+    }
+    assert st.detail == (
+        "running: X.mp4 [4K 3840x2160, unet-4x] · 47% · ETA 30:47 · "
+        "112.3 fps · 2/5 done"
+    )
+
+
+def test_idle_snapshot_omits_per_task_progress(tmp_path):
+    cfg, _inp, _out, _home = _managed(tmp_path, jasna_capture_progress=True)
+    inst = JasnaInstance("j1", cfg)
+    inst._current = Path("X.mp4")
+    inst._consume_output(_PROGRESS)
+    m = inst._build_status("idle").metrics
+    for k in ("current_file", "percent", "fps", "eta", "processed_frames"):
+        assert k not in m
+
+
+def test_detail_shows_the_tier_and_unet_state(tmp_path):
+    cfg, _inp, _out, _home = _managed(tmp_path)
+    inst = JasnaInstance("j1", cfg)
+    inst._current = Path("clip.mkv")
+    inst._current_tier = "1080p"
+    inst._current_dims = (1920, 1080)
+    inst._current_unet = False
+    assert inst._build_status("running").detail == (
+        "running: clip.mkv [1080p 1920x1080, unet-4x off]"
+    )
+
+
+def test_compiling_hint_shows_until_engines_exist(tmp_path, monkeypatch):
+    cfg, inp, _out, home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    st = inst.check(emit)
+    assert st.state == "running"
+    assert st.detail.startswith("compiling TensorRT engines (first run, 15-60 min): ")
+    weights = home / "model_weights"
+    weights.mkdir()
+    (weights / "restore.engine").write_bytes(b"x")
+    st = inst.check(emit)
+    assert not st.detail.startswith("compiling")
+    inst.stop(timeout=0.5)
+
+
+def test_failure_tail_is_captured_cleared_per_launch_and_sharpens_the_degrade(
+    tmp_path, monkeypatch
+):
+    cfg, inp, _out, _home = _managed(tmp_path, jasna_capture_progress=True)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([1, 0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    inst._consume_output(
+        b"RuntimeError: unet-4x is a supporter feature. Enter your license."
+    )
+    inst.check(emit)  # the unet launch fails → tail snapshotted, relaunch cleared it
+    assert "supporter feature" in inst._last_failure_tail
+    with inst._lock:
+        assert list(inst._recent_output) == []  # cleared per launch
+    inst.check(emit)  # the plain relaunch succeeds → degrade alert
+    degrade = [e for e in evs if "unet-4x disabled" in e[1]]
+    assert len(degrade) == 1
+    assert "not activated in Jasna's GUI" in degrade[0][2]
+
+
+def test_capture_failure_alert_carries_the_bounded_tail_never_the_argv(
+    tmp_path, monkeypatch
+):
+    cfg, inp, _out, _home = _managed(
+        tmp_path, jasna_capture_progress=True, unet4x_1080p=False
+    )
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([1, 1])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    inst.check(emit)  # plain fail → retry
+    inst._consume_output(b"RuntimeError: CUDA out of memory")
+    inst.check(emit)  # retry fails → alert
+    fail = next(e for e in evs if e[1].endswith("a.mp4 failed"))
+    assert "exit code 1" in fail[2]
+    assert "RuntimeError: CUDA out of memory" in fail[2]
+    assert "--secondary-restoration" not in fail[2]
+    assert len(fail[2]) < 1200
+
+
+def test_non_capture_failure_alert_has_no_tail(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path, unet4x_1080p=False)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([1, 1])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    inst._consume_output(b"RuntimeError: CUDA out of memory")
+    inst.check(emit)
+    inst.check(emit)
+    fail = next(e for e in evs if e[1].endswith("a.mp4 failed"))
+    assert fail[2] == "exit code 1"
+
+
+# ── passive mode ──────────────────────────────────────────────────────────
+def test_passive_running_then_gone_emits_done(monkeypatch):
+    alive = {"v": True}
+    monkeypatch.setattr(J, "process_alive", lambda _n: alive["v"])
+    inst = JasnaInstance("j1", _cfg(jasna_gpu_monitor=False))
+    evs, emit = _events()
+    assert inst.check(emit).state == "running"
+    assert evs == []
+    alive["v"] = False
+    st = inst.check(emit)
+    assert st.state == "idle"
+    assert [e[0] for e in evs] == ["done"]
+    assert "Jasna processing complete" in evs[0][2]
+    assert "queue_total" not in st.metrics
+
+
+# ── plugin / registry ─────────────────────────────────────────────────────
+def test_plugin_is_registered_and_self_describing():
+    reg = default_registry()
+    assert reg.has("jasna")
+    plugin = reg.get("jasna")
+    assert plugin.type_id == "jasna"
+    assert plugin.display_name == "Jasna (video restore)"
+    assert plugin.category == "task"
+    assert plugin.config_version == 1
+    assert plugin.system is False
+    order = plugin.ui_schema()["ui:order"]
+    assert order[:6] == [
+        "name",
+        "jasna_exe_path",
+        "jasna_input_folder",
+        "jasna_output_folder",
+        "unet4x_1080p",
+        "unet4x_4k",
+    ]
+    assert order[-1] == "*"
+    assert reg.has("lada")  # jasna does not replace lada in the registry
+
+
+def test_manual_start_only_for_managed(tmp_path):
+    plugin = JasnaPlugin()
+    cfg, _inp, _out, _home = _managed(tmp_path)
+    assert plugin.manual_start(cfg) is True
+    assert plugin.manual_start(_cfg()) is False
+
+
+def test_create_builds_a_jasna_instance(tmp_path):
+    cfg, _inp, _out, _home = _managed(tmp_path)
+    inst = JasnaPlugin().create("j1", cfg)
+    assert isinstance(inst, JasnaInstance)

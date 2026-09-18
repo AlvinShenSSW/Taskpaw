@@ -47,8 +47,8 @@ for r in rows:
             vram_used_mb  = num(met, "gpu_mem_used_mb")
             vram_total_mb = num(met, "gpu_mem_total_mb")
 
-        # lada: type_id == "lada", or a queue_total in metrics
-        if tid == "lada" or num(met, "queue_total") is not None:
+        # lada / jasna: type_id == "lada"/"jasna", or a queue_total in metrics
+        if tid in ("lada", "jasna") or num(met, "queue_total") is not None:
             done, total = num(met, "queue_completed"), num(met, "queue_total")
             left, cur   = num(met, "queue_remaining"), met.get("current_file")
             running     = state == "running"          # ← judge by state, NOT enabled
@@ -75,12 +75,13 @@ for r in rows:
 | RAM used / total (MB) | `mem_used_mb` / `mem_total_mb` | host | ÷1024 = GB. See version note. |
 | GPU % | `gpu_pct` | host | Windows (`"n/a"` on macOS) |
 | VRAM used / total (MB) | `gpu_mem_used_mb` / `gpu_mem_total_mb` | host | ÷1024 = GB |
-| Lada done / total / left | `queue_completed` / `queue_total` / `queue_remaining` | lada | |
-| Lada current task | `current_file` | lada | string; capture mode or folder-derived |
-| Lada current-file % | `percent` | lada | 0..100; **capture mode only** |
-| Lada ETA / elapsed | `eta` / `elapsed` | lada | string `MM:SS`/`H:MM:SS`; **capture mode only** |
-| Lada frames done / left | `processed_frames` / `remaining_frames` | lada | int; **capture mode only** |
-| Lada speed (fps) | `fps` | lada | float; **capture mode only** |
+| Queue done / total / left | `queue_completed` / `queue_total` / `queue_remaining` | lada / jasna | |
+| Queue failed | `queue_failed` | jasna | int; files given up on after their retries (plus output-name collisions) |
+| Current task | `current_file` | lada / jasna | string; capture mode or folder-derived |
+| Current-file % | `percent` | lada / jasna | 0..100; **capture mode only** |
+| ETA / elapsed | `eta` / `elapsed` | lada / jasna | string `MM:SS`/`H:MM:SS`; **capture mode only** |
+| Frames done / left | `processed_frames` / `remaining_frames` | lada / jasna | int; **capture mode only** |
+| Speed (fps) | `fps` | lada / jasna | float; **capture mode only** |
 | ComfyUI running / pending | `running` / `pending` | comfyui | |
 | **Running?** | top-level **`state`** (`running`/`idle`/`ok`/`error`/`stopped`) | any | **use this, not `enabled`** |
 
@@ -94,6 +95,11 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > `current_file` — are available. They also appear only while the monitor `state`
 > is `running`; an idle/finished snapshot omits them. Always guard each with
 > `num()` / a `None` check.
+>
+> **Jasna reports the same keys.** A monitor with `type_id == "jasna"` carries exactly
+> the same metric names as lada (plus `queue_failed`), so the same reader code covers
+> both — but its `current_file` is always known, even with capture off, because it
+> launches one `jasna.exe` per video instead of one batch for the folder.
 
 ## Three rules that bite
 
@@ -104,7 +110,7 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 2. **Filter every number** — a metric can be `NaN` or the string `"n/a"` (e.g. GPU on
    macOS). Use the `num()` helper above.
 3. **Identify a monitor by `type_id` first**, falling back to a metric signature only
-   for pre-`type_id` agents (`disk_pct` ⇒ host; `queue_total` ⇒ lada; both
+   for pre-`type_id` agents (`disk_pct` ⇒ host; `queue_total` ⇒ lada/jasna; both
    `running`+`pending` ⇒ comfyui).
 
 ## `status.md` format (the secondary source)

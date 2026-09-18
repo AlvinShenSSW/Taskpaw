@@ -27,6 +27,7 @@ file/folder pickers for path fields.
 | Monitor | Watches |
 |---------|---------|
 | `lada` | LADA video restore — managed (TaskPaw launches `lada-cli`, parses progress) or passive (detect an external run); file queue, GPU/VRAM, CPU/RAM |
+| `jasna` | Jasna video restore — managed (TaskPaw runs one `jasna.exe` per video: skip/resume, per-resolution `unet-4x`, retry + degrade) or passive; file queue with failures, GPU/VRAM, CPU/RAM |
 | `comfyui` | ComfyUI queue (idle = complete) + error diagnostics from its log |
 | `folder` | A downloads dir — a file is "done" once its size is stable |
 | `process` | Any process by name/pattern (running ↔ exited) |

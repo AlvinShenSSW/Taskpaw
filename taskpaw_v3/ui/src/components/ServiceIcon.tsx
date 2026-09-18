@@ -8,6 +8,14 @@ import type { ReactNode } from "react";
 // untrusted input (Kimi).
 const SHAPES: Record<string, ReactNode> = {
   lada: <><path d="M4 5h16v14H4z" /><path d="M4 9h16M8 5v14M16 5v14M8 9v4h8V9" /></>,
+  // Jasna: a film frame (sprocket rail) with a restore "sparkle" in the picture area.
+  jasna: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="1" />
+      <path d="M7 5v14M6 8h.01M6 12h.01M6 16h.01" />
+      <path d="M14 8.5l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1z" />
+    </>
+  ),
   comfyui: (
     <>
       <circle cx="6" cy="7" r="2" /><circle cx="18" cy="7" r="2" /><circle cx="12" cy="17" r="2" />

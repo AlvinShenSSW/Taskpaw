@@ -23,6 +23,26 @@ const ladaPlugin: apiModule.PluginInfo = {
   ui_schema: {},
 };
 
+// A jasna-shaped plugin (#173): the two unet-4x tickboxes, with the backend's
+// defaults (1080p on, 4K off) carried in the json_schema.
+const jasnaPlugin: apiModule.PluginInfo = {
+  type_id: "jasna",
+  display_name: "Jasna (video restore)",
+  category: "task",
+  config_version: 1,
+  system: false,
+  json_schema: {
+    type: "object",
+    required: ["name"],
+    properties: {
+      name: { type: "string", title: "Monitor name" },
+      unet4x_1080p: { type: "boolean", title: "Unet4X 1080P", default: true },
+      unet4x_4k: { type: "boolean", title: "Unet4X 4K", default: false },
+    },
+  },
+  ui_schema: {},
+};
+
 const hostMetrics: apiModule.PluginInfo = {
   ...ladaPlugin, type_id: "host_metrics", display_name: "Host metrics", system: true,
 };
@@ -89,6 +109,21 @@ describe("MonitorWizard", () => {
       expect(addMonitor).toHaveBeenCalledWith({ type_id: "lada", config: expect.objectContaining({ name: "lada-1" }) }),
     );
     await waitFor(() => expect(onDone).toHaveBeenCalledWith("lada-1"));
+  });
+
+  it("jasna: the unet-4x tickboxes render with 1080p on and 4K off by default (#173)", () => {
+    wrap(<MonitorWizard mode="add" {...baseProps} plugins={[ladaPlugin, jasnaPlugin]} />);
+    fireEvent.click(screen.getByText("Jasna (video restore)"));
+    fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
+
+    // zh labels come from schemaI18n; the regex also accepts the schema's English
+    // title so the test doesn't depend on the UI language.
+    const on = screen.getByLabelText(
+      /1080p 档：使用 unet-4x 二次修复|Unet4X 1080P/,
+    ) as HTMLInputElement;
+    const off = screen.getByLabelText(/4K 档：使用 unet-4x 二次修复|Unet4X 4K/) as HTMLInputElement;
+    expect(on.checked).toBe(true);
+    expect(off.checked).toBe(false);
   });
 
   it("preset flow: creates every bundled monitor (4 addMonitor calls)", async () => {

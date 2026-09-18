@@ -711,3 +711,59 @@ def test_lada_error_state_hides_stale_progress():
     line = _lada_line(md)
     assert "error" in line
     assert "47%" not in line and "done" not in line
+
+
+# ── #173: a `jasna` snapshot renders through the same block as lada ───────────
+def _jasna_row(metrics: dict, state: str = "running") -> list[dict]:
+    return [
+        {
+            "name": "box",
+            "reachable": 1,
+            "status_json": json.dumps(
+                {
+                    "monitors": {
+                        "JASNA": {
+                            "state": state,
+                            "type_id": "jasna",
+                            "metrics": metrics,
+                        }
+                    }
+                }
+            ),
+        }
+    ]
+
+
+def test_jasna_renders_queue_and_progress_like_lada():
+    md = render_status_md(
+        _jasna_row(
+            {
+                "queue_completed": 5,
+                "queue_total": 10,
+                "queue_remaining": 4,
+                "queue_failed": 1,
+                "current_file": "clip.mp4",
+                "percent": 47,
+                "eta": "30:47",
+                "fps": 112.3,
+            }
+        ),
+        "t",
+    )
+    line = next(ln for ln in md.splitlines() if ln.startswith("- JASNA:"))
+    assert "5/10 done (4 left) | clip.mp4 |" in line
+    assert "47%" in line and "ETA 30:47" in line and "112fps" in line
+
+
+def test_jasna_degraded_still_renders_metrics():
+    # A 3-strike abort leaves the monitor `degraded` — an active-alert state, not
+    # an outage, so the queue counts must still reach OpenClaw (#173).
+    md = render_status_md(
+        _jasna_row(
+            {"queue_completed": 2, "queue_total": 6, "queue_remaining": 1},
+            state="degraded",
+        ),
+        "t",
+    )
+    line = next(ln for ln in md.splitlines() if ln.startswith("- JASNA:"))
+    assert "2/6 done (1 left)" in line

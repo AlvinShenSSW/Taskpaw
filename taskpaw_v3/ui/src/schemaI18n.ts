@@ -130,6 +130,80 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
         "高级。关（默认）：lada-cli 自己开一个控制台窗口显示进度条。开：把 lada 的输出捕获进 TaskPaw（不另开窗口），在状态面板显示 文件/%/fps/ETA。",
     },
   },
+  jasna: {
+    jasna_exe_path: {
+      title: "jasna.exe 路径",
+      description:
+        "jasna.exe 可执行文件的完整路径（如 C:\\Jasna\\jasna.exe）——不是文件夹。填写 → 托管模式（TaskPaw 逐个文件启动 jasna.exe，需要下方的输入/输出文件夹）。留空 → 被动模式（仅监视已在运行的 jasna）。托管模式不会随 TaskPaw 开机自启，需手动点「启动」。",
+    },
+    process_name: {
+      title: "进程名",
+      description: "仅被动模式：要检测的进程。带不带结尾的 '.exe' 都能匹配（Windows：jasna.exe）。",
+    },
+    jasna_input_folder: {
+      title: "输入文件夹",
+      description:
+        "要处理的视频所在文件夹（不递归扫描子文件夹）。托管模式必填，且必须与输出文件夹不同。",
+    },
+    jasna_output_folder: {
+      title: "输出文件夹",
+      description:
+        "结果写入的文件夹，每个文件输出 <原名>_restored.mp4。托管模式必填；已存在最终输出的文件会被跳过（断点续跑），也用于统计队列数量与完成通知。",
+    },
+    unet4x_1080p: {
+      title: "1080p 档：使用 unet-4x 二次修复",
+      description:
+        "默认开。1080p 档指像素数 ≤ 1920×1080×1.5 的视频（1920×1200、2560×1080 仍属 1080p 档；2560×1440 及以上归为 4K 档）。unet-4x 是 Jasna 的赞助者功能，需先在 Jasna 图形界面激活授权；未激活或显存不足时该文件会自动改用不带 unet-4x 重跑，并告警一次。",
+    },
+    unet4x_4k: {
+      title: "4K 档：使用 unet-4x 二次修复",
+      description:
+        "默认关：8 GB 显存放不下 4K 的 unet-4x。4K 档指像素数 > 1920×1080×1.5（约 3.1 MP，即 2560×1440 及以上）的视频。显存更大时可以打开。",
+    },
+    clip_size_1080p: {
+      title: "1080p 档片段长度",
+      description:
+        "1080p 档每次送进模型的帧数（--max-clip-size）。越大越稳定但更吃显存；8 GB 显存建议 90。",
+    },
+    clip_size_4k: {
+      title: "4K 档片段长度",
+      description:
+        "4K 档每次送进模型的帧数（--max-clip-size）。越大越稳定但更吃显存；8 GB 显存建议 60。",
+    },
+    temporal_overlap: {
+      title: "时序重叠帧数",
+      description:
+        "相邻片段之间重叠的帧数（--temporal-overlap），减少接缝闪烁。建议 8–20；Jasna 要求 2×重叠 必须小于片段长度（两个档位都要满足）。",
+    },
+    codec: {
+      title: "编码器",
+      description: "输出视频的编码格式（--codec）。默认 hevc。",
+    },
+    cq: {
+      title: "画质 CQ",
+      description:
+        "恒定质量参数（--cq，0–63）。数值越小画质越好、文件越大；hevc 建议 24。",
+    },
+    detection_model: {
+      title: "检测模型",
+      description:
+        "马赛克检测模型（--detection-model）。保持默认 rfdetr-v6 时，4K 档会在 model_weights 里存在 rfdetr-v6-large.onnx 的情况下自动升级为 rfdetr-v6-large；手动指定则原样使用。",
+    },
+    jasna_extra_args: {
+      title: "额外参数",
+      description:
+        "原样追加到命令行末尾的额外参数，例如 --device cuda:1。不要在这里重复 TaskPaw 已经控制的参数（--input --output --max-clip-size --temporal-overlap --codec --cq --detection-model）。特例：在这里写 --secondary-restoration（如 tvai / rtx-super-res / none）会对每个文件覆盖上面两个勾选框，并关闭自动的 unet-4x 降级重试。另外 --encoder-settings cq= 与上面的 CQ 冲突，Jasna 自己会报错。",
+    },
+    jasna_gpu_monitor: {
+      title: "GPU 监控",
+      description: "通过 nvidia-smi 报告 GPU%/显存（没有 NVIDIA GPU 的机器请关闭）。",
+    },
+    jasna_capture_progress: {
+      title: "捕获进度",
+      description:
+        "高级。关（默认）：每个文件的 jasna.exe 各自开一个控制台窗口显示进度条（一个文件一个窗口）。开：把 Jasna 的输出捕获进 TaskPaw（不另开窗口），在状态面板显示 文件/%/fps/ETA。注意：「正在编译引擎」提示只依据 model_weights/*.engine 是否存在，与本开关无关。",
+    },
+  },
 };
 
 function zhField(typeId: string | undefined, field: string): FieldT | undefined {

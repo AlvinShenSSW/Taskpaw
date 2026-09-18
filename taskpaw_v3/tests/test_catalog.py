@@ -30,6 +30,8 @@ def test_plugin_catalog_lists_all_with_schema():
         "state_file",
         "heartbeat",
         "tcp_check",
+        "lada",
+        "jasna",
     } <= set(by_id)
     # each entry carries a form schema the UI can render + the four-piece bits
     for p in cat:
@@ -56,6 +58,9 @@ def test_path_fields_carry_taskpawpath_marker():
     assert kind("lada", "lada_cli_path") == "file"
     assert kind("lada", "lada_input_folder") == "directory"
     assert kind("lada", "lada_output_folder") == "directory"
+    assert kind("jasna", "jasna_exe_path") == "file"
+    assert kind("jasna", "jasna_input_folder") == "directory"
+    assert kind("jasna", "jasna_output_folder") == "directory"
     assert kind("comfyui", "comfyui_log_path") == "file"
     assert kind("folder", "path") == "directory"
     assert kind("state_file", "path") == "file"
