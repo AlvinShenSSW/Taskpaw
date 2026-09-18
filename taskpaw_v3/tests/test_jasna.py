@@ -240,9 +240,23 @@ def test_owned_flags_rejected_in_extra_args():
         "--cq 30",
         "--detection-model rfdetr-v6-large",
         "--output-pattern {original}",
+        # argparse abbreviations select the same options (Codex 外门 C-5)
+        "--inp other.mp4",
+        "--outp=C:/y",
+        "--max-clip 40",
+        "--det rfdetr-v6-large",
     ):
         with pytest.raises(ValueError, match="TaskPaw owns"):
             _cfg(jasna_extra_args=bad)
+    assert owned_flags_in("--inp x") == ["--input"]
+    assert owned_flags_in("--outp x") == ["--output", "--output-pattern"]
+
+
+def test_secondary_override_detection_covers_abbreviations():
+    assert J.secondary_overridden("--sec none")
+    assert J.secondary_overridden("--secondary=tvai")
+    assert not J.secondary_overridden("--secondary-restoration-x 1")
+    assert not J.secondary_overridden("--device cuda:1")
 
 
 def test_lookalike_flags_and_secondary_restoration_are_accepted():
@@ -823,7 +837,36 @@ def test_stop_after_the_child_exited_leaves_the_staging_file(tmp_path, monkeypat
     inst.start(emit)
     inst.stop(timeout=0.5)
     assert launcher.procs[0].terminated is False
-    assert (out / "a_restored.tmp.mp4").exists()  # left for the exit branch
+    # Codex 外门 C-4: the finished video is PUBLISHED by stop() itself, because
+    # the worker may never run check() again — a Stop between files must not
+    # throw away completed work.
+    assert (out / "a_restored.mp4").exists()
+    assert not (out / "a_restored.tmp.mp4").exists()
+    # A later check() must not double-handle it, launch anything or emit done.
+    st = inst.check(emit)
+    assert st.state == "idle"
+    assert launcher.n == 1
+    assert not [e for e in _evs if e[0] == "done"]
+
+
+def test_exit_branch_publishes_a_clean_exit_while_stopping(tmp_path, monkeypatch):
+    # The other half of C-4: _stopping is already set when check() sees rc 0
+    # (stop() set the flag but has not taken the lock yet) → publish, no
+    # counters, no relaunch, no done event.
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4", "b.mp4")
+    launcher = _Launcher([0, 0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    inst._stopping.set()
+    st = inst.check(emit)
+    assert (out / "a_restored.mp4").exists()
+    assert launcher.n == 1  # b.mp4 not launched
+    assert inst._done == 0  # run is ending; the next start() rescans
+    assert st.state == "idle"
+    assert not [e for e in evs if e[0] == "done"]
 
 
 def test_stopping_set_inside_popen_is_caught_by_the_post_launch_recheck(

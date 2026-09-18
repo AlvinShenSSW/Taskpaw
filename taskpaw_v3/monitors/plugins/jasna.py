@@ -316,25 +316,39 @@ def _split_args(extra: str) -> list[str]:
         return extra.split()
 
 
+def _flag_names(extra: str) -> list[str]:
+    """The `--name` part of every `--name` / `--name=value` token in `extra`."""
+    return [t.split("=", 1)[0] for t in _split_args(extra) if t.startswith("--")]
+
+
+def _selects(name: str, flag: str) -> bool:
+    """Whether the option token `name` selects `flag` under argparse's rules:
+    the exact name, or an abbreviation (any prefix — Jasna 0.10.0 keeps
+    argparse's default `allow_abbrev=True`, so `--inp` selects `--input`).
+    `--input-size` does NOT select `--input` (it is longer, not a prefix)."""
+    return name == flag or (len(name) > 2 and flag.startswith(name))
+
+
 def owned_flags_in(extra: str) -> list[str]:
-    """Which plugin-owned flags `extra` sets (exact token or `--flag=` form).
-    A substring test would wrongly reject `--input-size` (lada's Codex finding)."""
-    toks = _split_args(extra)
+    """Which plugin-owned flags `extra` sets — by exact name, `--flag=value`, or
+    an argparse abbreviation (`--inp x` would silently override the generated
+    `--input` and restore the wrong file under every queue item's name — Codex
+    外门). A substring test would wrongly reject `--input-size` (lada's Codex
+    finding), so the check is prefix-of-flag, never flag-in-token."""
+    names = _flag_names(extra)
     found: list[str] = []
     for flag in _OWNED_FLAGS:
-        if any(t == flag or t.startswith(flag + "=") for t in toks):
+        if any(_selects(n, flag) for n in names):
             found.append(flag)
     return found
 
 
 def secondary_overridden(extra: str) -> bool:
     """Whether `extra` carries the documented `--secondary-restoration` override
-    (exact token or `--secondary-restoration=`), which disables the automatic
-    unet-4x degrade because the relaunch would carry the same flag."""
-    return any(
-        t == "--secondary-restoration" or t.startswith("--secondary-restoration=")
-        for t in _split_args(extra)
-    )
+    (exact, `=value`, or an argparse abbreviation such as `--sec none`), which
+    disables the automatic unet-4x degrade because the relaunch would carry the
+    same flag."""
+    return any(_selects(n, "--secondary-restoration") for n in _flag_names(extra))
 
 
 def _same_folder(a: str, b: str) -> bool:
@@ -387,7 +401,8 @@ class JasnaConfig(BaseMonitorConfig):
         description="Folder where the restored videos are written as "
         "<name>_restored.mp4. Required in managed mode, and must be a DIFFERENT "
         "folder from the input. A file whose output already exists is skipped, so "
-        "a batch resumes where it left off.",
+        "a batch resumes where it left off. Give each Jasna monitor its OWN output "
+        "folder: Start sweeps stale *_restored.tmp.mp4 files it does not own.",
     )
     unet4x_1080p: bool = Field(
         True,
@@ -724,8 +739,16 @@ class JasnaInstance(MonitorInstance):
                 if proc is not None and proc.poll() is None:
                     _terminate_child(proc, timeout)
                     # ONLY after killing a LIVE child: an already-exited child is
-                    # left to the exit branch, so a completed rename is never undone.
+                    # never left with a stale staging file — see below.
                     self._delete_current_staging()
+                elif proc is not None and proc.poll() == 0:
+                    # The child finished between two polls and the worker may never
+                    # run check() again: publish its result NOW so a Stop between
+                    # files never throws away a completed video (Codex 外门 C-4).
+                    # Counters are per-run and the run is ending — the next
+                    # start() rescans and counts it as done.
+                    self._publish_current()
+                    self._process = None
             else:
                 log.warning(
                     "jasna %s: stop() could not take the launch lock within %.1fs; "
@@ -943,7 +966,10 @@ class JasnaInstance(MonitorInstance):
             self._process = None  # handled ONCE
             if self._stopping.is_set():
                 # Shutting down: a terminate-induced non-zero exit is not a file
-                # failure — don't alert, don't relaunch.
+                # failure — don't alert, don't relaunch. A clean exit is still
+                # published so the finished video survives the Stop (C-4).
+                if retcode == 0:
+                    self._publish_current()
                 return
             if retcode == 0:
                 self._handle_success(emit)
@@ -954,20 +980,29 @@ class JasnaInstance(MonitorInstance):
         # probe. _launch_next re-checks _stopping under the lock before popping.
         self._advance(emit)
 
-    def _handle_success(self, emit: EventEmitter) -> None:
-        cfg = self._cfg
+    def _publish_current(self) -> Optional[str]:
+        """Atomic publish of the current file's staging output (constitution §2).
+        Returns an error string when the rename failed, else None."""
         video = self._current
+        if video is None:
+            return None
+        staging = staging_path_for(self._cfg.jasna_output_folder, video)
+        final = output_path_for(self._cfg.jasna_output_folder, video)
+        try:
+            os.replace(staging, final)
+        except OSError as e:
+            log.warning("jasna: could not publish %s: %s", final, e)
+            return f"could not publish {final.name}: {e}"
+        return None
+
+    def _handle_success(self, emit: EventEmitter) -> None:
         tier = self._current_tier or "1080p"
-        if video is not None:
-            staging = staging_path_for(cfg.jasna_output_folder, video)
-            final = output_path_for(cfg.jasna_output_folder, video)
-            try:
-                os.replace(staging, final)  # atomic publish — constitution §2
-            except OSError as e:
-                # Jasna says it succeeded but we cannot publish the result — the
-                # file is NOT done, so count it as a failure rather than lie.
-                self._fail_current(emit, f"could not publish {final.name}: {e}")
-                return
+        err = self._publish_current()
+        if err is not None:
+            # Jasna says it succeeded but we cannot publish the result — the
+            # file is NOT done, so count it as a failure rather than lie.
+            self._fail_current(emit, err)
+            return
         self._done += 1
         self._consecutive_failures = 0
         if self._unet_retry_pending:
