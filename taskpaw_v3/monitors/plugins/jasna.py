@@ -1139,7 +1139,12 @@ class JasnaInstance(MonitorInstance):
             status = retag_hevc_hvc1(staging)
             if status == "patched":
                 log.info("jasna: %s retagged hev1 -> hvc1", staging.name)
-            elif status != "already-hvc1":
+            elif status.startswith("unsupported") or (
+                # `no-hevc-entry` is the expected result for an h264/av1 job —
+                # only HEVC needs this tag. It IS worth a warning when we asked
+                # Jasna for HEVC and did not get one (Codex 外门).
+                status == "no-hevc-entry" and self._cfg.codec == "hevc"
+            ):
                 log.warning(
                     "jasna: %s kept its ffmpeg codec tag (%s); macOS will not "
                     "preview it",

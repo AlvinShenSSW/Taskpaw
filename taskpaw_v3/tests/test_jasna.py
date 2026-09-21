@@ -1443,6 +1443,40 @@ def test_publish_warns_when_the_tag_could_not_be_fixed(tmp_path, monkeypatch, ca
     assert any("kept its ffmpeg codec tag" in r.message for r in caplog.records)
 
 
+def test_publish_does_not_warn_about_a_non_hevc_output(tmp_path, monkeypatch, caplog):
+    # Codex 外门: with codec=h264 there is no HEVC entry to retag, so the
+    # "macOS will not preview it" warning would be false on every finished job.
+    cfg, inp, out, _home = _managed(tmp_path, codec="h264")
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    (out / "a_restored.tmp.mp4").write_bytes(_mp4(_sample_entry(b"avc1")))
+    with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
+        inst.check(emit)
+    assert not any("kept its ffmpeg codec tag" in r.message for r in caplog.records)
+    assert inst._done == 1
+
+
+def test_publish_warns_when_an_hevc_job_produced_no_hevc_entry(
+    tmp_path, monkeypatch, caplog
+):
+    # The same status IS an anomaly when we asked Jasna for HEVC.
+    cfg, inp, out, _home = _managed(tmp_path)  # codec defaults to hevc
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    (out / "a_restored.tmp.mp4").write_bytes(_mp4(_sample_entry(b"avc1")))
+    with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
+        inst.check(emit)
+    assert any("no-hevc-entry" in r.message for r in caplog.records)
+
+
 def test_publish_does_not_retag_a_missing_staging_file(tmp_path, monkeypatch, caplog):
     # The os.replace failure is the one honest report; a retag warning on top of
     # it would just be noise.
