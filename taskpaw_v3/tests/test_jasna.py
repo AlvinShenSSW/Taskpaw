@@ -1214,6 +1214,257 @@ def test_passive_running_then_gone_emits_done(monkeypatch):
 
 
 # ── plugin / registry ─────────────────────────────────────────────────────
+# ── HEVC hev1 → hvc1 retag, so macOS can preview the output ───────────────
+def _box(btype: bytes, payload: bytes) -> bytes:
+    return (8 + len(payload)).to_bytes(4, "big") + btype + payload
+
+
+def _sample_entry(name: bytes, *, hvcc: bool = True) -> bytes:
+    """A VisualSampleEntry: 78 fixed bytes, then its child boxes."""
+    children = _box(b"hvcC", b"\x01" + bytes(20)) if hvcc else b""
+    return _box(name, bytes(78) + children)
+
+
+def _mp4(entry: bytes, *, with_moov: bool = True, moov_last: bool = False) -> bytes:
+    stsd = _box(b"stsd", bytes(4) + (1).to_bytes(4, "big") + entry)
+    moov = _box(
+        b"moov", _box(b"trak", _box(b"mdia", _box(b"minf", _box(b"stbl", stsd))))
+    )
+    ftyp = _box(b"ftyp", b"isom" + bytes(8))
+    mdat = _box(b"mdat", b"\xde\xad\xbe\xef" * 8)
+    if not with_moov:
+        return ftyp + mdat
+    return ftyp + mdat + moov if moov_last else ftyp + moov + mdat
+
+
+def _write(tmp_path: Path, data: bytes, name: str = "v.mp4") -> Path:
+    p = tmp_path / name
+    p.write_bytes(data)
+    return p
+
+
+def test_retag_rewrites_hev1_to_hvc1_in_place(tmp_path):
+    data = _mp4(_sample_entry(b"hev1"))
+    p = _write(tmp_path, data)
+    assert J.retag_hevc_hvc1(p) == "patched"
+    after = p.read_bytes()
+    # Metadata only: same length, and nothing outside the 4-byte type field of
+    # the sample entry changed (hev1 and hvc1 share their first and last byte,
+    # so only two bytes actually move).
+    assert len(after) == len(data)
+    at = data.index(b"hev1")
+    assert after[at : at + 4] == b"hvc1"
+    assert after[:at] == data[:at] and after[at + 4 :] == data[at + 4 :]
+    assert b"hev1" not in after and after.count(b"hvc1") == 1
+    assert J.retag_hevc_hvc1(p) == "already-hvc1"  # idempotent
+
+
+def test_retag_finds_moov_after_the_media_data(tmp_path):
+    p = _write(tmp_path, _mp4(_sample_entry(b"hev1"), moov_last=True))
+    assert J.retag_hevc_hvc1(p) == "patched"
+    assert b"hvc1" in p.read_bytes()
+
+
+def test_retag_handles_a_64_bit_largesize_moov(tmp_path):
+    inner = _mp4(_sample_entry(b"hev1"))
+    start = inner.index(b"moov") - 4
+    moov = inner[start:]
+    big = (
+        (1).to_bytes(4, "big") + b"moov" + (len(moov) + 8).to_bytes(8, "big") + moov[8:]
+    )
+    p = _write(tmp_path, inner[:start] + big)
+    assert J.retag_hevc_hvc1(p) == "patched"
+
+
+@pytest.mark.parametrize(
+    "name,data,expected",
+    [
+        ("avc1.mp4", _mp4(_sample_entry(b"avc1")), "no-hevc-entry"),
+        ("hvc1.mp4", _mp4(_sample_entry(b"hvc1")), "already-hvc1"),
+        ("nohvcc.mp4", _mp4(_sample_entry(b"hev1", hvcc=False)), "unsupported:no-hvcC"),
+        (
+            "nomoov.mp4",
+            _mp4(_sample_entry(b"hev1"), with_moov=False),
+            "unsupported:no-moov",
+        ),
+        ("empty.mp4", b"", "unsupported:no-moov"),
+        ("junk.mp4", b"not an mp4 at all, really", "unsupported:no-moov"),
+        # A box declaring size 4 advances the cursor by nothing: the walk must
+        # end rather than spin inside check().
+        (
+            "spin.mp4",
+            (4).to_bytes(4, "big") + b"moov" + bytes(32),
+            "unsupported:no-moov",
+        ),
+        # A size that runs past the end of the file is never trusted.
+        (
+            "toolong.mp4",
+            (1 << 30).to_bytes(4, "big") + b"moov" + bytes(8),
+            "unsupported:no-moov",
+        ),
+    ],
+)
+def test_retag_leaves_other_codecs_and_broken_layouts_alone(
+    tmp_path, name, data, expected
+):
+    p = _write(tmp_path, data, name)
+    assert J.retag_hevc_hvc1(p) == expected
+    assert p.read_bytes() == data  # untouched
+
+
+def test_retag_on_a_missing_file_is_reported_not_raised(tmp_path):
+    assert J.retag_hevc_hvc1(tmp_path / "nope.mp4").startswith("unsupported:")
+
+
+def test_publish_retags_before_renaming(tmp_path, monkeypatch):
+    # The published file must never be the unpreviewable hev1 variant, not even
+    # briefly: the retag happens on the staging name, before the rename.
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    # Stand in for Jasna's real output: HEVC tagged hev1, as ffmpeg writes it.
+    (out / "a_restored.tmp.mp4").write_bytes(_mp4(_sample_entry(b"hev1")))
+    inst.check(emit)
+    published = (out / "a_restored.mp4").read_bytes()
+    assert b"hvc1" in published and b"hev1" not in published
+    assert inst._done == 1
+
+
+def test_publish_still_happens_when_the_file_cannot_be_retagged(tmp_path, monkeypatch):
+    # An output we don't understand is published as-is — a retag failure must
+    # never cost the operator a finished video.
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    (out / "a_restored.tmp.mp4").write_bytes(b"not an mp4")
+    inst.check(emit)
+    assert (out / "a_restored.mp4").read_bytes() == b"not an mp4"
+    assert inst._done == 1
+
+
+def _trak(*, stsd_entry: bytes = b"", extra: bytes = b"") -> bytes:
+    """A trak: `tkhd` plus, unless `stsd_entry` is empty, the mdia→stsd chain."""
+    body = _box(b"tkhd", bytes(84)) + extra
+    if stsd_entry:
+        stsd = _box(b"stsd", bytes(4) + (1).to_bytes(4, "big") + stsd_entry)
+        body += _box(b"mdia", _box(b"minf", _box(b"stbl", stsd)))
+    return _box(b"trak", body)
+
+
+def _mp4_traks(*traks: bytes) -> bytes:
+    return _box(b"ftyp", b"isom" + bytes(8)) + _box(b"moov", b"".join(traks))
+
+
+def test_retag_scans_every_track_not_just_the_first(tmp_path):
+    # E-1: a file whose audio track comes first is legal and common (ffmpeg
+    # writes one on `-map 0:a -map 0:v`). Stopping at track 0 would leave the
+    # video entry untagged and the fix would silently do nothing.
+    data = _mp4_traks(
+        _trak(stsd_entry=_sample_entry(b"mp4a", hvcc=False)),
+        _trak(stsd_entry=_sample_entry(b"hev1")),
+    )
+    p = _write(tmp_path, data, "audio_first.mp4")
+    assert J.retag_hevc_hvc1(p) == "patched"
+    after = p.read_bytes()
+    assert b"hev1" not in after and after.count(b"hvc1") == 1
+
+
+def test_retag_skips_a_track_without_a_sample_table(tmp_path):
+    # A tkhd-only timecode/chapter track must not abort the walk.
+    data = _mp4_traks(_trak(), _trak(stsd_entry=_sample_entry(b"hev1")))
+    p = _write(tmp_path, data, "tkhd_only_first.mp4")
+    assert J.retag_hevc_hvc1(p) == "patched"
+
+
+def test_retag_tries_the_next_entry_when_one_has_no_hvcc(tmp_path):
+    # E-2: a bare hev1 entry must not veto a well-formed one after it.
+    entries = _sample_entry(b"hev1", hvcc=False) + _sample_entry(b"hev1")
+    stsd = _box(b"stsd", bytes(4) + (2).to_bytes(4, "big") + entries)
+    data = _mp4_traks(_box(b"trak", _box(b"mdia", _box(b"minf", _box(b"stbl", stsd)))))
+    p = _write(tmp_path, data, "two_entries.mp4")
+    assert J.retag_hevc_hvc1(p) == "patched"
+    assert p.read_bytes().count(b"hvc1") == 1
+
+
+def test_retag_reports_no_trak_and_a_size_zero_moov(tmp_path):
+    assert J.retag_hevc_hvc1(_write(tmp_path, _mp4_traks(), "notrak.mp4")) == (
+        "unsupported:no-trak"
+    )
+    # A final box declaring size 0 runs to the end of the file (ISO 14496-12).
+    inner = _mp4(_sample_entry(b"hev1"), moov_last=True)
+    at = inner.index(b"moov") - 4
+    zero = inner[:at] + (0).to_bytes(4, "big") + inner[at + 4 :]
+    assert J.retag_hevc_hvc1(_write(tmp_path, zero, "size0.mp4")) == "patched"
+
+
+def test_publish_retags_the_staging_file_before_the_rename(tmp_path, monkeypatch):
+    # E-4: assert the ORDER, not just the outcome — retagging after the rename
+    # would publish the unpreviewable variant first and still end up correct.
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    seen: list[tuple[str, bool]] = []
+    real = J.retag_hevc_hvc1
+
+    def spy(path):
+        seen.append((path.name, (out / "a_restored.mp4").exists()))
+        return real(path)
+
+    monkeypatch.setattr(J, "retag_hevc_hvc1", spy)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    (out / "a_restored.tmp.mp4").write_bytes(_mp4(_sample_entry(b"hev1")))
+    inst.check(emit)
+    assert seen == [("a_restored.tmp.mp4", False)]
+    assert b"hvc1" in (out / "a_restored.mp4").read_bytes()
+
+
+def test_publish_warns_when_the_tag_could_not_be_fixed(tmp_path, monkeypatch, caplog):
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    (out / "a_restored.tmp.mp4").write_bytes(b"not an mp4")
+    with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
+        inst.check(emit)
+    assert any("kept its ffmpeg codec tag" in r.message for r in caplog.records)
+
+
+def test_publish_does_not_retag_a_missing_staging_file(tmp_path, monkeypatch, caplog):
+    # The os.replace failure is the one honest report; a retag warning on top of
+    # it would just be noise.
+    cfg, inp, out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    (out / "a_restored.tmp.mp4").unlink()
+    with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
+        inst.check(emit)
+    # (match the log TEXT, not the word "retag": pytest's tmp_path is named
+    # after this test function, so it appears inside every logged path.)
+    assert not any(
+        "could not retag" in r.message or "kept its ffmpeg codec tag" in r.message
+        for r in caplog.records
+    )
+    assert [e for e in evs if "failed" in e[1]]
+
+
 def test_plugin_is_registered_and_self_describing():
     reg = default_registry()
     assert reg.has("jasna")
