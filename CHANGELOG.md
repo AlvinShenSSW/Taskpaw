@@ -4,6 +4,22 @@
 
 ---
 
+## V3 3.2.1 — Jasna 输出改用 hvc1 标签（macOS 可预览）
+
+- **修复:Jasna 产出的 MP4 在 macOS 上无法预览。** ffmpeg 给 MP4 里的 HEVC 默认写
+  `hev1` 采样条目名,苹果的 AVFoundation 只认 `hvc1`,于是 Finder 缩略图、QuickLook、
+  QuickTime 和 Safari 一律当成不支持的格式。发布环节现在把暂存文件 stsd 里的那 4 个字节
+  从 `hev1` 改写成 `hvc1`,然后再原子改名为最终文件。
+- **只改元数据,不重封装。** 采样数据、`hvcC` 参数集和所有字节偏移原样不动,文件大小不变,
+  解码结果逐帧一致——等价于 `ffmpeg -c copy -tag:v hvc1`,但不需要重写几十 GB。非苹果播放器
+  两种标签都认。只有当采样条目确实是 `hev1` 且带 `hvcC`(参数集在盒内)时才改写;文件结构看不懂
+  就原样发布并记一条警告,绝不会因为改标签丢掉已完成的视频。
+- 同一问题 Lada 在 [ladaapp/lada@ed2f09e](https://github.com/ladaapp/lada/commit/ed2f09ec3a717756b316188889b32a9a2b8c29af)
+  中在写入端修掉了;Jasna 是冻结的二进制、CLI 也没有设置 codec tag 的开关,所以 TaskPaw 在
+  发布环节补上。已有的旧输出可以用同一个函数原地补标签。
+
+---
+
 ## V3 3.2.0 — Jasna 任务类型 (#173)
 
 - **新增 `jasna` 任务类型（Jasna 视频修复）**。托管模式下 TaskPaw **逐个文件**启动

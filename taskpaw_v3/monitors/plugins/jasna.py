@@ -305,6 +305,148 @@ def is_license_failure(tail: str) -> bool:
     return "supporter feature" in (tail or "").casefold()
 
 
+# ── HEVC sample-entry retag (hev1 → hvc1) ─────────────────────────────────
+# Jasna muxes HEVC into MP4 with ffmpeg's default sample-entry name `hev1`.
+# That is spec-valid, but Apple's AVFoundation only accepts `hvc1`, so Finder
+# thumbnails, QuickLook, QuickTime and Safari treat every restored file as
+# unsupported. Lada hit exactly this and fixed it in its writer
+# (ladaapp/lada@ed2f09e); we cannot patch Jasna's frozen binary, so the publish
+# step rewrites the four-byte sample-entry type instead.
+#
+# This is metadata only: the sample data, the `hvcC` parameter sets and every
+# byte offset stay put, which is also all `ffmpeg -c copy -tag:v hvc1` does to
+# such a file — without rewriting tens of gigabytes. Non-Apple players accept
+# both names.
+_ISOBMFF_PATH = (b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd")
+_HEV1, _HVC1, _HVCC = b"hev1", b"hvc1", b"hvcC"
+# A VisualSampleEntry's fixed header before its child boxes (ISO/IEC 14496-12):
+# 6 reserved + 2 data_reference_index + 16 pre_defined/reserved + 2 width +
+# 2 height + 4 horizresolution + 4 vertresolution + 4 reserved + 2 frame_count +
+# 32 compressorname + 2 depth + 2 pre_defined.
+_VISUAL_SAMPLE_ENTRY_HEADER = 78
+# Termination is guaranteed by the `size < header_len` check below (every
+# iteration advances at least 8 bytes); the cap is only a backstop against a
+# pathological header-only file.
+_MAX_BOXES_SCANNED = 10_000
+
+
+def _iter_boxes(fh, start: int, end: int):
+    """Yield `(type, box_start, payload_start, box_end)` for the boxes in
+    `[start, end)`. Stops on anything malformed rather than guessing, and can
+    never loop: a box that does not advance the cursor ends the walk."""
+    pos, scanned = start, 0
+    while pos + 8 <= end:
+        scanned += 1
+        if scanned > _MAX_BOXES_SCANNED:
+            return
+        fh.seek(pos)
+        header = fh.read(8)
+        if len(header) < 8:
+            return
+        size = int.from_bytes(header[:4], "big")
+        btype = header[4:8]
+        header_len = 8
+        if size == 1:  # 64-bit largesize follows the type
+            ext = fh.read(8)
+            if len(ext) < 8:
+                return
+            size = int.from_bytes(ext, "big")
+            header_len = 16
+        elif size == 0:  # last box in the file (clamped to the parent here)
+            size = end - pos
+        if size < header_len or pos + size > end:
+            return  # truncated or nonsensical — do not guess
+        yield btype, pos, pos + header_len, pos + size
+        pos += size
+
+
+def _find_box(fh, start: int, end: int, wanted: bytes):
+    """The first `wanted` box in `[start, end)`, as `(payload_start, box_end)`."""
+    for btype, _box_start, payload_start, box_end in _iter_boxes(fh, start, end):
+        if btype == wanted:
+            return payload_start, box_end
+    return None
+
+
+def retag_hevc_hvc1(path: Path) -> str:
+    """Rewrite an ISOBMFF file's HEVC sample-entry name from `hev1` to `hvc1`
+    in place (four bytes). Returns a status string for the log:
+    `patched` / `already-hvc1` / `no-hevc-entry` / `unsupported:<reason>`.
+    Never raises and never touches a file it did not fully understand.
+
+    EVERY `trak` is examined, not just the first: a file whose audio (or a
+    timecode/chapter) track comes first is perfectly legal, and stopping at
+    track 0 would silently leave the video entry untagged."""
+    try:
+        with open(path, "r+b") as fh:
+            moov = _find_box(fh, 0, path.stat().st_size, b"moov")
+            if moov is None:
+                return "unsupported:no-moov"
+            saw_trak = saw_hvc1 = saw_hev1_without_hvcc = False
+            for btype, _box_start, trak_body, trak_end in _iter_boxes(fh, *moov):
+                if btype != b"trak":
+                    continue
+                saw_trak = True
+                start, end, complete = trak_body, trak_end, True
+                for level in _ISOBMFF_PATH[2:]:  # mdia -> minf -> stbl -> stsd
+                    found = _find_box(fh, start, end, level)
+                    if found is None:
+                        # A tkhd-only timecode/chapter track, or a layout we do
+                        # not understand: skip this track, keep looking.
+                        complete = False
+                        break
+                    start, end = found
+                if not complete:
+                    continue
+                # stsd payload: 4 version/flags + 4 entry_count, then the entries.
+                entries_start = start + 8
+                if entries_start > end:
+                    continue
+                for etype, entry_start, payload_start, box_end in _iter_boxes(
+                    fh, entries_start, end
+                ):
+                    if etype == _HVC1:
+                        saw_hvc1 = True
+                        continue
+                    if etype != _HEV1:
+                        continue
+                    # Only retag when the parameter sets live in an `hvcC` box:
+                    # that is what makes the renamed entry a conformant `hvc1`
+                    # one. An entry without it is skipped rather than fatal — a
+                    # later entry, or a later track, may still be patchable.
+                    children = payload_start + _VISUAL_SAMPLE_ENTRY_HEADER
+                    if (
+                        children > box_end
+                        or _find_box(fh, children, box_end, _HVCC) is None
+                    ):
+                        saw_hev1_without_hvcc = True
+                        continue
+                    type_offset = entry_start + 4
+                    fh.seek(type_offset)
+                    if fh.read(4) != _HEV1:  # an arithmetic slip in the walk
+                        return "unsupported:type-mismatch"
+                    fh.seek(type_offset)
+                    fh.write(_HVC1)
+                    # Deliberately NOT fsync'ed: on Windows that flushes the
+                    # whole file's dirty cache — hundreds of milliseconds for the
+                    # multi-GB output the child just wrote — while this runs
+                    # under `_launch_lock`, and it buys nothing. Atomicity is the
+                    # `os.replace`; a crash before write-back leaves the STAGING
+                    # name, which `plan_queue` never counts as done, so the file
+                    # is simply restored again.
+                    return "patched"
+            if not saw_trak:
+                return "unsupported:no-trak"
+            if saw_hev1_without_hvcc:
+                return "unsupported:no-hvcC"
+            return "already-hvc1" if saw_hvc1 else "no-hevc-entry"
+    except OSError as e:
+        # An unreadable/locked output must never cost us the video — publish it
+        # untagged and say so.
+        log.warning("jasna: could not retag %s: %s", path, e)
+        return f"unsupported:{type(e).__name__}"
+
+
 def _split_args(extra: str) -> list[str]:
     if not extra.strip():
         return []
@@ -569,8 +711,9 @@ class JasnaInstance(MonitorInstance):
     per line. Lock order is `_launch_lock` → `_lock` only; nothing holding `_lock`
     ever takes `_launch_lock`; `stop()` joins the reader holding neither; and the
     only waits under `_launch_lock` are the non-blocking `Popen`, the
-    `os.replace`, and `_terminate_child`, bounded by its timeout (+2 s for the
-    kill reap)."""
+    `os.replace`, the publish-time `hev1` retag (a bounded header walk and a
+    four-byte write — deliberately never an fsync), and `_terminate_child`,
+    bounded by its timeout (+2 s for the kill reap)."""
 
     def __init__(self, instance_id: str, config: JasnaConfig) -> None:
         super().__init__(instance_id, config)
@@ -988,6 +1131,26 @@ class JasnaInstance(MonitorInstance):
             return None
         staging = staging_path_for(self._cfg.jasna_output_folder, video)
         final = output_path_for(self._cfg.jasna_output_folder, video)
+        # Retag BEFORE the rename, so the published file is never briefly the
+        # unpreviewable `hev1` variant and a failure here costs nothing. A
+        # missing staging file is reported by the os.replace below — don't add a
+        # second, more confusing line to the log.
+        if staging.exists():
+            status = retag_hevc_hvc1(staging)
+            if status == "patched":
+                log.info("jasna: %s retagged hev1 -> hvc1", staging.name)
+            elif status.startswith("unsupported") or (
+                # `no-hevc-entry` is the expected result for an h264/av1 job —
+                # only HEVC needs this tag. It IS worth a warning when we asked
+                # Jasna for HEVC and did not get one (Codex 外门).
+                status == "no-hevc-entry" and self._cfg.codec == "hevc"
+            ):
+                log.warning(
+                    "jasna: %s kept its ffmpeg codec tag (%s); macOS will not "
+                    "preview it",
+                    staging.name,
+                    status,
+                )
         try:
             os.replace(staging, final)
         except OSError as e:
