@@ -645,3 +645,108 @@ def test_tracking_is_safe_while_terminate_runs_on_another_thread():
         _kill_pid(gpid)
         _cleanup(c)
     assert errors == []
+
+
+# ── #179 repair cycle 3 (S4/IR2): tracked_running(), bounded, exists_quietly ──
+def test_tracked_running_lists_live_tracked_pids_without_killing():
+    psutil = pytest.importorskip("psutil")
+    c = ChildProcess([PY, "-c", "pass"])
+    try:
+        _wait_exit(c)
+        me = psutil.Process()
+        with c._tracked_lock:
+            c._tracked[me.pid] = me.create_time()  # live, same create time
+            c._tracked[4_000_000] = 1.0  # no such process
+        assert c.tracked_running() == [me.pid]
+        assert c._tracked_running() == [me.pid]  # the old name still works
+        with c._tracked_lock:
+            c._tracked[me.pid] = me.create_time() - 1000.0  # a "reused" pid
+        assert c.tracked_running() == []  # never ours
+    finally:
+        _cleanup(c)
+
+
+def test_tracked_running_sees_an_orphaned_grandchild_until_it_is_killed():
+    c, gpid, ctime = _orphan_tree()
+    try:
+        assert gpid in c.tracked_running()
+        assert not _gone(gpid, ctime, timeout=0.2)  # listing never kills
+        assert gpid in c.kill_tracked()
+        assert _gone(gpid, ctime)
+        assert gpid not in c.tracked_running()
+    finally:
+        _kill_pid(gpid)
+        _cleanup(c)
+
+
+def test_tracked_running_never_raises(monkeypatch):
+    c = ChildProcess([PY, "-c", "pass"])
+    try:
+        _wait_exit(c)
+        with c._tracked_lock:
+            c._tracked[12345] = 1.0
+
+        def boom(*a, **kw):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(child_mod.psutil, "Process", boom)
+        assert c.tracked_running() == []
+        monkeypatch.setattr(c, "_tracked_copy", boom)
+        assert c.tracked_running() == []
+    finally:
+        monkeypatch.undo()
+        _cleanup(c)
+
+
+def test_bounded_keeps_the_head_and_the_end_within_the_limit():
+    from taskpaw_v3.monitors.subs.util import bounded
+
+    assert bounded("  short  ", 800) == "short"
+    assert bounded("", 10) == "" and bounded(None, 10) == ""  # type: ignore[arg-type]
+    text = "exit code 1: " + "x" * 5000 + " LAST"
+    out = bounded(text, 800)
+    assert len(out) <= 800
+    assert out.startswith("exit code 1: ") and out.endswith(" LAST")
+    assert " … " in out
+    # the #177 shape at the 800 cap: 80 head chars + " … " + 717 tail chars
+    assert out == text[:80] + " … " + text[-717:]
+    exact = "y" * 800
+    assert bounded(exact, 800) == exact  # at the limit: untouched
+    for limit in (1, 2, 3, 5, 9, 83, 200):
+        got = bounded(text, limit)
+        assert len(got) <= limit and got.endswith(text[-1])
+    assert bounded(text, 0) == "" and bounded(text, -5) == ""
+
+
+def test_exists_quietly(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from taskpaw_v3.monitors.subs.util import exists_quietly
+
+    f = tmp_path / "a.srt"
+    f.write_text("x", encoding="utf-8")
+    assert exists_quietly(f) is True
+    assert exists_quietly(str(f)) is True
+    assert exists_quietly(tmp_path / "missing.srt") is False
+
+    def boom(self, *a, **kw):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "exists", boom)
+    assert exists_quietly(f) is False  # unreadable → "not there yet"
+
+
+def test_subs_package_reexports_the_shared_helpers():
+    from taskpaw_v3.monitors import subs
+    from taskpaw_v3.monitors.subs import util
+
+    assert subs.bounded is util.bounded
+    assert subs.exists_quietly is util.exists_quietly
+    assert {"bounded", "exists_quietly"} <= set(subs.__all__)
+    # C1: the subs package never imports lada
+    for name, mod in list(sys.modules.items()):
+        if name.startswith("taskpaw_v3.monitors.subs"):
+            src = getattr(mod, "__file__", "") or ""
+            if src.endswith(".py"):
+                text = open(src, encoding="utf-8").read()
+                assert "plugins.lada" not in text, name

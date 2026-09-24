@@ -566,3 +566,23 @@ Start again → all skipped. With a Jasna task running at the same time, one sho
   transfer (Jasna); `TreePlan.folders` (the temp-sweep scope); a translator that fails to start is
   an avsubs launch error; a `no LLM key` translator result also raises the once-per-run key alert;
   the avsubs test harness sets `avsubs_gpu_monitor=False` (no real `nvidia-smi` in tests).
+
+## PR-gate record (PR #184)
+
+- **Correction (IR3):** AC4 lists `skipped(collision)`, but the module design, the test plan and
+  the code count collisions as **failed** (`queue_failed`, one alert), exactly like Jasna's
+  `plan_queue` collisions. The code and tests are authoritative; AC4's list should read
+  `completed | failed | skipped(no_llm_key | unstable | cancelled | no_exe)`.
+- **Repair batch (review cycle 3):** sweep S1 (three tests for surviving mutants), S2 (survivor
+  alert on the launch-exception path), S3 / IR6 (exe example paths use
+  `C:\WhisperJAV\Scripts\whisperjav.exe` in both tasks, EN + zh; the zh root text names the `._`
+  skip), S4 / IR2 (`bounded(text, limit)`, `exists_quietly(path)` and
+  `ChildProcess.tracked_running()` shared from the `subs` package; `J._bounded` kept as an alias),
+  S5 (Jasna clears `_gpu_waiting` after a successful take; the waiting detail never names the run
+  itself), IR4 (field text: "linked or mounted folders" — a volume mount point carries the same
+  reparse tag as a junction and is skipped), IR5 (Jasna's survivor reap uses `poll_asr()`, no
+  `taskkill` under the lock).
+- **Deferred for the owner at merge (IR1, P2):** after a `False` tracked-tree kill the GPU lease is
+  still released (C11 decision); the other task could then fail to allocate VRAM. The survivor
+  alert names it. Out of scope (IR7): the ASR tree is not in a kill-on-close Job object, so a hard
+  agent crash (not a Stop) can orphan WhisperJAV — pre-existing since #177.

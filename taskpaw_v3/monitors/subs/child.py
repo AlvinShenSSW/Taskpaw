@@ -258,10 +258,21 @@ class ChildProcess:
                 )
         return hit
 
-    def _tracked_running(self) -> list[int]:
+    def tracked_running(self) -> list[int]:
+        """The pids of tracked descendants still running with their tracked
+        create time (pid-reuse safe). No kill, no wait. Never raises."""
         if psutil is None:
             return []
-        return [pid for pid, ctime in self._tracked_copy() if self._ours(pid, ctime)]
+        try:
+            return [
+                pid for pid, ctime in self._tracked_copy() if self._ours(pid, ctime)
+            ]
+        except Exception as e:  # never raises
+            log.warning("child %s: tracked scan failed (%s)", self.pid, e)
+            return []
+
+    # Kept for callers written against the #179 first cut.
+    _tracked_running = tracked_running
 
     def kill_tracked(self) -> list[int]:
         """psutil-kill every tracked descendant still running with its tracked
@@ -328,7 +339,7 @@ class ChildProcess:
             log.warning("child %s: tree kill failed (%s)", self.pid, e)
         try:
             child_gone = self.proc.poll() is not None
-            survivors = self._tracked_running()
+            survivors = self.tracked_running()
         except Exception as e:  # never raises
             log.warning("child %s: tree check failed (%s)", self.pid, e)
             return False

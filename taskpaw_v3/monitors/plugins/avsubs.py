@@ -54,8 +54,8 @@ from taskpaw_v3.monitors.base import (
     State,
 )
 from taskpaw_v3.monitors.plugins.host_metrics import read_gpu
-from taskpaw_v3.monitors.plugins.lada import _CRASH_DETAIL_CHARS, _cpu_mem
-from taskpaw_v3.monitors.subs import asr_env
+from taskpaw_v3.monitors.plugins.lada import _cpu_mem
+from taskpaw_v3.monitors.subs import asr_env, bounded, exists_quietly
 
 # `Translator` and `ChildProcess` are bound as module-level names and looked up
 # at call time, so tests can monkeypatch `AV.Translator` / `AV.ChildProcess`
@@ -90,6 +90,7 @@ _SRT_TMP_RE = re.compile(r"\.srt\.\d+\.tmp$", re.IGNORECASE)
 _TMP_SWEEP_AGE_S = 600.0  # C3/M12: never sweep a temp another task may be writing
 _EXT_RE = re.compile(r"[a-z0-9]+")
 _MAX_LISTED = 5
+_DETAIL_CHARS = 800  # alert detail cap (same value as lada's crash detail)
 
 # Windows reparse tags that make a directory a LINK (C1): a junction / mount
 # point and a symbolic link. Any other reparse point (OneDrive placeholders,
@@ -169,13 +170,6 @@ def _norm_exts(extensions: Iterable[str]) -> set[str]:
     return out
 
 
-def _exists(path: Path) -> bool:
-    try:
-        return path.exists()
-    except OSError:  # unreadable entry — treat as "not there yet"
-        return False
-
-
 def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan:
     """Pure: walk `root` (iteratively, `os.scandir`) and plan every video.
 
@@ -251,10 +245,10 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
             continue
         for k in keys:
             reserved[k] = source
-        if _exists(zh):
+        if exists_quietly(zh):
             done += 1
             continue
-        kind: Kind = "translate_only" if _exists(ja) else "full"
+        kind: Kind = "translate_only" if exists_quietly(ja) else "full"
         try:
             identity = source_identity(source)  # D11
         except OSError as e:
@@ -299,15 +293,6 @@ def _default_spawn(argv: list[str]) -> ChildProcess:
     return ChildProcess(argv, env=asr_env())
 
 
-def _bounded(text: str) -> str:
-    """An alert-sized detail: the head plus the end of the tail."""
-    text = (text or "").strip()
-    if len(text) > _CRASH_DETAIL_CHARS:
-        head = text[:80].rstrip()
-        text = f"{head} … {text[-(_CRASH_DETAIL_CHARS - 83) :].lstrip()}"
-    return text
-
-
 def _remove_tree(path: Path) -> None:
     try:
         shutil.rmtree(path)
@@ -324,8 +309,8 @@ class AvsubsConfig(BaseMonitorConfig):
         description="The video library folder to scan (required). Every video "
         "without a same-named .srt gets <name>.ja.srt (Japanese) and <name>.srt "
         "(Simplified Chinese) next to it; videos that already have a .srt are "
-        "skipped and an existing .ja.srt is reused (translation only). Hidden and "
-        "linked folders, and macOS ._ metadata files, are skipped. A .avsubs working folder is created here. "
+        "skipped and an existing .ja.srt is reused (translation only). Hidden, "
+        "linked or mounted folders, and macOS ._ metadata files, are skipped. A .avsubs working folder is created here. "
         "The GPU is shared with Jasna, one file at a time. Do not let two active "
         "tasks cover overlapping folders, and do not point it at the output "
         "folder of a Jasna task that has AV 翻译 on.",
@@ -343,7 +328,7 @@ class AvsubsConfig(BaseMonitorConfig):
     whisperjav_exe_path: str = Field(
         "",
         description="Full path to whisperjav.exe (e.g. "
-        r"C:\WhisperJAV\whisperjav.exe) — NOT the folder. Required.",
+        r"C:\WhisperJAV\Scripts\whisperjav.exe) — NOT the folder. Required.",
     )
     whisperjav_engine: Engine = Field(
         DEFAULT_ENGINE,
@@ -619,7 +604,9 @@ class AvsubsInstance(MonitorInstance):
             try:
                 loaded.append((job, job.load_ja(), ""))
             except (SrtError, OSError) as e:
-                loaded.append((job, None, _bounded(f"unreadable .ja.srt: {e}")))
+                loaded.append(
+                    (job, None, bounded(f"unreadable .ja.srt: {e}", _DETAIL_CHARS))
+                )
         with self._launch_lock:
             for job, cues, err in loaded:
                 # m5: a Stop (or an abort settled by the previous job) that
@@ -795,8 +782,17 @@ class AvsubsInstance(MonitorInstance):
         except Exception as e:  # D10: a bug must not strand the lease
             log.exception("avsubs %s: launching %s failed", self.instance_id, item)
             with self._launch_lock:
-                if job.child is not None and self._asr_job is not job:
-                    self._kill_for_stop(job)
+                if (
+                    job.child is not None
+                    and self._asr_job is not job
+                    and not self._kill_for_stop(job)
+                ):
+                    # S2: a spawned child we could not kill is surfaced once,
+                    # like the abort path. If the DIRECT child still runs, it
+                    # stays the live ASR job (rule c) and keeps the lease: the
+                    # `finally` below releases only once `job.child` is None,
+                    # and the poll path (or stop()) reaps it and releases then.
+                    self._alert_survivor(emit)
                 detail = f"internal: {type(e).__name__}"
                 self._settle(job.job_id, "failed", detail, emit)
                 self._alert_job(job.job_id, detail, emit)
@@ -807,11 +803,13 @@ class AvsubsInstance(MonitorInstance):
                 self._gpu_rel()
         self._run_deferred()
 
-    def _kill_for_stop(self, job: SubsJob) -> None:
+    def _kill_for_stop(self, job: SubsJob) -> bool:
         """Under the lock: kill a just-spawned child we must not keep. A direct
         child that survives stays the live ASR job (rule c) so stop()/the poll
-        path still reach it; the lease is then released by them."""
-        if not job.terminate(timeout=2.0):
+        path still reach it; the lease is then released by them. Returns the
+        kill's result (False: a tracked process survived)."""
+        gone = job.terminate(timeout=2.0)
+        if not gone:
             log.error(
                 "avsubs %s: a WhisperJAV process survived the kill (%s)",
                 self.instance_id,
@@ -819,6 +817,7 @@ class AvsubsInstance(MonitorInstance):
             )
         if job.child is not None:
             self._asr_job = job
+        return gone
 
     def _poll_asr(self, emit: EventEmitter) -> None:
         job = self._asr_job
@@ -826,8 +825,18 @@ class AvsubsInstance(MonitorInstance):
             return
         release = False
         with self._launch_lock:
-            if self._stopping.is_set() or self._asr_job is not job:
-                return  # stop() owns it now
+            if self._asr_job is not job:
+                return
+            if self._stopping.is_set():
+                # stop() owns the run; only a direct child that survived its
+                # kill (rule c) is reaped here once it has exited — never
+                # published, settled or followed by a launch.
+                child = job.child
+                if child is not None and child.poll() is not None:
+                    job.poll_asr()
+                    if job.child is None:
+                        self._asr_job = None
+                return
             if job.job_id in self._settled:
                 release = self._reap_settled(job)
             else:
@@ -908,7 +917,7 @@ class AvsubsInstance(MonitorInstance):
         emit(
             "alert",
             f"{self._cfg.name}: subtitles for {_printable(job_id)} failed",
-            _bounded(detail),  # bounded tail, never the argv
+            bounded(detail, _DETAIL_CHARS),  # bounded tail, never the argv
             dedupe_key=f"{self.instance_id}:avsubs:{job_id}",
         )
 
@@ -1041,7 +1050,7 @@ class AvsubsInstance(MonitorInstance):
                 cues = job.load_ja()
             except (SrtError, OSError) as e:
                 self._fail_unreadable_ja(
-                    job, _bounded(f"unreadable .ja.srt: {e}"), emit
+                    job, bounded(f"unreadable .ja.srt: {e}", _DETAIL_CHARS), emit
                 )
                 return
         if not cues:

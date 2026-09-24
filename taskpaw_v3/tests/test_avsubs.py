@@ -1066,6 +1066,83 @@ def test_stop_never_publishes_for_an_aborted_survivor(tmp_path, monkeypatch):
     assert inst._asr_job is None
 
 
+def test_stop_winning_the_spawn_race_keeps_a_surviving_child_live(
+    tmp_path, monkeypatch
+):
+    # S1 / rule (c): stop() lands during the spawn; the post-spawn kill cannot
+    # end the direct child, so it stays `_asr_job` (stop() reaches it again and
+    # releases the lease), and a later check reaps it once it has exited.
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+    inst = r.inst
+
+    def racing_spawn(argv):
+        child = r.spawner(argv)
+        child.survive = True
+        child.kill_result = False
+        inst._stopping.set()  # a concurrent Stop
+        return child
+
+    inst._spawn = racing_spawn  # type: ignore[assignment]
+    inst.start(r.emit)
+    child = r.spawner.last
+    job = inst._jobs["a.mp4"]
+    assert child.calls[:1] == ["terminate_tree"]  # the post-spawn kill ran
+    assert inst._asr_job is job and job.child is child  # kept live (rule c)
+    assert gpu_lease.holder() == inst._run  # not released next to a live child
+    inst.stop(timeout=1)
+    assert child.calls.count("terminate_tree") == 2  # stop() reached it again
+    assert gpu_lease.holder() is None  # stop released the lease
+    assert inst._run not in gpu_lease.waiters()
+    assert inst._asr_job is job
+    inst.check(r.emit)
+    assert inst._asr_job is job  # still running: nothing to reap
+    child.rc = 137  # it finally exits
+    inst.check(r.emit)
+    assert inst._asr_job is None and job.child is None
+    assert "a.mp4" not in inst._settled and not _ja(r, "a.mp4").exists()
+    assert len(r.spawner.argvs) == 1  # nothing launched after the Stop
+
+
+@pytest.mark.parametrize("direct_survives", [True, False])
+def test_an_unkillable_child_in_the_launch_exception_path_alerts_survivor(
+    tmp_path, monkeypatch, direct_survives
+):
+    # S2: the exception path kills the spawned child; a False kill raises the
+    # one-time survivor alert. A direct child that still runs keeps the lease
+    # (rule c) until the poll path reaps it; else the lease goes at once.
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    real = SubsJob.start_asr
+
+    def start_then_raise(self, spawn):
+        err = real(self, spawn)
+        if self.job_id == "a.mp4":
+            self.child.kill_result = False
+            self.child.survive = direct_survives
+            raise RuntimeError("bug after the spawn")
+        return err
+
+    monkeypatch.setattr(SubsJob, "start_asr", start_then_raise)
+    inst.start(emit)
+    first = sp.children[0]
+    assert "terminate_tree" in first.calls
+    assert inst._settled["a.mp4"] == ("failed", "internal: RuntimeError")
+    survivor = _keyed(r.evs, f"{IID}:avsubs-survivor")
+    assert len(survivor) == 1 and "Task Manager" in survivor[0][2]
+    if direct_survives:
+        assert inst._asr_job is inst._jobs["a.mp4"]
+        assert gpu_lease.holder() == inst._run  # kept with the live child
+        assert len(sp.argvs) == 1  # b waits behind it
+        inst.check(emit)
+        assert len(sp.argvs) == 1 and inst._asr_job is inst._jobs["a.mp4"]
+        first.rc = 137
+        inst.check(emit)  # reaped → released → b launches (same run)
+    assert inst._asr_job is inst._jobs["b.mp4"]
+    assert len(sp.argvs) == 2 and gpu_lease.holder() == inst._run
+    assert len(_keyed(r.evs, f"{IID}:avsubs-survivor")) == 1
+    inst.stop(timeout=1)
+
+
 # ── done ──────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     "block", ["none", "queue", "asr", "unsettled", "queued", "in_flight", "results"]

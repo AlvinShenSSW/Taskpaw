@@ -82,6 +82,7 @@ from taskpaw_v3.monitors.plugins.lada import (
 # `Translator` and `ChildProcess` are bound as module-level names and looked up
 # at call time, so tests can monkeypatch `J.Translator` / `J.ChildProcess` for
 # supervisor-created instances (D10). Nothing here comes from `lada.py` (C1).
+from taskpaw_v3.monitors.subs import bounded, exists_quietly
 from taskpaw_v3.monitors.subs.child import ChildProcess, asr_env
 from taskpaw_v3.monitors.subs.job import SubsJob
 from taskpaw_v3.monitors.subs.srt import Cue, SrtError
@@ -307,20 +308,13 @@ def zh_target_for(output_folder: str, video: Path) -> Path:
     return Path(output_folder) / f"{video.stem}{_ZH_SUFFIX}"
 
 
-def _exists(path: Path) -> bool:
-    try:
-        return path.exists()
-    except OSError:  # unreadable entry — treat as "not there yet"
-        return False
-
-
 def subs_kind(output_folder: str, video: Path) -> SubsKind:
     """What a file needs: an existing zh (a 0-byte one counts) → `none`; an
     existing `.ja.srt` (reused by existence only) → `translate_only`; else
     `full` (ASR + translation)."""
-    if _exists(zh_target_for(output_folder, video)):
+    if exists_quietly(zh_target_for(output_folder, video)):
         return "none"
-    if _exists(ja_target_for(output_folder, video)):
+    if exists_quietly(ja_target_for(output_folder, video)):
         return "translate_only"
     return "full"
 
@@ -367,7 +361,7 @@ def plan_subs(
     for video in entries:
         if video in skip:
             continue
-        if not _exists(output_path_for(output_folder, video)):
+        if not exists_quietly(output_path_for(output_folder, video)):
             continue
         if subs_kind(output_folder, video) != "none":
             subs_only.append(video)
@@ -391,7 +385,7 @@ def _survivor_pids(child: Optional[ChildProcess]) -> list[int]:
     pid = getattr(child, "pid", None)
     if isinstance(pid, int):
         pids.append(pid)
-    running = getattr(child, "_tracked_running", None)
+    running = getattr(child, "tracked_running", None)
     if callable(running):
         try:
             pids.extend(p for p in running() if p not in pids)
@@ -401,13 +395,9 @@ def _survivor_pids(child: Optional[ChildProcess]) -> list[int]:
 
 
 def _bounded(text: str) -> str:
-    """An alert-sized detail: the head (e.g. `exit code 1: …`) plus the end of
-    the tail, never more than `_CRASH_DETAIL_CHARS`."""
-    text = (text or "").strip()
-    if len(text) > _CRASH_DETAIL_CHARS:
-        head = text[:80].rstrip()
-        text = f"{head} … {text[-(_CRASH_DETAIL_CHARS - 83) :].lstrip()}"
-    return text
+    """An alert-sized detail (the shared `bounded`, #179 S4): the head plus the
+    end of the tail, never more than `_CRASH_DETAIL_CHARS`."""
+    return bounded(text, _CRASH_DETAIL_CHARS)
 
 
 def sweep_orphan_staging(
@@ -740,7 +730,7 @@ class JasnaConfig(BaseMonitorConfig):
     whisperjav_exe_path: str = Field(
         "",
         description="Full path to whisperjav.exe (e.g. "
-        r"C:\WhisperJAV\whisperjav.exe) — NOT the folder. Required when AV 翻译 is "
+        r"C:\WhisperJAV\Scripts\whisperjav.exe) — NOT the folder. Required when AV 翻译 is "
         "ticked.",
     )
     whisperjav_engine: Engine = Field(
@@ -1426,6 +1416,7 @@ class JasnaInstance(MonitorInstance):
             if not self._gpu_take(hold):
                 self._gpu_waiting = True
                 return
+        self._gpu_waiting = False  # S5: we hold the GPU — no longer waiting
         # N5: from here on every path that does not leave a live child gives
         # the hold — the probe and the reader join included.
         launched = False
@@ -2177,6 +2168,7 @@ class JasnaInstance(MonitorInstance):
                 self._subs_only.insert(0, video)
                 self._gpu_waiting = True
                 return
+        self._gpu_waiting = False  # S5: we hold the GPU — no longer waiting
         release_gpu = False
         with self._launch_lock:
             if self._stopping.is_set() or self._subs_disabled is not None:
@@ -2297,11 +2289,13 @@ class JasnaInstance(MonitorInstance):
     def _reap_survivor(self, job: SubsJob) -> None:
         """Under `_launch_lock`: a settled job whose direct child outlived its
         kill (C11) — once that child has exited, join it, drop the job and
-        request an advance. A no-op while it still runs."""
+        request an advance. A no-op while it still runs. IR5: an exited child
+        is reaped by `poll_asr()` (kills lingering tracked pids, joins the
+        readers) — never a tree kill under `_launch_lock`."""
         child = job.child
         if child is None or child.poll() is None:
             return
-        job.terminate(timeout=0.5)  # joins the readers, resets `child`
+        job.poll_asr()  # reaps; the outcome of a settled job is ignored
         if job.child is not None:
             return
         self._subs_job = None
@@ -2461,8 +2455,13 @@ class JasnaInstance(MonitorInstance):
         return f"{translating} · {subs}"
 
     def _waiting_detail(self, m: dict) -> str:
-        """#179: `waiting for GPU (held by <label>)` + the usual queue text."""
-        label = gpu_lease.blocking_label()
+        """#179: `waiting for GPU (held by <label>)` + the usual queue text.
+        While the lease is free and reserved for THIS run (S5), nobody else
+        blocks it: just `waiting for GPU` (the next check takes it)."""
+        if gpu_lease.reserved_for() == self._run:
+            label = ""
+        else:
+            label = gpu_lease.blocking_label()
         parts = [f"waiting for GPU (held by {label})" if label else "waiting for GPU"]
         if m.get("subs_translating"):
             parts.append(f"translating {m['subs_translating']}")

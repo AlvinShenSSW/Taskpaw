@@ -174,7 +174,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     whisperjav_exe_path: {
       title: "whisperjav.exe 路径",
       description:
-        "WhisperJAV 安装目录中 whisperjav.exe 的完整路径（如 C:\\WhisperJAV\\whisperjav.exe）——不是文件夹。勾选「AV 翻译」时必填。",
+        "WhisperJAV 安装目录中 whisperjav.exe 的完整路径（如 C:\\WhisperJAV\\Scripts\\whisperjav.exe）——不是文件夹。勾选「AV 翻译」时必填。",
     },
     whisperjav_engine: { title: "识别引擎", description: WHISPERJAV_ENGINE_ZH },
     whisperjav_extra_args: { title: "WhisperJAV 额外参数", description: WHISPERJAV_EXTRA_ARGS_ZH },
@@ -227,7 +227,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     avsubs_root_folder: {
       title: "片库文件夹",
       description:
-        "要扫描的视频片库文件夹（必填）。每个还没有同名 .srt 的视频，会在旁边生成 <原名>.ja.srt（日语）和 <原名>.srt（简体中文）；已有 .srt 的视频会跳过，已存在的 .ja.srt 会直接复用（只做翻译）。隐藏文件夹和链接文件夹会被跳过。会在该文件夹下创建 .avsubs/ 工作文件夹。与 Jasna 共用 GPU：两者同时运行时按文件轮流使用，等待的一方显示「waiting for GPU (held by …)」。需要先在「设置」里配置 LLM API。不会随 TaskPaw 开机自启，需手动点「启动」。注意：不要让两个运行中的任务覆盖相互重叠的文件夹，也不要指向已开启「AV 翻译」的 Jasna 任务的输出文件夹。",
+        "要扫描的视频片库文件夹（必填）。每个还没有同名 .srt 的视频，会在旁边生成 <原名>.ja.srt（日语）和 <原名>.srt（简体中文）；已有 .srt 的视频会跳过，已存在的 .ja.srt 会直接复用（只做翻译）。隐藏、链接或挂载的文件夹，以及 macOS 的 ._ 元数据文件，会被跳过。会在该文件夹下创建 .avsubs/ 工作文件夹。与 Jasna 共用 GPU：两者同时运行时按文件轮流使用，等待的一方显示「waiting for GPU (held by …)」。需要先在「设置」里配置 LLM API。不会随 TaskPaw 开机自启，需手动点「启动」。注意：不要让两个运行中的任务覆盖相互重叠的文件夹，也不要指向已开启「AV 翻译」的 Jasna 任务的输出文件夹。",
     },
     avsubs_recursive: {
       title: "扫描子文件夹",

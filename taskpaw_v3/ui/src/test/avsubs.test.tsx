@@ -61,8 +61,20 @@ describe("avsubs UI strings + icon (#179)", () => {
     }
     expect(fieldLabel("avsubs_root_folder", "avsubs", "zh-CN")).toBe("片库文件夹");
     expect(p.avsubs_root_folder.description).toMatch(/\.avsubs\//);
+    expect(p.avsubs_root_folder.description).toContain("链接或挂载的文件夹");
+    expect(p.avsubs_root_folder.description).toContain("macOS 的 ._ 元数据文件");
     expect(p.whisperjav_exe_path.description).toContain("C:\\WhisperJAV\\Scripts\\whisperjav.exe");
     expect(p.whisperjav_extra_args.description).toMatch(/--translate\*.*Windows 路径请加引号/);
+    // Jasna's「AV 翻译」exe field uses the same (real) install layout.
+    const j = localizeSchema(
+      {
+        type: "object" as const,
+        properties: { whisperjav_exe_path: { type: "string" as const, description: "EN" } },
+      },
+      "jasna",
+      "zh-CN",
+    ).properties as Record<string, { description: string }>;
+    expect(j.whisperjav_exe_path.description).toContain("C:\\WhisperJAV\\Scripts\\whisperjav.exe");
     // English stays untouched.
     expect(localizeSchema(s, "avsubs", "en")).toBe(s);
   });

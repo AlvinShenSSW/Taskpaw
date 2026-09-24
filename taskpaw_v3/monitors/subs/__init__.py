@@ -9,6 +9,7 @@ Knows nothing about Jasna: paths in, outcomes out.
 - `srt`        — strict parse/serialize
 - `translate`  — `Translator`, the `llm-worker` client thread
 - `job`        — `SubsJob`: ASR attempts, identity check, atomic publishing
+- `util`       — `bounded` (alert-sized detail) and `exists_quietly`
 
 Nothing here is imported from `lada.py` (C1).
 """
@@ -30,6 +31,7 @@ from taskpaw_v3.monitors.subs.translate import (
     Translator,
     needs_llm_key,
 )
+from taskpaw_v3.monitors.subs.util import bounded, exists_quietly
 from taskpaw_v3.monitors.subs.whisperjav import (
     DEFAULT_ENGINE,
     ENGINES,
@@ -59,6 +61,8 @@ __all__ = [
     "TranslateResult",
     "Translator",
     "asr_env",
+    "bounded",
+    "exists_quietly",
     "needs_llm_key",
     "owned_flags_in",
     "source_identity",
