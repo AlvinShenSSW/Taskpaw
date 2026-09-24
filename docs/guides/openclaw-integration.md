@@ -60,6 +60,12 @@ for r in rows:
             done_frames = num(met, "processed_frames")
             left_frames = num(met, "remaining_frames")
             fps         = num(met, "fps")
+            # jasna「AV 翻译」(#177) — present only when the task has it ticked:
+            phase       = met.get("phase")             # "restore" | "subs" | "translate"
+            subs_done   = num(met, "subs_completed")
+            subs_total  = num(met, "subs_total")
+            subs_failed = num(met, "subs_failed")
+            translating = num(met, "subs_translating") # files queued/in flight
 
         # comfyui: type_id == "comfyui", or BOTH running and pending present
         if tid == "comfyui" or (num(met, "running") is not None and num(met, "pending") is not None):
@@ -82,6 +88,10 @@ for r in rows:
 | ETA / elapsed | `eta` / `elapsed` | lada / jasna | string `MM:SS`/`H:MM:SS`; **capture mode only** |
 | Frames done / left | `processed_frames` / `remaining_frames` | lada / jasna | int; **capture mode only** |
 | Speed (fps) | `fps` | lada / jasna | float; **capture mode only** |
+| Phase | `phase` | jasna | `restore` (a video is being restored, or idle), `subs` (WhisperJAV is transcribing), `translate` (only translations are running) |
+| Subtitles done / total / left | `subs_completed` / `subs_total` / `subs_remaining` | jasna | int; only with「AV 翻译」ticked |
+| Subtitles failed / skipped | `subs_failed` / `subs_skipped` | jasna | int; skipped = restore failed, no LLM key, source changed, cancelled, or whisperjav.exe missing |
+| Translations pending | `subs_translating` | jasna | int; files queued in or held by the translator |
 | ComfyUI running / pending | `running` / `pending` | comfyui | |
 | **Running?** | top-level **`state`** (`running`/`idle`/`ok`/`error`/`stopped`) | any | **use this, not `enabled`** |
 
@@ -100,6 +110,15 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > the same metric names as lada (plus `queue_failed`), so the same reader code covers
 > both — but its `current_file` is always known, even with capture off, because it
 > launches one `jasna.exe` per video instead of one batch for the folder.
+>
+> **Jasna「AV 翻译」(#177).** With the tickbox on, every restored film also gets
+> `<name>_restored.ja.srt` (Japanese) and `<name>_restored.srt` (Simplified Chinese)
+> **next to `<name>_restored.mp4`** in the output folder, and the snapshot adds
+> `phase` plus the `subs_*` keys above. `current_file` follows the live child: the
+> video being restored in `phase == "restore"`, the `<name>_restored.mp4` being
+> transcribed in `phase == "subs"`, and **absent** in `phase == "translate"` (no GPU
+> child is running then). The batch `done` event text gains
+> `| Subs: S/T done, U failed, V skipped`.
 
 ## Three rules that bite
 
@@ -123,9 +142,13 @@ Last updated: YYYY-MM-DD HH:MM:SS
 ## PinkPig: ONLINE
 - PinkPig-host: CPU 45% | RAM 8.2/16.0GB | GPU 78% | VRAM 12.3/24.0GB
 - LADA: 5/10 done (5 left) | clip.mp4 | 47% · ETA 30:47 · 112fps
+- JASNA: 3/8 done (5 left) | film.mp4 | subs 2/3 (1 failed)
 - ComfyUI: 2 running, 100 pending
 ## SkyPig: OFFLINE (last seen 09:15:30)
 ```
+
+A Jasna task with「AV 翻译」on appends `subs S/T` (and ` (N failed)` when any failed)
+after its queue segment; without subtitle metrics the line is exactly the lada format.
 
 A monitor renders as `- <name>: disabled` only when it is genuinely not running (a
 configured-but-unstarted stub). All names/values are sanitized (control chars → space,

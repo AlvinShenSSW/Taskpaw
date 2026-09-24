@@ -24,7 +24,8 @@ const ladaPlugin: apiModule.PluginInfo = {
 };
 
 // A jasna-shaped plugin (#173): the two unet-4x tickboxes, with the backend's
-// defaults (1080p on, 4K off) carried in the json_schema.
+// defaults (1080p on, 4K off) carried in the json_schema; plus the #177「AV 翻译」
+// tickbox (default off).
 const jasnaPlugin: apiModule.PluginInfo = {
   type_id: "jasna",
   display_name: "Jasna (video restore)",
@@ -38,6 +39,7 @@ const jasnaPlugin: apiModule.PluginInfo = {
       name: { type: "string", title: "Monitor name" },
       unet4x_1080p: { type: "boolean", title: "Unet4X 1080P", default: true },
       unet4x_4k: { type: "boolean", title: "Unet4X 4K", default: false },
+      av_translate: { type: "boolean", title: "AV 翻译", default: false },
     },
   },
   ui_schema: {},
@@ -124,6 +126,16 @@ describe("MonitorWizard", () => {
     const off = screen.getByLabelText(/4K 档：使用 unet-4x 二次修复|Unet4X 4K/) as HTMLInputElement;
     expect(on.checked).toBe(true);
     expect(off.checked).toBe(false);
+  });
+
+  it("jasna: the AV 翻译 tickbox renders unticked by default (#177)", () => {
+    wrap(<MonitorWizard mode="add" {...baseProps} plugins={[ladaPlugin, jasnaPlugin]} />);
+    fireEvent.click(screen.getByText("Jasna (video restore)"));
+    fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
+
+    const av = screen.getByLabelText(/AV 翻译|Av Translate/) as HTMLInputElement;
+    expect(av.type).toBe("checkbox");
+    expect(av.checked).toBe(false);
   });
 
   it("preset flow: creates every bundled monitor (4 addMonitor calls)", async () => {

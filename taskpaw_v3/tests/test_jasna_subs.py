@@ -1,0 +1,1260 @@
+"""#177 Jasna「AV 翻译」: planning, the subs/translate phases, settlement, stop/start.
+
+Nothing real is executed: `jasna.exe` is the existing `_FakePopen` harness from
+`test_jasna.py` (patched `subprocess.Popen`), the WhisperJAV ASR child is a
+`ChildProcess` fake injected through `J.ChildProcess` (→ `JasnaInstance._spawn`),
+and the translator is replaced wholesale by monkeypatching `J.Translator` — so a
+test here never reaches `taskkill`, the network or a real LLM worker (D10).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import queue
+import sys
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Optional
+
+import pytest
+from test_jasna import _events, _Launcher, _managed, _patch, _videos
+
+from taskpaw_v3.core.llm import LLMSettings, set_llm_settings
+from taskpaw_v3.monitors.plugins import jasna as J
+from taskpaw_v3.monitors.plugins.jasna import (
+    JasnaConfig,
+    JasnaInstance,
+    JasnaPlugin,
+    output_path_for,
+    plan_queue,
+    plan_subs,
+)
+from taskpaw_v3.monitors.subs import job as subs_job_mod
+from taskpaw_v3.monitors.subs.job import SubsJob
+from taskpaw_v3.monitors.subs.srt import Cue
+from taskpaw_v3.monitors.subs.translate import CANCELLED, TranslateResult
+from taskpaw_v3.monitors.subs.whisperjav import attempt_dir
+from taskpaw_v3.monitors.supervisor import Supervisor
+
+SRT_JA = (
+    "1\n00:00:00,000 --> 00:00:01,000\nはい\n\n"
+    "2\n00:00:01,500 --> 00:00:02,500\nいいえ\n"
+)
+SRT_ZH = "1\n00:00:00,000 --> 00:00:01,000\n好\n"
+
+
+# ── fakes ─────────────────────────────────────────────────────────────────
+def _lock_free(inst: JasnaInstance) -> bool:
+    """Whether ANOTHER thread can take `_launch_lock` right now (RLock: a
+    same-thread probe would always succeed)."""
+    got: list[bool] = []
+
+    def grab() -> None:
+        ok = inst._launch_lock.acquire(timeout=0)
+        got.append(ok)
+        if ok:
+            inst._launch_lock.release()
+
+    t = threading.Thread(target=grab, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    return bool(got and got[0])
+
+
+class _FakeAsr:
+    """`ChildProcess` stand-in for whisperjav.exe: exits when told and writes
+    the WhisperJAV manifest (+ srt) into its `--output-dir`."""
+
+    def __init__(self, argv: list[str], owner: Optional[dict] = None) -> None:
+        self.argv = list(argv)
+        self.pid = 5151
+        self.rc: Optional[int] = None
+        self.calls: list[str] = []
+        self.terminate_lock_free: list[bool] = []
+        self._owner = owner or {}
+        self.out_dir = Path(argv[argv.index("--output-dir") + 1])
+
+    def poll(self) -> Optional[int]:
+        return self.rc
+
+    def tail(self, lines: int = 10, max_chars: int = 800) -> str:
+        return "ASR TAIL"
+
+    def terminate_tree(self, timeout: float = 5.0) -> None:
+        self.calls.append("terminate_tree")
+        inst = self._owner.get("inst")
+        if inst is not None:
+            self.terminate_lock_free.append(_lock_free(inst))
+        if self.rc is None:
+            self.rc = 1
+
+    def join_readers(self, timeout: float = 2.0) -> None:
+        self.calls.append("join_readers")
+
+    def finish(self, rc: int = 0, state: str = "done", text: str = SRT_JA) -> None:
+        out = self.out_dir / "m.ja.whisperjav.srt"
+        out.write_text(text, encoding="utf-8")
+        manifest = {
+            "files": [{"path": "m", "state": state, "output": str(out), "detail": ""}]
+        }
+        (self.out_dir / "whisperjav_run.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        self.rc = rc
+
+
+class _Spawner:
+    def __init__(self, owner: dict) -> None:
+        self.owner = owner
+        self.argvs: list[list[str]] = []
+        self.children: list[_FakeAsr] = []
+        self.fail_at: set[int] = set()
+        self.on_spawn = None
+
+    def __call__(self, argv, **kw):
+        self.argvs.append(list(argv))
+        n = len(self.argvs)
+        if self.on_spawn is not None:
+            self.on_spawn(n)
+        if n in self.fail_at:
+            raise OSError("boom")
+        child = _FakeAsr(argv, self.owner)
+        self.children.append(child)
+        return child
+
+    @property
+    def last(self) -> _FakeAsr:
+        return self.children[-1]
+
+
+class _FakeTranslator:
+    def __init__(self, run, *, name, owner: Optional[dict] = None, **kw) -> None:
+        self.run = run
+        self.name = name
+        self.results: "queue.Queue[object]" = queue.Queue()
+        self.submitted: list = []
+        self.answered: set[str] = set()
+        self.started = False
+        self.joined = False
+        self.cancelled = False
+        self.cancel_calls = 0
+        self.cancel_lock_free: list[bool] = []
+        self.on_submit = None
+        self._owner = owner or {}
+
+    def start(self) -> None:
+        self.started = True
+
+    def submit(self, req) -> None:
+        if self.cancelled:
+            return
+        if self.on_submit is not None:
+            self.on_submit(req)
+        self.submitted.append(req)
+
+    def queued(self) -> int:
+        if self.cancelled:
+            return 0
+        return len([r for r in self.submitted if r.job_id not in self.answered])
+
+    def in_flight(self) -> bool:
+        return False
+
+    def cancel(self) -> None:
+        self.cancel_calls += 1
+        inst = self._owner.get("inst")
+        if inst is not None:
+            self.cancel_lock_free.append(_lock_free(inst))
+        self.cancelled = True
+        self.results.put(CANCELLED)
+
+    def join(self, timeout: float) -> None:
+        self.joined = True
+
+    def is_alive(self) -> bool:
+        return self.started and not self.joined
+
+    def answer(self, job_id: str, ok: bool = True, zh: str = "好") -> None:
+        req = next(r for r in self.submitted if r.job_id == job_id)
+        self.answered.add(job_id)
+        if ok:
+            cues = tuple(Cue(c.index, c.start_ms, c.end_ms, zh) for c in req.cues)
+            self.results.put(TranslateResult(req.run, job_id, "translated", cues, ""))
+        else:
+            self.results.put(TranslateResult(req.run, job_id, "failed", (), "network"))
+
+
+def _key(on: bool = True) -> None:
+    set_llm_settings(
+        LLMSettings("https://api.x.ai/v1", "grok-4.3", "sk-test" if on else "", "none")
+    )
+
+
+def _setup(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    pending=(),
+    restored=(),
+    ja=(),
+    zh=(),
+    rcs=None,
+    key: bool = True,
+    exe: bool = True,
+    probe=None,
+    **kw,
+):
+    wj = tmp_path / "wj" / "whisperjav.exe"
+    wj.parent.mkdir(parents=True, exist_ok=True)
+    if exe:
+        wj.write_bytes(b"MZ")
+    base: dict = dict(
+        av_translate=True, whisperjav_exe_path=str(wj), unet4x_1080p=False
+    )
+    base.update(kw)
+    cfg, inp, out, _home = _managed(tmp_path, **base)
+    _videos(inp, *pending, *restored)
+    for n in restored:
+        output_path_for(str(out), Path(n)).write_bytes(b"restored " + n.encode())
+    for n in ja:
+        (out / f"{Path(n).stem}_restored.ja.srt").write_text(SRT_JA, encoding="utf-8")
+    for n in zh:
+        (out / f"{Path(n).stem}_restored.srt").write_text(SRT_ZH, encoding="utf-8")
+    launcher = _Launcher(list(rcs) if rcs is not None else [0] * 20)
+    _patch(monkeypatch, launcher, probe)
+    owner: dict = {}
+    translators: list[_FakeTranslator] = []
+
+    def factory(run, *, name, **k):
+        t = _FakeTranslator(run, name=name, owner=owner)
+        translators.append(t)
+        return t
+
+    monkeypatch.setattr(J, "Translator", factory)
+    spawner = _Spawner(owner)
+    monkeypatch.setattr(J, "ChildProcess", spawner)
+    _key(key)
+    inst = JasnaInstance("j1", cfg)
+    owner["inst"] = inst
+    evs, emit = _events()
+    return SimpleNamespace(
+        cfg=cfg,
+        inp=inp,
+        out=out,
+        launcher=launcher,
+        spawner=spawner,
+        translators=translators,
+        inst=inst,
+        evs=evs,
+        emit=emit,
+        owner=owner,
+    )
+
+
+def _gpu_spy(monkeypatch) -> list[str]:
+    log: list[str] = []
+
+    def acquire(self) -> bool:
+        log.append("acquire")
+        return True
+
+    def release(self) -> None:
+        log.append("release")
+
+    monkeypatch.setattr(JasnaInstance, "_gpu_acquire", acquire)
+    monkeypatch.setattr(JasnaInstance, "_gpu_release", release)
+    return log
+
+
+def _assert_strict_pairs(log: list[str], open_ok: bool = False) -> None:
+    """acquire/release alternate, starting with acquire, and are balanced (one
+    trailing acquire allowed while a GPU child is still live)."""
+    for i, what in enumerate(log):
+        assert what == ("acquire" if i % 2 == 0 else "release"), log
+    if not open_ok:
+        assert len(log) % 2 == 0, log
+
+
+def _done(evs) -> list:
+    return [e for e in evs if e[0] == "done"]
+
+
+def _keyed(evs, key: str) -> list:
+    return [e for e in evs if e[3] == key]
+
+
+def _ja(r, name: str) -> Path:
+    return r.out / f"{Path(name).stem}_restored.ja.srt"
+
+
+def _zh(r, name: str) -> Path:
+    return r.out / f"{Path(name).stem}_restored.srt"
+
+
+def _wait(cond, timeout: float = 8.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return cond()
+
+
+def _depth() -> int:
+    f = sys._getframe(1)
+    n = 0
+    while f is not None:
+        n += 1
+        f = f.f_back
+    return n
+
+
+# ── config ────────────────────────────────────────────────────────────────
+def test_subs_config_defaults_and_schema():
+    c = JasnaConfig(name="j")
+    assert c.av_translate is False
+    assert c.whisperjav_exe_path == ""
+    assert c.whisperjav_engine == "anime-whisper"
+    assert c.whisperjav_extra_args == ""
+    props = JasnaPlugin.json_schema()["properties"]
+    assert props["av_translate"]["default"] is False
+    assert props["av_translate"]["title"] == "AV 翻译"
+    assert props["whisperjav_engine"]["default"] == "anime-whisper"
+    assert set(props["whisperjav_engine"]["enum"]) == {
+        "anime-whisper",
+        "large-v3",
+        "large-v2",
+        "qwen3",
+        "custom",
+    }
+    for f in ("av_translate", "whisperjav_exe_path", "whisperjav_engine"):
+        assert props[f].get("description")
+    ui = JasnaPlugin.ui_schema()
+    order = ui["ui:order"]
+    i = order.index("unet4x_4k")
+    assert order[i + 1 : i + 5] == [
+        "av_translate",
+        "whisperjav_exe_path",
+        "whisperjav_engine",
+        "whisperjav_extra_args",
+    ]
+    assert ui["whisperjav_exe_path"]["ui:options"]["taskpawPath"] == "file"
+
+
+def test_ticked_av_translate_needs_the_whisperjav_exe():
+    with pytest.raises(ValueError, match="whisperjav_exe_path"):
+        JasnaConfig(name="j", av_translate=True)
+    with pytest.raises(ValueError, match="whisperjav_exe_path"):
+        JasnaConfig(name="j", av_translate=True, whisperjav_exe_path="   ")
+    ok = JasnaConfig(name="j", av_translate=True, whisperjav_exe_path="C:/wj.exe")
+    assert ok.av_translate is True
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "--output-dir x",
+        "--out x",
+        "--language=japanese",
+        "--lang ja",
+        "--temp x",
+        "--no-sig",
+        "--mode fast",
+        "--mod fast",
+        "--qwen-gen x",
+        "--translate",
+        "--translate-api-key k",
+        "--translate=deepseek",
+    ],
+)
+def test_owned_and_forbidden_whisperjav_flags_are_rejected(extra):
+    with pytest.raises(ValueError, match="whisperjav_extra_args"):
+        JasnaConfig(
+            name="j",
+            av_translate=True,
+            whisperjav_exe_path="C:/wj.exe",
+            whisperjav_extra_args=extra,
+        )
+
+
+def test_allowed_whisperjav_extras_pass_and_custom_frees_the_preset_flags():
+    c = JasnaConfig(
+        name="j",
+        av_translate=True,
+        whisperjav_exe_path="C:/wj.exe",
+        whisperjav_extra_args=(
+            "--sensitivity aggressive --vad-version 4 --qwen-segmenter x "
+            "--fail-on never --ensemble"
+        ),
+    )
+    assert "--ensemble" in c.whisperjav_extra_args
+    c2 = JasnaConfig(
+        name="j",
+        av_translate=True,
+        whisperjav_exe_path="C:/wj.exe",
+        whisperjav_engine="custom",
+        whisperjav_extra_args="--mode balanced --model large-v3",
+    )
+    assert c2.whisperjav_engine == "custom"
+    with pytest.raises(ValueError, match="--output-dir"):
+        JasnaConfig(
+            name="j",
+            whisperjav_engine="custom",
+            whisperjav_extra_args="--output-dir x",
+        )
+
+
+def test_unbalanced_quote_in_whisperjav_extras_is_a_config_error():
+    with pytest.raises(ValueError, match="quote"):
+        JasnaConfig(name="j", whisperjav_extra_args='--sensitivity "aggressive')
+
+
+# ── plan_subs (pure) ──────────────────────────────────────────────────────
+def test_plan_subs_classifies_orders_and_counts(tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "a.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mkv", "f.mp4")
+    (inp / "z.srt").write_text(SRT_JA, encoding="utf-8")  # never scanned
+    (inp / ".avsubs").mkdir()  # never scanned
+    for n in ("c", "d", "e", "f"):
+        (out / f"{n}_restored.mp4").write_bytes(b"r")
+    (out / "b_restored.ja.srt").write_text(SRT_JA, encoding="utf-8")  # pending, ja
+    (out / "c_restored.srt").write_text(SRT_ZH, encoding="utf-8")  # zh → none
+    (out / "d_restored.ja.srt").write_text(SRT_JA, encoding="utf-8")  # translate
+    (out / "f_restored.srt").write_bytes(b"")  # 0-byte zh counts as done
+    pending, _done, collisions = plan_queue(str(inp), str(out))
+    plan = plan_subs(str(inp), str(out), pending, [a for a, _ in collisions])
+    assert {p.name: k for p, k in plan.for_pending.items()} == {
+        "a.mp4": "full",
+        "b.mp4": "translate_only",
+    }
+    assert [p.name for p in plan.subs_only] == ["d.mp4", "e.mkv"]
+    assert plan.total == 4
+
+
+def test_plan_subs_pending_with_an_existing_zh_needs_nothing(tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "a.mp4")
+    (out / "a_restored.srt").write_text(SRT_ZH, encoding="utf-8")
+    plan = plan_subs(str(inp), str(out), [inp / "a.mp4"], [])
+    assert plan.for_pending == {inp / "a.mp4": "none"}
+    assert plan.subs_only == [] and plan.total == 0
+
+
+def test_plan_subs_excludes_collision_losers_so_one_media_gets_one_job(tmp_path):
+    # D21: a.mkv + a.mp4 share a_restored.mp4 — without `excluded` the loser would
+    # become a duplicate subs-only job on the same media and the same targets.
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "a.mkv", "a.mp4")
+    (out / "a_restored.mp4").write_bytes(b"r")
+    pending, _done, collisions = plan_queue(str(inp), str(out))
+    assert [a.name for a, _ in collisions] == ["a.mp4"]
+    plan = plan_subs(str(inp), str(out), pending, [a for a, _ in collisions])
+    assert [p.name for p in plan.subs_only] == ["a.mkv"]
+    assert plan.total == 1
+
+
+def test_collision_loser_never_gets_asr(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, restored=["a.mkv", "a.mp4"])
+    r.inst.start(r.emit)
+    assert r.launcher.n == 0
+    assert len(r.spawner.argvs) == 1
+    assert r.inst.check(r.emit).metrics["subs_total"] == 1
+
+
+# ── lifecycle ─────────────────────────────────────────────────────────────
+def test_restore_then_asr_then_translation_end_to_end(tmp_path, monkeypatch):
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    assert r.launcher.n == 1 and r.spawner.argvs == []
+
+    st = inst.check(emit)  # a restored → ASR for a, NOT a second jasna.exe (D3)
+    assert r.launcher.n == 1
+    assert len(r.spawner.argvs) == 1
+    argv = r.spawner.argvs[0]
+    media = r.out / "a_restored.mp4"
+    assert argv[0] == r.cfg.whisperjav_exe_path
+    assert argv[1] == str(media)  # C10: the restored file
+    out_dir = attempt_dir(r.out / ".avsubs", "a.mp4", 1)
+    assert argv[argv.index("--output-dir") + 1] == str(out_dir)
+    assert argv[argv.index("--temp-dir") + 1] == str(r.out / ".avsubs" / "tmp")
+    assert "--no-signature" in argv
+    assert argv[argv.index("--language") + 1] == "japanese"
+    assert st.state == "running"
+    assert st.metrics["phase"] == "subs"
+    assert st.metrics["current_file"] == "a_restored.mp4"
+    assert "percent" not in st.metrics
+    assert st.detail.startswith("subtitling: a_restored.mp4 [anime-whisper] · ")
+    assert "elapsed · translating 0 · subs 0/2" in st.detail
+    _assert_strict_pairs(gpu, open_ok=True)
+
+    r.spawner.last.finish(0)
+    st = inst.check(emit)  # ja published, translation submitted, b launched
+    assert _ja(r, "a.mp4").read_text(encoding="utf-8").count("-->") == 2
+    tr = r.translators[0]
+    assert [q.job_id for q in tr.submitted] == ["a.mp4"]
+    assert len(tr.submitted[0].cues) == 2
+    assert tr.submitted[0].run == inst._run
+    assert r.launcher.n == 2 and r.launcher.inputs()[-1] == "b.mp4"
+    assert st.metrics["phase"] == "restore"
+    assert st.metrics["subs_translating"] == 1
+    assert "translating 1" in st.detail
+
+    tr.answer("a.mp4")
+    st = inst.check(emit)  # zh published; b restored → ASR for b
+    assert _zh(r, "a.mp4").read_text(encoding="utf-8").count("好") == 2
+    assert st.metrics["subs_completed"] == 1
+    assert len(r.spawner.argvs) == 2
+
+    r.spawner.last.finish(0, state="empty", text="")
+    st = inst.check(emit)  # no speech → two 0-byte files, completed
+    assert _ja(r, "b.mp4").read_bytes() == b""
+    assert _zh(r, "b.mp4").read_bytes() == b""
+    done = _done(r.evs)
+    assert len(done) == 1
+    assert (
+        "Queue: 2/2 done, 0 failed | Subs: 2/2 done, 0 failed, 0 skipped"
+        in (done[0][2])
+    )
+    assert st.state == "idle"
+    assert st.metrics["subs_remaining"] == 0
+    for _ in range(3):
+        inst.check(emit)
+    assert len(_done(r.evs)) == 1
+    assert r.launcher.n == 2
+    _assert_strict_pairs(gpu)
+    assert gpu.count("acquire") == 4  # 2 restores + 2 ASR
+    inst.stop(timeout=1)
+
+
+def test_result_for_an_already_settled_job_is_never_published(tmp_path, monkeypatch):
+    # D7: _settled is checked before any publish.
+    r = _setup(tmp_path, monkeypatch, restored=["d.mp4"], ja=["d.mp4"])
+    r.inst.start(r.emit)
+    tr = r.translators[0]
+    assert [q.job_id for q in tr.submitted] == ["d.mp4"]
+    with r.inst._launch_lock:
+        r.inst._settle("d.mp4", "skipped", "cancelled", r.emit)
+    req = tr.submitted[0]
+    tr.results.put(
+        TranslateResult(req.run, "d.mp4", "translated", (Cue(1, 0, 1000, "好"),), "")
+    )
+    r.inst.check(r.emit)
+    assert not _zh(r, "d.mp4").exists()
+    assert r.inst._subs_completed == 0 and r.inst._subs_skipped == 1
+
+
+def test_asr_failure_retries_once_then_alerts_failed(tmp_path, monkeypatch):
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)
+    r.spawner.last.finish(1)
+    r.inst.check(r.emit)  # retry in a NEW attempt dir
+    assert len(r.spawner.argvs) == 2
+    a2 = r.spawner.argvs[1]
+    assert a2[a2.index("--output-dir") + 1] == str(
+        attempt_dir(r.out / ".avsubs", "a.mp4", 2)
+    )
+    r.spawner.last.finish(1)
+    st = r.inst.check(r.emit)
+    alerts = _keyed(r.evs, "j1:subs:a.mp4")
+    assert len(alerts) == 1
+    assert "exit code 1" in alerts[0][2]
+    assert "--output-dir" not in alerts[0][2]  # never the argv
+    assert st.metrics["queue_completed"] == 1 and st.metrics["queue_failed"] == 0
+    assert st.metrics["subs_failed"] == 1
+    done = _done(r.evs)
+    assert len(done) == 1 and "Subs: 0/1 done, 1 failed, 0 skipped" in done[0][2]
+    _assert_strict_pairs(gpu)
+
+
+def test_media_changed_during_asr_is_skipped_unstable(tmp_path, monkeypatch):
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)
+    (r.out / "a_restored.mp4").write_bytes(b"changed underneath, longer")
+    r.spawner.last.finish(0)
+    r.inst.check(r.emit)
+    assert len(_keyed(r.evs, "j1:subs-unstable:a.mp4")) == 1
+    assert r.inst._settled["a.mp4"][0] == "skipped"
+    assert not _ja(r, "a.mp4").exists()
+    assert "Subs: 0/1 done, 0 failed, 1 skipped" in _done(r.evs)[0][2]
+    _assert_strict_pairs(gpu)
+
+
+def test_restore_failure_settles_the_subs_job_skipped_restore_failed(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"], rcs=[1, 1])
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)
+    r.inst.check(r.emit)
+    assert r.spawner.argvs == []
+    assert r.inst._settled["a.mp4"] == ("skipped", "restore_failed")
+    done = _done(r.evs)
+    assert len(done) == 1
+    assert (
+        "Queue: 0/1 done, 1 failed | Subs: 0/1 done, 0 failed, 1 skipped"
+        in (done[0][2])
+    )
+
+
+def test_subs_only_with_nothing_pending_starts_without_jasna(tmp_path, monkeypatch):
+    # D2: an empty _pending with subs-only work starts subtitling at Start.
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"])
+    r.inst.start(r.emit)
+    assert r.launcher.n == 0
+    assert len(r.spawner.argvs) == 1
+    st = r.inst.check(r.emit)
+    assert st.state == "running" and st.metrics["phase"] == "subs"
+    assert r.launcher.n == 0
+    r.inst.stop(timeout=1)
+
+
+def test_translate_only_skips_asr_and_never_acquires_the_gpu(tmp_path, monkeypatch):
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, restored=["d.mp4"], ja=["d.mp4"])
+    r.inst.start(r.emit)
+    assert r.spawner.argvs == [] and gpu == []
+    st = r.inst.check(r.emit)
+    assert st.state == "running"
+    assert st.metrics["phase"] == "translate"
+    assert "current_file" not in st.metrics  # D17: no live child
+    assert st.detail == "translating 1 · subs 0/1"
+    r.translators[0].answer("d.mp4")
+    st = r.inst.check(r.emit)
+    assert _zh(r, "d.mp4").exists()
+    assert st.state == "idle"
+    assert len(_done(r.evs)) == 1
+    assert gpu == []
+
+
+def test_missing_key_skips_per_job_one_alert_and_a_later_key_translates(
+    tmp_path, monkeypatch
+):
+    # D31: a translate-only no-key file followed by a pending restore → exactly
+    # one jasna.exe launch in the same check.
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4", "b.mp4", "c.mp4"],
+        ja=["a.mp4", "b.mp4", "c.mp4"],
+        key=False,
+    )
+    r.inst.start(r.emit)
+    assert r.launcher.n == 1
+    r.inst.check(r.emit)  # a restored → translate-only → no key → b launched
+    assert r.inst._settled["a.mp4"] == ("skipped", "no_llm_key")
+    assert r.launcher.n == 2
+    r.inst.check(r.emit)  # b → no key again: still ONE alert per run
+    assert r.launcher.n == 3
+    assert len(_keyed(r.evs, "j1:subs-nokey")) == 1
+    _key(True)
+    r.inst.check(r.emit)  # c → the key is live now → submitted
+    assert [q.job_id for q in r.translators[0].submitted] == ["c.mp4"]
+    assert r.spawner.argvs == []
+
+
+def test_three_consecutive_subs_failures_disable_subs_via_the_deferred_step(
+    tmp_path, monkeypatch
+):
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(
+        tmp_path, monkeypatch, pending=["a.mp4", "b.mp4", "c.mp4", "d.mp4", "e.mp4"]
+    )
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    inst.start(emit)
+    inst.check(emit)  # a → ASR a
+    sp.last.finish(1)
+    inst.check(emit)  # retry
+    sp.last.finish(1)
+    inst.check(emit)  # a failed (1) → b launched
+    inst.check(emit)  # b → ASR b
+    sp.last.finish(0)
+    inst.check(emit)  # tB submitted → c launched
+    inst.check(emit)  # c → ASR c
+    sp.last.finish(0)
+    inst.check(emit)  # tC submitted → d launched
+    inst.check(emit)  # d → ASR d (live)
+    asr_d = sp.last
+    assert asr_d.rc is None and r.launcher.n == 4
+    tr = r.translators[0]
+    tr.answer("b.mp4", ok=False)
+    tr.answer("c.mp4", ok=False)
+    st = inst.check(emit)  # (2) then (3) → disable, deferred cancel + terminate
+    assert len(_keyed(r.evs, "j1:subs-disabled")) == 1
+    assert tr.cancel_calls == 1 and tr.cancel_lock_free == [True]
+    assert asr_d.calls[:2] == ["terminate_tree", "join_readers"]
+    assert asr_d.terminate_lock_free == [True]
+    assert inst._settled["d.mp4"] == ("skipped", "cancelled")
+    assert inst._settled["e.mp4"] == ("skipped", "cancelled")
+    assert inst._subs_job is None
+    assert r.launcher.n == 5  # restores continue
+    # settlement runs before the restore poll, so e's (instant) exit is handled
+    # in this same check — with subtitles off it just completes the queue
+    assert st.metrics["queue_completed"] == 5
+    inst.check(emit)
+    assert len(sp.argvs) == 5  # a twice, b, c, d — nothing for e
+    done = _done(r.evs)
+    assert len(done) == 1
+    assert (
+        "Queue: 5/5 done, 0 failed | Subs: 0/5 done, 3 failed, 2 skipped"
+        in (done[0][2])
+    )
+    _assert_strict_pairs(gpu)
+
+
+def test_restore_abort_disables_subs_and_runs_the_deferred_part_in_that_check(
+    tmp_path, monkeypatch
+):
+    # C2 + D8: the abort short-circuit must not strand a translator or a child.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4", "c.mp4"], rcs=[1] * 6)
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    for _ in range(5):
+        inst.check(emit)
+    tr = r.translators[0]
+    assert tr.cancel_calls == 0
+    # A live ASR child the abort must reach (constructed: GPU work is serial).
+    job = inst._jobs["c.mp4"]
+    child = _FakeAsr(["wj", "m", "--output-dir", str(tmp_path)], r.owner)
+    job.child = child
+    inst._subs_job = job
+    st = inst.check(emit)
+    assert st.state == "degraded"
+    assert tr.cancel_calls == 1 and tr.cancel_lock_free == [True]
+    assert "terminate_tree" in child.calls and child.terminate_lock_free == [True]
+    titles = [e[1] for e in r.evs if e[0] == "alert"]
+    disabled = next(i for i, t in enumerate(titles) if "AV 翻译 disabled" in t)
+    aborted = next(i for i, t in enumerate(titles) if "batch aborted" in t)
+    assert disabled < aborted
+    assert not _done(r.evs)
+    assert inst.check(emit).state == "degraded"
+
+
+@pytest.mark.parametrize("asr", ["failed", "succeeded"])
+def test_third_failure_from_a_translation_while_the_asr_exited_unpolled(
+    tmp_path, monkeypatch, asr
+):
+    # D22 + D26: the closure terminates/joins the exited-but-unpolled child,
+    # releases the GPU hook once, and no ASR retry / ja publish follows.
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4", "c.mp4"])
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    inst.start(emit)
+    inst.check(emit)  # ASR a
+    sp.last.finish(0)
+    inst.check(emit)  # tA submitted → b
+    inst.check(emit)  # ASR b
+    sp.last.finish(1 if asr == "failed" else 0)  # exited, NOT polled yet
+    inst._subs_consecutive_failures = 2
+    r.translators[0].answer("a.mp4", ok=False)
+    inst.check(emit)
+    child_b = sp.children[1]
+    assert child_b.calls == ["terminate_tree", "join_readers"]
+    assert len(sp.argvs) == 2  # no retry
+    assert not _ja(r, "b.mp4").exists()
+    assert inst._subs_job is None
+    assert r.launcher.n == 3  # c launched once
+    _assert_strict_pairs(gpu, open_ok=True)
+    inst.check(emit)  # c restored → done
+    assert len(_done(r.evs)) == 1
+    _assert_strict_pairs(gpu)
+
+
+def test_asr_final_failure_as_third_failure_launches_exactly_one_restore(
+    tmp_path, monkeypatch
+):
+    # D25: the poll terminal branch and the disable closure must not both advance.
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4", "c.mp4"])
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    inst.start(emit)
+    inst.check(emit)
+    inst._subs_consecutive_failures = 2
+    sp.last.finish(1)
+    inst.check(emit)
+    sp.last.finish(1)
+    assert r.launcher.n == 1
+    inst.check(emit)
+    assert len(_keyed(r.evs, "j1:subs-disabled")) == 1
+    assert r.launcher.n == 2
+    _assert_strict_pairs(gpu, open_ok=True)
+
+
+def test_asr_launch_error_then_next_probe_runs_outside_the_launch_lock(
+    tmp_path, monkeypatch
+):
+    # D27: after a _start_subs launch error the ffprobe for the next restore
+    # never runs under _launch_lock.
+    lock_free: list[bool] = []
+    holder: dict = {}
+
+    def probe(video, ffprobe):
+        if "inst" in holder:
+            lock_free.append(_lock_free(holder["inst"]))
+        return (1920, 1080)
+
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], probe=probe)
+    holder["inst"] = r.inst
+    r.spawner.fail_at = {1, 2}
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)
+    assert len(r.spawner.argvs) == 2  # one retry of the launch
+    alerts = _keyed(r.evs, "j1:subs:a.mp4")
+    assert len(alerts) == 1 and "launch: OSError: boom" in alerts[0][2]
+    assert r.launcher.n == 2
+    assert lock_free == [True, True]
+    _assert_strict_pairs(gpu, open_ok=True)
+
+
+def test_1500_translate_only_files_are_walked_iteratively(tmp_path, monkeypatch):
+    # D29: no _advance → _start_subs → _dispatch → _advance recursion.
+    names = [f"v{i:04d}.mp4" for i in range(1500)]
+    r = _setup(tmp_path, monkeypatch, restored=names, ja=names)
+    depths: list[int] = []
+    orig = J.Translator
+
+    def factory(run, *, name, **k):
+        t = orig(run, name=name, **k)
+        t.on_submit = lambda req: depths.append(_depth())
+        return t
+
+    monkeypatch.setattr(J, "Translator", factory)
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)
+    tr = r.translators[0]
+    assert len(tr.submitted) == 1500
+    assert max(depths) - min(depths) <= 2
+
+
+def test_1500_translate_only_files_without_a_key_finish_with_done(
+    tmp_path, monkeypatch
+):
+    # D32: Start walks them all, one alert, and `done` fires.
+    names = [f"v{i:04d}.mp4" for i in range(1500)]
+    r = _setup(tmp_path, monkeypatch, restored=names, ja=names, key=False)
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)
+    assert r.inst._subs_skipped == 1500
+    assert len(_keyed(r.evs, "j1:subs-nokey")) == 1
+    done = _done(r.evs)
+    assert len(done) == 1 and "Subs: 0/1500 done, 0 failed, 1500 skipped" in done[0][2]
+
+
+@pytest.mark.parametrize("retry", ["unstable", "raises"])
+def test_asr_retry_that_cannot_start_settles_like_a_final_failure(
+    tmp_path, monkeypatch, retry
+):
+    # D33
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"])
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    inst.start(emit)
+    inst.check(emit)
+    sp.last.finish(1)
+    if retry == "raises":
+        sp.fail_at = {2}
+    else:
+        real = subs_job_mod.source_identity
+        calls = {"n": 0}
+
+        def ident(path):
+            calls["n"] += 1
+            if calls["n"] >= 2:  # (patched after start #1) poll, then the retry
+                return (0, 0)
+            return real(path)
+
+        monkeypatch.setattr(subs_job_mod, "source_identity", ident)
+    inst.check(emit)
+    if retry == "raises":
+        assert inst._settled["a.mp4"][0] == "failed"
+        assert "launch: OSError" in inst._settled["a.mp4"][1]
+        assert len(_keyed(r.evs, "j1:subs:a.mp4")) == 1
+    else:
+        assert inst._settled["a.mp4"] == ("skipped", "unstable")
+        assert len(_keyed(r.evs, "j1:subs-unstable:a.mp4")) == 1
+    assert inst._subs_job is None
+    assert r.launcher.n == 2  # next restore launched
+    assert gpu.count("acquire") == 3 and gpu.count("release") == 2  # b is live
+    _assert_strict_pairs(gpu, open_ok=True)
+
+
+def test_stop_winning_the_lock_before_start_asr_still_releases_the_gpu(
+    tmp_path, monkeypatch
+):
+    # D30
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    log: list[str] = []
+
+    def acquire(self) -> bool:
+        log.append("acquire")
+        if len(log) == 3:  # the ASR acquire (restore acquire + release first)
+            self._stopping.set()
+        return True
+
+    def release(self) -> None:
+        log.append("release")
+
+    monkeypatch.setattr(JasnaInstance, "_gpu_acquire", acquire)
+    monkeypatch.setattr(JasnaInstance, "_gpu_release", release)
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)
+    assert r.spawner.argvs == []
+    assert log == ["acquire", "release", "acquire", "release"]
+    assert not _done(r.evs)
+
+
+def test_stop_racing_the_asr_retry_releases_the_gpu_once(tmp_path, monkeypatch):
+    # D35: the retry's post-spawn _stopping re-check terminates, releases,
+    # clears _subs_job and requests no advance.
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"])
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    inst.start(emit)
+    inst.check(emit)
+    sp.last.finish(1)
+
+    def on_spawn(n):
+        if n == 2:
+            inst._stopping.set()
+
+    sp.on_spawn = on_spawn
+    inst.check(emit)
+    assert len(sp.children) == 2
+    assert "terminate_tree" in sp.children[1].calls
+    assert inst._subs_job is None
+    assert r.launcher.n == 1
+    assert "a.mp4" not in inst._settled
+    _assert_strict_pairs(gpu)
+    inst.stop(timeout=1)
+    _assert_strict_pairs(gpu)
+
+
+@pytest.mark.parametrize("av", [True, False])
+@pytest.mark.parametrize("case", ["empty", "all_restored", "all_none"])
+def test_zero_work_start_emits_nothing(tmp_path, monkeypatch, av, case):
+    # D20
+    if case == "empty":
+        kw: dict = {}
+    elif case == "all_restored":
+        kw = dict(restored=["a.mp4"], zh=["a.mp4"])
+    else:
+        kw = dict(restored=["a.mp4", "b.mp4"], zh=["a.mp4", "b.mp4"])
+    r = _setup(tmp_path, monkeypatch, av_translate=av, **kw)
+    r.inst.start(r.emit)
+    st = r.inst.check(r.emit)
+    r.inst.check(r.emit)
+    assert r.evs == []
+    assert st.state == "idle" and st.detail.startswith("nothing to process")
+    assert r.launcher.n == 0 and r.spawner.argvs == []
+
+
+def test_done_fires_after_the_last_translation_settles(tmp_path, monkeypatch):
+    # D1: no further _advance happens — check() itself evaluates `done`.
+    r = _setup(tmp_path, monkeypatch, restored=["d.mp4"], ja=["d.mp4"])
+    r.inst.start(r.emit)
+    for _ in range(3):
+        r.inst.check(r.emit)
+    assert not _done(r.evs)
+    r.translators[0].answer("d.mp4")
+    r.inst.check(r.emit)
+    r.inst.check(r.emit)
+    assert len(_done(r.evs)) == 1
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        None,
+        "pending",
+        "process",
+        "unsettled",
+        "subs_job",
+        "subs_only",
+        "queued",
+        "result",
+        "stopping",
+        "aborted",
+        "no_work",
+    ],
+)
+def test_each_done_condition_alone_blocks_done(tmp_path, monkeypatch, block):
+    r = _setup(tmp_path, monkeypatch, restored=["d.mp4"], ja=["d.mp4"])
+    inst = r.inst
+    inst.start(r.emit)
+    tr = r.translators[0]
+    tr.answer("d.mp4")
+    inst._settle_results(r.emit)
+    assert inst._settled["d.mp4"][0] == "completed"
+    r.evs.clear()
+    inst._batch_done_emitted = False
+    if block == "pending":
+        inst._pending = [r.inp / "d.mp4"]
+    elif block == "process":
+        inst._process = object()  # type: ignore[assignment]
+    elif block == "unsettled":
+        del inst._settled["d.mp4"]
+    elif block == "subs_job":
+        inst._subs_job = inst._jobs["d.mp4"]
+    elif block == "subs_only":
+        inst._subs_only = [r.inp / "d.mp4"]
+    elif block == "queued":
+        tr.answered.clear()
+    elif block == "result":
+        tr.results.put(TranslateResult(inst._run, "zz", "failed", (), "x"))
+    elif block == "stopping":
+        inst._stopping.set()
+    elif block == "aborted":
+        inst._batch_aborted = True
+    elif block == "no_work":
+        inst._had_work = False
+    inst._maybe_done(r.emit)
+    assert len(_done(r.evs)) == (1 if block is None else 0)
+    inst._process = None
+
+
+# ── stop / restart ────────────────────────────────────────────────────────
+def test_stop_with_a_live_asr_child_terminates_it_and_releases_the_gpu(
+    tmp_path, monkeypatch
+):
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"])
+    r.inst.start(r.emit)
+    child = r.spawner.last
+    tr = r.translators[0]
+    r.inst.stop(timeout=2)
+    assert tr.cancel_calls == 1 and tr.cancel_lock_free == [True]  # first
+    assert tr.joined
+    assert "terminate_tree" in child.calls
+    assert r.inst._subs_job is None
+    _assert_strict_pairs(gpu)
+    r.inst.check(r.emit)
+    assert not _done(r.evs)
+
+
+def test_stop_with_an_exited_asr_child_publishes_the_ja_only(tmp_path, monkeypatch):
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"])
+    r.inst.start(r.emit)
+    r.spawner.last.finish(0)
+    r.inst.stop(timeout=2)
+    assert _ja(r, "e.mp4").exists()
+    assert not _zh(r, "e.mp4").exists()
+    assert r.translators[0].submitted == []
+    _assert_strict_pairs(gpu)
+    r.inst.check(r.emit)
+    assert not _done(r.evs) and not _zh(r, "e.mp4").exists()
+
+
+def test_restart_takes_a_new_generation_cleans_up_and_sweeps(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, restored=["d.mp4"], ja=["d.mp4"])
+    r.inst.start(r.emit)
+    old_run = r.inst._run
+    old_tr = r.translators[0]
+    stale = r.out / "d_restored.srt.99.tmp"
+    stale.write_text("x", encoding="utf-8")
+    keep = r.out / "notes.tmp"
+    keep.write_text("x", encoding="utf-8")
+    junk = r.out / ".avsubs" / "tmp" / "audio.wav"
+    junk.parent.mkdir(parents=True, exist_ok=True)
+    junk.write_bytes(b"x")
+    r.inst.start(r.emit)  # only the translator was alive
+    assert old_tr.cancel_calls == 1 and old_tr.joined
+    assert r.inst._run[0] == "j1" and r.inst._run[1] > old_run[1]
+    assert not stale.exists() and keep.exists()
+    assert not junk.exists()
+    new_tr = r.translators[1]
+    # a result from the previous generation is dropped
+    new_tr.results.put(
+        TranslateResult(old_run, "d.mp4", "translated", (Cue(1, 0, 1000, "旧"),), "")
+    )
+    r.inst.check(r.emit)
+    assert not _zh(r, "d.mp4").exists()
+    assert "d.mp4" not in r.inst._settled
+    r.inst.stop(timeout=1)
+
+
+def test_exe_missing_skips_every_job_and_done_still_fires(tmp_path, monkeypatch):
+    # D34: _subs_only is emptied too, so `done` can fire after the last restore.
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4", "b.mp4"],
+        restored=["e.mp4"],
+        exe=False,
+    )
+    r.inst.start(r.emit)
+    assert len(_keyed(r.evs, "j1:subs-noexe")) == 1
+    assert all(v == ("skipped", "no_exe") for v in r.inst._settled.values())
+    assert len(r.inst._settled) == 3
+    r.inst.check(r.emit)
+    assert not _done(r.evs)
+    r.inst.check(r.emit)
+    done = _done(r.evs)
+    assert len(done) == 1
+    assert (
+        "Queue: 3/3 done, 0 failed | Subs: 0/3 done, 0 failed, 3 skipped"
+        in (done[0][2])
+    )
+    assert r.spawner.argvs == [] and r.launcher.n == 2
+    assert len(_keyed(r.evs, "j1:subs-noexe")) == 1
+
+
+def test_exe_missing_with_only_subs_work_is_done_on_the_first_check(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"], exe=False)
+    r.inst.start(r.emit)
+    st = r.inst.check(r.emit)
+    done = _done(r.evs)
+    assert len(done) == 1 and "Subs: 0/1 done, 0 failed, 1 skipped" in done[0][2]
+    assert st.state == "idle"
+    assert r.spawner.argvs == []
+
+
+# ── metrics ───────────────────────────────────────────────────────────────
+def test_metrics_contract_with_and_without_av_translate(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"], restored=["d.mp4"])
+    r.inst.start(r.emit)
+    st = r.inst.check(r.emit)  # a restored → ASR a
+    m = st.metrics
+    for k in (
+        "subs_total",
+        "subs_completed",
+        "subs_failed",
+        "subs_skipped",
+        "subs_remaining",
+        "subs_translating",
+    ):
+        assert isinstance(m[k], int), k
+    assert m["subs_total"] == 2 and m["subs_remaining"] == 2
+    assert m["phase"] == "subs"
+    r.inst.stop(timeout=1)
+
+    off = tmp_path / "off"
+    off.mkdir()
+    r2 = _setup(off, monkeypatch, pending=["a.mp4"], av_translate=False, rcs=[None])
+    r2.inst.start(r2.emit)
+    m2 = r2.inst.check(r2.emit).metrics
+    assert m2["phase"] == "restore" and m2["current_file"] == "a.mp4"
+    assert not [k for k in m2 if k.startswith("subs_")]
+    assert r2.translators == []
+    r2.inst.stop(timeout=1)
+
+
+# ── real supervisor paths (D11) ───────────────────────────────────────────
+def test_supervisor_unregister_register_and_reconfigure(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"], poll_interval=1.0)
+    sink: list = []
+    sup = Supervisor(sink=lambda *a: sink.append(a))
+    plugin = JasnaPlugin()
+    sup.start()
+    try:
+        sup.register(plugin, r.cfg, "j1")
+        assert _wait(lambda: len(r.spawner.children) == 1)
+        old = sup._monitors["j1"].instance
+        old_child, old_tr = r.spawner.children[0], r.translators[0]
+
+        cycled = threading.Event()
+
+        def cycle():
+            sup.unregister("j1", timeout=5)
+            sup.register(plugin, r.cfg, "j1")  # admin.set_enabled's re-Start
+            cycled.set()
+
+        t = threading.Thread(target=cycle, daemon=True)
+        t.start()
+        t.join(timeout=15)
+        assert cycled.is_set()  # immediate re-Start does not deadlock
+        assert "terminate_tree" in old_child.calls
+        assert old_tr.cancel_calls == 1 and old_tr.joined
+        assert _wait(lambda: len(r.spawner.children) == 2)
+        new = sup._monitors["j1"].instance
+        assert new is not old and new._run[1] > old._run[1]
+        new_tr = r.translators[1]
+        new_tr.results.put(
+            TranslateResult(old._run, "e.mp4", "translated", (Cue(1, 0, 9, "旧"),), "")
+        )
+        assert _wait(lambda: new_tr.results.empty())
+        time.sleep(0.2)
+        assert not _zh(r, "e.mp4").exists()
+        assert "e.mp4" not in new._settled
+
+        cfg2 = r.cfg.model_copy(update={"whisperjav_engine": "large-v3"})
+        sup.reconfigure("j1", cfg2)
+        assert "terminate_tree" in r.spawner.children[1].calls
+        assert new_tr.cancel_calls == 1 and new_tr.joined
+        assert _wait(lambda: len(r.spawner.children) == 3)
+        newest = sup._monitors["j1"].instance
+        assert newest._run[1] > new._run[1]
+        assert "large-v3" in r.spawner.children[2].argv
+    finally:
+        sup.stop(timeout=5)
+    assert "terminate_tree" in r.spawner.children[-1].calls
+
+
+def test_default_spawn_goes_through_the_module_level_child_process(
+    tmp_path, monkeypatch
+):
+    # D27: J.ChildProcess is the seam for supervisor-created instances.
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"])
+    fresh = JasnaInstance("j2", r.cfg)
+    evs, emit = _events()
+    fresh.start(emit)
+    assert len(r.spawner.argvs) == 1
+    fresh.stop(timeout=1)
+
+
+def test_subs_job_is_a_plain_subs_job_keyed_by_video_name(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    r.inst.start(r.emit)
+    job = r.inst._jobs["a.mp4"]
+    assert isinstance(job, SubsJob)
+    assert job.run == r.inst._run
+    assert job.media == r.out / "a_restored.mp4"
+    assert job.ja_target == r.out / "a_restored.ja.srt"
+    assert job.zh_target == r.out / "a_restored.srt"
+    assert job.staging_root == r.out / ".avsubs"
+    assert os.path.basename(job.exe) == "whisperjav.exe"
+    r.inst.stop(timeout=1)
+
+
+def test_asr_child_env_never_carries_the_llm_key(monkeypatch):
+    # AC10: the key travels only in the llm-worker's env — never the ASR child's.
+    seen: dict = {}
+
+    def fake_child(argv, **kw):
+        seen["argv"], seen["kw"] = argv, kw
+        return object()
+
+    monkeypatch.setenv("TASKPAW_LLM_API_KEY", "sk-secret")
+    monkeypatch.setenv("TASKPAW_LLM_API_BASE", "https://x.invalid/v1")
+    monkeypatch.setenv("TASKPAW_KEEP_ME", "1")
+    monkeypatch.setattr(J, "ChildProcess", fake_child)
+    J._default_spawn(["whisperjav.exe", "m.mp4"])
+    env = seen["kw"]["env"]
+    assert "TASKPAW_LLM_API_KEY" not in env and "TASKPAW_LLM_API_BASE" not in env
+    assert env["TASKPAW_KEEP_ME"] == "1"
+    assert "sk-secret" not in " ".join(seen["argv"])
+    assert "stdin_pipe" not in seen["kw"]  # stdin stays DEVNULL (D15)
+
+
+def test_long_failure_detail_keeps_its_head_and_is_bounded():
+    text = "exit code 1: " + "x" * 5000 + " LAST"
+    out = J._bounded(text)
+    assert out.startswith("exit code 1: ") and out.endswith(" LAST")
+    assert len(out) <= J._CRASH_DETAIL_CHARS

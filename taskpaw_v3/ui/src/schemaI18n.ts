@@ -160,6 +160,26 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
       description:
         "默认关：8 GB 显存放不下 4K 的 unet-4x。4K 档指像素数 > 1920×1080×1.5（约 3.1 MP，即 2560×1440 及以上）的视频。显存更大时可以打开。",
     },
+    av_translate: {
+      title: "AV 翻译",
+      description:
+        "默认关。开：每个文件修复完成后，用 WhisperJAV 识别日语语音，再用「设置」里的 LLM API 翻译成简体中文，在修复后的视频旁边生成 <原名>_restored.ja.srt（日语）和 <原名>_restored.srt（简体中文）。输出文件夹里已修复但还没有字幕的影片，会在待修复文件全部处理完之后补做；已存在的 .ja.srt 会直接复用（只做翻译）。会在输出文件夹里创建 .avsubs/ 工作文件夹。需要先在「设置」里配置 LLM API。",
+    },
+    whisperjav_exe_path: {
+      title: "whisperjav.exe 路径",
+      description:
+        "WhisperJAV 安装目录中 whisperjav.exe 的完整路径（如 C:\\WhisperJAV\\whisperjav.exe）——不是文件夹。勾选「AV 翻译」时必填。",
+    },
+    whisperjav_engine: {
+      title: "识别引擎",
+      description:
+        "WhisperJAV 语音识别预设：anime-whisper（默认，--mode qwen --qwen-generator anime-whisper；原型机实测胜出：逐句断句、时间轴准确、显存更低）、large-v3（--mode balanced --model large-v3）、large-v2（--mode balanced）、qwen3（--mode qwen）、custom（不传预设参数，--mode / --model / --qwen-generator 交给下方的额外参数自行指定）。",
+    },
+    whisperjav_extra_args: {
+      title: "WhisperJAV 额外参数",
+      description:
+        "原样追加到 WhisperJAV 命令行末尾的额外参数。TaskPaw 已经控制的参数会被拒绝：--output-dir --output-format --language --temp-dir --no-signature，以及引擎不是 custom 时的 --mode --model --qwen-generator；4 个字符及以上的 argparse 前缀缩写（如 --out）同样会被拒绝。--translate* 系列参数一律拒绝，因为它们会把 API 密钥写到命令行上（翻译由 TaskPaw 用「设置」里的 LLM API 完成）。",
+    },
     clip_size_1080p: {
       title: "1080p 档片段长度",
       description:

@@ -200,7 +200,7 @@ def test_json_schema_exposes_the_tickbox_defaults():
     own = set(JasnaConfig.model_fields) - set(
         JasnaConfig.__bases__[0].model_fields  # type: ignore[attr-defined]
     )
-    assert len(own) == 15
+    assert len(own) == 19  # 15 restore fields + 4「AV 翻译」fields (#177)
     for name in own:
         assert props[name].get("description"), f"{name} has no description"
 

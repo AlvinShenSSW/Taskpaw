@@ -4,6 +4,31 @@
 
 ---
 
+## V3 3.4.0 — Jasna「AV 翻译」：WhisperJAV 识别 + 全局 LLM 翻译（#177）
+
+- **Jasna 任务新增「AV 翻译」勾选框。** 勾上后,每部影片修复完成即自动进入字幕流程:先用
+  WhisperJAV(VAD 优先的日语 ASR,业内方案)对已发布的 `<名字>_restored.mp4` 出日文字幕
+  `<名字>_restored.ja.srt`,再经 #178 的全局 LLM API(默认 xAI `grok-4.3`,JSON 模式、40 句一批、
+  带 5 句上下文)译成简体中文 `<名字>_restored.srt`,两个文件都放在修复视频旁边。GPU 串行:修复 →
+  识别 → 下一部修复;翻译在后台线程里通过可终止的 `llm-worker` 子进程进行,不占 GPU、不阻塞下一部。
+- **已修复但没字幕的影片也会补做**,排在待修复影片之后;已有 `.ja.srt` 只补翻译;无人声的影片写两个
+  0 字节字幕并计为完成。连续 3 次字幕失败只告警一次并停掉本轮字幕,修复照常;缺 exe / 缺 key 各告警
+  一次并跳过。
+- 新配置:`whisperjav_exe_path`(勾选时必填)、`whisperjav_engine`(`anime-whisper` 默认、
+  `large-v3`、`large-v2`、`qwen3`、`custom`)、`whisperjav_extra_args`(TaskPaw 自管的
+  `--output-dir/--output-format/--language/--temp-dir/--no-signature` 及预设占用的
+  `--mode/--model/--qwen-generator` 连同 4 字符以上的 argparse 缩写一律拒绝;`--translate*` 因为
+  会把 key 放进命令行也一律拒绝)。输出文件夹内多一个 `.avsubs/` 工作目录。
+- **新共享包 `taskpaw_v3/monitors/subs/`**(`child.py` 子进程树 + `taskkill /T`、`whisperjav.py`
+  参数/清单、`srt.py`、`translate.py` 翻译线程、`job.py`)与 `core/generation.py`(进程内单调的运行
+  代号,Stop/Start 后旧结果一律丢弃);#179 的独立字幕任务直接复用。
+- 状态:`phase ∈ restore | subs | translate`、`subs_total/completed/failed/skipped/remaining`、
+  `subs_translating`;`status.md` 的 Jasna 行追加 `subs S/T`;`done` 事件多一段
+  `Subs: S/T done, U failed, V skipped`。设置页与向导补齐中英文说明。
+- 设计与对抗评审:`docs/specs/2026-09-24-177-jasna-av-translate-design.md`(六轮 D1–D35)。
+
+---
+
 ## V3 3.3.1 — LLM API 出厂默认改为 xAI 直连（#181）
 
 - `llm_api_base` 默认 `https://api.x.ai/v1`,`llm_model` 默认 `grok-4.3`(owner 在 3.3.0 上实测通过的
