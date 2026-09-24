@@ -148,8 +148,26 @@ def _status_text(snap: Any) -> str:
             prog.append(f"{m['fps']:.0f}fps")
         if prog:
             lada_parts.append(" · ".join(prog))
-        if lada_parts:
-            parts.append(" ".join(lada_parts))
+        segment = " ".join(lada_parts)
+        # jasna「AV 翻译」(#177): a separate `subs S/T` part, ONLY when the
+        # agent reports a numeric subs_total — without it the line above stays
+        # byte-identical. A segment already ending in the "| file |" delimiter is
+        # continued with a space so the line never shows an empty "| |" cell.
+        if _is_num(m.get("subs_total")):
+            subs_done = (
+                int(m["subs_completed"]) if _is_num(m.get("subs_completed")) else 0
+            )
+            subs = f"subs {subs_done}/{int(m['subs_total'])}"
+            if _is_num(m.get("subs_failed")) and m["subs_failed"] > 0:
+                subs += f" ({int(m['subs_failed'])} failed)"
+            if not segment:
+                segment = subs
+            elif segment.endswith("|"):
+                segment = f"{segment} {subs}"
+            else:
+                segment = f"{segment} | {subs}"
+        if segment:
+            parts.append(segment)
 
     # comfyui-style depth: "N running, M pending".
     is_comfyui = tid == "comfyui" or (

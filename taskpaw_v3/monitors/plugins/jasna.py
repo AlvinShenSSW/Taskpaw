@@ -24,12 +24,24 @@ exactly like lada's passive mode.
 Process/reader/terminate recipes and the tqdm progress parser are IMPORTED from
 `lada.py` (never duplicated, never modified there). No `shell=True`; the child is
 terminated in `stop()` (#40 no-orphan guarantee).
+
+「AV 翻译」(#177, `av_translate`): after each restore the published
+`<stem>_restored.mp4` is transcribed by WhisperJAV (a GPU child, serial with the
+restores) into `<stem>_restored.ja.srt`, which a background `Translator` (the
+`llm-worker` client) turns into `<stem>_restored.srt`. The engine lives in the
+shared `taskpaw_v3.monitors.subs` package; this plugin owns planning
+(`plan_subs`), policy (retry, degrade), counters, events and settlement. Every
+planned subtitle job reaches exactly one terminal state, settled only by the
+monitor worker thread under `_launch_lock`; blocking side effects of a
+settlement are deferred until the lock is released (D8), and only `_dispatch()`
+advances the queue on the exit/poll/settle paths (D25/D29).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import queue
 import shlex
 import shutil
 import subprocess
@@ -37,12 +49,15 @@ import sys
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Callable, Iterable, Literal, Optional
 
 from pydantic import Field, model_validator
 
+from taskpaw_v3.core.generation import next_generation
+from taskpaw_v3.core.llm import get_llm_settings
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -61,6 +76,25 @@ from taskpaw_v3.monitors.plugins.lada import (
     _cpu_mem,
     parse_progress_line,
     process_alive,
+)
+
+# `Translator` and `ChildProcess` are bound as module-level names and looked up
+# at call time, so tests can monkeypatch `J.Translator` / `J.ChildProcess` for
+# supervisor-created instances (D10). Nothing here comes from `lada.py` (C1).
+from taskpaw_v3.monitors.subs.child import ChildProcess
+from taskpaw_v3.monitors.subs.job import SubsJob
+from taskpaw_v3.monitors.subs.srt import Cue, SrtError
+from taskpaw_v3.monitors.subs.translate import (
+    CANCELLED,
+    RunId,
+    TranslateRequest,
+    TranslateResult,
+    Translator,
+    needs_llm_key,
+)
+from taskpaw_v3.monitors.subs.whisperjav import DEFAULT_ENGINE, Engine
+from taskpaw_v3.monitors.subs.whisperjav import (
+    owned_flags_in as whisperjav_owned_flags_in,
 )
 
 log = logging.getLogger("taskpaw.monitors.jasna")
@@ -99,6 +133,22 @@ _ABORT_AFTER_FAILURES = 3
 _DEFAULT_DETECTION_MODEL = "rfdetr-v6"
 _LARGE_DETECTION_MODEL = "rfdetr-v6-large"
 _COMPILING_HINT = "compiling TensorRT engines (first run, 15-60 min): "
+
+# 「AV 翻译」(#177). The staging root lives INSIDE the output folder (D16):
+# `plan_queue` scans the input folder only and `sweep_orphan_staging` only looks
+# at files, so neither ever sees it. `.avsubs/tmp` is WhisperJAV's --temp-dir.
+_SUBS_STAGING = ".avsubs"
+_JA_SUFFIX = "_restored.ja.srt"
+_ZH_SUFFIX = "_restored.srt"
+# Publish temp names are `<target>.<generation>.tmp` (subs/job.py); Start sweeps
+# every generation's leftovers.
+_SUBS_TMP_GLOB = "*_restored*.srt.*.tmp"
+_SUBS_DISABLE_AFTER = 3
+_ASR_MAX_ATTEMPTS = 2
+_LLM_ENV_PREFIX = "TASKPAW_LLM_"
+
+SubsKind = Literal["full", "translate_only", "none"]
+Phase = Literal["restore", "subs", "translate"]
 
 
 # ── pure helpers (unit-tested without a GPU) ──────────────────────────────
@@ -241,6 +291,110 @@ def plan_queue(
         else:
             pending.append(video)
     return pending, done, collisions
+
+
+def ja_target_for(output_folder: str, video: Path) -> Path:
+    """`<out>/<stem>_restored.ja.srt` — the Japanese transcript (C8: derives from
+    the same stem as the restored file, so it can never collide)."""
+    return Path(output_folder) / f"{video.stem}{_JA_SUFFIX}"
+
+
+def zh_target_for(output_folder: str, video: Path) -> Path:
+    """`<out>/<stem>_restored.srt` — the Simplified-Chinese subtitle."""
+    return Path(output_folder) / f"{video.stem}{_ZH_SUFFIX}"
+
+
+def _exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:  # unreadable entry — treat as "not there yet"
+        return False
+
+
+def subs_kind(output_folder: str, video: Path) -> SubsKind:
+    """What a file needs: an existing zh (a 0-byte one counts) → `none`; an
+    existing `.ja.srt` (reused by existence only) → `translate_only`; else
+    `full` (ASR + translation)."""
+    if _exists(zh_target_for(output_folder, video)):
+        return "none"
+    if _exists(ja_target_for(output_folder, video)):
+        return "translate_only"
+    return "full"
+
+
+@dataclass(frozen=True)
+class SubsPlan:
+    """`for_pending`: the kind each pending file will need once restored;
+    `subs_only`: already-restored files that still need subtitles (sorted,
+    handled after every pending restore); `total`: planned subtitle jobs."""
+
+    for_pending: dict[Path, SubsKind]
+    subs_only: list[Path]
+    total: int
+
+
+def plan_subs(
+    input_folder: str,
+    output_folder: str,
+    pending: list[Path],
+    excluded: Iterable[Path],
+) -> SubsPlan:
+    """Pure second planning layer (C6/D19/D21) — `plan_queue` is untouched.
+
+    Scans the input folder exactly like `plan_queue` (same extensions, sorted,
+    non-recursive), skips `pending` and `excluded` (the collision losers from
+    `plan_queue`: a loser's `output_path_for()` is the winner's file, so without
+    this it would become a duplicate job on the same media and targets), and
+    classifies every other video whose restored output exists. Raises `OSError`
+    when the input folder cannot be scanned."""
+    pending_set = set(pending)
+    skip = pending_set | set(excluded)
+    entries = sorted(
+        (
+            f
+            for f in Path(input_folder).iterdir()
+            if f.is_file() and f.suffix.lower() in JASNA_VIDEO_EXTENSIONS
+        ),
+        key=lambda p: p.name,
+    )
+    for_pending: dict[Path, SubsKind] = {
+        v: subs_kind(output_folder, v) for v in pending
+    }
+    subs_only: list[Path] = []
+    for video in entries:
+        if video in skip:
+            continue
+        if not _exists(output_path_for(output_folder, video)):
+            continue
+        if subs_kind(output_folder, video) != "none":
+            subs_only.append(video)
+    total = sum(1 for k in for_pending.values() if k != "none") + len(subs_only)
+    return SubsPlan(for_pending, subs_only, total)
+
+
+def _asr_env() -> dict[str, str]:
+    """The agent's environment minus every `TASKPAW_LLM_*` variable: the LLM key
+    (usually `TASKPAW_LLM_API_KEY`) must never reach the ASR child (AC10)."""
+    return {
+        k: v for k, v in os.environ.items() if not k.upper().startswith(_LLM_ENV_PREFIX)
+    }
+
+
+def _default_spawn(argv: list[str]) -> ChildProcess:
+    # Resolved at call time so `J.ChildProcess` can be monkeypatched (D10).
+    # stdin=DEVNULL (D15) and a merged stdout/stderr tail are ChildProcess's
+    # defaults; the env is scrubbed of the LLM key.
+    return ChildProcess(argv, env=_asr_env())
+
+
+def _bounded(text: str) -> str:
+    """An alert-sized detail: the head (e.g. `exit code 1: …`) plus the end of
+    the tail, never more than `_CRASH_DETAIL_CHARS`."""
+    text = (text or "").strip()
+    if len(text) > _CRASH_DETAIL_CHARS:
+        head = text[:80].rstrip()
+        text = f"{head} … {text[-(_CRASH_DETAIL_CHARS - 83) :].lstrip()}"
+    return text
 
 
 def sweep_orphan_staging(
@@ -556,6 +710,42 @@ class JasnaConfig(BaseMonitorConfig):
         description="4K tier: run the supporter-only unet-4x secondary "
         "restoration. Off by default — it does not fit in 8 GB of VRAM at 4K.",
     )
+    av_translate: bool = Field(
+        False,
+        title="AV 翻译",
+        description="After each restore, transcribe the restored video with "
+        "WhisperJAV and translate it to Simplified Chinese with the agent's LLM "
+        "setting: writes <name>_restored.ja.srt (Japanese) and <name>_restored.srt "
+        "(Chinese) next to <name>_restored.mp4. GPU work stays serial (restore → "
+        "transcribe → next restore); translation runs in the background. Already "
+        "restored files without subtitles are handled after the pending restores; "
+        "an existing .ja.srt is reused (translation only). Staging lives in the "
+        "output folder's .avsubs directory. An existing .ja.srt / .srt is reused "
+        "as-is: if you replace a source video under the same name, delete its old "
+        ".srt files first.",
+    )
+    whisperjav_exe_path: str = Field(
+        "",
+        description="Full path to whisperjav.exe (e.g. "
+        r"C:\WhisperJAV\whisperjav.exe) — NOT the folder. Required when AV 翻译 is "
+        "ticked.",
+    )
+    whisperjav_engine: Engine = Field(
+        DEFAULT_ENGINE,
+        description="WhisperJAV preset: anime-whisper (default; best on the "
+        "prototype), large-v3, large-v2, qwen3, or custom (no preset flags — "
+        "set --mode/--model/--qwen-generator yourself in the extra args).",
+    )
+    whisperjav_extra_args: str = Field(
+        "",
+        description="Extra WhisperJAV flags appended to every transcription, e.g. "
+        "--sensitivity aggressive. TaskPaw owns --output-dir, --output-format, "
+        "--language, --temp-dir and --no-signature (and, unless the engine is "
+        "custom, --mode/--model/--qwen-generator); those, and any argparse "
+        "abbreviation of them 4 or more characters long (e.g. --out), are "
+        "rejected. --translate* options are always rejected (they "
+        "would put an API key on the command line).",
+    )
     clip_size_1080p: int = Field(
         90,
         ge=8,
@@ -651,6 +841,24 @@ class JasnaConfig(BaseMonitorConfig):
             raise ValueError(
                 "jasna_extra_args must not set the flags TaskPaw owns "
                 f"({', '.join(owned)}); use the dedicated fields instead"
+            )
+        if self.av_translate and not self.whisperjav_exe_path.strip():
+            raise ValueError(
+                "AV 翻译 (av_translate) needs whisperjav_exe_path — the full path "
+                "to whisperjav.exe"
+            )
+        try:
+            wj_owned = whisperjav_owned_flags_in(
+                self.whisperjav_extra_args, self.whisperjav_engine
+            )
+        except ValueError as e:
+            raise ValueError(
+                f"whisperjav_extra_args cannot be parsed ({e}); check the quotes"
+            ) from e
+        if wj_owned:
+            raise ValueError(
+                "whisperjav_extra_args must not set the flags TaskPaw owns or "
+                f"forbids ({', '.join(wj_owned)})"
             )
         smallest = min(self.clip_size_1080p, self.clip_size_4k)
         if 2 * self.temporal_overlap >= smallest:
@@ -749,6 +957,33 @@ class JasnaInstance(MonitorInstance):
         self._started = False
         self._ffprobe: Optional[str] = None
         self._prev_running: Optional[bool] = None  # passive transition
+        # GPU lease hooks (#177 AC9; bodies filled by #179). `_gpu_holder` makes
+        # every release pair exactly one acquire even when two exit paths race
+        # (tiny leaf lock, taken under nothing else).
+        self._gpu_lock = threading.Lock()
+        self._gpu_holder: Optional[object] = None
+        self._restore_hold: Optional[object] = None
+        # 「AV 翻译」(#177) — per-run subtitle state, reset in start()
+        self._spawn: Callable[[list[str]], ChildProcess] = _default_spawn
+        self._run: RunId = (instance_id, 0)
+        self._phase: Phase = "restore"
+        self._plan = SubsPlan({}, [], 0)
+        self._kinds: dict[str, SubsKind] = {}
+        self._subs_only: list[Path] = []
+        self._subs_job: Optional[SubsJob] = None
+        self._translator: Optional[Translator] = None
+        self._jobs: dict[str, SubsJob] = {}
+        self._settled: dict[str, tuple[str, str]] = {}
+        self._subs_completed = 0
+        self._subs_failed = 0
+        self._subs_skipped = 0
+        self._subs_consecutive_failures = 0
+        self._subs_disabled: Optional[str] = None
+        self._subs_key_alerted = False
+        self._next_action: Optional[str] = None
+        self._deferred: list[Callable[[], None]] = []
+        self._advance_requested = False
+        self._had_work = False
 
     @property
     def _cfg(self) -> JasnaConfig:
@@ -764,7 +999,13 @@ class JasnaInstance(MonitorInstance):
         # Idempotent restart (supervisor stop→start / watchdog respawn): kill any
         # child a prior run left, then RESET every per-run field so a stale flag
         # can't suppress the next completion or mask a healthy relaunch (lada #59).
-        if self._process is not None:
+        # #177: the subtitle side (ASR child, translator thread) counts too — a
+        # run whose only live part is the translator must still be stopped.
+        if (
+            self._process is not None
+            or self._subs_job is not None
+            or self._translator is not None
+        ):
             self.stop()
         self._stopping.clear()
         self._process = None
@@ -791,8 +1032,54 @@ class JasnaInstance(MonitorInstance):
         with self._lock:
             self._progress = {}
             self._recent_output.clear()
+        self._reset_subs()
         if cfg.jasna_exe_path.strip():
+            self._sweep_subs_leftovers()
             self._start_managed(emit)
+
+    def _reset_subs(self) -> None:
+        """Every per-run subtitle field back to its initial value, under a NEW
+        process-wide generation (results/temp names of an earlier run — or an
+        earlier instance object — can never be mistaken for this run's)."""
+        with self._gpu_lock:
+            self._gpu_holder = None
+        self._restore_hold = None
+        self._run = (self.instance_id, next_generation())
+        self._phase = "restore"
+        self._plan = SubsPlan({}, [], 0)
+        self._kinds = {}
+        self._subs_only = []
+        self._subs_job = None
+        self._translator = None
+        self._jobs = {}
+        self._settled = {}
+        self._subs_completed = self._subs_failed = self._subs_skipped = 0
+        self._subs_consecutive_failures = 0
+        self._subs_disabled = None
+        self._subs_key_alerted = False
+        self._next_action = None
+        self._deferred = []
+        self._advance_requested = False
+        self._had_work = False
+
+    def _sweep_subs_leftovers(self) -> None:
+        """Best effort: `*_restored*.srt.<gen>.tmp` publish leftovers and
+        WhisperJAV's `.avsubs/tmp` from a crashed / hard-stopped run."""
+        out = self._cfg.jasna_output_folder.strip()
+        if not out:
+            return
+        try:
+            leftovers = list(Path(out).glob(_SUBS_TMP_GLOB))
+        except OSError as e:
+            log.warning("jasna: subtitle temp sweep skipped (%s)", e)
+            leftovers = []
+        for tmp in leftovers:
+            try:
+                if tmp.is_file():
+                    tmp.unlink()
+            except OSError as e:
+                log.warning("jasna: could not sweep %s: %s", tmp, e)
+        shutil.rmtree(Path(out) / _SUBS_STAGING / "tmp", ignore_errors=True)
 
     def _emit_launch_error(self, emit: EventEmitter, msg: str) -> None:
         self._launch_error = msg
@@ -864,18 +1151,126 @@ class JasnaInstance(MonitorInstance):
         # Orphaned staging files from an earlier hard stop (best effort).
         sweep_orphan_staging(cfg.jasna_input_folder, cfg.jasna_output_folder)
 
+        if cfg.av_translate:
+            self._setup_subs(emit, pending, [loser for loser, _ in collisions])
+        # D20: only a Start that has work can ever emit `done`.
+        self._had_work = bool(self._pending) or bool(self._jobs)
+
         if not self._pending:
+            if cfg.av_translate and self._subs_only:
+                # D2/D32: subs-only work starts at once, without jasna.exe — through
+                # the dispatch LOOP, so a large translate-only backlog is walked
+                # iteratively (D29).
+                self._advance_requested = True
+                self._dispatch(emit)
+                return
             # Nothing to do is NOT an event (AC 6) — just a visible idle detail.
             self._idle_note = f"nothing to process ({done} already restored)"
             return
         self._launch_next(emit)
 
+    def _setup_subs(
+        self, emit: EventEmitter, pending: list[Path], excluded: list[Path]
+    ) -> None:
+        """Plan the run's subtitle jobs, preflight whisperjav.exe and start the
+        translator. Never raises (start() never raises)."""
+        cfg = self._cfg
+        out = cfg.jasna_output_folder
+        try:
+            plan = plan_subs(cfg.jasna_input_folder, out, pending, excluded)
+        except OSError as e:
+            # plan_queue just scanned the same folder, so this is a race; the
+            # restores still run, subtitles are off for this run — visibly.
+            log.warning("jasna %s: subtitle planning failed: %s", self.instance_id, e)
+            emit(
+                "alert",
+                f"{cfg.name}: AV 翻译 disabled",
+                f"could not plan subtitles ({e}); restores continue",
+                dedupe_key=f"{self.instance_id}:subs-disabled",
+            )
+            self._subs_disabled = "planning failed"
+            return
+        self._plan = plan
+        exe = cfg.whisperjav_exe_path.strip()
+        staging = Path(out) / _SUBS_STAGING
+        work: list[tuple[Path, SubsKind]] = [
+            (v, k) for v, k in plan.for_pending.items() if k != "none"
+        ]
+        work += [(v, subs_kind(out, v)) for v in plan.subs_only]
+        for video, kind in work:
+            self._kinds[video.name] = kind
+            self._jobs[video.name] = SubsJob(
+                run=self._run,
+                job_id=video.name,
+                media=output_path_for(out, video),  # C10: the restored file
+                relpath=video.name,
+                ja_target=ja_target_for(out, video),
+                zh_target=zh_target_for(out, video),
+                staging_root=staging,
+                exe=exe,
+                engine=cfg.whisperjav_engine,
+                extra=cfg.whisperjav_extra_args,
+            )
+        self._subs_only = list(plan.subs_only)
+        if not self._jobs:
+            return
+        try:
+            exe_ok = Path(exe).is_file()
+        except OSError:
+            exe_ok = False
+        if not exe_ok:
+            # D34: every job skipped AND _subs_only emptied, so `done` can fire.
+            with self._launch_lock:
+                self._subs_disabled = "no_exe"
+                self._subs_only = []
+                emit(
+                    "alert",
+                    f"{cfg.name}: whisperjav.exe not found",
+                    f"AV 翻译 is off for this run: whisperjav_exe_path ({exe}) is "
+                    "not a file. Restores continue; every subtitle job is skipped.",
+                    dedupe_key=f"{self.instance_id}:subs-noexe",
+                )
+                for job_id in list(self._jobs):
+                    self._settle(job_id, "skipped", "no_exe", emit)
+            return
+        try:
+            translator = Translator(self._run, name=self.instance_id)
+            # Assigned BEFORE the re-check below (CX2): a concurrent stop() either
+            # snapshots it (and cancels it) or has already set the flag we see.
+            self._translator = translator
+            translator.start()
+            if self._stopping.is_set():
+                # A Stop landed during start(): never leave an idle daemon thread.
+                translator.cancel()
+                translator.join(1.0)
+        except Exception as e:  # a thread that cannot start — never raise here
+            log.warning("jasna %s: translator did not start: %s", self.instance_id, e)
+            self._translator = None
+            with self._launch_lock:
+                self._disable_subs(f"translator did not start ({e})", emit)
+            self._run_deferred()
+            return
+
     def stop(self, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + max(0.1, timeout)
         self._stopping.set()
+        # #177: cancel the translator FIRST (bounded: ≤ 1 s + a tree kill) so its
+        # llm-worker is already going away while we wait for the lock. It takes
+        # neither of our locks.
+        translator = self._translator
+        if translator is not None:
+            try:
+                translator.cancel()
+            except Exception as e:  # never let cleanup abort the child kill
+                log.warning(
+                    "jasna %s: translator cancel failed: %s", self.instance_id, e
+                )
         # Mirrors supervisor.stop()'s timed acquire: the no-orphan guarantee (#40)
         # wins over tidiness, so a lock we can't take within the caller's budget
         # must not stop us from terminating the child.
-        acquired = self._launch_lock.acquire(timeout=max(0.1, timeout))
+        acquired = self._launch_lock.acquire(
+            timeout=max(0.1, deadline - time.monotonic())
+        )
         try:
             proc = self._process
             if acquired:
@@ -884,6 +1279,7 @@ class JasnaInstance(MonitorInstance):
                     # ONLY after killing a LIVE child: an already-exited child is
                     # never left with a stale staging file — see below.
                     self._delete_current_staging()
+                    self._gpu_give(self._restore_hold)
                 elif proc is not None and proc.poll() == 0:
                     # The child finished between two polls and the worker may never
                     # run check() again: publish its result NOW so a Stop between
@@ -892,6 +1288,12 @@ class JasnaInstance(MonitorInstance):
                     # start() rescans and counts it as done.
                     self._publish_current()
                     self._process = None
+                    self._gpu_give(self._restore_hold)
+                elif proc is not None:
+                    # Exited non-zero, unpolled: the exit branch handles it, but
+                    # the GPU is free now — release the hook (idempotent).
+                    self._gpu_give(self._restore_hold)
+                self._stop_asr(deadline)
             else:
                 log.warning(
                     "jasna %s: stop() could not take the launch lock within %.1fs; "
@@ -901,12 +1303,41 @@ class JasnaInstance(MonitorInstance):
                     timeout,
                 )
                 _terminate_child(proc, timeout)
+                self._gpu_give(self._restore_hold)
+                job = self._subs_job
+                if job is not None and job.child is not None:
+                    job.terminate(timeout=max(0.1, deadline - time.monotonic()))
+                    self._gpu_give(job)
         finally:
             if acquired:
                 self._launch_lock.release()
         reader = self._reader  # joined with NO lock held
         if reader is not None:
             reader.join(timeout=2)
+        if translator is not None:
+            translator.join(max(0.1, deadline - time.monotonic()))
+
+    def _stop_asr(self, deadline: float) -> None:
+        """Under `_launch_lock` (stop): a live ASR child is tree-killed (bounded)
+        and its GPU hook released; one that already exited 0 unpolled gets its
+        `.ja.srt` published (never the zh — the translator is cancelled)."""
+        job = self._subs_job
+        # Read `child` ONCE: the deferred cleanup of `_disable_subs` runs without
+        # `_launch_lock` and `SubsJob.terminate()` sets it to None concurrently.
+        child = job.child if job is not None else None
+        if job is None or child is None:
+            return
+        if child.poll() is None:
+            job.terminate(timeout=max(0.1, min(5.0, deadline - time.monotonic())))
+        else:
+            outcome = job.poll_asr()
+            if outcome is not None and outcome.kind == "succeeded":
+                err = job.publish_ja(outcome.cues)
+                if err is not None:
+                    log.warning("jasna %s: %s", self.instance_id, err)
+            job.terminate(timeout=0.5)  # joins readers; no-op once reaped
+        self._gpu_give(job)
+        self._subs_job = None
 
     def _delete_current_staging(self) -> None:
         if self._current is None:
@@ -921,7 +1352,6 @@ class JasnaInstance(MonitorInstance):
 
     # ── launching ──────────────────────────────────────────────────────────
     def _launch_next(self, emit: EventEmitter) -> None:
-        cfg = self._cfg
         if self._stopping.is_set() or not self._pending:
             return
         # Peek + probe BEFORE taking the lock: probe_resolution may block up to 5 s
@@ -940,9 +1370,30 @@ class JasnaInstance(MonitorInstance):
         if prev_reader is not None and prev_reader.is_alive():
             prev_reader.join(timeout=1)
 
+        # GPU lease (#177 AC9): acquired OUTSIDE the lock (it may wait in #179);
+        # every path below that does not leave a live child releases it.
+        hold = object()
+        self._gpu_take(hold)
+        launched = False
+        try:
+            launched = self._launch_locked(emit, tier, dims, hold)
+        finally:
+            if not launched:
+                self._gpu_give(hold)
+
+    def _launch_locked(
+        self,
+        emit: EventEmitter,
+        tier: Tier,
+        dims: Optional[tuple[int, int]],
+        hold: object,
+    ) -> bool:
+        """The locked half of `_launch_next`; True when a child is now live."""
+        cfg = self._cfg
         with self._launch_lock:
             if self._stopping.is_set() or not self._pending:
-                return
+                return False
+            self._phase = "restore"
             video = self._pending.pop(0)
             if video != self._current:  # a NEW file → fresh retry budget
                 self._plain_retry_used = False
@@ -999,7 +1450,7 @@ class JasnaInstance(MonitorInstance):
                 self._emit_launch_error(
                     emit, f"jasna not found at {cfg.jasna_exe_path}"
                 )
-                return
+                return False
             except PermissionError as e:
                 # WinError 5 — usually a non-executable target or an AV block.
                 self._emit_launch_error(
@@ -1007,18 +1458,19 @@ class JasnaInstance(MonitorInstance):
                     f"access denied launching {cfg.jasna_exe_path} ({e}); make sure "
                     "it's the Jasna executable and isn't blocked by antivirus",
                 )
-                return
+                return False
             except (OSError, ValueError) as e:
                 # start()/check() must NEVER raise — a raising start() would make
                 # the supervisor's watchdog restart-spin on a broken install.
                 self._emit_launch_error(emit, f"failed to launch jasna: {e}")
-                return
+                return False
 
             self._compiling = not engines_present(exe_dir)
             if self._stopping.is_set():
                 # stop() ran between the guard above and Popen — don't orphan it.
                 _terminate_child(proc, timeout=2)
-                return
+                return False
+            self._restore_hold = hold  # released by the exit branch / stop()
             self._process = proc
             if capture and proc.stdout is not None:
                 self._reader = threading.Thread(
@@ -1028,6 +1480,7 @@ class JasnaInstance(MonitorInstance):
                     daemon=True,
                 )
                 self._reader.start()
+            return True
 
     # ── reader thread (capture mode) ───────────────────────────────────────
     def _reader_loop(self, proc: subprocess.Popen) -> None:
@@ -1074,26 +1527,59 @@ class JasnaInstance(MonitorInstance):
         return self._check_passive(emit)
 
     def _check_managed(self, emit: EventEmitter) -> MonitorStatus:
+        if not self._started:
+            if self._launch_error is not None:
+                return MonitorStatus(state="error", detail=self._launch_error)
+            return MonitorStatus(state="error", detail="not started")
+        # (1) translation results first: settlement — and the deferred part of a
+        # degrade it triggers — happens before anything below can return, so a
+        # restore launch error never strands finished translations (S1).
+        self._settle_results(emit)
+        # (2) launch error
         if self._launch_error is not None:
             return MonitorStatus(state="error", detail=self._launch_error)
-        if not self._started:
-            return MonitorStatus(state="error", detail="not started")
         if self._batch_aborted:
             # Short-circuit: counters are frozen and nothing launches again.
+            self._phase = self._live_phase()
             return self._build_status("degraded", detail=self._aborted_detail())
         proc = self._process
         if proc is not None:
             retcode = proc.poll()
-            if retcode is None:
-                return self._build_status("running")
-            self._handle_exit(retcode, emit)  # may launch the next file
-            if self._launch_error is not None:
-                return MonitorStatus(state="error", detail=self._launch_error)
-            if self._batch_aborted:
-                return self._build_status("degraded", detail=self._aborted_detail())
-            if self._process is not None:
-                return self._build_status("running")
+            if retcode is not None:
+                self._handle_exit(retcode, emit)  # may launch the next file
+                if self._launch_error is not None:
+                    return MonitorStatus(state="error", detail=self._launch_error)
+                if self._batch_aborted:
+                    self._phase = self._live_phase()
+                    return self._build_status("degraded", detail=self._aborted_detail())
+        self._poll_subs(emit)
+        self._maybe_done(emit)  # D1: evaluated at the end of EVERY check
+        if self._launch_error is not None:
+            return MonitorStatus(state="error", detail=self._launch_error)
+        self._phase = self._live_phase()
+        if self._process is not None or self._asr_live() or self._translating():
+            return self._build_status("running")
         return self._build_status("idle", detail=self._idle_note or None)
+
+    def _asr_live(self) -> bool:
+        job = self._subs_job
+        return job is not None and job.child is not None
+
+    def _translating(self) -> int:
+        """Requests queued in or held by the translator (0 once cancelled)."""
+        tr = self._translator
+        if tr is None:
+            return 0
+        return tr.queued() + (1 if tr.in_flight() else 0)
+
+    def _live_phase(self) -> Phase:
+        if self._process is not None:
+            return "restore"
+        if self._asr_live():
+            return "subs"
+        if self._translating():
+            return "translate"
+        return "restore"
 
     def _aborted_detail(self) -> str:
         return (
@@ -1103,25 +1589,43 @@ class JasnaInstance(MonitorInstance):
 
     # ── exit handling (one place, under _launch_lock) ──────────────────────
     def _handle_exit(self, retcode: int, emit: EventEmitter) -> None:
+        stopping = False
         with self._launch_lock:
             if self._process is None:
                 return  # already handled
             self._process = None  # handled ONCE
+            self._next_action = None
             if self._stopping.is_set():
                 # Shutting down: a terminate-induced non-zero exit is not a file
                 # failure — don't alert, don't relaunch. A clean exit is still
                 # published so the finished video survives the Stop (C-4).
                 if retcode == 0:
                     self._publish_current()
-                return
-            if retcode == 0:
+                stopping = True
+            elif retcode == 0:
                 self._handle_success(emit)
             else:
                 self._handle_failure(retcode, emit)
-        # Advance OUTSIDE the lock: _launch_next probes the next file (up to 5 s)
+            # D3: exactly ONE post-lock action, chosen under the lock.
+            action = self._next_action or "advance"
+            self._next_action = None
+            video = self._current
+        self._gpu_give(self._restore_hold)  # the restore child is gone
+        if stopping:
+            return
+        # Act OUTSIDE the lock: _launch_next probes the next file (up to 5 s)
         # before taking the lock, so a concurrent stop() is never held behind the
         # probe. _launch_next re-checks _stopping under the lock before popping.
-        self._advance(emit)
+        if action == "subs" and video is not None:
+            self._start_subs(video, emit)  # never dispatches itself (D29)
+        else:
+            self._advance_requested = True
+        # D31/D32: after EITHER action — a subs start that settled synchronously
+        # (e.g. translate-only without a key) leaves its request for this loop.
+        # The deferred part of a degrade/abort runs here, before check() can
+        # return `degraded` (D8).
+        self._run_deferred()
+        self._dispatch(emit)
 
     def _publish_current(self) -> Optional[str]:
         """Atomic publish of the current file's staging output (constitution §2).
@@ -1174,6 +1678,18 @@ class JasnaInstance(MonitorInstance):
             self._emit_degrade(emit, tier)
             self._run_unet_disabled[tier] = True
         self._unet_retry_pending = False
+        # #177 (D3): subtitle this file next, or move on.
+        name = self._current.name if self._current is not None else None
+        if (
+            self._cfg.av_translate
+            and self._subs_disabled is None
+            and name is not None
+            and name in self._jobs
+            and name not in self._settled
+        ):
+            self._next_action = "subs"
+        else:
+            self._next_action = "advance"
 
     def _emit_degrade(self, emit: EventEmitter, tier: str) -> None:
         label = "4K" if tier == "4k" else "1080p"
@@ -1232,10 +1748,18 @@ class JasnaInstance(MonitorInstance):
         self._failed += 1
         self._consecutive_failures += 1
         emit("alert", f"{cfg.name}: {name} failed", detail)
+        if cfg.av_translate and name in self._jobs:
+            # #177: a file that never got restored gets no subtitles.
+            self._settle(name, "skipped", "restore_failed", emit)
         if (
             self._consecutive_failures >= _ABORT_AFTER_FAILURES
             and not self._batch_aborted
         ):
+            if cfg.av_translate:
+                # C2: disable subtitles BEFORE the abort — its deferred part
+                # (translator cancel, ASR terminate) runs right after this
+                # _handle_exit releases the lock, before `degraded` is returned.
+                self._disable_subs("batch aborted", emit)
             self._batch_aborted = True
             emit(
                 "alert",
@@ -1245,19 +1769,389 @@ class JasnaInstance(MonitorInstance):
             )
 
     def _advance(self, emit: EventEmitter) -> None:
-        if self._batch_aborted or self._stopping.is_set():
+        """Never under `_launch_lock`; reached only through `_dispatch()`."""
+        if (
+            self._batch_aborted
+            or self._stopping.is_set()
+            or self._launch_error is not None
+        ):
             return
+        if self._process is not None or self._asr_live():
+            return  # D25 safety net: one GPU child at a time
         if self._pending:
             self._launch_next(emit)
             return
-        if not self._batch_done_emitted:
-            self._batch_done_emitted = True
-            emit(
-                "done",
-                f"{self._cfg.name} complete",
-                f"Jasna processing complete | Queue: {self._done}/{self._total} "
-                f"done, {self._failed} failed | {datetime.now():%Y-%m-%d %H:%M:%S}",
+        if self._cfg.av_translate and self._subs_disabled is None and self._subs_only:
+            self._start_subs(self._subs_only.pop(0), emit)
+            return
+        self._maybe_done(emit)
+
+    def _dispatch(self, emit: EventEmitter) -> None:
+        """The ONLY caller of `_advance()` on the exit/poll/settle/start paths
+        (D25/D29). A LOOP, not recursion: a subs-only file that settles inside
+        `_start_subs` just sets the request again, so any backlog is walked on
+        this one frame. Ends when an advance launches a GPU child, finds nothing
+        to do, or the run is stopped/aborted."""
+        while self._advance_requested:
+            self._advance_requested = False
+            self._advance(emit)
+
+    def _run_deferred(self) -> None:
+        """Run the blocking side effects queued by settlements (D8) — called by
+        every lock holder right after it released `_launch_lock`."""
+        while self._deferred:
+            fn = self._deferred.pop(0)
+            try:
+                fn()
+            except Exception as e:  # never let cleanup break check()
+                log.warning(
+                    "jasna %s: deferred cleanup failed: %s", self.instance_id, e
+                )
+
+    def _maybe_done(self, emit: EventEmitter) -> None:
+        """Emit the batch `done` exactly once, when every part of the run has
+        finished (D1). Stop/abort/launch errors never emit; a Start without any
+        work never emits (D20)."""
+        if not self._had_work or self._batch_done_emitted:
+            return
+        if (
+            self._stopping.is_set()
+            or self._batch_aborted
+            or self._launch_error is not None
+        ):
+            return
+        if self._pending or self._process is not None:
+            return
+        av = bool(self._cfg.av_translate)
+        if av:
+            if self._subs_job is not None or self._subs_only:
+                return
+            if len(self._settled) < len(self._jobs):
+                return
+            tr = self._translator
+            if tr is not None and (
+                tr.queued() or tr.in_flight() or not tr.results.empty()
+            ):
+                return
+        self._batch_done_emitted = True
+        self._phase = "restore"
+        subs = ""
+        if av:
+            subs = (
+                f" | Subs: {self._subs_completed}/{len(self._jobs)} done, "
+                f"{self._subs_failed} failed, {self._subs_skipped} skipped"
             )
+        emit(
+            "done",
+            f"{self._cfg.name} complete",
+            f"Jasna processing complete | Queue: {self._done}/{self._total} "
+            f"done, {self._failed} failed{subs} | "
+            f"{datetime.now():%Y-%m-%d %H:%M:%S}",
+        )
+        # F2 (constitution §4): the run is over — end the idle translator thread
+        # and its llm-worker now instead of at Stop. Bounded, and never under
+        # `_launch_lock` (`_maybe_done` only runs outside it).
+        translator = self._translator
+        if translator is not None:
+            self._translator = None
+            try:
+                translator.cancel()
+                translator.join(2.0)
+            except Exception as e:  # cleanup must never break check()
+                log.warning(
+                    "jasna %s: translator shutdown failed: %s", self.instance_id, e
+                )
+
+    # ── 「AV 翻译」: subtitle phases (#177) ─────────────────────────────────
+    def _gpu_acquire(self) -> bool:
+        """GPU lease hook (#179 fills it). Always paired with `_gpu_release`."""
+        return True
+
+    def _gpu_release(self) -> None:
+        """GPU lease hook (#179 fills it)."""
+
+    def _gpu_take(self, holder: object) -> None:
+        if not self._gpu_acquire():
+            log.warning("jasna %s: GPU lease not granted; continuing", self.instance_id)
+        with self._gpu_lock:
+            self._gpu_holder = holder
+
+    def _gpu_give(self, holder: Optional[object]) -> None:
+        """Release the hook once for `holder` — a no-op for any other holder, so
+        two racing exit paths can never release twice (D12 strict pairs)."""
+        with self._gpu_lock:
+            if holder is None or self._gpu_holder is not holder:
+                return
+            self._gpu_holder = None
+        self._gpu_release()
+
+    def _alert_job(self, job_id: str, detail: str, emit: EventEmitter) -> None:
+        emit(
+            "alert",
+            f"{self._cfg.name}: subtitles for {job_id} failed",
+            _bounded(detail),  # bounded tail, never the argv
+            dedupe_key=f"{self.instance_id}:subs:{job_id}",
+        )
+
+    def _settle(
+        self, job_id: str, terminal: str, detail: str, emit: EventEmitter
+    ) -> None:
+        """The ONE place a job becomes terminal (callers hold `_launch_lock`).
+        No-op when it already is; 3 consecutive failures → `_disable_subs`."""
+        if job_id in self._settled or job_id not in self._jobs:
+            return
+        self._settled[job_id] = (terminal, detail)
+        if terminal == "completed":
+            self._subs_completed += 1
+            self._subs_consecutive_failures = 0
+        elif terminal == "failed":
+            self._subs_failed += 1
+            self._subs_consecutive_failures += 1
+        else:
+            self._subs_skipped += 1
+            if detail == "no_llm_key":
+                self._subs_consecutive_failures = 0
+        if (
+            self._subs_consecutive_failures >= _SUBS_DISABLE_AFTER
+            and self._subs_disabled is None
+        ):
+            self._disable_subs(
+                f"{_SUBS_DISABLE_AFTER} consecutive subtitle failures", emit
+            )
+
+    def _disable_subs(self, reason: str, emit: EventEmitter) -> None:
+        """Flags + settlement only (may run under `_launch_lock`); the blocking
+        part — translator cancel, ASR terminate — is DEFERRED until the lock is
+        released (D8/D22), and it only REQUESTS an advance (D25)."""
+        if self._subs_disabled is not None:
+            return
+        self._subs_disabled = reason
+        emit(
+            "alert",
+            f"{self._cfg.name}: AV 翻译 disabled",
+            f"Subtitles are off for the rest of this run ({reason}); restores "
+            "continue. Unfinished subtitle jobs are skipped.",
+            dedupe_key=f"{self.instance_id}:subs-disabled",
+        )
+        for job_id in list(self._jobs):
+            self._settle(job_id, "skipped", "cancelled", emit)
+        self._subs_only = []
+        translator = self._translator
+        job = self._subs_job
+
+        def cleanup() -> None:
+            if translator is not None:
+                translator.cancel()
+            # D26: an exited-but-unpolled child is NOT reaped — still terminate
+            # it (harmless on an exited tree), join it and release its hook.
+            if job is not None and job.child is not None:
+                job.terminate()
+                self._gpu_give(job)
+                if self._subs_job is job:
+                    self._subs_job = None
+                    self._phase = "restore"
+                    self._advance_requested = True
+
+        self._deferred.append(cleanup)
+
+    def _submit_translation(
+        self, job: SubsJob, cues: Optional[list[Cue]], emit: EventEmitter
+    ) -> None:
+        """Under `_launch_lock`. The transcript is loaded first: an empty one
+        needs no request (CX3); otherwise the key is checked per job
+        (live-apply)."""
+        if cues is None:
+            try:
+                cues = job.load_ja()
+            except (SrtError, OSError) as e:
+                log.warning("jasna %s: %s: %s", self.instance_id, job.job_id, e)
+                self._settle(job.job_id, "failed", "unreadable .ja.srt", emit)
+                self._alert_job(job.job_id, "unreadable .ja.srt", emit)
+                return
+        if not cues:
+            # An empty transcript (no speech): the zh is empty too — regardless
+            # of the key, since nothing has to be translated.
+            err = job.publish_zh([])
+            if err is None:
+                self._settle(job.job_id, "completed", "no speech", emit)
+            else:
+                self._settle(job.job_id, "failed", err, emit)
+                self._alert_job(job.job_id, err, emit)
+            return
+        settings = get_llm_settings()
+        if not settings.api_key and needs_llm_key(settings.api_base):
+            self._settle(job.job_id, "skipped", "no_llm_key", emit)
+            if not self._subs_key_alerted:
+                self._subs_key_alerted = True
+                emit(
+                    "alert",
+                    f"{self._cfg.name}: no LLM API key",
+                    "AV 翻译 needs the agent's LLM API key to translate; files are "
+                    "skipped (their .ja.srt is kept) until a key is set.",
+                    dedupe_key=f"{self.instance_id}:subs-nokey",
+                )
+            return
+        translator = self._translator
+        if translator is None:
+            self._settle(job.job_id, "failed", "translator not running", emit)
+            self._alert_job(job.job_id, "translator not running", emit)
+            return
+        translator.submit(TranslateRequest(self._run, job.job_id, tuple(cues)))
+
+    def _start_subs(self, video: Path, emit: EventEmitter) -> None:
+        """Start one file's subtitle job. Always called from a dispatching
+        context, so it NEVER dispatches itself (D29); terminal branches only set
+        flags under the lock, and the GPU release / deferred work run after it
+        (D27/D30)."""
+        name = video.name
+        job = self._jobs.get(name)
+        if job is None or name in self._settled:
+            self._advance_requested = True
+            return
+        if self._kinds.get(name) == "translate_only":
+            with self._launch_lock:  # no GPU (D12)
+                if not self._stopping.is_set() and self._subs_disabled is None:
+                    self._submit_translation(job, None, emit)
+                    self._advance_requested = True
+            self._run_deferred()
+            return
+        self._gpu_take(job)
+        release_gpu = False
+        with self._launch_lock:
+            if self._stopping.is_set() or self._subs_disabled is not None:
+                release_gpu = True  # D30: no bare return — the release pairs
+            else:
+                err = job.start_asr(self._spawn)
+                if (
+                    err is not None
+                    and err != "unstable"
+                    and job.attempt < _ASR_MAX_ATTEMPTS
+                ):
+                    err = job.start_asr(self._spawn)  # a failed attempt: retry once
+                if self._stopping.is_set():
+                    job.terminate(timeout=2.0)  # D9: stop() raced the spawn
+                    release_gpu = True
+                elif err is None:
+                    self._phase = "subs"
+                    self._subs_job = job
+                elif err == "unstable":
+                    self._settle_unstable(job, emit)
+                    release_gpu = True
+                    self._advance_requested = True
+                else:
+                    self._settle(name, "failed", err, emit)
+                    self._alert_job(name, err, emit)
+                    release_gpu = True
+                    self._advance_requested = True
+        if release_gpu:
+            self._gpu_give(job)
+        self._run_deferred()
+
+    def _settle_unstable(self, job: SubsJob, emit: EventEmitter) -> None:
+        self._settle(job.job_id, "skipped", "unstable", emit)
+        emit(
+            "alert",
+            f"{self._cfg.name}: {job.job_id} changed during transcription",
+            f"{job.media.name} changed or disappeared while it was being "
+            "transcribed; its subtitles are skipped for this run.",
+            dedupe_key=f"{self.instance_id}:subs-unstable:{job.job_id}",
+        )
+
+    def _poll_subs(self, emit: EventEmitter) -> None:
+        job = self._subs_job
+        if job is None:
+            return
+        release_gpu = False
+        with self._launch_lock:
+            if (
+                self._stopping.is_set()
+                or self._subs_disabled is not None
+                or job.job_id in self._settled
+                or self._subs_job is not job
+            ):
+                return  # stop() / the deferred terminate owns this job (D22)
+            outcome = job.poll_asr()
+            if outcome is None:
+                return
+            terminal = True
+            name = job.job_id
+            if outcome.kind == "succeeded":
+                err = job.publish_ja(outcome.cues)  # D9: under the lock
+                if err is not None:
+                    self._settle(name, "failed", err, emit)
+                    self._alert_job(name, err, emit)
+                else:
+                    self._submit_translation(job, list(outcome.cues), emit)
+            elif outcome.kind == "no_speech":
+                err = job.publish_empty()
+                if err is None:
+                    self._settle(name, "completed", "no speech", emit)
+                else:
+                    self._settle(name, "failed", err, emit)
+                    self._alert_job(name, err, emit)
+            elif outcome.kind == "unstable":
+                self._settle_unstable(job, emit)
+            elif job.attempt < _ASR_MAX_ATTEMPTS:
+                err = job.start_asr(self._spawn)  # retry: a new attempt dir
+                if self._stopping.is_set():
+                    # D35: exactly _start_subs's post-spawn re-check.
+                    job.terminate(timeout=2.0)
+                    release_gpu = True
+                    self._subs_job = None
+                    terminal = False
+                elif err is None:
+                    terminal = False  # the job stays current
+                elif err == "unstable":  # D33: like a final failure
+                    self._settle_unstable(job, emit)
+                else:
+                    self._settle(name, "failed", err, emit)
+                    self._alert_job(name, err, emit)
+            else:
+                self._settle(name, "failed", outcome.detail, emit)
+                self._alert_job(name, outcome.detail, emit)
+            if terminal:
+                self._subs_job = None
+                release_gpu = True
+                self._phase = "translate" if self._translating() else "restore"
+                self._advance_requested = True  # D28
+        if release_gpu:
+            self._gpu_give(job)
+        self._run_deferred()
+        self._dispatch(emit)
+
+    def _settle_results(self, emit: EventEmitter) -> None:
+        """Drain the translator's results (worker thread only). Each result is
+        settled under `_launch_lock`, `_settled` checked BEFORE any publish (D7);
+        deferred work and dispatch run after each release."""
+        translator = self._translator
+        if translator is None:
+            return
+        while True:
+            try:
+                result = translator.results.get_nowait()
+            except queue.Empty:
+                return
+            if result is CANCELLED or not isinstance(result, TranslateResult):
+                continue
+            if result.run != self._run:
+                continue  # an earlier generation's result
+            with self._launch_lock:
+                if self._stopping.is_set():
+                    return
+                job = self._jobs.get(result.job_id)
+                if job is not None and result.job_id not in self._settled:
+                    if result.outcome == "translated":
+                        err = job.publish_zh(result.zh_cues)  # D9: under the lock
+                        if err is None:
+                            self._settle(job.job_id, "completed", "", emit)
+                        else:
+                            self._settle(job.job_id, "failed", err, emit)
+                            self._alert_job(job.job_id, err, emit)
+                    else:
+                        self._settle(job.job_id, "failed", result.detail, emit)
+                        self._alert_job(job.job_id, result.detail, emit)
+            self._run_deferred()
+            self._dispatch(emit)
 
     # ── passive ────────────────────────────────────────────────────────────
     def _check_passive(self, emit: EventEmitter) -> MonitorStatus:
@@ -1280,8 +2174,10 @@ class JasnaInstance(MonitorInstance):
         metrics: dict = {}
         # Per-task progress / current file are only meaningful while RUNNING —
         # reporting them when idle would tell the UI/Hub a file is being processed
-        # when it isn't (lada/Codex #59 parity).
-        if state == "running":
+        # when it isn't (lada/Codex #59 parity). #177 (D17): they belong to the
+        # phase's live child — the restore child's progress in `restore`, the
+        # ASR child's media name in `subs`, nothing while only translating.
+        if state == "running" and self._phase == "restore":
             with self._lock:
                 metrics.update(self._progress)
             if self._current is not None:
@@ -1292,11 +2188,31 @@ class JasnaInstance(MonitorInstance):
                 "percent" in metrics or engines_present(self._exe_dir())
             ):
                 self._compiling = False
+        elif state == "running" and self._phase == "subs":
+            job = self._subs_job
+            if job is not None and job.child is not None:
+                metrics["current_file"] = job.media.name
         if cfg.jasna_exe_path.strip() and self._total:
             metrics["queue_completed"] = self._done
             metrics["queue_total"] = self._total
             metrics["queue_failed"] = self._failed
             metrics["queue_remaining"] = max(0, self._total - self._done - self._failed)
+        if cfg.jasna_exe_path.strip():
+            metrics["phase"] = self._phase
+            if cfg.av_translate:
+                total = len(self._jobs)
+                metrics["subs_total"] = total
+                metrics["subs_completed"] = self._subs_completed
+                metrics["subs_failed"] = self._subs_failed
+                metrics["subs_skipped"] = self._subs_skipped
+                metrics["subs_remaining"] = max(
+                    0,
+                    total
+                    - self._subs_completed
+                    - self._subs_failed
+                    - self._subs_skipped,
+                )
+                metrics["subs_translating"] = self._translating()
         metrics.update(_cpu_mem())
         if cfg.jasna_gpu_monitor:
             gpu = read_gpu()
@@ -1321,6 +2237,8 @@ class JasnaInstance(MonitorInstance):
         # A clean one-line summary with "·" separators (lada parity); the rich
         # view is the UI metrics dashboard.
         parts: list[str] = []
+        if state == "running" and self._phase in ("subs", "translate"):
+            return self._subs_detail(m)
         if state == "running" and self._current is not None:
             head = f"{state}: {self._current.name}{self._tier_suffix()}"
             if self._compiling and "percent" not in m:
@@ -1336,7 +2254,20 @@ class JasnaInstance(MonitorInstance):
             parts.append(f"{m['fps']:.1f} fps")
         if "queue_total" in m:
             parts.append(f"{m['queue_completed']}/{m['queue_total']} done")
+        if m.get("subs_translating"):
+            parts.insert(1, f"translating {m['subs_translating']}")
         return " · ".join(parts)
+
+    def _subs_detail(self, m: dict) -> str:
+        subs = f"subs {m.get('subs_completed', 0)}/{m.get('subs_total', 0)}"
+        translating = f"translating {m.get('subs_translating', 0)}"
+        job = self._subs_job
+        if self._phase == "subs" and job is not None and job.child is not None:
+            secs = max(0, int(time.monotonic() - job.started_at))
+            elapsed = f"{secs // 60:02d}:{secs % 60:02d} elapsed"
+            head = f"subtitling: {job.media.name} [{job.engine}]"
+            return " · ".join((head, elapsed, translating, subs))
+        return f"{translating} · {subs}"
 
 
 class JasnaPlugin(MonitorPlugin):
@@ -1362,6 +2293,10 @@ class JasnaPlugin(MonitorPlugin):
                 "jasna_output_folder",
                 "unet4x_1080p",
                 "unet4x_4k",
+                "av_translate",
+                "whisperjav_exe_path",
+                "whisperjav_engine",
+                "whisperjav_extra_args",
                 "clip_size_1080p",
                 "clip_size_4k",
                 "temporal_overlap",
@@ -1379,6 +2314,7 @@ class JasnaPlugin(MonitorPlugin):
             "jasna_exe_path": {"ui:options": {"taskpawPath": "file"}},
             "jasna_input_folder": {"ui:options": {"taskpawPath": "directory"}},
             "jasna_output_folder": {"ui:options": {"taskpawPath": "directory"}},
+            "whisperjav_exe_path": {"ui:options": {"taskpawPath": "file"}},
         }
 
     def manual_start(self, config: BaseMonitorConfig) -> bool:

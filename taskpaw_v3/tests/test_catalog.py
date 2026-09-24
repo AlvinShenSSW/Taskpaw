@@ -306,3 +306,18 @@ def test_control_plugins_endpoint():
     ids = {p["type_id"] for p in body["plugins"]}
     assert "host_metrics" in ids and "comfyui" in ids
     assert any(p["id"] == "moomoo" for p in body["presets"])
+
+
+def test_jasna_av_translate_fields_in_the_catalog():
+    # #177: the four「AV 翻译」fields with their defaults; the exe is a file picker.
+    by_id = {p["type_id"]: p for p in plugin_catalog()}
+    jasna = by_id["jasna"]
+    props = jasna["json_schema"]["properties"]
+    assert props["av_translate"]["default"] is False
+    assert props["whisperjav_exe_path"]["default"] == ""
+    assert props["whisperjav_engine"]["default"] == "anime-whisper"
+    assert props["whisperjav_extra_args"]["default"] == ""
+    ui = jasna["ui_schema"]
+    assert ui["whisperjav_exe_path"]["ui:options"]["taskpawPath"] == "file"
+    order = ui["ui:order"]
+    assert order.index("av_translate") == order.index("unet4x_4k") + 1

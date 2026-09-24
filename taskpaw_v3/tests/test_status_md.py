@@ -798,3 +798,122 @@ def test_malformed_unhashable_type_id_does_not_crash_rendering():
     md = render_status_md(rows, "t")
     assert "- JASNA: 5/10 done (5 left)" in md  # the good monitor still renders
     assert "- WEIRD:" in md  # the bad one degrades to a state line, no crash
+
+
+# ── #177: Jasna「AV 翻译」appends a `subs S/T` part ─────────────────────────────
+def _jasna_line(md: str) -> str:
+    return next(ln for ln in md.splitlines() if ln.startswith("- JASNA:"))
+
+
+def test_jasna_subs_part_appended_when_subs_total_present():
+    md = render_status_md(
+        _jasna_row(
+            {
+                "queue_completed": 5,
+                "queue_total": 10,
+                "queue_remaining": 5,
+                "current_file": "clip.mp4",
+                "subs_total": 5,
+                "subs_completed": 3,
+                "subs_failed": 0,
+            }
+        ),
+        "t",
+    )
+    line = _jasna_line(md)
+    # the legacy lada substring stays byte-identical, subs follows it
+    assert line == "- JASNA: 5/10 done (5 left) | clip.mp4 | subs 3/5"
+
+
+def test_jasna_subs_part_carries_the_failed_suffix():
+    md = render_status_md(
+        _jasna_row(
+            {
+                "queue_completed": 2,
+                "queue_total": 4,
+                "subs_total": 4,
+                "subs_completed": 1,
+                "subs_failed": 2,
+            }
+        ),
+        "t",
+    )
+    assert _jasna_line(md) == "- JASNA: 2/4 done (2 left) | subs 1/4 (2 failed)"
+
+
+def test_jasna_subs_part_alone_and_malformed_values():
+    md = render_status_md(_jasna_row({"subs_total": 3}), "t")
+    assert _jasna_line(md) == "- JASNA: subs 0/3"
+    md = render_status_md(
+        _jasna_row(
+            {
+                "queue_completed": 1,
+                "queue_total": 2,
+                "subs_total": float("nan"),
+                "subs_completed": 1,
+            }
+        ),
+        "t",
+    )
+    assert _jasna_line(md) == "- JASNA: 1/2 done (1 left)"
+    md = render_status_md(
+        _jasna_row({"subs_total": 2, "subs_completed": "x", "subs_failed": "y"}), "t"
+    )
+    assert _jasna_line(md) == "- JASNA: subs 0/2"
+
+
+def test_lada_line_byte_identical_without_subs_metrics():
+    md = render_status_md(
+        _jasna_row(
+            {
+                "queue_completed": 5,
+                "queue_total": 10,
+                "queue_remaining": 5,
+                "current_file": "clip.mp4",
+            }
+        ),
+        "t",
+    )
+    assert _jasna_line(md) == "- JASNA: 5/10 done (5 left) | clip.mp4 |"
+    md = render_status_md(
+        _lada_row(
+            {
+                "queue_completed": 5,
+                "queue_total": 10,
+                "queue_remaining": 5,
+                "current_file": "clip.mp4",
+            }
+        ),
+        "t",
+    )
+    assert _lada_line(md) == "- LADA: 5/10 done (5 left) | clip.mp4 |"
+
+
+def test_jasna_error_state_hides_the_subs_part():
+    md = render_status_md(
+        _jasna_row({"subs_total": 3, "subs_completed": 1}, state="error"), "t"
+    )
+    assert "subs" not in _jasna_line(md)
+
+
+def test_jasna_subs_part_with_capture_progress_renders_each_fragment_once():
+    # K-m8: progress fragment and subs fragment together, each exactly once.
+    base = {
+        "queue_completed": 5,
+        "queue_total": 10,
+        "queue_remaining": 5,
+        "current_file": "clip.mp4",
+        "percent": 47,
+        "eta": "30:47",
+        "fps": 112.3,
+    }
+    md = render_status_md(
+        _jasna_row({**base, "subs_total": 4, "subs_completed": 2}), "t"
+    )
+    line = _jasna_line(md)
+    progress = "47% · ETA 30:47 · 112fps"
+    assert line.count(progress) == 1
+    assert line.count("subs 2/4") == 1
+    assert line == f"- JASNA: 5/10 done (5 left) | clip.mp4 | {progress} | subs 2/4"
+    md = render_status_md(_lada_row(base), "t")
+    assert _lada_line(md) == f"- LADA: 5/10 done (5 left) | clip.mp4 | {progress}"
