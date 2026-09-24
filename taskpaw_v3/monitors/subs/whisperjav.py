@@ -144,10 +144,12 @@ def _first_entry(out_dir: Path) -> Optional[dict[str, Any]]:
 
 
 def _resolve_output(out_dir: Path, output: str) -> Path:
+    """Absolute → as-is; relative → ONLY `out_dir / <name>` — never the process
+    CWD, where a same-named file would be read as this media's subtitles."""
     p = Path(output)
-    if p.is_absolute() or p.exists():
+    if p.is_absolute():
         return p
-    return out_dir / p.name  # a relative name is taken relative to out_dir
+    return out_dir / p.name
 
 
 def read_outcome(out_dir: Path, rc: Optional[int], tail: str) -> AsrOutcome:

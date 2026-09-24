@@ -283,3 +283,24 @@ def test_read_outcome_unparseable_srt(tmp_path):
     _manifest(tmp_path, {"state": "done", "output": str(p)})
     o = read_outcome(tmp_path, 0, "")
     assert o.kind == "failed" and o.detail.startswith("unparseable srt")
+
+
+def test_read_outcome_relative_output_resolves_only_in_out_dir(tmp_path, monkeypatch):
+    # A same-named file in the process CWD must never be read as this media's
+    # subtitles (K-m2): a relative manifest output is `out_dir / name` only.
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    out = tmp_path / "attempt-1"
+    out.mkdir()
+    name = "a_restored.ja.whisperjav.srt"
+    (cwd / name).write_text(
+        "1\n00:00:00,000 --> 00:00:01,000\nCWD-IMPOSTOR\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(cwd)
+    _manifest(out, {"state": "done", "output": name})
+    missing = read_outcome(out, 0, "")
+    assert missing.kind == "failed" and "output missing" in missing.detail
+    _srt(out, name=name)
+    o = read_outcome(out, 0, "")
+    assert o.kind == "succeeded"
+    assert [c.text for c in o.cues] == ["はい", "いいえ"]

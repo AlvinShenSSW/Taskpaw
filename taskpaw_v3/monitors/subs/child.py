@@ -198,8 +198,10 @@ class ChildProcess:
         return text[-max_chars:] if max_chars > 0 else ""
 
     def terminate_tree(self, timeout: float = 5.0) -> None:
-        """End the child and its descendants; bounded by ~`timeout` + 2 s
-        (+ the taskkill run itself on Windows). Never raises."""
+        """Windows: `taskkill /PID <pid> /T /F` first (the whole tree, C7),
+        then wait → kill. POSIX: terminate → wait → kill of the DIRECT child
+        only (D18) — descendants are not signalled. Bounded by ~`timeout` +
+        2 s (+ the taskkill run itself on Windows). Never raises."""
         if sys.platform == "win32":
             self._taskkill(timeout)
         else:

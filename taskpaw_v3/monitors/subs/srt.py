@@ -27,8 +27,11 @@ class SrtError(ValueError):
     """The text is not a well-formed SRT document."""
 
 
-_TS = r"(\d+):([0-5]\d):([0-5]\d)[,.](\d{3})"
+_TS = r"(\d{1,12}):([0-5]\d):([0-5]\d)[,.](\d{3})"
 _TIMING = re.compile(rf"{_TS}[ \t]*-->[ \t]*{_TS}[ \t]*")
+# Longer digit runs are rejected before int(): Python's int-str digit limit
+# would otherwise raise a plain ValueError past the SrtError guards.
+_MAX_DIGITS = 12
 _BLOCK_SPLIT = re.compile(r"\n(?:[ \t]*\n)+")
 
 
@@ -49,7 +52,7 @@ def parse(text: str) -> list[Cue]:
         if len(lines) < 2:
             raise SrtError(f"block {n}: expected an index and a timing line")
         head = lines[0].strip()
-        if not (head.isascii() and head.isdigit()):
+        if not (head.isascii() and head.isdigit()) or len(head) > _MAX_DIGITS:
             raise SrtError(f"block {n}: index is not an integer")
         m = _TIMING.fullmatch(lines[1])
         if m is None:
@@ -69,10 +72,17 @@ def _ts(ms: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{milli:03d}"
 
 
+def _cue_text(text: str) -> str:
+    """Cue text with no blank line inside (a blank line ends an SRT cue)."""
+    return "\n".join(ln for ln in text.splitlines() if ln.strip())
+
+
 def serialize(cues: Iterable[Cue]) -> str:
-    """Renumber 1..n; `\\n` endings; every cue followed by a blank line."""
+    """Renumber 1..n; `\\n` endings; every cue followed by a blank line.
+    Defensive (F1): blank/whitespace-only lines inside a cue's text are
+    dropped, so no caller can emit a malformed file."""
     parts = [
-        f"{i}\n{_ts(c.start_ms)} --> {_ts(c.end_ms)}\n{c.text}\n\n"
+        f"{i}\n{_ts(c.start_ms)} --> {_ts(c.end_ms)}\n{_cue_text(c.text)}\n\n"
         for i, c in enumerate(cues, start=1)
     ]
     return "".join(parts)

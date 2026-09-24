@@ -695,7 +695,10 @@ def test_three_consecutive_subs_failures_disable_subs_via_the_deferred_step(
     tr.answer("c.mp4", ok=False)
     st = inst.check(emit)  # (2) then (3) → disable, deferred cancel + terminate
     assert len(_keyed(r.evs, "j1:subs-disabled")) == 1
-    assert tr.cancel_calls == 1 and tr.cancel_lock_free == [True]
+    # the deferred disable cancels it; the run then completes in this same check
+    # and F2 releases the (already cancelled) translator — cancel is idempotent
+    assert tr.cancel_calls == 2 and tr.cancel_lock_free == [True, True]
+    assert len(_done(r.evs)) == 1 and r.inst._translator is None
     assert asr_d.calls[:2] == ["terminate_tree", "join_readers"]
     assert asr_d.terminate_lock_free == [True]
     assert inst._settled["d.mp4"] == ("skipped", "cancelled")
@@ -1332,3 +1335,75 @@ def test_degraded_snapshot_never_shows_a_stale_phase(tmp_path, monkeypatch):
     inst._phase = "translate"
     st = inst.check(emit)  # the abort short-circuit path
     assert st.state == "degraded" and st.metrics["phase"] == "restore"
+
+
+# ── #177 repair cycle 2 ───────────────────────────────────────────────────
+def test_translator_is_assigned_before_the_post_start_stop_recheck(
+    tmp_path, monkeypatch
+):
+    # CX2: a Stop landing after the re-check must still find the translator, so
+    # the assignment has to precede the re-check.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    seen: list[bool] = []
+
+    class _StopOnStart(_FakeTranslator):
+        def start(self) -> None:
+            super().start()
+            seen.append(r.inst._translator is self)
+            r.inst._stopping.set()
+
+    made: list[_FakeTranslator] = []
+
+    def factory(run, *, name, **k):
+        t = _StopOnStart(run, name=name)
+        made.append(t)
+        return t
+
+    monkeypatch.setattr(J, "Translator", factory)
+    r.inst.start(r.emit)
+    assert seen == [True]
+    assert made[0].cancel_calls == 1 and made[0].joined
+    r.inst.stop(timeout=1)  # stop() sees it too — idempotent, no raise
+    assert not made[0].is_alive()
+
+
+def test_empty_ja_without_a_key_still_gets_its_empty_zh(tmp_path, monkeypatch):
+    # CX3: a 0-cue transcript needs no request, so the key is irrelevant.
+    r = _setup(tmp_path, monkeypatch, restored=["d.mp4"], key=False)
+    _ja(r, "d.mp4").write_bytes(b"")
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)
+    assert _zh(r, "d.mp4").exists() and _zh(r, "d.mp4").read_bytes() == b""
+    assert r.inst._settled["d.mp4"] == ("completed", "no speech")
+    assert not _keyed(r.evs, "j1:subs-nokey")
+    done = _done(r.evs)
+    assert len(done) == 1 and "Subs: 1/1 done, 0 failed, 0 skipped" in done[0][2]
+
+
+def test_done_releases_the_translator_and_stop_start_still_work(tmp_path, monkeypatch):
+    # F2: no idle translator thread / llm-worker survives a finished run.
+    r = _setup(tmp_path, monkeypatch, restored=["d.mp4"], ja=["d.mp4"])
+    r.inst.start(r.emit)
+    tr = r.translators[0]
+    tr.answer("d.mp4")
+    st = r.inst.check(r.emit)
+    assert len(_done(r.evs)) == 1
+    assert tr.cancel_calls == 1 and tr.joined
+    assert r.inst._translator is None
+    assert st.state == "idle" and st.metrics["subs_translating"] == 0
+    r.inst.check(r.emit)  # settling with no translator is fine
+    r.inst.stop(timeout=1)  # no raise
+    assert tr.cancel_calls == 1
+    _zh(r, "d.mp4").unlink()
+    r.inst.start(r.emit)  # a fresh run gets a fresh translator
+    assert len(r.translators) == 2 and r.inst._translator is r.translators[1]
+    assert r.translators[1].started
+    r.inst.stop(timeout=1)
+
+
+def test_extra_args_and_av_translate_descriptions_state_the_rules():
+    props = JasnaPlugin.json_schema()["properties"]
+    extra = props["whisperjav_extra_args"]["description"]
+    assert "4" in extra and "any argparse prefix" not in extra
+    av = props["av_translate"]["description"]
+    assert "delete its old .srt files first" in av

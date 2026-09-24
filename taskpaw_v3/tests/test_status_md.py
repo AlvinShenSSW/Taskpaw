@@ -894,3 +894,26 @@ def test_jasna_error_state_hides_the_subs_part():
         _jasna_row({"subs_total": 3, "subs_completed": 1}, state="error"), "t"
     )
     assert "subs" not in _jasna_line(md)
+
+
+def test_jasna_subs_part_with_capture_progress_renders_each_fragment_once():
+    # K-m8: progress fragment and subs fragment together, each exactly once.
+    base = {
+        "queue_completed": 5,
+        "queue_total": 10,
+        "queue_remaining": 5,
+        "current_file": "clip.mp4",
+        "percent": 47,
+        "eta": "30:47",
+        "fps": 112.3,
+    }
+    md = render_status_md(
+        _jasna_row({**base, "subs_total": 4, "subs_completed": 2}), "t"
+    )
+    line = _jasna_line(md)
+    progress = "47% · ETA 30:47 · 112fps"
+    assert line.count(progress) == 1
+    assert line.count("subs 2/4") == 1
+    assert line == f"- JASNA: 5/10 done (5 left) | clip.mp4 | {progress} | subs 2/4"
+    md = render_status_md(_lada_row(base), "t")
+    assert _lada_line(md) == f"- LADA: 5/10 done (5 left) | clip.mp4 | {progress}"

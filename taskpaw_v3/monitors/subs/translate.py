@@ -149,9 +149,14 @@ def _validate(content: str, ids: list[str]) -> Union[dict[str, str], _Fail]:
     out: dict[str, str] = {}
     for k in ids:
         v = obj[k]
-        if not isinstance(v, str) or not v.strip():
+        if not isinstance(v, str):
             return _Fail("content", "empty or non-string value")
-        out[k] = v.strip()
+        # F1: blank/whitespace-only lines are dropped — a blank line inside a
+        # cue would end the cue early and corrupt the published .srt.
+        text = "\n".join(ln.strip() for ln in v.splitlines() if ln.strip())
+        if not text:
+            return _Fail("content", "empty or non-string value")
+        out[k] = text
     return out
 
 
@@ -221,7 +226,9 @@ class Translator:
             return self._in_flight
 
     def cancel(self) -> None:
-        """Idempotent; bounded (≤ ~3 s worst case, D24). Never respawns."""
+        """Idempotent and bounded (D24); never respawns. In practice about
+        1–2.6 s (stdin EOF, ≤ 1 s wait, taskkill, reader join); ≈ 5.5 s only if
+        the worker survives both stdin EOF and `taskkill /F`."""
         with self._cancel_once:
             if self._cancel_started:
                 return

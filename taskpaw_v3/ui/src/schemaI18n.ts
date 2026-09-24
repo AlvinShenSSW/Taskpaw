@@ -163,7 +163,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     av_translate: {
       title: "AV 翻译",
       description:
-        "默认关。开：每个文件修复完成后，用 WhisperJAV 识别日语语音，再用「设置」里的 LLM API 翻译成简体中文，在修复后的视频旁边生成 <原名>_restored.ja.srt（日语）和 <原名>_restored.srt（简体中文）。输出文件夹里已修复但还没有字幕的影片，会在待修复文件全部处理完之后补做；已存在的 .ja.srt 会直接复用（只做翻译）。会在输出文件夹里创建 .avsubs/ 工作文件夹。需要先在「设置」里配置 LLM API。",
+        "默认关。开：每个文件修复完成后，用 WhisperJAV 识别日语语音，再用「设置」里的 LLM API 翻译成简体中文，在修复后的视频旁边生成 <原名>_restored.ja.srt（日语）和 <原名>_restored.srt（简体中文）。输出文件夹里已修复但还没有字幕的影片，会在待修复文件全部处理完之后补做；已存在的 .ja.srt 会直接复用（只做翻译）。会在输出文件夹里创建 .avsubs/ 工作文件夹。需要先在「设置」里配置 LLM API。已有的 .ja.srt / .srt 会原样复用：如果同名替换了源视频，请先删掉旧的 .srt 文件。",
     },
     whisperjav_exe_path: {
       title: "whisperjav.exe 路径",

@@ -115,7 +115,11 @@ agent→hub wire shape (only keys added); the lada `status.md` line stays byte-i
 
 **Non-goals:** #179 (standalone task, GPU lease body); OCR; LLM configuration; retries beyond
 those stated; ensemble-specific fields (`--ensemble*` stays allowed in extra args; the manifest
-path handles its naming); `.ja.srt` invalidation by source change; subtitle editing; lada.
+path handles its naming); `.ja.srt`/`.srt` invalidation by source change (conscious decision,
+Kimi F3: a re-restore of the same source keeps the same timeline, so existing subtitles stay
+valid and an mtime rule would redo about an hour of ASR + LLM per film for nothing; a source
+replaced under the same name is handled by deleting its old `.srt` files, which the field text
+now says); subtitle editing; lada.
 
 **Causal boundary:** `taskpaw_v3/core/generation.py` (new), `taskpaw_v3/monitors/subs/*` (new),
 `taskpaw_v3/monitors/plugins/jasna.py`, `taskpaw_v3/hub/server/status_md.py`,
@@ -130,7 +134,7 @@ path handles its naming); `.ja.srt` invalidation by source change; subtitle edit
 |---|-------|-------|---------------|
 | A1 | WhisperJAV 1.9.3 CLI facts (presets, `--language japanese`, output flags, manifest states, rc 0 for `empty`/`suspect`, prefixes accepted, 3-level tree) | **Verified** on the prototype (§12); the critic re-derived the prefix rule against the real 179-flag list from `main.py` (no non-owned flag is caught) | — |
 | A2 | xAI `grok-4.3` honours `response_format json_object` and returns `{"<id>": "<zh>"}` | **Verified** live (E1) | other providers: content validation → `failed` per file |
-| A3′ | Jasna's `_restored.mp4` carries the source audio stream (C10 runs ASR on it) | **unverified** — `jasna.exe` is a compiled build and no restored file exists on the prototype to probe (D23); owner smoke check below | every ASR fails → 3 strikes → subtitles disabled for the run with one alert (visible, never silent); the fallback is a one-line switch of `media()` to the source file |
+| A3′ | Jasna's `_restored.mp4` carries the source audio stream (C10 runs ASR on it) | **Verified** on the prototype (2026-09-24): three real Jasna outputs in `C:\OUTPUT` (`SSNI-012-C`, `-033-C`, `-056-C`) each carry `aac` stereo 48 kHz with the same duration as the `hevc` video; the sources in `C:\TODO` are `h264` + `aac` stereo | — (the one-line `media()` fallback to the source stays available) |
 | A4 | Packaged `taskpaw-backend llm-worker` starts and answers | not exercised yet | `Popen`/protocol failure → `network` → per-file `failed` with an alert; restores unaffected |
 | A5 | `taskkill /PID <pid> /T /F` ends a live WhisperJAV tree | **Verified** (critic exp 2: 0.27 s, grandchild gone) — and **only** while the launcher is alive (C7) | — |
 | A6 | `no_speech` ⇔ manifest `empty` | **Verified** (§12 + `run_outcome.py` docstring) | — |
@@ -712,10 +716,9 @@ harness imported plus a `_FakeChild`/`_FakeTranslator` — D10/D19):
 **Regression risk areas**: every existing `test_jasna.py` case, `status_md` lada tests,
 `test_version.py`, the #178 worker tests.
 
-**Manual smoke (owner)**: first `C:\WhisperJAV\Library\bin\ffprobe.exe <name>_restored.mp4` on any
-existing Jasna output must list an audio stream (A3′; if it does not, switch `media()` to the
-source file before anything else); then tick「AV 翻译」on a Jasna task with a short film → after
-restore the detail shows `subtitling:`; `<name>_restored.ja.srt` then `<name>_restored.srt` appear; `done`
+**Manual smoke (owner)**: (the ffprobe audio-stream check on a real Jasna output — A3′ — is done:
+`aac` stereo on every probed `C:\OUTPUT\*_restored.mp4`); tick「AV 翻译」on a Jasna task with a
+short film → after restore the detail shows `subtitling:`; `<name>_restored.ja.srt` then `<name>_restored.srt` appear; `done`
 says `Subs: 1/1 done`; Start again → all skipped; delete `.srt` → translate-only; delete both →
 subs-only without a Jasna launch; Stop during translation stops within seconds; the packaged app's
 first translation exercises `taskpaw-backend llm-worker` (A4).
@@ -768,3 +771,11 @@ and its tests; the PR-gate reviews verify them against the code:
   `.avsubs/<sha1>/` are not removed after settle; revisit with #179).
 - **Out of scope (pre-existing):** `start()` clears `_stopping` unconditionally, so a Stop that
   completes just before a Start can be undone; predates #177.
+- **Seventh cycle (operator-authorized after the gates):** CX2 (`_translator` assigned before the
+  post-start Stop re-check), CX3 (a 0-cue `.ja.srt` completes with an empty `.srt` before the
+  key check), F1 (blank lines inside an LLM value are dropped; `srt.serialize` never emits an
+  empty line inside a cue), F2 (`_maybe_done` cancels and joins the translator after `done`),
+  K-m1 (over-long digit fields → `SrtError`), K-m2 (a relative manifest output resolves only
+  under the attempt dir), K-m3/K-m5 docstrings, K-m4 field text, K-m8 status test. F3 deferred
+  by decision (see non-goals); CX1 deferred (two monitors sharing an output folder is forbidden
+  by the field text; revisit with #179's shared staging).

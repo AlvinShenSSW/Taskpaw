@@ -720,7 +720,9 @@ class JasnaConfig(BaseMonitorConfig):
         "transcribe → next restore); translation runs in the background. Already "
         "restored files without subtitles are handled after the pending restores; "
         "an existing .ja.srt is reused (translation only). Staging lives in the "
-        "output folder's .avsubs directory.",
+        "output folder's .avsubs directory. An existing .ja.srt / .srt is reused "
+        "as-is: if you replace a source video under the same name, delete its old "
+        ".srt files first.",
     )
     whisperjav_exe_path: str = Field(
         "",
@@ -739,8 +741,9 @@ class JasnaConfig(BaseMonitorConfig):
         description="Extra WhisperJAV flags appended to every transcription, e.g. "
         "--sensitivity aggressive. TaskPaw owns --output-dir, --output-format, "
         "--language, --temp-dir and --no-signature (and, unless the engine is "
-        "custom, --mode/--model/--qwen-generator); those and any argparse prefix "
-        "of them are rejected. --translate* options are always rejected (they "
+        "custom, --mode/--model/--qwen-generator); those, and any argparse "
+        "abbreviation of them 4 or more characters long (e.g. --out), are "
+        "rejected. --translate* options are always rejected (they "
         "would put an API key on the command line).",
     )
     clip_size_1080p: int = Field(
@@ -1232,6 +1235,9 @@ class JasnaInstance(MonitorInstance):
             return
         try:
             translator = Translator(self._run, name=self.instance_id)
+            # Assigned BEFORE the re-check below (CX2): a concurrent stop() either
+            # snapshots it (and cancels it) or has already set the flag we see.
+            self._translator = translator
             translator.start()
             if self._stopping.is_set():
                 # A Stop landed during start(): never leave an idle daemon thread.
@@ -1239,11 +1245,11 @@ class JasnaInstance(MonitorInstance):
                 translator.join(1.0)
         except Exception as e:  # a thread that cannot start — never raise here
             log.warning("jasna %s: translator did not start: %s", self.instance_id, e)
+            self._translator = None
             with self._launch_lock:
                 self._disable_subs(f"translator did not start ({e})", emit)
             self._run_deferred()
             return
-        self._translator = translator
 
     def stop(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + max(0.1, timeout)
@@ -1842,6 +1848,19 @@ class JasnaInstance(MonitorInstance):
             f"done, {self._failed} failed{subs} | "
             f"{datetime.now():%Y-%m-%d %H:%M:%S}",
         )
+        # F2 (constitution §4): the run is over — end the idle translator thread
+        # and its llm-worker now instead of at Stop. Bounded, and never under
+        # `_launch_lock` (`_maybe_done` only runs outside it).
+        translator = self._translator
+        if translator is not None:
+            self._translator = None
+            try:
+                translator.cancel()
+                translator.join(2.0)
+            except Exception as e:  # cleanup must never break check()
+                log.warning(
+                    "jasna %s: translator shutdown failed: %s", self.instance_id, e
+                )
 
     # ── 「AV 翻译」: subtitle phases (#177) ─────────────────────────────────
     def _gpu_acquire(self) -> bool:
@@ -1938,7 +1957,27 @@ class JasnaInstance(MonitorInstance):
     def _submit_translation(
         self, job: SubsJob, cues: Optional[list[Cue]], emit: EventEmitter
     ) -> None:
-        """Under `_launch_lock`. The key is checked per job (live-apply)."""
+        """Under `_launch_lock`. The transcript is loaded first: an empty one
+        needs no request (CX3); otherwise the key is checked per job
+        (live-apply)."""
+        if cues is None:
+            try:
+                cues = job.load_ja()
+            except (SrtError, OSError) as e:
+                log.warning("jasna %s: %s: %s", self.instance_id, job.job_id, e)
+                self._settle(job.job_id, "failed", "unreadable .ja.srt", emit)
+                self._alert_job(job.job_id, "unreadable .ja.srt", emit)
+                return
+        if not cues:
+            # An empty transcript (no speech): the zh is empty too — regardless
+            # of the key, since nothing has to be translated.
+            err = job.publish_zh([])
+            if err is None:
+                self._settle(job.job_id, "completed", "no speech", emit)
+            else:
+                self._settle(job.job_id, "failed", err, emit)
+                self._alert_job(job.job_id, err, emit)
+            return
         settings = get_llm_settings()
         if not settings.api_key and needs_llm_key(settings.api_base):
             self._settle(job.job_id, "skipped", "no_llm_key", emit)
@@ -1951,23 +1990,6 @@ class JasnaInstance(MonitorInstance):
                     "skipped (their .ja.srt is kept) until a key is set.",
                     dedupe_key=f"{self.instance_id}:subs-nokey",
                 )
-            return
-        if cues is None:
-            try:
-                cues = job.load_ja()
-            except (SrtError, OSError) as e:
-                log.warning("jasna %s: %s: %s", self.instance_id, job.job_id, e)
-                self._settle(job.job_id, "failed", "unreadable .ja.srt", emit)
-                self._alert_job(job.job_id, "unreadable .ja.srt", emit)
-                return
-        if not cues:
-            # An empty transcript (no speech): the zh is empty too.
-            err = job.publish_zh([])
-            if err is None:
-                self._settle(job.job_id, "completed", "no speech", emit)
-            else:
-                self._settle(job.job_id, "failed", err, emit)
-                self._alert_job(job.job_id, err, emit)
             return
         translator = self._translator
         if translator is None:

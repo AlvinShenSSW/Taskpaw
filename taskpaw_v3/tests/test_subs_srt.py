@@ -126,3 +126,28 @@ def test_load_undecodable_bytes_is_srt_error(tmp_path):
     p.write_bytes(b"1\n00:00:01,000 --> 00:00:02,000\n\xff\xfe\xfd\n")
     with pytest.raises(SrtError):
         load(p)
+
+
+def test_serialize_never_emits_a_blank_line_inside_a_cue():
+    cues = [
+        Cue(1, 0, 1000, "甲\n\n乙"),
+        Cue(2, 1000, 2000, "丙\n  \n\t\n丁\r\n\r\n戊"),
+        Cue(3, 2000, 3000, "己"),
+    ]
+    out = serialize(cues)
+    again = parse(out)
+    assert len(again) == 3
+    assert [c.text for c in again] == ["甲\n乙", "丙\n丁\n戊", "己"]
+    assert serialize(again) == out
+
+
+def test_parse_absurdly_long_index_is_srt_error():
+    text = "9" * 5000 + "\n00:00:01,000 --> 00:00:02,000\nx\n"
+    with pytest.raises(SrtError):
+        parse(text)
+
+
+def test_parse_absurdly_long_hours_is_srt_error():
+    text = "1\n" + "9" * 5000 + ":00:01,000 --> 00:00:02,000\nx\n"
+    with pytest.raises(SrtError):
+        parse(text)

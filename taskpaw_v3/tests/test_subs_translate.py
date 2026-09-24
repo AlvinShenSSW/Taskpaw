@@ -22,6 +22,7 @@ import pytest
 
 from taskpaw_v3.core.llm import LLMSettings
 from taskpaw_v3.core.llm_worker import ENV_KEY
+from taskpaw_v3.monitors.subs import srt
 from taskpaw_v3.monitors.subs.child import Eof
 from taskpaw_v3.monitors.subs.srt import Cue
 from taskpaw_v3.monitors.subs.translate import (
@@ -393,7 +394,16 @@ def _not_json(req: dict, w: FakeWorker) -> dict:
     return _ok("here you go: {", req)
 
 
+def _blank_only(req: dict, w: FakeWorker) -> dict:
+    ids = [c["id"] for c in _user(req)["cues"]]
+    blank = " \n\n \n"  # only blank/whitespace lines
+    return _ok(
+        json.dumps({i: (blank if n == 0 else "x") for n, i in enumerate(ids)}), req
+    )
+
+
 CONTENT_FAILURES = [
+    _blank_only,
     _dupe,
     _missing,
     _extra,
@@ -894,3 +904,31 @@ def test_needs_llm_key_only_loopback_is_keyless(base, needs):
     from taskpaw_v3.monitors import subs
 
     assert subs.needs_llm_key is needs_llm_key
+
+
+def test_interior_blank_lines_in_a_reply_are_collapsed(harness_factory):
+    # F1: "甲\n\n乙" must never reach a cue verbatim — a blank line inside a
+    # cue would corrupt the published .srt.
+    def blank_inside(req: dict, w: FakeWorker) -> dict:
+        ids = [c["id"] for c in _user(req)["cues"]]
+        return _ok(json.dumps({i: " 甲\n\n  \n乙 " for i in ids}), req)
+
+    sp = Spawner(blank_inside)
+    h = harness_factory(sp)
+    r = h.run(_cues(3))
+    assert r.outcome == "translated"
+    assert [c.text for c in r.zh_cues] == ["甲\n乙"] * 3
+    assert len(sp.workers[0].requests) == 1  # accepted as is: no retry needed
+    text = srt.serialize(r.zh_cues)
+    again = srt.parse(text)
+    assert len(again) == 3 and [c.text for c in again] == ["甲\n乙"] * 3
+
+
+def test_blank_only_value_is_a_retryable_content_failure(harness_factory):
+    sp = Spawner(scripted(_blank_only))
+    h = harness_factory(sp)
+    r = h.run(_cues(4))
+    assert r.outcome == "translated"
+    reqs = sp.workers[0].requests
+    assert len(reqs) == 3  # the failed batch was split into two halves
+    assert [c["id"] for c in _user(reqs[1])["cues"]] == ["1", "2"]
