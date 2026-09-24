@@ -162,7 +162,9 @@ def handle_request(
             else:
                 raise _InvalidRequest
         effective, kwargs = _parse_request(req, settings)
-    except (ValueError, _InvalidRequest):  # JSONDecodeError is a ValueError
+    except Exception:  # JSONDecodeError/_InvalidRequest, but also RecursionError
+        # from a pathologically nested line (internal review R1): parsing must
+        # never take the worker down — the contract is "never raises".
         return _error_reply(rid, "bad_response", None, "invalid request")
     try:
         r = chat_fn(effective, req["messages"], **kwargs)

@@ -588,6 +588,20 @@ def test_handle_request_garbage_has_null_id():
     assert json.loads(handle_request("{{{", _settings()))["id"] is None
 
 
+def test_handle_request_pathological_nesting_is_an_error_line():
+    # Internal review R1: json.loads raises RecursionError on a deeply nested
+    # line; that must become the "invalid request" reply, never a dead worker.
+    line = "[" * 100_000
+    reply = json.loads(handle_request(line, _settings()))
+    assert reply == {
+        "id": None,
+        "ok": False,
+        "kind": "bad_response",
+        "status": None,
+        "message": "invalid request",
+    }
+
+
 def test_handle_request_unexpected_exception_is_contained():
     def boom(*a, **k):
         raise RuntimeError(KEY_MARKER)
@@ -743,13 +757,23 @@ def _stop_fake(srv: ThreadingHTTPServer) -> None:
     _stop(srv)
 
 
+class _WorkerProc(subprocess.Popen):
+    """A worker child whose stderr is drained by a collector thread from spawn
+    on, so `_reap` never needs `communicate()` — which on POSIX flushes stdin
+    first and raises once the test has closed it (the Linux CI failure on
+    966b411), leaving `Popen` half-initialised for a second call."""
+
+    collected: bytearray
+    collector: threading.Thread
+
+
 def _spawn_worker(srv: ThreadingHTTPServer):
     s = _settings(base=f"http://127.0.0.1:{srv.server_address[1]}/v1")
     # Hermetic: bypass any configured proxy for the loopback fake.
     base = {k: v for k, v in os.environ.items() if k.lower() != "no_proxy"}
     base["no_proxy"] = "*"
     env = worker_env(s, base)
-    proc = subprocess.Popen(
+    proc = _WorkerProc(
         worker_argv(),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -757,6 +781,15 @@ def _spawn_worker(srv: ThreadingHTTPServer):
         env=env,
         cwd=str(REPO_ROOT),
     )
+    proc.collected = bytearray()
+
+    def _collect() -> None:
+        assert proc.stderr is not None
+        for chunk in iter(lambda: proc.stderr.read(4096), b""):
+            proc.collected.extend(chunk)
+
+    proc.collector = threading.Thread(target=_collect, daemon=True)
+    proc.collector.start()
     return proc, env
 
 
@@ -774,14 +807,20 @@ def _send_req(proc, **req) -> None:
     proc.stdin.flush()
 
 
-def _reap(proc) -> bytes:
+def _reap(proc: _WorkerProc) -> bytes:
+    """Kill a still-running worker, wait, and return everything it wrote to
+    stderr. Idempotent, and independent of who consumed stdout/stdin."""
     if proc.poll() is None:
         proc.kill()
-    try:
-        _out, err = proc.communicate(timeout=10)
-    except ValueError:  # pipes already consumed/closed by an earlier _reap
-        return b""
-    return err or b""
+    proc.wait(timeout=10)
+    proc.collector.join(5)
+    for stream in (proc.stdin, proc.stdout):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            pass
+    return bytes(proc.collected)
 
 
 def test_worker_subprocess_round_trip_error_and_secrets():
