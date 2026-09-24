@@ -274,9 +274,6 @@ class ChildProcess:
             log.warning("child %s: tracked scan failed (%s)", self.pid, e)
             return []
 
-    # Kept for callers written against the #179 first cut.
-    _tracked_running = tracked_running
-
     def kill_tracked(self) -> list[int]:
         """psutil-kill every tracked descendant still running with its tracked
         create time (no taskkill, no wait). Returns the pids actually killed

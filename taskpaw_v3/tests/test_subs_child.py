@@ -658,7 +658,7 @@ def test_tracked_running_lists_live_tracked_pids_without_killing():
             c._tracked[me.pid] = me.create_time()  # live, same create time
             c._tracked[4_000_000] = 1.0  # no such process
         assert c.tracked_running() == [me.pid]
-        assert c._tracked_running() == [me.pid]  # the old name still works
+        assert not hasattr(c, "_tracked_running")  # the alias is gone
         with c._tracked_lock:
             c._tracked[me.pid] = me.create_time() - 1000.0  # a "reused" pid
         assert c.tracked_running() == []  # never ours

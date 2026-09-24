@@ -1286,6 +1286,84 @@ def test_a_raising_job_lookup_in_start_asr_still_releases_the_lease(
     assert inst._asr_job is inst._jobs["b.mp4"]
     assert gpu_lease.holder() == inst._run
     assert all(i.relpath != "a.mp4" for i in inst._queue)  # no endless retry
+    # F2: the planned job still reaches a terminal state …
+    assert inst._settled["a.mp4"] == ("failed", "internal: KeyError")
+    assert len(_keyed(r.evs, f"{IID}:avsubs:a.mp4")) == 1
+    # … so `done` can fire once b is finished
+    r.spawner.last.finish(0, state="empty", text="")
+    inst.check(r.emit)
+    done = _done(r.evs)
+    assert len(done) == 1 and "Queue: 1/2 done, 1 failed, 0 skipped" in done[0][2]
+    inst.stop(timeout=1)
+
+
+def test_a_raise_inside_the_poll_settles_failed_and_releases_the_lease(
+    tmp_path, monkeypatch
+):
+    # F1 (a): a raise after the child was reaped but before settlement. check()
+    # must not raise; the job is failed(internal), the lease is released and
+    # the next file launches.
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    inst.start(emit)
+    real = SubsJob.publish_ja
+    armed = {"on": True}
+
+    def publish_ja_once(self, cues):
+        if armed["on"]:
+            armed["on"] = False
+            raise RuntimeError("publish bug")
+        return real(self, cues)
+
+    monkeypatch.setattr(SubsJob, "publish_ja", publish_ja_once)
+    log = _lease_spy(monkeypatch, r.owner)
+    sp.last.finish(0)
+    st = inst.check(emit)  # must not raise
+    assert inst._settled["a.mp4"] == ("failed", "internal: RuntimeError")
+    assert len(_keyed(r.evs, f"{IID}:avsubs:a.mp4")) == 1
+    assert _names(log)[:2] == ["release", "acquire"]  # released, then b's turn
+    assert len(sp.argvs) == 2 and sp.argvs[1][1] == str(r.root / "b.mp4")
+    assert inst._asr_job is inst._jobs["b.mp4"]
+    assert st.state == "running" and st.metrics["current_file"] == "b.mp4"
+    sp.last.finish(0, state="empty", text="")
+    inst.check(emit)
+    assert gpu_lease.holder() is None
+    assert len(_done(r.evs)) == 1
+
+
+def test_a_raise_inside_the_poll_with_a_live_child_keeps_the_lease(
+    tmp_path, monkeypatch
+):
+    # F1 (b): the retry spawned a new child, then something raised. Rule (c):
+    # the live direct child keeps `_asr_job` and the lease until it exits and
+    # the reap path releases.
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    inst.start(emit)
+    real = SubsJob.start_asr
+
+    def retry_then_raise(self, spawn):
+        err = real(self, spawn)
+        if self.attempt == 2 and self.job_id == "a.mp4":
+            raise RuntimeError("bug after the retry spawn")
+        return err
+
+    monkeypatch.setattr(SubsJob, "start_asr", retry_then_raise)
+    sp.last.finish(1)
+    inst.check(emit)  # a's retry spawns, then the raise → fenced
+    retry = sp.last
+    assert len(sp.argvs) == 2 and retry.rc is None
+    assert inst._settled["a.mp4"] == ("failed", "internal: RuntimeError")
+    assert inst._asr_job is inst._jobs["a.mp4"] and inst._asr_job.child is retry
+    assert gpu_lease.holder() == inst._run  # kept with the live child
+    assert _job_dir(r, "a.mp4").is_dir()  # not removed while it may still write
+    inst.check(emit)
+    assert len(sp.argvs) == 2  # b waits behind it
+    retry.rc = 1  # the child exits
+    inst.check(emit)  # reaped → released → b launches
+    assert inst._asr_job is inst._jobs["b.mp4"]
+    assert len(sp.argvs) == 3 and sp.argvs[2][1] == str(r.root / "b.mp4")
+    assert not _job_dir(r, "a.mp4").exists()
     inst.stop(timeout=1)
 
 

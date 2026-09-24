@@ -805,6 +805,20 @@ class AvsubsInstance(MonitorInstance):
                 if self._queue and self._queue[0] is item:
                     self._queue.pop(0)  # never retry the same item forever
                 if job is None:
+                    # F2: the lookup itself failed — still give a planned job
+                    # its terminal state, so `done` can fire.
+                    detail = f"internal: {type(e).__name__}"
+                    try:
+                        if (
+                            item.relpath in self._jobs
+                            and item.relpath not in self._settled
+                        ):
+                            self._settle(item.relpath, "failed", detail, emit)
+                            self._alert_job(item.relpath, detail, emit)
+                    except Exception as e2:  # never raise out of check()
+                        log.warning(
+                            "avsubs %s: settle failed: %s", self.instance_id, e2
+                        )
                     release = True
                     self._advance_requested = True
                     return
@@ -856,78 +870,128 @@ class AvsubsInstance(MonitorInstance):
         job = self._asr_job
         if job is None:
             return
-        release = False
-        with self._launch_lock:
-            if self._asr_job is not job:
-                return
-            if self._stopping.is_set():
-                # stop() owns the run. IR8: only a child recorded as a kill
-                # survivor (rule c) is reaped here once it has exited — never
-                # published, settled or followed by a launch. Any other child
-                # (e.g. one that finished 0 while stop() cancels the
-                # translator) is left to `_stop_asr`, which publishes its ja.
-                child = job.child
-                if (
-                    job.job_id in self._survivor_jobs
-                    and child is not None
-                    and child.poll() is not None
-                ):
-                    job.poll_asr()
-                    if job.child is None:
-                        self._asr_job = None
-                        self._survivor_jobs.discard(job.job_id)
-                return
-            if job.job_id in self._settled:
-                release = self._reap_settled(job)
-            else:
-                outcome = job.poll_asr()
-                if outcome is None:
-                    return
-                terminal = True
-                name = job.job_id
-                if outcome.kind == "succeeded":
-                    err = job.publish_ja(outcome.cues)
-                    if err is not None:
-                        self._settle(name, "failed", err, emit)
-                        self._alert_job(name, err, emit)
-                    else:
-                        self._submit_translation(job, list(outcome.cues), emit)
-                elif outcome.kind == "no_speech":
-                    err = job.publish_empty()
-                    if err is None:
-                        self._settle(name, "completed", "no speech", emit)
-                    else:
-                        self._settle(name, "failed", err, emit)
-                        self._alert_job(name, err, emit)
-                elif outcome.kind == "unstable":
-                    self._settle_unstable(job, emit)
-                elif job.attempt < _ASR_MAX_ATTEMPTS:
-                    err = job.start_asr(self._spawn)  # retry, same hold
-                    if self._stopping.is_set():
-                        # D35: exactly _start_asr's post-spawn re-check.
-                        self._kill_for_stop(job)
-                        if job.child is None:
-                            self._asr_job = None
-                            release = True
-                        terminal = False
-                    elif err is None:
-                        terminal = False  # the job stays current
-                    elif err == "unstable":  # D33: like a final failure
-                        self._settle_unstable(job, emit)
-                    else:
-                        self._settle(name, "failed", err, emit)
-                        self._alert_job(name, err, emit)
-                else:
-                    self._settle(name, "failed", outcome.detail, emit)
-                    self._alert_job(name, outcome.detail, emit)
-                if terminal:
-                    self._asr_job = None
-                    release = True
-                    self._advance_requested = True
+        release: Optional[bool]
+        try:
+            with self._launch_lock:
+                release = self._poll_asr_locked(job, emit)
+        except Exception as e:  # F1: a bug must never strand the lease / raise
+            release = self._fence_poll(job, e, emit)
+        if release is None:
+            return  # nothing happened (or stop() owns the job)
         if release:
             self._gpu_rel()
         self._run_deferred()
         self._dispatch(emit)
+
+    def _poll_asr_locked(self, job: SubsJob, emit: EventEmitter) -> Optional[bool]:
+        """The locked body of `_poll_asr` (caller holds `_launch_lock`).
+        Returns None when there is nothing to follow up (no release, no
+        deferred work, no dispatch), else whether to release the lease."""
+        release = False
+        if self._asr_job is not job:
+            return None
+        if self._stopping.is_set():
+            # stop() owns the run. IR8: only a child recorded as a kill
+            # survivor (rule c) is reaped here once it has exited — never
+            # published, settled or followed by a launch. Any other child
+            # (e.g. one that finished 0 while stop() cancels the
+            # translator) is left to `_stop_asr`, which publishes its ja.
+            child = job.child
+            if (
+                job.job_id in self._survivor_jobs
+                and child is not None
+                and child.poll() is not None
+            ):
+                job.poll_asr()
+                if job.child is None:
+                    self._asr_job = None
+                    self._survivor_jobs.discard(job.job_id)
+            return None
+        if job.job_id in self._settled:
+            release = self._reap_settled(job)
+        else:
+            outcome = job.poll_asr()
+            if outcome is None:
+                return None
+            terminal = True
+            name = job.job_id
+            if outcome.kind == "succeeded":
+                err = job.publish_ja(outcome.cues)
+                if err is not None:
+                    self._settle(name, "failed", err, emit)
+                    self._alert_job(name, err, emit)
+                else:
+                    self._submit_translation(job, list(outcome.cues), emit)
+            elif outcome.kind == "no_speech":
+                err = job.publish_empty()
+                if err is None:
+                    self._settle(name, "completed", "no speech", emit)
+                else:
+                    self._settle(name, "failed", err, emit)
+                    self._alert_job(name, err, emit)
+            elif outcome.kind == "unstable":
+                self._settle_unstable(job, emit)
+            elif job.attempt < _ASR_MAX_ATTEMPTS:
+                err = job.start_asr(self._spawn)  # retry, same hold
+                if self._stopping.is_set():
+                    # D35: exactly _start_asr's post-spawn re-check.
+                    self._kill_for_stop(job)
+                    if job.child is None:
+                        self._asr_job = None
+                        release = True
+                    terminal = False
+                elif err is None:
+                    terminal = False  # the job stays current
+                elif err == "unstable":  # D33: like a final failure
+                    self._settle_unstable(job, emit)
+                else:
+                    self._settle(name, "failed", err, emit)
+                    self._alert_job(name, err, emit)
+            else:
+                self._settle(name, "failed", outcome.detail, emit)
+                self._alert_job(name, outcome.detail, emit)
+            if terminal:
+                self._asr_job = None
+                release = True
+                self._advance_requested = True
+        return release
+
+    def _fence_poll(self, job: SubsJob, exc: Exception, emit: EventEmitter) -> bool:
+        """F1: `_poll_asr` raised. Settle the job `failed(internal)` once (one
+        raise-safe alert), request an advance, and release the lease — unless
+        its DIRECT child still runs (rule c): then `_asr_job` and the lease
+        stay with it and `_reap_settled` releases once it has exited."""
+        log.exception(
+            "avsubs %s: polling %s failed", self.instance_id, job.job_id, exc_info=exc
+        )
+        with self._launch_lock:
+            child = job.child
+            try:
+                live = child is not None and child.poll() is None
+            except Exception as e:  # treat an unpollable child as gone
+                log.warning("avsubs %s: poll failed: %s", self.instance_id, e)
+                live = False
+            detail = f"internal: {type(exc).__name__}"
+            if job.job_id not in self._settled:
+                try:
+                    self._settle(job.job_id, "failed", detail, emit)
+                    self._alert_job(job.job_id, detail, emit)
+                except Exception as e:  # never raise out of check()
+                    log.warning("avsubs %s: settle failed: %s", self.instance_id, e)
+            self._advance_requested = True
+            if live:
+                return False
+            if child is not None:
+                try:
+                    job.terminate(timeout=0.5)  # joins readers; exited already
+                except Exception as e:  # never raise out of check()
+                    log.warning("avsubs %s: reap failed: %s", self.instance_id, e)
+            if self._asr_job is job:
+                self._asr_job = None
+            self._survivor_jobs.discard(job.job_id)
+            if job.attempt > 0 and job.child is None:
+                self._defer_remove(job)  # M11 (a second removal is harmless)
+            return True
 
     def _reap_settled(self, job: SubsJob) -> bool:
         """Under the lock: a settled job whose direct child survived its kill
