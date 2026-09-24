@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _valid_port(p: int) -> int:
@@ -22,6 +22,13 @@ def _valid_port(p: int) -> int:
 
 class AgentConfig(BaseModel):
     """A V3 agent's local config (`agent.yaml`)."""
+
+    # Never echo field INPUTS in validation errors: a wrongly typed secret (e.g.
+    # `llm_api_key: [sk-…]` in a hand-edited YAML, or a non-string key in a
+    # PATCH) would otherwise print the credential into the startup traceback
+    # (persisted in the packaged backend log) or a 400 body — constitution §2
+    # "no secrets in logs" (Codex 外门 #178). Field names and reasons still show.
+    model_config = ConfigDict(hide_input_in_errors=True)
 
     server_id: str = Field(..., min_length=1)
     machine: str = Field(..., min_length=1)

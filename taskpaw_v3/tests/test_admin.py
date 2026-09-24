@@ -867,3 +867,18 @@ def test_live_and_non_live_config_partition():
         "control_port",
         "host_metrics",
     )
+
+
+def test_update_config_400_never_echoes_a_secret_input(tmp_path):
+    # Codex 外门 #178: PATCH /control/config with a wrongly typed llm_api_key
+    # (or api_token) is rejected with 400, and the detail carries the field
+    # name but never the value (pydantic input hidden at the model level).
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    client = TestClient(create_control_app(cfg, admin=admin))
+    marker = "sk-super-secret-marker"
+    for field in ("llm_api_key", "api_token"):
+        r = client.patch("/control/config", json={field: [marker]})
+        assert r.status_code == 400
+        assert marker not in r.text and field in r.text
+    assert cfg.llm_api_key == "" and cfg.api_token == ""  # nothing applied
