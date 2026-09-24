@@ -35,6 +35,9 @@ export function Settings({ role }: { role: "agent" | "hub" }) {
       {/* Agent config (#43) — agent role only */}
       {role === "agent" && <ConfigSection />}
 
+      {/* Agent-level LLM API (#178) — agent role only */}
+      {role === "agent" && <LlmSection />}
+
       {/* About */}
       <Card>
         <CardContent>
@@ -133,6 +136,119 @@ function ConfigSection() {
               <Button variant="contained" disabled={save.isPending} onClick={() => { setMsg(null); save.mutate(); }}>
                 {t("settings.save")}
               </Button>
+            </Stack>
+          </Stack>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+type LlmForm = { llm_api_base: string; llm_model: string; llm_api_key: string };
+
+// #178: one agent-level LLM endpoint (base URL, model, key). The key is write-only
+// here: GET reports it as "***" plus its source; an env-provided key can't be
+// edited or cleared from the UI (TASKPAW_LLM_API_KEY wins).
+function LlmSection() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const cfg = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
+  const [form, setForm] = useState<LlmForm | null>(null);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  // Seed once from the config; the key field always starts blank (blank → keep).
+  useEffect(() => {
+    if (cfg.data && form === null) {
+      const c = cfg.data;
+      setForm({
+        llm_api_base: String(c.llm_api_base ?? ""), llm_model: String(c.llm_model ?? ""),
+        llm_api_key: "",
+      });
+    }
+  }, [cfg.data, form]);
+
+  const source = cfg.data?.llm_api_key_source ?? "none";
+  const fromEnv = source === "env";
+
+  // Current form values; a blank key is omitted so the backend uses the stored one.
+  const values = () => {
+    const f = form!;
+    const v: Record<string, unknown> = { llm_api_base: f.llm_api_base, llm_model: f.llm_model };
+    if (f.llm_api_key.trim()) v.llm_api_key = f.llm_api_key;
+    return v;
+  };
+
+  const onSaved = (text: string) => {
+    qc.invalidateQueries({ queryKey: ["agentConfig"] });
+    setForm((p) => (p ? { ...p, llm_api_key: "" } : p)); // never keep the typed key around
+    setMsg({ kind: "ok", text });
+  };
+  const onError = (e: unknown) =>
+    setMsg({ kind: "err", text: e instanceof Error ? e.message : String(e) });
+
+  const save = useMutation({
+    mutationFn: () => api.updateConfig(values()),
+    onSuccess: () => onSaved(t("settings.llmSaved")),
+    onError,
+  });
+  const clear = useMutation({
+    mutationFn: () => api.updateConfig({ llm_api_key: null }),
+    onSuccess: () => onSaved(t("settings.llmCleared")),
+    onError,
+  });
+  const test = useMutation({
+    mutationFn: () => api.llmTest(values()),
+    onSuccess: (r) => {
+      if (r.ok) {
+        const ok = t("settings.llmTestOk", { model: r.model ?? "", latency: r.latency_ms ?? 0 });
+        setMsg({ kind: "ok", text: r.truncated ? `${ok} ${t("settings.llmTestTruncated")}` : ok });
+      } else {
+        setMsg({ kind: "err", text: t("settings.llmTestFail", { error: r.error ?? "" }) });
+      }
+    },
+    onError: (e) =>
+      setMsg({ kind: "err", text: t("settings.llmTestFail", { error: e instanceof Error ? e.message : String(e) }) }),
+  });
+
+  const writing = save.isPending || clear.isPending;
+  const set = (k: keyof LlmForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setForm((p) => (p ? { ...p, [k]: e.target.value } : p));
+
+  return (
+    <Card>
+      <CardContent>
+        <Typography variant="subtitle1" sx={{ mb: 0.5 }}>{t("settings.llm")}</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          {t("settings.llmHint")}
+        </Typography>
+        {cfg.isLoading || !form ? (
+          <Typography variant="body2" color="text.secondary">{t("common.loading")}</Typography>
+        ) : (
+          <Stack spacing={1.5}>
+            <TextField size="small" label={t("settings.llmApiBase")} value={form.llm_api_base}
+              onChange={set("llm_api_base")} placeholder="https://openrouter.ai/api/v1" />
+            <TextField size="small" label={t("settings.llmModel")} value={form.llm_model}
+              onChange={set("llm_model")} placeholder="x-ai/grok-4.1-fast" />
+            <TextField size="small" type="password" autoComplete="off" label={t("settings.llmApiKey")}
+              value={form.llm_api_key} onChange={set("llm_api_key")} disabled={fromEnv}
+              placeholder={source !== "none" ? "***" : undefined}
+              helperText={fromEnv ? t("settings.llmApiKeyEnv") : t("settings.llmApiKeyHint")} />
+            {msg && <Alert severity={msg.kind === "ok" ? "success" : "error"}>{msg.text}</Alert>}
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Button variant="contained" disabled={writing}
+                onClick={() => { setMsg(null); save.mutate(); }}>
+                {t("settings.llmSave")}
+              </Button>
+              <Button variant="outlined" disabled={test.isPending}
+                onClick={() => { setMsg(null); test.mutate(); }}>
+                {test.isPending ? t("settings.llmTesting") : t("settings.llmTest")}
+              </Button>
+              {!fromEnv && (
+                <Button variant="outlined" color="inherit" disabled={writing}
+                  onClick={() => { setMsg(null); clear.mutate(); }}>
+                  {t("settings.llmClear")}
+                </Button>
+              )}
             </Stack>
           </Stack>
         )}

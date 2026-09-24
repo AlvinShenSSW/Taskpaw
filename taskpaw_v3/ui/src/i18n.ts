@@ -125,6 +125,16 @@ const en = {
     controlHost: "Control host (loopback)", controlPort: "Control port",
     apiToken: "API token", apiTokenHint: "Leave blank to keep the current token.",
     save: "Save", saved: "Saved.", restartNeeded: "Saved — restart the agent for port/host changes to take effect.",
+    llm: "LLM API",
+    llmHint: "One OpenAI-compatible LLM endpoint for this agent (e.g. OpenRouter). Changes apply immediately, no restart needed.",
+    llmApiBase: "API base URL", llmModel: "Model", llmApiKey: "API key",
+    llmApiKeyHint: "The TASKPAW_LLM_API_KEY environment variable takes precedence over this key. Leave blank to keep the stored key.",
+    llmApiKeyEnv: "Provided by the TASKPAW_LLM_API_KEY environment variable — change it there.",
+    llmSave: "Save LLM settings", llmClear: "Clear key", llmTest: "Test connection", llmTesting: "Testing…",
+    llmTestOk: "Connected — {{model}} replied in {{latency}} ms.",
+    llmTestTruncated: "The reply was truncated, but the connection works.",
+    llmTestFail: "Connection failed: {{error}}",
+    llmSaved: "LLM settings saved.", llmCleared: "Stored API key cleared.",
   },
 };
 
@@ -236,6 +246,16 @@ const zh: typeof en = {
     controlHost: "控制地址(回环)", controlPort: "控制端口",
     apiToken: "API 令牌", apiTokenHint: "留空则保留当前令牌。",
     save: "保存", saved: "已保存。", restartNeeded: "已保存 —— 端口/主机改动需重启 agent 才生效。",
+    llm: "LLM API",
+    llmHint: "本机 agent 统一使用的 OpenAI 兼容大模型接口(如 OpenRouter)。修改即时生效,无需重启。",
+    llmApiBase: "API 地址", llmModel: "模型", llmApiKey: "API 密钥",
+    llmApiKeyHint: "环境变量 TASKPAW_LLM_API_KEY 优先于此处的密钥。留空则保留已保存的密钥。",
+    llmApiKeyEnv: "密钥由环境变量 TASKPAW_LLM_API_KEY 提供,如需更改请修改该环境变量。",
+    llmSave: "保存 LLM 设置", llmClear: "清除密钥", llmTest: "测试连接", llmTesting: "测试中…",
+    llmTestOk: "连接成功 —— {{model}} 用时 {{latency}} 毫秒响应。",
+    llmTestTruncated: "回复被截断,但连接正常。",
+    llmTestFail: "连接失败:{{error}}",
+    llmSaved: "LLM 设置已保存。", llmCleared: "已清除保存的 API 密钥。",
   },
 };
 

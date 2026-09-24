@@ -158,11 +158,21 @@ export const api = {
   hubStatus: () => get<HubStatus>("hub", "/status"),
   plugins: () => get<{ plugins: PluginInfo[]; presets: PresetInfo[] }>("agent", "/control/plugins"),
   // Full agent config (secrets masked as "***") — used to pre-fill the edit form.
-  config: () => get<{ monitors: MonitorSpec[] } & Record<string, unknown>>("agent", "/control/config"),
+  // llm_api_key_source (#178): where the effective LLM key comes from (env wins).
+  config: () =>
+    get<{ monitors: MonitorSpec[]; llm_api_key_source?: "env" | "config" | "none" } & Record<string, unknown>>(
+      "agent", "/control/config",
+    ),
   // Edit top-level agent config from the Settings UI (#43). Returns
   // {ok, restart_required}. A blank/"***" api_token keeps the stored one.
   updateConfig: (patch: Record<string, unknown>) =>
     send<{ ok: boolean; restart_required: boolean }>("agent", "PATCH", "/control/config", patch),
+  // Test candidate LLM settings (#178) without persisting; a blank key means "use the
+  // effective one". Failures come back as {ok: false, error} and never carry the key.
+  llmTest: (candidate: Record<string, unknown>) =>
+    send<{ ok: boolean; model?: string; latency_ms?: number; truncated?: boolean; error?: string }>(
+      "agent", "POST", "/control/llm-test", candidate,
+    ),
   addMonitor: (spec: MonitorSpec) => send("agent", "POST", "/control/monitors", spec),
   removeMonitor: (name: string) => send("agent", "DELETE", `/control/monitors${q(name)}`),
   updateMonitor: (name: string, patch: { config?: Record<string, unknown>; enabled?: boolean }) =>

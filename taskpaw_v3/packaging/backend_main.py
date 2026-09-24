@@ -4,6 +4,7 @@ The Tauri shell spawns ONE backend executable and tells it which role to run:
 
     taskpaw-backend agent   # headless agent (reads agent.yaml)
     taskpaw-backend hub      # headless hub (reads hub.yaml)
+    taskpaw-backend llm-worker  # LLM request sidecar (#178; settings via env)
 
 PyInstaller bundles this module into `taskpaw-backend`; the shell resolves that
 sidecar next to the app and runs it with the role. Falls back to `agent`.
@@ -30,8 +31,15 @@ def main(argv: list[str] | None = None) -> int:
         from taskpaw_v3.agent.server.service import main as agent_main
 
         return agent_main()
+    if role == "llm-worker":
+        # The terminable child that runs chat() for #177 (#178): spawned by the
+        # agent itself via core.llm_worker.worker_argv(), never by the shell.
+        from taskpaw_v3.core.llm_worker import main as llm_worker_main
+
+        return llm_worker_main()
     print(
-        f"unknown backend role: {role!r} (expected 'agent' or 'hub')", file=sys.stderr
+        f"unknown backend role: {role!r} (expected 'agent', 'hub' or 'llm-worker')",
+        file=sys.stderr,
     )
     return 2
 

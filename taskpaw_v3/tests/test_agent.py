@@ -110,6 +110,9 @@ def test_control_config_masks_token():
     client = TestClient(create_control_app(cfg))
     r = client.get("/control/config")
     assert r.status_code == 200 and r.json()["api_token"] == "***"
+    # #178: the LLM key fields are always present (masked; none configured here).
+    assert r.json()["llm_api_key"] == "" and r.json()["llm_api_key_source"] == "none"
+    assert "secret" not in r.text
 
 
 def test_port_guard_detects_in_use():
@@ -154,3 +157,98 @@ def test_run_agent_guards_bind_exposure_before_binding():
         run_agent(_cfg(bind_host="8.8.8.8", api_token="tok"), block=False)
     with pytest.raises(ValueError, match="requires an api_token"):
         run_agent(_cfg(bind_host="192.168.1.9"), block=False)
+
+
+# ── global LLM API settings (#178) ─────────────────────────────────────────
+_LLM_KEY = "sk-ROUTEKEY-7b21"
+
+
+def _control_clients(cfg):
+    """Both construction paths: plain running config, and with a MonitorAdmin
+    (config_view = desired scalars)."""
+    from taskpaw_v3.agent.server.admin import MonitorAdmin
+    from taskpaw_v3.monitors.registry import PluginRegistry
+
+    admin = MonitorAdmin(cfg, None, PluginRegistry(), None)
+    return [
+        TestClient(create_control_app(cfg)),
+        TestClient(create_control_app(cfg, admin=admin)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "stored,env,shown,source",
+    [
+        (_LLM_KEY, None, "***", "config"),
+        ("", "sk-ENV-3c3c", "***", "env"),
+        (_LLM_KEY, "sk-ENV-3c3c", "***", "env"),
+        ("", "   ", "", "none"),
+        ("", None, "", "none"),
+    ],
+)
+def test_control_config_masks_llm_key_and_reports_source(
+    monkeypatch, stored, env, shown, source
+):
+    # T-G1: GET masks the LLM key to *** whenever one is in effect and reports
+    # where it comes from, via the same resolver chat() uses (D1).
+    from taskpaw_v3.core.llm import LLM_KEY_ENV
+
+    if env is not None:
+        monkeypatch.setenv(LLM_KEY_ENV, env)
+    for client in _control_clients(_cfg(llm_api_key=stored)):
+        r = client.get("/control/config")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["llm_api_key"] == shown
+        assert data["llm_api_key_source"] == source
+        assert data["llm_api_base"] == "https://openrouter.ai/api/v1"
+        assert data["llm_model"] == "x-ai/grok-4.1-fast"
+        assert _LLM_KEY not in r.text and "sk-ENV-3c3c" not in r.text
+
+
+def test_control_config_whitespace_stored_key_reports_none():
+    # A whitespace-only stored key (only reachable by bypassing the validator)
+    # resolves to no key at all → "" + none, never "***".
+    cfg = _cfg()
+    cfg.llm_api_key = "   "  # no validate_assignment → stays unstripped
+    for client in _control_clients(cfg):
+        data = client.get("/control/config").json()
+        assert (data["llm_api_key"], data["llm_api_key_source"]) == ("", "none")
+
+
+def test_control_llm_test_route(monkeypatch):
+    # T-G2: POST /control/llm-test → the admin's dict; bad base → 400 whose
+    # detail carries no key.
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.agent.server.admin import MonitorAdmin
+    from taskpaw_v3.core.llm import ChatResult
+    from taskpaw_v3.monitors.registry import PluginRegistry
+
+    calls = []
+
+    def fake_chat(settings, messages, **kw):
+        calls.append(settings)
+        return ChatResult("OK", "stop", "served/m", 5)
+
+    monkeypatch.setattr(adminmod, "chat", fake_chat)
+    cfg = _cfg(llm_api_key=_LLM_KEY)
+    admin = MonitorAdmin(cfg, None, PluginRegistry(), None)
+    client = TestClient(create_control_app(cfg, admin=admin))
+    r = client.post("/control/llm-test", json={"llm_model": "cand/m"})
+    assert r.status_code == 200
+    assert r.json() == {
+        "ok": True,
+        "model": "served/m",
+        "latency_ms": 5,
+        "truncated": False,
+    }
+    assert calls[0].model == "cand/m"
+    r = client.post(
+        "/control/llm-test", json={"llm_api_base": "ftp://x", "llm_api_key": _LLM_KEY}
+    )
+    assert r.status_code == 400
+    assert "llm_api_base" in r.json()["detail"] and _LLM_KEY not in r.text
+    assert len(calls) == 1
+    # Not mounted without an admin (like the other mutation routes).
+    plain = TestClient(create_control_app(cfg))
+    assert plain.post("/control/llm-test", json={}).status_code in (404, 405)

@@ -602,3 +602,268 @@ def test_admin_live_apply(tmp_path):
         assert sup.has("w1") is False
     finally:
         sup.stop()
+
+
+# ── global LLM API settings (#178) ─────────────────────────────────────────
+_LLM_KEY = "sk-ADMINKEY-41d0"
+
+
+def test_update_config_llm_fields_are_live_no_restart(tmp_path):
+    # T-A1: the three LLM fields are live-safe: persisted, applied to the running
+    # config, and published to the process-wide holder — no restart_required.
+    from taskpaw_v3.core.llm import get_llm_settings
+
+    cfg = _agent_config()
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    res = admin.update_config(
+        {
+            "llm_api_base": "http://127.0.0.1:11434/v1/",
+            "llm_model": " qwen3 ",
+            "llm_api_key": _LLM_KEY,
+        }
+    )
+    assert res == {"ok": True, "restart_required": False}
+    on_disk = load_yaml(AgentConfig, path)
+    assert (on_disk.llm_api_base, on_disk.llm_model, on_disk.llm_api_key) == (
+        "http://127.0.0.1:11434/v1",
+        "qwen3",
+        _LLM_KEY,
+    )
+    assert (cfg.llm_api_base, cfg.llm_model, cfg.llm_api_key) == (
+        "http://127.0.0.1:11434/v1",
+        "qwen3",
+        _LLM_KEY,
+    )
+    s = get_llm_settings()
+    assert (s.api_base, s.model, s.api_key, s.key_source) == (
+        "http://127.0.0.1:11434/v1",
+        "qwen3",
+        _LLM_KEY,
+        "config",
+    )
+    # A non-live field alongside still reports restart_required (unchanged).
+    assert admin.update_config({"machine": "m2", "llm_model": "x"})["restart_required"]
+
+
+def test_update_config_llm_key_keep_clear_and_env(tmp_path, monkeypatch):
+    # T-A2 (D12): blank/*** keeps the stored key; null clears it; an env key is
+    # never written back into agent.yaml.
+    from taskpaw_v3.core.llm import LLM_KEY_ENV, get_llm_settings
+
+    cfg = _agent_config(llm_api_key=_LLM_KEY)
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    for kept in ("***", "  ", "", " *** "):
+        admin.update_config({"llm_api_key": kept, "llm_model": "m1"})
+        assert cfg.llm_api_key == _LLM_KEY
+        assert load_yaml(AgentConfig, path).llm_api_key == _LLM_KEY
+    admin.update_config({"llm_api_key": None})
+    assert cfg.llm_api_key == ""
+    assert load_yaml(AgentConfig, path).llm_api_key == ""
+    assert get_llm_settings().key_source == "none"
+    # With the env var set, saves report source env but persist only the stored.
+    monkeypatch.setenv(LLM_KEY_ENV, "sk-ENVKEY-0000")
+    admin.update_config({"llm_model": "m2", "llm_api_key": "***"})
+    assert "sk-ENVKEY-0000" not in path.read_text(encoding="utf-8")
+    assert load_yaml(AgentConfig, path).llm_api_key == ""
+    s = get_llm_settings()
+    assert (s.api_key, s.key_source, s.model) == ("sk-ENVKEY-0000", "env", "m2")
+
+
+def test_update_config_llm_failed_save_leaves_holder(tmp_path, monkeypatch):
+    # T-A3: validate → guard → save → commit → live-apply. A failed save leaves
+    # the running config AND the holder untouched.
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import get_llm_settings
+
+    cfg = _agent_config(llm_api_key=_LLM_KEY)
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    before = get_llm_settings()
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(adminmod, "save_yaml", boom)
+    with pytest.raises(OSError):
+        admin.update_config({"llm_model": "new/model", "llm_api_key": None})
+    assert get_llm_settings() is before
+    assert (cfg.llm_model, cfg.llm_api_key) == ("x-ai/grok-4.1-fast", _LLM_KEY)
+    assert admin.config_view()["llm_model"] == "x-ai/grok-4.1-fast"
+
+
+def test_update_config_rejects_bad_llm_base(tmp_path):
+    cfg = _agent_config()
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    with pytest.raises(ValueError):
+        admin.update_config({"llm_api_base": "ftp://x"})
+    assert not path.exists() and cfg.llm_api_base == "https://openrouter.ai/api/v1"
+
+
+class _ChatSpy:
+    """Stands in for admin.chat: records the call and checks the admin lock is
+    NOT held while the (slow, network) request runs (D11)."""
+
+    def __init__(self, admin, result=None, exc=None):
+        self.admin = admin
+        self.result = result
+        self.exc = exc
+        self.calls: list = []
+
+    def __call__(self, settings, messages, **kw):
+        assert self.admin._lock.acquire(blocking=False), "admin lock held in chat"
+        self.admin._lock.release()
+        self.calls.append((settings, messages, kw))
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+
+def _ok_result(finish_reason="stop"):
+    from taskpaw_v3.core.llm import ChatResult
+
+    return ChatResult("OK", finish_reason, "served/m", 42)
+
+
+def test_llm_test_uses_candidate_without_persisting(tmp_path, monkeypatch):
+    # T-A4: candidate base/model reach chat() with strict=False; nothing persists.
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import get_llm_settings
+
+    cfg = _agent_config(llm_api_key=_LLM_KEY)
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    holder = get_llm_settings()
+    desired = dict(admin._desired)
+    spy = _ChatSpy(admin, result=_ok_result())
+    monkeypatch.setattr(adminmod, "chat", spy)
+    res = admin.llm_test(
+        {"llm_api_base": "http://h:1/v1/", "llm_model": "cand/m", "llm_api_key": ""}
+    )
+    assert res == {
+        "ok": True,
+        "model": "served/m",
+        "latency_ms": 42,
+        "truncated": False,
+    }
+    ((settings, messages, kw),) = spy.calls
+    assert (settings.api_base, settings.model) == ("http://h:1/v1", "cand/m")
+    assert (settings.api_key, settings.key_source) == (_LLM_KEY, "config")  # blank
+    assert kw["strict"] is False and kw["max_tokens"] == 16 and kw["timeout"] == 20
+    assert messages[0]["role"] == "user"
+    # Nothing touched: desired, running config, disk, holder.
+    assert admin._desired == desired
+    assert (cfg.llm_api_base, cfg.llm_model) == (
+        "https://openrouter.ai/api/v1",
+        "x-ai/grok-4.1-fast",
+    )
+    assert not path.exists()
+    assert get_llm_settings() is holder
+
+
+def test_llm_test_key_resolution(tmp_path, monkeypatch):
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import LLM_KEY_ENV
+
+    cfg = _agent_config(llm_api_key=_LLM_KEY)
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    spy = _ChatSpy(admin, result=_ok_result())
+    monkeypatch.setattr(adminmod, "chat", spy)
+    admin.llm_test({"llm_api_key": "***"})  # masked → the stored key
+    admin.llm_test({"llm_api_key": None})  # null = absent here (no clear)
+    admin.llm_test({"llm_api_key": " sk-typed \r\n"})  # a typed candidate, stripped
+    monkeypatch.setenv(LLM_KEY_ENV, "sk-ENVKEY-1111")
+    admin.llm_test({})  # env first
+    assert [(c[0].api_key, c[0].key_source) for c in spy.calls] == [
+        (_LLM_KEY, "config"),
+        (_LLM_KEY, "config"),
+        ("sk-typed", "config"),
+        ("sk-ENVKEY-1111", "env"),
+    ]
+    assert cfg.llm_api_key == _LLM_KEY  # a typed candidate is never saved
+
+
+def test_llm_test_errors_never_carry_exception_text(tmp_path, monkeypatch):
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import LLMError
+
+    cfg = _agent_config(llm_api_key=_LLM_KEY)
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    monkeypatch.setattr(
+        adminmod,
+        "chat",
+        _ChatSpy(admin, exc=LLMError("auth", "authentication failed", 401)),
+    )
+    res = admin.llm_test({})
+    assert res == {"ok": False, "error": "auth: authentication failed (HTTP 401)"}
+    monkeypatch.setattr(
+        adminmod, "chat", _ChatSpy(admin, exc=LLMError("bad_response", "HTTP 500", 500))
+    )
+    assert admin.llm_test({}) == {"ok": False, "error": "bad_response: HTTP 500"}
+    monkeypatch.setattr(
+        adminmod, "chat", _ChatSpy(admin, exc=LLMError("network", "timeout"))
+    )
+    assert admin.llm_test({}) == {"ok": False, "error": "network: timeout"}
+    monkeypatch.setattr(
+        adminmod, "chat", _ChatSpy(admin, exc=RuntimeError(f"boom {_LLM_KEY}"))
+    )
+    res = admin.llm_test({})
+    assert res == {"ok": False, "error": "unexpected error: RuntimeError"}
+    assert _LLM_KEY not in str(res)
+
+
+def test_llm_test_truncated_reply_is_ok(tmp_path, monkeypatch):
+    import taskpaw_v3.agent.server.admin as adminmod
+
+    admin = MonitorAdmin(_agent_config(), None, _registry(), tmp_path / "a.yaml")
+    monkeypatch.setattr(adminmod, "chat", _ChatSpy(admin, _ok_result("length")))
+    res = admin.llm_test({})
+    assert res["ok"] is True and res["truncated"] is True
+
+
+def test_llm_test_bad_base_is_value_error_without_key(tmp_path, monkeypatch):
+    import taskpaw_v3.agent.server.admin as adminmod
+
+    admin = MonitorAdmin(_agent_config(), None, _registry(), tmp_path / "a.yaml")
+    spy = _ChatSpy(admin, result=_ok_result())
+    monkeypatch.setattr(adminmod, "chat", spy)
+    with pytest.raises(ValueError) as ei:
+        admin.llm_test({"llm_api_base": "ftp://x", "llm_api_key": _LLM_KEY})
+    assert "llm_api_base" in str(ei.value) and _LLM_KEY not in str(ei.value)
+    with pytest.raises(ValueError) as ei:
+        admin.llm_test({"llm_api_key": 12345})  # wrong type: value not echoed
+    assert "12345" not in str(ei.value)
+    assert spy.calls == []
+
+
+def test_handle_llm_test_dispatches(tmp_path, monkeypatch):
+    # T-A5: the /control/command path reaches llm_test, with or without a
+    # `candidate` envelope; validation errors come back as {ok: false}.
+    import taskpaw_v3.agent.server.admin as adminmod
+
+    admin = MonitorAdmin(_agent_config(), None, _registry(), tmp_path / "a.yaml")
+    spy = _ChatSpy(admin, result=_ok_result())
+    monkeypatch.setattr(adminmod, "chat", spy)
+    assert admin.handle("llm_test", {"candidate": {"llm_model": "a/b"}})["ok"] is True
+    assert admin.handle("llm_test", {"command": "llm_test", "llm_model": "c/d"})["ok"]
+    assert [c[0].model for c in spy.calls] == ["a/b", "c/d"]
+    res = admin.handle("llm_test", {"llm_api_base": "ftp://x"})
+    assert res["ok"] is False and "llm_api_base" in res["error"]
+    res = admin.handle("llm_test", {"candidate": ["not", "an", "object"]})
+    assert res == {"ok": False, "error": "llm test candidate must be an object"}
+    assert len(spy.calls) == 2
+
+
+def test_live_and_non_live_config_partition():
+    # #178: exactly the token + the three LLM fields are live; the rest (the
+    # restart-required baseline) is unchanged.
+    assert set(MonitorAdmin._LIVE_CONFIG) <= set(MonitorAdmin._EDITABLE_CONFIG)
+    assert MonitorAdmin._NON_LIVE_CONFIG == (
+        "machine",
+        "bind_host",
+        "bind_port",
+        "control_host",
+        "control_port",
+        "host_metrics",
+    )

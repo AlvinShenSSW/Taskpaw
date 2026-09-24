@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 from taskpaw_v3 import __version__
 from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import AgentConfig
+from taskpaw_v3.core.llm import resolve_llm_settings
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import effective_monitors, monitor_name
@@ -128,6 +129,17 @@ def create_control_app(
         data["auth_disabled"] = auth_disabled(str(data.get("api_token", "")))
         if data.get("api_token"):
             data["api_token"] = "***"
+        # LLM key (#178): mask it and report where the EFFECTIVE key comes from,
+        # computed by the same env-first resolver chat() uses (D1) — so an env key
+        # with nothing stored still shows "***" + "env", and a whitespace-only
+        # stored key shows "" + "none". The key value itself never leaves here.
+        llm = resolve_llm_settings(
+            str(data.get("llm_api_base") or ""),
+            str(data.get("llm_model") or ""),
+            str(data.get("llm_api_key") or ""),
+        )
+        data["llm_api_key_source"] = llm.key_source
+        data["llm_api_key"] = "***" if llm.key_source != "none" else ""
         return data
 
     @app.get("/control/events")
@@ -221,5 +233,13 @@ def create_control_app(
             # instead of hand-editing agent.yaml. Validated + persisted atomically;
             # returns {ok, restart_required} — port/host changes apply on restart.
             return _guard(admin.update_config, body)
+
+        @app.post("/control/llm-test")
+        def llm_test(body: dict):
+            # Settings "Test connection" (#178): tests the CURRENT FORM values
+            # without persisting. 400 only for a validation error (bad base URL);
+            # provider failures come back as {ok: false, error} — never exception
+            # text (D1).
+            return _guard(admin.llm_test, body)
 
     return app

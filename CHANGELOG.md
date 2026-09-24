@@ -4,6 +4,27 @@
 
 ---
 
+## V3 3.3.0 — 全局 LLM API 设置 + 可终止的 llm-worker（#178）
+
+- **新增 agent 级 LLM API 设置。** `agent.yaml` 多了 `llm_api_base`（默认
+  `https://openrouter.ai/api/v1`）、`llm_model`（默认 `x-ai/grok-4.1-fast`）、`llm_api_key`
+  三个键；设置页新增「LLM API」卡片,可保存、清除 key、测试连接。三个字段**即时生效**,不需要重启。
+  key 的优先级:环境变量 `TASKPAW_LLM_API_KEY` > `agent.yaml`;界面与 `/control/config` 一律
+  打码为 `***`,并附 `llm_api_key_source`(env / config / none);留空或 `***` 保留原值,`null`
+  显式清除;来自环境变量的 key 永远不写回 YAML(宪法 §2)。
+- **`taskpaw_v3/core/llm.py`**:同步的 OpenAI 兼容 `chat()`(标准库 `urllib`,不跟随重定向,
+  `Authorization` 只发给原始地址),完整校验响应信封,错误统一为 `LLMError(auth / rate_limit /
+  refusal / network / bad_response)`,报错文本是固定字符串,绝不包含 key、提示词或响应正文。
+- **`taskpaw_v3/core/llm_worker.py` + 打包角色 `taskpaw-backend llm-worker`**:stdin/stdout
+  JSON 行协议的 LLM 请求子进程,设置只从子进程环境变量读取。取消 = 关闭它的 stdin:worker 自带的
+  stdin 监视线程在 EOF 时立刻 `os._exit(0)`,即使主线程正阻塞在 HTTP 里,所以父进程死亡也不会遗留
+  worker;Windows 上再加一层 kill-on-close Job Object 兜底。这是 #177「AV 翻译」的翻译线程能在
+  5 秒停止预算内退出的前提。
+- 新增控制命令 `llm_test` / 路由 `POST /control/llm-test`:用当前表单值测试连接,不持久化。
+- 版本 3.2.1 → 3.3.0(六处版本文件同步)。
+
+---
+
 ## V3 3.2.1 — Jasna 输出改用 hvc1 标签（macOS 可预览）
 
 - **修复:Jasna 产出的 MP4 在 macOS 上无法预览。** ffmpeg 给 MP4 里的 HEVC 默认写

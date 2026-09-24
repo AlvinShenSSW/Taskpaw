@@ -232,3 +232,42 @@ def test_bind_host_normalized_on_both_configs():
     assert AgentConfig(server_id="s", machine="m", bind_host="[::1]").bind_host == "::1"
     assert HubConfig(bind_host="  10.0.0.5 ").bind_host == "10.0.0.5"
     assert HubConfig(bind_host="[::1]").bind_host == "::1"
+
+
+def test_agent_config_llm_fields():
+    """#178 AC1: global LLM API settings — defaults, normalisation, validation."""
+    c = AgentConfig(server_id="s", machine="m")
+    assert c.llm_api_base == "https://openrouter.ai/api/v1"
+    assert c.llm_model == "x-ai/grok-4.1-fast"
+    assert c.llm_api_key == ""
+    c = AgentConfig(
+        server_id="s",
+        machine="m",
+        llm_api_base=" https://x/v1/ ",
+        llm_model="  a/b \n",
+        llm_api_key=" sk-abc\r\n",
+    )
+    assert c.llm_api_base == "https://x/v1"  # stripped + trailing / removed
+    assert c.llm_model == "a/b"
+    assert c.llm_api_key == "sk-abc"  # CR/LF + whitespace normalised (D1)
+    assert AgentConfig(server_id="s", machine="m", llm_api_base="  ").llm_api_base == ""
+    assert (
+        AgentConfig(server_id="s", machine="m", llm_api_base="HTTP://h:1/").llm_api_base
+        == "HTTP://h:1"
+    )
+    for bad in ("ftp://x/v1", "openrouter.ai/api/v1", "javascript:alert(1)"):
+        with pytest.raises(Exception):
+            AgentConfig(server_id="s", machine="m", llm_api_base=bad)
+
+
+def test_agent_example_yaml_documents_llm_keys():
+    from taskpaw_v3 import bootstrap
+
+    path = bootstrap.EXAMPLES / "agent.example.yaml"
+    text = path.read_text(encoding="utf-8")
+    for key in ("llm_api_base:", "llm_model:", "llm_api_key:"):
+        assert key in text
+    cfg = load_yaml(AgentConfig, path)
+    assert cfg.llm_api_base == "https://openrouter.ai/api/v1"
+    assert cfg.llm_model == "x-ai/grok-4.1-fast"
+    assert cfg.llm_api_key == ""
