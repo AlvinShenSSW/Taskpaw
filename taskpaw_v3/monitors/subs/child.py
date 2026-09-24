@@ -237,16 +237,17 @@ class ChildProcess:
             return None
 
     def _kill_ours(self) -> list[Any]:
-        """psutil-kill every tracked process that is still ours. Returns those
-        that were running (whether or not the kill succeeded)."""
+        """psutil-kill every tracked process that is still ours. Returns only
+        those whose `kill()` succeeded (K4); a failed kill (AccessDenied,
+        NoSuchProcess, …) is logged and left to the caller's survivor check
+        (`tracked_running()`)."""
         if psutil is None:
             return []
-        hit: list[Any] = []
+        killed: list[Any] = []
         for pid, ctime in self._tracked_copy():
             p = self._ours(pid, ctime)
             if p is None:
                 continue
-            hit.append(p)
             try:
                 p.kill()
             except Exception as e:  # reported through the caller's result
@@ -256,7 +257,9 @@ class ChildProcess:
                     pid,
                     type(e).__name__,
                 )
-        return hit
+                continue
+            killed.append(p)
+        return killed
 
     def tracked_running(self) -> list[int]:
         """The pids of tracked descendants still running with their tracked
@@ -276,7 +279,8 @@ class ChildProcess:
 
     def kill_tracked(self) -> list[int]:
         """psutil-kill every tracked descendant still running with its tracked
-        create time (no taskkill, no wait). Returns their pids. Never raises."""
+        create time (no taskkill, no wait). Returns the pids actually killed
+        (a failed kill is logged, not listed). Never raises."""
         try:
             return [p.pid for p in self._kill_ours()]
         except Exception as e:  # never raises

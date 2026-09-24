@@ -1203,6 +1203,92 @@ def test_waiting_text_never_names_this_run_itself(tmp_path, monkeypatch):
     r.inst.stop(timeout=1)
 
 
+def test_a_third_failure_settled_by_the_poll_is_degraded_in_that_check(
+    tmp_path, monkeypatch
+):
+    # CX1: three videos each exhaust both ASR attempts; the check that settles
+    # the third final failure (inside _poll_asr, after the early abort guard)
+    # must already report `degraded`, not `idle`.
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4", "c.mp4", "d.mp4"])
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    inst.start(emit)
+    states = []
+    for _ in range(3):
+        sp.last.finish(1)
+        states.append(inst.check(emit).state)  # retry
+        sp.last.finish(1)
+        states.append(inst.check(emit).state)  # final failure
+    assert inst._aborted
+    assert states[:-1] == ["running"] * 5
+    st_detail = inst._aborted_detail()
+    assert states[-1] == "degraded"
+    st = inst.check(emit)
+    assert st.state == "degraded" and st.detail == st_detail
+    assert len(_keyed(r.evs, f"{IID}:avsubs-aborted")) == 1
+    assert len(sp.argvs) == 6 and gpu_lease.holder() is None
+
+
+def test_idle_note_for_a_plan_of_only_collisions(tmp_path, monkeypatch):
+    # K2: no "(0 already have .srt)"; the collisions are named instead.
+    # a.mkv / z.mkv win their targets (a.srt / z.srt exist: done); a.mp4 and
+    # z.mp4 collide with them.
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        full=["a.mp4", "z.mp4"],
+        zh=["a.mkv", "z.mkv"],
+        avsubs_extensions=["mp4", "mkv"],
+    )
+    r.inst.start(r.emit)
+    st = r.inst.check(r.emit)
+    assert st.state == "idle"
+    assert st.detail == (
+        "nothing to subtitle (2 already have .srt, 2 skipped as name collisions)"
+    )
+    # done == 0 with only collisions (the winners were not plannable, e.g. a
+    # failed stat): no "(0 already have .srt)".
+    loser, owner = tmp_path / "x.mp4", tmp_path / "x.mkv"
+    plan = AV.TreePlan([], 0, [(loser, owner)] * 3, ["x.mkv: PermissionError"])
+    note = AV._idle_note(plan, "R")
+    assert note == "nothing to subtitle (3 skipped as name collisions)"
+    assert AV._idle_note(AV.TreePlan([], 1, [], []), "R") == (
+        "nothing to subtitle (1 already have .srt)"
+    )
+    assert AV._idle_note(AV.TreePlan([], 0, [], []), "R") == ("no video files under R")
+
+
+def test_a_raising_job_lookup_in_start_asr_still_releases_the_lease(
+    tmp_path, monkeypatch
+):
+    # K3: the pop and the `_jobs` lookup are inside the exception fence.
+    _other_holds()
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+    inst = r.inst
+    inst.start(r.emit)
+    assert inst._waiting_gpu and r.spawner.argvs == []
+
+    class _Boom(dict):
+        armed = True
+
+        def __getitem__(self, key):
+            if key == "a.mp4" and _Boom.armed:
+                _Boom.armed = False
+                raise KeyError("lookup blew up")
+            return super().__getitem__(key)
+
+    inst._jobs = _Boom(inst._jobs)
+    log = _lease_spy(monkeypatch, r.owner)
+    assert gpu_lease.release(("other", 999))
+    inst.check(r.emit)  # a: acquire → raise → released; b: acquire → launch
+    assert _names(log)[:3] == ["release", "acquire", "release"]
+    assert "acquire" in _names(log)[3:]
+    assert [a[1] for a in r.spawner.argvs] == [str(r.root / "b.mp4")]
+    assert inst._asr_job is inst._jobs["b.mp4"]
+    assert gpu_lease.holder() == inst._run
+    assert all(i.relpath != "a.mp4" for i in inst._queue)  # no endless retry
+    inst.stop(timeout=1)
+
+
 # ── done ──────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     "block", ["none", "queue", "asr", "unsettled", "queued", "in_flight", "results"]

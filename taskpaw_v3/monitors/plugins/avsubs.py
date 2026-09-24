@@ -287,6 +287,19 @@ def sweep_srt_temps(
     return removed
 
 
+def _idle_note(plan: TreePlan, root: str) -> str:
+    """The idle detail of a Start with nothing to do (K2): never a
+    `(0 already have .srt)`; collisions are counted when there are any."""
+    why: list[str] = []
+    if plan.done:
+        why.append(f"{plan.done} already have .srt")
+    if plan.collisions:
+        why.append(f"{len(plan.collisions)} skipped as name collisions")
+    if why:
+        return f"nothing to subtitle ({', '.join(why)})"
+    return f"no video files under {root}"
+
+
 def _default_spawn(argv: list[str]) -> ChildProcess:
     # Resolved at call time so `AV.ChildProcess` can be monkeypatched (D10);
     # stdin=DEVNULL and a merged tail are ChildProcess's defaults.
@@ -568,10 +581,7 @@ class AvsubsInstance(MonitorInstance):
             return
         if not plan.items:
             # Nothing to do is not an event (M7), and no translator thread.
-            if plan.done or plan.collisions:
-                self._idle_note = f"nothing to subtitle ({plan.done} already have .srt)"
-            else:
-                self._idle_note = f"no video files under {root}"
+            self._idle_note = _idle_note(plan, root)
             return
         self._queue = [i for i in plan.items if i.kind == "full"]
         try:
@@ -754,12 +764,15 @@ class AvsubsInstance(MonitorInstance):
 
     def _start_asr(self, item: TreeItem, emit: EventEmitter) -> None:
         """Launch the head item's ASR with the lease held. Never dispatches;
-        the release (when nothing is left running) happens after the lock."""
-        if self._queue and self._queue[0] is item:
-            self._queue.pop(0)
-        job = self._jobs[item.relpath]
+        the release (when nothing is left running) happens after the lock.
+        Everything — the pop and the job lookup included (K3) — is inside the
+        exception fence, so any raise releases the lease."""
+        job: Optional[SubsJob] = None
         release = False
         try:
+            if self._queue and self._queue[0] is item:
+                self._queue.pop(0)
+            job = self._jobs[item.relpath]
             with self._launch_lock:
                 if self._stopping.is_set() or self._aborted:
                     release = True
@@ -789,6 +802,12 @@ class AvsubsInstance(MonitorInstance):
         except Exception as e:  # D10: a bug must not strand the lease
             log.exception("avsubs %s: launching %s failed", self.instance_id, item)
             with self._launch_lock:
+                if self._queue and self._queue[0] is item:
+                    self._queue.pop(0)  # never retry the same item forever
+                if job is None:
+                    release = True
+                    self._advance_requested = True
+                    return
                 if (
                     job.child is not None
                     and self._asr_job is not job
@@ -806,9 +825,9 @@ class AvsubsInstance(MonitorInstance):
                 release = True
                 self._advance_requested = True
         finally:
-            if release and job.child is None:
+            if release and (job is None or job.child is None):
                 self._gpu_rel()
-        self._run_deferred()
+            self._run_deferred()
 
     def _kill_for_stop(self, job: SubsJob) -> bool:
         """Under the lock: kill a just-spawned child we must not keep. A direct
@@ -1187,6 +1206,13 @@ class AvsubsInstance(MonitorInstance):
             self._dispatch(emit)
             if not self._waiting_gpu and not self._asr_live():
                 gpu_lease.withdraw(self._run)  # D12: the GPU is not needed now
+        # CX1: the poll or the retry above may have settled a third
+        # consecutive failure (e.g. a file's final ASR attempt) — report it in
+        # THIS check, exactly as the early guards do.
+        if self._launch_error is not None:
+            return self._build_status("error", self._launch_error)
+        if self._aborted:
+            return self._build_status("degraded", self._aborted_detail())
         self._maybe_done(emit)  # (7)
         busy = self._asr_live() or self._translating() > 0
         return self._build_status("running" if busy else "idle")  # (8)

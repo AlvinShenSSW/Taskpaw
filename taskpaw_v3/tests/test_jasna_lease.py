@@ -536,3 +536,109 @@ def test_the_srt_temp_sweep_is_age_gated(tmp_path, monkeypatch, clock):
     assert not old.exists()
     assert not junk.exists()  # the .avsubs/tmp rmtree is unchanged
     r.inst.stop(timeout=1)
+
+
+# ── K1: a raise while holding the GPU never strands the lease ─────────────
+def _raise_once(monkeypatch, name: str) -> list:
+    """Make `JasnaInstance.<name>` raise RuntimeError on its first call only."""
+    calls: list = []
+    real = getattr(JasnaInstance, name)
+
+    def wrapped(self, *a, **kw):
+        calls.append(a)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(JasnaInstance, name, wrapped)
+    return calls
+
+
+def test_k1_a_raise_in_start_subs_after_the_take_gives_the_hold(
+    tmp_path, monkeypatch, clock
+):
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"])
+    r.spawner.fail_at = {1, 2}  # → the launch-error branch calls _settle …
+    _raise_once(monkeypatch, "_settle")  # … which raises
+    r.inst.start(r.emit)  # never raises
+    assert gpu_lease.holder() is None and r.inst._gpu_holder is None
+    assert r.inst._settled["e.mp4"] == ("failed", "internal: RuntimeError")
+    assert len(_keyed(r.evs, "j1:subs:e.mp4")) == 1
+    st = r.inst.check(r.emit)
+    assert st.state == "idle" and len(_done(r.evs)) == 1
+    assert _other_try()
+
+
+def test_k1_a_raise_in_poll_subs_gives_the_hold(tmp_path, monkeypatch, clock):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    inst.check(emit)  # a restored → a's ASR under the carried hold
+    assert gpu_lease.holder() == inst._run
+    boom: list = []
+
+    def submit_raises(req):
+        if not boom:
+            boom.append(req)
+            raise RuntimeError("translator gone")
+
+    r.translators[0].on_submit = submit_raises
+    r.spawner.last.finish(0)
+    st = inst.check(emit)  # publish_ja → _submit_translation raises
+    assert boom
+    assert gpu_lease.holder() is None and inst._gpu_holder is None
+    assert inst._settled["a.mp4"] == ("failed", "internal: RuntimeError")
+    assert inst._subs_job is None
+    assert st.state == "idle"
+    assert _other_try()
+
+
+def test_k1_alerts_that_always_raise_still_give_the_hold(tmp_path, monkeypatch, clock):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    inst = r.inst
+
+    def emit(level, title, message, data=None, dedupe_key=None):
+        if level == "alert":
+            raise RuntimeError("hub down")
+
+    inst.start(emit)
+    inst.check(emit)  # ASR a
+    r.spawner.last.finish(1)
+    inst.check(emit)  # retry
+    r.spawner.last.finish(1)
+    st = inst.check(emit)  # final failure → _alert_job raises, twice
+    assert st is not None
+    assert gpu_lease.holder() is None
+    assert inst._settled["a.mp4"][0] == "failed"
+    assert _other_try()
+
+
+def test_k1_a_raise_that_leaves_a_live_asr_child_keeps_the_hold_until_it_exits(
+    tmp_path, monkeypatch, clock
+):
+    # Rule (c): a GPU child the failing code already started keeps the hold and
+    # the live-child guard; the reap after its exit gives the hold.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    inst.check(emit)  # ASR a, attempt 1
+    job = inst._subs_job
+    real = job.start_asr
+
+    def start_then_raise(spawn):
+        real(spawn)  # attempt 2 is spawned and live …
+        raise RuntimeError("after the spawn")  # … then something raises
+
+    monkeypatch.setattr(job, "start_asr", start_then_raise)
+    r.spawner.last.finish(1)
+    inst.check(emit)
+    assert len(r.spawner.children) == 2
+    assert inst._settled["a.mp4"] == ("failed", "internal: RuntimeError")
+    assert inst._subs_job is job and job.child is not None  # guard kept
+    assert gpu_lease.holder() == inst._run  # hold kept while it runs
+    assert not _other_try()
+    r.spawner.last.rc = 1  # it exits
+    inst.check(emit)  # reaped → the hold is given
+    assert inst._subs_job is None
+    assert gpu_lease.holder() is None and inst._gpu_holder is None
+    assert _other_try()

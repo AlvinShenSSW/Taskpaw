@@ -34,8 +34,9 @@ def bounded(text: str, limit: int) -> str:
 
 def exists_quietly(path: Union[str, "os.PathLike[str]"]) -> bool:
     """`Path(path).exists()`, with an unreadable entry (long path, dead network
-    drive, permission) reported as "not there yet" instead of raising."""
+    drive, permission: `OSError`) or an invalid path (e.g. an embedded NUL:
+    `ValueError`) reported as "not there yet" instead of raising."""
     try:
         return Path(path).exists()
-    except OSError:
+    except (OSError, ValueError):
         return False

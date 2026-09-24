@@ -733,7 +733,13 @@ def test_exists_quietly(tmp_path, monkeypatch):
         raise PermissionError("denied")
 
     monkeypatch.setattr(Path, "exists", boom)
-    assert exists_quietly(f) is False  # unreadable → "not there yet"
+    try:
+        got: object = exists_quietly(f)
+    except OSError:
+        got = "raised"
+    finally:
+        monkeypatch.undo()  # pytest itself calls Path.exists when reporting
+    assert got is False  # unreadable → "not there yet"
 
 
 def test_subs_package_reexports_the_shared_helpers():
@@ -750,3 +756,60 @@ def test_subs_package_reexports_the_shared_helpers():
             if src.endswith(".py"):
                 text = open(src, encoding="utf-8").read()
                 assert "plugins.lada" not in text, name
+
+
+# ── #179 review cycle 5: K4 / K5 ─────────────────────────────────────────
+def test_kill_tracked_lists_only_pids_whose_kill_succeeded(monkeypatch, caplog):
+    psutil = pytest.importorskip("psutil")
+    c = ChildProcess([PY, "-c", "pass"])
+    try:
+        _wait_exit(c)
+        me = psutil.Process()
+        with c._tracked_lock:
+            c._tracked[me.pid] = me.create_time()  # "ours", still running
+
+        def denied(self):
+            raise psutil.AccessDenied(self.pid)
+
+        monkeypatch.setattr(psutil.Process, "kill", denied)
+        with caplog.at_level("WARNING", logger="taskpaw.subs.child"):
+            assert c.kill_tracked() == []  # not killed → not listed
+        assert any("AccessDenied" in rec.getMessage() for rec in caplog.records)
+        assert c.tracked_running() == [me.pid]  # the survivor check still sees it
+
+        def gone(self):
+            raise psutil.NoSuchProcess(self.pid)
+
+        monkeypatch.setattr(psutil.Process, "kill", gone)
+        assert c.kill_tracked() == []
+
+        killed: list[int] = []
+        monkeypatch.setattr(psutil.Process, "kill", lambda self: killed.append(1))
+        assert c.kill_tracked() == [me.pid]  # a successful kill is listed
+        assert killed == [1]
+    finally:
+        monkeypatch.undo()
+        _cleanup(c)
+
+
+def test_exists_quietly_treats_an_invalid_path_as_missing(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from taskpaw_v3.monitors.subs.util import exists_quietly
+
+    assert exists_quietly(str(tmp_path) + chr(0) + "x.srt") is False
+    assert exists_quietly(tmp_path) is True
+
+    def invalid(self, *a, **kw):
+        raise ValueError("embedded null byte")
+
+    # pathlib swallows some of these itself (3.8+); the helper must not
+    # depend on that for any ValueError.
+    monkeypatch.setattr(Path, "exists", invalid)
+    try:
+        got: object = exists_quietly(tmp_path)
+    except ValueError:
+        got = "raised"
+    finally:
+        monkeypatch.undo()  # pytest itself calls Path.exists when reporting
+    assert got is False

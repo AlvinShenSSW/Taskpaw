@@ -2171,33 +2171,36 @@ class JasnaInstance(MonitorInstance):
         self._gpu_waiting = False  # S5: we hold the GPU — no longer waiting
         release_gpu = False
         with self._launch_lock:
-            if self._stopping.is_set() or self._subs_disabled is not None:
-                release_gpu = True  # D30: no bare return — the release pairs
-            else:
-                err = job.start_asr(self._spawn)
-                if (
-                    err is not None
-                    and err != "unstable"
-                    and job.attempt < _ASR_MAX_ATTEMPTS
-                ):
-                    err = job.start_asr(self._spawn)  # a failed attempt: retry once
-                if self._stopping.is_set():
-                    self._kill_asr(job, 2.0, emit)  # D9: stop() raced the spawn
-                    if job.child is not None:
-                        self._subs_job = job  # keep the live-child guard (C11)
-                    release_gpu = True
-                elif err is None:
-                    self._phase = "subs"
-                    self._subs_job = job
-                elif err == "unstable":
-                    self._settle_unstable(job, emit)
-                    release_gpu = True
-                    self._advance_requested = True
+            try:  # K1: we hold the GPU — no raise may skip the give below
+                if self._stopping.is_set() or self._subs_disabled is not None:
+                    release_gpu = True  # D30: no bare return — the release pairs
                 else:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
-                    release_gpu = True
-                    self._advance_requested = True
+                    err = job.start_asr(self._spawn)
+                    if (
+                        err is not None
+                        and err != "unstable"
+                        and job.attempt < _ASR_MAX_ATTEMPTS
+                    ):
+                        err = job.start_asr(self._spawn)  # failed attempt: retry
+                    if self._stopping.is_set():
+                        self._kill_asr(job, 2.0, emit)  # D9: stop() raced the spawn
+                        if job.child is not None:
+                            self._subs_job = job  # keep the live-child guard (C11)
+                        release_gpu = True
+                    elif err is None:
+                        self._phase = "subs"
+                        self._subs_job = job
+                    elif err == "unstable":
+                        self._settle_unstable(job, emit)
+                        release_gpu = True
+                        self._advance_requested = True
+                    else:
+                        self._settle(name, "failed", err, emit)
+                        self._alert_job(name, err, emit)
+                        release_gpu = True
+                        self._advance_requested = True
+            except Exception as e:
+                release_gpu = self._fence_internal(job, e, emit)
         if release_gpu:
             self._gpu_give(job)
         self._run_deferred()
@@ -2236,55 +2239,108 @@ class JasnaInstance(MonitorInstance):
                 or self._subs_job is not job
             ):
                 return  # stop() / the deferred terminate owns this job (D22)
-            outcome = job.poll_asr()
-            if outcome is None:
-                return
-            terminal = True
-            name = job.job_id
-            if outcome.kind == "succeeded":
-                err = job.publish_ja(outcome.cues)  # D9: under the lock
-                if err is not None:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
-                else:
-                    self._submit_translation(job, list(outcome.cues), emit)
-            elif outcome.kind == "no_speech":
-                err = job.publish_empty()
-                if err is None:
-                    self._settle(name, "completed", "no speech", emit)
-                else:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
-            elif outcome.kind == "unstable":
-                self._settle_unstable(job, emit)
-            elif job.attempt < _ASR_MAX_ATTEMPTS:
-                err = job.start_asr(self._spawn)  # retry: a new attempt dir
-                if self._stopping.is_set():
-                    # D35: exactly _start_subs's post-spawn re-check.
-                    self._kill_asr(job, 2.0, emit)
-                    release_gpu = True
-                    if job.child is None:  # else keep the guard (C11)
-                        self._subs_job = None
-                    terminal = False
-                elif err is None:
-                    terminal = False  # the job stays current
-                elif err == "unstable":  # D33: like a final failure
-                    self._settle_unstable(job, emit)
-                else:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
-            else:
-                self._settle(name, "failed", outcome.detail, emit)
-                self._alert_job(name, outcome.detail, emit)
-            if terminal:
-                self._subs_job = None
-                release_gpu = True
-                self._phase = "translate" if self._translating() else "restore"
-                self._advance_requested = True  # D28
+            try:  # K1: we hold the GPU — no raise may skip the give below
+                release_gpu = self._poll_subs_locked(job, emit)
+            except Exception as e:
+                release_gpu = self._fence_internal(job, e, emit)
         if release_gpu:
             self._gpu_give(job)
         self._run_deferred()
         self._dispatch(emit)
+
+    def _poll_subs_locked(self, job: SubsJob, emit: EventEmitter) -> bool:
+        """The locked body of `_poll_subs`; True when the hold is to be given."""
+        release_gpu = False
+        outcome = job.poll_asr()
+        if outcome is None:
+            return False
+        terminal = True
+        name = job.job_id
+        if outcome.kind == "succeeded":
+            err = job.publish_ja(outcome.cues)  # D9: under the lock
+            if err is not None:
+                self._settle(name, "failed", err, emit)
+                self._alert_job(name, err, emit)
+            else:
+                self._submit_translation(job, list(outcome.cues), emit)
+        elif outcome.kind == "no_speech":
+            err = job.publish_empty()
+            if err is None:
+                self._settle(name, "completed", "no speech", emit)
+            else:
+                self._settle(name, "failed", err, emit)
+                self._alert_job(name, err, emit)
+        elif outcome.kind == "unstable":
+            self._settle_unstable(job, emit)
+        elif job.attempt < _ASR_MAX_ATTEMPTS:
+            err = job.start_asr(self._spawn)  # retry: a new attempt dir
+            if self._stopping.is_set():
+                # D35: exactly _start_subs's post-spawn re-check.
+                self._kill_asr(job, 2.0, emit)
+                release_gpu = True
+                if job.child is None:  # else keep the guard (C11)
+                    self._subs_job = None
+                terminal = False
+            elif err is None:
+                terminal = False  # the job stays current
+            elif err == "unstable":  # D33: like a final failure
+                self._settle_unstable(job, emit)
+            else:
+                self._settle(name, "failed", err, emit)
+                self._alert_job(name, err, emit)
+        else:
+            self._settle(name, "failed", outcome.detail, emit)
+            self._alert_job(name, outcome.detail, emit)
+        if terminal:
+            self._subs_job = None
+            release_gpu = True
+            self._phase = "translate" if self._translating() else "restore"
+            self._advance_requested = True  # D28
+        return release_gpu
+
+    def _fence_internal(self, job: SubsJob, e: Exception, emit: EventEmitter) -> bool:
+        """K1: an unexpected raise while holding the GPU for `job` (under
+        `_launch_lock`). Logged; the job is settled `failed("internal: …")` if
+        it is not yet, and alerted (never raising); an advance is requested.
+        Returns whether to give the hold: not while a GPU child it started is
+        still running (rule c — the live-child guard is kept; stop() gives the
+        hold)."""
+        log.exception(
+            "jasna %s: internal error in the subtitle job %s",
+            self.instance_id,
+            job.job_id,
+        )
+        detail = f"internal: {type(e).__name__}"
+        try:
+            if job.job_id not in self._settled:
+                self._settle(job.job_id, "failed", detail, emit)
+        except Exception:
+            log.exception("jasna %s: settling %s failed", self.instance_id, job.job_id)
+        if job.job_id in self._jobs and job.job_id not in self._settled:
+            # `_settle` itself is what raised: record the terminal state so the
+            # run can still finish.
+            self._settled[job.job_id] = ("failed", detail)
+            self._subs_failed += 1
+        try:
+            self._alert_job(job.job_id, detail, emit)
+        except Exception:
+            log.exception("jasna %s: alert for %s failed", self.instance_id, job.job_id)
+        self._advance_requested = True
+        child = job.child
+        try:
+            live = child is not None and child.poll() is None
+        except Exception:
+            live = False  # cannot tell — never keep the GPU on a guess
+        if live:
+            self._subs_job = job  # keep the live-child guard (rule c)
+            return False
+        if self._subs_job is job:
+            self._subs_job = None
+        try:
+            self._phase = "translate" if self._translating() else "restore"
+        except Exception:
+            self._phase = "restore"
+        return True
 
     def _reap_survivor(self, job: SubsJob) -> None:
         """Under `_launch_lock`: a settled job whose direct child outlived its
@@ -2298,6 +2354,9 @@ class JasnaInstance(MonitorInstance):
         job.poll_asr()  # reaps; the outcome of a settled job is ignored
         if job.child is not None:
             return
+        # K1: a hold `_fence_internal` kept for this live child ends here (a
+        # no-op when the kill path already gave it).
+        self._gpu_give(job)
         self._subs_job = None
         self._phase = "translate" if self._translating() else "restore"
         self._advance_requested = True
