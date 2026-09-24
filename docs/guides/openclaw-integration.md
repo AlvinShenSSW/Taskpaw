@@ -60,7 +60,7 @@ for r in rows:
             done_frames = num(met, "processed_frames")
             left_frames = num(met, "remaining_frames")
             fps         = num(met, "fps")
-            # jasna「AV 翻译」(#177) — present only when the task has it ticked:
+            # jasna (#177): `phase` is on every managed Jasna; subs_* only with「AV 翻译」ticked:
             phase       = met.get("phase")             # "restore" | "subs" | "translate"
             subs_done   = num(met, "subs_completed")
             subs_total  = num(met, "subs_total")
@@ -114,7 +114,8 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > **Jasna「AV 翻译」(#177).** With the tickbox on, every restored film also gets
 > `<name>_restored.ja.srt` (Japanese) and `<name>_restored.srt` (Simplified Chinese)
 > **next to `<name>_restored.mp4`** in the output folder, and the snapshot adds
-> `phase` plus the `subs_*` keys above. `current_file` follows the live child: the
+> the `subs_*` keys above (`phase` itself is present for every managed Jasna, ticked or
+> not). `current_file` follows the live child: the
 > video being restored in `phase == "restore"`, the `<name>_restored.mp4` being
 > transcribed in `phase == "subs"`, and **absent** in `phase == "translate"` (no GPU
 > child is running then). The batch `done` event text gains

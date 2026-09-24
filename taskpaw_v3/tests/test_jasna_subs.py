@@ -1210,7 +1210,7 @@ def test_supervisor_unregister_register_and_reconfigure(tmp_path, monkeypatch):
 def test_default_spawn_goes_through_the_module_level_child_process(
     tmp_path, monkeypatch
 ):
-    # D27: J.ChildProcess is the seam for supervisor-created instances.
+    # D10: J.ChildProcess is the seam for supervisor-created instances.
     r = _setup(tmp_path, monkeypatch, restored=["e.mp4"])
     fresh = JasnaInstance("j2", r.cfg)
     evs, emit = _events()
@@ -1258,3 +1258,77 @@ def test_long_failure_detail_keeps_its_head_and_is_bounded():
     out = J._bounded(text)
     assert out.startswith("exit code 1: ") and out.endswith(" LAST")
     assert len(out) <= J._CRASH_DETAIL_CHARS
+
+
+# ── #177 repair batch ─────────────────────────────────────────────────────
+def test_translation_settles_after_a_restore_launch_error(tmp_path, monkeypatch):
+    # S1: settlement runs before the launch-error return, and a dispatch after a
+    # launch error never relaunches.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"])
+    calls = {"n": 0}
+
+    def popen(argv, creationflags=0, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("jasna blocked")
+        return r.launcher(argv, creationflags, **kw)
+
+    monkeypatch.setattr(J.subprocess, "Popen", popen)
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    inst.check(emit)  # a restored → ASR a
+    r.spawner.last.finish(0)
+    st = inst.check(emit)  # ja published, tA submitted; b's launch raises
+    assert st.state == "error" and "failed to launch jasna" in st.detail
+    assert [q.job_id for q in r.translators[0].submitted] == ["a.mp4"]
+    assert calls["n"] == 2
+    r.translators[0].answer("a.mp4")
+    st = inst.check(emit)
+    assert _zh(r, "a.mp4").exists()
+    assert inst._settled["a.mp4"][0] == "completed"
+    assert inst._subs_completed == 1
+    assert st.state == "error"
+    assert calls["n"] == 2  # no new launch
+    inst.check(emit)
+    assert calls["n"] == 2 and not _done(r.evs)
+    inst.stop(timeout=1)
+
+
+def test_stop_during_start_never_leaves_an_idle_translator(tmp_path, monkeypatch):
+    # IR-b: a Stop that lands while start() creates the translator cancels and
+    # joins it right away.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    made: list[_FakeTranslator] = []
+
+    class _StopOnStart(_FakeTranslator):
+        def start(self) -> None:
+            super().start()
+            r.inst._stopping.set()  # a concurrent Stop
+
+    def factory(run, *, name, **k):
+        t = _StopOnStart(run, name=name)
+        made.append(t)
+        return t
+
+    monkeypatch.setattr(J, "Translator", factory)
+    r.inst.start(r.emit)
+    tr = made[0]
+    assert tr.cancel_calls == 1 and tr.joined
+    assert not tr.is_alive()
+    assert r.launcher.n == 0 and r.spawner.argvs == []
+
+
+def test_degraded_snapshot_never_shows_a_stale_phase(tmp_path, monkeypatch):
+    # IR-e: the degraded snapshot's phase is recomputed from the live children.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4", "c.mp4"], rcs=[1] * 6)
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    for _ in range(5):
+        inst.check(emit)
+    inst._phase = "translate"  # as left by a translation phase
+    st = inst.check(emit)  # the third file's final failure → abort
+    assert st.state == "degraded"
+    assert st.metrics["phase"] == "restore"
+    inst._phase = "translate"
+    st = inst.check(emit)  # the abort short-circuit path
+    assert st.state == "degraded" and st.metrics["phase"] == "restore"

@@ -308,7 +308,9 @@ the file fails at once. Each batch is logged as kind/latency only. A file yields
 
 `cancel()`: set the flag; under `_spawn_lock`: if a worker exists → detach it and `lines.put(CANCELLED)`
 on **its** queue (D6); release; then `close_stdin()`, `wait(1.0)` best effort, `terminate_tree(1.0)`,
-`join_readers(0.5)`, keeper.close() (D24: explicit and bounded — ≤ 3 s worst case); then
+`join_readers(0.5)`, keeper.close() (D24: explicit and bounded — about 1–2.6 s in practice;
+≈ 5.5 s only if the worker survives both stdin EOF and `taskkill /F`, which no live process
+does); then
 `requests.put(None)`; `results.put(CANCELLED)`. After cancel, `queued()`/`in_flight()` return 0/False
 (D7). `join(timeout)` joins the thread. A worker detached by `_ensure_worker` at that moment is torn
 down by `_ensure_worker`'s own path, which then sees the cancel flag and never spawns.
@@ -750,3 +752,19 @@ and its tests; the PR-gate reviews verify them against the code:
 - **D35 (minor)** — the `_poll_subs` retry's post-spawn `_stopping` re-check does exactly what
   `_start_subs` does: `job.terminate()`, `release_gpu = True`, `_subs_job = None`, no advance
   request; covered by the strict-pairs spy test.
+
+## Implementation-stage record (PR #183)
+
+- **Contract deviation (recorded, harmless):** `test_jasna.py` is not byte-untouched — its
+  Jasna-field count assertion moved from 15 to 19 (one line, commented) because the four new
+  fields live directly on `JasnaConfig`; every other line and every existing test is unchanged.
+- **Review-driven repair batch (the issue's sixth and last review cycle):** S1 (P2 — settle
+  translation results before the `_launch_error` early return, plus a `_launch_error` guard in
+  `_advance`), S3 (the D6 cancel sentinel is now tested with a fake worker that emits no `Eof`),
+  S4 (`needs_llm_key` exported once from `subs/translate.py`), IR-a (`_stop_asr` reads
+  `job.child` once), IR-b (post-start `_stopping` re-check cancels/joins a translator started
+  during a concurrent Stop), IR-e (the degraded snapshot re-derives `phase`), S2 (openclaw guide:
+  `phase` is present for every managed Jasna). Deferred as minor: IR-d (attempt dirs under
+  `.avsubs/<sha1>/` are not removed after settle; revisit with #179).
+- **Out of scope (pre-existing):** `start()` clears `_stopping` unconditionally, so a Stop that
+  completes just before a Start can be undone; predates #177.

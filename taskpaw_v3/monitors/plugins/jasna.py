@@ -48,7 +48,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.parse
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -81,7 +80,7 @@ from taskpaw_v3.monitors.plugins.lada import (
 
 # `Translator` and `ChildProcess` are bound as module-level names and looked up
 # at call time, so tests can monkeypatch `J.Translator` / `J.ChildProcess` for
-# supervisor-created instances (D27). Nothing here comes from `lada.py` (C1).
+# supervisor-created instances (D10). Nothing here comes from `lada.py` (C1).
 from taskpaw_v3.monitors.subs.child import ChildProcess
 from taskpaw_v3.monitors.subs.job import SubsJob
 from taskpaw_v3.monitors.subs.srt import Cue, SrtError
@@ -91,6 +90,7 @@ from taskpaw_v3.monitors.subs.translate import (
     TranslateRequest,
     TranslateResult,
     Translator,
+    needs_llm_key,
 )
 from taskpaw_v3.monitors.subs.whisperjav import DEFAULT_ENGINE, Engine
 from taskpaw_v3.monitors.subs.whisperjav import (
@@ -145,7 +145,6 @@ _ZH_SUFFIX = "_restored.srt"
 _SUBS_TMP_GLOB = "*_restored*.srt.*.tmp"
 _SUBS_DISABLE_AFTER = 3
 _ASR_MAX_ATTEMPTS = 2
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _LLM_ENV_PREFIX = "TASKPAW_LLM_"
 
 SubsKind = Literal["full", "translate_only", "none"]
@@ -373,16 +372,6 @@ def plan_subs(
     return SubsPlan(for_pending, subs_only, total)
 
 
-def _needs_llm_key(api_base: str) -> bool:
-    """A keyless request is only allowed against a loopback base (a local
-    OpenAI-compatible server) — the translator's own rule."""
-    try:
-        host = (urllib.parse.urlsplit(api_base).hostname or "").lower()
-    except ValueError:
-        return True
-    return not (host in _LOOPBACK_HOSTS or host.startswith("127."))
-
-
 def _asr_env() -> dict[str, str]:
     """The agent's environment minus every `TASKPAW_LLM_*` variable: the LLM key
     (usually `TASKPAW_LLM_API_KEY`) must never reach the ASR child (AC10)."""
@@ -392,7 +381,7 @@ def _asr_env() -> dict[str, str]:
 
 
 def _default_spawn(argv: list[str]) -> ChildProcess:
-    # Resolved at call time so `J.ChildProcess` can be monkeypatched (D27).
+    # Resolved at call time so `J.ChildProcess` can be monkeypatched (D10).
     # stdin=DEVNULL (D15) and a merged stdout/stderr tail are ChildProcess's
     # defaults; the env is scrubbed of the LLM key.
     return ChildProcess(argv, env=_asr_env())
@@ -1244,6 +1233,10 @@ class JasnaInstance(MonitorInstance):
         try:
             translator = Translator(self._run, name=self.instance_id)
             translator.start()
+            if self._stopping.is_set():
+                # A Stop landed during start(): never leave an idle daemon thread.
+                translator.cancel()
+                translator.join(1.0)
         except Exception as e:  # a thread that cannot start — never raise here
             log.warning("jasna %s: translator did not start: %s", self.instance_id, e)
             with self._launch_lock:
@@ -1323,9 +1316,12 @@ class JasnaInstance(MonitorInstance):
         and its GPU hook released; one that already exited 0 unpolled gets its
         `.ja.srt` published (never the zh — the translator is cancelled)."""
         job = self._subs_job
-        if job is None or job.child is None:
+        # Read `child` ONCE: the deferred cleanup of `_disable_subs` runs without
+        # `_launch_lock` and `SubsJob.terminate()` sets it to None concurrently.
+        child = job.child if job is not None else None
+        if job is None or child is None:
             return
-        if job.child.poll() is None:
+        if child.poll() is None:
             job.terminate(timeout=max(0.1, min(5.0, deadline - time.monotonic())))
         else:
             outcome = job.poll_asr()
@@ -1525,15 +1521,20 @@ class JasnaInstance(MonitorInstance):
         return self._check_passive(emit)
 
     def _check_managed(self, emit: EventEmitter) -> MonitorStatus:
-        if self._launch_error is not None:
-            return MonitorStatus(state="error", detail=self._launch_error)
         if not self._started:
+            if self._launch_error is not None:
+                return MonitorStatus(state="error", detail=self._launch_error)
             return MonitorStatus(state="error", detail="not started")
         # (1) translation results first: settlement — and the deferred part of a
-        # degrade it triggers — happens before anything below can return.
+        # degrade it triggers — happens before anything below can return, so a
+        # restore launch error never strands finished translations (S1).
         self._settle_results(emit)
+        # (2) launch error
+        if self._launch_error is not None:
+            return MonitorStatus(state="error", detail=self._launch_error)
         if self._batch_aborted:
             # Short-circuit: counters are frozen and nothing launches again.
+            self._phase = self._live_phase()
             return self._build_status("degraded", detail=self._aborted_detail())
         proc = self._process
         if proc is not None:
@@ -1543,6 +1544,7 @@ class JasnaInstance(MonitorInstance):
                 if self._launch_error is not None:
                     return MonitorStatus(state="error", detail=self._launch_error)
                 if self._batch_aborted:
+                    self._phase = self._live_phase()
                     return self._build_status("degraded", detail=self._aborted_detail())
         self._poll_subs(emit)
         self._maybe_done(emit)  # D1: evaluated at the end of EVERY check
@@ -1762,7 +1764,11 @@ class JasnaInstance(MonitorInstance):
 
     def _advance(self, emit: EventEmitter) -> None:
         """Never under `_launch_lock`; reached only through `_dispatch()`."""
-        if self._batch_aborted or self._stopping.is_set():
+        if (
+            self._batch_aborted
+            or self._stopping.is_set()
+            or self._launch_error is not None
+        ):
             return
         if self._process is not None or self._asr_live():
             return  # D25 safety net: one GPU child at a time
@@ -1934,7 +1940,7 @@ class JasnaInstance(MonitorInstance):
     ) -> None:
         """Under `_launch_lock`. The key is checked per job (live-apply)."""
         settings = get_llm_settings()
-        if not settings.api_key and _needs_llm_key(settings.api_base):
+        if not settings.api_key and needs_llm_key(settings.api_base):
             self._settle(job.job_id, "skipped", "no_llm_key", emit)
             if not self._subs_key_alerted:
                 self._subs_key_alerted = True

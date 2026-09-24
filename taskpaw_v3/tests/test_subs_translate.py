@@ -34,6 +34,7 @@ from taskpaw_v3.monitors.subs.translate import (
     TranslateRequest,
     TranslateResult,
     Translator,
+    needs_llm_key,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -82,6 +83,7 @@ class FakeWorker:
         *,
         ignore_close: bool = False,
         write_error: bool = False,
+        silent_die: bool = False,
     ) -> None:
         self.argv = argv
         self.env = env
@@ -95,6 +97,9 @@ class FakeWorker:
         self.requests: list[dict] = []
         self.ignore_close = ignore_close
         self.write_error = write_error
+        # silent_die: dying emits NO `Eof`, so only cancel()'s CANCELLED sentinel
+        # on this worker's response queue can wake a waiting thread (D6).
+        self.silent_die = silent_die
 
     def _event(self, what: str) -> None:
         self.log.append(f"{self.pid}:{what}")
@@ -130,7 +135,8 @@ class FakeWorker:
     def die(self) -> None:
         if not self.dead.is_set():
             self.dead.set()
-            self.sink.put(Eof(self.pid))
+            if not self.silent_die:
+                self.sink.put(Eof(self.pid))
 
 
 class Spawner:
@@ -621,7 +627,9 @@ def test_queued_and_in_flight_track_work(harness_factory):
 
 def test_cancel_while_waiting(harness_factory):
     sp = Spawner(lambda req, w: None)
-    sp.per_worker_kw = [{"ignore_close": True}]
+    # silent_die: neither close_stdin nor terminate_tree produces an `Eof`, so the
+    # waiting thread can only be woken by the D6 CANCELLED sentinel.
+    sp.per_worker_kw = [{"ignore_close": True, "silent_die": True}]
     h = harness_factory(sp, deadline_s=30)
     tr = h.tr
     tr.submit(TranslateRequest(RUN, "a", _cues(2)))
@@ -634,8 +642,10 @@ def test_cancel_while_waiting(harness_factory):
     t0 = time.monotonic()
     tr.cancel()
     assert time.monotonic() - t0 < 3.0
+    t1 = time.monotonic()
     tr.join(1.0)
     assert not tr.is_alive()
+    assert time.monotonic() - t1 < 1.0  # woken by the sentinel, not the deadline
     assert tr.queued() == 0 and tr.in_flight() is False
     assert len(sp.workers) == 1  # no respawn on the cancel path
     w = sp.workers[0]
@@ -864,3 +874,23 @@ def test_real_worker_stop_while_request_hangs_or_drips(fake_llm, mode):
         tr.cancel()
         tr.join(2)
     assert _no_child_threads()
+
+
+@pytest.mark.parametrize(
+    "base, needs",
+    [
+        ("https://api.x.ai/v1", True),
+        ("http://localhost:11434/v1", False),
+        ("http://127.0.0.1:8080/v1", False),
+        ("http://127.5.0.1/v1", False),
+        ("http://[::1]:8080/v1", False),
+        ("", True),
+        ("http://[bad/v1", True),  # unparseable → needs a key
+    ],
+)
+def test_needs_llm_key_only_loopback_is_keyless(base, needs):
+    # S4: the one shared rule (the Jasna plugin imports it too).
+    assert needs_llm_key(base) is needs
+    from taskpaw_v3.monitors import subs
+
+    assert subs.needs_llm_key is needs_llm_key

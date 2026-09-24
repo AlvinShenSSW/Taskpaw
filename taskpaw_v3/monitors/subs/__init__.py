@@ -26,6 +26,7 @@ from taskpaw_v3.monitors.subs.translate import (
     TranslateRequest,
     TranslateResult,
     Translator,
+    needs_llm_key,
 )
 from taskpaw_v3.monitors.subs.whisperjav import (
     DEFAULT_ENGINE,
@@ -53,6 +54,7 @@ __all__ = [
     "TranslateRequest",
     "TranslateResult",
     "Translator",
+    "needs_llm_key",
     "owned_flags_in",
     "source_identity",
 ]

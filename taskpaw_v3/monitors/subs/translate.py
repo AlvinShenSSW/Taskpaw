@@ -123,12 +123,15 @@ def _no_dupes(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def _is_loopback(api_base: str) -> bool:
+def needs_llm_key(api_base: str) -> bool:
+    """Whether a request to `api_base` needs an API key: a keyless request is
+    only allowed against a loopback base (a local OpenAI-compatible server).
+    An unparseable base needs a key. Shared with the plugins (one rule)."""
     try:
         host = (urllib.parse.urlsplit(api_base).hostname or "").lower()
     except ValueError:
-        return False
-    return host in _LOOPBACK_HOSTS or host.startswith("127.")
+        return True
+    return not (host in _LOOPBACK_HOSTS or host.startswith("127."))
 
 
 def _validate(content: str, ids: list[str]) -> Union[dict[str, str], _Fail]:
@@ -290,7 +293,7 @@ class Translator:
 
     def _translate(self, req: TranslateRequest) -> TranslateResult:
         settings = self._settings_fn()
-        if not settings.api_key and not _is_loopback(settings.api_base):
+        if not settings.api_key and needs_llm_key(settings.api_base):
             return self._failed(req, "no LLM key")
         cues = list(req.cues)
         zh: dict[int, str] = {}
