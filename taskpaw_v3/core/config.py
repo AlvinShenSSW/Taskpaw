@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _valid_port(p: int) -> int:
@@ -22,6 +22,13 @@ def _valid_port(p: int) -> int:
 
 class AgentConfig(BaseModel):
     """A V3 agent's local config (`agent.yaml`)."""
+
+    # Never echo field INPUTS in validation errors: a wrongly typed secret (e.g.
+    # `llm_api_key: [sk-…]` in a hand-edited YAML, or a non-string key in a
+    # PATCH) would otherwise print the credential into the startup traceback
+    # (persisted in the packaged backend log) or a 400 body — constitution §2
+    # "no secrets in logs" (Codex 外门 #178). Field names and reasons still show.
+    model_config = ConfigDict(hide_input_in_errors=True)
 
     server_id: str = Field(..., min_length=1)
     machine: str = Field(..., min_length=1)
@@ -39,6 +46,14 @@ class AgentConfig(BaseModel):
     monitors: list[dict[str, Any]] = Field(default_factory=list)
     # Auto-run a host_metrics self-monitor on this agent (§5b: every agent).
     host_metrics: bool = True
+    # Global LLM API (#178): one OpenAI-compatible endpoint for the whole agent
+    # (Jasna AV translate #177, avsubs #179). Default = Grok via OpenRouter. The
+    # key's env var TASKPAW_LLM_API_KEY wins over this stored value (constitution
+    # §2: env first, gitignored agent.yaml second); empty key = no Authorization
+    # header (e.g. a local Ollama). Masked by the control API like api_token.
+    llm_api_base: str = "https://openrouter.ai/api/v1"
+    llm_model: str = "x-ai/grok-4.1-fast"
+    llm_api_key: str = ""
 
     @field_validator("server_id", "machine")
     @classmethod
@@ -62,6 +77,29 @@ class AgentConfig(BaseModel):
     @classmethod
     def _ports(cls, v: int) -> int:
         return _valid_port(v)
+
+    @field_validator("llm_api_base")
+    @classmethod
+    def _norm_llm_base(cls, v: str) -> str:
+        # Stored without a trailing "/" so chat() can append "/chat/completions";
+        # only http(s) — never a file:/ftp:/javascript: URL (#178). Empty is
+        # allowed (the feature is simply unconfigured).
+        v = v.strip().rstrip("/")
+        if v and not v.lower().startswith(("http://", "https://")):
+            raise ValueError("llm_api_base must start with http:// or https://")
+        return v
+
+    @field_validator("llm_model")
+    @classmethod
+    def _strip_llm_model(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("llm_api_key")
+    @classmethod
+    def _strip_llm_key(cls, v: str) -> str:
+        # A pasted key often carries a trailing CR/LF; http.client would reject
+        # it with a ValueError that EMBEDS the header value (D1) — normalise here.
+        return v.strip()
 
     @field_validator("control_host")
     @classmethod

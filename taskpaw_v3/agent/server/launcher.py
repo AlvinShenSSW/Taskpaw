@@ -14,6 +14,7 @@ from typing import Optional
 from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
+from taskpaw_v3.core.llm import llm_settings_from_config, set_llm_settings
 from taskpaw_v3.core.net import (  # re-export
     PortInUseError,
     announce_ready,
@@ -83,6 +84,12 @@ def run_agent(
     # — so a hand-edited agent.yaml / bootstrap can't bind wildcard/public/non-
     # loopback-without-token unguarded (#114/Kimi). Raised BEFORE any socket claim.
     guard_bind_exposure(config.bind_host, config.api_token, label="agent network API")
+
+    # Publish the global LLM settings (#178) BEFORE the stale-port reclaim, any
+    # socket claim and the supervisor, so the first check() of any monitor reads
+    # the real settings (env key first), never the unconfigured defaults (C2).
+    # MonitorAdmin.update_config refreshes it after each successful save.
+    set_llm_settings(llm_settings_from_config(config))
 
     # Seamless updates/restarts: if OUR OWN previous agent backend is still holding
     # these ports (common right after installing a new version), terminate that

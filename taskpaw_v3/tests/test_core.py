@@ -232,3 +232,69 @@ def test_bind_host_normalized_on_both_configs():
     assert AgentConfig(server_id="s", machine="m", bind_host="[::1]").bind_host == "::1"
     assert HubConfig(bind_host="  10.0.0.5 ").bind_host == "10.0.0.5"
     assert HubConfig(bind_host="[::1]").bind_host == "::1"
+
+
+def test_agent_config_llm_fields():
+    """#178 AC1: global LLM API settings — defaults, normalisation, validation."""
+    c = AgentConfig(server_id="s", machine="m")
+    assert c.llm_api_base == "https://openrouter.ai/api/v1"
+    assert c.llm_model == "x-ai/grok-4.1-fast"
+    assert c.llm_api_key == ""
+    c = AgentConfig(
+        server_id="s",
+        machine="m",
+        llm_api_base=" https://x/v1/ ",
+        llm_model="  a/b \n",
+        llm_api_key=" sk-abc\r\n",
+    )
+    assert c.llm_api_base == "https://x/v1"  # stripped + trailing / removed
+    assert c.llm_model == "a/b"
+    assert c.llm_api_key == "sk-abc"  # CR/LF + whitespace normalised (D1)
+    assert AgentConfig(server_id="s", machine="m", llm_api_base="  ").llm_api_base == ""
+    assert (
+        AgentConfig(server_id="s", machine="m", llm_api_base="HTTP://h:1/").llm_api_base
+        == "HTTP://h:1"
+    )
+    for bad in ("ftp://x/v1", "openrouter.ai/api/v1", "javascript:alert(1)"):
+        with pytest.raises(Exception):
+            AgentConfig(server_id="s", machine="m", llm_api_base=bad)
+
+
+def test_agent_example_yaml_documents_llm_keys():
+    from taskpaw_v3 import bootstrap
+
+    path = bootstrap.EXAMPLES / "agent.example.yaml"
+    text = path.read_text(encoding="utf-8")
+    for key in ("llm_api_base:", "llm_model:", "llm_api_key:"):
+        assert key in text
+    cfg = load_yaml(AgentConfig, path)
+    assert cfg.llm_api_base == "https://openrouter.ai/api/v1"
+    assert cfg.llm_model == "x-ai/grok-4.1-fast"
+    assert cfg.llm_api_key == ""
+
+
+def test_agent_config_validation_errors_never_echo_a_secret_input(tmp_path):
+    # Codex 外门 #178: a wrongly typed secret (a YAML list, a non-string PATCH
+    # value) must not be printed by pydantic's ValidationError — that text ends
+    # up in the startup traceback (persisted backend log) or a 400 body
+    # (constitution §2). hide_input_in_errors hides every field's input; the
+    # field name and reason still show so the operator can fix the YAML.
+    from pydantic import ValidationError
+
+    marker = "sk-super-secret-marker"
+    with pytest.raises(ValidationError) as ei:
+        AgentConfig(server_id="s", machine="m", llm_api_key=[marker])
+    text = str(ei.value)
+    assert marker not in text and "llm_api_key" in text
+    # errors() still carries `input` unless asked not to — the surfaces that
+    # matter (str() in tracebacks / 400 details) are what the config hides.
+    assert marker not in repr(ei.value.errors(include_input=False))
+    # The startup path: load_yaml on a malformed agent.yaml.
+    path = tmp_path / "agent.yaml"
+    yaml_text = (
+        f"server_id: s\nmachine: m\nllm_api_key: ['{marker}']\napi_token: [{marker}]\n"
+    )
+    path.write_text(yaml_text, encoding="utf-8")
+    with pytest.raises(ValidationError) as ei2:
+        load_yaml(AgentConfig, path)
+    assert marker not in str(ei2.value)

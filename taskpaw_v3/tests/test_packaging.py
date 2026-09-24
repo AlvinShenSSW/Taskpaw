@@ -50,6 +50,28 @@ def test_dispatch_unknown_role():
     assert backend_main.main(["bogus"]) == 2  # clean exit code, no crash
 
 
+def test_dispatch_llm_worker(monkeypatch):
+    # #178: the Tauri-bundled backend doubles as the terminable llm-worker
+    # sidecar (`taskpaw-backend llm-worker`, see core.llm_worker.worker_argv).
+    called = {}
+    import taskpaw_v3.core.llm_worker as llm_worker
+
+    def fake(argv=None):
+        called["role"] = "llm-worker"
+        return 0
+
+    monkeypatch.setattr(llm_worker, "main", fake)
+    assert backend_main.main(["llm-worker"]) == 0
+    assert called["role"] == "llm-worker"
+
+
+def test_unknown_role_message_names_every_role(capsys):
+    assert backend_main.main(["bogus"]) == 2
+    err = capsys.readouterr().err
+    for role in ("'agent'", "'hub'", "'llm-worker'"):
+        assert role in err
+
+
 def test_agent_service_scaffolds_missing_config(tmp_path, monkeypatch):
     # Fresh install / no config → the service self-initializes a default and runs,
     # instead of exiting and leaving the packaged UI with no backend (#40).

@@ -24,6 +24,16 @@ api_token: ""
 # Auto-run a host_metrics self-monitor (CPU/mem/disk/net; GPU+VRAM on Windows).
 host_metrics: true
 
+# Global LLM API (OpenAI-compatible /chat/completions) used by Jasna's AV
+# translate and the avsubs task. Default = Grok via OpenRouter. The API key is
+# best supplied via the TASKPAW_LLM_API_KEY environment variable (it wins over
+# the value here and is never written back); otherwise set it below or in
+# Settings -> LLM API. Never commit a real key. Empty key = no Authorization
+# header (e.g. a local Ollama at http://127.0.0.1:11434/v1).
+llm_api_base: https://openrouter.ai/api/v1
+llm_model: x-ai/grok-4.1-fast
+llm_api_key: ""
+
 # Monitor instances. Empty by default — with host_metrics:true above you already
 # get CPU/mem/disk/net (GPU+VRAM on Windows) with nothing else configured. Paste
 # your real monitors from `python -m taskpaw_v3.migrate --yaml`, or uncomment and

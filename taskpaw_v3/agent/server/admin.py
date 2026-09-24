@@ -23,8 +23,16 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
+from pydantic import ValidationError
+
 from taskpaw_v3.agent import catalog
 from taskpaw_v3.core.config import AgentConfig, save_yaml
+from taskpaw_v3.core.llm import (
+    LLMError,
+    chat,
+    llm_settings_from_config,
+    set_llm_settings,
+)
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import canonical_name, effective_monitors, monitor_name
 from taskpaw_v3.monitors.supervisor import Supervisor
@@ -38,6 +46,15 @@ def _as_bool(v: Any) -> bool:
     if not isinstance(v, bool):
         raise ValueError(f"'enabled' must be a boolean, got {type(v).__name__}")
     return v
+
+
+def _validation_summary(e: ValidationError) -> str:
+    """Field + reason only — pydantic's str() echoes the INPUT value, which for
+    an LLM candidate may be the API key (D1)."""
+    return "; ".join(
+        f"{'.'.join(str(x) for x in err.get('loc', ())) or 'config'}: {err.get('msg')}"
+        for err in e.errors()
+    )
 
 
 # Shared network-exposure guard (#114) — single source of truth used by the agent
@@ -215,10 +232,20 @@ class MonitorAdmin:
         "control_port",
         "api_token",
         "host_metrics",
+        "llm_api_base",
+        "llm_model",
+        "llm_api_key",
     )
-    # Editable fields that are NOT live-safe: changing them needs a restart (only
-    # api_token is read per-request). Used for the restart-required baseline.
-    _NON_LIVE_CONFIG = tuple(f for f in _EDITABLE_CONFIG if f != "api_token")
+    # Live-safe editable fields: api_token is read per request (token_ok) and the
+    # LLM settings are read by monitors at call time through the process-wide
+    # holder (#178), so changing them never needs a restart.
+    _LIVE_CONFIG = ("api_token", "llm_api_base", "llm_model", "llm_api_key")
+    # Editable fields that are NOT live-safe: changing them needs a restart. Used
+    # for the restart-required baseline. (A set difference, not a comprehension:
+    # a class-body comprehension can't see _LIVE_CONFIG. Order kept for clarity.)
+    _NON_LIVE_CONFIG = tuple(
+        sorted(set(_EDITABLE_CONFIG) - set(_LIVE_CONFIG), key=_EDITABLE_CONFIG.index)
+    )
 
     def config_view(self) -> dict[str, Any]:
         """The config to SHOW in the editor: current monitors + everything from the
@@ -243,6 +270,15 @@ class MonitorAdmin:
             # patch must NOT clobber the real one.
             if str(p.get("api_token", "")).strip() in ("", "***"):
                 p.pop("api_token", None)
+            # Same keep-on-blank/"***" contract for the LLM key, plus an explicit
+            # CLEAR: `null` → "" so a stored key is never sent on to a LAN host
+            # after the operator switches the base URL (#178 D12).
+            if "llm_api_key" in p:
+                key = p["llm_api_key"]
+                if key is None:
+                    p["llm_api_key"] = ""
+                elif isinstance(key, str) and key.strip() in ("", "***"):
+                    del p["llm_api_key"]
             # Merge over the DESIRED scalars (so a pending edit isn't lost by a
             # later save) on top of the running config's monitors (always current).
             editables = {
@@ -277,12 +313,66 @@ class MonitorAdmin:
             new_desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
             self._save(new_desired)
             self._desired = new_desired
-            # Live-apply ONLY the live-safe field: api_token (token_ok reads it per
-            # request). Non-live fields stay at their BOOT values in the running
-            # _config, so /status & events stay consistent until the restart that
+            # Live-apply ONLY the live-safe fields: api_token (token_ok reads it
+            # per request) and the LLM settings (#178: published to the holder
+            # monitors read at call time — only now, after a successful save).
+            # Non-live fields stay at their BOOT values in the running _config,
+            # so /status & events stay consistent until the restart that
             # restart_required asks for (Codex #43).
-            self._config.api_token = validated.api_token
+            for f in self._LIVE_CONFIG:
+                setattr(self._config, f, getattr(validated, f))
+            set_llm_settings(llm_settings_from_config(validated))
             return {"ok": True, "restart_required": restart_required}
+
+    def llm_test(self, candidate: dict) -> dict[str, Any]:
+        """Settings "Test connection" (#178): try the CURRENT FORM values without
+        persisting. The candidate is merged over the effective (desired) settings
+        and validated like a save; a blank/"***" field (or null) falls back to the
+        effective value, and the key still resolves env-first. Touches neither
+        _desired, _config, disk nor the holder.
+
+        chat() runs OUTSIDE the admin lock (D11): a slow provider must not block
+        monitor/config operations. strict=False accepts a max_tokens-truncated
+        reply — auth, connectivity, model and envelope are all proven (D4).
+        Never returns exception text (D1): LLMError messages are fixed strings."""
+        if not isinstance(candidate, dict):
+            raise ValueError("llm test candidate must be an object")
+        with self._lock:
+            overrides = {}
+            for f in ("llm_api_base", "llm_model", "llm_api_key"):
+                v = candidate.get(f)
+                if v is None or (isinstance(v, str) and v.strip() in ("", "***")):
+                    continue
+                overrides[f] = v
+            try:
+                validated = AgentConfig(
+                    **{**self._config.model_dump(), **self._desired, **overrides}
+                )
+            except ValidationError as e:
+                raise ValueError(_validation_summary(e)) from None
+            settings = llm_settings_from_config(validated)
+        try:
+            r = chat(
+                settings,
+                [{"role": "user", "content": "Reply with the single word OK."}],
+                max_tokens=16,
+                timeout=20,
+                strict=False,
+            )
+        except LLMError as e:
+            error = f"{e.kind}: {e.message}"
+            if e.status and str(e.status) not in e.message:
+                error += f" (HTTP {e.status})"
+            return {"ok": False, "error": error}
+        except Exception as e:  # chat() raises only LLMError; belt and braces (D1)
+            log.warning("LLM test failed unexpectedly: %s", type(e).__name__)
+            return {"ok": False, "error": f"unexpected error: {type(e).__name__}"}
+        return {
+            "ok": True,
+            "model": r.model,
+            "latency_ms": r.latency_ms,
+            "truncated": r.finish_reason == "length",
+        }
 
     # ── command dispatch (wired as create_control_app's on_command) ────────
     def handle(self, command: str, body: dict) -> dict[str, Any]:
@@ -300,6 +390,9 @@ class MonitorAdmin:
                 return self.set_enabled(body.get("name", ""), False)
             if command == "update_monitor":
                 return self.update(body.get("name", ""), body.get("config") or {})
+            if command == "llm_test":
+                # llm_test rejects a non-object candidate with a ValueError.
+                return self.llm_test(body.get("candidate") or body)
             return {"ok": False, "error": f"unknown command: {command!r}"}
         except (ValueError, KeyError) as e:
             return {"ok": False, "error": str(e)}
