@@ -1143,6 +1143,66 @@ def test_an_unkillable_child_in_the_launch_exception_path_alerts_survivor(
     inst.stop(timeout=1)
 
 
+@pytest.mark.parametrize("via", ["flag", "cancel_window"])
+@pytest.mark.parametrize("state", ["done", "empty"])
+def test_a_check_inside_the_stop_window_never_discards_a_finished_transcript(
+    tmp_path, monkeypatch, state, via
+):
+    # IR8: the child exited 0 unpolled; stop() has set `_stopping` and is still
+    # cancelling the translator (1–2.6 s) when the worker's check() runs. That
+    # check must leave the job to `_stop_asr`, which publishes its ja (CX5: the
+    # empty one for no speech) — it must not reap it and drop the outcome.
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4"])
+    inst = r.inst
+    inst.start(r.emit)
+    r.spawner.last.finish(0, state=state, text=SRT_JA if state == "done" else "")
+    job = inst._jobs["a.mp4"]
+    if via == "flag":
+        inst._stopping.set()  # exactly the reviewer's repro
+        inst.check(r.emit)
+        assert inst._asr_job is job and job.child is not None  # left to stop()
+    else:
+        tr = r.translators[0]
+        real_cancel = tr.cancel
+
+        def cancel_with_a_check_inside() -> None:
+            assert inst._stopping.is_set()
+            inst.check(r.emit)  # the supervisor worker, inside the window
+            real_cancel()
+
+        tr.cancel = cancel_with_a_check_inside  # type: ignore[method-assign]
+    inst.stop(timeout=2)
+    ja = _ja(r, "a.mp4")
+    assert ja.exists(), "the finished transcript was discarded"
+    if state == "done":
+        assert ja.read_text(encoding="utf-8").startswith("1\n")
+    else:
+        assert ja.read_bytes() == b""
+    assert not _zh(r, "a.mp4").exists()
+    assert inst._asr_job is None and gpu_lease.holder() is None
+    assert inst._survivor_jobs == set()
+
+
+def test_waiting_text_never_names_this_run_itself(tmp_path, monkeypatch):
+    # IR9 (Jasna S5 parity): free and reserved for THIS run → no "held by".
+    clk = _Clock()
+    gpu_lease._reset_for_tests(clock=clk)
+    other = _other_holds("Jasna")
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4"])
+    r.inst.start(r.emit)
+    assert r.inst._waiting_gpu
+    assert r.inst._build_status("idle").detail == (
+        "waiting for GPU (held by Jasna) · 0/1 done"
+    )
+    assert gpu_lease.release(other)
+    assert gpu_lease.reserved_for() == r.inst._run
+    assert gpu_lease.blocking_label() == "AV"  # the lease names the reserved us
+    st = r.inst._build_status("idle")
+    assert st.detail == "waiting for GPU · 0/1 done"
+    assert "held by" not in st.detail
+    r.inst.stop(timeout=1)
+
+
 # ── done ──────────────────────────────────────────────────────────────────
 @pytest.mark.parametrize(
     "block", ["none", "queue", "asr", "unsettled", "queued", "in_flight", "results"]

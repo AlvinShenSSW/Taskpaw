@@ -428,6 +428,10 @@ class AvsubsInstance(MonitorInstance):
         self._aborted = False
         self._launch_error: Optional[str] = None
         self._asr_job: Optional[SubsJob] = None
+        # IR8: ids of jobs whose DIRECT child survived a kill (rule c). Only
+        # these may be reaped by `_poll_asr` while stopping; any other exited
+        # child is left to `_stop_asr`, which publishes its transcript.
+        self._survivor_jobs: set[str] = set()
         self._translator: Optional[Translator] = None
         self._waiting_gpu = False
         self._advance_requested = False
@@ -664,6 +668,7 @@ class AvsubsInstance(MonitorInstance):
                             self.instance_id,
                             job.job_id,
                         )
+                    self._note_survivor(job)
             self._gpu_rel()
             gpu_lease.withdraw(self._run)
             self._waiting_gpu = False
@@ -690,11 +695,12 @@ class AvsubsInstance(MonitorInstance):
         if child.poll() is None:
             left = max(0.1, min(5.0, deadline - time.monotonic()))
             gone = job.terminate(timeout=left)
+            self._note_survivor(job)
         else:
             outcome = job.poll_asr()
             err: Optional[str] = None
-            if job.job_id in self._settled:
-                pass  # e.g. an aborted run's survivor: never publish for it
+            if job.job_id in self._settled or job.job_id in self._survivor_jobs:
+                pass  # a killed child (e.g. an aborted run's): never publish
             elif outcome is not None and outcome.kind == "succeeded":
                 err = job.publish_ja(outcome.cues)
             elif outcome is not None and outcome.kind == "no_speech":
@@ -710,6 +716,7 @@ class AvsubsInstance(MonitorInstance):
             )
         if job.child is None:
             self._asr_job = None
+            self._survivor_jobs.discard(job.job_id)
 
     # ── queue ────────────────────────────────────────────────────────────
     def _dispatch(self, emit: EventEmitter) -> None:
@@ -817,7 +824,14 @@ class AvsubsInstance(MonitorInstance):
             )
         if job.child is not None:
             self._asr_job = job
+            self._note_survivor(job)
         return gone
+
+    def _note_survivor(self, job: SubsJob) -> None:
+        """Record a job whose direct child is still running after its kill
+        (rule c) — the only kind the stopping branch of `_poll_asr` reaps."""
+        if job.child is not None:
+            self._survivor_jobs.add(job.job_id)
 
     def _poll_asr(self, emit: EventEmitter) -> None:
         job = self._asr_job
@@ -828,14 +842,21 @@ class AvsubsInstance(MonitorInstance):
             if self._asr_job is not job:
                 return
             if self._stopping.is_set():
-                # stop() owns the run; only a direct child that survived its
-                # kill (rule c) is reaped here once it has exited — never
-                # published, settled or followed by a launch.
+                # stop() owns the run. IR8: only a child recorded as a kill
+                # survivor (rule c) is reaped here once it has exited — never
+                # published, settled or followed by a launch. Any other child
+                # (e.g. one that finished 0 while stop() cancels the
+                # translator) is left to `_stop_asr`, which publishes its ja.
                 child = job.child
-                if child is not None and child.poll() is not None:
+                if (
+                    job.job_id in self._survivor_jobs
+                    and child is not None
+                    and child.poll() is not None
+                ):
                     job.poll_asr()
                     if job.child is None:
                         self._asr_job = None
+                        self._survivor_jobs.discard(job.job_id)
                 return
             if job.job_id in self._settled:
                 release = self._reap_settled(job)
@@ -900,6 +921,7 @@ class AvsubsInstance(MonitorInstance):
             if job.child is not None:
                 return False
         self._asr_job = None
+        self._survivor_jobs.discard(job.job_id)
         self._advance_requested = True
         self._defer_remove(job)
         return True
@@ -1010,6 +1032,7 @@ class AvsubsInstance(MonitorInstance):
             gone = True
             if job is not None and job.child is not None:
                 gone = job.terminate()
+                self._note_survivor(job)
             if not gone:
                 log.error(
                     "avsubs %s: a WhisperJAV process survived the abort (%s)",
@@ -1195,6 +1218,10 @@ class AvsubsInstance(MonitorInstance):
         return None
 
     def _waiting_text(self) -> str:
+        # IR9: never name this run itself (free and reserved for us — the
+        # grant comes on our next try).
+        if gpu_lease.reserved_for() == self._run:
+            return "waiting for GPU"
         label = gpu_lease.blocking_label()
         return f"waiting for GPU (held by {label})" if label else "waiting for GPU"
 
