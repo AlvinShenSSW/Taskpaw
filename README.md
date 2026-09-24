@@ -50,7 +50,7 @@ watch; it self-creates a default config on first run.
   — set an API token (Settings → Configuration) before binding it to a LAN address
   so the Hub reaches it over Bearer-authenticated HTTP.
 - **LLM API** (Settings → LLM API, #178): one agent-level base URL / model / key
-  (default OpenRouter + `x-ai/grok-4.1-fast`) that features such as Jasna's
+  (default xAI direct, `https://api.x.ai/v1` + `grok-4.3`) that features such as Jasna's
   AV 翻译 reuse. The key comes from the `TASKPAW_LLM_API_KEY` environment variable
   first, else `agent.yaml`; it is masked everywhere and never logged. "Test
   connection" checks the current form values without saving them.

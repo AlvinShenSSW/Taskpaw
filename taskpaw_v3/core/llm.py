@@ -37,8 +37,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("taskpaw.llm")
 
-DEFAULT_LLM_API_BASE = "https://openrouter.ai/api/v1"
-DEFAULT_LLM_MODEL = "x-ai/grok-4.1-fast"
+DEFAULT_LLM_API_BASE = "https://api.x.ai/v1"
+DEFAULT_LLM_MODEL = "grok-4.3"
 LLM_KEY_ENV = "TASKPAW_LLM_API_KEY"
 
 KeySource = Literal["env", "config", "none"]

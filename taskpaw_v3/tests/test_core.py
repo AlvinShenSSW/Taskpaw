@@ -237,8 +237,8 @@ def test_bind_host_normalized_on_both_configs():
 def test_agent_config_llm_fields():
     """#178 AC1: global LLM API settings — defaults, normalisation, validation."""
     c = AgentConfig(server_id="s", machine="m")
-    assert c.llm_api_base == "https://openrouter.ai/api/v1"
-    assert c.llm_model == "x-ai/grok-4.1-fast"
+    assert c.llm_api_base == "https://api.x.ai/v1"
+    assert c.llm_model == "grok-4.3"
     assert c.llm_api_key == ""
     c = AgentConfig(
         server_id="s",
@@ -268,8 +268,8 @@ def test_agent_example_yaml_documents_llm_keys():
     for key in ("llm_api_base:", "llm_model:", "llm_api_key:"):
         assert key in text
     cfg = load_yaml(AgentConfig, path)
-    assert cfg.llm_api_base == "https://openrouter.ai/api/v1"
-    assert cfg.llm_model == "x-ai/grok-4.1-fast"
+    assert cfg.llm_api_base == "https://api.x.ai/v1"
+    assert cfg.llm_model == "grok-4.3"
     assert cfg.llm_api_key == ""
 
 

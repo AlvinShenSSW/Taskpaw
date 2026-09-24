@@ -47,12 +47,13 @@ class AgentConfig(BaseModel):
     # Auto-run a host_metrics self-monitor on this agent (§5b: every agent).
     host_metrics: bool = True
     # Global LLM API (#178): one OpenAI-compatible endpoint for the whole agent
-    # (Jasna AV translate #177, avsubs #179). Default = Grok via OpenRouter. The
+    # (Jasna AV translate #177, avsubs #179). Default = xAI direct (Grok, #181);
+    # any OpenAI-compatible endpoint (OpenRouter, a local Ollama) works too. The
     # key's env var TASKPAW_LLM_API_KEY wins over this stored value (constitution
     # §2: env first, gitignored agent.yaml second); empty key = no Authorization
     # header (e.g. a local Ollama). Masked by the control API like api_token.
-    llm_api_base: str = "https://openrouter.ai/api/v1"
-    llm_model: str = "x-ai/grok-4.1-fast"
+    llm_api_base: str = "https://api.x.ai/v1"
+    llm_model: str = "grok-4.3"
     llm_api_key: str = ""
 
     @field_validator("server_id", "machine")
