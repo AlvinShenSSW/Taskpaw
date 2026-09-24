@@ -201,8 +201,8 @@ def test_control_config_masks_llm_key_and_reports_source(
         data = r.json()
         assert data["llm_api_key"] == shown
         assert data["llm_api_key_source"] == source
-        assert data["llm_api_base"] == "https://openrouter.ai/api/v1"
-        assert data["llm_model"] == "x-ai/grok-4.1-fast"
+        assert data["llm_api_base"] == "https://api.x.ai/v1"
+        assert data["llm_model"] == "grok-4.3"
         assert _LLM_KEY not in r.text and "sk-ENV-3c3c" not in r.text
 
 

@@ -688,8 +688,8 @@ def test_update_config_llm_failed_save_leaves_holder(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         admin.update_config({"llm_model": "new/model", "llm_api_key": None})
     assert get_llm_settings() is before
-    assert (cfg.llm_model, cfg.llm_api_key) == ("x-ai/grok-4.1-fast", _LLM_KEY)
-    assert admin.config_view()["llm_model"] == "x-ai/grok-4.1-fast"
+    assert (cfg.llm_model, cfg.llm_api_key) == ("grok-4.3", _LLM_KEY)
+    assert admin.config_view()["llm_model"] == "grok-4.3"
 
 
 def test_update_config_rejects_bad_llm_base(tmp_path):
@@ -698,7 +698,7 @@ def test_update_config_rejects_bad_llm_base(tmp_path):
     admin = MonitorAdmin(cfg, None, _registry(), path)
     with pytest.raises(ValueError):
         admin.update_config({"llm_api_base": "ftp://x"})
-    assert not path.exists() and cfg.llm_api_base == "https://openrouter.ai/api/v1"
+    assert not path.exists() and cfg.llm_api_base == "https://api.x.ai/v1"
 
 
 class _ChatSpy:
@@ -755,8 +755,8 @@ def test_llm_test_uses_candidate_without_persisting(tmp_path, monkeypatch):
     # Nothing touched: desired, running config, disk, holder.
     assert admin._desired == desired
     assert (cfg.llm_api_base, cfg.llm_model) == (
-        "https://openrouter.ai/api/v1",
-        "x-ai/grok-4.1-fast",
+        "https://api.x.ai/v1",
+        "grok-4.3",
     )
     assert not path.exists()
     assert get_llm_settings() is holder

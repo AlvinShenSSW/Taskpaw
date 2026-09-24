@@ -226,9 +226,9 @@ function LlmSection() {
         ) : (
           <Stack spacing={1.5}>
             <TextField size="small" label={t("settings.llmApiBase")} value={form.llm_api_base}
-              onChange={set("llm_api_base")} placeholder="https://openrouter.ai/api/v1" />
+              onChange={set("llm_api_base")} placeholder="https://api.x.ai/v1" />
             <TextField size="small" label={t("settings.llmModel")} value={form.llm_model}
-              onChange={set("llm_model")} placeholder="x-ai/grok-4.1-fast" />
+              onChange={set("llm_model")} placeholder="grok-4.3" />
             <TextField size="small" type="password" autoComplete="off" label={t("settings.llmApiKey")}
               value={form.llm_api_key} onChange={set("llm_api_key")} disabled={fromEnv}
               placeholder={source !== "none" ? "***" : undefined}

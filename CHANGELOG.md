@@ -4,6 +4,14 @@
 
 ---
 
+## V3 3.3.1 — LLM API 出厂默认改为 xAI 直连（#181）
+
+- `llm_api_base` 默认 `https://api.x.ai/v1`,`llm_model` 默认 `grok-4.3`(owner 在 3.3.0 上实测通过的
+  组合),不再默认 OpenRouter。只改默认值:已保存过设置的 `agent.yaml` 不受影响;OpenRouter、本地
+  Ollama 等 OpenAI 兼容端点仍可在设置页填写。示例配置、设置页占位符与提示、README 同步。
+
+---
+
 ## V3 3.3.0 — 全局 LLM API 设置 + 可终止的 llm-worker（#178）
 
 - **新增 agent 级 LLM API 设置。** `agent.yaml` 多了 `llm_api_base`（默认
