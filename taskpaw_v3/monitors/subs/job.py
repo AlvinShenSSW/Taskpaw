@@ -102,6 +102,7 @@ class SubsJob:
         rc = child.poll()
         if rc is None:
             return None
+        self._kill_lingering(child)
         child.join_readers(1.0)
         self.child = None
         try:
@@ -114,14 +115,45 @@ class SubsJob:
         o = read_outcome(out_dir, rc, child.tail())
         return JobOutcome(o.kind, o.cues, o.detail)
 
-    def terminate(self, timeout: float = 5.0) -> None:
-        """Tree-kill and join the ASR child (harmless on an exited one)."""
+    def _kill_lingering(self, child: ChildProcess) -> None:
+        """m1: the direct child has exited — kill any tracked descendant that
+        still runs (create time checked, psutil only) and name it. Test doubles
+        without `kill_tracked` are fine."""
+        kill_tracked = getattr(child, "kill_tracked", None)
+        if kill_tracked is None:
+            return
+        survivors = kill_tracked()
+        if survivors:
+            log.warning(
+                "subs job %s: ASR child %s exited but tracked processes were "
+                "still running; killed: %s",
+                self.job_id,
+                child.pid,
+                survivors,
+            )
+
+    def terminate(self, timeout: float = 5.0) -> bool:
+        """Tree-kill and join the ASR child (harmless on an exited one).
+
+        Returns `terminate_tree(...) is not False` (N2: a double returning None
+        counts as gone); True without a child. `child` is reset — UNLESS the
+        direct child is still running after the kill, in which case it stays
+        set so the plugins' live-child guards keep blocking new launches and
+        the normal poll path reaps it later."""
         child = self.child
         if child is None:
-            return
-        child.terminate_tree(timeout)
+            return True
+        gone = child.terminate_tree(timeout) is not False
+        if child.poll() is None:
+            log.error(
+                "subs job %s: ASR child %s still running after the kill",
+                self.job_id,
+                child.pid,
+            )
+            return gone
         child.join_readers(2.0)
         self.child = None
+        return gone
 
     # ── publishing ───────────────────────────────────────────────────────
     def _publish(self, target: Path, text: str) -> Optional[str]:

@@ -19,6 +19,12 @@ const BASE: Record<string, FieldT> = {
   max_line_bytes: { title: "单行最大字节" },
 };
 
+// WhisperJAV field help shared by jasna (AV 翻译 tickbox, #177) and avsubs (#179).
+const WHISPERJAV_ENGINE_ZH =
+  "WhisperJAV 语音识别预设：anime-whisper（默认，--mode qwen --qwen-generator anime-whisper；原型机实测胜出：逐句断句、时间轴准确、显存更低）、large-v3（--mode balanced --model large-v3）、large-v2（--mode balanced）、qwen3（--mode qwen）、custom（不传预设参数，--mode / --model / --qwen-generator 交给下方的额外参数自行指定）。";
+const WHISPERJAV_EXTRA_ARGS_ZH =
+  "原样追加到 WhisperJAV 命令行末尾的额外参数。TaskPaw 已经控制的参数会被拒绝：--output-dir --output-format --language --temp-dir --no-signature，以及引擎不是 custom 时的 --mode --model --qwen-generator；4 个字符及以上的 argparse 前缀缩写（如 --out）同样会被拒绝。--translate* 系列参数一律拒绝，因为它们会把 API 密钥写到命令行上（翻译由 TaskPaw 用「设置」里的 LLM API 完成）。";
+
 // Per-plugin field translations (type_id → field → zh title/description).
 const BY_TYPE: Record<string, Record<string, FieldT>> = {
   process: {
@@ -170,16 +176,8 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
       description:
         "WhisperJAV 安装目录中 whisperjav.exe 的完整路径（如 C:\\WhisperJAV\\whisperjav.exe）——不是文件夹。勾选「AV 翻译」时必填。",
     },
-    whisperjav_engine: {
-      title: "识别引擎",
-      description:
-        "WhisperJAV 语音识别预设：anime-whisper（默认，--mode qwen --qwen-generator anime-whisper；原型机实测胜出：逐句断句、时间轴准确、显存更低）、large-v3（--mode balanced --model large-v3）、large-v2（--mode balanced）、qwen3（--mode qwen）、custom（不传预设参数，--mode / --model / --qwen-generator 交给下方的额外参数自行指定）。",
-    },
-    whisperjav_extra_args: {
-      title: "WhisperJAV 额外参数",
-      description:
-        "原样追加到 WhisperJAV 命令行末尾的额外参数。TaskPaw 已经控制的参数会被拒绝：--output-dir --output-format --language --temp-dir --no-signature，以及引擎不是 custom 时的 --mode --model --qwen-generator；4 个字符及以上的 argparse 前缀缩写（如 --out）同样会被拒绝。--translate* 系列参数一律拒绝，因为它们会把 API 密钥写到命令行上（翻译由 TaskPaw 用「设置」里的 LLM API 完成）。",
-    },
+    whisperjav_engine: { title: "识别引擎", description: WHISPERJAV_ENGINE_ZH },
+    whisperjav_extra_args: { title: "WhisperJAV 额外参数", description: WHISPERJAV_EXTRA_ARGS_ZH },
     clip_size_1080p: {
       title: "1080p 档片段长度",
       description:
@@ -222,6 +220,36 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
       title: "捕获进度",
       description:
         "高级。关（默认）：每个文件的 jasna.exe 各自开一个控制台窗口显示进度条（一个文件一个窗口）。开：把 Jasna 的输出捕获进 TaskPaw（不另开窗口），在状态面板显示 文件/%/fps/ETA。注意：「正在编译引擎」提示只依据 model_weights/*.engine 是否存在，与本开关无关。",
+    },
+  },
+  // Standalone「AV 翻译 (subtitles)」task (#179).
+  avsubs: {
+    avsubs_root_folder: {
+      title: "片库文件夹",
+      description:
+        "要扫描的视频片库文件夹（必填）。每个还没有同名 .srt 的视频，会在旁边生成 <原名>.ja.srt（日语）和 <原名>.srt（简体中文）；已有 .srt 的视频会跳过，已存在的 .ja.srt 会直接复用（只做翻译）。隐藏文件夹和链接文件夹会被跳过。会在该文件夹下创建 .avsubs/ 工作文件夹。与 Jasna 共用 GPU：两者同时运行时按文件轮流使用，等待的一方显示「waiting for GPU (held by …)」。需要先在「设置」里配置 LLM API。不会随 TaskPaw 开机自启，需手动点「启动」。注意：不要让两个运行中的任务覆盖相互重叠的文件夹，也不要指向已开启「AV 翻译」的 Jasna 任务的输出文件夹。",
+    },
+    avsubs_recursive: {
+      title: "扫描子文件夹",
+      description: "默认开：同时扫描所有子文件夹。关：只处理片库文件夹本身里的视频。",
+    },
+    avsubs_extensions: {
+      title: "扩展名",
+      description: '要处理的视频扩展名，不带点、不区分大小写，默认 ["mp4"]；例如再加上 mkv。',
+    },
+    whisperjav_exe_path: {
+      title: "whisperjav.exe 路径",
+      description:
+        "whisperjav.exe 的完整路径（如 C:\\WhisperJAV\\Scripts\\whisperjav.exe）——不是文件夹。必填。",
+    },
+    whisperjav_engine: { title: "识别引擎", description: WHISPERJAV_ENGINE_ZH },
+    whisperjav_extra_args: {
+      title: "WhisperJAV 额外参数",
+      description: WHISPERJAV_EXTRA_ARGS_ZH + "Windows 路径请加引号。",
+    },
+    avsubs_gpu_monitor: {
+      title: "GPU 监控",
+      description: "通过 nvidia-smi 报告 GPU%/显存（没有 NVIDIA GPU 的机器请关闭）。",
     },
   },
 };

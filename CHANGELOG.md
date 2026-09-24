@@ -4,6 +4,31 @@
 
 ---
 
+## V3 3.5.0 — 独立「AV 翻译」任务 + GPU 轮流使用（#179）
+
+- **新任务类型「AV 翻译 (subtitles)」**（`avsubs`，与 Lada / Jasna 并列，只能手动启动）：指向一个片库
+  文件夹，默认递归扫描子文件夹；凡是没有同名 `.srt` 的视频（默认只看 MP4，可加 mkv 等），就用与
+  Jasna「AV 翻译」同一套引擎生成 `<名字>.ja.srt`（日文）和 `<名字>.srt`（简体中文），放在视频旁边。
+  已有 `.srt` 的跳过；已有 `.ja.srt` 的只补翻译（开跑就提交，不占 GPU）；隐藏文件夹、链接/junction
+  文件夹、Windows 系统文件夹跳过；同名目标冲突（如 `a.mp4` + `a.mkv`）跳过并计失败。工作目录在
+  `<片库>/.avsubs/avsubs-<id>/`，每个文件完成后清掉。
+- **GPU 轮流使用**：新的进程内 GPU 租约 `core/gpu_lease.py`。AV 翻译任务与 Jasna 同时运行时不会同时占
+  8 GB 显存；一方做完**当前文件**的 GPU 工作后，如果另一方在等，就轮到另一方（公平交棒，保留窗口
+  `max(30 s, 2×轮询间隔)`），等待的一方显示 `waiting for GPU (held by <任务名>)`。Jasna 的同一个文件
+  从修复到识别（含重试）中间不会让出 GPU。
+- 连续 3 个文件字幕失败 → 本轮中止（先杀掉识别进程树、再放 GPU、再取消翻译），告警一次，状态
+  `degraded`；已有但无法读取的 `.ja.srt`（如 Shift-JIS）记失败但不计入这 3 次。
+- 识别进程树更可靠地结束：`ChildProcess` 在运行中记录 WhisperJAV 的全部子进程，结束时按记录逐个
+  终止（防 PID 复用），即使启动器先退出也能清掉遗留的识别进程。
+- 状态：`queue_*`、`current_file`（相对路径）、`phase`（`asr` / `translate` / `waiting_gpu`）、
+  `subs_translating`；Hub `status.md` 与 Jasna 同样渲染；`done` 事件
+  `AV 翻译 complete | Queue: X/Y done, F failed, K skipped`。
+- 共享：`asr_env()`、`validate_fields()` 移入 `subs` 包，Jasna 与新任务共用；Jasna 启动时对
+  `*_restored*.srt.*.tmp` 的清扫加了 10 分钟年龄门槛。
+- 设计与对抗评审：`docs/specs/2026-09-24-179-avsubs-task-design.md`（v3，三轮）。
+
+---
+
 ## V3 3.4.0 — Jasna「AV 翻译」：WhisperJAV 识别 + 全局 LLM 翻译（#177）
 
 - **Jasna 任务新增「AV 翻译」勾选框。** 勾上后,每部影片修复完成即自动进入字幕流程:先用

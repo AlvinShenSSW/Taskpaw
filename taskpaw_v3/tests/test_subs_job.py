@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -296,3 +297,171 @@ def test_start_asr_with_real_childprocess_sees_devnull(tmp_path):
     assert job.child.proc.wait(timeout=30) is not None
     o = job.poll_asr()
     assert o is not None and o.kind == "failed"  # no manifest, but no hang
+
+
+# ── #179: terminate -> bool (C11 / N2 / item c), lingering descendants (m1) ──
+
+
+class TreeFake(FakeAsrChild):
+    """A fake with a configurable `terminate_tree` result and a direct child
+    that may survive the kill; `kill_tracked` reports lingering pids."""
+
+    def __init__(self, argv: list[str], result=None, dies: bool = True) -> None:
+        super().__init__(argv)
+        self.result = result
+        self.dies = dies
+        self.lingering: list[int] = []
+
+    def terminate_tree(self, timeout: float = 5.0):
+        self.calls.append("terminate_tree")
+        if self.dies and self.rc is None:
+            self.rc = 1
+        return self.result
+
+    def kill_tracked(self) -> list[int]:
+        self.calls.append("kill_tracked")
+        out, self.lingering = self.lingering, []
+        return out
+
+
+def _spawn_one(job: SubsJob, **kw) -> TreeFake:
+    made: list[TreeFake] = []
+
+    def spawn(argv: list[str]) -> TreeFake:
+        made.append(TreeFake(argv, **kw))
+        return made[-1]
+
+    assert job.start_asr(spawn) is None
+    return made[0]
+
+
+def test_terminate_without_a_child_is_true(tmp_path):
+    job = _job(tmp_path)
+    assert job.terminate(1.0) is True
+
+
+@pytest.mark.parametrize("result,gone", [(None, True), (True, True), (False, False)])
+def test_terminate_returns_tree_result_is_not_false(tmp_path, result, gone):
+    # N2: a fake that returns None (the #177 signature) counts as gone.
+    job = _job(tmp_path)
+    c = _spawn_one(job, result=result)
+    assert job.terminate(1.0) is gone
+    assert c.calls == ["terminate_tree", "join_readers"]
+    assert job.child is None  # the direct child exited: reset as before
+
+
+def test_terminate_keeps_child_while_the_direct_child_still_runs(tmp_path):
+    # (c): the live-child guards must keep blocking new launches, and the
+    # normal poll path reaps it later.
+    job = _job(tmp_path)
+    c = _spawn_one(job, result=False, dies=False)
+    assert job.terminate(1.0) is False
+    assert job.child is c
+    assert "join_readers" not in c.calls  # its readers cannot end yet
+    c.finish(0)  # it finally exits
+    o = job.poll_asr()
+    assert o is not None and o.kind == "succeeded"
+    assert job.child is None
+
+
+def test_terminate_with_real_child_returns_true_and_resets(tmp_path):
+    job = _job(tmp_path)
+    job.exe = sys.executable
+    job.engine = "custom"
+    job.extra = ""
+    job.media.write_text("import time; time.sleep(60)", encoding="utf-8")
+    job.identity = None
+    assert job.start_asr() is None
+    assert job.child is not None
+    assert job.terminate(5.0) is True
+    assert job.child is None
+
+
+def test_poll_asr_kills_lingering_tracked_processes_and_warns(tmp_path, caplog):
+    job = _job(tmp_path)
+    c = _spawn_one(job)
+    c.lingering = [111, 222]
+    c.finish(0)
+    caplog.set_level("WARNING", logger="taskpaw.subs.job")
+    o = job.poll_asr()
+    assert o is not None and o.kind == "succeeded"
+    assert "kill_tracked" in c.calls
+    msg = " ".join(r.getMessage() for r in caplog.records)
+    assert "111" in msg and "222" in msg
+
+
+def test_poll_asr_quiet_when_nothing_lingers(tmp_path, caplog):
+    job = _job(tmp_path)
+    c = _spawn_one(job)
+    c.finish(0)
+    caplog.set_level("WARNING", logger="taskpaw.subs.job")
+    assert job.poll_asr() is not None
+    assert "kill_tracked" in c.calls
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_poll_asr_with_a_fake_without_kill_tracked_still_works(tmp_path):
+    # Older fakes (and the plugins' test doubles) have no `kill_tracked`.
+    job = _job(tmp_path)
+    sp = Spawner()
+    job.start_asr(sp)
+    sp.children[0].finish(0)
+    o = job.poll_asr()
+    assert o is not None and o.kind == "succeeded"
+
+
+_BASE_PY = getattr(sys, "_base_executable", None) or sys.executable
+
+
+def test_poll_asr_real_launcher_exits_leaving_a_tracked_grandchild(tmp_path):
+    # m1 with real processes: the "exe" starts a grandchild, lives long enough
+    # for a tracking poll, then exits; poll_asr must kill the orphan.
+    psutil = pytest.importorskip("psutil")
+    pid_file = tmp_path / "gpid.txt"
+    job = _job(tmp_path)
+    job.exe = _BASE_PY
+    job.engine = "custom"
+    job.extra = ""
+    job.media.write_text(
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(p.pid))\n"
+        "time.sleep(1.5)\n",
+        encoding="utf-8",
+    )
+    job.identity = None
+    assert job.start_asr() is None
+    gpid = None
+    try:
+        deadline = time.monotonic() + 30
+        outcome = None
+        while outcome is None and time.monotonic() < deadline:
+            if gpid is None and pid_file.exists():
+                text = pid_file.read_text().strip()
+                gpid = int(text) if text else None
+            outcome = job.poll_asr()
+            time.sleep(0.05)
+        assert outcome is not None and outcome.kind == "failed"  # no manifest
+        assert gpid is not None
+        gone_by = time.monotonic() + 5
+        while psutil.pid_exists(gpid) and time.monotonic() < gone_by:
+            try:
+                if psutil.Process(gpid).status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.NoSuchProcess:
+                break
+            time.sleep(0.05)
+        try:
+            alive = psutil.Process(gpid).status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            alive = False
+        assert not alive, "the orphaned grandchild survived poll_asr"
+    finally:
+        if gpid is not None:
+            try:
+                psutil.Process(gpid).kill()
+            except psutil.Error:
+                pass
+        job.terminate(2.0)

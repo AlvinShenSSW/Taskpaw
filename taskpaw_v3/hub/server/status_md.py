@@ -115,9 +115,11 @@ def _status_text(snap: Any) -> str:
     # processed_frames / remaining_frames) for programmatic reads.
     # `jasna` (#173) reports the SAME queue/progress metric names as lada, so it
     # renders through this exact block — the lada line stays byte-identical.
+    # `avsubs` (#179) reports the same queue/current_file keys (its current_file
+    # is the relpath being transcribed) and renders here too.
     # Tuple membership (==), not a set: a malformed agent can send a list/dict as
     # type_id and a set lookup would raise TypeError and stall status.md (Codex).
-    is_lada = tid in ("lada", "jasna") or (
+    is_lada = tid in ("lada", "jasna", "avsubs") or (
         tid is None and _is_num(m.get("queue_total"))
     )
     if is_lada and not bad_state:

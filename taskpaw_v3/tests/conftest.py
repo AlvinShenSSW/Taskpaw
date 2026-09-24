@@ -24,3 +24,15 @@ def _llm_isolation(monkeypatch):
     reset_llm_settings()
     yield
     reset_llm_settings()
+
+
+@pytest.fixture(autouse=True)
+def _gpu_lease_isolation():
+    """A fresh process-wide GPU lease per test (#179, D3): no holder, waiter or
+    reservation leaks between tests. It runs on the real monotonic clock; a test
+    that needs to drive time calls `gpu_lease._reset_for_tests(clock=fake)`."""
+    from taskpaw_v3.core import gpu_lease
+
+    gpu_lease._reset_for_tests()
+    yield
+    gpu_lease._reset_for_tests()

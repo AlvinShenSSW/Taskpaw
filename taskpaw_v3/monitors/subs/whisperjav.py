@@ -71,6 +71,30 @@ def owned_flags_in(extra: str, engine: str) -> list[str]:
     return hits
 
 
+def validate_fields(
+    exe: str, engine: str, extra: str, *, required: bool, owner: str
+) -> None:
+    """The WhisperJAV config rules shared by every task type that runs it
+    (#179 C6): `exe` is required when `required`; `extra` must parse and must
+    not set owned or forbidden flags. Raises ValueError with the #177 texts
+    (`owner` names the switch/task in the first one)."""
+    if required and not exe.strip():
+        raise ValueError(
+            f"{owner} needs whisperjav_exe_path — the full path to whisperjav.exe"
+        )
+    try:
+        hits = owned_flags_in(extra, engine)
+    except ValueError as e:
+        raise ValueError(
+            f"whisperjav_extra_args cannot be parsed ({e}); check the quotes"
+        ) from e
+    if hits:
+        raise ValueError(
+            "whisperjav_extra_args must not set the flags TaskPaw owns or "
+            f"forbids ({', '.join(hits)})"
+        )
+
+
 def build_argv(
     exe: str, source: Path, out_dir: Path, tmp_dir: Path, engine: str, extra: str
 ) -> list[str]:

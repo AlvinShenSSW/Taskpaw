@@ -16,6 +16,14 @@ const SHAPES: Record<string, ReactNode> = {
       <path d="M14 8.5l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1z" />
     </>
   ),
+  // AV 翻译 (#179): a film frame (sprocket rail on top) with two centred subtitle lines at the bottom.
+  avsubs: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="1" />
+      <path d="M3 8h18M6.5 6h.01M10.5 6h.01M14.5 6h.01M18.5 6h.01" />
+      <path d="M7 13.5h10M9 16.5h6" />
+    </>
+  ),
   comfyui: (
     <>
       <circle cx="6" cy="7" r="2" /><circle cx="18" cy="7" r="2" /><circle cx="12" cy="17" r="2" />

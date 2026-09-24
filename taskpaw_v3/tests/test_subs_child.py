@@ -305,3 +305,343 @@ def test_terminate_tree_live_single_child():
         c.join_readers(2.0)
     finally:
         _cleanup(c)
+
+
+# ── #179: asr_env, descendant tracking, terminate_tree -> bool (C6, C11) ──
+
+# The uv venv's `sys.executable` is a trampoline that adds a process level
+# (N9); the base interpreter gives the exact tree shape the tests describe.
+BASE_PY = getattr(sys, "_base_executable", None) or sys.executable
+
+# launcher → grandchild (sleep 60, stdio detached so no pipe outlives the
+# launcher); prints the grandchild pid, then exits when its stdin closes.
+_LAUNCHER = (
+    "import subprocess, sys\n"
+    "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+    "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+    "    stderr=subprocess.DEVNULL)\n"
+    "print(p.pid, flush=True)\n"
+    "sys.stdin.readline()\n"
+)
+
+
+def _kill_pid(pid: int) -> None:
+    psutil = pytest.importorskip("psutil")
+    try:
+        psutil.Process(pid).kill()
+    except psutil.Error:
+        pass
+
+
+def _gone(pid: int, create_time: float, timeout: float = 5.0) -> bool:
+    psutil = pytest.importorskip("psutil")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            p = psutil.Process(pid)
+            if p.create_time() != create_time or p.status() == psutil.STATUS_ZOMBIE:
+                return True
+        except psutil.NoSuchProcess:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _launch_tree() -> tuple[ChildProcess, int, float]:
+    psutil = pytest.importorskip("psutil")
+    sink: "queue.Queue[object]" = queue.Queue()
+    c = ChildProcess([BASE_PY, "-c", _LAUNCHER], stdin_pipe=True, line_sink=sink)
+    gpid = _grandchild_pid(sink)
+    return c, gpid, psutil.Process(gpid).create_time()
+
+
+def _orphan_tree() -> tuple[ChildProcess, int, float]:
+    """A tree whose launcher has exited AFTER one tracking poll: the grandchild
+    is orphaned and only reachable through the tracked pid."""
+    c, gpid, ctime = _launch_tree()
+    assert c.poll() is None
+    assert c._tracked.get(gpid) == ctime
+    c.close_stdin()
+    assert _wait_exit(c) == 0
+    return c, gpid, ctime
+
+
+def test_llm_env_prefix_constant():
+    assert child_mod.LLM_ENV_PREFIX == "TASKPAW_LLM_"
+
+
+def test_subs_package_reexports_the_179_additions():
+    from taskpaw_v3.monitors import subs
+    from taskpaw_v3.monitors.subs import whisperjav
+
+    assert subs.asr_env is child_mod.asr_env
+    assert subs.LLM_ENV_PREFIX == child_mod.LLM_ENV_PREFIX
+    assert subs.validate_fields is whisperjav.validate_fields
+    assert {"asr_env", "LLM_ENV_PREFIX", "validate_fields"} <= set(subs.__all__)
+
+
+def test_asr_env_strips_taskpaw_llm_vars_only():
+    base = {
+        "PATH": "C:/bin",
+        "TASKPAW_LLM_API_KEY": "sk-secret",
+        "taskpaw_llm_model": "grok",  # case-insensitive, like Jasna's _asr_env
+        "TASKPAW_LLM_API_BASE": "https://x",
+        "TASKPAW_AGENT_TOKEN": "keep",
+        "MY_TASKPAW_LLM_X": "keep",
+    }
+    env = child_mod.asr_env(base)
+    assert env == {
+        "PATH": "C:/bin",
+        "TASKPAW_AGENT_TOKEN": "keep",
+        "MY_TASKPAW_LLM_X": "keep",
+    }
+    assert base["TASKPAW_LLM_API_KEY"] == "sk-secret"  # input untouched (a copy)
+
+
+def test_asr_env_defaults_to_os_environ(monkeypatch):
+    monkeypatch.setenv("TASKPAW_LLM_API_KEY", "sk-secret")
+    monkeypatch.setenv("TASKPAW_TEST_KEEP", "1")
+    env = child_mod.asr_env()
+    assert "TASKPAW_LLM_API_KEY" not in env
+    assert env["TASKPAW_TEST_KEEP"] == "1"
+    assert isinstance(env, dict)
+
+
+def test_poll_tracks_descendants_while_the_child_lives():
+    c, gpid, ctime = _launch_tree()
+    try:
+        assert c.poll() is None
+        assert c._tracked.get(gpid) == ctime
+        assert c.pid not in c._tracked  # only descendants
+    finally:
+        c.terminate_tree(5.0)
+        _kill_pid(gpid)
+        _cleanup(c)
+
+
+def test_poll_tracking_never_raises(monkeypatch):
+    c = ChildProcess([PY, "-c", "import time; time.sleep(60)"])
+    try:
+
+        def boom(pid):
+            raise RuntimeError("psutil exploded")
+
+        monkeypatch.setattr(child_mod.psutil, "Process", boom)
+        assert c.poll() is None
+        assert c._tracked == {}
+    finally:
+        monkeypatch.undo()
+        _cleanup(c)
+
+
+def test_poll_does_not_track_after_the_child_exited(monkeypatch):
+    c = ChildProcess([PY, "-c", "pass"])
+    try:
+        _wait_exit(c)
+        calls: list[int] = []
+
+        def spy(pid):
+            calls.append(pid)
+            raise RuntimeError("must not be called")
+
+        monkeypatch.setattr(child_mod.psutil, "Process", spy)
+        assert c.poll() == 0
+        assert calls == []
+    finally:
+        monkeypatch.undo()
+        _cleanup(c)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="taskkill tree kill (Windows)")
+def test_terminate_tree_returns_true_for_a_killed_two_level_tree():
+    c, gpid, ctime = _launch_tree()
+    try:
+        t0 = time.monotonic()
+        assert c.terminate_tree(5.0) is True
+        assert time.monotonic() - t0 < 6.5
+        assert c.poll() is not None
+        assert _gone(gpid, ctime, timeout=0.5)
+    finally:
+        _kill_pid(gpid)
+        _cleanup(c)
+
+
+def test_terminate_tree_kills_the_tracked_grandchild_after_the_launcher_exited():
+    # N1: once the launcher has exited, taskkill /T cannot find the grandchild
+    # (Windows does not re-parent) — only the tracked pid still reaches it.
+    psutil = pytest.importorskip("psutil")
+    c, gpid, ctime = _orphan_tree()
+    try:
+        assert psutil.Process(gpid).is_running()  # orphaned, still alive
+        assert c.terminate_tree(5.0) is True
+        assert _gone(gpid, ctime, timeout=0.5)
+    finally:
+        _kill_pid(gpid)
+        _cleanup(c)
+
+
+def test_terminate_tree_true_for_an_exited_child_with_nothing_tracked():
+    c = ChildProcess([PY, "-c", "pass"])
+    try:
+        _wait_exit(c)
+        assert c._tracked == {}
+        assert c.terminate_tree(1.0) is True
+        assert c.terminate_tree(1.0) is True  # idempotent
+    finally:
+        _cleanup(c)
+
+
+def test_terminate_tree_false_while_a_tracked_process_survives(monkeypatch):
+    psutil = pytest.importorskip("psutil")
+    c, gpid, ctime = _orphan_tree()
+    try:
+        monkeypatch.setattr(psutil.Process, "kill", lambda self: None)
+        assert c.terminate_tree(0.5) is False
+        assert c.terminate_tree(0.5) is False  # still there: still False
+        assert psutil.Process(gpid).create_time() == ctime  # really alive
+    finally:
+        monkeypatch.undo()
+        _kill_pid(gpid)
+        _cleanup(c)
+
+
+def test_terminate_tree_is_bounded_by_one_deadline(monkeypatch):
+    # A survivor makes the wait run to the deadline: the whole call is still
+    # bounded by timeout + ~1.5 s (N4), never a fresh budget per step.
+    psutil = pytest.importorskip("psutil")
+    c, gpid, _ = _orphan_tree()
+    try:
+        monkeypatch.setattr(psutil.Process, "kill", lambda self: None)
+        t0 = time.monotonic()
+        assert c.terminate_tree(1.0) is False
+        elapsed = time.monotonic() - t0
+        assert 0.9 <= elapsed <= 1.0 + 1.5
+    finally:
+        monkeypatch.undo()
+        _kill_pid(gpid)
+        _cleanup(c)
+
+
+def test_terminate_tree_live_child_bounded_when_its_descendant_survives(monkeypatch):
+    # POSIX: the direct child is terminated, the tracked grandchild's psutil
+    # kill is a no-op → False within the bound. Windows: taskkill /T takes the
+    # intact tree down anyway → True. Either way: bounded, child gone.
+    psutil = pytest.importorskip("psutil")
+    c, gpid, _ = _launch_tree()
+    try:
+        monkeypatch.setattr(psutil.Process, "kill", lambda self: None)
+        t0 = time.monotonic()
+        result = c.terminate_tree(1.0)
+        assert time.monotonic() - t0 <= 1.0 + 1.5
+        assert c.poll() is not None
+        assert result is (sys.platform == "win32")
+    finally:
+        monkeypatch.undo()
+        _kill_pid(gpid)
+        _cleanup(c)
+
+
+def test_terminate_tree_never_kills_a_reused_pid():
+    psutil = pytest.importorskip("psutil")
+    # An unrelated process whose pid "reuses" a tracked entry (different
+    # create time): it must survive and must not count as ours.
+    stranger = subprocess.Popen(
+        [BASE_PY, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    c = ChildProcess([PY, "-c", "pass"])
+    try:
+        real_ctime = psutil.Process(stranger.pid).create_time()
+        _wait_exit(c)
+        with c._tracked_lock:
+            c._tracked[stranger.pid] = real_ctime - 1000.0
+        assert c.terminate_tree(1.0) is True
+        assert c.kill_tracked() == []
+        assert stranger.poll() is None
+        assert psutil.Process(stranger.pid).create_time() == real_ctime
+    finally:
+        stranger.kill()
+        stranger.wait(10)
+        _cleanup(c)
+
+
+def test_terminate_tree_never_raises(monkeypatch):
+    c = ChildProcess([PY, "-c", "import time; time.sleep(60)"])
+    try:
+
+        def boom(*a, **kw):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(child_mod.psutil, "wait_procs", boom)
+        monkeypatch.setattr(child_mod.psutil, "Process", boom)
+        t0 = time.monotonic()
+        assert c.terminate_tree(1.0) in (True, False)
+        assert time.monotonic() - t0 <= 1.0 + 1.5
+    finally:
+        monkeypatch.undo()
+        _cleanup(c)
+
+
+def test_kill_tracked_kills_lingering_processes_by_create_time():
+    c, gpid, ctime = _orphan_tree()
+    try:
+        # Windows also tracks the launcher's conhost.exe (a real descendant).
+        assert gpid in c.kill_tracked()
+        assert _gone(gpid, ctime)
+        assert c.kill_tracked() == []  # nothing left
+    finally:
+        _kill_pid(gpid)
+        _cleanup(c)
+
+
+def test_kill_tracked_never_raises(monkeypatch):
+    c = ChildProcess([PY, "-c", "pass"])
+    try:
+        _wait_exit(c)
+        with c._tracked_lock:
+            c._tracked[12345] = 1.0
+
+        def boom(*a, **kw):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(child_mod.psutil, "Process", boom)
+        assert c.kill_tracked() == []
+    finally:
+        monkeypatch.undo()
+        _cleanup(c)
+
+
+def test_tracking_is_safe_while_terminate_runs_on_another_thread():
+    # m4: poll() merges into _tracked while terminate_tree iterates it.
+    c, gpid, _ = _launch_tree()
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def poller() -> None:
+        try:
+            bogus = range(40_000_000, 40_000_050)
+            while not stop.is_set():
+                c.poll()
+                with c._tracked_lock:  # churn the size: add, then drop
+                    for pid in bogus:
+                        c._tracked[pid] = 1.0
+                with c._tracked_lock:
+                    for pid in bogus:
+                        c._tracked.pop(pid, None)
+        except BaseException as e:  # surfaced below
+            errors.append(e)
+
+    t = threading.Thread(target=poller)
+    t.start()
+    try:
+        for _ in range(3):
+            assert c.terminate_tree(1.0) in (True, False)
+    finally:
+        stop.set()
+        t.join(10)
+        _kill_pid(gpid)
+        _cleanup(c)
+    assert errors == []

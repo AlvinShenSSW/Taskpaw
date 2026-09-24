@@ -917,3 +917,67 @@ def test_jasna_subs_part_with_capture_progress_renders_each_fragment_once():
     assert line == f"- JASNA: 5/10 done (5 left) | clip.mp4 | {progress} | subs 2/4"
     md = render_status_md(_lada_row(base), "t")
     assert _lada_line(md) == f"- LADA: 5/10 done (5 left) | clip.mp4 | {progress}"
+
+
+# ── #179: an `avsubs` snapshot renders through the lada/jasna block ───────────
+def _avsubs_row(metrics: dict, state: str = "running") -> list[dict]:
+    return [
+        {
+            "name": "box",
+            "reachable": 1,
+            "status_json": json.dumps(
+                {
+                    "monitors": {
+                        "AVSUBS": {
+                            "state": state,
+                            "type_id": "avsubs",
+                            "metrics": metrics,
+                        }
+                    }
+                }
+            ),
+        }
+    ]
+
+
+def _avsubs_line(md: str) -> str:
+    return next(ln for ln in md.splitlines() if ln.startswith("- AVSUBS:"))
+
+
+def test_avsubs_renders_queue_and_current_file_like_jasna():
+    metrics = {
+        "queue_completed": 3,
+        "queue_total": 10,
+        "queue_remaining": 6,
+        "queue_failed": 1,
+        "queue_skipped": 0,
+        "current_file": "sub/film 01.mp4",
+        "phase": "asr",
+        "subs_translating": 2,
+        "cpu_pct": 12.0,
+        "gpu_pct": 80,
+    }
+    md = render_status_md(_avsubs_row(metrics), "t")
+    assert _avsubs_line(md) == "- AVSUBS: 3/10 done (6 left) | sub/film 01.mp4 |"
+    # exactly the line a jasna snapshot with the same keys gets
+    md = render_status_md(_jasna_row(metrics), "t")
+    assert _jasna_line(md) == "- JASNA: 3/10 done (6 left) | sub/film 01.mp4 |"
+
+
+def test_avsubs_degraded_keeps_counts_and_error_hides_them():
+    counts = {"queue_completed": 2, "queue_total": 6, "queue_remaining": 1}
+    md = render_status_md(_avsubs_row(counts, state="degraded"), "t")
+    assert _avsubs_line(md) == "- AVSUBS: 2/6 done (1 left)"
+    md = render_status_md(_avsubs_row(counts, state="error"), "t")
+    assert "done" not in _avsubs_line(md)
+
+
+def test_avsubs_does_not_change_the_lada_line():
+    base = {
+        "queue_completed": 5,
+        "queue_total": 10,
+        "queue_remaining": 5,
+        "current_file": "clip.mp4",
+    }
+    md = render_status_md(_lada_row(base), "t")
+    assert _lada_line(md) == "- LADA: 5/10 done (5 left) | clip.mp4 |"

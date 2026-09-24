@@ -2,8 +2,10 @@
 
 Knows nothing about Jasna: paths in, outcomes out.
 
-- `child`      — `ChildProcess` (readers, bounded tail, `terminate_tree`) + `Eof`
-- `whisperjav` — engine presets, argv, owned-flag rule, manifest outcome
+- `child`      — `ChildProcess` (readers, bounded tail, descendant tracking,
+                 `terminate_tree` -> bool) + `Eof` + `asr_env`
+- `whisperjav` — engine presets, argv, owned-flag rule, `validate_fields`,
+                 manifest outcome
 - `srt`        — strict parse/serialize
 - `translate`  — `Translator`, the `llm-worker` client thread
 - `job`        — `SubsJob`: ASR attempts, identity check, atomic publishing
@@ -11,7 +13,7 @@ Knows nothing about Jasna: paths in, outcomes out.
 Nothing here is imported from `lada.py` (C1).
 """
 
-from taskpaw_v3.monitors.subs.child import ChildProcess, Eof
+from taskpaw_v3.monitors.subs.child import LLM_ENV_PREFIX, ChildProcess, Eof, asr_env
 from taskpaw_v3.monitors.subs.job import (
     JobOutcome,
     SkipReason,
@@ -34,6 +36,7 @@ from taskpaw_v3.monitors.subs.whisperjav import (
     AsrOutcome,
     Engine,
     owned_flags_in,
+    validate_fields,
 )
 
 __all__ = [
@@ -46,6 +49,7 @@ __all__ = [
     "Engine",
     "Eof",
     "JobOutcome",
+    "LLM_ENV_PREFIX",
     "RunId",
     "SkipReason",
     "SrtError",
@@ -54,7 +58,9 @@ __all__ = [
     "TranslateRequest",
     "TranslateResult",
     "Translator",
+    "asr_env",
     "needs_llm_key",
     "owned_flags_in",
     "source_identity",
+    "validate_fields",
 ]
