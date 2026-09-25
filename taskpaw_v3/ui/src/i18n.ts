@@ -121,8 +121,13 @@ const en = {
     tile: {
       speed: "Speed", frames: "Frames", elapsed: "Elapsed", eta: "ETA", scene: "Scene", phase: "Phase",
       batches: "Batches", cues: "Translated",
+      // #192 resumable translation: lines from the checkpoint / a fallback model / kept in Japanese.
+      resumed: "Resumed", fallback: "Fallback", keptJa: "Kept in Japanese",
     },
     cues: "{{done}} / {{total}} cues",
+    // #192: the film waits for a translation provider to come back (the step stays active).
+    paused: "Waiting for translation service",
+    pausedN: "Waiting for translation service · {{n}} films on hold",
     gpuHeld: "GPU in use by “{{holder}}”",
     gpuHeldHint:
       "It starts here once that task finishes the GPU work on its current file — the two take turns per file and never share VRAM.",
@@ -169,13 +174,18 @@ const en = {
     llm: "LLM API",
     llmHint: "One OpenAI-compatible LLM endpoint for this agent (default xAI Grok; OpenRouter or a local Ollama work too). Changes apply immediately, no restart needed.",
     llmApiBase: "API base URL", llmModel: "Model", llmApiKey: "API key",
-    llmApiKeyHint: "The TASKPAW_LLM_API_KEY environment variable takes precedence over this key. Leave blank to keep the stored key.",
-    llmApiKeyEnv: "Provided by the TASKPAW_LLM_API_KEY environment variable — change it there.",
+    llmApiKeyHint: "The {{env}} environment variable takes precedence over this key. Leave blank to keep the stored key.",
+    llmApiKeyEnv: "Provided by the {{env}} environment variable — change it there.",
     llmSave: "Save LLM settings", llmClear: "Clear key", llmTest: "Test connection", llmTesting: "Testing…",
     llmTestOk: "Connected — {{model}} replied in {{latency}} ms.",
-    llmTestTruncated: "The reply was truncated, but the connection works.",
     llmTestFail: "Connection failed: {{error}}",
     llmSaved: "LLM settings saved.", llmCleared: "Stored API key cleared.",
+    // #190 fallback models + #192 failover switch.
+    llmFallback: "Fallback model {{n}}",
+    llmFallbackHint: "Optional. Used only for lines the primary model refuses to translate — and, with failover on (below), while the primary is unavailable. Any OpenAI-compatible endpoint works (e.g. DeepSeek or MiMo); leave it blank to not use it. Changes apply immediately.",
+    llmFailoverTitle: "Failover",
+    llmFailover: "Use the fallback models while the primary is unavailable",
+    llmFailoverHint: "On (default): while the primary model is down, rate-limited or out of credit, lines go to the fallback models. Off: translation waits for the primary to recover (lines it refuses still go to the fallbacks).",
   },
 };
 
@@ -285,8 +295,11 @@ const zh: typeof en = {
     tile: {
       speed: "速度", frames: "帧", elapsed: "已用", eta: "约剩", scene: "场景", phase: "阶段",
       batches: "批次", cues: "已译",
+      resumed: "已续翻", fallback: "备用模型", keptJa: "保留日文",
     },
     cues: "{{done}} / {{total}} 句",
+    paused: "等待翻译服务",
+    pausedN: "等待翻译服务 · {{n}} 部片暂缓",
     gpuHeld: "GPU 正由「{{holder}}」使用",
     gpuHeldHint:
       "对方做完当前这部片子的 GPU 工作后，就轮到这里；两边按文件轮流，不会同时占用显存。",
@@ -329,13 +342,17 @@ const zh: typeof en = {
     llm: "LLM API",
     llmHint: "本机 agent 统一使用的 OpenAI 兼容大模型接口(默认 xAI Grok,也可用 OpenRouter 或本地 Ollama)。修改即时生效,无需重启。",
     llmApiBase: "API 地址", llmModel: "模型", llmApiKey: "API 密钥",
-    llmApiKeyHint: "环境变量 TASKPAW_LLM_API_KEY 优先于此处的密钥。留空则保留已保存的密钥。",
-    llmApiKeyEnv: "密钥由环境变量 TASKPAW_LLM_API_KEY 提供,如需更改请修改该环境变量。",
+    llmApiKeyHint: "环境变量 {{env}} 优先于此处的密钥。留空则保留已保存的密钥。",
+    llmApiKeyEnv: "密钥由环境变量 {{env}} 提供,如需更改请修改该环境变量。",
     llmSave: "保存 LLM 设置", llmClear: "清除密钥", llmTest: "测试连接", llmTesting: "测试中…",
     llmTestOk: "连接成功 —— {{model}} 用时 {{latency}} 毫秒响应。",
-    llmTestTruncated: "回复被截断,但连接正常。",
     llmTestFail: "连接失败:{{error}}",
     llmSaved: "LLM 设置已保存。", llmCleared: "已清除保存的 API 密钥。",
+    llmFallback: "备用模型 {{n}}",
+    llmFallbackHint: "可选。仅用于主模型拒绝翻译的句子;开启下方的故障切换后,主模型不可用期间也会改用它。任何 OpenAI 兼容接口均可(例如 DeepSeek、MiMo);留空即不使用。修改即时生效。",
+    llmFailoverTitle: "故障切换",
+    llmFailover: "主模型不可用时改用备用模型",
+    llmFailoverHint: "开启(默认):主模型宕机、限流或额度用尽期间,句子改由备用模型翻译。关闭:翻译会等待主模型恢复(主模型拒绝的句子仍交给备用模型)。",
   },
 };
 

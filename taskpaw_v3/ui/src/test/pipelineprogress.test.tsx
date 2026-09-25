@@ -612,3 +612,109 @@ describe("PipelineProgress — malformed input never crashes (#189)", () => {
     expect(p?.filmsMore).toBe(0);
   });
 });
+
+// #192 (AC12): the translate step's resumable-translation numbers — 已续翻 /
+// 备用模型 / 保留日文 tiles only when > 0, and a 等待翻译服务 chip while `paused`
+// (the step itself stays `active`: no new step state, design C8).
+describe("PipelineProgress — resumable translation numbers (#192)", () => {
+  afterEach(reset);
+
+  const withTranslate = (extra: Record<string, unknown>) => ({
+    ...TRANSLATE,
+    steps: [
+      { key: "restore", state: "done", duration_s: 3420 },
+      { key: "asr", state: "done", duration_s: 600 },
+      { ...TRANSLATE.steps[2], ...extra },
+    ],
+  });
+  const panel = () => within(screen.getByTestId("pipeline-panel"));
+  // The value shown in the tile labelled `label` (label and value share one Tile).
+  const tile = (label: string) => panel().getByText(label).parentElement as HTMLElement;
+
+  it("shows 已续翻 / 备用模型 / 保留日文 tiles next to the existing ones (zh)", () => {
+    setLang("zh-CN");
+    wrap(<MonitorMetrics metrics={withTranslate({ cues_resumed: 240, cues_fallback: 7, cues_kept_ja: 2 })} />);
+    expect(tile("已续翻")).toHaveTextContent("240");
+    expect(tile("备用模型")).toHaveTextContent("7");
+    expect(tile("保留日文")).toHaveTextContent("2");
+    // The #189 tiles are unchanged.
+    expect(tile("批次")).toHaveTextContent("9 / 16");
+    expect(tile("已译")).toHaveTextContent("360 / 620 句");
+    expect(panel().queryByTestId("translate-paused")).toBeNull();
+  });
+
+  it("Resumed / Fallback / Kept in Japanese tiles (en)", () => {
+    setLang("en");
+    wrap(<MonitorMetrics metrics={withTranslate({ cues_resumed: 12, cues_fallback: 3, cues_kept_ja: 1 })} />);
+    expect(tile("Resumed")).toHaveTextContent("12");
+    expect(tile("Fallback")).toHaveTextContent("3");
+    expect(tile("Kept in Japanese")).toHaveTextContent("1");
+  });
+
+  it("only counts > 0 get a tile", () => {
+    setLang("zh-CN");
+    wrap(<MonitorMetrics metrics={withTranslate({ cues_resumed: 0, cues_fallback: 5, cues_kept_ja: 0 })} />);
+    expect(panel().queryByText("已续翻")).toBeNull();
+    expect(tile("备用模型")).toHaveTextContent("5");
+    expect(panel().queryByText("保留日文")).toBeNull();
+  });
+
+  it("paused: 等待翻译服务 chip while the step stays active; the deferred count only when > 1", () => {
+    setLang("zh-CN");
+    const { unmount } = wrap(<MonitorMetrics metrics={withTranslate({ paused: true, deferred: 1 })} />);
+    expect(panel().getByTestId("translate-paused")).toHaveTextContent(/^等待翻译服务$/);
+    // No new step state: the stepper still shows the translate step as running.
+    expect(within(stepper()).getByTestId("step-active-icon")).toBeInTheDocument();
+    expect(within(pipe()).getByText("正在处理")).toBeInTheDocument();
+    unmount();
+    wrap(<MonitorMetrics metrics={withTranslate({ paused: true, deferred: 3 })} />);
+    expect(panel().getByTestId("translate-paused")).toHaveTextContent("等待翻译服务 · 3 部片暂缓");
+  });
+
+  it("paused chip in English (with and without the deferred count)", () => {
+    setLang("en");
+    const { unmount } = wrap(<MonitorMetrics metrics={withTranslate({ paused: true })} />);
+    expect(panel().getByTestId("translate-paused")).toHaveTextContent(/^Waiting for translation service$/);
+    unmount();
+    wrap(<MonitorMetrics metrics={withTranslate({ paused: true, deferred: 2 })} />);
+    expect(panel().getByTestId("translate-paused"))
+      .toHaveTextContent("Waiting for translation service · 2 films on hold");
+  });
+
+  it("without the new numbers (or with unusable ones) the panel renders as before", () => {
+    setLang("zh-CN");
+    const { unmount } = wrap(<MonitorMetrics metrics={TRANSLATE} />);
+    for (const label of ["已续翻", "备用模型", "保留日文"]) expect(panel().queryByText(label)).toBeNull();
+    expect(panel().queryByTestId("translate-paused")).toBeNull();
+    expect(tile("已译")).toHaveTextContent("360 / 620 句");
+    unmount();
+    wrap(<MonitorMetrics metrics={withTranslate({ paused: "yes", deferred: 4, cues_resumed: -1,
+      cues_fallback: "5", cues_kept_ja: Number.NaN })} />);
+    for (const label of ["已续翻", "备用模型", "保留日文"]) expect(panel().queryByText(label)).toBeNull();
+    expect(panel().queryByTestId("translate-paused")).toBeNull();
+  });
+
+  it("paused / counts on a non-translate step are ignored", () => {
+    setLang("zh-CN");
+    wrap(<MonitorMetrics metrics={{ ...ASR, steps: [
+      { key: "restore", state: "done", duration_s: 3420 },
+      { key: "asr", state: "active", percent: 43, paused: true, cues_resumed: 9 },
+      { key: "translate", state: "pending" },
+    ] }} />);
+    expect(panel().queryByTestId("translate-paused")).toBeNull();
+    expect(panel().queryByText("已续翻")).toBeNull();
+  });
+
+  it("readPipeline: paused only for a real boolean; counts are non-negative numbers", () => {
+    const p = readPipeline({ steps: [
+      { key: "translate", state: "active", paused: true, deferred: 2, cues_resumed: 3,
+        cues_fallback: 0, cues_kept_ja: 1 },
+      { key: "translate", state: "active", paused: 1, deferred: -1, cues_resumed: "3" },
+    ] });
+    expect(p?.steps[0]).toMatchObject({ paused: true, deferred: 2, cues_resumed: 3,
+      cues_fallback: 0, cues_kept_ja: 1 });
+    expect(p?.steps[1].paused).toBeUndefined();
+    expect(p?.steps[1].deferred).toBeUndefined();
+    expect(p?.steps[1].cues_resumed).toBeUndefined();
+  });
+});

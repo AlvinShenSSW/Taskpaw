@@ -13,8 +13,13 @@ from typing import Optional
 
 from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
+from taskpaw_v3.core.datadir import set_data_dir
 from taskpaw_v3.core.lifecycle import GracefulShutdown
-from taskpaw_v3.core.llm import llm_settings_from_config, set_llm_settings
+from taskpaw_v3.core.llm import (
+    llm_settings_from_config,
+    set_llm_chain,
+    set_llm_settings,
+)
 from taskpaw_v3.core.net import (  # re-export
     PortInUseError,
     announce_ready,
@@ -29,6 +34,7 @@ from taskpaw_v3.core.state import load_next_id, save_next_id
 from taskpaw_v3.monitors.runtime import (
     effective_monitors,  # re-export (moved to runtime)
 )
+from taskpaw_v3.monitors.subs.translate import llm_chain_from_config
 
 log = logging.getLogger("taskpaw.agent")
 
@@ -88,8 +94,12 @@ def run_agent(
     # Publish the global LLM settings (#178) BEFORE the stale-port reclaim, any
     # socket claim and the supervisor, so the first check() of any monitor reads
     # the real settings (env key first), never the unconfigured defaults (C2).
-    # MonitorAdmin.update_config refreshes it after each successful save.
+    # MonitorAdmin.update_config refreshes it after each successful save. Same
+    # for the provider chain + failover switch (#192 AC1) and the data dir —
+    # ONLY this run's config_path folder, never default_config_path() (C5).
     set_llm_settings(llm_settings_from_config(config))
+    set_llm_chain(llm_chain_from_config(config), failover=config.llm_failover)
+    set_data_dir(config_path.parent if config_path is not None else None)
 
     # Seamless updates/restarts: if OUR OWN previous agent backend is still holding
     # these ports (common right after installing a new version), terminate that

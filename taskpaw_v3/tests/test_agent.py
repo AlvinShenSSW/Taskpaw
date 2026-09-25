@@ -228,7 +228,7 @@ def test_control_llm_test_route(monkeypatch):
 
     def fake_chat(settings, messages, **kw):
         calls.append(settings)
-        return ChatResult("OK", "stop", "served/m", 5)
+        return ChatResult('{"1": "你好"}', "stop", "served/m", 5)
 
     monkeypatch.setattr(adminmod, "chat", fake_chat)
     cfg = _cfg(llm_api_key=_LLM_KEY)
@@ -236,12 +236,7 @@ def test_control_llm_test_route(monkeypatch):
     client = TestClient(create_control_app(cfg, admin=admin))
     r = client.post("/control/llm-test", json={"llm_model": "cand/m"})
     assert r.status_code == 200
-    assert r.json() == {
-        "ok": True,
-        "model": "served/m",
-        "latency_ms": 5,
-        "truncated": False,
-    }
+    assert r.json() == {"ok": True, "model": "served/m", "latency_ms": 5}
     assert calls[0].model == "cand/m"
     r = client.post(
         "/control/llm-test", json={"llm_api_base": "ftp://x", "llm_api_key": _LLM_KEY}
@@ -252,3 +247,228 @@ def test_control_llm_test_route(monkeypatch):
     # Not mounted without an admin (like the other mutation routes).
     plain = TestClient(create_control_app(cfg))
     assert plain.post("/control/llm-test", json={}).status_code in (404, 405)
+
+
+# ── #190/#192 AC11: fallback providers over the control API ────────────────
+_FB_KEYS = {
+    "primary": "sk-STORED-P-1a1a",
+    "fallback1": "sk-STORED-F1-2b2b",
+    "fallback2": "sk-STORED-F2-3c3c",
+}
+_FB_ENV_KEYS = {
+    "primary": "sk-ENV-P-4d4d",
+    "fallback1": "sk-ENV-F1-5e5e",
+    "fallback2": "sk-ENV-F2-6f6f",
+}
+
+
+@pytest.mark.parametrize("slot", ["fallback1", "fallback2"])
+@pytest.mark.parametrize(
+    "stored,env,shown,source",
+    [
+        (True, False, "***", "config"),
+        (False, True, "***", "env"),
+        (True, True, "***", "env"),
+        (False, False, "", "none"),
+    ],
+)
+def test_control_config_masks_fallback_keys_and_reports_source(
+    monkeypatch, slot, stored, env, shown, source
+):
+    from taskpaw_v3.core.llm import LLM_SLOT_KEY_ENV
+
+    key_field = f"llm_{slot}_api_key"
+    if env:
+        monkeypatch.setenv(LLM_SLOT_KEY_ENV[slot], _FB_ENV_KEYS[slot])
+    cfg = _cfg(**({key_field: _FB_KEYS[slot]} if stored else {}))
+    for client in _control_clients(cfg):
+        r = client.get("/control/config")
+        data = r.json()
+        assert data[key_field] == shown
+        assert data[f"{key_field}_source"] == source
+        # The other slots are unaffected (by name, never positional).
+        for other in {"primary", "fallback1", "fallback2"} - {slot}:
+            prefix = "llm_" if other == "primary" else f"llm_{other}_"
+            assert data[f"{prefix}api_key"] == ""
+            assert data[f"{prefix}api_key_source"] == "none"
+        assert _FB_KEYS[slot] not in r.text and _FB_ENV_KEYS[slot] not in r.text
+
+
+def test_control_config_never_returns_a_stored_or_env_key_value(monkeypatch):
+    # AC11: no stored key VALUE — primary or fallback, stored or env — nor the
+    # token appears anywhere in GET /control/config.
+    from taskpaw_v3.core.llm import LLM_SLOT_KEY_ENV
+
+    cfg = _cfg(
+        api_token="tok-SECRET-7a7a",
+        llm_api_key=_FB_KEYS["primary"],
+        llm_fallback1_api_base="https://api.deepseek.com/v1",
+        llm_fallback1_model="deepseek-chat",
+        llm_fallback1_api_key=_FB_KEYS["fallback1"],
+        llm_fallback2_api_base="https://mimo.example/v1",
+        llm_fallback2_model="mimo",
+        llm_fallback2_api_key=_FB_KEYS["fallback2"],
+    )
+    for with_env in (False, True):
+        if with_env:
+            for slot, name in LLM_SLOT_KEY_ENV.items():
+                monkeypatch.setenv(name, _FB_ENV_KEYS[slot])
+        for client in _control_clients(cfg):
+            r = client.get("/control/config")
+            assert r.status_code == 200
+            for secret in (*_FB_KEYS.values(), *_FB_ENV_KEYS.values(), "tok-SECRET"):
+                assert secret not in r.text
+            data = r.json()
+            for prefix in ("llm_", "llm_fallback1_", "llm_fallback2_"):
+                assert data[f"{prefix}api_key"] == "***"
+                assert data[f"{prefix}api_key_source"] == (
+                    "env" if with_env else "config"
+                )
+            assert data["llm_fallback1_api_base"] == "https://api.deepseek.com/v1"
+            assert data["llm_fallback2_model"] == "mimo"
+            assert data["llm_failover"] is True
+
+
+def test_control_config_emits_every_fallback_field_and_failover():
+    for client in _control_clients(_cfg()):
+        data = client.get("/control/config").json()
+        for n in (1, 2):
+            for f in ("api_base", "model", "api_key", "api_key_source"):
+                assert f"llm_fallback{n}_{f}" in data
+            assert data[f"llm_fallback{n}_api_key_source"] == "none"
+        assert data["llm_failover"] is True
+
+
+def _admin_client(cfg, tmp_path=None):
+    from taskpaw_v3.agent.server.admin import MonitorAdmin
+    from taskpaw_v3.monitors.registry import PluginRegistry
+
+    path = None if tmp_path is None else tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, PluginRegistry(), path)
+    return TestClient(create_control_app(cfg, admin=admin))
+
+
+def test_patch_config_fallback_shapes_from_the_settings_ui(tmp_path):
+    # The UI's exact PATCH shapes: Save = base + model (+ the key only when
+    # typed); Clear = key null; turning a fallback off = blank base + model;
+    # the failover switch alone on every toggle.
+    from taskpaw_v3.core.llm import get_llm_chain, get_llm_failover
+
+    cfg = _cfg(llm_api_key=_FB_KEYS["primary"])
+    client = _admin_client(cfg, tmp_path)
+
+    def patch(body):
+        r = client.patch("/control/config", json=body)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    patch(
+        {
+            "llm_fallback1_api_base": "https://api.deepseek.com/v1",
+            "llm_fallback1_model": "deepseek-chat",
+            "llm_fallback1_api_key": _FB_KEYS["fallback1"],
+        }
+    )
+    assert [s.model for s in get_llm_chain()] == ["grok-4.3", "deepseek-chat"]
+    # Save without a typed key keeps the stored one (absent, blank or ***).
+    for body_key in (
+        {},
+        {"llm_fallback1_api_key": ""},
+        {"llm_fallback1_api_key": "***"},
+    ):
+        patch(
+            {
+                "llm_fallback1_api_base": "https://api.deepseek.com/v1",
+                "llm_fallback1_model": "deepseek-reasoner",
+                **body_key,
+            }
+        )
+        assert cfg.llm_fallback1_api_key == _FB_KEYS["fallback1"]
+    assert get_llm_chain()[1].model == "deepseek-reasoner"
+    # The failover switch alone.
+    assert patch({"llm_failover": False}) == {"ok": True, "restart_required": False}
+    assert get_llm_failover() is False and cfg.llm_failover is False
+    assert patch({"llm_failover": True})["ok"] is True
+    assert get_llm_failover() is True
+    # Clear.
+    patch({"llm_fallback1_api_key": None})
+    assert cfg.llm_fallback1_api_key == ""
+    assert [s.model for s in get_llm_chain()] == ["grok-4.3"]
+    # Off: blank base + model are accepted (the validators allow "").
+    patch({"llm_fallback1_api_base": "", "llm_fallback1_model": ""})
+    assert (cfg.llm_fallback1_api_base, cfg.llm_fallback1_model) == ("", "")
+    data = client.get("/control/config").json()
+    assert (data["llm_fallback1_api_base"], data["llm_fallback1_model"]) == ("", "")
+    assert data["llm_fallback1_api_key_source"] == "none"
+    text = (tmp_path / "agent.yaml").read_text(encoding="utf-8")
+    assert _FB_KEYS["fallback1"] not in text
+
+
+@pytest.mark.parametrize(
+    "slot,body",
+    [
+        (
+            "primary",
+            {
+                "llm_api_base": "https://cand.example/v1",
+                "llm_model": "cand/p",
+                "slot": "primary",
+            },
+        ),
+        (
+            "fallback1",
+            {
+                "llm_fallback1_api_base": "https://cand.example/v1",
+                "llm_fallback1_model": "cand/f1",
+                "llm_fallback1_api_key": "***",
+                "slot": "fallback1",
+            },
+        ),
+        (
+            "fallback2",
+            {
+                "llm_fallback2_api_base": "https://cand.example/v1",
+                "llm_fallback2_model": "cand/f2",
+                "llm_fallback2_api_key": "",
+                "slot": "fallback2",
+            },
+        ),
+    ],
+)
+def test_control_llm_test_route_per_slot(monkeypatch, slot, body):
+    # The UI's llm-test body per slot: that slot's OWN field names + `slot`; a
+    # missing / blank / *** key uses the slot's stored key.
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import ChatResult
+
+    calls = []
+
+    def fake_chat(settings, messages, **kw):
+        calls.append(settings)
+        return ChatResult('{"1": "你好"}', "stop", "served/m", 5)
+
+    monkeypatch.setattr(adminmod, "chat", fake_chat)
+    cfg = _cfg(
+        llm_api_key=_FB_KEYS["primary"],
+        llm_fallback1_api_key=_FB_KEYS["fallback1"],
+        llm_fallback2_api_key=_FB_KEYS["fallback2"],
+    )
+    client = _admin_client(cfg)
+    prefix = "llm_" if slot == "primary" else f"llm_{slot}_"
+    r = client.post("/control/llm-test", json=body)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "model": "served/m", "latency_ms": 5}
+    ((s,),) = [calls]
+    assert (s.api_base, s.model) == ("https://cand.example/v1", body[f"{prefix}model"])
+    assert (s.api_key, s.key_source) == (_FB_KEYS[slot], "config")
+
+
+def test_control_llm_test_route_rejects_an_unknown_slot(monkeypatch):
+    import taskpaw_v3.agent.server.admin as adminmod
+
+    monkeypatch.setattr(
+        adminmod, "chat", lambda *a, **k: pytest.fail("chat must not be called")
+    )
+    client = _admin_client(_cfg())
+    r = client.post("/control/llm-test", json={"slot": "fallback9"})
+    assert r.status_code == 400 and "slot" in r.json()["detail"]

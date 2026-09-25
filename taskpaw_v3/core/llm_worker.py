@@ -10,10 +10,13 @@ Protocol — JSON lines, UTF-8, `\\n`-terminated:
   "json_mode"?, "timeout"?, "api_base"?, "model"?}` (`api_base`/`model` override
   the environment for that request — live-apply; the key can NOT be overridden);
 - reply on stdout: `{"id", "ok": true, "content", "finish_reason", "model",
-  "latency_ms"}` or `{"id", "ok": false, "kind", "status", "message"}`.
+  "latency_ms"}` or `{"id", "ok": false, "kind", "status", "message",
+  "retry_after"}` (`retry_after`: the server's Retry-After delta-seconds, or
+  null — #192 C1).
 
 Settings come from the child's environment (`worker_env()`), never argv — the key
-must not appear in a process listing (constitution §2).
+must not appear in a process listing (constitution §2). Each worker serves ONE
+provider: its environment carries that provider's key only (C7).
 
 Cancel contract (D5/D6), consumed by #177's parent side:
 1. close the worker's stdin → the stdin watcher calls `os._exit(0)` at once,
@@ -48,6 +51,7 @@ from taskpaw_v3.core.llm import (
     LLMSettings,
     chat,
     resolve_llm_settings,
+    without_llm_env,
 )
 
 log = logging.getLogger("taskpaw.llm_worker")
@@ -71,16 +75,16 @@ def worker_argv() -> list[str]:
 def worker_env(
     settings: LLMSettings, base: Optional[Mapping[str, str]] = None
 ) -> dict[str, str]:
-    """A COPY of `base` (default `os.environ`) carrying the settings. The key is
-    set only when non-empty and otherwise removed, so a stale inherited key can't
-    leak into a keyless (e.g. local Ollama) worker. Never mutates `os.environ`."""
-    env = dict(os.environ if base is None else base)
+    """A COPY of `base` (default `os.environ`) carrying the settings. EVERY
+    inherited `TASKPAW_LLM_*` variable is dropped first (case-insensitive: the
+    other providers' keys, a stale base/model — C7), then only this worker's own
+    base, model and key are set; the key only when non-empty, so a keyless (e.g.
+    local Ollama) worker gets none. Never mutates `os.environ`."""
+    env = without_llm_env(base)
     env[ENV_BASE] = settings.api_base
     env[ENV_MODEL] = settings.model
     if settings.api_key:
         env[ENV_KEY] = settings.api_key
-    else:
-        env.pop(ENV_KEY, None)
     return env
 
 
@@ -138,9 +142,22 @@ def _override(req: dict, field: str) -> str:
     return value.strip()
 
 
-def _error_reply(rid: Any, kind: str, status: Optional[int], message: str) -> str:
+def _error_reply(
+    rid: Any,
+    kind: str,
+    status: Optional[int],
+    message: str,
+    retry_after: Optional[int] = None,
+) -> str:
     return json.dumps(
-        {"id": rid, "ok": False, "kind": kind, "status": status, "message": message}
+        {
+            "id": rid,
+            "ok": False,
+            "kind": kind,
+            "status": status,
+            "message": message,
+            "retry_after": retry_after,
+        }
     )
 
 
@@ -169,7 +186,7 @@ def handle_request(
     try:
         r = chat_fn(effective, req["messages"], **kwargs)
     except LLMError as e:
-        return _error_reply(rid, e.kind, e.status, e.message)
+        return _error_reply(rid, e.kind, e.status, e.message, e.retry_after)
     except Exception as e:  # catch-all (D2): the worker must never die mid-run
         log.warning("llm-worker: request failed: %s", type(e).__name__)
         return _error_reply(

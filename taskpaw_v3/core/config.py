@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 def _valid_port(p: int) -> int:
@@ -55,6 +55,19 @@ class AgentConfig(BaseModel):
     llm_api_base: str = "https://api.x.ai/v1"
     llm_model: str = "grok-4.3"
     llm_api_key: str = ""
+    # Two optional fallback models (#190/#192), tried in order when the primary
+    # refuses a line or is unavailable. Same rules as the primary; their keys'
+    # env vars TASKPAW_LLM_FALLBACK1_API_KEY / TASKPAW_LLM_FALLBACK2_API_KEY win.
+    # An empty base or model leaves the slot unused (the default).
+    llm_fallback1_api_base: str = ""
+    llm_fallback1_model: str = ""
+    llm_fallback1_api_key: str = ""
+    llm_fallback2_api_base: str = ""
+    llm_fallback2_model: str = ""
+    llm_fallback2_api_key: str = ""
+    # Failover (#192 §4, 「主模型不可用时改用备用模型」): while a model is
+    # unavailable its lines go to the next one; off → they wait for the first.
+    llm_failover: bool = True
 
     @field_validator("server_id", "machine")
     @classmethod
@@ -79,23 +92,23 @@ class AgentConfig(BaseModel):
     def _ports(cls, v: int) -> int:
         return _valid_port(v)
 
-    @field_validator("llm_api_base")
+    @field_validator("llm_api_base", "llm_fallback1_api_base", "llm_fallback2_api_base")
     @classmethod
-    def _norm_llm_base(cls, v: str) -> str:
+    def _norm_llm_base(cls, v: str, info: ValidationInfo) -> str:
         # Stored without a trailing "/" so chat() can append "/chat/completions";
         # only http(s) — never a file:/ftp:/javascript: URL (#178). Empty is
-        # allowed (the feature is simply unconfigured).
+        # allowed (the feature, or that fallback slot, is simply unconfigured).
         v = v.strip().rstrip("/")
         if v and not v.lower().startswith(("http://", "https://")):
-            raise ValueError("llm_api_base must start with http:// or https://")
+            raise ValueError(f"{info.field_name} must start with http:// or https://")
         return v
 
-    @field_validator("llm_model")
+    @field_validator("llm_model", "llm_fallback1_model", "llm_fallback2_model")
     @classmethod
     def _strip_llm_model(cls, v: str) -> str:
         return v.strip()
 
-    @field_validator("llm_api_key")
+    @field_validator("llm_api_key", "llm_fallback1_api_key", "llm_fallback2_api_key")
     @classmethod
     def _strip_llm_key(cls, v: str) -> str:
         # A pasted key often carries a trailing CR/LF; http.client would reject

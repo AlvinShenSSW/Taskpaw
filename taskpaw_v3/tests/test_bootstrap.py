@@ -36,7 +36,7 @@ def home(tmp_path, monkeypatch):
 def test_scaffold_agent_creates_config(home):
     path, created = bootstrap.scaffold("agent")
     assert created and path.exists() and path.name == "agent.yaml"
-    assert "monitors: []" in path.read_text()
+    assert "monitors: []" in path.read_text(encoding="utf-8")
 
 
 def test_scaffold_hub_creates_config(home):
@@ -46,7 +46,7 @@ def test_scaffold_hub_creates_config(home):
 
 def test_scaffold_agent_gets_unique_server_id(home):
     path, _ = bootstrap.scaffold("agent")
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     assert "server_id: my-agent" not in text  # placeholder replaced
     assert "machine: my-machine" not in text
     from taskpaw_v3.core.config import AgentConfig, load_yaml
@@ -98,20 +98,20 @@ def test_scaffold_does_not_clobber(home):
     path.write_text("server_id: mine\nmachine: mine\n")
     path2, created = bootstrap.scaffold("agent")
     assert path2 == path and created is False
-    assert "server_id: mine" in path.read_text()  # untouched
+    assert "server_id: mine" in path.read_text(encoding="utf-8")  # untouched
 
 
 def test_scaffold_force_overwrites(home):
     path, _ = bootstrap.scaffold("agent")
     path.write_text("custom")
     _, created = bootstrap.scaffold("agent", force=True)
-    assert created and "custom" not in path.read_text()
+    assert created and "custom" not in path.read_text(encoding="utf-8")
 
 
 def test_scaffold_is_atomic_no_tmp_left(home):
     """Atomic write: the dst is the example content and no .tmp residue remains."""
     path, _ = bootstrap.scaffold("agent")
-    assert "monitors: []" in path.read_text()
+    assert "monitors: []" in path.read_text(encoding="utf-8")
     assert list(path.parent.glob(".*.tmp")) == []
 
 

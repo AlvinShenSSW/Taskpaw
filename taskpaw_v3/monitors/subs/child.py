@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import collections
 import logging
-import os
 import queue
 import subprocess
 import sys
@@ -32,6 +31,9 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import IO, Any, Callable, Mapping, Optional
+
+from taskpaw_v3.core.llm import LLM_ENV_PREFIX as LLM_ENV_PREFIX
+from taskpaw_v3.core.llm import without_llm_env
 
 try:
     import psutil
@@ -45,15 +47,13 @@ _TASKKILL_NOT_FOUND = 128  # the process is already gone — not an error
 _TASKKILL_MIN_S = 0.5  # taskkill always gets at least this long to run
 _FINAL_KILL_WAIT_S = 1.0  # the one wait after the last-resort proc.kill() (N4)
 
-LLM_ENV_PREFIX = "TASKPAW_LLM_"
-
 
 def asr_env(base: Optional[Mapping[str, str]] = None) -> dict[str, str]:
     """A copy of `base` (default: the agent's environment) minus every
     `TASKPAW_LLM_*` variable (case-insensitive): the LLM key must never reach
-    the ASR child (#177 AC10; moved here from Jasna by #179 C6)."""
-    src: Mapping[str, str] = os.environ if base is None else base
-    return {k: v for k, v in src.items() if not k.upper().startswith(LLM_ENV_PREFIX)}
+    the ASR child (#177 AC10; moved here from Jasna by #179 C6). The filter is
+    `core.llm.without_llm_env`, shared with the llm-worker's env (#192 C7)."""
+    return without_llm_env(base)
 
 
 @dataclass(frozen=True)

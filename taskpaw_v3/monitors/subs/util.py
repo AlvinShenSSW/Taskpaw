@@ -55,3 +55,27 @@ def exists_quietly(path: Union[str, "os.PathLike[str]"]) -> bool:
         return Path(path).exists()
     except (OSError, ValueError):
         return False
+
+
+def translation_suffix(kept_ja: int, paused: int) -> str:
+    """#192 AC8/AC9: what a run's `done` text gains after its counts —
+    `; N lines kept in Japanese` (`1 line`) and `; N paused`, each only when
+    N > 0, so the text of a run with neither stays byte-identical."""
+    out = ""
+    if kept_ja > 0:
+        lines = "line" if kept_ja == 1 else "lines"
+        out += f"; {kept_ja} {lines} kept in Japanese"
+    if paused > 0:
+        out += f"; {paused} paused"
+    return out
+
+
+def paused_alert_message() -> str:
+    """#192 AC8: the text of the one per-run alert about paused films. No
+    count: the alert is raised once, at the first pause, so a count would be
+    stale — the run's `done` text carries the exact `; N paused`."""
+    return (
+        "Some files were paused: no translation service was available for 2 h. "
+        "Their progress is kept; the next Start continues them. "
+        "The run summary gives the count."
+    )

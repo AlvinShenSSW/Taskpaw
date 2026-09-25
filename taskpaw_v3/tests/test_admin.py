@@ -720,39 +720,45 @@ class _ChatSpy:
         return self.result
 
 
-def _ok_result(finish_reason="stop"):
+_PROBE_REPLY = '{"1": "你好"}'
+
+
+def _ok_result(finish_reason="stop", content=_PROBE_REPLY):
     from taskpaw_v3.core.llm import ChatResult
 
-    return ChatResult("OK", finish_reason, "served/m", 42)
+    return ChatResult(content, finish_reason, "served/m", 42)
 
 
 def test_llm_test_uses_candidate_without_persisting(tmp_path, monkeypatch):
-    # T-A4: candidate base/model reach chat() with strict=False; nothing persists.
+    # T-A4: candidate base/model reach chat() with the real translation probe
+    # (#192 G5/H4: strict, json_mode on); nothing persists.
     import taskpaw_v3.agent.server.admin as adminmod
-    from taskpaw_v3.core.llm import get_llm_settings
+    from taskpaw_v3.core.llm import get_llm_chain, get_llm_settings
+    from taskpaw_v3.monitors.subs.translate import PROBE_MAX_TOKENS, probe_messages
 
     cfg = _agent_config(llm_api_key=_LLM_KEY)
     path = tmp_path / "a.yaml"
     admin = MonitorAdmin(cfg, None, _registry(), path)
     holder = get_llm_settings()
+    chain = get_llm_chain()
     desired = dict(admin._desired)
     spy = _ChatSpy(admin, result=_ok_result())
     monkeypatch.setattr(adminmod, "chat", spy)
     res = admin.llm_test(
         {"llm_api_base": "http://h:1/v1/", "llm_model": "cand/m", "llm_api_key": ""}
     )
-    assert res == {
-        "ok": True,
-        "model": "served/m",
-        "latency_ms": 42,
-        "truncated": False,
-    }
+    assert res == {"ok": True, "model": "served/m", "latency_ms": 42}
     ((settings, messages, kw),) = spy.calls
     assert (settings.api_base, settings.model) == ("http://h:1/v1", "cand/m")
     assert (settings.api_key, settings.key_source) == (_LLM_KEY, "config")  # blank
-    assert kw["strict"] is False and kw["max_tokens"] == 16 and kw["timeout"] == 20
-    assert messages[0]["role"] == "user"
-    # Nothing touched: desired, running config, disk, holder.
+    assert messages == probe_messages()
+    assert kw == {
+        "max_tokens": PROBE_MAX_TOKENS,
+        "json_mode": True,
+        "timeout": 20,
+        "strict": True,
+    }
+    # Nothing touched: desired, running config, disk, holders.
     assert admin._desired == desired
     assert (cfg.llm_api_base, cfg.llm_model) == (
         "https://api.x.ai/v1",
@@ -760,6 +766,7 @@ def test_llm_test_uses_candidate_without_persisting(tmp_path, monkeypatch):
     )
     assert not path.exists()
     assert get_llm_settings() is holder
+    assert get_llm_chain() is chain
 
 
 def test_llm_test_key_resolution(tmp_path, monkeypatch):
@@ -813,13 +820,144 @@ def test_llm_test_errors_never_carry_exception_text(tmp_path, monkeypatch):
     assert _LLM_KEY not in str(res)
 
 
-def test_llm_test_truncated_reply_is_ok(tmp_path, monkeypatch):
+class _BodyOpener:
+    """For the REAL chat(): `.open()` answers each request with the next canned
+    envelope (hermetic — no socket) and records the request payloads."""
+
+    def __init__(self, *bodies: dict):
+        self.bodies = list(bodies)
+        self.payloads: list = []
+
+    def open(self, request, timeout=None):
+        import io
+        import json
+
+        self.payloads.append(json.loads(request.data))
+        return io.BytesIO(json.dumps(self.bodies.pop(0)).encode("utf-8"))
+
+
+def _envelope(content, finish_reason="stop"):
+    return {
+        "model": "served/m",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": finish_reason,
+            }
+        ],
+    }
+
+
+def _real_chat_with(monkeypatch, opener):
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import chat as real_chat
+
+    monkeypatch.setattr(
+        adminmod,
+        "chat",
+        lambda settings, messages, **kw: real_chat(
+            settings, messages, opener=opener, **kw
+        ),
+    )
+
+
+def test_llm_test_truncated_reply_fails_like_the_engine_probe(tmp_path, monkeypatch):
+    # #192 H4: the Test uses the engine's OK rule — a length-truncated reply is a
+    # failure there (strict), so it is one here too (was "ok, truncated").
+    admin = MonitorAdmin(_agent_config(), None, _registry(), tmp_path / "a.yaml")
+    _real_chat_with(monkeypatch, _BodyOpener(_envelope(_PROBE_REPLY, "length")))
+    assert admin.llm_test({}) == {
+        "ok": False,
+        "error": "bad_response: finish_reason=length",
+    }
+
+
+def test_llm_test_real_chat_probe_round_trip(tmp_path, monkeypatch):
+    # The real chat() sends the probe: the system prompt + the こんにちは cue,
+    # json_mode on; a valid reply is OK with the served model.
+    from taskpaw_v3.monitors.subs.translate import SYSTEM_PROMPT
+
+    admin = MonitorAdmin(_agent_config(), None, _registry(), tmp_path / "a.yaml")
+    opener = _BodyOpener(_envelope(_PROBE_REPLY))
+    _real_chat_with(monkeypatch, opener)
+    res = admin.llm_test({"llm_api_key": _LLM_KEY})
+    assert res["ok"] is True and res["model"] == "served/m"
+    assert set(res) == {"ok", "model", "latency_ms"}  # IR3: no `truncated`
+    assert isinstance(res["latency_ms"], int)
+    ((payload),) = opener.payloads
+    assert payload["response_format"] == {"type": "json_object"}
+    assert payload["messages"][0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert "こんにちは" in payload["messages"][1]["content"]
+
+
+def test_llm_test_400_retries_once_without_json_mode(tmp_path, monkeypatch):
+    # H4/AC6: HTTP 400 on the json_mode request → ONE retry without json_mode.
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import LLMError
+
+    admin = MonitorAdmin(_agent_config(), None, _registry(), tmp_path / "a.yaml")
+    outcomes: list = [LLMError("bad_response", "HTTP 400", 400), _ok_result()]
+    calls: list = []
+
+    def fake(settings, messages, **kw):
+        calls.append(kw["json_mode"])
+        got = outcomes.pop(0)
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+    monkeypatch.setattr(adminmod, "chat", fake)
+    res = admin.llm_test({})
+    assert res["ok"] is True and calls == [True, False]
+    # 400 again without json_mode → that error, still exactly two requests.
+    outcomes[:] = [
+        LLMError("bad_response", "HTTP 400", 400),
+        LLMError("bad_response", "HTTP 400", 400),
+    ]
+    calls.clear()
+    assert admin.llm_test({}) == {"ok": False, "error": "bad_response: HTTP 400"}
+    assert calls == [True, False]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ("auth", "authentication failed", 401),
+        ("bad_response", "HTTP 402", 402),
+        ("bad_response", "HTTP 404", 404),
+        ("rate_limit", "rate limited", 429),
+        ("refusal", "empty reply", None),
+    ],
+)
+def test_llm_test_other_failures_are_not_retried(tmp_path, monkeypatch, exc):
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import LLMError
+
+    admin = MonitorAdmin(_agent_config(), None, _registry(), tmp_path / "a.yaml")
+    spy = _ChatSpy(admin, exc=LLMError(*exc))
+    monkeypatch.setattr(adminmod, "chat", spy)
+    res = admin.llm_test({})
+    assert res["ok"] is False and res["error"].startswith(f"{exc[0]}: {exc[1]}")
+    assert len(spy.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["OK", '{"2": "你好"}', '{"1": ""}', '{"1": "a", "1": "b"}', "PROBEMARKER-9d9d"],
+)
+def test_llm_test_ok_only_when_the_reply_is_a_valid_translation(
+    tmp_path, monkeypatch, content
+):
+    # H4: an envelope-OK reply that fails the translator's _validate is NOT ok.
     import taskpaw_v3.agent.server.admin as adminmod
 
     admin = MonitorAdmin(_agent_config(), None, _registry(), tmp_path / "a.yaml")
-    monkeypatch.setattr(adminmod, "chat", _ChatSpy(admin, _ok_result("length")))
+    monkeypatch.setattr(
+        adminmod, "chat", _ChatSpy(admin, result=_ok_result(content=content))
+    )
     res = admin.llm_test({})
-    assert res["ok"] is True and res["truncated"] is True
+    assert res["ok"] is False and res["error"].startswith("invalid: ")
+    assert content not in res["error"]  # the reply text is never echoed
 
 
 def test_llm_test_bad_base_is_value_error_without_key(tmp_path, monkeypatch):
@@ -856,9 +994,23 @@ def test_handle_llm_test_dispatches(tmp_path, monkeypatch):
 
 
 def test_live_and_non_live_config_partition():
-    # #178: exactly the token + the three LLM fields are live; the rest (the
-    # restart-required baseline) is unchanged.
+    # #178/#192: exactly the token + the LLM fields (three per slot + the
+    # failover switch) are live; the rest (the restart-required baseline) is
+    # unchanged.
     assert set(MonitorAdmin._LIVE_CONFIG) <= set(MonitorAdmin._EDITABLE_CONFIG)
+    assert set(MonitorAdmin._LIVE_CONFIG) == {
+        "api_token",
+        "llm_api_base",
+        "llm_model",
+        "llm_api_key",
+        "llm_fallback1_api_base",
+        "llm_fallback1_model",
+        "llm_fallback1_api_key",
+        "llm_fallback2_api_base",
+        "llm_fallback2_model",
+        "llm_fallback2_api_key",
+        "llm_failover",
+    }
     assert MonitorAdmin._NON_LIVE_CONFIG == (
         "machine",
         "bind_host",
@@ -877,8 +1029,224 @@ def test_update_config_400_never_echoes_a_secret_input(tmp_path):
     admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
     client = TestClient(create_control_app(cfg, admin=admin))
     marker = "sk-super-secret-marker"
-    for field in ("llm_api_key", "api_token"):
+    for field in (
+        "llm_api_key",
+        "llm_fallback1_api_key",
+        "llm_fallback2_api_key",
+        "api_token",
+    ):
         r = client.patch("/control/config", json={field: [marker]})
         assert r.status_code == 400
         assert marker not in r.text and field in r.text
     assert cfg.llm_api_key == "" and cfg.api_token == ""  # nothing applied
+    assert cfg.llm_fallback1_api_key == cfg.llm_fallback2_api_key == ""
+
+
+# ── #190/#192: fallback providers + failover (AC1, AC11 backend) ───────────
+_DS_BASE = "https://api.deepseek.com/v1"
+
+
+def _fb(slot: str, base: str = _DS_BASE, model: str = "deepseek-chat", key=None):
+    from taskpaw_v3.core.llm import llm_slot_fields
+
+    fb, fm, fk = llm_slot_fields(slot)
+    out = {fb: base, fm: model}
+    if key is not None:
+        out[fk] = key
+    return out
+
+
+def test_update_config_fallbacks_and_failover_are_live_and_publish_the_chain(
+    tmp_path,
+):
+    from taskpaw_v3.core.llm import get_llm_chain, get_llm_failover
+
+    cfg = _agent_config(llm_api_key=_LLM_KEY)
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    res = admin.update_config(
+        {
+            **_fb("fallback1", base=_DS_BASE + "/", key=" sk-FB1-a1a1 "),
+            **_fb("fallback2", base="http://127.0.0.1:11434/v1", model="qwen3"),
+            "llm_failover": False,
+        }
+    )
+    assert res == {"ok": True, "restart_required": False}
+    on_disk = load_yaml(AgentConfig, path)
+    assert (on_disk.llm_fallback1_api_base, on_disk.llm_fallback1_api_key) == (
+        _DS_BASE,
+        "sk-FB1-a1a1",
+    )
+    assert (on_disk.llm_fallback2_model, on_disk.llm_failover) == ("qwen3", False)
+    assert (cfg.llm_fallback1_model, cfg.llm_failover) == ("deepseek-chat", False)
+    assert [(s.api_base, s.model, s.api_key) for s in get_llm_chain()] == [
+        ("https://api.x.ai/v1", "grok-4.3", _LLM_KEY),
+        (_DS_BASE, "deepseek-chat", "sk-FB1-a1a1"),
+        ("http://127.0.0.1:11434/v1", "qwen3", ""),
+    ]
+    assert get_llm_failover() is False
+    admin.update_config({"llm_failover": True, "llm_api_key": None})
+    assert get_llm_failover() is True
+    assert [s.model for s in get_llm_chain()] == ["deepseek-chat", "qwen3"]
+
+
+@pytest.mark.parametrize("slot", ["fallback1", "fallback2"])
+def test_update_config_fallback_key_keep_clear_and_env(tmp_path, monkeypatch, slot):
+    # AC11: blank/*** keeps the stored fallback key; null clears it; the slot's
+    # env key is never written back into agent.yaml and wins at resolution.
+    from taskpaw_v3.core.llm import LLM_SLOT_KEY_ENV, get_llm_chain, llm_slot_fields
+
+    _fbase, fmodel, fkey = llm_slot_fields(slot)
+    stored = f"sk-{slot.upper()}-STORED-9c9c"
+    cfg = _agent_config(**_fb(slot, key=stored))
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    for kept in ("***", "  ", "", " *** "):
+        admin.update_config({fkey: kept, fmodel: "m1"})
+        assert getattr(cfg, fkey) == stored
+        assert getattr(load_yaml(AgentConfig, path), fkey) == stored
+    assert [(s.model, s.api_key) for s in get_llm_chain()] == [("m1", stored)]
+    admin.update_config({fkey: None})
+    assert getattr(cfg, fkey) == ""
+    assert getattr(load_yaml(AgentConfig, path), fkey) == ""
+    assert get_llm_chain() == ()  # keyless non-loopback fallback → unusable
+    env_key = f"sk-ENV-{slot.upper()}-0000"
+    monkeypatch.setenv(LLM_SLOT_KEY_ENV[slot], env_key)
+    admin.update_config({fmodel: "m2", fkey: "***"})
+    assert env_key not in path.read_text(encoding="utf-8")
+    assert getattr(load_yaml(AgentConfig, path), fkey) == ""
+    assert [(s.model, s.api_key, s.key_source) for s in get_llm_chain()] == [
+        ("m2", env_key, "env")
+    ]
+
+
+def test_update_config_failed_save_leaves_the_chain_holders(tmp_path, monkeypatch):
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import get_llm_chain, get_llm_failover
+
+    cfg = _agent_config(llm_api_key=_LLM_KEY)
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    admin.update_config({**_fb("fallback1", key="sk-FB1-b2b2")})
+    chain = get_llm_chain()
+    assert len(chain) == 2
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(adminmod, "save_yaml", boom)
+    with pytest.raises(OSError):
+        admin.update_config({"llm_fallback1_api_key": None, "llm_failover": False})
+    assert get_llm_chain() is chain and get_llm_failover() is True
+    assert (cfg.llm_fallback1_api_key, cfg.llm_failover) == ("sk-FB1-b2b2", True)
+
+
+@pytest.mark.parametrize("slot", ["fallback1", "fallback2"])
+def test_llm_test_probes_the_given_slot(tmp_path, monkeypatch, slot):
+    # AC11: Test for a fallback slot uses THAT slot's candidate fields (the
+    # primary's are ignored), keeps a blank/*** key, resolves the slot's env key
+    # first, and never persists or publishes.
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import LLM_SLOT_KEY_ENV, get_llm_chain, llm_slot_fields
+    from taskpaw_v3.monitors.subs.translate import probe_messages
+
+    fbase, fmodel, fkey = llm_slot_fields(slot)
+    stored = f"sk-{slot.upper()}-STORED-7e7e"
+    cfg = _agent_config(llm_api_key=_LLM_KEY, **_fb(slot, key=stored))
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    spy = _ChatSpy(admin, result=_ok_result())
+    monkeypatch.setattr(adminmod, "chat", spy)
+    chain = get_llm_chain()
+    res = admin.llm_test(
+        {
+            "llm_api_base": "http://primary-ignored/v1",
+            "llm_model": "primary/ignored",
+            fbase: "https://mimo.example/v1/",
+            fmodel: " mimo ",
+            fkey: "***",
+        },
+        slot,
+    )
+    assert res == {"ok": True, "model": "served/m", "latency_ms": 42}
+    settings, messages, _kw = spy.calls[-1]
+    assert (settings.api_base, settings.model) == ("https://mimo.example/v1", "mimo")
+    assert (settings.api_key, settings.key_source) == (stored, "config")
+    assert messages == probe_messages()
+    admin.llm_test({fkey: " sk-typed \r\n"}, slot)  # a typed candidate, stripped
+    assert (spy.calls[-1][0].api_key, spy.calls[-1][0].model) == (
+        "sk-typed",
+        "deepseek-chat",
+    )
+    monkeypatch.setenv(LLM_SLOT_KEY_ENV[slot], "sk-ENV-SLOT-1212")
+    admin.llm_test({}, slot)  # the slot's env key first
+    assert (spy.calls[-1][0].api_key, spy.calls[-1][0].key_source) == (
+        "sk-ENV-SLOT-1212",
+        "env",
+    )
+    assert getattr(cfg, fkey) == stored and not path.exists()
+    assert get_llm_chain() is chain
+
+
+def test_llm_test_unknown_slot_is_a_value_error(tmp_path, monkeypatch):
+    import taskpaw_v3.agent.server.admin as adminmod
+
+    admin = MonitorAdmin(_agent_config(), None, _registry(), tmp_path / "a.yaml")
+    spy = _ChatSpy(admin, result=_ok_result())
+    monkeypatch.setattr(adminmod, "chat", spy)
+    for bad in ("fallback3", "", None, 1):
+        with pytest.raises(ValueError):
+            admin.llm_test({}, bad)  # type: ignore[arg-type]
+    res = admin.handle("llm_test", {"candidate": {}, "slot": "nope"})
+    assert res["ok"] is False and "slot" in res["error"]
+    assert spy.calls == []
+
+
+def test_handle_llm_test_passes_the_slot(tmp_path, monkeypatch):
+    import taskpaw_v3.agent.server.admin as adminmod
+
+    admin = MonitorAdmin(
+        _agent_config(**_fb("fallback2", key="sk-FB2-c3c3")),
+        None,
+        _registry(),
+        tmp_path / "a.yaml",
+    )
+    spy = _ChatSpy(admin, result=_ok_result())
+    monkeypatch.setattr(adminmod, "chat", spy)
+    admin.handle("llm_test", {"candidate": {}, "slot": "fallback2"})
+    admin.handle("llm_test", {"command": "llm_test", "slot": "fallback2"})
+    assert [(c[0].model, c[0].api_key) for c in spy.calls] == [
+        ("deepseek-chat", "sk-FB2-c3c3"),
+        ("deepseek-chat", "sk-FB2-c3c3"),
+    ]
+
+
+def test_llm_test_fallback_errors_never_carry_a_key(tmp_path, monkeypatch):
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import LLMError
+
+    stored = "sk-FB1-STORED-4d4d"
+    admin = MonitorAdmin(
+        _agent_config(**_fb("fallback1", key=stored)),
+        None,
+        _registry(),
+        tmp_path / "a.yaml",
+    )
+    with pytest.raises(ValueError) as ei:
+        admin.llm_test(
+            {"llm_fallback1_api_base": "ftp://x", "llm_fallback1_api_key": stored},
+            "fallback1",
+        )
+    assert "llm_fallback1_api_base" in str(ei.value) and stored not in str(ei.value)
+    monkeypatch.setattr(
+        adminmod, "chat", _ChatSpy(admin, exc=RuntimeError(f"boom {stored}"))
+    )
+    res = admin.llm_test({}, "fallback1")
+    assert res == {"ok": False, "error": "unexpected error: RuntimeError"}
+    monkeypatch.setattr(
+        adminmod,
+        "chat",
+        _ChatSpy(admin, exc=LLMError("auth", "authentication failed", 401)),
+    )
+    res = admin.llm_test({}, "fallback1")
+    assert res == {"ok": False, "error": "auth: authentication failed (HTTP 401)"}
+    assert stored not in str(res)

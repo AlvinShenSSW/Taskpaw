@@ -84,6 +84,87 @@ def test_run_agent_sets_llm_holder_before_port_reclaim(monkeypatch):
     assert get_llm_settings() == s
 
 
+# ── #192: the provider chain, the failover switch and the data dir (C5) ─────
+def _chain_boot_cfg() -> AgentConfig:
+    return AgentConfig(
+        server_id="s1",
+        machine="box1",
+        bind_port=15680,
+        control_port=15681,
+        host_metrics=False,
+        llm_model="cfg/model",
+        llm_api_key="sk-BOOTKEY-2e2e",
+        llm_fallback1_api_base="https://api.deepseek.com/v1",
+        llm_fallback1_model="deepseek-chat",
+        llm_fallback1_api_key="sk-FB1BOOT-3f3f",
+        llm_failover=False,
+    )
+
+
+def _observe_at_reclaim(monkeypatch) -> dict:
+    """Stop run_agent at the stale-port reclaim (before any socket claim and
+    the supervisor) and record what the holders publish by then."""
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core.datadir import get_data_dir
+    from taskpaw_v3.core.llm import get_llm_chain, get_llm_failover
+
+    seen: dict = {}
+
+    def reclaim(*a, **k):
+        seen["chain"] = get_llm_chain()
+        seen["failover"] = get_llm_failover()
+        seen["data_dir"] = get_data_dir()
+        raise _Sentinel
+
+    def no_claim(*a, **k):
+        raise AssertionError("must not claim a port")
+
+    monkeypatch.setattr(launcher, "reclaim_ports_from_stale_instance", reclaim)
+    monkeypatch.setattr(launcher, "claim_port", no_claim)
+    return seen
+
+
+def _no_default_config_path(monkeypatch) -> None:
+    # C5: the data dir comes ONLY from run_agent's config_path — never from
+    # default_config_path() (it would be the real %APPDATA% in a test).
+    from taskpaw_v3.agent.server import service
+
+    def boom():
+        raise AssertionError("default_config_path() must not be used")
+
+    monkeypatch.setattr(service, "default_config_path", boom)
+
+
+def test_run_agent_publishes_chain_failover_and_data_dir_first(monkeypatch, tmp_path):
+    from taskpaw_v3.agent.server import launcher
+
+    _no_default_config_path(monkeypatch)
+    seen = _observe_at_reclaim(monkeypatch)
+    config_path = tmp_path / "cfgdir" / "agent.yaml"
+    with pytest.raises(_Sentinel):
+        launcher.run_agent(_chain_boot_cfg(), config_path=config_path, block=False)
+    assert [(s.model, s.api_key, s.key_source) for s in seen["chain"]] == [
+        ("cfg/model", "sk-BOOTKEY-2e2e", "config"),
+        ("deepseek-chat", "sk-FB1BOOT-3f3f", "config"),
+    ]
+    assert seen["failover"] is False
+    assert seen["data_dir"] == tmp_path / "cfgdir"
+    assert not (tmp_path / "cfgdir").exists()  # publishing creates nothing
+
+
+def test_run_agent_without_config_path_has_no_data_dir(monkeypatch, tmp_path):
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core.datadir import set_data_dir
+
+    _no_default_config_path(monkeypatch)
+    set_data_dir(tmp_path / "stale")  # a previous value never survives
+    seen = _observe_at_reclaim(monkeypatch)
+    with pytest.raises(_Sentinel):
+        launcher.run_agent(_chain_boot_cfg(), block=False)
+    assert seen["data_dir"] is None
+    assert len(seen["chain"]) == 2
+
+
 def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
     # T-L2 (D13): ordering by observation — the supervisor's start() (the first
     # point any monitor can check()) already sees the configured settings.
@@ -100,7 +181,12 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
 
     class _FakeSupervisor:
         def start(self):
+            from taskpaw_v3.core.datadir import get_data_dir
+            from taskpaw_v3.core.llm import get_llm_chain
+
             started["settings"] = get_llm_settings()
+            started["chain"] = get_llm_chain()
+            started["data_dir"] = get_data_dir()
 
         def stop(self):
             started["stopped"] = True
@@ -134,6 +220,8 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
             "sk-BOOTKEY-2e2e",
             "config",
         )
+        assert started["chain"] == (s,)
+        assert started["data_dir"] is None  # no config_path
     finally:
         shutdown.shutdown()
     assert started.get("stopped") is True

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 from taskpaw_v3 import __version__
 from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import AgentConfig
-from taskpaw_v3.core.llm import resolve_llm_settings
+from taskpaw_v3.core.llm import LLM_SLOTS, llm_slot_fields, resolve_llm_settings
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import effective_monitors, monitor_name
@@ -129,17 +129,21 @@ def create_control_app(
         data["auth_disabled"] = auth_disabled(str(data.get("api_token", "")))
         if data.get("api_token"):
             data["api_token"] = "***"
-        # LLM key (#178): mask it and report where the EFFECTIVE key comes from,
-        # computed by the same env-first resolver chat() uses (D1) — so an env key
-        # with nothing stored still shows "***" + "env", and a whitespace-only
-        # stored key shows "" + "none". The key value itself never leaves here.
-        llm = resolve_llm_settings(
-            str(data.get("llm_api_base") or ""),
-            str(data.get("llm_model") or ""),
-            str(data.get("llm_api_key") or ""),
-        )
-        data["llm_api_key_source"] = llm.key_source
-        data["llm_api_key"] = "***" if llm.key_source != "none" else ""
+        # LLM keys (#178; both fallbacks', #190), by field name: mask each and
+        # report where the EFFECTIVE key comes from, computed by the same
+        # env-first resolver chat() uses (D1) — so an env key with nothing
+        # stored still shows "***" + "env", and a whitespace-only stored key
+        # shows "" + "none". A key value itself never leaves here.
+        for slot in LLM_SLOTS:
+            base_field, model_field, key_field = llm_slot_fields(slot)
+            llm = resolve_llm_settings(
+                str(data.get(base_field) or ""),
+                str(data.get(model_field) or ""),
+                str(data.get(key_field) or ""),
+                slot=slot,
+            )
+            data[f"{key_field}_source"] = llm.key_source
+            data[key_field] = "***" if llm.key_source != "none" else ""
         return data
 
     @app.get("/control/events")
@@ -236,10 +240,11 @@ def create_control_app(
 
         @app.post("/control/llm-test")
         def llm_test(body: dict):
-            # Settings "Test connection" (#178): tests the CURRENT FORM values
-            # without persisting. 400 only for a validation error (bad base URL);
-            # provider failures come back as {ok: false, error} — never exception
-            # text (D1).
-            return _guard(admin.llm_test, body)
+            # Settings "Test connection" (#178): tests the CURRENT FORM values of
+            # one provider `slot` (#190; default primary) without persisting.
+            # 400 only for a validation error (bad base URL, unknown slot);
+            # provider failures come back as {ok: false, error} — never
+            # exception text (D1).
+            return _guard(admin.llm_test, body, body.get("slot", "primary"))
 
     return app

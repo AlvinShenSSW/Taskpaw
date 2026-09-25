@@ -35,6 +35,14 @@ export type Step = {
   batches_total?: number;
   cues_done?: number;
   cues_total?: number;
+  // #192 resumable translation: cues taken from the checkpoint / translated by a
+  // fallback model / kept in Japanese; `paused` = the film waits for a translation
+  // provider (the step stays `active`, design C8), `deferred` = films waiting so.
+  cues_resumed?: number;
+  cues_fallback?: number;
+  cues_kept_ja?: number;
+  paused?: boolean;
+  deferred?: number;
 };
 
 export type FilmRow = {
@@ -72,6 +80,7 @@ const pct = (v: unknown): number | undefined => {
   return n === undefined ? undefined : Math.max(0, Math.min(100, n));
 };
 export const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+const bool = (v: unknown): boolean | undefined => (typeof v === "boolean" ? v : undefined);
 const state = (v: unknown): StepState | undefined =>
   typeof v === "string" && STATES.has(v) ? (v as StepState) : undefined;
 
@@ -100,6 +109,11 @@ function readStep(v: unknown): Step | null {
     batches_total: nonNeg(v.batches_total),
     cues_done: nonNeg(v.cues_done),
     cues_total: nonNeg(v.cues_total),
+    cues_resumed: nonNeg(v.cues_resumed),
+    cues_fallback: nonNeg(v.cues_fallback),
+    cues_kept_ja: nonNeg(v.cues_kept_ja),
+    paused: bool(v.paused),
+    deferred: nonNeg(v.deferred),
   };
 }
 

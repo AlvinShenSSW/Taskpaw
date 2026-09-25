@@ -35,6 +35,21 @@ llm_api_base: https://api.x.ai/v1
 llm_model: grok-4.3
 llm_api_key: ""
 
+# Up to two optional fallback models (#190/#192), tried in order when the
+# primary refuses a line or is unavailable (e.g. DeepSeek first, then the MiMo
+# Token Plan). Same rules as above; an empty base or model leaves the slot
+# unused. Their keys are best supplied via TASKPAW_LLM_FALLBACK1_API_KEY /
+# TASKPAW_LLM_FALLBACK2_API_KEY (they win over the values here).
+llm_fallback1_api_base: ""
+llm_fallback1_model: ""
+llm_fallback1_api_key: ""
+llm_fallback2_api_base: ""
+llm_fallback2_model: ""
+llm_fallback2_api_key: ""
+# While a model is unavailable, send its lines to the next one (Settings ->
+# 「主模型不可用时改用备用模型」); false = they wait for the first model.
+llm_failover: true
+
 # Monitor instances. Empty by default — with host_metrics:true above you already
 # get CPU/mem/disk/net (GPU+VRAM on Windows) with nothing else configured. Paste
 # your real monitors from `python -m taskpaw_v3.migrate --yaml`, or uncomment and

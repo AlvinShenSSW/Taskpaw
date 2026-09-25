@@ -88,6 +88,27 @@ export interface EventItem {
   level?: string;
 }
 
+// The agent's LLM providers (#178 primary; #190 two optional fallbacks). Each slot's
+// config fields are `llm_<field>` (primary) or `llm_fallbackN_<field>`.
+export type LlmSlot = "primary" | "fallback1" | "fallback2";
+// Where a slot's effective key comes from (its TASKPAW_LLM_*_API_KEY env var wins).
+export type LlmKeySource = "env" | "config" | "none";
+
+// GET /control/config: the agent config with every secret masked as "***" (the key
+// values never leave the agent), plus each LLM slot's key source and the #192
+// failover switch (absent from an older agent → treated as on, its default).
+export type AgentConfigView = {
+  monitors: MonitorSpec[];
+  llm_api_key_source?: LlmKeySource;
+  llm_fallback1_api_key_source?: LlmKeySource;
+  llm_fallback2_api_key_source?: LlmKeySource;
+  llm_failover?: boolean;
+} & Record<string, unknown>;
+
+export type LlmTestResult = {
+  ok: boolean; model?: string; latency_ms?: number; error?: string;
+};
+
 declare global {
   interface Window {
     // Injected by the Tauri shell on the loopback origin (main.rs init_script).
@@ -158,21 +179,17 @@ export const api = {
   hubStatus: () => get<HubStatus>("hub", "/status"),
   plugins: () => get<{ plugins: PluginInfo[]; presets: PresetInfo[] }>("agent", "/control/plugins"),
   // Full agent config (secrets masked as "***") — used to pre-fill the edit form.
-  // llm_api_key_source (#178): where the effective LLM key comes from (env wins).
-  config: () =>
-    get<{ monitors: MonitorSpec[]; llm_api_key_source?: "env" | "config" | "none" } & Record<string, unknown>>(
-      "agent", "/control/config",
-    ),
+  config: () => get<AgentConfigView>("agent", "/control/config"),
   // Edit top-level agent config from the Settings UI (#43). Returns
-  // {ok, restart_required}. A blank/"***" api_token keeps the stored one.
+  // {ok, restart_required}. A blank/"***" api_token or LLM key keeps the stored one;
+  // a null LLM key clears it.
   updateConfig: (patch: Record<string, unknown>) =>
     send<{ ok: boolean; restart_required: boolean }>("agent", "PATCH", "/control/config", patch),
-  // Test candidate LLM settings (#178) without persisting; a blank key means "use the
-  // effective one". Failures come back as {ok: false, error} and never carry the key.
-  llmTest: (candidate: Record<string, unknown>) =>
-    send<{ ok: boolean; model?: string; latency_ms?: number; truncated?: boolean; error?: string }>(
-      "agent", "POST", "/control/llm-test", candidate,
-    ),
+  // Test one slot's candidate LLM settings (#178/#190) without persisting — the
+  // agent sends its real translation probe; a blank key means "use the effective
+  // one". Failures come back as {ok: false, error} and never carry the key.
+  llmTest: (candidate: Record<string, unknown>, slot: LlmSlot) =>
+    send<LlmTestResult>("agent", "POST", "/control/llm-test", { ...candidate, slot }),
   addMonitor: (spec: MonitorSpec) => send("agent", "POST", "/control/monitors", spec),
   removeMonitor: (name: string) => send("agent", "DELETE", `/control/monitors${q(name)}`),
   updateMonitor: (name: string, patch: { config?: Record<string, unknown>; enabled?: boolean }) =>

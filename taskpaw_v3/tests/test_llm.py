@@ -7,6 +7,7 @@ a local `http.server` on 127.0.0.1:0, and the autouse `_llm_isolation` fixture
 
 from __future__ import annotations
 
+import email.message
 import http.client
 import io
 import json
@@ -24,18 +25,30 @@ from pathlib import Path
 import pytest
 
 from taskpaw_v3.core import llm, llm_worker
+from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.llm import (
     DEFAULT_LLM_API_BASE,
     DEFAULT_LLM_MODEL,
+    LLM_ENV_PREFIX,
+    LLM_FALLBACK1_KEY_ENV,
+    LLM_FALLBACK2_KEY_ENV,
     LLM_KEY_ENV,
+    LLM_SLOT_KEY_ENV,
+    LLM_SLOTS,
     ChatResult,
     LLMError,
     LLMSettings,
     chat,
+    get_llm_chain,
+    get_llm_failover,
     get_llm_settings,
+    llm_settings_from_config,
+    llm_slot_fields,
     reset_llm_settings,
     resolve_llm_settings,
+    set_llm_chain,
     set_llm_settings,
+    without_llm_env,
 )
 from taskpaw_v3.core.llm_worker import (
     ENV_BASE,
@@ -48,6 +61,7 @@ from taskpaw_v3.core.llm_worker import (
     worker_argv,
     worker_env,
 )
+from taskpaw_v3.monitors.subs.translate import llm_chain_from_config, model_label
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -91,12 +105,19 @@ class _FakeOpener:
         return io.BytesIO(raw if isinstance(raw, bytes) else raw.encode("utf-8"))
 
 
-def _http_error(code: int) -> urllib.error.HTTPError:
+def _http_error(
+    code: int, headers: dict[str, str] | None = None
+) -> urllib.error.HTTPError:
+    hdrs = None
+    if headers is not None:
+        hdrs = email.message.Message()
+        for name, value in headers.items():
+            hdrs[name] = value
     return urllib.error.HTTPError(
         "https://llm.example/v1/chat/completions",
         code,
         f"status {code} {BODY_MARKER}",
-        None,  # type: ignore[arg-type]
+        hdrs,  # type: ignore[arg-type]
         io.BytesIO(BODY_MARKER.encode()),
     )
 
@@ -146,6 +167,213 @@ def test_holder_defaults_set_get_reset():
         got.api_key = "x"  # type: ignore[misc]
     reset_llm_settings()
     assert get_llm_settings() == d
+
+
+# ── #192/#190 AC1: provider slots, env-first key per slot ─────────────────
+def test_slot_names_env_vars_and_config_fields():
+    assert LLM_SLOTS == ("primary", "fallback1", "fallback2")
+    assert (LLM_KEY_ENV, LLM_FALLBACK1_KEY_ENV, LLM_FALLBACK2_KEY_ENV) == (
+        "TASKPAW_LLM_API_KEY",
+        "TASKPAW_LLM_FALLBACK1_API_KEY",
+        "TASKPAW_LLM_FALLBACK2_API_KEY",
+    )
+    assert dict(LLM_SLOT_KEY_ENV) == {
+        "primary": LLM_KEY_ENV,
+        "fallback1": LLM_FALLBACK1_KEY_ENV,
+        "fallback2": LLM_FALLBACK2_KEY_ENV,
+    }
+    assert all(n.startswith(LLM_ENV_PREFIX) for n in LLM_SLOT_KEY_ENV.values())
+    assert llm_slot_fields("primary") == ("llm_api_base", "llm_model", "llm_api_key")
+    for n in (1, 2):
+        assert llm_slot_fields(f"fallback{n}") == (
+            f"llm_fallback{n}_api_base",
+            f"llm_fallback{n}_model",
+            f"llm_fallback{n}_api_key",
+        )
+    for slot in LLM_SLOTS:  # every slot names real AgentConfig fields
+        assert set(llm_slot_fields(slot)) <= set(AgentConfig.model_fields)
+    with pytest.raises(ValueError):
+        llm_slot_fields("fallback3")
+
+
+@pytest.mark.parametrize("slot", ["primary", "fallback1", "fallback2"])
+def test_resolve_slot_reads_only_its_own_env_key(slot):
+    mine = LLM_SLOT_KEY_ENV[slot]
+    others = {n: f"sk-OTHER-{n}" for n in LLM_SLOT_KEY_ENV.values() if n != mine}
+    s = resolve_llm_settings(
+        "https://b/v1", "m", "stored", slot=slot, environ={**others, mine: " sk-mine\n"}
+    )
+    assert (s.api_key, s.key_source) == ("sk-mine", "env")
+    # Another slot's env key is never borrowed: the stored key, else none.
+    s = resolve_llm_settings("https://b/v1", "m", "stored", slot=slot, environ=others)
+    assert (s.api_key, s.key_source) == ("stored", "config")
+    s = resolve_llm_settings("https://b/v1", "m", "", slot=slot, environ=others)
+    assert (s.api_key, s.key_source) == ("", "none")
+
+
+def test_resolve_unknown_slot_is_a_value_error():
+    with pytest.raises(ValueError):
+        resolve_llm_settings("b", "m", "k", slot="fallback3", environ={})  # type: ignore[arg-type]
+
+
+def test_llm_settings_from_config_per_slot():
+    cfg = AgentConfig(
+        server_id="s",
+        machine="m",
+        llm_api_key="k0",
+        llm_fallback1_api_base=" https://api.deepseek.com/v1/ ",
+        llm_fallback1_model=" deepseek-chat ",
+        llm_fallback1_api_key=" k1\r\n",
+        llm_fallback2_api_base="http://127.0.0.1:11434/v1",
+        llm_fallback2_model="qwen3",
+    )
+    assert llm_settings_from_config(cfg, environ={}) == LLMSettings(
+        DEFAULT_LLM_API_BASE, DEFAULT_LLM_MODEL, "k0", "config"
+    )
+    assert llm_settings_from_config(cfg, slot="fallback1", environ={}) == LLMSettings(
+        "https://api.deepseek.com/v1", "deepseek-chat", "k1", "config"
+    )
+    env = {LLM_FALLBACK2_KEY_ENV: "e2"}
+    assert llm_settings_from_config(cfg, slot="fallback2", environ=env) == LLMSettings(
+        "http://127.0.0.1:11434/v1", "qwen3", "e2", "env"
+    )
+
+
+# ── #192 AC1: the chain + failover holders ────────────────────────────────
+def test_chain_and_failover_holders_default_set_reset():
+    assert get_llm_chain() == ()
+    assert get_llm_failover() is True
+    a, b = _settings(), _settings(base="https://other/v1")
+    set_llm_chain([a, b], failover=False)
+    got = get_llm_chain()
+    assert got == (a, b) and isinstance(got, tuple)
+    assert get_llm_failover() is False
+    # The primary holder is separate: get_llm_settings() is still the primary.
+    assert get_llm_settings().key_source == "none"
+    reset_llm_settings()
+    assert get_llm_chain() == () and get_llm_failover() is True
+
+
+_DS_BASE = "https://api.deepseek.com/v1"
+_OLLAMA_BASE = "http://127.0.0.1:11434/v1"
+
+
+def _chain_cfg(**kw) -> AgentConfig:
+    return AgentConfig(server_id="s", machine="m", **kw)
+
+
+def _rows(chain) -> list[tuple[str, str, str, str]]:
+    return [(s.api_base, s.model, s.api_key, s.key_source) for s in chain]
+
+
+def test_chain_is_the_usable_providers_in_slot_order():
+    cfg = _chain_cfg(
+        llm_api_key="k0",
+        llm_fallback1_api_base=_DS_BASE,
+        llm_fallback1_model="deepseek-chat",
+        llm_fallback1_api_key="k1",
+        llm_fallback2_api_base=_OLLAMA_BASE,  # loopback: usable without a key
+        llm_fallback2_model="qwen3",
+    )
+    assert _rows(llm_chain_from_config(cfg, environ={})) == [
+        (DEFAULT_LLM_API_BASE, DEFAULT_LLM_MODEL, "k0", "config"),
+        (_DS_BASE, "deepseek-chat", "k1", "config"),
+        (_OLLAMA_BASE, "qwen3", "", "none"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "base,model,key",
+    [
+        ("", "deepseek-chat", "k1"),  # no base
+        (_DS_BASE, "", "k1"),  # no model
+        (_DS_BASE, "deepseek-chat", ""),  # a non-loopback base without a key
+    ],
+)
+def test_chain_skips_an_unusable_fallback(base, model, key):
+    cfg = _chain_cfg(
+        llm_api_key="k0",
+        llm_fallback1_api_base=base,
+        llm_fallback1_model=model,
+        llm_fallback1_api_key=key,
+    )
+    chain = llm_chain_from_config(cfg, environ={})
+    assert [s.model for s in chain] == [DEFAULT_LLM_MODEL]
+
+
+def test_chain_skips_an_unusable_primary_so_a_fallback_leads():
+    # H7: chain[0] is the first USABLE provider, not necessarily the primary.
+    cfg = _chain_cfg(
+        llm_fallback1_api_base=_DS_BASE,
+        llm_fallback1_model="deepseek-chat",
+        llm_fallback1_api_key="k1",
+    )
+    assert [s.model for s in llm_chain_from_config(cfg, environ={})] == [
+        "deepseek-chat"
+    ]
+
+
+def test_chain_is_empty_without_a_usable_provider():
+    assert llm_chain_from_config(_chain_cfg(), environ={}) == ()
+
+
+def test_chain_env_key_per_slot():
+    cfg = _chain_cfg(
+        llm_fallback1_api_base=_DS_BASE,
+        llm_fallback1_model="deepseek-chat",
+        llm_fallback2_api_base="https://mimo.example/v1",
+        llm_fallback2_model="mimo",
+    )
+    assert llm_chain_from_config(cfg, environ={}) == ()
+    env = {LLM_FALLBACK1_KEY_ENV: "sk-env-1"}
+    assert _rows(llm_chain_from_config(cfg, environ=env)) == [
+        (_DS_BASE, "deepseek-chat", "sk-env-1", "env")
+    ]
+    env = {LLM_KEY_ENV: "sk-env-0", LLM_FALLBACK2_KEY_ENV: "sk-env-2"}
+    assert _rows(llm_chain_from_config(cfg, environ=env)) == [
+        (DEFAULT_LLM_API_BASE, DEFAULT_LLM_MODEL, "sk-env-0", "env"),
+        ("https://mimo.example/v1", "mimo", "sk-env-2", "env"),
+    ]
+
+
+def test_chain_reads_os_environ_by_default(monkeypatch):
+    monkeypatch.setenv(LLM_FALLBACK1_KEY_ENV, "sk-env-1")
+    cfg = _chain_cfg(llm_fallback1_api_base=_DS_BASE, llm_fallback1_model="d")
+    assert [s.key_source for s in llm_chain_from_config(cfg)] == ["env"]
+
+
+def test_chain_dedupes_by_label_first_wins_with_one_warning(caplog):
+    # G9: fallback 1 is the primary again (same model, same host — the label
+    # ignores the userinfo, port and path) → dropped with ONE warning that
+    # names the label only, never a key or the userinfo.
+    cfg = _chain_cfg(
+        llm_api_key="k0",
+        llm_fallback1_api_base="https://u:SECRETPW@api.x.ai:443/v1/",
+        llm_fallback1_model=DEFAULT_LLM_MODEL,
+        llm_fallback1_api_key="sk-DUPKEY-1111",
+        llm_fallback2_api_base=_DS_BASE,
+        llm_fallback2_model="deepseek-chat",
+        llm_fallback2_api_key="k2",
+    )
+    caplog.set_level(logging.DEBUG)
+    chain = llm_chain_from_config(cfg, environ={})
+    assert [(s.model, s.api_key) for s in chain] == [
+        (DEFAULT_LLM_MODEL, "k0"),
+        ("deepseek-chat", "k2"),
+    ]
+    assert len({model_label(s.model, s.api_base) for s in chain}) == len(chain)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert model_label(DEFAULT_LLM_MODEL, DEFAULT_LLM_API_BASE) in (
+        warnings[0].getMessage()
+    )
+    for secret in ("sk-DUPKEY-1111", "SECRETPW"):
+        assert secret not in caplog.text
+
+
+def test_agent_config_failover_defaults_on():
+    assert _chain_cfg().llm_failover is True
+    assert _chain_cfg(llm_failover=False).llm_failover is False
 
 
 # ── T-C1 request shape ────────────────────────────────────────────────────
@@ -274,6 +502,70 @@ def test_chat_exception_mapping(exc, kind, status, message):
     assert KEY_MARKER not in str(e) and BODY_MARKER not in str(e)
     # The original exception (whose text may embed the key) is not chained.
     assert e.__cause__ is None and e.__suppress_context__
+    assert e.retry_after is None
+
+
+@pytest.mark.parametrize("code", [400, 402, 404, 408, 422, 503])
+def test_chat_other_http_errors_carry_their_status(code):
+    # C2/C3: 402 (DeepSeek: insufficient balance) / 404 (model or URL) and the
+    # other statuses reach the caller, which decides on a probe (AC6).
+    with pytest.raises(LLMError) as ei:
+        chat(_settings(), _msgs(), opener=_FakeOpener(exc=_http_error(code)))
+    e = ei.value
+    assert (e.kind, e.status, e.message) == ("bad_response", code, f"HTTP {code}")
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("120", 120),
+        (" 7 ", 7),
+        ("0", 0),
+        ("0030", 30),
+        ("3600", 3600),
+        ("3601", 3600),  # over the bound → capped (IR4), never ignored
+        ("86400", 3600),
+        ("9" * 40, 3600),
+        # past int()'s digit limit: capped, never raises
+        pytest.param("9" * 5000, 3600, id="5000-nines"),
+        ("0" * 20 + "5", 5),
+        ("-1", None),
+        ("+5", None),
+        ("1.5", None),
+        ("12abc", None),
+        ("", None),
+        ("   ", None),
+        ("\u0661\u0662", None),  # non-ASCII digits
+        ("Wed, 21 Oct 2015 07:28:00 GMT", None),  # an HTTP-date → None (C1)
+    ],
+)
+@pytest.mark.parametrize("code,kind", [(429, "rate_limit"), (503, "bad_response")])
+def test_chat_retry_after_is_delta_seconds_only(code, kind, value, expected):
+    # C1: the Retry-After header is parsed (delta-seconds, capped at 3600).
+    exc = _http_error(code, {"Retry-After": value})
+    with pytest.raises(LLMError) as ei:
+        chat(_settings(), _msgs(), opener=_FakeOpener(exc=exc))
+    e = ei.value
+    assert (e.kind, e.status, e.retry_after) == (kind, code, expected)
+
+
+def test_chat_retry_after_absent_is_none():
+    for exc in (_http_error(429), _http_error(429, {}), _http_error(429, {"X": "1"})):
+        with pytest.raises(LLMError) as ei:
+            chat(_settings(), _msgs(), opener=_FakeOpener(exc=exc))
+        assert ei.value.retry_after is None
+
+
+def test_llm_error_fields():
+    e = LLMError("rate_limit", "rate limited", 429, retry_after=12)
+    assert (e.kind, e.message, e.status, e.retry_after) == (
+        "rate_limit",
+        "rate limited",
+        429,
+        12,
+    )
+    e = LLMError("network", "timeout")
+    assert (e.status, e.retry_after) == (None, None)
 
 
 @pytest.mark.parametrize(
@@ -473,6 +765,48 @@ def test_worker_env_sets_vars_without_mutating(monkeypatch):
     assert env["PATH"] == "p"
 
 
+def _llm_vars(env: dict[str, str]) -> dict[str, str]:
+    return {k: v for k, v in env.items() if k.upper().startswith(LLM_ENV_PREFIX)}
+
+
+def test_worker_env_drops_every_llm_var_and_carries_only_its_own():
+    # C7: a fallback provider's worker must never see the primary's or the
+    # other fallback's key (nor a stale base/model) — every TASKPAW_LLM_*
+    # (case-insensitive) is dropped, then only this worker's own are set.
+    base = {
+        "PATH": "p",
+        "TASKPAW_OTHER": "keep",
+        ENV_KEY: "sk-PRIMARY-0000",
+        LLM_FALLBACK1_KEY_ENV: "sk-FB1-1111",
+        LLM_FALLBACK2_KEY_ENV.lower(): "sk-FB2-2222",
+        "Taskpaw_Llm_Api_Base": "http://stale/v1",
+        "TASKPAW_LLM_ANYTHING_ELSE": "x",
+    }
+    frozen = dict(base)
+    own = LLMSettings(_DS_BASE, "deepseek-chat", "sk-OWN-3333", "config")
+    env = worker_env(own, base)
+    assert _llm_vars(env) == {
+        ENV_BASE: _DS_BASE,
+        ENV_MODEL: "deepseek-chat",
+        ENV_KEY: "sk-OWN-3333",
+    }
+    assert (env["PATH"], env["TASKPAW_OTHER"]) == ("p", "keep")
+    assert base == frozen  # base untouched
+    keyless = worker_env(LLMSettings(_OLLAMA_BASE, "qwen3", "", "none"), base)
+    assert _llm_vars(keyless) == {ENV_BASE: _OLLAMA_BASE, ENV_MODEL: "qwen3"}
+    # The worker resolves exactly its own key back (primary env name, C7).
+    back = settings_from_env(env)
+    assert (back.api_key, back.key_source) == ("sk-OWN-3333", "env")
+
+
+def test_without_llm_env_is_the_one_filter_asr_env_uses():
+    from taskpaw_v3.monitors.subs import child
+
+    base = {"PATH": "p", "taskpaw_llm_api_key": "k", LLM_FALLBACK1_KEY_ENV: "k1"}
+    assert without_llm_env(base) == child.asr_env(base) == {"PATH": "p"}
+    assert child.LLM_ENV_PREFIX is LLM_ENV_PREFIX
+
+
 def test_settings_from_env_round_trips():
     s = _settings()
     back = settings_from_env(worker_env(s, {}))
@@ -555,6 +889,23 @@ def test_handle_request_llm_error_echoes_id(rid):
         "kind": "rate_limit",
         "status": 429,
         "message": "rate limited",
+        "retry_after": None,
+    }
+
+
+def test_handle_request_error_carries_retry_after():
+    # C1: the worker's error line carries LLMError.retry_after (delta-seconds).
+    def fake(*a, **k):
+        raise LLMError("rate_limit", "rate limited", 429, retry_after=30)
+
+    out = json.loads(handle_request(_line(id="r"), _settings(), chat_fn=fake))
+    assert out == {
+        "id": "r",
+        "ok": False,
+        "kind": "rate_limit",
+        "status": 429,
+        "message": "rate limited",
+        "retry_after": 30,
     }
 
 
@@ -582,6 +933,7 @@ def test_handle_request_invalid_request(line):
     assert out["ok"] is False and out["kind"] == "bad_response"
     assert out["message"] == "invalid request" and out["status"] is None
     assert out["id"] in (None, 1)
+    assert out["retry_after"] is None
 
 
 def test_handle_request_garbage_has_null_id():
@@ -599,6 +951,7 @@ def test_handle_request_pathological_nesting_is_an_error_line():
         "kind": "bad_response",
         "status": None,
         "message": "invalid request",
+        "retry_after": None,
     }
 
 
@@ -613,6 +966,7 @@ def test_handle_request_unexpected_exception_is_contained():
         "kind": "bad_response",
         "status": None,
         "message": "unexpected error: RuntimeError",
+        "retry_after": None,
     }
     assert KEY_MARKER not in out
 
@@ -727,6 +1081,13 @@ class _FakeLLM(BaseHTTPRequestHandler):
         elif srv.mode == "500":
             msg = f"upstream {BODY_MARKER}".encode()
             self.send_response(500)
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+        elif srv.mode == "429":
+            msg = f"slow down {BODY_MARKER}".encode()
+            self.send_response(429)
+            self.send_header("Retry-After", "7")
             self.send_header("Content-Length", str(len(msg)))
             self.end_headers()
             self.wfile.write(msg)
@@ -856,6 +1217,19 @@ def test_worker_subprocess_round_trip_error_and_secrets():
             "kind": "bad_response",
             "status": 500,
             "message": "HTTP 500",
+            "retry_after": None,
+        }
+        # (b2) a 429's Retry-After reaches the reply line (C1).
+        srv.mode = "429"  # type: ignore[attr-defined]
+        _send_req(proc, id=3, timeout=10)
+        err = json.loads(_readline(proc.stdout).decode("utf-8"))
+        assert err == {
+            "id": 3,
+            "ok": False,
+            "kind": "rate_limit",
+            "status": 429,
+            "message": "rate limited",
+            "retry_after": 7,
         }
         # Closing stdin (the cancel contract) ends an idle worker with 0.
         proc.stdin.close()
