@@ -2698,3 +2698,25 @@ def test_root_folder_description_states_the_library_rules():
         assert text in desc, text
     assert "cannot be read" in desc
     assert "same-named .srt" not in desc
+
+
+@pytest.mark.parametrize(
+    "video, ja_name",
+    [("t.mp4", "T.JA.SRT"), ("caf\u00e9.mp4", "cafe\u0301.ja.srt")],
+    ids=["case", "nfd"],
+)
+def test_a_translate_only_job_loads_the_transcript_as_it_is_named(
+    tmp_path, monkeypatch, video, ja_name
+):
+    # CX1: a transcript matched only after normalisation (case / Unicode form)
+    # is loaded by its actual name — never a reconstructed `<stem>.ja.srt` that
+    # is not there (which would fail as "unreadable .ja.srt" on every Start).
+    r = _setup(tmp_path, monkeypatch, full=[video])
+    (r.root / ja_name).write_text(SRT_JA, encoding="utf-8")
+    plan = plan_tree(str(r.root), True, ["mp4"])
+    assert [(i.relpath, i.kind, i.ja_target.name) for i in plan.items] == [
+        (video, "translate_only", ja_name)
+    ]
+    r.inst.start(r.emit)
+    assert [q.job_id for q in r.translators[0].submitted] == [video]
+    assert r.spawner.argvs == []

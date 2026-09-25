@@ -2674,3 +2674,37 @@ def test_av_translate_description_states_the_library_rules():
     av = JasnaConfig.model_fields["av_translate"].description or ""
     for text in (".chs.srt", "Japanese", "never overwritten", "cannot be read"):
         assert text in av, text
+
+
+def test_plan_subs_finds_a_case_variant_restored_file_like_the_filesystem(
+    tmp_path, monkeypatch
+):
+    # CX2: the planning listing compares names the way the platform's default
+    # filesystem does, and the media is the name actually listed, so the
+    # subtitles follow the real file.
+    from taskpaw_v3.monitors.subs import existing as E
+
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "a.mp4")
+    (out / "A-破解.MP4").write_bytes(b"restored")
+    monkeypatch.setattr(E, "_CASE_INSENSITIVE_FS", True)
+    plan = plan_subs(str(inp), str(out), [], [])
+    assert plan.subs_only == [inp / "a.mp4"]
+    assert plan.media[inp / "a.mp4"].name == "A-破解.MP4"
+    monkeypatch.setattr(E, "_CASE_INSENSITIVE_FS", False)
+    assert plan_subs(str(inp), str(out), [], []).subs_only == []
+
+
+def test_plan_subs_carries_the_transcript_as_it_is_named(tmp_path):
+    # CX1: a translate_only file's job loads its `.ja.srt` by its actual name.
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "a.mp4")
+    (out / "a-破解.mp4").write_bytes(b"restored")
+    (out / "a-破解.JA.srt").write_text(SRT_JA, encoding="utf-8")
+    plan = plan_subs(str(inp), str(out), [], [])
+    assert plan.kinds[inp / "a.mp4"] == "translate_only"
+    assert plan.ja[inp / "a.mp4"].name == "a-破解.JA.srt"

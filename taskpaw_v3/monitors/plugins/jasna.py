@@ -411,6 +411,8 @@ class SubsPlan:
     total: int
     kinds: dict[Path, SubsKind] = field(default_factory=dict)
     media: dict[Path, Path] = field(default_factory=dict)
+    # CX1: a translate_only file's `.ja.srt` as it is actually named
+    ja: dict[Path, Path] = field(default_factory=dict)
 
 
 def plan_subs(
@@ -445,15 +447,19 @@ def plan_subs(
         key=lambda p: p.name,
     )
     names = list_names_missing_ok(output_folder)
-    listed = {entry_key(n) for n in names}
+    # CX2: keyed the way the filesystem compares names; the value is the name
+    # as listed, so a case-variant restored file is found and its subtitles
+    # follow its actual name.
+    listed = {entry_key(n): n for n in names}
 
     def restored(video: Path) -> Optional[Path]:
         for final in (
             output_path_for(output_folder, video),
             legacy_output_path_for(output_folder, video),
         ):
-            if entry_key(final.name) in listed:
-                return final
+            actual = listed.get(entry_key(final.name))
+            if actual is not None:
+                return final.with_name(actual)
         return None
 
     media: dict[Path, Path] = {
@@ -466,12 +472,14 @@ def plan_subs(
                 media[video] = final
     extra = [media[v].name for v in pending]  # not restored yet (attribution)
     kinds: dict[Path, SubsKind] = {}
+    ja: dict[Path, Path] = {}
     for video, m in media.items():
         got = judge(m.name, names, _is_output_video, rule_c=False, extra_videos=extra)
         if got.chinese is not None:
             kinds[video] = "none"
         elif got.ja_transcript is not None:
             kinds[video] = "translate_only"
+            ja[video] = m.with_name(got.ja_transcript)  # CX1: as named
         else:
             kinds[video] = "full"
     for_pending = {v: kinds[v] for v in pending}
@@ -479,7 +487,7 @@ def plan_subs(
         v for v in entries if v not in pending_set and kinds.get(v, "none") != "none"
     ]
     total = sum(1 for k in for_pending.values() if k != "none") + len(subs_only)
-    return SubsPlan(for_pending, subs_only, total, kinds, media)
+    return SubsPlan(for_pending, subs_only, total, kinds, media, ja)
 
 
 def _initial_steps(kind: SubsKind, restored: bool) -> dict[str, str]:
@@ -1384,7 +1392,8 @@ class JasnaInstance(MonitorInstance):
                 job_id=video.name,
                 media=media,
                 relpath=video.name,
-                ja_target=ja_target_for(media),
+                # CX1: an existing transcript as it is actually named
+                ja_target=plan.ja.get(video) or ja_target_for(media),
                 zh_target=zh_target_for(media),
                 staging_root=staging,
                 exe=exe,

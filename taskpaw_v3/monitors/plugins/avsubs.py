@@ -292,6 +292,10 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
             done += 1
             continue
         kind: Kind = "translate_only" if existing.ja_transcript else "full"
+        if existing.ja_transcript is not None:
+            # CX1: the transcript as it is actually named (it may differ from
+            # `<stem>.ja.srt` in case or Unicode form) — the job loads it.
+            ja = source.with_name(existing.ja_transcript)
         try:
             identity = source_identity(source)  # D11
         except OSError as e:

@@ -27,6 +27,7 @@ import functools
 import logging
 import os
 import re
+import sys
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,10 +78,17 @@ def norm(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
 
+# CX2: the default filesystems of Windows (NTFS) and macOS (APFS/HFS+) compare
+# names case-insensitively; elsewhere (Linux) case matters.
+_CASE_INSENSITIVE_FS = sys.platform in ("win32", "darwin")
+
+
 def entry_key(name: str) -> str:
-    """A name as the filesystem compares it here: `os.path.normcase` of the
-    NFC form (case-insensitive on Windows)."""
-    return os.path.normcase(unicodedata.normalize("NFC", name))
+    """A name as this platform's default filesystem compares it: the NFC
+    form, lower-cased on Windows and macOS (CX2: POSIX `os.path.normcase` is
+    a no-op, but a default macOS volume is case-insensitive too)."""
+    nfc = unicodedata.normalize("NFC", name)
+    return nfc.lower() if _CASE_INSENSITIVE_FS else nfc
 
 
 def _tags(text: str) -> list[str]:
