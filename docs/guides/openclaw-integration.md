@@ -96,7 +96,7 @@ for r in rows:
 | Queue restored | `queue_restored` | jasna | int; only with「AV 翻译」ticked (3.7.0): films restored so far — the restore count `queue_completed` carried before 3.7.0 |
 | Queue already subtitled | `queue_pre_done` | avsubs | int (3.7.0): videos that already had subtitles at Start (included in `queue_completed`) |
 | Queue failed | `queue_failed` | jasna / avsubs | int; files given up on after their retries (plus output-name collisions) |
-| Queue skipped | `queue_skipped` | avsubs | int; no LLM key, source changed during transcription, cancelled (abort), whisperjav.exe missing, or (3.7.1) a subtitle / transcript that appeared before it could be written (never overwritten) or a folder that could not be read |
+| Queue skipped | `queue_skipped` | avsubs | int; no LLM key (since 3.8.0: no usable model — primary or fallback), source changed during transcription, cancelled (abort), whisperjav.exe missing, (3.7.1) a subtitle / transcript that appeared before it could be written (never overwritten) or a folder that could not be read, or (3.8.0) a translation paused after 2 h without a translation service (continued at the next Start) |
 | Current task | `current_file` | lada / jasna / avsubs | string; capture mode or folder-derived. avsubs: the video's path **relative to the library folder** (e.g. `sub/film.mp4`), only while WhisperJAV transcribes it |
 | Current-file % | `percent` | lada / jasna | 0..100; **capture mode only** |
 | ETA / elapsed | `eta` / `elapsed` | lada / jasna | string `MM:SS`/`H:MM:SS`; **capture mode only** |
@@ -104,7 +104,7 @@ for r in rows:
 | Speed (fps) | `fps` | lada / jasna | float; **capture mode only** |
 | Phase | `phase` | jasna | `restore` (a video is being restored, or idle), `subs` (WhisperJAV is transcribing), `translate` (only translations are running) |
 | Subtitles done / total / left | `subs_completed` / `subs_total` / `subs_remaining` | jasna | int; only with「AV 翻译」ticked |
-| Subtitles failed / skipped | `subs_failed` / `subs_skipped` | jasna | int; skipped = restore failed, no LLM key, source changed, cancelled, whisperjav.exe missing, or (3.7.1) a subtitle / transcript that appeared before it could be written (never overwritten) or an output folder that could not be read |
+| Subtitles failed / skipped | `subs_failed` / `subs_skipped` | jasna | int; skipped = restore failed, no LLM key (since 3.8.0: no usable model — also when the translator finds none, formerly a failure), source changed, cancelled, whisperjav.exe missing, (3.7.1) a subtitle / transcript that appeared before it could be written (never overwritten) or an output folder that could not be read, or (3.8.0) a translation paused after 2 h without a translation service |
 | Translations pending | `subs_translating` | jasna / avsubs | int; files queued in or held by the translator |
 | Phase | `phase` | avsubs | `asr` (WhisperJAV is transcribing `current_file`), `translate` (only translations are running), `waiting_gpu` (the GPU is held by another task, e.g. Jasna); **absent** when idle/finished |
 | Focus film | `film` | jasna (「AV 翻译」) / avsubs | string ≤ 200 (3.7.0): the film `steps` describes — the one in a GPU child (restore / transcription), else the one waiting for the GPU, else the one translating, else the next still to finish, else the last finished. avsubs: the path relative to the library folder |
@@ -148,7 +148,9 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > video being restored in `phase == "restore"`, the restored `.mp4` being
 > transcribed in `phase == "subs"`, and **absent** in `phase == "translate"` (no GPU
 > child is running then). The batch `done` event text gains
-> `| Subs: S/T done, U failed, V skipped`.
+> `| Subs: S/T done, U failed, V skipped` — since 3.8.0 followed by
+> `; N lines kept in Japanese` and `; N paused` when those are not 0 (see
+> "Resumable translation" below).
 
 > **Jasna queue counts with「AV 翻译」ticked (#189, since 3.7.0).** `queue_completed`
 > counts films that are **fully done**: restored AND their subtitle job settled —
@@ -175,7 +177,11 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 >   only); asr: `percent` (0..99), `eta_s`, `elapsed_s`, `phase` (1..8) / `phase_n`
 >   (8), `scene` / `scenes` (the WhisperJAV qwen pipelines, e.g. anime-whisper; other
 >   engines report `elapsed_s` only); translate: `percent`, `eta_s`, `elapsed_s`,
->   `model`, `batches_done` / `batches_total`, `cues_done` / `cues_total`;
+>   `model`, `batches_done` / `batches_total`, `cues_done` / `cues_total`, and since
+>   3.8.0 (#192) `cues_resumed` (lines taken from the checkpoint), `cues_fallback`
+>   (lines translated by a fallback model), `cues_kept_ja` (lines kept in Japanese),
+>   `paused` (bool: the film waits for a translation service — the step stays
+>   `active` and `eta_s` is absent) and `deferred` (how many films wait so);
 > - a `waiting_gpu` step: `holder` (the task holding the GPU; `""` while the GPU is
 >   free and reserved for this task) and `waited_s`.
 >
@@ -217,7 +223,8 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > <task name>)` — that is not an event. Events:
 >
 > - `done`: `AV 翻译 complete | Queue: X/Y done, F failed, K skipped | <timestamp>`
->   (never after a Stop or an abort);
+>   (never after a Stop or an abort); since 3.8.0 `skipped` is followed by
+>   `; N lines kept in Japanese` and `; N paused` when those are not 0;
 > - alert `AV 翻译 aborted after 3 consecutive failures | Queue: X/Y done, F failed,
 >   K skipped` (the monitor then stays `degraded` until the next Start);
 > - alert `a WhisperJAV process may still be running; check Task Manager` (a killed
@@ -226,7 +233,33 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 >   alerts for a missing LLM API key, `whisperjav.exe not found` (monitor `error`),
 >   subtitle name collisions, unreadable folders/names, and (3.7.1) one
 >   `<task>: subtitle state unreadable` when a video's folder could not be read
->   right before its work.
+>   right before its work; since 3.8.0 also the translation alerts below.
+
+> **Resumable translation and fallback models (#192/#190, since 3.8.0).** Both Jasna's
+> 「AV 翻译」and `avsubs` translate line by line from a checkpoint under the agent's
+> data folder (`subs-checkpoints/`, next to `agent.yaml`; labels only, never a key),
+> so a Stop, a crash or an outage loses at most the request in flight and the next
+> Start asks only for the lines still open. Settings → LLM API has two optional
+> fallback models (`llm_fallback1_api_base` / `_model` / `_api_key`, the same for
+> `llm_fallback2_…`; the keys also from `TASKPAW_LLM_FALLBACK1_API_KEY` /
+> `TASKPAW_LLM_FALLBACK2_API_KEY`, which win) and the switch
+> 「主模型不可用时改用备用模型」(`llm_failover`, default on). A line a model refuses goes
+> to the next model; a line every model refuses keeps its Japanese text; while a
+> model is unavailable its lines go to the next one (switch on) or wait. A film is
+> skipped `no_llm_key` only when no model is usable. Skip reasons and events:
+>
+> - `translation_paused` — a film that found no translation service for 2 h in total
+>   is skipped (`queue_skipped` / `subs_skipped`, never a failure, its transcript
+>   and checkpoint kept) and continued at the next Start; ONE alert per run
+>   `<task>: translation paused` — `N file(s) paused: …`;
+> - alert `<task>: translation model unavailable: <model> · <api host>` — once per
+>   model per run, with the reason (key or credit, model or URL not found, rate
+>   limit or quota, content policy, a rejected request, unusable output,
+>   unreachable) and when it is tried again;
+> - alert `<task>: translation checkpoint not saved` — once per run; translation goes
+>   on, but a Stop then loses the lines not yet published;
+> - the `done` text's `; N lines kept in Japanese` / `; N paused` (above); each film
+>   with kept lines is also logged by the agent (a count, never the text).
 
 ## Three rules that bite
 

@@ -1,30 +1,75 @@
-"""`Translator`: ja→zh subtitle translation through the `llm-worker` (#177).
+"""`Translator`: ja→zh subtitle translation through `llm-worker`s (#177),
+resumable and with fallback providers (#192/#190).
 
-One daemon thread per monitor run. The thread is only a CLIENT of the
-terminable `llm-worker` child process (#178): it writes JSON request lines and
-waits on that worker's own response queue with a deadline. It never writes a
-subtitle file and never touches plugin counters — every file yields exactly one
-`TranslateResult` on `results`, which the monitor's worker thread settles.
+One daemon thread per monitor run. The thread is only a CLIENT of terminable
+`llm-worker` child processes (#178): it writes JSON request lines and waits on
+the worker's own response queue with a deadline. It never writes a subtitle
+and never touches plugin counters — it writes only its checkpoint files, and
+every film yields exactly one `TranslateResult` on `results`, which the
+monitor's worker thread settles. Requests are sequential.
 
-Cancel (D6/D24): set the flag; under `_spawn_lock` detach the current worker
-and put `CANCELLED` on ITS response queue (so a waiting thread wakes at once);
-then, outside the lock, close the worker's stdin (its EOF watcher `os._exit`s
-even mid-HTTP), wait ≤ 1 s, tree-kill as fallback, join its readers and close
-the job keeper. Every worker gets its own response queue (D4): a stale `Eof`
-from a killed worker can never reach a later request.
+The engine (#192 design v4, AC2–AC10/AC12):
 
-The API key travels only in the worker's environment (`worker_env`) — never
-argv, logs, exception text or `detail` strings. Each batch is logged as
-kind/latency only.
+- **Provider chain** (`chain_fn`, default `core.llm.get_llm_chain`): the usable
+  providers, re-read at every routing decision, before every retry and every
+  bisection node, and after every wait (each wait is sliced to ≤ 60 s). A
+  provider is identified by its label (`model_label`: model + host) for
+  persistence and display, and in memory by its fingerprint (base, model,
+  sha256(key)[:16]) — a Settings change resets its state; the worker of a
+  fingerprint that left the chain is retired at once (H2).
+- **Per-cue state**: `zh`, `by` (label), `refused_by` (labels, persisted),
+  `failed_by` (a transient leaf, memory only — H5). A cue is exhausted when
+  the chain is non-empty and its refusals cover every label SEEN since the
+  film was dequeued (H1); open otherwise. Blank cues are done at load (G10).
+- **Checkpoint** (`checkpoint.CheckpointStore`, AC3): loaded at dequeue, saved
+  atomically after every successful request and every recorded refusal; a
+  write failure raises one notice per run, translation goes on in memory.
+- **Routing** (AC7): an open cue goes to the first chain provider it has not
+  refused that is closed (an open one is probed when its cool-down ended);
+  with failover off a cue not refused by `chain[0]` waits for it (H7).
+  Consecutive cues with the same route form batches of ≤ the provider's batch
+  size (40, halved by a timeout/length bisection, floor 5 — H8).
+- **An attempt** (AC5/AC6): a transient failure (network, timeout, 5xx, 408,
+  429, `finish_reason=length`, an empty reply, other bad responses) is retried
+  after 10/30/90 s (429/503: `Retry-After`, ≤ 300 s); still failing, or a
+  refusal / 401–404 / other 4xx (400: once more without json_mode first), →
+  the probe (the Settings Test's request; cached 60 s for these top-level
+  decisions). Probe failed → the provider opens (breaker 5/15/30 min; key,
+  credit and content-policy failures start at 30) with one notice per
+  provider per run. Probe OK, or invalid output → bisect on that provider: one
+  request per node; a single cue failing transiently gets one retry after
+  10 s and, still failing, a fresh probe at once (I1); after the leaves ONE
+  fresh confirming probe decides whether the failed leaves are recorded as
+  refused by that provider (G6/H8) or the provider opens instead.
+- **Defer, never block** (AC8): a film whose open cues have no available
+  provider is deferred; the next film goes first; a deferred film resumes
+  when a provider it needs closes again, returns `paused` after 2 h of
+  ACCUMULATED deferral (H6) and `no_key` when the chain becomes empty (H1).
 
-`progress()` (#189) is a read-only view of the in-flight request: its batch
-and cue counters and the model label `<model> · <api host>` (`model_label`:
-the host only — never the key, the userinfo or the port). None when idle and
-as soon as `cancel()` was called.
+Cancel (D6/D24, C6): set the flag; under `_spawn_lock` detach EVERY worker and
+put `CANCELLED` on each one's response queue (a waiting thread wakes at once);
+then, outside the lock, close every worker's stdin, wait ONE shared ≤ 1 s for
+them, tree-kill the survivors, join their readers and close the job keepers.
+Every worker gets its own response queue (D4): a stale `Eof` from a killed
+worker can never reach a later request.
+
+Secrets: each provider's key travels only in ITS worker's environment
+(`worker_env`, C7) — never argv, logs, notices, checkpoints, exception text or
+`detail` strings. Requests are logged as kind/status/latency/label only.
+
+`progress()` (#189/#192 AC12) is a read-only view of the film `in_flight()`
+stands for; None when idle and as soon as `cancel()` was called.
+
+`llm_chain_from_config` builds the provider chain the agent publishes
+(`core.llm.set_llm_chain`), and the provider probe (`probe_messages` /
+`probe_ok`: the real prompt with one cue, OK only when the reply passes
+`_validate`) is shared by the Settings Test and the translator.
 """
 
 from __future__ import annotations
 
+import hashlib
+import itertools
 import json
 import logging
 import math
@@ -33,27 +78,76 @@ import subprocess
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional, Union
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+)
 
-from taskpaw_v3.core.llm import LLMSettings, get_llm_settings
+from taskpaw_v3.core.llm import (
+    EMPTY_REPLY_MESSAGE,
+    LLM_SLOTS,
+    LLMSettings,
+    get_llm_chain,
+    get_llm_failover,
+    llm_settings_from_config,
+)
 from taskpaw_v3.core.llm_worker import (
     JobKeeper,
     assign_kill_on_close_job,
     worker_argv,
     worker_env,
 )
+from taskpaw_v3.monitors.subs.checkpoint import CheckpointStore, SavedCue
 from taskpaw_v3.monitors.subs.child import ChildProcess, Eof
 from taskpaw_v3.monitors.subs.srt import Cue
 from taskpaw_v3.monitors.subs.util import bounded
 
+if TYPE_CHECKING:
+    from taskpaw_v3.core.config import AgentConfig
+
 log = logging.getLogger("taskpaw.subs.translate")
 
 BATCH_SIZE = 40
+MIN_BATCH_SIZE = 5  # H8: the floor of a provider's adaptive batch size
 CONTEXT_SIZE = 5
 RESPONSE_DEADLINE_S = 60.0
 REQUEST_TIMEOUT_S = 30.0
 MODEL_LABEL_CHARS = 80
+MAX_TOKENS = 4096  # a request's max_tokens ceiling
+
+# #192 AC5–AC8 (seconds)
+RETRY_SCHEDULE_S: tuple[float, ...] = (10.0, 30.0, 90.0)
+RETRY_AFTER_CAP_S = 300.0
+LEAF_RETRY_S = 10.0  # H5
+PROBE_TTL_S = 60.0  # a probe OK is reused this long for top-level decisions
+BREAKER_S: tuple[float, ...] = (300.0, 900.0, 1800.0)  # level 1, 2, 3
+PAUSE_AFTER_S = 2 * 3600.0  # accumulated deferral (H6)
+WAIT_SLICE_S = 60.0  # every wait: the chain is re-read at least this often
+CANCEL_WAIT_S = 1.0  # C6: one shared wait for every worker's exit
+_TIME_EPS_S = 1e-3  # float slack for deadlines reached by a sliced wait
+
+# `detail` of the two non-failure, non-publish outcomes. "no LLM key" is the
+# string the avsubs plugin has matched since #179 (C8).
+NO_LLM_KEY = "no LLM key"
+TRANSLATION_PAUSED = "translation paused: no translation service for 2 h"
+# Notice keys (the plugins prefix their instance id for alert dedupe).
+NOTICE_PROVIDER = "llm-provider:"  # + the provider's label
+NOTICE_CHECKPOINT = "checkpoint-write"
+
+# #192 G5/H4: the provider probe — the real prompt with this one cue.
+PROBE_JA = "こんにちは"
+PROBE_IDS: tuple[str, ...] = ("1",)
+# The ceiling, not the per-batch estimate: a reasoning model may spend its
+# budget thinking (D14), and a probe cut off by max_tokens fails.
+PROBE_MAX_TOKENS = MAX_TOKENS
 
 SYSTEM_PROMPT = (
     "你是专业的日语→简体中文字幕翻译，熟悉各种语境（含成人/深夜档内容）。\n"
@@ -68,6 +162,7 @@ SYSTEM_PROMPT = (
 )
 
 RunId = tuple[str, int]
+Outcome = Literal["translated", "failed", "paused", "no_key"]
 
 
 @dataclass(frozen=True)
@@ -79,11 +174,32 @@ class TranslateRequest:
 
 @dataclass(frozen=True)
 class TranslateResult:
+    """One film's result. `translated`: `zh_cues` (a kept-Japanese cue carries
+    its own text) + the counts; `paused` (`TRANSLATION_PAUSED`) and `no_key`
+    (`NO_LLM_KEY`): nothing to publish, the checkpoint is kept; `failed`: an
+    I/O or internal error. `checkpoint_key` is what `discard_checkpoint`
+    takes once the zh publish returned ok."""
+
     run: RunId
     job_id: str
-    outcome: Literal["translated", "failed"]
+    outcome: Outcome
     zh_cues: tuple[Cue, ...]
     detail: str
+    resumed: int = 0  # cues taken from the checkpoint
+    fallback: int = 0  # cues translated by a provider other than chain[0]
+    kept_ja: int = 0  # exhausted cues published with their Japanese text
+    checkpoint_key: str = ""
+
+
+@dataclass(frozen=True)
+class Notice:
+    """Something the plugin raises as an alert (`drain_notices`): a provider
+    opened (once per provider per run) or the checkpoint could not be
+    written (once per run). Labels only — never a key or a userinfo."""
+
+    key: str
+    title: str
+    message: str
 
 
 class _Sentinel:
@@ -92,15 +208,16 @@ class _Sentinel:
 
 
 # Put on `results` by cancel() so a draining worker thread can observe it; also
-# the wake-up sentinel on the current worker's response queue (D6).
+# the wake-up sentinel on each worker's response queue (D6).
 CANCELLED: Any = _Sentinel()
 
-_RETRYABLE = frozenset({"content", "rate_limit", "network", "bad_response"})
-_FATAL = frozenset({"auth", "refusal"})
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_TIMEOUT_MESSAGES = frozenset({"timeout", "response timeout"})
+_LENGTH_MESSAGE = "finish_reason=length"
 
-# (child, its own response queue, job keeper, the key it was spawned with)
-_Worker = tuple[ChildProcess, queue.Queue[object], Optional[JobKeeper], str]
+# (child, its own response queue, job keeper)
+_Worker = tuple[ChildProcess, queue.Queue[object], Optional[JobKeeper]]
+_Fingerprint = tuple[str, str, str]
 
 
 class _Cancelled(Exception):
@@ -108,7 +225,7 @@ class _Cancelled(Exception):
 
 
 class _WorkerError(Exception):
-    """The worker could not be spawned (network kind for the batch). The
+    """The worker could not be spawned (network kind for the request). The
     message is a fixed `spawn: <TypeName>` — never exception text."""
 
 
@@ -120,6 +237,61 @@ class _DuplicateKey(ValueError):
 class _Fail:
     kind: str
     message: str
+    status: Optional[int] = None  # C2: the HTTP status, when there was one
+    retry_after: Optional[int] = None  # C1: Retry-After delta-seconds
+
+
+def _transient(f: _Fail) -> bool:
+    """AC5 (top-level requests): retried on the schedule — network, timeout,
+    5xx, 408, 429, 503, `finish_reason=length`, an empty reply and every other
+    bad response (no status, 3xx). Not: content, refusals, auth, other 4xx."""
+    if f.kind in ("network", "rate_limit"):
+        return True
+    if f.kind == "refusal":
+        return f.message == EMPTY_REPLY_MESSAGE
+    if f.kind == "bad_response":
+        s = f.status
+        return s is None or s in (408, 429) or not 400 <= s < 500
+    return False
+
+
+def _leaf_transient(f: _Fail) -> bool:
+    """H5: a single cue's failure worth one more try — network / timeout /
+    5xx / 429 (408 counts as a timeout). An empty reply or a length cut-off
+    of ONE cue is that cue's refusal."""
+    if f.kind in ("network", "rate_limit"):
+        return True
+    s = f.status
+    return f.kind == "bad_response" and s is not None and (s >= 500 or s in (408, 429))
+
+
+def _shrinks_batch(f: _Fail) -> bool:
+    """H8: a bisection triggered by this failure halves the batch size when
+    its halves succeed — a timeout (incl. HTTP 408) or `finish_reason=length`."""
+    timed_out = f.message in _TIMEOUT_MESSAGES or f.status == 408
+    return timed_out or f.message == _LENGTH_MESSAGE
+
+
+def _severe(f: _Fail) -> bool:
+    """AC7: key, credit and content-policy failures open for 30 min at once."""
+    return f.kind in ("auth", "refusal") or f.status in (401, 402, 403)
+
+
+def _reason(f: _Fail) -> str:
+    """H4: the notice text follows the failed probe."""
+    if f.kind == "auth" or f.status in (401, 402, 403):
+        return "key or credit problem"
+    if f.status == 404:
+        return "model or URL not found"
+    if f.kind == "rate_limit" or f.status == 429:
+        return "rate limit or quota reached"
+    if f.status is not None and 400 <= f.status < 500:
+        return f"rejected the request (HTTP {f.status})"
+    if f.kind == "refusal":
+        return "content policy rejected the translation prompt"
+    if f.kind in ("invalid", "content"):
+        return "returns unusable output"
+    return "unreachable"
 
 
 def _no_dupes(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -163,17 +335,61 @@ def model_label(model: object, api_base: object) -> str:
     return bounded(" · ".join(p for p in (name, host) if p), MODEL_LABEL_CHARS)
 
 
-@dataclass
-class _Progress:
-    """The in-flight request's counters (#189), guarded by `_count_lock`."""
+def _usable(s: LLMSettings) -> bool:
+    """G11: base and model set, and a key unless the base is loopback."""
+    return bool(s.api_base and s.model) and bool(
+        s.api_key or not needs_llm_key(s.api_base)
+    )
 
-    job_id: str
-    model: str
-    cues_total: int
-    batches_total: int
-    started_at: float
-    cues_done: int = 0
-    batches_done: int = 0
+
+def llm_chain_from_config(
+    config: "AgentConfig", *, environ: Optional[Mapping[str, str]] = None
+) -> tuple[LLMSettings, ...]:
+    """#192 AC1: the provider chain — the USABLE providers among primary,
+    fallback 1 and fallback 2, in that order, each key resolved env-first for
+    its own slot. Usable (G11) = base and model non-empty and a key unless the
+    base is loopback (`needs_llm_key`). A provider whose `model_label` repeats
+    an earlier one's is dropped — first wins — with one warning naming the
+    slot and the label only (G9): the label is a provider's identity.
+
+    Lives here, beside `needs_llm_key` and `model_label` (core cannot import
+    the subs engine); the launcher (boot) and `MonitorAdmin` (after a save)
+    publish it with `core.llm.set_llm_chain`."""
+    chain: list[LLMSettings] = []
+    labels: set[str] = set()
+    for slot in LLM_SLOTS:
+        s = llm_settings_from_config(config, slot=slot, environ=environ)
+        if not _usable(s):
+            continue
+        label = model_label(s.model, s.api_base)
+        if label in labels:
+            log.warning(
+                "LLM %s ignored: the same model as an earlier provider (%s)",
+                slot,
+                label,
+            )
+            continue
+        labels.add(label)
+        chain.append(s)
+    return tuple(chain)
+
+
+def _messages(user: dict[str, Any]) -> list[dict[str, str]]:
+    """A translation request's messages: the system prompt + the JSON user turn
+    (`{"cues": [...], "context": [...]}`) — every batch and the probe."""
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+    ]
+
+
+def probe_messages() -> list[dict[str, str]]:
+    """#192 G5/H4: the provider probe — the REAL translation prompt with one
+    cue (`PROBE_JA`, id "1", no context). Shared by the Settings Test and the
+    translator so both ask exactly the same question."""
+    return _messages(
+        {"cues": [{"id": i, "ja": PROBE_JA} for i in PROBE_IDS], "context": []}
+    )
 
 
 def _validate(content: str, ids: list[str]) -> Union[dict[str, str], _Fail]:
@@ -202,6 +418,81 @@ def _validate(content: str, ids: list[str]) -> Union[dict[str, str], _Fail]:
     return out
 
 
+def probe_ok(content: str) -> bool:
+    """H4: a probe reply is OK only when it passes the translator's own
+    `_validate` for `PROBE_IDS` — an envelope-OK but unusable reply fails."""
+    return not isinstance(_validate(content, list(PROBE_IDS)), _Fail)
+
+
+def _fingerprint(s: LLMSettings) -> _Fingerprint:
+    """H2: a provider's in-memory identity — never the raw key."""
+    digest = hashlib.sha256(s.api_key.encode("utf-8")).hexdigest()[:16]
+    return (s.api_base, s.model, digest)
+
+
+@dataclass(eq=False)
+class _Provider:
+    """One fingerprint's state for this run (translator thread only)."""
+
+    settings: LLMSettings
+    fingerprint: _Fingerprint
+    label: str
+    json_mode: bool = True  # off for the run after a 400 → no-json success
+    batch_size: int = BATCH_SIZE  # H8
+    open_until: Optional[float] = None  # breaker: None = closed
+    level: int = 0
+    probe_ok_at: Optional[float] = None
+    alerted: bool = False
+    retired: bool = False  # left the chain (H2): never asked again
+
+
+@dataclass(eq=False)
+class _CueState:
+    zh: Optional[str] = None
+    by: Optional[str] = None
+    refused_by: set[str] = field(default_factory=set)  # persisted
+    failed_by: set[str] = field(default_factory=set)  # H5: memory only
+    blank: bool = False
+
+
+@dataclass(eq=False)
+class _Film:
+    """A dequeued film. The counters, `seen`, `model` and the deferral fields
+    are guarded by `_count_lock`; `states` belongs to the translator thread."""
+
+    req: TranslateRequest
+    key: str
+    states: list[_CueState]
+    seen: set[str]
+    started_at: float
+    model: str
+    n_done: int = 0  # has zh (translated, resumed or blank)
+    n_kept: int = 0  # exhausted
+    n_resumed: int = 0
+    n_fallback: int = 0
+    n_new: int = 0  # translated since dequeue (the ETA's rate)
+    batches_done: int = 0
+    batches_total: int = 0
+    deferred_total: float = 0.0
+    deferred_since: Optional[float] = None
+    finished: bool = False  # its result is (about to be) on `results`
+
+    def deferred_for(self, now: float) -> float:
+        since = self.deferred_since
+        return self.deferred_total + (now - since if since is not None else 0.0)
+
+    def deadline(self) -> float:
+        """While deferred: when its accumulated deferral reaches 2 h."""
+        since = self.deferred_since if self.deferred_since is not None else 0.0
+        return since + PAUSE_AFTER_S - self.deferred_total
+
+
+def _exhausted(film: _Film, st: _CueState, chain: Sequence[_Provider]) -> bool:
+    """AC2/H1: refused by every label seen since dequeue — never with an
+    empty chain (then the film is `no_key`)."""
+    return bool(chain) and film.seen <= (st.refused_by | st.failed_by)
+
+
 class Translator:
     def __init__(
         self,
@@ -209,31 +500,49 @@ class Translator:
         *,
         name: str,
         spawn: Callable[..., ChildProcess] = ChildProcess,
-        settings_fn: Callable[[], LLMSettings] = get_llm_settings,
+        chain_fn: Callable[[], Sequence[LLMSettings]] = get_llm_chain,
+        failover_fn: Callable[[], bool] = get_llm_failover,
+        checkpoint_dir: Optional[Path] = None,
+        clock: Callable[[], float] = time.monotonic,
+        wait_fn: Optional[Callable[[float], bool]] = None,
         worker_argv_fn: Callable[[], list[str]] = worker_argv,
         job_fn: Callable[[subprocess.Popen], Optional[JobKeeper]] = (
             assign_kill_on_close_job
         ),
         deadline_s: float = RESPONSE_DEADLINE_S,
     ) -> None:
+        """`checkpoint_dir`: the `subs-checkpoints` folder, or None (memory
+        only). `clock` is monotonic; `wait_fn(seconds)` waits and returns
+        True when cancelled — the default wakes on cancel() and submit()."""
         self._run = run
         self._name = name
         self._spawn = spawn
-        self._settings_fn = settings_fn
+        self._chain_fn = chain_fn
+        self._failover_fn = failover_fn
+        self._store = CheckpointStore(checkpoint_dir)
+        self._clock = clock
+        self._wait_fn = wait_fn if wait_fn is not None else self._wait_wake
         self._worker_argv_fn = worker_argv_fn
         self._job_fn = job_fn
         self._deadline_s = deadline_s
         self.results: "queue.Queue[TranslateResult | object]" = queue.Queue()
         self._requests: "queue.Queue[Optional[TranslateRequest]]" = queue.Queue()
         self._cancel = threading.Event()
+        self._wake = threading.Event()  # set by submit() and cancel()
         self._cancel_once = threading.Lock()
         self._cancel_started = False
         self._spawn_lock = threading.Lock()
-        self._worker: Optional[_Worker] = None
+        self._workers: dict[_Fingerprint, _Worker] = {}
         self._count_lock = threading.Lock()
         self._queued = 0
-        self._in_flight = False
-        self._progress: Optional[_Progress] = None
+        self._working: Optional[_Film] = None
+        self._deferred: list[_Film] = []
+        self._notices: list[Notice] = []
+        # translator thread only
+        self._providers: dict[_Fingerprint, _Provider] = {}
+        self._chain: list[_Provider] = []
+        self._rids = itertools.count()
+        self._checkpoint_alerted = False
         self._thread: Optional[threading.Thread] = None
 
     # ── public API ───────────────────────────────────────────────────────
@@ -252,73 +561,110 @@ class Translator:
                 return
             self._queued += 1
         self._requests.put(req)
+        self._wake.set()
 
     def queued(self) -> int:
-        """Requests not yet taken by the thread; 0 after cancel (D7)."""
+        """H3: every unsettled film but the one `in_flight()` stands for —
+        the queued requests and the deferred films; 0 after cancel (D7)."""
         if self._cancel.is_set():
             return 0
         with self._count_lock:
-            return self._queued
+            n = self._queued + len(self._deferred)
+            if self._working is None and self._deferred:
+                n -= 1
+            return n
 
     def in_flight(self) -> bool:
-        """A request is being translated and its result is not yet on
-        `results`; False after cancel (D7)."""
+        """H3: a film is worked or deferred and its result is not yet on
+        `results` — exactly one film; False after cancel (D7)."""
         if self._cancel.is_set():
             return False
         with self._count_lock:
-            return self._in_flight
+            return self._working is not None or bool(self._deferred)
 
     def progress(self, now: Optional[float] = None) -> Optional[dict[str, Any]]:
-        """#189 (AC2): a fresh dict of the in-flight request — `job_id`,
-        `model` (label), `batches_done`/`batches_total` (a split batch counts
-        once, when both halves finished), `cues_done`/`cues_total`,
-        `started_at` (monotonic), `elapsed_s`, `percent` = floor(100 × done /
-        total) and `eta_s` = ceil(elapsed / done × left) once ≥ 1 cue is done
-        and ≥ 10 s passed (D10). None when idle and whenever cancel is set
-        (D5). `now` defaults to `time.monotonic()`."""
+        """#189/#192 AC12: a fresh dict of the film `in_flight()` stands for
+        (the worked one, else the deferred one with the earliest deadline):
+        `job_id`, `model` (the label of the provider in use), `batches_done`/
+        `batches_total` (a top-level batch counts once it concluded),
+        `cues_done` (translated, resumed, blank or kept) / `cues_total`,
+        `started_at` (monotonic, at dequeue), `elapsed_s`, `percent`, `eta_s`
+        (≥ 1 cue translated and ≥ 10 s passed; None while paused),
+        `cues_resumed`, `cues_fallback`, `cues_kept_ja`, `paused` (the film is
+        deferred) and `deferred` (how many films are). None when idle and
+        whenever cancel is set (D5). `now` defaults to the clock."""
         with self._count_lock:
-            p = self._progress
-            if p is None or self._cancel.is_set():
+            if self._cancel.is_set():
                 return None
-            job_id, model = p.job_id, p.model
-            done, total = p.cues_done, p.cues_total
-            b_done, b_total, started = p.batches_done, p.batches_total, p.started_at
-        elapsed = max(0.0, (time.monotonic() if now is None else now) - started)
+            film = self._working
+            paused = False
+            if film is None or film.finished:
+                waiting = [f for f in self._deferred if not f.finished]
+                film = min(waiting, key=_Film.deadline) if waiting else None
+                paused = film is not None
+            if film is None or film.finished:
+                return None
+            total = len(film.states)
+            done, kept = film.n_done, film.n_kept
+            new, started = film.n_new, film.started_at
+            snap = {
+                "job_id": film.req.job_id,
+                "model": film.model,
+                "batches_done": film.batches_done,
+                "batches_total": max(film.batches_total, film.batches_done),
+                "cues_resumed": film.n_resumed,
+                "cues_fallback": film.n_fallback,
+                "cues_kept_ja": kept,
+            }
+            deferred = len(self._deferred)
+            t = self._clock() if now is None else now
+            waited = film.deferred_for(t)
+        elapsed = max(0.0, t - started)
+        settled = done + kept
         eta: Optional[int] = None
-        if done >= 1 and elapsed >= 10:
-            eta = math.ceil(elapsed / done * (total - done))
+        if not paused and new >= 1 and elapsed >= 10:
+            active = max(0.0, elapsed - waited)
+            eta = math.ceil(active / new * max(0, total - settled))
         return {
-            "job_id": job_id,
-            "model": model,
-            "batches_done": b_done,
-            "batches_total": b_total,
-            "cues_done": done,
+            **snap,
+            "cues_done": settled,
             "cues_total": total,
             "started_at": started,
             "elapsed_s": int(elapsed),
-            "percent": 100 * done // total if total else 0,
+            "percent": 100 * settled // total if total else 0,
             "eta_s": eta,
+            "paused": paused,
+            "deferred": deferred,
         }
 
+    def drain_notices(self) -> list[Notice]:
+        """The notices raised since the last call (then forgotten)."""
+        with self._count_lock:
+            out, self._notices = self._notices, []
+        return out
+
+    def discard_checkpoint(self, key: str) -> None:
+        """Delete a film's checkpoint — call it only after its zh publish
+        returned ok. Never raises."""
+        self._store.delete(key)
+
     def cancel(self) -> None:
-        """Idempotent and bounded (D24); never respawns. In practice about
-        1–2.6 s (stdin EOF, ≤ 1 s wait, taskkill, reader join); ≈ 5.5 s only if
-        the worker survives both stdin EOF and `taskkill /F`."""
+        """Idempotent and bounded (D24, C6); never respawns. Every worker's
+        stdin is closed, then ONE shared ≤ 1 s wait, then the survivors are
+        tree-killed — about 1 s for three live workers."""
         with self._cancel_once:
             if self._cancel_started:
                 return
             self._cancel_started = True
         self._cancel.set()
-        with self._count_lock:
-            self._progress = None  # D5: no stale counters after a cancel
+        self._wake.set()
         with self._spawn_lock:
-            w = self._worker
-            self._worker = None
-            if w is not None:
+            workers = list(self._workers.values())
+            self._workers.clear()
+            for w in workers:
                 w[1].put(CANCELLED)  # wake a thread waiting on THIS worker (D6)
-        if w is not None:
-            self._teardown(w, wait_s=1.0)
-        # A worker that _ensure_worker detached at this moment is torn down by
+        self._teardown(workers, wait_s=CANCEL_WAIT_S)
+        # A worker that _ensure_worker spawned at this moment is torn down by
         # its own path, which then sees the flag and never spawns (D24).
         self._requests.put(None)
         self.results.put(CANCELLED)
@@ -335,194 +681,686 @@ class Translator:
     # ── thread ───────────────────────────────────────────────────────────
     def _loop(self) -> None:
         try:
-            while True:
-                req = self._requests.get()
-                if req is None or self._cancel.is_set():
-                    return
-                with self._count_lock:
-                    self._queued -= 1
-                    self._in_flight = True
-                try:
-                    result = self._translate(req)
-                except _Cancelled:
-                    return
-                except Exception as e:  # a bug must not kill the thread silently
-                    log.error(
-                        "subs-translate %s: internal error (%s)",
-                        self._name,
-                        type(e).__name__,
-                    )
-                    result = self._failed(req, f"internal error: {type(e).__name__}")
-                if self._cancel.is_set():
-                    return
-                self.results.put(result)
-                with self._count_lock:
-                    self._in_flight = False
+            self._store.prune()
+            while self._step():
+                pass
+        except _Cancelled:
+            pass
         finally:
             with self._count_lock:
-                self._in_flight = False
-            self._shutdown_worker()
+                self._working = None
+                self._deferred = []
+            self._shutdown_workers()
 
-    def _shutdown_worker(self) -> None:
+    def _step(self) -> bool:
+        """One film's turn (or one idle decision). False: the thread ends."""
+        try:
+            film = self._next_film()
+        except _Cancelled:
+            raise
+        except Exception as e:  # a bug must not kill the thread silently
+            self._internal_error(e, None)
+            return True
+        if film is None:
+            return False
+        try:
+            outcome = self._work(film)
+        except _Cancelled:
+            raise
+        except Exception as e:
+            self._internal_error(e, film)
+            return True
+        if outcome == "defer":
+            self._defer(film)
+        else:
+            self._finish(film, self._result(film, outcome))
+        return True
+
+    def _internal_error(self, e: Exception, film: Optional[_Film]) -> None:
+        log.error(
+            "subs-translate %s: internal error (%s)", self._name, type(e).__name__
+        )
+        detail = f"internal error: {type(e).__name__}"
+        if film is not None:
+            self._finish(film, self._failed(film.req, detail))
+            return
+        with self._count_lock:
+            deferred = list(self._deferred)
+        for f in deferred:
+            self._finish(f, self._failed(f.req, detail))
+        self._sleep(1.0)  # never a hot loop on a persistent bug
+
+    def _shutdown_workers(self) -> None:
         """Thread exit: no worker may outlive the thread."""
         with self._spawn_lock:
-            w = self._worker
-            self._worker = None
-        if w is not None:
-            self._teardown(w, wait_s=1.0)
+            workers = list(self._workers.values())
+            self._workers.clear()
+        self._teardown(workers, wait_s=CANCEL_WAIT_S)
 
     @staticmethod
     def _failed(req: TranslateRequest, detail: str) -> TranslateResult:
         return TranslateResult(req.run, req.job_id, "failed", (), detail)
 
-    def _translate(self, req: TranslateRequest) -> TranslateResult:
-        settings = self._settings_fn()
-        if not settings.api_key and needs_llm_key(settings.api_base):
-            return self._failed(req, "no LLM key")
-        cues = list(req.cues)
-        self._begin_progress(req, settings, len(cues))
-        try:
-            zh: dict[int, str] = {}
-            for b, lo in enumerate(range(0, len(cues), BATCH_SIZE)):
-                fail = self._run_batch(
-                    req.job_id,
-                    str(b),
-                    cues,
-                    lo,
-                    lo + BATCH_SIZE,
-                    settings,
-                    zh,
-                    retry=False,
-                )
-                if fail is not None:
-                    return self._failed(req, f"{fail.kind}: {fail.message}")
-                self._advance_progress(min(BATCH_SIZE, len(cues) - lo))
+    def _result(self, film: _Film, outcome: str) -> TranslateResult:
+        req = film.req
+        if outcome == "translated":
             zh_cues = tuple(
-                Cue(c.index, c.start_ms, c.end_ms, zh[pos])
-                for pos, c in enumerate(cues)
+                Cue(
+                    c.index,
+                    c.start_ms,
+                    c.end_ms,
+                    st.zh if st.zh is not None else c.text,
+                )
+                for c, st in zip(req.cues, film.states)
             )
-            return TranslateResult(req.run, req.job_id, "translated", zh_cues, "")
-        finally:
-            with self._count_lock:
-                self._progress = None
+            kept = sum(1 for st in film.states if st.zh is None)
+            log.info(
+                "subs-translate %s: film translated (%d lines: %d resumed, "
+                "%d by a fallback model, %d kept in Japanese)",
+                self._name,
+                len(zh_cues),
+                film.n_resumed,
+                film.n_fallback,
+                kept,
+            )
+            return TranslateResult(
+                req.run,
+                req.job_id,
+                "translated",
+                zh_cues,
+                "",
+                film.n_resumed,
+                film.n_fallback,
+                kept,
+                film.key,
+            )
+        kind: Outcome = "paused" if outcome == "paused" else "no_key"
+        if kind == "paused":
+            log.warning(
+                "subs-translate %s: film paused — no translation service for 2 h "
+                "(its checkpoint is kept)",
+                self._name,
+            )
+        return TranslateResult(
+            req.run,
+            req.job_id,
+            kind,
+            (),
+            TRANSLATION_PAUSED if kind == "paused" else NO_LLM_KEY,
+            film.n_resumed,
+            film.n_fallback,
+            0,
+            film.key,
+        )
 
-    def _begin_progress(
-        self, req: TranslateRequest, settings: LLMSettings, n: int
-    ) -> None:
-        label = model_label(settings.model, settings.api_base)
+    def _finish(self, film: _Film, result: TranslateResult) -> None:
+        """Publish a film's result, THEN forget it: `queued()`/`in_flight()`
+        never report nothing while its result is not yet on `results`."""
+        if self._cancel.is_set():
+            raise _Cancelled
         with self._count_lock:
+            film.finished = True  # progress() stops reporting it now
+        self.results.put(result)
+        with self._count_lock:
+            if self._working is film:
+                self._working = None
+            if film in self._deferred:
+                self._deferred.remove(film)
+
+    def _defer(self, film: _Film) -> None:
+        with self._count_lock:
+            film.deferred_since = self._clock()
+            self._deferred.append(film)
+            if self._working is film:
+                self._working = None
+            left = len(film.states) - film.n_done - film.n_kept
+        log.info(
+            "subs-translate %s: film deferred — no translation service for its "
+            "%d open line(s)",
+            self._name,
+            left,
+        )
+
+    def _resume(self, film: _Film) -> None:
+        with self._count_lock:
+            film.deferred_total = film.deferred_for(self._clock())
+            film.deferred_since = None
+            self._deferred.remove(film)
+            self._working = film
+
+    def _next_film(self) -> Optional[_Film]:
+        """The next film to work: a deferred one that a provider can take
+        again, else the next queued request, else a wait (≤ 60 s, until a
+        cool-down end, a deferral deadline or a new request). None: cancel."""
+        while True:
             if self._cancel.is_set():
-                return
-            self._progress = _Progress(
-                job_id=req.job_id,
-                model=label,
-                cues_total=n,
-                batches_total=math.ceil(n / BATCH_SIZE),
-                started_at=time.monotonic(),
-            )
+                raise _Cancelled
+            chain = self._refresh_chain()
+            with self._count_lock:
+                deferred = list(self._deferred)
+            if deferred and not chain:  # H1: the empty chain → no_key, all
+                for f in deferred:
+                    self._finish(f, self._result(f, "no_key"))
+                deferred = []
+            now = self._clock()
+            for f in list(deferred):
+                if f.deferred_for(now) >= PAUSE_AFTER_S - _TIME_EPS_S:
+                    self._finish(f, self._result(f, "paused"))
+                    deferred.remove(f)
+            failover = self._failover_fn()
+            for f in deferred:
+                if self._routable(f, chain, failover):
+                    self._resume(f)
+                    return f
+            try:
+                req = self._requests.get_nowait()
+            except queue.Empty:
+                if deferred:
+                    self._idle(self._idle_delay(chain, deferred))
+                    continue
+                req = self._requests.get()
+            if req is None:
+                return None
+            return self._dequeue(req)
 
-    def _advance_progress(self, cues: int) -> None:
-        """A top-level batch finished (both halves, when it was split)."""
+    def _idle_delay(self, chain: Sequence[_Provider], deferred: list[_Film]) -> float:
+        now = self._clock()
+        ends = [
+            p.open_until - now
+            for p in chain
+            if p.open_until is not None and p.open_until > now
+        ]
+        deadlines = [f.deadline() - now for f in deferred]
+        return max(_TIME_EPS_S, min([WAIT_SLICE_S, *ends, *deadlines]))
+
+    def _idle(self, seconds: float) -> None:
+        """Only deferred films are left: wait, but return early for a new
+        request (the default wait wakes on submit)."""
+        self._wake.clear()
+        if self._cancel.is_set():
+            raise _Cancelled
+        if not self._requests.empty():
+            return
+        if self._wait_fn(seconds):
+            raise _Cancelled
+
+    def _wait_wake(self, seconds: float) -> bool:
+        self._wake.wait(seconds)
+        return self._cancel.is_set()
+
+    def _sleep(self, seconds: float, p: Optional[_Provider] = None) -> bool:
+        """Wait `seconds` in slices of ≤ 60 s, re-reading the chain after
+        each (H2). False when `p` was retired meanwhile. Raises on cancel."""
+        end = self._clock() + max(0.0, seconds)
+        while True:
+            if p is not None and self._retired(p):
+                return False
+            left = end - self._clock()
+            if left <= 0:
+                return True
+            self._wake.clear()
+            if self._cancel.is_set():
+                raise _Cancelled
+            if self._wait_fn(min(left, WAIT_SLICE_S)):
+                raise _Cancelled
+
+    def _dequeue(self, req: TranslateRequest) -> _Film:
+        """C9: the checkpoint is read when the film is dequeued."""
+        cues = req.cues
+        key = self._store.key(cues)
+        saved = self._store.load(key, len(cues))
+        states: list[_CueState] = []
+        resumed = 0
+        for i, c in enumerate(cues):
+            st = _CueState()
+            if not c.text.strip():
+                st.zh, st.blank = c.text, True  # G10: done with its own text
+            elif saved is not None:
+                s = saved[i]
+                st.refused_by = set(s.refused_by)
+                if s.zh is not None:
+                    st.zh, st.by = s.zh, s.by
+                    resumed += 1
+            states.append(st)
+        chain = self._refresh_chain()
+        film = _Film(
+            req=req,
+            key=key,
+            states=states,
+            seen={p.label for p in chain},
+            started_at=self._clock(),
+            model=chain[0].label if chain else "",
+            n_done=sum(1 for st in states if st.zh is not None),
+            n_resumed=resumed,
+        )
+        self._recount(film, chain)
         with self._count_lock:
-            p = self._progress
-            if p is not None:
-                p.batches_done += 1
-                p.cues_done += cues
-
-    def _run_batch(
-        self,
-        job_id: str,
-        label: str,
-        cues: list[Cue],
-        lo: int,
-        hi: int,
-        settings: LLMSettings,
-        zh: dict[int, str],
-        *,
-        retry: bool,
-    ) -> Optional[_Fail]:
-        """Translate cues[lo:hi] into `zh` (by position). Retry policy (§4.2):
-        a retryable failure splits the batch in two halves, each tried once
-        more (depth 1); auth/refusal fail the file at once."""
-        hi = min(hi, len(cues))
-        got = self._request(job_id, label, int(retry), cues, lo, hi, settings)
-        if isinstance(got, dict):
-            for k, v in got.items():
-                zh[int(k) - 1] = v
-            return None
-        if retry or got.kind in _FATAL or got.kind not in _RETRYABLE:
-            return got
-        mid = lo + max(1, (hi - lo) // 2)
-        halves = [(lo, mid), (mid, hi)] if mid < hi else [(lo, hi)]
-        for h, (a, z) in enumerate(halves):
-            fail = self._run_batch(
-                job_id, f"{label}.{h}", cues, a, z, settings, zh, retry=True
+            self._queued -= 1
+            self._working = film
+        if resumed:
+            log.info(
+                "subs-translate %s: %d of %d lines resumed from the checkpoint",
+                self._name,
+                resumed,
+                len(cues),
             )
-            if fail is not None:
-                return fail
+        return film
+
+    def _recount(self, film: _Film, chain: Sequence[_Provider]) -> None:
+        """The kept count and the batch estimate (after each routing pass
+        and each concluded batch)."""
+        kept = sum(
+            1 for st in film.states if st.zh is None and _exhausted(film, st, chain)
+        )
+        size = chain[0].batch_size if chain else BATCH_SIZE
+        with self._count_lock:
+            film.n_kept = kept
+            left = len(film.states) - film.n_done - kept
+            film.batches_total = film.batches_done + math.ceil(left / size)
+
+    # ── chain + routing ──────────────────────────────────────────────────
+    def _refresh_chain(self) -> list[_Provider]:
+        """AC1/H2: re-read the chain; a new fingerprint gets a fresh state,
+        a departed one is retired (its worker torn down). Every label is
+        added to `seen` of the worked and the deferred films (H1)."""
+        chain: list[_Provider] = []
+        labels: set[str] = set()
+        for s in self._chain_fn():
+            if not _usable(s):
+                continue
+            label = model_label(s.model, s.api_base)
+            if label in labels:
+                continue  # G9: first wins (the publisher already warned)
+            labels.add(label)
+            fp = _fingerprint(s)
+            p = self._providers.get(fp)
+            if p is None:
+                p = _Provider(settings=s, fingerprint=fp, label=label)
+                self._providers[fp] = p
+            chain.append(p)
+        current = {p.fingerprint for p in chain}
+        for fp in [fp for fp in self._providers if fp not in current]:
+            gone = self._providers.pop(fp)
+            gone.retired = True
+            self._retire_worker(gone)
+        self._chain = chain
+        with self._count_lock:
+            films = list(self._deferred)
+            if self._working is not None:
+                films.append(self._working)
+            for f in films:
+                f.seen |= labels
+        return chain
+
+    def _retired(self, p: _Provider) -> bool:
+        self._refresh_chain()
+        return p.retired
+
+    def _routable(
+        self, film: _Film, chain: Sequence[_Provider], failover: bool
+    ) -> bool:
+        """A deferred film can go on: no open cue is left, or one has a route."""
+        open_cues = self._open_cues(film, chain)
+        if not open_cues:
+            return True
+        return any(self._route(film, i, chain, failover) is not None for i in open_cues)
+
+    @staticmethod
+    def _open_cues(film: _Film, chain: Sequence[_Provider]) -> list[int]:
+        return [
+            i
+            for i, st in enumerate(film.states)
+            if st.zh is None and not _exhausted(film, st, chain)
+        ]
+
+    def _route(
+        self, film: _Film, i: int, chain: Sequence[_Provider], failover: bool
+    ) -> Optional[_Provider]:
+        """AC7: the first provider the cue has not refused that is closed —
+        an open one whose cool-down ended is probed first. Failover off: a
+        cue not refused by `chain[0]` waits for it (H7)."""
+        st = film.states[i]
+        for k, p in enumerate(chain):
+            if p.label in st.refused_by or p.label in st.failed_by:
+                continue
+            self._half_open(p)
+            if p.open_until is None:
+                return p
+            if not failover and k == 0:
+                return None
         return None
+
+    def _half_open(self, p: _Provider) -> None:
+        if p.open_until is None or self._clock() < p.open_until:
+            return
+        fail = self._probe(p, cached=False)
+        if fail is None:
+            p.open_until, p.level = None, 0
+            log.info("subs-translate %s: %s is available again", self._name, p.label)
+        else:
+            self._open(p, fail)
+
+    def _open(self, p: _Provider, fail: _Fail) -> None:
+        """AC7: open the breaker (5 → 15 → 30 min; key/credit/content policy
+        at 30 at once) + one notice per provider per run (H4)."""
+        p.level = len(BREAKER_S) if _severe(fail) else min(p.level + 1, len(BREAKER_S))
+        cool = BREAKER_S[p.level - 1]
+        p.open_until = self._clock() + cool
+        p.probe_ok_at = None
+        log.warning(
+            "subs-translate %s: %s unavailable (probe kind=%s status=%s); "
+            "tried again in %d min",
+            self._name,
+            p.label,
+            fail.kind,
+            fail.status,
+            int(cool // 60),
+        )
+        if p.alerted:
+            return
+        p.alerted = True
+        self._notify(
+            Notice(
+                f"{NOTICE_PROVIDER}{p.label}",
+                f"translation model unavailable: {p.label}",
+                f"{p.label}: {_reason(fail)}. Its lines go to the next translation "
+                "model when one is set up (else they wait); it is tried again in "
+                f"{int(cool // 60)} min.",
+            )
+        )
+
+    def _notify(self, notice: Notice) -> None:
+        with self._count_lock:
+            self._notices.append(notice)
+
+    # ── working a film ───────────────────────────────────────────────────
+    def _work(self, film: _Film) -> str:
+        """Translate until no open cue is left ("translated"), none has a
+        route ("defer") or the chain is empty ("no_key")."""
+        while True:
+            if self._cancel.is_set():
+                raise _Cancelled
+            chain = self._refresh_chain()
+            if not chain:
+                return "no_key"
+            self._recount(film, chain)
+            open_cues = self._open_cues(film, chain)
+            if not open_cues:
+                return "translated"
+            failover = self._failover_fn()
+            todo: list[tuple[int, _Provider]] = []
+            for i in open_cues:
+                p = self._route(film, i, chain, failover)
+                if p is not None:
+                    todo.append((i, p))
+            if not todo:
+                return "defer"
+            k = 0
+            while k < len(todo):
+                p = todo[k][1]
+                batch = [todo[k][0]]
+                k += 1
+                # built lazily: a halved batch size applies at once (H8)
+                while k < len(todo) and todo[k][1] is p and len(batch) < p.batch_size:
+                    batch.append(todo[k][0])
+                    k += 1
+                if self._cancel.is_set():
+                    raise _Cancelled
+                if self._retired(p) or p.open_until is not None:
+                    continue  # re-routed on the next pass
+                if self._attempt(film, p, batch):
+                    with self._count_lock:
+                        film.batches_done += 1
+                    self._recount(film, self._chain)
+
+    def _attempt(self, film: _Film, p: _Provider, idx: list[int]) -> bool:
+        """AC5/AC6: one top-level batch on `p`. True when it concluded (each
+        cue done or its failure recorded); False when `p` opened or left the
+        chain with the rest of the batch untouched."""
+        got = self._call(p, film, idx)
+        if not isinstance(got, _Fail):
+            self._done(film, p, idx, got)
+            return True
+        trigger = got
+        if trigger.kind != "content":  # invalid output: bisect at once
+            if _transient(trigger):
+                for scheduled in RETRY_SCHEDULE_S:
+                    if not self._sleep(self._retry_delay(got, scheduled), p):
+                        return False
+                    got = self._call(p, film, idx)
+                    if not isinstance(got, _Fail):
+                        self._done(film, p, idx, got)
+                        return True
+                    if not _transient(got):
+                        break
+            fail = self._probe(p, cached=True)
+            if fail is not None:
+                self._open(p, fail)
+                return False
+        return self._bisect(film, p, idx, trigger)
+
+    @staticmethod
+    def _retry_delay(f: _Fail, scheduled: float) -> float:
+        if f.retry_after is not None and f.status in (429, 503):
+            return min(float(f.retry_after), RETRY_AFTER_CAP_S)
+        return scheduled
+
+    def _bisect(
+        self, film: _Film, p: _Provider, idx: list[int], trigger: _Fail
+    ) -> bool:
+        """AC6: the failure is content-specific — split on `p`, one request
+        per node, down to single cues (H5 leaf retry, I1 leaf probe), then
+        ONE fresh confirming probe before any failed leaf is recorded."""
+        failed: list[tuple[int, bool]] = []  # (cue, transient → memory only)
+        abandoned = False
+
+        def leaf(i: int, fail: _Fail, root: bool) -> None:
+            nonlocal abandoned
+            if not root and _leaf_transient(fail):
+                if not self._sleep(LEAF_RETRY_S, p):
+                    abandoned = True
+                    return
+                got = self._call(p, film, [i])
+                if not isinstance(got, _Fail):
+                    self._done(film, p, [i], got)
+                    return
+                fail = got
+                if _leaf_transient(fail):  # I1: an outage, or this cue?
+                    probe = self._probe(p, cached=False)
+                    if probe is not None:
+                        self._open(p, probe)
+                        abandoned = True
+                        return
+            failed.append((i, _leaf_transient(fail)))
+
+        def node(ix: list[int], fail: _Fail, root: bool) -> None:
+            nonlocal abandoned
+            if len(ix) == 1:
+                leaf(ix[0], fail, root)
+                return
+            half = len(ix) // 2
+            for part in (ix[:half], ix[half:]):
+                if abandoned:
+                    return
+                if self._retired(p):
+                    abandoned = True
+                    return
+                got = self._call(p, film, part)
+                if isinstance(got, _Fail):
+                    node(part, got, False)
+                else:
+                    self._done(film, p, part, got)
+
+        node(idx, trigger, True)
+        if abandoned:
+            return False
+        if failed:
+            fail = self._probe(p, cached=False)
+            if fail is not None:
+                self._open(p, fail)
+                return False
+            persist = False
+            for i, transient in failed:
+                if transient:
+                    film.states[i].failed_by.add(p.label)
+                else:
+                    film.states[i].refused_by.add(p.label)
+                    persist = True
+            log.info(
+                "subs-translate %s: %d line(s) refused by %s",
+                self._name,
+                len(failed),
+                p.label,
+            )
+            if persist:
+                self._save(film)
+        elif _shrinks_batch(trigger) and len(idx) > 1:
+            p.batch_size = max(MIN_BATCH_SIZE, p.batch_size // 2)
+            log.info(
+                "subs-translate %s: %s batch size now %d",
+                self._name,
+                p.label,
+                p.batch_size,
+            )
+        return True
+
+    def _done(
+        self, film: _Film, p: _Provider, idx: list[int], got: dict[str, str]
+    ) -> None:
+        first = self._chain[0].label if self._chain else None
+        with self._count_lock:
+            for i in idx:
+                st = film.states[i]
+                st.zh, st.by = got[str(i + 1)], p.label
+                film.n_done += 1
+                film.n_new += 1
+                if p.label != first:
+                    film.n_fallback += 1
+        self._save(film)
+
+    def _save(self, film: _Film) -> None:
+        states = [
+            SavedCue()
+            if st.blank
+            else SavedCue(zh=st.zh, by=st.by, refused_by=tuple(sorted(st.refused_by)))
+            for st in film.states
+        ]
+        if self._store.save(film.key, film.req.job_id, states):
+            return
+        if not self._checkpoint_alerted:
+            self._checkpoint_alerted = True
+            self._notify(
+                Notice(
+                    NOTICE_CHECKPOINT,
+                    "translation checkpoint not saved",
+                    "The translation checkpoint could not be written; translation "
+                    "goes on, but a Stop now loses the lines not yet published.",
+                )
+            )
+
+    def _probe(self, p: _Provider, *, cached: bool) -> Optional[_Fail]:
+        """G5/H4: the Settings Test's request (the real prompt, one cue, the
+        provider's json_mode with the same 400 → no-json retry). None = OK —
+        only when the reply passes `_validate`. A cached OK (≤ 60 s) serves
+        top-level decisions only."""
+        if (
+            cached
+            and p.probe_ok_at is not None
+            and self._clock() - p.probe_ok_at < PROBE_TTL_S
+        ):
+            return None
+        got = self._send(p, probe_messages(), PROBE_MAX_TOKENS, "probe")
+        if isinstance(got, _Fail):
+            return got
+        if not probe_ok(got):
+            return _Fail("invalid", "unusable probe reply")
+        p.probe_ok_at = self._clock()
+        return None
+
+    # ── requests ─────────────────────────────────────────────────────────
+    def _call(
+        self, p: _Provider, film: _Film, idx: list[int]
+    ) -> Union[dict[str, str], _Fail]:
+        """One translation request for the cues at positions `idx` (ids =
+        position + 1; context = the 5 cues before the first)."""
+        cues = film.req.cues
+        ids = [str(i + 1) for i in idx]
+        first = idx[0]
+        user = {
+            "cues": [{"id": d, "ja": cues[i].text} for d, i in zip(ids, idx)],
+            "context": [c.text for c in cues[max(0, first - CONTEXT_SIZE) : first]],
+        }
+        chars = sum(len(cues[i].text) for i in idx)
+        with self._count_lock:
+            film.model = p.label
+        got = self._send(
+            p, _messages(user), min(MAX_TOKENS, 64 + 8 * chars), film.req.job_id
+        )
+        return got if isinstance(got, _Fail) else _validate(got, ids)
+
+    def _send(
+        self, p: _Provider, messages: list[dict[str, str]], max_tokens: int, tag: str
+    ) -> Union[str, _Fail]:
+        """A request with the provider's json_mode; an HTTP 400 with
+        json_mode on is sent once more without it, and a reply then turns
+        json_mode off for that provider for the run (AC6)."""
+        json_mode = p.json_mode
+        got = self._request(p, messages, max_tokens, json_mode, tag)
+        if json_mode and isinstance(got, _Fail) and got.status == 400:
+            got = self._request(p, messages, max_tokens, False, tag)
+            if not isinstance(got, _Fail):
+                p.json_mode = False
+                log.info(
+                    "subs-translate %s: %s rejects json_mode — off for this run",
+                    self._name,
+                    p.label,
+                )
+        return got
 
     def _request(
         self,
-        job_id: str,
-        label: str,
-        attempt: int,
-        cues: list[Cue],
-        lo: int,
-        hi: int,
-        settings: LLMSettings,
-    ) -> Union[dict[str, str], _Fail]:
-        started = time.monotonic()
-        got = self._exchange(job_id, label, attempt, cues, lo, hi, settings)
-        kind = "ok" if isinstance(got, dict) else got.kind
-        log.info(
-            "subs-translate %s: batch kind=%s latency_ms=%d",
-            self._name,
-            kind,
-            int((time.monotonic() - started) * 1000),
-        )
-        return got
-
-    def _exchange(
-        self,
-        job_id: str,
-        label: str,
-        attempt: int,
-        cues: list[Cue],
-        lo: int,
-        hi: int,
-        settings: LLMSettings,
-    ) -> Union[dict[str, str], _Fail]:
+        p: _Provider,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        json_mode: bool,
+        tag: str,
+    ) -> Union[str, _Fail]:
+        """One exchange with `p`'s worker → the reply content or a `_Fail`.
+        Logged as kind/status/latency/label only."""
         if self._cancel.is_set():
             raise _Cancelled
-        batch = cues[lo:hi]
-        ids = [str(pos + 1) for pos in range(lo, hi)]
-        user = {
-            "cues": [{"id": i, "ja": c.text} for i, c in zip(ids, batch)],
-            "context": [c.text for c in cues[max(0, lo - CONTEXT_SIZE) : lo]],
-        }
-        total_chars = sum(len(c.text) for c in batch)
-        rid = f"{job_id}#{label}#{attempt}"
+        rid = f"{tag}#{next(self._rids)}"
         line = json.dumps(
             {
                 "id": rid,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
-                ],
+                "messages": messages,
                 "temperature": 0.3,
-                "max_tokens": min(4096, 64 + 8 * total_chars),
-                "json_mode": True,
+                "max_tokens": max_tokens,
+                "json_mode": json_mode,
                 "timeout": int(REQUEST_TIMEOUT_S),
-                "api_base": settings.api_base,
-                "model": settings.model,
+                "api_base": p.settings.api_base,
+                "model": p.settings.model,
             }
         )
+        started = time.monotonic()
+        got = self._exchange(p, line, rid)
+        log.info(
+            "subs-translate %s: %s kind=%s status=%s latency_ms=%d (%s)",
+            self._name,
+            "probe" if tag == "probe" else "batch",
+            got.kind if isinstance(got, _Fail) else "ok",
+            got.status if isinstance(got, _Fail) else None,
+            int((time.monotonic() - started) * 1000),
+            p.label,
+        )
+        return got
+
+    def _exchange(self, p: _Provider, line: str, rid: str) -> Union[str, _Fail]:
         try:
-            worker = self._ensure_worker(settings)
+            worker = self._ensure_worker(p)
         except _WorkerError as e:
             return _Fail("network", str(e))
-        child, lines = worker[0], worker[1]
+        child = worker[0]
         try:
             child.write_line(line)
         except OSError as e:
@@ -531,18 +1369,14 @@ class Translator:
                 self._name,
                 type(e).__name__,
             )
-            self._drop_worker(worker)
+            self._drop_worker(p, worker)
             return _Fail("network", "worker gone")
-        return self._await_reply(worker, child, lines, rid, ids)
+        return self._await_reply(p, worker, rid)
 
     def _await_reply(
-        self,
-        worker: _Worker,
-        child: ChildProcess,
-        lines: "queue.Queue[object]",
-        rid: str,
-        ids: list[str],
-    ) -> Union[dict[str, str], _Fail]:
+        self, p: _Provider, worker: _Worker, rid: str
+    ) -> Union[str, _Fail]:
+        child, lines = worker[0], worker[1]
         deadline = time.monotonic() + self._deadline_s
         rearmed = False
         while True:
@@ -554,14 +1388,14 @@ class Translator:
             except queue.Empty:
                 log.info("subs-translate %s: worker response timeout", self._name)
                 child.terminate_tree(1.0)
-                self._drop_worker(worker)
+                self._drop_worker(p, worker)
                 return _Fail("network", "response timeout")
             if msg is CANCELLED or self._cancel.is_set():
                 raise _Cancelled
             if isinstance(msg, Eof):
                 if msg.pid != child.pid:
                     continue  # not this worker's EOF (D4)
-                self._drop_worker(worker)
+                self._drop_worker(p, worker)
                 return _Fail("network", "worker exited")
             reply = self._parse_reply(msg)
             if reply is None or reply.get("id") != rid:
@@ -573,12 +1407,16 @@ class Translator:
                 content = reply.get("content")
                 if not isinstance(content, str):
                     return _Fail("bad_response", "reply without content")
-                return _validate(content, ids)
+                return content
             kind = reply.get("kind")
             message = reply.get("message")
+            status = reply.get("status")
+            retry_after = reply.get("retry_after")
             return _Fail(
                 kind if isinstance(kind, str) and kind else "bad_response",
                 message if isinstance(message, str) else "error",
+                status if type(status) is int else None,
+                retry_after if type(retry_after) is int and retry_after >= 0 else None,
             )
 
     @staticmethod
@@ -591,33 +1429,25 @@ class Translator:
             return None
         return obj if isinstance(obj, dict) else None
 
-    # ── worker lifecycle ─────────────────────────────────────────────────
-    def _ensure_worker(self, settings: LLMSettings) -> _Worker:
-        old: Optional[_Worker] = None
+    # ── worker lifecycle (one lazy worker per provider) ──────────────────
+    def _ensure_worker(self, p: _Provider) -> _Worker:
         with self._spawn_lock:
             if self._cancel.is_set():
                 raise _Cancelled
-            current = self._worker
-            if current is not None and current[3] == settings.api_key:
-                return current
+            if p.retired:  # H2: never respawn a departed fingerprint
+                raise _WorkerError("retired")
+            current = self._workers.get(p.fingerprint)
             if current is not None:
-                old, self._worker = current, None  # detach under the lock (D24)
-        if old is not None:
-            # Outside the lock, short bounds: cancel() must never wait on this.
-            self._teardown(old, wait_s=0.5)
-        doomed: Optional[_Worker] = None
-        with self._spawn_lock:
-            if self._cancel.is_set():
-                raise _Cancelled
+                return current
             lines: "queue.Queue[object]" = queue.Queue()
             try:
                 child = self._spawn(
                     self._worker_argv_fn(),
-                    env=worker_env(settings),
+                    env=worker_env(p.settings),  # C7: this provider's key only
                     stdin_pipe=True,
                     line_sink=lines,
                 )
-            except Exception as e:  # recorded as a network failure for the batch
+            except Exception as e:  # recorded as a network failure
                 log.warning(
                     "subs-translate %s: worker spawn failed (%s)",
                     self._name,
@@ -625,39 +1455,56 @@ class Translator:
                 )
                 raise _WorkerError(f"spawn: {type(e).__name__}") from None
             keeper = self._job_fn(child.proc)
-            worker: _Worker = (child, lines, keeper, settings.api_key)
-            if self._cancel.is_set():  # post-spawn re-check (D6)
-                doomed = worker
-            else:
-                self._worker = worker
+            worker: _Worker = (child, lines, keeper)
+            if not self._cancel.is_set():  # post-spawn re-check (D6)
+                self._workers[p.fingerprint] = worker
                 return worker
-        self._teardown(doomed, wait_s=0.5)
+        self._teardown([worker], wait_s=0.5)
         raise _Cancelled
 
-    def _drop_worker(self, worker: _Worker) -> None:
+    def _drop_worker(self, p: _Provider, worker: _Worker) -> None:
         with self._spawn_lock:
-            if self._worker is worker:
-                self._worker = None
-        self._teardown(worker, wait_s=0.5)
+            if self._workers.get(p.fingerprint) is worker:
+                del self._workers[p.fingerprint]
+        self._teardown([worker], wait_s=0.5)
 
-    def _teardown(self, worker: _Worker, *, wait_s: float) -> None:
-        """close stdin → bounded wait → tree kill (always: a launcher that
-        exited may leave the real interpreter behind; harmless on a gone tree)
-        → join readers → close the job keeper. Bounded; never raises."""
-        child, _lines, keeper, _key = worker
-        child.close_stdin()
-        try:
-            child.proc.wait(timeout=wait_s)
-        except subprocess.TimeoutExpired:
-            log.info("subs-translate %s: worker ignored stdin EOF", self._name)
-        child.terminate_tree(1.0)
-        child.join_readers(0.5)
-        if keeper is not None:
+    def _retire_worker(self, p: _Provider) -> None:
+        with self._spawn_lock:
+            worker = self._workers.pop(p.fingerprint, None)
+        if worker is not None:
+            log.info(
+                "subs-translate %s: %s left the provider chain — worker retired",
+                self._name,
+                p.label,
+            )
+            self._teardown([worker], wait_s=0.5)
+
+    def _teardown(self, workers: Sequence[_Worker], *, wait_s: float) -> None:
+        """C6: close every stdin → ONE shared bounded wait → tree-kill the
+        survivors → join readers → close the job keepers. Bounded; never
+        raises. Outside every lock: cancel() must never wait on it."""
+        if not workers:
+            return
+        for child, _lines, _keeper in workers:
+            child.close_stdin()
+        deadline = time.monotonic() + wait_s
+        for child, _lines, _keeper in workers:
             try:
-                keeper.close()
-            except OSError as e:
-                log.warning(
-                    "subs-translate %s: job keeper close failed (%s)",
-                    self._name,
-                    type(e).__name__,
-                )
+                child.proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                continue  # a survivor: logged and tree-killed below
+        for child, _lines, _keeper in workers:
+            if child.poll() is None:
+                log.info("subs-translate %s: worker ignored stdin EOF", self._name)
+                child.terminate_tree(1.0)
+        for child, _lines, keeper in workers:
+            child.join_readers(0.5)
+            if keeper is not None:
+                try:
+                    keeper.close()
+                except OSError as e:
+                    log.warning(
+                        "subs-translate %s: job keeper close failed (%s)",
+                        self._name,
+                        type(e).__name__,
+                    )

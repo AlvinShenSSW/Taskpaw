@@ -42,6 +42,7 @@ SkipReason = Literal[
     "subtitle exists",
     "transcript exists",
     "subtitle state unreadable",
+    "translation_paused",  # #192 AC8: no translation service for 2 h
 ]
 # #191: the skips of a film whose subtitles exist (已有字幕), whose transcript
 # appeared meanwhile, or whose folder could not be read — so nobody can tell

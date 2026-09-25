@@ -43,6 +43,15 @@ points (ASR start, the `.ja.srt` publish, `translator.submit`, `_settle`) and
 the status adds the per-film stepper (`film`, `steps`, `films`, `films_more`,
 `model` while translating) derived from what is live at status time, plus
 `queue_pre_done`. Read-only observation; the queue semantics are unchanged.
+
+Resumable translation (#192/#190): the translator keeps each film's progress
+in a checkpoint under the agent's data dir (none without one: memory only),
+which the plugin discards only after the zh publish returned ok. A key check
+skips a film (`no_llm_key`) only when no provider in the chain is usable; a
+film with no translation service for 2 h settles `skipped`
+(`translation_paused`, streak neutral, one alert per run); the translator's
+notices become alerts; lines kept in Japanese and paused films are counted in
+the `done` text.
 """
 
 from __future__ import annotations
@@ -64,8 +73,9 @@ from typing import Any, Callable, Iterable, Literal, Optional
 from pydantic import Field, field_validator, model_validator
 
 from taskpaw_v3.core import gpu_lease
+from taskpaw_v3.core.datadir import get_data_dir
 from taskpaw_v3.core.generation import next_generation
-from taskpaw_v3.core.llm import get_llm_settings
+from taskpaw_v3.core.llm import get_llm_chain
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -77,6 +87,7 @@ from taskpaw_v3.monitors.base import (
 from taskpaw_v3.monitors.plugins.host_metrics import read_gpu
 from taskpaw_v3.monitors.plugins.lada import _cpu_mem
 from taskpaw_v3.monitors.subs import asr_env, bounded
+from taskpaw_v3.monitors.subs.checkpoint import CHECKPOINTS_DIRNAME
 
 # `Translator` and `ChildProcess` are bound as module-level names and looked up
 # at call time, so tests can monkeypatch `AV.Translator` / `AV.ChildProcess`
@@ -111,8 +122,8 @@ from taskpaw_v3.monitors.subs.translate import (
     TranslateRequest,
     TranslateResult,
     Translator,
-    needs_llm_key,
 )
+from taskpaw_v3.monitors.subs.util import paused_alert_message, translation_suffix
 from taskpaw_v3.monitors.subs.whisperjav import (
     DEFAULT_ENGINE,
     Engine,
@@ -512,6 +523,10 @@ class AvsubsInstance(MonitorInstance):
         self._key_alerted = False
         self._survivor_alerted = False
         self._unreadable_alerted = False  # #191: one alert per run (F16)
+        # #192: lines published in Japanese; films paused (one alert per run)
+        self._kept_ja = 0
+        self._paused = 0
+        self._paused_alerted = False
         self._idle_note = ""
 
     # ── GPU lease hooks ──────────────────────────────────────────────────
@@ -648,8 +663,14 @@ class AvsubsInstance(MonitorInstance):
             self._idle_note = _idle_note(plan, root)
             return
         self._queue = [i for i in plan.items if i.kind == "full"]
+        # #192 AC3/C5: checkpoints under the agent's data dir; none = memory only
+        data_dir = get_data_dir()
         try:
-            translator = Translator(self._run, name=self.instance_id)
+            translator = Translator(
+                self._run,
+                name=self.instance_id,
+                checkpoint_dir=data_dir / CHECKPOINTS_DIRNAME if data_dir else None,
+            )
             # Assigned BEFORE the re-check below (CX2): a concurrent stop()
             # either snapshots it (and cancels it) or set the flag we see.
             self._translator = translator
@@ -1303,7 +1324,8 @@ class AvsubsInstance(MonitorInstance):
         self, job: SubsJob, cues: Optional[list[Cue]], emit: EventEmitter
     ) -> None:
         """Under `_launch_lock`. An empty transcript needs no request and no key
-        (CX3); otherwise the key is checked per job (live-apply)."""
+        (CX3); otherwise the provider chain is checked per job (live-apply):
+        only an empty chain — no usable provider — skips it (#192 AC10)."""
         if cues is None:
             try:
                 cues = job.load_ja()
@@ -1322,8 +1344,7 @@ class AvsubsInstance(MonitorInstance):
                 self._settle(job.job_id, "failed", res.detail, emit)
                 self._alert_job(job.job_id, res.detail, emit)
             return
-        settings = get_llm_settings()
-        if not settings.api_key and needs_llm_key(settings.api_base):
+        if not get_llm_chain():
             self._settle(job.job_id, "skipped", "no_llm_key", emit)
             self._alert_no_key(emit)
             return
@@ -1339,7 +1360,8 @@ class AvsubsInstance(MonitorInstance):
     def _settle_results(self, emit: EventEmitter) -> None:
         """Drain the translator's results; each is settled under the lock with
         `_settled` checked BEFORE any publish; deferred work and dispatch run
-        after each release."""
+        after each release. Then (#192) the translator's notices and the
+        run's one paused-films alert."""
         translator = self._translator
         if translator is None:
             return
@@ -1347,7 +1369,7 @@ class AvsubsInstance(MonitorInstance):
             try:
                 result = translator.results.get_nowait()
             except queue.Empty:
-                return
+                break
             if result is CANCELLED or not isinstance(result, TranslateResult):
                 continue
             if result.run != self._run:
@@ -1361,19 +1383,47 @@ class AvsubsInstance(MonitorInstance):
                         res = job.publish_zh(result.zh_cues)
                         if res.ok:
                             self._settle_completed(job, "", emit)
+                            # #192 AC3: the checkpoint goes only after the publish
+                            translator.discard_checkpoint(result.checkpoint_key)
+                            if result.kept_ja:  # AC9: the count, never the text
+                                self._kept_ja += result.kept_ja
+                                log.info(
+                                    "avsubs %s: %s: %d line(s) kept in Japanese",
+                                    self.instance_id,
+                                    _printable(job.job_id),
+                                    result.kept_ja,
+                                )
                         elif res.kind == "exists":  # #191 AC6: never replaced
                             self._skip_existing(job, SUBTITLE_EXISTS, emit)
                         else:
                             self._settle(job.job_id, "failed", res.detail, emit)
                             self._alert_job(job.job_id, res.detail, emit)
-                    elif result.detail == "no LLM key":  # C8
+                    elif result.outcome == "no_key":  # C8; #192 AC10
                         self._settle(job.job_id, "skipped", "no_llm_key", emit)
                         self._alert_no_key(emit)
+                    elif result.outcome == "paused":  # #192 AC8: streak neutral
+                        self._settle(job.job_id, "skipped", "translation_paused", emit)
+                        self._paused += 1
                     else:
                         self._settle(job.job_id, "failed", result.detail, emit)
                         self._alert_job(job.job_id, result.detail, emit)
             self._run_deferred()
             self._dispatch(emit)
+        for n in translator.drain_notices():
+            emit(
+                "alert",
+                f"{self._cfg.name}: {n.title}",
+                n.message,
+                dedupe_key=f"{self.instance_id}:{n.key}",
+            )
+        if self._paused and not self._paused_alerted:
+            self._paused_alerted = True
+            emit(
+                "alert",
+                f"{self._cfg.name}: translation paused",
+                paused_alert_message(self._paused),
+                dedupe_key=f"{self.instance_id}:translation-paused",
+            )
 
     def _maybe_done(self, emit: EventEmitter) -> None:
         """`done` exactly once, when every planned job is terminal, no child is
@@ -1394,7 +1444,8 @@ class AvsubsInstance(MonitorInstance):
             "done",
             f"{self._cfg.name} complete",
             f"AV 翻译 complete | Queue: {self._pre_done + self._completed}/"
-            f"{self._total} done, {self._failed} failed, {self._skipped} skipped "
+            f"{self._total} done, {self._failed} failed, {self._skipped} skipped"
+            f"{translation_suffix(self._kept_ja, self._paused)} "
             f"| {datetime.now():%Y-%m-%d %H:%M:%S}",
         )
         gpu_lease.withdraw(self._run)

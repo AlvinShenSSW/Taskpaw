@@ -260,6 +260,53 @@ def test_agent_config_llm_fields():
             AgentConfig(server_id="s", machine="m", llm_api_base=bad)
 
 
+def test_agent_config_llm_fallback_fields():
+    # #190/#192: two optional fallback providers + the failover switch; same
+    # normalisation/validation as the primary.
+    c = AgentConfig(server_id="s", machine="m")
+    for n in (1, 2):
+        assert getattr(c, f"llm_fallback{n}_api_base") == ""
+        assert getattr(c, f"llm_fallback{n}_model") == ""
+        assert getattr(c, f"llm_fallback{n}_api_key") == ""
+    assert c.llm_failover is True
+    for n in (1, 2):
+        c = AgentConfig(
+            server_id="s",
+            machine="m",
+            **{
+                f"llm_fallback{n}_api_base": " https://api.deepseek.com/v1/ ",
+                f"llm_fallback{n}_model": "  deepseek-chat \n",
+                f"llm_fallback{n}_api_key": " sk-abc\r\n",
+            },
+        )
+        assert getattr(c, f"llm_fallback{n}_api_base") == "https://api.deepseek.com/v1"
+        assert getattr(c, f"llm_fallback{n}_model") == "deepseek-chat"
+        assert getattr(c, f"llm_fallback{n}_api_key") == "sk-abc"
+        for bad in ("ftp://x/v1", "api.deepseek.com/v1", "javascript:alert(1)"):
+            with pytest.raises(Exception):
+                AgentConfig(
+                    server_id="s", machine="m", **{f"llm_fallback{n}_api_base": bad}
+                )
+    assert (
+        AgentConfig(server_id="s", machine="m", llm_failover=False).llm_failover
+        is False
+    )
+
+
+def test_agent_config_fallback_key_validation_never_echoes_it():
+    from pydantic import ValidationError
+
+    marker = "sk-super-secret-fallback"
+    for n in (1, 2):
+        with pytest.raises(ValidationError) as ei:
+            AgentConfig(
+                server_id="s", machine="m", **{f"llm_fallback{n}_api_key": [marker]}
+            )
+        assert marker not in str(ei.value) and f"llm_fallback{n}_api_key" in str(
+            ei.value
+        )
+
+
 def test_agent_example_yaml_documents_llm_keys():
     from taskpaw_v3 import bootstrap
 
@@ -267,10 +314,39 @@ def test_agent_example_yaml_documents_llm_keys():
     text = path.read_text(encoding="utf-8")
     for key in ("llm_api_base:", "llm_model:", "llm_api_key:"):
         assert key in text
+    for key in (
+        "llm_fallback1_api_base:",
+        "llm_fallback1_model:",
+        "llm_fallback1_api_key:",
+        "llm_fallback2_api_base:",
+        "llm_fallback2_model:",
+        "llm_fallback2_api_key:",
+        "llm_failover:",
+        "TASKPAW_LLM_FALLBACK1_API_KEY",
+        "TASKPAW_LLM_FALLBACK2_API_KEY",
+    ):
+        assert key in text
     cfg = load_yaml(AgentConfig, path)
     assert cfg.llm_api_base == "https://api.x.ai/v1"
     assert cfg.llm_model == "grok-4.3"
     assert cfg.llm_api_key == ""
+    for n in (1, 2):
+        assert getattr(cfg, f"llm_fallback{n}_api_base") == ""
+        assert getattr(cfg, f"llm_fallback{n}_model") == ""
+        assert getattr(cfg, f"llm_fallback{n}_api_key") == ""
+    assert cfg.llm_failover is True
+
+
+def test_data_dir_holder(tmp_path):
+    # #192 C5: set only by run_agent (from its config_path); None = no
+    # persistence. The autouse conftest fixture resets it to None per test.
+    from taskpaw_v3.core import datadir
+
+    assert datadir.get_data_dir() is None
+    datadir.set_data_dir(tmp_path)
+    assert datadir.get_data_dir() == tmp_path
+    datadir.set_data_dir(None)
+    assert datadir.get_data_dir() is None
 
 
 def test_agent_config_validation_errors_never_echo_a_secret_input(tmp_path):

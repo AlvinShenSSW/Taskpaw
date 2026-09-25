@@ -59,6 +59,15 @@ translating) derived from what is live at status time, plus `queue_restored`;
 `queue_completed` then counts FULLY done films — restored and their subtitle
 job settled (D1) — and the detail follows (D6). Read-only observation: nothing
 about scheduling, settlement or the GPU lease changes.
+
+Resumable translation (#192/#190), the same rules as `avsubs`: the
+translator's per-film checkpoint lives under the agent's data dir (none: memory
+only) and is discarded only after the zh publish returned ok; only an empty
+provider chain skips a film (`no_llm_key` — the translator's own no-key result
+too, never a failure); a film with no translation service for 2 h settles
+`skipped` (`translation_paused`, streak neutral, one alert per run); the
+translator's notices become alerts; kept-Japanese lines and paused films are
+counted in the `done` text.
 """
 
 from __future__ import annotations
@@ -81,8 +90,9 @@ from typing import Callable, Iterable, Literal, Optional
 from pydantic import Field, model_validator
 
 from taskpaw_v3.core import gpu_lease
+from taskpaw_v3.core.datadir import get_data_dir
 from taskpaw_v3.core.generation import next_generation
-from taskpaw_v3.core.llm import get_llm_settings
+from taskpaw_v3.core.llm import get_llm_chain
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -107,6 +117,7 @@ from taskpaw_v3.monitors.plugins.lada import (
 # at call time, so tests can monkeypatch `J.Translator` / `J.ChildProcess` for
 # supervisor-created instances (D10). Nothing here comes from `lada.py` (C1).
 from taskpaw_v3.monitors.subs import bounded, exists_quietly
+from taskpaw_v3.monitors.subs.checkpoint import CHECKPOINTS_DIRNAME
 from taskpaw_v3.monitors.subs.child import ChildProcess, asr_env
 from taskpaw_v3.monitors.subs.existing import (
     VIDEO_EXTENSIONS,
@@ -140,8 +151,8 @@ from taskpaw_v3.monitors.subs.translate import (
     TranslateRequest,
     TranslateResult,
     Translator,
-    needs_llm_key,
 )
+from taskpaw_v3.monitors.subs.util import paused_alert_message, translation_suffix
 from taskpaw_v3.monitors.subs.whisperjav import (
     DEFAULT_ENGINE,
     Engine,
@@ -1135,6 +1146,10 @@ class JasnaInstance(MonitorInstance):
         self._subs_disabled: Optional[str] = None
         self._subs_key_alerted = False
         self._subs_unreadable_alerted = False  # #191: one alert per run (F16)
+        # #192: lines published in Japanese; films paused (one alert per run)
+        self._subs_kept_ja = 0
+        self._subs_paused = 0
+        self._subs_paused_alerted = False
         self._next_action: Optional[str] = None
         self._deferred: list[Callable[[], None]] = []
         self._advance_requested = False
@@ -1224,6 +1239,8 @@ class JasnaInstance(MonitorInstance):
         self._subs_disabled = None
         self._subs_key_alerted = False
         self._subs_unreadable_alerted = False
+        self._subs_kept_ja = self._subs_paused = 0
+        self._subs_paused_alerted = False
         self._next_action = None
         self._deferred = []
         self._advance_requested = False
@@ -1422,8 +1439,14 @@ class JasnaInstance(MonitorInstance):
                 for job_id in list(self._jobs):
                     self._settle(job_id, "skipped", "no_exe", emit)
             return
+        # #192 AC3/C5: checkpoints under the agent's data dir; none = memory only
+        data_dir = get_data_dir()
         try:
-            translator = Translator(self._run, name=self.instance_id)
+            translator = Translator(
+                self._run,
+                name=self.instance_id,
+                checkpoint_dir=data_dir / CHECKPOINTS_DIRNAME if data_dir else None,
+            )
             # Assigned BEFORE the re-check below (CX2): a concurrent stop() either
             # snapshots it (and cancels it) or has already set the flag we see.
             self._translator = translator
@@ -2197,6 +2220,7 @@ class JasnaInstance(MonitorInstance):
             subs = (
                 f" | Subs: {self._subs_completed}/{len(self._jobs)} done, "
                 f"{self._subs_failed} failed, {self._subs_skipped} skipped"
+                f"{translation_suffix(self._subs_kept_ja, self._subs_paused)}"
             )
         emit(
             "done",
@@ -2274,6 +2298,18 @@ class JasnaInstance(MonitorInstance):
             f"{self._cfg.name}: subtitles for {job_id} failed",
             _bounded(detail),  # bounded tail, never the argv
             dedupe_key=f"{self.instance_id}:subs:{job_id}",
+        )
+
+    def _alert_no_key(self, emit: EventEmitter) -> None:
+        if self._subs_key_alerted:
+            return
+        self._subs_key_alerted = True
+        emit(
+            "alert",
+            f"{self._cfg.name}: no LLM API key",
+            "AV 翻译 needs the agent's LLM API key to translate; files are "
+            "skipped (their .ja.srt is kept) until a key is set.",
+            dedupe_key=f"{self.instance_id}:subs-nokey",
         )
 
     def _settle(
@@ -2409,8 +2445,9 @@ class JasnaInstance(MonitorInstance):
         self, job: SubsJob, cues: Optional[list[Cue]], emit: EventEmitter
     ) -> None:
         """Under `_launch_lock`. The transcript is loaded first: an empty one
-        needs no request (CX3); otherwise the key is checked per job
-        (live-apply)."""
+        needs no request (CX3); otherwise the provider chain is checked per job
+        (live-apply): only an empty chain — no usable provider — skips it
+        (#192 AC10)."""
         if cues is None:
             try:
                 cues = job.load_ja()
@@ -2431,18 +2468,9 @@ class JasnaInstance(MonitorInstance):
                 self._settle(job.job_id, "failed", res.detail, emit)
                 self._alert_job(job.job_id, res.detail, emit)
             return
-        settings = get_llm_settings()
-        if not settings.api_key and needs_llm_key(settings.api_base):
+        if not get_llm_chain():
             self._settle(job.job_id, "skipped", "no_llm_key", emit)
-            if not self._subs_key_alerted:
-                self._subs_key_alerted = True
-                emit(
-                    "alert",
-                    f"{self._cfg.name}: no LLM API key",
-                    "AV 翻译 needs the agent's LLM API key to translate; files are "
-                    "skipped (their .ja.srt is kept) until a key is set.",
-                    dedupe_key=f"{self.instance_id}:subs-nokey",
-                )
+            self._alert_no_key(emit)
             return
         translator = self._translator
         if translator is None:
@@ -2717,7 +2745,8 @@ class JasnaInstance(MonitorInstance):
     def _settle_results(self, emit: EventEmitter) -> None:
         """Drain the translator's results (worker thread only). Each result is
         settled under `_launch_lock`, `_settled` checked BEFORE any publish (D7);
-        deferred work and dispatch run after each release."""
+        deferred work and dispatch run after each release. Then (#192) the
+        translator's notices and the run's one paused-films alert."""
         translator = self._translator
         if translator is None:
             return
@@ -2725,7 +2754,7 @@ class JasnaInstance(MonitorInstance):
             try:
                 result = translator.results.get_nowait()
             except queue.Empty:
-                return
+                break
             if result is CANCELLED or not isinstance(result, TranslateResult):
                 continue
             if result.run != self._run:
@@ -2739,16 +2768,47 @@ class JasnaInstance(MonitorInstance):
                         res = job.publish_zh(result.zh_cues)  # D9: under the lock
                         if res.ok:
                             self._settle_completed(job, "", emit)
+                            # #192 AC3: the checkpoint goes only after the publish
+                            translator.discard_checkpoint(result.checkpoint_key)
+                            if result.kept_ja:  # AC9: the count, never the text
+                                self._subs_kept_ja += result.kept_ja
+                                log.info(
+                                    "jasna %s: %s: %d line(s) kept in Japanese",
+                                    self.instance_id,
+                                    job.job_id,
+                                    result.kept_ja,
+                                )
                         elif res.kind == "exists":  # #191 AC6: never replaced
                             self._skip_existing(job, SUBTITLE_EXISTS, emit)
                         else:
                             self._settle(job.job_id, "failed", res.detail, emit)
                             self._alert_job(job.job_id, res.detail, emit)
+                    elif result.outcome == "no_key":  # #192 AC10/G11: as avsubs
+                        self._settle(job.job_id, "skipped", "no_llm_key", emit)
+                        self._alert_no_key(emit)
+                    elif result.outcome == "paused":  # #192 AC8: streak neutral
+                        self._settle(job.job_id, "skipped", "translation_paused", emit)
+                        self._subs_paused += 1
                     else:
                         self._settle(job.job_id, "failed", result.detail, emit)
                         self._alert_job(job.job_id, result.detail, emit)
             self._run_deferred()
             self._dispatch(emit)
+        for n in translator.drain_notices():
+            emit(
+                "alert",
+                f"{self._cfg.name}: {n.title}",
+                n.message,
+                dedupe_key=f"{self.instance_id}:{n.key}",
+            )
+        if self._subs_paused and not self._subs_paused_alerted:
+            self._subs_paused_alerted = True
+            emit(
+                "alert",
+                f"{self._cfg.name}: translation paused",
+                paused_alert_message(self._subs_paused),
+                dedupe_key=f"{self.instance_id}:translation-paused",
+            )
 
     # ── passive ────────────────────────────────────────────────────────────
     def _check_passive(self, emit: EventEmitter) -> MonitorStatus:

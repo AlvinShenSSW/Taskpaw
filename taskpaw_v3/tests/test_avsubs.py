@@ -24,9 +24,20 @@ from types import SimpleNamespace
 from typing import Optional
 
 import pytest
+from test_subs_translate import (
+    FakeClock,
+    Spawner,
+    _ids,
+    _reply,
+    _seq,
+    _stepper,
+    down,
+    good,
+)
 
 from taskpaw_v3.core import gpu_lease
-from taskpaw_v3.core.llm import LLMSettings, set_llm_settings
+from taskpaw_v3.core.datadir import set_data_dir
+from taskpaw_v3.core.llm import LLMSettings, set_llm_chain, set_llm_settings
 from taskpaw_v3.monitors.plugins import avsubs as AV
 from taskpaw_v3.monitors.plugins.avsubs import (
     AvsubsConfig,
@@ -36,10 +47,19 @@ from taskpaw_v3.monitors.plugins.avsubs import (
     sweep_srt_temps,
 )
 from taskpaw_v3.monitors.registry import default_registry
+from taskpaw_v3.monitors.subs import srt
+from taskpaw_v3.monitors.subs.checkpoint import CHECKPOINTS_DIRNAME
 from taskpaw_v3.monitors.subs.job import PublishResult, SubsJob, source_identity
 from taskpaw_v3.monitors.subs.progress import AsrProgress, LiveFacts
 from taskpaw_v3.monitors.subs.srt import Cue
-from taskpaw_v3.monitors.subs.translate import CANCELLED, TranslateResult
+from taskpaw_v3.monitors.subs.translate import (
+    CANCELLED,
+    NO_LLM_KEY,
+    TRANSLATION_PAUSED,
+    Notice,
+    TranslateResult,
+    Translator,
+)
 from taskpaw_v3.monitors.subs.whisperjav import attempt_dir
 from taskpaw_v3.monitors.supervisor import Supervisor
 
@@ -152,6 +172,9 @@ class _FakeTranslator:
         self.flight = False
         self.live: Optional[dict] = None  # #189: what progress() reports
         self._owner = owner if owner is not None else {}
+        self.kw = kw  # #192: the plugin's construction arguments (checkpoint_dir)
+        self.notices: list[Notice] = []  # what drain_notices() hands over next
+        self.discarded: list[str] = []  # discard_checkpoint() keys, in order
 
     def start(self) -> None:
         self.started = True
@@ -191,14 +214,39 @@ class _FakeTranslator:
     def is_alive(self) -> bool:
         return self.started and not self.joined
 
-    def answer(self, job_id: str, ok: bool = True, detail: str = "network") -> None:
+    def drain_notices(self) -> list[Notice]:
+        out, self.notices = self.notices, []
+        return out
+
+    def discard_checkpoint(self, key: str) -> None:
+        self.discarded.append(key)
+
+    def answer(
+        self,
+        job_id: str,
+        ok: bool = True,
+        detail: str = "network",
+        *,
+        outcome: Optional[str] = None,
+        kept_ja: int = 0,
+    ) -> None:
+        """`translated` (ok) / `failed` (not ok), or #192's `paused` / `no_key`
+        (`outcome`) with the engine's detail; `checkpoint_key` = `ck:<job>`."""
         req = next(r for r in self.submitted if r.job_id == job_id)
         self.answered.add(job_id)
-        if ok:
+        kind = outcome or ("translated" if ok else "failed")
+        key = f"ck:{job_id}"
+        if kind == "translated":
             cues = tuple(Cue(c.index, c.start_ms, c.end_ms, "好") for c in req.cues)
-            self.results.put(TranslateResult(req.run, job_id, "translated", cues, ""))
+            res = TranslateResult(
+                req.run, job_id, kind, cues, "", kept_ja=kept_ja, checkpoint_key=key
+            )
+        elif kind in ("paused", "no_key"):
+            text = TRANSLATION_PAUSED if kind == "paused" else NO_LLM_KEY
+            res = TranslateResult(req.run, job_id, kind, (), text, checkpoint_key=key)
         else:
-            self.results.put(TranslateResult(req.run, job_id, "failed", (), detail))
+            res = TranslateResult(req.run, job_id, "failed", (), detail)
+        self.results.put(res)
 
 
 class _Clock:
@@ -219,9 +267,11 @@ def _events():
 
 
 def _key(on: bool = True) -> None:
-    set_llm_settings(
-        LLMSettings("https://api.x.ai/v1", "grok-4.3", "sk-test" if on else "", "none")
-    )
+    """The primary's settings AND the provider chain the key check reads
+    (#192 AC10): on = one usable provider, off = an empty chain."""
+    s = LLMSettings("https://api.x.ai/v1", "grok-4.3", "sk-test" if on else "", "none")
+    set_llm_settings(s)
+    set_llm_chain((s,) if on else ())
 
 
 def _touch(path: Path, data: bytes = b"video") -> Path:
@@ -274,7 +324,7 @@ def _setup(
     translators: list[_FakeTranslator] = []
 
     def factory(run, *, name, **k):
-        t = _FakeTranslator(run, name=name, owner=owner)
+        t = _FakeTranslator(run, name=name, owner=owner, **k)
         translators.append(t)
         return t
 
@@ -898,7 +948,7 @@ def test_a_no_llm_key_translator_result_is_a_skip(tmp_path, monkeypatch):
     r.inst.start(r.emit)
     tr = r.translators[0]
     for rel in ("a.mp4", "b.mp4", "c.mp4"):
-        tr.answer(rel, ok=False, detail="no LLM key")
+        tr.answer(rel, outcome="no_key")
     tr.answer("d.mp4")
     r.inst.check(r.emit)
     for rel in ("a.mp4", "b.mp4", "c.mp4"):
@@ -1972,7 +2022,7 @@ def test_ja_is_kept_as_the_resume_checkpoint(tmp_path, monkeypatch, case):
     elif case == "no_key":
         assert inst._settled["a.mp4"] == ("skipped", "no_llm_key")
     elif case == "no_key_result":
-        r.translators[0].answer("a.mp4", ok=False, detail="no LLM key")
+        r.translators[0].answer("a.mp4", outcome="no_key")
         inst.check(emit)
         assert inst._settled["a.mp4"] == ("skipped", "no_llm_key")
     else:
@@ -2720,3 +2770,309 @@ def test_a_translate_only_job_loads_the_transcript_as_it_is_named(
     r.inst.start(r.emit)
     assert [q.job_id for q in r.translators[0].submitted] == [video]
     assert r.spawner.argvs == []
+
+
+# ── #192/#190: resumable translation with fallback models ─────────────────
+DS = LLMSettings("https://api.deepseek.com/v1", "deepseek-chat", "sk-ds", "config")
+SRT_90 = srt.serialize(
+    [Cue(i + 1, i * 1000, i * 1000 + 500, f"台詞{i}") for i in range(90)]
+)
+
+
+def test_the_translator_checkpoints_under_the_data_dir_only_when_one_is_set(
+    tmp_path, monkeypatch
+):
+    # C5: no data dir (every other test) = memory only, never a real folder.
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4"])
+    r.inst.start(r.emit)
+    assert r.translators[0].kw["checkpoint_dir"] is None
+    r.inst.stop(timeout=1)
+    set_data_dir(tmp_path / "data")
+    r.inst.start(r.emit)
+    assert r.translators[1].kw["checkpoint_dir"] == (
+        tmp_path / "data" / CHECKPOINTS_DIRNAME
+    )
+    assert not (tmp_path / "data").exists()  # the plugin itself creates nothing
+    r.inst.stop(timeout=1)
+
+
+@pytest.mark.parametrize("case", ["fallback_only", "no_usable_provider"])
+def test_the_key_check_reads_the_provider_chain(tmp_path, monkeypatch, case):
+    # AC10/G11: only an EMPTY chain skips — a keyless primary with a usable
+    # fallback translates; a primary with a key but no model is not usable.
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4"], key=False)
+    if case == "fallback_only":
+        set_llm_chain((DS,))
+    else:
+        set_llm_settings(LLMSettings("https://api.x.ai/v1", "", "sk-test", "config"))
+    r.inst.start(r.emit)
+    tr = r.translators[0]
+    if case == "fallback_only":
+        assert [q.job_id for q in tr.submitted] == ["a.mp4"]
+        assert "a.mp4" not in r.inst._settled
+        assert not _keyed(r.evs, f"{IID}:avsubs-nokey")
+    else:
+        assert tr.submitted == []
+        assert r.inst._settled["a.mp4"] == ("skipped", "no_llm_key")
+        assert len(_keyed(r.evs, f"{IID}:avsubs-nokey")) == 1
+
+
+def test_a_paused_film_is_skipped_streak_neutral_with_one_alert_per_run(
+    tmp_path, monkeypatch
+):
+    # AC8: no translation service for 2 h → skipped `translation_paused` (its
+    # .ja.srt and checkpoint kept), streak neutral, ONE alert per run, and the
+    # done text counts them.
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4", "b.mp4", "c.mp4", "d.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    tr = r.translators[0]
+    tr.answer("a.mp4", ok=False)
+    inst.check(emit)
+    assert inst._streak == 1
+    tr.answer("b.mp4", outcome="paused")
+    tr.answer("c.mp4", outcome="paused")
+    inst.check(emit)
+    for rel in ("b.mp4", "c.mp4"):
+        assert inst._settled[rel] == ("skipped", "translation_paused")
+        assert _ja(r, rel).exists() and not _zh(r, rel).exists()
+    assert inst._streak == 1  # neither counted nor reset
+    alerts = _keyed(r.evs, f"{IID}:translation-paused")
+    assert len(alerts) == 1 and alerts[0][1] == "AV: translation paused"
+    assert alerts[0][2].startswith("2 file(s) paused")
+    assert not _keyed(r.evs, f"{IID}:avsubs:b.mp4")
+    tr.answer("d.mp4", outcome="paused")
+    st = inst.check(emit)
+    assert len(_keyed(r.evs, f"{IID}:translation-paused")) == 1  # once per run
+    assert not inst._aborted and tr.discarded == []
+    assert st.metrics["queue_skipped"] == 3
+    done = _done(r.evs)
+    assert len(done) == 1
+    assert "Queue: 0/4 done, 1 failed, 3 skipped; 3 paused | " in done[0][2]
+
+
+@pytest.mark.parametrize("outcome", ["paused", "no_key"])
+def test_paused_and_no_key_films_settle_their_rows_skipped(
+    tmp_path, monkeypatch, outcome
+):
+    # #189: the new skips end the film's row like any other skip.
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    r.spawner.last.finish(0)
+    inst.check(emit)  # ja published, submitted
+    r.translators[0].answer("a.mp4", outcome=outcome)
+    st = inst.check(emit)
+    reason = "translation_paused" if outcome == "paused" else "no_llm_key"
+    assert inst._settled["a.mp4"] == ("skipped", reason)
+    assert _states(inst, "a.mp4") == {"asr": "done", "translate": "skipped"}
+    assert _rows(st.metrics) == [("a.mp4", "skipped")]
+    assert _ja(r, "a.mp4").exists()
+    assert len(_done(r.evs)) == 1
+
+
+def test_kept_japanese_lines_are_logged_per_film_and_suffix_the_done_text(
+    tmp_path, monkeypatch, caplog
+):
+    # AC9: counts only (never a line's text); one info line per film with any.
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4", "b.mp4", "c.mp4", "d.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    tr = r.translators[0]
+    tr.answer("a.mp4", kept_ja=2)
+    tr.answer("b.mp4")
+    tr.answer("c.mp4", kept_ja=1)
+    tr.answer("d.mp4", outcome="paused")
+    with caplog.at_level(logging.INFO, logger="taskpaw.monitors.avsubs"):
+        inst.check(emit)
+    kept = [m for m in caplog.messages if "kept in Japanese" in m]
+    assert len(kept) == 2
+    assert "a.mp4: 2 line(s) kept in Japanese" in kept[0]
+    assert "c.mp4: 1 line(s) kept in Japanese" in kept[1]
+    assert not any("はい" in m or "好" in m for m in caplog.messages)
+    done = _done(r.evs)
+    assert len(done) == 1
+    assert (
+        "Queue: 3/4 done, 0 failed, 1 skipped; 3 lines kept in Japanese; 1 paused | "
+        in done[0][2]
+    )
+
+
+def test_translator_notices_become_alerts_with_their_dedupe_keys(tmp_path, monkeypatch):
+    # AC6/AC3: a provider that opened, a checkpoint that cannot be written —
+    # raised once by the translator, alerted under `<iid>:<notice key>`.
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    tr = r.translators[0]
+    grok, ds = "grok-4.3 · api.x.ai", "deepseek-chat · api.deepseek.com"
+    tr.notices = [
+        Notice(f"llm-provider:{grok}", f"translation model unavailable: {grok}", "w"),
+        Notice("checkpoint-write", "translation checkpoint not saved", "disk"),
+    ]
+    inst.check(emit)
+    assert _alerts(r.evs) == [
+        (
+            "alert",
+            f"AV: translation model unavailable: {grok}",
+            "w",
+            f"{IID}:llm-provider:{grok}",
+        ),
+        (
+            "alert",
+            "AV: translation checkpoint not saved",
+            "disk",
+            f"{IID}:checkpoint-write",
+        ),
+    ]
+    inst.check(emit)  # drained: nothing twice
+    assert len(_alerts(r.evs)) == 2
+    # a notice raised with the run's last result is alerted before `done`
+    tr.notices = [
+        Notice(f"llm-provider:{ds}", f"translation model unavailable: {ds}", "x")
+    ]
+    tr.answer("a.mp4")
+    inst.check(emit)
+    assert len(_keyed(r.evs, f"{IID}:llm-provider:{ds}")) == 1
+    assert len(_done(r.evs)) == 1
+
+
+@pytest.mark.parametrize(
+    "case", ["published", "srt_exists", "publish_error", "failed", "paused", "no_key"]
+)
+def test_the_checkpoint_is_discarded_only_after_the_zh_was_published(
+    tmp_path, monkeypatch, case
+):
+    # AC3: a film's checkpoint goes only once its zh publish returned ok
+    # (after the #187 .ja.srt rule); every other end keeps it for next Start.
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4"])
+    if case == "publish_error":
+        monkeypatch.setattr(
+            SubsJob,
+            "publish_zh",
+            lambda self, cues: PublishResult("error", f"publish {self.zh_target.name}"),
+        )
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    tr = r.translators[0]
+    if case == "srt_exists":
+        _put(_zh(r, "a.mp4"))  # #191: the owner's .srt appeared meanwhile
+    if case in ("failed", "paused", "no_key"):
+        tr.answer("a.mp4", ok=False, outcome=None if case == "failed" else case)
+    else:
+        tr.answer("a.mp4", kept_ja=1)
+    inst.check(emit)
+    ok = case == "published"
+    assert tr.discarded == (["ck:a.mp4"] if ok else [])
+    assert _ja(r, "a.mp4").exists() is not ok
+    done = _done(r.evs)
+    assert len(done) == 1
+    assert ("; 1 lines kept in Japanese" in done[0][2]) is ok
+
+
+def test_stop_mid_film_then_start_resumes_only_the_open_lines(tmp_path, monkeypatch):
+    # AC3/AC4 end to end: the REAL Translator (driven by test_subs_translate's
+    # fake llm-workers) with the plugin's checkpoint dir under a tmp data dir.
+    # Stop lands while batch 2 is in flight; the next Start asks only for
+    # lines 41–90, and the checkpoint goes with the published zh.
+    set_data_dir(tmp_path / "data")
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4"])
+    _ja(r, "a.mp4").write_text(SRT_90, encoding="utf-8")
+    responder, held = _stepper()
+    spawners = [Spawner(responder), Spawner(good)]
+    made: list[Translator] = []
+
+    def factory(run, *, name, **k):
+        t = Translator(
+            run,
+            name=name,
+            spawn=spawners[len(made)],
+            worker_argv_fn=lambda: ["llm-worker"],
+            job_fn=lambda proc: None,
+            **k,
+        )
+        made.append(t)
+        return t
+
+    monkeypatch.setattr(AV, "Translator", factory)
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    _reply(held.get(timeout=5))  # lines 1–40 translated → checkpointed
+    assert _ids(held.get(timeout=5)[0])[0] == "41"  # batch 2 in flight
+    inst.stop(timeout=5)
+    ckpt = tmp_path / "data" / CHECKPOINTS_DIRNAME
+    assert len(list(ckpt.glob("*.json"))) == 1
+    assert _ja(r, "a.mp4").exists() and not _zh(r, "a.mp4").exists()
+    inst.start(emit)
+
+    def finished() -> bool:
+        inst.check(emit)
+        return bool(_done(r.evs))
+
+    assert _wait(finished)
+    assert inst._settled["a.mp4"] == ("completed", "")
+    assert [_seq(q) for q in spawners[1].requests] == ["41-80", "81-90"]
+    zh = srt.parse(_zh(r, "a.mp4").read_text(encoding="utf-8"))
+    assert [c.text for c in zh] == [f"中台詞{i}" for i in range(90)]
+    assert not list(ckpt.glob("*.json"))  # discarded once the zh was published
+    assert not _ja(r, "a.mp4").exists()
+    assert inst._translator is None and not made[1].is_alive()  # F2 at done
+
+
+def test_a_film_the_real_translator_defers_holds_done_until_it_pauses(
+    tmp_path, monkeypatch
+):
+    # AC8/H3 with the REAL Translator and a fake clock (2 h of deferral run in
+    # ms): every model is down, so the only film is deferred — still in flight
+    # and unsettled, `done` waits — until 2 h of deferral pause it: skipped
+    # `translation_paused`, the model's notice and the one paused alert, and
+    # `done` says `; 1 paused`.
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4"])
+    clock = FakeClock()
+    deferred, release = threading.Event(), threading.Event()
+    made: list[Translator] = []
+
+    def hook(seconds: float) -> None:  # runs in the translator's waits
+        p = made[0].progress()
+        if p is not None and p["paused"] and not release.is_set():
+            deferred.set()
+            release.wait(5)
+
+    clock.hook = hook
+
+    def factory(run, *, name, **k):
+        t = Translator(
+            run,
+            name=name,
+            spawn=Spawner(down),
+            clock=clock,
+            wait_fn=clock.wait,
+            worker_argv_fn=lambda: ["llm-worker"],
+            job_fn=lambda proc: None,
+            **k,
+        )
+        clock.cancelled = t._cancel.is_set
+        made.append(t)
+        return t
+
+    monkeypatch.setattr(AV, "Translator", factory)
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    assert deferred.wait(5)
+    st = inst.check(emit)  # deferred: in flight, unsettled, no `done`
+    assert st.state == "running" and st.metrics["subs_translating"] == 1
+    assert _step(st.metrics, "translate")["paused"] is True
+    assert "a.mp4" not in inst._settled and not _done(r.evs)
+    assert len(_keyed(r.evs, f"{IID}:llm-provider:grok-4.3 · api.x.ai")) == 1
+    release.set()
+
+    def finished() -> bool:
+        inst.check(emit)
+        return bool(_done(r.evs))
+
+    assert _wait(finished)
+    assert inst._settled["a.mp4"] == ("skipped", "translation_paused")
+    assert len(_keyed(r.evs, f"{IID}:translation-paused")) == 1
+    assert len(_keyed(r.evs, f"{IID}:llm-provider:grok-4.3 · api.x.ai")) == 1
+    assert "Queue: 0/1 done, 0 failed, 1 skipped; 1 paused | " in _done(r.evs)[0][2]
+    assert _ja(r, "a.mp4").exists() and not _zh(r, "a.mp4").exists()

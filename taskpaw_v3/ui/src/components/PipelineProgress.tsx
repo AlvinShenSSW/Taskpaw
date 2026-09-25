@@ -199,6 +199,12 @@ function panelTiles(s: Step, m: Metrics, t: TFunction) {
     if (s.cues_total !== undefined) {
       add(t("pipeline.tile.cues"), t("pipeline.cues", { done: s.cues_done ?? 0, total: s.cues_total }));
     }
+    // #192: resumed / fallback / kept-Japanese counts, each only once it is > 0.
+    const count = (label: string, n: number | undefined) =>
+      add(label, n !== undefined && n > 0 ? String(n) : undefined);
+    count(t("pipeline.tile.resumed"), s.cues_resumed);
+    count(t("pipeline.tile.fallback"), s.cues_fallback);
+    count(t("pipeline.tile.keptJa"), s.cues_kept_ja);
   }
   add(t("pipeline.tile.elapsed"), elapsed);
   add(t("pipeline.tile.eta"), eta);
@@ -246,6 +252,10 @@ function StepPanel({ step, pipeline, metrics }: { step: Step; pipeline: Pipeline
   const title = panelTitle(step, pipeline, t);
   const pct = step.percent ?? (step.key === "restore" ? fin(metrics.percent) : undefined);
   const tiles = panelTiles(step, metrics, t);
+  // #192: a translation waiting for a provider to come back stays `active` (C8) and
+  // says so in text + icon (never colour alone); the count names every film on hold.
+  const paused = step.key === "translate" && step.paused === true;
+  const onHold = step.deferred !== undefined && step.deferred > 1 ? step.deferred : undefined;
   return (
     <Box data-testid="pipeline-panel" sx={{ mt: 2, p: 2, borderRadius: 2,
       bgcolor: "rgba(34,197,94,0.06)", border: "1px solid", borderColor: "rgba(34,197,94,0.25)" }}>
@@ -261,6 +271,11 @@ function StepPanel({ step, pipeline, metrics }: { step: Step; pipeline: Pipeline
           sx={{ mt: 1, height: 10, borderRadius: 5,
                 "& .MuiLinearProgress-bar": { bgcolor: TINT.ok, borderRadius: 5 },
                 bgcolor: SLATE_TRACK }} />
+      )}
+      {paused && (
+        <Chip size="small" data-testid="translate-paused" icon={<ScheduleIcon />}
+          label={onHold !== undefined ? t("pipeline.pausedN", { n: onHold }) : t("pipeline.paused")}
+          sx={{ mt: 1.5, ...toneSx("warn"), "& .MuiChip-icon": { color: "inherit", fontSize: 16 } }} />
       )}
       {tiles.length > 0 && (
         <Stack direction="row" sx={{ flexWrap: "wrap", gap: 1.5, mt: 1.5 }}>

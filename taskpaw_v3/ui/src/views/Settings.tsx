@@ -1,10 +1,10 @@
 import {
-  Alert, Button, Card, CardContent, MenuItem, Stack, TextField, Typography,
+  Alert, Button, Card, CardContent, FormControlLabel, MenuItem, Stack, Switch, TextField, Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api } from "../api";
+import { type LlmKeySource, type LlmSlot, api } from "../api";
 import { Logo } from "../components/Logo";
 import { LANGS, type Lang, currentLang, setLang } from "../i18n";
 
@@ -35,8 +35,16 @@ export function Settings({ role }: { role: "agent" | "hub" }) {
       {/* Agent config (#43) — agent role only */}
       {role === "agent" && <ConfigSection />}
 
-      {/* Agent-level LLM API (#178) — agent role only */}
-      {role === "agent" && <LlmSection />}
+      {/* Agent-level LLM API (#178) + two optional fallbacks and the failover
+          switch (#190/#192) — agent role only */}
+      {role === "agent" && (
+        <>
+          <LlmSection slot="primary" />
+          <LlmSection slot="fallback1" />
+          <LlmSection slot="fallback2" />
+          <FailoverSection />
+        </>
+      )}
 
       {/* About */}
       <Card>
@@ -144,43 +152,57 @@ function ConfigSection() {
   );
 }
 
-type LlmForm = { llm_api_base: string; llm_model: string; llm_api_key: string };
+// Per-slot LLM wiring (#178 primary, #190 fallbacks): the config-field prefix, the
+// env var whose key wins over the stored one, and the fallback's 1-based number.
+const LLM_SLOTS: Record<LlmSlot, { prefix: string; env: string; fallback?: number }> = {
+  primary: { prefix: "llm_", env: "TASKPAW_LLM_API_KEY" },
+  fallback1: { prefix: "llm_fallback1_", env: "TASKPAW_LLM_FALLBACK1_API_KEY", fallback: 1 },
+  fallback2: { prefix: "llm_fallback2_", env: "TASKPAW_LLM_FALLBACK2_API_KEY", fallback: 2 },
+};
 
-// #178: one agent-level LLM endpoint (base URL, model, key). The key is write-only
-// here: GET reports it as "***" plus its source; an env-provided key can't be
-// edited or cleared from the UI (TASKPAW_LLM_API_KEY wins).
-function LlmSection() {
+const KEY_SOURCES: ReadonlySet<string> = new Set<LlmKeySource>(["env", "config", "none"]);
+const keySource = (v: unknown): LlmKeySource =>
+  typeof v === "string" && KEY_SOURCES.has(v) ? (v as LlmKeySource) : "none";
+
+type LlmForm = { api_base: string; model: string; api_key: string };
+
+// One LLM provider card (#178; #190 reuses it for fallback 1 / 2): base URL, model
+// and a write-only key. GET reports the key as "***" plus its source; an
+// env-provided key can't be edited or cleared from the UI (its env var wins).
+// Save / Clear / Test send only this slot's fields.
+function LlmSection({ slot }: { slot: LlmSlot }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
   const cfg = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
   const [form, setForm] = useState<LlmForm | null>(null);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const { prefix, env, fallback } = LLM_SLOTS[slot];
 
   // Seed once from the config; the key field always starts blank (blank → keep).
   useEffect(() => {
     if (cfg.data && form === null) {
       const c = cfg.data;
       setForm({
-        llm_api_base: String(c.llm_api_base ?? ""), llm_model: String(c.llm_model ?? ""),
-        llm_api_key: "",
+        api_base: String(c[`${prefix}api_base`] ?? ""), model: String(c[`${prefix}model`] ?? ""),
+        api_key: "",
       });
     }
-  }, [cfg.data, form]);
+  }, [cfg.data, form, prefix]);
 
-  const source = cfg.data?.llm_api_key_source ?? "none";
+  const source = keySource(cfg.data?.[`${prefix}api_key_source`]);
   const fromEnv = source === "env";
 
-  // Current form values; a blank key is omitted so the backend uses the stored one.
+  // This slot's form values; a blank key is omitted so the backend keeps the stored one.
   const values = () => {
     const f = form!;
-    const v: Record<string, unknown> = { llm_api_base: f.llm_api_base, llm_model: f.llm_model };
-    if (f.llm_api_key.trim()) v.llm_api_key = f.llm_api_key;
+    const v: Record<string, unknown> = { [`${prefix}api_base`]: f.api_base, [`${prefix}model`]: f.model };
+    if (f.api_key.trim()) v[`${prefix}api_key`] = f.api_key;
     return v;
   };
 
   const onSaved = (text: string) => {
     qc.invalidateQueries({ queryKey: ["agentConfig"] });
-    setForm((p) => (p ? { ...p, llm_api_key: "" } : p)); // never keep the typed key around
+    setForm((p) => (p ? { ...p, api_key: "" } : p)); // never keep the typed key around
     setMsg({ kind: "ok", text });
   };
   const onError = (e: unknown) =>
@@ -192,12 +214,12 @@ function LlmSection() {
     onError,
   });
   const clear = useMutation({
-    mutationFn: () => api.updateConfig({ llm_api_key: null }),
+    mutationFn: () => api.updateConfig({ [`${prefix}api_key`]: null }),
     onSuccess: () => onSaved(t("settings.llmCleared")),
     onError,
   });
   const test = useMutation({
-    mutationFn: () => api.llmTest(values()),
+    mutationFn: () => api.llmTest(values(), slot),
     onSuccess: (r) => {
       if (r.ok) {
         const ok = t("settings.llmTestOk", { model: r.model ?? "", latency: r.latency_ms ?? 0 });
@@ -217,22 +239,25 @@ function LlmSection() {
   return (
     <Card>
       <CardContent>
-        <Typography variant="subtitle1" sx={{ mb: 0.5 }}>{t("settings.llm")}</Typography>
+        <Typography variant="subtitle1" sx={{ mb: 0.5 }}>
+          {fallback ? t("settings.llmFallback", { n: fallback }) : t("settings.llm")}
+        </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-          {t("settings.llmHint")}
+          {fallback ? t("settings.llmFallbackHint") : t("settings.llmHint")}
         </Typography>
         {cfg.isLoading || !form ? (
           <Typography variant="body2" color="text.secondary">{t("common.loading")}</Typography>
         ) : (
           <Stack spacing={1.5}>
-            <TextField size="small" label={t("settings.llmApiBase")} value={form.llm_api_base}
-              onChange={set("llm_api_base")} placeholder="https://api.x.ai/v1" />
-            <TextField size="small" label={t("settings.llmModel")} value={form.llm_model}
-              onChange={set("llm_model")} placeholder="grok-4.3" />
+            {/* Example placeholders on the primary only: a fallback has no default provider. */}
+            <TextField size="small" label={t("settings.llmApiBase")} value={form.api_base}
+              onChange={set("api_base")} placeholder={fallback ? undefined : "https://api.x.ai/v1"} />
+            <TextField size="small" label={t("settings.llmModel")} value={form.model}
+              onChange={set("model")} placeholder={fallback ? undefined : "grok-4.3"} />
             <TextField size="small" type="password" autoComplete="off" label={t("settings.llmApiKey")}
-              value={form.llm_api_key} onChange={set("llm_api_key")} disabled={fromEnv}
+              value={form.api_key} onChange={set("api_key")} disabled={fromEnv}
               placeholder={source !== "none" ? "***" : undefined}
-              helperText={fromEnv ? t("settings.llmApiKeyEnv") : t("settings.llmApiKeyHint")} />
+              helperText={fromEnv ? t("settings.llmApiKeyEnv", { env }) : t("settings.llmApiKeyHint", { env })} />
             {msg && <Alert severity={msg.kind === "ok" ? "success" : "error"}>{msg.text}</Alert>}
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
               <Button variant="contained" disabled={writing}
@@ -250,6 +275,64 @@ function LlmSection() {
                 </Button>
               )}
             </Stack>
+          </Stack>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// #192 failover switch (`llm_failover`, default on): while the primary is
+// unavailable, lines go to the fallbacks; off → they wait for the primary (lines it
+// refuses still go to the fallbacks). Saved on toggle and applied live by the agent;
+// the switch flips back if the save fails.
+function FailoverSection() {
+  const { t } = useTranslation();
+  const qc = useQueryClient();
+  const cfg = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
+  const [on, setOn] = useState<boolean | null>(null);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  // Seed once; an agent that doesn't report the switch has it on (the default).
+  useEffect(() => {
+    if (cfg.data && on === null) setOn(cfg.data.llm_failover !== false);
+  }, [cfg.data, on]);
+
+  const save = useMutation({
+    mutationFn: (value: boolean) => api.updateConfig({ llm_failover: value }),
+    onMutate: (value) => {
+      setMsg(null);
+      setOn(value);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["agentConfig"] });
+      setMsg({ kind: "ok", text: t("settings.saved") });
+    },
+    onError: (e, value) => {
+      setOn(!value);
+      setMsg({ kind: "err", text: e instanceof Error ? e.message : String(e) });
+    },
+  });
+
+  return (
+    <Card>
+      <CardContent>
+        <Typography variant="subtitle1" sx={{ mb: 0.5 }}>{t("settings.llmFailoverTitle")}</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          {t("settings.llmFailoverHint")}
+        </Typography>
+        {cfg.isLoading || on === null ? (
+          <Typography variant="body2" color="text.secondary">{t("common.loading")}</Typography>
+        ) : (
+          <Stack spacing={1} alignItems="flex-start">
+            <FormControlLabel label={t("settings.llmFailover")}
+              control={<Switch checked={on} disabled={save.isPending}
+                onChange={(e) => save.mutate(e.target.checked)} />} />
+            {msg && (
+              <Alert severity={msg.kind === "ok" ? "success" : "error"} sx={{ alignSelf: "stretch" }}>
+                {msg.text}
+              </Alert>
+            )}
           </Stack>
         )}
       </CardContent>

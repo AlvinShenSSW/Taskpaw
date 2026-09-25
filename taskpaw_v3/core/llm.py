@@ -5,14 +5,18 @@ Jasna "AV translate" tick box (#177) and the `avsubs` task (#179) never carry
 their own credentials.
 
 - **Settings** resolve env-first (constitution §2): `TASKPAW_LLM_API_KEY` wins
-  when non-blank, else the stored `agent.yaml` key, else none.
-- **Holder**: a process-wide immutable snapshot, set at boot by the launcher and
-  after each successful Settings save (live-apply); monitors read it at call time
-  — no change to the plugin protocol.
+  when non-blank, else the stored `agent.yaml` key, else none. #190/#192 add two
+  fallback provider slots with their own env keys
+  (`TASKPAW_LLM_FALLBACK1_API_KEY`, `TASKPAW_LLM_FALLBACK2_API_KEY`).
+- **Holders**: process-wide immutable snapshots, set at boot by the launcher and
+  after each successful Settings save (live-apply); monitors read them at call
+  time — no change to the plugin protocol. `get_llm_settings()` is the primary;
+  `get_llm_chain()` the usable providers in order and `get_llm_failover()` the
+  failover switch (#192 AC1).
 - **`chat()`** is stdlib `urllib` only, never follows redirects (D10), maps every
   failure to an `LLMError` with a FIXED message (never exception text, headers or
-  body — the key must not leak, D1/D2), and logs exactly one kind/status/latency
-  line. It has no wall-clock deadline: callers that must be cancellable run it in
+  body — the key must not leak, D1/D2) plus its HTTP status and `Retry-After`
+  delta-seconds (#192 C1), and logs exactly one kind/status/latency line. It has no wall-clock deadline: callers that must be cancellable run it in
   the `llm-worker` child process (`core/llm_worker.py`).
 """
 
@@ -28,7 +32,8 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Iterable, Literal, Mapping, Optional
 
 from taskpaw_v3 import __version__
 
@@ -39,10 +44,30 @@ log = logging.getLogger("taskpaw.llm")
 
 DEFAULT_LLM_API_BASE = "https://api.x.ai/v1"
 DEFAULT_LLM_MODEL = "grok-4.3"
+# Every LLM variable of the agent's environment starts with this (the keys, and
+# the llm-worker's own base/model): children strip them all (C7, #177 AC10).
+LLM_ENV_PREFIX = "TASKPAW_LLM_"
 LLM_KEY_ENV = "TASKPAW_LLM_API_KEY"
+LLM_FALLBACK1_KEY_ENV = "TASKPAW_LLM_FALLBACK1_API_KEY"
+LLM_FALLBACK2_KEY_ENV = "TASKPAW_LLM_FALLBACK2_API_KEY"
+# C1: a Retry-After above this is ignored (None), never clamped.
+RETRY_AFTER_MAX_S = 3600
+# The `refusal` message of a blank reply: the translator retries it as a
+# transient failure at top level (#192 AC5), unlike a content-filter refusal.
+EMPTY_REPLY_MESSAGE = "empty reply"
 
 KeySource = Literal["env", "config", "none"]
 ErrorKind = Literal["auth", "rate_limit", "refusal", "network", "bad_response"]
+# #190/#192: the provider slots, in chain order.
+LLMSlot = Literal["primary", "fallback1", "fallback2"]
+LLM_SLOTS: tuple[LLMSlot, ...] = ("primary", "fallback1", "fallback2")
+LLM_SLOT_KEY_ENV: Mapping[str, str] = MappingProxyType(
+    {
+        "primary": LLM_KEY_ENV,
+        "fallback1": LLM_FALLBACK1_KEY_ENV,
+        "fallback2": LLM_FALLBACK2_KEY_ENV,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -53,18 +78,35 @@ class LLMSettings:
     key_source: KeySource
 
 
+def _check_slot(slot: object) -> None:
+    if slot not in LLM_SLOTS:
+        raise ValueError("unknown LLM slot (primary, fallback1 or fallback2)")
+
+
+def llm_slot_fields(slot: str) -> tuple[str, str, str]:
+    """The `AgentConfig` field names `(api_base, model, api_key)` of a provider
+    slot: `llm_…` for the primary, `llm_fallbackN_…` for a fallback. Raises
+    ValueError for an unknown slot."""
+    _check_slot(slot)
+    prefix = "llm_" if slot == "primary" else f"llm_{slot}_"
+    return f"{prefix}api_base", f"{prefix}model", f"{prefix}api_key"
+
+
 def resolve_llm_settings(
     api_base: str,
     model: str,
     api_key: str,
     *,
+    slot: str = "primary",
     environ: Optional[Mapping[str, str]] = None,
 ) -> LLMSettings:
-    """Env-first key resolution. A whitespace-only env var or stored key counts
+    """Env-first key resolution: the SLOT's own env var (`LLM_SLOT_KEY_ENV`) —
+    never another slot's. A whitespace-only env var or stored key counts
     as absent, and the key is always stripped (a CR/LF key would otherwise make
     http.client raise with the key in the message, D1)."""
+    _check_slot(slot)
     env = os.environ if environ is None else environ
-    env_key = str(env.get(LLM_KEY_ENV, "") or "").strip()
+    env_key = str(env.get(LLM_SLOT_KEY_ENV[slot], "") or "").strip()
     stored = str(api_key or "").strip()
     key: str
     source: KeySource
@@ -83,11 +125,28 @@ def resolve_llm_settings(
 
 
 def llm_settings_from_config(
-    config: "AgentConfig", *, environ: Optional[Mapping[str, str]] = None
+    config: "AgentConfig",
+    *,
+    slot: str = "primary",
+    environ: Optional[Mapping[str, str]] = None,
 ) -> LLMSettings:
+    base_field, model_field, key_field = llm_slot_fields(slot)
     return resolve_llm_settings(
-        config.llm_api_base, config.llm_model, config.llm_api_key, environ=environ
+        getattr(config, base_field),
+        getattr(config, model_field),
+        getattr(config, key_field),
+        slot=slot,
+        environ=environ,
     )
+
+
+def without_llm_env(base: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+    """A copy of `base` (default: the agent's environment) minus every
+    `TASKPAW_LLM_*` variable (case-insensitive) — the one filter for every
+    child that must not inherit an LLM key (the ASR child, and each llm-worker
+    before it gets its own settings, C7)."""
+    src: Mapping[str, str] = os.environ if base is None else base
+    return {k: v for k, v in src.items() if not k.upper().startswith(LLM_ENV_PREFIX)}
 
 
 def _default_settings() -> LLMSettings:
@@ -96,6 +155,8 @@ def _default_settings() -> LLMSettings:
 
 _holder_lock = threading.Lock()
 _holder: LLMSettings = _default_settings()
+_chain: tuple[LLMSettings, ...] = ()
+_failover = True
 
 
 def set_llm_settings(settings: LLMSettings) -> None:
@@ -112,20 +173,54 @@ def get_llm_settings() -> LLMSettings:
         return _holder
 
 
+def set_llm_chain(chain: Iterable[LLMSettings], *, failover: bool = True) -> None:
+    """Publish the provider chain and the failover switch together (#192 AC1;
+    boot + after each successful save). `chain` = the USABLE providers in slot
+    order, deduplicated by label — built by `subs.translate.llm_chain_from_config`,
+    which owns the usable rule (`needs_llm_key`) and the label (`model_label`)."""
+    global _chain, _failover
+    snapshot = tuple(chain)
+    with _holder_lock:
+        _chain, _failover = snapshot, bool(failover)
+
+
+def get_llm_chain() -> tuple[LLMSettings, ...]:
+    """The usable providers in order (primary → fallback 1 → fallback 2). Empty
+    before the launcher initialises it and whenever no provider is usable."""
+    with _holder_lock:
+        return _chain
+
+
+def get_llm_failover() -> bool:
+    """The failover switch (#192 §4); True (the default) before init."""
+    with _holder_lock:
+        return _failover
+
+
 def reset_llm_settings() -> None:
-    """Test hook (autouse fixture, D8): back to the pre-init defaults."""
+    """Test hook (autouse fixture, D8): every holder back to its pre-init
+    default — the primary, an empty chain, failover on."""
     set_llm_settings(_default_settings())
+    set_llm_chain((), failover=True)
 
 
 class LLMError(Exception):
     """The only exception `chat()` raises. `message` is always one of a fixed set
-    of strings — never exception text, headers or body content (D1)."""
+    of strings — never exception text, headers or body content (D1).
+    `retry_after` is a server's `Retry-After` in delta-seconds (C1), else None."""
 
-    def __init__(self, kind: ErrorKind, message: str, status: Optional[int] = None):
+    def __init__(
+        self,
+        kind: ErrorKind,
+        message: str,
+        status: Optional[int] = None,
+        retry_after: Optional[int] = None,
+    ):
         super().__init__(message)
         self.kind: ErrorKind = kind
         self.message = message
         self.status = status
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -149,20 +244,39 @@ _DEFAULT_OPENER = urllib.request.build_opener(_NoRedirect())
 # finish_reason values echoed into an error message must look like an enum token;
 # anything else is server-controlled text and is reported generically.
 _FINISH_TOKEN = re.compile(r"[A-Za-z0-9_\-]{1,40}")
+# Retry-After as delta-seconds: ASCII digits only (an HTTP-date is ignored, C1).
+_DELTA_SECONDS = re.compile(r"[0-9]{1,10}")
 
 
 def _envelope_error() -> LLMError:
     return LLMError("bad_response", "invalid response")
 
 
-def _http_error(code: int) -> LLMError:
+def _retry_after(headers: Any) -> Optional[int]:
+    """C1: the `Retry-After` header as delta-seconds in 0–`RETRY_AFTER_MAX_S`,
+    else None — an HTTP-date, a sign, a fraction, non-ASCII digits or a value
+    over the bound are ignored (never clamped)."""
+    raw = headers.get("Retry-After") if headers is not None else None
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not _DELTA_SECONDS.fullmatch(value):
+        return None
+    seconds = int(value)
+    return seconds if seconds <= RETRY_AFTER_MAX_S else None
+
+
+def _http_error(code: int, headers: Any = None) -> LLMError:
+    retry_after = _retry_after(headers)
     if code in (401, 403):
-        return LLMError("auth", "authentication failed", code)
+        return LLMError("auth", "authentication failed", code, retry_after)
     if code == 429:
-        return LLMError("rate_limit", "rate limited", code)
+        return LLMError("rate_limit", "rate limited", code, retry_after)
     if 300 <= code < 400:
-        return LLMError("bad_response", f"HTTP {code} redirect not followed", code)
-    return LLMError("bad_response", f"HTTP {code}", code)
+        return LLMError(
+            "bad_response", f"HTTP {code} redirect not followed", code, retry_after
+        )
+    return LLMError("bad_response", f"HTTP {code}", code, retry_after)
 
 
 def _is_timeout(e: BaseException) -> bool:
@@ -190,7 +304,7 @@ def _send(settings: LLMSettings, data: bytes, timeout: float, opener: Any) -> by
         with opener.open(request, timeout=timeout) as resp:
             return resp.read()
     except urllib.error.HTTPError as e:  # before URLError/OSError: it is both
-        raise _http_error(e.code) from None
+        raise _http_error(e.code, e.headers) from None
     except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
         # URLError (DNS/refused), socket timeout, reset, IncompleteRead,
         # BadStatusLine, RemoteDisconnected… (D2).
@@ -248,7 +362,7 @@ def _parse(
     if not isinstance(content, str):
         raise _envelope_error()
     if not content.strip():
-        raise LLMError("refusal", "empty reply")
+        raise LLMError("refusal", EMPTY_REPLY_MESSAGE)
     return ChatResult(content, "stop", served, _elapsed_ms(started))
 
 
