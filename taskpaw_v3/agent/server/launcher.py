@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from taskpaw_v3 import __version__
 from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.datadir import set_data_dir
@@ -31,6 +32,7 @@ from taskpaw_v3.core.net import (  # re-export
 )
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.core.state import load_next_id, save_next_id
+from taskpaw_v3.core.tasklog import TaskLog, set_task_log
 from taskpaw_v3.monitors.runtime import (
     effective_monitors,  # re-export (moved to runtime)
 )
@@ -126,6 +128,17 @@ def run_agent(
         net_sock.close()
         raise
 
+    # #196 L19: no store scan/append until reclaim AND both claims succeeded.
+    task_log = TaskLog(config_path.parent if config_path is not None else None)
+    set_task_log(task_log)
+    previous = task_log.reconcile()
+    task_log.record(
+        "",
+        "agent.started",
+        task_type="agent",
+        data={"version": __version__, **previous},
+    )
+
     # Auth-disabled visibility (#145): the guard above already refuses a
     # non-loopback bind with no token, so reaching here with auth off means a
     # loopback-only API. Warn loudly (only now the service is actually starting —
@@ -140,7 +153,17 @@ def run_agent(
             config.bind_host,
         )
 
-    queue = queue or build_queue(config, state_path)
+    queue = queue if queue is not None else build_queue(config, state_path)
+
+    def _log_failure(message: str) -> None:
+        queue.add(
+            monitor="tasklog",
+            message=message,
+            level="alert",
+            title="Task log write failed",
+        )
+
+    task_log.set_on_first_failure(_log_failure)
     shutdown = shutdown or GracefulShutdown()
 
     # Build + start the monitor supervisor from the effective monitor list
@@ -230,6 +253,11 @@ def run_agent(
                 pass
 
     shutdown.register("agent-servers", _stop_servers)
+    # Callbacks are LIFO: log before servers and supervisor stop (N3/W5).
+    shutdown.register(
+        "agent-tasklog",
+        lambda: task_log.record("", "agent.stopping", task_type="agent"),
+    )
     shutdown.install_signal_handlers()
 
     net_thread.start()

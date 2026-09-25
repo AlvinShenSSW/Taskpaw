@@ -520,3 +520,186 @@ def test_lada_registered():
     assert reg.has("lada")
     p = reg.get("lada")
     assert p.type_id == "lada" and p.system is False
+
+
+def _tasklog(kind=None):
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    rows = list(get_task_log()._ring)
+    return [r for r in rows if kind is None or r["kind"] == kind]
+
+
+def test_tasklog_lada_capture_and_last_exit(monkeypatch):
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    cfg = _cfg(
+        lada_cli_path="lada.exe",
+        lada_input_folder="in",
+        lada_output_folder="out",
+        lada_capture_progress=True,
+        lada_gpu_monitor=False,
+    )
+    proc = _ExitedProcess("a.mp4:\n50%\nb.mp4:\n", 0)
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: proc)
+    inst = LadaInstance("l", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    inst._reader.join(2)
+    inst.check(emit)
+    inst.check(emit)
+    assert [r["film"] for r in _tasklog("restore.started")] == ["a.mp4", "b.mp4"]
+    assert [r["film"] for r in _tasklog("restore.finished")] == ["a.mp4", "b.mp4"]
+    assert len(_tasklog("task.started")) == len(_tasklog("task.done")) == 1
+
+
+def test_tasklog_lada_non_capture_has_no_files(monkeypatch):
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    cfg = _cfg(
+        lada_cli_path="lada.exe",
+        lada_input_folder="in",
+        lada_output_folder="out",
+        lada_gpu_monitor=False,
+    )
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: _ExitedProcess("", 0))
+    inst = LadaInstance("l", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    inst.check(emit)
+    assert _tasklog("task.started") and _tasklog("task.done")
+    assert not any(r["kind"].startswith("restore.") for r in _tasklog())
+
+
+def test_tasklog_lada_failed_capture_and_stop(monkeypatch):
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    cfg = _cfg(
+        lada_cli_path="lada.exe",
+        lada_input_folder="in",
+        lada_output_folder="out",
+        lada_capture_progress=True,
+        lada_gpu_monitor=False,
+    )
+    proc = _ExitedProcess("a.mp4:\n", 7)
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: proc)
+    inst = LadaInstance("l", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    inst._reader.join(2)
+    inst.stop()
+    inst.stop()
+    row = _tasklog("restore.failed")[0]
+    assert row["film"] == "a.mp4" and row["data"]["exit_code"] == 7
+    assert row["data"]["at_stop"] is True
+    assert len(_tasklog("restore.failed")) == 1
+    assert not _tasklog("task.interrupted")
+
+
+def test_tasklog_lada_error_header_never_finishes_failed_file(monkeypatch):
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    cfg = _cfg(
+        lada_cli_path="lada.exe",
+        lada_input_folder="in",
+        lada_output_folder="out",
+        lada_capture_progress=True,
+        lada_gpu_monitor=False,
+    )
+    proc = _ExitedProcess("a.mp4:\nERROR: failed\nb.mp4:\n", 0)
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: proc)
+    inst = LadaInstance("l", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    inst._reader.join(2)
+    inst.check(emit)
+    assert [r["film"] for r in _tasklog("restore.failed")] == ["a.mp4"]
+    assert [r["film"] for r in _tasklog("restore.finished")] == ["b.mp4"]
+    assert _tasklog("task.done")[0]["data"]["failed"] == 1
+
+
+def test_tasklog_lada_launch_error_safe(monkeypatch):
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    def fail(*args, **kwargs):
+        raise OSError("PLANTED_SECRET --private-argv https://user:pass@host:4321")
+
+    monkeypatch.setattr(L.subprocess, "Popen", fail)
+    cfg = _cfg(
+        lada_cli_path="lada.exe",
+        lada_input_folder="in",
+        lada_output_folder="out",
+        lada_gpu_monitor=False,
+    )
+    inst = LadaInstance("l", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    assert len(_tasklog("task.error")) == 1
+    assert "PLANTED_SECRET" not in str(_tasklog())
+
+
+def test_tasklog_lada_passive_run(monkeypatch):
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    seq = iter([True, True, False])
+    monkeypatch.setattr(L, "process_alive", lambda _: next(seq))
+    inst = LadaInstance("l", _cfg(lada_gpu_monitor=False))
+    _, emit = _events()
+    inst.start(emit)
+    for _ in range(3):
+        inst.check(emit)
+    assert len(_tasklog("task.started")) == len(_tasklog("task.done")) == 1
+    assert not any(r["kind"].startswith("restore.") for r in _tasklog())
+
+
+def test_tasklog_lada_late_reader_closes_last_file(monkeypatch):
+    import threading
+
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    entered, release = threading.Event(), threading.Event()
+    proc = _ExitedProcess("a.mp4:\n", 0)
+    original = proc.stdout.read
+
+    def delayed(n):
+        entered.set()
+        assert release.wait(3)
+        return original(n)
+
+    proc.stdout.read = delayed
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: proc)
+    cfg = _cfg(
+        lada_cli_path="lada.exe",
+        lada_input_folder="in",
+        lada_output_folder="out",
+        lada_capture_progress=True,
+        lada_gpu_monitor=False,
+    )
+    inst = LadaInstance("l", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    assert entered.wait(2)
+    inst.check(emit)
+    release.set()
+    inst._reader.join(3)
+    assert len(_tasklog("restore.started")) == len(_tasklog("restore.finished")) == 1
+
+
+def test_tasklog_lada_failed_run(monkeypatch):
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    cfg = _cfg(
+        lada_cli_path="lada.exe",
+        lada_input_folder="in",
+        lada_output_folder="out",
+        lada_capture_progress=True,
+        lada_gpu_monitor=False,
+    )
+    proc = _ExitedProcess("a.mp4:\n", 7)
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: proc)
+    inst = LadaInstance("l", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    inst._reader.join(2)
+    inst.check(emit)
+    assert len(_tasklog("restore.failed")) == len(_tasklog("task.aborted")) == 1
+    assert not _tasklog("task.done")

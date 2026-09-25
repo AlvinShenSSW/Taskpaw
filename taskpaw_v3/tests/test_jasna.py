@@ -1532,3 +1532,145 @@ def test_create_builds_a_jasna_instance(tmp_path):
     cfg, _inp, _out, _home = _managed(tmp_path)
     inst = JasnaPlugin().create("j1", cfg)
     assert isinstance(inst, JasnaInstance)
+
+
+def _tasklog(kind=None):
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    rows = list(get_task_log()._ring)
+    return [r for r in rows if kind is None or r["kind"] == kind]
+
+
+@pytest.mark.parametrize("path", ["normal", "stopping", "stop"])
+def test_tasklog_restore_publish_paths(tmp_path, monkeypatch, path):
+    cfg, inp, out, _ = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([0])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    if path == "stop":
+        inst.stop()
+    else:
+        if path == "stopping":
+            inst._stopping.set()
+        inst.check(emit)
+    assert len(_tasklog("restore.started")) == 1
+    assert len(_tasklog("restore.finished")) == 1
+    row = _tasklog("restore.finished")[0]
+    assert row["film"] == "a.mp4"
+    assert row["data"]["output"] == "a-\u7834\u89e3.mp4"
+    assert row["data"]["duration"] >= 0
+    assert not _tasklog("task.interrupted")
+    if path == "normal":
+        inst.check(emit)
+        assert len(_tasklog("task.done")) == 1
+    inst.stop()
+
+
+@pytest.mark.parametrize("rc", [None, 7])
+def test_tasklog_restore_stop_live_or_failed(tmp_path, monkeypatch, rc):
+    cfg, inp, _, _ = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([rc])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    inst.stop()
+    inst.stop()
+    if rc is None:
+        rows = _tasklog("task.interrupted")
+        assert len(rows) == 1 and rows[0]["data"]["step"] == "restore"
+    else:
+        assert not _tasklog("task.interrupted")
+        assert _tasklog("restore.failed")[0]["data"]["at_stop"] is True
+        assert len(_tasklog("restore.failed")) == 1
+
+
+def test_tasklog_restore_retry_abort_and_errors(tmp_path, monkeypatch):
+    cfg, inp, _, _ = _managed(tmp_path, unet4x_1080p=False)
+    _videos(inp, "a.mp4", "b.mp4", "c.mp4")
+    launcher = _Launcher([1] * 6)
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    for _ in range(8):
+        inst.check(emit)
+    assert len(_tasklog("restore.failed")) == 6
+    assert len(_tasklog("restore.retry")) == 3
+    assert len(_tasklog("task.aborted")) == 1
+    assert not _tasklog("task.done")
+    inst.stop()
+
+
+def test_tasklog_gpu_wait_acquire_only_at_spawn(tmp_path, monkeypatch):
+    from taskpaw_v3.core import gpu_lease
+
+    cfg, inp, _, _ = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    _patch(monkeypatch, _Launcher([None]))
+    other = ("other", 1)
+    gpu_lease.try_acquire(other, 5, label="other task")
+    inst = JasnaInstance("j", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    inst.check(emit)
+    assert len(_tasklog("task.gpu_wait")) == 1
+    assert _tasklog("task.gpu_wait")[0]["data"]["holder"] == "other task"
+    gpu_lease.release(other)
+    inst.check(emit)
+    assert len(_tasklog("task.gpu_acquired")) == 1
+    inst.stop()
+    assert len(_tasklog("task.gpu_acquired")) == 1
+
+
+def test_tasklog_restore_skips_and_setup_errors(tmp_path, monkeypatch):
+    cfg, inp, out, _ = _managed(tmp_path)
+    _videos(inp, "a.mp4", "b.mp4", "b.mkv")
+    output_path_for(str(out), inp / "a.mp4").write_bytes(b"done")
+    _patch(monkeypatch, _Launcher([None]))
+    monkeypatch.setattr(J, "find_ffprobe", lambda _: None)
+    inst = JasnaInstance("j", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    assert len(_tasklog("restore.skipped")) == 2
+    assert {r["data"]["reason"] for r in _tasklog("task.error")} == {
+        "ffprobe_missing",
+        "name_collision",
+    }
+    assert _tasklog("task.started")[0]["data"] == {"queued": 1, "done": 1, "skipped": 1}
+    inst.stop()
+
+
+def test_tasklog_restore_and_translation_stop_snapshot(tmp_path, monkeypatch):
+    from test_jasna_subs import _setup
+
+    h = _setup(tmp_path, monkeypatch, pending=("a.mp4",), rcs=[None])
+    h.inst.start(h.emit)
+    h.translators[0].live = {"job_id": "previous.mp4", "elapsed_s": 8}
+    h.inst.stop()
+    assert {r["data"]["step"] for r in _tasklog("task.interrupted")} == {
+        "restore",
+        "translate",
+    }
+
+
+def test_tasklog_jasna_launch_error_no_secret(tmp_path, monkeypatch):
+    cfg, inp, _, _ = _managed(tmp_path, jasna_extra_args="--device PLANTED_SECRET")
+    _videos(inp, "a.mp4")
+
+    def fail(*args, **kwargs):
+        raise OSError("PLANTED_SECRET https://user:pass@host:4321 --private-argv")
+
+    _patch(monkeypatch, fail)
+    inst = JasnaInstance("j", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    assert _tasklog("task.error")
+    assert "PLANTED_SECRET" not in str(_tasklog())
+    assert "user:pass" not in str(_tasklog())
+    assert not _tasklog("restore.started")
+    inst.stop()

@@ -27,6 +27,7 @@ from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.llm import LLM_SLOTS, llm_slot_fields, resolve_llm_settings
 from taskpaw_v3.core.protocol import EventQueue
+from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import effective_monitors, monitor_name
 
@@ -157,6 +158,34 @@ def create_control_app(
             return {"events": []}
         events = events_provider(limit, monitor) if monitor else events_provider(limit)
         return {"events": events}
+
+    @app.get("/control/logs")
+    def control_logs(
+        day: Optional[str] = None,
+        task: Optional[str] = None,
+        severity: Optional[str] = None,
+        q: str = "",
+        before: Optional[str] = None,
+        after: Optional[str] = None,
+        limit: int = 200,
+        days: bool = False,
+    ):
+        store = get_task_log()
+        try:
+            return store.query(
+                day=day,
+                task=task,
+                severity=severity,
+                q=q,
+                before=before,
+                after=after,
+                limit=limit,
+                days=days,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"boot": store.boot, "error": str(exc)}, status_code=400
+            )
 
     @app.get("/control/plugins")
     def plugins() -> dict:

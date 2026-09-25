@@ -39,6 +39,7 @@ DEDUPE_MAX = 10_000
 # (instance_id, level, title, message, data, dedupe_key) — instance_id is the
 # STABLE monitor name (used as the event's `monitor` field), title is display text.
 EventSink = Callable[[str, str, str, str, Optional[dict], Optional[str]], None]
+EventObserver = Callable[[str, str, str, str, str], None]
 
 
 class _BoundedKeySet:
@@ -79,9 +80,14 @@ class _Managed:
 
 class Supervisor:
     def __init__(
-        self, sink: EventSink, clock: Callable[[], float] = time.monotonic
+        self,
+        sink: EventSink,
+        clock: Callable[[], float] = time.monotonic,
+        *,
+        observer: EventObserver | None = None,
     ) -> None:
         self._sink = sink
+        self._observer = observer
         self._clock = clock
         self._lock = threading.RLock()  # guards _monitors + emit state
         self._life = threading.RLock()  # serializes lifecycle ops
@@ -393,19 +399,41 @@ class Supervisor:
                 m.last_emit_window = window
                 m.emit_count = 0
         if folded is not None:
-            self._safe_sink(instance_id, "warn", folded[0], folded[1], None, None)
+            self._safe_sink(
+                instance_id,
+                "warn",
+                folded[0],
+                folded[1],
+                None,
+                None,
+                task_type=m.plugin.type_id,
+            )
 
     def _safe_sink(
-        self, instance_id, level, title, message, data=None, dedupe_key=None
+        self,
+        instance_id,
+        level,
+        title,
+        message,
+        data=None,
+        dedupe_key=None,
+        *,
+        task_type="",
     ) -> bool:
         """Call the sink, isolating its exceptions (a bad sink must not degrade a
         healthy monitor or lose-then-suppress later events). Returns success."""
         try:
             self._sink(instance_id, level, title, message, data, dedupe_key)
-            return True
         except Exception as e:
             log.error("event sink failed (%s): %s", title, e)
             return False
+        if self._observer is not None:
+            try:
+                self._observer(instance_id, task_type, level, title, message)
+            except Exception as e:
+                # Observation cannot change delivery/dedupe or degrade a monitor.
+                log.warning("event observer failed: %s", type(e).__name__)
+        return True
 
     def _emit(
         self, instance_id, level, title, message, data=None, dedupe_key=None
@@ -433,15 +461,30 @@ class Supervisor:
             else:
                 m.emit_count += 1
                 deliver = True
+            task_type = m.plugin.type_id
         # Sink calls happen OUTSIDE the lock (a blocking sink must not stall
         # lifecycle ops) and are exception-isolated.
         if folded_msg is not None:
             self._safe_sink(
-                instance_id, "warn", folded_msg[0], folded_msg[1], None, None
+                instance_id,
+                "warn",
+                folded_msg[0],
+                folded_msg[1],
+                None,
+                None,
+                task_type=task_type,
             )
         if deliver:
             if (
-                self._safe_sink(instance_id, level, title, message, data, dedupe_key)
+                self._safe_sink(
+                    instance_id,
+                    level,
+                    title,
+                    message,
+                    data,
+                    dedupe_key,
+                    task_type=task_type,
+                )
                 and dedupe_key is not None
             ):
                 with self._lock:

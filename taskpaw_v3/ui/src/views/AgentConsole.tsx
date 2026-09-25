@@ -10,7 +10,7 @@ import { api, type MonitorSnapshot, type PluginInfo, type PresetInfo } from "../
 import { StatusDot } from "../components/StatusDot";
 import { SkeletonRows } from "../components/SkeletonRows";
 import { MonitorMetrics } from "../components/MonitorMetrics";
-import { EventLog } from "../components/EventLog";
+import { TaskLog, TaskLogRows } from "../components/TaskLog";
 import { MonitorSelector } from "../components/MonitorSelector";
 import { MonitorWizard } from "./MonitorWizard";
 import { Settings } from "./Settings";
@@ -44,12 +44,7 @@ export function AgentConsole() {
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<null | { mode: "add" } | { mode: "edit"; name: string }>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"monitors" | "events" | "settings">("monitors");
-  // Recent local events for the event-log tab (#44); only poll while it's open.
-  const events = useQuery({
-    queryKey: ["agentEvents"], queryFn: () => api.agentEvents(),
-    refetchInterval: 5000, enabled: tab === "events",
-  });
+  const [tab, setTab] = useState<"monitors" | "logs" | "settings">("monitors");
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["agentStatus"] });
@@ -68,7 +63,7 @@ export function AgentConsole() {
     <Stack spacing={1.5}>
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ minHeight: 0 }}>
         <Tab value="monitors" label={t("agent.monitors")} />
-        <Tab value="events" label={t("agent.events")} />
+        <Tab value="logs" label={t("logs.title")} />
         <Tab value="settings" label={t("settings.title")} />
       </Tabs>
 
@@ -78,24 +73,12 @@ export function AgentConsole() {
 
       {tab === "settings" ? (
         <Settings role="agent" />
+      ) : tab === "logs" ? (
+        <TaskLog tasks={names} />
       ) : status.isLoading ? (
         <Card><CardContent><SkeletonRows rows={5} /></CardContent></Card>
       ) : status.error ? (
         <Alert severity="error">{t("agent.unreachable", { error: String(status.error) })}</Alert>
-      ) : tab === "events" ? (
-        <Card>
-          <CardContent>
-            <Stack direction="row" alignItems="baseline" justifyContent="space-between">
-              <Typography variant="overline" color="text.secondary">
-                {t("agent.recentEvents", { machine: status.data?.machine })}
-              </Typography>
-              {events.isFetching && (
-                <Typography variant="caption" color="text.secondary">{t("common.updating")}</Typography>
-              )}
-            </Stack>
-            <EventLog events={events.data?.events} />
-          </CardContent>
-        </Card>
       ) : names.length === 0 ? (
         // Empty state: the one place a prominent CTA appears (design).
         <Card><CardContent>
@@ -172,24 +155,23 @@ export function AgentConsole() {
   );
 }
 
-// Inline recent-events panel shown beside the hero metrics (#136): the hero has
-// room, and recent events are the most useful fill. Scoped to the hero's monitor
-// via the backend `monitor` filter (#130), so the panel shows what's happening on
-// the monitor you're looking at rather than the whole agent's stream.
+// Last eight task log entries across days, beside the hero metrics (#130/#196).
 function InlineEvents({ monitor }: { monitor: string }) {
   const { t } = useTranslation();
-  const events = useQuery({
-    queryKey: ["agentEvents", "inline", monitor],
-    queryFn: () => api.agentEvents(8, monitor),
+  const logs = useQuery({
+    queryKey: ["taskLogs", "inline", monitor],
+    queryFn: () => api.logs({ task: monitor, limit: 8 }),
     refetchInterval: 5000,
   });
   return (
     <Card sx={{ height: "100%" }}>
       <CardContent>
         <Typography variant="overline" color="text.secondary">
-          {t("agent.recentEventsShort")}
+          {t("logs.recent")}
         </Typography>
-        <EventLog events={events.data?.events} />
+        {logs.isLoading ? <SkeletonRows rows={3} /> : logs.error ?
+          <Alert severity="error">{t("logs.failed")}</Alert> :
+          <TaskLogRows key={`${monitor}-${logs.data?.boot}`} entries={logs.data?.entries} compact />}
       </CardContent>
     </Card>
   );

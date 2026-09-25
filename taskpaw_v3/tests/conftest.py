@@ -40,6 +40,16 @@ def _data_dir_isolation():
 
 
 @pytest.fixture(autouse=True)
+def _task_log_isolation():
+    """#196: a fresh memory-only holder; never resolve the real app data dir."""
+    from taskpaw_v3.core.tasklog import set_task_log
+
+    set_task_log(None)
+    yield
+    set_task_log(None)
+
+
+@pytest.fixture(autouse=True)
 def _gpu_lease_isolation():
     """A fresh process-wide GPU lease per test (#179, D3): no holder, waiter or
     reservation leaks between tests. It runs on the real monotonic clock; a test

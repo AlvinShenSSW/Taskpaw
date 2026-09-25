@@ -17,6 +17,47 @@ from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
 
 
+def test_tasklog_control_api_shapes_filters_clamp_and_network_absence():
+    from datetime import datetime, timedelta, timezone
+
+    from taskpaw_v3.core.tasklog import TaskLog, set_task_log
+
+    now = [datetime(2026, 9, 26, 23, 59, tzinfo=timezone.utc)]
+    store = TaskLog(clock=lambda: now[0])
+    set_task_log(store)
+    store.record(
+        "a",
+        "restore.started",
+        task_type="jasna",
+        film="Film\ud800",
+        data={"model": "Grok", "n": float("nan")},
+    )
+    now[0] += timedelta(minutes=2)
+    for _ in range(502):
+        store.record("b", "task.done", task_type="jasna", severity="warn")
+    cfg = AgentConfig(server_id="s", machine="m")
+    client = TestClient(create_control_app(cfg))
+    response = client.get(
+        "/control/logs",
+        params={"day": "20260926", "q": "grok", "severity": "info,error"},
+    )
+    assert response.status_code == 200
+    assert response.json()["boot"] == store.boot
+    assert response.json()["entries"][0]["film"] == "Film\\ud800"
+    assert len(client.get("/control/logs?limit=900").json()["entries"]) == 500
+    assert len(client.get("/control/logs?limit=0").json()["entries"]) == 1
+    assert len(client.get("/control/logs?task=a").json()["entries"]) == 1
+    page = client.get("/control/logs?after=20260926-1&limit=2").json()
+    assert [r["id"] for r in page["entries"]] == ["20260927-1", "20260927-2"]
+    assert client.get("/control/logs?days=true").json()["days"][0] == {
+        "day": "20260927",
+        "count": 502,
+    }
+    assert client.get("/control/logs?day=../../secret").status_code == 400
+    net = TestClient(create_network_app(cfg, EventQueue("m")))
+    assert net.get("/control/logs").status_code == 404
+
+
 def _cfg(**kw):
     return AgentConfig(server_id="s1", machine="dev", **kw)
 

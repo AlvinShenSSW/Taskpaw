@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
+from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.supervisor import Supervisor
 
@@ -138,7 +139,20 @@ def build_supervisor(
     authority). Unknown type_ids and invalid configs raise — the caller decides
     whether to fail the whole agent or skip the bad monitor.
     """
-    sup = Supervisor(sink=make_queue_sink(queue, machine))
+    task_log = get_task_log()
+
+    def observe(
+        instance_id: str, task_type: str, level: str, title: str, message: str
+    ) -> None:
+        task_log.record(
+            instance_id,
+            "event.mirrored",
+            task_type=task_type,
+            severity={"alert": "error", "warn": "warn"}.get(level, "info"),
+            data={"level": level, "title": title, "message": message},
+        )
+
+    sup = Supervisor(sink=make_queue_sink(queue, machine), observer=observe)
     for spec in monitors:
         # An explicitly disabled monitor stays in config but is NOT started (#57).
         # Default (key absent) = enabled, so existing configs are unaffected.

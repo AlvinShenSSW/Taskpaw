@@ -105,6 +105,7 @@ from taskpaw_v3.core.llm_worker import (
     worker_argv,
     worker_env,
 )
+from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.subs.checkpoint import CheckpointStore, SavedCue
 from taskpaw_v3.monitors.subs.child import ChildProcess, Eof
 from taskpaw_v3.monitors.subs.srt import Cue
@@ -449,6 +450,7 @@ class _Provider:
     level: int = 0
     probe_ok_at: Optional[float] = None
     alerted: bool = False
+    last_fail_kind: Optional[str] = None
     retired: bool = False  # left the chain (H2): never asked again
 
 
@@ -481,6 +483,9 @@ class _Film:
     batches_total: int = 0
     deferred_total: float = 0.0
     deferred_since: Optional[float] = None
+    log_started: bool = False
+    last_provider: Optional[_Provider] = None
+    left_open: set[str] = field(default_factory=set)
     finished: bool = False  # its result is (about to be) on `results`
 
     def deferred_for(self, now: float) -> float:
@@ -505,6 +510,7 @@ class Translator:
         run: RunId,
         *,
         name: str,
+        task_type: str = "avsubs",
         spawn: Callable[..., ChildProcess] = ChildProcess,
         chain_fn: Callable[[], Sequence[LLMSettings]] = get_llm_chain,
         failover_fn: Callable[[], bool] = get_llm_failover,
@@ -522,6 +528,7 @@ class Translator:
         True when cancelled — the default wakes on cancel() and submit()."""
         self._run = run
         self._name = name
+        self._task_type = task_type
         self._spawn = spawn
         self._chain_fn = chain_fn
         self._failover_fn = failover_fn
@@ -552,6 +559,31 @@ class Translator:
         self._thread: Optional[threading.Thread] = None
 
     # ── public API ───────────────────────────────────────────────────────
+    def _record(
+        self, event_kind: str, film: Optional[_Film] = None, **data: Any
+    ) -> None:
+        get_task_log().record(
+            self._name,
+            event_kind,
+            task_type=self._task_type,
+            film=film.req.job_id if film is not None else None,
+            severity="warn"
+            if event_kind in {"translate.provider_down", "translate.paused"}
+            else "info",
+            data=data,
+        )
+
+    def _log_start(self, film: _Film, model: Optional[str]) -> None:
+        if not film.log_started:
+            film.log_started = True
+            self._record(
+                "translate.started",
+                film,
+                model=model,
+                lines=len(film.states),
+                resumed=film.n_resumed,
+            )
+
     def start(self) -> None:
         if self._thread is not None:
             return
@@ -804,6 +836,22 @@ class Translator:
         never report nothing while its result is not yet on `results`."""
         if self._cancel.is_set():
             raise _Cancelled
+        self._log_start(film, None)
+        if result.outcome == "translated":
+            by_model: dict[str, int] = {}
+            for st in film.states:
+                if st.by is not None and st.zh is not None and not st.blank:
+                    by_model[st.by] = by_model.get(st.by, 0) + 1
+            self._record(
+                "translate.finished",
+                film,
+                lines=len(result.zh_cues),
+                by_model=by_model,
+                kept_ja=result.kept_ja,
+                duration=max(0.0, self._clock() - film.started_at),
+            )
+        elif result.outcome == "paused":
+            self._record("translate.paused", film, minutes=120)
         with self._count_lock:
             film.finished = True  # progress() stops reporting it now
         self.results.put(result)
@@ -814,12 +862,14 @@ class Translator:
                 self._deferred.remove(film)
 
     def _defer(self, film: _Film) -> None:
+        self._log_start(film, None)
         with self._count_lock:
             film.deferred_since = self._clock()
             self._deferred.append(film)
             if self._working is film:
                 self._working = None
             left = len(film.states) - film.n_done - film.n_kept
+        self._record("translate.deferred", film, lines=left)
         log.info(
             "subs-translate %s: film deferred — no translation service for its "
             "%d open line(s)",
@@ -833,6 +883,7 @@ class Translator:
             film.deferred_since = None
             self._deferred.remove(film)
             self._working = film
+        self._record("translate.resumed", film)
 
     def _next_film(self) -> Optional[_Film]:
         """The next film to work: a deferred one that a provider can take
@@ -1042,6 +1093,7 @@ class Translator:
         fail = self._probe(p, cached=False)
         if fail is None:
             p.open_until, p.level = None, 0
+            self._record("translate.provider_up", model=p.label)
             log.info("subs-translate %s: %s is available again", self._name, p.label)
         else:
             self._open(p, fail)
@@ -1053,6 +1105,13 @@ class Translator:
         cool = BREAKER_S[p.level - 1]
         p.open_until = self._clock() + cool
         p.probe_ok_at = None
+        p.last_fail_kind = fail.kind
+        self._record(
+            "translate.provider_down",
+            model=p.label,
+            reason=fail.kind,
+            minutes=int(cool // 60),
+        )
         log.warning(
             "subs-translate %s: %s unavailable (probe kind=%s status=%s); "
             "tried again in %d min",
@@ -1236,6 +1295,7 @@ class Translator:
                 len(failed),
                 p.label,
             )
+            self._record("translate.refused", film, model=p.label, lines=len(failed))
             if persist:
                 self._save(film)
         elif _shrinks_batch(trigger) and len(idx) > 1:
@@ -1315,8 +1375,29 @@ class Translator:
             "context": [c.text for c in cues[max(0, first - CONTEXT_SIZE) : first]],
         }
         chars = sum(len(cues[i].text) for i in idx)
+        switch: Optional[dict[str, Any]] = None
         with self._count_lock:
+            previous = film.last_provider
+            if previous is not None and previous.label != p.label:
+                reason = None
+                if previous.open_until is not None:
+                    reason = "unavailable"
+                    film.left_open.add(previous.label)
+                elif p.label in film.left_open and p.open_until is None:
+                    reason = "recovered"
+                    film.left_open.remove(p.label)
+                elif previous.retired or previous not in self._chain:
+                    reason = "changed"
+                if reason is not None:
+                    switch = {"from": previous.label, "to": p.label, "reason": reason}
+                    if reason == "unavailable":
+                        switch["kind"] = previous.last_fail_kind
             film.model = p.label
+            film.last_provider = p
+        # Logging is push-only; file I/O never holds the status/submit lock.
+        self._log_start(film, p.label)
+        if switch is not None:
+            self._record("translate.switched", film, **switch)
         got = self._send(
             p, _messages(user), min(MAX_TOKENS, 64 + 8 * chars), film.req.job_id
         )

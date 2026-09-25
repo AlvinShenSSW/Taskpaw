@@ -93,6 +93,7 @@ from taskpaw_v3.core import gpu_lease
 from taskpaw_v3.core.datadir import get_data_dir
 from taskpaw_v3.core.generation import next_generation
 from taskpaw_v3.core.llm import get_llm_chain
+from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -1135,6 +1136,11 @@ class JasnaInstance(MonitorInstance):
         self._subs_job: Optional[SubsJob] = None
         self._translator: Optional[Translator] = None
         self._jobs: dict[str, SubsJob] = {}
+        self._log_started_at = time.monotonic()
+        self._log_restore_at = self._log_started_at
+        self._log_gpu_wait = False
+        self._log_stopped = False
+        self._log_bulk = False
         self._settled: dict[str, tuple[str, str]] = {}
         # #189: per-film step outcomes, marked at the counter points; its films
         # are added only with AV 翻译 on (a mark for an unknown film is a no-op)
@@ -1232,6 +1238,11 @@ class JasnaInstance(MonitorInstance):
         self._subs_job = None
         self._translator = None
         self._jobs = {}
+        self._log_started_at = time.monotonic()
+        self._log_restore_at = self._log_started_at
+        self._log_gpu_wait = False
+        self._log_stopped = False
+        self._log_bulk = False
         self._settled = {}
         self._tracker = FilmTracker(JASNA_STEPS)
         self._subs_completed = self._subs_failed = self._subs_skipped = 0
@@ -1272,6 +1283,13 @@ class JasnaInstance(MonitorInstance):
 
     def _emit_launch_error(self, emit: EventEmitter, msg: str) -> None:
         self._launch_error = msg
+        get_task_log().record(
+            self.instance_id,
+            "task.error",
+            task_type="jasna",
+            severity="error",
+            data={"reason": "setup_or_launch_failed"},
+        )
         gpu_lease.withdraw(self._run)  # nothing launches any more this run
         emit(
             "alert",
@@ -1303,6 +1321,13 @@ class JasnaInstance(MonitorInstance):
 
         self._ffprobe = find_ffprobe(self._exe_dir())
         if self._ffprobe is None:
+            get_task_log().record(
+                self.instance_id,
+                "task.error",
+                task_type="jasna",
+                severity="error",
+                data={"reason": "ffprobe_missing"},
+            )
             emit(
                 "alert",
                 f"{cfg.name}: ffprobe not found",
@@ -1329,7 +1354,35 @@ class JasnaInstance(MonitorInstance):
         self._done = done
         self._failed = len(collisions)
         self._total = done + len(pending) + len(collisions)
+        get_task_log().record(
+            self.instance_id,
+            "task.started",
+            task_type="jasna",
+            data={"queued": len(pending), "done": done, "skipped": len(collisions)},
+        )
+        if done:
+            get_task_log().record(
+                self.instance_id,
+                "restore.skipped",
+                task_type="jasna",
+                data={"reason": "already restored", "count": done},
+            )
         if collisions:
+            get_task_log().record(
+                self.instance_id,
+                "task.error",
+                task_type="jasna",
+                severity="error",
+                data={"reason": "name_collision", "count": len(collisions)},
+            )
+            for loser, _ in collisions:
+                get_task_log().record(
+                    self.instance_id,
+                    "restore.skipped",
+                    task_type="jasna",
+                    film=loser.name,
+                    data={"reason": "name collision"},
+                )
             listed = ", ".join(f"{a.name} vs {b.name}" for a, b in collisions[:5])
             emit(
                 "alert",
@@ -1384,6 +1437,13 @@ class JasnaInstance(MonitorInstance):
                 f"could not plan subtitles ({e}); restores continue",
                 dedupe_key=f"{self.instance_id}:subs-disabled",
             )
+            get_task_log().record(
+                self.instance_id,
+                "task.error",
+                task_type="jasna",
+                severity="error",
+                data={"reason": "subtitle_planning_failed"},
+            )
             self._subs_disabled = "planning failed"
             return
         self._plan = plan
@@ -1425,6 +1485,13 @@ class JasnaInstance(MonitorInstance):
         except OSError:
             exe_ok = False
         if not exe_ok:
+            get_task_log().record(
+                self.instance_id,
+                "task.error",
+                task_type="jasna",
+                severity="error",
+                data={"reason": "no_exe"},
+            )
             # D34: every job skipped AND _subs_only emptied, so `done` can fire.
             with self._launch_lock:
                 self._subs_disabled = "no_exe"
@@ -1436,8 +1503,20 @@ class JasnaInstance(MonitorInstance):
                     "not a file. Restores continue; every subtitle job is skipped.",
                     dedupe_key=f"{self.instance_id}:subs-noexe",
                 )
-                for job_id in list(self._jobs):
-                    self._settle(job_id, "skipped", "no_exe", emit)
+                self._log_bulk = True
+                count = len(self._jobs.keys() - self._settled.keys())
+                try:
+                    for job_id in list(self._jobs):
+                        self._settle(job_id, "skipped", "no_exe", emit)
+                finally:
+                    self._log_bulk = False
+                if count:
+                    get_task_log().record(
+                        self.instance_id,
+                        "subs.skipped_bulk",
+                        task_type="jasna",
+                        data={"count": count, "reason": "no_exe"},
+                    )
             return
         # #192 AC3/C5: checkpoints under the agent's data dir; none = memory only
         data_dir = get_data_dir()
@@ -1445,6 +1524,7 @@ class JasnaInstance(MonitorInstance):
             translator = Translator(
                 self._run,
                 name=self.instance_id,
+                task_type="jasna",
                 checkpoint_dir=data_dir / CHECKPOINTS_DIRNAME if data_dir else None,
             )
             # Assigned BEFORE the re-check below (CX2): a concurrent stop() either
@@ -1458,6 +1538,13 @@ class JasnaInstance(MonitorInstance):
         except Exception as e:  # a thread that cannot start — never raise here
             log.warning("jasna %s: translator did not start: %s", self.instance_id, e)
             self._translator = None
+            get_task_log().record(
+                self.instance_id,
+                "task.error",
+                task_type="jasna",
+                severity="error",
+                data={"reason": "translator_launch_failed"},
+            )
             with self._launch_lock:
                 self._disable_subs(f"translator did not start ({e})", emit)
             self._run_deferred()
@@ -1466,6 +1553,68 @@ class JasnaInstance(MonitorInstance):
     def stop(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + max(0.1, timeout)
         self._stopping.set()
+        if not self._log_stopped:
+            self._log_stopped = True
+            translator = self._translator
+            if translator is not None:
+                snap = translator.progress()
+                queued = translator.queued()
+                if snap is not None:
+                    get_task_log().record(
+                        self.instance_id,
+                        "task.interrupted",
+                        task_type="jasna",
+                        film=snap["job_id"],
+                        severity="warn",
+                        data={
+                            "step": "translate",
+                            "elapsed": snap.get("elapsed_s", 0),
+                            "queued": queued,
+                        },
+                    )
+            job = self._subs_job
+            child = job.child if job is not None else None
+            if job is not None and child is not None and child.poll() is None:
+                get_task_log().record(
+                    self.instance_id,
+                    "task.interrupted",
+                    task_type="jasna",
+                    film=job.job_id,
+                    severity="warn",
+                    pid=getattr(child, "pid", None),
+                    data={
+                        "step": "asr",
+                        "elapsed": max(0.0, time.monotonic() - job.started_at),
+                    },
+                )
+            proc = self._process
+            if proc is not None:
+                rc = proc.poll()
+                film = self._current.name if self._current else None
+                if rc is None:
+                    get_task_log().record(
+                        self.instance_id,
+                        "task.interrupted",
+                        task_type="jasna",
+                        film=film,
+                        severity="warn",
+                        pid=getattr(proc, "pid", None),
+                        data={
+                            "step": "restore",
+                            "elapsed": max(
+                                0.0, time.monotonic() - self._log_restore_at
+                            ),
+                        },
+                    )
+                elif rc != 0:
+                    get_task_log().record(
+                        self.instance_id,
+                        "restore.failed",
+                        task_type="jasna",
+                        film=film,
+                        severity="error",
+                        data={"exit_code": rc, "at_stop": True},
+                    )
         # #177: cancel the translator FIRST (bounded: ≤ 1 s + a tree kill) so its
         # llm-worker is already going away while we wait for the lock. It takes
         # neither of our locks.
@@ -1553,6 +1702,17 @@ class JasnaInstance(MonitorInstance):
             outcome = job.poll_asr()
             if outcome is not None and outcome.kind == "succeeded":
                 res = job.publish_ja(outcome.cues)
+                if res.ok and outcome.cues:
+                    get_task_log().record(
+                        self.instance_id,
+                        "asr.finished",
+                        task_type="jasna",
+                        film=job.job_id,
+                        data={
+                            "lines": len(outcome.cues),
+                            "duration": max(0.0, time.monotonic() - job.started_at),
+                        },
+                    )
                 if not res.ok:  # #191: never replaced; logged
                     log.warning("jasna %s: %s", self.instance_id, res.detail)
             self._kill_asr(job, 0.5)  # joins readers; no-op once reaped
@@ -1616,6 +1776,14 @@ class JasnaInstance(MonitorInstance):
                 return  # stop() gave the carried hold; take nothing new
             if not self._gpu_take(hold):
                 self._gpu_waiting = True
+                if not self._log_gpu_wait:
+                    self._log_gpu_wait = True
+                    get_task_log().record(
+                        self.instance_id,
+                        "task.gpu_wait",
+                        task_type="jasna",
+                        data={"holder": self._gpu_blocker()},
+                    )
                 return
         self._gpu_waiting = False  # S5: we hold the GPU — no longer waiting
         # N5: from here on every path that does not leave a live child gives
@@ -1741,6 +1909,25 @@ class JasnaInstance(MonitorInstance):
                 return False
             self._restore_hold = hold  # released by the exit branch / stop()
             self._process = proc
+            self._log_restore_at = time.monotonic()
+            if self._log_gpu_wait:
+                get_task_log().record(
+                    self.instance_id, "task.gpu_acquired", task_type="jasna"
+                )
+                self._log_gpu_wait = False
+            get_task_log().record(
+                self.instance_id,
+                "restore.started",
+                task_type="jasna",
+                film=video.name,
+                pid=getattr(proc, "pid", None),
+                proc=Path(cfg.jasna_exe_path).name,
+                data={
+                    "index": self._done + self._failed + 1,
+                    "total": self._total,
+                    "mode": "unet-4x" if self._current_unet else "plain",
+                },
+            )
             # #189: a retry of the same file keeps the first stamp
             self._tracker.start(video.name, RESTORE, time.monotonic())
             if capture and proc.stdout is not None:
@@ -2028,7 +2215,25 @@ class JasnaInstance(MonitorInstance):
             os.replace(staging, final)
         except OSError as e:
             log.warning("jasna: could not publish %s: %s", final, e)
+            get_task_log().record(
+                self.instance_id,
+                "restore.failed",
+                task_type="jasna",
+                film=video.name,
+                severity="error",
+                data={"exit_code": 0, "reason": "publish_failed"},
+            )
             return f"could not publish {final.name}: {e}"
+        get_task_log().record(
+            self.instance_id,
+            "restore.finished",
+            task_type="jasna",
+            film=video.name,
+            data={
+                "output": final.name,
+                "duration": max(0.0, time.monotonic() - self._log_restore_at),
+            },
+        )
         return None
 
     def _handle_success(self, emit: EventEmitter) -> None:
@@ -2084,6 +2289,17 @@ class JasnaInstance(MonitorInstance):
         with self._lock:
             tail = "\n".join(list(self._recent_output)[-_CRASH_DETAIL_LINES:]).strip()
         self._last_failure_tail = tail
+        get_task_log().record(
+            self.instance_id,
+            "restore.failed",
+            task_type="jasna",
+            film=self._current.name if self._current else None,
+            severity="error",
+            data={
+                "exit_code": retcode,
+                "tail": _bounded(tail) if cfg.jasna_capture_progress else "",
+            },
+        )
         if self._current is not None:
             staging = staging_path_for(cfg.jasna_output_folder, self._current)
             try:
@@ -2111,6 +2327,13 @@ class JasnaInstance(MonitorInstance):
 
     def _requeue_current(self) -> None:
         if self._current is not None:
+            get_task_log().record(
+                self.instance_id,
+                "restore.retry",
+                task_type="jasna",
+                film=self._current.name,
+                data={"mode": "plain"},
+            )
             self._pending.insert(0, self._current)  # front → deterministic order
 
     def _fail_current(self, emit: EventEmitter, detail: str) -> None:
@@ -2133,6 +2356,13 @@ class JasnaInstance(MonitorInstance):
                 # _handle_exit releases the lock, before `degraded` is returned.
                 self._disable_subs("batch aborted", emit)
             self._batch_aborted = True
+            get_task_log().record(
+                self.instance_id,
+                "task.aborted",
+                task_type="jasna",
+                severity="error",
+                data={"reason": "consecutive_restore_failures"},
+            )
             gpu_lease.withdraw(self._run)  # #179: nothing launches again
             emit(
                 "alert",
@@ -2214,6 +2444,19 @@ class JasnaInstance(MonitorInstance):
             ):
                 return
         self._batch_done_emitted = True
+        get_task_log().record(
+            self.instance_id,
+            "task.done",
+            task_type="jasna",
+            data={
+                "done": self._done,
+                "failed": self._failed,
+                "skipped": self._subs_skipped,
+                "duration": max(0.0, time.monotonic() - self._log_started_at),
+                "kept_ja": self._subs_kept_ja,
+                "paused": self._subs_paused,
+            },
+        )
         self._phase = "restore"
         subs = ""
         if av:
@@ -2313,13 +2556,47 @@ class JasnaInstance(MonitorInstance):
         )
 
     def _settle(
-        self, job_id: str, terminal: str, detail: str, emit: EventEmitter
+        self,
+        job_id: str,
+        terminal: str,
+        detail: str,
+        emit: EventEmitter,
+        *,
+        step: Optional[str] = None,
     ) -> None:
         """The ONE place a job becomes terminal (callers hold `_launch_lock`).
         No-op when it already is; 3 consecutive failures → `_disable_subs`."""
         if job_id in self._settled or job_id not in self._jobs:
             return
         self._settled[job_id] = (terminal, detail)
+        if not self._log_bulk:
+            if terminal == "completed":
+                kind = "subs.published"
+                data: dict = {"srt": self._jobs[job_id].zh_target.name}
+                if detail == "no speech":
+                    data["no_speech"] = True
+            elif terminal == "failed":
+                kind = "subs.failed"
+                # Failure details may contain exception/child text. Compose a
+                # safe category here; raw output belongs only in bounded tails.
+                data = {
+                    "detail": "asr failed"
+                    if step == "asr"
+                    else "subtitle operation failed"
+                }
+                if step is not None:
+                    data["step"] = step
+            else:
+                kind = "subs.skipped"
+                data = {"reason": detail}
+            get_task_log().record(
+                self.instance_id,
+                kind,
+                task_type="jasna",
+                film=job_id,
+                severity="error" if terminal == "failed" else "info",
+                data=data,
+            )
         if terminal == "completed":
             self._subs_completed += 1
             self._subs_consecutive_failures = 0
@@ -2417,8 +2694,20 @@ class JasnaInstance(MonitorInstance):
             "continue. Unfinished subtitle jobs are skipped.",
             dedupe_key=f"{self.instance_id}:subs-disabled",
         )
-        for job_id in list(self._jobs):
-            self._settle(job_id, "skipped", "cancelled", emit)
+        self._log_bulk = True
+        count = len(self._jobs.keys() - self._settled.keys())
+        try:
+            for job_id in list(self._jobs):
+                self._settle(job_id, "skipped", "cancelled", emit)
+        finally:
+            self._log_bulk = False
+        if count:
+            get_task_log().record(
+                self.instance_id,
+                "subs.skipped_bulk",
+                task_type="jasna",
+                data={"count": count, "reason": "cancelled"},
+            )
         self._subs_only = []
         translator = self._translator
         job = self._subs_job
@@ -2523,6 +2812,14 @@ class JasnaInstance(MonitorInstance):
                 # Refused: the file stays first in line, check() retries.
                 self._subs_only.insert(0, video)
                 self._gpu_waiting = True
+                if not self._log_gpu_wait:
+                    self._log_gpu_wait = True
+                    get_task_log().record(
+                        self.instance_id,
+                        "task.gpu_wait",
+                        task_type="jasna",
+                        data={"holder": self._gpu_blocker()},
+                    )
                 return
         self._gpu_waiting = False  # S5: we hold the GPU — no longer waiting
         names = list_names(job.media.parent)
@@ -2538,12 +2835,68 @@ class JasnaInstance(MonitorInstance):
                     self._advance_requested = True
                 else:
                     err = job.start_asr(self._spawn)
+                    if err is None and job.child is not None:
+                        get_task_log().record(
+                            self.instance_id,
+                            "asr.started",
+                            task_type="jasna",
+                            film=job.job_id,
+                            pid=getattr(job.child, "pid", None),
+                            proc=Path(job.exe).name,
+                            data={"engine": job.engine},
+                        )
+                        if self._log_gpu_wait and not self._stopping.is_set():
+                            get_task_log().record(
+                                self.instance_id, "task.gpu_acquired", task_type="jasna"
+                            )
+                            self._log_gpu_wait = False
+                    elif err is not None and err != "unstable":
+                        get_task_log().record(
+                            self.instance_id,
+                            "task.error",
+                            task_type="jasna",
+                            film=job.job_id,
+                            severity="error",
+                            data={"reason": "asr_launch_failed"},
+                        )
                     if (
                         err is not None
                         and err != "unstable"
                         and job.attempt < _ASR_MAX_ATTEMPTS
                     ):
+                        get_task_log().record(
+                            self.instance_id,
+                            "asr.retry",
+                            task_type="jasna",
+                            film=job.job_id,
+                        )
                         err = job.start_asr(self._spawn)  # failed attempt: retry
+                        if err is None and job.child is not None:
+                            get_task_log().record(
+                                self.instance_id,
+                                "asr.started",
+                                task_type="jasna",
+                                film=job.job_id,
+                                pid=getattr(job.child, "pid", None),
+                                proc=Path(job.exe).name,
+                                data={"engine": job.engine},
+                            )
+                            if self._log_gpu_wait and not self._stopping.is_set():
+                                get_task_log().record(
+                                    self.instance_id,
+                                    "task.gpu_acquired",
+                                    task_type="jasna",
+                                )
+                                self._log_gpu_wait = False
+                        elif err is not None and err != "unstable":
+                            get_task_log().record(
+                                self.instance_id,
+                                "task.error",
+                                task_type="jasna",
+                                film=job.job_id,
+                                severity="error",
+                                data={"reason": "asr_launch_failed"},
+                            )
                     if self._stopping.is_set():
                         self._kill_asr(job, 2.0, emit)  # D9: stop() raced the spawn
                         if job.child is not None:
@@ -2558,7 +2911,7 @@ class JasnaInstance(MonitorInstance):
                         release_gpu = True
                         self._advance_requested = True
                     else:
-                        self._settle(name, "failed", err, emit)
+                        self._settle(name, "failed", err, emit, step="asr")
                         self._alert_job(name, err, emit)
                         release_gpu = True
                         self._advance_requested = True
@@ -2621,6 +2974,17 @@ class JasnaInstance(MonitorInstance):
         name = job.job_id
         if outcome.kind == "succeeded":
             res = job.publish_ja(outcome.cues)  # D9: under the lock
+            if res.ok and outcome.cues:
+                get_task_log().record(
+                    self.instance_id,
+                    "asr.finished",
+                    task_type="jasna",
+                    film=job.job_id,
+                    data={
+                        "lines": len(outcome.cues),
+                        "duration": max(0.0, time.monotonic() - job.started_at),
+                    },
+                )
             if res.ok:
                 self._tracker.finish(name, ASR, "done", time.monotonic())  # #189
                 # #191 (AC5/F15): the file's last look before its translation —
@@ -2653,7 +3017,34 @@ class JasnaInstance(MonitorInstance):
         elif outcome.kind == "unstable":
             self._settle_unstable(job, emit)
         elif job.attempt < _ASR_MAX_ATTEMPTS:
+            get_task_log().record(
+                self.instance_id, "asr.retry", task_type="jasna", film=job.job_id
+            )
             err = job.start_asr(self._spawn)  # retry: a new attempt dir
+            if err is None and job.child is not None:
+                get_task_log().record(
+                    self.instance_id,
+                    "asr.started",
+                    task_type="jasna",
+                    film=job.job_id,
+                    pid=getattr(job.child, "pid", None),
+                    proc=Path(job.exe).name,
+                    data={"engine": job.engine},
+                )
+                if self._log_gpu_wait and not self._stopping.is_set():
+                    get_task_log().record(
+                        self.instance_id, "task.gpu_acquired", task_type="jasna"
+                    )
+                    self._log_gpu_wait = False
+            elif err is not None and err != "unstable":
+                get_task_log().record(
+                    self.instance_id,
+                    "task.error",
+                    task_type="jasna",
+                    film=job.job_id,
+                    severity="error",
+                    data={"reason": "asr_launch_failed"},
+                )
             if self._stopping.is_set():
                 # D35: exactly _start_subs's post-spawn re-check.
                 self._kill_asr(job, 2.0, emit)
@@ -2666,10 +3057,10 @@ class JasnaInstance(MonitorInstance):
             elif err == "unstable":  # D33: like a final failure
                 self._settle_unstable(job, emit)
             else:
-                self._settle(name, "failed", err, emit)
+                self._settle(name, "failed", err, emit, step="asr")
                 self._alert_job(name, err, emit)
         else:
-            self._settle(name, "failed", outcome.detail, emit)
+            self._settle(name, "failed", outcome.detail, emit, step="asr")
             self._alert_job(name, outcome.detail, emit)
         if terminal:
             self._subs_job = None

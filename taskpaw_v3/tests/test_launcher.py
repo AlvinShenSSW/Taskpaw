@@ -56,6 +56,103 @@ class _Sentinel(Exception):
     pass
 
 
+@pytest.mark.parametrize("fail_at", ["reclaim", "network", "control"])
+def test_tasklog_failed_claim_creates_no_store_or_line(tmp_path, monkeypatch, fail_at):
+    from unittest.mock import Mock
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    sock = Mock()
+
+    def reclaim(*a, **kw):
+        assert not (tmp_path / "logs").exists()
+        if fail_at == "reclaim":
+            raise launcher.PortInUseError("occupied")
+
+    def claim(host, port, label):
+        assert not (tmp_path / "logs").exists()
+        if fail_at in label:
+            raise launcher.PortInUseError("occupied")
+        return sock
+
+    monkeypatch.setattr(launcher, "reclaim_ports_from_stale_instance", reclaim)
+    monkeypatch.setattr(launcher, "claim_port", claim)
+    with pytest.raises(launcher.PortInUseError):
+        launcher.run_agent(_llm_cfg(), config_path=tmp_path / "agent.yaml", block=False)
+    assert not (tmp_path / "logs").exists()
+    assert get_task_log().query()["entries"] == []
+    if fail_at == "control":
+        sock.close.assert_called_once()
+
+
+def test_tasklog_launcher_order_and_direct_failure_alert(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    import uvicorn
+
+    from taskpaw_v3 import __version__
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+    from taskpaw_v3.core.protocol import EventQueue
+    from taskpaw_v3.core.tasklog import TaskLog, get_task_log
+    from taskpaw_v3.monitors import runtime
+
+    calls = []
+    previous = TaskLog(tmp_path)
+    previous.record("", "agent.started", task_type="agent")
+    previous.record("a", "restore.started", task_type="jasna", film="old")
+    queue = EventQueue("m")
+    shutdown = GracefulShutdown()
+    monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
+    monkeypatch.setattr(
+        launcher,
+        "reclaim_ports_from_stale_instance",
+        lambda *a, **kw: calls.append("reclaim"),
+    )
+    monkeypatch.setattr(
+        launcher, "claim_port", lambda *a, **kw: (calls.append("claim"), Mock())[1]
+    )
+
+    def build(*a, **kw):
+        assert calls == ["reclaim", "claim", "claim"]
+        rows = get_task_log().query()["entries"]
+        assert rows[0]["kind"] == "agent.started"
+        assert rows[0]["data"]["version"] == __version__
+        assert rows[0]["data"]["previous_exit"] == "unclean"
+        assert rows[1]["data"]["reconstructed"] is True
+        sup = Mock()
+        sup.stop.side_effect = lambda: calls.append(
+            get_task_log().query()["entries"][0]["kind"]
+        )
+        return sup
+
+    monkeypatch.setattr(runtime, "build_supervisor", build)
+    monkeypatch.setattr(uvicorn, "Server", lambda *a, **kw: Mock())
+    monkeypatch.setattr(uvicorn, "Config", lambda *a, **kw: None)
+    monkeypatch.setattr(launcher, "announce_ready", lambda *a: None)
+    launcher.run_agent(
+        _llm_cfg(),
+        queue=queue,
+        shutdown=shutdown,
+        config_path=tmp_path / "agent.yaml",
+        block=False,
+    )
+    store = get_task_log()
+
+    def fail(row):
+        raise OSError("locked")
+
+    monkeypatch.setattr(store, "_append", fail)
+    store.record("a", "task.done", task_type="jasna")
+    store.record("a", "task.done", task_type="jasna")
+    alerts = queue.recent()
+    assert len(alerts) == 1 and alerts[0]["level"] == "alert"
+    assert not any(r["kind"] == "event.mirrored" for r in store.query()["entries"])
+    shutdown.shutdown()
+    assert calls[-1] == "agent.stopping"
+
+
 def test_run_agent_sets_llm_holder_before_port_reclaim(monkeypatch):
     # T-L1: the holder is initialised BEFORE the stale-port reclaim — hence before
     # every socket claim and the supervisor.
