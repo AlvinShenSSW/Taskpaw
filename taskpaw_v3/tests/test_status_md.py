@@ -981,3 +981,35 @@ def test_avsubs_does_not_change_the_lada_line():
     }
     md = render_status_md(_lada_row(base), "t")
     assert _lada_line(md) == "- LADA: 5/10 done (5 left) | clip.mp4 |"
+
+
+def test_unknown_state_hides_stale_metrics_like_other_outages():
+    # #127: `unknown` joins error/stopped/unreachable — a monitor whose state is
+    # unknown must surface that, never a stale metric sample (host or queue).
+    def row(state, type_id, metrics):
+        return [
+            {
+                "name": "b",
+                "reachable": 1,
+                "status_json": json.dumps(
+                    {
+                        "monitors": {
+                            "m": {
+                                "state": state,
+                                "type_id": type_id,
+                                "metrics": metrics,
+                            }
+                        }
+                    }
+                ),
+            }
+        ]
+
+    host = {"cpu_pct": 95.0, "mem_used_mb": 8000, "mem_total_mb": 16000}
+    queue = {"queue_total": 10, "queue_completed": 4, "queue_remaining": 6}
+    out = render_status_md(row("unknown", "host_metrics", host), "t")
+    assert "- m: unknown" in out and "95" not in out
+    out = render_status_md(row("unknown", "jasna", queue), "t")
+    assert "- m: unknown" in out and "4/10" not in out
+    # a healthy state still renders the metrics (no regression)
+    assert "4/10 done (6 left)" in render_status_md(row("running", "jasna", queue), "t")
