@@ -9,7 +9,7 @@ assistant when work completes.
 
 - **Agent** — runs on each machine; watches that machine's monitors and exposes a
   small local API. A native console lets you add/edit/start/stop monitors and read
-  recent events without touching config files.
+  the local task log (「日志」), retained for 30 days, without touching config files.
 - **Hub** — a headless aggregator that polls your agents, keeps durable event +
   status history, and forwards completions to OpenClaw. A dashboard view shows the
   whole fleet and its event log.

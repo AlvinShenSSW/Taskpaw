@@ -786,7 +786,8 @@ class AvsubsInstance(MonitorInstance):
     def stop(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + max(0.1, timeout)
         self._stopping.set()
-        if not self._log_stopped:
+        log_stop = not self._log_stopped
+        if log_stop:
             self._log_stopped = True
             translator = self._translator
             if translator is not None:
@@ -805,21 +806,6 @@ class AvsubsInstance(MonitorInstance):
                             "queued": queued,
                         },
                     )
-            job = self._asr_job
-            child = job.child if job is not None else None
-            if job is not None and child is not None and child.poll() is None:
-                get_task_log().record(
-                    self.instance_id,
-                    "task.interrupted",
-                    task_type="avsubs",
-                    film=job.job_id,
-                    severity="warn",
-                    pid=getattr(child, "pid", None),
-                    data={
-                        "step": "asr",
-                        "elapsed": max(0.0, time.monotonic() - job.started_at),
-                    },
-                )
         # Cancel the translator FIRST (bounded) so its llm-worker is already
         # going away while we wait for the lock. It takes none of our locks.
         translator = self._translator
@@ -835,7 +821,7 @@ class AvsubsInstance(MonitorInstance):
         )
         try:
             if acquired:
-                self._stop_asr(deadline)
+                self._stop_asr(deadline, log_stop=log_stop)
             else:
                 # D13: the no-orphan guarantee wins over tidiness.
                 log.warning(
@@ -846,6 +832,8 @@ class AvsubsInstance(MonitorInstance):
                 )
                 job = self._asr_job  # read once
                 if job is not None and job.child is not None:
+                    if log_stop and job.child.poll() is None:
+                        self._log_asr_stop(job, job.child)
                     left = max(0.1, deadline - time.monotonic())
                     if not job.terminate(timeout=left):
                         log.error(
@@ -868,7 +856,21 @@ class AvsubsInstance(MonitorInstance):
                     "avsubs %s: translator join failed: %s", self.instance_id, e
                 )
 
-    def _stop_asr(self, deadline: float) -> None:
+    def _log_asr_stop(self, job: SubsJob, child) -> None:
+        get_task_log().record(
+            self.instance_id,
+            "task.interrupted",
+            task_type="avsubs",
+            film=job.job_id,
+            severity="warn",
+            pid=getattr(child, "pid", None),
+            data={
+                "step": "asr",
+                "elapsed": max(0.0, time.monotonic() - job.started_at),
+            },
+        )
+
+    def _stop_asr(self, deadline: float, *, log_stop: bool = True) -> None:
         """Under `_launch_lock` (stop): a live ASR child is tree-killed; one
         that already exited 0 unpolled keeps its `.ja.srt` — including the
         empty one of a no-speech result (CX5) — never the zh."""
@@ -878,6 +880,8 @@ class AvsubsInstance(MonitorInstance):
             self._asr_job = None
             return
         if child.poll() is None:
+            if log_stop:
+                self._log_asr_stop(job, child)
             left = max(0.1, min(5.0, deadline - time.monotonic()))
             gone = job.terminate(timeout=left)
             self._note_survivor(job)

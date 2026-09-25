@@ -62,6 +62,28 @@ def _cfg(**kw):
     return AgentConfig(server_id="s1", machine="dev", **kw)
 
 
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"limit": "abc"},
+        {"days": "perhaps"},
+        {"day": "bad"},
+        {"before": "bad"},
+        {"after": "bad"},
+        {"severity": "fatal"},
+    ],
+)
+def test_tasklog_invalid_parameters_have_boot_envelope(params):
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    client = TestClient(create_control_app(_cfg()))
+    response = client.get("/control/logs", params=params)
+    assert response.status_code == 400
+    assert response.json()["boot"] == get_task_log().boot
+    assert response.json()["error"]
+    assert client.get("/control/events?limit=abc").status_code == 422
+
+
 def test_ping_open_no_auth():
     from taskpaw_v3 import __version__
 

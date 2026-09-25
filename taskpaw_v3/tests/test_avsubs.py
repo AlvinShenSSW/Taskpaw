@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 import pytest
+from conftest import tasklog_rows as _tasklog
 from test_subs_translate import (
     FakeClock,
     Spawner,
@@ -3119,13 +3120,6 @@ def test_a_film_the_real_translator_defers_holds_done_until_it_pauses(
     assert _ja(r, "a.mp4").exists() and not _zh(r, "a.mp4").exists()
 
 
-def _tasklog(kind=None):
-    from taskpaw_v3.core.tasklog import get_task_log
-
-    rows = list(get_task_log()._ring)
-    return [r for r in rows if kind is None or r["kind"] == kind]
-
-
 @pytest.mark.parametrize("path", ["normal", "stop", "no_speech", "failed"])
 def test_tasklog_asr_outcomes(tmp_path, monkeypatch, path):
     h = _setup(tmp_path, monkeypatch, full=("a.mp4",))
@@ -3182,6 +3176,21 @@ def test_tasklog_stop_translation_snapshot_and_asr(tmp_path, monkeypatch):
         next(r for r in rows if r["data"]["step"] == "translate")["data"]["elapsed"]
         == 42
     )
+
+
+def test_tasklog_asr_finishes_during_cancel_not_interrupted(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, full=("LMNO-123.mp4",))
+    h.inst.start(h.emit)
+    cancel = h.translators[0].cancel
+
+    def finish_during_cancel():
+        h.spawner.last.finish(state="done", text=SRT_JA)
+        cancel()
+
+    monkeypatch.setattr(h.translators[0], "cancel", finish_during_cancel)
+    h.inst.stop()
+    assert len(_tasklog("asr.finished")) == 1
+    assert not _tasklog("task.interrupted")
 
 
 @pytest.mark.parametrize("rc", [1, None])

@@ -16,6 +16,8 @@ import platform
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 if TYPE_CHECKING:
@@ -100,6 +102,15 @@ def create_control_app(
 
     app = FastAPI(title="TaskPaw Agent Control", docs_url=None, redoc_url=None)
     add_ui_cors(app)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path == "/control/logs":
+            return JSONResponse(
+                {"boot": get_task_log().boot, "error": "invalid task log parameters"},
+                status_code=400,
+            )
+        return await request_validation_exception_handler(request, exc)
 
     @app.get("/control/ping")
     def ping() -> dict:
@@ -232,23 +243,7 @@ def create_control_app(
 
         @app.patch("/control/monitors")
         def update_monitor(name: str, body: dict):
-            # {config?: {...}, enabled?: bool}. Apply CONFIG first: it validates,
-            # so an invalid config fails (400) BEFORE enabled is touched/persisted
-            # — a failed combined edit must not leave the monitor started/stopped
-            # (Codex #57a). A valid config persists, then enabled (which can't fail
-            # once the monitor is found).
-            if "config" not in body and "enabled" not in body:
-                raise HTTPException(
-                    status_code=400, detail="patch needs 'config' and/or 'enabled'"
-                )
-            out: dict = {"ok": True, "name": name}
-            if "config" in body:
-                out = _guard(admin.update, name, body["config"])
-            if "enabled" in body:
-                # pass through raw — admin.set_enabled requires a real boolean
-                # (rejects "false"/0 strings) → 400, not a silent enable.
-                out = _guard(admin.set_enabled, name, body["enabled"])
-            return out
+            return _guard(admin.patch, name, body)
 
         # Start/Stop are persisted enable/disable (V2 parity: a stopped monitor
         # stays stopped across restarts).

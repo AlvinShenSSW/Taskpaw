@@ -512,6 +512,10 @@ class LadaInstance(MonitorInstance):
             # A crash line printed right before exit may arrive without a trailing
             # \r/\n before the pipe closes — flush it so the reason isn't lost.
             self._consume_output(buf)
+        except (OSError, ValueError):
+            # Pipe closed / read on a terminated process as the child exits.
+            pass
+        finally:
             # A check can observe exit before the last buffered header arrives.
             # Defer only the log conclusion; polling and alerts never wait here.
             with self._lock:
@@ -519,10 +523,6 @@ class LadaInstance(MonitorInstance):
                 pending, self._log_pending_exit = self._log_pending_exit, None
             if pending is not None:
                 self._log_exit(pending[0], at_stop=pending[1])
-        except (OSError, ValueError):
-            # Pipe closed / read on a terminated process as the child exits —
-            # expected; the reader simply ends.
-            pass
 
     def _consume_output(self, buf: bytes) -> None:
         """Classify one decoded output line: a recognized progress update advances
@@ -612,6 +612,14 @@ class LadaInstance(MonitorInstance):
             self._log_exit_code = rc
             tail = "\n".join(list(self._recent_output)[-_CRASH_DETAIL_LINES:])[-800:]
             self._log_file_end(rc, tail=tail, at_stop=at_stop)
+            if at_stop and rc != 0 and self._log_file is None:
+                get_task_log().record(
+                    self.instance_id,
+                    "restore.failed",
+                    task_type="lada",
+                    severity="error",
+                    data={"exit_code": rc, "at_stop": True, "tail": tail},
+                )
         if at_stop:
             return
         if rc == 0:

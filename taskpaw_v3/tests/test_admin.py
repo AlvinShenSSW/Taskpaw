@@ -320,6 +320,30 @@ def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
     assert cfg.monitors[0].get("enabled", True) is True  # enabled untouched
 
 
+@pytest.mark.parametrize("enabled", ["false", 0, None, []])
+def test_rejected_combined_patch_changes_nothing(tmp_path, enabled):
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    cfg = _agent_config()
+    reg = _registry()
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, reg, path)
+    admin.add({"type_id": "fake", "config": {"name": "w1"}})
+    before = cfg.model_dump()
+    disk = path.read_bytes()
+    rows = get_task_log().query()["entries"]
+    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    response = client.patch(
+        "/control/monitors",
+        params={"name": "w1"},
+        json={"config": {"poll_interval": 12}, "enabled": enabled},
+    )
+    assert response.status_code == 400
+    assert cfg.model_dump() == before
+    assert path.read_bytes() == disk
+    assert get_task_log().query()["entries"] == rows
+
+
 # ── config editing (#43) ───────────────────────────────────────────────────
 def test_update_config_token_only_is_live_no_restart(tmp_path):
     # api_token is read per-request (token_ok), so changing ONLY it applies live

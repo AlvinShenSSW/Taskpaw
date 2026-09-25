@@ -230,15 +230,7 @@ export const api = {
     send("agent", "PATCH", `/control/monitors${q(name)}`, patch),
   startMonitor: (name: string) => send("agent", "POST", `/control/monitors/start${q(name)}`),
   stopMonitor: (name: string) => send("agent", "POST", `/control/monitors/stop${q(name)}`),
-  // Event log (#44): agent reads recent local events (non-destructive); the Hub
-  // reads durable aggregated history, filterable by server id + level.
-  // `monitor` (optional) filters to one monitor's events for the console's
-  // per-monitor inline panel (#130); the name is URL-encoded (it may contain '/').
-  agentEvents: (limit = 200, monitor?: string) => {
-    const qs = new URLSearchParams({ limit: String(limit) });
-    if (monitor) qs.set("monitor", monitor);
-    return get<{ events: EventItem[] }>("agent", `/control/events?${qs}`);
-  },
+  // The Hub reads durable aggregated event history, by server id + level.
   hubEvents: (p: { server?: number; level?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
     if (p.server != null) qs.set("server", String(p.server));

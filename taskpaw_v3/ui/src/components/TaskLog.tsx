@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useRef, useState } from "react";
 import { Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Stack, TextField, Typography } from "@mui/material";
 import { useTranslation } from "react-i18next";
 import { api, type LogEntry, type LogDays, type LogParams } from "../api";
@@ -60,11 +60,14 @@ type Session = {
 // cannot overwrite the next selection. Paging and polling are serialized.
 export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
   const { t, i18n } = useTranslation();
-  const [today] = useState(() => localLogDay());
-  const [yesterday] = useState(() => localLogDay(-1));
+  const [today, setToday] = useState(() => localLogDay());
+  const yesterday = localLogDay(-1);
+  const taskListId = useId();
   const [day, setDay] = useState(today);
+  const [taskText, setTaskText] = useState("");
   const [task, setTask] = useState("");
   const [severity, setSeverity] = useState("");
+  const [searchText, setSearchText] = useState("");
   const [q, setQ] = useState("");
   const [revision, setRevision] = useState(0);
   const [entries, setEntries] = useState<LogEntry[]>([]);
@@ -76,6 +79,11 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
   const [exporting, setExporting] = useState(false);
   const [notice, setNotice] = useState("");
   const session = useRef<Session | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { setTask(taskText); setQ(searchText); }, 300);
+    return () => window.clearTimeout(timer);
+  }, [taskText, searchText]);
 
   useEffect(() => {
     const current: Session = { day, boot: null, cursor: `${day}-0`, before: null, busy: false, active: true, load: async () => {} };
@@ -107,13 +115,19 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
       finally { current.busy = false; if (current.active) { setBusy(false); setLoading(false); } }
     };
     async function poll() {
+      const nowDay = localLogDay();
+      if (current.active && nowDay !== today) {
+        setToday(nowDay);
+        setDay(selected => selected === today ? nowDay : selected);
+        return;
+      }
       if (!current.active || current.busy) return;
       if (!current.boot) { await current.load(); return; }
       current.busy = true; setBusy(true);
       try {
         // Catch up full pages without skipping rows. Bound each tick so a busy
         // producer cannot monopolize the tab; the next tick resumes this cursor.
-        for (let page = 0; page < 20 && current.active; page++) {
+        for (let page = 0; day === today && page < 20 && current.active; page++) {
           const result = await api.logs({ ...filters, after: current.cursor, limit: 500 });
           if (!current.active) return;
           if (result.boot !== current.boot) { restart(); return; }
@@ -141,7 +155,8 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
     if (!current?.boot || exporting) return;
     setExporting(true); setNotice("");
     const translate = i18n.getFixedT(i18n.language);
-    const params: LogParams = { day, task, severity, q, limit: 500 };
+    const exportDay = day === today ? localLogDay() : day;
+    const params: LogParams = { day: exportDay, task, severity, q, limit: 500 };
     const all = new Map<string, LogEntry>();
     const cursors = new Set<string>();
     let truncated = false;
@@ -163,7 +178,7 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
       const url = URL.createObjectURL(blob);
       try {
         const link = document.createElement("a");
-        link.href = url; link.download = `taskpaw-${day}.txt`;
+        link.href = url; link.download = `taskpaw-${exportDay}.txt`;
         document.body.appendChild(link);
         try { link.click(); } finally { link.remove(); }
       } finally {
@@ -175,7 +190,7 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
     finally { setExporting(false); }
   }
 
-  const taskNames = [...new Set([...tasks, ...entries.map(e => e.task), ...(task ? [task] : [])])].sort();
+  const taskNames = [...new Set([...tasks, ...entries.map(e => e.task), ...(task ? [task] : [])].filter(Boolean))].sort();
   return <Card><CardContent>
     <Stack spacing={1.5}>
       <Stack direction="row" useFlexGap flexWrap="wrap" gap={1}>
@@ -183,15 +198,14 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
           <option value={today}>{t("logs.today")}</option><option value={yesterday}>{t("logs.yesterday")}</option>
           {days.filter(d => d.day !== today && d.day !== yesterday).map(d => <option key={d.day} value={d.day}>{formatLogDay(d.day)} ({d.count})</option>)}
         </TextField>
-        <TextField select SelectProps={{ native: true }} size="small" label={t("logs.task")} value={task} onChange={e => setTask(e.target.value)} sx={{ minWidth: 150, maxWidth: "100%" }}>
-          <option value="">{t("logs.allTasks")}</option>{taskNames.map(name => <option key={name} value={name}>{logSafeText(name)}</option>)}
-        </TextField>
+        <TextField size="small" label={t("logs.task")} placeholder={t("logs.allTasks")} value={taskText} onChange={e => setTaskText(e.target.value)} inputProps={{ list: taskListId }} sx={{ minWidth: 150, maxWidth: "100%" }} />
+        <datalist id={taskListId}>{taskNames.map(name => <option key={name} value={name}>{logSafeText(name)}</option>)}</datalist>
         <TextField select SelectProps={{ native: true }} size="small" label={t("logs.severity")} value={severity} onChange={e => setSeverity(e.target.value)} sx={{ minWidth: 160 }}>
           <option value="">{t("logs.allSeverities")}</option>
           {["info", "warn", "error"].map(s => <option key={s} value={s}>{t(`logs.${s}`)}</option>)}
           <option value="warn,error">{t("logs.warningsErrors")}</option>
         </TextField>
-        <TextField size="small" label={t("logs.search")} value={q} onChange={e => setQ(e.target.value)} sx={{ flex: "1 1 220px" }} />
+        <TextField size="small" label={t("logs.search")} value={searchText} onChange={e => setSearchText(e.target.value)} sx={{ flex: "1 1 220px" }} />
         <Button variant="outlined" disabled={loading || exporting || !session.current?.boot} onClick={() => { void exportDay(); }}>{t(exporting ? "logs.exporting" : "logs.export")}</Button>
       </Stack>
       {notice && <Alert severity={notice === "exportCap" ? "info" : "warning"}>{t(`logs.${notice}`)}</Alert>}

@@ -29,14 +29,199 @@ def entries(store, **kw):
     return store.query(**kw)["entries"]
 
 
+@pytest.mark.parametrize(
+    "module",
+    [
+        "test_lada",
+        "test_jasna",
+        "test_jasna_subs",
+        "test_avsubs",
+        "test_subs_translate",
+    ],
+)
+def test_producers_share_tasklog_reader(module):
+    import importlib
+
+    reader = importlib.import_module(module)._tasklog
+    assert reader.__module__ == "conftest"
+
+
+@pytest.mark.parametrize(
+    "path,phrases",
+    [
+        ("README.md", ("task log", "30 days")),
+        (
+            "docs/guides/openclaw-integration.md",
+            ("task log", "not forwarded to OpenClaw or your phone"),
+        ),
+        (
+            "docs/specs/2026-06-27-taskpaw-v3-design.md",
+            ("3.9.0", "get_task_log().record(...)"),
+        ),
+        (
+            "docs/specs/2026-09-26-196-activity-log-design.md",
+            ("title/message verbatim", "fields TaskPaw composes"),
+        ),
+    ],
+)
+def test_tasklog_documentation_contract(path, phrases):
+    text = (Path(__file__).resolve().parents[2] / path).read_text(encoding="utf-8")
+    assert all(phrase in text for phrase in phrases)
+
+
+def test_complete_unterminated_tail_reserves_id(tmp_path):
+    store = TaskLog(tmp_path, clock=Clock())
+    record(store)
+    path = tmp_path / "logs/tasklog-20260926.jsonl"
+    path.write_bytes(path.read_bytes().rstrip(b"\n"))
+    restarted = TaskLog(tmp_path, clock=Clock())
+    record(restarted)
+    assert [json.loads(line)["id"] for line in path.read_text().splitlines()] == [
+        "20260926-1",
+        "20260926-2",
+    ]
+
+
+@pytest.mark.parametrize("error", [PermissionError, OSError])
+def test_unreadable_startup_scan_blocks_append_until_recovery(
+    tmp_path, monkeypatch, error
+):
+    store = TaskLog(tmp_path, clock=Clock())
+    store._n = 40
+    record(store)
+    path = tmp_path / "logs/tasklog-20260926.jsonl"
+    original = Path.open
+    locked = True
+
+    def open_file(self, mode="r", *args, **kwargs):
+        if self == path and mode == "r" and locked:
+            raise error("scan unavailable")
+        return original(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    failures = []
+    restarted = TaskLog(tmp_path, clock=Clock(), on_first_failure=failures.append)
+    record(restarted)
+    record(restarted)
+    assert restarted.write_failures == 2
+    assert len(failures) == 1
+    assert len(path.read_bytes().splitlines()) == 1
+    locked = False
+    record(restarted)
+    ids = [json.loads(line)["id"] for line in path.read_text().splitlines()]
+    assert ids[0] == "20260926-41"
+    assert int(ids[1].split("-")[1]) > 41
+    assert len(entries(restarted)) == 4
+
+
+@pytest.mark.parametrize("file_max", [1, 41])
+def test_unscanned_ids_remain_unique_monotonic_and_pollable(
+    tmp_path, monkeypatch, file_max
+):
+    store = TaskLog(tmp_path, clock=Clock())
+    store._n = file_max - 1
+    record(store, task="persisted")
+    path = tmp_path / "logs/tasklog-20260926.jsonl"
+    original = Path.open
+    locked = True
+
+    def open_file(self, mode="r", *args, **kwargs):
+        if self == path and mode == "r" and locked:
+            raise PermissionError("scan unavailable")
+        return original(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    recovering = TaskLog(tmp_path, clock=Clock())
+    for _ in range(3):
+        record(recovering, task="memory")
+    memory = entries(recovering, day="20260926")
+    memory_ids = {row["id"] for row in memory}
+    assert len(memory_ids) == 3
+    assert f"20260926-{file_max}" not in memory_ids
+    assert all(int(row["id"].split("-")[1]) > file_max for row in memory)
+    cursor = memory[0]["id"]
+
+    locked = False
+    merged = entries(recovering, day="20260926")
+    assert len(merged) == 4
+    assert {row["task"] for row in merged} == {"persisted", "memory"}
+    assert entries(recovering, after=cursor) == []
+    for _ in range(2):
+        record(recovering, task="recovered")
+    polled = entries(recovering, after=cursor)
+    assert [row["task"] for row in polled] == ["recovered", "recovered"]
+    assert int(polled[0]["id"].split("-")[1]) > int(cursor.split("-")[1])
+    assert entries(recovering, after=polled[-1]["id"]) == []
+    assert len(entries(recovering, day="20260926")) == 6
+
+    restarted = TaskLog(tmp_path, clock=Clock())
+    record(restarted, task="restarted")
+    resumed = entries(restarted, after=polled[-1]["id"])
+    assert len(resumed) == 1 and resumed[0]["task"] == "restarted"
+    assert (
+        int(resumed[0]["id"].split("-")[1]) == int(polled[-1]["id"].split("-")[1]) + 1
+    )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("task", [1]),
+        ("kind", 5),
+        ("task_type", {}),
+        ("severity", []),
+        ("severity", "fatal"),
+        ("data", [1]),
+        ("film", [1]),
+        ("proc", 2),
+        ("pid", "1"),
+        ("pid", True),
+    ],
+)
+def test_malformed_record_shapes_are_skipped_everywhere(tmp_path, field, value):
+    store = TaskLog(tmp_path, clock=Clock())
+    record(store, "event.mirrored")
+    path = tmp_path / "logs/tasklog-20260926.jsonl"
+    row = entries(store)[0]
+    row[field] = value
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    restarted = TaskLog(tmp_path, clock=Clock())
+    assert restarted.reconcile() == {"previous_exit": "first"}
+    for query in ({"day": "20260926"}, {"task": "a"}, {"after": "20260926-0"}):
+        assert entries(restarted, **query) == []
+    assert restarted.query(days=True)["days"] == [{"day": "20260926", "count": 0}]
+
+
+def test_closed_day_count_tracks_evicted_memory_only_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr("taskpaw_v3.core.tasklog.RING_SIZE", 2)
+    clock = Clock()
+    store = TaskLog(tmp_path, clock=clock)
+    record(store)
+    original = store._append
+
+    def fail(row):
+        raise OSError("locked")
+
+    monkeypatch.setattr(store, "_append", fail)
+    record(store)
+    monkeypatch.setattr(store, "_append", original)
+    clock.now += timedelta(days=1)
+    record(store)
+    assert store.query(days=True)["days"][1]["count"] == 2
+    record(store)
+    assert store.query(days=True)["days"][1]["count"] == 1
+    assert len(entries(store, day="20260926")) == 1
+
+
 def test_append_resume_max_counter_torn_line_and_boot(tmp_path):
     clock = Clock()
     store = TaskLog(tmp_path, clock=clock)
     record(store)
     path = tmp_path / "logs/tasklog-20260926.jsonl"
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"id": "20260926-1000", "task": "a"}) + "\n")
-        f.write(json.dumps({"id": "20260926-900", "task": "a"}) + "\n")
+        row = entries(store)[0]
+        f.write(json.dumps({**row, "id": "20260926-1000"}) + "\n")
+        f.write(json.dumps({**row, "id": "20260926-900"}) + "\n")
         f.write('{"id":"20260926-9000"')
     restarted = TaskLog(tmp_path, clock=clock)
     record(restarted)

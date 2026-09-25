@@ -56,6 +56,8 @@ time without a date; every event of every level is forwarded to OpenClaw; the ba
     text. `operator.update` records changed field NAMES only (L12). Child output tails appear only in failure
     records, bounded to 800 chars (existing `bounded`); a tail is the child's own output and is exempt from the
     "no argv" test (L12).
+    `event.mirrored` carries the existing alert's title/message verbatim — the text TaskPaw already sends
+    to the Hub/phone. The "never logged" privacy rule applies to fields TaskPaw composes for the log.
 - [ ] AC3 **Kind catalog** (structured `data`; the UI renders zh + en; plugins never concatenate text):
   - agent: `agent.started` (version), `agent.stopping` — recorded by the launcher. **Unclean exit (L10):** on
     Windows the desktop shell force-kills the backend when the app closes (no signal; `GracefulShutdown`, plugin

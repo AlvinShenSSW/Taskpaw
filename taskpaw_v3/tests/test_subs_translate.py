@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 import pytest
+from conftest import tasklog_rows as _tasklog
 
 from taskpaw_v3.core.llm import LLMSettings
 from taskpaw_v3.core.llm_worker import ENV_BASE, ENV_KEY, ENV_MODEL
@@ -2505,13 +2506,6 @@ def test_teardown_tree_kills_a_worker_whose_launcher_already_exited(harness_fact
     events = [e.split(":", 1)[1] for e in sp.log]
     assert "close_stdin" in events and "terminate_tree" in events
     assert events.index("close_stdin") < events.index("terminate_tree")
-
-
-def _tasklog(kind=None):
-    from taskpaw_v3.core.tasklog import get_task_log
-
-    rows = list(get_task_log()._ring)
-    return [r for r in rows if kind is None or r["kind"] == kind]
 
 
 def test_tasklog_translation_started_finished_no_requests(harness_factory):

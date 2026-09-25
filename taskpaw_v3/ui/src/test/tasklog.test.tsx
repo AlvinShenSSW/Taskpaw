@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { TaskLog, TaskLogRows } from "../components/TaskLog";
-import { compareLogIds, localLogDay, logText, renderLogSentence } from "../components/TaskLog.helpers";
+import { compareLogIds, localLogDay, logDetails, logText, renderLogSentence } from "../components/TaskLog.helpers";
 import { api, type LogEntry } from "../api";
 import i18n, { setLang } from "../i18n";
 import { theme } from "../theme";
@@ -29,10 +29,103 @@ const catalog: [string, string, string][] = [
   ["event.mirrored", "Alert", "提醒"], ["event.suppressed", "suppressed", "省略"],
 ];
 
+// Exact data shapes from the producer call sites, without invented fallback keys.
+const producerData: Record<string, Record<string, unknown>> = {
+  "agent.started": { version: "3.9.0", previous_exit: "first" }, "agent.stopping": {},
+  "operator.start": {}, "operator.stop": {}, "operator.add": {}, "operator.remove": {}, "operator.update": { fields: ["poll_interval"] },
+  "task.started": { queued: 3, done: 2, skipped: 1 },
+  "task.done": { done: 3, failed: 1, skipped: 2, duration: 12.3456, kept_ja: 4, paused: 1 },
+  "task.aborted": { reason: "child_failed", exit_code: 7 }, "task.error": { reason: "no_exe" },
+  "task.interrupted": { step: "restore", elapsed: 12.3456 },
+  "task.gpu_wait": { holder: "other task" }, "task.gpu_acquired": {},
+  "restore.started": { index: 1, total: 3, mode: "plain" }, "restore.finished": { output: "LMNO-123.mp4", duration: 12.3456 },
+  "restore.failed": { exit_code: 7, tail: "failed" }, "restore.retry": { mode: "plain" }, "restore.skipped": { reason: "already restored", count: 2 },
+  "asr.started": { engine: "faster-whisper" }, "asr.finished": { lines: 17, duration: 12.3456 }, "asr.retry": {},
+  "translate.started": { model: "model-A", lines: 17, resumed: 2 },
+  "translate.switched": { from: "model-A", to: "model-B", reason: "unavailable", kind: "network" },
+  "translate.refused": { model: "model-A", lines: 17 },
+  "translate.provider_down": { model: "model-A", reason: "network", minutes: 30 }, "translate.provider_up": { model: "model-A" },
+  "translate.deferred": { lines: 17 }, "translate.paused": { minutes: 120 }, "translate.resumed": {},
+  "translate.finished": { lines: 17, by_model: { "model-A": 17 }, kept_ja: 2, duration: 12.3456 },
+  "subs.published": { srt: "LMNO-123.srt" }, "subs.skipped": { reason: "no_llm_key" }, "subs.failed": { detail: "asr failed", step: "asr" },
+  "subs.skipped_bulk": { count: 3, reason: "cancelled" },
+  "event.mirrored": { level: "alert", title: "Alert", message: "Original alert" }, "event.suppressed": { count: 17 },
+};
+const reasonCodes = [
+  "setup_or_launch_failed", "child_failed", "ffprobe_missing", "already restored", "name_collision", "name collision",
+  "subtitle_planning_failed", "no_exe", "translator_launch_failed", "publish_failed", "consecutive_restore_failures",
+  "asr_launch_failed", "cancelled", "scan_failed", "consecutive_subtitle_failures", "no_llm_key", "restore_failed",
+  "unstable", "translation_paused", "subtitle exists", "transcript exists", "subtitle state unreadable",
+  "asr failed", "subtitle operation failed", "network", "rate_limit", "refusal", "bad_response", "auth", "invalid", "content",
+  "unavailable", "recovered", "changed",
+];
+
 beforeEach(() => setLang("en"));
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); setLang("zh-CN"); });
 
 describe("log sentences", () => {
+  it.each(catalog)("uses actual producer fields for %s in the list and export", (kind) => {
+    const data = producerData[kind];
+    expect(data).toBeDefined();
+    const templateKind = kind === "translate.switched" ? "translate_unavailable" : kind.replaceAll(".", "_");
+    for (const lang of ["en", "zh-CN"] as const) {
+      setLang(lang);
+      const template = String(i18n.getResource(lang, "translation", `logs.kinds.${templateKind}`));
+      for (const [, field] of template.matchAll(/\{\{(\w+)\}\}/g)) {
+        expect(Object.hasOwn(data, field === "detail" && kind === "task.error" ? "reason" : field), `${kind}: ${field}`).toBe(true);
+      }
+      const row = entry(undefined, kind, data);
+      const sentence = renderLogSentence(row, i18n.t);
+      expect(logText([row], i18n.t)).toContain(sentence);
+      if (kind === "translate.refused") expect(sentence).toContain("17");
+    }
+  });
+  it.each(reasonCodes)("localizes producer reason %s in both languages and export", reason => {
+    for (const lang of ["en", "zh-CN"] as const) {
+      setLang(lang);
+      const text = i18n.getResource(lang, "translation", `logs.reasons.${reason}`);
+      expect(typeof text).toBe("string");
+      expect(text).not.toBe(reason);
+      const row = entry(undefined, "task.error", { reason });
+      expect(renderLogSentence(row, i18n.t)).toContain(text);
+      expect(logText([row], i18n.t)).toContain(text);
+    }
+    expect(renderLogSentence(entry(undefined, "task.error", { reason: "future_reason" }), i18n.t)).toContain("future_reason");
+  });
+  it.each([[3780.567, "1 h 3 min", "1 小时 3 分"], [3420.123, "57 min", "57 分"], [12.3456, "12 s", "12 秒"]])("formats duration and elapsed %s", (seconds, en, zh) => {
+    for (const [lang, expected] of [["en", en], ["zh-CN", zh]] as const) {
+      setLang(lang);
+      const row = entry(undefined, "restore.finished", { output: "LMNO-123.mp4", duration: seconds, elapsed: seconds, minutes: 1.234567 });
+      expect(renderLogSentence(row, i18n.t)).toContain(expected);
+      expect(logDetails(row, i18n.t).filter(([, value]) => value === expected)).toHaveLength(2);
+      expect(logText([row], i18n.t)).not.toContain("1.234567");
+    }
+  });
+  it("explains publish failures and GPU waits without a holder", () => {
+    for (const [lang, failure, wait] of [["en", "Restored but publishing failed", "Waiting for the GPU"], ["zh-CN", "修复完成但写入失败", "等待 GPU"]] as const) {
+      setLang(lang);
+      expect(renderLogSentence(entry(undefined, "restore.failed", { exit_code: 0, reason: "publish_failed" }), i18n.t)).toBe(failure);
+      expect(renderLogSentence(entry(undefined, "task.gpu_wait", { holder: "" }), i18n.t)).toBe(wait);
+    }
+  });
+  it("uses a holder-free GPU wait sentence", () => {
+    expect(renderLogSentence(entry(undefined, "task.gpu_wait", { holder: "" }), i18n.t)).toBe("Waiting for the GPU");
+  });
+  it.each([`"api_key": "PLANTED secret"`, `'token': 'PLANTED secret'`, `"Authorization": "Bearer PLANTED secret"`, `api_token=PLANTED`, `Bearer PLANTED`])("redacts quoted credentials: %s", credential => {
+    const row = entry(undefined, "event.mirrored", { title: credential, message: credential, tail: credential });
+    render(<TaskLogRows entries={[row]} />);
+    fireEvent.click(screen.getByRole("button", { name: /Details/ }));
+    expect(document.body.textContent).not.toContain("PLANTED");
+    expect(logText([row], i18n.t)).not.toContain("PLANTED");
+  });
+  it("removes obsolete agent event UI symbols while retaining Hub events", () => {
+    expect(api).not.toHaveProperty("agentEvents");
+    expect(api.hubEvents).toBeTypeOf("function");
+    for (const lang of ["en", "zh-CN"]) {
+      expect(i18n.getResource(lang, "translation", "agent.recentEvents")).toBeUndefined();
+      expect(i18n.getResource(lang, "translation", "agent.recentEventsShort")).toBeUndefined();
+    }
+  });
   it.each(catalog)("renders %s in both languages from structured data", (kind, en, zh) => {
     const e = entry(undefined, kind, { reason: "unavailable", from: "grok-4.3", to: "deepseek-chat", title: "Alert", queued: 3, done: 2, skipped: 1 });
     for (const [lang, expected] of [["en", en], ["zh-CN", zh]] as const) {
@@ -92,6 +185,75 @@ const show = () => render(<ThemeProvider theme={theme}><TaskLog tasks={["main/�
 const select = (name: string, value: string) => fireEvent.change(screen.getByLabelText(name), { target: { value } });
 
 describe("TaskLog", () => {
+  it.each([["Task", "task"], ["Search film / model / title", "q"]])("debounces typing in %s before querying", async (label, param) => {
+    vi.useFakeTimers();
+    const fetcher = stub(() => ({ entries: [entry()] }));
+    show();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fetcher.mockClear();
+    for (const value of ["r", "re", "removed"]) {
+      select(label, value);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(screen.getByTestId("log-row-20260926-9")).toBeInTheDocument();
+    }
+    expect(screen.getByLabelText(label)).toHaveValue("removed");
+    await act(async () => { await vi.advanceTimersByTimeAsync(199); });
+    expect(fetcher).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const queries = fetcher.mock.calls.map(([url]) => new URL(url).searchParams).filter(p => !p.has("days"));
+    expect(queries).toHaveLength(1);
+    expect(queries[0].get(param)).toBe("removed");
+  });
+
+  it("refreshes only the days list while viewing a past day", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-26T12:00:00"));
+    const fetcher = stub();
+    show();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    select("Day", "20260924");
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fetcher.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(new URL(fetcher.mock.calls[0][0]).searchParams.has("days")).toBe(true);
+  });
+  it("allows exact removed task names and excludes empty task suggestions", async () => {
+    const fetcher = stub(() => ({ entries: [{ ...entry(undefined, "agent.stopping"), task: "" }] }));
+    show(); await screen.findByText("Agent is stopping");
+    const input = screen.getByLabelText("Task");
+    expect(input.tagName).toBe("INPUT");
+    expect(document.querySelector('datalist option[value=""]')).toBeNull();
+    select("Task", "removed / LMNO");
+    await waitFor(() => expect(fetcher.mock.calls.some(([url]) => new URL(url).searchParams.get("task") === "removed / LMNO")).toBe(true));
+  });
+  it("does not offer an empty-labelled agent task", async () => {
+    stub(() => ({ entries: [{ ...entry(undefined, "agent.stopping"), task: "" }] }));
+    show(); await screen.findByText("Agent is stopping");
+    expect([...document.querySelectorAll("option")].some(option => option.textContent === "")).toBe(false);
+  });
+  it.each([false, true])("updates day labels and export after midnight (past day: %s)", async past => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-26T23:59:59"));
+    const fetcher = stub();
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL() { return "blob:test"; }
+      static revokeObjectURL = vi.fn();
+    });
+    const downloads: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
+    show(); await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    if (past) { select("Day", "20260924"); await act(async () => { await vi.advanceTimersByTimeAsync(0); }); }
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(screen.getByRole("option", { name: "Today" })).toHaveValue("20260927");
+    expect(screen.getByRole("option", { name: "Yesterday" })).toHaveValue("20260926");
+    expect(screen.getByLabelText("Day")).toHaveValue(past ? "20260924" : "20260927");
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Export" })); });
+    expect(downloads).toEqual([`taskpaw-${past ? "20260924" : "20260927"}.txt`]);
+    expect(fetcher.mock.calls.some(([url]) => {
+      const p = new URL(url).searchParams;
+      return p.get("limit") === "500" && p.get("day") === (past ? "20260924" : "20260927");
+    })).toBe(true);
+  });
   it("encodes query values and consumes the retained-days shape", async () => {
     const fetcher = stub();
     await api.logs({ day: "20260926", task: "任务 / &", severity: "info,error", q: "a+b & c", before: "20260926-1000", limit: 500 });
@@ -126,8 +288,8 @@ describe("TaskLog", () => {
     await waitFor(() => expect(screen.getAllByTestId(/^log-row/)).toHaveLength(2));
     expect(fetcher.mock.calls.some(([url]) => new URL(url).searchParams.get("before") === "20260926-9")).toBe(true);
   });
-  it("polls after the largest numeric id, dedupes across midnight, and stops on unmount", async () => {
-    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-26T23:59:59"));
+  it("polls after the largest numeric id, dedupes across days, and stops on unmount", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-26T12:00:00"));
     const fetcher = stub(p => ({ entries: p.has("after")
       ? [entry("20260926-1000"), entry("20260927-1")]
       : [entry("20260926-1000"), entry("20260926-900")] }));

@@ -31,9 +31,9 @@ export function logSafeText(value: unknown): string {
   if (typeof value !== "string" && typeof value !== "number") return "";
   return String(value)
     .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
-    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/["']?\b(api[_-]?(?:key|token)|token|password|secret|authorization)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|Bearer\s+[^\s,;]+|[^\s,;]+)/gi, "$1=[redacted]")
+    .replace(/\bBearer\s+[^\s"',;]+/gi, "Bearer [redacted]")
     .replace(/\bsk-[\w-]+/g, "[redacted]")
-    .replace(/\b(api[_-]?key|token|password|secret|authorization)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "$1=[redacted]")
     // Strip terminal control characters while preserving multiline details.
     .split("").filter(c => c >= " " && c !== "\u007f" || c === "\n" || c === "\t" || c === "\r").join("")
     .slice(0, 4000);
@@ -48,6 +48,16 @@ const FIELDS = [
 const COUNTS = new Set(["queued", "done", "failed", "skipped", "kept_ja", "paused", "lines", "resumed", "count"]);
 
 function valueText(key: string, value: unknown, t: TFunction): string {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (key === "duration" || key === "elapsed") {
+      const seconds = Math.max(0, Math.round(value));
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor(seconds % 3600 / 60);
+      if (hours) return [t("logs.duration.hours", { count: hours }), minutes ? t("logs.duration.minutes", { count: minutes }) : ""].filter(Boolean).join(" ");
+      return minutes ? t("logs.duration.minutes", { count: minutes }) : t("logs.duration.seconds", { count: seconds });
+    }
+    return String(Math.round(value * 100) / 100);
+  }
   if (typeof value === "boolean") return t(value ? "logs.yes" : "logs.no");
   if (key === "by_model" && value && typeof value === "object" && !Array.isArray(value)) {
     return Object.entries(value).filter(([, n]) => typeof n === "number" && Number.isFinite(n))
@@ -57,6 +67,7 @@ function valueText(key: string, value: unknown, t: TFunction): string {
   if (key === "fields" && Array.isArray(value)) return value.map(logSafeText).filter(Boolean).join(", ");
   const text = logSafeText(value);
   if (["step", "previous_exit"].includes(key) && text) return t(`logs.values.${text}`, { defaultValue: text });
+  if (["reason", "detail", "kind"].includes(key) && text) return t(`logs.reasons.${text}`, { defaultValue: text });
   return text;
 }
 
@@ -81,6 +92,8 @@ export function renderLogSentence(entry: LogEntry, t: TFunction): string {
   let kind = entry.kind.replaceAll(".", "_");
   if (entry.kind === "agent.started" && data.previous_exit === "unclean") kind = "agent_unclean";
   if (entry.kind === "task.interrupted" && data.reconstructed) kind = "task_inferred";
+  if (entry.kind === "restore.failed" && data.reason === "publish_failed") kind = "restore_publish_failed";
+  if (entry.kind === "task.gpu_wait" && !data.holder) kind = "task_gpu_wait_free";
   if (entry.kind === "translate.switched") {
     kind = `translate_${["unavailable", "recovered", "changed"].includes(String(data.reason)) ? data.reason : "changed"}`;
   }

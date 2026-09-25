@@ -24,6 +24,7 @@ log = logging.getLogger("taskpaw.tasklog")
 MAX_BYTES = 50 * 1024 * 1024
 MIRROR_CAP = 500
 RING_SIZE = 2000
+_UNSCANNED_BASE = 1_000_000
 _FILE = re.compile(r"tasklog-(\d{8})\.jsonl\Z")
 _ID = re.compile(r"(\d{8})-(\d+)\Z")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
@@ -148,8 +149,8 @@ class TaskLog:
             log.warning("Task log listing failed: %s", type(exc).__name__)
             return {}
 
-    def _read_day(self, day: str) -> Iterator[dict[str, Any]]:
-        """Stream complete lines only. Corrupt/torn lines are not records."""
+    def _read_day(self, day: str, *, strict: bool = False) -> Iterator[dict[str, Any]]:
+        """A parseable tail is complete even if its newline was not written."""
         if self._folder is None:
             return
         try:
@@ -157,13 +158,24 @@ class TaskLog:
                 "r", encoding="utf-8", errors="replace"
             ) as stream:
                 for line in stream:
-                    if not line.endswith("\n"):
-                        continue
                     try:
                         row = json.loads(line)
                         if (
                             isinstance(row, dict)
                             and _id_key(row.get("id", ""))[0] == day
+                            and all(
+                                isinstance(row.get(k), str)
+                                for k in ("kind", "task", "task_type")
+                            )
+                            and row.get("severity") in ("info", "warn", "error")
+                            and (
+                                row.get("data") is None or isinstance(row["data"], dict)
+                            )
+                            and all(
+                                row.get(k) is None or isinstance(row[k], str)
+                                for k in ("film", "proc")
+                            )
+                            and (row.get("pid") is None or type(row["pid"]) is int)
                         ):
                             yield _sanitize(row)
                     except (ValueError, TypeError, RecursionError):
@@ -171,6 +183,8 @@ class TaskLog:
         except FileNotFoundError:
             return
         except OSError as exc:
+            if strict:
+                raise
             log.warning("Task log read failed: %s", type(exc).__name__)
 
     def _load_day(self) -> None:
@@ -180,7 +194,18 @@ class TaskLog:
         self._pending.clear()
         self._types.clear()
         self._last_delta.clear()
-        for row in self._read_day(self._day):
+        self._scan_ready = False
+        self._scan_day()
+
+    def _scan_day(self) -> None:
+        # Commit scan state only after EOF: a failed/partial read cannot authorize
+        # appending from an unknown counter. Retry on the next observation.
+        try:
+            rows = list(self._read_day(self._day, strict=True))
+        except OSError as exc:
+            log.warning("Task log scan failed: %s", type(exc).__name__)
+            return
+        for row in rows:
             self._n = max(self._n, _id_key(row["id"])[1])
             self._latest_record_day = max(self._latest_record_day, self._day)
             task = row.get("task", "")
@@ -190,6 +215,7 @@ class TaskLog:
             elif kind == "event.suppressed":
                 self._capped.add(task)
                 self._last_delta[task] = self._monotonic()
+        self._scan_ready = True
 
     def _append(self, row: dict[str, Any]) -> None:
         if self._folder is None:
@@ -218,10 +244,16 @@ class TaskLog:
 
     def _insert(self, row: dict[str, Any]) -> None:
         """Called only under _lock. A failed append still consumes this id."""
+        if not self._scan_ready:
+            # Keep memory-only observations above ordinary persisted daily ids;
+            # the successful rescan preserves this counter via max().
+            self._n = max(self._n, _UNSCANNED_BASE)
         self._n += 1
         row["id"] = f"{self._day}-{self._n}"
         for attempt in range(2):
             try:
+                if not self._scan_ready:
+                    raise OSError("day scan unavailable")
                 # A close() error can occur after a full line reached disk. Do
                 # not append that id twice on the retry; torn lines are repaired.
                 if attempt and any(
@@ -305,6 +337,8 @@ class TaskLog:
                     self._day = day
                     self._load_day()
                     rolled = True
+                elif not self._scan_ready:
+                    self._scan_day()
                 if kind == "agent.stopping":
                     self._flush_deltas(now)
                 if kind == "event.mirrored":
@@ -406,7 +440,14 @@ class TaskLog:
 
     def _rows(self, day: str) -> list[dict[str, Any]]:
         rows = {r["id"]: r for r in self._read_day(day)}
-        rows.update({r["id"]: r for r in self._ring if _id_key(r["id"])[0] == day})
+        memory = {r["id"]: r for r in self._ring if _id_key(r["id"])[0] == day}
+        if (
+            day < self._latest_record_day
+            and self._folder is not None
+            and memory.keys() <= rows.keys()
+        ):
+            self._cache[day] = len(rows), {r["task"] for r in rows.values()}
+        rows.update(memory)
         return sorted(rows.values(), key=lambda row: _id_key(row["id"]))
 
     def _summary(self, day: str) -> tuple[int, set[str]]:
@@ -414,10 +455,6 @@ class TaskLog:
             return self._cache[day]
         rows = self._rows(day)
         summary = len(rows), {r.get("task", "") for r in rows}
-        # Wall time alone doesn't close a day: its rollover delta is pending.
-        # Memory-only counts can shrink on ring eviction, so never cache those.
-        if day < self._latest_record_day and self._folder is not None:
-            self._cache[day] = summary
         return summary
 
     @staticmethod
@@ -458,6 +495,8 @@ class TaskLog:
         after_key = _id_key(after) if after else None
         limit = max(1, min(500, limit))
         severities = set(filter(None, re.split(r"[,\s]+", severity or "")))
+        if severities - {"info", "warn", "error"}:
+            raise ValueError("invalid task log severity")
         with self._lock:
             available = self._days()
             if days:
@@ -482,8 +521,6 @@ class TaskLog:
                 ):
                     continue
                 rows = self._rows(d)
-                if d < self._latest_record_day and self._folder is not None:
-                    self._cache[d] = len(rows), {r.get("task", "") for r in rows}
                 for row in rows if after_key else reversed(rows):
                     key = _id_key(row["id"])
                     if (

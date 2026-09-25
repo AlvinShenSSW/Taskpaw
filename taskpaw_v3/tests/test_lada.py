@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+from conftest import tasklog_rows as _tasklog
+
 from taskpaw_v3.monitors.plugins.lada import (
     LadaConfig,
     LadaInstance,
@@ -522,13 +525,6 @@ def test_lada_registered():
     assert p.type_id == "lada" and p.system is False
 
 
-def _tasklog(kind=None):
-    from taskpaw_v3.core.tasklog import get_task_log
-
-    rows = list(get_task_log()._ring)
-    return [r for r in rows if kind is None or r["kind"] == kind]
-
-
 def test_tasklog_lada_capture_and_last_exit(monkeypatch):
     import taskpaw_v3.monitors.plugins.lada as L
 
@@ -703,3 +699,61 @@ def test_tasklog_lada_failed_run(monkeypatch):
     inst.check(emit)
     assert len(_tasklog("restore.failed")) == len(_tasklog("task.aborted")) == 1
     assert not _tasklog("task.done")
+
+
+@pytest.mark.parametrize("error", [OSError, ValueError])
+@pytest.mark.parametrize("exit_first", [True, False])
+def test_tasklog_reader_error_delivers_conclusion_once(error, exit_first):
+    from types import SimpleNamespace
+
+    inst = LadaInstance(
+        "l",
+        _cfg(
+            lada_cli_path="lada.exe",
+            lada_capture_progress=True,
+            lada_input_folder="in",
+            lada_output_folder="out",
+            lada_gpu_monitor=False,
+        ),
+    )
+    proc = _ExitedProcess("", 7)
+
+    def fail_read(n):
+        raise error("closed pipe")
+
+    proc.stdout.read = fail_read
+    inst._process = proc
+    inst._reader = SimpleNamespace(join=lambda **kw: None)
+    inst._consume_output(b"LMNO-123.mp4:")
+    _, emit = _events()
+    if exit_first:
+        inst.check(emit)
+    inst._reader_loop()
+    inst.check(emit)
+    inst.stop()
+    assert inst._log_reader_done
+    assert len(_tasklog("restore.failed")) == 1
+    assert len(_tasklog("task.aborted")) == 1
+
+
+def test_tasklog_non_capture_failed_at_stop_has_run_scope(monkeypatch):
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    cfg = _cfg(
+        lada_cli_path="lada.exe",
+        lada_input_folder="in",
+        lada_output_folder="out",
+        lada_gpu_monitor=False,
+    )
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: _ExitedProcess("", 7))
+    inst = LadaInstance("l", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    inst.stop()
+    inst.stop()
+    rows = _tasklog("restore.failed")
+    assert len(rows) == 1
+    assert rows[0]["data"]["exit_code"] == 7
+    assert rows[0]["data"]["at_stop"] is True
+    assert "film" not in rows[0]
+    assert not _tasklog("task.interrupted")

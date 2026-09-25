@@ -214,6 +214,19 @@ class MonitorAdmin:
                     self._sup.unregister(iid)
             return {"ok": True, "name": iid, "enabled": bool(enabled)}
 
+    def patch(self, name: str, body: dict) -> dict[str, Any]:
+        if "config" not in body and "enabled" not in body:
+            raise ValueError("patch needs 'config' and/or 'enabled'")
+        # Validate the toggle before update() can log or apply the config.
+        if "enabled" in body:
+            _as_bool(body["enabled"])
+        out: dict[str, Any] = {"ok": True, "name": name}
+        if "config" in body:
+            out = self.update(name, body["config"])
+        if "enabled" in body:
+            out = self.set_enabled(name, body["enabled"])
+        return out
+
     def update(self, name: str, config: dict) -> dict[str, Any]:
         with self._lock:
             m = self._find(name)

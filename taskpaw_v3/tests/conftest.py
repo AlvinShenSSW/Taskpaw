@@ -59,3 +59,10 @@ def _gpu_lease_isolation():
     gpu_lease._reset_for_tests()
     yield
     gpu_lease._reset_for_tests()
+
+
+def tasklog_rows(kind=None):
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    rows = list(get_task_log()._ring)
+    return [r for r in rows if kind is None or r["kind"] == kind]

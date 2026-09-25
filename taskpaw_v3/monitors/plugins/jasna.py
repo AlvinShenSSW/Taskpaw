@@ -1140,6 +1140,7 @@ class JasnaInstance(MonitorInstance):
         self._log_restore_at = self._log_started_at
         self._log_gpu_wait = False
         self._log_stopped = False
+        self._log_stop_proc: Optional[subprocess.Popen] = None
         self._log_bulk = False
         self._settled: dict[str, tuple[str, str]] = {}
         # #189: per-film step outcomes, marked at the counter points; its films
@@ -1242,6 +1243,7 @@ class JasnaInstance(MonitorInstance):
         self._log_restore_at = self._log_started_at
         self._log_gpu_wait = False
         self._log_stopped = False
+        self._log_stop_proc = None
         self._log_bulk = False
         self._settled = {}
         self._tracker = FilmTracker(JASNA_STEPS)
@@ -1553,7 +1555,8 @@ class JasnaInstance(MonitorInstance):
     def stop(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + max(0.1, timeout)
         self._stopping.set()
-        if not self._log_stopped:
+        log_stop = not self._log_stopped
+        if log_stop:
             self._log_stopped = True
             translator = self._translator
             if translator is not None:
@@ -1571,49 +1574,6 @@ class JasnaInstance(MonitorInstance):
                             "elapsed": snap.get("elapsed_s", 0),
                             "queued": queued,
                         },
-                    )
-            job = self._subs_job
-            child = job.child if job is not None else None
-            if job is not None and child is not None and child.poll() is None:
-                get_task_log().record(
-                    self.instance_id,
-                    "task.interrupted",
-                    task_type="jasna",
-                    film=job.job_id,
-                    severity="warn",
-                    pid=getattr(child, "pid", None),
-                    data={
-                        "step": "asr",
-                        "elapsed": max(0.0, time.monotonic() - job.started_at),
-                    },
-                )
-            proc = self._process
-            if proc is not None:
-                rc = proc.poll()
-                film = self._current.name if self._current else None
-                if rc is None:
-                    get_task_log().record(
-                        self.instance_id,
-                        "task.interrupted",
-                        task_type="jasna",
-                        film=film,
-                        severity="warn",
-                        pid=getattr(proc, "pid", None),
-                        data={
-                            "step": "restore",
-                            "elapsed": max(
-                                0.0, time.monotonic() - self._log_restore_at
-                            ),
-                        },
-                    )
-                elif rc != 0:
-                    get_task_log().record(
-                        self.instance_id,
-                        "restore.failed",
-                        task_type="jasna",
-                        film=film,
-                        severity="error",
-                        data={"exit_code": rc, "at_stop": True},
                     )
         # #177: cancel the translator FIRST (bounded: ≤ 1 s + a tree kill) so its
         # llm-worker is already going away while we wait for the lock. It takes
@@ -1636,6 +1596,8 @@ class JasnaInstance(MonitorInstance):
             proc = self._process
             if acquired:
                 if proc is not None and proc.poll() is None:
+                    if log_stop:
+                        self._log_restore_stop(proc, None)
                     _terminate_child(proc, timeout)
                     # ONLY after killing a LIVE child: an already-exited child is
                     # never left with a stale staging file — see below.
@@ -1651,10 +1613,12 @@ class JasnaInstance(MonitorInstance):
                     self._process = None
                     self._gpu_give(self._restore_hold)
                 elif proc is not None:
+                    if log_stop:
+                        self._log_restore_stop(proc, proc.poll())
                     # Exited non-zero, unpolled: the exit branch handles it, but
                     # the GPU is free now — release the hook (idempotent).
                     self._gpu_give(self._restore_hold)
-                self._stop_asr(deadline)
+                self._stop_asr(deadline, log_stop=log_stop)
             else:
                 log.warning(
                     "jasna %s: stop() could not take the launch lock within %.1fs; "
@@ -1663,10 +1627,14 @@ class JasnaInstance(MonitorInstance):
                     self.instance_id,
                     timeout,
                 )
+                if log_stop and proc is not None:
+                    self._log_restore_stop(proc, proc.poll())
                 _terminate_child(proc, timeout)
                 self._gpu_give(self._restore_hold)
                 job = self._subs_job
                 if job is not None and job.child is not None:
+                    if log_stop and job.child.poll() is None:
+                        self._log_asr_stop(job, job.child)
                     self._kill_asr(job, max(0.1, deadline - time.monotonic()))
                     self._gpu_give(job)
             # #179 M4: whatever still holds the GPU — e.g. a restore's hold
@@ -1686,7 +1654,51 @@ class JasnaInstance(MonitorInstance):
         if translator is not None:
             translator.join(max(0.1, deadline - time.monotonic()))
 
-    def _stop_asr(self, deadline: float) -> None:
+    def _log_asr_stop(self, job: SubsJob, child) -> None:
+        get_task_log().record(
+            self.instance_id,
+            "task.interrupted",
+            task_type="jasna",
+            film=job.job_id,
+            severity="warn",
+            pid=getattr(child, "pid", None),
+            data={
+                "step": "asr",
+                "elapsed": max(0.0, time.monotonic() - job.started_at),
+            },
+        )
+
+    def _log_restore_stop(self, proc, rc: int | None) -> None:
+        # stop() and the stopping exit handler may consume the same child in
+        # either order. A terminate-induced exit must keep its interruption.
+        if proc is self._log_stop_proc:
+            return
+        self._log_stop_proc = proc
+        film = self._current.name if self._current else None
+        if rc is None:
+            get_task_log().record(
+                self.instance_id,
+                "task.interrupted",
+                task_type="jasna",
+                film=film,
+                severity="warn",
+                pid=getattr(proc, "pid", None),
+                data={
+                    "step": "restore",
+                    "elapsed": max(0.0, time.monotonic() - self._log_restore_at),
+                },
+            )
+        elif rc != 0:
+            get_task_log().record(
+                self.instance_id,
+                "restore.failed",
+                task_type="jasna",
+                film=film,
+                severity="error",
+                data={"exit_code": rc, "at_stop": True},
+            )
+
+    def _stop_asr(self, deadline: float, *, log_stop: bool = True) -> None:
         """Under `_launch_lock` (stop): a live ASR child is tree-killed (bounded)
         and its GPU hook released; one that already exited 0 unpolled gets its
         `.ja.srt` published (never the zh — the translator is cancelled)."""
@@ -1697,6 +1709,8 @@ class JasnaInstance(MonitorInstance):
         if job is None or child is None:
             return
         if child.poll() is None:
+            if log_stop:
+                self._log_asr_stop(job, child)
             self._kill_asr(job, max(0.1, min(5.0, deadline - time.monotonic())))
         else:
             outcome = job.poll_asr()
@@ -2076,6 +2090,7 @@ class JasnaInstance(MonitorInstance):
         with self._launch_lock:
             if self._process is None:
                 return  # already handled
+            proc = self._process
             self._process = None  # handled ONCE
             self._next_action = None
             # Shutting down: a terminate-induced non-zero exit is not a file
@@ -2088,6 +2103,8 @@ class JasnaInstance(MonitorInstance):
                 if stopping:
                     if retcode == 0:
                         self._publish_current()
+                    else:
+                        self._log_restore_stop(proc, retcode)
                 elif retcode == 0:
                     self._handle_success(emit)
                 else:

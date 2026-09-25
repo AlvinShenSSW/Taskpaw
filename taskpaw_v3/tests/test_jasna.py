@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import tasklog_rows as _tasklog
 
 from taskpaw_v3.monitors.plugins import jasna as J
 from taskpaw_v3.monitors.plugins.jasna import (
@@ -1534,13 +1535,6 @@ def test_create_builds_a_jasna_instance(tmp_path):
     assert isinstance(inst, JasnaInstance)
 
 
-def _tasklog(kind=None):
-    from taskpaw_v3.core.tasklog import get_task_log
-
-    rows = list(get_task_log()._ring)
-    return [r for r in rows if kind is None or r["kind"] == kind]
-
-
 @pytest.mark.parametrize("path", ["normal", "stopping", "stop"])
 def test_tasklog_restore_publish_paths(tmp_path, monkeypatch, path):
     cfg, inp, out, _ = _managed(tmp_path)
@@ -1587,6 +1581,42 @@ def test_tasklog_restore_stop_live_or_failed(tmp_path, monkeypatch, rc):
         assert not _tasklog("task.interrupted")
         assert _tasklog("restore.failed")[0]["data"]["at_stop"] is True
         assert len(_tasklog("restore.failed")) == 1
+
+
+@pytest.mark.parametrize("exit_first", [True, False])
+@pytest.mark.parametrize("rc", [7, None])
+def test_tasklog_restore_stop_exit_race_records_once(
+    tmp_path, monkeypatch, exit_first, rc
+):
+    from test_jasna_subs import _setup
+
+    h = _setup(tmp_path, monkeypatch, pending=("a.mp4",), rcs=[rc])
+    h.inst.start(h.emit)
+    child = h.inst._process
+    cancel = h.translators[0].cancel
+
+    def check_during_cancel():
+        h.inst.check(h.emit)
+        cancel()
+
+    if exit_first:
+        monkeypatch.setattr(h.translators[0], "cancel", check_during_cancel)
+    h.inst.stop()
+    h.inst.check(h.emit)
+    h.inst.stop()
+    assert h.inst._process is None
+    if rc is None:
+        assert child.terminated
+        assert not _tasklog("restore.failed")
+        rows = _tasklog("task.interrupted")
+        assert len(rows) == 1 and rows[0]["data"]["step"] == "restore"
+    else:
+        assert not child.terminated
+        assert not _tasklog("task.interrupted")
+        rows = _tasklog("restore.failed")
+        assert len(rows) == 1
+        assert rows[0]["film"] == "a.mp4"
+        assert rows[0]["data"] == {"exit_code": 7, "at_stop": True}
 
 
 def test_tasklog_restore_retry_abort_and_errors(tmp_path, monkeypatch):
@@ -1656,6 +1686,24 @@ def test_tasklog_restore_and_translation_stop_snapshot(tmp_path, monkeypatch):
         "restore",
         "translate",
     }
+
+
+def test_tasklog_restore_finishes_during_cancel_not_interrupted(tmp_path, monkeypatch):
+    from test_jasna_subs import _setup
+
+    h = _setup(tmp_path, monkeypatch, pending=("LMNO-123.mp4",), rcs=[None])
+    h.inst.start(h.emit)
+    child = h.inst._process
+    cancel = h.translators[0].cancel
+
+    def finish_during_cancel():
+        child._rc = 0
+        cancel()
+
+    monkeypatch.setattr(h.translators[0], "cancel", finish_during_cancel)
+    h.inst.stop()
+    assert len(_tasklog("restore.finished")) == 1
+    assert not _tasklog("task.interrupted")
 
 
 def test_tasklog_jasna_launch_error_no_secret(tmp_path, monkeypatch):
