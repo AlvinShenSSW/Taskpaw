@@ -42,6 +42,15 @@ planned subtitle job reaches exactly one terminal state, settled only by the
 monitor worker thread under `_launch_lock`; blocking side effects of a
 settlement are deferred until the lock is released (D8), and only `_dispatch()`
 advances the queue on the exit/poll/settle paths (D25/D29).
+
+Progress view (#189, AV 翻译 on only): a per-run `FilmTracker` is marked at the
+existing counter points (restore launch / `_done` / `_failed`, ASR start, the
+`.ja.srt` publish, `translator.submit`, `_settle`) and the status adds the
+per-film stepper (`film`, `steps`, `films`, `films_more`, `model` while
+translating) derived from what is live at status time, plus `queue_restored`;
+`queue_completed` then counts FULLY done films — restored and their subtitle
+job settled (D1) — and the detail follows (D6). Read-only observation: nothing
+about scheduling, settlement or the GPU lease changes.
 """
 
 from __future__ import annotations
@@ -92,6 +101,16 @@ from taskpaw_v3.monitors.plugins.lada import (
 from taskpaw_v3.monitors.subs import bounded, exists_quietly
 from taskpaw_v3.monitors.subs.child import ChildProcess, asr_env
 from taskpaw_v3.monitors.subs.job import SubsJob
+from taskpaw_v3.monitors.subs.progress import (
+    ASR,
+    JASNA_STEPS,
+    NAME_CHARS,
+    RESTORE,
+    TRANSLATE,
+    FilmTracker,
+    parse_eta,
+    progress_view,
+)
 from taskpaw_v3.monitors.subs.srt import Cue, SrtError
 from taskpaw_v3.monitors.subs.translate import (
     CANCELLED,
@@ -413,6 +432,19 @@ def plan_subs(
             subs_only.append(video)
     total = sum(1 for k in for_pending.values() if k != "none") + len(subs_only)
     return SubsPlan(for_pending, subs_only, total)
+
+
+def _initial_steps(kind: SubsKind, restored: bool) -> dict[str, str]:
+    """#189: a film's tracker steps at Start — restored at Start (subs-only) →
+    restore `done`; an existing `.ja.srt` → asr `done` (no duration); an
+    existing zh (kind none: no job) → asr and translate `skipped`, so the film
+    is done once it is restored (M2)."""
+    initial: dict[str, str] = {RESTORE: "done"} if restored else {}
+    if kind == "translate_only":
+        initial[ASR] = "done"
+    elif kind == "none":
+        initial[ASR] = initial[TRANSLATE] = "skipped"
+    return initial
 
 
 def _default_spawn(argv: list[str]) -> ChildProcess:
@@ -1028,6 +1060,9 @@ class JasnaInstance(MonitorInstance):
         self._translator: Optional[Translator] = None
         self._jobs: dict[str, SubsJob] = {}
         self._settled: dict[str, tuple[str, str]] = {}
+        # #189: per-film step outcomes, marked at the counter points; its films
+        # are added only with AV 翻译 on (a mark for an unknown film is a no-op)
+        self._tracker = FilmTracker(JASNA_STEPS)
         self._subs_completed = 0
         self._subs_failed = 0
         self._subs_skipped = 0
@@ -1117,6 +1152,7 @@ class JasnaInstance(MonitorInstance):
         self._translator = None
         self._jobs = {}
         self._settled = {}
+        self._tracker = FilmTracker(JASNA_STEPS)
         self._subs_completed = self._subs_failed = self._subs_skipped = 0
         self._subs_consecutive_failures = 0
         self._subs_disabled = None
@@ -1251,6 +1287,10 @@ class JasnaInstance(MonitorInstance):
         except OSError as e:
             # plan_queue just scanned the same folder, so this is a race; the
             # restores still run, subtitles are off for this run — visibly.
+            # #189 (R2): no jobs — every pending film still gets its row,
+            # with nothing to subtitle (done once restored).
+            for video in pending:
+                self._tracker.add(video.name, _initial_steps("none", False))
             log.warning("jasna %s: subtitle planning failed: %s", self.instance_id, e)
             emit(
                 "alert",
@@ -1263,11 +1303,16 @@ class JasnaInstance(MonitorInstance):
         self._plan = plan
         exe = cfg.whisperjav_exe_path.strip()
         staging = Path(out) / _SUBS_STAGING
-        work: list[tuple[Path, SubsKind]] = [
-            (v, k) for v, k in plan.for_pending.items() if k != "none"
+        work: list[tuple[Path, SubsKind, bool]] = [
+            (v, k, False) for v, k in plan.for_pending.items()
         ]
-        work += [(v, subs_kind(out, v)) for v in plan.subs_only]
-        for video, kind in work:
+        work += [(v, subs_kind(out, v), True) for v in plan.subs_only]
+        for video, kind, restored in work:
+            # #189 (M1/M2): every film joins the tracker in plan order before
+            # anything can settle — a kind-none film too (it has no job).
+            self._tracker.add(video.name, _initial_steps(kind, restored))
+            if kind == "none":
+                continue
             # C10: the restored file — new or legacy name (#187); the subtitle
             # targets sit next to it under its own stem.
             media = subs_media_for(out, video)
@@ -1602,6 +1647,8 @@ class JasnaInstance(MonitorInstance):
                 return False
             self._restore_hold = hold  # released by the exit branch / stop()
             self._process = proc
+            # #189: a retry of the same file keeps the first stamp
+            self._tracker.start(video.name, RESTORE, time.monotonic())
             if capture and proc.stdout is not None:
                 self._reader = threading.Thread(
                     target=self._reader_loop,
@@ -1848,6 +1895,7 @@ class JasnaInstance(MonitorInstance):
                 if self._failed == failed_before:
                     self._failed += 1
                     self._consecutive_failures += 1
+                    self._mark_restore_failed(name)
         if self._cfg.av_translate and name in self._jobs and name not in self._settled:
             try:
                 self._settle(name, "skipped", "restore_failed", emit)
@@ -1899,6 +1947,9 @@ class JasnaInstance(MonitorInstance):
             return
         self._done += 1
         self._consecutive_failures = 0
+        name = self._current.name if self._current is not None else None
+        if name is not None:  # #189: the restore's terminal mark (N1)
+            self._tracker.finish(name, RESTORE, "done", time.monotonic())
         if self._unet_retry_pending:
             # The plain relaunch after a unet-4x failure worked → unet-4x is
             # unavailable for this tier in this run (AC 4).
@@ -1906,7 +1957,6 @@ class JasnaInstance(MonitorInstance):
             self._run_unet_disabled[tier] = True
         self._unet_retry_pending = False
         # #177 (D3): subtitle this file next, or move on.
-        name = self._current.name if self._current is not None else None
         if (
             self._cfg.av_translate
             and self._subs_disabled is None
@@ -1974,6 +2024,7 @@ class JasnaInstance(MonitorInstance):
         name = self._current.name if self._current is not None else "?"
         self._failed += 1
         self._consecutive_failures += 1
+        self._mark_restore_failed(name)
         emit("alert", f"{cfg.name}: {name} failed", detail)
         if cfg.av_translate and name in self._jobs:
             # #177: a file that never got restored gets no subtitles.
@@ -1995,6 +2046,13 @@ class JasnaInstance(MonitorInstance):
                 f"batch aborted after {_ABORT_AFTER_FAILURES} consecutive failures "
                 f"| Queue: {self._done}/{self._total} done, {self._failed} failed",
             )
+
+    def _mark_restore_failed(self, name: str) -> None:
+        """#189: right after a `_failed` bump, before any emit (M1) — the
+        restore's terminal mark (N1) and the film's subtitle steps skipped."""
+        now = time.monotonic()
+        self._tracker.finish(name, RESTORE, "failed", now)
+        self._tracker.settle_subs(name, "skipped", now)
 
     def _advance(self, emit: EventEmitter) -> None:
         """Never under `_launch_lock`; reached only through `_dispatch()`."""
@@ -2165,6 +2223,9 @@ class JasnaInstance(MonitorInstance):
             self._subs_skipped += 1
             if detail == "no_llm_key":
                 self._subs_consecutive_failures = 0
+        # #189: the subtitle steps only — a restore is never touched (N1) —
+        # and before `_disable_subs` can emit (M1).
+        self._tracker.settle_subs(job_id, terminal, time.monotonic())
         if (
             self._subs_consecutive_failures >= _SUBS_DISABLE_AFTER
             and self._subs_disabled is None
@@ -2268,6 +2329,8 @@ class JasnaInstance(MonitorInstance):
             self._alert_job(job.job_id, "translator not running", emit)
             return
         translator.submit(TranslateRequest(self._run, job.job_id, tuple(cues)))
+        # #189 (N2): submitted = queued until the translator reports it live
+        self._tracker.start(job.job_id, TRANSLATE, time.monotonic())
 
     def _start_subs(self, video: Path, emit: EventEmitter) -> None:
         """Start one file's subtitle job. Always called from a dispatching
@@ -2321,6 +2384,7 @@ class JasnaInstance(MonitorInstance):
                     elif err is None:
                         self._phase = "subs"
                         self._subs_job = job
+                        self._tracker.start(name, ASR, job.started_at)  # #189
                     elif err == "unstable":
                         self._settle_unstable(job, emit)
                         release_gpu = True
@@ -2393,10 +2457,12 @@ class JasnaInstance(MonitorInstance):
                 self._settle(name, "failed", err, emit)
                 self._alert_job(name, err, emit)
             else:
+                self._tracker.finish(name, ASR, "done", time.monotonic())  # #189
                 self._submit_translation(job, list(outcome.cues), emit)
         elif outcome.kind == "no_speech":
             err = job.publish_empty()
             if err is None:
+                self._tracker.finish(name, ASR, "done", time.monotonic())  # #189
                 self._settle_completed(job, "no speech", emit)
             else:
                 self._settle(name, "failed", err, emit)
@@ -2452,6 +2518,7 @@ class JasnaInstance(MonitorInstance):
             # run can still finish.
             self._settled[job.job_id] = ("failed", detail)
             self._subs_failed += 1
+            self._tracker.settle_subs(job.job_id, "failed", time.monotonic())
         try:
             self._alert_job(job.job_id, detail, emit)
         except Exception:
@@ -2566,10 +2633,16 @@ class JasnaInstance(MonitorInstance):
             if job is not None and job.child is not None:
                 metrics["current_file"] = job.media.name
         if cfg.jasna_exe_path.strip() and self._total:
-            metrics["queue_completed"] = self._done
+            completed = self._done
+            if cfg.av_translate:
+                # #189 (D1): a film counts once it is restored AND its subtitle
+                # job settled; `queue_restored` keeps the restore count.
+                metrics["queue_restored"] = self._done
+                completed = max(0, self._done - self._unsettled_restored())
+            metrics["queue_completed"] = completed
             metrics["queue_total"] = self._total
             metrics["queue_failed"] = self._failed
-            metrics["queue_remaining"] = max(0, self._total - self._done - self._failed)
+            metrics["queue_remaining"] = max(0, self._total - completed - self._failed)
         if cfg.jasna_exe_path.strip():
             metrics["phase"] = self._phase
             if cfg.av_translate:
@@ -2586,6 +2659,7 @@ class JasnaInstance(MonitorInstance):
                     - self._subs_skipped,
                 )
                 metrics["subs_translating"] = self._translating()
+                metrics.update(self._progress_view())
         metrics.update(_cpu_mem())
         if cfg.jasna_gpu_monitor:
             gpu = read_gpu()
@@ -2595,6 +2669,52 @@ class JasnaInstance(MonitorInstance):
                 metrics["gpu_mem_total_mb"] = gpu["mem_total_mb"]
         return MonitorStatus(
             state=state, detail=detail or self._detail(state, metrics), metrics=metrics
+        )
+
+    def _unsettled_restored(self) -> int:
+        """#189 (D1): planned subtitle jobs whose film is restored — at Start
+        (subs-only) or during this run — but not settled yet."""
+        n = 0
+        for name in self._jobs:
+            if name not in self._settled and self._tracker.restore_done(name):
+                n += 1
+        return n
+
+    def _progress_view(self) -> dict:
+        """#189: the per-film stepper (`film`, `steps`, `films`, `films_more`
+        — all or none) and, while a translation runs, its `model`. Derived
+        from what is live NOW (D3): the restore child with its captured
+        numbers, the ASR child with its WhisperJAV progress, the translator's
+        in-flight request, and the GPU wait of the queue head `_advance`
+        launches next. Read-only."""
+        now = time.monotonic()
+        restore: Optional[tuple[str, dict]] = None
+        if self._process is not None and self._current is not None:
+            with self._lock:
+                capture = dict(self._progress)
+            restore = (
+                self._current.name,
+                {
+                    "percent": capture.get("percent"),
+                    "eta_s": parse_eta(capture.get("eta")),
+                    "elapsed_s": parse_eta(capture.get("elapsed")),
+                },
+            )
+        waiting: Optional[tuple[str, str]] = None
+        if self._gpu_waiting and not self._gpu_child_live():
+            if self._pending:
+                waiting = (self._pending[0].name, RESTORE)
+            elif self._subs_only:
+                waiting = (self._subs_only[0].name, ASR)
+        holder = bounded(self._gpu_blocker(), NAME_CHARS) if waiting else ""
+        return progress_view(
+            self._tracker,
+            now,
+            self._subs_job,
+            self._translator,
+            waiting,
+            holder,
+            restore,
         )
 
     def _tier_suffix(self) -> str:
@@ -2644,14 +2764,18 @@ class JasnaInstance(MonitorInstance):
             return " · ".join((head, elapsed, translating, subs))
         return f"{translating} · {subs}"
 
-    def _waiting_detail(self, m: dict) -> str:
-        """#179: `waiting for GPU (held by <label>)` + the usual queue text.
-        While the lease is free and reserved for THIS run (S5), nobody else
-        blocks it: just `waiting for GPU` (the next check takes it)."""
+    def _gpu_blocker(self) -> str:
+        """Who blocks this run's GPU wait: the lease's blocking label — but ""
+        while the lease is free and reserved for THIS run (S5), since nobody
+        else blocks it then (the next check takes it)."""
         if gpu_lease.reserved_for() == self._run:
-            label = ""
-        else:
-            label = gpu_lease.blocking_label()
+            return ""
+        return gpu_lease.blocking_label()
+
+    def _waiting_detail(self, m: dict) -> str:
+        """#179: `waiting for GPU (held by <label>)` + the usual queue text;
+        just `waiting for GPU` when nobody else blocks it (`_gpu_blocker`)."""
+        label = self._gpu_blocker()
         parts = [f"waiting for GPU (held by {label})" if label else "waiting for GPU"]
         if m.get("subs_translating"):
             parts.append(f"translating {m['subs_translating']}")

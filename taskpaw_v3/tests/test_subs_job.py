@@ -7,11 +7,18 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
 
-from taskpaw_v3.monitors.subs.job import JobOutcome, SubsJob, source_identity
+from taskpaw_v3.monitors.subs.job import (
+    ASR_TAIL_CHARS,
+    ASR_TAIL_LINES,
+    JobOutcome,
+    SubsJob,
+    source_identity,
+)
 from taskpaw_v3.monitors.subs.srt import Cue, load, parse
 from taskpaw_v3.monitors.subs.whisperjav import attempt_dir, build_argv
 
@@ -487,3 +494,114 @@ def test_poll_asr_real_launcher_exits_leaving_a_tracked_grandchild(tmp_path):
             except psutil.Error:
                 pass
         job.terminate(2.0)
+
+
+# ── #189: live ASR progress (SubsJob.progress, C2) ────────────────────────
+_P = "2026-09-25 10:00:00 - whisperjav - INFO - "
+_QWEN5 = "\n".join(
+    [f"{_P}[QwenPipeline PID 7] Phase {k}: x" for k in range(1, 6)]
+    + [f"{_P}[DecoupledPipeline] Generating scene 3/4 (26.1s audio)..."]
+)
+
+
+class TailFake(FakeAsrChild):
+    """An ASR child whose captured tail the test sets; records tail() calls."""
+
+    def __init__(self, argv: list[str]) -> None:
+        super().__init__(argv)
+        self.text = ""
+        self.tail_calls: list[tuple[int, int]] = []
+
+    def tail(self, lines: int = 10, max_chars: int = 800) -> str:
+        self.tail_calls.append((lines, max_chars))
+        return self.text
+
+
+class TailSpawner:
+    def __init__(self) -> None:
+        self.children: list[TailFake] = []
+
+    def __call__(self, argv: list[str]) -> TailFake:
+        self.children.append(TailFake(argv))
+        return self.children[-1]
+
+
+def _pin_clock(monkeypatch, t: float = 100.0) -> None:
+    """Freeze `time.monotonic` as subs/job.py sees it (only its `time`), so
+    `started_at + 30` is exactly 30 s later: on the real clock `(t0 + 30) - t0`
+    can round to 29.99... and floor to 29 (#189 IR1)."""
+    fake = SimpleNamespace(monotonic=lambda: t, time=time.time, sleep=time.sleep)
+    monkeypatch.setattr("taskpaw_v3.monitors.subs.job.time", fake)
+
+
+def test_progress_none_without_a_live_child(tmp_path):
+    job = _job(tmp_path)
+    assert job.progress(1.0) is None  # never started
+    sp = TailSpawner()
+    assert job.start_asr(sp) is None
+    sp.children[0].finish(0)
+    assert job.poll_asr() is not None  # reaped: child is None again
+    assert job.progress(job.started_at + 5) is None
+
+
+def test_progress_feeds_the_child_tail_on_every_poll(tmp_path, monkeypatch):
+    assert (ASR_TAIL_LINES, ASR_TAIL_CHARS) == (40, 16000)
+    _pin_clock(monkeypatch)
+    job = _job(tmp_path)
+    sp = TailSpawner()
+    assert job.start_asr(sp) is None
+    c = sp.children[0]
+    t0 = job.started_at
+    assert job.progress(t0 + 5) == {
+        "phase": None,
+        "phase_n": None,
+        "scene": None,
+        "scenes": None,
+        "percent": None,
+        "eta_s": None,
+        "elapsed_s": 5,
+    }
+    c.text = _QWEN5
+    s = job.progress(t0 + 30)
+    assert s is not None
+    assert (s["phase"], s["phase_n"], s["scene"], s["scenes"]) == (5, 8, 3, 4)
+    assert (s["percent"], s["elapsed_s"]) == (54, 30)  # 0.2 + 0.75 × 0.9 × 2/4
+    assert c.tail_calls == [(40, 16000), (40, 16000)]
+    c.text = ""  # the tail rolled over: the parser keeps what it saw
+    assert job.progress(t0 + 31)["percent"] == 54
+
+
+def test_progress_new_attempt_gets_a_new_parser(tmp_path, monkeypatch):
+    _pin_clock(monkeypatch)
+    job = _job(tmp_path)
+    sp = TailSpawner()
+    assert job.start_asr(sp) is None
+    sp.children[0].text = _QWEN5
+    assert job.progress(job.started_at + 1)["phase"] == 5
+    sp.children[0].finish(1, state="")
+    assert job.poll_asr() is not None
+    assert job.start_asr(sp) is None
+    s = job.progress(job.started_at + 2)
+    assert s is not None and (s["phase"], s["percent"], s["elapsed_s"]) == (
+        None,
+        None,
+        2,
+    )
+
+
+def test_progress_none_when_the_child_has_no_tail_or_tail_raises(tmp_path):
+    class NoTail:
+        pid = 1
+
+    class BadTail:
+        pid = 2
+
+        def tail(self, lines: int = 10, max_chars: int = 800) -> str:
+            raise RuntimeError("boom")
+
+    job = _job(tmp_path)
+    assert job.start_asr(TailSpawner()) is None
+    job.child = NoTail()  # type: ignore[assignment]
+    assert job.progress(job.started_at + 1) is None
+    job.child = BadTail()  # type: ignore[assignment]
+    assert job.progress(job.started_at + 1) is None

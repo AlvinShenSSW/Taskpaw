@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Union
+from typing import Any, Union
 
 _HEAD_CHARS = 80
 _SEP = " … "
+# #189: what identifies a translator request rather than its progress — it
+# never reaches the metrics.
+_REQUEST_KEYS = frozenset({"job_id", "started_at"})
 
 
 def bounded(text: str, limit: int) -> str:
@@ -30,6 +33,18 @@ def bounded(text: str, limit: int) -> str:
     head = text[:head_n].rstrip()
     tail = text[-tail_n:].lstrip()
     return f"{head}{_SEP}{tail}"
+
+
+def step_numbers(snapshot: object) -> dict[str, Any]:
+    """#189: the live numbers of one stepper entry — a fresh dict of the
+    non-None values of a progress snapshot (the restore capture, the ASR
+    job's or the translator's), without the request's own `job_id` /
+    `started_at`. Anything that is not a dict → `{}`."""
+    if not isinstance(snapshot, dict):
+        return {}
+    return {
+        k: v for k, v in snapshot.items() if v is not None and k not in _REQUEST_KEYS
+    }
 
 
 def exists_quietly(path: Union[str, "os.PathLike[str]"]) -> bool:

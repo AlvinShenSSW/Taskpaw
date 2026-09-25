@@ -4,7 +4,9 @@ Paths in, outcomes out. No retry policy and no counters live here: retry,
 degrade and abort are the plugin's policy. Every publish goes through
 `<target>.<generation>.tmp` + `os.replace`, so `start()` can sweep a crashed
 run's leftovers by generation. `discard_ja()` drops the `.ja.srt` checkpoint
-once the plugin settled the job `completed` (#187).
+once the plugin settled the job `completed` (#187). `progress(now)` is the live
+ASR progress of the current attempt, parsed from the child's captured tail
+(#189, read-only observation).
 """
 
 from __future__ import annotations
@@ -13,12 +15,13 @@ import logging
 import os
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Literal, Optional
+from typing import Any, Callable, Iterable, Literal, Optional
 
 from taskpaw_v3.monitors.subs import srt
 from taskpaw_v3.monitors.subs.child import ChildProcess
+from taskpaw_v3.monitors.subs.progress import AsrProgress
 from taskpaw_v3.monitors.subs.srt import Cue
 from taskpaw_v3.monitors.subs.translate import RunId
 from taskpaw_v3.monitors.subs.whisperjav import attempt_dir, build_argv, read_outcome
@@ -27,6 +30,10 @@ log = logging.getLogger("taskpaw.subs.job")
 
 Terminal = Literal["completed", "failed", "skipped"]
 SkipReason = Literal["restore_failed", "no_llm_key", "unstable", "cancelled", "no_exe"]
+
+# #189 (C2): what one progress poll reads of the ASR child's captured output.
+ASR_TAIL_LINES = 40
+ASR_TAIL_CHARS = 16000
 
 
 def source_identity(path: Path) -> tuple[int, int]:
@@ -58,6 +65,10 @@ class SubsJob:
     attempt: int = 0
     child: Optional[ChildProcess] = None
     started_at: float = 0.0
+    # #189: the current attempt's progress parser (a new one per attempt).
+    _asr_progress: Optional[AsrProgress] = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     # ── ASR ──────────────────────────────────────────────────────────────
     def start_asr(
@@ -92,6 +103,7 @@ class SubsJob:
             self.child = None
             return f"launch: {type(e).__name__}: {e}"
         self.started_at = time.monotonic()
+        self._asr_progress = AsrProgress(self.started_at)
         return None
 
     def poll_asr(self) -> Optional[JobOutcome]:
@@ -115,6 +127,31 @@ class SubsJob:
         out_dir = attempt_dir(self.staging_root, self.relpath, self.attempt)
         o = read_outcome(out_dir, rc, child.tail())
         return JobOutcome(o.kind, o.cues, o.detail)
+
+    def progress(self, now: float) -> Optional[dict[str, Any]]:
+        """#189: the live ASR progress of the current attempt (a fresh
+        `AsrProgress.snapshot`), fed the child's captured tail on every call.
+        None without a live child, or when the child has no `tail` (or it
+        failed). Read-only: never touches the child's lifecycle; never
+        raises. Call it from the thread that polls the job. `now` must be a
+        `time.monotonic()` reading (the clock of `started_at`)."""
+        child, parser = self.child, self._asr_progress
+        if child is None or parser is None:
+            return None
+        tail = getattr(child, "tail", None)
+        if not callable(tail):
+            return None
+        try:
+            text = tail(lines=ASR_TAIL_LINES, max_chars=ASR_TAIL_CHARS)
+        except Exception as e:  # observation only: never break a status poll
+            log.debug(
+                "subs job %s: reading the ASR tail failed (%s)",
+                self.job_id,
+                type(e).__name__,
+            )
+            return None
+        parser.feed_text(text, now)
+        return parser.snapshot(now)
 
     def _kill_lingering(self, child: ChildProcess) -> None:
         """m1: the direct child has exited — kill any tracked descendant that

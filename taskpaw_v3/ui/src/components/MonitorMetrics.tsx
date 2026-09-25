@@ -2,6 +2,10 @@ import { Box, CircularProgress, LinearProgress, Stack, Tooltip, Typography } fro
 import { useTranslation } from "react-i18next";
 import { AiActivity } from "./AiActivity";
 import { isAiMetrics } from "./aiActivity.helpers";
+import { TINT, utilTint } from "./monitorMetrics.helpers";
+import { PipelineProgress } from "./PipelineProgress";
+import { hiddenWithPipeline, readPipeline } from "./pipelineProgress.helpers";
+import { Tile } from "./Tile";
 
 // Live metrics dashboard for a monitor's status pane (design-system
 // pages/agent-console.md → StatusHeader: "live metric line … file N/M, fps, %").
@@ -9,21 +13,6 @@ import { isAiMetrics } from "./aiActivity.helpers";
 // fps, eta, …); we render the KNOWN keys as a dashboard — current file + progress,
 // circular utilization gauges, a VRAM bar, stat tiles — and degrade any unknown
 // keys to labelled tiles rather than dumping raw JSON.
-
-export const TINT = {
-  ok: "#22C55E",      // success green — design Accent
-  warn: "#F59E0B",    // amber
-  crit: "#EF4444",    // destructive
-  idle: "#64748B",    // slate
-} as const;
-
-// Utilization colour ramp (CPU/GPU/MEM/VRAM): green → amber → red. Exported so the
-// Hub card mini-bars (#113) share the exact 70/90 thresholds + colours.
-export function utilTint(pct: number): string {
-  if (pct >= 90) return TINT.crit;
-  if (pct >= 70) return TINT.warn;
-  return TINT.ok;
-}
 
 function fmtGB(mb: number): string {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
@@ -62,26 +51,13 @@ function Gauge({ label, pct, sub }: { label: string; pct: number; sub?: string }
   );
 }
 
-// A labelled value tile (fps, ETA, and any unknown metric).
-function Tile({ label, value }: { label: string; value: string }) {
-  return (
-    <Box sx={{ px: 1.5, py: 1, borderRadius: 2, bgcolor: "rgba(148,163,184,0.06)",
-               border: "1px solid", borderColor: "divider", minWidth: 84 }}>
-      <Typography variant="caption" sx={{ letterSpacing: 0.6, color: "text.secondary",
-                                          textTransform: "uppercase", fontSize: 10, display: "block" }}>
-        {label}
-      </Typography>
-      <Typography sx={{ fontFamily: '"Fira Code", monospace', fontWeight: 600, fontSize: 15,
-                        fontVariantNumeric: "tabular-nums", mt: 0.25 }}>{value}</Typography>
-    </Box>
-  );
-}
-
 const KNOWN = new Set([
   "current_file", "queue_completed", "queue_total", "queue_remaining", "percent",
   "fps", "eta", "cpu_pct", "mem_pct", "gpu_pct", "gpu_mem_used_mb", "gpu_mem_total_mb",
   // absolute RAM (shown as the MEM gauge's GB sub-label, not raw tiles)
   "mem_used_mb", "mem_total_mb",
+  // #189 queue counters (an empty AV 翻译 tracker leaves them without `steps`)
+  "queue_restored", "queue_pre_done",
 ]);
 
 export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> }) {
@@ -112,6 +88,11 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
   const vramTotal = num("gpu_mem_total_mb");
   const ramUsed = num("mem_used_mb");
   const ramTotal = num("mem_total_mb");
+  // #189: per-film pipeline (Jasna AV 翻译 / avsubs). When `steps` is usable it
+  // REPLACES the now-processing banner, the queue bar and the fps/ETA tiles, and
+  // the keys it shows itself are hidden from the generic tiles (D13). Without it
+  // (Lada, AV-off Jasna, other monitors) nothing below changes.
+  const pipe = readPipeline(m);
 
   const gauges = [
     gpu !== undefined ? { label: "GPU", pct: gpu } : null,
@@ -120,11 +101,12 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
   ].filter(Boolean) as { label: string; pct: number }[];
 
   const tiles: { label: string; value: string }[] = [];
-  if (fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
-  if (eta) tiles.push({ label: t("events.eta"), value: eta });
+  if (!pipe && fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
+  if (!pipe && eta) tiles.push({ label: t("events.eta"), value: eta });
   // Unknown keys → tiles (so nothing is silently hidden, nothing is raw JSON).
   for (const [k, val] of Object.entries(m)) {
     if (KNOWN.has(k)) continue;
+    if (pipe && hiddenWithPipeline(k)) continue;
     tiles.push({ label: k.replace(/_/g, " "), value: typeof val === "number" ? String(val) : String(val) });
   }
 
@@ -132,8 +114,10 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
 
   return (
     <Stack spacing={2} sx={{ mt: 2 }}>
+      {pipe && <PipelineProgress pipeline={pipe} metrics={m} />}
+
       {/* Now-processing banner + current-file progress */}
-      {currentFile && (
+      {!pipe && currentFile && (
         <Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "rgba(34,197,94,0.06)",
                    border: "1px solid", borderColor: "rgba(34,197,94,0.25)" }}>
           <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase",
@@ -159,7 +143,7 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
       )}
 
       {/* Queue progress */}
-      {qTotal !== undefined && qTotal > 0 && qDone !== undefined && (
+      {!pipe && qTotal !== undefined && qTotal > 0 && qDone !== undefined && (
         <Box>
           <Stack direction="row" justifyContent="space-between" alignItems="baseline" sx={{ mb: 0.5 }}>
             <Typography variant="overline" color="text.secondary">{t("events.queue")}</Typography>

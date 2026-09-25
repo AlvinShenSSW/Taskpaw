@@ -69,6 +69,14 @@ for r in rows:
             # avsubs (#179): `phase` is "asr" | "translate" | "waiting_gpu" (absent
             # when idle); queue_skipped counts its skipped files
             skipped     = num(met, "queue_skipped")
+            # #189 (3.7.0) per-film pipeline — jasna with「AV 翻译」ticked, and avsubs:
+            film        = met.get("film")               # str: the film `steps` describes
+            steps       = met.get("steps")              # list of {key, state, …} (below)
+            films       = met.get("films")              # ≤ 12 rows, plan order
+            films_more  = num(met, "films_more")        # films not listed in `films`
+            model       = met.get("model")              # "grok-4.3 · api.x.ai", only while translating
+            restored    = num(met, "queue_restored")    # jasna: films restored so far
+            pre_done    = num(met, "queue_pre_done")    # avsubs: had their .srt at scan
 
         # comfyui: type_id == "comfyui", or BOTH running and pending present
         if tid == "comfyui" or (num(met, "running") is not None and num(met, "pending") is not None):
@@ -84,7 +92,9 @@ for r in rows:
 | RAM used / total (MB) | `mem_used_mb` / `mem_total_mb` | host | ÷1024 = GB. See version note. |
 | GPU % | `gpu_pct` | host | Windows (`"n/a"` on macOS) |
 | VRAM used / total (MB) | `gpu_mem_used_mb` / `gpu_mem_total_mb` | host | ÷1024 = GB |
-| Queue done / total / left | `queue_completed` / `queue_total` / `queue_remaining` | lada / jasna / avsubs | avsubs: done includes videos that already had their `.srt` at Start |
+| Queue done / total / left | `queue_completed` / `queue_total` / `queue_remaining` | lada / jasna / avsubs | avsubs: done includes videos that already had their `.srt` at Start. jasna with「AV 翻译」ticked (since 3.7.0): done = **fully** done films — see the note below |
+| Queue restored | `queue_restored` | jasna | int; only with「AV 翻译」ticked (3.7.0): films restored so far — the restore count `queue_completed` carried before 3.7.0 |
+| Queue already subtitled | `queue_pre_done` | avsubs | int (3.7.0): videos that already had their `.srt` at Start (included in `queue_completed`) |
 | Queue failed | `queue_failed` | jasna / avsubs | int; files given up on after their retries (plus output-name collisions) |
 | Queue skipped | `queue_skipped` | avsubs | int; no LLM key, source changed during transcription, cancelled (abort), or whisperjav.exe missing |
 | Current task | `current_file` | lada / jasna / avsubs | string; capture mode or folder-derived. avsubs: the video's path **relative to the library folder** (e.g. `sub/film.mp4`), only while WhisperJAV transcribes it |
@@ -97,6 +107,10 @@ for r in rows:
 | Subtitles failed / skipped | `subs_failed` / `subs_skipped` | jasna | int; skipped = restore failed, no LLM key, source changed, cancelled, or whisperjav.exe missing |
 | Translations pending | `subs_translating` | jasna / avsubs | int; files queued in or held by the translator |
 | Phase | `phase` | avsubs | `asr` (WhisperJAV is transcribing `current_file`), `translate` (only translations are running), `waiting_gpu` (the GPU is held by another task, e.g. Jasna); **absent** when idle/finished |
+| Focus film | `film` | jasna (「AV 翻译」) / avsubs | string ≤ 200 (3.7.0): the film `steps` describes — the one in a GPU child (restore / transcription), else the one waiting for the GPU, else the one translating, else the next still to finish, else the last finished. avsubs: the path relative to the library folder |
+| Film steps | `steps` | jasna (「AV 翻译」) / avsubs | list (3.7.0) of `{key, state, …}` for `film`, see "Per-film pipeline" below |
+| Film rows | `films` / `films_more` | jasna (「AV 翻译」) / avsubs | list (3.7.0) of at most 12 rows `{name, steps: {key: state}, status, percent, eta_s, duration_s}` in queue order (`percent` / `eta_s` / `duration_s` may be `null`); `films_more` = films not listed |
+| Translation model | `model` | jasna (「AV 翻译」) / avsubs | string ≤ 80 (3.7.0): `<model> · <api host>` of the translation in flight — **absent** otherwise; never the key |
 | ComfyUI running / pending | `running` / `pending` | comfyui | |
 | **Running?** | top-level **`state`** (`running`/`idle`/`ok`/`error`/`stopped`) | any | **use this, not `enabled`** |
 
@@ -130,6 +144,53 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > transcribed in `phase == "subs"`, and **absent** in `phase == "translate"` (no GPU
 > child is running then). The batch `done` event text gains
 > `| Subs: S/T done, U failed, V skipped`.
+
+> **Jasna queue counts with「AV 翻译」ticked (#189, since 3.7.0).** `queue_completed`
+> counts films that are **fully done**: restored AND their subtitle job settled —
+> translated, failed or skipped (a film that needs no subtitles counts once it is
+> restored). `queue_remaining` = `queue_total − queue_completed − queue_failed`, and
+> the detail line's `X/Y done` shows the same numbers. The restore count moved to
+> `queue_restored`. The batch `done` event and the abort alert keep the restore
+> count (`Queue: X/Y done, F failed`), which equals `queue_completed` once every
+> subtitle job has settled. With the tickbox off nothing changes and none of the
+> #189 keys appear.
+
+> **Per-film pipeline (#189, since 3.7.0).** Jasna with「AV 翻译」ticked and `avsubs`
+> add `film`, `steps`, `films` and `films_more` — always all four together, or none
+> (no films planned) — plus `model` while a translation is in flight. Each `steps`
+> entry is `{key, state}` plus optional numbers (**absent** when unknown, never
+> `null`):
+>
+> - `key` — `restore` (jasna only), `asr` (WhisperJAV transcription), `translate`,
+>   in that order;
+> - `state` — `done` / `failed` / `skipped` (terminal), `active`, `queued` (handed to
+>   the translator, waiting for its turn), `waiting_gpu`, `pending`;
+> - a terminal step: `duration_s`;
+> - the active step's numbers — restore: `percent`, `eta_s`, `elapsed_s` (capture mode
+>   only); asr: `percent` (0..99), `eta_s`, `elapsed_s`, `phase` (1..8) / `phase_n`
+>   (8), `scene` / `scenes` (the WhisperJAV qwen pipelines, e.g. anime-whisper; other
+>   engines report `elapsed_s` only); translate: `percent`, `eta_s`, `elapsed_s`,
+>   `model`, `batches_done` / `batches_total`, `cues_done` / `cues_total`;
+> - a `waiting_gpu` step: `holder` (the task holding the GPU; `""` while the GPU is
+>   free and reserved for this task) and `waited_s`.
+>
+> A row's `status` is `failed` when its restore failed; the restore step's state while
+> the restore is not done (even when its subtitles were already given up, e.g.
+> whisperjav.exe missing); then the subtitle job's outcome — translated → `done`,
+> `failed`, `skipped`; `done` when there was nothing to subtitle; otherwise the state
+> of its first unfinished step.
+>
+> **Rows ↔ counts.** `films` is capped; over ALL films the counts map as follows.
+> avsubs — `queue_completed − queue_pre_done` = films `done`; `queue_skipped` = films
+> `skipped`; `queue_failed −` (name collisions) = films `failed`. Jasna —
+> `queue_failed −` (name collisions) = films whose `restore` step `failed`;
+> `queue_completed −` (films already restored at Start that are not rows (normally those
+> that already had their `.srt`)) = films whose restore is `done` and whose `status` is
+> terminal (`done`, or a subtitle step `failed` / `skipped`: a settled job of any outcome
+> counts as done). Name collisions,
+> videos that already had their `.srt` (avsubs) and films already restored with
+> subtitles at Start (jasna) are counted but never rows; the steps show which step
+> failed.
 
 > **「AV 翻译 (subtitles)」task (`avsubs`, #179).** A library task: for every video
 > under its folder (recursively by default) that has no same-named `.srt`, it writes
@@ -174,16 +235,36 @@ Last updated: YYYY-MM-DD HH:MM:SS
 ## PinkPig: ONLINE
 - PinkPig-host: CPU 45% | RAM 8.2/16.0GB | GPU 78% | VRAM 12.3/24.0GB
 - LADA: 5/10 done (5 left) | clip.mp4 | 47% · ETA 30:47 · 112fps
-- JASNA: 3/8 done (5 left) | film.mp4 | subs 2/3 (1 failed)
-- AV-LIB: 12/40 done (27 left) | sub/film 01.mp4 |
+- JASNA: 2/8 done (5 left) | film-破解.mp4 | 识别 43% · 约剩 6 分 | 修复 3/8 · subs 1/8 (1 failed)
+- AV-LIB: 12/40 done (27 left) | sub/film 01.mp4 | 识别 43% · 约剩 6 分
 - ComfyUI: 2 running, 100 pending
 ## SkyPig: OFFLINE (last seen 09:15:30)
 ```
 
-A Jasna task with「AV 翻译」on appends `subs S/T` (and ` (N failed)` when any failed)
-after its queue segment; without subtitle metrics the line is exactly the lada format.
-An `avsubs` task renders exactly the lada format (its `current_file` is the relative
-path being transcribed).
+A Jasna task with「AV 翻译」on appends `修复 R/T · subs S/T` (`R` = `queue_restored`;
+` (N failed)` when any subtitle failed) after its queue segment; without subtitle
+metrics the line is exactly the lada format. An `avsubs` task renders the lada format
+(its `current_file` is the relative path being transcribed).
+
+Since 3.7.0 (#189) both also show the focus film's live stage, after the file and
+progress parts and before the counts:
+
+```
+- JASNA: 0/1 done (1 left) | SDAB-312.mp4 | 57% · ETA 7:18 · 157fps | 修复 0/1 · subs 0/1
+- JASNA: 0/1 done (1 left) | SDAB-312-破解.mp4 | 识别 43% · 约剩 6 分 | 修复 1/1 · subs 0/1
+- JASNA: 0/1 done (1 left) | SDAB-312-破解.mp4 | 识别 · 已用 4 分 | 修复 1/1 · subs 0/1
+- JASNA: 0/1 done (1 left) | 翻译 56% · 约剩 1 分 · grok-4.3 · api.x.ai | 修复 1/1 · subs 0/1
+- JASNA: 0/2 done (2 left) | 等待 GPU（AV） | 修复 0/2 · subs 0/2
+- AV: 21/63 done (41 left) | 2024/ABC-123.mp4 | 识别 43% · 约剩 6 分
+```
+
+The stage is taken from the focus film's active step, else its step waiting for the
+GPU: a restore adds nothing (the `P% · ETA · fps` part covers it); transcription reads
+`识别 P% · 约剩 N 分`, `识别 P%` before an estimate exists, or `识别 · 已用 N 分` for an
+engine without progress; translation reads `翻译 P% · 约剩 N 分 · <model>`; a GPU wait
+reads `等待 GPU（<holder>）`, or `等待 GPU` when the GPU is free and reserved for this
+task. Minutes are whole minutes and never 0 (remaining rounded up, elapsed rounded
+down). A queued, pending or finished focus step adds nothing.
 
 A monitor renders as `- <name>: disabled` only when it is genuinely not running (a
 configured-but-unstarted stub). All names/values are sanitized (control chars → space,
