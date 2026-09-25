@@ -994,7 +994,11 @@ def test_unknown_state_hides_stale_metrics_like_other_outages():
                 "status_json": json.dumps(
                     {
                         "monitors": {
-                            "m": {"state": state, "type_id": type_id, "metrics": metrics}
+                            "m": {
+                                "state": state,
+                                "type_id": type_id,
+                                "metrics": metrics,
+                            }
                         }
                     }
                 ),
