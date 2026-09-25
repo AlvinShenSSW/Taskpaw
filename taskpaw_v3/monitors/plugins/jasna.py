@@ -10,9 +10,12 @@ progress) but is built around Jasna's CLI:
   - a **resolution tier** per file ("1080p" vs "4k", chosen by pixel count from
     `ffprobe`) selecting the clip size and whether the supporter-only `unet-4x`
     secondary upscaler is used (two tickboxes: 1080p on, 4K off by default);
-  - Jasna writes to a **staging** name (`<stem>_restored.tmp.mp4`) and the plugin
-    `os.replace()`s it to `<stem>_restored.mp4` only on exit 0, so a killed or
-    crashed run never leaves a "done" marker (constitution §2 atomic publish);
+  - Jasna writes to a **staging** name (`<stem>-破解.tmp.mp4`) and the plugin
+    `os.replace()`s it to `<stem>-破解.mp4` only on exit 0, so a killed or
+    crashed run never leaves a "done" marker (constitution §2 atomic publish).
+    #187: a `<stem>_restored.mp4` written by 3.5.1 and earlier still counts as
+    restored (never renamed, never restored again; the new name wins when both
+    exist);
   - **outcome-based degrade**: with capture off the plugin cannot read Jasna's
     output, so a failed unet-4x launch is simply retried without unet-4x; if that
     succeeds, unet-4x is disabled for THAT TIER for the rest of the run and one
@@ -26,9 +29,13 @@ Process/reader/terminate recipes and the tqdm progress parser are IMPORTED from
 terminated in `stop()` (#40 no-orphan guarantee).
 
 「AV 翻译」(#177, `av_translate`): after each restore the published
-`<stem>_restored.mp4` is transcribed by WhisperJAV (a GPU child, serial with the
-restores) into `<stem>_restored.ja.srt`, which a background `Translator` (the
-`llm-worker` client) turns into `<stem>_restored.srt`. The engine lives in the
+`<stem>-破解.mp4` is transcribed by WhisperJAV (a GPU child, serial with the
+restores) into `<stem>-破解.ja.srt`, which a background `Translator` (the
+`llm-worker` client) turns into `<stem>-破解.srt`. Subtitle names always follow
+the restored file they sit next to (#187): a legacy `<stem>_restored.mp4` gets
+`<stem>_restored.srt`. The `.ja.srt` is only the resume checkpoint: it is
+deleted once the job settles `completed` with its `.srt` published, and kept
+on every other path. The engine lives in the
 shared `taskpaw_v3.monitors.subs` package; this plugin owns planning
 (`plan_subs`), policy (retry, degrade), counters, events and settlement. Every
 planned subtitle job reaches exactly one terminal state, settled only by the
@@ -111,9 +118,13 @@ JASNA_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm
 # (cinematic 1080p) to the 4K tier and silently strip unet-4x from them.
 _TIER_4K_PIXELS = 1920 * 1080 * 1.5
 
-_FINAL_SUFFIX = "_restored.mp4"
+_FINAL_SUFFIX = "-破解.mp4"  # #187 (owner): e.g. SDAB-312-破解.mp4
 # Keeps the .mp4 suffix so Jasna still picks the mp4 muxer for the staging write.
-_STAGING_SUFFIX = "_restored.tmp.mp4"
+_STAGING_SUFFIX = "-破解.tmp.mp4"
+# #187: the names of 3.5.1 and earlier. A legacy final still counts as restored
+# (never renamed); a legacy staging file is only ever swept / cleared.
+_LEGACY_FINAL_SUFFIX = "_restored.mp4"
+_LEGACY_STAGING_SUFFIX = "_restored.tmp.mp4"
 
 # Flags the plugin owns: letting them through `jasna_extra_args` would fight the
 # dedicated fields (argparse last-wins) and, for --output, break the staging
@@ -141,12 +152,14 @@ _COMPILING_HINT = "compiling TensorRT engines (first run, 15-60 min): "
 # `plan_queue` scans the input folder only and `sweep_orphan_staging` only looks
 # at files, so neither ever sees it. `.avsubs/tmp` is WhisperJAV's --temp-dir.
 _SUBS_STAGING = ".avsubs"
-_JA_SUFFIX = "_restored.ja.srt"
-_ZH_SUFFIX = "_restored.srt"
+# Subtitle targets are `<restored video stem>.ja.srt` / `.srt` (#187).
+_JA_EXT = ".ja.srt"
+_ZH_EXT = ".srt"
 # Publish temp names are `<target>.<generation>.tmp` (subs/job.py); Start sweeps
 # every generation's leftovers — only once they are old enough (#179 M12): an
-# `avsubs` task publishing into the same folder uses the same pattern.
-_SUBS_TMP_GLOB = "*_restored*.srt.*.tmp"
+# `avsubs` task publishing into the same folder uses the same pattern. Both the
+# new and the legacy subtitle names (#187).
+_SUBS_TMP_GLOBS = ("*-破解*.srt.*.tmp", "*_restored*.srt.*.tmp")
 _SUBS_TMP_MIN_AGE = 600.0  # seconds (mtime)
 _SUBS_DISABLE_AFTER = 3
 _ASR_MAX_ATTEMPTS = 2
@@ -157,13 +170,37 @@ Phase = Literal["restore", "subs", "translate"]
 
 # ── pure helpers (unit-tested without a GPU) ──────────────────────────────
 def output_path_for(output_folder: str, video: Path) -> Path:
-    """The FINAL (published) output for `video` — the skip/done marker."""
+    """The FINAL (published) name a restore of `video` writes:
+    `<out>/<stem>-破解.mp4`."""
     return Path(output_folder) / f"{video.stem}{_FINAL_SUFFIX}"
+
+
+def legacy_output_path_for(output_folder: str, video: Path) -> Path:
+    """`<out>/<stem>_restored.mp4` — the final name of 3.5.1 and earlier (#187)."""
+    return Path(output_folder) / f"{video.stem}{_LEGACY_FINAL_SUFFIX}"
+
+
+def restored_output_for(output_folder: str, video: Path) -> Optional[Path]:
+    """The restored file that exists for `video` — the skip/done marker (#187):
+    the new name, else the legacy one, else None (a staging file never counts;
+    an unreadable entry counts as missing)."""
+    for final in (
+        output_path_for(output_folder, video),
+        legacy_output_path_for(output_folder, video),
+    ):
+        if exists_quietly(final):
+            return final
+    return None
 
 
 def staging_path_for(output_folder: str, video: Path) -> Path:
     """The staging name Jasna writes to; renamed to the final name on exit 0."""
     return Path(output_folder) / f"{video.stem}{_STAGING_SUFFIX}"
+
+
+def legacy_staging_path_for(output_folder: str, video: Path) -> Path:
+    """`<out>/<stem>_restored.tmp.mp4` — a 3.5.1-or-earlier partial (#187)."""
+    return Path(output_folder) / f"{video.stem}{_LEGACY_STAGING_SUFFIX}"
 
 
 def tier_for(width: int, height: int) -> Tier:
@@ -254,13 +291,14 @@ def plan_queue(
 ) -> tuple[list[Path], int, list[tuple[Path, Path]]]:
     """Sorted, NON-recursive scan of the input folder → (pending, done, collisions).
 
-    `done` counts files whose FINAL output already exists (a staging file does not
-    count). `collisions` are later files whose final output path (casefolded)
+    `done` counts files whose restored output already exists — `<stem>-破解.mp4`
+    or a legacy `<stem>_restored.mp4` (#187; a staging file does not count).
+    `collisions` are later files whose final output path (casefolded)
     collides with an earlier file's — e.g. `a.mp4` + `a.mkv` — which would silently
     overwrite each other; they are excluded from `pending` and reported once.
     No name-based exclusion: the validator guarantees input != output, so the
     plugin's own outputs can never be scanned, and a source library may legitimately
-    contain a file called `foo_restored.mp4`.
+    contain a file called `foo-破解.mp4` or `foo_restored.mp4`.
 
     Raises `OSError` when the input folder cannot be scanned (missing, not a
     directory, permission denied): an unreadable folder is an ERROR the operator
@@ -286,35 +324,43 @@ def plan_queue(
             collisions.append((video, first))
             continue
         seen[key] = video
-        try:
-            exists = final.exists()
-        except OSError:  # unreadable output entry — treat as "not done yet"
-            exists = False
-        if exists:
+        # An unreadable output entry counts as "not done yet" (exists_quietly).
+        if restored_output_for(output_folder, video) is not None:
             done += 1
         else:
             pending.append(video)
     return pending, done, collisions
 
 
-def ja_target_for(output_folder: str, video: Path) -> Path:
-    """`<out>/<stem>_restored.ja.srt` — the Japanese transcript (C8: derives from
-    the same stem as the restored file, so it can never collide)."""
-    return Path(output_folder) / f"{video.stem}{_JA_SUFFIX}"
+def subs_media_for(output_folder: str, video: Path) -> Path:
+    """The restored file `video`'s subtitles belong to (#187, C10): the one that
+    exists (new name first, then legacy) — or, for a file still to be restored,
+    the new name its restore will publish."""
+    return restored_output_for(output_folder, video) or output_path_for(
+        output_folder, video
+    )
 
 
-def zh_target_for(output_folder: str, video: Path) -> Path:
-    """`<out>/<stem>_restored.srt` — the Simplified-Chinese subtitle."""
-    return Path(output_folder) / f"{video.stem}{_ZH_SUFFIX}"
+def ja_target_for(media: Path) -> Path:
+    """`<media stem>.ja.srt` next to the restored `media` — the Japanese
+    transcript (C8: derives from the restored file, so it can never collide)."""
+    return media.with_name(f"{media.stem}{_JA_EXT}")
+
+
+def zh_target_for(media: Path) -> Path:
+    """`<media stem>.srt` next to the restored `media` — the Simplified-Chinese
+    subtitle, named exactly like the video so players load it (#187)."""
+    return media.with_name(f"{media.stem}{_ZH_EXT}")
 
 
 def subs_kind(output_folder: str, video: Path) -> SubsKind:
-    """What a file needs: an existing zh (a 0-byte one counts) → `none`; an
-    existing `.ja.srt` (reused by existence only) → `translate_only`; else
-    `full` (ASR + translation)."""
-    if exists_quietly(zh_target_for(output_folder, video)):
+    """What a file needs, judged next to `subs_media_for()`: an existing zh (a
+    0-byte one counts) → `none`; an existing `.ja.srt` (reused by existence
+    only) → `translate_only`; else `full` (ASR + translation)."""
+    media = subs_media_for(output_folder, video)
+    if exists_quietly(zh_target_for(media)):
         return "none"
-    if exists_quietly(ja_target_for(output_folder, video)):
+    if exists_quietly(ja_target_for(media)):
         return "translate_only"
     return "full"
 
@@ -342,8 +388,8 @@ def plan_subs(
     non-recursive), skips `pending` and `excluded` (the collision losers from
     `plan_queue`: a loser's `output_path_for()` is the winner's file, so without
     this it would become a duplicate job on the same media and targets), and
-    classifies every other video whose restored output exists. Raises `OSError`
-    when the input folder cannot be scanned."""
+    classifies every other video whose restored output (new or legacy name,
+    #187) exists. Raises `OSError` when the input folder cannot be scanned."""
     pending_set = set(pending)
     skip = pending_set | set(excluded)
     entries = sorted(
@@ -361,7 +407,7 @@ def plan_subs(
     for video in entries:
         if video in skip:
             continue
-        if not exists_quietly(output_path_for(output_folder, video)):
+        if restored_output_for(output_folder, video) is None:
             continue
         if subs_kind(output_folder, video) != "none":
             subs_only.append(video)
@@ -403,23 +449,27 @@ def _bounded(text: str) -> str:
 def sweep_orphan_staging(
     input_folder: str, output_folder: str, max_age: float = _ORPHAN_STAGING_AGE
 ) -> list[Path]:
-    """Best effort: delete `*_restored.tmp.mp4` files in the output folder that no
-    source in the input folder could produce AND that haven't been touched for
-    `max_age` seconds (leftovers of an earlier hard stop). A fresh mtime means
-    something may still be writing it, so it is kept. Returns what was removed."""
+    """Best effort: delete `*-破解.tmp.mp4` and legacy `*_restored.tmp.mp4` files
+    (#187) in the output folder that no source in the input folder could produce
+    AND that haven't been touched for `max_age` seconds (leftovers of an earlier
+    hard stop). A fresh mtime means something may still be writing it, so it is
+    kept. A source's own legacy partial is kept here like its new one and
+    cleared when that source is launched. Returns what was removed."""
     keep: set[str] = set()
     try:
         for f in Path(input_folder).iterdir():
             if f.is_file() and f.suffix.lower() in JASNA_VIDEO_EXTENSIONS:
                 keep.add(str(staging_path_for(output_folder, f)).casefold())
+                keep.add(str(legacy_staging_path_for(output_folder, f)).casefold())
         candidates = [p for p in Path(output_folder).iterdir() if p.is_file()]
     except OSError as e:
         log.warning("jasna: staging sweep skipped (%s)", e)
         return []
     now = time.time()
     removed: list[Path] = []
+    suffixes = tuple(s.casefold() for s in (_STAGING_SUFFIX, _LEGACY_STAGING_SUFFIX))
     for cand in candidates:
-        if not cand.name.casefold().endswith(_STAGING_SUFFIX.casefold()):
+        if not cand.name.casefold().endswith(suffixes):
             continue
         if str(cand).casefold() in keep:
             continue
@@ -698,10 +748,12 @@ class JasnaConfig(BaseMonitorConfig):
     jasna_output_folder: str = Field(
         "",
         description="Folder where the restored videos are written as "
-        "<name>_restored.mp4. Required in managed mode, and must be a DIFFERENT "
+        "<name>-破解.mp4. Required in managed mode, and must be a DIFFERENT "
         "folder from the input. A file whose output already exists is skipped, so "
-        "a batch resumes where it left off. Give each Jasna monitor its OWN output "
-        "folder: Start sweeps stale *_restored.tmp.mp4 files it does not own.",
+        "a batch resumes where it left off; a <name>_restored.mp4 from TaskPaw "
+        "3.5 and earlier also counts as restored (it is not renamed). Give each "
+        "Jasna monitor its OWN output folder: Start sweeps stale *-破解.tmp.mp4 "
+        "(and old *_restored.tmp.mp4) files it does not own.",
     )
     unet4x_1080p: bool = Field(
         True,
@@ -718,11 +770,14 @@ class JasnaConfig(BaseMonitorConfig):
         title="AV 翻译",
         description="After each restore, transcribe the restored video with "
         "WhisperJAV and translate it to Simplified Chinese with the agent's LLM "
-        "setting: writes <name>_restored.ja.srt (Japanese) and <name>_restored.srt "
-        "(Chinese) next to <name>_restored.mp4. GPU work stays serial (restore → "
-        "transcribe → next restore); translation runs in the background. Already "
-        "restored files without subtitles are handled after the pending restores; "
-        "an existing .ja.srt is reused (translation only). Staging lives in the "
+        "setting: writes <name>-破解.srt (Chinese) next to <name>-破解.mp4 — the "
+        "subtitle always has the video's own name, so a <name>_restored.mp4 from "
+        "TaskPaw 3.5 and earlier gets <name>_restored.srt. The Japanese transcript "
+        "(<name>-破解.ja.srt) is deleted once the Chinese .srt is written; it is "
+        "kept when translation does not finish, and the next Start then only "
+        "translates. GPU work stays serial (restore → transcribe → next restore); "
+        "translation runs in the background. Already restored files without "
+        "subtitles are handled after the pending restores. Staging lives in the "
         "output folder's .avsubs directory. An existing .ja.srt / .srt is reused "
         "as-is: if you replace a source video under the same name, delete its old "
         ".srt files first.",
@@ -834,7 +889,7 @@ class JasnaConfig(BaseMonitorConfig):
                 )
             if _same_folder(self.jasna_input_folder, self.jasna_output_folder):
                 # Same folder → the restored files would be rescanned as sources on
-                # the next run and every `<stem>_restored.mp4` would collide.
+                # the next run and every `<stem>-破解.mp4` would collide.
                 raise ValueError(
                     "jasna_input_folder and jasna_output_folder must be different "
                     "folders"
@@ -912,8 +967,9 @@ class JasnaInstance(MonitorInstance):
     ever takes `_launch_lock`; `stop()` joins the reader holding neither; and the
     only waits under `_launch_lock` are the non-blocking `Popen`, the
     `os.replace`, the publish-time `hev1` retag (a bounded header walk and a
-    four-byte write — deliberately never an fsync), and `_terminate_child`,
-    bounded by its timeout (+2 s for the kill reap)."""
+    four-byte write — deliberately never an fsync), single-file unlinks (a
+    stale staging file, a settled job's `.ja.srt` — #187), and
+    `_terminate_child`, bounded by its timeout (+2 s for the kill reap)."""
 
     def __init__(self, instance_id: str, config: JasnaConfig) -> None:
         super().__init__(instance_id, config)
@@ -1071,18 +1127,20 @@ class JasnaInstance(MonitorInstance):
         self._had_work = False
 
     def _sweep_subs_leftovers(self) -> None:
-        """Best effort: `*_restored*.srt.<gen>.tmp` publish leftovers untouched
-        for `_SUBS_TMP_MIN_AGE` (#179 M12 — a fresh one may belong to another
-        task still publishing) and WhisperJAV's `.avsubs/tmp` from a crashed /
+        """Best effort: `*-破解*.srt.<gen>.tmp` and legacy
+        `*_restored*.srt.<gen>.tmp` publish leftovers (#187) untouched for
+        `_SUBS_TMP_MIN_AGE` (#179 M12 — a fresh one may belong to another task
+        still publishing) and WhisperJAV's `.avsubs/tmp` from a crashed /
         hard-stopped run."""
         out = self._cfg.jasna_output_folder.strip()
         if not out:
             return
-        try:
-            leftovers = list(Path(out).glob(_SUBS_TMP_GLOB))
-        except OSError as e:
-            log.warning("jasna: subtitle temp sweep skipped (%s)", e)
-            leftovers = []
+        leftovers: dict[Path, None] = {}  # a name may match both patterns
+        for pattern in _SUBS_TMP_GLOBS:
+            try:
+                leftovers.update(dict.fromkeys(Path(out).glob(pattern)))
+            except OSError as e:
+                log.warning("jasna: subtitle temp sweep skipped (%s)", e)
         now = time.time()
         for tmp in leftovers:
             try:
@@ -1210,14 +1268,17 @@ class JasnaInstance(MonitorInstance):
         ]
         work += [(v, subs_kind(out, v)) for v in plan.subs_only]
         for video, kind in work:
+            # C10: the restored file — new or legacy name (#187); the subtitle
+            # targets sit next to it under its own stem.
+            media = subs_media_for(out, video)
             self._kinds[video.name] = kind
             self._jobs[video.name] = SubsJob(
                 run=self._run,
                 job_id=video.name,
-                media=output_path_for(out, video),  # C10: the restored file
+                media=media,
                 relpath=video.name,
-                ja_target=ja_target_for(out, video),
-                zh_target=zh_target_for(out, video),
+                ja_target=ja_target_for(media),
+                zh_target=zh_target_for(media),
                 staging_root=staging,
                 exe=exe,
                 engine=cfg.whisperjav_engine,
@@ -1466,10 +1527,16 @@ class JasnaInstance(MonitorInstance):
             self._current_dims = dims
 
             staging = staging_path_for(cfg.jasna_output_folder, video)
-            try:
-                staging.unlink(missing_ok=True)  # stale partial from an earlier run
-            except OSError as e:
-                log.warning("jasna: could not clear staging file %s: %s", staging, e)
+            # A stale partial from an earlier run — and a 3.5.1-or-earlier one
+            # under the legacy name, which nothing writes any more (#187).
+            for stale in (
+                staging,
+                legacy_staging_path_for(cfg.jasna_output_folder, video),
+            ):
+                try:
+                    stale.unlink(missing_ok=True)
+                except OSError as e:
+                    log.warning("jasna: could not clear staging file %s: %s", stale, e)
 
             exe_dir = self._exe_dir()
             tickbox = cfg.unet4x_4k if tier == "4k" else cfg.unet4x_1080p
@@ -2106,6 +2173,20 @@ class JasnaInstance(MonitorInstance):
                 f"{_SUBS_DISABLE_AFTER} consecutive subtitle failures", emit
             )
 
+    def _settle_completed(self, job: SubsJob, detail: str, emit: EventEmitter) -> None:
+        """Under `_launch_lock`, right after `job`'s zh was published: settle it
+        `completed` and delete its `.ja.srt` (#187). The transcript is only the
+        checkpoint a later Start resumes an unfinished translation from, so
+        every other terminal path keeps it. The delete is a single unlink — the
+        same class of work as the publish's `os.replace` (D9); a failure is
+        logged and never fails the job or raises."""
+        self._settle(job.job_id, "completed", detail, emit)
+        if self._settled.get(job.job_id, ("", ""))[0] != "completed":
+            return
+        err = job.discard_ja()
+        if err is not None:
+            log.warning("jasna %s: %s: %s", self.instance_id, job.job_id, err)
+
     def _disable_subs(self, reason: str, emit: EventEmitter) -> None:
         """Flags + settlement only (may run under `_launch_lock`); the blocking
         part — translator cancel, ASR terminate — is DEFERRED until the lock is
@@ -2163,7 +2244,7 @@ class JasnaInstance(MonitorInstance):
             # of the key, since nothing has to be translated.
             err = job.publish_zh([])
             if err is None:
-                self._settle(job.job_id, "completed", "no speech", emit)
+                self._settle_completed(job, "no speech", emit)
             else:
                 self._settle(job.job_id, "failed", err, emit)
                 self._alert_job(job.job_id, err, emit)
@@ -2316,7 +2397,7 @@ class JasnaInstance(MonitorInstance):
         elif outcome.kind == "no_speech":
             err = job.publish_empty()
             if err is None:
-                self._settle(name, "completed", "no speech", emit)
+                self._settle_completed(job, "no speech", emit)
             else:
                 self._settle(name, "failed", err, emit)
                 self._alert_job(name, err, emit)
@@ -2435,7 +2516,7 @@ class JasnaInstance(MonitorInstance):
                     if result.outcome == "translated":
                         err = job.publish_zh(result.zh_cues)  # D9: under the lock
                         if err is None:
-                            self._settle(job.job_id, "completed", "", emit)
+                            self._settle_completed(job, "", emit)
                         else:
                             self._settle(job.job_id, "failed", err, emit)
                             self._alert_job(job.job_id, err, emit)

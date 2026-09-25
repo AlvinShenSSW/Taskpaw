@@ -21,6 +21,19 @@ describe("avsubs UI strings + icon (#179)", () => {
     expect(zh).not.toBe(en);
   });
 
+  it("describes the Chinese .srt as the output and the .ja.srt as removed (#187)", () => {
+    setLang("en");
+    const en = i18n.t("services.avsubs");
+    expect(en).not.toContain("Japanese + Simplified Chinese");
+    expect(en).toContain("Simplified Chinese .srt named after each video");
+    expect(en).toContain(".ja.srt is only an intermediate, removed once translated");
+    setLang("zh-CN");
+    const zh = i18n.t("services.avsubs");
+    expect(zh).not.toContain("日语 + 简体中文");
+    expect(zh).toContain("与视频同名的简体中文 .srt");
+    expect(zh).toContain(".ja.srt 只是中间产物，翻译完成后删除");
+  });
+
   it("mentions the standalone AV-translate task in the About blurb (en + zh)", () => {
     setLang("en");
     expect(i18n.t("settings.aboutBody")).toMatch(/standalone task/);

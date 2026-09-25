@@ -116,20 +116,27 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > both — but its `current_file` is always known, even with capture off, because it
 > launches one `jasna.exe` per video instead of one batch for the folder.
 >
-> **Jasna「AV 翻译」(#177).** With the tickbox on, every restored film also gets
-> `<name>_restored.ja.srt` (Japanese) and `<name>_restored.srt` (Simplified Chinese)
-> **next to `<name>_restored.mp4`** in the output folder, and the snapshot adds
+> **Jasna「AV 翻译」(#177, names since 3.6.0 / #187).** Restored films are written as
+> `<name>-破解.mp4` (a `<name>_restored.mp4` from 3.5 and earlier still counts as
+> restored and is not renamed). With the tickbox on, every restored film also gets
+> `<name>-破解.srt` (Simplified Chinese) **next to `<name>-破解.mp4`** in the output
+> folder — the subtitle always carries its video's name, so a legacy
+> `<name>_restored.mp4` gets `<name>_restored.srt`. The Japanese transcript
+> (`<name>-破解.ja.srt`) is deleted once the `.srt` is written and kept only while
+> a translation is unfinished. The snapshot adds
 > the `subs_*` keys above (`phase` itself is present for every managed Jasna, ticked or
 > not). `current_file` follows the live child: the
-> video being restored in `phase == "restore"`, the `<name>_restored.mp4` being
+> video being restored in `phase == "restore"`, the restored `.mp4` being
 > transcribed in `phase == "subs"`, and **absent** in `phase == "translate"` (no GPU
 > child is running then). The batch `done` event text gains
 > `| Subs: S/T done, U failed, V skipped`.
 
 > **「AV 翻译 (subtitles)」task (`avsubs`, #179).** A library task: for every video
 > under its folder (recursively by default) that has no same-named `.srt`, it writes
-> `<name>.ja.srt` (Japanese) and `<name>.srt` (Simplified Chinese) **next to the
-> video**. It reports the same `queue_*` / `current_file` keys as lada/jasna (plus
+> `<name>.srt` (Simplified Chinese) **next to the video**; the intermediate
+> `<name>.ja.srt` (Japanese) is deleted once the `.srt` is written (since 3.6.0 /
+> #187) and kept only while a translation is unfinished. It reports the same
+> `queue_*` / `current_file` keys as lada/jasna (plus
 > `queue_skipped`, `phase`, `subs_translating`), so the reader above covers it. It
 > shares the GPU with Jasna one file at a time: while the other task holds the GPU
 > its `phase` is `waiting_gpu` and its detail reads `waiting for GPU (held by

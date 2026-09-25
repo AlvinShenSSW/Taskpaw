@@ -265,6 +265,28 @@ def test_load_ja_round_trip(tmp_path):
     assert job.load_ja() == cues
 
 
+# ── #187: the .ja.srt checkpoint goes once the zh is published ────────────
+def test_discard_ja_removes_only_the_transcript_and_tolerates_a_missing_one(
+    tmp_path,
+):
+    job = _job(tmp_path)
+    assert job.publish_ja([Cue(1, 0, 1000, "はい")]) is None
+    assert job.publish_zh([Cue(1, 0, 1000, "是")]) is None
+    assert job.discard_ja() is None
+    assert not job.ja_target.exists()
+    assert job.zh_target.exists() and job.media.exists()
+    assert job.discard_ja() is None  # already gone: missing_ok
+
+
+def test_discard_ja_failure_is_error_text_and_never_raises(tmp_path):
+    job = _job(tmp_path)
+    job.ja_target.mkdir()  # a directory in the way: unlink fails (OSError)
+    (job.ja_target / "keep").write_text("x", encoding="utf-8")
+    err = job.discard_ja()
+    assert err is not None and job.ja_target.name in err
+    assert job.ja_target.is_dir()
+
+
 def test_terminate_live_and_dead_child(tmp_path):
     job = _job(tmp_path)
     sp = Spawner()

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import queue
 import subprocess
@@ -789,7 +790,7 @@ def test_no_speech_publishes_empty_srts_and_completes(tmp_path, monkeypatch):
     r.inst.start(r.emit)
     r.spawner.last.finish(0, state="empty", text="")
     r.inst.check(r.emit)
-    assert _ja(r, "a.mp4").read_bytes() == b""
+    assert not _ja(r, "a.mp4").exists()  # #187: gone once the zh is published
     assert _zh(r, "a.mp4").read_bytes() == b""
     assert r.inst._settled["a.mp4"] == ("completed", "no speech")
     assert r.translators[0].submitted == []
@@ -912,6 +913,8 @@ def test_unreadable_existing_ja_fails_without_counting_the_streak(
     assert r.inst._streak == 0 and not r.inst._aborted  # D9
     assert len(_alerts(r.evs)) == 3
     assert len(r.spawner.argvs) == 1  # d still transcribes
+    for rel in ("a.mp4", "b.mp4", "c.mp4"):  # #187: a failed job keeps its ja
+        assert _ja(r, rel).read_text(encoding="utf-8") == "not an srt at all"
 
 
 # ── the 3-strike abort (C7 / m3) ──────────────────────────────────────────
@@ -1901,3 +1904,155 @@ def test_jobs_are_plain_subs_jobs_keyed_by_relpath(tmp_path, monkeypatch):
     assert argv[argv.index("--temp-dir") + 1] == str(_staging_root(r) / "tmp")
     assert job.identity == source_identity(r.root / "x" / "a.mp4")
     r.inst.stop(timeout=1)
+
+
+# ── #187: the .ja.srt goes once the Chinese .srt is published ─────────────
+@pytest.mark.parametrize(
+    "case", ["translated", "no_speech", "zero_cue_resume", "library_ja_resume"]
+)
+def test_ja_is_deleted_once_the_zh_is_published(tmp_path, monkeypatch, case):
+    if case in ("translated", "no_speech"):
+        r = _setup(tmp_path, monkeypatch, full=["片/a.mp4"])
+    else:
+        r = _setup(tmp_path, monkeypatch, ja=["片/a.mp4"])
+        if case == "zero_cue_resume":
+            _ja(r, "片/a.mp4").write_bytes(b"")
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    if case == "translated":
+        r.spawner.last.finish(0)
+        inst.check(emit)
+        assert _ja(r, "片/a.mp4").exists()  # the checkpoint while translating
+        r.translators[0].answer("片/a.mp4")
+    elif case == "no_speech":
+        r.spawner.last.finish(0, state="empty", text="")
+    elif case == "library_ja_resume":
+        # the owner's rule: a pre-existing library .ja.srt goes too
+        assert _ja(r, "片/a.mp4").exists() and r.spawner.argvs == []
+        r.translators[0].answer("片/a.mp4")
+    inst.check(emit)
+    assert inst._settled["片/a.mp4"][0] == "completed"
+    assert _zh(r, "片/a.mp4").exists()
+    assert not _ja(r, "片/a.mp4").exists()
+    assert (r.root / "片" / "a.mp4").exists()
+    assert len(_done(r.evs)) == 1
+
+
+@pytest.mark.parametrize(
+    "case", ["failed", "zh_publish_failed", "no_key", "no_key_result", "cancelled"]
+)
+def test_ja_is_kept_as_the_resume_checkpoint(tmp_path, monkeypatch, case):
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4"], key=case != "no_key")
+    if case == "zh_publish_failed":
+        monkeypatch.setattr(
+            SubsJob, "publish_zh", lambda self, cues: f"publish {self.zh_target.name}"
+        )
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    if case == "failed":
+        r.translators[0].answer("a.mp4", ok=False)
+        inst.check(emit)
+        assert inst._settled["a.mp4"][0] == "failed"
+    elif case == "zh_publish_failed":
+        r.translators[0].answer("a.mp4")
+        inst.check(emit)
+        assert inst._settled["a.mp4"][0] == "failed"
+    elif case == "no_key":
+        assert inst._settled["a.mp4"] == ("skipped", "no_llm_key")
+    elif case == "no_key_result":
+        r.translators[0].answer("a.mp4", ok=False, detail="no LLM key")
+        inst.check(emit)
+        assert inst._settled["a.mp4"] == ("skipped", "no_llm_key")
+    else:
+        with inst._launch_lock:
+            inst._abort(emit)
+        inst._run_deferred()
+        assert inst._settled["a.mp4"] == ("skipped", "cancelled")
+    assert _ja(r, "a.mp4").read_text(encoding="utf-8") == SRT_JA
+    assert not _zh(r, "a.mp4").exists()
+
+
+def _publish_ja_only(self: SubsJob) -> str:
+    """`SubsJob.publish_empty` whose zh half fails: the empty ja is on disk."""
+    return self._publish(self.ja_target, "") or f"publish {self.zh_target.name}"
+
+
+@pytest.mark.parametrize(
+    "case", ["zero_cue_zh_publish_failed", "no_speech_publish_failed"]
+)
+def test_ja_is_kept_when_the_empty_zh_cannot_be_published(tmp_path, monkeypatch, case):
+    # The 0-cue resume and the no-speech outcome settle `completed` only after
+    # their (empty) zh is published; when that publish fails the .ja.srt stays
+    # as the next Start's checkpoint.
+    if case == "no_speech_publish_failed":
+        r = _setup(tmp_path, monkeypatch, full=["片/a.mp4"])
+        monkeypatch.setattr(SubsJob, "publish_empty", _publish_ja_only)
+    else:
+        r = _setup(tmp_path, monkeypatch, ja=["片/a.mp4"])
+        _ja(r, "片/a.mp4").write_bytes(b"")
+        monkeypatch.setattr(
+            SubsJob, "publish_zh", lambda self, cues: f"publish {self.zh_target.name}"
+        )
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    if case == "no_speech_publish_failed":
+        r.spawner.last.finish(0, state="empty", text="")
+    inst.check(emit)
+    assert inst._settled["片/a.mp4"][0] == "failed"
+    assert _ja(r, "片/a.mp4").read_text(encoding="utf-8") == ""
+    assert not _zh(r, "片/a.mp4").exists()
+
+
+def test_a_ja_kept_at_stop_is_resumed_translate_only_and_then_deleted(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    r.spawner.last.finish(0)
+    inst.stop(timeout=2)  # Stop publishes the ja only
+    assert _ja(r, "a.mp4").exists() and not _zh(r, "a.mp4").exists()
+    inst.start(emit)  # the next Start resumes from the checkpoint
+    assert inst._kinds["a.mp4"] == "translate_only"
+    assert len(r.spawner.argvs) == 1  # no second transcription
+    r.translators[1].answer("a.mp4")
+    inst.check(emit)
+    assert _zh(r, "a.mp4").exists()
+    assert not _ja(r, "a.mp4").exists()
+    assert len(_done(r.evs)) == 1
+
+
+def test_a_ja_deletion_failure_is_logged_and_never_fails_the_job(
+    tmp_path, monkeypatch, caplog
+):
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)  # the ja is loaded and submitted
+    ja = _ja(r, "a.mp4")
+    ja.unlink()
+    ja.mkdir()  # something in the way: the unlink fails
+    (ja / "locked").write_text("x", encoding="utf-8")
+    r.translators[0].answer("a.mp4")
+    with caplog.at_level(logging.WARNING, logger="taskpaw.monitors.avsubs"):
+        st = inst.check(emit)  # never raises
+    assert inst._settled["a.mp4"] == ("completed", "")
+    assert _zh(r, "a.mp4").exists() and ja.is_dir()
+    assert any(ja.name in rec.getMessage() for rec in caplog.records)
+    done = _done(r.evs)
+    assert len(done) == 1 and "Queue: 1/1 done, 0 failed, 0 skipped" in done[0][2]
+    assert not _alerts(r.evs)
+    assert st.state == "idle"
+
+
+def test_plan_tree_skips_jasna_staging_names_old_and_new(tmp_path):
+    for rel in ("a.mp4", "a-破解.tmp.mp4", "a_restored.tmp.mp4", "b-破解.mp4"):
+        _touch(tmp_path / rel)
+    assert _rels(plan_tree(str(tmp_path), True, ["mp4"])) == ["a.mp4", "b-破解.mp4"]
+    item = plan_tree(str(tmp_path), True, ["mp4"]).items[1]
+    assert item.zh_target == tmp_path / "b-破解.srt"  # same name as Jasna's
+
+
+def test_root_folder_description_states_the_ja_cleanup():
+    desc = AvsubsConfig.model_fields["avsubs_root_folder"].description or ""
+    assert "<name>.srt" in desc and "<name>.ja.srt" in desc
+    assert "deleted" in desc
