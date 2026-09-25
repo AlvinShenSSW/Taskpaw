@@ -37,7 +37,15 @@ the restored file they sit next to (#187): a legacy `<stem>_restored.mp4` gets
 deleted once the job settles `completed` with its `.srt` published, and kept
 on every other path. The engine lives in the
 shared `taskpaw_v3.monitors.subs` package; this plugin owns planning
-(`plan_subs`), policy (retry, degrade), counters, events and settlement. Every
+(`plan_subs`), policy (retry, degrade), counters, events and settlement.
+Library safety (#191): a film already has subtitles — and gets no job — when,
+judged from ONE listing of the output folder, `<media stem>.srt` (or `.ass` /
+`.ssa` / `.vtt`) or a `<media stem>.<tag>.srt` with no Japanese tag exists
+(rules a/b; rule c never applies here: the output folder is flat, C4); an
+output folder that cannot be listed turns subtitles off for the run. The
+folder is looked at again before each ASR and before each translation is
+submitted (`subtitle exists` / `subtitle state unreadable` skips), and a
+publish never overwrites an existing file. Every
 planned subtitle job reaches exactly one terminal state, settled only by the
 monitor worker thread under `_launch_lock`; blocking side effects of a
 settlement are deferred until the lock is released (D8), and only `_dispatch()`
@@ -65,7 +73,7 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Literal, Optional
@@ -100,7 +108,21 @@ from taskpaw_v3.monitors.plugins.lada import (
 # supervisor-created instances (D10). Nothing here comes from `lada.py` (C1).
 from taskpaw_v3.monitors.subs import bounded, exists_quietly
 from taskpaw_v3.monitors.subs.child import ChildProcess, asr_env
-from taskpaw_v3.monitors.subs.job import SubsJob
+from taskpaw_v3.monitors.subs.existing import (
+    VIDEO_EXTENSIONS,
+    entry_key,
+    judge,
+    list_names,
+    list_names_missing_ok,
+    qualifies,
+    skip_reason,
+)
+from taskpaw_v3.monitors.subs.job import (
+    SUBTITLE_EXISTS,
+    SUBTITLE_UNREADABLE,
+    TRANSCRIPT_EXISTS,
+    SubsJob,
+)
 from taskpaw_v3.monitors.subs.progress import (
     ASR,
     JASNA_STEPS,
@@ -130,8 +152,9 @@ log = logging.getLogger("taskpaw.monitors.jasna")
 
 Tier = Literal["1080p", "4k"]
 
-#: Containers Jasna's own CLI accepts (its folder mode scans the same set).
-JASNA_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm"}
+#: Containers Jasna's own CLI accepts (its folder mode scans the same set) —
+#: the shared common-video set the subtitle attribution uses too (#191).
+JASNA_VIDEO_EXTENSIONS = VIDEO_EXTENSIONS
 
 # C5: pixel-count tier rule. `height > 1080` would demote 1920x1200 / 2560x1080
 # (cinematic 1080p) to the 4K tier and silently strip unet-4x from them.
@@ -351,15 +374,6 @@ def plan_queue(
     return pending, done, collisions
 
 
-def subs_media_for(output_folder: str, video: Path) -> Path:
-    """The restored file `video`'s subtitles belong to (#187, C10): the one that
-    exists (new name first, then legacy) — or, for a file still to be restored,
-    the new name its restore will publish."""
-    return restored_output_for(output_folder, video) or output_path_for(
-        output_folder, video
-    )
-
-
 def ja_target_for(media: Path) -> Path:
     """`<media stem>.ja.srt` next to the restored `media` — the Japanese
     transcript (C8: derives from the restored file, so it can never collide)."""
@@ -372,27 +386,33 @@ def zh_target_for(media: Path) -> Path:
     return media.with_name(f"{media.stem}{_ZH_EXT}")
 
 
-def subs_kind(output_folder: str, video: Path) -> SubsKind:
-    """What a file needs, judged next to `subs_media_for()`: an existing zh (a
-    0-byte one counts) → `none`; an existing `.ja.srt` (reused by existence
-    only) → `translate_only`; else `full` (ASR + translation)."""
-    media = subs_media_for(output_folder, video)
-    if exists_quietly(zh_target_for(media)):
-        return "none"
-    if exists_quietly(ja_target_for(media)):
-        return "translate_only"
-    return "full"
+_OUTPUT_VIDEO_EXTS = frozenset(e[1:] for e in JASNA_VIDEO_EXTENSIONS)
+
+
+def _is_output_video(name: str) -> bool:
+    """A video in the output folder for subtitle attribution (#191): one of
+    Jasna's containers, not a staging `.tmp.` file, not a macOS `._` file
+    (the shared `qualifies` filter)."""
+    return qualifies(_OUTPUT_VIDEO_EXTS, name)
 
 
 @dataclass(frozen=True)
 class SubsPlan:
     """`for_pending`: the kind each pending file will need once restored;
     `subs_only`: already-restored files that still need subtitles (sorted,
-    handled after every pending restore); `total`: planned subtitle jobs."""
+    handled after every pending restore); `total`: planned subtitle jobs.
+    #191: `kinds` / `media` — every classified file's kind and the restored
+    file its subtitles belong to (C10: new name, else legacy, else the new
+    name its restore will publish), both from the ONE planning listing, so
+    nothing is judged or probed again after planning."""
 
     for_pending: dict[Path, SubsKind]
     subs_only: list[Path]
     total: int
+    kinds: dict[Path, SubsKind] = field(default_factory=dict)
+    media: dict[Path, Path] = field(default_factory=dict)
+    # CX1: a translate_only file's `.ja.srt` as it is actually named
+    ja: dict[Path, Path] = field(default_factory=dict)
 
 
 def plan_subs(
@@ -408,7 +428,14 @@ def plan_subs(
     `plan_queue`: a loser's `output_path_for()` is the winner's file, so without
     this it would become a duplicate job on the same media and targets), and
     classifies every other video whose restored output (new or legacy name,
-    #187) exists. Raises `OSError` when the input folder cannot be scanned."""
+    #187) is in the output folder's listing. #191: ONE listing of the output
+    folder per pass (`list_names_missing_ok`: a genuinely missing folder is
+    empty); each file's media is resolved from it and its kind judged from
+    it — rules (a)/(b) only (C4), the not-yet-restored media of the pending
+    files owning their subtitles too: its subtitles exist (a 0-byte `.srt`
+    counts) → `none`; its `.ja.srt` there (reused by existence only) →
+    `translate_only`; else `full`. Raises `OSError` when the input folder
+    cannot be scanned or the output folder cannot be listed."""
     pending_set = set(pending)
     skip = pending_set | set(excluded)
     entries = sorted(
@@ -419,19 +446,48 @@ def plan_subs(
         ),
         key=lambda p: p.name,
     )
-    for_pending: dict[Path, SubsKind] = {
-        v: subs_kind(output_folder, v) for v in pending
-    }
-    subs_only: list[Path] = []
+    names = list_names_missing_ok(output_folder)
+    # CX2: keyed the way the filesystem compares names; the value is the name
+    # as listed, so a case-variant restored file is found and its subtitles
+    # follow its actual name.
+    listed = {entry_key(n): n for n in names}
+
+    def restored(video: Path) -> Optional[Path]:
+        for final in (
+            output_path_for(output_folder, video),
+            legacy_output_path_for(output_folder, video),
+        ):
+            actual = listed.get(entry_key(final.name))
+            if actual is not None:
+                return final.with_name(actual)
+        return None
+
+    # CX3: a pending file's subtitles belong to the file its restore will
+    # publish — never to an older file whose name only looks the same.
+    media: dict[Path, Path] = {v: output_path_for(output_folder, v) for v in pending}
     for video in entries:
-        if video in skip:
-            continue
-        if restored_output_for(output_folder, video) is None:
-            continue
-        if subs_kind(output_folder, video) != "none":
-            subs_only.append(video)
+        if video not in skip:
+            final = restored(video)
+            if final is not None:
+                media[video] = final
+    extra = [media[v].name for v in pending]  # not restored yet (attribution)
+    kinds: dict[Path, SubsKind] = {}
+    ja: dict[Path, Path] = {}
+    for video, m in media.items():
+        got = judge(m.name, names, _is_output_video, rule_c=False, extra_videos=extra)
+        if got.chinese is not None:
+            kinds[video] = "none"
+        elif got.ja_transcript is not None:
+            kinds[video] = "translate_only"
+            ja[video] = m.with_name(got.ja_transcript)  # CX1: as named
+        else:
+            kinds[video] = "full"
+    for_pending = {v: kinds[v] for v in pending}
+    subs_only = [
+        v for v in entries if v not in pending_set and kinds.get(v, "none") != "none"
+    ]
     total = sum(1 for k in for_pending.values() if k != "none") + len(subs_only)
-    return SubsPlan(for_pending, subs_only, total)
+    return SubsPlan(for_pending, subs_only, total, kinds, media, ja)
 
 
 def _initial_steps(kind: SubsKind, restored: bool) -> dict[str, str]:
@@ -810,7 +866,14 @@ class JasnaConfig(BaseMonitorConfig):
         "translates. GPU work stays serial (restore → transcribe → next restore); "
         "translation runs in the background. Already restored files without "
         "subtitles are handled after the pending restores. Staging lives in the "
-        "output folder's .avsubs directory. An existing .ja.srt / .srt is reused "
+        "output folder's .avsubs directory. A file already has subtitles, and "
+        "gets none, when <name>-破解.srt (or .ass / .ssa / .vtt) or a "
+        "<name>-破解.<tag>.srt such as <name>-破解.chs.srt exists next to its "
+        "restored video and the tag is not Japanese (ja, jp, jpn, jap, japanese, "
+        "日语, 日文, 日本語 — also as ja-JP); other subtitles in the output folder "
+        "never count for it. If the output folder cannot be read, subtitles are "
+        "skipped (one alert; tried again at the next Start), and an existing "
+        "subtitle is never overwritten. An existing .ja.srt / .srt is reused "
         "as-is: if you replace a source video under the same name, delete its old "
         ".srt files first.",
     )
@@ -1000,8 +1063,10 @@ class JasnaInstance(MonitorInstance):
     only waits under `_launch_lock` are the non-blocking `Popen`, the
     `os.replace`, the publish-time `hev1` retag (a bounded header walk and a
     four-byte write — deliberately never an fsync), single-file unlinks (a
-    stale staging file, a settled job's `.ja.srt` — #187), and
-    `_terminate_child`, bounded by its timeout (+2 s for the kill reap)."""
+    stale staging file, a settled job's `.ja.srt` — #187), the subtitle
+    publishes and the one output-folder listing right after a `.ja.srt`
+    publish (#191 F15: the same class of I/O), and `_terminate_child`,
+    bounded by its timeout (+2 s for the kill reap)."""
 
     def __init__(self, instance_id: str, config: JasnaConfig) -> None:
         super().__init__(instance_id, config)
@@ -1069,6 +1134,7 @@ class JasnaInstance(MonitorInstance):
         self._subs_consecutive_failures = 0
         self._subs_disabled: Optional[str] = None
         self._subs_key_alerted = False
+        self._subs_unreadable_alerted = False  # #191: one alert per run (F16)
         self._next_action: Optional[str] = None
         self._deferred: list[Callable[[], None]] = []
         self._advance_requested = False
@@ -1157,6 +1223,7 @@ class JasnaInstance(MonitorInstance):
         self._subs_consecutive_failures = 0
         self._subs_disabled = None
         self._subs_key_alerted = False
+        self._subs_unreadable_alerted = False
         self._next_action = None
         self._deferred = []
         self._advance_requested = False
@@ -1284,9 +1351,11 @@ class JasnaInstance(MonitorInstance):
         out = cfg.jasna_output_folder
         try:
             plan = plan_subs(cfg.jasna_input_folder, out, pending, excluded)
-        except OSError as e:
-            # plan_queue just scanned the same folder, so this is a race; the
-            # restores still run, subtitles are off for this run — visibly.
+        except (OSError, ValueError) as e:
+            # A race on the input folder plan_queue just scanned, or (#191) an
+            # output folder that cannot be listed (an unreachable share, an
+            # invalid path) — the restores still run, subtitles are off for
+            # this run, visibly.
             # #189 (R2): no jobs — every pending film still gets its row,
             # with nothing to subtitle (done once restored).
             for video in pending:
@@ -1306,7 +1375,7 @@ class JasnaInstance(MonitorInstance):
         work: list[tuple[Path, SubsKind, bool]] = [
             (v, k, False) for v, k in plan.for_pending.items()
         ]
-        work += [(v, subs_kind(out, v), True) for v in plan.subs_only]
+        work += [(v, plan.kinds[v], True) for v in plan.subs_only]
         for video, kind, restored in work:
             # #189 (M1/M2): every film joins the tracker in plan order before
             # anything can settle — a kind-none film too (it has no job).
@@ -1314,15 +1383,17 @@ class JasnaInstance(MonitorInstance):
             if kind == "none":
                 continue
             # C10: the restored file — new or legacy name (#187); the subtitle
-            # targets sit next to it under its own stem.
-            media = subs_media_for(out, video)
+            # targets sit next to it under its own stem. #191: resolved by the
+            # planning listing, never probed again.
+            media = plan.media[video]
             self._kinds[video.name] = kind
             self._jobs[video.name] = SubsJob(
                 run=self._run,
                 job_id=video.name,
                 media=media,
                 relpath=video.name,
-                ja_target=ja_target_for(media),
+                # CX1: an existing transcript as it is actually named
+                ja_target=plan.ja.get(video) or ja_target_for(media),
                 zh_target=zh_target_for(media),
                 staging_root=staging,
                 exe=exe,
@@ -1458,9 +1529,9 @@ class JasnaInstance(MonitorInstance):
         else:
             outcome = job.poll_asr()
             if outcome is not None and outcome.kind == "succeeded":
-                err = job.publish_ja(outcome.cues)
-                if err is not None:
-                    log.warning("jasna %s: %s", self.instance_id, err)
+                res = job.publish_ja(outcome.cues)
+                if not res.ok:  # #191: never replaced; logged
+                    log.warning("jasna %s: %s", self.instance_id, res.detail)
             self._kill_asr(job, 0.5)  # joins readers; no-op once reaped
         self._gpu_give(job)  # C11: released even when a process survived
         if job.child is None:
@@ -2248,6 +2319,54 @@ class JasnaInstance(MonitorInstance):
         if err is not None:
             log.warning("jasna %s: %s: %s", self.instance_id, job.job_id, err)
 
+    def _recheck(self, job: SubsJob, names: Optional[list[str]]) -> Optional[str]:
+        """#191 (AC5): the skip reason for `job` from a fresh listing of the
+        output folder (None: unreadable), judged like `plan_subs` — rules
+        (a)/(b) only (C4), every planned file's media owning its own
+        subtitles — or None when its work goes on."""
+        return skip_reason(
+            names,
+            job.media.name,
+            _is_output_video,
+            rule_c=False,
+            # CX4: every planned file's media owns its subtitles — including a
+            # pending file with no subtitle job (kind none) whose restore failed.
+            extra_videos=[
+                m.name
+                for m in (
+                    self._plan.media.values()
+                    if self._plan is not None
+                    else (j.media for j in self._jobs.values())
+                )
+            ],
+        )
+
+    def _skip_existing(self, job: SubsJob, reason: str, emit: EventEmitter) -> None:
+        """#191 (under `_launch_lock`): settle `job` `skipped` because its
+        subtitles exist (a re-check or a refused `.srt`: the `.ja.srt` goes
+        only when THIS job published it in this run — AC6), its transcript
+        appeared (a refused `.ja.srt`), or the output folder could not be read
+        (one alert per run). One info line per file; never a failure."""
+        self._settle(job.job_id, "skipped", reason, emit)
+        if self._settled.get(job.job_id) != ("skipped", reason):
+            return
+        log.info("jasna %s: %s skipped (%s)", self.instance_id, job.job_id, reason)
+        if reason == SUBTITLE_EXISTS:
+            err = job.discard_own_ja()
+            if err is not None:
+                log.warning("jasna %s: %s: %s", self.instance_id, job.job_id, err)
+        elif reason == SUBTITLE_UNREADABLE and not self._subs_unreadable_alerted:
+            self._subs_unreadable_alerted = True
+            emit(
+                "alert",
+                f"{self._cfg.name}: subtitle state unreadable",
+                f"The output folder could not be read when {job.job_id} was due, "
+                "so it is unknown whether it already has subtitles; it (and any "
+                "other such file) is skipped for this run and tried again at the "
+                "next Start.",
+                dedupe_key=f"{self.instance_id}:subs-unreadable",
+            )
+
     def _disable_subs(self, reason: str, emit: EventEmitter) -> None:
         """Flags + settlement only (may run under `_launch_lock`); the blocking
         part — translator cancel, ASR terminate — is DEFERRED until the lock is
@@ -2303,12 +2422,14 @@ class JasnaInstance(MonitorInstance):
         if not cues:
             # An empty transcript (no speech): the zh is empty too — regardless
             # of the key, since nothing has to be translated.
-            err = job.publish_zh([])
-            if err is None:
+            res = job.publish_zh([])
+            if res.ok:
                 self._settle_completed(job, "no speech", emit)
+            elif res.kind == "exists":
+                self._skip_existing(job, SUBTITLE_EXISTS, emit)  # #191 AC6
             else:
-                self._settle(job.job_id, "failed", err, emit)
-                self._alert_job(job.job_id, err, emit)
+                self._settle(job.job_id, "failed", res.detail, emit)
+                self._alert_job(job.job_id, res.detail, emit)
             return
         settings = get_llm_settings()
         if not settings.api_key and needs_llm_key(settings.api_base):
@@ -2336,7 +2457,15 @@ class JasnaInstance(MonitorInstance):
         """Start one file's subtitle job. Always called from a dispatching
         context, so it NEVER dispatches itself (D29); terminal branches only set
         flags under the lock, and the GPU release / deferred work run after it
-        (D27/D30)."""
+        (D27/D30).
+
+        #191 (AC5): the output folder is listed once more OUTSIDE the lock (the
+        listing never raises, F14) and judged under it — before the submit of
+        a translate-only file (no hold exists there; it may run hours after the
+        scan), and before an ASR once the hold is held (carried or taken, so
+        nothing is listed while the GPU is refused). Subtitles there, or a
+        folder that cannot be read, skip the file; every skip requests an
+        advance, so the walk goes on."""
         name = video.name
         # #179 C5: the restore's hold when this file was just restored (full
         # kind); None on the subs-only path.
@@ -2348,9 +2477,14 @@ class JasnaInstance(MonitorInstance):
             return
         if self._kinds.get(name) == "translate_only":
             self._gpu_give(carried)
+            names = list_names(job.media.parent)
             with self._launch_lock:  # no GPU (D12)
                 if not self._stopping.is_set() and self._subs_disabled is None:
-                    self._submit_translation(job, None, emit)
+                    skip = self._recheck(job, names)
+                    if skip is None:
+                        self._submit_translation(job, None, emit)
+                    else:
+                        self._skip_existing(job, skip, emit)
                     self._advance_requested = True
             self._run_deferred()
             return
@@ -2363,11 +2497,17 @@ class JasnaInstance(MonitorInstance):
                 self._gpu_waiting = True
                 return
         self._gpu_waiting = False  # S5: we hold the GPU — no longer waiting
+        names = list_names(job.media.parent)
         release_gpu = False
         with self._launch_lock:
             try:  # K1: we hold the GPU — no raise may skip the give below
+                skip = self._recheck(job, names)
                 if self._stopping.is_set() or self._subs_disabled is not None:
                     release_gpu = True  # D30: no bare return — the release pairs
+                elif skip is not None:
+                    self._skip_existing(job, skip, emit)
+                    release_gpu = True
+                    self._advance_requested = True
                 else:
                     err = job.start_asr(self._spawn)
                     if (
@@ -2452,21 +2592,36 @@ class JasnaInstance(MonitorInstance):
         terminal = True
         name = job.job_id
         if outcome.kind == "succeeded":
-            err = job.publish_ja(outcome.cues)  # D9: under the lock
-            if err is not None:
-                self._settle(name, "failed", err, emit)
-                self._alert_job(name, err, emit)
-            else:
+            res = job.publish_ja(outcome.cues)  # D9: under the lock
+            if res.ok:
                 self._tracker.finish(name, ASR, "done", time.monotonic())  # #189
-                self._submit_translation(job, list(outcome.cues), emit)
+                # #191 (AC5/F15): the file's last look before its translation —
+                # the same class of I/O as the publish itself.
+                skip = self._recheck(job, list_names(job.media.parent))
+                if skip is None:
+                    self._submit_translation(job, list(outcome.cues), emit)
+                else:
+                    self._skip_existing(job, skip, emit)
+            elif res.kind == "exists":
+                self._skip_existing(job, TRANSCRIPT_EXISTS, emit)
+            else:
+                self._settle(name, "failed", res.detail, emit)
+                self._alert_job(name, res.detail, emit)
         elif outcome.kind == "no_speech":
-            err = job.publish_empty()
-            if err is None:
+            res = job.publish_empty()
+            if res.ok:
                 self._tracker.finish(name, ASR, "done", time.monotonic())  # #189
                 self._settle_completed(job, "no speech", emit)
+            elif res.kind == "exists":
+                # #191: a refused .srt took the empty .ja.srt with it (AC4)
+                reason = TRANSCRIPT_EXISTS
+                if job.ja_published:
+                    self._tracker.finish(name, ASR, "done", time.monotonic())
+                    reason = SUBTITLE_EXISTS
+                self._skip_existing(job, reason, emit)
             else:
-                self._settle(name, "failed", err, emit)
-                self._alert_job(name, err, emit)
+                self._settle(name, "failed", res.detail, emit)
+                self._alert_job(name, res.detail, emit)
         elif outcome.kind == "unstable":
             self._settle_unstable(job, emit)
         elif job.attempt < _ASR_MAX_ATTEMPTS:
@@ -2581,12 +2736,14 @@ class JasnaInstance(MonitorInstance):
                 job = self._jobs.get(result.job_id)
                 if job is not None and result.job_id not in self._settled:
                     if result.outcome == "translated":
-                        err = job.publish_zh(result.zh_cues)  # D9: under the lock
-                        if err is None:
+                        res = job.publish_zh(result.zh_cues)  # D9: under the lock
+                        if res.ok:
                             self._settle_completed(job, "", emit)
+                        elif res.kind == "exists":  # #191 AC6: never replaced
+                            self._skip_existing(job, SUBTITLE_EXISTS, emit)
                         else:
-                            self._settle(job.job_id, "failed", err, emit)
-                            self._alert_job(job.job_id, err, emit)
+                            self._settle(job.job_id, "failed", res.detail, emit)
+                            self._alert_job(job.job_id, res.detail, emit)
                     else:
                         self._settle(job.job_id, "failed", result.detail, emit)
                         self._alert_job(job.job_id, result.detail, emit)

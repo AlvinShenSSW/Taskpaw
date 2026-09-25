@@ -2,15 +2,19 @@
 
 Paths in, outcomes out. No retry policy and no counters live here: retry,
 degrade and abort are the plugin's policy. Every publish goes through
-`<target>.<generation>.tmp` + `os.replace`, so `start()` can sweep a crashed
-run's leftovers by generation. `discard_ja()` drops the `.ja.srt` checkpoint
-once the plugin settled the job `completed` (#187). `progress(now)` is the live
-ASR progress of the current attempt, parsed from the child's captured tail
-(#189, read-only observation).
+`<target>.<generation>.tmp`, so `start()` can sweep a crashed run's leftovers
+by generation, and the tmp is moved into place WITHOUT replacing anything
+(#191): a target that already exists is refused (`PublishResult` `exists`),
+never overwritten. `discard_ja()` drops the `.ja.srt` checkpoint once the
+plugin settled the job `completed` (#187); `discard_own_ja()` only when this
+job published it in this run (#191). `progress(now)` is the live ASR progress
+of the current attempt, parsed from the child's captured tail (#189,
+read-only observation).
 """
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import shutil
@@ -29,11 +33,94 @@ from taskpaw_v3.monitors.subs.whisperjav import attempt_dir, build_argv, read_ou
 log = logging.getLogger("taskpaw.subs.job")
 
 Terminal = Literal["completed", "failed", "skipped"]
-SkipReason = Literal["restore_failed", "no_llm_key", "unstable", "cancelled", "no_exe"]
+SkipReason = Literal[
+    "restore_failed",
+    "no_llm_key",
+    "unstable",
+    "cancelled",
+    "no_exe",
+    "subtitle exists",
+    "transcript exists",
+    "subtitle state unreadable",
+]
+# #191: the skips of a film whose subtitles exist (已有字幕), whose transcript
+# appeared meanwhile, or whose folder could not be read — so nobody can tell
+# (fail closed; the next Start tries again).
+SUBTITLE_EXISTS: SkipReason = "subtitle exists"
+TRANSCRIPT_EXISTS: SkipReason = "transcript exists"
+SUBTITLE_UNREADABLE: SkipReason = "subtitle state unreadable"
 
 # #189 (C2): what one progress poll reads of the ASR child's captured output.
 ASR_TAIL_LINES = 40
 ASR_TAIL_CHARS = 16000
+
+# #191 (AC4): Windows `os.rename` refuses an existing target (FileExistsError —
+# verified on NTFS for existing, case-variant, read-only, open and directory
+# targets, A1); elsewhere `rename` replaces, so a hard link is the refusing
+# move there (`link(2)`: EEXIST, A3). Both are as atomic as `os.replace`.
+_RENAME_REFUSES = os.name == "nt"
+# `os.link` failures that mean "this filesystem has no hard links".
+_NO_HARD_LINKS = frozenset({errno.EPERM, errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS})
+
+
+def _present(path: Path) -> bool:
+    """Whether a directory entry named `path` exists. Raises `OSError` when
+    that cannot be told — the caller fails closed."""
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _move_into_place(tmp: Path, target: Path) -> None:
+    """Move the finished `tmp` to `target` without replacing anything; raises
+    `FileExistsError` when `target` exists. A filesystem without hard links
+    falls back to a checked `os.replace` (a race window remains there)."""
+    if _RENAME_REFUSES:
+        os.rename(tmp, target)
+        return
+    try:
+        os.link(tmp, target)
+    except FileExistsError:
+        raise
+    except OSError as e:
+        if e.errno not in _NO_HARD_LINKS:
+            raise
+        log.debug(
+            "subs: no hard links for %s (%s); checked replace instead",
+            target.name,
+            errno.errorcode.get(e.errno or 0, e.errno),
+        )
+        if _present(target):
+            raise FileExistsError(errno.EEXIST, "already exists", str(target)) from e
+        os.replace(tmp, target)
+        return
+    try:
+        tmp.unlink()
+    except OSError as e:  # published; the age-gated sweep takes the tmp later
+        log.warning(
+            "subs: published %s but could not remove %s (%s)",
+            target.name,
+            tmp.name,
+            type(e).__name__,
+        )
+
+
+@dataclass(frozen=True)
+class PublishResult:
+    """What one publish did (#191 AC4) — a distinct type (F8), so a caller
+    still reading it as an error text fails the type check. `ok`: written;
+    `exists`: refused — a file of that name was already there (nothing
+    written, nothing replaced); `error`: the write or the move failed.
+    `detail` is empty when `ok`, else one log/alert line."""
+
+    kind: Literal["ok", "exists", "error"]
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.kind == "ok"
 
 
 def source_identity(path: Path) -> tuple[int, int]:
@@ -69,6 +156,9 @@ class SubsJob:
     _asr_progress: Optional[AsrProgress] = field(
         default=None, init=False, repr=False, compare=False
     )
+    # #191 (AC6): THIS job published its `.ja.srt` in this run — only then may
+    # a refused `.srt` take the transcript with it (`discard_own_ja`).
+    ja_published: bool = field(default=False, init=False, compare=False)
 
     # ── ASR ──────────────────────────────────────────────────────────────
     def start_asr(
@@ -194,34 +284,63 @@ class SubsJob:
         return gone
 
     # ── publishing ───────────────────────────────────────────────────────
-    def _publish(self, target: Path, text: str) -> Optional[str]:
+    def _publish(self, target: Path, text: str) -> PublishResult:
+        """Write `<target>.<gen>.tmp`, then move it into place WITHOUT
+        replacing (#191 AC4): a target that is already there — checked first
+        (C1: defence in depth), refused by the move itself — is `exists`. The
+        tmp is removed on every path that does not publish it."""
         tmp = target.with_name(f"{target.name}.{self.run[1]}.tmp")
         try:
             with open(tmp, "w", encoding="utf-8", newline="") as f:
                 f.write(text)
-            os.replace(tmp, target)
+            if _present(target):
+                raise FileExistsError(errno.EEXIST, "already exists", str(target))
+            _move_into_place(tmp, target)
+        except FileExistsError:
+            self._drop_tmp(tmp)
+            return PublishResult(
+                "exists", f"{target.name} already exists; not replaced"
+            )
         except OSError as e:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError as cleanup:
-                log.warning(
-                    "subs job %s: could not remove %s (%s)",
-                    self.job_id,
-                    tmp.name,
-                    type(cleanup).__name__,
-                )
-            return f"publish {target.name}: {type(e).__name__}: {e}"
-        return None
+            self._drop_tmp(tmp)
+            return PublishResult(
+                "error", f"publish {target.name}: {type(e).__name__}: {e}"
+            )
+        return PublishResult("ok")
 
-    def publish_ja(self, cues: Iterable[Cue]) -> Optional[str]:
-        return self._publish(self.ja_target, srt.serialize(cues))
+    def _drop_tmp(self, tmp: Path) -> None:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError as cleanup:
+            log.warning(
+                "subs job %s: could not remove %s (%s)",
+                self.job_id,
+                tmp.name,
+                type(cleanup).__name__,
+            )
 
-    def publish_zh(self, cues: Iterable[Cue]) -> Optional[str]:
+    def publish_ja(self, cues: Iterable[Cue]) -> PublishResult:
+        res = self._publish(self.ja_target, srt.serialize(cues))
+        if res.ok:
+            self.ja_published = True
+        return res
+
+    def publish_zh(self, cues: Iterable[Cue]) -> PublishResult:
         return self._publish(self.zh_target, srt.serialize(cues))
 
-    def publish_empty(self) -> Optional[str]:
-        """0-byte `.ja.srt` and `.srt` (no speech)."""
-        return self._publish(self.ja_target, "") or self._publish(self.zh_target, "")
+    def publish_empty(self) -> PublishResult:
+        """0-byte `.ja.srt` and `.srt` (no speech). A refused `.srt` takes the
+        empty `.ja.srt` this call just wrote with it (#191 AC4); a refused
+        `.ja.srt` writes nothing."""
+        res = self.publish_ja([])
+        if not res.ok:
+            return res
+        res = self.publish_zh([])
+        if res.kind == "exists":
+            err = self.discard_ja()
+            if err is not None:
+                log.warning("subs job %s: %s", self.job_id, err)
+        return res
 
     def discard_ja(self) -> Optional[str]:
         """Delete the `.ja.srt` once the Chinese `.srt` is published (#187).
@@ -235,6 +354,12 @@ class SubsJob:
         except (OSError, ValueError) as e:
             return f"could not remove {self.ja_target.name}: {type(e).__name__}: {e}"
         return None
+
+    def discard_own_ja(self) -> Optional[str]:
+        """#191 (AC6): `discard_ja()` only when THIS job published the
+        `.ja.srt` in this run — a transcript that was already in the library
+        (translate-only) or appeared meanwhile stays. Never raises."""
+        return self.discard_ja() if self.ja_published else None
 
     def load_ja(self) -> list[Cue]:
         return srt.load(self.ja_target)

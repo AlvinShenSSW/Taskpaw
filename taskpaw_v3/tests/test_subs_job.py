@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import logging
 import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -12,10 +15,12 @@ from typing import Optional
 
 import pytest
 
+from taskpaw_v3.monitors.subs import job as job_mod
 from taskpaw_v3.monitors.subs.job import (
     ASR_TAIL_CHARS,
     ASR_TAIL_LINES,
     JobOutcome,
+    PublishResult,
     SubsJob,
     source_identity,
 )
@@ -228,19 +233,28 @@ def _no_tmp_left(folder: Path) -> bool:
     return not list(folder.glob("*.tmp"))
 
 
-def test_publish_ja_and_zh_via_generation_tmp_and_replace(tmp_path, monkeypatch):
+def test_publish_ja_and_zh_via_generation_tmp_and_a_refusing_move(
+    tmp_path, monkeypatch
+):
+    # #191 (AC4): the tmp is moved into place WITHOUT replacing — `os.rename`
+    # on Windows, `os.link` elsewhere — never `os.replace`.
     job = _job(tmp_path)
     cues = [Cue(5, 0, 1000, "はい"), Cue(9, 1000, 2000, "いいえ")]
     seen: list[tuple[str, str]] = []
-    real_replace = os.replace
+    move = "rename" if job_mod._RENAME_REFUSES else "link"
+    real_move = getattr(os, move)
 
     def spy(src, dst):
         seen.append((str(src), str(dst)))
-        return real_replace(src, dst)
+        return real_move(src, dst)
 
-    monkeypatch.setattr(os, "replace", spy)
-    assert job.publish_ja(cues) is None
-    assert job.publish_zh([Cue(1, 0, 1000, "是")]) is None
+    def no_replace(src, dst):
+        raise AssertionError("os.replace must not publish")
+
+    monkeypatch.setattr(os, move, spy)
+    monkeypatch.setattr(os, "replace", no_replace)
+    assert job.publish_ja(cues) == PublishResult("ok")
+    assert job.publish_zh([Cue(1, 0, 1000, "是")]).ok
     assert seen == [
         (str(job.ja_target) + ".7.tmp", str(job.ja_target)),
         (str(job.zh_target) + ".7.tmp", str(job.zh_target)),
@@ -250,17 +264,30 @@ def test_publish_ja_and_zh_via_generation_tmp_and_replace(tmp_path, monkeypatch)
     assert _no_tmp_left(job.ja_target.parent)
 
 
-def test_publish_error_is_text_and_tmp_cleaned(tmp_path):
+def test_publish_error_is_text_and_tmp_cleaned(tmp_path, monkeypatch):
+    # #191: a directory in the way is now `exists` (never replaced); an error
+    # is a failed write or move.
     job = _job(tmp_path)
-    job.ja_target.mkdir()  # a directory in the way: os.replace fails
-    err = job.publish_ja([Cue(1, 0, 1, "x")])
-    assert err is not None and job.ja_target.name in err
-    assert _no_tmp_left(job.ja_target.parent)
+    job.ja_target = tmp_path / "gone" / "m_restored.ja.srt"  # no such folder
+    res = job.publish_ja([Cue(1, 0, 1, "x")])
+    assert res.kind == "error" and not res.ok
+    assert res.detail.startswith("publish m_restored.ja.srt: FileNotFoundError")
+    move = "rename" if job_mod._RENAME_REFUSES else "link"
+
+    def denied(src, dst):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(os, move, denied)
+    res = job.publish_zh([Cue(1, 0, 1, "x")])
+    assert res.kind == "error" and "PermissionError" in res.detail
+    assert job.zh_target.name in res.detail
+    assert not job.zh_target.exists()
+    assert _no_tmp_left(job.zh_target.parent)
 
 
 def test_publish_empty_writes_two_zero_byte_files(tmp_path):
     job = _job(tmp_path)
-    assert job.publish_empty() is None
+    assert job.publish_empty().ok
     assert job.ja_target.read_bytes() == b"" and job.zh_target.read_bytes() == b""
     assert _no_tmp_left(job.ja_target.parent)
 
@@ -277,8 +304,8 @@ def test_discard_ja_removes_only_the_transcript_and_tolerates_a_missing_one(
     tmp_path,
 ):
     job = _job(tmp_path)
-    assert job.publish_ja([Cue(1, 0, 1000, "はい")]) is None
-    assert job.publish_zh([Cue(1, 0, 1000, "是")]) is None
+    assert job.publish_ja([Cue(1, 0, 1000, "はい")]).ok
+    assert job.publish_zh([Cue(1, 0, 1000, "是")]).ok
     assert job.discard_ja() is None
     assert not job.ja_target.exists()
     assert job.zh_target.exists() and job.media.exists()
@@ -292,6 +319,197 @@ def test_discard_ja_failure_is_error_text_and_never_raises(tmp_path):
     err = job.discard_ja()
     assert err is not None and job.ja_target.name in err
     assert job.ja_target.is_dir()
+
+
+# ── #191 (AC4): publishing never overwrites ────────────────────────────────
+LIBRARY = "1\n00:00:00,000 --> 00:00:01,000\n店主的字幕\n".encode("utf-8")
+
+
+def _bypass_pre_check(monkeypatch) -> None:
+    """Skip the defensive pre-check so the MOVE itself must refuse (C1)."""
+    monkeypatch.setattr(job_mod, "_present", lambda path: False)
+
+
+def test_publish_result_values(tmp_path):
+    job = _job(tmp_path)
+    ok = job.publish_zh([Cue(1, 0, 1000, "是")])
+    assert ok == PublishResult("ok") and ok.ok and ok.detail == ""
+    again = job.publish_zh([Cue(1, 0, 1000, "否")])
+    assert again.kind == "exists" and not again.ok
+    assert again.detail == "m_restored.srt already exists; not replaced"
+    assert load(job.zh_target) == [Cue(1, 0, 1000, "是")]
+    assert _no_tmp_left(job.zh_target.parent)
+    assert not isinstance(ok, str)  # F8: a distinct type, never an error text
+
+
+@pytest.mark.parametrize("pre_check", [True, False])
+@pytest.mark.parametrize("kind", ["file", "read-only", "open", "directory"])
+def test_publish_never_overwrites_an_existing_target(
+    tmp_path, monkeypatch, kind, pre_check
+):
+    # The platform's own refusing move (Windows: a real `os.rename`; POSIX:
+    # `os.link`), with and without the pre-check in front of it.
+    job = _job(tmp_path)
+    if not pre_check:
+        _bypass_pre_check(monkeypatch)
+    target = job.zh_target
+    handle = None
+    if kind == "directory":
+        target.mkdir()
+        (target / "keep.txt").write_bytes(LIBRARY)
+    else:
+        target.write_bytes(LIBRARY)
+        if kind == "read-only":
+            os.chmod(target, stat.S_IREAD)
+        elif kind == "open":
+            handle = open(target, "rb")
+    try:
+        res = job.publish_zh([Cue(1, 0, 1000, "机器翻译")])
+    finally:
+        if handle is not None:
+            handle.close()
+        if kind == "read-only":
+            os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+    assert res.kind == "exists", res
+    if kind == "directory":
+        assert (target / "keep.txt").read_bytes() == LIBRARY
+    else:
+        assert target.read_bytes() == LIBRARY  # byte-identical
+    assert _no_tmp_left(target.parent)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NTFS is case-insensitive")
+@pytest.mark.parametrize("pre_check", [True, False])
+def test_windows_rename_refuses_a_case_variant_target(tmp_path, monkeypatch, pre_check):
+    assert job_mod._RENAME_REFUSES
+    job = _job(tmp_path)
+    if not pre_check:
+        _bypass_pre_check(monkeypatch)
+    variant = job.zh_target.with_name(job.zh_target.name.upper())
+    variant.write_bytes(LIBRARY)
+    res = job.publish_zh([Cue(1, 0, 1000, "机器翻译")])
+    assert res.kind == "exists"
+    assert [p.name for p in variant.parent.iterdir() if p.suffix == ".SRT"] == [
+        variant.name
+    ]
+    assert variant.read_bytes() == LIBRARY
+    assert _no_tmp_left(variant.parent)
+
+
+@pytest.mark.parametrize("pre_check", [True, False])
+def test_the_hard_link_path_publishes_and_refuses(tmp_path, monkeypatch, pre_check):
+    # POSIX path (forced here on every platform: NTFS has hard links too, A3):
+    # `os.link(tmp, target)` + unlink the tmp; EEXIST refuses.
+    monkeypatch.setattr(job_mod, "_RENAME_REFUSES", False)
+    if not pre_check:
+        _bypass_pre_check(monkeypatch)
+
+    def no_rename(src, dst):
+        raise AssertionError("the link path never renames")
+
+    monkeypatch.setattr(os, "rename", no_rename)
+    monkeypatch.setattr(os, "replace", no_rename)
+    job = _job(tmp_path)
+    assert job.publish_ja([Cue(1, 0, 1000, "はい")]).ok
+    assert load(job.ja_target) == [Cue(1, 0, 1000, "はい")]
+    assert _no_tmp_left(job.ja_target.parent)
+    job.zh_target.write_bytes(LIBRARY)
+    res = job.publish_zh([Cue(1, 0, 1000, "机器翻译")])
+    assert res.kind == "exists"
+    assert job.zh_target.read_bytes() == LIBRARY
+    assert _no_tmp_left(job.zh_target.parent)
+
+
+@pytest.mark.parametrize("code", [errno.EPERM, errno.EOPNOTSUPP])
+def test_no_hard_links_fall_back_to_a_checked_replace(
+    tmp_path, monkeypatch, caplog, code
+):
+    monkeypatch.setattr(job_mod, "_RENAME_REFUSES", False)
+
+    def no_links(src, dst):
+        raise OSError(code, "no hard links here")
+
+    monkeypatch.setattr(os, "link", no_links)
+    job = _job(tmp_path)
+    with caplog.at_level(logging.DEBUG, logger="taskpaw.subs.job"):
+        assert job.publish_ja([Cue(1, 0, 1000, "はい")]).ok
+    assert load(job.ja_target) == [Cue(1, 0, 1000, "はい")]
+    assert any("no hard links" in r.getMessage() for r in caplog.records)
+    assert _no_tmp_left(job.ja_target.parent)
+    # the fallback's own check refuses even when the first one is bypassed
+    calls = {"n": 0}
+    real = job_mod._present
+
+    def first_misses(path):
+        calls["n"] += 1
+        return False if calls["n"] == 1 else real(path)
+
+    monkeypatch.setattr(job_mod, "_present", first_misses)
+    job.zh_target.write_bytes(LIBRARY)
+    res = job.publish_zh([Cue(1, 0, 1000, "机器翻译")])
+    assert res.kind == "exists" and calls["n"] == 2
+    assert job.zh_target.read_bytes() == LIBRARY
+    assert _no_tmp_left(job.zh_target.parent)
+
+
+def test_any_other_link_error_is_an_error_not_a_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(job_mod, "_RENAME_REFUSES", False)
+
+    def io_error(src, dst):
+        raise OSError(errno.EIO, "i/o error")
+
+    monkeypatch.setattr(os, "link", io_error)
+    job = _job(tmp_path)
+    res = job.publish_zh([Cue(1, 0, 1000, "是")])
+    assert res.kind == "error" and "i/o error" in res.detail
+    assert not job.zh_target.exists() and _no_tmp_left(job.zh_target.parent)
+
+
+def test_an_unreadable_target_state_fails_closed(tmp_path, monkeypatch):
+    # The pre-check cannot tell whether the target exists → error, not a write.
+    def unreadable(path):
+        raise PermissionError(13, "denied")
+
+    job = _job(tmp_path)
+    monkeypatch.setattr(job_mod.os, "lstat", unreadable)
+    res = job.publish_zh([Cue(1, 0, 1000, "是")])
+    monkeypatch.undo()
+    assert res.kind == "error" and "PermissionError" in res.detail
+    assert not job.zh_target.exists() and _no_tmp_left(job.zh_target.parent)
+
+
+def test_publish_empty_refused_srt_removes_the_empty_ja_it_just_wrote(tmp_path):
+    job = _job(tmp_path)
+    job.zh_target.write_bytes(LIBRARY)
+    res = job.publish_empty()
+    assert res.kind == "exists"
+    assert not job.ja_target.exists()
+    assert job.zh_target.read_bytes() == LIBRARY
+    assert job.ja_published  # it did publish (and then took it back)
+    assert _no_tmp_left(job.zh_target.parent)
+
+
+def test_publish_empty_refused_ja_writes_nothing(tmp_path):
+    job = _job(tmp_path)
+    job.ja_target.write_bytes(LIBRARY)  # a transcript appeared mid-run
+    res = job.publish_empty()
+    assert res.kind == "exists" and not job.ja_published
+    assert job.ja_target.read_bytes() == LIBRARY
+    assert not job.zh_target.exists()
+
+
+def test_discard_own_ja_only_removes_a_transcript_this_job_published(tmp_path):
+    job = _job(tmp_path)
+    job.ja_target.write_bytes(LIBRARY)  # the library's own transcript
+    assert not job.ja_published
+    assert job.discard_own_ja() is None
+    assert job.ja_target.read_bytes() == LIBRARY
+    assert job.publish_ja([Cue(1, 0, 1000, "はい")]).kind == "exists"
+    assert not job.ja_published
+    job.ja_target.unlink()
+    assert job.publish_ja([Cue(1, 0, 1000, "はい")]).ok and job.ja_published
+    assert job.discard_own_ja() is None
+    assert not job.ja_target.exists()
 
 
 def test_terminate_live_and_dead_child(tmp_path):
