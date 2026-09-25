@@ -63,7 +63,8 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
   const [today, setToday] = useState(() => localLogDay());
   const yesterday = localLogDay(-1);
   const taskListId = useId();
-  const [day, setDay] = useState(today);
+  const [selection, setSelection] = useState("today");
+  const day = selection === "today" ? today : selection;
   const [taskText, setTaskText] = useState("");
   const [task, setTask] = useState("");
   const [severity, setSeverity] = useState("");
@@ -86,6 +87,8 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
   }, [taskText, searchText]);
 
   useEffect(() => {
+    const live = selection === "today";
+    const day = live ? localLogDay() : selection;
     const current: Session = { day, boot: null, cursor: `${day}-0`, before: null, busy: false, active: true, load: async () => {} };
     session.current = current;
     const filters = { task, severity, q };
@@ -116,18 +119,14 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
     };
     async function poll() {
       const nowDay = localLogDay();
-      if (current.active && nowDay !== today) {
-        setToday(nowDay);
-        setDay(selected => selected === today ? nowDay : selected);
-        return;
-      }
+      if (current.active) setToday(nowDay);
       if (!current.active || current.busy) return;
       if (!current.boot) { await current.load(); return; }
       current.busy = true; setBusy(true);
       try {
         // Catch up full pages without skipping rows. Bound each tick so a busy
         // producer cannot monopolize the tab; the next tick resumes this cursor.
-        for (let page = 0; day === today && page < 20 && current.active; page++) {
+        for (let page = 0; live && page < 20 && current.active; page++) {
           const result = await api.logs({ ...filters, after: current.cursor, limit: 500 });
           if (!current.active) return;
           if (result.boot !== current.boot) { restart(); return; }
@@ -136,7 +135,7 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
           current.cursor = newest;
           // Today's live timeline carries forward over midnight with date
           // headers; an explicitly selected historical day stays day-scoped.
-          const visible = result.entries.filter(e => day === today ? e.id.slice(0, 8) >= day : e.id.slice(0, 8) === day);
+          const visible = result.entries.filter(e => e.id.slice(0, 8) >= day);
           setEntries(previous => mergeLogEntries(previous, visible));
           if (result.entries.length < 500) break;
         }
@@ -148,14 +147,14 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
     void current.load();
     const timer = window.setInterval(() => { void poll(); }, 5000);
     return () => { current.active = false; window.clearInterval(timer); };
-  }, [day, today, task, severity, q, revision]);
+  }, [selection, task, severity, q, revision]);
 
   async function exportDay() {
     const current = session.current;
     if (!current?.boot || exporting) return;
     setExporting(true); setNotice("");
     const translate = i18n.getFixedT(i18n.language);
-    const exportDay = day === today ? localLogDay() : day;
+    const exportDay = selection === "today" ? localLogDay() : day;
     const params: LogParams = { day: exportDay, task, severity, q, limit: 500 };
     const all = new Map<string, LogEntry>();
     const cursors = new Set<string>();
@@ -194,7 +193,7 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
   return <Card><CardContent>
     <Stack spacing={1.5}>
       <Stack direction="row" useFlexGap flexWrap="wrap" gap={1}>
-        <TextField select SelectProps={{ native: true }} size="small" label={t("logs.day")} value={day} onChange={e => setDay(e.target.value)} sx={{ minWidth: 155 }}>
+        <TextField select SelectProps={{ native: true }} size="small" label={t("logs.day")} value={day} onChange={e => setSelection(e.target.value === today ? "today" : e.target.value)} sx={{ minWidth: 155 }}>
           <option value={today}>{t("logs.today")}</option><option value={yesterday}>{t("logs.yesterday")}</option>
           {days.filter(d => d.day !== today && d.day !== yesterday).map(d => <option key={d.day} value={d.day}>{formatLogDay(d.day)} ({d.count})</option>)}
         </TextField>
@@ -213,7 +212,7 @@ export function TaskLog({ tasks = [] }: { tasks?: string[] }) {
       <Box role="status" sx={{ minHeight: 20 }}>
         {busy && <Typography variant="caption" color="text.secondary">{t(loading ? "common.loading" : "common.updating")}</Typography>}
       </Box>
-      {loading ? <CircularProgress size={24} aria-label={t("common.loading")} /> : <TaskLogRows key={`${revision}-${day}-${task}-${severity}-${q}`} entries={entries} />}
+      {loading ? <CircularProgress size={24} aria-label={t("common.loading")} /> : <TaskLogRows key={`${revision}-${selection}-${task}-${severity}-${q}`} entries={entries} />}
       {before && <Button disabled={busy} onClick={() => { void session.current?.load(true); }}>{t("logs.earlier")}</Button>}
     </Stack>
   </CardContent></Card>;

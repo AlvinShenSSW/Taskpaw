@@ -60,7 +60,11 @@ def test_producers_share_tasklog_reader(module):
         ),
         (
             "docs/specs/2026-09-26-196-activity-log-design.md",
-            ("title/message verbatim", "fields TaskPaw composes"),
+            (
+                "title/message verbatim",
+                "fields TaskPaw composes",
+                "a torn (unparseable) tail is ignored; a complete tail counts and is repaired",
+            ),
         ),
     ],
 )
@@ -80,6 +84,88 @@ def test_complete_unterminated_tail_reserves_id(tmp_path):
         "20260926-1",
         "20260926-2",
     ]
+
+
+@pytest.mark.parametrize("cyclic", [True, False])
+def test_rejected_payload_does_not_consume_write_failure_alert(
+    tmp_path, monkeypatch, caplog, cyclic
+):
+    failures = []
+    store = TaskLog(tmp_path, clock=Clock(), on_first_failure=failures.append)
+    data = {}
+    data["bad"] = data if cyclic else 10**5000
+    record(store, data=data)
+    assert store.write_failures == 0
+    assert failures == [] and entries(store) == []
+    assert "Task log record rejected" in caplog.text
+
+    def fail(row):
+        raise OSError("append unavailable")
+
+    monkeypatch.setattr(store, "_append", fail)
+    record(store)
+    assert store.write_failures == 1 and len(failures) == 1
+
+
+def test_record_guards_unexpected_rollover_prune_failure(tmp_path, monkeypatch, caplog):
+    clock = Clock()
+    store = TaskLog(tmp_path, clock=clock)
+    record(store)
+
+    def fail():
+        raise RuntimeError("unexpected prune failure")
+
+    monkeypatch.setattr(store, "prune", fail)
+    clock.now += timedelta(days=1)
+    record(store)
+    assert entries(store)[0]["id"] == "20260927-1"
+    assert store.write_failures == 0
+    assert "Task log prune failed" in caplog.text
+
+
+def test_two_unreadable_restarts_same_day_never_shadow_persisted_ids(
+    tmp_path, monkeypatch
+):
+    clock = Clock()
+    record(TaskLog(tmp_path, clock=clock), task="original")
+    path = tmp_path / "logs/tasklog-20260926.jsonl"
+    original = Path.open
+    locked = True
+
+    def open_file(self, mode="r", *args, **kwargs):
+        if self == path and mode == "r" and locked:
+            raise PermissionError("scan unavailable")
+        return original(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    first = TaskLog(tmp_path, clock=clock)
+    record(first, task="first-memory")
+    locked = False
+    record(first, task="first-recovered")
+    persisted = entries(first)[0]["id"]
+    clock.now += timedelta(seconds=2)
+    locked = True
+    second = TaskLog(tmp_path, clock=clock)
+    record(second, task="second-memory-1")
+    record(second, task="second-memory-2")
+    cursor = entries(second)[0]["id"]
+    assert int(cursor.split("-")[1]) > int(persisted.split("-")[1])
+    locked = False
+    rows = entries(second)
+    assert len(rows) == 4
+    assert {r["task"] for r in rows} == {
+        "original",
+        "first-recovered",
+        "second-memory-1",
+        "second-memory-2",
+    }
+    assert entries(second, after=cursor) == []
+    record(second, task="second-recovered")
+    assert [r["task"] for r in entries(second, after=cursor)] == ["second-recovered"]
+    last = entries(second)[0]["id"]
+    restarted = TaskLog(tmp_path, clock=clock)
+    record(restarted)
+    assert int(entries(restarted)[0]["id"].split("-")[1]) == int(last.split("-")[1]) + 1
 
 
 @pytest.mark.parametrize("error", [PermissionError, OSError])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 
 import pytest
 from conftest import tasklog_rows as _tasklog
@@ -284,6 +285,7 @@ def test_managed_nonzero_capture_reports_recent_error_output():
         "RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB\n",
         7,
     )
+    inst._reader = threading.current_thread()
     inst._reader_loop()
 
     evs, emit = _events()
@@ -313,6 +315,7 @@ def test_managed_nonzero_capture_flushes_unterminated_final_line():
     inst._process = _ExitedProcess(
         "Error on export: frame restorer stopped prematurely", 1
     )  # no trailing \n
+    inst._reader = threading.current_thread()
     inst._reader_loop()
 
     evs, emit = _events()
@@ -355,6 +358,7 @@ def test_managed_nonzero_capture_error_tail_is_bounded():
         ),
     )
     inst._process = _ExitedProcess("\n".join(lines) + "\n", 3)
+    inst._reader = threading.current_thread()
     inst._reader_loop()
 
     evs, emit = _events()
@@ -546,6 +550,8 @@ def test_tasklog_lada_capture_and_last_exit(monkeypatch):
     assert [r["film"] for r in _tasklog("restore.started")] == ["a.mp4", "b.mp4"]
     assert [r["film"] for r in _tasklog("restore.finished")] == ["a.mp4", "b.mp4"]
     assert len(_tasklog("task.started")) == len(_tasklog("task.done")) == 1
+    assert _tasklog("task.started")[0]["data"]["skipped"] == 0
+    assert _tasklog("task.done")[0]["data"]["skipped"] == 0
 
 
 def test_tasklog_lada_non_capture_has_no_files(monkeypatch):
@@ -591,7 +597,11 @@ def test_tasklog_lada_failed_capture_and_stop(monkeypatch):
     assert not _tasklog("task.interrupted")
 
 
-def test_tasklog_lada_error_header_never_finishes_failed_file(monkeypatch):
+@pytest.mark.parametrize(
+    "diagnostic,named",
+    [("ERROR: torch fallback failed", False), ("ERROR: failed A.MP4", True)],
+)
+def test_tasklog_lada_error_requires_current_filename(monkeypatch, diagnostic, named):
     import taskpaw_v3.monitors.plugins.lada as L
 
     cfg = _cfg(
@@ -601,16 +611,21 @@ def test_tasklog_lada_error_header_never_finishes_failed_file(monkeypatch):
         lada_capture_progress=True,
         lada_gpu_monitor=False,
     )
-    proc = _ExitedProcess("a.mp4:\nERROR: failed\nb.mp4:\n", 0)
+    proc = _ExitedProcess(f"a.mp4:\n{diagnostic}\nb.mp4:\n", 0)
     monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: proc)
     inst = LadaInstance("l", cfg)
     _, emit = _events()
     inst.start(emit)
     inst._reader.join(2)
     inst.check(emit)
-    assert [r["film"] for r in _tasklog("restore.failed")] == ["a.mp4"]
-    assert [r["film"] for r in _tasklog("restore.finished")] == ["b.mp4"]
-    assert _tasklog("task.done")[0]["data"]["failed"] == 1
+    assert diagnostic in inst._recent_output
+    assert [r["film"] for r in _tasklog("restore.failed")] == (
+        ["a.mp4"] if named else []
+    )
+    assert [r["film"] for r in _tasklog("restore.finished")] == (
+        ["b.mp4"] if named else ["a.mp4", "b.mp4"]
+    )
+    assert _tasklog("task.done")[0]["data"]["failed"] == int(named)
 
 
 def test_tasklog_lada_launch_error_safe(monkeypatch):
@@ -703,7 +718,8 @@ def test_tasklog_lada_failed_run(monkeypatch):
 
 @pytest.mark.parametrize("error", [OSError, ValueError])
 @pytest.mark.parametrize("exit_first", [True, False])
-def test_tasklog_reader_error_delivers_conclusion_once(error, exit_first):
+def test_tasklog_reader_error_delivers_conclusion_once(monkeypatch, error, exit_first):
+    import threading
     from types import SimpleNamespace
 
     inst = LadaInstance(
@@ -724,6 +740,7 @@ def test_tasklog_reader_error_delivers_conclusion_once(error, exit_first):
     proc.stdout.read = fail_read
     inst._process = proc
     inst._reader = SimpleNamespace(join=lambda **kw: None)
+    monkeypatch.setattr(threading, "current_thread", lambda: inst._reader)
     inst._consume_output(b"LMNO-123.mp4:")
     _, emit = _events()
     if exit_first:
@@ -734,6 +751,63 @@ def test_tasklog_reader_error_delivers_conclusion_once(error, exit_first):
     assert inst._log_reader_done
     assert len(_tasklog("restore.failed")) == 1
     assert len(_tasklog("task.aborted")) == 1
+
+
+@pytest.mark.parametrize("ending", [b"", b"\n"])
+def test_tasklog_stale_reader_cannot_conclude_new_run(monkeypatch, ending):
+    import taskpaw_v3.monitors.plugins.lada as L
+
+    class Reader:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, **kwargs):
+            pass
+
+    old = _ExitedProcess("old.mp4:", 0)
+    new = _ExitedProcess("new.mp4:\n", 0)
+    processes = iter([old, new])
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: next(processes))
+    monkeypatch.setattr(L.threading, "Thread", Reader)
+    inst = LadaInstance(
+        "l",
+        _cfg(
+            lada_cli_path="lada.exe",
+            lada_input_folder="in",
+            lada_output_folder="out",
+            lada_capture_progress=True,
+            lada_gpu_monitor=False,
+        ),
+    )
+    _, emit = _events()
+    inst.start(emit)
+    old_reader = inst._reader
+    monkeypatch.setattr(L.threading, "current_thread", lambda: old_reader)
+    read = old.stdout.read
+    switched = False
+
+    def finish_after_restart(n):
+        nonlocal switched
+        ch = read(n)
+        if not ch and not switched:
+            switched = True
+            inst.start(emit)
+            inst.check(emit)
+            return ending
+        return ch
+
+    old.stdout.read = finish_after_restart
+    inst._reader_loop()
+    assert inst._log_reader_done is False
+    assert inst._log_pending_exit == (0, False)
+    assert not _tasklog("restore.started") and not _tasklog("task.done")
+    monkeypatch.setattr(L.threading, "current_thread", lambda: inst._reader)
+    inst._reader_loop()
+    assert [r["film"] for r in _tasklog("restore.finished")] == ["new.mp4"]
+    assert len(_tasklog("task.done")) == 1
 
 
 def test_tasklog_non_capture_failed_at_stop_has_run_scope(monkeypatch):

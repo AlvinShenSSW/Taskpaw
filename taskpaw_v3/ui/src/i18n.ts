@@ -26,7 +26,7 @@ const en = {
     fields: {
       pid: "PID", proc: "Process", exit_code: "Exit code", tail: "Output tail", model: "Model",
       from: "Previous model", to: "New model", kind: "Failure kind", lines: "Lines", by_model: "Lines by model",
-      queued: "Queued", done: "Done", failed: "Failed", skipped: "Skipped", duration: "Duration",
+      queued: "Queued", done: "Done", failed: "Failed", skipped: "Skipped", subs_skipped: "Subtitles skipped", duration: "Duration",
       kept_ja: "Japanese lines kept", paused: "Paused", resumed: "Resumed lines", count: "Count",
       title: "Alert title", message: "Original alert", level: "Alert level", output: "Output", srt: "Subtitle file",
       reason: "Reason", detail: "Detail", step: "Step", elapsed: "Elapsed", reconstructed: "Inferred",
@@ -292,7 +292,7 @@ const zh: typeof en = {
     fields: {
       pid: "PID", proc: "进程", exit_code: "退出码", tail: "输出末尾", model: "模型",
       from: "原模型", to: "新模型", kind: "失败类型", lines: "行数", by_model: "各模型行数",
-      queued: "排队", done: "完成", failed: "失败", skipped: "跳过", duration: "耗时",
+      queued: "排队", done: "完成", failed: "失败", skipped: "跳过", subs_skipped: "字幕跳过", duration: "耗时",
       kept_ja: "保留日文行数", paused: "暂停", resumed: "续译行数", count: "数量",
       title: "提醒标题", message: "原始提醒", level: "提醒级别", output: "输出", srt: "字幕文件",
       reason: "原因", detail: "详情", step: "步骤", elapsed: "已用时间", reconstructed: "推断记录",

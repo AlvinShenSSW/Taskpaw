@@ -1137,6 +1137,7 @@ class JasnaInstance(MonitorInstance):
         self._translator: Optional[Translator] = None
         self._jobs: dict[str, SubsJob] = {}
         self._log_started_at = time.monotonic()
+        self._log_skipped = 0
         self._log_restore_at = self._log_started_at
         self._log_gpu_wait = False
         self._log_stopped = False
@@ -1240,6 +1241,7 @@ class JasnaInstance(MonitorInstance):
         self._translator = None
         self._jobs = {}
         self._log_started_at = time.monotonic()
+        self._log_skipped = 0
         self._log_restore_at = self._log_started_at
         self._log_gpu_wait = False
         self._log_stopped = False
@@ -1355,6 +1357,7 @@ class JasnaInstance(MonitorInstance):
         self._pending = list(pending)
         self._done = done
         self._failed = len(collisions)
+        self._log_skipped = len(collisions)
         self._total = done + len(pending) + len(collisions)
         get_task_log().record(
             self.instance_id,
@@ -2468,7 +2471,8 @@ class JasnaInstance(MonitorInstance):
             data={
                 "done": self._done,
                 "failed": self._failed,
-                "skipped": self._subs_skipped,
+                "skipped": self._log_skipped,
+                "subs_skipped": self._subs_skipped,
                 "duration": max(0.0, time.monotonic() - self._log_started_at),
                 "kept_ja": self._subs_kept_ja,
                 "paused": self._subs_paused,

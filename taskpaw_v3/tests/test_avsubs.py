@@ -3281,6 +3281,9 @@ def test_tasklog_settle_only_one_skip(tmp_path, monkeypatch):
     assert len(_tasklog("subs.skipped")) == 1
     assert _tasklog("subs.skipped")[0]["data"] == {"reason": "no_llm_key"}
     assert not _tasklog("subs.published")
+    assert _tasklog("task.started")[0]["data"]["skipped"] == 0
+    assert _tasklog("task.done")[0]["data"]["skipped"] == 0
+    assert _tasklog("task.done")[0]["data"]["subs_skipped"] == 1
     h.inst.stop()
 
 

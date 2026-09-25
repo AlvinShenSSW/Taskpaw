@@ -46,7 +46,7 @@ time without a date; every event of every level is forwarded to OpenClaw; the ba
 - [ ] AC2 **Record shape and ids (L1).** `{"v":1, "id":"<YYYYMMDD>-<n>", "ts":"<local ISO with offset>",
   "task", "task_type", "kind", "severity":"info|warn|error", "film"?, "pid"?, "proc"?, "data"?}`.
   - `n` is a per-day counter: at start the store scans today's file for the **largest** `n` on any parseable line
-    (a trailing line without `\n` is ignored) and continues from it; a failed write still consumes its `n`
+    (a torn (unparseable) tail is ignored; a complete tail counts and is repaired) and continues from it; a failed write still consumes its `n`
     (memory-only records never share an id with a file line in the same process; after a restart they are gone).
   - Ids are compared as `(day, int n)`, never as strings.
   - **Boot id (L18b):** every API response carries `boot` (a random id per agent process); the UI reloads its view

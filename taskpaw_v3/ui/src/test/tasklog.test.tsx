@@ -185,6 +185,35 @@ const show = () => render(<ThemeProvider theme={theme}><TaskLog tasks={["main/�
 const select = (name: string, value: string) => fireEvent.change(screen.getByLabelText(name), { target: { value } });
 
 describe("TaskLog", () => {
+  it.each([false, true])("keeps the session and cursor across midnight (past day: %s)", async past => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-26T23:59:59"));
+    const fetcher = stub(p => ({ entries: p.has("after")
+      ? [entry("20260926-9"), entry("20260927-1")]
+      : [entry(p.get("day") === "20260924" ? "20260924-1" : "20260926-9")] }));
+    show(); await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    if (past) { select("Day", "20260924"); await act(async () => { await vi.advanceTimersByTimeAsync(0); }); }
+    fetcher.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(screen.getByTestId(past ? "log-row-20260924-1" : "log-row-20260926-9")).toBeInTheDocument();
+    const queries = () => fetcher.mock.calls.map(([url]) => new URL(url).searchParams).filter(p => !p.has("days"));
+    expect(queries().every(p => p.has("after"))).toBe(true);
+    if (past) {
+      expect(queries()).toHaveLength(0);
+      expect(screen.getAllByTestId(/^log-row/)).toHaveLength(1);
+    } else {
+      expect(queries().map(p => p.get("after"))).toEqual(["20260926-9"]);
+      expect(screen.getByText("2026-09-26")).toBeInTheDocument();
+      expect(screen.getByText("2026-09-27")).toBeInTheDocument();
+      expect(screen.getAllByTestId(/^log-row/)).toHaveLength(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(queries().map(p => p.get("after"))).toEqual(["20260926-9", "20260927-1"]);
+      expect(screen.getAllByTestId(/^log-row/)).toHaveLength(2);
+    }
+  });
+  it.each([["en", "Subtitles skipped"], ["zh-CN", "字幕跳过"]] as const)("labels subtitle skips separately in %s", (lang, label) => {
+    setLang(lang);
+    expect(logDetails(entry(undefined, "task.done", { skipped: 1, subs_skipped: 3 }), i18n.t)).toContainEqual([label, "3"]);
+  });
   it.each([["Task", "task"], ["Search film / model / title", "q"]])("debounces typing in %s before querying", async (label, param) => {
     vi.useFakeTimers();
     const fetcher = stub(() => ({ entries: [entry()] }));

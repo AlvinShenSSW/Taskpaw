@@ -40,7 +40,7 @@ export function logSafeText(value: unknown): string {
 }
 
 const FIELDS = [
-  "version", "previous_exit", "last_ts", "fields", "queued", "done", "failed", "skipped", "duration",
+  "version", "previous_exit", "last_ts", "fields", "queued", "done", "failed", "skipped", "subs_skipped", "duration",
   "kept_ja", "paused", "reason", "detail", "step", "elapsed", "reconstructed", "holder", "index", "total",
   "mode", "output", "exit_code", "tail", "at_stop", "engine", "model", "lines", "resumed", "from", "to",
   "kind", "count", "minutes", "by_model", "srt", "no_speech", "level", "title", "message", "since_cap",

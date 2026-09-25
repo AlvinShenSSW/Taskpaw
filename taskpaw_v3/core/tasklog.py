@@ -245,9 +245,10 @@ class TaskLog:
     def _insert(self, row: dict[str, Any]) -> None:
         """Called only under _lock. A failed append still consumes this id."""
         if not self._scan_ready:
-            # Keep memory-only observations above ordinary persisted daily ids;
-            # the successful rescan preserves this counter via max().
-            self._n = max(self._n, _UNSCANNED_BASE)
+            now = self._clock()
+            seconds = now.hour * 3600 + now.minute * 60 + now.second
+            # Assumes advancing restart clocks and fewer than 1000 ids/second.
+            self._n = max(self._n, _UNSCANNED_BASE + 1000 * seconds)
         self._n += 1
         row["id"] = f"{self._day}-{self._n}"
         for attempt in range(2):
@@ -330,6 +331,8 @@ class TaskLog:
             # Severity is a closed vocabulary even for malformed caller input.
             if row["severity"] not in {"info", "warn", "error"}:
                 row["severity"] = "info"
+            # Reject unserialisable caller data before entering the append path.
+            json.dumps(row, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
             with self._lock:
                 day = max(self._day, now.strftime("%Y%m%d"))
                 if day != self._day:
@@ -377,13 +380,14 @@ class TaskLog:
                 else:
                     self._insert(row)
         except Exception as exc:
-            with self._lock:
-                self._failed()
             log.warning("Task log record rejected: %s", type(exc).__name__)
         finally:
             self._notify_failure()
             if rolled:
-                self.prune()
+                try:
+                    self.prune()
+                except Exception as exc:
+                    log.warning("Task log prune failed: %s", type(exc).__name__)
 
     def set_on_first_failure(self, callback: Callable[[str], None]) -> None:
         """Wire the queue after boot; deliver an earlier latched failure once."""
@@ -466,13 +470,14 @@ class TaskLog:
         if severities and row.get("severity") not in severities:
             return False
         data = row.get("data") or {}
+        by_model = data.get("by_model")
         labels = [
             row.get("film", ""),
             data.get("title", ""),
             data.get("model", ""),
             data.get("from", ""),
             data.get("to", ""),
-            *data.get("by_model", {}).keys(),
+            *(by_model.keys() if isinstance(by_model, dict) else ()),
         ]
         return not q or any(q in str(label).casefold() for label in labels)
 

@@ -17,6 +17,38 @@ from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.protocol import EventQueue
 
 
+@pytest.mark.parametrize("by_model", [None, [], "invalid", 7])
+def test_tasklog_queries_accept_non_dict_by_model(tmp_path, by_model):
+    from datetime import datetime, timezone
+
+    from taskpaw_v3.core.tasklog import TaskLog, set_task_log
+
+    def clock():
+        return datetime(2026, 9, 26, tzinfo=timezone.utc)
+
+    store = TaskLog(tmp_path, clock=clock)
+    store.record(
+        "a",
+        "translate.finished",
+        task_type="fake",
+        film="movie.mp4",
+        data={"by_model": by_model},
+    )
+    set_task_log(TaskLog(tmp_path, clock=clock))
+    client = TestClient(
+        create_control_app(AgentConfig(server_id="s", machine="m")),
+        raise_server_exceptions=False,
+    )
+    for params in (
+        {"day": "20260926"},
+        {"task": "a"},
+        {"day": "20260926", "q": "movie"},
+    ):
+        response = client.get("/control/logs", params=params)
+        assert response.status_code == 200
+        assert response.json()["entries"][0]["film"] == "movie.mp4"
+
+
 def test_tasklog_control_api_shapes_filters_clamp_and_network_absence():
     from datetime import datetime, timedelta, timezone
 

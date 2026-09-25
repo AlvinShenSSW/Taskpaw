@@ -500,6 +500,7 @@ class AvsubsInstance(MonitorInstance):
         self._jobs: dict[str, SubsJob] = {}
         self._kinds: dict[str, Kind] = {}
         self._log_started_at = time.monotonic()
+        self._log_skipped = 0
         self._log_gpu_wait = False
         self._log_stopped = False
         self._log_bulk = False
@@ -599,6 +600,7 @@ class AvsubsInstance(MonitorInstance):
         sweep_srt_temps(plan.folders)  # C3: age-gated
         self._pre_done = plan.done
         self._failed = len(plan.collisions)
+        self._log_skipped = len(plan.collisions)
         self._total = plan.done + len(plan.items) + len(plan.collisions)
         get_task_log().record(
             self.instance_id,
@@ -1704,7 +1706,8 @@ class AvsubsInstance(MonitorInstance):
             data={
                 "done": self._pre_done + self._completed,
                 "failed": self._failed,
-                "skipped": self._skipped,
+                "skipped": self._log_skipped,
+                "subs_skipped": self._skipped,
                 "kept_ja": self._kept_ja,
                 "paused": self._paused,
                 "duration": max(0.0, time.monotonic() - self._log_started_at),

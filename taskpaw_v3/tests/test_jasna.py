@@ -1672,6 +1672,14 @@ def test_tasklog_restore_skips_and_setup_errors(tmp_path, monkeypatch):
         "name_collision",
     }
     assert _tasklog("task.started")[0]["data"] == {"queued": 1, "done": 1, "skipped": 1}
+    # Only the log counters are under test; finish the fake restore queue.
+    inst._current = None
+    inst._process = None
+    inst._pending.clear()
+    inst._subs_skipped = 3
+    inst._maybe_done(emit)
+    assert _tasklog("task.done")[0]["data"]["skipped"] == 1
+    assert _tasklog("task.done")[0]["data"]["subs_skipped"] == 3
     inst.stop()
 
 
