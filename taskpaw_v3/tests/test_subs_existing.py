@@ -476,10 +476,15 @@ def test_the_filesystem_root_is_never_missing(monkeypatch):
 
 
 def test_entry_key_follows_the_platform_default_filesystem(monkeypatch):
-    # CX2: Windows and macOS default volumes compare names case-insensitively
-    # (POSIX normcase is a no-op, so macOS needs this explicitly); NFC always.
-    monkeypatch.setattr(E, "_CASE_INSENSITIVE_FS", True)
+    # CX2/CX3: Windows — case-insensitive, normalisation-sensitive; macOS —
+    # both folded; Linux — exact.
+    nfd, nfc = "cafe\u0301.mp4", "caf\u00e9.mp4"
+    monkeypatch.setattr(E, "_PLATFORM", "win32")
     assert E.entry_key("A-破解.MP4") == E.entry_key("a-破解.mp4")
-    monkeypatch.setattr(E, "_CASE_INSENSITIVE_FS", False)
+    assert E.entry_key(nfd) != E.entry_key(nfc)
+    monkeypatch.setattr(E, "_PLATFORM", "darwin")
+    assert E.entry_key("A-破解.MP4") == E.entry_key("a-破解.mp4")
+    assert E.entry_key(nfd) == E.entry_key(nfc)
+    monkeypatch.setattr(E, "_PLATFORM", "linux")
     assert E.entry_key("A-破解.MP4") != E.entry_key("a-破解.mp4")
-    assert E.entry_key("cafe\u0301.mp4") == E.entry_key("caf\u00e9.mp4")
+    assert E.entry_key(nfd) != E.entry_key(nfc)

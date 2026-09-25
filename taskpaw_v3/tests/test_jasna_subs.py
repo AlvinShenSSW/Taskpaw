@@ -2689,11 +2689,11 @@ def test_plan_subs_finds_a_case_variant_restored_file_like_the_filesystem(
     out.mkdir()
     _videos(inp, "a.mp4")
     (out / "A-破解.MP4").write_bytes(b"restored")
-    monkeypatch.setattr(E, "_CASE_INSENSITIVE_FS", True)
+    monkeypatch.setattr(E, "_PLATFORM", "darwin")
     plan = plan_subs(str(inp), str(out), [], [])
     assert plan.subs_only == [inp / "a.mp4"]
     assert plan.media[inp / "a.mp4"].name == "A-破解.MP4"
-    monkeypatch.setattr(E, "_CASE_INSENSITIVE_FS", False)
+    monkeypatch.setattr(E, "_PLATFORM", "linux")
     assert plan_subs(str(inp), str(out), [], []).subs_only == []
 
 
@@ -2708,3 +2708,30 @@ def test_plan_subs_carries_the_transcript_as_it_is_named(tmp_path):
     plan = plan_subs(str(inp), str(out), [], [])
     assert plan.kinds[inp / "a.mp4"] == "translate_only"
     assert plan.ja[inp / "a.mp4"].name == "a-破解.JA.srt"
+
+
+def test_a_pending_films_subtitles_belong_to_the_file_its_restore_writes(tmp_path):
+    # CX3: an older restored file whose name differs only in Unicode form (NFD,
+    # e.g. from a Mac client) is not this film's restore on NTFS / Linux; the
+    # pending film's subtitles target the file its restore will publish.
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "caf\u00e9.mp4")
+    (out / "cafe\u0301-破解.mp4").write_bytes(b"older restore")
+    video = inp / "caf\u00e9.mp4"
+    plan = plan_subs(str(inp), str(out), [video], [])
+    assert plan.media[video] == output_path_for(str(out), video)
+
+
+def test_a_recheck_keeps_every_planned_film_as_a_subtitle_owner(tmp_path, monkeypatch):
+    # CX4: `Movie-破解.part2-破解.srt` belongs to the pending `Movie-破解.part2.mp4`
+    # (kind none: no subtitle job). While that film is not restored (or its
+    # restore failed), `Movie.mp4`'s re-check must still not claim it.
+    r = _setup(tmp_path, monkeypatch, pending=["Movie.mp4", "Movie-破解.part2.mp4"])
+    (r.out / "Movie-破解.part2-破解.srt").write_text(SRT_ZH, encoding="utf-8")
+    r.inst.start(r.emit)
+    assert "Movie-破解.part2.mp4" not in r.inst._jobs  # kind none
+    job = r.inst._jobs["Movie.mp4"]
+    assert r.inst._recheck(job, J.list_names(r.out)) is None
+    r.inst.stop(timeout=1)

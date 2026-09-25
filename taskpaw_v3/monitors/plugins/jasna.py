@@ -462,9 +462,9 @@ def plan_subs(
                 return final.with_name(actual)
         return None
 
-    media: dict[Path, Path] = {
-        v: restored(v) or output_path_for(output_folder, v) for v in pending
-    }
+    # CX3: a pending file's subtitles belong to the file its restore will
+    # publish — never to an older file whose name only looks the same.
+    media: dict[Path, Path] = {v: output_path_for(output_folder, v) for v in pending}
     for video in entries:
         if video not in skip:
             final = restored(video)
@@ -2329,7 +2329,16 @@ class JasnaInstance(MonitorInstance):
             job.media.name,
             _is_output_video,
             rule_c=False,
-            extra_videos=[j.media.name for j in self._jobs.values()],
+            # CX4: every planned file's media owns its subtitles — including a
+            # pending file with no subtitle job (kind none) whose restore failed.
+            extra_videos=[
+                m.name
+                for m in (
+                    self._plan.media.values()
+                    if self._plan is not None
+                    else (j.media for j in self._jobs.values())
+                )
+            ],
         )
 
     def _skip_existing(self, job: SubsJob, reason: str, emit: EventEmitter) -> None:

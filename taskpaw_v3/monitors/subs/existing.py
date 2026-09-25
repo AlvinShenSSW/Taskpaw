@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import ntpath
 import os
 import re
 import sys
@@ -78,17 +79,22 @@ def norm(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
 
-# CX2: the default filesystems of Windows (NTFS) and macOS (APFS/HFS+) compare
-# names case-insensitively; elsewhere (Linux) case matters.
-_CASE_INSENSITIVE_FS = sys.platform in ("win32", "darwin")
+# CX2/CX3: names are matched the way the platform's default filesystem
+# identifies files — Windows (NTFS): case-insensitive but normalisation-
+# sensitive (an NFC and an NFD name are two files); macOS (APFS/HFS+): case-
+# and normalisation-insensitive; elsewhere (Linux): exact bytes.
+_PLATFORM = sys.platform
 
 
 def entry_key(name: str) -> str:
-    """A name as this platform's default filesystem compares it: the NFC
-    form, lower-cased on Windows and macOS (CX2: POSIX `os.path.normcase` is
-    a no-op, but a default macOS volume is case-insensitive too)."""
-    nfc = unicodedata.normalize("NFC", name)
-    return nfc.lower() if _CASE_INSENSITIVE_FS else nfc
+    """A name as this platform's default filesystem identifies it (CX2/CX3)
+    — used to find a restored file in a listing, so it agrees with the
+    filesystem lookups of restore planning."""
+    if _PLATFORM == "win32":
+        return ntpath.normcase(name)
+    if _PLATFORM == "darwin":
+        return unicodedata.normalize("NFC", name).lower()
+    return name
 
 
 def _tags(text: str) -> list[str]:
@@ -271,5 +277,7 @@ def _missing(folder: str) -> bool:
             type(e).__name__,
         )
         return False
-    want = entry_key(path.name)
-    return all(entry_key(n) != want for n in siblings)
+    # Fail closed (F13/F18): any sibling that even LOOKS like the folder
+    # (case / Unicode form folded) means it is not missing.
+    want = norm(path.name)
+    return all(norm(n) != want for n in siblings)
