@@ -849,6 +849,22 @@ def test_logs_carry_kind_status_latency_and_label_only(harness_factory, caplog):
         assert marker not in text
 
 
+def test_a_film_named_probe_is_logged_as_batches(harness_factory, caplog):
+    # B-2: the probe is flagged, never recognised by a name — a film called
+    # "probe" logs its requests as batches; the real probe still logs "probe".
+    caplog.set_level(logging.INFO, logger="taskpaw.subs.translate")
+    sp = Spawner(scripted(forbid))  # 403 → the probe → bisect
+    h = harness_factory(sp)
+    assert h.run(_cues(4), job_id="probe").outcome == "translated"
+    assert [_seq(q) for q in sp.requests] == ["1-4", "P", "1-2", "3-4"]
+    kinds = [
+        m.split(": ", 1)[1].split(" ", 1)[0]
+        for m in caplog.messages
+        if "latency_ms=" in m
+    ]
+    assert kinds == ["batch", "probe", "batch", "batch"]
+
+
 def test_queued_and_in_flight_track_work(harness_factory):
     release = threading.Event()
 

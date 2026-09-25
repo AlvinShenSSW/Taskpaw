@@ -251,7 +251,8 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > - `translation_paused` — a film that found no translation service for 2 h in total
 >   is skipped (`queue_skipped` / `subs_skipped`, never a failure, its transcript
 >   and checkpoint kept) and continued at the next Start; ONE alert per run
->   `<task>: translation paused` — `N file(s) paused: …`;
+>   `<task>: translation paused` — `Some files were paused: …` (no count: the
+>   `done` text's `; N paused` has it);
 > - alert `<task>: translation model unavailable: <model> · <api host>` — once per
 >   model per run, with the reason (key or credit, model or URL not found, rate
 >   limit or quota, content policy, a rejected request, unusable output,

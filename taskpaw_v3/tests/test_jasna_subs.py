@@ -59,6 +59,7 @@ from taskpaw_v3.monitors.subs.translate import (
     TranslateResult,
     Translator,
 )
+from taskpaw_v3.monitors.subs.util import paused_alert_message
 from taskpaw_v3.monitors.subs.whisperjav import attempt_dir
 from taskpaw_v3.monitors.supervisor import Supervisor
 
@@ -2894,7 +2895,7 @@ def test_a_paused_film_is_skipped_streak_neutral_with_one_alert_per_run(
     assert inst._subs_consecutive_failures == 1  # neither counted nor reset
     alerts = _keyed(r.evs, "j1:translation-paused")
     assert len(alerts) == 1 and alerts[0][1] == "JASNA: translation paused"
-    assert alerts[0][2].startswith("2 file(s) paused")
+    assert alerts[0][2] == paused_alert_message()  # no count (IR2)
     assert not _keyed(r.evs, "j1:subs:b.mp4")
     tr.answer("d.mp4", outcome="paused")
     st = inst.check(emit)
@@ -2957,6 +2958,24 @@ def test_kept_japanese_lines_are_logged_per_film_and_suffix_the_done_text(
     )
 
 
+def test_the_paused_alert_is_raised_once_in_each_run(tmp_path, monkeypatch):
+    # AC8 (D-SR5): the once-per-run flag resets at Start — films paused again
+    # in the next run alert again, once.
+    films = ["a.mp4", "b.mp4"]
+    r = _setup(tmp_path, monkeypatch, restored=films, ja=films)
+    inst, emit = r.inst, r.emit
+    for run in (1, 2):
+        inst.start(emit)
+        inst.check(emit)
+        tr = r.translators[-1]
+        for film in films:
+            tr.answer(film, outcome="paused")
+            inst.check(emit)
+        assert len(_keyed(r.evs, "j1:translation-paused")) == run
+        assert len(_done(r.evs)) == run
+        inst.stop(timeout=1)
+
+
 def test_translator_notices_become_alerts_with_their_dedupe_keys(tmp_path, monkeypatch):
     # AC6/AC3: a provider that opened, a checkpoint that cannot be written —
     # raised once by the translator, alerted under `<iid>:<notice key>`.
@@ -3014,6 +3033,14 @@ def test_the_checkpoint_is_discarded_only_after_the_zh_was_published(
     inst, emit = r.inst, r.emit
     inst.start(emit)
     tr = r.translators[0]
+    seen: list = []  # D-SR6: at discard time, a.mp4's settle + its .ja.srt
+    real_discard = tr.discard_checkpoint
+
+    def discard(key: str) -> None:
+        seen.append((inst._settled.get("a.mp4"), _ja(r, "a.mp4").exists()))
+        real_discard(key)
+
+    monkeypatch.setattr(tr, "discard_checkpoint", discard)
     if case == "srt_exists":
         _zh(r, "a.mp4").write_text(SRT_ZH, encoding="utf-8")  # #191: appeared
     if case in ("failed", "paused", "no_key"):
@@ -3023,10 +3050,12 @@ def test_the_checkpoint_is_discarded_only_after_the_zh_was_published(
     inst.check(emit)
     ok = case == "published"
     assert tr.discarded == (["ck:a.mp4"] if ok else [])
+    # D-SR6: after `_settle_completed` — settled completed, .ja.srt already gone
+    assert seen == ([(("completed", ""), False)] if ok else [])
     assert _ja(r, "a.mp4").exists() is not ok
     done = _done(r.evs)
     assert len(done) == 1
-    assert ("; 1 lines kept in Japanese" in done[0][2]) is ok
+    assert ("; 1 line kept in Japanese" in done[0][2]) is ok  # D-SR7
 
 
 def test_stop_mid_film_then_start_resumes_only_the_open_lines(tmp_path, monkeypatch):

@@ -223,7 +223,7 @@ function LlmSection({ slot }: { slot: LlmSlot }) {
     onSuccess: (r) => {
       if (r.ok) {
         const ok = t("settings.llmTestOk", { model: r.model ?? "", latency: r.latency_ms ?? 0 });
-        setMsg({ kind: "ok", text: r.truncated ? `${ok} ${t("settings.llmTestTruncated")}` : ok });
+        setMsg({ kind: "ok", text: ok });
       } else {
         setMsg({ kind: "err", text: t("settings.llmTestFail", { error: r.error ?? "" }) });
       }
@@ -264,7 +264,8 @@ function LlmSection({ slot }: { slot: LlmSlot }) {
                 onClick={() => { setMsg(null); save.mutate(); }}>
                 {t("settings.llmSave")}
               </Button>
-              <Button variant="outlined" disabled={test.isPending}
+              {/* A blank base URL or model can't be tested: the probe would fail misleadingly. */}
+              <Button variant="outlined" disabled={test.isPending || !form.api_base.trim() || !form.model.trim()}
                 onClick={() => { setMsg(null); test.mutate(); }}>
                 {test.isPending ? t("settings.llmTesting") : t("settings.llmTest")}
               </Button>

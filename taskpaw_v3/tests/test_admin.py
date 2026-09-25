@@ -747,12 +747,7 @@ def test_llm_test_uses_candidate_without_persisting(tmp_path, monkeypatch):
     res = admin.llm_test(
         {"llm_api_base": "http://h:1/v1/", "llm_model": "cand/m", "llm_api_key": ""}
     )
-    assert res == {
-        "ok": True,
-        "model": "served/m",
-        "latency_ms": 42,
-        "truncated": False,
-    }
+    assert res == {"ok": True, "model": "served/m", "latency_ms": 42}
     ((settings, messages, kw),) = spy.calls
     assert (settings.api_base, settings.model) == ("http://h:1/v1", "cand/m")
     assert (settings.api_key, settings.key_source) == (_LLM_KEY, "config")  # blank
@@ -887,7 +882,8 @@ def test_llm_test_real_chat_probe_round_trip(tmp_path, monkeypatch):
     _real_chat_with(monkeypatch, opener)
     res = admin.llm_test({"llm_api_key": _LLM_KEY})
     assert res["ok"] is True and res["model"] == "served/m"
-    assert res["truncated"] is False and isinstance(res["latency_ms"], int)
+    assert set(res) == {"ok", "model", "latency_ms"}  # IR3: no `truncated`
+    assert isinstance(res["latency_ms"], int)
     ((payload),) = opener.payloads
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["messages"][0] == {"role": "system", "content": SYSTEM_PROMPT}
@@ -1171,12 +1167,7 @@ def test_llm_test_probes_the_given_slot(tmp_path, monkeypatch, slot):
         },
         slot,
     )
-    assert res == {
-        "ok": True,
-        "model": "served/m",
-        "latency_ms": 42,
-        "truncated": False,
-    }
+    assert res == {"ok": True, "model": "served/m", "latency_ms": 42}
     settings, messages, _kw = spy.calls[-1]
     assert (settings.api_base, settings.model) == ("https://mimo.example/v1", "mimo")
     assert (settings.api_key, settings.key_source) == (stored, "config")

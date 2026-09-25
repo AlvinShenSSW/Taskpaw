@@ -50,7 +50,7 @@ LLM_ENV_PREFIX = "TASKPAW_LLM_"
 LLM_KEY_ENV = "TASKPAW_LLM_API_KEY"
 LLM_FALLBACK1_KEY_ENV = "TASKPAW_LLM_FALLBACK1_API_KEY"
 LLM_FALLBACK2_KEY_ENV = "TASKPAW_LLM_FALLBACK2_API_KEY"
-# C1: a Retry-After above this is ignored (None), never clamped.
+# C1: a Retry-After above this is capped at it (the translator caps at 300 s).
 RETRY_AFTER_MAX_S = 3600
 # The `refusal` message of a blank reply: the translator retries it as a
 # transient failure at top level (#192 AC5), unlike a content-filter refusal.
@@ -245,7 +245,7 @@ _DEFAULT_OPENER = urllib.request.build_opener(_NoRedirect())
 # anything else is server-controlled text and is reported generically.
 _FINISH_TOKEN = re.compile(r"[A-Za-z0-9_\-]{1,40}")
 # Retry-After as delta-seconds: ASCII digits only (an HTTP-date is ignored, C1).
-_DELTA_SECONDS = re.compile(r"[0-9]{1,10}")
+_DELTA_SECONDS = re.compile(r"[0-9]+")
 
 
 def _envelope_error() -> LLMError:
@@ -253,17 +253,19 @@ def _envelope_error() -> LLMError:
 
 
 def _retry_after(headers: Any) -> Optional[int]:
-    """C1: the `Retry-After` header as delta-seconds in 0–`RETRY_AFTER_MAX_S`,
-    else None — an HTTP-date, a sign, a fraction, non-ASCII digits or a value
-    over the bound are ignored (never clamped)."""
+    """C1: the `Retry-After` header as delta-seconds (any non-negative ASCII
+    integer), capped at `RETRY_AFTER_MAX_S`; an HTTP-date, a sign, a fraction
+    or non-ASCII digits → None."""
     raw = headers.get("Retry-After") if headers is not None else None
     if not isinstance(raw, str):
         return None
     value = raw.strip()
     if not _DELTA_SECONDS.fullmatch(value):
         return None
-    seconds = int(value)
-    return seconds if seconds <= RETRY_AFTER_MAX_S else None
+    digits = value.lstrip("0") or "0"
+    if len(digits) > len(str(RETRY_AFTER_MAX_S)):  # never int() a huge string
+        return RETRY_AFTER_MAX_S
+    return min(int(digits), RETRY_AFTER_MAX_S)
 
 
 def _http_error(code: int, headers: Any = None) -> LLMError:

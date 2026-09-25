@@ -431,12 +431,7 @@ class MonitorAdmin:
                 "ok": False,
                 "error": "invalid: the reply is not a usable translation",
             }
-        return {
-            "ok": True,
-            "model": r.model,
-            "latency_ms": r.latency_ms,
-            "truncated": r.finish_reason == "length",
-        }
+        return {"ok": True, "model": r.model, "latency_ms": r.latency_ms}
 
     # ── command dispatch (wired as create_control_app's on_command) ────────
     def handle(self, command: str, body: dict) -> dict[str, Any]:

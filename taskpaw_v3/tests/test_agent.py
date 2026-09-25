@@ -236,12 +236,7 @@ def test_control_llm_test_route(monkeypatch):
     client = TestClient(create_control_app(cfg, admin=admin))
     r = client.post("/control/llm-test", json={"llm_model": "cand/m"})
     assert r.status_code == 200
-    assert r.json() == {
-        "ok": True,
-        "model": "served/m",
-        "latency_ms": 5,
-        "truncated": False,
-    }
+    assert r.json() == {"ok": True, "model": "served/m", "latency_ms": 5}
     assert calls[0].model == "cand/m"
     r = client.post(
         "/control/llm-test", json={"llm_api_base": "ftp://x", "llm_api_key": _LLM_KEY}
@@ -462,12 +457,7 @@ def test_control_llm_test_route_per_slot(monkeypatch, slot, body):
     prefix = "llm_" if slot == "primary" else f"llm_{slot}_"
     r = client.post("/control/llm-test", json=body)
     assert r.status_code == 200
-    assert r.json() == {
-        "ok": True,
-        "model": "served/m",
-        "latency_ms": 5,
-        "truncated": False,
-    }
+    assert r.json() == {"ok": True, "model": "served/m", "latency_ms": 5}
     ((s,),) = [calls]
     assert (s.api_base, s.model) == ("https://cand.example/v1", body[f"{prefix}model"])
     assert (s.api_key, s.key_source) == (_FB_KEYS[slot], "config")

@@ -106,7 +106,7 @@ export type AgentConfigView = {
 } & Record<string, unknown>;
 
 export type LlmTestResult = {
-  ok: boolean; model?: string; latency_ms?: number; truncated?: boolean; error?: string;
+  ok: boolean; model?: string; latency_ms?: number; error?: string;
 };
 
 declare global {

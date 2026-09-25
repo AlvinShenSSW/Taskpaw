@@ -523,9 +523,12 @@ def test_chat_other_http_errors_carry_their_status(code):
         ("0", 0),
         ("0030", 30),
         ("3600", 3600),
-        ("3601", None),  # over the bound → ignored, never clamped
-        ("86400", None),
-        ("9" * 40, None),
+        ("3601", 3600),  # over the bound → capped (IR4), never ignored
+        ("86400", 3600),
+        ("9" * 40, 3600),
+        # past int()'s digit limit: capped, never raises
+        pytest.param("9" * 5000, 3600, id="5000-nines"),
+        ("0" * 20 + "5", 5),
         ("-1", None),
         ("+5", None),
         ("1.5", None),
@@ -538,7 +541,7 @@ def test_chat_other_http_errors_carry_their_status(code):
 )
 @pytest.mark.parametrize("code,kind", [(429, "rate_limit"), (503, "bad_response")])
 def test_chat_retry_after_is_delta_seconds_only(code, kind, value, expected):
-    # C1: the Retry-After header is parsed (delta-seconds 0–3600 only).
+    # C1: the Retry-After header is parsed (delta-seconds, capped at 3600).
     exc = _http_error(code, {"Retry-After": value})
     with pytest.raises(LLMError) as ei:
         chat(_settings(), _msgs(), opener=_FakeOpener(exc=exc))

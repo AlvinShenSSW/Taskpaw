@@ -1269,7 +1269,7 @@ class Translator:
             and self._clock() - p.probe_ok_at < PROBE_TTL_S
         ):
             return None
-        got = self._send(p, probe_messages(), PROBE_MAX_TOKENS, "probe")
+        got = self._send(p, probe_messages(), PROBE_MAX_TOKENS, None)
         if isinstance(got, _Fail):
             return got
         if not probe_ok(got):
@@ -1299,11 +1299,17 @@ class Translator:
         return got if isinstance(got, _Fail) else _validate(got, ids)
 
     def _send(
-        self, p: _Provider, messages: list[dict[str, str]], max_tokens: int, tag: str
+        self,
+        p: _Provider,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        tag: Optional[str],
     ) -> Union[str, _Fail]:
         """A request with the provider's json_mode; an HTTP 400 with
         json_mode on is sent once more without it, and a reply then turns
-        json_mode off for that provider for the run (AC6)."""
+        json_mode off for that provider for the run (AC6). `tag` = the film's
+        job id, None for the probe (never a name: a film may be called
+        "probe")."""
         json_mode = p.json_mode
         got = self._request(p, messages, max_tokens, json_mode, tag)
         if json_mode and isinstance(got, _Fail) and got.status == 400:
@@ -1323,13 +1329,13 @@ class Translator:
         messages: list[dict[str, str]],
         max_tokens: int,
         json_mode: bool,
-        tag: str,
+        tag: Optional[str],
     ) -> Union[str, _Fail]:
         """One exchange with `p`'s worker → the reply content or a `_Fail`.
         Logged as kind/status/latency/label only."""
         if self._cancel.is_set():
             raise _Cancelled
-        rid = f"{tag}#{next(self._rids)}"
+        rid = f"{'probe' if tag is None else tag}#{next(self._rids)}"
         line = json.dumps(
             {
                 "id": rid,
@@ -1347,7 +1353,7 @@ class Translator:
         log.info(
             "subs-translate %s: %s kind=%s status=%s latency_ms=%d (%s)",
             self._name,
-            "probe" if tag == "probe" else "batch",
+            "probe" if tag is None else "batch",
             got.kind if isinstance(got, _Fail) else "ok",
             got.status if isinstance(got, _Fail) else None,
             int((time.monotonic() - started) * 1000),

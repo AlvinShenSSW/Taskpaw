@@ -1421,7 +1421,7 @@ class AvsubsInstance(MonitorInstance):
             emit(
                 "alert",
                 f"{self._cfg.name}: translation paused",
-                paused_alert_message(self._paused),
+                paused_alert_message(),
                 dedupe_key=f"{self.instance_id}:translation-paused",
             )
 

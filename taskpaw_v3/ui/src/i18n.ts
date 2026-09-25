@@ -178,7 +178,6 @@ const en = {
     llmApiKeyEnv: "Provided by the {{env}} environment variable — change it there.",
     llmSave: "Save LLM settings", llmClear: "Clear key", llmTest: "Test connection", llmTesting: "Testing…",
     llmTestOk: "Connected — {{model}} replied in {{latency}} ms.",
-    llmTestTruncated: "The reply was truncated, but the connection works.",
     llmTestFail: "Connection failed: {{error}}",
     llmSaved: "LLM settings saved.", llmCleared: "Stored API key cleared.",
     // #190 fallback models + #192 failover switch.
@@ -347,7 +346,6 @@ const zh: typeof en = {
     llmApiKeyEnv: "密钥由环境变量 {{env}} 提供,如需更改请修改该环境变量。",
     llmSave: "保存 LLM 设置", llmClear: "清除密钥", llmTest: "测试连接", llmTesting: "测试中…",
     llmTestOk: "连接成功 —— {{model}} 用时 {{latency}} 毫秒响应。",
-    llmTestTruncated: "回复被截断,但连接正常。",
     llmTestFail: "连接失败:{{error}}",
     llmSaved: "LLM 设置已保存。", llmCleared: "已清除保存的 API 密钥。",
     llmFallback: "备用模型 {{n}}",

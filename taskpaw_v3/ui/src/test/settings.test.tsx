@@ -8,7 +8,8 @@ import * as apiModule from "../api";
 import "../i18n";
 
 // The card (MUI Card root) whose heading matches `title` — the page has several
-// cards and two Save buttons (agent config + LLM API, #178), so queries are scoped.
+// cards and four Save buttons (agent config, LLM API #178, fallback 1 / 2 #190), so
+// queries are scoped.
 const card = (title: RegExp) =>
   screen.getByText(title).closest(".MuiCard-root") as HTMLElement;
 const AGENT_CARD = /^(Agent configuration|Agent 配置)$/;
@@ -178,7 +179,7 @@ describe("Settings LLM API card", () => {
     mockConfig("config");
     const testSpy = vi
       .spyOn(apiModule.api, "llmTest")
-      .mockResolvedValue({ ok: true, model: "x-ai/grok-4.1-fast", latency_ms: 812, truncated: false });
+      .mockResolvedValue({ ok: true, model: "x-ai/grok-4.1-fast", latency_ms: 812 });
     const { llm } = await renderLlm();
 
     fireEvent.change(llm.getByLabelText(BASE), { target: { value: "http://127.0.0.1:11434/v1" } });
@@ -192,14 +193,13 @@ describe("Settings LLM API card", () => {
     const alert = await llm.findByRole("alert");
     expect(alert).toHaveTextContent("x-ai/grok-4.1-fast");
     expect(alert).toHaveTextContent("812");
-    expect(alert).not.toHaveTextContent(/truncated|截断/);
   });
 
-  it("T-U3 Test connection includes a typed key and notes a truncated reply", async () => {
+  it("T-U3 Test connection includes a typed key", async () => {
     mockConfig("config");
     const testSpy = vi
       .spyOn(apiModule.api, "llmTest")
-      .mockResolvedValue({ ok: true, model: "m1", latency_ms: 40, truncated: true });
+      .mockResolvedValue({ ok: true, model: "m1", latency_ms: 40 });
     const { llm } = await renderLlm();
 
     fireEvent.change(llm.getByLabelText(KEY), { target: { value: "sk-try" } });
@@ -212,7 +212,6 @@ describe("Settings LLM API card", () => {
     );
     const alert = await llm.findByRole("alert");
     expect(alert).toHaveTextContent("m1");
-    expect(alert).toHaveTextContent(/truncated|截断/);
   });
 
   it("T-U3 Test connection shows the backend error string", async () => {
@@ -224,6 +223,24 @@ describe("Settings LLM API card", () => {
     fireEvent.click(llm.getByRole("button", { name: TEST }));
     const alert = await llm.findByRole("alert");
     expect(alert).toHaveTextContent("auth: authentication failed (HTTP 401)");
+  });
+
+  it("T-U3 Test connection is disabled while the base URL or model is blank", async () => {
+    mockConfig("config");
+    const testSpy = vi.spyOn(apiModule.api, "llmTest").mockResolvedValue({ ok: true, model: "m", latency_ms: 1 });
+    const { llm } = await renderLlm();
+    const testButton = () => llm.getByRole("button", { name: TEST });
+
+    expect(testButton()).not.toBeDisabled();
+    fireEvent.change(llm.getByLabelText(BASE), { target: { value: "  " } }); // whitespace is blank
+    expect(testButton()).toBeDisabled();
+    fireEvent.click(testButton());
+    fireEvent.change(llm.getByLabelText(BASE), { target: { value: "https://api.x.ai/v1" } });
+    expect(testButton()).not.toBeDisabled();
+    fireEvent.change(llm.getByLabelText(MODEL), { target: { value: "" } });
+    expect(testButton()).toBeDisabled();
+    fireEvent.click(testButton());
+    expect(testSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -358,7 +375,7 @@ describe("Settings fallback models + failover (#190/#192)", () => {
     mockConfig();
     const testSpy = vi
       .spyOn(apiModule.api, "llmTest")
-      .mockResolvedValue({ ok: true, model: "fb2-chat", latency_ms: 321, truncated: false });
+      .mockResolvedValue({ ok: true, model: "fb2-chat", latency_ms: 321 });
     const { fb2 } = await renderSettings();
 
     fireEvent.change(fb2.getByLabelText(BASE), { target: { value: "https://fb2.example/v1" } });
@@ -374,6 +391,28 @@ describe("Settings fallback models + failover (#190/#192)", () => {
     const alert = await fb2.findByRole("alert");
     expect(alert).toHaveTextContent("fb2-chat");
     expect(alert).toHaveTextContent("321");
+  });
+
+  it("Test in a fallback card is disabled while that slot's base URL or model is blank", async () => {
+    mockConfig(); // fallback 1 configured, fallback 2 unset (blank base + model)
+    const testSpy = vi.spyOn(apiModule.api, "llmTest").mockResolvedValue({ ok: true, model: "m", latency_ms: 1 });
+    const { fb1, fb2 } = await renderSettings();
+    const fb1Test = () => fb1.getByRole("button", { name: TEST });
+    const fb2Test = () => fb2.getByRole("button", { name: TEST });
+
+    expect(fb1Test()).not.toBeDisabled();
+    expect(fb2Test()).toBeDisabled();
+    fireEvent.change(fb2.getByLabelText(BASE), { target: { value: "https://fb2.example/v1" } });
+    expect(fb2Test()).toBeDisabled(); // model still blank
+    fireEvent.click(fb2Test());
+    expect(testSpy).not.toHaveBeenCalled();
+    fireEvent.change(fb2.getByLabelText(MODEL), { target: { value: "fb2-chat" } });
+    expect(fb2Test()).not.toBeDisabled();
+    // Blanking fallback 1's base URL disables only fallback 1's Test.
+    fireEvent.change(fb1.getByLabelText(BASE), { target: { value: "" } });
+    expect(fb1Test()).toBeDisabled();
+    expect(fb2Test()).not.toBeDisabled();
+    expect(within(card(LLM_CARD)).getByRole("button", { name: TEST })).not.toBeDisabled();
   });
 
   it("the failover switch is on by default and saves llm_failover on each toggle", async () => {
