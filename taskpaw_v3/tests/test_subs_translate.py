@@ -1290,6 +1290,18 @@ PROBE_FAILURES = [
         1800.0,
     ),
     (
+        "refused",
+        lambda q: _err("refusal", q, message="model refused"),
+        "content policy rejected the translation prompt",
+        1800.0,
+    ),
+    (
+        "empty",  # CX3: a blank probe reply is unusable output, not a policy
+        lambda q: _err("refusal", q, message="empty reply"),
+        "returns unusable output",
+        300.0,
+    ),
+    (
         "invalid",
         lambda q: _ok('{"1": ""}', q),  # envelope OK, content unusable (H4)
         "returns unusable output",
@@ -1414,6 +1426,65 @@ def test_h7_failover_off_with_an_unusable_primary_uses_chain0(harness_factory):
     assert r.fallback == 0 and [c["env"][ENV_KEY] for c in sp.calls] == [KEY_DS]
 
 
+def test_cx2_failover_switched_off_mid_film_stops_the_fallback_batches(
+    harness_factory,
+):
+    # Film a opens grok (401, its probe 401 → 30 min) and goes to ds. Film b
+    # (81 cues) starts with grok open → ds; the owner turns failover off
+    # during b's first batch → b's other batches wait for grok (b defers).
+    holder: dict[str, Harness] = {}
+
+    def ds(req: dict, w: FakeWorker) -> dict:
+        if "b0" in _jas(req):
+            holder["h"].failover = False
+        return good_as("DS")(req, w)
+
+    sp = Spawner(by_model(grok=lambda req, w: _err("auth", req, status=401), ds=ds))
+    h = harness_factory(sp, chain=[GROK, DS])
+    holder["h"] = h
+    h.tr.submit(TranslateRequest(RUN, "a", _cues(1, "a")))
+    h.tr.submit(TranslateRequest(RUN, "b", _cues(81, "b")))
+    ra, rb = h.result(), h.result(timeout=30)
+    assert (ra.job_id, ra.outcome, ra.fallback) == ("a", "translated", 1)
+    assert _of(sp, "ds") == ["1", "1-40"]  # nothing of b after the switch
+    assert (rb.job_id, rb.outcome) == ("b", "paused")
+
+
+def test_cx2_a_primary_recovering_mid_film_takes_the_later_batches_back(
+    harness_factory,
+):
+    # Film a opens grok (401, its probe down → 5 min) and goes to ds. Film b
+    # (81 cues) starts on ds; grok's cool-down ends during b's first batch →
+    # the next routing probes grok (OK) → b's later batches go to grok.
+    state = {"up": False}
+    holder: dict[str, Harness] = {}
+
+    def grok(req: dict, w: FakeWorker) -> dict:
+        if state["up"]:
+            return good(req, w)
+        return down(req, w) if _is_probe(req) else _err("auth", req, status=401)
+
+    def ds(req: dict, w: FakeWorker) -> dict:
+        if "b0" in _jas(req):
+            state["up"] = True
+            holder["h"].clock.t += BREAKER_S[0]  # the cool-down ends meanwhile
+        return good_as("DS")(req, w)
+
+    sp = Spawner(by_model(grok=grok, ds=ds))
+    h = harness_factory(sp, chain=[GROK, DS])
+    holder["h"] = h
+    h.tr.submit(TranslateRequest(RUN, "a", _cues(1, "a")))
+    h.tr.submit(TranslateRequest(RUN, "b", _cues(81, "b")))
+    ra, rb = h.result(), h.result()
+    assert (ra.job_id, ra.outcome, ra.fallback) == ("a", "translated", 1)
+    assert _of(sp, "ds") == ["1", "1-40"]
+    assert _of(sp, "grok") == ["1", "P", "P", "41-80", "81"]
+    assert rb.outcome == "translated" and rb.fallback == 40
+    assert [c.text for c in rb.zh_cues] == (
+        [f"DSb{i}" for i in range(40)] + [f"中b{i}" for i in range(40, 81)]
+    )
+
+
 # ── G1: bounded — a line failing everywhere ends kept-Japanese ───────────
 def test_g1_a_cue_failing_transiently_everywhere_ends_kept_japanese_bounded(
     harness_factory, tmp_path
@@ -1454,6 +1525,66 @@ def test_h5_transient_leaf_one_retry_and_a_resume_asks_again(harness_factory, tm
     assert [_seq(q) for q in sp2.requests] == ["2"]
     assert (r2.resumed, r2.kept_ja) == (1, 0)
     assert [c.text for c in r2.zh_cues] == ["中ja0", "中ja1"]
+
+
+@pytest.mark.parametrize(
+    "steps,refused",
+    [
+        # an empty reply, then three network failures: the final failure is
+        # transient → `failed`, memory only (H5) — never a persisted refusal
+        ((empty_reply, down, down, down), False),
+        # a network failure, then a content refusal (403): refused, persisted
+        ((down, forbid), True),
+    ],
+    ids=["empty-then-network", "network-then-refusal"],
+)
+def test_cx1_a_single_cue_batch_is_classified_by_its_final_failure(
+    harness_factory, tmp_path, steps, refused
+):
+    sp = Spawner(fail_when({"ja40"}, scripted(*steps)))
+    h = harness_factory(sp, checkpoint_dir=tmp_path)
+    cues = _cues(41)  # the second batch holds one cue
+    r = h.run(cues)
+    assert r.outcome == "translated" and r.kept_ja == 1
+    assert r.zh_cues[40].text == "ja40"
+    assert [_seq(q) for q in sp.requests] == (
+        ["1-40"] + ["41"] * len(steps) + ["P", "P"]
+    )
+    saved = CheckpointStore(tmp_path).load(r.checkpoint_key, 41)
+    assert saved is not None
+    assert saved[40] == (SavedCue(refused_by=(L_DEFAULT,)) if refused else SavedCue())
+    # a new Translator on the same checkpoint (a Stop before the publish)
+    sp2 = Spawner(good)
+    h2 = harness_factory(sp2, checkpoint_dir=tmp_path)
+    r2 = h2.run(cues)
+    assert r2.resumed == 40
+    if refused:
+        assert sp2.requests == [] and r2.kept_ja == 1
+    else:  # the provider is asked again
+        assert [_seq(q) for q in sp2.requests] == ["41"]
+        assert r2.kept_ja == 0 and r2.zh_cues[40].text == "中ja40"
+
+
+def test_cx1_the_first_failure_still_drives_the_adaptive_batch_size(harness_factory):
+    # H8 follows the attempt's ORIGINAL trigger (a timeout) even when the
+    # schedule's retries ended with another transient failure.
+    state = {"n": 0}
+
+    def resp(req: dict, w: FakeWorker) -> dict:
+        if _is_probe(req) or len(_ids(req)) <= 20:
+            return good(req, w)
+        state["n"] += 1
+        return timeout(req, w) if state["n"] == 1 else down(req, w)
+
+    sp = Spawner(resp)
+    h = harness_factory(sp)
+    r = h.run(_cues(60))
+    assert r.outcome == "translated" and r.kept_ja == 0
+    assert [_seq(q) for q in sp.requests] == (
+        ["1-40"] * 4 + ["P", "1-20", "21-40", "41-60"]
+    )
+    (p,) = h.tr._providers.values()
+    assert p.batch_size == 20
 
 
 # ── I1: an outage beginning mid-bisection ───────────────────────────────

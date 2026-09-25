@@ -272,9 +272,15 @@ def _shrinks_batch(f: _Fail) -> bool:
     return timed_out or f.message == _LENGTH_MESSAGE
 
 
+def _empty(f: _Fail) -> bool:
+    """An empty reply: unusable output (level 1, AC7), not a content policy."""
+    return f.kind == "refusal" and f.message == EMPTY_REPLY_MESSAGE
+
+
 def _severe(f: _Fail) -> bool:
     """AC7: key, credit and content-policy failures open for 30 min at once."""
-    return f.kind in ("auth", "refusal") or f.status in (401, 402, 403)
+    policy = f.kind == "refusal" and not _empty(f)
+    return f.kind == "auth" or policy or f.status in (401, 402, 403)
 
 
 def _reason(f: _Fail) -> str:
@@ -287,9 +293,9 @@ def _reason(f: _Fail) -> str:
         return "rate limit or quota reached"
     if f.status is not None and 400 <= f.status < 500:
         return f"rejected the request (HTTP {f.status})"
-    if f.kind == "refusal":
+    if f.kind == "refusal" and not _empty(f):
         return "content policy rejected the translation prompt"
-    if f.kind in ("invalid", "content"):
+    if f.kind in ("invalid", "content") or _empty(f):
         return "returns unusable output"
     return "unreachable"
 
@@ -1076,7 +1082,10 @@ class Translator:
     # ── working a film ───────────────────────────────────────────────────
     def _work(self, film: _Film) -> str:
         """Translate until no open cue is left ("translated"), none has a
-        route ("defer") or the chain is empty ("no_key")."""
+        route ("defer") or the chain is empty ("no_key"). A pass goes through
+        the open cues in order; the chain, the failover switch and each
+        provider's availability are re-read before EACH batch (AC1/G8)."""
+        start = 0  # the pass's position: the cues before it wait for the next
         while True:
             if self._cancel.is_set():
                 raise _Cancelled
@@ -1087,31 +1096,44 @@ class Translator:
             open_cues = self._open_cues(film, chain)
             if not open_cues:
                 return "translated"
-            failover = self._failover_fn()
-            todo: list[tuple[int, _Provider]] = []
-            for i in open_cues:
-                p = self._route(film, i, chain, failover)
-                if p is not None:
-                    todo.append((i, p))
-            if not todo:
-                return "defer"
-            k = 0
-            while k < len(todo):
-                p = todo[k][1]
-                batch = [todo[k][0]]
-                k += 1
-                # built lazily: a halved batch size applies at once (H8)
-                while k < len(todo) and todo[k][1] is p and len(batch) < p.batch_size:
-                    batch.append(todo[k][0])
-                    k += 1
-                if self._cancel.is_set():
-                    raise _Cancelled
-                if self._retired(p) or p.open_until is not None:
-                    continue  # re-routed on the next pass
-                if self._attempt(film, p, batch):
-                    with self._count_lock:
-                        film.batches_done += 1
-                    self._recount(film, self._chain)
+            rest = [i for i in open_cues if i >= start]
+            got = self._next_batch(film, rest, chain, self._failover_fn())
+            if got is None:
+                if start == 0:
+                    return "defer"
+                start = 0  # the next pass
+                continue
+            p, batch = got
+            start = batch[-1] + 1
+            if self._attempt(film, p, batch):
+                with self._count_lock:
+                    film.batches_done += 1
+                self._recount(film, self._chain)
+
+    def _next_batch(
+        self,
+        film: _Film,
+        cues: Sequence[int],
+        chain: Sequence[_Provider],
+        failover: bool,
+    ) -> Optional[tuple[_Provider, list[int]]]:
+        """The first of `cues` that has a route, with the next cues on the
+        same route (a cue without one is skipped) — at most that provider's
+        batch size (H8). None: none of them has a route."""
+        p: Optional[_Provider] = None
+        batch: list[int] = []
+        for i in cues:
+            q = self._route(film, i, chain, failover)
+            if q is None:
+                continue
+            if p is None:
+                p = q
+            elif q is not p:
+                break
+            batch.append(i)
+            if len(batch) >= p.batch_size:
+                break
+        return None if p is None else (p, batch)
 
     def _attempt(self, film: _Film, p: _Provider, idx: list[int]) -> bool:
         """AC5/AC6: one top-level batch on `p`. True when it concluded (each
@@ -1121,7 +1143,7 @@ class Translator:
         if not isinstance(got, _Fail):
             self._done(film, p, idx, got)
             return True
-        trigger = got
+        trigger = got  # the first failure: it drives the batch size (H8)
         if trigger.kind != "content":  # invalid output: bisect at once
             if _transient(trigger):
                 for scheduled in RETRY_SCHEDULE_S:
@@ -1137,7 +1159,7 @@ class Translator:
             if fail is not None:
                 self._open(p, fail)
                 return False
-        return self._bisect(film, p, idx, trigger)
+        return self._bisect(film, p, idx, trigger, got)
 
     @staticmethod
     def _retry_delay(f: _Fail, scheduled: float) -> float:
@@ -1146,11 +1168,13 @@ class Translator:
         return scheduled
 
     def _bisect(
-        self, film: _Film, p: _Provider, idx: list[int], trigger: _Fail
+        self, film: _Film, p: _Provider, idx: list[int], trigger: _Fail, last: _Fail
     ) -> bool:
         """AC6: the failure is content-specific — split on `p`, one request
         per node, down to single cues (H5 leaf retry, I1 leaf probe), then
-        ONE fresh confirming probe before any failed leaf is recorded."""
+        ONE fresh confirming probe before any failed leaf is recorded.
+        `trigger` (the attempt's first failure) decides the adaptive batch
+        size (H8); `last` (its final failure) classifies a one-cue batch."""
         failed: list[tuple[int, bool]] = []  # (cue, transient → memory only)
         abandoned = False
 
@@ -1191,7 +1215,7 @@ class Translator:
                 else:
                     self._done(film, p, part, got)
 
-        node(idx, trigger, True)
+        node(idx, last, True)
         if abandoned:
             return False
         if failed:
