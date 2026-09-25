@@ -44,6 +44,22 @@ SUBTITLE_EXTENSIONS = (".srt", ".ass", ".ssa", ".vtt")
 #: Common video containers — Jasna's CLI accepts exactly these. Any of them
 #: owns its subtitles for attribution, whatever the caller processes (F17).
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm"})
+
+
+def qualifies(exts: set[str] | frozenset[str], name: str) -> bool:
+    """A video a task processes (#179/#191): extension (without the dot) in
+    `exts`, case-insensitive; no `.tmp.` in the name (a staging/temp file,
+    e.g. Jasna's `x-破解.tmp.mp4`); not a macOS `._` AppleDouble file.
+    Shared by avsubs and Jasna so both filter videos identically."""
+    suffix = os.path.splitext(name)[1][1:].casefold()
+    return (
+        bool(suffix)
+        and suffix in exts
+        and ".tmp." not in name.casefold()
+        and not name.startswith("._")
+    )
+
+
 #: A subtitle carrying one of these tags is Japanese and never counts as
 #: Chinese (F3).
 JAPANESE_TAGS = frozenset(
@@ -152,7 +168,9 @@ def _judge(
                     ja = ja or n
                 if not _japanese(tags):
                     b = b or n
-        if single and c is None and owner in (None, me):
+        # IR1: an attributed subtitle is judged by (a)/(b) only — (c) never
+        # re-reads it (else `JA-001.mp4`'s own `JA-001.ja.srt` would count).
+        if single and c is None and owner is None:
             if not _japanese(t for t in _tags(base) if t not in me_tokens):
                 c = n
     return Existing(a or b or c, ja)

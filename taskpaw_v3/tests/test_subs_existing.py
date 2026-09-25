@@ -211,6 +211,18 @@ def test_rule_c_residual_x_jp_is_recognised():
     assert _zh("X-JP.mp4", ["X-JP.mp4", "X.jp.srt"]).chinese == "X.jp.srt"
 
 
+@pytest.mark.parametrize("video", ["JA-001.mp4", "X-JA.mp4", "Kissa_ja_koira.mp4"])
+def test_rule_c_never_rejudges_the_films_own_japanese_transcript(video):
+    # IR1: a subtitle attributed to the video is judged by (a)/(b) only; a
+    # `ja` token inside the video's own name must not let (c) count its own
+    # `.ja.srt` as Chinese (the film would be skipped and re-transcribed forever).
+    stem = video[: -len(".mp4")]
+    got = _zh(video, [video, f"{stem}.ja.srt"])
+    assert got.chinese is None and got.ja_transcript == f"{stem}.ja.srt"
+    # …while a Chinese subtitle attributed to it still counts, via (b)
+    assert _zh(video, [video, f"{stem}.chs.srt"]).chinese == f"{stem}.chs.srt"
+
+
 # ── Japanese tags (F3 / F12) ──────────────────────────────────────────────
 @pytest.mark.parametrize(
     "sub",

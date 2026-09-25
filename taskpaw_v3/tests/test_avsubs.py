@@ -2473,6 +2473,18 @@ def test_plan_tree_judges_every_film_from_its_folder_listing(tmp_path, monkeypat
     ]
 
 
+def test_plan_tree_translates_a_ja_token_film_from_its_own_transcript(tmp_path):
+    # IR1: `JA-001.mp4` alone with its own `JA-001.ja.srt` is NOT subtitled — (c)
+    # never re-reads an attributed subtitle — so it is planned translate_only.
+    _touch(tmp_path / "JA-001" / "JA-001.mp4", b"x")
+    _touch(tmp_path / "JA-001" / "JA-001.ja.srt", b"x")
+    plan = plan_tree(str(tmp_path), True, ["mp4"])
+    assert plan.done == 0
+    assert [(i.relpath, i.kind) for i in plan.items] == [
+        ("JA-001/JA-001.mp4", "translate_only")
+    ]
+
+
 def test_idle_note_counts_the_films_that_already_have_subtitles(tmp_path, monkeypatch):
     r = _setup(tmp_path, monkeypatch)
     _touch(r.root / "PQRS-218.mp4")

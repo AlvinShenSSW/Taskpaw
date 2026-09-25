@@ -114,6 +114,7 @@ from taskpaw_v3.monitors.subs.existing import (
     judge,
     list_names,
     list_names_missing_ok,
+    qualifies,
     skip_reason,
 )
 from taskpaw_v3.monitors.subs.job import (
@@ -385,14 +386,14 @@ def zh_target_for(media: Path) -> Path:
     return media.with_name(f"{media.stem}{_ZH_EXT}")
 
 
+_OUTPUT_VIDEO_EXTS = frozenset(e[1:] for e in JASNA_VIDEO_EXTENSIONS)
+
+
 def _is_output_video(name: str) -> bool:
     """A video in the output folder for subtitle attribution (#191): one of
-    Jasna's containers, not a staging `.tmp.` file, not a macOS `._` file."""
-    return (
-        os.path.splitext(name)[1].lower() in JASNA_VIDEO_EXTENSIONS
-        and ".tmp." not in name.casefold()
-        and not name.startswith("._")
-    )
+    Jasna's containers, not a staging `.tmp.` file, not a macOS `._` file
+    (the shared `qualifies` filter)."""
+    return qualifies(_OUTPUT_VIDEO_EXTS, name)
 
 
 @dataclass(frozen=True)

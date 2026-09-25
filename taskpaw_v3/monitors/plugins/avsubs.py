@@ -82,7 +82,12 @@ from taskpaw_v3.monitors.subs import asr_env, bounded
 # at call time, so tests can monkeypatch `AV.Translator` / `AV.ChildProcess`
 # for supervisor-created instances (D10).
 from taskpaw_v3.monitors.subs.child import ChildProcess
-from taskpaw_v3.monitors.subs.existing import judge, list_names, skip_reason
+from taskpaw_v3.monitors.subs.existing import (
+    judge,
+    list_names,
+    qualifies,
+    skip_reason,
+)
 from taskpaw_v3.monitors.subs.job import (
     SUBTITLE_EXISTS,
     SUBTITLE_UNREADABLE,
@@ -207,25 +212,12 @@ def _norm_exts(extensions: Iterable[str]) -> set[str]:
     return out
 
 
-def _qualifies(exts: set[str], name: str) -> bool:
-    """A video this task processes: extension in `exts` (case-insensitive),
-    no `.tmp.` in the name (a staging/temp file, e.g. Jasna's
-    `x-破解.tmp.mp4`), not a macOS `._` AppleDouble file."""
-    suffix = os.path.splitext(name)[1][1:].casefold()
-    return (
-        bool(suffix)
-        and suffix in exts
-        and ".tmp." not in name.casefold()
-        and not name.startswith("._")
-    )
-
-
 def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan:
     """Pure: walk `root` (iteratively, `os.scandir`) and plan every video.
 
     Raises `OSError` when `root` itself cannot be listed. An unreadable
     subfolder and a name that is not encodable as UTF-8 (D10) are reported in
-    `errors` and skipped. Qualifying files (`_qualifies`) are ordered by
+    `errors` and skipped. Qualifying files (`qualifies`) are ordered by
     `(relpath.casefold(), relpath)`; in that order each reserves its
     `<stem>.ja.srt` and `<stem>.srt` (key: `normcase(realpath(dir)/name)`) —
     a file whose target is already reserved is a collision (M8). Then each is
@@ -234,7 +226,7 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
     `.srt` counts) → done; its `.ja.srt` there → `translate_only`; else
     `full`."""
     exts = _norm_exts(extensions)
-    is_video = functools.partial(_qualifies, exts)
+    is_video = functools.partial(qualifies, exts)
     errors: list[str] = []
     folders: list[Path] = []
     # (relpath, source, real dir, the names of its directory)
@@ -1151,9 +1143,7 @@ class AvsubsInstance(MonitorInstance):
         """#191 (AC5): the skip reason for `job` from a fresh listing of its
         folder (None: unreadable), judged like `plan_tree` (rules a/b/c) —
         or None when its work goes on."""
-        is_video = functools.partial(
-            _qualifies, _norm_exts(self._cfg.avsubs_extensions)
-        )
+        is_video = functools.partial(qualifies, _norm_exts(self._cfg.avsubs_extensions))
         return skip_reason(names, job.media.name, is_video, rule_c=True)
 
     def _skip_existing(self, job: SubsJob, reason: str, emit: EventEmitter) -> None:
