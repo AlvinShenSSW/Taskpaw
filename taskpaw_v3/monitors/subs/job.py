@@ -3,7 +3,8 @@
 Paths in, outcomes out. No retry policy and no counters live here: retry,
 degrade and abort are the plugin's policy. Every publish goes through
 `<target>.<generation>.tmp` + `os.replace`, so `start()` can sweep a crashed
-run's leftovers by generation.
+run's leftovers by generation. `discard_ja()` drops the `.ja.srt` checkpoint
+once the plugin settled the job `completed` (#187).
 """
 
 from __future__ import annotations
@@ -184,6 +185,19 @@ class SubsJob:
     def publish_empty(self) -> Optional[str]:
         """0-byte `.ja.srt` and `.srt` (no speech)."""
         return self._publish(self.ja_target, "") or self._publish(self.zh_target, "")
+
+    def discard_ja(self) -> Optional[str]:
+        """Delete the `.ja.srt` once the Chinese `.srt` is published (#187).
+
+        The transcript is only the resume checkpoint for a translation that did
+        not finish; after a successful publish it has no further use. A missing
+        file is fine. Returns an error text when the delete failed (locked,
+        permission) — the caller logs it; never raises."""
+        try:
+            self.ja_target.unlink(missing_ok=True)
+        except (OSError, ValueError) as e:
+            return f"could not remove {self.ja_target.name}: {type(e).__name__}: {e}"
+        return None
 
     def load_ja(self) -> list[Cue]:
         return srt.load(self.ja_target)

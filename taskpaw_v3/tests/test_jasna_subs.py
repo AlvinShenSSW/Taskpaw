@@ -199,6 +199,7 @@ def _setup(
     *,
     pending=(),
     restored=(),
+    legacy=(),
     ja=(),
     zh=(),
     rcs=None,
@@ -216,13 +217,18 @@ def _setup(
     )
     base.update(kw)
     cfg, inp, out, _home = _managed(tmp_path, **base)
-    _videos(inp, *pending, *restored)
+    _videos(inp, *dict.fromkeys((*pending, *restored, *legacy)))
     for n in restored:
         output_path_for(str(out), Path(n)).write_bytes(b"restored " + n.encode())
+    for n in legacy:  # #187: a `<stem>_restored.mp4` from 3.5.1 and earlier
+        (out / f"{Path(n).stem}_restored.mp4").write_bytes(b"legacy " + n.encode())
+    # Subtitles sit next to the video they belong to (#187): the legacy file's
+    # names only when there is no new-name output.
+    old = set(legacy) - set(restored)
     for n in ja:
-        (out / f"{Path(n).stem}_restored.ja.srt").write_text(SRT_JA, encoding="utf-8")
+        _sub(out, n, ".ja.srt", n in old).write_text(SRT_JA, encoding="utf-8")
     for n in zh:
-        (out / f"{Path(n).stem}_restored.srt").write_text(SRT_ZH, encoding="utf-8")
+        _sub(out, n, ".srt", n in old).write_text(SRT_ZH, encoding="utf-8")
     launcher = _Launcher(list(rcs) if rcs is not None else [0] * 20)
     _patch(monkeypatch, launcher, probe)
     owner: dict = {}
@@ -286,12 +292,19 @@ def _keyed(evs, key: str) -> list:
     return [e for e in evs if e[3] == key]
 
 
-def _ja(r, name: str) -> Path:
-    return r.out / f"{Path(name).stem}_restored.ja.srt"
+def _sub(out: Path, name: str, suffix: str, legacy: bool = False) -> Path:
+    """`<stem>-破解<suffix>` next to the new output, or `<stem>_restored<suffix>`
+    next to a legacy one (#187) — spelled out, never via the plugin helpers."""
+    tag = "_restored" if legacy else "-破解"
+    return out / f"{Path(name).stem}{tag}{suffix}"
 
 
-def _zh(r, name: str) -> Path:
-    return r.out / f"{Path(name).stem}_restored.srt"
+def _ja(r, name: str, legacy: bool = False) -> Path:
+    return _sub(r.out, name, ".ja.srt", legacy)
+
+
+def _zh(r, name: str, legacy: bool = False) -> Path:
+    return _sub(r.out, name, ".srt", legacy)
 
 
 def _wait(cond, timeout: float = 8.0) -> bool:
@@ -421,11 +434,11 @@ def test_plan_subs_classifies_orders_and_counts(tmp_path):
     (inp / "z.srt").write_text(SRT_JA, encoding="utf-8")  # never scanned
     (inp / ".avsubs").mkdir()  # never scanned
     for n in ("c", "d", "e", "f"):
-        (out / f"{n}_restored.mp4").write_bytes(b"r")
-    (out / "b_restored.ja.srt").write_text(SRT_JA, encoding="utf-8")  # pending, ja
-    (out / "c_restored.srt").write_text(SRT_ZH, encoding="utf-8")  # zh → none
-    (out / "d_restored.ja.srt").write_text(SRT_JA, encoding="utf-8")  # translate
-    (out / "f_restored.srt").write_bytes(b"")  # 0-byte zh counts as done
+        (out / f"{n}-破解.mp4").write_bytes(b"r")
+    (out / "b-破解.ja.srt").write_text(SRT_JA, encoding="utf-8")  # pending, ja
+    (out / "c-破解.srt").write_text(SRT_ZH, encoding="utf-8")  # zh → none
+    (out / "d-破解.ja.srt").write_text(SRT_JA, encoding="utf-8")  # translate
+    (out / "f-破解.srt").write_bytes(b"")  # 0-byte zh counts as done
     pending, _done, collisions = plan_queue(str(inp), str(out))
     plan = plan_subs(str(inp), str(out), pending, [a for a, _ in collisions])
     assert {p.name: k for p, k in plan.for_pending.items()} == {
@@ -441,20 +454,20 @@ def test_plan_subs_pending_with_an_existing_zh_needs_nothing(tmp_path):
     inp.mkdir()
     out.mkdir()
     _videos(inp, "a.mp4")
-    (out / "a_restored.srt").write_text(SRT_ZH, encoding="utf-8")
+    (out / "a-破解.srt").write_text(SRT_ZH, encoding="utf-8")
     plan = plan_subs(str(inp), str(out), [inp / "a.mp4"], [])
     assert plan.for_pending == {inp / "a.mp4": "none"}
     assert plan.subs_only == [] and plan.total == 0
 
 
 def test_plan_subs_excludes_collision_losers_so_one_media_gets_one_job(tmp_path):
-    # D21: a.mkv + a.mp4 share a_restored.mp4 — without `excluded` the loser would
+    # D21: a.mkv + a.mp4 share a-破解.mp4 — without `excluded` the loser would
     # become a duplicate subs-only job on the same media and the same targets.
     inp, out = tmp_path / "in", tmp_path / "out"
     inp.mkdir()
     out.mkdir()
     _videos(inp, "a.mkv", "a.mp4")
-    (out / "a_restored.mp4").write_bytes(b"r")
+    (out / "a-破解.mp4").write_bytes(b"r")
     pending, _done, collisions = plan_queue(str(inp), str(out))
     assert [a.name for a, _ in collisions] == ["a.mp4"]
     plan = plan_subs(str(inp), str(out), pending, [a for a, _ in collisions])
@@ -482,7 +495,7 @@ def test_restore_then_asr_then_translation_end_to_end(tmp_path, monkeypatch):
     assert r.launcher.n == 1
     assert len(r.spawner.argvs) == 1
     argv = r.spawner.argvs[0]
-    media = r.out / "a_restored.mp4"
+    media = r.out / "a-破解.mp4"
     assert argv[0] == r.cfg.whisperjav_exe_path
     assert argv[1] == str(media)  # C10: the restored file
     out_dir = attempt_dir(r.out / ".avsubs", "a.mp4", 1)
@@ -492,9 +505,9 @@ def test_restore_then_asr_then_translation_end_to_end(tmp_path, monkeypatch):
     assert argv[argv.index("--language") + 1] == "japanese"
     assert st.state == "running"
     assert st.metrics["phase"] == "subs"
-    assert st.metrics["current_file"] == "a_restored.mp4"
+    assert st.metrics["current_file"] == "a-破解.mp4"
     assert "percent" not in st.metrics
-    assert st.detail.startswith("subtitling: a_restored.mp4 [anime-whisper] · ")
+    assert st.detail.startswith("subtitling: a-破解.mp4 [anime-whisper] · ")
     assert "elapsed · translating 0 · subs 0/2" in st.detail
     _assert_strict_pairs(gpu, open_ok=True)
 
@@ -513,12 +526,13 @@ def test_restore_then_asr_then_translation_end_to_end(tmp_path, monkeypatch):
     tr.answer("a.mp4")
     st = inst.check(emit)  # zh published; b restored → ASR for b
     assert _zh(r, "a.mp4").read_text(encoding="utf-8").count("好") == 2
+    assert not _ja(r, "a.mp4").exists()  # #187: the checkpoint goes with the zh
     assert st.metrics["subs_completed"] == 1
     assert len(r.spawner.argvs) == 2
 
     r.spawner.last.finish(0, state="empty", text="")
-    st = inst.check(emit)  # no speech → two 0-byte files, completed
-    assert _ja(r, "b.mp4").read_bytes() == b""
+    st = inst.check(emit)  # no speech → an empty zh, completed, no ja left
+    assert not _ja(r, "b.mp4").exists()
     assert _zh(r, "b.mp4").read_bytes() == b""
     done = _done(r.evs)
     assert len(done) == 1
@@ -585,7 +599,7 @@ def test_media_changed_during_asr_is_skipped_unstable(tmp_path, monkeypatch):
     r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
     r.inst.start(r.emit)
     r.inst.check(r.emit)
-    (r.out / "a_restored.mp4").write_bytes(b"changed underneath, longer")
+    (r.out / "a-破解.mp4").write_bytes(b"changed underneath, longer")
     r.spawner.last.finish(0)
     r.inst.check(r.emit)
     assert len(_keyed(r.evs, "j1:subs-unstable:a.mp4")) == 1
@@ -1234,9 +1248,9 @@ def test_subs_job_is_a_plain_subs_job_keyed_by_video_name(tmp_path, monkeypatch)
     job = r.inst._jobs["a.mp4"]
     assert isinstance(job, SubsJob)
     assert job.run == r.inst._run
-    assert job.media == r.out / "a_restored.mp4"
-    assert job.ja_target == r.out / "a_restored.ja.srt"
-    assert job.zh_target == r.out / "a_restored.srt"
+    assert job.media == r.out / "a-破解.mp4"
+    assert job.ja_target == r.out / "a-破解.ja.srt"
+    assert job.zh_target == r.out / "a-破解.srt"
     assert job.staging_root == r.out / ".avsubs"
     assert os.path.basename(job.exe) == "whisperjav.exe"
     r.inst.stop(timeout=1)

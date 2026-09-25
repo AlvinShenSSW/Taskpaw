@@ -310,8 +310,8 @@ def test_tier_for_uses_the_pixel_count_rule():
 
 def test_output_and_staging_paths(tmp_path):
     v = tmp_path / "Clip 01.mkv"
-    assert output_path_for(str(tmp_path), v).name == "Clip 01_restored.mp4"
-    assert staging_path_for(str(tmp_path), v).name == "Clip 01_restored.tmp.mp4"
+    assert output_path_for(str(tmp_path), v).name == "Clip 01-破解.mp4"
+    assert staging_path_for(str(tmp_path), v).name == "Clip 01-破解.tmp.mp4"
 
 
 def test_build_argv_1080p_with_unet(tmp_path):
@@ -527,17 +527,17 @@ def test_sequential_batch_renames_on_success_and_emits_one_done(tmp_path, monkey
 
     inst.start(emit)
     assert launcher.n == 1 and launcher.inputs() == ["a.mp4"]
-    assert launcher.arg(0, "--output").endswith("a_restored.tmp.mp4")
+    assert launcher.arg(0, "--output").endswith("a-破解.tmp.mp4")
 
     st = inst.check(emit)  # a exits 0 → renamed, b launched
     assert st.state == "running"
-    assert (out / "a_restored.mp4").exists()
-    assert not (out / "a_restored.tmp.mp4").exists()
+    assert (out / "a-破解.mp4").exists()
+    assert not (out / "a-破解.tmp.mp4").exists()
     assert launcher.inputs() == ["a.mp4", "b.mp4"]
 
     st = inst.check(emit)  # b exits 0 → batch complete
     assert st.state == "idle"
-    assert (out / "b_restored.mp4").exists()
+    assert (out / "b-破解.mp4").exists()
     done = [e for e in evs if e[0] == "done"]
     assert len(done) == 1
     assert "Jasna processing complete | Queue: 2/2 done, 0 failed" in done[0][2]
@@ -620,8 +620,8 @@ def test_always_failing_file_costs_exactly_three_launches(tmp_path, monkeypatch)
     fails = [e for e in evs if e[1].endswith("a.mp4 failed")]
     assert len(fails) == 1 and "exit code 1" in fails[0][2]
     assert inst._failed == 1 and inst._done == 0
-    assert not (out / "a_restored.tmp.mp4").exists()  # staging cleaned up
-    assert not (out / "a_restored.mp4").exists()  # never published
+    assert not (out / "a-破解.tmp.mp4").exists()  # staging cleaned up
+    assert not (out / "a-破解.mp4").exists()  # never published
 
 
 def test_next_file_gets_a_fresh_retry_budget(tmp_path, monkeypatch):
@@ -778,11 +778,11 @@ def test_a_killed_runs_staging_file_is_not_counted_as_done(tmp_path, monkeypatch
 def test_start_sweeps_only_orphaned_staging_files(tmp_path, monkeypatch):
     cfg, inp, out, _home = _managed(tmp_path)
     _videos(inp, "a.mp4")
-    orphan = out / "gone_restored.tmp.mp4"
+    orphan = out / "gone-破解.tmp.mp4"
     orphan.write_bytes(b"x")
     old = time.time() - 600
     os.utime(orphan, (old, old))
-    mine = out / "a_restored.tmp.mp4"
+    mine = out / "a-破解.tmp.mp4"
     mine.write_bytes(b"x")
     os.utime(mine, (old, old))
     launcher = _Launcher([None])
@@ -821,10 +821,10 @@ def test_stop_terminates_a_live_child_and_removes_its_staging(tmp_path, monkeypa
     inst = JasnaInstance("j1", cfg)
     _evs, emit = _events()
     inst.start(emit)
-    assert (out / "a_restored.tmp.mp4").exists()
+    assert (out / "a-破解.tmp.mp4").exists()
     inst.stop(timeout=0.5)
     assert launcher.procs[0].terminated is True
-    assert not (out / "a_restored.tmp.mp4").exists()
+    assert not (out / "a-破解.tmp.mp4").exists()
 
 
 def test_stop_after_the_child_exited_leaves_the_staging_file(tmp_path, monkeypatch):
@@ -840,8 +840,8 @@ def test_stop_after_the_child_exited_leaves_the_staging_file(tmp_path, monkeypat
     # Codex 外门 C-4: the finished video is PUBLISHED by stop() itself, because
     # the worker may never run check() again — a Stop between files must not
     # throw away completed work.
-    assert (out / "a_restored.mp4").exists()
-    assert not (out / "a_restored.tmp.mp4").exists()
+    assert (out / "a-破解.mp4").exists()
+    assert not (out / "a-破解.tmp.mp4").exists()
     # A later check() must not double-handle it, launch anything or emit done.
     st = inst.check(emit)
     assert st.state == "idle"
@@ -862,7 +862,7 @@ def test_exit_branch_publishes_a_clean_exit_while_stopping(tmp_path, monkeypatch
     inst.start(emit)
     inst._stopping.set()
     st = inst.check(emit)
-    assert (out / "a_restored.mp4").exists()
+    assert (out / "a-破解.mp4").exists()
     assert launcher.n == 1  # b.mp4 not launched
     assert inst._done == 0  # run is ending; the next start() rescans
     assert st.state == "idle"
@@ -1327,9 +1327,9 @@ def test_publish_retags_before_renaming(tmp_path, monkeypatch):
     _evs, emit = _events()
     inst.start(emit)
     # Stand in for Jasna's real output: HEVC tagged hev1, as ffmpeg writes it.
-    (out / "a_restored.tmp.mp4").write_bytes(_mp4(_sample_entry(b"hev1")))
+    (out / "a-破解.tmp.mp4").write_bytes(_mp4(_sample_entry(b"hev1")))
     inst.check(emit)
-    published = (out / "a_restored.mp4").read_bytes()
+    published = (out / "a-破解.mp4").read_bytes()
     assert b"hvc1" in published and b"hev1" not in published
     assert inst._done == 1
 
@@ -1344,9 +1344,9 @@ def test_publish_still_happens_when_the_file_cannot_be_retagged(tmp_path, monkey
     inst = JasnaInstance("j1", cfg)
     _evs, emit = _events()
     inst.start(emit)
-    (out / "a_restored.tmp.mp4").write_bytes(b"not an mp4")
+    (out / "a-破解.tmp.mp4").write_bytes(b"not an mp4")
     inst.check(emit)
-    assert (out / "a_restored.mp4").read_bytes() == b"not an mp4"
+    assert (out / "a-破解.mp4").read_bytes() == b"not an mp4"
     assert inst._done == 1
 
 
@@ -1416,17 +1416,17 @@ def test_publish_retags_the_staging_file_before_the_rename(tmp_path, monkeypatch
     real = J.retag_hevc_hvc1
 
     def spy(path):
-        seen.append((path.name, (out / "a_restored.mp4").exists()))
+        seen.append((path.name, (out / "a-破解.mp4").exists()))
         return real(path)
 
     monkeypatch.setattr(J, "retag_hevc_hvc1", spy)
     inst = JasnaInstance("j1", cfg)
     _evs, emit = _events()
     inst.start(emit)
-    (out / "a_restored.tmp.mp4").write_bytes(_mp4(_sample_entry(b"hev1")))
+    (out / "a-破解.tmp.mp4").write_bytes(_mp4(_sample_entry(b"hev1")))
     inst.check(emit)
-    assert seen == [("a_restored.tmp.mp4", False)]
-    assert b"hvc1" in (out / "a_restored.mp4").read_bytes()
+    assert seen == [("a-破解.tmp.mp4", False)]
+    assert b"hvc1" in (out / "a-破解.mp4").read_bytes()
 
 
 def test_publish_warns_when_the_tag_could_not_be_fixed(tmp_path, monkeypatch, caplog):
@@ -1437,7 +1437,7 @@ def test_publish_warns_when_the_tag_could_not_be_fixed(tmp_path, monkeypatch, ca
     inst = JasnaInstance("j1", cfg)
     _evs, emit = _events()
     inst.start(emit)
-    (out / "a_restored.tmp.mp4").write_bytes(b"not an mp4")
+    (out / "a-破解.tmp.mp4").write_bytes(b"not an mp4")
     with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
         inst.check(emit)
     assert any("kept its ffmpeg codec tag" in r.message for r in caplog.records)
@@ -1453,7 +1453,7 @@ def test_publish_does_not_warn_about_a_non_hevc_output(tmp_path, monkeypatch, ca
     inst = JasnaInstance("j1", cfg)
     _evs, emit = _events()
     inst.start(emit)
-    (out / "a_restored.tmp.mp4").write_bytes(_mp4(_sample_entry(b"avc1")))
+    (out / "a-破解.tmp.mp4").write_bytes(_mp4(_sample_entry(b"avc1")))
     with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
         inst.check(emit)
     assert not any("kept its ffmpeg codec tag" in r.message for r in caplog.records)
@@ -1471,7 +1471,7 @@ def test_publish_warns_when_an_hevc_job_produced_no_hevc_entry(
     inst = JasnaInstance("j1", cfg)
     _evs, emit = _events()
     inst.start(emit)
-    (out / "a_restored.tmp.mp4").write_bytes(_mp4(_sample_entry(b"avc1")))
+    (out / "a-破解.tmp.mp4").write_bytes(_mp4(_sample_entry(b"avc1")))
     with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
         inst.check(emit)
     assert any("no-hevc-entry" in r.message for r in caplog.records)
@@ -1487,7 +1487,7 @@ def test_publish_does_not_retag_a_missing_staging_file(tmp_path, monkeypatch, ca
     inst = JasnaInstance("j1", cfg)
     evs, emit = _events()
     inst.start(emit)
-    (out / "a_restored.tmp.mp4").unlink()
+    (out / "a-破解.tmp.mp4").unlink()
     with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
         inst.check(emit)
     # (match the log TEXT, not the word "retag": pytest's tmp_path is named

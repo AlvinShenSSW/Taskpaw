@@ -3,7 +3,10 @@
 Points at a library folder, walks it (recursively by default) and, for every
 video without a same-named `.srt`, writes `<stem>.ja.srt` (WhisperJAV) and
 `<stem>.srt` (Simplified Chinese through the agent's LLM setting) next to the
-video. Everything engine-related is the shared `taskpaw_v3.monitors.subs`
+video. The `.ja.srt` is only the resume checkpoint (#187): it is deleted once
+the job settles `completed` with its `.srt` published — a pre-existing library
+`.ja.srt` included — and kept on every other path, so the next Start only
+translates. Everything engine-related is the shared `taskpaw_v3.monitors.subs`
 package (#177); this module owns tree planning (`plan_tree`), the task's queue,
 settlement, abort, `done` and status.
 
@@ -217,7 +220,7 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
             if not suffix or suffix not in exts:
                 continue
             if ".tmp." in name.casefold():
-                continue  # a staging/temp file (e.g. Jasna's `x_restored.tmp.mp4`)
+                continue  # a staging/temp file (e.g. Jasna's `x-破解.tmp.mp4`)
             if name.startswith("._"):
                 continue  # macOS AppleDouble metadata, not a video
             try:
@@ -320,9 +323,11 @@ class AvsubsConfig(BaseMonitorConfig):
     avsubs_root_folder: str = Field(
         "",
         description="The video library folder to scan (required). Every video "
-        "without a same-named .srt gets <name>.ja.srt (Japanese) and <name>.srt "
-        "(Simplified Chinese) next to it; videos that already have a .srt are "
-        "skipped and an existing .ja.srt is reused (translation only). Hidden, "
+        "without a same-named .srt gets <name>.srt (Simplified Chinese) next to "
+        "it; videos that already have a .srt are skipped. The Japanese transcript "
+        "<name>.ja.srt is an intermediate: it is deleted once the .srt is written "
+        "and kept when translation does not finish — an existing .ja.srt is "
+        "reused (translation only), then deleted the same way. Hidden, "
         "linked or mounted folders, and macOS ._ metadata files, are skipped. A .avsubs working folder is created here. "
         "The GPU is shared with Jasna, one file at a time. Do not let two active "
         "tasks cover overlapping folders, and do not point it at the output "
@@ -925,7 +930,7 @@ class AvsubsInstance(MonitorInstance):
             elif outcome.kind == "no_speech":
                 err = job.publish_empty()
                 if err is None:
-                    self._settle(name, "completed", "no speech", emit)
+                    self._settle_completed(job, "no speech", emit)
                 else:
                     self._settle(name, "failed", err, emit)
                     self._alert_job(name, err, emit)
@@ -1092,6 +1097,22 @@ class AvsubsInstance(MonitorInstance):
         if self._streak >= _ABORT_AFTER and not self._aborted:
             self._abort(emit)
 
+    def _settle_completed(self, job: SubsJob, detail: str, emit: EventEmitter) -> None:
+        """Under `_launch_lock`, right after `job`'s zh was published: settle it
+        `completed` and delete its `.ja.srt` (#187) — a pre-existing library one
+        too (owner's rule). The transcript is only the checkpoint a later Start
+        resumes an unfinished translation from, so every other terminal path
+        keeps it. A single unlink, like the publish's `os.replace`; a failure
+        is logged and never fails the job or raises."""
+        self._settle(job.job_id, "completed", detail, emit)
+        if self._settled.get(job.job_id, ("", ""))[0] != "completed":
+            return
+        err = job.discard_ja()
+        if err is not None:
+            log.warning(
+                "avsubs %s: %s: %s", self.instance_id, _printable(job.job_id), err
+            )
+
     def _abort(self, emit: EventEmitter) -> None:
         """Under the lock (C7): flags, settlement and one alert; the kill →
         release + withdraw → translator cancel part is deferred until the lock
@@ -1164,7 +1185,7 @@ class AvsubsInstance(MonitorInstance):
         if not cues:
             err = job.publish_zh([])
             if err is None:
-                self._settle(job.job_id, "completed", "no speech", emit)
+                self._settle_completed(job, "no speech", emit)
             else:
                 self._settle(job.job_id, "failed", err, emit)
                 self._alert_job(job.job_id, err, emit)
@@ -1205,7 +1226,7 @@ class AvsubsInstance(MonitorInstance):
                     if result.outcome == "translated":
                         err = job.publish_zh(result.zh_cues)
                         if err is None:
-                            self._settle(job.job_id, "completed", "", emit)
+                            self._settle_completed(job, "", emit)
                         else:
                             self._settle(job.job_id, "failed", err, emit)
                             self._alert_job(job.job_id, err, emit)

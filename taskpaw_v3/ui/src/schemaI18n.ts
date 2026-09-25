@@ -154,7 +154,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     jasna_output_folder: {
       title: "输出文件夹",
       description:
-        "结果写入的文件夹，每个文件输出 <原名>_restored.mp4。托管模式必填；已存在最终输出的文件会被跳过（断点续跑），也用于统计队列数量与完成通知。",
+        "结果写入的文件夹，每个文件输出 <原名>-破解.mp4，也用于统计队列数量与完成通知。托管模式必填；已存在最终输出的文件会被跳过（断点续跑），TaskPaw 3.5 及更早版本生成的 <原名>_restored.mp4 也算已修复（不改名、不重跑）。",
     },
     unet4x_1080p: {
       title: "1080p 档：使用 unet-4x 二次修复",
@@ -169,7 +169,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     av_translate: {
       title: "AV 翻译",
       description:
-        "默认关。开：每个文件修复完成后，用 WhisperJAV 识别日语语音，再用「设置」里的 LLM API 翻译成简体中文，在修复后的视频旁边生成 <原名>_restored.ja.srt（日语）和 <原名>_restored.srt（简体中文）。输出文件夹里已修复但还没有字幕的影片，会在待修复文件全部处理完之后补做；已存在的 .ja.srt 会直接复用（只做翻译）。会在输出文件夹里创建 .avsubs/ 工作文件夹。需要先在「设置」里配置 LLM API。已有的 .ja.srt / .srt 会原样复用：如果同名替换了源视频，请先删掉旧的 .srt 文件。",
+        "默认关。开：每个文件修复完成后，用 WhisperJAV 识别日语语音，再用「设置」里的 LLM API 翻译成简体中文，在修复后的视频旁边生成与视频同名的中文字幕 <原名>-破解.srt（3.5 及更早版本修复的 <原名>_restored.mp4 则生成 <原名>_restored.srt）。日文字幕 <原名>-破解.ja.srt 只是中间产物：中文字幕写好后自动删除；翻译没完成（失败、跳过、缺 API key、停止）时保留，下次启动只补翻译。输出文件夹里已修复但还没有字幕的影片，会在待修复文件全部处理完之后补做。会在输出文件夹里创建 .avsubs/ 工作文件夹。需要先在「设置」里配置 LLM API。已有的 .ja.srt / .srt 会原样复用：如果同名替换了源视频，请先删掉旧的 .srt 文件。",
     },
     whisperjav_exe_path: {
       title: "whisperjav.exe 路径",
@@ -227,7 +227,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     avsubs_root_folder: {
       title: "片库文件夹",
       description:
-        "要扫描的视频片库文件夹（必填）。每个还没有同名 .srt 的视频，会在旁边生成 <原名>.ja.srt（日语）和 <原名>.srt（简体中文）；已有 .srt 的视频会跳过，已存在的 .ja.srt 会直接复用（只做翻译）。隐藏、链接或挂载的文件夹，以及 macOS 的 ._ 元数据文件，会被跳过。会在该文件夹下创建 .avsubs/ 工作文件夹。与 Jasna 共用 GPU：两者同时运行时按文件轮流使用，等待的一方显示「waiting for GPU (held by …)」。需要先在「设置」里配置 LLM API。不会随 TaskPaw 开机自启，需手动点「启动」。注意：不要让两个运行中的任务覆盖相互重叠的文件夹，也不要指向已开启「AV 翻译」的 Jasna 任务的输出文件夹。",
+        "要扫描的视频片库文件夹（必填）。每个还没有同名 .srt 的视频，会在旁边生成 <原名>.srt（简体中文）；已有 .srt 的视频会跳过。日文字幕 <原名>.ja.srt 只是中间产物：中文字幕写好后自动删除，翻译没完成时保留；已存在的 .ja.srt 会直接复用（只做翻译），完成后同样删除。隐藏、链接或挂载的文件夹，以及 macOS 的 ._ 元数据文件，会被跳过。会在该文件夹下创建 .avsubs/ 工作文件夹。与 Jasna 共用 GPU：两者同时运行时按文件轮流使用，等待的一方显示「waiting for GPU (held by …)」。需要先在「设置」里配置 LLM API。不会随 TaskPaw 开机自启，需手动点「启动」。注意：不要让两个运行中的任务覆盖相互重叠的文件夹，也不要指向已开启「AV 翻译」的 Jasna 任务的输出文件夹。",
     },
     avsubs_recursive: {
       title: "扫描子文件夹",

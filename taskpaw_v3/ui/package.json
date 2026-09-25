@@ -1,7 +1,7 @@
 {
   "name": "taskpaw-v3-ui",
   "private": true,
-  "version": "3.5.1",
+  "version": "3.6.0",
   "type": "module",
   "description": "TaskPaw V3 shared frontend — agent console + Hub dashboard (Tauri + web).",
   "scripts": {

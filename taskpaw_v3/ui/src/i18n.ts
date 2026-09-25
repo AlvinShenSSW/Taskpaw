@@ -67,7 +67,7 @@ const en = {
   services: {
     lada: "Subtitle/translation pipeline — files, fps, GPU.",
     jasna: "Jasna video restore — per-file queue, unet-4x by resolution, GPU, optional AV-translate subtitles.",
-    avsubs: "AV translate — Japanese + Simplified Chinese .srt for every video in a library folder, GPU shared with Jasna.",
+    avsubs: "AV translate — a Simplified Chinese .srt named after each video in a library folder (the Japanese .ja.srt is only an intermediate, removed once translated), GPU shared with Jasna.",
     comfyui: "Image render queue depth and progress.",
     moomoo: "Trading server — life-signs heartbeat.",
     folder_watch: "Alert when files arrive or go idle.",
@@ -194,7 +194,7 @@ const zh: typeof en = {
   services: {
     lada: "字幕/翻译流水线 —— 文件、帧率、GPU。",
     jasna: "Jasna 视频修复 —— 逐文件队列、按分辨率启用 unet-4x、GPU、可选 AV 翻译字幕。",
-    avsubs: "AV 翻译 —— 为片库文件夹里的每个视频生成日语 + 简体中文 .srt,与 Jasna 轮流使用 GPU。",
+    avsubs: "AV 翻译 —— 为片库文件夹里的每个视频生成与视频同名的简体中文 .srt（日文 .ja.srt 只是中间产物，翻译完成后删除），与 Jasna 轮流使用 GPU。",
     comfyui: "图像渲染队列深度与进度。",
     moomoo: "交易服务 —— 生命体征心跳。",
     folder_watch: "文件到达或长时间空闲时告警。",

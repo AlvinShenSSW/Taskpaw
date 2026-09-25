@@ -8,7 +8,8 @@ Knows nothing about Jasna: paths in, outcomes out.
                  manifest outcome
 - `srt`        — strict parse/serialize
 - `translate`  — `Translator`, the `llm-worker` client thread
-- `job`        — `SubsJob`: ASR attempts, identity check, atomic publishing
+- `job`        — `SubsJob`: ASR attempts, identity check, atomic publishing,
+                 dropping the `.ja.srt` checkpoint once completed (#187)
 - `util`       — `bounded` (alert-sized detail) and `exists_quietly`
 
 Nothing here is imported from `lada.py` (C1).
