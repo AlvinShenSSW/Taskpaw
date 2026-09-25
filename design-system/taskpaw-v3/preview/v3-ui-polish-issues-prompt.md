@@ -19,7 +19,7 @@
 - 现有 UI 实现与契约：`taskpaw_v3/ui/`（重点：`src/theme.ts`、`src/App.tsx`、`src/views/AgentConsole.tsx`、`src/views/HubDashboard.tsx`、`src/components/SchemaForm.tsx`、`src/components/PathWidget.tsx`、`src/components/StatusDot.tsx`、`src/api.ts`、`src/i18n.ts`）
 - V3 UI 原始 spec：`docs/specs/2026-06-27-v3-ui-19.md`
 - 硬规则与协作约定：`docs/constitution.md`、`AGENTS.md`、`CLAUDE.md`
-- 仓库自带视觉精修知识库：`skill/ui-ux-pro-max/SKILL.md`（实现时按其 §1–§4 检查项自查）
+- 视觉精修知识库：用户级 `ui-ux-pro-max` 技能（实现时按其 §1–§4 检查项自查；仓库内的 `skill/` 副本已于 2026-09-25 移除）
 
 ## 2) 全局约束（写进每个 issue 的前提，别违反）
 
