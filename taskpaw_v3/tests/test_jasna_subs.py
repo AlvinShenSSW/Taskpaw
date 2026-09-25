@@ -533,7 +533,8 @@ def test_restore_then_asr_then_translation_end_to_end(tmp_path, monkeypatch):
     assert len(_done(r.evs)) == 1
     assert r.launcher.n == 2
     _assert_strict_pairs(gpu)
-    assert gpu.count("acquire") == 4  # 2 restores + 2 ASR
+    # #179 C5: file-scoped hold — each file acquires once (restore → ASR)
+    assert gpu.count("acquire") == 2
     inst.stop(timeout=1)
 
 
@@ -892,20 +893,22 @@ def test_asr_retry_that_cannot_start_settles_like_a_final_failure(
         assert len(_keyed(r.evs, "j1:subs-unstable:a.mp4")) == 1
     assert inst._subs_job is None
     assert r.launcher.n == 2  # next restore launched
-    assert gpu.count("acquire") == 3 and gpu.count("release") == 2  # b is live
+    # #179 C5: a's ASR continued with its restore hold; b is live
+    assert gpu.count("acquire") == 2 and gpu.count("release") == 1
     _assert_strict_pairs(gpu, open_ok=True)
 
 
 def test_stop_winning_the_lock_before_start_asr_still_releases_the_gpu(
     tmp_path, monkeypatch
 ):
-    # D30
-    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    # D30 — on the subs-only path, which still acquires (#179: a restored
+    # file's ASR continues with the restore's hold instead).
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"])
     log: list[str] = []
 
     def acquire(self) -> bool:
         log.append("acquire")
-        if len(log) == 3:  # the ASR acquire (restore acquire + release first)
+        if len(log) == 1:  # the subs-only ASR acquire
             self._stopping.set()
         return True
 
@@ -917,7 +920,7 @@ def test_stop_winning_the_lock_before_start_asr_still_releases_the_gpu(
     r.inst.start(r.emit)
     r.inst.check(r.emit)
     assert r.spawner.argvs == []
-    assert log == ["acquire", "release", "acquire", "release"]
+    assert log == ["acquire", "release"]
     assert not _done(r.evs)
 
 
@@ -1070,6 +1073,9 @@ def test_restart_takes_a_new_generation_cleans_up_and_sweeps(tmp_path, monkeypat
     old_tr = r.translators[0]
     stale = r.out / "d_restored.srt.99.tmp"
     stale.write_text("x", encoding="utf-8")
+    # #179 (C3/M12): the Start sweep only removes temporaries older than 10 min,
+    # so a same-folder avsubs publish in flight is never deleted — age this one.
+    os.utime(stale, (time.time() - 660,) * 2)
     keep = r.out / "notes.tmp"
     keep.write_text("x", encoding="utf-8")
     junk = r.out / ".avsubs" / "tmp" / "audio.wav"

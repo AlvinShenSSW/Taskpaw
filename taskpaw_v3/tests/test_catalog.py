@@ -32,6 +32,7 @@ def test_plugin_catalog_lists_all_with_schema():
         "tcp_check",
         "lada",
         "jasna",
+        "avsubs",
     } <= set(by_id)
     # each entry carries a form schema the UI can render + the four-piece bits
     for p in cat:
@@ -321,3 +322,28 @@ def test_jasna_av_translate_fields_in_the_catalog():
     assert ui["whisperjav_exe_path"]["ui:options"]["taskpawPath"] == "file"
     order = ui["ui:order"]
     assert order.index("av_translate") == order.index("unet4x_4k") + 1
+
+
+def test_avsubs_is_listed_with_directory_and_file_pickers():
+    # #179: the standalone「AV 翻译」task with its seven fields and the pickers.
+    by_id = {p["type_id"]: p for p in plugin_catalog()}
+    av = by_id["avsubs"]
+    assert av["display_name"] == "AV 翻译 (subtitles)"
+    assert av["category"] == "task" and av["system"] is False
+    props = av["json_schema"]["properties"]
+    assert {
+        "avsubs_root_folder",
+        "avsubs_recursive",
+        "avsubs_extensions",
+        "whisperjav_exe_path",
+        "whisperjav_engine",
+        "whisperjav_extra_args",
+        "avsubs_gpu_monitor",
+    } <= set(props)
+    assert props["avsubs_recursive"]["default"] is True
+    assert props["avsubs_extensions"]["default"] == ["mp4"]
+    assert props["whisperjav_engine"]["default"] == "anime-whisper"
+    ui = av["ui_schema"]
+    assert ui["avsubs_root_folder"]["ui:options"]["taskpawPath"] == "directory"
+    assert ui["whisperjav_exe_path"]["ui:options"]["taskpawPath"] == "file"
+    assert ui["ui:order"].index("avsubs_root_folder") == 1

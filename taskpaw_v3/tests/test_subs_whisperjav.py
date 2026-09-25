@@ -22,6 +22,7 @@ from taskpaw_v3.monitors.subs.whisperjav import (
     manifest_path,
     owned_flags_in,
     read_outcome,
+    validate_fields,
 )
 
 SRT_TWO = (
@@ -304,3 +305,96 @@ def test_read_outcome_relative_output_resolves_only_in_out_dir(tmp_path, monkeyp
     o = read_outcome(out, 0, "")
     assert o.kind == "succeeded"
     assert [c.text for c in o.cues] == ["はい", "いいえ"]
+
+
+# ── #179: validate_fields (C6 / AC10) — Jasna's exact #177 texts ──────────
+
+JASNA_OWNER = "AV 翻译 (av_translate)"
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [JASNA_OWNER, "AV 翻译 (subtitles)"],
+)
+@pytest.mark.parametrize("exe", ["", "   "])
+def test_validate_fields_required_needs_exe_with_owner_label(owner, exe):
+    with pytest.raises(ValueError) as ei:
+        validate_fields(exe, "anime-whisper", "", required=True, owner=owner)
+    assert str(ei.value) == (
+        f"{owner} needs whisperjav_exe_path — the full path to whisperjav.exe"
+    )
+
+
+def test_validate_fields_jasna_owner_text_is_byte_identical():
+    with pytest.raises(ValueError) as ei:
+        validate_fields("", DEFAULT_ENGINE, "", required=True, owner=JASNA_OWNER)
+    assert str(ei.value) == (
+        "AV 翻译 (av_translate) needs whisperjav_exe_path — the full path "
+        "to whisperjav.exe"
+    )
+
+
+def test_validate_fields_not_required_allows_an_empty_exe():
+    validate_fields("", "anime-whisper", "", required=False, owner=JASNA_OWNER)
+    validate_fields(
+        "C:/WJ/whisperjav.exe", "anime-whisper", "", required=True, owner="x"
+    )
+
+
+@pytest.mark.parametrize("required", [True, False])
+def test_validate_fields_unbalanced_quotes(required):
+    with pytest.raises(ValueError) as ei:
+        validate_fields(
+            "C:/WJ/whisperjav.exe",
+            "anime-whisper",
+            '--note "unbalanced',
+            required=required,
+            owner=JASNA_OWNER,
+        )
+    msg = str(ei.value)
+    assert msg.startswith("whisperjav_extra_args cannot be parsed (")
+    assert msg.endswith("); check the quotes")
+    assert isinstance(ei.value.__cause__, ValueError)
+
+
+def test_validate_fields_exe_check_comes_before_the_extra_args_check():
+    with pytest.raises(ValueError, match="needs whisperjav_exe_path"):
+        validate_fields(
+            "", "anime-whisper", '--note "bad', required=True, owner=JASNA_OWNER
+        )
+
+
+@pytest.mark.parametrize(
+    "extra,engine,hits",
+    [
+        ("--output-dir x", "anime-whisper", "--output-dir"),
+        ("--out x", "anime-whisper", "--out"),  # prefix
+        ("--mode fast", "large-v2", "--mode"),
+        ("--model=large-v3", "qwen3", "--model"),
+        ("--output-format vtt", "custom", "--output-format"),
+        ("--translate-api-key k", "custom", "--translate-api-key"),
+        ("--translate-provider x --lang ja", "custom", "--translate-provider, --lang"),
+    ],
+)
+@pytest.mark.parametrize("required", [True, False])
+def test_validate_fields_owned_or_forbidden_flags(extra, engine, hits, required):
+    with pytest.raises(ValueError) as ei:
+        validate_fields(
+            "C:/WJ/whisperjav.exe", engine, extra, required=required, owner="x"
+        )
+    assert str(ei.value) == (
+        f"whisperjav_extra_args must not set the flags TaskPaw owns or forbids ({hits})"
+    )
+
+
+@pytest.mark.parametrize(
+    "extra,engine",
+    [
+        ("--mode fast", "custom"),  # preset flags are free under custom
+        ("--sensitivity aggressive", "anime-whisper"),
+        ("--o x", "anime-whisper"),
+        ("", "large-v3"),
+    ],
+)
+def test_validate_fields_accepts_allowed_extra(extra, engine):
+    validate_fields("C:/WJ/whisperjav.exe", engine, extra, required=True, owner="x")

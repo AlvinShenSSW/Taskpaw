@@ -56,6 +56,7 @@ from typing import Callable, Iterable, Literal, Optional
 
 from pydantic import Field, model_validator
 
+from taskpaw_v3.core import gpu_lease
 from taskpaw_v3.core.generation import next_generation
 from taskpaw_v3.core.llm import get_llm_settings
 from taskpaw_v3.monitors.base import (
@@ -81,7 +82,8 @@ from taskpaw_v3.monitors.plugins.lada import (
 # `Translator` and `ChildProcess` are bound as module-level names and looked up
 # at call time, so tests can monkeypatch `J.Translator` / `J.ChildProcess` for
 # supervisor-created instances (D10). Nothing here comes from `lada.py` (C1).
-from taskpaw_v3.monitors.subs.child import ChildProcess
+from taskpaw_v3.monitors.subs import bounded, exists_quietly
+from taskpaw_v3.monitors.subs.child import ChildProcess, asr_env
 from taskpaw_v3.monitors.subs.job import SubsJob
 from taskpaw_v3.monitors.subs.srt import Cue, SrtError
 from taskpaw_v3.monitors.subs.translate import (
@@ -92,9 +94,10 @@ from taskpaw_v3.monitors.subs.translate import (
     Translator,
     needs_llm_key,
 )
-from taskpaw_v3.monitors.subs.whisperjav import DEFAULT_ENGINE, Engine
 from taskpaw_v3.monitors.subs.whisperjav import (
-    owned_flags_in as whisperjav_owned_flags_in,
+    DEFAULT_ENGINE,
+    Engine,
+    validate_fields,
 )
 
 log = logging.getLogger("taskpaw.monitors.jasna")
@@ -141,11 +144,12 @@ _SUBS_STAGING = ".avsubs"
 _JA_SUFFIX = "_restored.ja.srt"
 _ZH_SUFFIX = "_restored.srt"
 # Publish temp names are `<target>.<generation>.tmp` (subs/job.py); Start sweeps
-# every generation's leftovers.
+# every generation's leftovers — only once they are old enough (#179 M12): an
+# `avsubs` task publishing into the same folder uses the same pattern.
 _SUBS_TMP_GLOB = "*_restored*.srt.*.tmp"
+_SUBS_TMP_MIN_AGE = 600.0  # seconds (mtime)
 _SUBS_DISABLE_AFTER = 3
 _ASR_MAX_ATTEMPTS = 2
-_LLM_ENV_PREFIX = "TASKPAW_LLM_"
 
 SubsKind = Literal["full", "translate_only", "none"]
 Phase = Literal["restore", "subs", "translate"]
@@ -304,20 +308,13 @@ def zh_target_for(output_folder: str, video: Path) -> Path:
     return Path(output_folder) / f"{video.stem}{_ZH_SUFFIX}"
 
 
-def _exists(path: Path) -> bool:
-    try:
-        return path.exists()
-    except OSError:  # unreadable entry — treat as "not there yet"
-        return False
-
-
 def subs_kind(output_folder: str, video: Path) -> SubsKind:
     """What a file needs: an existing zh (a 0-byte one counts) → `none`; an
     existing `.ja.srt` (reused by existence only) → `translate_only`; else
     `full` (ASR + translation)."""
-    if _exists(zh_target_for(output_folder, video)):
+    if exists_quietly(zh_target_for(output_folder, video)):
         return "none"
-    if _exists(ja_target_for(output_folder, video)):
+    if exists_quietly(ja_target_for(output_folder, video)):
         return "translate_only"
     return "full"
 
@@ -364,7 +361,7 @@ def plan_subs(
     for video in entries:
         if video in skip:
             continue
-        if not _exists(output_path_for(output_folder, video)):
+        if not exists_quietly(output_path_for(output_folder, video)):
             continue
         if subs_kind(output_folder, video) != "none":
             subs_only.append(video)
@@ -372,29 +369,35 @@ def plan_subs(
     return SubsPlan(for_pending, subs_only, total)
 
 
-def _asr_env() -> dict[str, str]:
-    """The agent's environment minus every `TASKPAW_LLM_*` variable: the LLM key
-    (usually `TASKPAW_LLM_API_KEY`) must never reach the ASR child (AC10)."""
-    return {
-        k: v for k, v in os.environ.items() if not k.upper().startswith(_LLM_ENV_PREFIX)
-    }
-
-
 def _default_spawn(argv: list[str]) -> ChildProcess:
     # Resolved at call time so `J.ChildProcess` can be monkeypatched (D10).
     # stdin=DEVNULL (D15) and a merged stdout/stderr tail are ChildProcess's
-    # defaults; the env is scrubbed of the LLM key.
-    return ChildProcess(argv, env=_asr_env())
+    # defaults; the env is scrubbed of the LLM key (`asr_env`, AC10).
+    return ChildProcess(argv, env=asr_env())
+
+
+def _survivor_pids(child: Optional[ChildProcess]) -> list[int]:
+    """The ASR child's pid plus the tracked descendants still running (for the
+    survivor log line). Never raises; test doubles may lack the tracking."""
+    if child is None:
+        return []
+    pids: list[int] = []
+    pid = getattr(child, "pid", None)
+    if isinstance(pid, int):
+        pids.append(pid)
+    running = getattr(child, "tracked_running", None)
+    if callable(running):
+        try:
+            pids.extend(p for p in running() if p not in pids)
+        except Exception as e:  # diagnostics only
+            log.debug("jasna: survivor scan failed (%s)", e)
+    return pids
 
 
 def _bounded(text: str) -> str:
-    """An alert-sized detail: the head (e.g. `exit code 1: …`) plus the end of
-    the tail, never more than `_CRASH_DETAIL_CHARS`."""
-    text = (text or "").strip()
-    if len(text) > _CRASH_DETAIL_CHARS:
-        head = text[:80].rstrip()
-        text = f"{head} … {text[-(_CRASH_DETAIL_CHARS - 83) :].lstrip()}"
-    return text
+    """An alert-sized detail (the shared `bounded`, #179 S4): the head plus the
+    end of the tail, never more than `_CRASH_DETAIL_CHARS`."""
+    return bounded(text, _CRASH_DETAIL_CHARS)
 
 
 def sweep_orphan_staging(
@@ -727,7 +730,7 @@ class JasnaConfig(BaseMonitorConfig):
     whisperjav_exe_path: str = Field(
         "",
         description="Full path to whisperjav.exe (e.g. "
-        r"C:\WhisperJAV\whisperjav.exe) — NOT the folder. Required when AV 翻译 is "
+        r"C:\WhisperJAV\Scripts\whisperjav.exe) — NOT the folder. Required when AV 翻译 is "
         "ticked.",
     )
     whisperjav_engine: Engine = Field(
@@ -842,24 +845,13 @@ class JasnaConfig(BaseMonitorConfig):
                 "jasna_extra_args must not set the flags TaskPaw owns "
                 f"({', '.join(owned)}); use the dedicated fields instead"
             )
-        if self.av_translate and not self.whisperjav_exe_path.strip():
-            raise ValueError(
-                "AV 翻译 (av_translate) needs whisperjav_exe_path — the full path "
-                "to whisperjav.exe"
-            )
-        try:
-            wj_owned = whisperjav_owned_flags_in(
-                self.whisperjav_extra_args, self.whisperjav_engine
-            )
-        except ValueError as e:
-            raise ValueError(
-                f"whisperjav_extra_args cannot be parsed ({e}); check the quotes"
-            ) from e
-        if wj_owned:
-            raise ValueError(
-                "whisperjav_extra_args must not set the flags TaskPaw owns or "
-                f"forbids ({', '.join(wj_owned)})"
-            )
+        validate_fields(
+            self.whisperjav_exe_path,
+            self.whisperjav_engine,
+            self.whisperjav_extra_args,
+            required=self.av_translate,
+            owner="AV 翻译 (av_translate)",
+        )
         smallest = min(self.clip_size_1080p, self.clip_size_4k)
         if 2 * self.temporal_overlap >= smallest:
             raise ValueError(
@@ -957,12 +949,18 @@ class JasnaInstance(MonitorInstance):
         self._started = False
         self._ffprobe: Optional[str] = None
         self._prev_running: Optional[bool] = None  # passive transition
-        # GPU lease hooks (#177 AC9; bodies filled by #179). `_gpu_holder` makes
-        # every release pair exactly one acquire even when two exit paths race
-        # (tiny leaf lock, taken under nothing else).
+        # GPU lease (#177 AC9 hooks, backed by `core.gpu_lease` since #179).
+        # `_gpu_holder` makes every release pair exactly one acquire even when
+        # two exit paths race (tiny leaf lock, taken under nothing but
+        # `_launch_lock`). The hold is FILE-SCOPED (#179 C5/D7): a restore's
+        # hold that the same file continues with (its ASR, or a same-file
+        # retry) is parked in `_carried` and transferred, never given and
+        # re-taken. `_gpu_waiting`: a launch was refused; `check()` retries.
         self._gpu_lock = threading.Lock()
         self._gpu_holder: Optional[object] = None
         self._restore_hold: Optional[object] = None
+        self._carried: Optional[object] = None
+        self._gpu_waiting = False
         # 「AV 翻译」(#177) — per-run subtitle state, reset in start()
         self._spawn: Callable[[list[str]], ChildProcess] = _default_spawn
         self._run: RunId = (instance_id, 0)
@@ -1040,10 +1038,20 @@ class JasnaInstance(MonitorInstance):
     def _reset_subs(self) -> None:
         """Every per-run subtitle field back to its initial value, under a NEW
         process-wide generation (results/temp names of an earlier run — or an
-        earlier instance object — can never be mistaken for this run's)."""
+        earlier instance object — can never be mistaken for this run's).
+
+        #179 N7: a hold the OLD run still records is released, and the old run's
+        waiter entry withdrawn, BEFORE `_run` changes — a late release under the
+        new run id would be refused and the lease would stay stuck."""
         with self._gpu_lock:
+            had_hold = self._gpu_holder is not None
             self._gpu_holder = None
+        if had_hold:
+            self._gpu_release()
+        gpu_lease.withdraw(self._run)
         self._restore_hold = None
+        self._carried = None
+        self._gpu_waiting = False
         self._run = (self.instance_id, next_generation())
         self._phase = "restore"
         self._plan = SubsPlan({}, [], 0)
@@ -1063,8 +1071,10 @@ class JasnaInstance(MonitorInstance):
         self._had_work = False
 
     def _sweep_subs_leftovers(self) -> None:
-        """Best effort: `*_restored*.srt.<gen>.tmp` publish leftovers and
-        WhisperJAV's `.avsubs/tmp` from a crashed / hard-stopped run."""
+        """Best effort: `*_restored*.srt.<gen>.tmp` publish leftovers untouched
+        for `_SUBS_TMP_MIN_AGE` (#179 M12 — a fresh one may belong to another
+        task still publishing) and WhisperJAV's `.avsubs/tmp` from a crashed /
+        hard-stopped run."""
         out = self._cfg.jasna_output_folder.strip()
         if not out:
             return
@@ -1073,9 +1083,10 @@ class JasnaInstance(MonitorInstance):
         except OSError as e:
             log.warning("jasna: subtitle temp sweep skipped (%s)", e)
             leftovers = []
+        now = time.time()
         for tmp in leftovers:
             try:
-                if tmp.is_file():
+                if tmp.is_file() and now - tmp.stat().st_mtime >= _SUBS_TMP_MIN_AGE:
                     tmp.unlink()
             except OSError as e:
                 log.warning("jasna: could not sweep %s: %s", tmp, e)
@@ -1083,6 +1094,7 @@ class JasnaInstance(MonitorInstance):
 
     def _emit_launch_error(self, emit: EventEmitter, msg: str) -> None:
         self._launch_error = msg
+        gpu_lease.withdraw(self._run)  # nothing launches any more this run
         emit(
             "alert",
             f"{self._cfg.name} error",
@@ -1306,8 +1318,16 @@ class JasnaInstance(MonitorInstance):
                 self._gpu_give(self._restore_hold)
                 job = self._subs_job
                 if job is not None and job.child is not None:
-                    job.terminate(timeout=max(0.1, deadline - time.monotonic()))
+                    self._kill_asr(job, max(0.1, deadline - time.monotonic()))
                     self._gpu_give(job)
+            # #179 M4: whatever still holds the GPU — e.g. a restore's hold
+            # carried to the same file's ASR or retry — is given now, and a
+            # registered wait is withdrawn: nothing of this run launches again.
+            with self._gpu_lock:
+                holder = self._gpu_holder
+            self._gpu_give(holder)
+            gpu_lease.withdraw(self._run)
+            self._gpu_waiting = False  # K8: a stopped task never "waits"
         finally:
             if acquired:
                 self._launch_lock.release()
@@ -1328,16 +1348,46 @@ class JasnaInstance(MonitorInstance):
         if job is None or child is None:
             return
         if child.poll() is None:
-            job.terminate(timeout=max(0.1, min(5.0, deadline - time.monotonic())))
+            self._kill_asr(job, max(0.1, min(5.0, deadline - time.monotonic())))
         else:
             outcome = job.poll_asr()
             if outcome is not None and outcome.kind == "succeeded":
                 err = job.publish_ja(outcome.cues)
                 if err is not None:
                     log.warning("jasna %s: %s", self.instance_id, err)
-            job.terminate(timeout=0.5)  # joins readers; no-op once reaped
-        self._gpu_give(job)
-        self._subs_job = None
+            self._kill_asr(job, 0.5)  # joins readers; no-op once reaped
+        self._gpu_give(job)  # C11: released even when a process survived
+        if job.child is None:
+            # A direct child still running keeps `_subs_job` (and so the
+            # live-child guards); the next start()'s stop() tries again.
+            self._subs_job = None
+
+    def _kill_asr(
+        self, job: SubsJob, timeout: float, emit: Optional[EventEmitter] = None
+    ) -> bool:
+        """Tree-kill `job`'s ASR child (#179 C11). A False result — a tracked
+        process survived — is logged with the pids and, where an `emit` is
+        available, alerted once; the caller still releases the hold."""
+        child = job.child
+        if job.terminate(timeout=timeout):
+            return True
+        pids = _survivor_pids(child)
+        log.error(
+            "jasna %s: WhisperJAV processes survived the kill of %s: %s",
+            self.instance_id,
+            job.job_id,
+            pids,
+        )
+        if emit is not None:
+            emit(
+                "alert",
+                f"{self._cfg.name}: a WhisperJAV process may still be running",
+                f"Stopping the transcription of {job.job_id} left a process "
+                f"running (pids {pids}); check Task Manager. The GPU is handed "
+                "on regardless.",
+                dedupe_key=f"{self.instance_id}:subs-survivor",
+            )
+        return False
 
     def _delete_current_staging(self) -> None:
         if self._current is None:
@@ -1353,29 +1403,42 @@ class JasnaInstance(MonitorInstance):
     # ── launching ──────────────────────────────────────────────────────────
     def _launch_next(self, emit: EventEmitter) -> None:
         if self._stopping.is_set() or not self._pending:
+            self._give_carried()
             return
-        # Peek + probe BEFORE taking the lock: probe_resolution may block up to 5 s
-        # and touches no shared state. A relaunch of the SAME file reuses the
-        # earlier probe (Q-3). Only this worker thread mutates _pending/_current.
-        nxt = self._pending[0]
-        if nxt == self._current and self._current_tier is not None:
-            tier: Tier = self._current_tier
-            dims = self._current_dims
-        else:
-            dims = probe_resolution(nxt, self._ffprobe)
-            tier = tier_for(*dims) if dims else "1080p"
-        # The previous file's reader is at EOF (its process exited before we got
-        # here); join it so it can't append to the deque we are about to clear.
-        prev_reader = self._reader
-        if prev_reader is not None and prev_reader.is_alive():
-            prev_reader.join(timeout=1)
-
-        # GPU lease (#177 AC9): acquired OUTSIDE the lock (it may wait in #179);
-        # every path below that does not leave a live child releases it.
+        # GPU lease FIRST (#179 D5), outside the lock and never blocking: a
+        # same-file retry continues with the carried hold (C5/D7); otherwise the
+        # lease is tried, and a refusal leaves `_pending` untouched and waits
+        # for the next check() — the probe is not even run.
         hold = object()
-        self._gpu_take(hold)
+        carried, self._carried = self._carried, None
+        if not (carried is not None and self._gpu_transfer(carried, hold)):
+            if self._stopping.is_set():
+                return  # stop() gave the carried hold; take nothing new
+            if not self._gpu_take(hold):
+                self._gpu_waiting = True
+                return
+        self._gpu_waiting = False  # S5: we hold the GPU — no longer waiting
+        # N5: from here on every path that does not leave a live child gives
+        # the hold — the probe and the reader join included.
         launched = False
         try:
+            # Peek + probe BEFORE taking the lock: probe_resolution may block up
+            # to 5 s and touches no shared state. A relaunch of the SAME file
+            # reuses the earlier probe (Q-3). Only this worker thread mutates
+            # _pending/_current.
+            nxt = self._pending[0]
+            if nxt == self._current and self._current_tier is not None:
+                tier: Tier = self._current_tier
+                dims = self._current_dims
+            else:
+                dims = probe_resolution(nxt, self._ffprobe)
+                tier = tier_for(*dims) if dims else "1080p"
+            # The previous file's reader is at EOF (its process exited before we
+            # got here); join it so it can't append to the deque we are about to
+            # clear.
+            prev_reader = self._reader
+            if prev_reader is not None and prev_reader.is_alive():
+                prev_reader.join(timeout=1)
             launched = self._launch_locked(emit, tier, dims, hold)
         finally:
             if not launched:
@@ -1553,13 +1616,39 @@ class JasnaInstance(MonitorInstance):
                     self._phase = self._live_phase()
                     return self._build_status("degraded", detail=self._aborted_detail())
         self._poll_subs(emit)
+        self._retry_gpu_wait(emit)
         self._maybe_done(emit)  # D1: evaluated at the end of EVERY check
         if self._launch_error is not None:
             return MonitorStatus(state="error", detail=self._launch_error)
         self._phase = self._live_phase()
-        if self._process is not None or self._asr_live() or self._translating():
+        if self._process is not None or self._asr_live():
+            return self._build_status("running")
+        if self._gpu_waiting:
+            # #179: queued work waits for the GPU another task holds.
+            return self._build_status("running" if self._translating() else "idle")
+        if self._translating():
             return self._build_status("running")
         return self._build_status("idle", detail=self._idle_note or None)
+
+    def _gpu_child_live(self) -> bool:
+        return self._process is not None or self._asr_live()
+
+    def _retry_gpu_wait(self, emit: EventEmitter) -> None:
+        """#179: a launch refused by the GPU lease is retried once per check;
+        a retry that finds nothing needing the GPU withdraws the wait (D12)."""
+        if (
+            not self._gpu_waiting
+            or self._gpu_child_live()
+            or self._stopping.is_set()
+            or self._batch_aborted
+            or self._launch_error is not None
+        ):
+            return
+        self._gpu_waiting = False
+        self._advance_requested = True
+        self._dispatch(emit)
+        if not self._gpu_waiting and not self._gpu_child_live():
+            gpu_lease.withdraw(self._run)
 
     def _asr_live(self) -> bool:
         job = self._subs_job
@@ -1589,28 +1678,57 @@ class JasnaInstance(MonitorInstance):
 
     # ── exit handling (one place, under _launch_lock) ──────────────────────
     def _handle_exit(self, retcode: int, emit: EventEmitter) -> None:
-        stopping = False
         with self._launch_lock:
             if self._process is None:
                 return  # already handled
             self._process = None  # handled ONCE
             self._next_action = None
-            if self._stopping.is_set():
-                # Shutting down: a terminate-induced non-zero exit is not a file
-                # failure — don't alert, don't relaunch. A clean exit is still
-                # published so the finished video survives the Stop (C-4).
-                if retcode == 0:
-                    self._publish_current()
-                stopping = True
-            elif retcode == 0:
-                self._handle_success(emit)
-            else:
-                self._handle_failure(retcode, emit)
+            # Shutting down: a terminate-induced non-zero exit is not a file
+            # failure — don't alert, don't relaunch. A clean exit is still
+            # published so the finished video survives the Stop (C-4).
+            stopping = self._stopping.is_set()
+            failed_before, done_before = self._failed, self._done
+            internal = False
+            try:  # CX2: a raise here must never strand the restore's hold
+                if stopping:
+                    if retcode == 0:
+                        self._publish_current()
+                elif retcode == 0:
+                    self._handle_success(emit)
+                else:
+                    self._handle_failure(retcode, emit)
+            except Exception as e:
+                internal = True
+                self._exit_internal_error(e, stopping, failed_before, done_before, emit)
             # D3: exactly ONE post-lock action, chosen under the lock.
-            action = self._next_action or "advance"
+            action = "advance" if internal else (self._next_action or "advance")
             self._next_action = None
             video = self._current
-        self._gpu_give(self._restore_hold)  # the restore child is gone
+            # #179 C5/D7: the hold is FILE-scoped — kept (carried) when the
+            # same file continues with a GPU child: its ASR (a `full` job) or a
+            # retry `_requeue_current()` put back at the head of `_pending`.
+            # Never after an internal error (CX2): the file's work is over.
+            carry = (
+                not stopping
+                and not internal
+                and (
+                    (
+                        action == "subs"
+                        and video is not None
+                        and self._kinds.get(video.name) == "full"
+                    )
+                    or (
+                        action == "advance"
+                        and video is not None
+                        and bool(self._pending)
+                        and self._pending[0] == video
+                    )
+                )
+            )
+            if carry:
+                self._carried = self._restore_hold
+        if not carry:
+            self._gpu_give(self._restore_hold)  # the file's GPU work is over
         if stopping:
             return
         # Act OUTSIDE the lock: _launch_next probes the next file (up to 5 s)
@@ -1626,6 +1744,48 @@ class JasnaInstance(MonitorInstance):
         # return `degraded` (D8).
         self._run_deferred()
         self._dispatch(emit)
+        # A continuation nothing consumed (e.g. the run was aborted or stopped
+        # meanwhile) must not keep the GPU.
+        self._give_carried()
+
+    def _exit_internal_error(
+        self,
+        e: Exception,
+        stopping: bool,
+        failed_before: int,
+        done_before: int,
+        emit: EventEmitter,
+    ) -> None:
+        """CX2 (under `_launch_lock`, never raises): the exit handling of the
+        current file raised. Logged; unless stopping — or the file's outcome was
+        already counted before the raise — it fails through `_fail_current`
+        (one alert, the subtitle `skipped(restore_failed)` settle, the 3-strike
+        abort) with a bounded `internal: <Type>: <msg>` detail. A subtitle job
+        the file can no longer reach is settled so `done` can still fire."""
+        name = self._current.name if self._current is not None else "?"
+        log.exception(
+            "jasna %s: internal error handling the exit of %s", self.instance_id, name
+        )
+        self._next_action = None
+        if stopping:
+            return
+        try:
+            detail = _bounded(f"internal: {type(e).__name__}: {e}")
+        except Exception:
+            detail = "internal error"
+        if self._failed == failed_before and self._done == done_before:
+            try:
+                self._fail_current(emit, detail)
+            except Exception:
+                log.exception("jasna %s: failing %s raised", self.instance_id, name)
+                if self._failed == failed_before:
+                    self._failed += 1
+                    self._consecutive_failures += 1
+        if self._cfg.av_translate and name in self._jobs and name not in self._settled:
+            try:
+                self._settle(name, "skipped", "restore_failed", emit)
+            except Exception:
+                log.exception("jasna %s: settling %s raised", self.instance_id, name)
 
     def _publish_current(self) -> Optional[str]:
         """Atomic publish of the current file's staging output (constitution §2).
@@ -1761,6 +1921,7 @@ class JasnaInstance(MonitorInstance):
                 # _handle_exit releases the lock, before `degraded` is returned.
                 self._disable_subs("batch aborted", emit)
             self._batch_aborted = True
+            gpu_lease.withdraw(self._run)  # #179: nothing launches again
             emit(
                 "alert",
                 f"{cfg.name} batch aborted",
@@ -1848,6 +2009,7 @@ class JasnaInstance(MonitorInstance):
             f"done, {self._failed} failed{subs} | "
             f"{datetime.now():%Y-%m-%d %H:%M:%S}",
         )
+        gpu_lease.withdraw(self._run)  # #179: the run needs no GPU any more
         # F2 (constitution §4): the run is over — end the idle translator thread
         # and its llm-worker now instead of at Stop. Bounded, and never under
         # `_launch_lock` (`_maybe_done` only runs outside it).
@@ -1864,17 +2026,42 @@ class JasnaInstance(MonitorInstance):
 
     # ── 「AV 翻译」: subtitle phases (#177) ─────────────────────────────────
     def _gpu_acquire(self) -> bool:
-        """GPU lease hook (#179 fills it). Always paired with `_gpu_release`."""
-        return True
+        """Try the process-wide GPU lease (#179); never blocks. A True is
+        always paired with one `_gpu_release`. A refusal while stopping
+        withdraws the waiter entry at once (D6)."""
+        ok = gpu_lease.try_acquire(
+            self._run, self._cfg.poll_interval, label=self._cfg.name
+        )
+        if not ok and self._stopping.is_set():
+            gpu_lease.withdraw(self._run)
+        return ok
 
     def _gpu_release(self) -> None:
-        """GPU lease hook (#179 fills it)."""
+        gpu_lease.release(self._run)
 
-    def _gpu_take(self, holder: object) -> None:
+    def _gpu_take(self, holder: object) -> bool:
+        """Acquire the lease for `holder`; False (nothing recorded) when it is
+        refused — the caller waits and retries on a later check."""
         if not self._gpu_acquire():
-            log.warning("jasna %s: GPU lease not granted; continuing", self.instance_id)
+            return False
         with self._gpu_lock:
             self._gpu_holder = holder
+        return True
+
+    def _gpu_transfer(self, old: Optional[object], new: object) -> bool:
+        """Hand the hold from `old` to `new` without touching the lease (#179
+        C5: same-file continuation). False when `old` is not the holder (e.g.
+        stop() already gave it)."""
+        with self._gpu_lock:
+            if old is None or self._gpu_holder is not old:
+                return False
+            self._gpu_holder = new
+        return True
+
+    def _give_carried(self) -> None:
+        """Give a carried hold nothing is going to continue with."""
+        carried, self._carried = self._carried, None
+        self._gpu_give(carried)
 
     def _gpu_give(self, holder: Optional[object]) -> None:
         """Release the hook once for `holder` — a no-op for any other holder, so
@@ -1945,9 +2132,12 @@ class JasnaInstance(MonitorInstance):
             # D26: an exited-but-unpolled child is NOT reaped — still terminate
             # it (harmless on an exited tree), join it and release its hook.
             if job is not None and job.child is not None:
-                job.terminate()
-                self._gpu_give(job)
-                if self._subs_job is job:
+                self._kill_asr(job, 5.0, emit)
+                self._gpu_give(job)  # C11: released even when one survived
+                # A direct child still running keeps `_subs_job`, so the
+                # live-child guards keep blocking launches until `_poll_subs`
+                # reaps it.
+                if self._subs_job is job and job.child is None:
                     self._subs_job = None
                     self._phase = "restore"
                     self._advance_requested = True
@@ -2004,45 +2194,63 @@ class JasnaInstance(MonitorInstance):
         flags under the lock, and the GPU release / deferred work run after it
         (D27/D30)."""
         name = video.name
+        # #179 C5: the restore's hold when this file was just restored (full
+        # kind); None on the subs-only path.
+        carried, self._carried = self._carried, None
         job = self._jobs.get(name)
         if job is None or name in self._settled:
+            self._gpu_give(carried)
             self._advance_requested = True
             return
         if self._kinds.get(name) == "translate_only":
+            self._gpu_give(carried)
             with self._launch_lock:  # no GPU (D12)
                 if not self._stopping.is_set() and self._subs_disabled is None:
                     self._submit_translation(job, None, emit)
                     self._advance_requested = True
             self._run_deferred()
             return
-        self._gpu_take(job)
+        if not (carried is not None and self._gpu_transfer(carried, job)):
+            if self._stopping.is_set():
+                return  # stop() gave the carried hold; take nothing new
+            if not self._gpu_take(job):
+                # Refused: the file stays first in line, check() retries.
+                self._subs_only.insert(0, video)
+                self._gpu_waiting = True
+                return
+        self._gpu_waiting = False  # S5: we hold the GPU — no longer waiting
         release_gpu = False
         with self._launch_lock:
-            if self._stopping.is_set() or self._subs_disabled is not None:
-                release_gpu = True  # D30: no bare return — the release pairs
-            else:
-                err = job.start_asr(self._spawn)
-                if (
-                    err is not None
-                    and err != "unstable"
-                    and job.attempt < _ASR_MAX_ATTEMPTS
-                ):
-                    err = job.start_asr(self._spawn)  # a failed attempt: retry once
-                if self._stopping.is_set():
-                    job.terminate(timeout=2.0)  # D9: stop() raced the spawn
-                    release_gpu = True
-                elif err is None:
-                    self._phase = "subs"
-                    self._subs_job = job
-                elif err == "unstable":
-                    self._settle_unstable(job, emit)
-                    release_gpu = True
-                    self._advance_requested = True
+            try:  # K1: we hold the GPU — no raise may skip the give below
+                if self._stopping.is_set() or self._subs_disabled is not None:
+                    release_gpu = True  # D30: no bare return — the release pairs
                 else:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
-                    release_gpu = True
-                    self._advance_requested = True
+                    err = job.start_asr(self._spawn)
+                    if (
+                        err is not None
+                        and err != "unstable"
+                        and job.attempt < _ASR_MAX_ATTEMPTS
+                    ):
+                        err = job.start_asr(self._spawn)  # failed attempt: retry
+                    if self._stopping.is_set():
+                        self._kill_asr(job, 2.0, emit)  # D9: stop() raced the spawn
+                        if job.child is not None:
+                            self._subs_job = job  # keep the live-child guard (C11)
+                        release_gpu = True
+                    elif err is None:
+                        self._phase = "subs"
+                        self._subs_job = job
+                    elif err == "unstable":
+                        self._settle_unstable(job, emit)
+                        release_gpu = True
+                        self._advance_requested = True
+                    else:
+                        self._settle(name, "failed", err, emit)
+                        self._alert_job(name, err, emit)
+                        release_gpu = True
+                        self._advance_requested = True
+            except Exception as e:
+                release_gpu = self._fence_internal(job, e, emit)
         if release_gpu:
             self._gpu_give(job)
         self._run_deferred()
@@ -2061,6 +2269,17 @@ class JasnaInstance(MonitorInstance):
         job = self._subs_job
         if job is None:
             return
+        if self._subs_disabled is not None or job.job_id in self._settled:
+            # The deferred terminate owns this job (D22). It leaves the job
+            # current only when the direct child survived the kill (C11, hold
+            # already released): reap it here once it has exited.
+            with self._launch_lock:
+                if self._stopping.is_set() or self._subs_job is not job:
+                    return
+                self._reap_survivor(job)
+            self._run_deferred()
+            self._dispatch(emit)
+            return
         release_gpu = False
         with self._launch_lock:
             if (
@@ -2070,54 +2289,127 @@ class JasnaInstance(MonitorInstance):
                 or self._subs_job is not job
             ):
                 return  # stop() / the deferred terminate owns this job (D22)
-            outcome = job.poll_asr()
-            if outcome is None:
-                return
-            terminal = True
-            name = job.job_id
-            if outcome.kind == "succeeded":
-                err = job.publish_ja(outcome.cues)  # D9: under the lock
-                if err is not None:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
-                else:
-                    self._submit_translation(job, list(outcome.cues), emit)
-            elif outcome.kind == "no_speech":
-                err = job.publish_empty()
-                if err is None:
-                    self._settle(name, "completed", "no speech", emit)
-                else:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
-            elif outcome.kind == "unstable":
-                self._settle_unstable(job, emit)
-            elif job.attempt < _ASR_MAX_ATTEMPTS:
-                err = job.start_asr(self._spawn)  # retry: a new attempt dir
-                if self._stopping.is_set():
-                    # D35: exactly _start_subs's post-spawn re-check.
-                    job.terminate(timeout=2.0)
-                    release_gpu = True
-                    self._subs_job = None
-                    terminal = False
-                elif err is None:
-                    terminal = False  # the job stays current
-                elif err == "unstable":  # D33: like a final failure
-                    self._settle_unstable(job, emit)
-                else:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
-            else:
-                self._settle(name, "failed", outcome.detail, emit)
-                self._alert_job(name, outcome.detail, emit)
-            if terminal:
-                self._subs_job = None
-                release_gpu = True
-                self._phase = "translate" if self._translating() else "restore"
-                self._advance_requested = True  # D28
+            try:  # K1: we hold the GPU — no raise may skip the give below
+                release_gpu = self._poll_subs_locked(job, emit)
+            except Exception as e:
+                release_gpu = self._fence_internal(job, e, emit)
         if release_gpu:
             self._gpu_give(job)
         self._run_deferred()
         self._dispatch(emit)
+
+    def _poll_subs_locked(self, job: SubsJob, emit: EventEmitter) -> bool:
+        """The locked body of `_poll_subs`; True when the hold is to be given."""
+        release_gpu = False
+        outcome = job.poll_asr()
+        if outcome is None:
+            return False
+        terminal = True
+        name = job.job_id
+        if outcome.kind == "succeeded":
+            err = job.publish_ja(outcome.cues)  # D9: under the lock
+            if err is not None:
+                self._settle(name, "failed", err, emit)
+                self._alert_job(name, err, emit)
+            else:
+                self._submit_translation(job, list(outcome.cues), emit)
+        elif outcome.kind == "no_speech":
+            err = job.publish_empty()
+            if err is None:
+                self._settle(name, "completed", "no speech", emit)
+            else:
+                self._settle(name, "failed", err, emit)
+                self._alert_job(name, err, emit)
+        elif outcome.kind == "unstable":
+            self._settle_unstable(job, emit)
+        elif job.attempt < _ASR_MAX_ATTEMPTS:
+            err = job.start_asr(self._spawn)  # retry: a new attempt dir
+            if self._stopping.is_set():
+                # D35: exactly _start_subs's post-spawn re-check.
+                self._kill_asr(job, 2.0, emit)
+                release_gpu = True
+                if job.child is None:  # else keep the guard (C11)
+                    self._subs_job = None
+                terminal = False
+            elif err is None:
+                terminal = False  # the job stays current
+            elif err == "unstable":  # D33: like a final failure
+                self._settle_unstable(job, emit)
+            else:
+                self._settle(name, "failed", err, emit)
+                self._alert_job(name, err, emit)
+        else:
+            self._settle(name, "failed", outcome.detail, emit)
+            self._alert_job(name, outcome.detail, emit)
+        if terminal:
+            self._subs_job = None
+            release_gpu = True
+            self._phase = "translate" if self._translating() else "restore"
+            self._advance_requested = True  # D28
+        return release_gpu
+
+    def _fence_internal(self, job: SubsJob, e: Exception, emit: EventEmitter) -> bool:
+        """K1: an unexpected raise while holding the GPU for `job` (under
+        `_launch_lock`). Logged; the job is settled `failed("internal: …")` if
+        it is not yet, and alerted (never raising); an advance is requested.
+        Returns whether to give the hold: not while a GPU child it started is
+        still running (rule c — the live-child guard is kept; stop() gives the
+        hold)."""
+        log.exception(
+            "jasna %s: internal error in the subtitle job %s",
+            self.instance_id,
+            job.job_id,
+        )
+        detail = f"internal: {type(e).__name__}"
+        try:
+            if job.job_id not in self._settled:
+                self._settle(job.job_id, "failed", detail, emit)
+        except Exception:
+            log.exception("jasna %s: settling %s failed", self.instance_id, job.job_id)
+        if job.job_id in self._jobs and job.job_id not in self._settled:
+            # `_settle` itself is what raised: record the terminal state so the
+            # run can still finish.
+            self._settled[job.job_id] = ("failed", detail)
+            self._subs_failed += 1
+        try:
+            self._alert_job(job.job_id, detail, emit)
+        except Exception:
+            log.exception("jasna %s: alert for %s failed", self.instance_id, job.job_id)
+        self._advance_requested = True
+        child = job.child
+        try:
+            live = child is not None and child.poll() is None
+        except Exception:
+            live = False  # cannot tell — never keep the GPU on a guess
+        if live:
+            self._subs_job = job  # keep the live-child guard (rule c)
+            return False
+        if self._subs_job is job:
+            self._subs_job = None
+        try:
+            self._phase = "translate" if self._translating() else "restore"
+        except Exception:
+            self._phase = "restore"
+        return True
+
+    def _reap_survivor(self, job: SubsJob) -> None:
+        """Under `_launch_lock`: a settled job whose direct child outlived its
+        kill (C11) — once that child has exited, join it, drop the job and
+        request an advance. A no-op while it still runs. IR5: an exited child
+        is reaped by `poll_asr()` (kills lingering tracked pids, joins the
+        readers) — never a tree kill under `_launch_lock`."""
+        child = job.child
+        if child is None or child.poll() is None:
+            return
+        job.poll_asr()  # reaps; the outcome of a settled job is ignored
+        if job.child is not None:
+            return
+        # K1: a hold `_fence_internal` kept for this live child ends here (a
+        # no-op when the kill path already gave it).
+        self._gpu_give(job)
+        self._subs_job = None
+        self._phase = "translate" if self._translating() else "restore"
+        self._advance_requested = True
 
     def _settle_results(self, emit: EventEmitter) -> None:
         """Drain the translator's results (worker thread only). Each result is
@@ -2237,6 +2529,8 @@ class JasnaInstance(MonitorInstance):
         # A clean one-line summary with "·" separators (lada parity); the rich
         # view is the UI metrics dashboard.
         parts: list[str] = []
+        if self._gpu_waiting and not self._gpu_child_live():
+            return self._waiting_detail(m)
         if state == "running" and self._phase in ("subs", "translate"):
             return self._subs_detail(m)
         if state == "running" and self._current is not None:
@@ -2268,6 +2562,23 @@ class JasnaInstance(MonitorInstance):
             head = f"subtitling: {job.media.name} [{job.engine}]"
             return " · ".join((head, elapsed, translating, subs))
         return f"{translating} · {subs}"
+
+    def _waiting_detail(self, m: dict) -> str:
+        """#179: `waiting for GPU (held by <label>)` + the usual queue text.
+        While the lease is free and reserved for THIS run (S5), nobody else
+        blocks it: just `waiting for GPU` (the next check takes it)."""
+        if gpu_lease.reserved_for() == self._run:
+            label = ""
+        else:
+            label = gpu_lease.blocking_label()
+        parts = [f"waiting for GPU (held by {label})" if label else "waiting for GPU"]
+        if m.get("subs_translating"):
+            parts.append(f"translating {m['subs_translating']}")
+        if "queue_total" in m:
+            parts.append(f"{m['queue_completed']}/{m['queue_total']} done")
+        if "subs_total" in m:
+            parts.append(f"subs {m['subs_completed']}/{m['subs_total']}")
+        return " · ".join(parts)
 
 
 class JasnaPlugin(MonitorPlugin):
