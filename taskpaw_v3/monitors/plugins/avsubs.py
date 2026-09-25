@@ -983,7 +983,9 @@ class AvsubsInstance(MonitorInstance):
                 return False
             if child is not None:
                 try:
-                    job.terminate(timeout=0.5)  # joins readers; exited already
+                    # IR12: reap like `_reap_settled` (kill_tracked + reader
+                    # join) — never terminate(): no taskkill under the lock.
+                    job.poll_asr()
                 except Exception as e:  # never raise out of check()
                     log.warning("avsubs %s: reap failed: %s", self.instance_id, e)
             if self._asr_job is job:

@@ -1331,6 +1331,36 @@ def test_a_raise_inside_the_poll_settles_failed_and_releases_the_lease(
     assert len(_done(r.evs)) == 1
 
 
+def test_the_poll_fence_reaps_an_exited_child_without_taskkill(tmp_path, monkeypatch):
+    # IR12: the raise happens before the exited child was reaped. The fence
+    # reaps it like `_reap_settled` (poll_asr: kill_tracked + reader join) —
+    # never `terminate()`, which would run taskkill under `_launch_lock`.
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+    inst, emit, sp = r.inst, r.emit, r.spawner
+    inst.start(emit)
+    child = sp.last
+    real = SubsJob.poll_asr
+    armed = {"on": True}
+
+    def poll_asr_once(self):
+        if armed["on"]:
+            armed["on"] = False
+            raise RuntimeError("poll bug")
+        return real(self)
+
+    monkeypatch.setattr(SubsJob, "poll_asr", poll_asr_once)
+    child.finish(0)  # exited, still attached to the job
+    st = inst.check(emit)  # must not raise
+    assert inst._settled["a.mp4"] == ("failed", "internal: RuntimeError")
+    assert "terminate_tree" not in child.calls  # no taskkill under the lock
+    assert "join_readers" in child.calls  # but its readers were joined
+    assert inst._jobs["a.mp4"].child is None
+    assert len(sp.argvs) == 2 and inst._asr_job is inst._jobs["b.mp4"]
+    assert st.state == "running" and gpu_lease.holder() == inst._run
+    assert not _job_dir(r, "a.mp4").exists()
+    inst.stop(timeout=1)
+
+
 def test_a_raise_inside_the_poll_with_a_live_child_keeps_the_lease(
     tmp_path, monkeypatch
 ):

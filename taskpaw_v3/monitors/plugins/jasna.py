@@ -1327,6 +1327,7 @@ class JasnaInstance(MonitorInstance):
                 holder = self._gpu_holder
             self._gpu_give(holder)
             gpu_lease.withdraw(self._run)
+            self._gpu_waiting = False  # K8: a stopped task never "waits"
         finally:
             if acquired:
                 self._launch_lock.release()
@@ -1677,41 +1678,51 @@ class JasnaInstance(MonitorInstance):
 
     # ── exit handling (one place, under _launch_lock) ──────────────────────
     def _handle_exit(self, retcode: int, emit: EventEmitter) -> None:
-        stopping = False
         with self._launch_lock:
             if self._process is None:
                 return  # already handled
             self._process = None  # handled ONCE
             self._next_action = None
-            if self._stopping.is_set():
-                # Shutting down: a terminate-induced non-zero exit is not a file
-                # failure — don't alert, don't relaunch. A clean exit is still
-                # published so the finished video survives the Stop (C-4).
-                if retcode == 0:
-                    self._publish_current()
-                stopping = True
-            elif retcode == 0:
-                self._handle_success(emit)
-            else:
-                self._handle_failure(retcode, emit)
+            # Shutting down: a terminate-induced non-zero exit is not a file
+            # failure — don't alert, don't relaunch. A clean exit is still
+            # published so the finished video survives the Stop (C-4).
+            stopping = self._stopping.is_set()
+            failed_before, done_before = self._failed, self._done
+            internal = False
+            try:  # CX2: a raise here must never strand the restore's hold
+                if stopping:
+                    if retcode == 0:
+                        self._publish_current()
+                elif retcode == 0:
+                    self._handle_success(emit)
+                else:
+                    self._handle_failure(retcode, emit)
+            except Exception as e:
+                internal = True
+                self._exit_internal_error(e, stopping, failed_before, done_before, emit)
             # D3: exactly ONE post-lock action, chosen under the lock.
-            action = self._next_action or "advance"
+            action = "advance" if internal else (self._next_action or "advance")
             self._next_action = None
             video = self._current
             # #179 C5/D7: the hold is FILE-scoped — kept (carried) when the
             # same file continues with a GPU child: its ASR (a `full` job) or a
             # retry `_requeue_current()` put back at the head of `_pending`.
-            carry = not stopping and (
-                (
-                    action == "subs"
-                    and video is not None
-                    and self._kinds.get(video.name) == "full"
-                )
-                or (
-                    action == "advance"
-                    and video is not None
-                    and bool(self._pending)
-                    and self._pending[0] == video
+            # Never after an internal error (CX2): the file's work is over.
+            carry = (
+                not stopping
+                and not internal
+                and (
+                    (
+                        action == "subs"
+                        and video is not None
+                        and self._kinds.get(video.name) == "full"
+                    )
+                    or (
+                        action == "advance"
+                        and video is not None
+                        and bool(self._pending)
+                        and self._pending[0] == video
+                    )
                 )
             )
             if carry:
@@ -1736,6 +1747,45 @@ class JasnaInstance(MonitorInstance):
         # A continuation nothing consumed (e.g. the run was aborted or stopped
         # meanwhile) must not keep the GPU.
         self._give_carried()
+
+    def _exit_internal_error(
+        self,
+        e: Exception,
+        stopping: bool,
+        failed_before: int,
+        done_before: int,
+        emit: EventEmitter,
+    ) -> None:
+        """CX2 (under `_launch_lock`, never raises): the exit handling of the
+        current file raised. Logged; unless stopping — or the file's outcome was
+        already counted before the raise — it fails through `_fail_current`
+        (one alert, the subtitle `skipped(restore_failed)` settle, the 3-strike
+        abort) with a bounded `internal: <Type>: <msg>` detail. A subtitle job
+        the file can no longer reach is settled so `done` can still fire."""
+        name = self._current.name if self._current is not None else "?"
+        log.exception(
+            "jasna %s: internal error handling the exit of %s", self.instance_id, name
+        )
+        self._next_action = None
+        if stopping:
+            return
+        try:
+            detail = _bounded(f"internal: {type(e).__name__}: {e}")
+        except Exception:
+            detail = "internal error"
+        if self._failed == failed_before and self._done == done_before:
+            try:
+                self._fail_current(emit, detail)
+            except Exception:
+                log.exception("jasna %s: failing %s raised", self.instance_id, name)
+                if self._failed == failed_before:
+                    self._failed += 1
+                    self._consecutive_failures += 1
+        if self._cfg.av_translate and name in self._jobs and name not in self._settled:
+            try:
+                self._settle(name, "skipped", "restore_failed", emit)
+            except Exception:
+                log.exception("jasna %s: settling %s raised", self.instance_id, name)
 
     def _publish_current(self) -> Optional[str]:
         """Atomic publish of the current file's staging output (constitution §2).

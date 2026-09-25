@@ -642,3 +642,116 @@ def test_k1_a_raise_that_leaves_a_live_asr_child_keeps_the_hold_until_it_exits(
     assert inst._subs_job is None
     assert gpu_lease.holder() is None and inst._gpu_holder is None
     assert _other_try()
+
+
+# ── CX2: a raise in the restore's exit handling never strands the lease ───
+def _raise_once_with(monkeypatch, name: str, exc: Exception) -> list:
+    calls: list = []
+    real = getattr(JasnaInstance, name)
+
+    def wrapped(self, *a, **kw):
+        calls.append(a)
+        if len(calls) == 1:
+            raise exc
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(JasnaInstance, name, wrapped)
+    return calls
+
+
+def _failed_alerts(r, name: str) -> list:
+    return [e for e in r.evs if e[0] == "alert" and e[1] == f"JASNA: {name} failed"]
+
+
+def test_cx2_a_raise_while_publishing_counts_a_failure_and_the_next_file_launches(
+    tmp_path, monkeypatch, clock
+):
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4", "b.mp4"],
+        rcs=[0, None],
+        av_translate=False,
+    )
+    inst, emit = r.inst, r.emit
+    _raise_once_with(monkeypatch, "_publish_current", PermissionError("denied"))
+    inst.start(emit)
+    a_hold = inst._restore_hold
+    st = inst.check(emit)  # a exits 0 → publishing raises
+    assert inst._failed == 1 and inst._done == 0
+    alerts = _failed_alerts(r, "a.mp4")
+    assert len(alerts) == 1
+    assert alerts[0][2] == "internal: PermissionError: denied"
+    assert r.launcher.inputs() == ["a.mp4", "b.mp4"]  # no same-file retry
+    assert inst._gpu_holder is not a_hold  # a's hold was given …
+    assert gpu_lease.holder() == inst._run  # … b's hold is a new one
+    assert st.state == "running" and st.metrics["current_file"] == "b.mp4"
+    inst.stop(timeout=1)
+    assert gpu_lease.holder() is None
+
+
+def test_cx2_the_waiting_task_gets_the_turn_after_a_raising_exit(
+    tmp_path, monkeypatch, clock
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], rcs=[None, None])
+    inst, emit = r.inst, r.emit
+    _raise_once_with(monkeypatch, "_publish_current", PermissionError("denied"))
+    inst.start(emit)
+    assert not _other_try()  # the other task waits
+    _finish_restore(r, 0)
+    st = inst.check(emit)
+    assert gpu_lease.holder() is None
+    assert gpu_lease.reserved_for() == OTHER
+    assert inst._gpu_waiting and r.launcher.n == 1
+    assert inst._settled["a.mp4"] == ("skipped", "restore_failed")
+    assert "held by Other" in st.detail
+    assert _other_try()
+    inst.stop(timeout=1)
+
+
+def test_cx2_a_raise_inside_handle_failure_fails_the_file_once(
+    tmp_path, monkeypatch, clock
+):
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4", "b.mp4"],
+        rcs=[1, None],
+        av_translate=False,
+    )
+    inst, emit = r.inst, r.emit
+    _raise_once_with(monkeypatch, "_requeue_current", OSError("disk"))
+    inst.start(emit)
+    inst.check(emit)  # a exits 1 → _handle_failure raises before the requeue
+    assert inst._failed == 1
+    assert len(_failed_alerts(r, "a.mp4")) == 1
+    assert "internal: OSError: disk" in _failed_alerts(r, "a.mp4")[0][2]
+    assert r.launcher.inputs() == ["a.mp4", "b.mp4"]
+    assert gpu_lease.holder() == inst._run and inst._carried is None
+    inst.stop(timeout=1)
+    assert gpu_lease.holder() is None
+
+
+def test_cx2_a_raise_while_publishing_during_stop_only_gives_the_hold(
+    tmp_path, monkeypatch, clock
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], av_translate=False)
+    inst, emit = r.inst, r.emit
+    _raise_once_with(monkeypatch, "_publish_current", PermissionError("denied"))
+    inst.start(emit)
+    inst._stopping.set()  # a Stop is under way when the exit is handled
+    inst.check(emit)
+    assert gpu_lease.holder() is None and inst._gpu_holder is None
+    assert inst._failed == 0 and not _failed_alerts(r, "a.mp4")
+    assert r.launcher.n == 1
+
+
+# ── K8: a stopped task never shows "waiting for GPU" ──────────────────────
+def test_stop_while_waiting_clears_the_waiting_detail(tmp_path, monkeypatch, clock):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    assert _other_try()
+    r.inst.start(r.emit)
+    assert "waiting for GPU" in r.inst.check(r.emit).detail
+    r.inst.stop(timeout=1)
+    assert not r.inst._gpu_waiting
+    assert "waiting" not in r.inst.check(r.emit).detail
