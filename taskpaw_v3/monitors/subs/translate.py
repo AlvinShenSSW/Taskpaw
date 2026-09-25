@@ -1510,9 +1510,12 @@ class Translator:
             self._teardown([worker], wait_s=0.5)
 
     def _teardown(self, workers: Sequence[_Worker], *, wait_s: float) -> None:
-        """C6: close every stdin → ONE shared bounded wait → tree-kill the
-        survivors → join readers → close the job keepers. Bounded; never
-        raises. Outside every lock: cancel() must never wait on it."""
+        """C6: close every stdin → ONE shared bounded wait → tree-kill EVERY
+        worker (CX4: also one whose launcher already exited — it may leave the
+        real interpreter behind; `terminate_tree` reaches tracked orphans and is
+        harmless on a gone tree) → join readers → close the job keepers.
+        Bounded; never raises. Outside every lock: cancel() must never wait on
+        it."""
         if not workers:
             return
         for child, _lines, _keeper in workers:
@@ -1526,7 +1529,7 @@ class Translator:
         for child, _lines, _keeper in workers:
             if child.poll() is None:
                 log.info("subs-translate %s: worker ignored stdin EOF", self._name)
-                child.terminate_tree(1.0)
+            child.terminate_tree(1.0)  # CX4: always, exited launcher or not
         for child, _lines, keeper in workers:
             child.join_readers(0.5)
             if keeper is not None:

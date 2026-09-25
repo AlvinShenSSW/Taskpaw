@@ -2483,3 +2483,25 @@ def test_the_default_wait_ends_at_once_on_cancel():
     finally:
         tr.cancel()
         tr.join(2)
+
+
+def test_teardown_tree_kills_a_worker_whose_launcher_already_exited(harness_factory):
+    # CX4 (constitution: children die with the agent): a worker whose launcher
+    # exits on stdin EOF may leave the real interpreter behind — teardown must
+    # still tree-kill it, not only the workers that ignored the EOF.
+    held = threading.Event()
+
+    def silent(req: dict, w: FakeWorker) -> None:
+        held.set()  # never answers
+        return None
+
+    sp = Spawner(silent)  # the launcher exits on stdin EOF (ignore_close=False)
+    h = harness_factory(sp, deadline_s=30)
+    h.tr.submit(TranslateRequest(RUN, "a", _cues(1)))
+    assert held.wait(5)
+    assert len(sp.workers) == 1
+    h.tr.cancel()
+    h.tr.join(2.0)
+    events = [e.split(":", 1)[1] for e in sp.log]
+    assert "close_stdin" in events and "terminate_tree" in events
+    assert events.index("close_stdin") < events.index("terminate_tree")
