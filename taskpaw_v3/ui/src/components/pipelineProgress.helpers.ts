@@ -61,7 +61,7 @@ export type Pipeline = {
 
 type Rec = Record<string, unknown>;
 const isRec = (v: unknown): v is Rec => typeof v === "object" && v !== null && !Array.isArray(v);
-const fin = (v: unknown): number | undefined =>
+export const fin = (v: unknown): number | undefined =>
   typeof v === "number" && Number.isFinite(v) ? v : undefined;
 const nonNeg = (v: unknown): number | undefined => {
   const n = fin(v);
@@ -71,7 +71,7 @@ const pct = (v: unknown): number | undefined => {
   const n = fin(v);
   return n === undefined ? undefined : Math.max(0, Math.min(100, n));
 };
-const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+export const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 const state = (v: unknown): StepState | undefined =>
   typeof v === "string" && STATES.has(v) ? (v as StepState) : undefined;
 

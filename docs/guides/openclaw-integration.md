@@ -184,9 +184,10 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > avsubs — `queue_completed − queue_pre_done` = films `done`; `queue_skipped` = films
 > `skipped`; `queue_failed −` (name collisions) = films `failed`. Jasna —
 > `queue_failed −` (name collisions) = films whose `restore` step `failed`;
-> `queue_completed −` (films restored at Start that already had their `.srt`) = films
-> whose restore is `done` and whose `status` is terminal (`done`, or a subtitle step
-> `failed` / `skipped`: a settled job of any outcome counts as done). Name collisions,
+> `queue_completed −` (films already restored at Start that are not rows (normally those
+> that already had their `.srt`)) = films whose restore is `done` and whose `status` is
+> terminal (`done`, or a subtitle step `failed` / `skipped`: a settled job of any outcome
+> counts as done). Name collisions,
 > videos that already had their `.srt` (avsubs) and films already restored with
 > subtitles at Start (jasna) are counted but never rows; the steps show which step
 > failed.

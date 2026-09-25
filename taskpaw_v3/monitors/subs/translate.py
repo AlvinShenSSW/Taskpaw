@@ -131,13 +131,23 @@ def _no_dupes(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def _api_host(api_base: object) -> Optional[str]:
+    """`urlsplit(api_base).hostname` (lower-case; never the userinfo, port or
+    path), or None — no host, not a string, or unparseable. Never raises."""
+    if not isinstance(api_base, str):
+        return None
+    try:
+        return urllib.parse.urlsplit(api_base).hostname
+    except Exception:  # N7: a malformed base is "no host", never an error
+        return None
+
+
 def needs_llm_key(api_base: str) -> bool:
     """Whether a request to `api_base` needs an API key: a keyless request is
     only allowed against a loopback base (a local OpenAI-compatible server).
     An unparseable base needs a key. Shared with the plugins (one rule)."""
-    try:
-        host = (urllib.parse.urlsplit(api_base).hostname or "").lower()
-    except ValueError:
+    host = _api_host(api_base)
+    if host is None:
         return True
     return not (host in _LOOPBACK_HOSTS or host.startswith("127."))
 
@@ -149,12 +159,7 @@ def model_label(model: object, api_base: object) -> str:
     defensively: no parseable host, or any error → the model name alone.
     At most `MODEL_LABEL_CHARS` (`bounded` keeps the host at the end)."""
     name = model.strip() if isinstance(model, str) else ""
-    host: Optional[str] = None
-    try:
-        if isinstance(api_base, str):
-            host = urllib.parse.urlsplit(api_base).hostname
-    except Exception:  # N7: a label can never fail the translation
-        host = None
+    host = _api_host(api_base)
     return bounded(" · ".join(p for p in (name, host) if p), MODEL_LABEL_CHARS)
 
 

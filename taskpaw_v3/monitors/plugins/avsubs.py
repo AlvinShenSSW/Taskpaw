@@ -77,7 +77,7 @@ from taskpaw_v3.monitors.subs.progress import (
     NAME_CHARS,
     TRANSLATE,
     FilmTracker,
-    LiveFacts,
+    progress_view,
 )
 from taskpaw_v3.monitors.subs.srt import Cue, SrtError
 from taskpaw_v3.monitors.subs.translate import (
@@ -88,7 +88,6 @@ from taskpaw_v3.monitors.subs.translate import (
     Translator,
     needs_llm_key,
 )
-from taskpaw_v3.monitors.subs.util import step_numbers
 from taskpaw_v3.monitors.subs.whisperjav import (
     DEFAULT_ENGINE,
     Engine,
@@ -1378,27 +1377,13 @@ class AvsubsInstance(MonitorInstance):
         progress, the translator's in-flight request, and the GPU wait of the
         queue head `_advance` launches next. Read-only."""
         now = time.monotonic()
-        active: dict[str, str] = {}
-        numbers: dict[str, dict] = {}
-        job = self._asr_job
-        if job is not None and job.child is not None:
-            active[ASR] = job.job_id
-            numbers[ASR] = step_numbers(job.progress(now))
-        translator = self._translator
-        request = translator.progress(now) if translator is not None else None
-        job_id = request.get("job_id") if request is not None else None
-        if isinstance(job_id, str):
-            active[TRANSLATE] = job_id
-            numbers[TRANSLATE] = step_numbers(request)
         waiting: Optional[tuple[str, str]] = None
         if self._waiting_gpu and not self._asr_live() and self._queue:
             waiting = (self._queue[0].relpath, ASR)
         holder = bounded(self._gpu_blocker(), NAME_CHARS) if waiting else ""
-        view = self._tracker.view(LiveFacts(active, waiting, holder, numbers), now)
-        model = numbers.get(TRANSLATE, {}).get("model")
-        if view and model:
-            view["model"] = model
-        return view
+        return progress_view(
+            self._tracker, now, self._asr_job, self._translator, waiting, holder
+        )
 
     def _build_status(
         self, state: State, detail: Optional[str] = None

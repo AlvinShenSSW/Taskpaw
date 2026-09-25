@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
@@ -525,6 +526,14 @@ class TailSpawner:
         return self.children[-1]
 
 
+def _pin_clock(monkeypatch, t: float = 100.0) -> None:
+    """Freeze `time.monotonic` as subs/job.py sees it (only its `time`), so
+    `started_at + 30` is exactly 30 s later: on the real clock `(t0 + 30) - t0`
+    can round to 29.99... and floor to 29 (#189 IR1)."""
+    fake = SimpleNamespace(monotonic=lambda: t, time=time.time, sleep=time.sleep)
+    monkeypatch.setattr("taskpaw_v3.monitors.subs.job.time", fake)
+
+
 def test_progress_none_without_a_live_child(tmp_path):
     job = _job(tmp_path)
     assert job.progress(1.0) is None  # never started
@@ -535,8 +544,9 @@ def test_progress_none_without_a_live_child(tmp_path):
     assert job.progress(job.started_at + 5) is None
 
 
-def test_progress_feeds_the_child_tail_on_every_poll(tmp_path):
+def test_progress_feeds_the_child_tail_on_every_poll(tmp_path, monkeypatch):
     assert (ASR_TAIL_LINES, ASR_TAIL_CHARS) == (40, 16000)
+    _pin_clock(monkeypatch)
     job = _job(tmp_path)
     sp = TailSpawner()
     assert job.start_asr(sp) is None
@@ -561,7 +571,8 @@ def test_progress_feeds_the_child_tail_on_every_poll(tmp_path):
     assert job.progress(t0 + 31)["percent"] == 54
 
 
-def test_progress_new_attempt_gets_a_new_parser(tmp_path):
+def test_progress_new_attempt_gets_a_new_parser(tmp_path, monkeypatch):
+    _pin_clock(monkeypatch)
     job = _job(tmp_path)
     sp = TailSpawner()
     assert job.start_asr(sp) is None

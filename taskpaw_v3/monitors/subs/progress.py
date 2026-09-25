@@ -49,18 +49,23 @@ Status time — the plugin derives `LiveFacts` and never stores them:
 - `waiting` — `(film, step)` of the GPU wait (the queue head for the next
   GPU step while `_gpu_waiting`), else None;
 - `holder`  — `gpu_lease.blocking_label()`, `""` when the lease is reserved
-  for this run (N5);
+  for this run (N5); the tracker caps it at `NAME_CHARS`;
 - `numbers` — step → the live numbers of that step's ACTIVE film, merged into
   its `steps` entry and used for the row's `percent`/`eta_s` (restore:
-  `percent`, `eta_s` via `parse_eta`; asr: `SubsJob.progress()` minus
-  nothing; translate: `Translator.progress()` fields).
+  `percent`, `eta_s` via `parse_eta`; asr: the `SubsJob.progress(now)`
+  snapshot (`phase`, `phase_n`, `scene`, `scenes`, `percent`, `eta_s`,
+  `elapsed_s`); translate: `Translator.progress()` fields).
 
 Then `view(live, now)` → `{"film", "steps", "films", "films_more"}` (or `{}`
 without films) to merge into the metrics; it calls `observe(live, now)`
-(activations + the N6 `waited_s` stamp) first. The pieces are public too:
+(activations + the N6 `waited_s` stamp) first. `progress_view(...)` is the
+one builder both plugins call: it derives `active`/`numbers` from the ASR job
+and the translator (plus Jasna's restore capture), calls `view` and adds the
+translation's `model`. The pieces are public too:
 `observe`, `focus(live)`, `steps(film, live, now)`, `rows(live, focus)`,
 `row_status(film, live)`, `statuses(live)` (every film, for the row ↔ count
-mapping) and `record(film)`. Every returned object is a fresh copy.
+mapping), `record(film)` and `restore_done(film)`. Every returned object is a
+fresh copy. Every `now` must be a `time.monotonic()` reading.
 
 Derived state of a step: a stored terminal state wins; else `active` (the
 live film of that step), `waiting_gpu` (`live.waiting`), `queued` (translate
@@ -81,9 +86,13 @@ import math
 import re
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
-from taskpaw_v3.monitors.subs.util import bounded
+from taskpaw_v3.monitors.subs.util import bounded, step_numbers
+
+if TYPE_CHECKING:  # annotations only: job.py imports this module
+    from taskpaw_v3.monitors.subs.job import SubsJob
+    from taskpaw_v3.monitors.subs.translate import Translator
 
 # ── AsrProgress (AC1) ─────────────────────────────────────────────────────
 PHASES = 8
@@ -317,12 +326,50 @@ class LiveFacts:
 
     `active`: step → the film live in it now; `waiting`: `(film, step)` of
     the GPU wait; `holder`: who holds the GPU (`""` when reserved for this
-    run); `numbers`: step → live numbers of that step's active film."""
+    run; capped at `NAME_CHARS`); `numbers`: step → live numbers of that
+    step's active film."""
 
     active: Mapping[str, str] = field(default_factory=dict)
     waiting: Optional[tuple[str, str]] = None
     holder: str = ""
     numbers: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+
+
+def progress_view(
+    tracker: "FilmTracker",
+    now: float,
+    asr_job: Optional["SubsJob"],
+    translator: Optional["Translator"],
+    waiting: Optional[tuple[str, str]] = None,
+    holder: str = "",
+    restore: Optional[tuple[str, dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """#189: the per-film stepper of one status poll (`film`, `steps`,
+    `films`, `films_more` — all or none) and, while a translation runs, its
+    `model` — the one builder Jasna and avsubs share. Derived from what is
+    live NOW (D3): `restore` is Jasna's `(film, capture numbers)` while its
+    restore child runs; the ASR step is live while `asr_job` has a child
+    (numbers: `asr_job.progress(now)`); the translate step while
+    `translator.progress(now)` names a request. `waiting`/`holder` are the
+    plugin's GPU-wait facts. `now` must be `time.monotonic()`. Read-only."""
+    active: dict[str, str] = {}
+    numbers: dict[str, dict[str, Any]] = {}
+    if restore is not None:
+        active[RESTORE] = restore[0]
+        numbers[RESTORE] = step_numbers(restore[1])
+    if asr_job is not None and asr_job.child is not None:
+        active[ASR] = asr_job.job_id
+        numbers[ASR] = step_numbers(asr_job.progress(now))
+    request = translator.progress(now) if translator is not None else None
+    job_id = request.get("job_id") if request is not None else None
+    if isinstance(job_id, str):
+        active[TRANSLATE] = job_id
+        numbers[TRANSLATE] = step_numbers(request)
+    view = tracker.view(LiveFacts(active, waiting, holder, numbers), now)
+    model = numbers.get(TRANSLATE, {}).get("model")
+    if view and model:
+        view["model"] = model
+    return view
 
 
 @dataclass(frozen=True)
@@ -354,7 +401,7 @@ def _validate(live: object) -> _Live:
         ):
             waiting = (w[0], w[1])
         if isinstance(live.holder, str):
-            holder = live.holder
+            holder = bounded(live.holder, NAME_CHARS)  # defence in depth
         if isinstance(live.numbers, Mapping):
             for step, nums in live.numbers.items():
                 if isinstance(step, str) and isinstance(nums, Mapping):
@@ -396,7 +443,9 @@ def _duration(key: str, s: _Step) -> Optional[int]:
 
 
 class FilmTracker:
-    """Per-film step outcomes of one run; see the module docstring."""
+    """Per-film step outcomes of one run; see the module docstring. Every
+    `now` passed to it (marks, `observe`, `steps`, `view`) must be a
+    `time.monotonic()` reading: stamps are subtracted from each other."""
 
     def __init__(self, steps: tuple[str, ...]) -> None:
         try:
@@ -510,6 +559,14 @@ class FilmTracker:
                     for k, s in f.steps.items()
                 },
             }
+
+    def restore_done(self, film: str) -> bool:
+        """Whether `film`'s restore step is `done` (#189 D1). False for an
+        unknown film, a non-string or a tracker without a restore step; never
+        raises and copies nothing."""
+        with self._lock:
+            s = self._step(film, RESTORE)
+            return s is not None and s.state == "done"
 
     # ── status time ──────────────────────────────────────────────────────
     def observe(self, live: LiveFacts, now: float) -> None:

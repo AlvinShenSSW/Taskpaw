@@ -1761,6 +1761,41 @@ def test_progress_waiting_gpu_holder_waited_s_and_reset(
     inst.stop(timeout=1)
 
 
+def test_progress_subs_only_head_waits_for_the_gpu_on_its_asr_step(
+    tmp_path, monkeypatch, lease_clock
+):
+    # Nothing to restore: the queue head is a subs-only film's ASR.
+    clk = _mono(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"])
+    inst, emit = r.inst, r.emit
+    assert gpu_lease.try_acquire(_OTHER, 1.0, label="Other")
+    inst.start(emit)  # refused → waits
+    st = inst.check(emit)
+    assert inst._gpu_waiting and not inst._pending
+    assert [p.name for p in inst._subs_only] == ["e.mp4"]
+    assert st.state == "idle" and st.metrics["film"] == "e.mp4"
+    assert _step(st.metrics, "restore") == {"key": "restore", "state": "done"}
+    assert _step(st.metrics, "asr") == {
+        "key": "asr",
+        "state": "waiting_gpu",
+        "holder": "Other",
+        "waited_s": 0,
+    }
+    assert _rows(st.metrics) == [("e.mp4", "waiting_gpu")]
+    clk.t += 20
+    st = inst.check(emit)
+    assert _step(st.metrics, "asr")["waited_s"] == 20
+    clk.t += 5
+    st = inst.check(emit)
+    assert _step(st.metrics, "asr") == {
+        "key": "asr",
+        "state": "waiting_gpu",
+        "holder": "Other",
+        "waited_s": 25,
+    }
+    inst.stop(timeout=1)
+
+
 def test_progress_mixed_run_counts_rows_and_the_row_count_mapping(
     tmp_path, monkeypatch
 ):
@@ -2075,9 +2110,11 @@ def test_progress_restore_retry_keeps_one_start_stamp_and_one_duration(
     st = inst.check(emit)  # unet-4x failed → the same file relaunched plain
     assert r.launcher.n == 2
     assert _step(st.metrics, "restore")["state"] == "active"
+    assert _qc(st.metrics) == (0, 0, 1, 0)  # requeued: not restored, not failed
     r.launcher.procs[1]._rc = 0
     clk.t = 200.0
-    inst.check(emit)
+    st = inst.check(emit)
+    assert _qc(st.metrics) == (1, 0, 1, 0)  # restored once; subtitles to do
     rec = inst._tracker.record("a.mp4")["steps"]["restore"]
     assert (rec["state"], rec["started_at"], rec["activated_at"], rec["ended_at"]) == (
         "done",

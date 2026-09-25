@@ -133,7 +133,8 @@ class SubsJob:
         `AsrProgress.snapshot`), fed the child's captured tail on every call.
         None without a live child, or when the child has no `tail` (or it
         failed). Read-only: never touches the child's lifecycle; never
-        raises. Call it from the thread that polls the job."""
+        raises. Call it from the thread that polls the job. `now` must be a
+        `time.monotonic()` reading (the clock of `started_at`)."""
         child, parser = self.child, self._asr_progress
         if child is None or parser is None:
             return None

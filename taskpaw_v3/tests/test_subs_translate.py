@@ -1009,15 +1009,18 @@ def test_progress_elapsed_percent_and_eta(harness_factory):
     h = harness_factory(Spawner(responder))
     h.tr.submit(TranslateRequest(RUN, "a.mp4", _cues(90)))
     first = held.get(timeout=5)
+    # `started_at` is the real clock: `(t0 + 30) - t0` can round to 29.99…,
+    # so an offset whose floor is asserted sits half a second clear of an
+    # integer (#189 IR1).
     t0 = h.tr.progress()["started_at"]
     assert h.tr.progress(now=t0 + 30)["eta_s"] is None  # no cue done yet
     _reply(first)
     held.get(timeout=5)  # the 2nd batch is in flight: 40/90 done
-    early = h.tr.progress(now=t0 + 5)
+    early = h.tr.progress(now=t0 + 5.5)
     assert (early["elapsed_s"], early["eta_s"]) == (5, None)  # < 10 s
-    late = h.tr.progress(now=t0 + 30)
-    # floor(100 × 40/90); ceil(30/40 × (90 − 40))
-    assert (late["elapsed_s"], late["percent"], late["eta_s"]) == (30, 44, 38)
+    late = h.tr.progress(now=t0 + 30.5)
+    # floor(100 × 40/90); ceil(30.5/40 × (90 − 40))
+    assert (late["elapsed_s"], late["percent"], late["eta_s"]) == (30, 44, 39)
     late["cues_done"] = 999
     assert h.tr.progress(now=t0 + 30)["cues_done"] == 40  # a fresh dict
 

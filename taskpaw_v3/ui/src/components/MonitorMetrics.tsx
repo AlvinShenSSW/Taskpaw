@@ -2,8 +2,10 @@ import { Box, CircularProgress, LinearProgress, Stack, Tooltip, Typography } fro
 import { useTranslation } from "react-i18next";
 import { AiActivity } from "./AiActivity";
 import { isAiMetrics } from "./aiActivity.helpers";
+import { TINT, utilTint } from "./monitorMetrics.helpers";
 import { PipelineProgress } from "./PipelineProgress";
 import { hiddenWithPipeline, readPipeline } from "./pipelineProgress.helpers";
+import { Tile } from "./Tile";
 
 // Live metrics dashboard for a monitor's status pane (design-system
 // pages/agent-console.md → StatusHeader: "live metric line … file N/M, fps, %").
@@ -11,21 +13,6 @@ import { hiddenWithPipeline, readPipeline } from "./pipelineProgress.helpers";
 // fps, eta, …); we render the KNOWN keys as a dashboard — current file + progress,
 // circular utilization gauges, a VRAM bar, stat tiles — and degrade any unknown
 // keys to labelled tiles rather than dumping raw JSON.
-
-export const TINT = {
-  ok: "#22C55E",      // success green — design Accent
-  warn: "#F59E0B",    // amber
-  crit: "#EF4444",    // destructive
-  idle: "#64748B",    // slate
-} as const;
-
-// Utilization colour ramp (CPU/GPU/MEM/VRAM): green → amber → red. Exported so the
-// Hub card mini-bars (#113) share the exact 70/90 thresholds + colours.
-export function utilTint(pct: number): string {
-  if (pct >= 90) return TINT.crit;
-  if (pct >= 70) return TINT.warn;
-  return TINT.ok;
-}
 
 function fmtGB(mb: number): string {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
@@ -64,27 +51,13 @@ function Gauge({ label, pct, sub }: { label: string; pct: number; sub?: string }
   );
 }
 
-// A labelled value tile (fps, ETA, and any unknown metric). Also used by the
-// #189 PipelineProgress step panels.
-export function Tile({ label, value }: { label: string; value: string }) {
-  return (
-    <Box sx={{ px: 1.5, py: 1, borderRadius: 2, bgcolor: "rgba(148,163,184,0.06)",
-               border: "1px solid", borderColor: "divider", minWidth: 84 }}>
-      <Typography variant="caption" sx={{ letterSpacing: 0.6, color: "text.secondary",
-                                          textTransform: "uppercase", fontSize: 10, display: "block" }}>
-        {label}
-      </Typography>
-      <Typography sx={{ fontFamily: '"Fira Code", monospace', fontWeight: 600, fontSize: 15,
-                        fontVariantNumeric: "tabular-nums", mt: 0.25 }}>{value}</Typography>
-    </Box>
-  );
-}
-
 const KNOWN = new Set([
   "current_file", "queue_completed", "queue_total", "queue_remaining", "percent",
   "fps", "eta", "cpu_pct", "mem_pct", "gpu_pct", "gpu_mem_used_mb", "gpu_mem_total_mb",
   // absolute RAM (shown as the MEM gauge's GB sub-label, not raw tiles)
   "mem_used_mb", "mem_total_mb",
+  // #189 queue counters (an empty AV 翻译 tracker leaves them without `steps`)
+  "queue_restored", "queue_pre_done",
 ]);
 
 export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> }) {

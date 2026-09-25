@@ -9,14 +9,12 @@ import RemoveIcon from "@mui/icons-material/Remove";
 import ScheduleIcon from "@mui/icons-material/Schedule";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-// Import cycle: MonitorMetrics renders this component. TINT / Tile are only read
-// inside render functions (never at module evaluation), so the cycle is benign —
-// keep it that way (no top-level constant built from TINT here).
-import { TINT, Tile } from "./MonitorMetrics";
+import { TINT } from "./monitorMetrics.helpers";
 import {
   type FilmRow, type Pipeline, type Step, type StepState,
-  clock, durationText, etaText, focusStep, isTerminal, stepIndex, stepLabel,
+  clock, durationText, etaText, fin, focusStep, isTerminal, stepIndex, stepLabel, str,
 } from "./pipelineProgress.helpers";
+import { Tile } from "./Tile";
 
 // #189 AV 翻译 progress: one film's 修复 → 识别 → 翻译 (Jasna) or 识别 → 翻译
 // (avsubs) stepper, the active step's own bar + tiles, the queue card and the
@@ -31,10 +29,6 @@ const SLATE_TRACK = "rgba(148,163,184,0.15)";
 const BOX = { borderRadius: 2, border: "1px solid", borderColor: "divider" } as const;
 
 type Metrics = Record<string, unknown>;
-const num = (m: Metrics, k: string): number | undefined =>
-  typeof m[k] === "number" && Number.isFinite(m[k] as number) ? (m[k] as number) : undefined;
-const text = (m: Metrics, k: string): string | undefined =>
-  typeof m[k] === "string" && m[k] ? (m[k] as string) : undefined;
 
 // ── stepper ─────────────────────────────────────────────────────────────────
 function StepDot({ state, index }: { state: StepState; index: number }) {
@@ -107,7 +101,10 @@ function activeText(s: Step, t: TFunction): string {
 
 function waitText(s: Step, t: TFunction): string {
   const head = s.holder ? t("pipeline.waitGpuHeld", { holder: s.holder }) : t("pipeline.waitGpu");
-  return s.waited_s !== undefined ? `${head} · ${t("pipeline.waited", { t: clock(s.waited_s) })}` : head;
+  if (s.waited_s === undefined) return head;
+  // A full-width "）" already carries its own gap — no extra space before the dot.
+  const sep = head.endsWith("）") ? "· " : " · ";
+  return `${head}${sep}${t("pipeline.waited", { t: clock(s.waited_s) })}`;
 }
 
 function stepSubText(s: Step, prev: Step | undefined, t: TFunction): string {
@@ -179,10 +176,14 @@ function panelTiles(s: Step, m: Metrics, t: TFunction) {
   const elapsed = s.elapsed_s !== undefined ? clock(s.elapsed_s) : undefined;
   const eta = s.eta_s !== undefined ? etaText(s.eta_s, t) : undefined;
   if (s.key === "restore") {
-    const fps = num(m, "fps");
+    const fps = fin(m.fps);
+    const frames = fin(m.processed_frames);
+    const rest = fin(m.remaining_frames);
     add(t("pipeline.tile.speed"), fps !== undefined ? `${fps.toFixed(fps < 10 ? 1 : 0)} fps` : undefined);
-    add(t("pipeline.tile.elapsed"), elapsed ?? text(m, "elapsed"));
-    add(t("pipeline.tile.eta"), eta ?? text(m, "eta"));
+    add(t("pipeline.tile.frames"), frames === undefined ? undefined
+      : rest !== undefined ? `${frames} / ${frames + rest}` : String(frames));
+    add(t("pipeline.tile.elapsed"), elapsed ?? str(m.elapsed));
+    add(t("pipeline.tile.eta"), eta ?? str(m.eta));
     return tiles;
   }
   if (s.key === "asr") {
@@ -243,7 +244,7 @@ function StepPanel({ step, pipeline, metrics }: { step: Step; pipeline: Pipeline
   }
   // active
   const title = panelTitle(step, pipeline, t);
-  const pct = step.percent ?? (step.key === "restore" ? num(metrics, "percent") : undefined);
+  const pct = step.percent ?? (step.key === "restore" ? fin(metrics.percent) : undefined);
   const tiles = panelTiles(step, metrics, t);
   return (
     <Box data-testid="pipeline-panel" sx={{ mt: 2, p: 2, borderRadius: 2,
@@ -286,12 +287,12 @@ const SUBS_BUSY: ReadonlySet<StepState> = new Set<StepState>(["active", "queued"
 
 function QueueCard({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics }) {
   const { t } = useTranslation();
-  const total = num(metrics, "queue_total");
-  const done = num(metrics, "queue_completed");
+  const total = fin(metrics.queue_total);
+  const done = fin(metrics.queue_completed);
   if (total === undefined || total <= 0 || done === undefined) return null;
-  const rem = num(metrics, "queue_remaining");
-  const failed = num(metrics, "queue_failed") ?? 0;
-  const translating = num(metrics, "subs_translating") ?? 0;
+  const rem = fin(metrics.queue_remaining);
+  const failed = fin(metrics.queue_failed) ?? 0;
+  const translating = fin(metrics.subs_translating) ?? 0;
   const segs: { id: string; value: number; color: string }[] = [
     { id: "seg-done", value: done, color: TINT.ok },
   ];
@@ -301,7 +302,7 @@ function QueueCard({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics
   if (pipeline.kind === "jasna") {
     // Jasna with AV 翻译: queue_completed = fully done (restored AND subtitles
     // settled); queue_restored − that = films still in progress (light green).
-    const restored = num(metrics, "queue_restored");
+    const restored = fin(metrics.queue_restored);
     if (restored !== undefined) {
       const inProgress = Math.max(0, restored - done);
       segs.push({ id: "seg-progress", value: inProgress, color: alpha(TINT.ok, 0.4) });
@@ -309,11 +310,11 @@ function QueueCard({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics
       chips.push({ label: t("pipeline.q.restored", { a: restored, b: total }),
                    tone: restored >= total ? "ok" : "idle" });
     }
-    const subsTotal = num(metrics, "subs_total");
+    const subsTotal = fin(metrics.subs_total);
     if (subsTotal !== undefined) {
-      const sDone = num(metrics, "subs_completed") ?? 0;
-      const sFailed = num(metrics, "subs_failed") ?? 0;
-      const sSkipped = num(metrics, "subs_skipped") ?? 0;
+      const sDone = fin(metrics.subs_completed) ?? 0;
+      const sFailed = fin(metrics.subs_failed) ?? 0;
+      const sSkipped = fin(metrics.subs_skipped) ?? 0;
       const busy = translating > 0
         || pipeline.steps.some((s) => s.key !== "restore" && SUBS_BUSY.has(s.state));
       let label = t("pipeline.q.subs", { a: sDone, b: subsTotal });
@@ -326,8 +327,8 @@ function QueueCard({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics
   } else {
     // avsubs: queue_completed includes the films that already had subtitles at
     // scan (queue_pre_done, the 已有字幕 chip); 排队 = remaining − translating.
-    const pre = num(metrics, "queue_pre_done");
-    const skipped = num(metrics, "queue_skipped") ?? 0;
+    const pre = fin(metrics.queue_pre_done);
+    const skipped = fin(metrics.queue_skipped) ?? 0;
     segs.push({ id: "seg-failed", value: failed, color: TINT.crit });
     segs.push({ id: "seg-progress", value: translating, color: alpha(TINT.ok, 0.45) });
     chips.push(

@@ -150,6 +150,18 @@ describe("PipelineProgress — stepper (#189)", () => {
     expect(within(pipe()).getByText("第 2 步 / 共 3 步")).toBeInTheDocument();
   });
 
+  it("hour-scale durations and ETAs use the 小时 + 分 format", () => {
+    setLang("zh-CN");
+    wrap(<MonitorMetrics metrics={{ ...ASR, steps: [
+      { key: "restore", state: "done", duration_s: 6300 },
+      { key: "asr", state: "active", percent: 10, eta_s: 3601 },
+      { key: "translate", state: "pending" },
+    ] }} />);
+    const s = within(stepper());
+    expect(s.getByText("完成 · 1 小时 45 分")).toBeInTheDocument();       // round(6300/60) = 105
+    expect(s.getByText("10% · 约剩 1 小时 01 分")).toBeInTheDocument();  // ceil(3601/60) = 61
+  });
+
   it("done without a duration shows ✓ alone (a translation finished between polls)", () => {
     setLang("zh-CN");
     wrap(<MonitorMetrics metrics={{ ...TRANSLATE, steps: [
@@ -197,7 +209,8 @@ describe("PipelineProgress — stepper (#189)", () => {
     setLang("zh-CN");
     wrap(<MonitorMetrics metrics={AVSUBS_WAIT} />);
     const s = within(stepper());
-    expect(s.getByText("等待 GPU（Jasna） · 已等 3:20")).toBeInTheDocument();
+    // No extra space after the full-width "）" (it carries its own gap).
+    expect(s.getByText("等待 GPU（Jasna）· 已等 3:20")).toBeInTheDocument();
     expect(s.getByTestId("step-waiting-icon")).toBeInTheDocument();
     expect(within(pipe()).getByText("GPU 正由「Jasna」使用")).toBeInTheDocument();
     expect(within(pipe()).getByText("下一个文件")).toBeInTheDocument();
@@ -240,10 +253,40 @@ describe("PipelineProgress — active-step panel (#189)", () => {
     expect(p.getByRole("progressbar")).toBeInTheDocument();
     expect(p.getByText("速度")).toBeInTheDocument();
     expect(p.getByText("157 fps")).toBeInTheDocument();
+    expect(p.getByText("帧")).toBeInTheDocument();
+    expect(p.getByText("36703 / 244157")).toBeInTheDocument(); // processed / (processed + remaining)
     expect(p.getByText("已用")).toBeInTheDocument();
     expect(p.getByText("39:12")).toBeInTheDocument();
     expect(p.getByText("约剩")).toBeInTheDocument();
     expect(p.getByText("8 分")).toBeInTheDocument();
+  });
+
+  it("restore panel (en): Frames + ETA tiles, hour-scale ETA, pending wording", () => {
+    setLang("en");
+    wrap(<MonitorMetrics metrics={{ ...RESTORE, steps: [
+      { key: "restore", state: "active", percent: 69, eta_s: 6300 },
+      { key: "asr", state: "pending" },
+      { key: "translate", state: "pending" },
+    ] }} />);
+    const p = within(screen.getByTestId("pipeline-panel"));
+    expect(p.getByText("Frames")).toBeInTheDocument();
+    expect(p.getByText("36703 / 244157")).toBeInTheDocument();
+    expect(p.getByText("ETA")).toBeInTheDocument();
+    expect(p.getByText("1 h 45 min")).toBeInTheDocument(); // ceil(6300/60) = 105 min
+    const s = within(stepper());
+    expect(s.getByText("69% · 1 h 45 min left")).toBeInTheDocument();
+    expect(s.getByText("Restore must finish first")).toBeInTheDocument();
+    expect(s.getByText("Transcribe must finish first")).toBeInTheDocument();
+  });
+
+  it("restore panel: processed frames alone when remaining_frames is absent", () => {
+    setLang("zh-CN");
+    const noRemaining = Object.fromEntries(Object.entries(RESTORE).filter(
+      ([k]) => k !== "remaining_frames"));
+    wrap(<MonitorMetrics metrics={noRemaining} />);
+    const p = within(screen.getByTestId("pipeline-panel"));
+    expect(p.getByText("帧")).toBeInTheDocument();
+    expect(p.getByText("36703")).toBeInTheDocument();
   });
 
   it("asr panel formats 场景 i/N (zh) when the scene is known", () => {
@@ -480,10 +523,23 @@ describe("MonitorMetrics with / without steps (#189 D13)", () => {
     expect(screen.getByText(/0 \/ 1 完成/)).toBeInTheDocument();
     expect(screen.getByText("帧率")).toBeInTheDocument();
     expect(screen.getByText("预计剩余")).toBeInTheDocument();
-    for (const label of ["phase", "subs total", "queue failed", "queue restored", "elapsed",
-                         "processed frames"]) {
+    for (const label of ["phase", "subs total", "queue failed", "elapsed", "processed frames"]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
+    expect(screen.queryByText("queue restored")).toBeNull(); // a known key since #189
+  });
+
+  it("without steps: queue_restored / queue_pre_done never become raw tiles (empty tracker)", () => {
+    setLang("zh-CN");
+    // AV-on Jasna with nothing pending / avsubs with every video already subtitled:
+    // the tracker is empty, so no `steps`, but the queue counters are still emitted.
+    wrap(<MonitorMetrics metrics={{ ...GAUGES, queue_completed: 3, queue_total: 3,
+      queue_remaining: 0, queue_restored: 3, queue_pre_done: 3, custom_metric: 7 }} />);
+    expect(screen.queryByTestId("pipeline-progress")).toBeNull();
+    expect(screen.getByText(/3 \/ 3 完成/)).toBeInTheDocument();
+    expect(screen.queryByText("queue restored")).toBeNull();
+    expect(screen.queryByText("queue pre done")).toBeNull();
+    expect(screen.getByText("custom metric")).toBeInTheDocument();
   });
 });
 

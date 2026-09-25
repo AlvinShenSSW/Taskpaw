@@ -17,6 +17,7 @@ import pytest
 from taskpaw_v3.monitors.subs.progress import (
     ASR,
     AVSUBS_STEPS,
+    FINISHED_ROWS,
     JASNA_STEPS,
     MAX_ROWS,
     NAME_CHARS,
@@ -992,6 +993,36 @@ def test_rows_waiting_film_is_picked_before_queued_and_finished():
     assert rows[-1]["status"] == "waiting_gpu"
 
 
+def _capped(queued: bool) -> FilmTracker:
+    """4 finished films (d3 the most recent), the ASR focus film, then 11
+    films queued for translation (`queued`) or still pending."""
+    t = FilmTracker(AVSUBS_STEPS)
+    for i in range(4):
+        t.add(f"d{i}", {})
+        t.settle_subs(f"d{i}", "completed", 10.0 * (i + 1))
+    t.add("focus", {})
+    t.start("focus", ASR, 50.0)
+    for i in range(11):
+        t.add(f"q{i:02d}", {"asr": "done"} if queued else {})
+        if queued:
+            t.start(f"q{i:02d}", TRANSLATE, 60.0 + i)
+    return t
+
+
+def test_rows_queued_films_beat_the_last_finished_under_the_cap():
+    assert FINISHED_ROWS == 3
+    live = LiveFacts(active={ASR: "focus"})
+    rows, more = _capped(queued=True).rows(live, "focus")
+    assert len(rows) == MAX_ROWS and more == 4
+    assert {r["status"] for r in rows} == {"active", "queued"}  # no finished row
+    # With pending films instead, the FINISHED_ROWS most recent finished ones
+    # are picked before them.
+    rows, more = _capped(queued=False).rows(live, "focus")
+    finished = [r["name"] for r in rows if r["status"] == "done"]
+    assert finished == ["d1", "d2", "d3"] and len(finished) == FINISHED_ROWS
+    assert len(rows) == MAX_ROWS and more == 4
+
+
 def test_rows_small_batch_lists_everything_and_unknown_focus_is_ignored():
     t = _t(AVSUBS_STEPS, "a", "b", "c")
     rows, more = t.rows(NO, "not-a-film")
@@ -1024,6 +1055,15 @@ def test_name_is_bounded():
     assert len(rows[0]["name"]) <= NAME_CHARS
     assert rows[0]["name"].endswith(".mp4")
     assert len(t.view(NO, 1.0)["film"]) <= NAME_CHARS
+
+
+def test_holder_is_capped_by_the_tracker():
+    t = _t(JASNA_STEPS, "a")
+    live = LiveFacts(waiting=("a", RESTORE), holder="Other " + "x" * 500)
+    t.observe(live, 1.0)
+    holder = t.steps("a", live, 2.0)[0]["holder"]
+    assert len(holder) <= NAME_CHARS and holder.startswith("Other ")
+    assert t.view(live, 3.0)["steps"][0]["holder"] == holder
 
 
 def test_view_bundles_focus_steps_and_rows():
@@ -1109,3 +1149,19 @@ def test_tracker_keeps_only_known_steps_in_canonical_order():
     t.add("a", {})
     assert list(t.record("a")["steps"]) == [ASR, TRANSLATE]
     assert FilmTracker(None).view(NO, 1.0) == {}  # type: ignore[arg-type]
+
+
+def test_restore_done_is_a_narrow_total_accessor():
+    t = _t(JASNA_STEPS, "a", "b", "p")
+    t.add("c", {"restore": "done"})  # restored at Start
+    t.finish("a", RESTORE, "done", 5.0)
+    t.finish("b", RESTORE, "failed", 5.0)
+    assert [t.restore_done(f) for f in ("a", "b", "p", "c")] == [
+        True,
+        False,
+        False,
+        True,
+    ]
+    assert t.restore_done("zzz") is False
+    assert t.restore_done(None) is False  # type: ignore[arg-type]
+    assert _t(AVSUBS_STEPS, "a").restore_done("a") is False  # no restore step
