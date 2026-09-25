@@ -41,6 +41,52 @@ def _is_num(v: Any) -> bool:
     )
 
 
+_MODEL_CHARS = 80  # #189: the translate model label's cap (as the agent's)
+
+
+def _stage_text(m: dict) -> str:
+    """#189 (D7): the live stage of a jasna/avsubs focus film, from `steps` —
+    its active step, else the one waiting for the GPU: `等待 GPU（<holder>）` /
+    `等待 GPU`; asr `识别 43% · 约剩 6 分`, `识别 43%` or `识别 · 已用 4 分`;
+    translate `翻译 56% · 约剩 1 分 · <model>`. Nothing for a restore (the
+    progress part covers it), for queued/pending/terminal steps, or when
+    `steps` is malformed (not a list of {key, state} dicts). A bad number is
+    dropped on its own. Minutes never read 0: ETA ceil, elapsed floor, min 1."""
+    steps = m.get("steps")
+    if not isinstance(steps, list) or not all(
+        isinstance(s, dict)
+        and isinstance(s.get("key"), str)
+        and isinstance(s.get("state"), str)
+        for s in steps
+    ):
+        return ""
+    step = next((s for s in steps if s["state"] == "active"), None) or next(
+        (s for s in steps if s["state"] == "waiting_gpu"), None
+    )
+    if step is None:
+        return ""
+    if step["state"] == "waiting_gpu":
+        holder = _inline(step["holder"]) if isinstance(step.get("holder"), str) else ""
+        return f"等待 GPU（{holder}）" if holder else "等待 GPU"
+    label = {"asr": "识别", "translate": "翻译"}.get(step["key"])
+    if label is None:
+        return ""  # an active restore: the progress part covers it
+    pct, eta, elapsed = step.get("percent"), step.get("eta_s"), step.get("elapsed_s")
+    has_pct = _is_num(pct) and 0 <= pct <= 100
+    parts = [f"{label} {pct:.0f}%" if has_pct else label]
+    if _is_num(eta) and eta >= 0:
+        parts.append(f"约剩 {max(1, math.ceil(eta / 60))} 分")
+    elif not has_pct and _is_num(elapsed) and elapsed >= 0:
+        parts.append(f"已用 {max(1, math.floor(elapsed / 60))} 分")
+    if step["key"] == "translate":
+        model = step.get("model")
+        if not isinstance(model, str):
+            model = m.get("model")
+        if isinstance(model, str) and (model := _inline(model, _MODEL_CHARS)):
+            parts.append(model)
+    return " · ".join(parts)
+
+
 def _status_text(snap: Any) -> str:
     """The human status string for one monitor — the V3 `state` enriched with its
     measured metrics in V2's exact format, so the OpenClaw readers (daily-report /
@@ -153,10 +199,16 @@ def _status_text(snap: Any) -> str:
         if prog:
             lada_parts.append(" · ".join(prog))
         segment = " ".join(lada_parts)
-        # jasna「AV 翻译」(#177): a separate `subs S/T` part, ONLY when the
-        # agent reports a numeric subs_total — without it the line above stays
-        # byte-identical. A segment already ending in the "| file |" delimiter is
-        # continued with a space so the line never shows an empty "| |" cell.
+        # jasna / avsubs (#189): the focus film's live stage (`_stage_text`),
+        # then the counts part — jasna「AV 翻译」(#177) `subs S/T`, ONLY when
+        # the agent reports a numeric subs_total, led by `修复 a/b` when it
+        # reports queue_restored (#189). Without those keys the line above
+        # stays byte-identical. A segment already ending in the "| file |"
+        # delimiter is continued with a space so the line never shows an empty
+        # "| |" cell.
+        counts: list[str] = []
+        if _is_num(m.get("queue_restored")) and _is_num(m.get("queue_total")):
+            counts.append(f"修复 {int(m['queue_restored'])}/{int(m['queue_total'])}")
         if _is_num(m.get("subs_total")):
             subs_done = (
                 int(m["subs_completed"]) if _is_num(m.get("subs_completed")) else 0
@@ -164,12 +216,16 @@ def _status_text(snap: Any) -> str:
             subs = f"subs {subs_done}/{int(m['subs_total'])}"
             if _is_num(m.get("subs_failed")) and m["subs_failed"] > 0:
                 subs += f" ({int(m['subs_failed'])} failed)"
+            counts.append(subs)
+        for part in (_stage_text(m), " · ".join(counts)):
+            if not part:
+                continue
             if not segment:
-                segment = subs
+                segment = part
             elif segment.endswith("|"):
-                segment = f"{segment} {subs}"
+                segment = f"{segment} {part}"
             else:
-                segment = f"{segment} | {subs}"
+                segment = f"{segment} | {part}"
         if segment:
             parts.append(segment)
 

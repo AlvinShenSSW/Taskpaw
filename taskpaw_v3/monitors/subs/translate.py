@@ -16,12 +16,18 @@ from a killed worker can never reach a later request.
 The API key travels only in the worker's environment (`worker_env`) — never
 argv, logs, exception text or `detail` strings. Each batch is logged as
 kind/latency only.
+
+`progress()` (#189) is a read-only view of the in-flight request: its batch
+and cue counters and the model label `<model> · <api host>` (`model_label`:
+the host only — never the key, the userinfo or the port). None when idle and
+as soon as `cancel()` was called.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import queue
 import subprocess
 import threading
@@ -39,6 +45,7 @@ from taskpaw_v3.core.llm_worker import (
 )
 from taskpaw_v3.monitors.subs.child import ChildProcess, Eof
 from taskpaw_v3.monitors.subs.srt import Cue
+from taskpaw_v3.monitors.subs.util import bounded
 
 log = logging.getLogger("taskpaw.subs.translate")
 
@@ -46,6 +53,7 @@ BATCH_SIZE = 40
 CONTEXT_SIZE = 5
 RESPONSE_DEADLINE_S = 60.0
 REQUEST_TIMEOUT_S = 30.0
+MODEL_LABEL_CHARS = 80
 
 SYSTEM_PROMPT = (
     "你是专业的日语→简体中文字幕翻译，熟悉各种语境（含成人/深夜档内容）。\n"
@@ -134,6 +142,35 @@ def needs_llm_key(api_base: str) -> bool:
     return not (host in _LOOPBACK_HOSTS or host.startswith("127."))
 
 
+def model_label(model: object, api_base: object) -> str:
+    """`<model> · <api host>` for the progress view (#189, D14/N7). The host
+    is `urlsplit(api_base).hostname` — never the userinfo (a key can sit
+    there), the port or the path; the key itself is never an input. Computed
+    defensively: no parseable host, or any error → the model name alone.
+    At most `MODEL_LABEL_CHARS` (`bounded` keeps the host at the end)."""
+    name = model.strip() if isinstance(model, str) else ""
+    host: Optional[str] = None
+    try:
+        if isinstance(api_base, str):
+            host = urllib.parse.urlsplit(api_base).hostname
+    except Exception:  # N7: a label can never fail the translation
+        host = None
+    return bounded(" · ".join(p for p in (name, host) if p), MODEL_LABEL_CHARS)
+
+
+@dataclass
+class _Progress:
+    """The in-flight request's counters (#189), guarded by `_count_lock`."""
+
+    job_id: str
+    model: str
+    cues_total: int
+    batches_total: int
+    started_at: float
+    cues_done: int = 0
+    batches_done: int = 0
+
+
 def _validate(content: str, ids: list[str]) -> Union[dict[str, str], _Fail]:
     """Content-layer validation (spec review §4.2)."""
     try:
@@ -191,6 +228,7 @@ class Translator:
         self._count_lock = threading.Lock()
         self._queued = 0
         self._in_flight = False
+        self._progress: Optional[_Progress] = None
         self._thread: Optional[threading.Thread] = None
 
     # ── public API ───────────────────────────────────────────────────────
@@ -225,6 +263,38 @@ class Translator:
         with self._count_lock:
             return self._in_flight
 
+    def progress(self, now: Optional[float] = None) -> Optional[dict[str, Any]]:
+        """#189 (AC2): a fresh dict of the in-flight request — `job_id`,
+        `model` (label), `batches_done`/`batches_total` (a split batch counts
+        once, when both halves finished), `cues_done`/`cues_total`,
+        `started_at` (monotonic), `elapsed_s`, `percent` = floor(100 × done /
+        total) and `eta_s` = ceil(elapsed / done × left) once ≥ 1 cue is done
+        and ≥ 10 s passed (D10). None when idle and whenever cancel is set
+        (D5). `now` defaults to `time.monotonic()`."""
+        with self._count_lock:
+            p = self._progress
+            if p is None or self._cancel.is_set():
+                return None
+            job_id, model = p.job_id, p.model
+            done, total = p.cues_done, p.cues_total
+            b_done, b_total, started = p.batches_done, p.batches_total, p.started_at
+        elapsed = max(0.0, (time.monotonic() if now is None else now) - started)
+        eta: Optional[int] = None
+        if done >= 1 and elapsed >= 10:
+            eta = math.ceil(elapsed / done * (total - done))
+        return {
+            "job_id": job_id,
+            "model": model,
+            "batches_done": b_done,
+            "batches_total": b_total,
+            "cues_done": done,
+            "cues_total": total,
+            "started_at": started,
+            "elapsed_s": int(elapsed),
+            "percent": 100 * done // total if total else 0,
+            "eta_s": eta,
+        }
+
     def cancel(self) -> None:
         """Idempotent and bounded (D24); never respawns. In practice about
         1–2.6 s (stdin EOF, ≤ 1 s wait, taskkill, reader join); ≈ 5.5 s only if
@@ -234,6 +304,8 @@ class Translator:
                 return
             self._cancel_started = True
         self._cancel.set()
+        with self._count_lock:
+            self._progress = None  # D5: no stale counters after a cancel
         with self._spawn_lock:
             w = self._worker
             self._worker = None
@@ -303,17 +375,54 @@ class Translator:
         if not settings.api_key and needs_llm_key(settings.api_base):
             return self._failed(req, "no LLM key")
         cues = list(req.cues)
-        zh: dict[int, str] = {}
-        for b, lo in enumerate(range(0, len(cues), BATCH_SIZE)):
-            fail = self._run_batch(
-                req.job_id, str(b), cues, lo, lo + BATCH_SIZE, settings, zh, retry=False
+        self._begin_progress(req, settings, len(cues))
+        try:
+            zh: dict[int, str] = {}
+            for b, lo in enumerate(range(0, len(cues), BATCH_SIZE)):
+                fail = self._run_batch(
+                    req.job_id,
+                    str(b),
+                    cues,
+                    lo,
+                    lo + BATCH_SIZE,
+                    settings,
+                    zh,
+                    retry=False,
+                )
+                if fail is not None:
+                    return self._failed(req, f"{fail.kind}: {fail.message}")
+                self._advance_progress(min(BATCH_SIZE, len(cues) - lo))
+            zh_cues = tuple(
+                Cue(c.index, c.start_ms, c.end_ms, zh[pos])
+                for pos, c in enumerate(cues)
             )
-            if fail is not None:
-                return self._failed(req, f"{fail.kind}: {fail.message}")
-        zh_cues = tuple(
-            Cue(c.index, c.start_ms, c.end_ms, zh[pos]) for pos, c in enumerate(cues)
-        )
-        return TranslateResult(req.run, req.job_id, "translated", zh_cues, "")
+            return TranslateResult(req.run, req.job_id, "translated", zh_cues, "")
+        finally:
+            with self._count_lock:
+                self._progress = None
+
+    def _begin_progress(
+        self, req: TranslateRequest, settings: LLMSettings, n: int
+    ) -> None:
+        label = model_label(settings.model, settings.api_base)
+        with self._count_lock:
+            if self._cancel.is_set():
+                return
+            self._progress = _Progress(
+                job_id=req.job_id,
+                model=label,
+                cues_total=n,
+                batches_total=math.ceil(n / BATCH_SIZE),
+                started_at=time.monotonic(),
+            )
+
+    def _advance_progress(self, cues: int) -> None:
+        """A top-level batch finished (both halves, when it was split)."""
+        with self._count_lock:
+            p = self._progress
+            if p is not None:
+                p.batches_done += 1
+                p.cues_done += cues
 
     def _run_batch(
         self,

@@ -1,0 +1,502 @@
+import { Fragment } from "react";
+import { Box, Chip, LinearProgress, Stack, Typography } from "@mui/material";
+import { alpha } from "@mui/material/styles";
+import CheckIcon from "@mui/icons-material/Check";
+import CloseIcon from "@mui/icons-material/Close";
+import HourglassEmptyIcon from "@mui/icons-material/HourglassEmpty";
+import MemoryIcon from "@mui/icons-material/Memory";
+import RemoveIcon from "@mui/icons-material/Remove";
+import ScheduleIcon from "@mui/icons-material/Schedule";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
+// Import cycle: MonitorMetrics renders this component. TINT / Tile are only read
+// inside render functions (never at module evaluation), so the cycle is benign —
+// keep it that way (no top-level constant built from TINT here).
+import { TINT, Tile } from "./MonitorMetrics";
+import {
+  type FilmRow, type Pipeline, type Step, type StepState,
+  clock, durationText, etaText, focusStep, isTerminal, stepIndex, stepLabel,
+} from "./pipelineProgress.helpers";
+
+// #189 AV 翻译 progress: one film's 修复 → 识别 → 翻译 (Jasna) or 识别 → 翻译
+// (avsubs) stepper, the active step's own bar + tiles, the queue card and the
+// batch list. MonitorMetrics renders it INSTEAD of the now-processing banner, the
+// queue bar and the fps/ETA tiles whenever `metrics.steps` is usable (D13).
+// Design: docs/specs/2026-09-25-189-progress-redesign-design.md → "UI (D8/D13)";
+// every state is spelled out in text next to its icon (never colour alone).
+
+const MONO = '"Fira Code", monospace';
+const SLATE_WASH = "rgba(148,163,184,0.1)";
+const SLATE_TRACK = "rgba(148,163,184,0.15)";
+const BOX = { borderRadius: 2, border: "1px solid", borderColor: "divider" } as const;
+
+type Metrics = Record<string, unknown>;
+const num = (m: Metrics, k: string): number | undefined =>
+  typeof m[k] === "number" && Number.isFinite(m[k] as number) ? (m[k] as number) : undefined;
+const text = (m: Metrics, k: string): string | undefined =>
+  typeof m[k] === "string" && m[k] ? (m[k] as string) : undefined;
+
+// ── stepper ─────────────────────────────────────────────────────────────────
+function StepDot({ state, index }: { state: StepState; index: number }) {
+  const base = {
+    width: 30, height: 30, borderRadius: "50%", boxSizing: "border-box", flex: "0 0 auto",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    transition: "all 200ms ease",
+  } as const;
+  const ring = (color: string, style = "solid") => ({ ...base, border: `2px ${style} ${color}` });
+  switch (state) {
+    case "done":
+      return (
+        <Box aria-hidden sx={{ ...base, bgcolor: TINT.ok }}>
+          <CheckIcon data-testid="step-done-icon" sx={{ fontSize: 18, color: "background.default" }} />
+        </Box>
+      );
+    case "failed":
+      return (
+        <Box aria-hidden sx={{ ...base, bgcolor: TINT.crit }}>
+          <CloseIcon data-testid="step-failed-icon" sx={{ fontSize: 18, color: "background.default" }} />
+        </Box>
+      );
+    case "active":
+      return (
+        <Box aria-hidden data-testid="step-active-icon"
+          sx={{ ...ring(TINT.ok), boxShadow: `0 0 10px ${alpha(TINT.ok, 0.45)}` }}>
+          <Box sx={{ width: 12, height: 12, borderRadius: "50%", bgcolor: TINT.ok }} />
+        </Box>
+      );
+    case "waiting_gpu":
+      return (
+        <Box aria-hidden sx={ring(TINT.warn, "dashed")}>
+          <ScheduleIcon data-testid="step-waiting-icon" sx={{ fontSize: 16, color: TINT.warn }} />
+        </Box>
+      );
+    case "queued":
+      return (
+        <Box aria-hidden sx={ring(TINT.idle)}>
+          <HourglassEmptyIcon data-testid="step-queued-icon" sx={{ fontSize: 16, color: "text.secondary" }} />
+        </Box>
+      );
+    case "skipped":
+      return (
+        <Box aria-hidden sx={ring(TINT.idle)}>
+          <RemoveIcon data-testid="step-skipped-icon" sx={{ fontSize: 16, color: "text.secondary" }} />
+        </Box>
+      );
+    default: // pending
+      return (
+        <Box aria-hidden sx={ring(TINT.idle)}>
+          <Typography sx={{ fontFamily: MONO, fontSize: 13, color: "text.secondary", lineHeight: 1 }}>
+            {index}
+          </Typography>
+        </Box>
+      );
+  }
+}
+
+// Percent + ETA for a running step; elapsed when there is no percent yet
+// (non-qwen engines, pre-pipeline start).
+function activeText(s: Step, t: TFunction): string {
+  const bits: string[] = [];
+  if (s.percent !== undefined) bits.push(`${Math.round(s.percent)}%`);
+  if (s.eta_s !== undefined) bits.push(t("pipeline.left", { d: etaText(s.eta_s, t) }));
+  if (bits.length === 0 && s.elapsed_s !== undefined) {
+    bits.push(t("pipeline.elapsed", { t: clock(s.elapsed_s) }));
+  }
+  return bits.length > 0 ? bits.join(" · ") : t("pipeline.running");
+}
+
+function waitText(s: Step, t: TFunction): string {
+  const head = s.holder ? t("pipeline.waitGpuHeld", { holder: s.holder }) : t("pipeline.waitGpu");
+  return s.waited_s !== undefined ? `${head} · ${t("pipeline.waited", { t: clock(s.waited_s) })}` : head;
+}
+
+function stepSubText(s: Step, prev: Step | undefined, t: TFunction): string {
+  switch (s.state) {
+    case "done":
+      return s.duration_s !== undefined
+        ? t("pipeline.doneIn", { d: durationText(s.duration_s, t) })
+        : t("pipeline.done");
+    case "failed":
+      return t("pipeline.failed");
+    case "skipped":
+      return t("pipeline.skipped");
+    case "queued":
+      return t("pipeline.queued");
+    case "waiting_gpu":
+      return waitText(s, t);
+    case "active":
+      return activeText(s, t);
+    default: // pending: waits for the step before it, unless that one is finished
+      return prev && !isTerminal(prev.state)
+        ? t("pipeline.after", { step: stepLabel(prev.key, t) })
+        : t("pipeline.notStarted");
+  }
+}
+
+const SUB_COLOR: Partial<Record<StepState, string>> = {
+  active: "success.main", waiting_gpu: "warning.main", failed: "error.main",
+};
+
+function Stepper({ steps }: { steps: Step[] }) {
+  const { t } = useTranslation();
+  return (
+    <Stack direction="row" alignItems="center" data-testid="pipeline-stepper"
+      sx={{ flexWrap: "wrap", columnGap: 1.5, rowGap: 1.5, mt: 2 }}>
+      {steps.map((s, i) => (
+        <Fragment key={`${s.key}-${i}`}>
+          {i > 0 && (
+            <Box aria-hidden sx={{
+              flex: "1 1 24px", minWidth: 16, height: 2, borderRadius: 1,
+              bgcolor: steps[i - 1].state === "done" ? TINT.ok : SLATE_TRACK,
+              transition: "background-color 200ms ease",
+            }} />
+          )}
+          <Stack direction="row" alignItems="center" spacing={1.25} sx={{ minWidth: 0 }}>
+            <StepDot state={s.state} index={i + 1} />
+            <Box sx={{ minWidth: 0 }}>
+              <Typography sx={{ fontWeight: 600, fontSize: 15, lineHeight: 1.3,
+                color: s.state === "pending" || s.state === "skipped" ? "text.secondary" : "text.primary" }}>
+                {stepLabel(s.key, t)}
+              </Typography>
+              <Typography variant="caption" sx={{ display: "block", fontVariantNumeric: "tabular-nums",
+                color: SUB_COLOR[s.state] ?? "text.secondary" }}>
+                {stepSubText(s, i > 0 ? steps[i - 1] : undefined, t)}
+              </Typography>
+            </Box>
+          </Stack>
+        </Fragment>
+      ))}
+    </Stack>
+  );
+}
+
+// ── active-step panel ───────────────────────────────────────────────────────
+function panelTiles(s: Step, m: Metrics, t: TFunction) {
+  const tiles: { label: string; value: string }[] = [];
+  const add = (label: string, value: string | undefined) => {
+    if (value) tiles.push({ label, value });
+  };
+  const elapsed = s.elapsed_s !== undefined ? clock(s.elapsed_s) : undefined;
+  const eta = s.eta_s !== undefined ? etaText(s.eta_s, t) : undefined;
+  if (s.key === "restore") {
+    const fps = num(m, "fps");
+    add(t("pipeline.tile.speed"), fps !== undefined ? `${fps.toFixed(fps < 10 ? 1 : 0)} fps` : undefined);
+    add(t("pipeline.tile.elapsed"), elapsed ?? text(m, "elapsed"));
+    add(t("pipeline.tile.eta"), eta ?? text(m, "eta"));
+    return tiles;
+  }
+  if (s.key === "asr") {
+    if (s.scene !== undefined && s.scenes !== undefined && s.scene >= 1 && s.scenes >= 1) {
+      add(t("pipeline.tile.scene"), `${s.scene} / ${s.scenes}`);
+    } else if (s.phase !== undefined && s.phase >= 1) {
+      add(t("pipeline.tile.phase"), s.phase_n ? `${s.phase} / ${s.phase_n}` : String(s.phase));
+    }
+  } else if (s.key === "translate") {
+    if (s.batches_total !== undefined) {
+      add(t("pipeline.tile.batches"), `${s.batches_done ?? 0} / ${s.batches_total}`);
+    }
+    if (s.cues_total !== undefined) {
+      add(t("pipeline.tile.cues"), t("pipeline.cues", { done: s.cues_done ?? 0, total: s.cues_total }));
+    }
+  }
+  add(t("pipeline.tile.elapsed"), elapsed);
+  add(t("pipeline.tile.eta"), eta);
+  return tiles;
+}
+
+function panelTitle(s: Step, p: Pipeline, t: TFunction): string {
+  if (s.key === "restore") return t("pipeline.panel.restore");
+  if (s.key === "asr") return t("pipeline.panel.asr");
+  if (s.key === "translate") {
+    const model = s.model ?? p.model;
+    return model ? `${t("pipeline.panel.translate")} · ${model}` : t("pipeline.panel.translate");
+  }
+  return stepLabel(s.key, t);
+}
+
+function StepPanel({ step, pipeline, metrics }: { step: Step; pipeline: Pipeline; metrics: Metrics }) {
+  const { t } = useTranslation();
+  if (step.state === "waiting_gpu") {
+    return (
+      <Box data-testid="pipeline-panel" sx={{
+        mt: 2, p: 2, borderRadius: 2, display: "flex", alignItems: "center", gap: 2,
+        bgcolor: alpha(TINT.warn, 0.07), border: `1px solid ${alpha(TINT.warn, 0.35)}`,
+      }}>
+        <MemoryIcon aria-hidden sx={{ color: "warning.main", fontSize: 22 }} />
+        <Box sx={{ minWidth: 0 }}>
+          <Typography sx={{ fontWeight: 600, fontSize: 15, color: "warning.main" }}>
+            {step.holder ? t("pipeline.gpuHeld", { holder: step.holder }) : t("pipeline.waitGpu")}
+          </Typography>
+          <Typography sx={{ fontSize: 13, color: "text.secondary" }}>
+            {step.holder ? t("pipeline.gpuHeldHint") : t("pipeline.gpuFreeHint")}
+          </Typography>
+        </Box>
+      </Box>
+    );
+  }
+  if (step.state === "queued") {
+    return (
+      <Box data-testid="pipeline-panel" sx={{ mt: 2, p: 2, ...BOX, bgcolor: SLATE_WASH }}>
+        <Typography sx={{ fontSize: 14, color: "text.secondary" }}>{t("pipeline.translateQueued")}</Typography>
+      </Box>
+    );
+  }
+  // active
+  const title = panelTitle(step, pipeline, t);
+  const pct = step.percent ?? (step.key === "restore" ? num(metrics, "percent") : undefined);
+  const tiles = panelTiles(step, metrics, t);
+  return (
+    <Box data-testid="pipeline-panel" sx={{ mt: 2, p: 2, borderRadius: 2,
+      bgcolor: "rgba(34,197,94,0.06)", border: "1px solid", borderColor: "rgba(34,197,94,0.25)" }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="baseline" spacing={1}>
+        <Typography sx={{ fontSize: 14, fontWeight: 500, minWidth: 0, wordBreak: "break-word" }}>{title}</Typography>
+        {pct !== undefined && (
+          <Typography sx={{ fontFamily: MONO, fontWeight: 600, fontSize: 18,
+            fontVariantNumeric: "tabular-nums" }}>{Math.round(pct)}%</Typography>
+        )}
+      </Stack>
+      {pct !== undefined && (
+        <LinearProgress variant="determinate" value={Math.max(0, Math.min(100, pct))} aria-label={title}
+          sx={{ mt: 1, height: 10, borderRadius: 5,
+                "& .MuiLinearProgress-bar": { bgcolor: TINT.ok, borderRadius: 5 },
+                bgcolor: SLATE_TRACK }} />
+      )}
+      {tiles.length > 0 && (
+        <Stack direction="row" sx={{ flexWrap: "wrap", gap: 1.5, mt: 1.5 }}>
+          {tiles.map((tile) => <Tile key={tile.label} label={tile.label} value={tile.value} />)}
+        </Stack>
+      )}
+    </Box>
+  );
+}
+
+// ── queue card ──────────────────────────────────────────────────────────────
+type Tone = "ok" | "soft" | "crit" | "warn" | "idle";
+function toneSx(tone: Tone) {
+  switch (tone) {
+    case "ok": return { bgcolor: alpha(TINT.ok, 0.14), color: "success.main" };
+    case "soft": return { bgcolor: alpha(TINT.ok, 0.08), color: "success.light" };
+    case "crit": return { bgcolor: alpha(TINT.crit, 0.14), color: "error.main" };
+    case "warn": return { bgcolor: alpha(TINT.warn, 0.14), color: "warning.main" };
+    default: return { bgcolor: SLATE_WASH, color: "text.secondary" };
+  }
+}
+
+const SUBS_BUSY: ReadonlySet<StepState> = new Set<StepState>(["active", "queued", "waiting_gpu"]);
+
+function QueueCard({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics }) {
+  const { t } = useTranslation();
+  const total = num(metrics, "queue_total");
+  const done = num(metrics, "queue_completed");
+  if (total === undefined || total <= 0 || done === undefined) return null;
+  const rem = num(metrics, "queue_remaining");
+  const failed = num(metrics, "queue_failed") ?? 0;
+  const translating = num(metrics, "subs_translating") ?? 0;
+  const segs: { id: string; value: number; color: string }[] = [
+    { id: "seg-done", value: done, color: TINT.ok },
+  ];
+  const chips: { label: string; tone: Tone }[] = [];
+  let legend = false;
+
+  if (pipeline.kind === "jasna") {
+    // Jasna with AV 翻译: queue_completed = fully done (restored AND subtitles
+    // settled); queue_restored − that = films still in progress (light green).
+    const restored = num(metrics, "queue_restored");
+    if (restored !== undefined) {
+      const inProgress = Math.max(0, restored - done);
+      segs.push({ id: "seg-progress", value: inProgress, color: alpha(TINT.ok, 0.4) });
+      legend = inProgress > 0;
+      chips.push({ label: t("pipeline.q.restored", { a: restored, b: total }),
+                   tone: restored >= total ? "ok" : "idle" });
+    }
+    const subsTotal = num(metrics, "subs_total");
+    if (subsTotal !== undefined) {
+      const sDone = num(metrics, "subs_completed") ?? 0;
+      const sFailed = num(metrics, "subs_failed") ?? 0;
+      const sSkipped = num(metrics, "subs_skipped") ?? 0;
+      const busy = translating > 0
+        || pipeline.steps.some((s) => s.key !== "restore" && SUBS_BUSY.has(s.state));
+      let label = t("pipeline.q.subs", { a: sDone, b: subsTotal });
+      if (busy) label += t("pipeline.q.inProgress");
+      if (sFailed > 0) label += t("pipeline.q.nFailed", { n: sFailed });
+      if (sSkipped > 0) label += t("pipeline.q.nSkipped", { n: sSkipped });
+      chips.push({ label, tone: subsTotal > 0 && sDone >= subsTotal ? "ok" : "idle" });
+    }
+    if (failed > 0) chips.push({ label: t("pipeline.q.failed", { n: failed }), tone: "crit" });
+  } else {
+    // avsubs: queue_completed includes the films that already had subtitles at
+    // scan (queue_pre_done, the 已有字幕 chip); 排队 = remaining − translating.
+    const pre = num(metrics, "queue_pre_done");
+    const skipped = num(metrics, "queue_skipped") ?? 0;
+    segs.push({ id: "seg-failed", value: failed, color: TINT.crit });
+    segs.push({ id: "seg-progress", value: translating, color: alpha(TINT.ok, 0.45) });
+    chips.push(
+      { label: t("pipeline.q.done", { n: Math.max(0, done - (pre ?? 0)) }), tone: "ok" },
+      { label: t("pipeline.q.translating", { n: translating }), tone: "soft" },
+      { label: t("pipeline.q.failed", { n: failed }), tone: failed > 0 ? "crit" : "idle" },
+      { label: t("pipeline.q.skipped", { n: skipped }), tone: "idle" },
+      { label: t("pipeline.q.queued", { n: Math.max(0, (rem ?? 0) - translating) }), tone: "idle" },
+    );
+    if (pre !== undefined) chips.push({ label: t("pipeline.q.preDone", { n: pre }), tone: "idle" });
+  }
+
+  const head = `${t("events.queueDone", { done, total })}${rem ? t("events.queueLeft", { n: rem }) : ""}`;
+  let used = 0;
+  const bars = segs.filter((s) => s.value > 0).map((s) => {
+    const width = Math.max(0, Math.min((s.value / total) * 100, 100 - used));
+    used += width;
+    return { ...s, width };
+  });
+  return (
+    <Box data-testid="pipeline-queue">
+      <Stack direction="row" justifyContent="space-between" alignItems="baseline" sx={{ mb: 0.5 }}>
+        <Typography variant="overline" color="text.secondary">{t("events.queue")}</Typography>
+        <Typography sx={{ fontFamily: MONO, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>{head}</Typography>
+      </Stack>
+      <Box role="img" aria-label={head} sx={{ display: "flex", height: 10, borderRadius: 5,
+        overflow: "hidden", bgcolor: SLATE_TRACK }}>
+        {bars.map((b) => (
+          <Box key={b.id} data-testid={b.id} style={{ width: `${b.width}%` }}
+            sx={{ height: "100%", bgcolor: b.color, transition: "width 300ms ease" }} />
+        ))}
+      </Box>
+      {chips.length > 0 && (
+        <Stack direction="row" sx={{ flexWrap: "wrap", gap: 1, mt: 1 }}>
+          {chips.map((c, i) => <Chip key={i} size="small" label={c.label} sx={toneSx(c.tone)} />)}
+        </Stack>
+      )}
+      {legend && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.75 }}>
+          {t("pipeline.q.legend")}
+        </Typography>
+      )}
+    </Box>
+  );
+}
+
+// ── batch list ──────────────────────────────────────────────────────────────
+const ROW_ACTIVE = new Set(["restore", "asr", "translate"]);
+
+function rowStatus(r: FilmRow, t: TFunction): string {
+  switch (r.status) {
+    case undefined:
+      return "";
+    case "active": {
+      const key = r.steps.find(([, s]) => s === "active")?.[0];
+      return key && ROW_ACTIVE.has(key) ? t(`pipeline.row.${key}`) : t("pipeline.row.active");
+    }
+    case "pending":
+      // A Jasna film restored before this run only needs its subtitles.
+      return r.steps.some(([k, s]) => k === "restore" && s === "done")
+        ? t("pipeline.row.subsOnly") : t("pipeline.row.pending");
+    default:
+      return t(`pipeline.row.${r.status}`);
+  }
+}
+
+function rowTime(r: FilmRow, t: TFunction): string {
+  if (r.status === "done" && r.duration_s !== undefined) return clock(r.duration_s);
+  if (r.status === "active" && r.eta_s !== undefined) {
+    return t("pipeline.left", { d: etaText(r.eta_s, t) });
+  }
+  return "—";
+}
+
+function RowChip({ stepKey, state, percent }: { stepKey: string; state: StepState; percent?: number }) {
+  const { t } = useTranslation();
+  const label = state === "active" && percent !== undefined
+    ? `${stepLabel(stepKey, t)} ${Math.round(percent)}%` : stepLabel(stepKey, t);
+  const icon = state === "done" ? <CheckIcon />
+    : state === "failed" ? <CloseIcon />
+    : state === "skipped" ? <RemoveIcon /> : undefined;
+  const tone: Tone = state === "done" ? "ok" : state === "failed" ? "crit"
+    : state === "waiting_gpu" ? "warn" : "idle";
+  return (
+    <Chip size="small" label={label} icon={icon}
+      variant={state === "active" ? "outlined" : "filled"}
+      sx={state === "active"
+        ? { borderColor: TINT.ok, bgcolor: alpha(TINT.ok, 0.08), color: "text.primary" }
+        : { ...toneSx(tone), "& .MuiChip-icon": { color: "inherit", fontSize: 14 } }} />
+  );
+}
+
+function FilmList({ pipeline }: { pipeline: Pipeline }) {
+  const { t } = useTranslation();
+  const { films, filmsMore } = pipeline;
+  // A single film is already the header above — the list is for batches.
+  if (films.length < 2 && filmsMore === 0) return null;
+  return (
+    <Box data-testid="pipeline-films" sx={{ ...BOX, py: 0.5 }}>
+      <Typography variant="overline" color="text.secondary" sx={{ px: 2, display: "block" }}>
+        {t("pipeline.films")}
+      </Typography>
+      {films.map((r, i) => {
+        const focus = r.name === pipeline.film;
+        const activeKey = r.steps.find(([, s]) => s === "active")?.[0];
+        return (
+          <Box key={`${r.name}-${i}`} data-testid="film-row" sx={{
+            display: "flex", flexWrap: "wrap", alignItems: "center", columnGap: 2, rowGap: 0.75,
+            px: 2, py: 1, borderTop: "1px solid", borderColor: "divider",
+            bgcolor: focus ? alpha(TINT.ok, 0.05) : "transparent",
+          }}>
+            <Typography sx={{ fontFamily: MONO, fontSize: 13, fontWeight: focus ? 600 : 400,
+              flex: "1 1 160px", minWidth: 0, wordBreak: "break-all" }}>{r.name}</Typography>
+            <Stack direction="row" sx={{ flexWrap: "wrap", gap: 0.75 }}>
+              {r.steps.map(([k, s]) => (
+                <RowChip key={k} stepKey={k} state={s} percent={k === activeKey ? r.percent : undefined} />
+              ))}
+            </Stack>
+            <Typography sx={{ fontSize: 13, flex: "1 1 140px", minWidth: 0,
+              color: r.status === "failed" ? "error.main"
+                : r.status === "active" || r.status === "done" ? "text.primary" : "text.secondary" }}>
+              {rowStatus(r, t)}
+            </Typography>
+            <Typography sx={{ fontFamily: MONO, fontSize: 13, color: "text.secondary", minWidth: 72,
+              textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{rowTime(r, t)}</Typography>
+          </Box>
+        );
+      })}
+      {filmsMore > 0 && (
+        <Typography variant="caption" color="text.secondary"
+          sx={{ px: 2, py: 1, display: "block", borderTop: "1px solid", borderColor: "divider" }}>
+          {t("pipeline.more", { n: filmsMore })}
+        </Typography>
+      )}
+    </Box>
+  );
+}
+
+// ── the view ────────────────────────────────────────────────────────────────
+export function PipelineProgress({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics }) {
+  const { t } = useTranslation();
+  const { steps } = pipeline;
+  const focus = focusStep(steps);
+  const heading = steps.some((s) => s.state === "active") ? t("events.nowProcessing")
+    : steps.every((s) => isTerminal(s.state)) ? t("pipeline.lastFinished") : t("pipeline.upNext");
+  return (
+    <Stack spacing={2} data-testid="pipeline-progress">
+      <Box sx={{ ...BOX, p: 2 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="flex-end"
+          sx={{ flexWrap: "wrap", columnGap: 2, rowGap: 0.5 }}>
+          <Box sx={{ minWidth: 0 }}>
+            <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase",
+                                                letterSpacing: 0.6, fontSize: 10 }}>
+              {heading}
+            </Typography>
+            {pipeline.film && (
+              <Typography sx={{ fontFamily: MONO, fontWeight: 600, fontSize: 16,
+                                wordBreak: "break-all", mt: 0.25 }}>{pipeline.film}</Typography>
+            )}
+          </Box>
+          <Typography variant="caption" color="text.secondary" sx={{ fontVariantNumeric: "tabular-nums" }}>
+            {t("pipeline.stepOf", { k: stepIndex(steps), n: steps.length })}
+          </Typography>
+        </Stack>
+        <Stepper steps={steps} />
+        {focus && <StepPanel step={focus} pipeline={pipeline} metrics={metrics} />}
+      </Box>
+      <QueueCard pipeline={pipeline} metrics={metrics} />
+      <FilmList pipeline={pipeline} />
+    </Stack>
+  );
+}

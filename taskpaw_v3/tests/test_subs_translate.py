@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import queue
 import subprocess
 import threading
 import time
@@ -29,12 +30,14 @@ from taskpaw_v3.monitors.subs.translate import (
     BATCH_SIZE,
     CANCELLED,
     CONTEXT_SIZE,
+    MODEL_LABEL_CHARS,
     REQUEST_TIMEOUT_S,
     RESPONSE_DEADLINE_S,
     SYSTEM_PROMPT,
     TranslateRequest,
     TranslateResult,
     Translator,
+    model_label,
     needs_llm_key,
 )
 
@@ -932,3 +935,151 @@ def test_blank_only_value_is_a_retryable_content_failure(harness_factory):
     reqs = sp.workers[0].requests
     assert len(reqs) == 3  # the failed batch was split into two halves
     assert [c["id"] for c in _user(reqs[1])["cues"]] == ["1", "2"]
+
+
+# ── #189: Translator.progress() — counters, percent/ETA, model label ─────
+PROGRESS_KEYS = {
+    "job_id",
+    "model",
+    "batches_done",
+    "batches_total",
+    "cues_done",
+    "cues_total",
+    "started_at",
+    "elapsed_s",
+    "percent",
+    "eta_s",
+}
+
+
+def _stepper() -> tuple[Responder, "queue.Queue[tuple[dict, FakeWorker]]"]:
+    """A responder that holds every request until the test replies to it."""
+    held: "queue.Queue[tuple[dict, FakeWorker]]" = queue.Queue()
+
+    def responder(req: dict, w: FakeWorker) -> None:
+        held.put((req, w))
+        return None
+
+    return responder, held
+
+
+def _reply(item: tuple[dict, FakeWorker], fn: Responder = good) -> None:
+    req, w = item
+    w.sink.put(json.dumps(fn(req, w)))
+
+
+def _counts(tr: Translator) -> tuple[int, int, int]:
+    p = tr.progress()
+    assert p is not None
+    return p["batches_done"], p["cues_done"], p["percent"]
+
+
+def test_progress_counts_batches_and_a_split_batch_once(harness_factory):
+    responder, held = _stepper()
+    h = harness_factory(Spawner(responder))
+    tr = h.tr
+    assert tr.progress() is None  # idle
+    tr.submit(TranslateRequest(RUN, "a.mp4", _cues(90)))
+    item = held.get(timeout=5)
+    p = tr.progress()
+    assert p is not None and set(p) == PROGRESS_KEYS
+    assert (p["job_id"], p["model"]) == ("a.mp4", "m/x · llm.example")
+    assert (p["batches_total"], p["cues_total"]) == (3, 90)
+    assert _counts(tr) == (0, 0, 0)
+    _reply(item)
+    item = held.get(timeout=5)
+    assert _counts(tr) == (1, 40, 44)
+    _reply(item, _not_json)  # the 2nd batch fails → two halves, retried once
+    item = held.get(timeout=5)
+    assert len(_user(item[0])["cues"]) == 20
+    assert _counts(tr) == (1, 40, 44)  # a split batch counts once …
+    _reply(item)
+    item = held.get(timeout=5)
+    assert _counts(tr) == (1, 40, 44)  # … when both halves have finished
+    _reply(item)
+    item = held.get(timeout=5)
+    assert _counts(tr) == (2, 80, 88)
+    _reply(item)
+    assert h.result().outcome == "translated"
+    assert tr.progress() is None  # cleared in the request's finally
+
+
+def test_progress_elapsed_percent_and_eta(harness_factory):
+    responder, held = _stepper()
+    h = harness_factory(Spawner(responder))
+    h.tr.submit(TranslateRequest(RUN, "a.mp4", _cues(90)))
+    first = held.get(timeout=5)
+    t0 = h.tr.progress()["started_at"]
+    assert h.tr.progress(now=t0 + 30)["eta_s"] is None  # no cue done yet
+    _reply(first)
+    held.get(timeout=5)  # the 2nd batch is in flight: 40/90 done
+    early = h.tr.progress(now=t0 + 5)
+    assert (early["elapsed_s"], early["eta_s"]) == (5, None)  # < 10 s
+    late = h.tr.progress(now=t0 + 30)
+    # floor(100 × 40/90); ceil(30/40 × (90 − 40))
+    assert (late["elapsed_s"], late["percent"], late["eta_s"]) == (30, 44, 38)
+    late["cues_done"] = 999
+    assert h.tr.progress(now=t0 + 30)["cues_done"] == 40  # a fresh dict
+
+
+def test_progress_none_after_cancel_mid_batch(harness_factory):
+    responder, held = _stepper()
+    h = harness_factory(Spawner(responder))
+    tr = h.tr
+    tr.submit(TranslateRequest(RUN, "a.mp4", _cues(90)))
+    _reply(held.get(timeout=5))
+    held.get(timeout=5)
+    assert _counts(tr) == (1, 40, 44)
+    tr.cancel()
+    assert tr.progress() is None  # D5: at once, not after the thread ends
+    assert tr._progress is None  # cleared by cancel() itself
+    tr.join(2.0)
+    assert not tr.is_alive() and tr.progress() is None
+
+
+def test_progress_none_for_a_request_that_fails_before_any_batch(harness_factory):
+    sp = Spawner(good)
+    h = harness_factory(sp, settings=_settings(key=""))
+    assert h.run(_cues(2)).detail == "no LLM key"
+    assert h.tr.progress() is None
+
+
+def test_progress_model_label_never_carries_the_key_userinfo_or_port(
+    harness_factory,
+):
+    responder, held = _stepper()
+    base = f"https://u:{KEY}@api.x.ai:443/v1"
+    h = harness_factory(Spawner(responder), settings=_settings(base=base))
+    h.tr.submit(TranslateRequest(RUN, "a.mp4", _cues(3)))
+    held.get(timeout=5)
+    p = h.tr.progress()
+    assert p is not None and p["model"] == "m/x · api.x.ai"
+    text = json.dumps(p, ensure_ascii=False)
+    assert KEY not in text and "u:" not in text and "443" not in text
+
+
+@pytest.mark.parametrize(
+    "model,base,label",
+    [
+        ("grok-4.3", "https://api.x.ai/v1", "grok-4.3 · api.x.ai"),
+        ("grok-4.3", "https://u:k@api.x.ai:443/v1", "grok-4.3 · api.x.ai"),
+        ("grok-4.3", "api.x.ai/v1", "grok-4.3"),  # no scheme: no host
+        ("grok-4.3", "http://[::1", "grok-4.3"),  # malformed: urlsplit raises
+        ("grok-4.3", "http://[::1]:8080/v1", "grok-4.3 · ::1"),
+        ("grok-4.3", "", "grok-4.3"),
+        ("grok-4.3", None, "grok-4.3"),
+        ("", "https://API.X.AI/v1", "api.x.ai"),
+        (None, None, ""),
+    ],
+)
+def test_model_label(model, base, label):
+    got = model_label(model, base)
+    assert got == label
+    assert "u:" not in got and "k@" not in got and ":443" not in got
+
+
+def test_model_label_is_bounded_and_keeps_the_host():
+    assert MODEL_LABEL_CHARS == 80
+    got = model_label("m" * 200, "https://api.x.ai/v1")
+    assert len(got) <= MODEL_LABEL_CHARS
+    assert got.startswith("mmm") and got.endswith("api.x.ai")

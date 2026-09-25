@@ -2,6 +2,8 @@ import { Box, CircularProgress, LinearProgress, Stack, Tooltip, Typography } fro
 import { useTranslation } from "react-i18next";
 import { AiActivity } from "./AiActivity";
 import { isAiMetrics } from "./aiActivity.helpers";
+import { PipelineProgress } from "./PipelineProgress";
+import { hiddenWithPipeline, readPipeline } from "./pipelineProgress.helpers";
 
 // Live metrics dashboard for a monitor's status pane (design-system
 // pages/agent-console.md → StatusHeader: "live metric line … file N/M, fps, %").
@@ -62,8 +64,9 @@ function Gauge({ label, pct, sub }: { label: string; pct: number; sub?: string }
   );
 }
 
-// A labelled value tile (fps, ETA, and any unknown metric).
-function Tile({ label, value }: { label: string; value: string }) {
+// A labelled value tile (fps, ETA, and any unknown metric). Also used by the
+// #189 PipelineProgress step panels.
+export function Tile({ label, value }: { label: string; value: string }) {
   return (
     <Box sx={{ px: 1.5, py: 1, borderRadius: 2, bgcolor: "rgba(148,163,184,0.06)",
                border: "1px solid", borderColor: "divider", minWidth: 84 }}>
@@ -112,6 +115,11 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
   const vramTotal = num("gpu_mem_total_mb");
   const ramUsed = num("mem_used_mb");
   const ramTotal = num("mem_total_mb");
+  // #189: per-film pipeline (Jasna AV 翻译 / avsubs). When `steps` is usable it
+  // REPLACES the now-processing banner, the queue bar and the fps/ETA tiles, and
+  // the keys it shows itself are hidden from the generic tiles (D13). Without it
+  // (Lada, AV-off Jasna, other monitors) nothing below changes.
+  const pipe = readPipeline(m);
 
   const gauges = [
     gpu !== undefined ? { label: "GPU", pct: gpu } : null,
@@ -120,11 +128,12 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
   ].filter(Boolean) as { label: string; pct: number }[];
 
   const tiles: { label: string; value: string }[] = [];
-  if (fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
-  if (eta) tiles.push({ label: t("events.eta"), value: eta });
+  if (!pipe && fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
+  if (!pipe && eta) tiles.push({ label: t("events.eta"), value: eta });
   // Unknown keys → tiles (so nothing is silently hidden, nothing is raw JSON).
   for (const [k, val] of Object.entries(m)) {
     if (KNOWN.has(k)) continue;
+    if (pipe && hiddenWithPipeline(k)) continue;
     tiles.push({ label: k.replace(/_/g, " "), value: typeof val === "number" ? String(val) : String(val) });
   }
 
@@ -132,8 +141,10 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
 
   return (
     <Stack spacing={2} sx={{ mt: 2 }}>
+      {pipe && <PipelineProgress pipeline={pipe} metrics={m} />}
+
       {/* Now-processing banner + current-file progress */}
-      {currentFile && (
+      {!pipe && currentFile && (
         <Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "rgba(34,197,94,0.06)",
                    border: "1px solid", borderColor: "rgba(34,197,94,0.25)" }}>
           <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase",
@@ -159,7 +170,7 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
       )}
 
       {/* Queue progress */}
-      {qTotal !== undefined && qTotal > 0 && qDone !== undefined && (
+      {!pipe && qTotal !== undefined && qTotal > 0 && qDone !== undefined && (
         <Box>
           <Stack direction="row" justifyContent="space-between" alignItems="baseline" sx={{ mb: 0.5 }}>
             <Typography variant="overline" color="text.secondary">{t("events.queue")}</Typography>

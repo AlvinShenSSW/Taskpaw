@@ -144,9 +144,12 @@ def test_the_hold_spans_restore_and_asr_and_the_waiter_gets_the_next_file(
     assert inst._gpu_waiting
     assert st.state == "running"  # a's translation is pending
     assert st.metrics["phase"] == "translate"
+    # #189 (D1/D6): a is restored but its subtitles are still translating, so
+    # it is not fully done yet — `queue_restored` carries the restore count.
     assert st.detail == (
-        "waiting for GPU (held by Other) · translating 1 · 1/2 done · subs 0/2"
+        "waiting for GPU (held by Other) · translating 1 · 0/2 done · subs 0/2"
     )
+    assert st.metrics["queue_restored"] == 1
     assert not _keyed(r.evs, "j1:launch")
     assert _other_try()  # the reserved waiter takes it
     st = inst.check(emit)

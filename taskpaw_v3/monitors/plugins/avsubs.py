@@ -25,6 +25,12 @@ touches it.
 
 No `shell=True`; the LLM key never reaches the ASR child (`asr_env`), argv,
 logs, events or the detail line.
+
+Progress view (#189): a per-run `FilmTracker` is marked at the existing counter
+points (ASR start, the `.ja.srt` publish, `translator.submit`, `_settle`) and
+the status adds the per-film stepper (`film`, `steps`, `films`, `films_more`,
+`model` while translating) derived from what is live at status time, plus
+`queue_pre_done`. Read-only observation; the queue semantics are unchanged.
 """
 
 from __future__ import annotations
@@ -65,6 +71,14 @@ from taskpaw_v3.monitors.subs import asr_env, bounded, exists_quietly
 # for supervisor-created instances (D10).
 from taskpaw_v3.monitors.subs.child import ChildProcess
 from taskpaw_v3.monitors.subs.job import SubsJob, source_identity
+from taskpaw_v3.monitors.subs.progress import (
+    ASR,
+    AVSUBS_STEPS,
+    NAME_CHARS,
+    TRANSLATE,
+    FilmTracker,
+    LiveFacts,
+)
 from taskpaw_v3.monitors.subs.srt import Cue, SrtError
 from taskpaw_v3.monitors.subs.translate import (
     CANCELLED,
@@ -74,6 +88,7 @@ from taskpaw_v3.monitors.subs.translate import (
     Translator,
     needs_llm_key,
 )
+from taskpaw_v3.monitors.subs.util import step_numbers
 from taskpaw_v3.monitors.subs.whisperjav import (
     DEFAULT_ENGINE,
     Engine,
@@ -437,6 +452,8 @@ class AvsubsInstance(MonitorInstance):
         self._jobs: dict[str, SubsJob] = {}
         self._kinds: dict[str, Kind] = {}
         self._settled: dict[str, tuple[str, str]] = {}
+        # #189: per-film step outcomes, marked at the counter points
+        self._tracker = FilmTracker(AVSUBS_STEPS)
         self._pre_done = 0
         self._completed = 0
         self._failed = 0
@@ -550,6 +567,11 @@ class AvsubsInstance(MonitorInstance):
             )
         exe = cfg.whisperjav_exe_path.strip()
         for item in plan.items:
+            # #189 (M1): every film joins the tracker in plan order before
+            # anything can settle; an existing .ja.srt → asr `done`.
+            self._tracker.add(
+                item.relpath, {ASR: "done"} if item.kind == "translate_only" else {}
+            )
             self._kinds[item.relpath] = item.kind
             self._jobs[item.relpath] = SubsJob(
                 run=self._run,
@@ -795,6 +817,7 @@ class AvsubsInstance(MonitorInstance):
                         release = True
                     elif err is None:
                         self._asr_job = job
+                        self._tracker.start(job.job_id, ASR, job.started_at)  # #189
                     elif err == "unstable":
                         self._settle_unstable(job, emit)
                         release = True
@@ -926,10 +949,12 @@ class AvsubsInstance(MonitorInstance):
                     self._settle(name, "failed", err, emit)
                     self._alert_job(name, err, emit)
                 else:
+                    self._tracker.finish(name, ASR, "done", time.monotonic())
                     self._submit_translation(job, list(outcome.cues), emit)
             elif outcome.kind == "no_speech":
                 err = job.publish_empty()
                 if err is None:
+                    self._tracker.finish(name, ASR, "done", time.monotonic())
                     self._settle_completed(job, "no speech", emit)
                 else:
                     self._settle(name, "failed", err, emit)
@@ -1088,6 +1113,8 @@ class AvsubsInstance(MonitorInstance):
             self._skipped += 1
             if reason == "no_llm_key":
                 self._streak = 0
+        # #189: before `_abort` can emit (M1)
+        self._tracker.settle_subs(job_id, terminal, time.monotonic())
         job = self._jobs[job_id]
         # M11: the job's attempt dirs go once it settled — except while its
         # ASR child is still live (the kill cleanup removes them after the
@@ -1201,6 +1228,8 @@ class AvsubsInstance(MonitorInstance):
             self._alert_job(job.job_id, "translator not running", emit)
             return
         translator.submit(TranslateRequest(self._run, job.job_id, tuple(cues)))
+        # #189 (N2): submitted = queued until the translator reports it live
+        self._tracker.start(job.job_id, TRANSLATE, time.monotonic())
 
     def _settle_results(self, emit: EventEmitter) -> None:
         """Drain the translator's results; each is settled under the lock with
@@ -1330,13 +1359,46 @@ class AvsubsInstance(MonitorInstance):
             return "waiting_gpu"
         return None
 
-    def _waiting_text(self) -> str:
-        # IR9: never name this run itself (free and reserved for us — the
-        # grant comes on our next try).
+    def _gpu_blocker(self) -> str:
+        """Who blocks this run's GPU wait: the lease's blocking label — but ""
+        while the lease is free and reserved for THIS run (IR9: never name
+        this run itself; the grant comes on our next try)."""
         if gpu_lease.reserved_for() == self._run:
-            return "waiting for GPU"
-        label = gpu_lease.blocking_label()
+            return ""
+        return gpu_lease.blocking_label()
+
+    def _waiting_text(self) -> str:
+        label = self._gpu_blocker()
         return f"waiting for GPU (held by {label})" if label else "waiting for GPU"
+
+    def _progress_view(self) -> dict:
+        """#189: the per-film stepper (`film`, `steps`, `films`, `films_more`
+        — all or none) and, while a translation runs, its `model`. Derived
+        from what is live NOW (D3): the ASR child with its WhisperJAV
+        progress, the translator's in-flight request, and the GPU wait of the
+        queue head `_advance` launches next. Read-only."""
+        now = time.monotonic()
+        active: dict[str, str] = {}
+        numbers: dict[str, dict] = {}
+        job = self._asr_job
+        if job is not None and job.child is not None:
+            active[ASR] = job.job_id
+            numbers[ASR] = step_numbers(job.progress(now))
+        translator = self._translator
+        request = translator.progress(now) if translator is not None else None
+        job_id = request.get("job_id") if request is not None else None
+        if isinstance(job_id, str):
+            active[TRANSLATE] = job_id
+            numbers[TRANSLATE] = step_numbers(request)
+        waiting: Optional[tuple[str, str]] = None
+        if self._waiting_gpu and not self._asr_live() and self._queue:
+            waiting = (self._queue[0].relpath, ASR)
+        holder = bounded(self._gpu_blocker(), NAME_CHARS) if waiting else ""
+        view = self._tracker.view(LiveFacts(active, waiting, holder, numbers), now)
+        model = numbers.get(TRANSLATE, {}).get("model")
+        if view and model:
+            view["model"] = model
+        return view
 
     def _build_status(
         self, state: State, detail: Optional[str] = None
@@ -1353,6 +1415,9 @@ class AvsubsInstance(MonitorInstance):
             metrics["queue_remaining"] = max(
                 0, self._total - done - self._failed - self._skipped
             )
+            # #189 (D8): the videos that had their .srt at scan (already in
+            # queue_completed) — the 已有字幕 chip
+            metrics["queue_pre_done"] = self._pre_done
         job = self._asr_job
         if job is not None and job.child is not None:
             metrics["current_file"] = job.relpath
@@ -1360,6 +1425,7 @@ class AvsubsInstance(MonitorInstance):
         if phase is not None:
             metrics["phase"] = phase
         metrics["subs_translating"] = translating
+        metrics.update(self._progress_view())
         metrics.update(_cpu_mem())
         if cfg.avsubs_gpu_monitor:
             gpu = read_gpu()

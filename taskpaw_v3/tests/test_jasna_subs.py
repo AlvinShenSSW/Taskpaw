@@ -22,6 +22,7 @@ from typing import Optional
 import pytest
 from test_jasna import _events, _Launcher, _managed, _patch, _videos
 
+from taskpaw_v3.core import gpu_lease
 from taskpaw_v3.core.llm import LLMSettings, set_llm_settings
 from taskpaw_v3.monitors.plugins import jasna as J
 from taskpaw_v3.monitors.plugins.jasna import (
@@ -34,6 +35,7 @@ from taskpaw_v3.monitors.plugins.jasna import (
 )
 from taskpaw_v3.monitors.subs import job as subs_job_mod
 from taskpaw_v3.monitors.subs.job import SubsJob
+from taskpaw_v3.monitors.subs.progress import AsrProgress, LiveFacts
 from taskpaw_v3.monitors.subs.srt import Cue
 from taskpaw_v3.monitors.subs.translate import CANCELLED, TranslateResult
 from taskpaw_v3.monitors.subs.whisperjav import attempt_dir
@@ -143,10 +145,17 @@ class _FakeTranslator:
         self.cancel_calls = 0
         self.cancel_lock_free: list[bool] = []
         self.on_submit = None
+        self.live: Optional[dict] = None  # #189: what progress() reports
         self._owner = owner or {}
 
     def start(self) -> None:
         self.started = True
+
+    def progress(self, now: Optional[float] = None) -> Optional[dict]:
+        """#189: the in-flight request's counters; None when idle/cancelled."""
+        if self.cancelled or self.live is None:
+            return None
+        return dict(self.live)
 
     def submit(self, req) -> None:
         if self.cancelled:
@@ -1427,3 +1436,756 @@ def test_extra_args_and_av_translate_descriptions_state_the_rules():
     assert "4" in extra and "any argparse prefix" not in extra
     av = props["av_translate"]["description"]
     assert "delete its old .srt files first" in av
+
+
+# ── #189: per-film progress (film / steps / films / model, queue counts) ──────
+# Observation only: the stepper metrics are derived at status time from the
+# tracker marks at the existing counter points; with「AV 翻译」on the queue's
+# `queue_completed` counts fully-done films (D1) and the detail follows (D6).
+QWEN_TAIL = (
+    "[QwenPipeline PID 4242] Phase 1: extracting audio\n"
+    "[QwenPipeline PID 4242] Phase 5: decoupled ASR\n"
+    "[DecoupledPipeline] Generating scene 3/10 (41.0s)\n"
+)
+_TQDM = (
+    "Processing video:  57%|███ |Processed: 06:09 (36703f) | "
+    "Remaining: 7:18 (207454f) | Speed: 157.0fps\n"
+)
+_NEW_KEYS = ("film", "steps", "films", "films_more", "model", "queue_restored")
+_OTHER = ("other", 1)
+_LIVE_TR = {
+    "job_id": "a.mp4",
+    "model": "grok-4.3 · api.x.ai",
+    "batches_done": 1,
+    "batches_total": 2,
+    "cues_done": 40,
+    "cues_total": 80,
+    "started_at": 12.5,
+    "elapsed_s": 30,
+    "percent": 50,
+    "eta_s": 30,
+}
+
+
+@pytest.fixture
+def lease_clock():
+    """A frozen lease clock: no reservation expires unless a test moves it."""
+    t = [1000.0]
+    gpu_lease._reset_for_tests(clock=lambda: t[0])
+    return t
+
+
+def _mono(monkeypatch, t: float = 100.0) -> SimpleNamespace:
+    """Freeze `time.monotonic` as the plugin module sees it (only J's `time`)."""
+    clk = SimpleNamespace(t=t)
+    fake = SimpleNamespace(monotonic=lambda: clk.t, time=time.time, sleep=time.sleep)
+    monkeypatch.setattr(J, "time", fake)
+    return clk
+
+
+def _step(m: dict, key: str) -> dict:
+    return next(s for s in m["steps"] if s["key"] == key)
+
+
+def _row(m: dict, name: str) -> dict:
+    return next(f for f in m["films"] if f["name"] == name)
+
+
+def _rows(m: dict) -> list:
+    return [(f["name"], f["status"]) for f in m["films"]]
+
+
+def _states(inst, name: str) -> dict:
+    rec = inst._tracker.record(name)
+    return {k: s["state"] for k, s in rec["steps"].items()}
+
+
+def _qc(m: dict) -> tuple:
+    """(queue_restored, queue_completed, queue_remaining, queue_failed)."""
+    return (
+        m["queue_restored"],
+        m["queue_completed"],
+        m["queue_remaining"],
+        m["queue_failed"],
+    )
+
+
+def test_progress_av_off_emits_no_new_keys_and_keeps_the_restore_counts(
+    tmp_path, monkeypatch
+):
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4", "b.mp4"],
+        av_translate=False,
+        rcs=[0, None],
+    )
+    r.inst.start(r.emit)
+    st = r.inst.check(r.emit)  # a restored, b restoring
+    assert not [k for k in _NEW_KEYS if k in st.metrics]
+    assert st.metrics["queue_completed"] == 1 and st.metrics["queue_remaining"] == 1
+    assert st.detail.endswith(" · 1/2 done")
+    r.inst.stop(timeout=1)
+
+
+def test_progress_restore_active_with_capture_numbers_and_queue_counts(
+    tmp_path, monkeypatch
+):
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4"],
+        rcs=[None],
+        jasna_capture_progress=True,
+    )
+    r.launcher._output = _TQDM
+    r.inst.start(r.emit)
+    assert _wait(lambda: r.inst._progress.get("percent") == 57)
+    st = r.inst.check(r.emit)
+    m = st.metrics
+    assert m["film"] == "a.mp4"
+    assert m["steps"] == [
+        {
+            "key": "restore",
+            "state": "active",
+            "percent": 57,
+            "eta_s": 438,
+            "elapsed_s": 369,
+        },
+        {"key": "asr", "state": "pending"},
+        {"key": "translate", "state": "pending"},
+    ]
+    assert m["films"] == [
+        {
+            "name": "a.mp4",
+            "steps": {"restore": "active", "asr": "pending", "translate": "pending"},
+            "status": "active",
+            "percent": 57,
+            "eta_s": 438,
+            "duration_s": None,
+        }
+    ]
+    assert m["films_more"] == 0 and "model" not in m
+    assert _qc(m) == (0, 0, 1, 0)
+    assert m["percent"] == 57 and m["eta"] == "7:18"  # the capture keys stay
+    assert st.detail.startswith("running: a.mp4 ")
+    assert st.detail.endswith(" · 0/1 done")
+    r.inst.stop(timeout=1)
+
+
+def test_progress_restore_active_without_capture_has_no_numbers(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], rcs=[None])
+    r.inst.start(r.emit)
+    m = r.inst.check(r.emit).metrics
+    assert m["film"] == "a.mp4"
+    assert m["steps"][0] == {"key": "restore", "state": "active"}
+    assert _rows(m) == [("a.mp4", "active"), ("b.mp4", "pending")]
+    assert _row(m, "a.mp4")["percent"] is None
+    assert _qc(m) == (0, 0, 2, 0)
+    r.inst.stop(timeout=1)
+
+
+def test_progress_asr_active_reports_whisperjav_phase_and_scene(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)  # a restored → ASR a
+    r.spawner.last.tail = lambda lines=10, max_chars=800: QWEN_TAIL
+    st = r.inst.check(r.emit)
+    m = st.metrics
+    expect = AsrProgress(0.0)
+    expect.feed_text(QWEN_TAIL, 1.0)
+    pct = expect.snapshot(1.0)["percent"]
+    assert m["film"] == "a.mp4" and m["current_file"] == "a-破解.mp4"
+    restore, asr, tr = m["steps"]
+    assert restore["state"] == "done" and isinstance(restore["duration_s"], int)
+    assert asr["key"] == "asr" and asr["state"] == "active"
+    assert (asr["phase"], asr["phase_n"], asr["scene"], asr["scenes"]) == (5, 8, 3, 10)
+    assert asr["percent"] == pct and 0 < pct < 99
+    assert isinstance(asr["elapsed_s"], int)
+    assert "eta_s" not in asr  # no ETA yet: absent, never null
+    assert tr == {"key": "translate", "state": "pending"}
+    row = _row(m, "a.mp4")
+    assert row["status"] == "active" and row["percent"] == pct
+    assert _qc(m) == (1, 0, 1, 0)
+    assert st.detail.startswith("subtitling: a-破解.mp4 [anime-whisper] · ")
+    r.inst.stop(timeout=1)
+
+
+def test_progress_translate_active_shows_the_model_and_only_design_keys(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    inst.check(emit)  # ASR a
+    r.spawner.last.finish(0)
+    st = inst.check(emit)  # ja published, a submitted → queued (N2)
+    assert _step(st.metrics, "asr")["state"] == "done"
+    assert _step(st.metrics, "translate") == {"key": "translate", "state": "queued"}
+    assert _row(st.metrics, "a.mp4")["status"] == "queued"
+    assert "model" not in st.metrics
+    tr = r.translators[0]
+    tr.live = dict(_LIVE_TR)
+    st = inst.check(emit)
+    m = st.metrics
+    assert m["film"] == "a.mp4" and m["model"] == "grok-4.3 · api.x.ai"
+    assert _step(m, "translate") == {
+        "key": "translate",
+        "state": "active",
+        "model": "grok-4.3 · api.x.ai",
+        "batches_done": 1,
+        "batches_total": 2,
+        "cues_done": 40,
+        "cues_total": 80,
+        "elapsed_s": 30,
+        "percent": 50,
+        "eta_s": 30,
+    }  # never the request's job_id / started_at
+    row = _row(m, "a.mp4")
+    assert (row["status"], row["percent"], row["eta_s"]) == ("active", 50, 30)
+    assert _qc(m) == (1, 0, 1, 0)
+    assert st.detail == "translating 1 · subs 0/1"
+    tr.live = None  # the request ends
+    tr.answer("a.mp4")
+    st = inst.check(emit)
+    m = st.metrics
+    assert "model" not in m
+    assert [s["state"] for s in m["steps"]] == ["done", "done", "done"]
+    assert all(isinstance(s.get("duration_s"), int) for s in m["steps"])
+    assert _row(m, "a.mp4")["status"] == "done"
+    assert _qc(m) == (1, 1, 0, 0)
+    assert st.detail == "idle · 1/1 done"
+    assert "Queue: 1/1 done, 0 failed" in _done(r.evs)[0][2]
+
+
+def test_progress_batch_one_film_translating_while_the_next_restores(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], rcs=[0, None])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    inst.check(emit)  # a restored → ASR a
+    r.spawner.last.finish(0)
+    inst.check(emit)  # a submitted, b launched
+    r.translators[0].live = dict(_LIVE_TR)
+    st = inst.check(emit)
+    m = st.metrics
+    assert m["film"] == "b.mp4"  # the GPU child wins the focus
+    assert _step(m, "restore")["state"] == "active"
+    assert m["model"] == "grok-4.3 · api.x.ai"
+    assert _rows(m) == [("a.mp4", "active"), ("b.mp4", "active")]
+    a = _row(m, "a.mp4")
+    assert a["steps"] == {"restore": "done", "asr": "done", "translate": "active"}
+    assert (a["percent"], a["eta_s"]) == (50, 30)
+    assert _row(m, "b.mp4")["steps"] == {
+        "restore": "active",
+        "asr": "pending",
+        "translate": "pending",
+    }
+    assert _qc(m) == (1, 0, 2, 0)
+    # D6: the detail's "X/Y done" is the fully-done count, not the restores
+    assert st.detail.endswith(" · translating 1 · 0/2 done")
+    inst.stop(timeout=1)
+
+
+def test_progress_translate_only_film_is_pending_until_submitted(tmp_path, monkeypatch):
+    # N2: an existing .ja.srt makes asr `done` at add (no duration); translate
+    # stays `pending` until translator.submit, `queued` after.
+    r = _setup(tmp_path, monkeypatch, pending=["b.mp4"], ja=["b.mp4"], rcs=[None])
+    r.inst.start(r.emit)
+    m = r.inst.check(r.emit).metrics
+    assert _row(m, "b.mp4")["steps"] == {
+        "restore": "active",
+        "asr": "done",
+        "translate": "pending",
+    }
+    assert "duration_s" not in _step(m, "asr")
+    r.launcher.procs[0]._rc = 0
+    m = r.inst.check(r.emit).metrics  # restored → submitted
+    assert _row(m, "b.mp4")["steps"] == {
+        "restore": "done",
+        "asr": "done",
+        "translate": "queued",
+    }
+    assert _row(m, "b.mp4")["status"] == "queued"
+
+
+def test_progress_waiting_gpu_holder_waited_s_and_reset(
+    tmp_path, monkeypatch, lease_clock
+):
+    clk = _mono(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], rcs=[None, None])
+    inst, emit = r.inst, r.emit
+    assert gpu_lease.try_acquire(_OTHER, 1.0, label="Other")
+    inst.start(emit)  # refused → waits
+    st = inst.check(emit)
+    assert st.state == "idle" and st.metrics["film"] == "a.mp4"
+    assert _step(st.metrics, "restore") == {
+        "key": "restore",
+        "state": "waiting_gpu",
+        "holder": "Other",
+        "waited_s": 0,
+    }
+    assert _rows(st.metrics) == [("a.mp4", "waiting_gpu"), ("b.mp4", "pending")]
+    clk.t += 30
+    st = inst.check(emit)  # N6: the refusal flag toggles inside check()
+    assert _step(st.metrics, "restore")["waited_s"] == 30
+    clk.t += 15
+    assert gpu_lease.release(_OTHER)
+    assert gpu_lease.reserved_for() == inst._run
+    st = inst._build_status("idle")  # N5: free and reserved for THIS run
+    assert _step(st.metrics, "restore") == {
+        "key": "restore",
+        "state": "waiting_gpu",
+        "holder": "",
+        "waited_s": 45,
+    }
+    assert st.detail == "waiting for GPU · 0/2 done · subs 0/2"
+    st = inst.check(emit)  # takes it: a restores, the wait is over
+    assert _step(st.metrics, "restore") == {"key": "restore", "state": "active"}
+    assert not gpu_lease.try_acquire(_OTHER, 1.0, label="Other")  # Other waits
+    r.launcher.procs[0]._rc = 0
+    inst.check(emit)  # a restored → a's ASR on the same hold
+    r.spawner.last.finish(0)
+    clk.t += 100
+    st = inst.check(emit)  # a's GPU work ends → reserved for Other → b waits
+    assert inst._gpu_waiting and st.metrics["film"] == "b.mp4"
+    assert _step(st.metrics, "restore") == {
+        "key": "restore",
+        "state": "waiting_gpu",
+        "holder": "Other",
+        "waited_s": 0,  # a new wait starts from zero
+    }
+    clk.t += 5
+    assert _step(inst.check(emit).metrics, "restore")["waited_s"] == 5
+    inst.stop(timeout=1)
+
+
+def test_progress_mixed_run_counts_rows_and_the_row_count_mapping(
+    tmp_path, monkeypatch
+):
+    # a: restore fails; b: translation fails; c: kind none (zh exists);
+    # d: translate-only; e: subs-only; y.mkv: restored with zh (counted, not
+    # tracked); y.mp4: an output-name collision (counted, not tracked) — W1.
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4", "b.mp4", "c.mp4", "d.mp4"],
+        restored=["e.mp4", "y.mkv", "y.mp4"],
+        zh=["c.mp4", "y.mkv"],
+        ja=["d.mp4"],
+        rcs=[1, 1, 0, 0, 0],
+    )
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    assert sorted(inst._jobs) == ["a.mp4", "b.mp4", "d.mp4", "e.mp4"]
+    assert [f["name"] for f in inst._tracker.view(LiveFacts(), 0.0)["films"]] == [
+        "a.mp4",
+        "b.mp4",
+        "c.mp4",
+        "d.mp4",
+        "e.mp4",
+    ]  # plan order: pending (kind none included), then subs-only
+    inst.check(emit)  # a: plain retry
+    inst.check(emit)  # a failed → b launched
+    inst.check(emit)  # b restored → ASR b
+    r.spawner.last.finish(0)
+    st = inst.check(emit)  # b submitted → c launched
+    m = st.metrics
+    assert _rows(m) == [
+        ("a.mp4", "failed"),
+        ("b.mp4", "queued"),
+        ("c.mp4", "active"),
+        ("d.mp4", "pending"),
+        ("e.mp4", "pending"),
+    ]
+    # restored: y.mkv, e, b; b and e still unsettled → 1 fully done (y.mkv)
+    assert _qc(m) == (3, 1, 4, 2)
+    assert st.detail.endswith(" · translating 1 · 1/7 done")
+    inst.check(emit)  # c restored (no job) → d launched
+    inst.check(emit)  # d restored → d submitted; subs-only e → ASR e
+    r.spawner.last.finish(0)
+    inst.check(emit)  # e submitted
+    tr = r.translators[0]
+    tr.answer("b.mp4", ok=False)
+    tr.answer("d.mp4")
+    tr.answer("e.mp4")
+    st = inst.check(emit)
+    m = st.metrics
+    assert _qc(m) == (5, 5, 0, 2)
+    statuses = inst._tracker.statuses(LiveFacts())
+    assert statuses == {
+        "a.mp4": "failed",
+        "b.mp4": "failed",
+        "c.mp4": "done",
+        "d.mp4": "done",
+        "e.mp4": "done",
+    }
+    assert {n: _states(inst, n) for n in statuses} == {
+        "a.mp4": {"restore": "failed", "asr": "skipped", "translate": "skipped"},
+        "b.mp4": {"restore": "done", "asr": "done", "translate": "failed"},
+        "c.mp4": {"restore": "done", "asr": "skipped", "translate": "skipped"},
+        "d.mp4": {"restore": "done", "asr": "done", "translate": "done"},
+        "e.mp4": {"restore": "done", "asr": "done", "translate": "done"},
+    }
+    # the row ↔ count mapping (documented in the openclaw guide)
+    plan_done, subs_only, collisions = 2, 1, 1
+    restored_terminal = [
+        n
+        for n, s in statuses.items()
+        if _states(inst, n)["restore"] == "done" and s in ("done", "failed", "skipped")
+    ]
+    restore_failed = [n for n in statuses if _states(inst, n)["restore"] == "failed"]
+    assert m["queue_completed"] - (plan_done - subs_only) == len(restored_terminal)
+    assert m["queue_failed"] - collisions == len(restore_failed) == 1
+    done = _done(r.evs)
+    assert len(done) == 1
+    assert (
+        "Queue: 5/7 done, 2 failed | Subs: 2/4 done, 1 failed, 1 skipped" in done[0][2]
+    )
+
+
+@pytest.mark.parametrize(
+    "outcome", ["completed", "asr_failed", "unstable", "no_key", "translate_failed"]
+)
+def test_progress_queue_completed_counts_a_film_once_its_job_settles(
+    tmp_path, monkeypatch, outcome
+):
+    # D1: a settled job of ANY outcome makes its restored film fully done.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"], key=outcome != "no_key")
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    st = inst.check(emit)  # a restored → ASR a
+    assert _qc(st.metrics) == (1, 0, 1, 0)
+    if outcome == "asr_failed":
+        r.spawner.last.finish(1)
+        inst.check(emit)  # retry
+        r.spawner.last.finish(1)
+    elif outcome == "unstable":
+        (r.out / "a-破解.mp4").write_bytes(b"changed underneath, longer")
+        r.spawner.last.finish(0)
+    else:
+        r.spawner.last.finish(0)
+    st = inst.check(emit)
+    if outcome in ("completed", "translate_failed"):
+        assert _qc(st.metrics) == (1, 0, 1, 0)  # still translating
+        r.translators[0].answer("a.mp4", ok=outcome == "completed")
+        st = inst.check(emit)
+    assert _qc(st.metrics) == (1, 1, 0, 0)
+    assert st.detail == "idle · 1/1 done"
+    row = _row(st.metrics, "a.mp4")
+    assert (row["status"], row["steps"]) == {
+        "completed": ("done", {"restore": "done", "asr": "done", "translate": "done"}),
+        "asr_failed": (
+            "failed",
+            {"restore": "done", "asr": "failed", "translate": "skipped"},
+        ),
+        "unstable": (
+            "skipped",
+            {"restore": "done", "asr": "skipped", "translate": "skipped"},
+        ),
+        "no_key": (
+            "skipped",
+            {"restore": "done", "asr": "done", "translate": "skipped"},
+        ),
+        "translate_failed": (
+            "failed",
+            {"restore": "done", "asr": "done", "translate": "failed"},
+        ),
+    }[outcome]
+    done = _done(r.evs)
+    assert len(done) == 1 and "Queue: 1/1 done, 0 failed" in done[0][2]
+
+
+def test_progress_no_exe_at_start_skips_subtitles_while_restores_progress(
+    tmp_path, monkeypatch
+):
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4", "b.mp4"],
+        restored=["e.mp4"],
+        exe=False,
+        rcs=[0, None],
+    )
+    inst, emit = r.inst, r.emit
+    inst.start(emit)  # every job skipped(no_exe) before any restore finished
+    for n in ("a.mp4", "b.mp4", "e.mp4"):
+        s = _states(inst, n)
+        assert (s["asr"], s["translate"]) == ("skipped", "skipped"), n
+    assert _states(inst, "a.mp4")["restore"] == "pending"  # never touched (N1)
+    assert _states(inst, "e.mp4")["restore"] == "done"
+    st = inst.check(emit)  # a restored, b restoring
+    m = st.metrics
+    assert _rows(m) == [
+        ("a.mp4", "skipped"),
+        ("b.mp4", "active"),  # R1: settled early, restore still active
+        ("e.mp4", "skipped"),
+    ]
+    assert m["film"] == "b.mp4"
+    assert [s["state"] for s in m["steps"]] == ["active", "skipped", "skipped"]
+    assert _qc(m) == (2, 2, 1, 0)
+    r.launcher.procs[1]._rc = 0
+    st = inst.check(emit)
+    assert _row(st.metrics, "b.mp4")["status"] == "skipped"
+    assert _qc(st.metrics) == (3, 3, 0, 0)
+    assert "Queue: 3/3 done, 0 failed" in _done(r.evs)[0][2]
+
+
+def test_progress_translator_start_failure_skips_subtitles_restores_continue(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"], restored=["e.mp4"], rcs=[None])
+
+    def no_thread(run, *, name, **k):
+        raise RuntimeError("no thread")
+
+    monkeypatch.setattr(J, "Translator", no_thread)
+    r.inst.start(r.emit)
+    assert r.inst._subs_disabled.startswith("translator did not start")
+    m = r.inst.check(r.emit).metrics
+    assert _rows(m) == [("a.mp4", "active"), ("e.mp4", "skipped")]
+    assert _row(m, "a.mp4")["steps"] == {
+        "restore": "active",
+        "asr": "skipped",
+        "translate": "skipped",
+    }
+    r.launcher.procs[0]._rc = 0
+    m = r.inst.check(r.emit).metrics
+    assert _row(m, "a.mp4")["status"] == "skipped"
+    assert _qc(m) == (2, 2, 0, 0)
+
+
+def test_progress_disable_subs_mid_batch_marks_skipped_not_done(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], rcs=[0, None])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    inst.check(emit)  # a restored → ASR a
+    with inst._launch_lock:
+        inst._disable_subs("test", emit)
+    inst._run_deferred()  # kills a's ASR, requests the advance
+    inst._dispatch(emit)  # b launched
+    m = inst.check(emit).metrics
+    a = _row(m, "a.mp4")
+    assert a["steps"] == {"restore": "done", "asr": "skipped", "translate": "skipped"}
+    assert a["status"] == "skipped"  # R1: skipped, never `done`
+    b = _row(m, "b.mp4")
+    assert b["steps"]["restore"] == "active" and b["status"] == "active"
+    r.launcher.procs[1]._rc = 0
+    m = inst.check(emit).metrics
+    assert _row(m, "b.mp4")["status"] == "skipped"
+    assert _qc(m) == (2, 2, 0, 0)
+
+
+def test_progress_kind_none_film_is_done_once_restored(tmp_path, monkeypatch):
+    # M2: an existing zh → no job; asr/translate skipped at add.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"], zh=["a.mp4"], rcs=[None])
+    r.inst.start(r.emit)
+    assert r.inst._jobs == {}
+    m = r.inst.check(r.emit).metrics
+    assert _row(m, "a.mp4") == {
+        "name": "a.mp4",
+        "steps": {"restore": "active", "asr": "skipped", "translate": "skipped"},
+        "status": "active",
+        "percent": None,
+        "eta_s": None,
+        "duration_s": None,
+    }
+    r.launcher.procs[0]._rc = 0
+    m = r.inst.check(r.emit).metrics
+    assert _row(m, "a.mp4")["status"] == "done"
+    assert _qc(m) == (1, 1, 0, 0)
+
+
+def test_progress_planning_failure_adds_every_pending_film_with_subs_skipped(
+    tmp_path, monkeypatch
+):
+    # R2
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], rcs=[0, 0])
+
+    def raced(*a, **k):
+        raise OSError("raced")
+
+    monkeypatch.setattr(J, "plan_subs", raced)
+    r.inst.start(r.emit)
+    assert r.inst._subs_disabled == "planning failed"
+    for n in ("a.mp4", "b.mp4"):
+        assert _states(r.inst, n) == {
+            "restore": "pending",
+            "asr": "skipped",
+            "translate": "skipped",
+        }
+    r.inst.check(r.emit)  # a restored → b launched
+    m = r.inst.check(r.emit).metrics
+    assert _rows(m) == [("a.mp4", "done"), ("b.mp4", "done")]
+    assert _qc(m) == (2, 2, 0, 0)
+    assert len(_done(r.evs)) == 1
+
+
+def test_progress_abort_keeps_the_restore_based_texts(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4", "c.mp4"], rcs=[1] * 6)
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    for _ in range(6):
+        st = inst.check(emit)
+    assert st.state == "degraded"
+    assert st.detail == (
+        "batch aborted after 3 consecutive failures · 0/3 done, 3 failed"
+    )
+    assert _rows(st.metrics) == [
+        ("a.mp4", "failed"),
+        ("b.mp4", "failed"),
+        ("c.mp4", "failed"),
+    ]
+    assert _qc(st.metrics) == (0, 0, 0, 3)
+    aborted = [e for e in r.evs if e[1].endswith("batch aborted")]
+    assert aborted and aborted[0][2].endswith("| Queue: 0/3 done, 3 failed")
+
+
+def test_progress_restart_takes_a_fresh_tracker(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    inst.check(emit)  # a restored → ASR a
+    old = inst._tracker
+    assert _states(inst, "a.mp4")["restore"] == "done"
+    inst.stop(timeout=1)
+    inst.start(emit)  # a is restored now: a subs-only film of the new run
+    assert inst._tracker is not old
+    m = inst.check(emit).metrics
+    assert m["film"] == "a.mp4" and _step(m, "asr")["state"] == "active"
+    assert _step(m, "restore") == {"key": "restore", "state": "done"}  # no duration
+    assert _qc(m) == (1, 0, 1, 0)
+    inst.stop(timeout=1)
+
+
+def test_progress_restore_retry_keeps_one_start_stamp_and_one_duration(
+    tmp_path, monkeypatch
+):
+    clk = _mono(monkeypatch)
+    r = _setup(
+        tmp_path, monkeypatch, pending=["a.mp4"], rcs=[None, None], unet4x_1080p=True
+    )
+    inst, emit = r.inst, r.emit
+    inst.start(emit)  # t=100: the unet-4x launch
+    clk.t = 110.0
+    inst.check(emit)  # first derived-active poll
+    r.launcher.procs[0]._rc = 1
+    clk.t = 150.0
+    st = inst.check(emit)  # unet-4x failed → the same file relaunched plain
+    assert r.launcher.n == 2
+    assert _step(st.metrics, "restore")["state"] == "active"
+    r.launcher.procs[1]._rc = 0
+    clk.t = 200.0
+    inst.check(emit)
+    rec = inst._tracker.record("a.mp4")["steps"]["restore"]
+    assert (rec["state"], rec["started_at"], rec["activated_at"], rec["ended_at"]) == (
+        "done",
+        100.0,
+        110.0,
+        200.0,
+    )
+    assert rec["duration_s"] == 90
+    assert len(_keyed(r.evs, "j1:unet:1080p")) == 1
+    inst.stop(timeout=1)
+
+
+@pytest.mark.parametrize("fail_current_raises", [False, True])
+def test_progress_exit_internal_error_marks_the_restore_failed(
+    tmp_path, monkeypatch, fail_current_raises
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"], rcs=[0, None])
+
+    def bug(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(r.inst, "_handle_success", bug)
+    if fail_current_raises:  # the fence's direct `_failed` bump
+        monkeypatch.setattr(r.inst, "_fail_current", bug)
+    r.inst.start(r.emit)
+    m = r.inst.check(r.emit).metrics
+    assert _row(m, "a.mp4")["steps"] == {
+        "restore": "failed",
+        "asr": "skipped",
+        "translate": "skipped",
+    }
+    assert _row(m, "a.mp4")["status"] == "failed"
+    assert _row(m, "b.mp4")["status"] == "active"
+    assert _qc(m) == (0, 0, 1, 1)
+    r.inst.stop(timeout=1)
+
+
+def test_progress_fence_internal_direct_write_marks_subtitles_failed(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    inst.check(emit)  # ASR a
+    job = inst._jobs["a.mp4"]
+
+    def bug(*a, **k):
+        raise RuntimeError("bug")
+
+    job.poll_asr = bug  # type: ignore[method-assign]
+    inst._settle = bug  # type: ignore[method-assign]  # `_settle` itself raises
+    r.spawner.last.rc = 0
+    inst.check(emit)
+    del job.poll_asr
+    del inst._settle
+    assert inst._settled["a.mp4"] == ("failed", "internal: RuntimeError")
+    assert _states(inst, "a.mp4") == {
+        "restore": "done",
+        "asr": "failed",
+        "translate": "skipped",
+    }
+    m = inst.check(emit).metrics
+    assert _row(m, "a.mp4")["status"] == "failed"
+    assert _qc(m) == (1, 1, 0, 0)
+
+
+def test_progress_restore_mark_survives_a_raising_failure_alert(tmp_path, monkeypatch):
+    # M1: the mark sits before the emit — a sink that raises cannot skip it.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"], rcs=[1, 1])
+    raised: list[str] = []
+
+    def emit(level, title, message, data=None, dedupe_key=None):
+        if title.endswith("a.mp4 failed") and not raised:
+            raised.append(title)
+            raise RuntimeError("sink down")
+        r.evs.append((level, title, message, dedupe_key))
+
+    r.inst.start(emit)
+    r.inst.check(emit)  # plain retry
+    r.inst.check(emit)  # final failure: the alert raises inside _fail_current
+    assert raised
+    assert _states(r.inst, "a.mp4") == {
+        "restore": "failed",
+        "asr": "skipped",
+        "translate": "skipped",
+    }
+
+
+def test_progress_settle_mark_survives_a_raising_disable_alert(tmp_path, monkeypatch):
+    # M1: `_settle` marks before `_disable_subs` can emit.
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    inst = r.inst
+
+    def emit(level, title, message, data=None, dedupe_key=None):
+        if "AV 翻译 disabled" in title:
+            raise RuntimeError("sink down")
+        r.evs.append((level, title, message, dedupe_key))
+
+    inst.start(emit)
+    inst.check(emit)  # ASR a
+    inst._subs_consecutive_failures = 2
+    with inst._launch_lock:
+        with pytest.raises(RuntimeError):
+            inst._settle("a.mp4", "failed", "exit code 1", emit)
+    assert inst._settled["a.mp4"] == ("failed", "exit code 1")
+    assert _states(inst, "a.mp4") == {
+        "restore": "done",
+        "asr": "failed",
+        "translate": "skipped",
+    }
+    inst.stop(timeout=1)

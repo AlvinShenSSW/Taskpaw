@@ -1013,3 +1013,284 @@ def test_unknown_state_hides_stale_metrics_like_other_outages():
     assert "- m: unknown" in out and "4/10" not in out
     # a healthy state still renders the metrics (no regression)
     assert "4/10 done (6 left)" in render_status_md(row("running", "jasna", queue), "t")
+
+
+# ── #189: the stage fragment + Jasna's `修复 a/b` count (D7) ─────────────────
+def _line_of(name: str, type_id: str, metrics: dict, state: str = "running") -> str:
+    rows = [
+        {
+            "name": "box",
+            "reachable": 1,
+            "status_json": json.dumps(
+                {
+                    "monitors": {
+                        name: {"state": state, "type_id": type_id, "metrics": metrics}
+                    }
+                }
+            ),
+        }
+    ]
+    md = render_status_md(rows, "t")
+    return next(ln for ln in md.splitlines() if ln.startswith(f"- {name}:"))
+
+
+_Q1 = {
+    "queue_completed": 0,
+    "queue_total": 1,
+    "queue_remaining": 1,
+    "queue_failed": 0,
+    "subs_total": 1,
+    "subs_completed": 0,
+    "subs_failed": 0,
+}
+_Q2 = {**_Q1, "queue_total": 2, "queue_remaining": 2, "subs_total": 2}
+_PENDING = [
+    {"key": "asr", "state": "pending"},
+    {"key": "translate", "state": "pending"},
+]
+_DONE_R = {"key": "restore", "state": "done", "duration_s": 3420}
+_TR_PENDING = {"key": "translate", "state": "pending"}
+_MODEL = "grok-4.3 · api.x.ai"
+
+
+def _asr(**nums) -> list:
+    return [_DONE_R, {"key": "asr", "state": "active", **nums}, _TR_PENDING]
+
+
+def _waiting(holder: str) -> list:
+    wait = {"key": "restore", "state": "waiting_gpu", "holder": holder}
+    return [{**wait, "waited_s": 30}, *_PENDING]
+
+
+_FIXTURES = [
+    (  # restore active, capture on
+        {
+            **_Q1,
+            "queue_restored": 0,
+            "current_file": "SDAB-312.mp4",
+            "percent": 57,
+            "eta": "7:18",
+            "fps": 157.0,
+            "film": "SDAB-312.mp4",
+            "steps": [
+                {"key": "restore", "state": "active", "percent": 57, "eta_s": 438},
+                *_PENDING,
+            ],
+        },
+        "running",
+        "- JASNA: 0/1 done (1 left) | SDAB-312.mp4 | 57% · ETA 7:18 · 157fps"
+        " | 修复 0/1 · subs 0/1",
+    ),
+    (  # restore active, capture off
+        {
+            **_Q1,
+            "queue_restored": 0,
+            "current_file": "SDAB-312.mp4",
+            "steps": [{"key": "restore", "state": "active"}, *_PENDING],
+        },
+        "running",
+        "- JASNA: 0/1 done (1 left) | SDAB-312.mp4 | 修复 0/1 · subs 0/1",
+    ),
+    (  # asr with percent + ETA
+        {
+            **_Q1,
+            "queue_restored": 1,
+            "current_file": "SDAB-312-破解.mp4",
+            "steps": _asr(percent=43, eta_s=360, phase=5, phase_n=8, elapsed_s=500),
+        },
+        "running",
+        "- JASNA: 0/1 done (1 left) | SDAB-312-破解.mp4 | 识别 43% · 约剩 6 分"
+        " | 修复 1/1 · subs 0/1",
+    ),
+    (  # asr without a percent (another engine): elapsed only
+        {
+            **_Q1,
+            "queue_restored": 1,
+            "current_file": "SDAB-312-破解.mp4",
+            "steps": _asr(elapsed_s=250),
+        },
+        "running",
+        "- JASNA: 0/1 done (1 left) | SDAB-312-破解.mp4 | 识别 · 已用 4 分"
+        " | 修复 1/1 · subs 0/1",
+    ),
+    (  # translate with ETA and model
+        {
+            **_Q1,
+            "queue_restored": 1,
+            "model": _MODEL,
+            "steps": [
+                _DONE_R,
+                {"key": "asr", "state": "done"},
+                {
+                    "key": "translate",
+                    "state": "active",
+                    "percent": 56,
+                    "eta_s": 45,
+                    "model": _MODEL,
+                },
+            ],
+        },
+        "running",
+        "- JASNA: 0/1 done (1 left) | 翻译 56% · 约剩 1 分 · grok-4.3 · api.x.ai"
+        " | 修复 1/1 · subs 0/1",
+    ),
+    (  # waiting for the GPU another task holds
+        {**_Q2, "queue_restored": 0, "steps": _waiting("AV")},
+        "idle",
+        "- JASNA: 0/2 done (2 left) | 等待 GPU（AV） | 修复 0/2 · subs 0/2",
+    ),
+    (  # waiting, the lease reserved for this run (holder "")
+        {**_Q2, "queue_restored": 0, "steps": _waiting("")},
+        "idle",
+        "- JASNA: 0/2 done (2 left) | 等待 GPU | 修复 0/2 · subs 0/2",
+    ),
+    (  # asr, no ETA yet
+        {
+            **_Q1,
+            "queue_restored": 1,
+            "current_file": "SDAB-312-破解.mp4",
+            "steps": _asr(percent=43, elapsed_s=90),
+        },
+        "running",
+        "- JASNA: 0/1 done (1 left) | SDAB-312-破解.mp4 | 识别 43% | 修复 1/1 · subs 0/1",
+    ),
+]
+
+
+def test_189_jasna_fixture_lines_are_byte_exact():
+    for metrics, state, expected in _FIXTURES:
+        assert _line_of("JASNA", "jasna", metrics, state) == expected
+
+
+def test_189_avsubs_fixture_line_is_byte_exact():
+    metrics = {
+        "queue_completed": 21,
+        "queue_total": 63,
+        "queue_remaining": 41,
+        "queue_failed": 1,
+        "queue_skipped": 0,
+        "queue_pre_done": 20,
+        "current_file": "2024/ABC-123.mp4",
+        "phase": "asr",
+        "subs_translating": 0,
+        "film": "2024/ABC-123.mp4",
+        "steps": [
+            {"key": "asr", "state": "active", "percent": 43, "eta_s": 330},
+            {"key": "translate", "state": "pending"},
+        ],
+    }
+    assert _line_of("AV", "avsubs", metrics) == (
+        "- AV: 21/63 done (41 left) | 2024/ABC-123.mp4 | 识别 43% · 约剩 6 分"
+    )
+
+
+def test_189_minutes_never_read_zero():
+    # ETA minutes = max(1, ceil(eta_s / 60)); elapsed = max(1, floor(s / 60)).
+    def line(**nums) -> str:
+        return _line_of("AV", "avsubs", {"steps": _asr(**nums)[1:]})
+
+    assert line(percent=99, eta_s=0) == "- AV: 识别 99% · 约剩 1 分"
+    assert line(percent=99, eta_s=59) == "- AV: 识别 99% · 约剩 1 分"
+    assert line(percent=99, eta_s=61) == "- AV: 识别 99% · 约剩 2 分"
+    assert line(elapsed_s=0) == "- AV: 识别 · 已用 1 分"
+    assert line(elapsed_s=119) == "- AV: 识别 · 已用 1 分"
+    assert line() == "- AV: 识别"
+
+
+def test_189_no_stage_for_restore_queued_pending_or_terminal_focus():
+    base = {**_Q1, "queue_restored": 1}
+    for steps in (
+        [{"key": "restore", "state": "active", "percent": 5}, *_PENDING],
+        [_DONE_R, {"key": "asr", "state": "done"}, {**_TR_PENDING, "state": "queued"}],
+        [{"key": "restore", "state": "pending"}, *_PENDING],
+        [
+            _DONE_R,
+            {"key": "asr", "state": "failed"},
+            {**_TR_PENDING, "state": "skipped"},
+        ],
+    ):
+        line = _line_of("JASNA", "jasna", {**base, "steps": steps})
+        assert line == "- JASNA: 0/1 done (1 left) | 修复 1/1 · subs 0/1"
+
+
+def test_189_malformed_steps_render_no_stage_fragment():
+    plain = "- JASNA: 0/1 done (1 left) | 修复 1/1 · subs 0/1"
+    for steps in (
+        "asr",
+        {"key": "asr", "state": "active"},
+        [1, 2],
+        [{"key": "asr"}],
+        [{"key": 7, "state": "active"}],
+        [{"key": "asr", "state": None}],
+        [_DONE_R, "x", {"key": "asr", "state": "active", "percent": 40}],
+    ):
+        m = {**_Q1, "queue_restored": 1, "steps": steps}
+        assert _line_of("JASNA", "jasna", m) == plain, steps
+    # a bad number is dropped on its own; the fragment stays
+    bad = {**_Q1, "queue_restored": 1}
+    bad["steps"] = _asr(percent="43", eta_s=float("nan"), elapsed_s=-5)
+    assert _line_of("JASNA", "jasna", bad) == (
+        "- JASNA: 0/1 done (1 left) | 识别 | 修复 1/1 · subs 0/1"
+    )
+    bad["steps"] = _asr(percent=140, eta_s=float("inf"))
+    assert _line_of("JASNA", "jasna", bad) == (
+        "- JASNA: 0/1 done (1 left) | 识别 | 修复 1/1 · subs 0/1"
+    )
+
+
+def test_189_model_and_holder_are_sanitized_and_capped():
+    model = "grok\n- INJECTED: x" + "m" * 200
+    steps = [{"key": "translate", "state": "active", "percent": 10, "model": model}]
+    line = _line_of("AV", "avsubs", {"steps": steps})
+    assert "\n" not in line and "INJECTED: x" in line  # one line, no new entry
+    fragment = line.removeprefix("- AV: 翻译 10% · ")
+    assert len(fragment) == 80
+    # the step's own model wins; the top-level one is the fallback
+    steps = [{"key": "translate", "state": "active", "percent": 10}]
+    line = _line_of("AV", "avsubs", {"model": _MODEL, "steps": steps})
+    assert line == "- AV: 翻译 10% · grok-4.3 · api.x.ai"
+    holder = "Other\ttask\n" + "h" * 300
+    steps = [{"key": "asr", "state": "waiting_gpu", "holder": holder}]
+    line = _line_of("AV", "avsubs", {"steps": steps})
+    assert line.startswith("- AV: 等待 GPU（Other task ") and line.endswith("）")
+    assert len(line) == len("- AV: 等待 GPU（）") + 200
+    steps = [{"key": "asr", "state": "waiting_gpu", "holder": 7}]
+    assert _line_of("AV", "avsubs", {"steps": steps}) == "- AV: 等待 GPU"
+
+
+def test_189_restored_count_carries_the_subs_failed_suffix():
+    m = {
+        "queue_completed": 1,
+        "queue_total": 4,
+        "queue_remaining": 2,
+        "queue_failed": 1,
+        "queue_restored": 2,
+        "subs_total": 3,
+        "subs_completed": 1,
+        "subs_failed": 1,
+    }
+    assert _line_of("JASNA", "jasna", m) == (
+        "- JASNA: 1/4 done (2 left) | 修复 2/4 · subs 1/3 (1 failed)"
+    )
+    # without queue_restored (AV 翻译 off / older agents) exactly as before
+    m.pop("queue_restored")
+    assert _line_of("JASNA", "jasna", m) == (
+        "- JASNA: 1/4 done (2 left) | subs 1/3 (1 failed)"
+    )
+
+
+def test_189_error_state_hides_the_stage_and_lada_is_unchanged():
+    m = {**_Q1, "queue_restored": 1, "steps": _asr(percent=43)}
+    assert _line_of("JASNA", "jasna", m, state="error") == "- JASNA: error"
+    base = {
+        "queue_completed": 5,
+        "queue_total": 10,
+        "queue_remaining": 5,
+        "current_file": "clip.mp4",
+        "percent": 47,
+        "eta": "30:47",
+        "fps": 112.3,
+    }
+    assert _lada_line(render_status_md(_lada_row(base), "t")) == (
+        "- LADA: 5/10 done (5 left) | clip.mp4 | 47% · ETA 30:47 · 112fps"
+    )
