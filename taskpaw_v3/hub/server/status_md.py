@@ -69,8 +69,10 @@ def _status_text(snap: Any) -> str:
     # metric sample — plugins emit metrics even in error states, so rendering them
     # would hide the outage from OpenClaw (Kimi). `degraded` is an active-alert
     # state (host over-threshold, state_file stale, …), NOT an outage, so it keeps
-    # rendering metrics — same rule for every monitor type.
-    bad_state = st in {"error", "stopped", "unreachable"}
+    # rendering metrics — same rule for every monitor type. `unknown` (no state
+    # reported yet, or an agent that lost track of the monitor) is an outage too:
+    # its metrics can only be stale (#127).
+    bad_state = st in {"error", "stopped", "unreachable", "unknown"}
 
     # host_metrics — CPU / RAM / GPU / VRAM. Each field guarded individually: a
     # host monitor can be typed yet carry empty/partial metrics (startup / disabled

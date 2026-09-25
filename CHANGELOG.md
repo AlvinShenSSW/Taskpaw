@@ -4,6 +4,16 @@
 
 ---
 
+## V3 3.5.1 — status.md：`unknown` 状态也隐藏过期指标（#127）
+
+- Hub 的 `status.md` 对状态为 `unknown` 的监控不再渲染它最后一次的指标（CPU/内存、队列等），直接
+  显示 `unknown`，与 `error` / `stopped` / `unreachable` 一致，避免把过期数据当成现状交给 OpenClaw。
+- #127 其余各项经复核不再做：OpenClaw 日报正则按现有无前缀的队列文本编写，加 `Queue:` 前缀反而会破坏
+  匹配；V3 agent 都上报 `type_id`，ComfyUI 的指标签名兜底只影响早期 agent；Windows 日志重解析点防护与
+  `%APPDATA%` 缺失回退在实际部署中无触发条件。
+
+---
+
 ## V3 3.5.0 — 独立「AV 翻译」任务 + GPU 轮流使用（#179）
 
 - **新任务类型「AV 翻译 (subtitles)」**（`avsubs`，与 Lada / Jasna 并列，只能手动启动）：指向一个片库
