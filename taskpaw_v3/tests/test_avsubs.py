@@ -36,7 +36,7 @@ from taskpaw_v3.monitors.plugins.avsubs import (
     sweep_srt_temps,
 )
 from taskpaw_v3.monitors.registry import default_registry
-from taskpaw_v3.monitors.subs.job import SubsJob, source_identity
+from taskpaw_v3.monitors.subs.job import PublishResult, SubsJob, source_identity
 from taskpaw_v3.monitors.subs.progress import AsrProgress, LiveFacts
 from taskpaw_v3.monitors.subs.srt import Cue
 from taskpaw_v3.monitors.subs.translate import CANCELLED, TranslateResult
@@ -997,7 +997,9 @@ def test_abort_from_the_start_time_translate_only_path(tmp_path, monkeypatch):
     for rel in ("a.mp4", "b.mp4", "c.mp4"):
         _ja(r, rel).write_bytes(b"")
     monkeypatch.setattr(
-        SubsJob, "publish_zh", lambda self, cues: f"publish {self.zh_target.name}: X"
+        SubsJob,
+        "publish_zh",
+        lambda self, cues: PublishResult("error", f"publish {self.zh_target.name}: X"),
     )
     order = r.owner.setdefault("order", [])
     _lease_spy(monkeypatch, r.owner)
@@ -1240,7 +1242,7 @@ def test_a_third_failure_settled_by_the_poll_is_degraded_in_that_check(
 
 
 def test_idle_note_for_a_plan_of_only_collisions(tmp_path, monkeypatch):
-    # K2: no "(0 already have .srt)"; the collisions are named instead.
+    # K2: no "(0 already have subtitles)"; the collisions are named instead.
     # a.mkv / z.mkv win their targets (a.srt / z.srt exist: done); a.mp4 and
     # z.mp4 collide with them.
     r = _setup(
@@ -1254,16 +1256,16 @@ def test_idle_note_for_a_plan_of_only_collisions(tmp_path, monkeypatch):
     st = r.inst.check(r.emit)
     assert st.state == "idle"
     assert st.detail == (
-        "nothing to subtitle (2 already have .srt, 2 skipped as name collisions)"
+        "nothing to subtitle (2 already have subtitles, 2 skipped as name collisions)"
     )
     # done == 0 with only collisions (the winners were not plannable, e.g. a
-    # failed stat): no "(0 already have .srt)".
+    # failed stat): no "(0 already have subtitles)".
     loser, owner = tmp_path / "x.mp4", tmp_path / "x.mkv"
     plan = AV.TreePlan([], 0, [(loser, owner)] * 3, ["x.mkv: PermissionError"])
     note = AV._idle_note(plan, "R")
     assert note == "nothing to subtitle (3 skipped as name collisions)"
     assert AV._idle_note(AV.TreePlan([], 1, [], []), "R") == (
-        "nothing to subtitle (1 already have .srt)"
+        "nothing to subtitle (1 already have subtitles)"
     )
     assert AV._idle_note(AV.TreePlan([], 0, [], []), "R") == ("no video files under R")
 
@@ -1713,7 +1715,7 @@ def test_nothing_to_do_is_idle_without_an_event_or_a_translator(
     if case == "empty":
         assert st.detail.startswith("no video files under ")
     else:
-        assert st.detail == "nothing to subtitle (1 already have .srt)"
+        assert st.detail == "nothing to subtitle (1 already have subtitles)"
     assert not [t for t in threading.enumerate() if t.name.startswith("subs-translate")]
 
 
@@ -1953,7 +1955,9 @@ def test_ja_is_kept_as_the_resume_checkpoint(tmp_path, monkeypatch, case):
     r = _setup(tmp_path, monkeypatch, ja=["a.mp4"], key=case != "no_key")
     if case == "zh_publish_failed":
         monkeypatch.setattr(
-            SubsJob, "publish_zh", lambda self, cues: f"publish {self.zh_target.name}"
+            SubsJob,
+            "publish_zh",
+            lambda self, cues: PublishResult("error", f"publish {self.zh_target.name}"),
         )
     inst, emit = r.inst, r.emit
     inst.start(emit)
@@ -1980,9 +1984,10 @@ def test_ja_is_kept_as_the_resume_checkpoint(tmp_path, monkeypatch, case):
     assert not _zh(r, "a.mp4").exists()
 
 
-def _publish_ja_only(self: SubsJob) -> str:
+def _publish_ja_only(self: SubsJob) -> PublishResult:
     """`SubsJob.publish_empty` whose zh half fails: the empty ja is on disk."""
-    return self._publish(self.ja_target, "") or f"publish {self.zh_target.name}"
+    res = self.publish_ja([])
+    return PublishResult("error", f"publish {self.zh_target.name}") if res.ok else res
 
 
 @pytest.mark.parametrize(
@@ -1999,7 +2004,9 @@ def test_ja_is_kept_when_the_empty_zh_cannot_be_published(tmp_path, monkeypatch,
         r = _setup(tmp_path, monkeypatch, ja=["片/a.mp4"])
         _ja(r, "片/a.mp4").write_bytes(b"")
         monkeypatch.setattr(
-            SubsJob, "publish_zh", lambda self, cues: f"publish {self.zh_target.name}"
+            SubsJob,
+            "publish_zh",
+            lambda self, cues: PublishResult("error", f"publish {self.zh_target.name}"),
         )
     inst, emit = r.inst, r.emit
     inst.start(emit)
@@ -2386,3 +2393,296 @@ def test_progress_restart_takes_a_fresh_tracker(tmp_path, monkeypatch):
     m = r.inst.check(r.emit).metrics
     assert _rows(m) == [("a.mp4", "active")]
     r.inst.stop(timeout=1)
+
+
+# ── #191: recognise existing subtitles, fail closed, never overwrite ──────────
+LIBRARY_ZH = "1\n00:00:00,000 --> 00:00:01,000\n店主的中文字幕\n"
+LIBRARY_JA = SRT_JA.replace("はい", "店主")
+
+
+def _put(path: Path, text: str = LIBRARY_ZH) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _refuse_listing(monkeypatch, folder: Path, exc: BaseException) -> None:
+    """`os.scandir(folder)` raises `exc` from now on (e.g. the NAS dropped)."""
+    real, key = os.scandir, str(folder)
+
+    def scandir(path="."):
+        if os.fspath(path) == key:
+            raise exc
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+
+
+def _gpu_turn(tmp_path, monkeypatch, **kw) -> SimpleNamespace:
+    """A Start whose first ASR waits for the GPU another task holds — the
+    window in which the library changes before the AC5 re-check."""
+    other = _other_holds("Jasna")
+    r = _setup(tmp_path, monkeypatch, **kw)
+    r.inst.start(r.emit)
+    assert r.spawner.argvs == [] and r.inst._waiting_gpu
+    r.other = other
+    return r
+
+
+EVIDENCE = {
+    "LMNO-047": ["LMNO-047-破解-C-4K.mp4", "LMNO-047-破解-4K-C.zh.srt"],
+    "LMNO-079": ["LMNO-079-破解-C-4K.mp4", "LMNO-079-破解-C-4K-C.zh.srt"],
+    "PQRS-218": ["PQRS-218.mp4", "PQRS-218.chs.srt"],
+    "PQRS-860": ["PQRS-860-破解-C.mp4", "PQRS-860-破解-C.chs.srt"],
+    "PQRS-948": [
+        "PQRS-948-破解-C.mp4",
+        "PQRS-948-破解-C.chs.srt",
+        "dl.example.com@pqrs00948.srt",
+    ],
+    "LMNO-005": ["LMNO-005-破解-C-4K.mp4", "LMNO-005-破解-C-4K.srt"],
+    "DEFG-594": [f"DEFG-594-cd{i}.mp4" for i in range(1, 5)]
+    + [f"DEFG-594-cd{i}.srt" for i in range(1, 4)],
+    "HIJK-100": [f"HIJK-100-cd{i}.mp4" for i in range(1, 6)]
+    + [f"HIJK-100-cd{i}.srt" for i in range(1, 6)],
+    "NEW-001": ["NEW-001.mp4"],
+    "NEW-002": ["NEW-002.mp4", "NEW-002.ja.srt"],
+    "ABC-003": ["ABC-003.mp4", "ABC-003.jpn.zh.srt"],
+    "MIX": ["Movie.mp4", "Movie.part2.mkv", "Movie.part2.srt"],
+}
+
+
+def test_plan_tree_judges_every_film_from_its_folder_listing(tmp_path, monkeypatch):
+    for folder, names in EVIDENCE.items():
+        for n in names:
+            _touch(tmp_path / folder / n, b"x")
+
+    def no_probe(self, *a, **k):  # AC2/C2: no per-file subtitle probe remains
+        raise AssertionError(f"probed {self}")
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "exists", no_probe)
+        plan = plan_tree(str(tmp_path), True, ["mp4"])
+    assert plan.errors == [] and plan.collisions == []
+    assert plan.done == 14  # 6 single films + DEFG cd1–cd3 + HIJK cd1–cd5
+    assert [(i.relpath, i.kind) for i in plan.items] == [
+        ("ABC-003/ABC-003.mp4", "full"),  # a Japanese tag never counts
+        ("DEFG-594/DEFG-594-cd4.mp4", "full"),  # each part only its own
+        ("MIX/Movie.mp4", "full"),  # Movie.part2.srt belongs to the .mkv (F17)
+        ("NEW-001/NEW-001.mp4", "full"),
+        ("NEW-002/NEW-002.mp4", "translate_only"),
+    ]
+
+
+def test_idle_note_counts_the_films_that_already_have_subtitles(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch)
+    _touch(r.root / "PQRS-218.mp4")
+    _put(r.root / "PQRS-218.chs.srt")
+    r.inst.start(r.emit)
+    st = r.inst.check(r.emit)
+    assert st.detail == "nothing to subtitle (1 already have subtitles)"
+    assert st.metrics["queue_pre_done"] == 1 and r.evs == []
+    assert (r.root / "PQRS-218.chs.srt").read_text(encoding="utf-8") == LIBRARY_ZH
+
+
+def test_a_subtitle_dropped_in_before_the_asr_skips_and_hands_the_gpu_on(
+    tmp_path, monkeypatch, caplog
+):
+    r = _gpu_turn(tmp_path, monkeypatch, full=["a/a.mp4", "b/b.mp4"])
+    sub = _put(r.root / "a" / "a.chs.srt")
+    assert gpu_lease.release(r.other)  # reserved for us now
+    third = ("third", 7)
+    assert not gpu_lease.try_acquire(third, 10.0, label="Other")  # behind us
+    with caplog.at_level(logging.INFO, logger="taskpaw.monitors.avsubs"):
+        st = r.inst.check(r.emit)
+    assert r.inst._settled["a/a.mp4"] == ("skipped", "subtitle exists")
+    assert r.spawner.argvs == []  # no ASR for a
+    assert gpu_lease.holder() is None
+    assert gpu_lease.reserved_for() == third  # the freed turn went on
+    assert r.inst._waiting_gpu  # b waits for its own turn
+    assert sub.read_text(encoding="utf-8") == LIBRARY_ZH
+    assert not _ja(r, "a/a.mp4").exists()
+    assert not _alerts(r.evs)  # an info line, never an alert
+    lines = [rec.getMessage() for rec in caplog.records]
+    assert sum("a/a.mp4" in m and "subtitle exists" in m for m in lines) == 1
+    assert st.metrics["queue_skipped"] == 1
+    assert _states(r.inst, "a/a.mp4") == {"asr": "skipped", "translate": "skipped"}
+    assert gpu_lease.release(third) is False  # not granted yet: reserved only
+    assert gpu_lease.try_acquire(third, 10.0) and gpu_lease.release(third)
+    r.inst.check(r.emit)  # b's turn now
+    assert len(r.spawner.argvs) == 1 and r.spawner.argvs[0][1] == str(
+        r.root / "b" / "b.mp4"
+    )
+    r.inst.stop(timeout=1)
+
+
+@pytest.mark.parametrize(
+    "exc", [PermissionError(13, "denied"), OSError(53, "net"), RuntimeError("bug")]
+)
+def test_an_unreadable_folder_before_the_asr_skips_with_one_alert(
+    tmp_path, monkeypatch, exc
+):
+    # AC5 + F14 (the listing helper swallows anything) + F16 (one alert/run).
+    r = _gpu_turn(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+    _refuse_listing(monkeypatch, r.root, exc)
+    r.inst._streak = 2
+    assert gpu_lease.release(r.other)
+    log = _lease_spy(monkeypatch, r.owner)
+    st = r.inst.check(r.emit)
+    for rel in ("a.mp4", "b.mp4"):
+        assert r.inst._settled[rel] == ("skipped", "subtitle state unreadable")
+    assert r.spawner.argvs == []
+    alerts = _keyed(r.evs, f"{IID}:avsubs-unreadable")
+    assert len(alerts) == 1 and "a.mp4" in alerts[0][2]
+    assert _names(log).count("acquire") == 2  # each film's own turn...
+    assert _names(log).count("release") == 2  # ...released every time
+    assert gpu_lease.holder() is None
+    assert r.inst._streak == 2 and not r.inst._aborted  # a skip never counts
+    assert st.metrics["queue_skipped"] == 2
+    done = _done(r.evs)
+    assert len(done) == 1 and "Queue: 0/2 done, 0 failed, 2 skipped" in done[0][2]
+
+
+@pytest.mark.parametrize("case", ["subtitle", "unreadable"])
+def test_a_full_film_is_rechecked_before_its_translation(tmp_path, monkeypatch, case):
+    # AC5 (F15): under the lock, right after its .ja.srt was published.
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+    r.inst.start(r.emit)
+    assert len(r.spawner.argvs) == 1  # a transcribing
+    if case == "subtitle":
+        sub = _put(r.root / "a.zh.srt")
+    else:
+        _refuse_listing(monkeypatch, r.root, PermissionError(13, "denied"))
+    r.spawner.last.finish(0)
+    r.inst.check(r.emit)
+    assert r.translators[0].submitted == []
+    assert _states(r.inst, "a.mp4") == {"asr": "done", "translate": "skipped"}
+    if case == "subtitle":
+        assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+        assert not _ja(r, "a.mp4").exists()  # ours (this run's) goes, AC6
+        assert sub.read_text(encoding="utf-8") == LIBRARY_ZH
+        assert not _alerts(r.evs)
+        assert len(r.spawner.argvs) == 2  # b is not affected by a.zh.srt
+    else:
+        assert r.inst._settled["a.mp4"] == ("skipped", "subtitle state unreadable")
+        assert _ja(r, "a.mp4").read_text(encoding="utf-8").count("-->") == 2  # kept
+        assert r.inst._settled["b.mp4"] == ("skipped", "subtitle state unreadable")
+        assert len(_keyed(r.evs, f"{IID}:avsubs-unreadable")) == 1
+        assert gpu_lease.holder() is None
+    r.inst.stop(timeout=1)
+
+
+def test_translate_only_films_submitted_at_start_are_not_relisted(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, ja=["t.mp4", "u.mp4"])
+    calls: list = []
+    real = AV.list_names
+    monkeypatch.setattr(AV, "list_names", lambda f: calls.append(f) or real(f))
+    r.inst.start(r.emit)
+    assert [q.job_id for q in r.translators[0].submitted] == ["t.mp4", "u.mp4"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("kind", ["full", "translate_only"])
+def test_a_refused_srt_skips_and_discards_only_this_runs_transcript(
+    tmp_path, monkeypatch, kind
+):
+    # AC6: the owner's .srt appeared while translating → never replaced.
+    if kind == "full":
+        r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+        r.inst.start(r.emit)
+        r.spawner.last.finish(0)
+        r.inst.check(r.emit)  # a: ja published + submitted; b transcribing
+    else:
+        r = _setup(tmp_path, monkeypatch, ja=["a.mp4", "b.mp4"])
+        _ja(r, "a.mp4").write_text(LIBRARY_JA, encoding="utf-8")
+        r.inst.start(r.emit)
+    assert [q.job_id for q in r.translators[0].submitted][0] == "a.mp4"
+    zh = _put(_zh(r, "a.mp4"))
+    r.inst._streak = 2
+    r.translators[0].answer("a.mp4")
+    st = r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+    assert zh.read_text(encoding="utf-8") == LIBRARY_ZH  # byte-identical
+    if kind == "full":
+        assert not _ja(r, "a.mp4").exists()  # this run's own transcript
+    else:
+        assert _ja(r, "a.mp4").read_text(encoding="utf-8") == LIBRARY_JA
+    assert not list(r.root.glob("*.tmp"))
+    assert r.inst._streak == 2 and not r.inst._aborted
+    assert not _alerts(r.evs)
+    assert st.metrics["queue_skipped"] == 1
+    assert _states(r.inst, "a.mp4") == {"asr": "done", "translate": "skipped"}
+    r.inst.stop(timeout=1)
+
+
+def test_a_transcript_that_appeared_mid_run_is_never_replaced(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4", "b.mp4"])
+    r.inst.start(r.emit)
+    lib = _put(_ja(r, "a.mp4"), LIBRARY_JA)
+    r.spawner.last.finish(0)
+    r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "transcript exists")
+    assert lib.read_text(encoding="utf-8") == LIBRARY_JA
+    assert r.translators[0].submitted == [] and not _alerts(r.evs)
+    assert _states(r.inst, "a.mp4") == {"asr": "skipped", "translate": "skipped"}
+    r.inst.stop(timeout=1)
+    r.inst.start(r.emit)  # the next Start only translates it
+    assert r.inst._kinds["a.mp4"] == "translate_only"
+    assert lib.read_text(encoding="utf-8") == LIBRARY_JA
+    r.inst.stop(timeout=1)
+
+
+def test_no_speech_with_a_srt_that_appeared_removes_only_our_empty_transcript(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4"])
+    r.inst.start(r.emit)
+    zh = _put(_zh(r, "a.mp4"))
+    r.spawner.last.finish(0, state="empty", text="")
+    r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+    assert zh.read_text(encoding="utf-8") == LIBRARY_ZH
+    assert not _ja(r, "a.mp4").exists()
+    assert _states(r.inst, "a.mp4") == {"asr": "done", "translate": "skipped"}
+    done = _done(r.evs)
+    assert len(done) == 1 and "Queue: 0/1 done, 0 failed, 1 skipped" in done[0][2]
+
+
+def test_a_zero_cue_resume_whose_srt_appeared_keeps_the_library_transcript(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, ja=["a.mp4"])
+    _ja(r, "a.mp4").write_bytes(b"")
+    real = SubsJob.load_ja
+
+    def load_then_drop(self):
+        cues = real(self)
+        _put(self.zh_target)  # the owner's .srt lands right then
+        return cues
+
+    monkeypatch.setattr(SubsJob, "load_ja", load_then_drop)
+    r.inst.start(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+    assert _zh(r, "a.mp4").read_text(encoding="utf-8") == LIBRARY_ZH
+    assert _ja(r, "a.mp4").read_bytes() == b""  # the library's, kept
+
+
+def test_stop_never_replaces_a_transcript_that_appeared(tmp_path, monkeypatch, caplog):
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4"])
+    r.inst.start(r.emit)
+    r.spawner.last.finish(0)  # exited, unpolled
+    lib = _put(_ja(r, "a.mp4"), LIBRARY_JA)
+    with caplog.at_level(logging.WARNING, logger="taskpaw.monitors.avsubs"):
+        r.inst.stop(timeout=2)
+    assert lib.read_text(encoding="utf-8") == LIBRARY_JA
+    assert not _zh(r, "a.mp4").exists()
+    assert any("a.ja.srt already exists" in m.getMessage() for m in caplog.records)
+
+
+def test_root_folder_description_states_the_library_rules():
+    desc = AvsubsConfig.model_fields["avsubs_root_folder"].description or ""
+    for text in (".chs.srt", "Japanese", "only this one video", "never overwritten"):
+        assert text in desc, text
+    assert "cannot be read" in desc
+    assert "same-named .srt" not in desc

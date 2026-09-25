@@ -1,7 +1,7 @@
 """`avsubs` monitor — the standalone「AV 翻译 (subtitles)」task (#179).
 
 Points at a library folder, walks it (recursively by default) and, for every
-video without a same-named `.srt`, writes `<stem>.ja.srt` (WhisperJAV) and
+video that has no subtitles yet, writes `<stem>.ja.srt` (WhisperJAV) and
 `<stem>.srt` (Simplified Chinese through the agent's LLM setting) next to the
 video. The `.ja.srt` is only the resume checkpoint (#187): it is deleted once
 the job settles `completed` with its `.srt` published — a pre-existing library
@@ -9,6 +9,18 @@ the job settles `completed` with its `.srt` published — a pre-existing library
 translates. Everything engine-related is the shared `taskpaw_v3.monitors.subs`
 package (#177); this module owns tree planning (`plan_tree`), the task's queue,
 settlement, abort, `done` and status.
+
+Library safety (#191): a video already has subtitles — and is skipped (counted
+已有字幕) — when, judged from its folder's listing, (a) `<stem>.srt` (or
+`.ass` / `.ssa` / `.vtt`) exists, (b) `<stem>.<tag>.srt` with no Japanese tag
+exists (e.g. `.chs.srt`), or (c) its folder holds only this one video and any
+non-Japanese subtitle file (`subs.existing`). The folder is looked at again
+right before the ASR and before a full film's translation; a subtitle found
+then skips the film (`subtitle exists`), a folder that cannot be read skips it
+too (`subtitle state unreadable`, one alert per run; retried next Start).
+Publishing never overwrites: a refused `.srt` skips the film and drops only
+the `.ja.srt` this run wrote; a refused `.ja.srt` skips it (`transcript
+exists`) and the next Start only translates.
 
 The #177 rules carry over verbatim: every planned job reaches exactly one
 terminal state, settled only under `_launch_lock` with `_settled` checked
@@ -64,13 +76,21 @@ from taskpaw_v3.monitors.base import (
 )
 from taskpaw_v3.monitors.plugins.host_metrics import read_gpu
 from taskpaw_v3.monitors.plugins.lada import _cpu_mem
-from taskpaw_v3.monitors.subs import asr_env, bounded, exists_quietly
+from taskpaw_v3.monitors.subs import asr_env, bounded
 
 # `Translator` and `ChildProcess` are bound as module-level names and looked up
 # at call time, so tests can monkeypatch `AV.Translator` / `AV.ChildProcess`
 # for supervisor-created instances (D10).
 from taskpaw_v3.monitors.subs.child import ChildProcess
-from taskpaw_v3.monitors.subs.job import SubsJob, source_identity
+from taskpaw_v3.monitors.subs.existing import judge, list_names, skip_reason
+from taskpaw_v3.monitors.subs.job import (
+    SUBTITLE_EXISTS,
+    SUBTITLE_UNREADABLE,
+    TRANSCRIPT_EXISTS,
+    PublishResult,
+    SubsJob,
+    source_identity,
+)
 from taskpaw_v3.monitors.subs.progress import (
     ASR,
     AVSUBS_STEPS,
@@ -187,21 +207,38 @@ def _norm_exts(extensions: Iterable[str]) -> set[str]:
     return out
 
 
+def _qualifies(exts: set[str], name: str) -> bool:
+    """A video this task processes: extension in `exts` (case-insensitive),
+    no `.tmp.` in the name (a staging/temp file, e.g. Jasna's
+    `x-破解.tmp.mp4`), not a macOS `._` AppleDouble file."""
+    suffix = os.path.splitext(name)[1][1:].casefold()
+    return (
+        bool(suffix)
+        and suffix in exts
+        and ".tmp." not in name.casefold()
+        and not name.startswith("._")
+    )
+
+
 def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan:
     """Pure: walk `root` (iteratively, `os.scandir`) and plan every video.
 
     Raises `OSError` when `root` itself cannot be listed. An unreadable
     subfolder and a name that is not encodable as UTF-8 (D10) are reported in
-    `errors` and skipped. Qualifying files (extension in the set, case-
-    insensitive; no `.tmp.` in the name; not a macOS `._` AppleDouble file)
-    are ordered by `(relpath.casefold(), relpath)`; in that order each reserves its `<stem>.ja.srt` and `<stem>.srt`
-    (key: `normcase(realpath(dir)/name)`) — a file whose target is already
-    reserved is a collision (M8). Then: zh exists (0 bytes counts) → done;
-    ja exists → `translate_only`; else `full`."""
+    `errors` and skipped. Qualifying files (`_qualifies`) are ordered by
+    `(relpath.casefold(), relpath)`; in that order each reserves its
+    `<stem>.ja.srt` and `<stem>.srt` (key: `normcase(realpath(dir)/name)`) —
+    a file whose target is already reserved is a collision (M8). Then each is
+    judged from the listing of its own directory the walk already holds
+    (#191, rules a/b/c — no per-file probe): already subtitled (a 0-byte
+    `.srt` counts) → done; its `.ja.srt` there → `translate_only`; else
+    `full`."""
     exts = _norm_exts(extensions)
+    is_video = functools.partial(_qualifies, exts)
     errors: list[str] = []
     folders: list[Path] = []
-    candidates: list[tuple[str, Path, str]] = []  # (relpath, source, real dir)
+    # (relpath, source, real dir, the names of its directory)
+    candidates: list[tuple[str, Path, str, list[str]]] = []
     stack: list[tuple[str, str]] = [(os.fspath(root), "")]
     is_root = True
     while stack:
@@ -216,6 +253,7 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
             continue
         finally:
             is_root = False
+        names = [entry.name for entry in entries]
         real_dir: Optional[str] = None
         for entry in entries:
             name = entry.name
@@ -230,13 +268,8 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
             except OSError as e:
                 errors.append(f"{_printable(relpath)}: {type(e).__name__}")
                 continue
-            suffix = os.path.splitext(name)[1][1:].casefold()
-            if not suffix or suffix not in exts:
+            if not is_video(name):
                 continue
-            if ".tmp." in name.casefold():
-                continue  # a staging/temp file (e.g. Jasna's `x-破解.tmp.mp4`)
-            if name.startswith("._"):
-                continue  # macOS AppleDouble metadata, not a video
             try:
                 relpath.encode("utf-8")
             except UnicodeEncodeError:
@@ -245,14 +278,14 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
             if real_dir is None:
                 real_dir = os.path.realpath(path)  # once per directory (M15)
                 folders.append(Path(path))
-            candidates.append((relpath, Path(entry.path), real_dir))
+            candidates.append((relpath, Path(entry.path), real_dir, names))
 
     candidates.sort(key=lambda c: (c[0].casefold(), c[0]))
     reserved: dict[str, Path] = {}
     items: list[TreeItem] = []
     collisions: list[tuple[Path, Path]] = []
     done = 0
-    for relpath, source, real_dir in candidates:
+    for relpath, source, real_dir, names in candidates:
         ja = source.with_name(f"{source.stem}.ja.srt")
         zh = source.with_name(f"{source.stem}.srt")
         keys = [os.path.normcase(os.path.join(real_dir, t.name)) for t in (ja, zh)]
@@ -262,10 +295,11 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
             continue
         for k in keys:
             reserved[k] = source
-        if exists_quietly(zh):
+        existing = judge(source.name, names, is_video, rule_c=True)
+        if existing.chinese is not None:
             done += 1
             continue
-        kind: Kind = "translate_only" if exists_quietly(ja) else "full"
+        kind: Kind = "translate_only" if existing.ja_transcript else "full"
         try:
             identity = source_identity(source)  # D11
         except OSError as e:
@@ -306,10 +340,10 @@ def sweep_srt_temps(
 
 def _idle_note(plan: TreePlan, root: str) -> str:
     """The idle detail of a Start with nothing to do (K2): never a
-    `(0 already have .srt)`; collisions are counted when there are any."""
+    `(0 already have subtitles)`; collisions are counted when there are any."""
     why: list[str] = []
     if plan.done:
-        why.append(f"{plan.done} already have .srt")
+        why.append(f"{plan.done} already have subtitles")
     if plan.collisions:
         why.append(f"{len(plan.collisions)} skipped as name collisions")
     if why:
@@ -337,8 +371,15 @@ class AvsubsConfig(BaseMonitorConfig):
     avsubs_root_folder: str = Field(
         "",
         description="The video library folder to scan (required). Every video "
-        "without a same-named .srt gets <name>.srt (Simplified Chinese) next to "
-        "it; videos that already have a .srt are skipped. The Japanese transcript "
+        "that has no subtitles yet gets <name>.srt (Simplified Chinese) next to "
+        "it. A video already has subtitles, and is skipped, when (a) <name>.srt "
+        "(or .ass / .ssa / .vtt) exists, (b) a <name>.<tag>.srt such as "
+        "<name>.chs.srt or <name>.zh.srt exists whose tag is not Japanese (ja, jp, "
+        "jpn, jap, japanese, 日语, 日文, 日本語 — also as ja-JP), or (c) its folder "
+        "holds only this one video and any subtitle file that is not Japanese, "
+        "whatever its name. A folder that cannot be read is skipped for this run "
+        "(one alert; it is tried again at the next Start), and an existing "
+        "subtitle is never overwritten. The Japanese transcript "
         "<name>.ja.srt is an intermediate: it is deleted once the .srt is written "
         "and kept when translation does not finish — an existing .ja.srt is "
         "reused (translation only), then deleted the same way. Hidden, "
@@ -474,6 +515,7 @@ class AvsubsInstance(MonitorInstance):
         self._done_emitted = False
         self._key_alerted = False
         self._survivor_alerted = False
+        self._unreadable_alerted = False  # #191: one alert per run (F16)
         self._idle_note = ""
 
     # ── GPU lease hooks ──────────────────────────────────────────────────
@@ -734,15 +776,15 @@ class AvsubsInstance(MonitorInstance):
             self._note_survivor(job)
         else:
             outcome = job.poll_asr()
-            err: Optional[str] = None
+            res: Optional[PublishResult] = None
             if job.job_id in self._settled or job.job_id in self._survivor_jobs:
                 pass  # a killed child (e.g. an aborted run's): never publish
             elif outcome is not None and outcome.kind == "succeeded":
-                err = job.publish_ja(outcome.cues)
+                res = job.publish_ja(outcome.cues)
             elif outcome is not None and outcome.kind == "no_speech":
-                err = job.publish_ja([])  # CX5: the empty ja only
-            if err is not None:
-                log.warning("avsubs %s: %s", self.instance_id, err)
+                res = job.publish_ja([])  # CX5: the empty ja only
+            if res is not None and not res.ok:  # #191: never replaced; logged
+                log.warning("avsubs %s: %s", self.instance_id, res.detail)
             gone = job.terminate(timeout=0.5)  # joins readers; no-op once reaped
         if not gone:
             log.error(
@@ -792,16 +834,27 @@ class AvsubsInstance(MonitorInstance):
         """Launch the head item's ASR with the lease held. Never dispatches;
         the release (when nothing is left running) happens after the lock.
         Everything — the pop and the job lookup included (K3) — is inside the
-        exception fence, so any raise releases the lease."""
+        exception fence, so any raise releases the lease.
+
+        #191 (AC5): the film's folder is listed once more with the hold held —
+        OUTSIDE the lock (the listing never raises, F14) — and judged under
+        it: subtitles there, or a folder that cannot be read, skip the film
+        without an ASR (the freed turn goes to the next waiter)."""
         job: Optional[SubsJob] = None
         release = False
         try:
             if self._queue and self._queue[0] is item:
                 self._queue.pop(0)
             job = self._jobs[item.relpath]
+            names = list_names(job.media.parent)
             with self._launch_lock:
+                skip = self._recheck(job, names)
                 if self._stopping.is_set() or self._aborted:
                     release = True
+                elif skip is not None:
+                    self._skip_existing(job, skip, emit)
+                    release = True
+                    self._advance_requested = True
                 else:
                     err = job.start_asr(self._spawn)
                     if (
@@ -943,21 +996,36 @@ class AvsubsInstance(MonitorInstance):
             terminal = True
             name = job.job_id
             if outcome.kind == "succeeded":
-                err = job.publish_ja(outcome.cues)
-                if err is not None:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
-                else:
+                res = job.publish_ja(outcome.cues)
+                if res.ok:
                     self._tracker.finish(name, ASR, "done", time.monotonic())
-                    self._submit_translation(job, list(outcome.cues), emit)
+                    # #191 (AC5/F15): the film's last look before its
+                    # translation — the same class of I/O as the publish.
+                    skip = self._recheck(job, list_names(job.media.parent))
+                    if skip is None:
+                        self._submit_translation(job, list(outcome.cues), emit)
+                    else:
+                        self._skip_existing(job, skip, emit)
+                elif res.kind == "exists":
+                    self._skip_existing(job, TRANSCRIPT_EXISTS, emit)
+                else:
+                    self._settle(name, "failed", res.detail, emit)
+                    self._alert_job(name, res.detail, emit)
             elif outcome.kind == "no_speech":
-                err = job.publish_empty()
-                if err is None:
+                res = job.publish_empty()
+                if res.ok:
                     self._tracker.finish(name, ASR, "done", time.monotonic())
                     self._settle_completed(job, "no speech", emit)
+                elif res.kind == "exists":
+                    # #191: a refused .srt took the empty .ja.srt with it (AC4)
+                    reason = TRANSCRIPT_EXISTS
+                    if job.ja_published:
+                        self._tracker.finish(name, ASR, "done", time.monotonic())
+                        reason = SUBTITLE_EXISTS
+                    self._skip_existing(job, reason, emit)
                 else:
-                    self._settle(name, "failed", err, emit)
-                    self._alert_job(name, err, emit)
+                    self._settle(name, "failed", res.detail, emit)
+                    self._alert_job(name, res.detail, emit)
             elif outcome.kind == "unstable":
                 self._settle_unstable(job, emit)
             elif job.attempt < _ASR_MAX_ATTEMPTS:
@@ -1078,6 +1146,48 @@ class AvsubsInstance(MonitorInstance):
             "(their .ja.srt is kept) until a key is set.",
             dedupe_key=f"{self.instance_id}:avsubs-nokey",
         )
+
+    def _recheck(self, job: SubsJob, names: Optional[list[str]]) -> Optional[str]:
+        """#191 (AC5): the skip reason for `job` from a fresh listing of its
+        folder (None: unreadable), judged like `plan_tree` (rules a/b/c) —
+        or None when its work goes on."""
+        is_video = functools.partial(
+            _qualifies, _norm_exts(self._cfg.avsubs_extensions)
+        )
+        return skip_reason(names, job.media.name, is_video, rule_c=True)
+
+    def _skip_existing(self, job: SubsJob, reason: str, emit: EventEmitter) -> None:
+        """#191 (under `_launch_lock`): settle `job` `skipped` because its
+        subtitles exist (a re-check or a refused `.srt`: the `.ja.srt` goes
+        only when THIS job published it in this run — AC6), its transcript
+        appeared (a refused `.ja.srt`), or its folder could not be read (one
+        alert per run). One info line per film; never counts as a failure."""
+        self._settle(job.job_id, "skipped", reason, emit)
+        if self._settled.get(job.job_id) != ("skipped", reason):
+            return
+        log.info(
+            "avsubs %s: %s skipped (%s)",
+            self.instance_id,
+            _printable(job.job_id),
+            reason,
+        )
+        if reason == SUBTITLE_EXISTS:
+            err = job.discard_own_ja()
+            if err is not None:
+                log.warning(
+                    "avsubs %s: %s: %s", self.instance_id, _printable(job.job_id), err
+                )
+        elif reason == SUBTITLE_UNREADABLE and not self._unreadable_alerted:
+            self._unreadable_alerted = True
+            emit(
+                "alert",
+                f"{self._cfg.name}: subtitle state unreadable",
+                f"The folder of {_printable(job.job_id)} could not be read, so it "
+                "is unknown whether the video already has subtitles; it (and any "
+                "other such video) is skipped for this run and tried again at the "
+                "next Start.",
+                dedupe_key=f"{self.instance_id}:avsubs-unreadable",
+            )
 
     def _fail_unreadable_ja(
         self, job: SubsJob, detail: str, emit: EventEmitter
@@ -1209,12 +1319,14 @@ class AvsubsInstance(MonitorInstance):
                 )
                 return
         if not cues:
-            err = job.publish_zh([])
-            if err is None:
+            res = job.publish_zh([])
+            if res.ok:
                 self._settle_completed(job, "no speech", emit)
+            elif res.kind == "exists":
+                self._skip_existing(job, SUBTITLE_EXISTS, emit)  # #191 AC6
             else:
-                self._settle(job.job_id, "failed", err, emit)
-                self._alert_job(job.job_id, err, emit)
+                self._settle(job.job_id, "failed", res.detail, emit)
+                self._alert_job(job.job_id, res.detail, emit)
             return
         settings = get_llm_settings()
         if not settings.api_key and needs_llm_key(settings.api_base):
@@ -1252,12 +1364,14 @@ class AvsubsInstance(MonitorInstance):
                 job = self._jobs.get(result.job_id)
                 if job is not None and result.job_id not in self._settled:
                     if result.outcome == "translated":
-                        err = job.publish_zh(result.zh_cues)
-                        if err is None:
+                        res = job.publish_zh(result.zh_cues)
+                        if res.ok:
                             self._settle_completed(job, "", emit)
+                        elif res.kind == "exists":  # #191 AC6: never replaced
+                            self._skip_existing(job, SUBTITLE_EXISTS, emit)
                         else:
-                            self._settle(job.job_id, "failed", err, emit)
-                            self._alert_job(job.job_id, err, emit)
+                            self._settle(job.job_id, "failed", res.detail, emit)
+                            self._alert_job(job.job_id, res.detail, emit)
                     elif result.detail == "no LLM key":  # C8
                         self._settle(job.job_id, "skipped", "no_llm_key", emit)
                         self._alert_no_key(emit)

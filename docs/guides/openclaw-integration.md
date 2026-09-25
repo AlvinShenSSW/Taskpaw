@@ -92,11 +92,11 @@ for r in rows:
 | RAM used / total (MB) | `mem_used_mb` / `mem_total_mb` | host | ÷1024 = GB. See version note. |
 | GPU % | `gpu_pct` | host | Windows (`"n/a"` on macOS) |
 | VRAM used / total (MB) | `gpu_mem_used_mb` / `gpu_mem_total_mb` | host | ÷1024 = GB |
-| Queue done / total / left | `queue_completed` / `queue_total` / `queue_remaining` | lada / jasna / avsubs | avsubs: done includes videos that already had their `.srt` at Start. jasna with「AV 翻译」ticked (since 3.7.0): done = **fully** done films — see the note below |
+| Queue done / total / left | `queue_completed` / `queue_total` / `queue_remaining` | lada / jasna / avsubs | avsubs: done includes videos that already had subtitles at Start (since 3.7.1 the #191 rules, see the `avsubs` note below). jasna with「AV 翻译」ticked (since 3.7.0): done = **fully** done films — see the note below |
 | Queue restored | `queue_restored` | jasna | int; only with「AV 翻译」ticked (3.7.0): films restored so far — the restore count `queue_completed` carried before 3.7.0 |
-| Queue already subtitled | `queue_pre_done` | avsubs | int (3.7.0): videos that already had their `.srt` at Start (included in `queue_completed`) |
+| Queue already subtitled | `queue_pre_done` | avsubs | int (3.7.0): videos that already had subtitles at Start (included in `queue_completed`) |
 | Queue failed | `queue_failed` | jasna / avsubs | int; files given up on after their retries (plus output-name collisions) |
-| Queue skipped | `queue_skipped` | avsubs | int; no LLM key, source changed during transcription, cancelled (abort), or whisperjav.exe missing |
+| Queue skipped | `queue_skipped` | avsubs | int; no LLM key, source changed during transcription, cancelled (abort), whisperjav.exe missing, or (3.7.1) a subtitle / transcript that appeared before it could be written (never overwritten) or a folder that could not be read |
 | Current task | `current_file` | lada / jasna / avsubs | string; capture mode or folder-derived. avsubs: the video's path **relative to the library folder** (e.g. `sub/film.mp4`), only while WhisperJAV transcribes it |
 | Current-file % | `percent` | lada / jasna | 0..100; **capture mode only** |
 | ETA / elapsed | `eta` / `elapsed` | lada / jasna | string `MM:SS`/`H:MM:SS`; **capture mode only** |
@@ -104,7 +104,7 @@ for r in rows:
 | Speed (fps) | `fps` | lada / jasna | float; **capture mode only** |
 | Phase | `phase` | jasna | `restore` (a video is being restored, or idle), `subs` (WhisperJAV is transcribing), `translate` (only translations are running) |
 | Subtitles done / total / left | `subs_completed` / `subs_total` / `subs_remaining` | jasna | int; only with「AV 翻译」ticked |
-| Subtitles failed / skipped | `subs_failed` / `subs_skipped` | jasna | int; skipped = restore failed, no LLM key, source changed, cancelled, or whisperjav.exe missing |
+| Subtitles failed / skipped | `subs_failed` / `subs_skipped` | jasna | int; skipped = restore failed, no LLM key, source changed, cancelled, whisperjav.exe missing, or (3.7.1) a subtitle / transcript that appeared before it could be written (never overwritten) or an output folder that could not be read |
 | Translations pending | `subs_translating` | jasna / avsubs | int; files queued in or held by the translator |
 | Phase | `phase` | avsubs | `asr` (WhisperJAV is transcribing `current_file`), `translate` (only translations are running), `waiting_gpu` (the GPU is held by another task, e.g. Jasna); **absent** when idle/finished |
 | Focus film | `film` | jasna (「AV 翻译」) / avsubs | string ≤ 200 (3.7.0): the film `steps` describes — the one in a GPU child (restore / transcription), else the one waiting for the GPU, else the one translating, else the next still to finish, else the last finished. avsubs: the path relative to the library folder |
@@ -137,7 +137,12 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > folder — the subtitle always carries its video's name, so a legacy
 > `<name>_restored.mp4` gets `<name>_restored.srt`. The Japanese transcript
 > (`<name>-破解.ja.srt`) is deleted once the `.srt` is written and kept only while
-> a translation is unfinished. The snapshot adds
+> a translation is unfinished. Since 3.7.1 (#191) a film whose restored video already
+> has `<name>-破解.srt` (or `.ass` / `.ssa` / `.vtt`), or a `<name>-破解.<tag>.srt` whose
+> tag is not Japanese (e.g. `.chs.srt`), gets no subtitle job; the output folder is
+> looked at again before each transcription and translation, a subtitle is never
+> overwritten, and an output folder that cannot be read skips the film (one alert
+> `subtitle state unreadable` per run). The snapshot adds
 > the `subs_*` keys above (`phase` itself is present for every managed Jasna, ticked or
 > not). `current_file` follows the live child: the
 > video being restored in `phase == "restore"`, the restored `.mp4` being
@@ -185,18 +190,26 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > `skipped`; `queue_failed −` (name collisions) = films `failed`. Jasna —
 > `queue_failed −` (name collisions) = films whose `restore` step `failed`;
 > `queue_completed −` (films already restored at Start that are not rows (normally those
-> that already had their `.srt`)) = films whose restore is `done` and whose `status` is
+> that already had their subtitles)) = films whose restore is `done` and whose `status` is
 > terminal (`done`, or a subtitle step `failed` / `skipped`: a settled job of any outcome
 > counts as done). Name collisions,
-> videos that already had their `.srt` (avsubs) and films already restored with
+> videos that already had subtitles (avsubs) and films already restored with
 > subtitles at Start (jasna) are counted but never rows; the steps show which step
 > failed.
 
 > **「AV 翻译 (subtitles)」task (`avsubs`, #179).** A library task: for every video
-> under its folder (recursively by default) that has no same-named `.srt`, it writes
+> under its folder (recursively by default) that has no subtitles yet, it writes
 > `<name>.srt` (Simplified Chinese) **next to the video**; the intermediate
 > `<name>.ja.srt` (Japanese) is deleted once the `.srt` is written (since 3.6.0 /
-> #187) and kept only while a translation is unfinished. It reports the same
+> #187) and kept only while a translation is unfinished. Since 3.7.1 (#191) a video
+> already has subtitles — and is skipped, counted in `queue_pre_done` — when, from
+> its folder's listing, (a) `<name>.srt` (or `.ass` / `.ssa` / `.vtt`) exists, (b) a
+> `<name>.<tag>.srt` whose tag is not Japanese exists (e.g. `.chs.srt`, `.zh.srt`), or
+> (c) its folder holds only this one video and any non-Japanese subtitle file. The
+> folder is looked at again before each transcription and translation; a subtitle
+> that appeared meanwhile, or a folder that cannot be read, skips the video
+> (`queue_skipped`; tried again at the next Start), and a subtitle is never
+> overwritten. It reports the same
 > `queue_*` / `current_file` keys as lada/jasna (plus
 > `queue_skipped`, `phase`, `subs_translating`), so the reader above covers it. It
 > shares the GPU with Jasna one file at a time: while the other task holds the GPU
@@ -211,7 +224,9 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 >   transcription left a process behind);
 > - per-file alerts `<task>: subtitles for <relpath> failed`, plus one-per-run
 >   alerts for a missing LLM API key, `whisperjav.exe not found` (monitor `error`),
->   subtitle name collisions and unreadable folders/names.
+>   subtitle name collisions, unreadable folders/names, and (3.7.1) one
+>   `<task>: subtitle state unreadable` when a video's folder could not be read
+>   right before its work.
 
 ## Three rules that bite
 

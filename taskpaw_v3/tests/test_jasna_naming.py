@@ -29,7 +29,7 @@ from taskpaw_v3.monitors.plugins.jasna import (
     staging_path_for,
     sweep_orphan_staging,
 )
-from taskpaw_v3.monitors.subs.job import SubsJob
+from taskpaw_v3.monitors.subs.job import PublishResult, SubsJob
 
 CJK = "SDAB-312 無修正.mp4"
 _OLD = time.time() - 600
@@ -295,7 +295,7 @@ def test_plan_subs_uses_the_legacy_file_and_prefers_the_new_one(tmp_path):
     assert pending == []
     plan = plan_subs(str(inp), str(out), pending, [a for a, _ in collisions])
     assert [p.name for p in plan.subs_only] == ["a.mp4", "c.mp4"]
-    assert J.subs_kind(str(out), inp / "b.mp4") == "none"
+    assert plan.kinds[inp / "b.mp4"] == "none"  # #191: judged from the listing
 
 
 def test_both_new_and_legacy_outputs_subtitle_the_new_file(tmp_path, monkeypatch):
@@ -358,7 +358,9 @@ def test_ja_is_kept_as_the_resume_checkpoint(tmp_path, monkeypatch, case):
         )
     if case == "zh_publish_failed":
         monkeypatch.setattr(
-            SubsJob, "publish_zh", lambda self, cues: f"publish {self.zh_target.name}"
+            SubsJob,
+            "publish_zh",
+            lambda self, cues: PublishResult("error", f"publish {self.zh_target.name}"),
         )
     inst, emit = r.inst, r.emit
     inst.start(emit)
@@ -381,9 +383,10 @@ def test_ja_is_kept_as_the_resume_checkpoint(tmp_path, monkeypatch, case):
     assert not _zh(r, "a.mp4").exists()
 
 
-def _publish_ja_only(self: SubsJob) -> str:
+def _publish_ja_only(self: SubsJob) -> PublishResult:
     """`SubsJob.publish_empty` whose zh half fails: the empty ja is on disk."""
-    return self._publish(self.ja_target, "") or f"publish {self.zh_target.name}"
+    res = self.publish_ja([])
+    return PublishResult("error", f"publish {self.zh_target.name}") if res.ok else res
 
 
 @pytest.mark.parametrize(
@@ -404,7 +407,9 @@ def test_ja_is_kept_when_the_empty_or_unreadable_path_fails(
         text = "" if case == "zero_cue_zh_publish_failed" else "not an srt at all"
         _ja(r, "a.mp4").write_text(text, encoding="utf-8")
         monkeypatch.setattr(
-            SubsJob, "publish_zh", lambda self, cues: f"publish {self.zh_target.name}"
+            SubsJob,
+            "publish_zh",
+            lambda self, cues: PublishResult("error", f"publish {self.zh_target.name}"),
         )
     inst, emit = r.inst, r.emit
     inst.start(emit)

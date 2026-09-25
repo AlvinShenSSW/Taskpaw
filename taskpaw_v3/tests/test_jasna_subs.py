@@ -10,6 +10,7 @@ test here never reaches `taskkill`, the network or a real LLM worker (D10).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import sys
@@ -2226,3 +2227,450 @@ def test_progress_settle_mark_survives_a_raising_disable_alert(tmp_path, monkeyp
         "translate": "skipped",
     }
     inst.stop(timeout=1)
+
+
+# ── #191: recognise existing subtitles, fail closed, never overwrite ──────────
+LIB_ZH = "1\n00:00:00,000 --> 00:00:01,000\n店主的中文字幕\n"
+LIB_JA = SRT_JA.replace("はい", "店主")
+_SKIPPED = {"restore": "done", "asr": "skipped", "translate": "skipped"}
+
+
+def _scandir_spy(monkeypatch, folder: Path, fail=None) -> list[str]:
+    """Record `os.scandir(folder)` calls; raise `fail` for them when given."""
+    real, key, calls = os.scandir, str(folder), []
+
+    def scandir(path="."):
+        if os.fspath(path) == key:
+            calls.append(key)
+            if fail is not None:
+                raise fail
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    return calls
+
+
+def test_plan_subs_judges_every_film_from_one_output_listing(tmp_path, monkeypatch):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, *(f"{n}.mp4" for n in "abcdefghi"), "JAP-001.mp4")
+    for name, text in {
+        "a-破解.mp4": "r",  # restored, nothing yet → full
+        "b-破解.mp4": "r",
+        "b-破解.chs.srt": LIB_ZH,  # (b)
+        "c-破解.mp4": "r",
+        "c-破解.srt": "",  # (a), 0 bytes counts
+        "d-破解.mp4": "r",
+        "d-破解.ja.srt": SRT_JA,  # translate-only
+        "e_restored.mp4": "r",
+        "e_restored.zh.srt": LIB_ZH,  # legacy media, (b)
+        "f_restored.mp4": "r",  # legacy media, nothing yet
+        "g-破解.mp4": "r",  # F1: the only restored video here ...
+        "h-破解.chs.srt": LIB_ZH,  # ... and pending h's pre-placed subtitle
+        "JAP-001-破解.mp4": "r",
+        "JAP-001-破解.srt": LIB_ZH,  # F12: a Japanese-looking stem
+    }.items():
+        (out / name).write_text(text, encoding="utf-8")
+    pending, _done_n, collisions = plan_queue(str(inp), str(out))
+    assert [p.name for p in pending] == ["h.mp4", "i.mp4"]
+    calls = _scandir_spy(monkeypatch, out)
+    plan = plan_subs(str(inp), str(out), pending, [a for a, _ in collisions])
+    assert calls == [str(out)]  # ONE listing per planning pass (AC3)
+    assert {p.name: k for p, k in plan.for_pending.items()} == {
+        "h.mp4": "none",
+        "i.mp4": "full",
+    }
+    assert [p.name for p in plan.subs_only] == ["a.mp4", "d.mp4", "f.mp4", "g.mp4"]
+    assert {p.name: k for p, k in plan.kinds.items()} == {
+        "JAP-001.mp4": "none",
+        "a.mp4": "full",
+        "b.mp4": "none",
+        "c.mp4": "none",
+        "d.mp4": "translate_only",
+        "e.mp4": "none",
+        "f.mp4": "full",
+        "g.mp4": "full",  # rule (c) is off for Jasna (C4)
+        "h.mp4": "none",
+        "i.mp4": "full",
+    }
+    media = {p.name: m.name for p, m in plan.media.items()}
+    assert media["e.mp4"] == "e_restored.mp4" and media["f.mp4"] == "f_restored.mp4"
+    assert media["a.mp4"] == "a-破解.mp4" and media["i.mp4"] == "i-破解.mp4"
+    assert plan.total == 5
+
+
+def test_plan_subs_never_credits_another_films_subtitle_f1(tmp_path):
+    # C4/F1: the ONLY restored video plus another (pending) film's pre-placed
+    # subtitle — rule (c) would credit the wrong film forever; it is off here.
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    (out / ".avsubs").mkdir()
+    _videos(inp, "A.mp4", "C.mp4")
+    (out / "A-破解.mp4").write_bytes(b"r")
+    (out / "C-破解.chs.srt").write_text(LIB_ZH, encoding="utf-8")
+    pending, _done_n, _coll = plan_queue(str(inp), str(out))
+    assert [p.name for p in pending] == ["C.mp4"]
+    plan = plan_subs(str(inp), str(out), pending, [])
+    assert plan.kinds == {inp / "A.mp4": "full", inp / "C.mp4": "none"}
+    assert plan.subs_only == [inp / "A.mp4"] and plan.total == 1
+
+
+def test_plan_subs_prefers_the_new_media_name_from_the_listing(tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    _videos(inp, "c.mp4")
+    (out / "c_restored.mp4").write_bytes(b"legacy")
+    (out / "c_restored.srt").write_text(LIB_ZH, encoding="utf-8")
+    (out / "C-破解.MP4").write_bytes(b"new")  # case-variant on disk
+    plan = plan_subs(str(inp), str(out), [], [])
+    if os.path.normcase("A") == os.path.normcase("a"):
+        assert plan.media[inp / "c.mp4"] == out / "c-破解.mp4"
+        assert plan.kinds[inp / "c.mp4"] == "full"  # the new file's own subs
+    else:
+        assert plan.media[inp / "c.mp4"] == out / "c_restored.mp4"
+        assert plan.kinds[inp / "c.mp4"] == "none"
+
+
+def test_plan_subs_counts_a_missing_output_folder_as_empty(tmp_path):
+    inp = tmp_path / "in"
+    inp.mkdir()
+    _videos(inp, "a.mp4")
+    plan = plan_subs(str(inp), str(tmp_path / "out"), [inp / "a.mp4"], [])
+    assert plan.for_pending == {inp / "a.mp4": "full"} and plan.total == 1
+
+
+@pytest.mark.parametrize("case", ["unreachable", "denied"])
+def test_an_unreadable_output_folder_fails_planning(tmp_path, monkeypatch, case):
+    # F13: an unreachable share also reads FileNotFoundError on Windows — the
+    # parent still lists the folder, so it is not "missing".
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"], restored=["e.mp4"])
+    fail = (
+        FileNotFoundError(2, "WinError 53")
+        if case == "unreachable"
+        else PermissionError(13, "denied")
+    )
+    with monkeypatch.context() as m:
+        _scandir_spy(m, r.out, fail)
+        r.inst.start(r.emit)
+    assert r.inst._subs_disabled == "planning failed"
+    assert r.inst._jobs == {}
+    assert len(_keyed(r.evs, "j1:subs-disabled")) == 1
+    assert r.launcher.n == 1  # restores continue
+    r.inst.stop(timeout=1)
+
+
+def test_setup_subs_uses_the_plan_and_never_probes_again(tmp_path, monkeypatch):
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4"],
+        restored=["e.mp4"],
+        legacy=["f.mp4"],
+        ja=["f.mp4"],
+    )
+    real = J.plan_subs
+
+    def forbid(*a, **k):
+        raise AssertionError("probed again after planning")
+
+    def plan_then_forbid(*a, **k):
+        plan = real(*a, **k)
+        monkeypatch.setattr(J, "exists_quietly", forbid)
+        monkeypatch.setattr(J, "judge", forbid)
+        monkeypatch.setattr(J, "list_names_missing_ok", forbid)
+        return plan
+
+    monkeypatch.setattr(J, "plan_subs", plan_then_forbid)
+    r.inst.start(r.emit)
+    assert r.inst._kinds == {
+        "a.mp4": "full",
+        "e.mp4": "full",
+        "f.mp4": "translate_only",
+    }
+    assert r.inst._jobs["a.mp4"].media == r.out / "a-破解.mp4"
+    assert r.inst._jobs["f.mp4"].media == r.out / "f_restored.mp4"
+    assert r.inst._jobs["f.mp4"].zh_target == r.out / "f_restored.srt"
+    r.inst.stop(timeout=1)
+
+
+def test_a_pending_film_with_subtitles_is_restored_without_a_job(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    lib = _sub(r.out, "a.mp4", ".chs.srt")
+    lib.write_text(LIB_ZH, encoding="utf-8")
+    r.inst.start(r.emit)
+    assert "a.mp4" not in r.inst._jobs and r.launcher.n == 1
+    st = r.inst.check(r.emit)
+    assert r.spawner.argvs == [] and (r.out / "a-破解.mp4").exists()
+    assert lib.read_text(encoding="utf-8") == LIB_ZH
+    assert st.metrics["queue_restored"] == 1 and len(_done(r.evs)) == 1
+
+
+def test_a_subtitle_dropped_in_before_the_asr_skips_and_consumes_the_carry(
+    tmp_path, monkeypatch, caplog
+):
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4", "b.mp4"])
+    inst, emit = r.inst, r.emit
+    inst.start(emit)
+    lib = _sub(r.out, "a.mp4", ".chs.srt")
+    lib.write_text(LIB_ZH, encoding="utf-8")
+    inst._subs_consecutive_failures = 2
+    with caplog.at_level(logging.INFO, logger="taskpaw.monitors.jasna"):
+        st = inst.check(emit)  # a restored → re-check → skipped; b launched
+    assert inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+    assert r.spawner.argvs == []  # no ASR for a
+    assert inst._carried is None  # the carried hold was consumed and given
+    assert r.launcher.n == 2 and r.launcher.inputs()[-1] == "b.mp4"
+    assert gpu == ["acquire", "release", "acquire"]  # a's hold released first
+    assert lib.read_text(encoding="utf-8") == LIB_ZH
+    assert not _ja(r, "a.mp4").exists()
+    assert inst._subs_consecutive_failures == 2 and inst._subs_disabled is None
+    assert not [e for e in r.evs if e[0] == "alert"]
+    msgs = [rec.getMessage() for rec in caplog.records]
+    assert sum("a.mp4" in m and "subtitle exists" in m for m in msgs) == 1
+    assert _states(inst, "a.mp4") == _SKIPPED
+    assert st.metrics["subs_skipped"] == 1 and inst._done == 1
+    inst.stop(timeout=1)
+
+
+def test_no_listing_happens_while_the_gpu_is_refused(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, restored=["e.mp4"])
+    other = ("other", 3)
+    assert gpu_lease.try_acquire(other, 1.0, label="Other")
+    calls: list = []
+    real = J.list_names
+    monkeypatch.setattr(J, "list_names", lambda f: calls.append(f) or real(f))
+    r.inst.start(r.emit)
+    for _ in range(3):
+        r.inst.check(r.emit)
+    assert r.inst._gpu_waiting and calls == [] and r.spawner.argvs == []
+    assert gpu_lease.release(other)
+    r.inst.check(r.emit)  # the hold is taken → one listing → ASR
+    assert calls == [r.out] and len(r.spawner.argvs) == 1
+    r.inst.stop(timeout=1)
+
+
+@pytest.mark.parametrize(
+    "exc", [PermissionError(13, "denied"), OSError(53, "net"), RuntimeError("bug")]
+)
+def test_an_unreadable_folder_before_the_asr_skips_and_releases_the_hold(
+    tmp_path, monkeypatch, exc
+):
+    # AC5 + F14: the listing (outside the K1 fence) never raises; the film is
+    # skipped, the hold released; one alert per run (F16).
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, restored=["d.mp4", "e.mp4"])
+    real = J.plan_subs
+
+    def plan_then_fail(*a, **k):
+        plan = real(*a, **k)
+        _scandir_spy(monkeypatch, r.out, exc)  # the share drops after the scan
+        return plan
+
+    monkeypatch.setattr(J, "plan_subs", plan_then_fail)
+    r.inst.start(r.emit)
+    for n in ("d.mp4", "e.mp4"):
+        assert r.inst._settled[n] == ("skipped", "subtitle state unreadable")
+        assert _states(r.inst, n) == _SKIPPED
+    assert r.spawner.argvs == []
+    assert gpu == ["acquire", "release", "acquire", "release"]
+    alerts = _keyed(r.evs, "j1:subs-unreadable")
+    assert len(alerts) == 1 and "d.mp4" in alerts[0][2]
+    r.inst.check(r.emit)
+    done = _done(r.evs)
+    assert len(done) == 1 and "Subs: 0/2 done, 0 failed, 2 skipped" in done[0][2]
+
+
+@pytest.mark.parametrize("case", ["subtitle", "unreadable"])
+def test_a_translate_only_film_is_rechecked_before_its_submit(
+    tmp_path, monkeypatch, case
+):
+    # F15: submitted hours after the scan — listed again first (no GPU).
+    gpu = _gpu_spy(monkeypatch)
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"], ja=["a.mp4"])
+    r.inst.start(r.emit)
+    if case == "subtitle":
+        _sub(r.out, "a.mp4", ".srt").write_text(LIB_ZH, encoding="utf-8")
+    else:
+        _scandir_spy(monkeypatch, r.out, PermissionError(13, "denied"))
+    r.inst.check(r.emit)  # a restored → translate-only → re-check
+    assert r.translators[0].submitted == []
+    reason = "subtitle exists" if case == "subtitle" else "subtitle state unreadable"
+    assert r.inst._settled["a.mp4"] == ("skipped", reason)
+    assert _ja(r, "a.mp4").read_text(encoding="utf-8") == SRT_JA  # library's
+    assert gpu == ["acquire", "release"]  # only the restore's hold
+    assert _states(r.inst, "a.mp4") == {
+        "restore": "done",
+        "asr": "done",
+        "translate": "skipped",
+    }
+    assert len(_done(r.evs)) == 1
+
+
+def test_a_skipped_translate_only_film_lets_the_subs_only_walk_continue(
+    tmp_path, monkeypatch
+):
+    names = ["d.mp4", "e.mp4", "f.mp4"]
+    r = _setup(tmp_path, monkeypatch, restored=names, ja=names)
+    real = J.list_names
+    seen: list = []
+
+    def drop_on_first(folder):
+        if not seen:  # the owner places d's subtitle right after the scan
+            _sub(r.out, "d.mp4", ".zh.srt").write_text(LIB_ZH, encoding="utf-8")
+        seen.append(folder)
+        return real(folder)
+
+    monkeypatch.setattr(J, "list_names", drop_on_first)
+    r.inst.start(r.emit)
+    assert len(seen) == 3
+    assert r.inst._settled["d.mp4"] == ("skipped", "subtitle exists")
+    assert [q.job_id for q in r.translators[0].submitted] == ["e.mp4", "f.mp4"]
+    assert _ja(r, "d.mp4").exists()  # a library transcript is never discarded
+
+
+@pytest.mark.parametrize("case", ["subtitle", "unreadable"])
+def test_a_full_film_is_rechecked_before_its_translation(tmp_path, monkeypatch, case):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)  # a restored → ASR
+    assert len(r.spawner.argvs) == 1
+    if case == "subtitle":
+        lib = _sub(r.out, "a.mp4", ".zh.srt")
+        lib.write_text(LIB_ZH, encoding="utf-8")
+    else:
+        _scandir_spy(monkeypatch, r.out, PermissionError(13, "denied"))
+    r.spawner.last.finish(0)
+    r.inst.check(r.emit)
+    assert r.translators[0].submitted == []
+    assert _states(r.inst, "a.mp4") == {
+        "restore": "done",
+        "asr": "done",
+        "translate": "skipped",
+    }
+    if case == "subtitle":
+        assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+        assert not _ja(r, "a.mp4").exists()  # this run's own transcript goes
+        assert lib.read_text(encoding="utf-8") == LIB_ZH
+    else:
+        assert r.inst._settled["a.mp4"] == ("skipped", "subtitle state unreadable")
+        assert _ja(r, "a.mp4").exists()  # kept: the next Start only translates
+        assert len(_keyed(r.evs, "j1:subs-unreadable")) == 1
+    assert len(_done(r.evs)) == 1
+
+
+@pytest.mark.parametrize("kind", ["full", "translate_only"])
+def test_a_refused_srt_skips_and_discards_only_this_runs_transcript(
+    tmp_path, monkeypatch, kind
+):
+    if kind == "full":
+        r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+        r.inst.start(r.emit)
+        r.inst.check(r.emit)  # restored → ASR
+        r.spawner.last.finish(0)
+        r.inst.check(r.emit)  # ja published + submitted
+    else:
+        r = _setup(tmp_path, monkeypatch, restored=["a.mp4"], ja=["a.mp4"])
+        _ja(r, "a.mp4").write_text(LIB_JA, encoding="utf-8")
+        r.inst.start(r.emit)
+    assert [q.job_id for q in r.translators[0].submitted] == ["a.mp4"]
+    zh = _zh(r, "a.mp4")
+    zh.write_text(LIB_ZH, encoding="utf-8")  # the owner's own .srt
+    r.inst._subs_consecutive_failures = 2
+    r.translators[0].answer("a.mp4")
+    st = r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+    assert zh.read_text(encoding="utf-8") == LIB_ZH  # never overwritten
+    if kind == "full":
+        assert not _ja(r, "a.mp4").exists()
+    else:
+        assert _ja(r, "a.mp4").read_text(encoding="utf-8") == LIB_JA
+    assert not list(r.out.glob("*.tmp"))
+    assert r.inst._subs_consecutive_failures == 2 and r.inst._subs_disabled is None
+    assert not [e for e in r.evs if e[0] == "alert"]
+    assert st.metrics["subs_skipped"] == 1
+    assert _states(r.inst, "a.mp4") == {
+        "restore": "done",
+        "asr": "done",
+        "translate": "skipped",
+    }
+    assert len(_done(r.evs)) == 1
+
+
+def test_a_transcript_that_appeared_mid_run_is_never_replaced(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)  # restored → ASR
+    lib = _ja(r, "a.mp4")
+    lib.write_text(LIB_JA, encoding="utf-8")
+    r.spawner.last.finish(0)
+    r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "transcript exists")
+    assert lib.read_text(encoding="utf-8") == LIB_JA
+    assert r.translators[0].submitted == []
+    assert _states(r.inst, "a.mp4") == _SKIPPED
+    r.inst.stop(timeout=1)
+    r.inst.start(r.emit)  # the next Start only translates it
+    assert r.inst._kinds["a.mp4"] == "translate_only"
+    r.inst.stop(timeout=1)
+
+
+def test_no_speech_with_a_srt_that_appeared_removes_only_our_empty_transcript(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)  # restored → ASR
+    zh = _zh(r, "a.mp4")
+    zh.write_text(LIB_ZH, encoding="utf-8")
+    r.spawner.last.finish(0, state="empty", text="")
+    r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+    assert zh.read_text(encoding="utf-8") == LIB_ZH
+    assert not _ja(r, "a.mp4").exists()
+    assert _states(r.inst, "a.mp4") == {
+        "restore": "done",
+        "asr": "done",
+        "translate": "skipped",
+    }
+
+
+def test_a_zero_cue_resume_whose_srt_appeared_keeps_the_library_transcript(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, restored=["a.mp4"], ja=["a.mp4"])
+    _ja(r, "a.mp4").write_bytes(b"")
+    real = SubsJob.load_ja
+
+    def load_then_drop(self):
+        cues = real(self)
+        self.zh_target.write_text(LIB_ZH, encoding="utf-8")
+        return cues
+
+    monkeypatch.setattr(SubsJob, "load_ja", load_then_drop)
+    r.inst.start(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle exists")
+    assert _zh(r, "a.mp4").read_text(encoding="utf-8") == LIB_ZH
+    assert _ja(r, "a.mp4").read_bytes() == b""
+
+
+def test_stop_never_replaces_a_transcript_that_appeared(tmp_path, monkeypatch, caplog):
+    r = _setup(tmp_path, monkeypatch, pending=["a.mp4"])
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)  # restored → ASR
+    r.spawner.last.finish(0)  # exited, unpolled
+    lib = _ja(r, "a.mp4")
+    lib.write_text(LIB_JA, encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="taskpaw.monitors.jasna"):
+        r.inst.stop(timeout=2)
+    assert lib.read_text(encoding="utf-8") == LIB_JA
+    assert any("a-破解.ja.srt already exists" in m.getMessage() for m in caplog.records)
+
+
+def test_av_translate_description_states_the_library_rules():
+    av = JasnaConfig.model_fields["av_translate"].description or ""
+    for text in (".chs.srt", "Japanese", "never overwritten", "cannot be read"):
+        assert text in av, text

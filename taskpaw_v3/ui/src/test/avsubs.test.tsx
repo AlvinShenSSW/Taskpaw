@@ -34,6 +34,37 @@ describe("avsubs UI strings + icon (#179)", () => {
     expect(zh).toContain(".ja.srt 只是中间产物，翻译完成后删除");
   });
 
+  it("states the #191 library rules (skip already-subtitled, never overwrite)", () => {
+    setLang("en");
+    expect(i18n.t("services.avsubs")).toContain(
+      "videos that already have subtitles are skipped and an existing subtitle is never overwritten",
+    );
+    setLang("zh-CN");
+    expect(i18n.t("services.avsubs")).toContain("已有字幕的视频跳过，已有的字幕绝不覆盖");
+    const field = (typeId: string, name: string) =>
+      (
+        localizeSchema(
+          {
+            type: "object" as const,
+            properties: { [name]: { type: "string" as const, description: "EN" } },
+          },
+          typeId,
+          "zh-CN",
+        ).properties as Record<string, { description: string }>
+      )[name].description;
+    const root = field("avsubs", "avsubs_root_folder");
+    expect(root).toContain("<原名>.chs.srt");
+    expect(root).toContain("日本語");
+    expect(root).toContain("只有这一部视频");
+    expect(root).toContain("读不到的文件夹本次跳过");
+    expect(root).toContain("绝不覆盖");
+    expect(root).not.toContain("还没有同名 .srt");
+    const av = field("jasna", "av_translate");
+    expect(av).toContain("<原名>-破解.chs.srt");
+    expect(av).toContain("绝不覆盖");
+    expect(av).not.toContain("只有这一部视频"); // rule (c) is never Jasna's
+  });
+
   it("mentions the standalone AV-translate task in the About blurb (en + zh)", () => {
     setLang("en");
     expect(i18n.t("settings.aboutBody")).toMatch(/standalone task/);

@@ -8,9 +8,13 @@ Knows nothing about Jasna: paths in, outcomes out.
                  manifest outcome
 - `srt`        — strict parse/serialize
 - `translate`  — `Translator`, the `llm-worker` client thread
-- `job`        — `SubsJob`: ASR attempts, identity check, atomic publishing,
-                 dropping the `.ja.srt` checkpoint once completed (#187),
-                 live ASR `progress` (#189)
+- `job`        — `SubsJob`: ASR attempts, identity check, atomic publishing
+                 that never overwrites (`PublishResult`, #191), dropping the
+                 `.ja.srt` checkpoint once completed (#187), live ASR
+                 `progress` (#189)
+- `existing`   — recognising a film's existing subtitles from one folder
+                 listing (#191): `judge` (rules a/b/c), `skip_reason`, and
+                 the listings `list_names` / `list_names_missing_ok`
 - `progress`   — pure progress observation (#189): `AsrProgress` (WhisperJAV
                  phases/scenes), `FilmTracker` + `LiveFacts` (per-film steps
                  and rows), `parse_eta`
@@ -20,8 +24,19 @@ Nothing here is imported from `lada.py` (C1).
 """
 
 from taskpaw_v3.monitors.subs.child import LLM_ENV_PREFIX, ChildProcess, Eof, asr_env
+from taskpaw_v3.monitors.subs.existing import (
+    Existing,
+    judge,
+    list_names,
+    list_names_missing_ok,
+    skip_reason,
+)
 from taskpaw_v3.monitors.subs.job import (
+    SUBTITLE_EXISTS,
+    SUBTITLE_UNREADABLE,
+    TRANSCRIPT_EXISTS,
     JobOutcome,
+    PublishResult,
     SkipReason,
     SubsJob,
     Terminal,
@@ -66,14 +81,19 @@ __all__ = [
     "Cue",
     "Engine",
     "Eof",
+    "Existing",
     "FilmTracker",
     "JobOutcome",
     "LLM_ENV_PREFIX",
     "LiveFacts",
+    "PublishResult",
     "RunId",
+    "SUBTITLE_EXISTS",
+    "SUBTITLE_UNREADABLE",
     "SkipReason",
     "SrtError",
     "SubsJob",
+    "TRANSCRIPT_EXISTS",
     "Terminal",
     "TranslateRequest",
     "TranslateResult",
@@ -81,9 +101,13 @@ __all__ = [
     "asr_env",
     "bounded",
     "exists_quietly",
+    "judge",
+    "list_names",
+    "list_names_missing_ok",
     "needs_llm_key",
     "owned_flags_in",
     "parse_eta",
+    "skip_reason",
     "source_identity",
     "validate_fields",
 ]
