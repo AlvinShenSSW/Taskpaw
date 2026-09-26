@@ -201,6 +201,8 @@ async function send<T>(
 const q = (name: string) => `?name=${encodeURIComponent(name)}`;
 
 export const api = {
+  films: (name: string, page?: number, size = 10) =>
+    get<unknown>("agent", `/control/monitors/films${q(name)}${page === undefined ? "" : `&page=${page}`}&size=${size}`),
   logs: (params: LogParams = {}) => {
     const qs = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {

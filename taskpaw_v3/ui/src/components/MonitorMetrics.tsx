@@ -4,6 +4,7 @@ import { AiActivity } from "./AiActivity";
 import { isAiMetrics } from "./aiActivity.helpers";
 import { TINT, utilTint } from "./monitorMetrics.helpers";
 import { PipelineProgress } from "./PipelineProgress";
+import { PagedFilmList } from "./PagedFilmList";
 import { hiddenWithPipeline, readPipeline } from "./pipelineProgress.helpers";
 import { Tile } from "./Tile";
 
@@ -60,7 +61,7 @@ const KNOWN = new Set([
   "queue_restored", "queue_pre_done",
 ]);
 
-export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> }) {
+export function MonitorMetrics({ metrics, taskName }: { metrics?: Record<string, unknown>; taskName?: string }) {
   const { t } = useTranslation();
   // The dev_activity monitor (#154) carries an `ai` block, not gauges — render its
   // dedicated view instead of the generic metric tiles.
@@ -114,7 +115,7 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
 
   return (
     <Stack spacing={2} sx={{ mt: 2 }}>
-      {pipe && <PipelineProgress pipeline={pipe} metrics={m} />}
+      {pipe && <PipelineProgress pipeline={pipe} metrics={m} taskName={taskName} />}
 
       {/* Now-processing banner + current-file progress */}
       {!pipe && currentFile && (
@@ -159,6 +160,9 @@ export function MonitorMetrics({ metrics }: { metrics?: Record<string, unknown> 
                   bgcolor: "rgba(148,163,184,0.15)" }} />
         </Box>
       )}
+
+      {!pipe && taskName !== undefined && typeof m.queue_pre_done === "number"
+        && <PagedFilmList key={taskName} name={taskName} />}
 
       {/* Utilization gauges */}
       {gauges.length > 0 && (

@@ -144,6 +144,7 @@ from taskpaw_v3.monitors.subs.progress import (
     FilmTracker,
     parse_eta,
     progress_view,
+    read_film_page,
 )
 from taskpaw_v3.monitors.subs.srt import Cue, SrtError
 from taskpaw_v3.monitors.subs.translate import (
@@ -3308,6 +3309,12 @@ class JasnaInstance(MonitorInstance):
             if name not in self._settled and self._tracker.restore_done(name):
                 n += 1
         return n
+
+    def film_page(self, page: object, size: object) -> dict | None:
+        tracker = self._tracker
+        if not self._cfg.av_translate:
+            return None
+        return read_film_page(tracker, page, size)
 
     def _progress_view(self) -> dict:
         """#189: the per-film stepper (`film`, `steps`, `films`, `films_more`

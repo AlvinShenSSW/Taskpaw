@@ -11,10 +11,13 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { TINT } from "./monitorMetrics.helpers";
 import {
-  type FilmRow, type Pipeline, type Step, type StepState,
+  BOX, MONO, SLATE_WASH, type Pipeline, type Step, type StepState,
   clock, durationText, etaText, fin, focusStep, isTerminal, stepIndex, stepLabel, str,
 } from "./pipelineProgress.helpers";
 import { Tile } from "./Tile";
+import { FilmList } from "./FilmList";
+import { PagedFilmList } from "./PagedFilmList";
+import { type Tone, toneSx } from "./filmList.helpers";
 
 // #189 AV 翻译 progress: one film's 修复 → 识别 → 翻译 (Jasna) or 识别 → 翻译
 // (avsubs) stepper, the active step's own bar + tiles, the queue card and the
@@ -23,10 +26,7 @@ import { Tile } from "./Tile";
 // Design: docs/specs/2026-09-25-189-progress-redesign-design.md → "UI (D8/D13)";
 // every state is spelled out in text next to its icon (never colour alone).
 
-const MONO = '"Fira Code", monospace';
-const SLATE_WASH = "rgba(148,163,184,0.1)";
 const SLATE_TRACK = "rgba(148,163,184,0.15)";
-const BOX = { borderRadius: 2, border: "1px solid", borderColor: "divider" } as const;
 
 type Metrics = Record<string, unknown>;
 
@@ -287,17 +287,6 @@ function StepPanel({ step, pipeline, metrics }: { step: Step; pipeline: Pipeline
 }
 
 // ── queue card ──────────────────────────────────────────────────────────────
-type Tone = "ok" | "soft" | "crit" | "warn" | "idle";
-function toneSx(tone: Tone) {
-  switch (tone) {
-    case "ok": return { bgcolor: alpha(TINT.ok, 0.14), color: "success.main" };
-    case "soft": return { bgcolor: alpha(TINT.ok, 0.08), color: "success.light" };
-    case "crit": return { bgcolor: alpha(TINT.crit, 0.14), color: "error.main" };
-    case "warn": return { bgcolor: alpha(TINT.warn, 0.14), color: "warning.main" };
-    default: return { bgcolor: SLATE_WASH, color: "text.secondary" };
-  }
-}
-
 const SUBS_BUSY: ReadonlySet<StepState> = new Set<StepState>(["active", "queued", "waiting_gpu"]);
 
 function QueueCard({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics }) {
@@ -390,100 +379,8 @@ function QueueCard({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics
   );
 }
 
-// ── batch list ──────────────────────────────────────────────────────────────
-const ROW_ACTIVE = new Set(["restore", "asr", "translate"]);
-
-function rowStatus(r: FilmRow, t: TFunction): string {
-  switch (r.status) {
-    case undefined:
-      return "";
-    case "active": {
-      const key = r.steps.find(([, s]) => s === "active")?.[0];
-      return key && ROW_ACTIVE.has(key) ? t(`pipeline.row.${key}`) : t("pipeline.row.active");
-    }
-    case "pending":
-      // A Jasna film restored before this run only needs its subtitles.
-      return r.steps.some(([k, s]) => k === "restore" && s === "done")
-        ? t("pipeline.row.subsOnly") : t("pipeline.row.pending");
-    default:
-      return t(`pipeline.row.${r.status}`);
-  }
-}
-
-function rowTime(r: FilmRow, t: TFunction): string {
-  if (r.status === "done" && r.duration_s !== undefined) return clock(r.duration_s);
-  if (r.status === "active" && r.eta_s !== undefined) {
-    return t("pipeline.left", { d: etaText(r.eta_s, t) });
-  }
-  return "—";
-}
-
-function RowChip({ stepKey, state, percent }: { stepKey: string; state: StepState; percent?: number }) {
-  const { t } = useTranslation();
-  const label = state === "active" && percent !== undefined
-    ? `${stepLabel(stepKey, t)} ${Math.round(percent)}%` : stepLabel(stepKey, t);
-  const icon = state === "done" ? <CheckIcon />
-    : state === "failed" ? <CloseIcon />
-    : state === "skipped" ? <RemoveIcon /> : undefined;
-  const tone: Tone = state === "done" ? "ok" : state === "failed" ? "crit"
-    : state === "waiting_gpu" ? "warn" : "idle";
-  return (
-    <Chip size="small" label={label} icon={icon}
-      variant={state === "active" ? "outlined" : "filled"}
-      sx={state === "active"
-        ? { borderColor: TINT.ok, bgcolor: alpha(TINT.ok, 0.08), color: "text.primary" }
-        : { ...toneSx(tone), "& .MuiChip-icon": { color: "inherit", fontSize: 14 } }} />
-  );
-}
-
-function FilmList({ pipeline }: { pipeline: Pipeline }) {
-  const { t } = useTranslation();
-  const { films, filmsMore } = pipeline;
-  // A single film is already the header above — the list is for batches.
-  if (films.length < 2 && filmsMore === 0) return null;
-  return (
-    <Box data-testid="pipeline-films" sx={{ ...BOX, py: 0.5 }}>
-      <Typography variant="overline" color="text.secondary" sx={{ px: 2, display: "block" }}>
-        {t("pipeline.films")}
-      </Typography>
-      {films.map((r, i) => {
-        const focus = r.name === pipeline.film;
-        const activeKey = r.steps.find(([, s]) => s === "active")?.[0];
-        return (
-          <Box key={`${r.name}-${i}`} data-testid="film-row" sx={{
-            display: "flex", flexWrap: "wrap", alignItems: "center", columnGap: 2, rowGap: 0.75,
-            px: 2, py: 1, borderTop: "1px solid", borderColor: "divider",
-            bgcolor: focus ? alpha(TINT.ok, 0.05) : "transparent",
-          }}>
-            <Typography sx={{ fontFamily: MONO, fontSize: 13, fontWeight: focus ? 600 : 400,
-              flex: "1 1 160px", minWidth: 0, wordBreak: "break-all" }}>{r.name}</Typography>
-            <Stack direction="row" sx={{ flexWrap: "wrap", gap: 0.75 }}>
-              {r.steps.map(([k, s]) => (
-                <RowChip key={k} stepKey={k} state={s} percent={k === activeKey ? r.percent : undefined} />
-              ))}
-            </Stack>
-            <Typography sx={{ fontSize: 13, flex: "1 1 140px", minWidth: 0,
-              color: r.status === "failed" ? "error.main"
-                : r.status === "active" || r.status === "done" ? "text.primary" : "text.secondary" }}>
-              {rowStatus(r, t)}
-            </Typography>
-            <Typography sx={{ fontFamily: MONO, fontSize: 13, color: "text.secondary", minWidth: 72,
-              textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{rowTime(r, t)}</Typography>
-          </Box>
-        );
-      })}
-      {filmsMore > 0 && (
-        <Typography variant="caption" color="text.secondary"
-          sx={{ px: 2, py: 1, display: "block", borderTop: "1px solid", borderColor: "divider" }}>
-          {t("pipeline.more", { n: filmsMore })}
-        </Typography>
-      )}
-    </Box>
-  );
-}
-
 // ── the view ────────────────────────────────────────────────────────────────
-export function PipelineProgress({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics }) {
+export function PipelineProgress({ pipeline, metrics, taskName }: { pipeline: Pipeline; metrics: Metrics; taskName?: string }) {
   const { t } = useTranslation();
   const { steps } = pipeline;
   const focus = focusStep(steps);
@@ -512,7 +409,8 @@ export function PipelineProgress({ pipeline, metrics }: { pipeline: Pipeline; me
         {focus && <StepPanel step={focus} pipeline={pipeline} metrics={metrics} />}
       </Box>
       <QueueCard pipeline={pipeline} metrics={metrics} />
-      <FilmList pipeline={pipeline} />
+      {taskName !== undefined ? <PagedFilmList key={taskName} name={taskName} fallback={pipeline} />
+        : <FilmList films={pipeline.films} filmsMore={pipeline.filmsMore} focus={pipeline.film} />}
     </Stack>
   );
 }

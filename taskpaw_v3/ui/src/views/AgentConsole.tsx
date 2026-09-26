@@ -272,7 +272,7 @@ function MonitorDetail({
           </Typography>
         )}
 
-        <MonitorMetrics metrics={snap.metrics} />
+        <MonitorMetrics metrics={snap.metrics} taskName={name} />
       </CardContent>
 
       <Dialog open={confirmDel} onClose={() => setConfirmDel(false)}>

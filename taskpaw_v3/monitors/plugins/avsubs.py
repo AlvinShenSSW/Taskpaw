@@ -115,6 +115,7 @@ from taskpaw_v3.monitors.subs.progress import (
     TRANSLATE,
     FilmTracker,
     progress_view,
+    read_film_page,
 )
 from taskpaw_v3.monitors.subs.srt import Cue, SrtError
 from taskpaw_v3.monitors.subs.translate import (
@@ -175,6 +176,8 @@ class TreePlan:
     errors: list[str]
     # Every directory that held a qualifying video (the C3 temp sweep's scope).
     folders: list[Path] = field(default_factory=list)
+    done_names: list[str] = field(default_factory=list)
+    collision_names: list[str] = field(default_factory=list)
 
 
 def _printable(text: str) -> str:
@@ -288,6 +291,8 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
     reserved: dict[str, Path] = {}
     items: list[TreeItem] = []
     collisions: list[tuple[Path, Path]] = []
+    done_names: list[str] = []
+    collision_names: list[str] = []
     done = 0
     for relpath, source, real_dir, names in candidates:
         ja = source.with_name(f"{source.stem}.ja.srt")
@@ -296,12 +301,14 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
         owner = next((reserved[k] for k in keys if k in reserved), None)
         if owner is not None:
             collisions.append((source, owner))
+            collision_names.append(relpath)
             continue
         for k in keys:
             reserved[k] = source
         existing = judge(source.name, names, is_video, rule_c=True)
         if existing.chinese is not None:
             done += 1
+            done_names.append(relpath)
             continue
         kind: Kind = "translate_only" if existing.ja_transcript else "full"
         if existing.ja_transcript is not None:
@@ -314,7 +321,9 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
             errors.append(f"{_printable(relpath)}: {type(e).__name__}")
             continue
         items.append(TreeItem(source, relpath, ja, zh, kind, identity))
-    return TreePlan(items, done, collisions, errors, folders)
+    return TreePlan(
+        items, done, collisions, errors, folders, done_names, collision_names
+    )
 
 
 def sweep_srt_temps(
@@ -597,6 +606,10 @@ class AvsubsInstance(MonitorInstance):
                 emit, f"cannot scan {root} ({e}); fix the folder and Start again"
             )
             return
+        self._tracker.set_extras(
+            [(name, "collision") for name in plan.collision_names]
+            + [(name, "pre_done") for name in plan.done_names]
+        )
         sweep_srt_temps(plan.folders)  # C3: age-gated
         self._pre_done = plan.done
         self._failed = len(plan.collisions)
@@ -1801,6 +1814,10 @@ class AvsubsInstance(MonitorInstance):
     def _waiting_text(self) -> str:
         label = self._gpu_blocker()
         return f"waiting for GPU (held by {label})" if label else "waiting for GPU"
+
+    def film_page(self, page: object, size: object) -> dict | None:
+        tracker = self._tracker
+        return read_film_page(tracker, page, size)
 
     def _progress_view(self) -> dict:
         """#189: the per-film stepper (`film`, `steps`, `films`, `films_more`

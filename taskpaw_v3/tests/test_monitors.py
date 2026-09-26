@@ -234,6 +234,36 @@ class _FakePlugin(MonitorPlugin):
         return _FakeInstance(instance_id, config, self.behavior)
 
 
+def test_supervisor_film_page_unknown_stopped_base_and_raising(monkeypatch):
+    sup = Supervisor(lambda *a: None)
+    assert sup.film_page("unknown", None, 10) is None
+    sup.register(_FakePlugin(lambda emit: MonitorStatus()), _FakeConfig(name="films"))
+    inst = sup._monitors["films"].instance
+    assert inst.film_page(None, 10) is None
+    assert sup.film_page("films", None, 10) is None
+    calls = []
+
+    def read(page, size):
+        calls.append((page, size))
+        # A non-reentrant probe catches holding _lock during the call.
+        assert sup._lock.acquire(blocking=False)
+        sup._lock.release()
+        return {"page": page, "size": size}
+
+    monkeypatch.setattr(sup, "_lock", threading.Lock())
+    monkeypatch.setattr(inst, "film_page", read)
+    assert sup.film_page("films", 2, 10) == {"page": 2, "size": 10}
+    assert calls == [(2, 10)]
+
+    def broken(*args):
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(inst, "film_page", broken)
+    assert sup.film_page("films", None, 10) is None
+    sup.unregister("films")
+    assert sup.film_page("films", None, 10) is None
+
+
 def test_supervisor_emit_throttle_and_dedupe():
     sink = []
     clock = [0.0]

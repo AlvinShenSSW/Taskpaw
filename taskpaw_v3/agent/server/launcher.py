@@ -222,6 +222,7 @@ def run_agent(
                 registry=registry,
                 admin=admin,
                 events_provider=queue.recent,
+                films_provider=supervisor.film_page,
             ),
             log_level="warning",
         )

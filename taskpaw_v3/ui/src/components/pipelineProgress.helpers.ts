@@ -10,7 +10,11 @@ import type { TFunction } from "i18next";
 export type StepState =
   | "done" | "failed" | "skipped" | "active" | "queued" | "waiting_gpu" | "pending";
 
-const STATES: ReadonlySet<string> = new Set<StepState>([
+export const MONO = '"Fira Code", monospace';
+export const SLATE_WASH = "rgba(148,163,184,0.1)";
+export const BOX = { borderRadius: 2, border: "1px solid", borderColor: "divider" } as const;
+
+export const STATES: ReadonlySet<string> = new Set<StepState>([
   "done", "failed", "skipped", "active", "queued", "waiting_gpu", "pending",
 ]);
 const TERMINAL: ReadonlySet<string> = new Set<StepState>(["done", "failed", "skipped"]);

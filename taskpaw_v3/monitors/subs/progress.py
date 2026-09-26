@@ -41,7 +41,8 @@ Every mark is total (M1): an unknown film or step, a bad state or a garbage
 `now` is ignored (a bad `now` only drops the stamp); terminal states are
 sticky; `start`/`activate` on a terminal step do nothing.
 
-Status time — the plugin derives `LiveFacts` and never stores them:
+Status time — the plugin derives `LiveFacts`; `view` retains the validated
+facts under the tracker lock for subsequent page reads:
 
 - `active`  — step → the film live in it now (restore: `_process` live and
   `_current` is the film; asr: the job's child is live; translate:
@@ -67,6 +68,18 @@ translation's `model`. The pieces are public too:
 mapping), `record(film)` and `restore_done(film)`. Every returned object is a
 fresh copy. Every `now` must be a `time.monotonic()` reading.
 
+Local paging (#198):
+
+- `set_extras(rows)` — retains untracked `(name, status)` rows once per run;
+  they follow the tracked films in the page list.
+- `page(page, size)` — returns a page in plan order plus run, total and focus
+  metadata, using the last `view`'s validated live facts (empty before the
+  first view). It reads under the tracker lock, never calls `observe` or a
+  live source, and does not change stamps. Terminal marks may be newer than
+  the retained live facts.
+- `read_film_page(tracker, page, size)` — the plugins' error boundary around
+  `page`: returns `None` on an internal error and logs once per tracker.
+
 Derived state of a step: a stored terminal state wins; else `active` (the
 live film of that step), `waiting_gpu` (`live.waiting`), `queued` (translate
 started, i.e. submitted) or `pending`. Row status (R1), first match wins:
@@ -82,10 +95,13 @@ can never race a status read; it never blocks on anything else.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import threading
+import uuid
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from taskpaw_v3.monitors.subs.util import bounded, step_numbers
@@ -322,7 +338,7 @@ _OUTCOME_STATE = {"completed": "done", "failed": "failed", "skipped": "skipped"}
 
 @dataclass(frozen=True)
 class LiveFacts:
-    """What the plugin derives at status time (never stored by the tracker).
+    """What the plugin derives at status time (validated and cached by view).
 
     `active`: step → the film live in it now; `waiting`: `(film, step)` of
     the GPU wait; `holder`: who holds the GPU (`""` when reserved for this
@@ -456,6 +472,77 @@ class FilmTracker:
         self._films: dict[str, _Film] = {}
         self._wait: Optional[tuple[tuple[str, str], float]] = None
         self._lock = threading.RLock()
+        self._last_live = _validate(None)
+        self._extras: Optional[tuple[tuple[str, str], ...]] = None
+        self._run = uuid.uuid4().hex
+        self._page_error_logged = False
+
+    def set_extras(self, rows: list[tuple[str, str]]) -> None:
+        """Retain the scan's untracked films once for this run (#198)."""
+        with self._lock:
+            if self._extras is None:
+                self._extras = tuple(rows)
+
+    def page(self, page: object, size: object) -> dict:
+        """Local full-list read using only the last view's live facts (#198).
+
+        Dict insertion order is plan order: add() assigns consecutive orders
+        and films are never removed. Only the requested window builds rows.
+        No observation or clock read: terminal marks may be newer than live.
+        """
+        limit = (
+            max(1, min(50, size))
+            if isinstance(size, int) and not isinstance(size, bool)
+            else 10
+        )
+        with self._lock:
+            lv = self._last_live
+            extras = self._extras or ()
+            tracked = len(self._films)
+            total = tracked + len(extras)
+            pages = max(1, (total + limit - 1) // limit)
+            statuses = {n: self._status(f, lv)[0] for n, f in self._films.items()}
+            focus = self._focus(lv, statuses)
+            focus_page = (
+                self._films[focus].order // limit + 1 if focus is not None else None
+            )
+            if page is None:
+                selected = focus_page or 1
+            elif isinstance(page, int) and not isinstance(page, bool) and page >= 1:
+                selected = page
+            else:
+                selected = 1
+            selected = min(selected, pages)
+            begin, end = (selected - 1) * limit, selected * limit
+            rows = [
+                self._row(f, lv, *self._status(f, lv))
+                for f in islice(
+                    self._films.values(), min(begin, tracked), min(end, tracked)
+                )
+            ]
+            rows.extend(
+                {
+                    "name": bounded(name, NAME_CHARS),
+                    "steps": {},
+                    "status": status,
+                    "percent": None,
+                    "eta_s": None,
+                    "duration_s": None,
+                }
+                for name, status in extras[
+                    max(0, begin - tracked) : max(0, end - tracked)
+                ]
+            )
+            return {
+                "run": self._run,
+                "total": total,
+                "size": limit,
+                "page": selected,
+                "pages": pages,
+                "focus": bounded(focus, NAME_CHARS) if focus is not None else None,
+                "focus_page": focus_page,
+                "films": rows,
+            }
 
     # ── marks ────────────────────────────────────────────────────────────
     def add(self, film: str, initial: dict[str, str]) -> None:
@@ -758,6 +845,7 @@ class FilmTracker:
         self.observe(live, now)
         lv = _validate(live)
         with self._lock:
+            self._last_live = lv
             status = {n: self._status(f, lv)[0] for n, f in self._films.items()}
             focus = self._focus(lv, status)
             if focus is None:
@@ -769,3 +857,17 @@ class FilmTracker:
                 "films": rows,
                 "films_more": more,
             }
+
+
+def read_film_page(tracker: FilmTracker, page: object, size: object) -> Optional[dict]:
+    """Plugin boundary: contain errors and log only once per tracker (#198 V3-2)."""
+    try:
+        return tracker.page(page, size)
+    except Exception as exc:
+        with tracker._lock:
+            if not tracker._page_error_logged:
+                tracker._page_error_logged = True
+                logging.getLogger(__name__).warning(
+                    "Film page unavailable (%s)", type(exc).__name__
+                )
+        return None
