@@ -2740,6 +2740,16 @@ def test_thinking_fallback_two_occurrences_shared_with_probe(
     assert all(q["max_tokens"] == 4096 for q in sp.requests[2:])
     assert caplog.text.count("thinking parameter rejected; sending without it") == 1
 
+    # Republish the same fingerprint, then translate another film on the worker.
+    h.settings = replace(h.settings)
+    assert h.settings.thinking_off is True
+    request_count = len(sp.requests)
+    assert h.run(_cues(80), "next.mp4").outcome == "translated"
+    next_requests = sp.requests[request_count:]
+    assert next_requests
+    assert all(q["thinking_off"] is False for q in next_requests)
+    assert len(sp.workers) == 1
+
 
 def test_thinking_carried_success_resets_rejection_count(harness_factory):
     def reject(req, w):

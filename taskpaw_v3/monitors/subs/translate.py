@@ -15,12 +15,14 @@ The engine (#192 design v4, AC2–AC10/AC12):
   bisection node, and after every wait (each wait is sliced to ≤ 60 s). A
   provider is identified by its label (`model_label`: model + host) for
   persistence and display, and in memory by its fingerprint (base, model,
-  sha256(key)[:16], thinking_off) — a Settings change resets its state; the worker of a
-  fingerprint that left the chain is retired at once (H2).
+  sha256(key)[:16], thinking_off) — a changed fingerprint resets its state;
+  republishing the same fingerprint preserves learned request settings. The
+  worker of a fingerprint that left the chain is retired at once (H2).
 - **Per-cue state**: `zh`, `by` (label), `refused_by` (labels, persisted),
   `failed_by` (a transient leaf, memory only — H5). A cue is exhausted when
-  the chain is non-empty and its refusals cover every label SEEN since the
-  film was dequeued (H1); open otherwise. Blank cues are done at load (G10).
+  the chain is non-empty and its refusals or memory-only failures cover every
+  label SEEN since the film was dequeued (H1); open otherwise. Blank cues are
+  done at load (G10).
 - **Checkpoint** (`checkpoint.CheckpointStore`, AC3): loaded at dequeue, saved
   atomically after every successful request and every recorded refusal; a
   write failure raises one notice per run, translation goes on in memory.
@@ -28,19 +30,25 @@ The engine (#192 design v4, AC2–AC10/AC12):
   refused that is closed (an open one is probed when its cool-down ended);
   with failover off a cue not refused by `chain[0]` waits for it (H7).
   Consecutive cues with the same route form batches of ≤ the provider's batch
-  size (40, halved by a timeout/length bisection, floor 5 — H8).
+  size (initially 40, halved after a timeout/length bisection succeeds, floor
+  5 — H8). After 3 consecutive clean full batches it doubles, up to 40, but
+  never regrows into a size that has shrunk twice (#201).
 - **An attempt** (AC5/AC6): a transient failure (network, timeout, 5xx, 408,
   429, `finish_reason=length`, an empty reply, other bad responses) is retried
   after 10/30/90 s (429/503: `Retry-After`, ≤ 300 s); still failing, or a
-  refusal / 401–404 / other 4xx (400: once more without json_mode first), →
-  the probe (the Settings Test's request; cached 60 s for these top-level
-  decisions). Probe failed → the provider opens (breaker 5/15/30 min; key,
-  credit and content-policy failures start at 30) with one notice per
+  refusal / 401–404 / other 4xx, → the probe (the Settings Test's request;
+  cached 60 s for these top-level decisions). Requests and probes first use
+  cumulative fallback: on 400/422 omit the thinking-disable parameter, then
+  on 400 omit json_mode too (#201). Probe failed → the provider opens
+  (breaker 5/15/30 min; key, credit and content-policy failures start at 30)
+  with one notice per
   provider per run. Probe OK, or invalid output → bisect on that provider: one
   request per node; a single cue failing transiently gets one retry after
   10 s and, still failing, a fresh probe at once (I1); after the leaves ONE
-  fresh confirming probe decides whether the failed leaves are recorded as
-  refused by that provider (G6/H8) or the provider opens instead.
+  fresh confirming probe decides whether failed leaves are recorded (G6/H8)
+  or the provider opens instead. Transient failures and one-cue length
+  cut-offs enter memory-only `failed_by`; other leaves enter persisted
+  `refused_by`.
 - **Defer, never block** (AC8): a film whose open cues have no available
   provider is deferred; the next film goes first; a deferred film resumes
   when a provider it needs closes again, returns `paused` after 2 h of
@@ -1364,10 +1372,11 @@ class Translator:
             )
 
     def _probe(self, p: _Provider, *, cached: bool) -> Optional[_Fail]:
-        """G5/H4: the Settings Test's request (the real prompt, one cue, the
-        provider's json_mode with the same 400 → no-json retry). None = OK —
-        only when the reply passes `_validate`. A cached OK (≤ 60 s) serves
-        top-level decisions only."""
+        """G5/H4: the Settings Test's request (the real prompt, one cue), with
+        the provider's learned settings and the same cumulative fallback:
+        omit the thinking-disable parameter on 400/422, then json_mode on 400.
+        None = OK — only when the reply passes `_validate`. A cached OK
+        (≤ 60 s) serves top-level decisions only."""
         if (
             cached
             and p.probe_ok_at is not None
@@ -1449,9 +1458,12 @@ class Translator:
         max_tokens: int,
         tag: Optional[str],
     ) -> Union[str, _Fail]:
-        """#201: drop thinking first (400/422), then JSON (400 only), cumulatively.
-        Only a success immediately after dropping thinking counts toward learning;
-        a carried-thinking success resets that count. `tag` is None for probes."""
+        """#201: omit the thinking-disable parameter on 400/422, then json_mode
+        on 400, cumulatively. `thinking_off=False` omits that parameter; it
+        does not explicitly enable thinking. Two successes immediately after
+        omitting it teach the provider to omit it for the run; success with
+        the parameter present resets the count. A later JSON fallback success
+        does not count toward this learning. `tag` is None for probes."""
         json_mode = p.json_mode
         thinking_off = p.settings.thinking_off
         got = self._request(p, messages, max_tokens, json_mode, tag, thinking_off)
