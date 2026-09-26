@@ -185,6 +185,15 @@ const show = () => render(<ThemeProvider theme={theme}><TaskLog tasks={["main/ไป
 const select = (name: string, value: string) => fireEvent.change(screen.getByLabelText(name), { target: { value } });
 
 describe("TaskLog", () => {
+  it("keeps object URL methods available after export stubs are restored", () => {
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL() { return "blob:test"; }
+      static revokeObjectURL = vi.fn();
+    });
+    vi.unstubAllGlobals();
+    expect(typeof URL.revokeObjectURL).toBe("function");
+    expect(typeof URL.createObjectURL).toBe("function");
+  });
   it.each([false, true])("keeps the session and cursor across midnight (past day: %s)", async past => {
     vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-26T23:59:59"));
     const fetcher = stub(p => ({ entries: p.has("after")
