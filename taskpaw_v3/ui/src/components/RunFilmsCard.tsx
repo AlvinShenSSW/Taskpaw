@@ -2,7 +2,6 @@ import { Fragment, useEffect, useId, useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Box, Button, Chip, Table, TableBody, TableCell, TableHead, TableRow, Typography, useMediaQuery } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
-import { visuallyHidden } from "@mui/utils";
 import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
 import { useTranslation } from "react-i18next";
@@ -11,7 +10,7 @@ import { FilmList } from "./FilmList";
 import { BOX, MONO, type Pipeline } from "./pipelineProgress.helpers";
 import { toneSx, type Tone } from "./filmList.helpers";
 import { TINT } from "./monitorMetrics.helpers";
-import { RUN_FILTERS, RUN_TOTALS, readRunFilms, restoreLabel, translationLabel, runDuration, runFinishedAt,
+import { RUN_FILTERS, RUN_TOTALS, readRunFilms, restoreLabel, translationLabel, runDuration, runFinishedAt, visuallyHidden,
   type RunFilm, type RunFilms, type RunFilter } from "./runFilmsCard.helpers";
 
 const buttonSx = { minHeight: 40, minWidth: 40,

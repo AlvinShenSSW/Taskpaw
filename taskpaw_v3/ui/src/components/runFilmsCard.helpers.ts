@@ -1,6 +1,11 @@
 import type { TFunction } from "i18next";
 import { STATES, type StepState } from "./pipelineProgress.helpers";
 
+export const visuallyHidden = {
+  border: 0, clip: "rect(0 0 0 0)", height: "1px", margin: "-1px", overflow: "hidden",
+  padding: 0, position: "absolute", whiteSpace: "nowrap", width: "1px",
+} as const;
+
 export type RunFilter = "done" | "open" | "all";
 export const RUN_FILTERS: RunFilter[] = ["done", "open", "all"];
 export const RUN_TOTALS = ["translated", "partial", "has_subs", "untranslated", "failed", "restore_failed"] as const;

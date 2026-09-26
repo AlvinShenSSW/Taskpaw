@@ -805,9 +805,23 @@ class FilmTracker:
                 state = later
             if f.outcome is None:
                 f.outcome = outcome
-                f.kept_ja = kept_ja
+                f.kept_ja = (
+                    max(0, kept_ja)
+                    if isinstance(kept_ja, int) and not isinstance(kept_ja, bool)
+                    else 0
+                )
                 by_model: dict[str, int] = {}
-                for label, lines in models:
+                for item in models if isinstance(models, (tuple, list)) else ():
+                    if not isinstance(item, (tuple, list)) or len(item) != 2:
+                        continue
+                    label, lines = item
+                    if (
+                        not isinstance(label, str)
+                        or not isinstance(lines, int)
+                        or isinstance(lines, bool)
+                        or lines < 0
+                    ):
+                        continue
                     label = bounded(label, MODEL_LABEL_CHARS)
                     if not label:
                         continue

@@ -1477,6 +1477,67 @@ def test_run_films_resumed_blank_model_labels(tmp_path, label):
     assert all(0 < len(name) <= 80 for name, _ in row["models"])
 
 
+@pytest.mark.parametrize("models", [None, 1, True, "bad", {"model": 3}])
+def test_settle_subs_malformed_models_container(models):
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {RESTORE: "done"})
+    t.settle_subs("film", "completed", 1, models=models)
+    assert t._films["film"].models == ()
+    row = _run_check(t)["films"][0]
+    assert row["models"] == []
+    assert (row["outcome"], row["finished_at"]) == ("translated", 42)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        1,
+        "ab",
+        (),
+        ("model",),
+        ("model", 1, 2),
+        {"model": 1, "other": 2},
+        (None, 1),
+        (123, 1),
+        ("model", "3"),
+        ("model", None),
+        ("model", 1.5),
+        ("model", True),
+        ("model", False),
+        ("model", -1),
+    ],
+)
+def test_settle_subs_malformed_model_entries(bad):
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {RESTORE: "done"})
+    t.settle_subs(
+        "film",
+        "completed",
+        1,
+        models=[("valid", 2), bad, ["valid", 3], ("zero", 0)],
+    )
+    assert t._films["film"].models == (("valid", 5), ("zero", 0))
+    row = _run_check(t)["films"][0]
+    assert row["models"] == [["valid", 5], ["zero", 0]]
+    assert all(type(lines) is int and lines >= 0 for _, lines in row["models"])
+    assert (row["outcome"], row["finished_at"]) == ("translated", 42)
+
+
+@pytest.mark.parametrize("kept", ["3", True, False, -1, None, 1.5, 0, 2])
+def test_settle_subs_malformed_kept_ja(kept):
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {RESTORE: "done"})
+    t.settle_subs("film", "completed", 1, kept_ja=kept)
+    expected = 2 if type(kept) is int and kept == 2 else 0
+    assert type(t._films["film"].kept_ja) is int
+    assert t._films["film"].kept_ja == expected
+    row = _run_check(t)["films"][0]
+    assert type(row["kept_ja"]) is int and row["kept_ja"] == expected
+    assert row["outcome"] == ("partial" if expected else "translated")
+    assert row["finished_at"] == 42
+
+
 def test_run_films_models_duration_and_legacy_keys():
     t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
     t.add("film", {})

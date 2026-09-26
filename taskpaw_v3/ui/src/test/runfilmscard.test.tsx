@@ -68,6 +68,13 @@ beforeEach(async () => {
 afterEach(async () => { cleanup(); qc.clear(); vi.useRealTimers(); vi.unstubAllGlobals(); await i18n.changeLanguage("zh-CN"); });
 
 describe("RunFilmsCard #200", () => {
+  it("does not import the undeclared MUI utils dependency from src", () => {
+    const sources = import.meta.glob("../**/*.{ts,tsx}", { query: "?raw", import: "default", eager: true });
+    for (const [path, source] of Object.entries(sources)) {
+      expect(source, path).not.toMatch(/(?:from\s*|import\s*\(\s*)["']@mui\/utils(?:\/[^"']*)?["']/);
+    }
+  });
+
   it("defaults to completed; consumes the agent URL, counts, six columns and done totals", async () => {
     mount(); await screen.findByText("本轮影片");
     expect(requests[0].origin).toBe("http://127.0.0.1:5681");
