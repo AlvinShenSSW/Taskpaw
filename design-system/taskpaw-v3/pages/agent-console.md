@@ -117,6 +117,20 @@ the form by monitor count:
 
 ---
 
+## 影片 list paging (#198)
+
+- Agent task details show every film in pages of 10, including already subtitled
+  films and skipped name collisions. Fully subtitled AV libraries show the list
+  beneath the queue even without a pipeline stepper. The Hub keeps its capped list.
+- Follow the current film until the operator pages manually; “回到当前影片” returns
+  to following. A new run resets following. Highlight the focus from the page data.
+- Show “上一页”, “第 x / y 页 · 共 N 部”, and “下一页” only above 10 films; hide the
+  list below two films. Localize all labels in Chinese and English.
+- Poll every five seconds while mounted. Keep the last good page on failure;
+  disable paging only at the ends or during a page transition, never for a poll.
+- Wrap the pager at 375px, use theme colors and visible keyboard focus, and keep
+  button targets at least 40px. Extra rows have text labels and no step chips.
+
 ## Recommendations
 
 - Live status updates over the local control API/WebSocket; show a subtle

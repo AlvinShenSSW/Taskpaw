@@ -1165,3 +1165,180 @@ def test_restore_done_is_a_narrow_total_accessor():
     assert t.restore_done("zzz") is False
     assert t.restore_done(None) is False  # type: ignore[arg-type]
     assert _t(AVSUBS_STEPS, "a").restore_done("a") is False  # no restore step
+
+
+def test_film_page_plan_order_extras_and_status_parity():
+    t = _t(AVSUBS_STEPS, "PQRS-002.mp4", "ABC-001.mp4", "LMNO-003.mp4")
+    t.start("PQRS-002.mp4", ASR, 1.0)
+    t.settle_subs("PQRS-002.mp4", "completed", 8.0)
+    t.start("LMNO-003.mp4", TRANSLATE, 9.0)
+    view = t.view(LiveFacts(active={ASR: "ABC-001.mp4"}), 10.0)
+    t.set_extras([("DEFG-004.mp4", "collision"), ("HIJK-005.mp4", "pre_done")])
+    page = t.page(None, 10)
+    assert set(page) == {
+        "run",
+        "total",
+        "size",
+        "page",
+        "pages",
+        "focus",
+        "focus_page",
+        "films",
+    }
+    assert page["films"][:3] == view["films"]
+    assert [r["name"] for r in page["films"]] == [
+        "PQRS-002.mp4",
+        "ABC-001.mp4",
+        "LMNO-003.mp4",
+        "DEFG-004.mp4",
+        "HIJK-005.mp4",
+    ]
+    assert page["total"] == 5
+    for row, status in zip(page["films"][3:], ("collision", "pre_done")):
+        assert row == dict(
+            name=row["name"],
+            steps={},
+            status=status,
+            percent=None,
+            eta_s=None,
+            duration_s=None,
+        )
+    assert t.view(NO, 11.0)["films_more"] == 0  # extras never enter status
+
+
+def test_film_page_focus_last_live_stamps_and_fresh_objects(monkeypatch):
+    names = [f"LMNO-{i:03}.mp4" for i in range(25)]
+    names[14] += "x" * 220
+    t = _t(AVSUBS_STEPS, *names)
+    assert t.page(None, 10)["films"][0]["status"] == "pending"
+    nums = {"percent": 37, "eta_s": 123}
+    t.view(LiveFacts(active={ASR: names[14]}, numbers={ASR: nums}), 20.0)
+    nums["percent"] = 98
+    records = [t.record(n) for n in names]
+    wait = t._wait
+    monkeypatch.setattr(t, "observe", lambda *a: pytest.fail("page observed"))
+    page = t.page(None, 10)
+    assert (page["page"], page["focus_page"], page["pages"]) == (2, 2, 3)
+    assert page["focus"] == page["films"][4]["name"]
+    assert len(page["focus"]) <= NAME_CHARS
+    assert (page["films"][4]["percent"], page["films"][4]["eta_s"]) == (37, 123)
+    page["films"][4]["steps"][ASR] = "failed"
+    page["films"].clear()
+    assert t.page(None, 10)["films"][4]["steps"][ASR] == "active"
+    assert [t.record(n) for n in names] == records and t._wait == wait
+    t.settle_subs(names[14], "completed", 30.0)
+    assert t.page(2, 10)["films"][4]["status"] == "done"
+
+
+@pytest.mark.parametrize(
+    "page, expected",
+    [
+        (None, 2),
+        (999, 3),
+        (0, 1),
+        (-1, 1),
+        (True, 1),
+        (False, 1),
+        ("2", 1),
+        (2.5, 1),
+        ([], 1),
+        ({}, 1),
+    ],
+)
+def test_film_page_bad_page_and_clamp(page, expected):
+    t = _t(AVSUBS_STEPS, *(f"ABC-{i:03}.mp4" for i in range(25)))
+    t.view(LiveFacts(active={ASR: "ABC-014.mp4"}), 1.0)
+    assert t.page(page, 10)["page"] == expected
+
+
+@pytest.mark.parametrize(
+    "size, expected",
+    [
+        (None, 10),
+        (True, 10),
+        (False, 10),
+        ("2", 10),
+        (2.5, 10),
+        ([], 10),
+        ({}, 10),
+        (0, 1),
+        (-9, 1),
+        (51, 50),
+        (2, 2),
+    ],
+)
+def test_film_page_bad_size_and_clamp(size, expected):
+    t = _t(AVSUBS_STEPS, *(f"ABC-{i:03}.mp4" for i in range(60)))
+    page = t.page(None, size)
+    assert page["size"] == len(page["films"]) == expected
+
+
+def test_film_page_empty_extras_only_and_run_isolation():
+    t, other = FilmTracker(AVSUBS_STEPS), FilmTracker(AVSUBS_STEPS)
+    page = t.page(999, 10)
+    assert page == dict(
+        run=page["run"],
+        total=0,
+        size=10,
+        page=1,
+        pages=1,
+        focus=None,
+        focus_page=None,
+        films=[],
+    )
+    assert isinstance(page["run"], str) and page["run"]
+    assert other.page(None, 10)["run"] != page["run"]
+    extras = [("LMNO-001.mp4" + "x" * 220, "pre_done"), ("ABC-002.mp4", "collision")]
+    t.set_extras(extras)
+    extras.clear()
+    t.set_extras([("HIJK-003.mp4", "pre_done")])  # write once, even per tracker
+    rows = t.page(None, 1)
+    assert (rows["total"], rows["pages"], rows["focus"], rows["focus_page"]) == (
+        2,
+        2,
+        None,
+        None,
+    )
+    assert len(rows["films"][0]["name"]) <= NAME_CHARS
+    rows["films"][0]["steps"]["asr"] = "done"
+    assert t.page(None, 1)["films"][0]["steps"] == {}
+    assert t.page(None, 10)["run"] == page["run"]
+    assert other.page(None, 10)["total"] == 0
+    other.set_extras([])
+    other.set_extras([("ABC-002.mp4", "pre_done")])
+    assert other.page(None, 10)["total"] == 0
+
+
+def test_film_page_builds_only_window_with_20000_extras(monkeypatch):
+    from taskpaw_v3.monitors.subs import progress
+
+    t = FilmTracker(AVSUBS_STEPS)
+    t.set_extras([(f"LMNO-{i:05}.mp4", "pre_done") for i in range(20000)])
+    built = []
+    original = progress.bounded
+
+    def bounded(name, size):
+        built.append(name)
+        return original(name, size)
+
+    monkeypatch.setattr(progress, "bounded", bounded)
+    page = t.page(1700, 10)
+    assert page["total"] == 20000 and page["pages"] == 2000
+    assert built == [f"LMNO-{i:05}.mp4" for i in range(16990, 17000)]
+
+
+def test_film_page_1000_tracked_slice_first(monkeypatch):
+    names = [f"PQRS-{i:04}.mp4" for i in reversed(range(1000))]
+    t = _t(AVSUBS_STEPS, *names)
+    built = []
+    original = t._row
+
+    def row(film, *args):
+        built.append(film.name)
+        return original(film, *args)
+
+    monkeypatch.setattr(t, "_row", row)
+    page = t.page(100, 10)
+    assert page["total"] == 1000 and page["pages"] == 100
+    assert built == names[990:]
+    assert [r["name"] for r in page["films"]] == names[990:]

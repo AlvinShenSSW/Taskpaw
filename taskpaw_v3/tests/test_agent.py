@@ -116,6 +116,75 @@ def test_tasklog_invalid_parameters_have_boot_envelope(params):
     assert client.get("/control/events?limit=abc").status_code == 422
 
 
+def test_film_page_control_api_shape_defaults_clamps_and_network_absence():
+    from taskpaw_v3.monitors.subs.progress import AVSUBS_STEPS, FilmTracker, LiveFacts
+
+    tracker = FilmTracker(AVSUBS_STEPS)
+    for i in range(23):
+        tracker.add(f"nested/LMNO-{i:03}.mp4", {})
+    tracker.view(LiveFacts(active={"asr": "nested/LMNO-014.mp4"}), 1.0)
+    calls = []
+
+    def provider(name, page, size):
+        calls.append((name, page, size))
+        return tracker.page(page, size)
+
+    client = TestClient(create_control_app(_cfg(), films_provider=provider))
+    response = client.get("/control/monitors/films", params={"name": "AV/library"})
+    assert response.status_code == 200
+    assert response.json() == tracker.page(None, 10)
+    assert calls == [("AV/library", None, 10)]
+    assert response.json()["page"] == 2
+    for size, expected in [(0, 1), (-1, 1), (99, 50)]:
+        result = client.get(
+            "/control/monitors/films",
+            params={"name": "AV/library", "page": 99, "size": size},
+        )
+        assert result.status_code == 200
+        assert calls[-1] == ("AV/library", 99, expected)
+        assert result.json() == tracker.page(99, expected)
+    net = TestClient(create_network_app(_cfg(), EventQueue("dev")))
+    assert (
+        net.get("/control/monitors/films", params={"name": "AV/library"}).status_code
+        == 404
+    )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"name": ""},
+        {"name": " \t "},
+        {"name": "AV", "page": "x"},
+        {"name": "AV", "page": "1.5"},
+        {"name": "AV", "page": "true"},
+        {"name": "AV", "page": 0},
+        {"name": "AV", "page": -1},
+        {"name": "AV", "size": "x"},
+        {"name": "AV", "size": "1.5"},
+        {"name": "AV", "size": "false"},
+    ],
+)
+def test_film_page_control_api_invalid_parameters_are_400(params):
+    calls = []
+    client = TestClient(
+        create_control_app(_cfg(), films_provider=lambda *a: calls.append(a))
+    )
+    response = client.get("/control/monitors/films", params=params)
+    assert response.status_code == 400
+    assert set(response.json()) == {"detail"}
+    assert calls == []
+
+
+@pytest.mark.parametrize("provider", [None, lambda *a: None])
+def test_film_page_control_api_no_list_is_404(provider):
+    client = TestClient(create_control_app(_cfg(), films_provider=provider))
+    response = client.get("/control/monitors/films", params={"name": "unknown"})
+    assert response.status_code == 404
+    assert response.json() == {"detail": "no film list"}
+
+
 def test_ping_open_no_auth():
     from taskpaw_v3 import __version__
 

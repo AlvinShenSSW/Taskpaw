@@ -208,6 +208,19 @@ class Supervisor:
         with self._lock:
             return instance_id in self._monitors
 
+    def film_page(self, instance_id: str, page: object, size: object) -> dict | None:
+        """Look up under the registry lock; read outside it like reconfigure."""
+        with self._lock:
+            managed = self._monitors.get(instance_id)
+            if managed is None:
+                return None
+            instance = managed.instance
+        try:
+            return instance.film_page(page, size)
+        except Exception as exc:
+            log.warning("Monitor film page unavailable (%s)", type(exc).__name__)
+            return None
+
     def unregister(self, instance_id: str, timeout: float = 10.0) -> None:
         """Stop + remove ONE monitor live (no agent restart) — used by the control
         API's remove/disable. Serialized against register/reconfigure/stop via the

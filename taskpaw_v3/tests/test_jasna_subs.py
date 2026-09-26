@@ -3331,6 +3331,48 @@ def test_tasklog_settle_only_one_skip(tmp_path, monkeypatch):
     h.inst.stop()
 
 
+def test_film_page_av_off(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, av_translate=False)
+    assert r.inst.film_page(None, 10) is None
+
+
+def test_film_page_after_status_never_reads_live_sources(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, restored=["LMNO-001.mp4", "PQRS-002.mp4"])
+    r.inst.start(r.emit)
+    status = r.inst.check(r.emit)
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append("live")
+        raise AssertionError("page read live progress")
+
+    with monkeypatch.context() as spy:
+        spy.setattr(r.inst._subs_job, "progress", forbidden)
+        spy.setattr(r.inst._translator, "progress", forbidden)
+        assert r.inst.film_page(None, 10)["films"] == status.metrics["films"]
+        assert r.inst.film_page(2, 1)["films"] == status.metrics["films"][1:]
+        assert calls == []
+    r.inst.stop(timeout=1)
+
+
+def test_film_page_error_logged_once_per_tracker(tmp_path, monkeypatch, caplog):
+    r = _setup(tmp_path, monkeypatch)
+
+    def broken(*args):
+        raise RuntimeError("synthetic failure")
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            monkeypatch.setattr(r.inst._tracker, "page", broken)
+            assert r.inst.film_page(None, 10) is None
+            assert r.inst.film_page(None, 10) is None
+            r.inst.start(r.emit)
+    assert (
+        len([rec for rec in caplog.records if "film page" in rec.message.lower()]) == 2
+    )
+    r.inst.stop(timeout=1)
+
+
 def test_tasklog_asr_gpu_acquired_at_spawn(tmp_path, monkeypatch):
     h = _setup(tmp_path, monkeypatch, restored=("a.mp4",))
     other = ("other", 1)

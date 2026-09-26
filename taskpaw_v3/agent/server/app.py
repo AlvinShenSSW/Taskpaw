@@ -15,7 +15,7 @@ from __future__ import annotations
 import platform
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -93,6 +93,7 @@ def create_control_app(
     registry: Optional[PluginRegistry] = None,
     admin: Optional["MonitorAdmin"] = None,
     events_provider: Optional[Callable[..., list[dict]]] = None,
+    films_provider: Optional[Callable[[str, object, object], Optional[dict]]] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""
@@ -105,6 +106,10 @@ def create_control_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path == "/control/monitors/films":
+            return JSONResponse(
+                {"detail": "invalid film list parameters"}, status_code=400
+            )
         if request.url.path == "/control/logs":
             return JSONResponse(
                 {"boot": get_task_log().boot, "error": "invalid task log parameters"},
@@ -115,6 +120,21 @@ def create_control_app(
     @app.get("/control/ping")
     def ping() -> dict:
         return {"ok": True}
+
+    @app.get("/control/monitors/films")
+    def films(
+        name: str, page: Optional[int] = Query(default=None, ge=1), size: int = 10
+    ):
+        if not name.strip():
+            raise HTTPException(status_code=400, detail="name must not be blank")
+        result = (
+            films_provider(name, page, max(1, min(50, size)))
+            if films_provider is not None
+            else None
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="no film list")
+        return result
 
     @app.get("/control/status")
     def control_status() -> dict:

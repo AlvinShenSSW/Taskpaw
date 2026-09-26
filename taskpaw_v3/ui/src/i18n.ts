@@ -231,7 +231,10 @@ const en = {
       legend: "Dark green = restored and subtitled; light green = in progress (restore or subtitles not finished yet)",
     },
     films: "Films", more: "{{n}} more",
+    paging: { previous: "Previous", next: "Next", current: "Back to current film",
+      page: "Page {{page}} / {{pages}} · {{total}} films" },
     row: {
+      pre_done: "Already had subtitles", collision: "Name collision, skipped",
       done: "Done", failed: "Failed", skipped: "Skipped", pending: "Queued",
       queued: "Waiting to translate", waiting_gpu: "Waiting for GPU", active: "In progress",
       restore: "Restoring", asr: "Transcribing",
@@ -493,7 +496,10 @@ const zh: typeof en = {
       legend: "深绿 = 修复和字幕都完成；浅绿 = 进行中（修复或字幕还没结束）",
     },
     films: "影片", more: "还有 {{n}} 部",
+    paging: { previous: "上一页", next: "下一页", current: "回到当前影片",
+      page: "第 {{page}} / {{pages}} 页 · 共 {{total}} 部" },
     row: {
+      pre_done: "已有字幕", collision: "同名冲突，未处理",
       done: "完成", failed: "失败", skipped: "跳过", pending: "排队",
       queued: "等待翻译", waiting_gpu: "等待 GPU", active: "进行中",
       restore: "修复中", asr: "识别中", translate: "翻译中 · 后台进行，不占 GPU",

@@ -291,6 +291,9 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
         def snapshot(self):
             return {}
 
+        def film_page(self, instance_id, page, size):
+            return None
+
     class _FakeServer:
         def __init__(self, config):
             self.should_exit = False

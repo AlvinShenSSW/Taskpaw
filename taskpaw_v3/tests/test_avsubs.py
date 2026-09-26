@@ -3287,6 +3287,115 @@ def test_tasklog_settle_only_one_skip(tmp_path, monkeypatch):
     h.inst.stop()
 
 
+def test_film_page_nested_plan_names_counts_and_order(tmp_path, monkeypatch):
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        full=["nested/LMNO-001.mkv", "nested/LMNO-001.mp4", "PQRS-002.mp4"],
+        zh=["nested/ABC-003.mp4"],
+        exe=False,
+        avsubs_extensions=["mp4", "mkv"],
+    )
+    plan = plan_tree(str(r.root), True, ["mp4", "mkv"])
+    assert [i.relpath for i in plan.items] == ["nested/LMNO-001.mkv", "PQRS-002.mp4"]
+    assert plan.done_names == ["nested/ABC-003.mp4"]
+    assert plan.collision_names == ["nested/LMNO-001.mp4"]
+    assert (plan.done, len(plan.items), len(plan.collisions), plan.errors) == (
+        1,
+        2,
+        1,
+        [],
+    )
+    assert AV.TreePlan([], 0, [], []).done_names == []
+    assert AV.TreePlan([], 0, [], []).collision_names == []
+    r.inst.start(r.emit)
+    page = r.inst.film_page(None, 10)
+    assert [row["name"] for row in page["films"]] == [
+        "nested/LMNO-001.mkv",
+        "PQRS-002.mp4",
+        "nested/LMNO-001.mp4",
+        "nested/ABC-003.mp4",
+    ]
+    assert [row["status"] for row in page["films"]] == [
+        "skipped",
+        "skipped",
+        "collision",
+        "pre_done",
+    ]
+    assert (r.inst._total, r.inst._pre_done, r.inst._failed, r.inst._skipped) == (
+        4,
+        1,
+        1,
+        2,
+    )
+    assert r.inst._queue == []
+    r.inst.stop(timeout=1)
+
+
+@pytest.mark.parametrize("exe", [True, False])
+def test_film_page_fully_subtitled_library_and_start_reset(tmp_path, monkeypatch, exe):
+    names = [f"nested/LMNO-{i:03}.mp4" for i in range(13)]
+    r = _setup(tmp_path, monkeypatch, zh=names, exe=exe)
+    r.inst.start(r.emit)
+    page = r.inst.film_page(None, 10)
+    assert page["total"] == 13 and len(page["films"]) == 10
+    rows = page["films"] + r.inst.film_page(2, 10)["films"]
+    assert [row["name"] for row in rows] == names
+    assert all(row["status"] == "pre_done" and row["steps"] == {} for row in rows)
+    assert "steps" not in r.inst.check(r.emit).metrics
+    old = r.inst._tracker
+    _touch(r.root / "nested/PQRS-014.mp4")
+    _stem_path(r.root, "nested/PQRS-014.mp4", ".srt").write_text(
+        SRT_ZH, encoding="utf-8"
+    )
+    r.inst.start(r.emit)
+    assert r.inst.film_page(None, 10)["total"] == 14
+    assert r.inst.film_page(None, 10)["run"] != page["run"]
+    assert old.page(None, 10)["total"] == 13
+    assert not r.spawner.children
+    r.inst.stop(timeout=1)
+
+
+def test_film_page_uses_status_snapshot_without_live_calls(tmp_path, monkeypatch):
+    r = _setup(tmp_path, monkeypatch, full=["LMNO-001.mp4"])
+    r.inst.start(r.emit)
+    r.spawner.last.tail = lambda **kw: QWEN_TAIL
+    status = r.inst.check(r.emit)
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append("live")
+        raise AssertionError("page read a live source")
+
+    with monkeypatch.context() as spy:
+        spy.setattr(r.inst._asr_job, "progress", forbidden)
+        spy.setattr(r.inst._translator, "progress", forbidden)
+        assert r.inst.film_page(None, 10)["films"] == status.metrics["films"]
+        assert calls == []
+    r.inst.stop(timeout=1)
+
+
+def test_film_page_internal_error_logged_once_per_tracker(
+    tmp_path, monkeypatch, caplog
+):
+    r = _setup(tmp_path, monkeypatch)
+
+    def broken(*args):
+        raise RuntimeError("synthetic failure")
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            tracker = r.inst._tracker
+            monkeypatch.setattr(tracker, "page", broken)
+            assert r.inst.film_page(None, 10) is None
+            assert r.inst.film_page(None, 10) is None
+            r.inst.start(r.emit)
+    assert (
+        len([rec for rec in caplog.records if "film page" in rec.message.lower()]) == 2
+    )
+    r.inst.stop(timeout=1)
+
+
 def test_tasklog_asr_gpu_acquired_at_spawn(tmp_path, monkeypatch):
     h = _setup(tmp_path, monkeypatch, full=("a.mp4",))
     other = ("other", 1)
