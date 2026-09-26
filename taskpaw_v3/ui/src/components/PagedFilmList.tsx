@@ -21,6 +21,12 @@ export function PagedFilmList({ name, fallback }: { name: string; fallback?: Pip
     gcTime: 0,
   });
 
+  // Recovery seeds can inherit the client's longer gcTime. Once we leave a
+  // page, discard its unobserved query before a later return can reuse it.
+  useEffect(() => {
+    queryClient.removeQueries({ queryKey: ["films", name], predicate: q => q.getObserversCount() === 0 });
+  }, [page, queryClient, name]);
+
   // gcTime: 0 is timer-based. Also discard immediately on task unmount so a
   // rapid reselect cannot reuse the previous run before that timer fires.
   useEffect(() => () => queryClient.removeQueries({ queryKey: ["films", name] }), [queryClient, name]);

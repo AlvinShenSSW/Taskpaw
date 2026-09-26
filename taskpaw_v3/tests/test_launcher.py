@@ -270,7 +270,7 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
     import uvicorn
 
     import taskpaw_v3.monitors.runtime as runtime
-    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.agent.server import app, launcher
     from taskpaw_v3.core.lifecycle import GracefulShutdown
     from taskpaw_v3.core.llm import get_llm_settings
 
@@ -301,11 +301,20 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
         def run(self, sockets=None):
             return None
 
+    supervisor = _FakeSupervisor()
+    control_kwargs = {}
+    create_control_app = app.create_control_app
+
+    def capture_control_app(*args, **kwargs):
+        control_kwargs.update(kwargs)
+        return create_control_app(*args, **kwargs)
+
     monkeypatch.setattr(
         launcher, "reclaim_ports_from_stale_instance", lambda *a, **k: None
     )
     monkeypatch.setattr(launcher, "claim_port", lambda *a, **k: socket.socket())
-    monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **k: _FakeSupervisor())
+    monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **k: supervisor)
+    monkeypatch.setattr(app, "create_control_app", capture_control_app)
     monkeypatch.setattr(uvicorn, "Server", _FakeServer)
     monkeypatch.setattr(uvicorn, "Config", lambda *a, **k: None)
     monkeypatch.setattr(launcher, "announce_ready", lambda *a, **k: None)
@@ -314,6 +323,7 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
     monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
     try:
         launcher.run_agent(_llm_cfg(), shutdown=shutdown, block=False)
+        assert control_kwargs.get("films_provider") == supervisor.film_page
         s = started["settings"]
         assert (s.model, s.api_key, s.key_source) == (
             "cfg/model",

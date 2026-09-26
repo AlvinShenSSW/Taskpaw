@@ -11,7 +11,7 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { TINT } from "./monitorMetrics.helpers";
 import {
-  type Pipeline, type Step, type StepState,
+  BOX, MONO, SLATE_WASH, type Pipeline, type Step, type StepState,
   clock, durationText, etaText, fin, focusStep, isTerminal, stepIndex, stepLabel, str,
 } from "./pipelineProgress.helpers";
 import { Tile } from "./Tile";
@@ -26,10 +26,7 @@ import { type Tone, toneSx } from "./filmList.helpers";
 // Design: docs/specs/2026-09-25-189-progress-redesign-design.md → "UI (D8/D13)";
 // every state is spelled out in text next to its icon (never colour alone).
 
-const MONO = '"Fira Code", monospace';
-const SLATE_WASH = "rgba(148,163,184,0.1)";
 const SLATE_TRACK = "rgba(148,163,184,0.15)";
-const BOX = { borderRadius: 2, border: "1px solid", borderColor: "divider" } as const;
 
 type Metrics = Record<string, unknown>;
 

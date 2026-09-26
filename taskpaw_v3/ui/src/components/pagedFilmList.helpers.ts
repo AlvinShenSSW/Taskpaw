@@ -1,4 +1,4 @@
-import type { FilmRow, StepState } from "./pipelineProgress.helpers";
+import { STATES, type FilmRow, type StepState } from "./pipelineProgress.helpers";
 
 export type PageRow = Omit<FilmRow, "status"> & { status: StepState | "pre_done" | "collision" };
 export type FilmPage = {
@@ -10,7 +10,7 @@ const record = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 const integer = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
 const stepState = (v: unknown): v is StepState =>
-  typeof v === "string" && ["done", "failed", "skipped", "active", "queued", "waiting_gpu", "pending"].includes(v);
+  typeof v === "string" && STATES.has(v);
 const numberOrNull = (v: unknown): v is number | null =>
   v === null || (typeof v === "number" && Number.isFinite(v) && v >= 0);
 
@@ -18,7 +18,7 @@ const numberOrNull = (v: unknown): v is number | null =>
 export function readPageRow(value: unknown): PageRow {
   if (!record(value) || typeof value.name !== "string" || !value.name || !record(value.steps)
       || (!stepState(value.status) && value.status !== "pre_done" && value.status !== "collision")
-      || !numberOrNull(value.percent) || (value.percent !== null && value.percent > 100)
+      || !numberOrNull(value.percent)
       || !numberOrNull(value.eta_s) || !numberOrNull(value.duration_s)) {
     throw new Error("Invalid film row");
   }
@@ -31,7 +31,8 @@ export function readPageRow(value: unknown): PageRow {
       && (steps.length || value.percent !== null || value.eta_s !== null || value.duration_s !== null)) {
     throw new Error("Invalid extra film row");
   }
-  return { name: value.name, steps, status: value.status, percent: value.percent ?? undefined,
+  return { name: value.name, steps, status: value.status,
+    percent: value.percent === null ? undefined : Math.min(100, value.percent),
     eta_s: value.eta_s ?? undefined, duration_s: value.duration_s ?? undefined };
 }
 

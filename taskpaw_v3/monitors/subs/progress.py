@@ -41,7 +41,8 @@ Every mark is total (M1): an unknown film or step, a bad state or a garbage
 `now` is ignored (a bad `now` only drops the stamp); terminal states are
 sticky; `start`/`activate` on a terminal step do nothing.
 
-Status time — the plugin derives `LiveFacts` and never stores them:
+Status time — the plugin derives `LiveFacts`; `view` retains the validated
+facts under the tracker lock for subsequent page reads:
 
 - `active`  — step → the film live in it now (restore: `_process` live and
   `_current` is the film; asr: the job's child is live; translate:
@@ -66,6 +67,18 @@ translation's `model`. The pieces are public too:
 `row_status(film, live)`, `statuses(live)` (every film, for the row ↔ count
 mapping), `record(film)` and `restore_done(film)`. Every returned object is a
 fresh copy. Every `now` must be a `time.monotonic()` reading.
+
+Local paging (#198):
+
+- `set_extras(rows)` — retains untracked `(name, status)` rows once per run;
+  they follow the tracked films in the page list.
+- `page(page, size)` — returns a page in plan order plus run, total and focus
+  metadata, using the last `view`'s validated live facts (empty before the
+  first view). It reads under the tracker lock, never calls `observe` or a
+  live source, and does not change stamps. Terminal marks may be newer than
+  the retained live facts.
+- `read_film_page(tracker, page, size)` — the plugins' error boundary around
+  `page`: returns `None` on an internal error and logs once per tracker.
 
 Derived state of a step: a stored terminal state wins; else `active` (the
 live film of that step), `waiting_gpu` (`live.waiting`), `queued` (translate

@@ -6,6 +6,7 @@ import { MonitorMetrics } from "../components/MonitorMetrics";
 import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
 import i18n from "../i18n";
+import { readFilmPage } from "../components/pagedFilmList.helpers";
 
 const row = (name: string, status = "pending") => ({ name, status,
   steps: status === "pre_done" || status === "collision" ? {} : { asr: status },
@@ -55,6 +56,53 @@ afterEach(async () => {
 });
 
 describe("film paging (#198)", () => {
+  it("clamps an over-100 row percent without rejecting the page", () => {
+    const body = page();
+    expect(readFilmPage({ ...body, films: body.films.map((r) => ({ ...r, percent: 125 })) })
+      .films.every((r) => r.percent === 100)).toBe(true);
+  });
+
+  it.each([-1, "125", NaN, Infinity])("rejects invalid row percent %s", (percent) => {
+    const body = page();
+    expect(() => readFilmPage({ ...body, films: body.films.map((r) => ({ ...r, percent })) }))
+      .toThrow("Invalid film row");
+  });
+
+  it.each(["run reset", "back to current"])("recovery cache never flashes old rows on %s", async (trigger) => {
+    mount(); await screen.findByText(text(2));
+    // Let the abandoned following query be collected before recovery recreates it.
+    const failed = deferred(); serve = () => failed.promise;
+    fireEvent.click(next());
+    await waitFor(() => expect(qc.getQueryCache().find({
+      queryKey: ["films", "translate/main", undefined], exact: true,
+    })).toBeUndefined());
+    const recovery = deferred();
+    serve = () => recovery.promise;
+    await act(async () => { failed.resolve(response({}, false)); });
+    await waitFor(() => expect(requests.filter((u) => !u.searchParams.has("page"))).toHaveLength(2));
+    await waitFor(() => expect(next()).toBeEnabled());
+
+    // Leave the recovered key and show different rows before returning to it.
+    serve = () => response(page(1));
+    fireEvent.click(prev()); await screen.findByText(text(1));
+    await act(async () => { recovery.resolve(response(page(2))); });
+    const pending = deferred();
+    if (trigger === "run reset") {
+      serve = (url) => url.searchParams.has("page")
+        ? response(page(1, 25, { run: "run-B" })) : pending.promise;
+      await poll();
+    } else {
+      serve = () => pending.promise;
+      fireEvent.click(back());
+    }
+    await waitFor(() => expect(requests.at(-1)?.searchParams.has("page")).toBe(false));
+    expect(screen.queryByText("LMNO-11.mp4")).toBeNull();
+    expect(screen.getByText("LMNO-1.mp4")).toBeInTheDocument();
+    expect(next()).toBeDisabled();
+    await act(async () => { pending.resolve(response(page(3, 25, { run: "run-B" }))); });
+    await screen.findByText(text(3));
+  });
+
   it("opens on the focus page, encodes slash names, shows at most ten rows and no capped remainder", async () => {
     mount();
     expect(await screen.findByText(text(2))).toBeInTheDocument();

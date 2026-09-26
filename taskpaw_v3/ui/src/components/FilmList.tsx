@@ -6,12 +6,10 @@ import RemoveIcon from "@mui/icons-material/Remove";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { TINT } from "./monitorMetrics.helpers";
-import { type FilmRow, type StepState, clock, etaText, stepLabel } from "./pipelineProgress.helpers";
+import { BOX, MONO, type FilmRow, type StepState, clock, etaText, stepLabel } from "./pipelineProgress.helpers";
 import type { PageRow } from "./pagedFilmList.helpers";
 import { type Tone, toneSx } from "./filmList.helpers";
 
-const MONO = '"Fira Code", monospace';
-const BOX = { borderRadius: 2, border: "1px solid", borderColor: "divider" } as const;
 // ── batch list ──────────────────────────────────────────────────────────────
 const ROW_ACTIVE = new Set(["restore", "asr", "translate"]);
 
