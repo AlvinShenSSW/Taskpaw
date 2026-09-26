@@ -3448,6 +3448,7 @@ def test_run_films_real_translation_result_paths(tmp_path, monkeypatch, case, ex
         ("asr_failed", "asr_failed"),
         ("unstable", "skipped:unstable"),
         ("transcript_exists", "skipped:transcript_exists"),
+        ("internal", "failed"),
         ("fence", "failed"),
     ],
 )
@@ -3455,14 +3456,15 @@ def test_run_films_real_asr_paths(tmp_path, monkeypatch, case, expected):
     h = _setup(tmp_path, monkeypatch, restored=("film.mp4",))
     h.inst.start(h.emit)
     try:
-        if case == "fence":
+        if case in ("internal", "fence"):
 
             def broken():
                 raise RuntimeError("synthetic failure")
 
             monkeypatch.setattr(h.inst._subs_job, "poll_asr", broken)
-            # Force the defensive fallback when _settle itself raises.
-            monkeypatch.setattr(h.inst, "_settle", lambda *a, **k: broken())
+            if case == "fence":
+                # Force the defensive fallback when _settle itself raises.
+                monkeypatch.setattr(h.inst, "_settle", lambda *a, **k: broken())
             h.spawner.last.rc = 0
         elif case == "asr_failed":
             h.spawner.last.finish(rc=1)

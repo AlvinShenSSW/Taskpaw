@@ -1449,6 +1449,34 @@ def test_run_films_atomic_restore_failure_unsettled():
     assert _run_check(t)["films"][0]["outcome"] == "restore_failed"
 
 
+@pytest.mark.parametrize("label", ["", " \t\n "])
+def test_run_films_resumed_blank_model_labels(tmp_path, label):
+    from taskpaw_v3.monitors.subs.checkpoint import CheckpointStore, SavedCue
+    from taskpaw_v3.tests.test_subs_translate import Harness, Spawner, _cues, good
+
+    cues = _cues(3)
+    store = CheckpointStore(tmp_path)
+    assert store.save(
+        store.key(cues),
+        "film",
+        [SavedCue(zh="saved", by=label)] * 2
+        + [SavedCue(zh="saved", by=" model · host ")],
+    )
+    h = Harness(Spawner(good), checkpoint_dir=tmp_path)
+    try:
+        result = h.run(cues)
+        assert result.resumed == 3 and result.outcome == "translated"
+    finally:
+        h.close()
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {RESTORE: "done", ASR: "done"})
+    t.settle_subs("film", "completed", 1, models=result.by_model)
+    row = _run_check(t)["films"][0]
+    assert row["outcome"] == "translated"
+    assert row["models"] == [["model · host", 1]]
+    assert all(0 < len(name) <= 80 for name, _ in row["models"])
+
+
 def test_run_films_models_duration_and_legacy_keys():
     t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
     t.add("film", {})

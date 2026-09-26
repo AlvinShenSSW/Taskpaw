@@ -319,7 +319,7 @@ describe.each(["zh-CN", "en"])("run film cells (%s)", lang => {
     const first = card().getAllByTestId("run-film-row")[0];
     expect(first.querySelector("dl")).not.toBeNull();
     expect(Array.from(first.querySelectorAll("dt")).map(el => el.textContent)).toEqual(lang === "en"
-      ? ["Restore", "Translation", "Models", "Duration", "Finished at"] : ["修复", "翻译", "模型", "用时", "完成于"]);
+      ? ["Restore: ", "Translation: ", "Models: ", "Duration: ", "Finished at: "] : ["修复：", "翻译：", "模型：", "用时：", "完成于："]);
     expect(within(first).getByText(lang === "en" ? "model-a · 12 lines" : "model-a · 12 句")).toHaveAccessibleDescription("model-a · host.invalid");
     expect(getComputedStyle(first).overflowWrap).toBe("anywhere");
     expect(getComputedStyle(next().parentElement!).flexWrap).toBe("wrap");

@@ -2592,7 +2592,6 @@ class JasnaInstance(MonitorInstance):
         emit: EventEmitter,
         *,
         step: Optional[str] = None,
-        code: Optional[str] = None,
         kept_ja: int = 0,
         models: tuple[tuple[str, int], ...] = (),
         translate_s: Optional[float] = None,
@@ -2642,29 +2641,28 @@ class JasnaInstance(MonitorInstance):
                 self._subs_consecutive_failures = 0
         # #189: the subtitle steps only — a restore is never touched (N1) —
         # and before `_disable_subs` can emit (M1).
-        if code is None:
-            if terminal == "completed":
-                code = (
-                    "no_speech"
-                    if detail == "no speech"
-                    else "partial"
-                    if kept_ja
-                    else "translated"
-                )
-            elif terminal == "failed":
-                code = "asr_failed" if step == "asr" else "failed"
-            else:
-                code = {
-                    "restore_failed": "restore_failed",
-                    "no_llm_key": "skipped:no_llm_key",
-                    "translation_paused": "skipped:translation_paused",
-                    SUBTITLE_EXISTS: "skipped:subtitle_exists",
-                    TRANSCRIPT_EXISTS: "skipped:transcript_exists",
-                    SUBTITLE_UNREADABLE: "skipped:unreadable",
-                    "unstable": "skipped:unstable",
-                    "cancelled": "skipped:cancelled",
-                    "no_exe": "skipped:no_exe",
-                }.get(detail, "skipped:other")
+        if terminal == "completed":
+            code = (
+                "no_speech"
+                if detail == "no speech"
+                else "partial"
+                if kept_ja
+                else "translated"
+            )
+        elif terminal == "failed":
+            code = "asr_failed" if step == "asr" else "failed"
+        else:
+            code = {
+                "restore_failed": "restore_failed",
+                "no_llm_key": "skipped:no_llm_key",
+                "translation_paused": "skipped:translation_paused",
+                SUBTITLE_EXISTS: "skipped:subtitle_exists",
+                TRANSCRIPT_EXISTS: "skipped:transcript_exists",
+                SUBTITLE_UNREADABLE: "skipped:unreadable",
+                "unstable": "skipped:unstable",
+                "cancelled": "skipped:cancelled",
+                "no_exe": "skipped:no_exe",
+            }.get(detail, "skipped:other")
         self._tracker.settle_subs(
             job_id,
             terminal,

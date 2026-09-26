@@ -60,7 +60,7 @@ function FilmRow({ row, focus, desktop }: { row: RunFilm; focus: boolean; deskto
       {cells.slice(1).map((cell, i) => <Box key={COLUMNS[i + 1]} sx={{ display: "flex", flexWrap: "wrap", gap: 0.5,
         flex: "1 1 200px", minWidth: 0, maxWidth: "100%", alignItems: "baseline" }}>
         <Typography component="dt" variant="caption" color="text.secondary">
-          {t(i === 2 ? "runFilms.models" : `runFilms.column.${COLUMNS[i + 1]}`)}
+          {t("runFilms.stackedLabel", { label: t(i === 2 ? "runFilms.models" : `runFilms.column.${COLUMNS[i + 1]}`) })}
         </Typography>
         <Box component="dd" sx={{ m: 0, minWidth: 0, maxWidth: "100%", fontSize: 13 }}>{cell}</Box>
       </Box>)}

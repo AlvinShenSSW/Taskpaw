@@ -30,10 +30,12 @@ counter / `_settled` update and before any `emit`:
   `translator.submit(...)` (queued) fact. Repeats keep the first stamp.
 - `activate(film, step, now)` — first time the step is derived active.
   `observe()` calls it for every live-active pair.
-- `finish(film, step, state, now)` — sticky terminal `done|failed|skipped`;
+- `finish(film, step, state, now, *, code=None)` — sticky terminal
+  `done|failed|skipped`;
   `finish(translate, done)` records the job outcome `completed`.
-- `settle_subs(film, outcome, now)` — the job settled `completed|failed|
-  skipped`: the first non-terminal SUBTITLE step gets the outcome (`done` for
+- `settle_subs(film, outcome, now, *, code=None, kept_ja=0, models=(),
+  translate_s=None)` — the job settled `completed|failed|skipped`:
+  the first non-terminal SUBTITLE step gets the outcome (`done` for
   completed), later subtitle steps `skipped` (`done` for completed); the job
   outcome is recorded. A restore is never touched (N1).
 
@@ -80,6 +82,25 @@ Local paging (#198):
 - `read_film_page(tracker, page, size)` — the plugins' error boundary around
   `page`: returns `None` on an internal error and logs once per tracker.
 
+This run's films (#200):
+
+- Marks retain the first `code` and, at the first subtitle settlement,
+  `kept_ja`, `models` (bounded, nonempty labels, aggregated line counts;
+  at most `MAX_FILM_MODELS`, descending by count) and `translate_s` (the
+  translator's duration, including resumed work in this run).
+- The terminal hook runs under the lock after all mark facts are assigned.
+  It stamps `finished_at` once using `FilmTracker(..., wall_clock=time.time)`;
+  step stamps still use monotonic time. `fail_restore(film, now, code)`
+  atomically marks restore failed and settles subtitles skipped.
+- `run_films(filter, page, size)` reads retained facts without observation or
+  clock reads, returning this run's tracked films, counts, totals and paging.
+  `read_run_films(tracker, filter, page, size)` is the plugin error boundary:
+  None on failure, logged once per tracker.
+- Effective terminal outcomes are derived at read time: a failed restore
+  wins; otherwise use `code` (a stale `restore_failed` becomes `skipped:other`),
+  then completed → `partial` when `kept_ja` > 0, else `translated`, failed →
+  `failed`, or `skipped:other`. No fallback is stored by the terminal hook.
+
 Derived state of a step: a stored terminal state wins; else `active` (the
 live film of that step), `waiting_gpu` (`live.waiting`), `queued` (translate
 started, i.e. submitted) or `pending`. Row status (R1), first match wins:
@@ -105,7 +126,12 @@ from dataclasses import dataclass, field
 from itertools import islice
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
-from taskpaw_v3.monitors.subs.util import bounded, step_numbers
+from taskpaw_v3.monitors.subs.util import (
+    MAX_FILM_MODELS,
+    MODEL_LABEL_CHARS,
+    bounded,
+    step_numbers,
+)
 
 if TYPE_CHECKING:  # annotations only: job.py imports this module
     from taskpaw_v3.monitors.subs.job import SubsJob
@@ -782,10 +808,14 @@ class FilmTracker:
                 f.kept_ja = kept_ja
                 by_model: dict[str, int] = {}
                 for label, lines in models:
-                    label = bounded(label, 80)
+                    label = bounded(label, MODEL_LABEL_CHARS)
+                    if not label:
+                        continue
                     by_model[label] = by_model.get(label, 0) + lines
                 f.models = tuple(
-                    sorted(by_model.items(), key=lambda item: -item[1])[:8]
+                    sorted(by_model.items(), key=lambda item: -item[1])[
+                        :MAX_FILM_MODELS
+                    ]
                 )
                 f.translate_s = translate_s
             if f.code is None and code is not None:

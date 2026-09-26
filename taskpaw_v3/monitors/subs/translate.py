@@ -117,7 +117,7 @@ from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.subs.checkpoint import CheckpointStore, SavedCue
 from taskpaw_v3.monitors.subs.child import ChildProcess, Eof
 from taskpaw_v3.monitors.subs.srt import Cue
-from taskpaw_v3.monitors.subs.util import bounded
+from taskpaw_v3.monitors.subs.util import MODEL_LABEL_CHARS, bounded
 
 if TYPE_CHECKING:
     from taskpaw_v3.core.config import AgentConfig
@@ -129,7 +129,6 @@ MIN_BATCH_SIZE = 5  # H8: the floor of a provider's adaptive batch size
 CONTEXT_SIZE = 5
 RESPONSE_DEADLINE_S = 60.0
 REQUEST_TIMEOUT_S = 30.0
-MODEL_LABEL_CHARS = 80
 MAX_TOKENS = 4096  # a request's max_tokens ceiling
 
 # #192 AC5–AC8 (seconds)
