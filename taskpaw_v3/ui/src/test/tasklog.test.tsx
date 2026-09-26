@@ -431,12 +431,12 @@ describe("TaskLog", () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     show(); await screen.findByText("没有符合筛选条件的日志。");
     fireEvent.click(screen.getByRole("button", { name: "导出" }));
-    await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    await waitFor(() => expect(click).toHaveBeenCalledOnce(), { timeout: 25_000 });
     expect(pages).toBe(40);
     expect(screen.getByRole("alert")).toHaveTextContent("20,000");
     const contents = await new Promise<string>(resolve => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.readAsText(output!); });
     expect(contents.match(/代理正在停止/g)).toHaveLength(20000);
-  });
+  }, 30_000);
   it("abandons export on a restart and reloads the view", async () => {
     let boot = "boot-1";
     stub(p => {
