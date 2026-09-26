@@ -26,6 +26,32 @@ export interface AgentStatus {
   monitors: Record<string, MonitorSnapshot>;
 }
 
+export type LogSeverity = "info" | "warn" | "error";
+export interface LogEntry {
+  v: 1;
+  id: string;
+  ts: string;
+  task: string;
+  task_type: string;
+  kind: string;
+  severity: LogSeverity;
+  film?: string;
+  pid?: number;
+  proc?: string;
+  data?: Record<string, unknown>;
+}
+export interface LogParams {
+  day?: string;
+  task?: string;
+  severity?: string;
+  q?: string;
+  before?: string;
+  after?: string;
+  limit?: number;
+}
+export interface LogPage { boot: string; entries: LogEntry[]; next_before: string | null }
+export interface LogDays { boot: string; days: Array<{ day: string; count: number }> }
+
 export interface HubServer {
   id: number;
   name: string;
@@ -175,6 +201,14 @@ async function send<T>(
 const q = (name: string) => `?name=${encodeURIComponent(name)}`;
 
 export const api = {
+  logs: (params: LogParams = {}) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== "") qs.set(key, String(value));
+    }
+    return get<LogPage>("agent", `/control/logs?${qs}`);
+  },
+  logDays: () => get<LogDays>("agent", "/control/logs?days=true"),
   agentStatus: () => get<AgentStatus>("agent", "/control/status"),
   hubStatus: () => get<HubStatus>("hub", "/status"),
   plugins: () => get<{ plugins: PluginInfo[]; presets: PresetInfo[] }>("agent", "/control/plugins"),
@@ -196,15 +230,7 @@ export const api = {
     send("agent", "PATCH", `/control/monitors${q(name)}`, patch),
   startMonitor: (name: string) => send("agent", "POST", `/control/monitors/start${q(name)}`),
   stopMonitor: (name: string) => send("agent", "POST", `/control/monitors/stop${q(name)}`),
-  // Event log (#44): agent reads recent local events (non-destructive); the Hub
-  // reads durable aggregated history, filterable by server id + level.
-  // `monitor` (optional) filters to one monitor's events for the console's
-  // per-monitor inline panel (#130); the name is URL-encoded (it may contain '/').
-  agentEvents: (limit = 200, monitor?: string) => {
-    const qs = new URLSearchParams({ limit: String(limit) });
-    if (monitor) qs.set("monitor", monitor);
-    return get<{ events: EventItem[] }>("agent", `/control/events?${qs}`);
-  },
+  // The Hub reads durable aggregated event history, by server id + level.
   hubEvents: (p: { server?: number; level?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
     if (p.server != null) qs.set("server", String(p.server));

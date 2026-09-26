@@ -63,6 +63,64 @@ def _agent_config(**kw) -> AgentConfig:
     return AgentConfig(**base)
 
 
+def test_tasklog_operator_entries_precede_apply_and_rejections_are_silent(monkeypatch):
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    cfg = _agent_config()
+    sup = build_supervisor(_registry(), [], EventQueue("m"), "m")
+    admin = MonitorAdmin(cfg, sup, _registry())
+    observed = []
+    for method in ("register", "unregister", "reconfigure"):
+        original = getattr(sup, method)
+
+        def observe(*a, _original=original, **kw):
+            observed.append(get_task_log().query()["entries"][0]["kind"])
+            return _original(*a, **kw)
+
+        monkeypatch.setattr(sup, method, observe)
+    admin.add({"type_id": "fake", "config": {"name": "x"}})
+    admin.update("x", {"poll_interval": 12})
+    admin.set_enabled("x", False)
+    admin.set_enabled("x", True)
+    admin.remove("x")
+    assert observed == [
+        "operator.add",
+        "operator.update",
+        "operator.stop",
+        "operator.start",
+        "operator.remove",
+    ]
+    rows = get_task_log().query()["entries"]
+    assert rows[3]["data"] == {"fields": ["poll_interval"]}
+    assert all(r["task_type"] == "fake" for r in rows)
+    for operation in (
+        lambda: admin.remove("missing"),
+        lambda: admin.set_enabled("missing", True),
+        lambda: admin.add({"type_id": "nope"}),
+        lambda: admin.update("missing", {}),
+    ):
+        with pytest.raises(ValueError):
+            operation()
+    assert get_task_log().query()["entries"] == rows
+
+
+def test_tasklog_config_and_monitor_updates_never_log_values():
+    import json
+
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    cfg = _agent_config()
+    admin = MonitorAdmin(cfg, None, default_registry())
+    admin.add(
+        {"type_id": "process", "config": {"name": "p", "pattern": "PLANTED_ARGV"}}
+    )
+    admin.update("p", {"pattern": "PLANTED_COMMAND"})
+    admin.update_config({"api_token": "PLANTED_SECRET", "llm_api_key": "PLANTED_KEY"})
+    rows = get_task_log().query()["entries"]
+    assert rows[0]["data"] == {"fields": ["api_token", "llm_api_key"]}
+    assert "PLANTED" not in json.dumps(rows)
+
+
 # ── config + persistence layer (supervisor=None) ──────────────────────────
 def test_admin_add_persists_and_dedupes(tmp_path):
     cfg = _agent_config()
@@ -260,6 +318,30 @@ def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
     )
     assert r.status_code == 400  # poll_interval < 1 → invalid
     assert cfg.monitors[0].get("enabled", True) is True  # enabled untouched
+
+
+@pytest.mark.parametrize("enabled", ["false", 0, None, []])
+def test_rejected_combined_patch_changes_nothing(tmp_path, enabled):
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    cfg = _agent_config()
+    reg = _registry()
+    path = tmp_path / "a.yaml"
+    admin = MonitorAdmin(cfg, None, reg, path)
+    admin.add({"type_id": "fake", "config": {"name": "w1"}})
+    before = cfg.model_dump()
+    disk = path.read_bytes()
+    rows = get_task_log().query()["entries"]
+    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    response = client.patch(
+        "/control/monitors",
+        params={"name": "w1"},
+        json={"config": {"poll_interval": 12}, "enabled": enabled},
+    )
+    assert response.status_code == 400
+    assert cfg.model_dump() == before
+    assert path.read_bytes() == disk
+    assert get_task_log().query()["entries"] == rows
 
 
 # ── config editing (#43) ───────────────────────────────────────────────────

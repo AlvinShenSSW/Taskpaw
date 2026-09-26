@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 import pytest
+from conftest import tasklog_rows as _tasklog
 
 from taskpaw_v3.core.llm import LLMSettings
 from taskpaw_v3.core.llm_worker import ENV_BASE, ENV_KEY, ENV_MODEL
@@ -2505,3 +2506,189 @@ def test_teardown_tree_kills_a_worker_whose_launcher_already_exited(harness_fact
     events = [e.split(":", 1)[1] for e in sp.log]
     assert "close_stdin" in events and "terminate_tree" in events
     assert events.index("close_stdin") < events.index("terminate_tree")
+
+
+def test_tasklog_translation_started_finished_no_requests(harness_factory):
+    h = harness_factory(Spawner(good))
+    result = h.run(_cues(85))
+    rows = _tasklog()
+    assert [r["kind"] for r in rows] == ["translate.started", "translate.finished"]
+    assert rows[0]["data"]["model"] == model_label(
+        h.settings.model, h.settings.api_base
+    )
+    assert rows[1]["data"]["lines"] == len(result.zh_cues)
+    assert sum(rows[1]["data"]["by_model"].values()) == 85
+    assert rows[1]["data"]["duration"] >= 0
+    assert KEY not in str(rows) and "worker-argv" not in str(rows)
+
+
+def test_tasklog_translation_no_call_model_null(harness_factory):
+    h = harness_factory(Spawner(good))
+    h.run(())
+    assert _tasklog("translate.started")[0]["data"]["model"] is None
+
+
+def test_tasklog_translation_outage_deferred_paused(harness_factory):
+    h = harness_factory(Spawner(down))
+    h.run(_cues(1))
+    assert len(_tasklog("translate.started")) == 1
+    assert _tasklog("translate.provider_down")
+    assert _tasklog("translate.deferred")
+    assert _tasklog("translate.paused")
+    assert not _tasklog("translate.finished")
+
+
+@pytest.mark.parametrize(
+    "reason", ["unavailable", "recovered", "changed", "both", "routing"]
+)
+def test_tasklog_switch_facts_outside_lock(monkeypatch, reason):
+    from taskpaw_v3.core.tasklog import get_task_log
+    from taskpaw_v3.monitors.subs.translate import _Fail
+
+    tr = Translator(RUN, name="t", task_type="jasna", chain_fn=lambda: [GROK, DS])
+    tr.submit(TranslateRequest(RUN, "a.mp4", _cues(2)))
+    film = tr._dequeue(tr._requests.get_nowait())
+    a, b = tr._chain
+    monkeypatch.setattr(tr, "_send", lambda *args: '{"1":"ok","2":"ok"}')
+    store = get_task_log()
+    original = store.record
+
+    def observed(*args, **kwargs):
+        assert tr._count_lock.acquire(blocking=False), "record under count lock"
+        tr._count_lock.release()
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "record", observed)
+    tr._call(a, film, [0, 1])
+    if reason in ("unavailable", "both"):
+        tr._open(a, _Fail("network", "secret exception"))
+    if reason in ("recovered", "both"):
+        film.left_open.add(b.label)
+    if reason == "changed":
+        a.retired = True
+        tr._chain = [b]
+    tr._call(b, film, [0, 1])
+    rows = _tasklog("translate.switched")
+    if reason == "routing":
+        assert rows == []
+    else:
+        assert len(rows) == 1
+        assert rows[0]["data"]["reason"] == (
+            "unavailable" if reason == "both" else reason
+        )
+        assert rows[0]["data"]["from"] == a.label
+        assert rows[0]["data"]["to"] == b.label
+        if reason in ("unavailable", "both"):
+            assert rows[0]["data"]["kind"] == "network"
+    assert all(r["task_type"] == "jasna" for r in _tasklog())
+    assert "secret exception" not in str(_tasklog())
+
+
+def test_tasklog_actual_fallback_at_first_call_and_refused_resume(
+    harness_factory, tmp_path
+):
+    from taskpaw_v3.monitors.subs.checkpoint import SavedCue
+
+    sp = Spawner(by_model(grok=good, ds=good))
+    h = harness_factory(sp, chain=[GROK, DS], checkpoint_dir=tmp_path)
+    cues = _cues(8)
+    label = model_label(GROK.model, GROK.api_base)
+    h.tr._store.save(
+        h.tr._store.key(cues),
+        "a.mp4",
+        [SavedCue(refused_by=(label,)) if i % 2 == 0 else SavedCue() for i in range(8)],
+    )
+    assert h.run(cues).outcome == "translated"
+    assert _tasklog("translate.started")[0]["data"]["model"] == model_label(
+        DS.model, DS.api_base
+    )
+    assert not _tasklog("translate.switched")
+    assert sum(_tasklog("translate.finished")[0]["data"]["by_model"].values()) == 8
+
+
+def test_tasklog_refused_per_bisection(harness_factory):
+    sp = Spawner(by_model(grok=fail_when({"ja1", "ja3"}, forbid), ds=good))
+    h = harness_factory(sp, chain=[GROK, DS])
+    assert h.run(_cues(5)).outcome == "translated"
+    rows = _tasklog("translate.refused")
+    assert len(rows) == 1 and rows[0]["data"]["lines"] == 2
+    assert not _tasklog("translate.switched")
+
+
+def test_tasklog_provider_recovery_resume(harness_factory):
+    state = {"probes": 0}
+
+    def responds(req, worker):
+        if _is_probe(req):
+            state["probes"] += 1
+        return good(req, worker) if state["probes"] >= 2 else down(req, worker)
+
+    h = harness_factory(Spawner(responds))
+    assert h.run(_cues(1)).outcome == "translated"
+    for kind in (
+        "translate.provider_down",
+        "translate.provider_up",
+        "translate.deferred",
+        "translate.resumed",
+        "translate.finished",
+    ):
+        assert len(_tasklog(kind)) == 1
+
+
+def test_tasklog_cancelled_finish_records_nothing(monkeypatch):
+    from taskpaw_v3.monitors.subs.translate import _Cancelled
+
+    tr = Translator(RUN, name="t", chain_fn=lambda: [GROK])
+    req = TranslateRequest(RUN, "a.mp4", _cues(1))
+    tr.submit(req)
+    film = tr._dequeue(tr._requests.get_nowait())
+    tr.cancel()
+    with pytest.raises(_Cancelled):
+        tr._finish(film, TranslateResult(RUN, "a.mp4", "translated", req.cues, ""))
+    assert not _tasklog()
+
+
+def test_tasklog_fully_resumed_has_null_model(harness_factory, tmp_path):
+    from taskpaw_v3.monitors.subs.checkpoint import SavedCue
+
+    h = harness_factory(Spawner(good), checkpoint_dir=tmp_path)
+    cues = _cues(2)
+    h.tr._store.save(
+        h.tr._store.key(cues), "a", [SavedCue(zh="saved", by="safe label")] * 2
+    )
+    assert h.run(cues).resumed == 2
+    assert _tasklog("translate.started")[0]["data"] == {
+        "model": None,
+        "lines": 2,
+        "resumed": 2,
+    }
+
+
+def test_tasklog_model_label_and_text_are_safe(harness_factory):
+    settings = LLMSettings(
+        "https://planted-user:planted-pass@llm.example:12345/v1",
+        "safe-model",
+        "PLANTED_SECRET",
+        "none",
+    )
+    h = harness_factory(Spawner(good), settings=settings)
+    h.run(_cues(2, "PRIVATE_SUBTITLE_TEXT"))
+    text = str(_tasklog())
+    for forbidden in (
+        "planted-user",
+        "planted-pass",
+        "12345",
+        "PLANTED_SECRET",
+        "PRIVATE_SUBTITLE_TEXT",
+    ):
+        assert forbidden not in text
+
+
+def test_tasklog_deferred_before_any_call_has_null_model():
+    tr = Translator(RUN, name="t", chain_fn=lambda: [GROK])
+    tr.submit(TranslateRequest(RUN, "a.mp4", _cues(1)))
+    film = tr._dequeue(tr._requests.get_nowait())
+    tr._defer(film)
+    assert _tasklog("translate.started")[0]["data"]["model"] is None
+    assert len(_tasklog("translate.deferred")) == 1
+    tr.cancel()

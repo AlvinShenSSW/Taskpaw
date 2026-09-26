@@ -1,6 +1,6 @@
 [package]
 name = "taskpaw"
-version = "3.8.0"
+version = "3.9.0"
 description = "TaskPaw V3 desktop shell"
 authors = ["TaskPaw"]
 edition = "2021"

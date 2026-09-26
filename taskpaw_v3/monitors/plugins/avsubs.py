@@ -76,6 +76,7 @@ from taskpaw_v3.core import gpu_lease
 from taskpaw_v3.core.datadir import get_data_dir
 from taskpaw_v3.core.generation import next_generation
 from taskpaw_v3.core.llm import get_llm_chain
+from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -498,6 +499,11 @@ class AvsubsInstance(MonitorInstance):
         self._queue: list[TreeItem] = []
         self._jobs: dict[str, SubsJob] = {}
         self._kinds: dict[str, Kind] = {}
+        self._log_started_at = time.monotonic()
+        self._log_skipped = 0
+        self._log_gpu_wait = False
+        self._log_stopped = False
+        self._log_bulk = False
         self._settled: dict[str, tuple[str, str]] = {}
         # #189: per-film step outcomes, marked at the counter points
         self._tracker = FilmTracker(AVSUBS_STEPS)
@@ -594,8 +600,26 @@ class AvsubsInstance(MonitorInstance):
         sweep_srt_temps(plan.folders)  # C3: age-gated
         self._pre_done = plan.done
         self._failed = len(plan.collisions)
+        self._log_skipped = len(plan.collisions)
         self._total = plan.done + len(plan.items) + len(plan.collisions)
+        get_task_log().record(
+            self.instance_id,
+            "task.started",
+            task_type="avsubs",
+            data={
+                "queued": len(plan.items),
+                "done": plan.done,
+                "skipped": len(plan.collisions),
+            },
+        )
         if plan.collisions:
+            get_task_log().record(
+                self.instance_id,
+                "task.error",
+                task_type="avsubs",
+                severity="error",
+                data={"reason": "name_collision", "count": len(plan.collisions)},
+            )
             listed = ", ".join(
                 f"{_printable(a.name)} vs {_printable(b.name)}"
                 for a, b in plan.collisions[:_MAX_LISTED]
@@ -608,6 +632,13 @@ class AvsubsInstance(MonitorInstance):
                 dedupe_key=f"{self.instance_id}:collisions",
             )
         if plan.errors:
+            get_task_log().record(
+                self.instance_id,
+                "task.error",
+                task_type="avsubs",
+                severity="error",
+                data={"reason": "scan_failed", "count": len(plan.errors)},
+            )
             listed = "; ".join(plan.errors[:_MAX_LISTED])
             more = len(plan.errors) - _MAX_LISTED
             emit(
@@ -643,6 +674,13 @@ class AvsubsInstance(MonitorInstance):
         except OSError:
             exe_ok = False
         if not exe_ok:
+            get_task_log().record(
+                self.instance_id,
+                "task.error",
+                task_type="avsubs",
+                severity="error",
+                data={"reason": "no_exe"},
+            )
             # C9: an error, every job skipped(no_exe); no translator, no lease,
             # never `done`.
             self._launch_error = f"whisperjav.exe not found at {exe}"
@@ -654,8 +692,20 @@ class AvsubsInstance(MonitorInstance):
                 dedupe_key=f"{self.instance_id}:avsubs-noexe",
             )
             with self._launch_lock:
-                for job_id in list(self._jobs):
-                    self._settle(job_id, "skipped", "no_exe", emit)
+                self._log_bulk = True
+                count = len(self._jobs.keys() - self._settled.keys())
+                try:
+                    for job_id in list(self._jobs):
+                        self._settle(job_id, "skipped", "no_exe", emit)
+                finally:
+                    self._log_bulk = False
+                if count:
+                    get_task_log().record(
+                        self.instance_id,
+                        "subs.skipped_bulk",
+                        task_type="avsubs",
+                        data={"count": count, "reason": "no_exe"},
+                    )
             self._run_deferred()
             return
         if not plan.items:
@@ -669,6 +719,7 @@ class AvsubsInstance(MonitorInstance):
             translator = Translator(
                 self._run,
                 name=self.instance_id,
+                task_type="avsubs",
                 checkpoint_dir=data_dir / CHECKPOINTS_DIRNAME if data_dir else None,
             )
             # Assigned BEFORE the re-check below (CX2): a concurrent stop()
@@ -720,6 +771,13 @@ class AvsubsInstance(MonitorInstance):
 
     def _emit_launch_error(self, emit: EventEmitter, msg: str) -> None:
         self._launch_error = msg
+        get_task_log().record(
+            self.instance_id,
+            "task.error",
+            task_type="avsubs",
+            severity="error",
+            data={"reason": "setup_or_launch_failed"},
+        )
         emit(
             "alert",
             f"{self._cfg.name} error",
@@ -730,6 +788,26 @@ class AvsubsInstance(MonitorInstance):
     def stop(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + max(0.1, timeout)
         self._stopping.set()
+        log_stop = not self._log_stopped
+        if log_stop:
+            self._log_stopped = True
+            translator = self._translator
+            if translator is not None:
+                snap = translator.progress()
+                queued = translator.queued()
+                if snap is not None:
+                    get_task_log().record(
+                        self.instance_id,
+                        "task.interrupted",
+                        task_type="avsubs",
+                        film=snap["job_id"],
+                        severity="warn",
+                        data={
+                            "step": "translate",
+                            "elapsed": snap.get("elapsed_s", 0),
+                            "queued": queued,
+                        },
+                    )
         # Cancel the translator FIRST (bounded) so its llm-worker is already
         # going away while we wait for the lock. It takes none of our locks.
         translator = self._translator
@@ -745,7 +823,7 @@ class AvsubsInstance(MonitorInstance):
         )
         try:
             if acquired:
-                self._stop_asr(deadline)
+                self._stop_asr(deadline, log_stop=log_stop)
             else:
                 # D13: the no-orphan guarantee wins over tidiness.
                 log.warning(
@@ -756,6 +834,8 @@ class AvsubsInstance(MonitorInstance):
                 )
                 job = self._asr_job  # read once
                 if job is not None and job.child is not None:
+                    if log_stop and job.child.poll() is None:
+                        self._log_asr_stop(job, job.child)
                     left = max(0.1, deadline - time.monotonic())
                     if not job.terminate(timeout=left):
                         log.error(
@@ -778,7 +858,21 @@ class AvsubsInstance(MonitorInstance):
                     "avsubs %s: translator join failed: %s", self.instance_id, e
                 )
 
-    def _stop_asr(self, deadline: float) -> None:
+    def _log_asr_stop(self, job: SubsJob, child) -> None:
+        get_task_log().record(
+            self.instance_id,
+            "task.interrupted",
+            task_type="avsubs",
+            film=job.job_id,
+            severity="warn",
+            pid=getattr(child, "pid", None),
+            data={
+                "step": "asr",
+                "elapsed": max(0.0, time.monotonic() - job.started_at),
+            },
+        )
+
+    def _stop_asr(self, deadline: float, *, log_stop: bool = True) -> None:
         """Under `_launch_lock` (stop): a live ASR child is tree-killed; one
         that already exited 0 unpolled keeps its `.ja.srt` — including the
         empty one of a no-speech result (CX5) — never the zh."""
@@ -788,6 +882,8 @@ class AvsubsInstance(MonitorInstance):
             self._asr_job = None
             return
         if child.poll() is None:
+            if log_stop:
+                self._log_asr_stop(job, child)
             left = max(0.1, min(5.0, deadline - time.monotonic()))
             gone = job.terminate(timeout=left)
             self._note_survivor(job)
@@ -798,6 +894,17 @@ class AvsubsInstance(MonitorInstance):
                 pass  # a killed child (e.g. an aborted run's): never publish
             elif outcome is not None and outcome.kind == "succeeded":
                 res = job.publish_ja(outcome.cues)
+                if res.ok and outcome.cues:
+                    get_task_log().record(
+                        self.instance_id,
+                        "asr.finished",
+                        task_type="avsubs",
+                        film=job.job_id,
+                        data={
+                            "lines": len(outcome.cues),
+                            "duration": max(0.0, time.monotonic() - job.started_at),
+                        },
+                    )
             elif outcome is not None and outcome.kind == "no_speech":
                 res = job.publish_ja([])  # CX5: the empty ja only
             if res is not None and not res.ok:  # #191: never replaced; logged
@@ -831,6 +938,14 @@ class AvsubsInstance(MonitorInstance):
             return
         if not self._gpu_try():
             self._waiting_gpu = True  # the item stays at the head
+            if not self._log_gpu_wait:
+                self._log_gpu_wait = True
+                get_task_log().record(
+                    self.instance_id,
+                    "task.gpu_wait",
+                    task_type="avsubs",
+                    data={"holder": self._gpu_blocker()},
+                )
             return
         self._waiting_gpu = False
         self._start_asr(self._queue[0], emit)
@@ -874,12 +989,70 @@ class AvsubsInstance(MonitorInstance):
                     self._advance_requested = True
                 else:
                     err = job.start_asr(self._spawn)
+                    if err is None and job.child is not None:
+                        get_task_log().record(
+                            self.instance_id,
+                            "asr.started",
+                            task_type="avsubs",
+                            film=job.job_id,
+                            pid=getattr(job.child, "pid", None),
+                            proc=Path(job.exe).name,
+                            data={"engine": job.engine},
+                        )
+                        if self._log_gpu_wait and not self._stopping.is_set():
+                            get_task_log().record(
+                                self.instance_id,
+                                "task.gpu_acquired",
+                                task_type="avsubs",
+                            )
+                            self._log_gpu_wait = False
+                    elif err is not None and err != "unstable":
+                        get_task_log().record(
+                            self.instance_id,
+                            "task.error",
+                            task_type="avsubs",
+                            film=job.job_id,
+                            severity="error",
+                            data={"reason": "asr_launch_failed"},
+                        )
                     if (
                         err is not None
                         and err != "unstable"
                         and job.attempt < _ASR_MAX_ATTEMPTS
                     ):
+                        get_task_log().record(
+                            self.instance_id,
+                            "asr.retry",
+                            task_type="avsubs",
+                            film=job.job_id,
+                        )
                         err = job.start_asr(self._spawn)  # one retry
+                        if err is None and job.child is not None:
+                            get_task_log().record(
+                                self.instance_id,
+                                "asr.started",
+                                task_type="avsubs",
+                                film=job.job_id,
+                                pid=getattr(job.child, "pid", None),
+                                proc=Path(job.exe).name,
+                                data={"engine": job.engine},
+                            )
+                            if self._log_gpu_wait and not self._stopping.is_set():
+                                get_task_log().record(
+                                    self.instance_id,
+                                    "task.gpu_acquired",
+                                    task_type="avsubs",
+                                )
+                                self._log_gpu_wait = False
+                        elif err is not None and err != "unstable":
+                            get_task_log().record(
+                                self.instance_id,
+                                "task.error",
+                                task_type="avsubs",
+                                film=job.job_id,
+                                severity="error",
+                                data={"reason": "asr_launch_failed"},
+                            )
                     if self._stopping.is_set():
                         # stop() raced the spawn: never orphan the child.
                         self._kill_for_stop(job)
@@ -892,7 +1065,7 @@ class AvsubsInstance(MonitorInstance):
                         release = True
                         self._advance_requested = True
                     else:
-                        self._settle(job.job_id, "failed", err, emit)
+                        self._settle(job.job_id, "failed", err, emit, step="asr")
                         self._alert_job(job.job_id, err, emit)
                         release = True
                         self._advance_requested = True
@@ -1014,6 +1187,17 @@ class AvsubsInstance(MonitorInstance):
             name = job.job_id
             if outcome.kind == "succeeded":
                 res = job.publish_ja(outcome.cues)
+                if res.ok and outcome.cues:
+                    get_task_log().record(
+                        self.instance_id,
+                        "asr.finished",
+                        task_type="avsubs",
+                        film=job.job_id,
+                        data={
+                            "lines": len(outcome.cues),
+                            "duration": max(0.0, time.monotonic() - job.started_at),
+                        },
+                    )
                 if res.ok:
                     self._tracker.finish(name, ASR, "done", time.monotonic())
                     # #191 (AC5/F15): the film's last look before its
@@ -1046,7 +1230,34 @@ class AvsubsInstance(MonitorInstance):
             elif outcome.kind == "unstable":
                 self._settle_unstable(job, emit)
             elif job.attempt < _ASR_MAX_ATTEMPTS:
+                get_task_log().record(
+                    self.instance_id, "asr.retry", task_type="avsubs", film=job.job_id
+                )
                 err = job.start_asr(self._spawn)  # retry, same hold
+                if err is None and job.child is not None:
+                    get_task_log().record(
+                        self.instance_id,
+                        "asr.started",
+                        task_type="avsubs",
+                        film=job.job_id,
+                        pid=getattr(job.child, "pid", None),
+                        proc=Path(job.exe).name,
+                        data={"engine": job.engine},
+                    )
+                    if self._log_gpu_wait and not self._stopping.is_set():
+                        get_task_log().record(
+                            self.instance_id, "task.gpu_acquired", task_type="avsubs"
+                        )
+                        self._log_gpu_wait = False
+                elif err is not None and err != "unstable":
+                    get_task_log().record(
+                        self.instance_id,
+                        "task.error",
+                        task_type="avsubs",
+                        film=job.job_id,
+                        severity="error",
+                        data={"reason": "asr_launch_failed"},
+                    )
                 if self._stopping.is_set():
                     # D35: exactly _start_asr's post-spawn re-check.
                     self._kill_for_stop(job)
@@ -1059,10 +1270,10 @@ class AvsubsInstance(MonitorInstance):
                 elif err == "unstable":  # D33: like a final failure
                     self._settle_unstable(job, emit)
                 else:
-                    self._settle(name, "failed", err, emit)
+                    self._settle(name, "failed", err, emit, step="asr")
                     self._alert_job(name, err, emit)
             else:
-                self._settle(name, "failed", outcome.detail, emit)
+                self._settle(name, "failed", outcome.detail, emit, step="asr")
                 self._alert_job(name, outcome.detail, emit)
             if terminal:
                 self._asr_job = None
@@ -1220,12 +1431,41 @@ class AvsubsInstance(MonitorInstance):
         emit: EventEmitter,
         *,
         streak: bool = True,
+        step: Optional[str] = None,
     ) -> None:
         """The ONE place a job becomes terminal (callers hold `_launch_lock`).
         No-op when it already is. Three consecutive failures → `_abort`."""
         if job_id in self._settled or job_id not in self._jobs:
             return
         self._settled[job_id] = (terminal, reason)
+        if not self._log_bulk:
+            if terminal == "completed":
+                kind = "subs.published"
+                data: dict = {"srt": self._jobs[job_id].zh_target.name}
+                if reason == "no speech":
+                    data["no_speech"] = True
+            elif terminal == "failed":
+                kind = "subs.failed"
+                # Failure details may contain exception/child text. Compose a
+                # safe category here; raw output belongs only in bounded tails.
+                data = {
+                    "detail": "asr failed"
+                    if step == "asr"
+                    else "subtitle operation failed"
+                }
+                if step is not None:
+                    data["step"] = step
+            else:
+                kind = "subs.skipped"
+                data = {"reason": reason}
+            get_task_log().record(
+                self.instance_id,
+                kind,
+                task_type="avsubs",
+                film=job_id,
+                severity="error" if terminal == "failed" else "info",
+                data=data,
+            )
         if terminal == "completed":
             self._completed += 1
             self._streak = 0
@@ -1269,10 +1509,29 @@ class AvsubsInstance(MonitorInstance):
         release + withdraw → translator cancel part is deferred until the lock
         is released (m3: the lease is ALWAYS released after the kill)."""
         self._aborted = True
+        get_task_log().record(
+            self.instance_id,
+            "task.aborted",
+            task_type="avsubs",
+            severity="error",
+            data={"reason": "consecutive_subtitle_failures"},
+        )
         self._waiting_gpu = False
         job = self._asr_job
-        for job_id in list(self._jobs):
-            self._settle(job_id, "skipped", "cancelled", emit)
+        self._log_bulk = True
+        count = len(self._jobs.keys() - self._settled.keys())
+        try:
+            for job_id in list(self._jobs):
+                self._settle(job_id, "skipped", "cancelled", emit)
+        finally:
+            self._log_bulk = False
+        if count:
+            get_task_log().record(
+                self.instance_id,
+                "subs.skipped_bulk",
+                task_type="avsubs",
+                data={"count": count, "reason": "cancelled"},
+            )
         self._queue = []
         emit(
             "alert",
@@ -1440,6 +1699,20 @@ class AvsubsInstance(MonitorInstance):
         if tr is not None and (tr.queued() or tr.in_flight() or not tr.results.empty()):
             return
         self._done_emitted = True
+        get_task_log().record(
+            self.instance_id,
+            "task.done",
+            task_type="avsubs",
+            data={
+                "done": self._pre_done + self._completed,
+                "failed": self._failed,
+                "skipped": self._log_skipped,
+                "subs_skipped": self._skipped,
+                "kept_ja": self._kept_ja,
+                "paused": self._paused,
+                "duration": max(0.0, time.monotonic() - self._log_started_at),
+            },
+        )
         emit(
             "done",
             f"{self._cfg.name} complete",

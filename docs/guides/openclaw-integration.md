@@ -1,5 +1,8 @@
 # OpenClaw integration — reading TaskPaw fleet status
 
+The Agent's task log (「日志」) is local only, retained for 30 days, and is
+not forwarded to OpenClaw or your phone. Existing alerts are unchanged.
+
 The V3 Hub writes two OpenClaw-facing artifacts into its data dir (default
 `~/.taskpaw-hub/`) every poll, so an external agent can read fleet status **without
 an API**:

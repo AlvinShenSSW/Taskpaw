@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 import pytest
+from conftest import tasklog_rows as _tasklog
 from test_subs_translate import (
     FakeClock,
     Spawner,
@@ -3117,3 +3118,183 @@ def test_a_film_the_real_translator_defers_holds_done_until_it_pauses(
     assert len(_keyed(r.evs, f"{IID}:llm-provider:grok-4.3 · api.x.ai")) == 1
     assert "Queue: 0/1 done, 0 failed, 1 skipped; 1 paused | " in _done(r.evs)[0][2]
     assert _ja(r, "a.mp4").exists() and not _zh(r, "a.mp4").exists()
+
+
+@pytest.mark.parametrize("path", ["normal", "stop", "no_speech", "failed"])
+def test_tasklog_asr_outcomes(tmp_path, monkeypatch, path):
+    h = _setup(tmp_path, monkeypatch, full=("a.mp4",))
+    h.inst.start(h.emit)
+    assert len(_tasklog("asr.started")) == 1
+    assert _tasklog("asr.started")[0]["proc"] == "whisperjav.exe"
+    if path == "failed":
+        h.spawner.last.finish(rc=1)
+        h.inst.check(h.emit)
+        assert len(_tasklog("asr.retry")) == 1
+        assert len(_tasklog("asr.started")) == 2
+        h.spawner.last.finish(rc=1)
+        h.inst.check(h.emit)
+        assert _tasklog("subs.failed")[0]["data"]["step"] == "asr"
+        assert not _tasklog("asr.finished")
+    else:
+        h.spawner.last.finish(
+            state="empty" if path == "no_speech" else "done",
+            text="" if path == "no_speech" else SRT_JA,
+        )
+        if path == "stop":
+            h.inst.stop()
+        else:
+            h.inst.check(h.emit)
+        if path == "no_speech":
+            assert not _tasklog("asr.finished")
+            assert _tasklog("subs.published")[0]["data"]["no_speech"] is True
+        else:
+            assert len(_tasklog("asr.finished")) == 1
+            assert _tasklog("asr.finished")[0]["data"]["lines"] == 2
+    h.inst.stop()
+
+
+def test_tasklog_bulk_missing_exe(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, full=("a.mp4", "b.mp4"), exe=False)
+    h.inst.start(h.emit)
+    assert _tasklog("subs.skipped_bulk")[0]["data"] == {"count": 2, "reason": "no_exe"}
+    assert not _tasklog("subs.skipped")
+    assert _tasklog("task.error")
+    h.inst.stop()
+
+
+def test_tasklog_stop_translation_snapshot_and_asr(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, full=("a.mp4",))
+    h.inst.start(h.emit)
+    tr = h.translators[0]
+    tr.live = {"job_id": "previous.mp4", "elapsed_s": 42}
+    h.inst.stop()
+    h.inst.stop()
+    rows = _tasklog("task.interrupted")
+    assert len(rows) == 2
+    assert {r["data"]["step"] for r in rows} == {"asr", "translate"}
+    assert (
+        next(r for r in rows if r["data"]["step"] == "translate")["data"]["elapsed"]
+        == 42
+    )
+
+
+def test_tasklog_asr_finishes_during_cancel_not_interrupted(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, full=("LMNO-123.mp4",))
+    h.inst.start(h.emit)
+    cancel = h.translators[0].cancel
+
+    def finish_during_cancel():
+        h.spawner.last.finish(state="done", text=SRT_JA)
+        cancel()
+
+    monkeypatch.setattr(h.translators[0], "cancel", finish_during_cancel)
+    h.inst.stop()
+    assert len(_tasklog("asr.finished")) == 1
+    assert not _tasklog("task.interrupted")
+
+
+@pytest.mark.parametrize("rc", [1, None])
+def test_tasklog_stop_asr_exited_or_live(tmp_path, monkeypatch, rc):
+    h = _setup(tmp_path, monkeypatch, full=("a.mp4", "b.mp4", "c.mp4", "d.mp4"))
+    h.inst.start(h.emit)
+    if rc is not None:
+        h.spawner.last.finish(rc=rc)
+    h.inst.stop()
+    assert len(_tasklog("task.interrupted")) == (1 if rc is None else 0)
+    assert not _tasklog("asr.finished") and not _tasklog("subs.failed")
+
+
+def test_tasklog_three_failures_bulk_is_inside_abort(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, full=("a.mp4", "b.mp4", "c.mp4", "d.mp4"))
+    h.inst.start(h.emit)
+    for _ in range(6):
+        h.spawner.last.finish(rc=1)
+        h.inst.check(h.emit)
+    assert len(_tasklog("subs.failed")) == 3
+    assert len(_tasklog("subs.skipped_bulk")) == 1
+    assert _tasklog("subs.skipped_bulk")[0]["data"]["count"] == 1
+    assert not _tasklog("subs.skipped")
+    h.inst.stop()
+
+
+def test_tasklog_subtitle_publish_skip_and_done(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, full=("a.mp4",))
+    h.inst.start(h.emit)
+    h.spawner.last.finish()
+    h.inst.check(h.emit)
+    tr = h.translators[0]
+    tr.answer("a.mp4", kept_ja=1)
+    h.inst.check(h.emit)
+    h.inst.check(h.emit)
+    assert len(_tasklog("subs.published")) == 1
+    assert _tasklog("subs.published")[0]["data"]["srt"].endswith(".srt")
+    assert len(_tasklog("task.done")) == 1
+    assert _tasklog("task.done")[0]["data"]["kept_ja"] == 1
+    h.inst.stop()
+
+
+def test_tasklog_wait_stop_never_acquires(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, full=("a.mp4", "b.mp4", "c.mp4", "d.mp4"))
+    other = ("other", 1)
+    gpu_lease.try_acquire(other, 5, label="other")
+    h.inst.start(h.emit)
+    h.inst.check(h.emit)
+    assert len(_tasklog("task.gpu_wait")) == 1
+    h.inst.stop()
+    gpu_lease.release(other)
+    assert not _tasklog("task.gpu_acquired")
+
+
+def test_tasklog_launch_errors_do_not_copy_argv(tmp_path, monkeypatch):
+    h = _setup(
+        tmp_path,
+        monkeypatch,
+        full=("a.mp4", "b.mp4", "c.mp4", "d.mp4"),
+        whisperjav_extra_args="--sensitivity PLANTED_SECRET",
+    )
+
+    def fail(*args, **kwargs):
+        raise OSError("PLANTED_SECRET https://user:pass@host:4321 --private-argv")
+
+    h.inst._spawn = fail
+    h.inst.start(h.emit)
+    assert _tasklog("task.error")
+    text = str(_tasklog())
+    for forbidden in (
+        "PLANTED_SECRET",
+        "user:pass",
+        "4321",
+        "--private-argv",
+        "--sensitivity",
+    ):
+        assert forbidden not in text
+    h.inst.stop()
+
+
+def test_tasklog_settle_only_one_skip(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, full=("a.mp4",), key=False)
+    h.inst.start(h.emit)
+    h.spawner.last.finish()
+    h.inst.check(h.emit)
+    h.inst.check(h.emit)
+    assert len(_tasklog("asr.finished")) == 1
+    assert len(_tasklog("subs.skipped")) == 1
+    assert _tasklog("subs.skipped")[0]["data"] == {"reason": "no_llm_key"}
+    assert not _tasklog("subs.published")
+    assert _tasklog("task.started")[0]["data"]["skipped"] == 0
+    assert _tasklog("task.done")[0]["data"]["skipped"] == 0
+    assert _tasklog("task.done")[0]["data"]["subs_skipped"] == 1
+    h.inst.stop()
+
+
+def test_tasklog_asr_gpu_acquired_at_spawn(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, full=("a.mp4",))
+    other = ("other", 1)
+    gpu_lease.try_acquire(other, 5, label="other")
+    h.inst.start(h.emit)
+    assert _tasklog("task.gpu_wait")
+    gpu_lease.release(other)
+    h.inst.check(h.emit)
+    assert len(_tasklog("task.gpu_acquired")) == len(_tasklog("asr.started")) == 1
+    assert h.translators[0].kw["task_type"] == "avsubs"
+    h.inst.stop()

@@ -16,6 +16,8 @@ import platform
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 if TYPE_CHECKING:
@@ -27,6 +29,7 @@ from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.llm import LLM_SLOTS, llm_slot_fields, resolve_llm_settings
 from taskpaw_v3.core.protocol import EventQueue
+from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import effective_monitors, monitor_name
 
@@ -100,6 +103,15 @@ def create_control_app(
     app = FastAPI(title="TaskPaw Agent Control", docs_url=None, redoc_url=None)
     add_ui_cors(app)
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path == "/control/logs":
+            return JSONResponse(
+                {"boot": get_task_log().boot, "error": "invalid task log parameters"},
+                status_code=400,
+            )
+        return await request_validation_exception_handler(request, exc)
+
     @app.get("/control/ping")
     def ping() -> dict:
         return {"ok": True}
@@ -158,6 +170,34 @@ def create_control_app(
         events = events_provider(limit, monitor) if monitor else events_provider(limit)
         return {"events": events}
 
+    @app.get("/control/logs")
+    def control_logs(
+        day: Optional[str] = None,
+        task: Optional[str] = None,
+        severity: Optional[str] = None,
+        q: str = "",
+        before: Optional[str] = None,
+        after: Optional[str] = None,
+        limit: int = 200,
+        days: bool = False,
+    ):
+        store = get_task_log()
+        try:
+            return store.query(
+                day=day,
+                task=task,
+                severity=severity,
+                q=q,
+                before=before,
+                after=after,
+                limit=limit,
+                days=days,
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                {"boot": store.boot, "error": str(exc)}, status_code=400
+            )
+
     @app.get("/control/plugins")
     def plugins() -> dict:
         # The selectable monitor services + their form schemas (the UI's "enable
@@ -203,23 +243,7 @@ def create_control_app(
 
         @app.patch("/control/monitors")
         def update_monitor(name: str, body: dict):
-            # {config?: {...}, enabled?: bool}. Apply CONFIG first: it validates,
-            # so an invalid config fails (400) BEFORE enabled is touched/persisted
-            # — a failed combined edit must not leave the monitor started/stopped
-            # (Codex #57a). A valid config persists, then enabled (which can't fail
-            # once the monitor is found).
-            if "config" not in body and "enabled" not in body:
-                raise HTTPException(
-                    status_code=400, detail="patch needs 'config' and/or 'enabled'"
-                )
-            out: dict = {"ok": True, "name": name}
-            if "config" in body:
-                out = _guard(admin.update, name, body["config"])
-            if "enabled" in body:
-                # pass through raw — admin.set_enabled requires a real boolean
-                # (rejects "false"/0 strings) → 400, not a silent enable.
-                out = _guard(admin.set_enabled, name, body["enabled"])
-            return out
+            return _guard(admin.patch, name, body)
 
         # Start/Stop are persisted enable/disable (V2 parity: a stopped monitor
         # stays stopped across restarts).

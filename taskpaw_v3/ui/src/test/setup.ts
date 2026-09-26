@@ -3,3 +3,7 @@
 // @testing-library/react auto-cleanup (vitest globals).
 import "@testing-library/jest-dom/vitest";
 import "../i18n";
+
+// Fill jsdom's object URL gaps so deferred export cleanup survives restored globals.
+URL.createObjectURL ??= () => "blob:jsdom";
+URL.revokeObjectURL ??= () => {};

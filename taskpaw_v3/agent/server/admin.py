@@ -36,6 +36,7 @@ from taskpaw_v3.core.llm import (
     set_llm_chain,
     set_llm_settings,
 )
+from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import canonical_name, effective_monitors, monitor_name
 from taskpaw_v3.monitors.subs.translate import (
@@ -155,6 +156,9 @@ class MonitorAdmin:
             default_enabled = not plugin.manual_start(cfg)
             added["enabled"] = _as_bool(spec.get("enabled", default_enabled))
             new_list[-1] = added
+            get_task_log().record(
+                monitor_name(added), "operator.add", task_type=added["type_id"]
+            )
             # Register live BEFORE persisting, so a config that can't actually run
             # is never written to agent.yaml (Codex). add_monitor already
             # validated, but registering can still surface a real failure.
@@ -168,7 +172,11 @@ class MonitorAdmin:
         with self._lock:
             iid = str(name).strip()
             # raises ValueError if absent or duplicate (no silent data loss).
-            self._config.monitors = catalog.remove_monitor(self._config.monitors, iid)
+            remaining = catalog.remove_monitor(self._config.monitors, iid)
+            removed = self._find(iid)
+            assert removed is not None  # catalog just validated its existence
+            get_task_log().record(iid, "operator.remove", task_type=removed["type_id"])
+            self._config.monitors = remaining
             self._persist()
             if self._sup is not None and self._sup.has(iid):
                 self._sup.unregister(iid)
@@ -187,6 +195,7 @@ class MonitorAdmin:
                 # sat disabled) must not be persisted enabled and then fail the
                 # next boot (Codex).
                 plugin, cfg = self._validated_config(m)
+                get_task_log().record(iid, "operator.start", task_type=m["type_id"])
                 if self._sup is not None and not self._sup.has(iid):
                     self._sup.register(plugin, cfg, instance_id=iid)  # launches now
                 # A manual-start monitor (managed Lada LAUNCHES lada-cli) is a
@@ -198,11 +207,25 @@ class MonitorAdmin:
                     m["enabled"] = True
                     self._persist()
             else:
+                get_task_log().record(iid, "operator.stop", task_type=m["type_id"])
                 m["enabled"] = False
                 self._persist()
                 if self._sup is not None and self._sup.has(iid):
                     self._sup.unregister(iid)
             return {"ok": True, "name": iid, "enabled": bool(enabled)}
+
+    def patch(self, name: str, body: dict) -> dict[str, Any]:
+        if "config" not in body and "enabled" not in body:
+            raise ValueError("patch needs 'config' and/or 'enabled'")
+        # Validate the toggle before update() can log or apply the config.
+        if "enabled" in body:
+            _as_bool(body["enabled"])
+        out: dict[str, Any] = {"ok": True, "name": name}
+        if "config" in body:
+            out = self.update(name, body["config"])
+        if "enabled" in body:
+            out = self.set_enabled(name, body["enabled"])
+        return out
 
     def update(self, name: str, config: dict) -> dict[str, Any]:
         with self._lock:
@@ -221,6 +244,14 @@ class MonitorAdmin:
             raw = {**(m.get("config") or {}), **config}
             raw["name"] = iid
             cfg = plugin.validate_config(raw)  # authoritative validation
+            changed = sorted(
+                k
+                for k, v in cfg.model_dump().items()
+                if v != (m.get("config") or {}).get(k)
+            )
+            get_task_log().record(
+                iid, "operator.update", task_type=m["type_id"], data={"fields": changed}
+            )
             # Live-apply BEFORE persisting: if reconfigure() fails (e.g. a wedged
             # worker that won't stop in time → RuntimeError), don't leave disk
             # ahead of runtime (Codex). reconfigure rolls back to the old config
@@ -346,6 +377,18 @@ class MonitorAdmin:
             # leaves config + disk untouched — atomic (Codex #43 r7).
             new_desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
             self._save(new_desired)
+            get_task_log().record(
+                "",
+                "operator.update",
+                task_type="agent",
+                data={
+                    "fields": sorted(
+                        f
+                        for f in self._EDITABLE_CONFIG
+                        if new_desired[f] != self._desired[f]
+                    )
+                },
+            )
             self._desired = new_desired
             # Live-apply ONLY the live-safe fields: api_token (token_ok reads it
             # per request) and the LLM settings (#178: published to the holder

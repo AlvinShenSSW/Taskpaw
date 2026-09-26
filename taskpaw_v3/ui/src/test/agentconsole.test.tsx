@@ -25,7 +25,7 @@ function stubFetch() {
       const body =
         url.includes("/control/status") ? STATUS
         : url.includes("/control/plugins") ? { plugins: [], presets: [] }
-        : { events: [] };
+        : { boot: "test", entries: [], next_before: null, days: [] };
       return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
     }),
   );
@@ -73,7 +73,7 @@ describe("AgentConsole", () => {
   const stubStatus = (monitors: Record<string, unknown>) =>
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       const body = url.includes("/control/status") ? { machine: "box1", monitors }
-        : url.includes("/control/plugins") ? { plugins: [], presets: [] } : { events: [] };
+        : url.includes("/control/plugins") ? { plugins: [], presets: [] } : { boot: "test", entries: [], next_before: null, days: [] };
       return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
     }));
 
@@ -103,22 +103,31 @@ describe("AgentConsole", () => {
     expect(screen.getByRole("button", { name: /Add|添加/ })).toBeInTheDocument();
   });
 
-  it("shows an inline recent-events panel on the monitor dashboard (#136)", async () => {
+  it("shows an inline recent-logs panel on the monitor dashboard (#136)", async () => {
     renderConsole(); // monitors tab (default), 2 monitors → hero + inline events
     await screen.findByText("downloads");
-    // The hero carries an inline "Recent events" panel beside the metrics.
-    expect(screen.getByText(/^Recent events$|^最近事件$/)).toBeInTheDocument();
+    // The hero carries an inline "Recent logs" panel beside the metrics.
+    expect(screen.getByText(/^Recent logs$|^最近日志$/)).toBeInTheDocument();
   });
 
-  it("scopes the inline events panel to the selected monitor (#130)", async () => {
+  it("scopes the inline logs panel to the selected monitor (#130)", async () => {
     renderConsole(); // lada-main auto-selected
     await screen.findByText("downloads");
-    // The inline panel fetches /control/events filtered to the current monitor.
+    // The inline panel fetches /control/logs filtered to the current monitor.
     await waitFor(() => {
       const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
       const urls = calls.map((c) => String(c[0]));
-      expect(urls.some((u) => /\/control\/events\?.*monitor=lada-main/.test(u))).toBe(true);
+      expect(urls.some((u) => /\/control\/logs\?.*task=lada-main/.test(u))).toBe(true);
+      expect(urls.some((u) => { const p = new URL(u).searchParams; return p.get("task") === "lada-main" && p.get("limit") === "8" && !p.has("day"); })).toBe(true);
     });
+  });
+
+  it("replaces the Events tab with Logs (#196)", async () => {
+    renderConsole();
+    await screen.findByText("downloads");
+    expect(screen.queryByRole("tab", { name: /^Events$|^事件$/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: /^Logs$|^日志$/ }));
+    expect(await screen.findByLabelText(/^Day$|^日期$/)).toBeInTheDocument();
   });
 
   // #145: auth-disabled banner is driven by /control/config { auth_disabled }.
@@ -130,7 +139,7 @@ describe("AgentConsole", () => {
           url.includes("/control/status") ? STATUS
           : url.includes("/control/config") ? { monitors: [], auth_disabled: authDisabled }
           : url.includes("/control/plugins") ? { plugins: [], presets: [] }
-          : { events: [] };
+          : { boot: "test", entries: [], next_before: null, days: [] };
         return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
       }),
     );

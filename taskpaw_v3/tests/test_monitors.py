@@ -36,6 +36,54 @@ from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
 from taskpaw_v3.monitors.supervisor import Supervisor
 
 
+def test_tasklog_agent_observer_mirrors_delivered_and_folded_only():
+    from taskpaw_v3.core.protocol import EventQueue
+    from taskpaw_v3.core.tasklog import get_task_log
+    from taskpaw_v3.monitors.runtime import build_supervisor
+
+    queue = EventQueue("m")
+    sup = build_supervisor(
+        default_registry(),
+        [
+            {
+                "type_id": "process",
+                "config": {
+                    "name": "p",
+                    "pattern": "unused",
+                    "max_events_per_minute": 1,
+                },
+            }
+        ],
+        queue,
+        "m",
+    )
+    clock = [60.0]
+    sup._clock = lambda: clock[0]
+    sup._emit("p", "alert", "title", "message", {"argv": "PLANTED_SECRET"}, "key")
+    sup._emit("p", "alert", "title", "message", None, "key")  # deduped
+    sup._emit("p", "info", "dropped", "dropped")
+    clock[0] += 60
+    sup._flush_folded("p")
+    rows = get_task_log().query()["entries"]
+    assert len(rows) == 2
+    assert all(
+        r["kind"] == "event.mirrored" and r["task_type"] == "process" for r in rows
+    )
+    assert rows[-1]["severity"] == "error"
+    assert rows[-1]["data"] == {
+        "level": "alert",
+        "title": "title",
+        "message": "message",
+    }
+    assert "PLANTED" not in json.dumps(rows)
+    assert len(queue.recent()) == 2
+    # The Hub constructs Supervisor directly and must remain unaffected.
+    hub = Supervisor(lambda *a: None)
+    hub.register(ProcessPlugin(), ProcessConfig(name="hub", pattern="unused"))
+    hub._emit("hub", "info", "hub", "hub")
+    assert get_task_log().query()["entries"] == rows
+
+
 @contextlib.contextmanager
 def _expect_thread_death():
     """Capture (and swallow) exceptions raised in worker threads for the duration

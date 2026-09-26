@@ -24,6 +24,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,7 @@ from typing import Optional
 
 from pydantic import Field, model_validator
 
+from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -315,6 +317,17 @@ class LadaInstance(MonitorInstance):
         self._inputs: list[str] = []  # start-of-run input snapshot
         self._launch_error: Optional[str] = None
         self._done_emitted = False
+        self._log_started_at = time.monotonic()
+        self._log_file_at = self._log_started_at
+        self._log_file: Optional[str] = None
+        self._log_file_closed = False
+        self._log_file_index = 0
+        self._log_failed = 0
+        self._log_reader_done = False
+        self._log_stopped = False
+        self._log_run_closed = False
+        self._log_exit_code: Optional[int] = None
+        self._log_pending_exit: Optional[tuple[int, bool]] = None
         self._prev_running: Optional[bool] = None  # passive transition
 
     # ── lifecycle ──────────────────────────────────────────────────────────
@@ -329,8 +342,23 @@ class LadaInstance(MonitorInstance):
         # (Codex #59).
         if self._process is not None:
             self.stop()
+        with self._lock:
+            self._reader = (
+                None  # invalidate a prior reader before resetting its log state
+            )
         self._stop.clear()
         self._done_emitted = False
+        self._log_started_at = time.monotonic()
+        self._log_file_at = self._log_started_at
+        self._log_file = None
+        self._log_file_closed = False
+        self._log_file_index = 0
+        self._log_failed = 0
+        self._log_reader_done = False
+        self._log_stopped = False
+        self._log_run_closed = False
+        self._log_exit_code = None
+        self._log_pending_exit = None
         self._launch_error = None
         self._prev_running = None
         self._process = None
@@ -345,6 +373,13 @@ class LadaInstance(MonitorInstance):
     def _emit_launch_error(self, emit: EventEmitter, msg: str) -> None:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
         self._launch_error = msg
+        get_task_log().record(
+            self.instance_id,
+            "task.error",
+            task_type="lada",
+            severity="error",
+            data={"reason": "setup_or_launch_failed"},
+        )
         emit("alert", f"{cfg.name} error", msg, dedupe_key=f"{self.instance_id}:launch")
 
     def _start_managed(self, emit: EventEmitter) -> None:
@@ -405,6 +440,13 @@ class LadaInstance(MonitorInstance):
             self._emit_launch_error(emit, f"failed to launch lada-cli: {e}")
             return
 
+        done, total = self._queue_counts()
+        get_task_log().record(
+            self.instance_id,
+            "task.started",
+            task_type="lada",
+            data={"queued": max(0, (total or 0) - done), "done": done, "skipped": 0},
+        )
         if capture and self._process.stdout is not None:
             self._reader = threading.Thread(
                 target=self._reader_loop,
@@ -416,6 +458,27 @@ class LadaInstance(MonitorInstance):
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
         p = self._process
+        if p is not None and not self._log_stopped:
+            self._log_stopped = True
+            rc = p.poll()
+            if rc is None:
+                with self._lock:
+                    get_task_log().record(
+                        self.instance_id,
+                        "task.interrupted",
+                        task_type="lada",
+                        film=self._log_file,
+                        severity="warn",
+                        pid=getattr(p, "pid", None),
+                        data={
+                            "step": "restore",
+                            "elapsed": max(0.0, time.monotonic() - self._log_file_at),
+                        },
+                    )
+                    self._log_file_closed = True
+                    self._log_run_closed = True
+            else:
+                self._log_exit(rc, at_stop=True)
         if p is not None and p.poll() is None:
             try:
                 p.terminate()  # graceful first
@@ -436,29 +499,44 @@ class LadaInstance(MonitorInstance):
 
     # ── reader thread (capture mode) ───────────────────────────────────────
     def _reader_loop(self) -> None:
-        stdout = self._process.stdout if self._process else None
+        reader = threading.current_thread()
+        with self._lock:
+            if self._reader is not reader:
+                return
+            stdout = self._process.stdout if self._process else None
         if stdout is None:
             return
         buf = b""
         try:
-            while not self._stop.is_set():
+            while not self._stop.is_set() and self._reader is reader:
                 ch = stdout.read(1)  # byte at a time: lada uses \r in-place updates
                 if ch == b"":
                     break  # EOF — process exited
                 if ch in (b"\r", b"\n"):
-                    self._consume_output(buf)
+                    self._consume_output(buf, reader=reader)
                     buf = b""
                 else:
                     buf += ch
             # A crash line printed right before exit may arrive without a trailing
             # \r/\n before the pipe closes — flush it so the reason isn't lost.
-            self._consume_output(buf)
+            self._consume_output(buf, reader=reader)
         except (OSError, ValueError):
-            # Pipe closed / read on a terminated process as the child exits —
-            # expected; the reader simply ends.
+            # Pipe closed / read on a terminated process as the child exits.
             pass
+        finally:
+            # A check can observe exit before the last buffered header arrives.
+            # Defer only the log conclusion; polling and alerts never wait here.
+            with self._lock:
+                pending = None
+                if self._reader is reader:
+                    self._log_reader_done = True
+                    pending, self._log_pending_exit = self._log_pending_exit, None
+            if pending is not None:
+                self._log_exit(pending[0], at_stop=pending[1], reader=reader)
 
-    def _consume_output(self, buf: bytes) -> None:
+    def _consume_output(
+        self, buf: bytes, *, reader: Optional[threading.Thread] = None
+    ) -> None:
         """Classify one decoded output line: a recognized progress update advances
         `_progress`; any other non-empty line is retained as recent output (so a
         non-zero exit can report the crash reason)."""
@@ -466,13 +544,47 @@ class LadaInstance(MonitorInstance):
             return
         line = buf.decode("utf-8", "replace")
         with self._lock:
+            if reader is not None and self._reader is not reader:
+                return
             new_progress = parse_progress_line(line, self._progress)
             # A new dict means a recognized progress update, even when repeated
             # tqdm values are content-equal.
             if new_progress is not self._progress:
+                cfg: LadaConfig = self.config  # type: ignore[assignment]
+                filename = new_progress.get("current_file")
+                if (
+                    cfg.lada_capture_progress
+                    and filename
+                    and filename != self._log_file
+                    and not (self._log_stopped and self._log_exit_code is None)
+                ):
+                    self._log_file_end(0)
+                    self._log_file = Path(filename).name
+                    self._log_file_at = time.monotonic()
+                    self._log_file_closed = False
+                    self._log_file_index += 1
+                    get_task_log().record(
+                        self.instance_id,
+                        "restore.started",
+                        task_type="lada",
+                        film=self._log_file,
+                        pid=getattr(self._process, "pid", None),
+                        proc=Path(cfg.lada_cli_path).name,
+                        data={
+                            "index": self._log_file_index,
+                            "total": len(self._inputs),
+                            "mode": "plain",
+                        },
+                    )
                 self._progress = new_progress
             elif line.strip():
                 self._recent_output.append(line.strip())
+                if (
+                    self._log_file
+                    and self._log_file.casefold() in line.casefold()
+                    and re.search(r"\b(error|failed|exception)\b", line, re.IGNORECASE)
+                ):
+                    self._log_file_end(None, tail=line.strip()[-800:])
 
     # ── check (one observation) ────────────────────────────────────────────
     def check(self, emit: EventEmitter) -> MonitorStatus:
@@ -480,6 +592,85 @@ class LadaInstance(MonitorInstance):
         if cfg.lada_cli_path:
             return self._check_managed(emit)
         return self._check_passive(emit)
+
+    def _log_file_end(
+        self, rc: Optional[int], *, tail: str = "", at_stop: bool = False
+    ) -> None:
+        """Under the output lock: only capture headers identify a file."""
+        if self._log_file is None or self._log_file_closed:
+            return
+        self._log_file_closed = True
+        if rc != 0:
+            self._log_failed += 1
+        data: dict = {"exit_code": rc, "tail": tail[-800:]}
+        if at_stop:
+            data["at_stop"] = True
+        if rc == 0:
+            data = {
+                "output": self._log_file,
+                "duration": max(0.0, time.monotonic() - self._log_file_at),
+            }
+        get_task_log().record(
+            self.instance_id,
+            "restore.finished" if rc == 0 else "restore.failed",
+            task_type="lada",
+            film=self._log_file,
+            severity="info" if rc == 0 else "error",
+            data=data,
+        )
+
+    def _log_exit(
+        self,
+        rc: int,
+        *,
+        at_stop: bool = False,
+        reader: Optional[threading.Thread] = None,
+    ) -> None:
+        with self._lock:
+            if reader is not None and self._reader is not reader:
+                return
+            if self._log_run_closed:
+                return
+            if self._reader is not None and not self._log_reader_done:
+                self._log_pending_exit = (rc, at_stop)
+                return
+            self._log_run_closed = True
+            self._log_exit_code = rc
+            tail = "\n".join(list(self._recent_output)[-_CRASH_DETAIL_LINES:])[-800:]
+            self._log_file_end(rc, tail=tail, at_stop=at_stop)
+            if at_stop and rc != 0 and self._log_file is None:
+                get_task_log().record(
+                    self.instance_id,
+                    "restore.failed",
+                    task_type="lada",
+                    severity="error",
+                    data={"exit_code": rc, "at_stop": True, "tail": tail},
+                )
+            if at_stop:
+                return
+            if rc == 0:
+                done, _ = self._queue_counts()
+                get_task_log().record(
+                    self.instance_id,
+                    "task.done",
+                    task_type="lada",
+                    data={
+                        "done": done,
+                        "failed": self._log_failed,
+                        "skipped": 0,
+                        "kept_ja": 0,
+                        "paused": 0,
+                        "duration": max(0.0, time.monotonic() - self._log_started_at),
+                    },
+                )
+            else:
+                get_task_log().record(
+                    self.instance_id,
+                    "task.aborted",
+                    task_type="lada",
+                    severity="error",
+                    data={"reason": "child_failed", "exit_code": rc},
+                )
 
     def _check_managed(self, emit: EventEmitter) -> MonitorStatus:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
@@ -493,6 +684,7 @@ class LadaInstance(MonitorInstance):
         # exited — emit completion/failure once (the V2 events).
         detail = self._managed_exit_detail(retcode)
         if not self._done_emitted:
+            self._log_exit(retcode)
             self._done_emitted = True
             q = self._queue_str()
             if retcode == 0:
@@ -523,7 +715,22 @@ class LadaInstance(MonitorInstance):
     def _check_passive(self, emit: EventEmitter) -> MonitorStatus:
         cfg: LadaConfig = self.config  # type: ignore[assignment]
         running = process_alive(cfg.process_name or "lada-cli")
+        if running and self._prev_running is not True:
+            self._log_started_at = time.monotonic()
+            self._log_run_closed = False
+            done, total = self._queue_counts()
+            get_task_log().record(
+                self.instance_id,
+                "task.started",
+                task_type="lada",
+                data={
+                    "queued": max(0, (total or 0) - done),
+                    "done": done,
+                    "skipped": 0,
+                },
+            )
         if self._prev_running is True and not running:  # exited → completion
+            self._log_exit(0)
             q = self._queue_str()
             emit(
                 "done",

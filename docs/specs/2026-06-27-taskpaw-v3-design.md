@@ -170,6 +170,7 @@ class Supervisor:
 - **退避**：指数退避，最小 5s、最大 5min；连续失败 5 次进入 `DEGRADED` 并发告警。
 - **reconfigure 语义**：默认 `stop()` → 替换配置 → `create()`+`start()`；实例声明支持热更新时由实例自行处理。
 - **事件出口**：`emit(...)` 是插件唯一出口；去重（`dedupe_key`）/持久化/限流由 supervisor + 现有事件队列（§6）保证。
+  - **3.9.0（#196）补充**：插件也通过 `get_task_log().record(...)` 写入结构化任务日志，仅保存在本机；`emit(...)` 仍是告警及 OpenClaw 通知的唯一出口。
 
 ### 4.2 V3 内置 Monitor 类型
 
