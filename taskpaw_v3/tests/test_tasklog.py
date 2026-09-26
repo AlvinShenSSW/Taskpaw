@@ -541,7 +541,9 @@ def test_sanitizes_every_string_recursively_nonfinite_and_forbidden_values(tmp_p
     text = json.dumps(store.query(), ensure_ascii=False, allow_nan=False)
     text.encode("utf-8")
     assert "PLANTED" not in text and "USER:PASS" not in text
-    assert "123" not in text
+    assert ":123" not in text
+    url = entries(store)[0]["data"]["url"]
+    assert "123" not in url and "USER" not in url and "PASS" not in url
     assert entries(store)[0]["data"]["infinity"] is None
     cyclic = {}
     cyclic["cycle"] = cyclic

@@ -418,8 +418,8 @@ describe("TaskLog", () => {
   it("caps export at 20,000 rows and reports the cap in Chinese", async () => {
     setLang("zh-CN");
     let pages = 0;
-    stub(p => {
-      if (p.get("limit") !== "500") return {};
+    const fetcher = stub(p => {
+      if (p.get("limit") !== "500" || p.has("after")) return {};
       const start = 30000 - pages++ * 500;
       return { entries: Array.from({ length: 500 }, (_, i) => entry(`20260926-${start - i}`, "agent.stopping")), next_before: `20260926-${start - 499}` };
     });
@@ -433,6 +433,9 @@ describe("TaskLog", () => {
     fireEvent.click(screen.getByRole("button", { name: "导出" }));
     await waitFor(() => expect(click).toHaveBeenCalledOnce(), { timeout: 25_000 });
     expect(pages).toBe(40);
+    const backwardPages = fetcher.mock.calls.map(([url]) => new URL(url).searchParams).filter(p => p.has("before"));
+    expect(backwardPages).toHaveLength(39);
+    expect(backwardPages.every(p => !p.has("after"))).toBe(true);
     expect(screen.getByRole("alert")).toHaveTextContent("20,000");
     const contents = await new Promise<string>(resolve => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.readAsText(output!); });
     expect(contents.match(/代理正在停止/g)).toHaveLength(20000);
