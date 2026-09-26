@@ -30,10 +30,12 @@ counter / `_settled` update and before any `emit`:
   `translator.submit(...)` (queued) fact. Repeats keep the first stamp.
 - `activate(film, step, now)` — first time the step is derived active.
   `observe()` calls it for every live-active pair.
-- `finish(film, step, state, now)` — sticky terminal `done|failed|skipped`;
+- `finish(film, step, state, now, *, code=None)` — sticky terminal
+  `done|failed|skipped`;
   `finish(translate, done)` records the job outcome `completed`.
-- `settle_subs(film, outcome, now)` — the job settled `completed|failed|
-  skipped`: the first non-terminal SUBTITLE step gets the outcome (`done` for
+- `settle_subs(film, outcome, now, *, code=None, kept_ja=0, models=(),
+  translate_s=None)` — the job settled `completed|failed|skipped`:
+  the first non-terminal SUBTITLE step gets the outcome (`done` for
   completed), later subtitle steps `skipped` (`done` for completed); the job
   outcome is recorded. A restore is never touched (N1).
 
@@ -80,6 +82,25 @@ Local paging (#198):
 - `read_film_page(tracker, page, size)` — the plugins' error boundary around
   `page`: returns `None` on an internal error and logs once per tracker.
 
+This run's films (#200):
+
+- Marks retain the first `code` and, at the first subtitle settlement,
+  `kept_ja`, `models` (bounded, nonempty labels, aggregated line counts;
+  at most `MAX_FILM_MODELS`, descending by count) and `translate_s` (the
+  translator's duration, including resumed work in this run).
+- The terminal hook runs under the lock after all mark facts are assigned.
+  It stamps `finished_at` once using `FilmTracker(..., wall_clock=time.time)`;
+  step stamps still use monotonic time. `fail_restore(film, now, code)`
+  atomically marks restore failed and settles subtitles skipped.
+- `run_films(filter, page, size)` reads retained facts without observation or
+  clock reads, returning this run's tracked films, counts, totals and paging.
+  `read_run_films(tracker, filter, page, size)` is the plugin error boundary:
+  None on failure, logged once per tracker.
+- Effective terminal outcomes are derived at read time: a failed restore
+  wins; otherwise use `code` (a stale `restore_failed` becomes `skipped:other`),
+  then completed → `partial` when `kept_ja` > 0, else `translated`, failed →
+  `failed`, or `skipped:other`. No fallback is stored by the terminal hook.
+
 Derived state of a step: a stored terminal state wins; else `active` (the
 live film of that step), `waiting_gpu` (`live.waiting`), `queued` (translate
 started, i.e. submitted) or `pending`. Row status (R1), first match wins:
@@ -99,12 +120,18 @@ import logging
 import math
 import re
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from itertools import islice
-from typing import TYPE_CHECKING, Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
-from taskpaw_v3.monitors.subs.util import bounded, step_numbers
+from taskpaw_v3.monitors.subs.util import (
+    MAX_FILM_MODELS,
+    MODEL_LABEL_CHARS,
+    bounded,
+    step_numbers,
+)
 
 if TYPE_CHECKING:  # annotations only: job.py imports this module
     from taskpaw_v3.monitors.subs.job import SubsJob
@@ -445,6 +472,11 @@ class _Film:
     steps: dict[str, _Step]
     job: bool
     outcome: Optional[str] = None
+    finished_wall: Optional[float] = None
+    code: Optional[str] = None
+    kept_ja: int = 0
+    models: tuple[tuple[str, int], ...] = ()
+    translate_s: Optional[float] = None
 
 
 def _duration(key: str, s: _Step) -> Optional[int]:
@@ -463,7 +495,9 @@ class FilmTracker:
     `now` passed to it (marks, `observe`, `steps`, `view`) must be a
     `time.monotonic()` reading: stamps are subtracted from each other."""
 
-    def __init__(self, steps: tuple[str, ...]) -> None:
+    def __init__(
+        self, steps: tuple[str, ...], *, wall_clock: Callable[[], float] = time.time
+    ) -> None:
         try:
             given = tuple(steps)
         except TypeError:
@@ -476,6 +510,8 @@ class FilmTracker:
         self._extras: Optional[tuple[tuple[str, str], ...]] = None
         self._run = uuid.uuid4().hex
         self._page_error_logged = False
+        self._run_films_error_logged = False
+        self._wall_clock = wall_clock
 
     def set_extras(self, rows: list[tuple[str, str]]) -> None:
         """Retain the scan's untracked films once for this run (#198)."""
@@ -544,6 +580,132 @@ class FilmTracker:
                 "films": rows,
             }
 
+    @staticmethod
+    def _effective_outcome(f: _Film) -> str:
+        restore = f.steps.get(RESTORE)
+        if restore is not None and restore.state == "failed":
+            return "restore_failed"
+        if f.code is not None:
+            return "skipped:other" if f.code == "restore_failed" else f.code
+        if f.outcome == "completed":
+            return "partial" if f.kept_ja else "translated"
+        if f.outcome == "failed":
+            return "failed"
+        return "skipped:other"
+
+    def _run_row(self, f: _Film, lv: _Live, status: str, key: Optional[str]) -> dict:
+        terminal = status in _TERMINAL
+        restore = f.steps.get(RESTORE)
+        duration: Optional[float] = None
+        if terminal:
+            parts = [
+                f.translate_s
+                if k == TRANSLATE and f.translate_s is not None
+                else _duration(k, s)
+                for k, s in f.steps.items()
+            ]
+            known = [d for d in parts if d is not None]
+            duration = sum(known) if known else None
+        return {
+            "name": bounded(f.name, NAME_CHARS),
+            "restore": self._derived(f, RESTORE, lv) if restore is not None else None,
+            "restored_before": bool(
+                restore is not None
+                and restore.state == "done"
+                and restore.started_at is None
+                and restore.activated_at is None
+                and restore.ended_at is None
+            ),
+            "asr": self._derived(f, ASR, lv) if ASR in f.steps else None,
+            "translate": self._derived(f, TRANSLATE, lv)
+            if TRANSLATE in f.steps
+            else None,
+            "percent": lv.numbers.get(key, {}).get("percent")
+            if status == "active" and key
+            else None,
+            "outcome": self._effective_outcome(f) if terminal else None,
+            "kept_ja": f.kept_ja,
+            "models": [[label, lines] for label, lines in f.models],
+            "duration_s": duration,
+            "finished_at": f.finished_wall,
+        }
+
+    def run_films(self, filter: object, page: object, size: object) -> dict:
+        """This run only (#200): a side-effect-free read of retained facts."""
+        selected_filter = (
+            filter
+            if isinstance(filter, str) and filter in ("done", "open", "all")
+            else "done"
+        )
+        limit = max(1, min(50, size)) if type(size) is int else 10
+        with self._lock:
+            lv = self._last_live
+            states = {n: self._status(f, lv) for n, f in self._films.items()}
+            focus = self._focus(lv, {n: st for n, (st, _) in states.items()})
+            done, opened = [], []
+            totals = dict.fromkeys(
+                (
+                    "translated",
+                    "partial",
+                    "has_subs",
+                    "untranslated",
+                    "failed",
+                    "restore_failed",
+                ),
+                0,
+            )
+            for f in self._films.values():
+                if states[f.name][0] not in _TERMINAL:
+                    opened.append(f)
+                    continue
+                done.append(f)
+                code = self._effective_outcome(f)
+                if code in ("has_subs", "skipped:subtitle_exists"):
+                    bucket = "has_subs"
+                elif code in ("failed", "asr_failed"):
+                    bucket = "failed"
+                elif code in ("translated", "partial", "restore_failed"):
+                    bucket = code
+                else:
+                    bucket = "untranslated"
+                totals[bucket] += 1
+            done.sort(key=lambda f: (-self._ended(f), f.order))
+            rank = {"active": 0, "waiting_gpu": 1, "queued": 2, "pending": 3}
+            opened.sort(
+                key=lambda f: (f.name != focus, rank.get(states[f.name][0], 3), f.order)
+            )
+            counts = {"done": len(done), "open": len(opened), "all": len(states)}
+            films = (
+                done
+                if selected_filter == "done"
+                else opened
+                if selected_filter == "open"
+                else opened + done
+            )
+            total = len(films)
+            pages = max(1, (total + limit - 1) // limit)
+            selected = min(page, pages) if type(page) is int and page >= 1 else 1
+            return {
+                "run": self._run,
+                "filter": selected_filter,
+                "total": total,
+                "size": limit,
+                "page": selected,
+                "pages": pages,
+                "focus": bounded(focus, NAME_CHARS) if focus is not None else None,
+                "counts": counts,
+                "totals": totals,
+                "films": [
+                    self._run_row(f, lv, *states[f.name])
+                    for f in films[(selected - 1) * limit : selected * limit]
+                ],
+            }
+
+    def _terminal_hook(self, f: _Film) -> None:
+        # Called after ALL facts of a mark, under _lock. Never stores a fallback.
+        if f.finished_wall is None and self._status(f, self._last_live)[0] in _TERMINAL:
+            f.finished_wall = self._wall_clock()
+
     # ── marks ────────────────────────────────────────────────────────────
     def add(self, film: str, initial: dict[str, str]) -> None:
         if not isinstance(film, str):
@@ -559,6 +721,7 @@ class FilmTracker:
             subs = [s for k, s in steps.items() if k != RESTORE]
             job = any(s.state not in _TERMINAL for s in subs)
             self._films[film] = _Film(film, len(self._films), steps, job)
+            self._terminal_hook(self._films[film])
 
     def _step(self, film: object, step: object) -> Optional[_Step]:
         if not isinstance(film, str) or not isinstance(step, str):
@@ -588,7 +751,15 @@ class FilmTracker:
                 s.started = True
                 s.started_at = t
 
-    def finish(self, film: str, step: str, state: str, now: float) -> None:
+    def finish(
+        self,
+        film: str,
+        step: str,
+        state: str,
+        now: float,
+        *,
+        code: Optional[str] = None,
+    ) -> None:
         if not isinstance(state, str) or state not in _TERMINAL:
             return
         with self._lock:
@@ -600,8 +771,21 @@ class FilmTracker:
             f = self._films[film]
             if step == TRANSLATE and state == "done" and f.outcome is None:
                 f.outcome = "completed"
+            if f.code is None and code is not None:
+                f.code = code
+            self._terminal_hook(f)
 
-    def settle_subs(self, film: str, outcome: str, now: float) -> None:
+    def settle_subs(
+        self,
+        film: str,
+        outcome: str,
+        now: float,
+        *,
+        code: Optional[str] = None,
+        kept_ja: int = 0,
+        models: tuple[tuple[str, int], ...] = (),
+        translate_s: Optional[float] = None,
+    ) -> None:
         if not isinstance(film, str) or not isinstance(outcome, str):
             return
         first = _OUTCOME_STATE.get(outcome)
@@ -621,6 +805,47 @@ class FilmTracker:
                 state = later
             if f.outcome is None:
                 f.outcome = outcome
+                f.kept_ja = (
+                    max(0, kept_ja)
+                    if isinstance(kept_ja, int) and not isinstance(kept_ja, bool)
+                    else 0
+                )
+                by_model: dict[str, int] = {}
+                for item in models if isinstance(models, (tuple, list)) else ():
+                    if not isinstance(item, (tuple, list)) or len(item) != 2:
+                        continue
+                    label, lines = item
+                    if (
+                        not isinstance(label, str)
+                        or not isinstance(lines, int)
+                        or isinstance(lines, bool)
+                        or lines < 0
+                    ):
+                        continue
+                    label = bounded(label, MODEL_LABEL_CHARS)
+                    if not label:
+                        continue
+                    by_model[label] = by_model.get(label, 0) + lines
+                f.models = tuple(
+                    sorted(by_model.items(), key=lambda item: -item[1])[
+                        :MAX_FILM_MODELS
+                    ]
+                )
+                f.translate_s = translate_s
+            if f.code is None and code is not None:
+                f.code = code
+            self._terminal_hook(f)
+
+    def fail_restore(self, film: str, now: float, code: Optional[str]) -> None:
+        """One atomic restore failure plus subtitle skip; never exposes half a mark."""
+        with self._lock:
+            s = self._step(film, RESTORE)
+            if s is None:
+                return
+            if s.state not in _TERMINAL:
+                s.state, s.ended_at = "failed", _clock(now)
+            # RLock: settle runs the hook only after all subtitle facts are set.
+            self.settle_subs(film, "skipped", now, code=code)
 
     def record(self, film: str) -> Optional[dict[str, Any]]:
         """A fresh copy of the stored record, None for an unknown film."""
@@ -869,5 +1094,21 @@ def read_film_page(tracker: FilmTracker, page: object, size: object) -> Optional
                 tracker._page_error_logged = True
                 logging.getLogger(__name__).warning(
                     "Film page unavailable (%s)", type(exc).__name__
+                )
+        return None
+
+
+def read_run_films(
+    tracker: FilmTracker, filter: object, page: object, size: object
+) -> Optional[dict]:
+    """#200 plugin boundary, logged once per tracker just like #198."""
+    try:
+        return tracker.run_films(filter, page, size)
+    except Exception as exc:
+        with tracker._lock:
+            if not tracker._run_films_error_logged:
+                tracker._run_films_error_logged = True
+                logging.getLogger(__name__).warning(
+                    "Run films unavailable (%s)", type(exc).__name__
                 )
         return None

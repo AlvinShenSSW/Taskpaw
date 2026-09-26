@@ -13,7 +13,7 @@ monitors arrive with the plugin supervisor in #17.
 from __future__ import annotations
 
 import platform
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -99,6 +99,9 @@ def create_control_app(
     admin: Optional["MonitorAdmin"] = None,
     events_provider: Optional[Callable[..., list[dict]]] = None,
     films_provider: Optional[Callable[[str, object, object], Optional[dict]]] = None,
+    run_films_provider: Optional[
+        Callable[[str, object, object, object], Optional[dict]]
+    ] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""
@@ -111,7 +114,10 @@ def create_control_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
-        if request.url.path == "/control/monitors/films":
+        if request.url.path in (
+            "/control/monitors/films",
+            "/control/monitors/run-films",
+        ):
             return JSONResponse(
                 {"detail": "invalid film list parameters"}, status_code=400
             )
@@ -135,6 +141,22 @@ def create_control_app(
         result = (
             films_provider(name, page, max(1, min(50, size)))
             if films_provider is not None
+            else None
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="no film list")
+        return result
+
+    @app.get("/control/monitors/run-films")
+    def run_films(
+        name: str = Query(pattern=r"\S"),
+        filter: Literal["done", "open", "all"] = "done",
+        page: int = Query(default=1, ge=1),
+        size: int = 10,
+    ):
+        result = (
+            run_films_provider(name, filter, page, max(1, min(50, size)))
+            if run_films_provider is not None
             else None
         )
         if result is None:

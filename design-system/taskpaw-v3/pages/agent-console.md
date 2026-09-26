@@ -133,6 +133,26 @@ the form by monitor count:
 
 ## Recommendations
 
+### Jasna 本轮影片 (#200)
+
+- On named Jasna tasks with a restore step, replace the #198 list with a green
+  bordered “本轮影片” card on the existing dark theme. avsubs retains #198; the
+  Hub and first-load/error fallback retain the plain capped FilmList.
+- Segmented filters are 已完成 (default), 未完成 and 全部, each with its count,
+  `aria-pressed`, visible keyboard focus and at least 40px targets. Show the
+  answered filter's order note and six done-total categories above the rows.
+- At `sm` and above use six columns: film (mono), restore, translation result,
+  models with line counts, duration, finish time. Highlight the response's focus
+  film with an accent wash; pair status colors with text and SVG icons.
+- Below `sm`, use stacked labelled rows: name, 修复, 翻译, 模型, 用时, 完成于.
+  Names, chips and model text wrap within the card; controls and pager wrap too,
+  avoiding horizontal scroll at 375px. Short model labels omit the host, while
+  an accessible text description retains the full `model · host` label.
+- Poll every five seconds. Retain the last good response on errors and restore
+  both query coordinates after failed navigation. Disable controls for a
+  placeholder transition only, not background polls. A filter or run change
+  returns to page 1; a new run keeps the filter. Localize all labels in zh/en.
+
 - Live status updates over the local control API/WebSocket; show a subtle
   "updating" affordance, not a blocking spinner, for sub-second refreshes.
 - Respect `prefers-reduced-motion`: the starting-state pulse degrades to a static

@@ -17,6 +17,7 @@ import {
 import { Tile } from "./Tile";
 import { FilmList } from "./FilmList";
 import { PagedFilmList } from "./PagedFilmList";
+import { RunFilmsCard } from "./RunFilmsCard";
 import { type Tone, toneSx } from "./filmList.helpers";
 
 // #189 AV 翻译 progress: one film's 修复 → 识别 → 翻译 (Jasna) or 识别 → 翻译
@@ -409,7 +410,9 @@ export function PipelineProgress({ pipeline, metrics, taskName }: { pipeline: Pi
         {focus && <StepPanel step={focus} pipeline={pipeline} metrics={metrics} />}
       </Box>
       <QueueCard pipeline={pipeline} metrics={metrics} />
-      {taskName !== undefined ? <PagedFilmList key={taskName} name={taskName} fallback={pipeline} />
+      {taskName !== undefined ? (steps.some(s => s.key === "restore")
+        ? <RunFilmsCard key={taskName} name={taskName} fallback={pipeline} />
+        : <PagedFilmList key={taskName} name={taskName} fallback={pipeline} />)
         : <FilmList films={pipeline.films} filmsMore={pipeline.filmsMore} focus={pipeline.film} />}
     </Stack>
   );

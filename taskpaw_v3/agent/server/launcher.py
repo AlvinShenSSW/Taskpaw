@@ -223,6 +223,7 @@ def run_agent(
                 admin=admin,
                 events_provider=queue.recent,
                 films_provider=supervisor.film_page,
+                run_films_provider=supervisor.run_films,
             ),
             log_level="warning",
         )

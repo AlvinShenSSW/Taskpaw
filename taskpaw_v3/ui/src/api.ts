@@ -208,6 +208,8 @@ async function send<T>(
 const q = (name: string) => `?name=${encodeURIComponent(name)}`;
 
 export const api = {
+  runFilms: (name: string, filter: "done" | "open" | "all", page: number, size = 10) =>
+    get<unknown>("agent", `/control/monitors/run-films${q(name)}&filter=${filter}&page=${page}&size=${size}`),
   films: (name: string, page?: number, size = 10) =>
     get<unknown>("agent", `/control/monitors/films${q(name)}${page === undefined ? "" : `&page=${page}`}&size=${size}`),
   logs: (params: LogParams = {}) => {

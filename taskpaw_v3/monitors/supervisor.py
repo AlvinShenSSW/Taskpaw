@@ -221,6 +221,21 @@ class Supervisor:
             log.warning("Monitor film page unavailable (%s)", type(exc).__name__)
             return None
 
+    def run_films(
+        self, instance_id: str, filter: object, page: object, size: object
+    ) -> dict | None:
+        """Registry lookup under _lock; tracker read outside it (#200)."""
+        with self._lock:
+            managed = self._monitors.get(instance_id)
+            if managed is None or managed.stop.is_set():
+                return None
+            instance = managed.instance
+        try:
+            return instance.run_films(filter, page, size)
+        except Exception as exc:
+            log.warning("Monitor run films unavailable (%s)", type(exc).__name__)
+            return None
+
     def unregister(self, instance_id: str, timeout: float = 10.0) -> None:
         """Stop + remove ONE monitor live (no agent restart) — used by the control
         API's remove/disable. Serialized against register/reconfigure/stop via the

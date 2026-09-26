@@ -11,6 +11,8 @@ from typing import Any, Union
 
 _HEAD_CHARS = 80
 _SEP = " … "
+MODEL_LABEL_CHARS = 80
+MAX_FILM_MODELS = 8
 # #189: what identifies a translator request rather than its progress — it
 # never reaches the metrics.
 _REQUEST_KEYS = frozenset({"job_id", "started_at"})

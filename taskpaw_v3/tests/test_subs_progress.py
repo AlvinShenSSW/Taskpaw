@@ -1342,3 +1342,404 @@ def test_film_page_1000_tracked_slice_first(monkeypatch):
     assert page["total"] == 1000 and page["pages"] == 100
     assert built == names[990:]
     assert [r["name"] for r in page["films"]] == names[990:]
+
+
+def _run_check(t, filter="done", page=1, size=10):
+    result = t.run_films(filter, page, size)
+    assert sum(result["totals"].values()) == result["counts"]["done"]
+    assert result["counts"]["all"] == sum(result["counts"][k] for k in ("done", "open"))
+    assert result["total"] == result["counts"][result["filter"]]
+    return result
+
+
+@pytest.mark.parametrize("code", ["partial", "has_subs", "skipped:planning_failed"])
+def test_run_films_terminal_facts_then_hook_once(code):
+    calls = []
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: calls.append(1234.5) or 1234.5)
+    t.add("film", {ASR: "skipped", TRANSLATE: "skipped"} if code != "partial" else {})
+    if code == "partial":
+        t.finish("film", RESTORE, "done", 1)
+        t.settle_subs(
+            "film",
+            "completed",
+            2,
+            code=code,
+            kept_ja=2,
+            models=(("model · host", 3),),
+            translate_s=7.5,
+        )
+    else:
+        t.finish("film", RESTORE, "done", 2, code=code)
+    row = _run_check(t)["films"][0]
+    assert (row["outcome"], row["finished_at"]) == (code, 1234.5)
+    assert t._films["film"].code == code
+    t.finish("film", RESTORE, "done", 99, code="failed")
+    t.settle_subs("film", "skipped", 99, code="failed")
+    assert calls == [1234.5]
+    assert _run_check(t)["films"][0] == row
+
+
+@pytest.mark.parametrize(
+    "outcome,kept,expected",
+    [
+        ("completed", 0, "translated"),
+        ("completed", 2, "partial"),
+        ("failed", 0, "failed"),
+        ("skipped", 0, "skipped:other"),
+    ],
+)
+def test_run_films_effective_job_outcome(outcome, kept, expected):
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {RESTORE: "done"})
+    t.settle_subs("film", outcome, 3, kept_ja=kept)
+    assert _run_check(t)["films"][0]["outcome"] == expected
+    assert t._films["film"].code is None  # no stored fallback
+
+
+def test_run_films_add_terminal_and_catch_all():
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("no-job", dict.fromkeys(JASNA_STEPS, "done"))
+    t.add("no-outcome", {RESTORE: "done"})
+    t.finish("no-outcome", ASR, "skipped", 1)
+    t.finish("no-outcome", TRANSLATE, "skipped", 2)
+    t.add("internal", {RESTORE: "done"})
+    t.settle_subs("internal", "skipped", 3, code="restore_failed")
+    assert all(
+        r["outcome"] == "skipped:other" and r["finished_at"] == 42
+        for r in _run_check(t)["films"]
+    )
+
+
+@pytest.mark.parametrize("early", ["skipped:no_exe", "skipped:cancelled"])
+@pytest.mark.parametrize("restore", ["done", "failed"])
+def test_run_films_early_settle_restore_atomic_and_histogram(early, restore):
+    seen = []
+    t = FilmTracker(
+        JASNA_STEPS,
+        wall_clock=lambda: (
+            seen.append([s.state for s in t._films["film"].steps.values()]) or 42
+        ),
+    )
+    t.add("film", {})
+    t.settle_subs("film", "skipped", 1, code=early)
+    assert _run_check(t, "open")["films"][0]["finished_at"] is None
+    assert seen == []
+    if restore == "failed":
+        t.fail_restore("film", 2, "restore_failed")
+    else:
+        t.finish("film", RESTORE, "done", 2)
+    assert seen == [[restore, "skipped", "skipped"]]
+    row = _run_check(t)["films"][0]
+    assert row["outcome"] == ("restore_failed" if restore == "failed" else early)
+    assert row["finished_at"] == 42
+    assert t._films["film"].code == early
+
+
+def test_run_films_atomic_restore_failure_unsettled():
+    seen = []
+    t = FilmTracker(
+        JASNA_STEPS,
+        wall_clock=lambda: (
+            seen.append(tuple(s.state for s in t._films["film"].steps.values())) or 42
+        ),
+    )
+    t.add("film", {})
+    t.fail_restore("film", 2, "restore_failed")
+    assert seen == [("failed", "skipped", "skipped")]
+    assert _run_check(t)["films"][0]["outcome"] == "restore_failed"
+
+
+@pytest.mark.parametrize("label", ["", " \t\n "])
+def test_run_films_resumed_blank_model_labels(tmp_path, label):
+    from taskpaw_v3.monitors.subs.checkpoint import CheckpointStore, SavedCue
+    from taskpaw_v3.tests.test_subs_translate import Harness, Spawner, _cues, good
+
+    cues = _cues(3)
+    store = CheckpointStore(tmp_path)
+    assert store.save(
+        store.key(cues),
+        "film",
+        [SavedCue(zh="saved", by=label)] * 2
+        + [SavedCue(zh="saved", by=" model · host ")],
+    )
+    h = Harness(Spawner(good), checkpoint_dir=tmp_path)
+    try:
+        result = h.run(cues)
+        assert result.resumed == 3 and result.outcome == "translated"
+    finally:
+        h.close()
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {RESTORE: "done", ASR: "done"})
+    t.settle_subs("film", "completed", 1, models=result.by_model)
+    row = _run_check(t)["films"][0]
+    assert row["outcome"] == "translated"
+    assert row["models"] == [["model · host", 1]]
+    assert all(0 < len(name) <= 80 for name, _ in row["models"])
+
+
+@pytest.mark.parametrize("models", [None, 1, True, "bad", {"model": 3}])
+def test_settle_subs_malformed_models_container(models):
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {RESTORE: "done"})
+    t.settle_subs("film", "completed", 1, models=models)
+    assert t._films["film"].models == ()
+    row = _run_check(t)["films"][0]
+    assert row["models"] == []
+    assert (row["outcome"], row["finished_at"]) == ("translated", 42)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        1,
+        "ab",
+        (),
+        ("model",),
+        ("model", 1, 2),
+        {"model": 1, "other": 2},
+        (None, 1),
+        (123, 1),
+        ("model", "3"),
+        ("model", None),
+        ("model", 1.5),
+        ("model", True),
+        ("model", False),
+        ("model", -1),
+    ],
+)
+def test_settle_subs_malformed_model_entries(bad):
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {RESTORE: "done"})
+    t.settle_subs(
+        "film",
+        "completed",
+        1,
+        models=[("valid", 2), bad, ["valid", 3], ("zero", 0)],
+    )
+    assert t._films["film"].models == (("valid", 5), ("zero", 0))
+    row = _run_check(t)["films"][0]
+    assert row["models"] == [["valid", 5], ["zero", 0]]
+    assert all(type(lines) is int and lines >= 0 for _, lines in row["models"])
+    assert (row["outcome"], row["finished_at"]) == ("translated", 42)
+
+
+@pytest.mark.parametrize("kept", ["3", True, False, -1, None, 1.5, 0, 2])
+def test_settle_subs_malformed_kept_ja(kept):
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {RESTORE: "done"})
+    t.settle_subs("film", "completed", 1, kept_ja=kept)
+    expected = 2 if type(kept) is int and kept == 2 else 0
+    assert type(t._films["film"].kept_ja) is int
+    assert t._films["film"].kept_ja == expected
+    row = _run_check(t)["films"][0]
+    assert type(row["kept_ja"]) is int and row["kept_ja"] == expected
+    assert row["outcome"] == ("partial" if expected else "translated")
+    assert row["finished_at"] == 42
+
+
+def test_run_films_models_duration_and_legacy_keys():
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    t.add("film", {})
+    t.start("film", RESTORE, 1)
+    t.finish("film", RESTORE, "done", 11)
+    t.start("film", ASR, 11)
+    t.finish("film", ASR, "done", 21)
+    t.activate("film", TRANSLATE, 21)
+    models = [("x" * 100, 20), ("x" * 40 + "y" * 20 + "x" * 40, 30)] + [
+        (f"m{i}", i) for i in range(12)
+    ]
+    t.settle_subs("film", "completed", 31, models=models, translate_s=99.5)
+    row = _run_check(t)["films"][0]
+    assert row["duration_s"] == 119.5
+    assert len(row["models"]) == 8
+    assert row["models"][0] == ["x" * 38 + " … " + "x" * 39, 50]
+    assert [m[1] for m in row["models"]] == [50, 11, 10, 9, 8, 7, 6, 5]
+    assert not row["restored_before"]
+    assert set(row) == {
+        "name",
+        "restore",
+        "restored_before",
+        "asr",
+        "translate",
+        "percent",
+        "outcome",
+        "kept_ja",
+        "models",
+        "duration_s",
+        "finished_at",
+    }
+    keys = {"name", "steps", "status", "percent", "eta_s", "duration_s"}
+    assert set(t.view(NO, 32)["films"][0]) == keys
+    assert set(t.page(1, 10)["films"][0]) == keys
+    t.add("prior", {RESTORE: "done"})
+    t.activate("prior", TRANSLATE, 40)
+    t.settle_subs("prior", "completed", 50)
+    prior = _run_check(t)["films"][0]
+    assert prior["restored_before"] and prior["duration_s"] == 10
+
+
+def test_run_films_order_focus_histogram_and_read_only(monkeypatch):
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    for n in ("pending", "queued", "active", "waiting", "focus"):
+        t.add(
+            n,
+            {RESTORE: "done", ASR: "done"}
+            if n == "queued"
+            else {RESTORE: "done"}
+            if n == "active"
+            else {},
+        )
+    t.start("queued", TRANSLATE, 1)
+    codes = [
+        "translated",
+        "partial",
+        "has_subs",
+        "skipped:subtitle_exists",
+        "no_speech",
+        "skipped:no_exe",
+        "asr_failed",
+        "failed",
+        "restore_failed",
+    ]
+    for i, code in enumerate(codes):
+        t.add(code, {RESTORE: "done"} if code != "restore_failed" else {})
+        if code == "restore_failed":
+            t.fail_restore(code, 10 + i, code)
+        else:
+            t.settle_subs(code, "completed", 10 + i, code=code)
+    t.view(
+        LiveFacts(
+            active={RESTORE: "focus", ASR: "active"},
+            waiting=("waiting", RESTORE),
+            numbers={RESTORE: {"percent": 23}},
+        ),
+        20,
+    )
+    records = repr(t._films), t._wait, repr(t._last_live)
+    monkeypatch.setattr(t, "observe", lambda *a: pytest.fail("read observed"))
+    opened = _run_check(t, "open")
+    assert [r["name"] for r in opened["films"]] == [
+        "focus",
+        "active",
+        "waiting",
+        "queued",
+        "pending",
+    ]
+    assert opened["focus"] == "focus" and opened["films"][0]["percent"] == 23
+    assert all(
+        r["outcome"] is None and r["duration_s"] is None for r in opened["films"]
+    )
+    done = _run_check(t, "done", 1, 2)
+    rows = [
+        r
+        for p in range(1, done["pages"] + 1)
+        for r in _run_check(t, "done", p, 2)["films"]
+    ]
+    assert [r["outcome"] for r in rows] == list(reversed(codes))
+
+    def bucket(code):
+        if code == "skipped:subtitle_exists":
+            return "has_subs"
+        if code == "no_speech" or code.startswith("skipped:"):
+            return "untranslated"
+        if code == "asr_failed":
+            return "failed"
+        return code
+
+    assert done["totals"] == dict(
+        collections.Counter(bucket(r["outcome"]) for r in rows)
+    )
+    assert _run_check(t, "all", 1, 50)["films"] == opened["films"] + rows
+    assert (repr(t._films), t._wait, repr(t._last_live)) == records
+    opened["films"][0]["models"].append(["mutated", 1])
+    assert _run_check(t, "open")["films"][0]["models"] == []
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_run_films_terminal_focus_excluded(stale):
+    t = FilmTracker(JASNA_STEPS)
+    t.add("film", {})
+    if stale:
+        t.view(LiveFacts(active={RESTORE: "film"}), 1)
+    t.fail_restore("film", 2, "restore_failed")
+    assert _run_check(t, "open")["films"] == []
+    assert _run_check(t, "open")["focus"] == "film"
+
+
+@pytest.mark.parametrize("bad", [None, True, False, "2", 2.5, [], {}, -1, 0])
+def test_run_films_totality_clamps_run(bad):
+    t = FilmTracker(JASNA_STEPS)
+    for i in range(60):
+        t.add(str(i), {})
+    result = _run_check(t, bad, bad, bad)
+    assert result["filter"] == "done" and result["page"] == 1
+    assert result["size"] == (1 if type(bad) is int else 10)
+    assert result["run"] == t.page(1, 10)["run"]
+    assert result["run"] != FilmTracker(JASNA_STEPS).run_films("all", 1, 10)["run"]
+    assert _run_check(t, "all", 999, 99)["page"] == 2
+    assert _run_check(t, "all", 999, 99)["size"] == 50
+
+
+def test_run_films_1000_slice_first(monkeypatch):
+    t = FilmTracker(JASNA_STEPS)
+    for i in range(1000):
+        t.add(f"film-{i}" + "x" * 220, {})
+    built = []
+    original = t._run_row
+
+    def row(f, *args):
+        built.append(f.name)
+        return original(f, *args)
+
+    monkeypatch.setattr(t, "_run_row", row)
+    result = _run_check(t, "all", 100, 10)
+    assert result["total"] == 1000 and result["pages"] == 100
+    assert len(built) == 10 and built[0].startswith("film-990")
+    assert len(result["focus"]) <= 200
+    assert all(len(r["name"]) <= 200 for r in result["films"])
+
+
+def test_run_films_waiting_focus_precedes_active_and_done_ties_use_plan_order():
+    t = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    for name in ("first", "second", "translating", "waiting"):
+        t.add(name, {RESTORE: "done", ASR: "done"} if name == "translating" else {})
+    for name in ("second", "first"):
+        t.fail_restore(name, 2, "restore_failed")
+    t.view(
+        LiveFacts(active={TRANSLATE: "translating"}, waiting=("waiting", RESTORE)), 3
+    )
+    assert [r["name"] for r in _run_check(t, "open")["films"]] == [
+        "waiting",
+        "translating",
+    ]
+    assert [r["name"] for r in _run_check(t)["films"]] == ["first", "second"]
+
+
+def test_run_films_terminal_hook_observes_assigned_facts():
+    seen = []
+    t = FilmTracker(
+        JASNA_STEPS,
+        wall_clock=lambda: (
+            seen.append(
+                (
+                    t._films["film"].code,
+                    t._films["film"].kept_ja,
+                    t._films["film"].models,
+                    t._films["film"].translate_s,
+                )
+            )
+            or 42
+        ),
+    )
+    t.add("film", {RESTORE: "done"})
+    t.settle_subs(
+        "film",
+        "completed",
+        1,
+        code="partial",
+        kept_ja=2,
+        models=(("model", 3),),
+        translate_s=4.5,
+    )
+    assert seen == [("partial", 2, (("model", 3),), 4.5)]

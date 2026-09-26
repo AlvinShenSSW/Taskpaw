@@ -185,6 +185,82 @@ def test_film_page_control_api_no_list_is_404(provider):
     assert response.json() == {"detail": "no film list"}
 
 
+def test_run_films_api_shape_defaults_clamps_network_absence():
+    from taskpaw_v3.monitors.subs.progress import JASNA_STEPS, FilmTracker
+
+    tracker = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
+    tracker.add("film", {})
+    tracker.fail_restore("film", 1, "restore_failed")
+    calls = []
+
+    def provider(name, filter, page, size):
+        calls.append((name, filter, page, size))
+        return tracker.run_films(filter, page, size)
+
+    client = TestClient(create_control_app(_cfg(), run_films_provider=provider))
+    path = "/control/monitors/run-films"
+    result = client.get(path, params={"name": "task/library"})
+    assert result.status_code == 200
+    assert result.json() == tracker.run_films("done", 1, 10)
+    assert calls == [("task/library", "done", 1, 10)]
+    assert set(result.json()) == {
+        "run",
+        "filter",
+        "total",
+        "size",
+        "page",
+        "pages",
+        "focus",
+        "counts",
+        "totals",
+        "films",
+    }
+    for filter in ("done", "open", "all"):
+        for size, expected in ((-1, 1), (99, 50)):
+            result = client.get(
+                path,
+                params={
+                    "name": "task/library",
+                    "filter": filter,
+                    "page": 99,
+                    "size": size,
+                },
+            )
+            assert result.status_code == 200
+            assert calls[-1] == ("task/library", filter, 99, expected)
+    net = TestClient(create_network_app(_cfg(), EventQueue("dev")))
+    assert net.get(path, params={"name": "task/library"}).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        {"name": ""},
+        {"name": " \t "},
+        *({"name": "task", "page": v} for v in ("x", "1.5", "true", 0, -1)),
+        *({"name": "task", "size": v} for v in ("x", "1.5", "false")),
+        *({"name": "task", "filter": v} for v in ("", "DONE", "other")),
+    ],
+)
+def test_run_films_api_invalid_400(params):
+    calls = []
+    client = TestClient(
+        create_control_app(_cfg(), run_films_provider=lambda *a: calls.append(a))
+    )
+    response = client.get("/control/monitors/run-films", params=params)
+    assert response.status_code == 400
+    assert set(response.json()) == {"detail"}
+    assert not calls
+
+
+@pytest.mark.parametrize("provider", [None, lambda *a: None])
+def test_run_films_api_404(provider):
+    client = TestClient(create_control_app(_cfg(), run_films_provider=provider))
+    response = client.get("/control/monitors/run-films", params={"name": "unknown"})
+    assert response.status_code == 404 and response.json() == {"detail": "no film list"}
+
+
 def test_ping_open_no_auth():
     from taskpaw_v3 import __version__
 

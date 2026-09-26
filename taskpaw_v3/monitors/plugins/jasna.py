@@ -145,6 +145,7 @@ from taskpaw_v3.monitors.subs.progress import (
     parse_eta,
     progress_view,
     read_film_page,
+    read_run_films,
 )
 from taskpaw_v3.monitors.subs.srt import Cue, SrtError
 from taskpaw_v3.monitors.subs.translate import (
@@ -2269,7 +2270,14 @@ class JasnaInstance(MonitorInstance):
         self._consecutive_failures = 0
         name = self._current.name if self._current is not None else None
         if name is not None:  # #189: the restore's terminal mark (N1)
-            self._tracker.finish(name, RESTORE, "done", time.monotonic())
+            code = None
+            if name not in self._jobs:
+                code = (
+                    "skipped:planning_failed"
+                    if self._subs_disabled == "planning failed"
+                    else "has_subs"
+                )
+            self._tracker.finish(name, RESTORE, "done", time.monotonic(), code=code)
         if self._unet_retry_pending:
             # The plain relaunch after a unet-4x failure worked → unet-4x is
             # unavailable for this tier in this run (AC 4).
@@ -2396,8 +2404,7 @@ class JasnaInstance(MonitorInstance):
         """#189: right after a `_failed` bump, before any emit (M1) — the
         restore's terminal mark (N1) and the film's subtitle steps skipped."""
         now = time.monotonic()
-        self._tracker.finish(name, RESTORE, "failed", now)
-        self._tracker.settle_subs(name, "skipped", now)
+        self._tracker.fail_restore(name, now, "restore_failed")
 
     def _advance(self, emit: EventEmitter) -> None:
         """Never under `_launch_lock`; reached only through `_dispatch()`."""
@@ -2585,6 +2592,9 @@ class JasnaInstance(MonitorInstance):
         emit: EventEmitter,
         *,
         step: Optional[str] = None,
+        kept_ja: int = 0,
+        models: tuple[tuple[str, int], ...] = (),
+        translate_s: Optional[float] = None,
     ) -> None:
         """The ONE place a job becomes terminal (callers hold `_launch_lock`).
         No-op when it already is; 3 consecutive failures → `_disable_subs`."""
@@ -2631,7 +2641,37 @@ class JasnaInstance(MonitorInstance):
                 self._subs_consecutive_failures = 0
         # #189: the subtitle steps only — a restore is never touched (N1) —
         # and before `_disable_subs` can emit (M1).
-        self._tracker.settle_subs(job_id, terminal, time.monotonic())
+        if terminal == "completed":
+            code = (
+                "no_speech"
+                if detail == "no speech"
+                else "partial"
+                if kept_ja
+                else "translated"
+            )
+        elif terminal == "failed":
+            code = "asr_failed" if step == "asr" else "failed"
+        else:
+            code = {
+                "restore_failed": "restore_failed",
+                "no_llm_key": "skipped:no_llm_key",
+                "translation_paused": "skipped:translation_paused",
+                SUBTITLE_EXISTS: "skipped:subtitle_exists",
+                TRANSCRIPT_EXISTS: "skipped:transcript_exists",
+                SUBTITLE_UNREADABLE: "skipped:unreadable",
+                "unstable": "skipped:unstable",
+                "cancelled": "skipped:cancelled",
+                "no_exe": "skipped:no_exe",
+            }.get(detail, "skipped:other")
+        self._tracker.settle_subs(
+            job_id,
+            terminal,
+            time.monotonic(),
+            code=code,
+            kept_ja=kept_ja,
+            models=models,
+            translate_s=translate_s,
+        )
         if (
             self._subs_consecutive_failures >= _SUBS_DISABLE_AFTER
             and self._subs_disabled is None
@@ -2640,14 +2680,31 @@ class JasnaInstance(MonitorInstance):
                 f"{_SUBS_DISABLE_AFTER} consecutive subtitle failures", emit
             )
 
-    def _settle_completed(self, job: SubsJob, detail: str, emit: EventEmitter) -> None:
+    def _settle_completed(
+        self,
+        job: SubsJob,
+        detail: str,
+        emit: EventEmitter,
+        *,
+        kept_ja: int = 0,
+        models: tuple[tuple[str, int], ...] = (),
+        translate_s: Optional[float] = None,
+    ) -> None:
         """Under `_launch_lock`, right after `job`'s zh was published: settle it
         `completed` and delete its `.ja.srt` (#187). The transcript is only the
         checkpoint a later Start resumes an unfinished translation from, so
         every other terminal path keeps it. The delete is a single unlink — the
         same class of work as the publish's `os.replace` (D9); a failure is
         logged and never fails the job or raises."""
-        self._settle(job.job_id, "completed", detail, emit)
+        self._settle(
+            job.job_id,
+            "completed",
+            detail,
+            emit,
+            kept_ja=kept_ja,
+            models=models,
+            translate_s=translate_s,
+        )
         if self._settled.get(job.job_id, ("", ""))[0] != "completed":
             return
         err = job.discard_ja()
@@ -2676,13 +2733,20 @@ class JasnaInstance(MonitorInstance):
             ],
         )
 
-    def _skip_existing(self, job: SubsJob, reason: str, emit: EventEmitter) -> None:
+    def _skip_existing(
+        self,
+        job: SubsJob,
+        reason: str,
+        emit: EventEmitter,
+        *,
+        translate_s: Optional[float] = None,
+    ) -> None:
         """#191 (under `_launch_lock`): settle `job` `skipped` because its
         subtitles exist (a re-check or a refused `.srt`: the `.ja.srt` goes
         only when THIS job published it in this run — AC6), its transcript
         appeared (a refused `.ja.srt`), or the output folder could not be read
         (one alert per run). One info line per file; never a failure."""
-        self._settle(job.job_id, "skipped", reason, emit)
+        self._settle(job.job_id, "skipped", reason, emit, translate_s=translate_s)
         if self._settled.get(job.job_id) != ("skipped", reason):
             return
         log.info("jasna %s: %s skipped (%s)", self.instance_id, job.job_id, reason)
@@ -3114,7 +3178,9 @@ class JasnaInstance(MonitorInstance):
             # run can still finish.
             self._settled[job.job_id] = ("failed", detail)
             self._subs_failed += 1
-            self._tracker.settle_subs(job.job_id, "failed", time.monotonic())
+            self._tracker.settle_subs(
+                job.job_id, "failed", time.monotonic(), code="failed"
+            )
         try:
             self._alert_job(job.job_id, detail, emit)
         except Exception:
@@ -3180,7 +3246,14 @@ class JasnaInstance(MonitorInstance):
                     if result.outcome == "translated":
                         res = job.publish_zh(result.zh_cues)  # D9: under the lock
                         if res.ok:
-                            self._settle_completed(job, "", emit)
+                            self._settle_completed(
+                                job,
+                                "",
+                                emit,
+                                kept_ja=result.kept_ja,
+                                models=result.by_model,
+                                translate_s=result.duration_s,
+                            )
                             # #192 AC3: the checkpoint goes only after the publish
                             translator.discard_checkpoint(result.checkpoint_key)
                             if result.kept_ja:  # AC9: the count, never the text
@@ -3192,18 +3265,47 @@ class JasnaInstance(MonitorInstance):
                                     result.kept_ja,
                                 )
                         elif res.kind == "exists":  # #191 AC6: never replaced
-                            self._skip_existing(job, SUBTITLE_EXISTS, emit)
+                            self._skip_existing(
+                                job,
+                                SUBTITLE_EXISTS,
+                                emit,
+                                translate_s=result.duration_s,
+                            )
                         else:
-                            self._settle(job.job_id, "failed", res.detail, emit)
+                            self._settle(
+                                job.job_id,
+                                "failed",
+                                res.detail,
+                                emit,
+                                translate_s=result.duration_s,
+                            )
                             self._alert_job(job.job_id, res.detail, emit)
                     elif result.outcome == "no_key":  # #192 AC10/G11: as avsubs
-                        self._settle(job.job_id, "skipped", "no_llm_key", emit)
+                        self._settle(
+                            job.job_id,
+                            "skipped",
+                            "no_llm_key",
+                            emit,
+                            translate_s=result.duration_s,
+                        )
                         self._alert_no_key(emit)
                     elif result.outcome == "paused":  # #192 AC8: streak neutral
-                        self._settle(job.job_id, "skipped", "translation_paused", emit)
+                        self._settle(
+                            job.job_id,
+                            "skipped",
+                            "translation_paused",
+                            emit,
+                            translate_s=result.duration_s,
+                        )
                         self._subs_paused += 1
                     else:
-                        self._settle(job.job_id, "failed", result.detail, emit)
+                        self._settle(
+                            job.job_id,
+                            "failed",
+                            result.detail,
+                            emit,
+                            translate_s=result.duration_s,
+                        )
                         self._alert_job(job.job_id, result.detail, emit)
             self._run_deferred()
             self._dispatch(emit)
@@ -3315,6 +3417,12 @@ class JasnaInstance(MonitorInstance):
         if not self._cfg.av_translate:
             return None
         return read_film_page(tracker, page, size)
+
+    def run_films(self, filter: object, page: object, size: object) -> dict | None:
+        tracker = self._tracker
+        if not self._cfg.av_translate:
+            return None
+        return read_run_films(tracker, filter, page, size)
 
     def _progress_view(self) -> dict:
         """#189: the per-film stepper (`film`, `steps`, `films`, `films_more`
