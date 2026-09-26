@@ -198,6 +198,8 @@ class TranslateResult:
     fallback: int = 0  # cues translated by a provider other than chain[0]
     kept_ja: int = 0  # exhausted cues published with their Japanese text
     checkpoint_key: str = ""
+    by_model: tuple[tuple[str, int], ...] = ()
+    duration_s: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -848,18 +850,25 @@ class Translator:
         if self._cancel.is_set():
             raise _Cancelled
         self._log_start(film, None)
+        by_model: dict[str, int] = {}
         if result.outcome == "translated":
-            by_model: dict[str, int] = {}
             for st in film.states:
                 if st.by is not None and st.zh is not None and not st.blank:
-                    by_model[st.by] = by_model.get(st.by, 0) + 1
+                    label = bounded(st.by, MODEL_LABEL_CHARS)
+                    by_model[label] = by_model.get(label, 0) + 1
+        result = replace(
+            result,
+            by_model=tuple(by_model.items()),
+            duration_s=max(0.0, self._clock() - film.started_at),
+        )
+        if result.outcome == "translated":
             self._record(
                 "translate.finished",
                 film,
                 lines=len(result.zh_cues),
                 by_model=by_model,
                 kept_ja=result.kept_ja,
-                duration=max(0.0, self._clock() - film.started_at),
+                duration=result.duration_s,
             )
         elif result.outcome == "paused":
             self._record("translate.paused", film, minutes=120)

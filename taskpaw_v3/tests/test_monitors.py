@@ -264,6 +264,39 @@ def test_supervisor_film_page_unknown_stopped_base_and_raising(monkeypatch):
     assert sup.film_page("films", None, 10) is None
 
 
+def test_supervisor_run_films_unknown_stopped_base_and_unlocked(monkeypatch):
+    sup = Supervisor(lambda *a: None)
+    assert sup.run_films("unknown", "done", 1, 10) is None
+    sup.register(_FakePlugin(lambda emit: MonitorStatus()), _FakeConfig(name="films"))
+    inst = sup._monitors["films"].instance
+    assert inst.run_films("done", 1, 10) is None
+    assert sup.run_films("films", "done", 1, 10) is None
+
+    def read(filter, page, size):
+        assert sup._lock.acquire(blocking=False)
+        sup._lock.release()
+        return {"filter": filter, "page": page, "size": size}
+
+    monkeypatch.setattr(sup, "_lock", threading.Lock())
+    monkeypatch.setattr(inst, "run_films", read)
+    assert sup.run_films("films", "open", 2, 10) == {
+        "filter": "open",
+        "page": 2,
+        "size": 10,
+    }
+    sup.stop()
+    assert sup.run_films("films", "open", 2, 10) is None
+    sup._monitors["films"].stop.clear()
+
+    def broken(*a):
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(inst, "run_films", broken)
+    assert sup.run_films("films", "done", 1, 10) is None
+    sup.unregister("films")
+    assert sup.run_films("films", "done", 1, 10) is None
+
+
 def test_supervisor_emit_throttle_and_dedupe():
     sink = []
     clock = [0.0]

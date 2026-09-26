@@ -294,6 +294,9 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
         def film_page(self, instance_id, page, size):
             return None
 
+        def run_films(self, instance_id, filter, page, size):
+            return None
+
     class _FakeServer:
         def __init__(self, config):
             self.should_exit = False
@@ -324,6 +327,7 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
     try:
         launcher.run_agent(_llm_cfg(), shutdown=shutdown, block=False)
         assert control_kwargs.get("films_provider") == supervisor.film_page
+        assert control_kwargs.get("run_films_provider") == supervisor.run_films
         s = started["settings"]
         assert (s.model, s.api_key, s.key_source) == (
             "cfg/model",

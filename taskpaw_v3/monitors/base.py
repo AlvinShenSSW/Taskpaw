@@ -103,6 +103,10 @@ class MonitorInstance(abc.ABC):
         """Optional local film list; monitors without one return None."""
         return None
 
+    def run_films(self, filter: object, page: object, size: object) -> dict | None:
+        """Optional local current-run results; None without a supported list."""
+        return None
+
     def stop(self, timeout: float = 5.0) -> None:
         """Release any owned resources (subprocess/socket/file watcher/tail).
         Default no-op; override when the instance owns something. Called by the

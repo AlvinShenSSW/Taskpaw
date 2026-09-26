@@ -2748,6 +2748,57 @@ def test_tasklog_deferred_before_any_call_has_null_model():
     tr.cancel()
 
 
+def test_run_films_translation_result_matches_log(harness_factory, tmp_path):
+    from taskpaw_v3.monitors.subs.checkpoint import SavedCue
+
+    h = harness_factory(Spawner(good), checkpoint_dir=tmp_path)
+    cues = _cues(3)
+    h.tr._store.save(
+        h.tr._store.key(cues),
+        "a",
+        [
+            SavedCue(zh="saved", by="x" * 100),
+            SavedCue(zh="saved", by="x" * 40 + "y" * 20 + "x" * 40),
+            SavedCue(zh="saved", by="another"),
+        ],
+    )
+    result = h.run(cues)
+    data = _tasklog("translate.finished")[0]["data"]
+    assert result.resumed == 3
+    assert dict(result.by_model) == data["by_model"]
+    assert sorted(dict(result.by_model).values()) == [1, 2]
+    assert all(len(label) <= 80 for label, _ in result.by_model)
+    assert result.duration_s == data["duration"]
+
+
+@pytest.mark.parametrize("outcome", ["translated", "paused", "no_key", "failed"])
+def test_run_films_finish_clock_once_and_only_translated_models(outcome):
+    reads = []
+    tr = Translator(
+        RUN, name="t", chain_fn=lambda: [GROK], clock=lambda: reads.append(7.5) or 7.5
+    )
+    req = TranslateRequest(RUN, "film", _cues(1))
+    tr.submit(req)
+    film = tr._dequeue(tr._requests.get_nowait())
+    film.states[0].by = "model"
+    film.states[0].zh = "translated"
+    film.started_at = 2
+    result = TranslateResult(RUN, "film", outcome, req.cues, "", 1, 2, 3, "checkpoint")
+    assert result.by_model == () and result.duration_s is None
+    reads.clear()
+    tr._finish(film, result)
+    got = tr.results.get_nowait()
+    assert reads == [7.5]
+    assert got.duration_s == 5.5
+    assert got.by_model == ((("model", 1),) if outcome == "translated" else ())
+    if outcome == "translated":
+        data = _tasklog("translate.finished")[0]["data"]
+        assert data["duration"] == got.duration_s and data["by_model"] == dict(
+            got.by_model
+        )
+    tr.cancel()
+
+
 @pytest.mark.parametrize("status", [400, 422])
 def test_thinking_fallback_two_occurrences_shared_with_probe(
     harness_factory, caplog, status

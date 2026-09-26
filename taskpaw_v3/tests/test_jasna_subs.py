@@ -3384,3 +3384,237 @@ def test_tasklog_asr_gpu_acquired_at_spawn(tmp_path, monkeypatch):
     assert len(_tasklog("task.gpu_acquired")) == len(_tasklog("asr.started")) == 1
     assert h.translators[0].kw["task_type"] == "jasna"
     h.inst.stop()
+
+
+def _run_row200(h, expected):
+    page = h.inst.run_films("done", 1, 10)
+    assert page["counts"] == {"done": 1, "open": 0, "all": 1}
+    assert sum(page["totals"].values()) == 1
+    row = page["films"][0]
+    assert row["outcome"] == expected and row["finished_at"] is not None
+    return row
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("translated", "translated"),
+        ("partial", "partial"),
+        ("paused", "skipped:translation_paused"),
+        ("no_key", "skipped:no_llm_key"),
+        ("failed", "failed"),
+        ("publish_failed", "failed"),
+        ("subtitle_exists", "skipped:subtitle_exists"),
+    ],
+)
+def test_run_films_real_translation_result_paths(tmp_path, monkeypatch, case, expected):
+    from dataclasses import replace
+
+    h = _setup(tmp_path, monkeypatch, restored=("film.mp4",), ja=("film.mp4",))
+    h.inst.start(h.emit)
+    try:
+        tr = h.translators[0]
+        tr.answer(
+            "film.mp4",
+            outcome=case if case in ("paused", "no_key", "failed") else "translated",
+            kept_ja=2 if case == "partial" else 0,
+        )
+        result = tr.results.get_nowait()
+        tr.results.put(replace(result, by_model=(("model · host", 3),), duration_s=7.5))
+        if case == "subtitle_exists":
+            _zh(h, "film.mp4").write_text(SRT_ZH, encoding="utf-8")
+        if case == "publish_failed":
+            monkeypatch.setattr(
+                h.inst._jobs["film.mp4"],
+                "publish_zh",
+                lambda *a: PublishResult("error", "synthetic failure"),
+            )
+        h.inst.check(h.emit)
+        row = _run_row200(h, expected)
+        if case in ("translated", "partial"):
+            assert row["models"] == [["model · host", 3]]
+            assert row["duration_s"] == 7.5
+            assert row["kept_ja"] == (2 if case == "partial" else 0)
+        else:
+            assert row["models"] == []
+    finally:
+        h.inst.stop()
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("no_speech", "no_speech"),
+        ("asr_failed", "asr_failed"),
+        ("unstable", "skipped:unstable"),
+        ("transcript_exists", "skipped:transcript_exists"),
+        ("fence", "failed"),
+    ],
+)
+def test_run_films_real_asr_paths(tmp_path, monkeypatch, case, expected):
+    h = _setup(tmp_path, monkeypatch, restored=("film.mp4",))
+    h.inst.start(h.emit)
+    try:
+        if case == "fence":
+
+            def broken():
+                raise RuntimeError("synthetic failure")
+
+            monkeypatch.setattr(h.inst._subs_job, "poll_asr", broken)
+            # Force the defensive fallback when _settle itself raises.
+            monkeypatch.setattr(h.inst, "_settle", lambda *a, **k: broken())
+            h.spawner.last.rc = 0
+        elif case == "asr_failed":
+            h.spawner.last.finish(rc=1)
+            h.inst.check(h.emit)
+            h.spawner.last.finish(rc=1)
+        else:
+            if case == "unstable":
+                h.inst._jobs["film.mp4"].media.write_bytes(b"synthetic changed media")
+            if case == "transcript_exists":
+                _ja(h, "film.mp4").write_text(SRT_JA, encoding="utf-8")
+            h.spawner.last.finish(
+                state="empty" if case == "no_speech" else "done",
+                text="" if case == "no_speech" else SRT_JA,
+            )
+        h.inst.check(h.emit)
+        _run_row200(h, expected)
+    finally:
+        h.inst.stop()
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("has_subs", "has_subs"),
+        ("planning_failed", "skipped:planning_failed"),
+        ("unreadable", "skipped:unreadable"),
+        ("unreadable_ja", "failed"),
+        ("translator_missing", "failed"),
+        ("no_key", "skipped:no_llm_key"),
+    ],
+)
+def test_run_films_real_planning_and_submit_paths(
+    tmp_path, monkeypatch, case, expected
+):
+    h = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=("film.mp4",),
+        zh=("film.mp4",) if case == "has_subs" else (),
+        ja=("film.mp4",) if case in ("unreadable_ja", "translator_missing") else (),
+        key=case != "no_key",
+    )
+    if case == "planning_failed":
+
+        def broken(*a):
+            raise OSError("synthetic listing failure")
+
+        monkeypatch.setattr(J, "plan_subs", broken)
+    h.inst.start(h.emit)
+    try:
+        if case == "unreadable":
+            monkeypatch.setattr(J, "list_names", lambda *a: None)
+        elif case == "unreadable_ja":
+            _ja(h, "film.mp4").write_text("invalid subtitle", encoding="utf-8")
+        elif case == "translator_missing":
+            h.inst._translator = None
+        h.inst.check(h.emit)
+        if case == "no_key":
+            h.spawner.last.finish()
+            h.inst.check(h.emit)
+        _run_row200(h, expected)
+    finally:
+        h.inst.stop()
+
+
+@pytest.mark.parametrize("early", ["no_exe", "cancelled"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_run_films_real_early_settle_then_restore(tmp_path, monkeypatch, early, fails):
+    h = _setup(
+        tmp_path, monkeypatch, pending=("film.mp4",), exe=early != "no_exe", rcs=[None]
+    )
+    h.inst.start(h.emit)
+    try:
+        if early == "cancelled":
+            h.inst._disable_subs("synthetic translator startup failure", h.emit)
+        assert h.inst.run_films("open", 1, 10)["films"][0]["finished_at"] is None
+        if fails:
+            h.inst._fail_current(h.emit, "synthetic restore failure")
+        else:
+            h.launcher.procs[0]._rc = 0
+            h.inst.check(h.emit)
+        page = h.inst.run_films("done", 1, 10)
+        _run_row200(h, "restore_failed" if fails else f"skipped:{early}")
+        assert page["totals"]["restore_failed" if fails else "untranslated"] == 1
+    finally:
+        h.inst.stop()
+
+
+def test_run_films_read_boundary_no_live_and_av_off(tmp_path, monkeypatch, caplog):
+    h = _setup(tmp_path, monkeypatch, restored=("film.mp4",))
+    h.inst.start(h.emit)
+    h.inst.check(h.emit)
+    try:
+
+        def forbidden(*a):
+            raise AssertionError("live source read")
+
+        with monkeypatch.context() as m:
+            m.setattr(h.inst._subs_job, "progress", forbidden)
+            m.setattr(h.inst._translator, "progress", forbidden)
+            assert h.inst.run_films("open", 1, 10)["total"] == 1
+        for _ in range(2):
+            monkeypatch.setattr(h.inst._tracker, "run_films", forbidden)
+            assert h.inst.run_films("done", 1, 10) is None
+        assert len([r for r in caplog.records if "run films" in r.message.lower()]) == 1
+        h.inst._cfg.av_translate = False
+        assert h.inst.run_films("all", 1, 10) is None
+    finally:
+        h.inst.stop()
+
+
+def test_run_films_internal_exit_after_success_is_other(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, pending=("film.mp4",))
+    original = h.inst._handle_success
+
+    def raised_after_success(emit):
+        original(emit)
+        raise RuntimeError("synthetic post-restore failure")
+
+    monkeypatch.setattr(h.inst, "_handle_success", raised_after_success)
+    h.inst.start(h.emit)
+    try:
+        h.inst.check(h.emit)
+        row = _run_row200(h, "skipped:other")
+        assert row["restore"] == "done"
+        assert h.inst._tracker._films["film.mp4"].code == "restore_failed"
+    finally:
+        h.inst.stop()
+
+
+def test_run_films_restore_failure_without_earlier_settle(tmp_path, monkeypatch):
+    h = _setup(tmp_path, monkeypatch, pending=("film.mp4",), rcs=[1, 1])
+    h.inst.start(h.emit)
+    try:
+        h.inst.check(h.emit)
+        h.inst.check(h.emit)
+        assert _run_row200(h, "restore_failed")["restore"] == "failed"
+    finally:
+        h.inst.stop()
+
+
+def test_run_films_avsubs_inherits_no_list(tmp_path):
+    from taskpaw_v3.monitors.plugins.avsubs import AvsubsConfig, AvsubsInstance
+
+    assert (
+        AvsubsInstance(
+            "subs",
+            AvsubsConfig(
+                name="subs",
+                avsubs_root_folder=str(tmp_path),
+                whisperjav_exe_path=str(tmp_path / "fake.exe"),
+            ),
+        ).run_films("all", 1, 10)
+        is None
+    )
