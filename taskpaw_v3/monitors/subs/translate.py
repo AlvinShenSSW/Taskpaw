@@ -1212,7 +1212,8 @@ class Translator:
         got = self._call(p, film, idx)
         if not isinstance(got, _Fail):
             self._done(film, p, idx, got)
-            p.clean_successes = p.clean_successes + 1 if len(idx) >= p.batch_size else 0
+            if len(idx) >= p.batch_size:
+                p.clean_successes += 1
             target = min(BATCH_SIZE, p.batch_size * 2)
             if (
                 p.clean_successes >= 3
@@ -1309,21 +1310,21 @@ class Translator:
             if fail is not None:
                 self._open(p, fail)
                 return False
-            persist = False
+            refused = 0
             for i, transient in failed:
                 if transient:
                     film.states[i].failed_by.add(p.label)
                 else:
                     film.states[i].refused_by.add(p.label)
-                    persist = True
-            log.info(
-                "subs-translate %s: %d line(s) refused by %s",
-                self._name,
-                len(failed),
-                p.label,
-            )
-            self._record("translate.refused", film, model=p.label, lines=len(failed))
-            if persist:
+                    refused += 1
+            if refused:
+                log.info(
+                    "subs-translate %s: %d line(s) refused by %s",
+                    self._name,
+                    refused,
+                    p.label,
+                )
+                self._record("translate.refused", film, model=p.label, lines=refused)
                 self._save(film)
         elif _shrinks_batch(trigger) and len(idx) > 1:
             p.shrinks[p.batch_size] = p.shrinks.get(p.batch_size, 0) + 1

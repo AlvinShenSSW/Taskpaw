@@ -2631,6 +2631,44 @@ def test_tasklog_refused_per_bisection(harness_factory):
     assert not _tasklog("translate.switched")
 
 
+@pytest.mark.parametrize("real_refusal", [False, True])
+def test_tasklog_refused_excludes_transient_leaves(
+    harness_factory, caplog, real_refusal
+):
+    def responds(req, worker):
+        if _is_probe(req):
+            return good(req, worker)
+        if len(_ids(req)) > 1:
+            return _ok("bad JSON", req)
+        cue = _ids(req)[0]
+        if cue == "1":
+            return _err("bad_response", req, message="finish_reason=length")
+        if cue == "2":
+            return down(req, worker)
+        if cue == "3":
+            return timeout(req, worker)
+        return forbid(req, worker) if real_refusal else good(req, worker)
+
+    h = harness_factory(Spawner(responds))
+    film = h.tr._dequeue(TranslateRequest(RUN, "film", _cues(4)))
+    p = h.tr._chain[0]
+    with caplog.at_level(logging.INFO):
+        assert h.tr._attempt(film, p, list(range(4)))
+    for state in film.states[:3]:
+        assert state.failed_by == {p.label}
+        assert state.refused_by == set()
+    assert film.states[3].refused_by == ({p.label} if real_refusal else set())
+    rows = _tasklog("translate.refused")
+    lines = [r.message for r in caplog.records if "refused by" in r.message]
+    if real_refusal:
+        assert len(rows) == 1 and rows[0]["data"]["lines"] == 1
+        assert rows[0]["data"]["model"] == p.label
+        assert lines == [f"subs-translate t: 1 line(s) refused by {p.label}"]
+    else:
+        assert rows == []
+        assert lines == []
+
+
 def test_tasklog_provider_recovery_resume(harness_factory):
     state = {"probes": 0}
 
@@ -2929,15 +2967,45 @@ def test_thinking_regrow_excludes_unclean_and_resets_counters(harness_factory, f
     )
     size = 5 if failure == "shrink" else 10
     assert p.batch_size == size
+    # AC6: short batches neither count nor reset the two prior clean successes.
+    assert p.clean_successes == (2 if failure == "short" else 0)
     sp.responder = good
     for worker in sp.workers:
         worker.responder = good
     assert h.run(_cues(size), "last.mp4").outcome == "translated"
+    if failure == "short":
+        assert p.batch_size == size * 2
+        assert p.clean_successes == 0
+        return
     assert p.batch_size == size
     assert h.run(_cues(size), "next.mp4").outcome == "translated"
     assert p.batch_size == size
     assert h.run(_cues(size), "grow.mp4").outcome == "translated"
     assert p.batch_size == size * 2
+
+
+def test_thinking_regrow_across_short_film_ends_after_shrink(harness_factory):
+    sp = Spawner(
+        lambda req, worker: (
+            timeout(req, worker) if len(_ids(req)) > 20 else good(req, worker)
+        )
+    )
+    h = harness_factory(sp)
+    assert h.run(_cues(40), "shrink.mp4").outcome == "translated"
+    p = h.tr._chain[0]
+    assert p.batch_size == 20 and p.clean_successes == 0
+    assert p.shrinks == {40: 1}
+    sp.responder = good
+    for worker in sp.workers:
+        worker.responder = good
+    start = len(sp.requests)
+    assert h.run(_cues(50), "first.mp4").outcome == "translated"
+    assert [len(_ids(q)) for q in sp.requests[start:]] == [20, 20, 10]
+    assert p.batch_size == 20 and p.clean_successes == 2
+    start = len(sp.requests)
+    assert h.run(_cues(50), "second.mp4").outcome == "translated"
+    assert [len(_ids(q)) for q in sp.requests[start:]] == [20, 30]
+    assert p.batch_size == 40 and p.clean_successes == 0
 
 
 def test_thinking_parameter_resend_still_counts_clean(harness_factory):
