@@ -149,7 +149,9 @@ real `%APPDATA%`.
 | C9 | checkpoint read at submit | translate-only films queued in bulk | read at dequeue |
 | C10 | "5 consecutive failed batches open the breaker"; "split in halves once"; "2 h run end" | G1/G2/G3: as written they loop, block the queue or mass-skip | the probe decides after the schedule (AC5/AC6); defer instead of block, per-film 2 h cap (AC8) |
 
-**Accepted residual:** a provider's halved batch size (H8) never grows back within a run (cost
+**#201 update:** the recovery rule in `2026-09-26-201-thinking-off-design.md` supersedes the following batch-size residual: three clean full batches double the size (cap 40), except into a size that shrank twice in the run.
+
+**Accepted residual (superseded by #201):** a provider's halved batch size (H8) never grows back within a run (cost
 only). **Non-goals (OUT-OF-SCOPE):** re-translating published films or their kept-Japanese lines; parallel
 requests; streaming; sharing one film's checkpoint across instances (overlapping Jasna + AV 翻译 on the
 same film is unsupported — worst case lost progress, never corruption); env keys inherited by jasna.exe /

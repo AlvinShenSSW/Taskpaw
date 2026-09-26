@@ -508,7 +508,7 @@ def test_batch_shaping_and_success(harness_factory):
         assert req["timeout"] == 30
         assert req["api_base"] == "https://llm.example/v1" and req["model"] == "m/x"
         chars = sum(len(c.text) for c in batch)
-        assert req["max_tokens"] == min(4096, 64 + 8 * chars)
+        assert req["max_tokens"] == min(4096, max(1024, 64 + 8 * chars))
         assert req["id"].startswith("a.mp4#")
     assert len({req["id"] for req in reqs}) == 3  # unique request ids (D4)
     assert KEY not in json.dumps(reqs)
@@ -1194,6 +1194,22 @@ def test_h8_adaptive_batch_size_floor_is_5(harness_factory):
     assert r.outcome == "translated" and r.kept_ja == 0
     (p,) = h.tr._providers.values()
     assert p.batch_size == MIN_BATCH_SIZE
+
+
+def test_thinking_h8_proven_ceiling_never_regrows_a_size_that_shrank_twice(
+    harness_factory,
+):
+    sp = Spawner(
+        lambda req, w: timeout(req, w) if len(_ids(req)) > 20 else good(req, w)
+    )
+    h = harness_factory(sp)
+    assert h.run(_cues(1200)).outcome == "translated"
+    sizes = [len(_ids(q)) for q in sp.requests if not _is_probe(q)]
+    assert sizes.count(40) == 8  # two attempts, each with today's 3 scheduled retries
+    assert len(sp.requests) == 70
+    assert sum(h.clock.waits) == 260
+    (p,) = h.tr._providers.values()
+    assert p.batch_size == 20
 
 
 def test_a_length_cut_off_bisection_also_halves_the_batch(harness_factory):
@@ -2615,6 +2631,44 @@ def test_tasklog_refused_per_bisection(harness_factory):
     assert not _tasklog("translate.switched")
 
 
+@pytest.mark.parametrize("real_refusal", [False, True])
+def test_tasklog_refused_excludes_transient_leaves(
+    harness_factory, caplog, real_refusal
+):
+    def responds(req, worker):
+        if _is_probe(req):
+            return good(req, worker)
+        if len(_ids(req)) > 1:
+            return _ok("bad JSON", req)
+        cue = _ids(req)[0]
+        if cue == "1":
+            return _err("bad_response", req, message="finish_reason=length")
+        if cue == "2":
+            return down(req, worker)
+        if cue == "3":
+            return timeout(req, worker)
+        return forbid(req, worker) if real_refusal else good(req, worker)
+
+    h = harness_factory(Spawner(responds))
+    film = h.tr._dequeue(TranslateRequest(RUN, "film", _cues(4)))
+    p = h.tr._chain[0]
+    with caplog.at_level(logging.INFO):
+        assert h.tr._attempt(film, p, list(range(4)))
+    for state in film.states[:3]:
+        assert state.failed_by == {p.label}
+        assert state.refused_by == set()
+    assert film.states[3].refused_by == ({p.label} if real_refusal else set())
+    rows = _tasklog("translate.refused")
+    lines = [r.message for r in caplog.records if "refused by" in r.message]
+    if real_refusal:
+        assert len(rows) == 1 and rows[0]["data"]["lines"] == 1
+        assert rows[0]["data"]["model"] == p.label
+        assert lines == [f"subs-translate t: 1 line(s) refused by {p.label}"]
+    else:
+        assert rows == []
+        assert lines == []
+
+
 def test_tasklog_provider_recovery_resume(harness_factory):
     state = {"probes": 0}
 
@@ -2692,3 +2746,313 @@ def test_tasklog_deferred_before_any_call_has_null_model():
     assert _tasklog("translate.started")[0]["data"]["model"] is None
     assert len(_tasklog("translate.deferred")) == 1
     tr.cancel()
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_thinking_fallback_two_occurrences_shared_with_probe(
+    harness_factory, caplog, status
+):
+    sp = Spawner(
+        lambda req, w: (
+            _err("bad_response", req, status=status, message=f"HTTP {status}")
+            if req["thinking_off"]
+            else good(req, w)
+        )
+    )
+    h = harness_factory(sp, settings=replace(_settings(), thinking_off=True))
+    with caplog.at_level(logging.INFO):
+        assert h.run(_cues(40)).outcome == "translated"
+        p = h.tr._chain[0]
+        assert p.settings.thinking_off is True  # one occurrence is insufficient
+        assert h.tr._probe(p, cached=False) is None
+        assert p.settings.thinking_off is False
+        assert h.tr._probe(p, cached=False) is None
+    assert [(q["json_mode"], q["thinking_off"]) for q in sp.requests] == [
+        (True, True),
+        (True, False),
+        (True, True),
+        (True, False),
+        (True, False),
+    ]
+    assert sp.requests[0]["max_tokens"] >= 1024
+    assert all(q["max_tokens"] == 4096 for q in sp.requests[2:])
+    assert caplog.text.count("thinking parameter rejected; sending without it") == 1
+
+    # Republish the same fingerprint, then translate another film on the worker.
+    h.settings = replace(h.settings)
+    assert h.settings.thinking_off is True
+    request_count = len(sp.requests)
+    assert h.run(_cues(80), "next.mp4").outcome == "translated"
+    next_requests = sp.requests[request_count:]
+    assert next_requests
+    assert all(q["thinking_off"] is False for q in next_requests)
+    assert len(sp.workers) == 1
+
+
+def test_thinking_carried_success_resets_rejection_count(harness_factory):
+    def reject(req, w):
+        return _err("bad_response", req, status=400, message="HTTP 400")
+
+    sp = Spawner(
+        scripted(reject, "good", "good", reject, "good", reject, "good", "good")
+    )
+    h = harness_factory(sp, settings=replace(_settings(), thinking_off=True))
+    p = h.tr._refresh_chain()[0]
+    for expected in (True, True, True, False, False):
+        assert h.tr._probe(p, cached=False) is None
+        assert p.settings.thinking_off is expected
+    assert [q["thinking_off"] for q in sp.requests] == [
+        True,
+        False,
+        True,
+        True,
+        False,
+        True,
+        False,
+        False,
+    ]
+
+
+def test_thinking_rejects_both_converges_without_learning_from_json_step(
+    harness_factory,
+):
+    sp = Spawner(
+        lambda req, w: (
+            _err("bad_response", req, status=400, message="HTTP 400")
+            if req["json_mode"] or req["thinking_off"]
+            else good(req, w)
+        )
+    )
+    h = harness_factory(sp, settings=replace(_settings(), thinking_off=True))
+    p = h.tr._refresh_chain()[0]
+    for expected in (True, True, False):
+        assert h.tr._probe(p, cached=False) is None
+        assert p.settings.thinking_off is expected
+    assert [(q["json_mode"], q["thinking_off"]) for q in sp.requests] == [
+        (True, True),
+        (True, False),
+        (False, False),
+        (False, True),
+        (False, False),
+        (False, True),
+        (False, False),
+    ]
+
+
+@pytest.mark.parametrize("thinking", [True, False])
+def test_thinking_422_never_falls_back_on_json_step(harness_factory, thinking):
+    from taskpaw_v3.monitors.subs.translate import _Fail
+
+    sp = Spawner(
+        lambda req, w: _err("bad_response", req, status=422, message="HTTP 422")
+    )
+    h = harness_factory(sp, settings=replace(_settings(), thinking_off=thinking))
+    p = h.tr._refresh_chain()[0]
+    assert isinstance(h.tr._probe(p, cached=False), _Fail)
+    assert [(q["json_mode"], q["thinking_off"]) for q in sp.requests] == (
+        [(True, True), (True, False)] if thinking else [(True, False)]
+    )
+    assert p.settings.thinking_off is thinking and p.json_mode is True
+
+
+def test_thinking_toggle_refresh_resets_provider_state(harness_factory):
+    sp = Spawner(good)
+    h = harness_factory(sp)
+    assert h.run(_cues(40)).outcome == "translated"
+    old = h.tr._chain[0]
+    old.batch_size, old.json_mode, old.open_until = 5, False, 99999
+    h.settings = replace(h.settings, thinking_off=True)
+    assert h.run(_cues(40), "next.mp4").outcome == "translated"
+    new = h.tr._chain[0]
+    assert new is not old and new.label == old.label
+    assert old.retired and new.batch_size == 40 and new.json_mode
+    assert new.open_until is None and sp.requests[-1]["thinking_off"] is True
+    assert len(sp.workers) == 2
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "finish_reason=length",
+        "reply without content",
+        "invalid response",
+        "empty reply",
+        "HTTP 400",
+        "timeout",
+        "spawn: OSError",
+    ],
+)
+def test_thinking_failure_log_layout_bounded_and_no_content(
+    harness_factory, caplog, reason
+):
+    import re
+
+    sp = Spawner(lambda req, w: _err("bad_response", req, status=401, message=reason))
+    h = harness_factory(
+        sp, settings=_settings(base="https://userinfo:password@llm.example/v1")
+    )
+    p = h.tr._refresh_chain()[0]
+    with caplog.at_level(logging.INFO):
+        h.tr._send(p, probe_messages(), 4096, None)
+        h.tr._send(p, probe_messages(), 1024, "film")
+    lines = [r.message for r in caplog.records if "kind=" in r.message]
+    assert len(lines) == 2
+    for tag, line in zip(("probe", "batch"), lines):
+        assert re.fullmatch(
+            rf"subs-translate t: {tag} kind=bad_response status=401 latency_ms=\d+ reason={re.escape(reason)} \(m/x · llm.example\)",
+            line,
+        )
+        assert len(line.split("reason=")[1].split(" (")[0]) <= 80
+    for secret in (KEY, "userinfo", "password", PROBE_JA):
+        assert secret not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "content,reason",
+    [("REPLYMARKER", "invalid JSON"), ('{"wrong":"REPLYMARKER"}', "id set mismatch")],
+)
+def test_thinking_unusable_content_logs(harness_factory, caplog, content, reason):
+    sp = Spawner(lambda req, w: _ok(content, req))
+    h = harness_factory(sp)
+    film = h.tr._dequeue(TranslateRequest(RUN, "film", _cues(1, "CUEMARKER")))
+    p = h.tr._chain[0]
+    with caplog.at_level(logging.INFO):
+        h.tr._call(p, film, [0])
+        h.tr._probe(p, cached=False)
+    assert f"batch unusable reason={reason} ({L_DEFAULT})" in caplog.text
+    assert f"probe unusable reason=unusable probe reply ({L_DEFAULT})" in caplog.text
+    for secret in (KEY, "REPLYMARKER", "CUEMARKER", PROBE_JA):
+        assert secret not in caplog.text
+    assert all(
+        "reason=" not in r.message for r in caplog.records if "kind=ok" in r.message
+    )
+
+
+def test_thinking_regrow_three_clean_first_send_successes_and_cap(
+    harness_factory, caplog
+):
+    sp = Spawner(good)
+    h = harness_factory(sp)
+    p = h.tr._refresh_chain()[0]
+    p.batch_size = 5
+    with caplog.at_level(logging.INFO):
+        assert h.run(_cues(225)).outcome == "translated"
+    assert [len(_ids(q)) for q in sp.requests] == [5] * 3 + [10] * 3 + [20] * 3 + [
+        40
+    ] * 3
+    assert p.batch_size == 40
+    assert all(f"batch size now {n}" in caplog.text for n in (10, 20, 40))
+
+
+@pytest.mark.parametrize("failure", ["retry", "bisect", "short", "shrink"])
+def test_thinking_regrow_excludes_unclean_and_resets_counters(harness_factory, failure):
+    sp = Spawner(good)
+    h = harness_factory(sp)
+    p = h.tr._refresh_chain()[0]
+    p.batch_size = 10
+    assert h.run(_cues(20), "warm.mp4").outcome == "translated"  # two clean batches
+    if failure == "retry":
+        sp.responder = scripted(timeout, "good")
+    elif failure == "bisect":
+        sp.responder = scripted(lambda req, w: _ok("bad JSON", req), "good", "good")
+    elif failure == "shrink":
+        sp.responder = lambda req, w: (
+            timeout(req, w) if len(_ids(req)) > 5 else good(req, w)
+        )
+    for worker in sp.workers:
+        worker.responder = sp.responder
+    assert (
+        h.run(_cues(1 if failure == "short" else 10), "middle.mp4").outcome
+        == "translated"
+    )
+    size = 5 if failure == "shrink" else 10
+    assert p.batch_size == size
+    # AC6: short batches neither count nor reset the two prior clean successes.
+    assert p.clean_successes == (2 if failure == "short" else 0)
+    sp.responder = good
+    for worker in sp.workers:
+        worker.responder = good
+    assert h.run(_cues(size), "last.mp4").outcome == "translated"
+    if failure == "short":
+        assert p.batch_size == size * 2
+        assert p.clean_successes == 0
+        return
+    assert p.batch_size == size
+    assert h.run(_cues(size), "next.mp4").outcome == "translated"
+    assert p.batch_size == size
+    assert h.run(_cues(size), "grow.mp4").outcome == "translated"
+    assert p.batch_size == size * 2
+
+
+def test_thinking_regrow_across_short_film_ends_after_shrink(harness_factory):
+    sp = Spawner(
+        lambda req, worker: (
+            timeout(req, worker) if len(_ids(req)) > 20 else good(req, worker)
+        )
+    )
+    h = harness_factory(sp)
+    assert h.run(_cues(40), "shrink.mp4").outcome == "translated"
+    p = h.tr._chain[0]
+    assert p.batch_size == 20 and p.clean_successes == 0
+    assert p.shrinks == {40: 1}
+    sp.responder = good
+    for worker in sp.workers:
+        worker.responder = good
+    start = len(sp.requests)
+    assert h.run(_cues(50), "first.mp4").outcome == "translated"
+    assert [len(_ids(q)) for q in sp.requests[start:]] == [20, 20, 10]
+    assert p.batch_size == 20 and p.clean_successes == 2
+    start = len(sp.requests)
+    assert h.run(_cues(50), "second.mp4").outcome == "translated"
+    assert [len(_ids(q)) for q in sp.requests[start:]] == [20, 30]
+    assert p.batch_size == 40 and p.clean_successes == 0
+
+
+def test_thinking_parameter_resend_still_counts_clean(harness_factory):
+    sp = Spawner(
+        lambda req, w: (
+            _err("bad_response", req, status=400, message="HTTP 400")
+            if req["thinking_off"]
+            else good(req, w)
+        )
+    )
+    h = harness_factory(sp, settings=replace(_settings(), thinking_off=True))
+    p = h.tr._refresh_chain()[0]
+    p.batch_size = 5
+    assert h.run(_cues(15)).outcome == "translated"
+    assert p.batch_size == 10 and h.clock.waits == []
+
+
+def test_thinking_single_length_failed_by_not_persisted_or_leaf_retried(
+    harness_factory, tmp_path
+):
+    from taskpaw_v3.monitors.subs.translate import _Fail, _leaf_transient
+
+    def cut(req, w):
+        return _err("bad_response", req, message="finish_reason=length")
+
+    sp = Spawner(fail_when({"ja0"}, cut))
+    h = harness_factory(sp, checkpoint_dir=tmp_path)
+    film = h.tr._dequeue(TranslateRequest(RUN, "film", _cues(2)))
+    p = h.tr._chain[0]
+    assert h.tr._attempt(film, p, [0, 1])
+    assert film.states[0].failed_by == {p.label}
+    assert film.states[0].refused_by == set()
+    assert not _leaf_transient(_Fail("bad_response", "finish_reason=length"))
+    assert [_seq(q) for q in sp.requests] == ["1-2"] * 4 + ["P", "1", "2", "P"]
+    saved = CheckpointStore(tmp_path).load(film.key, 2)
+    assert saved is not None and saved[0].refused_by == () and saved[0].zh is None
+
+
+def test_thinking_spawn_reason_bounded_to_80(harness_factory, caplog):
+    def spawn(*args, **kw):
+        raise type("Synthetic" * 20, (OSError,), {})("SECRET_EXCEPTION_MARKER")
+
+    h = harness_factory(spawn)
+    p = h.tr._refresh_chain()[0]
+    with caplog.at_level(logging.INFO):
+        h.tr._probe(p, cached=False)
+    line = next(r.message for r in caplog.records if "reason=" in r.message)
+    reason = line.split("reason=")[1].split(" (")[0]
+    assert reason.startswith("spawn: ") and len(reason) == 80
+    assert "SECRET_EXCEPTION_MARKER" not in caplog.text

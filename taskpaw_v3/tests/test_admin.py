@@ -1085,12 +1085,15 @@ def test_live_and_non_live_config_partition():
         "llm_api_base",
         "llm_model",
         "llm_api_key",
+        "llm_thinking_off",
         "llm_fallback1_api_base",
         "llm_fallback1_model",
         "llm_fallback1_api_key",
+        "llm_fallback1_thinking_off",
         "llm_fallback2_api_base",
         "llm_fallback2_model",
         "llm_fallback2_api_key",
+        "llm_fallback2_thinking_off",
         "llm_failover",
     }
     assert MonitorAdmin._NON_LIVE_CONFIG == (
@@ -1332,3 +1335,119 @@ def test_llm_test_fallback_errors_never_carry_a_key(tmp_path, monkeypatch):
     res = admin.llm_test({}, "fallback1")
     assert res == {"ok": False, "error": "auth: authentication failed (HTTP 401)"}
     assert stored not in str(res)
+
+
+@pytest.mark.parametrize("prefix", ["llm_", "llm_fallback1_", "llm_fallback2_"])
+def test_thinking_patch_live_persistence(tmp_path, prefix):
+    from taskpaw_v3.core.llm import get_llm_chain
+
+    cfg = _agent_config(
+        **{prefix + "api_base": "http://localhost/v1", prefix + "model": "m"}
+    )
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    client = TestClient(create_control_app(cfg, admin=admin))
+    field = prefix + "thinking_off"
+    for value in (True, False, None):
+        response = client.patch("/control/config", json={field: value})
+        assert response.status_code == 200
+        assert response.json()["restart_required"] is False
+        assert getattr(load_yaml(AgentConfig, path), field) is value
+        assert getattr(cfg, field) is value
+        assert get_llm_chain()[0].thinking_off is (value is True)
+
+
+@pytest.mark.parametrize(
+    "prefix,slot",
+    [
+        ("llm_", "primary"),
+        ("llm_fallback1_", "fallback1"),
+        ("llm_fallback2_", "fallback2"),
+    ],
+)
+def test_thinking_test_null_is_auto(tmp_path, monkeypatch, prefix, slot):
+    import taskpaw_v3.agent.server.admin as adminmod
+
+    field = prefix + "thinking_off"
+    cfg = _agent_config(
+        **{prefix + "api_base": "https://api.deepseek.com", field: False}
+    )
+    admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
+    spy = _ChatSpy(admin, result=_ok_result())
+    monkeypatch.setattr(adminmod, "chat", spy)
+    for candidate, expected in (
+        ({}, False),
+        ({field: None}, True),
+        ({field: True}, True),
+        ({field: False}, False),
+    ):
+        assert set(admin.llm_test(candidate, slot)) == {"ok", "model", "latency_ms"}
+        assert spy.calls[-1][0].thinking_off is expected
+    assert getattr(cfg, field) is False
+
+
+@pytest.mark.parametrize("success_step", [0, 1, 2, 3])
+def test_thinking_test_four_steps_and_attributed_note(
+    tmp_path, monkeypatch, success_step
+):
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import LLMError
+
+    admin = MonitorAdmin(
+        _agent_config(llm_thinking_off=True), None, _registry(), tmp_path / "a.yaml"
+    )
+    seen = []
+
+    def fake(settings, messages, **kw):
+        seen.append((kw["json_mode"], settings.thinking_off))
+        if len(seen) <= success_step:
+            raise LLMError("bad_response", "HTTP 400", 400)
+        return _ok_result()
+
+    monkeypatch.setattr(adminmod, "chat", fake)
+    result = admin.llm_test({})
+    assert (
+        seen
+        == [(True, True), (True, False), (False, True), (False, False)][
+            : success_step + 1
+        ]
+    )
+    assert result == {
+        "ok": True,
+        "model": "served/m",
+        "latency_ms": 42,
+        **({"note": "thinking_unsupported"} if success_step in (1, 3) else {}),
+    }
+
+
+@pytest.mark.parametrize(
+    "thinking,second_status,expected",
+    [
+        (True, None, [(True, True), (True, False)]),
+        (True, 422, [(True, True), (True, False)]),
+        (False, None, [(True, False)]),
+    ],
+)
+def test_thinking_test_422_only_on_thinking_step(
+    tmp_path, monkeypatch, thinking, second_status, expected
+):
+    import taskpaw_v3.agent.server.admin as adminmod
+    from taskpaw_v3.core.llm import LLMError
+
+    admin = MonitorAdmin(
+        _agent_config(llm_thinking_off=thinking), None, _registry(), tmp_path / "a.yaml"
+    )
+    seen = []
+
+    def fake(settings, messages, **kw):
+        seen.append((kw["json_mode"], settings.thinking_off))
+        if len(seen) == 1 or second_status:
+            raise LLMError("bad_response", "HTTP 422", 422)
+        return _ok_result()
+
+    monkeypatch.setattr(adminmod, "chat", fake)
+    result = admin.llm_test({})
+    assert seen == expected
+    assert result["ok"] is (thinking and second_status is None)
+    if result["ok"]:
+        assert result["note"] == "thinking_unsupported"

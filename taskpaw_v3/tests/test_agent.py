@@ -636,3 +636,19 @@ def test_control_llm_test_route_rejects_an_unknown_slot(monkeypatch):
     client = _admin_client(_cfg())
     r = client.post("/control/llm-test", json={"slot": "fallback9"})
     assert r.status_code == 400 and "slot" in r.json()["detail"]
+
+
+def test_thinking_config_get_auto_uses_stored_bases():
+    cfg = AgentConfig(
+        server_id="s",
+        machine="m",
+        llm_api_base="https://api.deepseek.com",
+        llm_thinking_off=False,
+        llm_fallback1_api_base="https://api.xiaomimimo.com/v1",
+        llm_fallback2_api_base="https://api.deepseek.com@evil.test",
+    )
+    data = TestClient(create_control_app(cfg)).get("/control/config").json()
+    assert data["llm_thinking_off"] is False
+    assert data["llm_thinking_off_auto"] is True
+    assert data["llm_fallback1_thinking_off_auto"] is True
+    assert data["llm_fallback2_thinking_off_auto"] is False

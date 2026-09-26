@@ -15,12 +15,14 @@ The engine (#192 design v4, AC2–AC10/AC12):
   bisection node, and after every wait (each wait is sliced to ≤ 60 s). A
   provider is identified by its label (`model_label`: model + host) for
   persistence and display, and in memory by its fingerprint (base, model,
-  sha256(key)[:16]) — a Settings change resets its state; the worker of a
-  fingerprint that left the chain is retired at once (H2).
+  sha256(key)[:16], thinking_off) — a changed fingerprint resets its state;
+  republishing the same fingerprint preserves learned request settings. The
+  worker of a fingerprint that left the chain is retired at once (H2).
 - **Per-cue state**: `zh`, `by` (label), `refused_by` (labels, persisted),
   `failed_by` (a transient leaf, memory only — H5). A cue is exhausted when
-  the chain is non-empty and its refusals cover every label SEEN since the
-  film was dequeued (H1); open otherwise. Blank cues are done at load (G10).
+  the chain is non-empty and its refusals or memory-only failures cover every
+  label SEEN since the film was dequeued (H1); open otherwise. Blank cues are
+  done at load (G10).
 - **Checkpoint** (`checkpoint.CheckpointStore`, AC3): loaded at dequeue, saved
   atomically after every successful request and every recorded refusal; a
   write failure raises one notice per run, translation goes on in memory.
@@ -28,19 +30,25 @@ The engine (#192 design v4, AC2–AC10/AC12):
   refused that is closed (an open one is probed when its cool-down ended);
   with failover off a cue not refused by `chain[0]` waits for it (H7).
   Consecutive cues with the same route form batches of ≤ the provider's batch
-  size (40, halved by a timeout/length bisection, floor 5 — H8).
+  size (initially 40, halved after a timeout/length bisection succeeds, floor
+  5 — H8). After 3 consecutive clean full batches it doubles, up to 40, but
+  never regrows into a size that has shrunk twice (#201).
 - **An attempt** (AC5/AC6): a transient failure (network, timeout, 5xx, 408,
   429, `finish_reason=length`, an empty reply, other bad responses) is retried
   after 10/30/90 s (429/503: `Retry-After`, ≤ 300 s); still failing, or a
-  refusal / 401–404 / other 4xx (400: once more without json_mode first), →
-  the probe (the Settings Test's request; cached 60 s for these top-level
-  decisions). Probe failed → the provider opens (breaker 5/15/30 min; key,
-  credit and content-policy failures start at 30) with one notice per
+  refusal / 401–404 / other 4xx, → the probe (the Settings Test's request;
+  cached 60 s for these top-level decisions). Requests and probes first use
+  cumulative fallback: on 400/422 omit the thinking-disable parameter, then
+  on 400 omit json_mode too (#201). Probe failed → the provider opens
+  (breaker 5/15/30 min; key, credit and content-policy failures start at 30)
+  with one notice per
   provider per run. Probe OK, or invalid output → bisect on that provider: one
   request per node; a single cue failing transiently gets one retry after
   10 s and, still failing, a fresh probe at once (I1); after the leaves ONE
-  fresh confirming probe decides whether the failed leaves are recorded as
-  refused by that provider (G6/H8) or the provider opens instead.
+  fresh confirming probe decides whether failed leaves are recorded (G6/H8)
+  or the provider opens instead. Transient failures and one-cue length
+  cut-offs enter memory-only `failed_by`; other leaves enter persisted
+  `refused_by`.
 - **Defer, never block** (AC8): a film whose open cues have no available
   provider is deferred; the next film goes first; a deferred film resumes
   when a provider it needs closes again, returns `paused` after 2 h of
@@ -55,7 +63,7 @@ worker can never reach a later request.
 
 Secrets: each provider's key travels only in ITS worker's environment
 (`worker_env`, C7) — never argv, logs, notices, checkpoints, exception text or
-`detail` strings. Requests are logged as kind/status/latency/label only.
+`detail` strings. Requests log kind/status/latency, a bounded failure reason and label.
 
 `progress()` (#189/#192 AC12) is a read-only view of the film `in_flight()`
 stands for; None when idle and as soon as `cancel()` was called.
@@ -78,7 +86,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -218,7 +226,7 @@ _LENGTH_MESSAGE = "finish_reason=length"
 
 # (child, its own response queue, job keeper)
 _Worker = tuple[ChildProcess, queue.Queue[object], Optional[JobKeeper]]
-_Fingerprint = tuple[str, str, str]
+_Fingerprint = tuple[str, str, str, bool]
 
 
 class _Cancelled(Exception):
@@ -258,8 +266,8 @@ def _transient(f: _Fail) -> bool:
 
 def _leaf_transient(f: _Fail) -> bool:
     """H5: a single cue's failure worth one more try — network / timeout /
-    5xx / 429 (408 counts as a timeout). An empty reply or a length cut-off
-    of ONE cue is that cue's refusal."""
+    5xx / 429 (408 counts as a timeout). Empty replies and length cut-offs
+    get no extra leaf retry; #201 records cut-offs as memory-only failures."""
     if f.kind in ("network", "rate_limit"):
         return True
     s = f.status
@@ -434,7 +442,7 @@ def probe_ok(content: str) -> bool:
 def _fingerprint(s: LLMSettings) -> _Fingerprint:
     """H2: a provider's in-memory identity — never the raw key."""
     digest = hashlib.sha256(s.api_key.encode("utf-8")).hexdigest()[:16]
-    return (s.api_base, s.model, digest)
+    return (s.api_base, s.model, digest, s.thinking_off)
 
 
 @dataclass(eq=False)
@@ -446,6 +454,9 @@ class _Provider:
     label: str
     json_mode: bool = True  # off for the run after a 400 → no-json success
     batch_size: int = BATCH_SIZE  # H8
+    clean_successes: int = 0
+    shrinks: dict[int, int] = field(default_factory=dict)
+    thinking_rejections: int = 0
     open_until: Optional[float] = None  # breaker: None = closed
     level: int = 0
     probe_ok_at: Optional[float] = None
@@ -1201,7 +1212,24 @@ class Translator:
         got = self._call(p, film, idx)
         if not isinstance(got, _Fail):
             self._done(film, p, idx, got)
+            if len(idx) >= p.batch_size:
+                p.clean_successes += 1
+            target = min(BATCH_SIZE, p.batch_size * 2)
+            if (
+                p.clean_successes >= 3
+                and target > p.batch_size
+                and p.shrinks.get(target, 0) < 2
+            ):
+                p.batch_size = target
+                p.clean_successes = 0
+                log.info(
+                    "subs-translate %s: %s batch size now %d",
+                    self._name,
+                    p.label,
+                    p.batch_size,
+                )
             return True
+        p.clean_successes = 0
         trigger = got  # the first failure: it drives the batch size (H8)
         if trigger.kind != "content":  # invalid output: bisect at once
             if _transient(trigger):
@@ -1254,7 +1282,7 @@ class Translator:
                         self._open(p, probe)
                         abandoned = True
                         return
-            failed.append((i, _leaf_transient(fail)))
+            failed.append((i, _leaf_transient(fail) or fail.message == _LENGTH_MESSAGE))
 
         def node(ix: list[int], fail: _Fail, root: bool) -> None:
             nonlocal abandoned
@@ -1282,24 +1310,26 @@ class Translator:
             if fail is not None:
                 self._open(p, fail)
                 return False
-            persist = False
+            refused = 0
             for i, transient in failed:
                 if transient:
                     film.states[i].failed_by.add(p.label)
                 else:
                     film.states[i].refused_by.add(p.label)
-                    persist = True
-            log.info(
-                "subs-translate %s: %d line(s) refused by %s",
-                self._name,
-                len(failed),
-                p.label,
-            )
-            self._record("translate.refused", film, model=p.label, lines=len(failed))
-            if persist:
+                    refused += 1
+            if refused:
+                log.info(
+                    "subs-translate %s: %d line(s) refused by %s",
+                    self._name,
+                    refused,
+                    p.label,
+                )
+                self._record("translate.refused", film, model=p.label, lines=refused)
                 self._save(film)
         elif _shrinks_batch(trigger) and len(idx) > 1:
+            p.shrinks[p.batch_size] = p.shrinks.get(p.batch_size, 0) + 1
             p.batch_size = max(MIN_BATCH_SIZE, p.batch_size // 2)
+            p.clean_successes = 0
             log.info(
                 "subs-translate %s: %s batch size now %d",
                 self._name,
@@ -1343,10 +1373,11 @@ class Translator:
             )
 
     def _probe(self, p: _Provider, *, cached: bool) -> Optional[_Fail]:
-        """G5/H4: the Settings Test's request (the real prompt, one cue, the
-        provider's json_mode with the same 400 → no-json retry). None = OK —
-        only when the reply passes `_validate`. A cached OK (≤ 60 s) serves
-        top-level decisions only."""
+        """G5/H4: the Settings Test's request (the real prompt, one cue), with
+        the provider's learned settings and the same cumulative fallback:
+        omit the thinking-disable parameter on 400/422, then json_mode on 400.
+        None = OK — only when the reply passes `_validate`. A cached OK
+        (≤ 60 s) serves top-level decisions only."""
         if (
             cached
             and p.probe_ok_at is not None
@@ -1357,6 +1388,11 @@ class Translator:
         if isinstance(got, _Fail):
             return got
         if not probe_ok(got):
+            log.info(
+                "subs-translate %s: probe unusable reason=unusable probe reply (%s)",
+                self._name,
+                p.label,
+            )
             return _Fail("invalid", "unusable probe reply")
         p.probe_ok_at = self._clock()
         return None
@@ -1399,9 +1435,22 @@ class Translator:
         if switch is not None:
             self._record("translate.switched", film, **switch)
         got = self._send(
-            p, _messages(user), min(MAX_TOKENS, 64 + 8 * chars), film.req.job_id
+            p,
+            _messages(user),
+            min(MAX_TOKENS, max(1024, 64 + 8 * chars)),
+            film.req.job_id,
         )
-        return got if isinstance(got, _Fail) else _validate(got, ids)
+        if isinstance(got, _Fail):
+            return got
+        validated = _validate(got, ids)
+        if isinstance(validated, _Fail):
+            log.info(
+                "subs-translate %s: batch unusable reason=%s (%s)",
+                self._name,
+                bounded(validated.message, 80),
+                p.label,
+            )
+        return validated
 
     def _send(
         self,
@@ -1410,15 +1459,31 @@ class Translator:
         max_tokens: int,
         tag: Optional[str],
     ) -> Union[str, _Fail]:
-        """A request with the provider's json_mode; an HTTP 400 with
-        json_mode on is sent once more without it, and a reply then turns
-        json_mode off for that provider for the run (AC6). `tag` = the film's
-        job id, None for the probe (never a name: a film may be called
-        "probe")."""
+        """#201: omit the thinking-disable parameter on 400/422, then json_mode
+        on 400, cumulatively. `thinking_off=False` omits that parameter; it
+        does not explicitly enable thinking. Two successes immediately after
+        omitting it teach the provider to omit it for the run; success with
+        the parameter present resets the count. A later JSON fallback success
+        does not count toward this learning. `tag` is None for probes."""
         json_mode = p.json_mode
-        got = self._request(p, messages, max_tokens, json_mode, tag)
+        thinking_off = p.settings.thinking_off
+        got = self._request(p, messages, max_tokens, json_mode, tag, thinking_off)
+        if not isinstance(got, _Fail) and thinking_off:
+            p.thinking_rejections = 0
+        if thinking_off and isinstance(got, _Fail) and got.status in (400, 422):
+            thinking_off = False
+            got = self._request(p, messages, max_tokens, json_mode, tag, thinking_off)
+            if not isinstance(got, _Fail):
+                p.thinking_rejections += 1
+                if p.thinking_rejections >= 2:
+                    p.settings = replace(p.settings, thinking_off=False)
+                    log.info(
+                        "subs-translate %s: thinking parameter rejected; sending without it (%s)",
+                        self._name,
+                        p.label,
+                    )
         if json_mode and isinstance(got, _Fail) and got.status == 400:
-            got = self._request(p, messages, max_tokens, False, tag)
+            got = self._request(p, messages, max_tokens, False, tag, thinking_off)
             if not isinstance(got, _Fail):
                 p.json_mode = False
                 log.info(
@@ -1435,9 +1500,10 @@ class Translator:
         max_tokens: int,
         json_mode: bool,
         tag: Optional[str],
+        thinking_off: bool,
     ) -> Union[str, _Fail]:
         """One exchange with `p`'s worker → the reply content or a `_Fail`.
-        Logged as kind/status/latency/label only."""
+        Failure reasons originate in the worker's fixed/sanitised errors."""
         if self._cancel.is_set():
             raise _Cancelled
         rid = f"{'probe' if tag is None else tag}#{next(self._rids)}"
@@ -1448,6 +1514,7 @@ class Translator:
                 "temperature": 0.3,
                 "max_tokens": max_tokens,
                 "json_mode": json_mode,
+                "thinking_off": thinking_off,
                 "timeout": int(REQUEST_TIMEOUT_S),
                 "api_base": p.settings.api_base,
                 "model": p.settings.model,
@@ -1456,12 +1523,13 @@ class Translator:
         started = time.monotonic()
         got = self._exchange(p, line, rid)
         log.info(
-            "subs-translate %s: %s kind=%s status=%s latency_ms=%d (%s)",
+            "subs-translate %s: %s kind=%s status=%s latency_ms=%d%s (%s)",
             self._name,
             "probe" if tag is None else "batch",
             got.kind if isinstance(got, _Fail) else "ok",
             got.status if isinstance(got, _Fail) else None,
             int((time.monotonic() - started) * 1000),
+            f" reason={bounded(got.message, 80)}" if isinstance(got, _Fail) else "",
             p.label,
         )
         return got

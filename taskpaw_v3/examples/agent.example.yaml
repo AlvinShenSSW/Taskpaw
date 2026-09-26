@@ -34,6 +34,9 @@ host_metrics: true
 llm_api_base: https://api.x.ai/v1
 llm_model: grok-4.3
 llm_api_key: ""
+# Thinking: true = send thinking disabled; false = send nothing (service default);
+# blank or auto = automatic (DeepSeek / MiMo off; other hosts send nothing).
+llm_thinking_off:
 
 # Up to two optional fallback models (#190/#192), tried in order when the
 # primary refuses a line or is unavailable (e.g. DeepSeek first, then the MiMo
@@ -43,9 +46,11 @@ llm_api_key: ""
 llm_fallback1_api_base: ""
 llm_fallback1_model: ""
 llm_fallback1_api_key: ""
+llm_fallback1_thinking_off: auto
 llm_fallback2_api_base: ""
 llm_fallback2_model: ""
 llm_fallback2_api_key: ""
+llm_fallback2_thinking_off:
 # While a model is unavailable, send its lines to the next one (Settings ->
 # 「主模型不可用时改用备用模型」); false = they wait for the first model.
 llm_failover: true

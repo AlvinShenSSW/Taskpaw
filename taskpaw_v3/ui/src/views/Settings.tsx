@@ -164,7 +164,9 @@ const KEY_SOURCES: ReadonlySet<string> = new Set<LlmKeySource>(["env", "config",
 const keySource = (v: unknown): LlmKeySource =>
   typeof v === "string" && KEY_SOURCES.has(v) ? (v as LlmKeySource) : "none";
 
-type LlmForm = { api_base: string; model: string; api_key: string };
+type LlmForm = { api_base: string; model: string; api_key: string; thinking_off: boolean | null };
+
+const normalizedBase = (base: string) => base.trim().replace(/\/+$/, "");
 
 // One LLM provider card (#178; #190 reuses it for fallback 1 / 2): base URL, model
 // and a write-only key. GET reports the key as "***" plus its source; an
@@ -184,18 +186,27 @@ function LlmSection({ slot }: { slot: LlmSlot }) {
       const c = cfg.data;
       setForm({
         api_base: String(c[`${prefix}api_base`] ?? ""), model: String(c[`${prefix}model`] ?? ""),
-        api_key: "",
+        api_key: "", thinking_off: typeof c[`${prefix}thinking_off`] === "boolean" ? c[`${prefix}thinking_off`] as boolean : null,
       });
     }
   }, [cfg.data, form, prefix]);
 
   const source = keySource(cfg.data?.[`${prefix}api_key_source`]);
   const fromEnv = source === "env";
+  // GET owns the automatic result. Hide it for an edited base until Save refetches it.
+  const auto = cfg.data?.[`${prefix}thinking_off_auto`];
+  const baseSaved = form !== null && normalizedBase(form.api_base) ===
+    normalizedBase(String(cfg.data?.[`${prefix}api_base`] ?? ""));
+  const autoLabel = !baseSaved || typeof auto !== "boolean" ? t("settings.llmThinkingAuto") :
+    auto ? t("settings.llmThinkingAutoOff") : t("settings.llmThinkingAutoDefault");
 
   // This slot's form values; a blank key is omitted so the backend keeps the stored one.
   const values = () => {
     const f = form!;
-    const v: Record<string, unknown> = { [`${prefix}api_base`]: f.api_base, [`${prefix}model`]: f.model };
+    const v: Record<string, unknown> = {
+      [`${prefix}api_base`]: f.api_base, [`${prefix}model`]: f.model,
+      [`${prefix}thinking_off`]: f.thinking_off,
+    };
     if (f.api_key.trim()) v[`${prefix}api_key`] = f.api_key;
     return v;
   };
@@ -223,7 +234,7 @@ function LlmSection({ slot }: { slot: LlmSlot }) {
     onSuccess: (r) => {
       if (r.ok) {
         const ok = t("settings.llmTestOk", { model: r.model ?? "", latency: r.latency_ms ?? 0 });
-        setMsg({ kind: "ok", text: ok });
+        setMsg({ kind: "ok", text: r.note === "thinking_unsupported" ? `${ok} ${t("settings.llmThinkingUnsupported")}` : ok });
       } else {
         setMsg({ kind: "err", text: t("settings.llmTestFail", { error: r.error ?? "" }) });
       }
@@ -233,7 +244,7 @@ function LlmSection({ slot }: { slot: LlmSlot }) {
   });
 
   const writing = save.isPending || clear.isPending;
-  const set = (k: keyof LlmForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
+  const set = (k: "api_base" | "model" | "api_key") => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((p) => (p ? { ...p, [k]: e.target.value } : p));
 
   return (
@@ -258,6 +269,15 @@ function LlmSection({ slot }: { slot: LlmSlot }) {
               value={form.api_key} onChange={set("api_key")} disabled={fromEnv}
               placeholder={source !== "none" ? "***" : undefined}
               helperText={fromEnv ? t("settings.llmApiKeyEnv", { env }) : t("settings.llmApiKeyHint", { env })} />
+            <TextField select size="small" label={t("settings.llmThinking")}
+              value={form.thinking_off === null ? "auto" : String(form.thinking_off)}
+              onChange={(e) => setForm((p) => p ? {
+                ...p, thinking_off: e.target.value === "auto" ? null : e.target.value === "true",
+              } : p)} helperText={t("settings.llmThinkingHint")}>
+              <MenuItem value="auto">{autoLabel}</MenuItem>
+              <MenuItem value="true">{t("settings.llmThinkingOff")}</MenuItem>
+              <MenuItem value="false">{t("settings.llmThinkingDefault")}</MenuItem>
+            </TextField>
             {msg && <Alert severity={msg.kind === "ok" ? "success" : "error"}>{msg.text}</Alert>}
             <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
               <Button variant="contained" disabled={writing}

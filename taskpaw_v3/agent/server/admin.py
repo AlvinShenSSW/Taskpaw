@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -275,12 +276,15 @@ class MonitorAdmin:
         "llm_api_base",
         "llm_model",
         "llm_api_key",
+        "llm_thinking_off",
         "llm_fallback1_api_base",
         "llm_fallback1_model",
         "llm_fallback1_api_key",
+        "llm_fallback1_thinking_off",
         "llm_fallback2_api_base",
         "llm_fallback2_model",
         "llm_fallback2_api_key",
+        "llm_fallback2_thinking_off",
         "llm_failover",
     )
     # Live-safe editable fields: api_token is read per request (token_ok) and the
@@ -292,12 +296,15 @@ class MonitorAdmin:
         "llm_api_base",
         "llm_model",
         "llm_api_key",
+        "llm_thinking_off",
         "llm_fallback1_api_base",
         "llm_fallback1_model",
         "llm_fallback1_api_key",
+        "llm_fallback1_thinking_off",
         "llm_fallback2_api_base",
         "llm_fallback2_model",
         "llm_fallback2_api_key",
+        "llm_fallback2_thinking_off",
         "llm_failover",
     )
     # The write-only LLM keys, one per provider slot (#178, #190).
@@ -409,12 +416,13 @@ class MonitorAdmin:
         fallback1 or fallback2): try the CURRENT FORM values of THAT slot (its own
         field names) without persisting. The candidate is merged over the
         effective (desired) settings and validated like a save; a blank/"***"
-        field (or null) falls back to the effective value, and the key still
+        base/model/key field (or null) falls back to the effective value. A
+        present thinking field overrides it even when null (automatic). The key still
         resolves env-first for the slot. Touches neither _desired, _config, disk
         nor the holders.
 
         It sends the translator's provider probe (#192 G5/H4): the real prompt
-        with one cue, json_mode on, once more without json_mode on an HTTP 400,
+        with one cue, trying thinking off/on and JSON mode on/off on rejection,
         strict like the translator; OK only when the reply passes the
         translator's validation. chat() runs OUTSIDE the admin lock (D11): a
         slow provider must not block monitor/config operations. Never returns
@@ -430,6 +438,11 @@ class MonitorAdmin:
                 if v is None or (isinstance(v, str) and v.strip() in ("", "***")):
                     continue
                 overrides[f] = v
+            thinking_field = llm_slot_fields(slot)[0].replace(
+                "api_base", "thinking_off"
+            )
+            if thinking_field in candidate:  # null explicitly requests automatic
+                overrides[thinking_field] = candidate[thinking_field]
             try:
                 validated = AgentConfig(
                     **{**self._config.model_dump(), **self._desired, **overrides}
@@ -438,29 +451,28 @@ class MonitorAdmin:
                 raise ValueError(_validation_summary(e)) from None
             settings = llm_settings_from_config(validated, slot=slot)
         messages = probe_messages()
+        steps = (
+            [(True, True), (True, False), (False, True), (False, False)]
+            if settings.thinking_off
+            else [(True, False), (False, False)]
+        )
         try:
-            try:
-                r = chat(
-                    settings,
-                    messages,
-                    max_tokens=PROBE_MAX_TOKENS,
-                    json_mode=True,
-                    timeout=20,
-                    strict=True,
-                )
-            except LLMError as e:
-                if e.status != 400:
-                    raise
-                # The provider rejects json_mode: once without it (the
-                # translator does the same).
-                r = chat(
-                    settings,
-                    messages,
-                    max_tokens=PROBE_MAX_TOKENS,
-                    json_mode=False,
-                    timeout=20,
-                    strict=True,
-                )
+            for index, (json_mode, thinking_off) in enumerate(steps):
+                try:
+                    r = chat(
+                        replace(settings, thinking_off=thinking_off),
+                        messages,
+                        max_tokens=PROBE_MAX_TOKENS,
+                        json_mode=json_mode,
+                        timeout=20,
+                        strict=True,
+                    )
+                    break
+                except LLMError as e:
+                    if index == len(steps) - 1 or not (
+                        e.status == 400 or (thinking_off and e.status == 422)
+                    ):
+                        raise
         except LLMError as e:
             error = f"{e.kind}: {e.message}"
             if e.status and str(e.status) not in e.message:
@@ -474,7 +486,10 @@ class MonitorAdmin:
                 "ok": False,
                 "error": "invalid: the reply is not a usable translation",
             }
-        return {"ok": True, "model": r.model, "latency_ms": r.latency_ms}
+        result = {"ok": True, "model": r.model, "latency_ms": r.latency_ms}
+        if settings.thinking_off and not thinking_off:
+            result["note"] = "thinking_unsupported"
+        return result
 
     # ── command dispatch (wired as create_control_app's on_command) ────────
     def handle(self, command: str, body: dict) -> dict[str, Any]:

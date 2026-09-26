@@ -8,7 +8,7 @@ and testable.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
@@ -55,6 +55,7 @@ class AgentConfig(BaseModel):
     llm_api_base: str = "https://api.x.ai/v1"
     llm_model: str = "grok-4.3"
     llm_api_key: str = ""
+    llm_thinking_off: Optional[bool] = None
     # Two optional fallback models (#190/#192), tried in order when the primary
     # refuses a line or is unavailable. Same rules as the primary; their keys'
     # env vars TASKPAW_LLM_FALLBACK1_API_KEY / TASKPAW_LLM_FALLBACK2_API_KEY win.
@@ -62,12 +63,26 @@ class AgentConfig(BaseModel):
     llm_fallback1_api_base: str = ""
     llm_fallback1_model: str = ""
     llm_fallback1_api_key: str = ""
+    llm_fallback1_thinking_off: Optional[bool] = None
     llm_fallback2_api_base: str = ""
     llm_fallback2_model: str = ""
     llm_fallback2_api_key: str = ""
+    llm_fallback2_thinking_off: Optional[bool] = None
     # Failover (#192 §4, 「主模型不可用时改用备用模型」): while a model is
     # unavailable its lines go to the next one; off → they wait for the first.
     llm_failover: bool = True
+
+    @field_validator(
+        "llm_thinking_off",
+        "llm_fallback1_thinking_off",
+        "llm_fallback2_thinking_off",
+        mode="before",
+    )
+    @classmethod
+    def _auto_thinking_off(cls, v: Any) -> Any:
+        if isinstance(v, str) and v.strip().lower() in ("", "auto"):
+            return None
+        return v
 
     @field_validator("server_id", "machine")
     @classmethod
