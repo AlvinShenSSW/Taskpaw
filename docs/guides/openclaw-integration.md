@@ -249,7 +249,9 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > 「主模型不可用时改用备用模型」(`llm_failover`, default on). A line a model refuses goes
 > to the next model; a line every model refuses keeps its Japanese text; while a
 > model is unavailable its lines go to the next one (switch on) or wait. A film is
-> skipped `no_llm_key` only when no model is usable. Skip reasons and events:
+> skipped `no_llm_key` only when no model is usable.
+> Each slot's「思考」/ Thinking setting (`llm_thinking_off`, `llm_fallback1_thinking_off`, `llm_fallback2_thinking_off`) accepts automatic (blank/`auto`, disables thinking on DeepSeek/MiMo), `true` (disable thinking), or `false` (send nothing; service default).
+> Skip reasons and events:
 >
 > - `translation_paused` — a film that found no translation service for 2 h in total
 >   is skipped (`queue_skipped` / `subs_skipped`, never a failure, its transcript

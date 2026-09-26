@@ -7,7 +7,7 @@ A child process is cancellable in every phase.
 
 Protocol — JSON lines, UTF-8, `\\n`-terminated:
 - request on stdin: `{"id", "messages", "temperature"?, "max_tokens"?,
-  "json_mode"?, "timeout"?, "api_base"?, "model"?}` (`api_base`/`model` override
+  "json_mode"?, "thinking_off"?, "timeout"?, "api_base"?, "model"?}` (`api_base`/`model` override
   the environment for that request — live-apply; the key can NOT be overridden);
 - reply on stdout: `{"id", "ok": true, "content", "finish_reason", "model",
   "latency_ms"}` or `{"id", "ok": false, "kind", "status", "message",
@@ -123,13 +123,18 @@ def _parse_request(req: Any, settings: LLMSettings) -> tuple[LLMSettings, dict]:
         raise _InvalidRequest
     if not isinstance(kwargs["json_mode"], bool):
         raise _InvalidRequest
+    thinking_off = req.get("thinking_off", False)
+    if not isinstance(thinking_off, bool):
+        raise _InvalidRequest
     if not _is_number(kwargs["timeout"]) or kwargs["timeout"] <= 0:
         raise _InvalidRequest
     api_base = _override(req, "api_base").rstrip("/") or settings.api_base
     model = _override(req, "model") or settings.model
     # The key is deliberately NOT overridable per request (it lives only in the
     # worker's environment); any "api_key" field in the request is ignored.
-    return dataclasses.replace(settings, api_base=api_base, model=model), kwargs
+    return dataclasses.replace(
+        settings, api_base=api_base, model=model, thinking_off=thinking_off
+    ), kwargs
 
 
 def _override(req: dict, field: str) -> str:

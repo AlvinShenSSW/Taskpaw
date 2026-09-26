@@ -27,7 +27,12 @@ if TYPE_CHECKING:
 from taskpaw_v3 import __version__
 from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import AgentConfig
-from taskpaw_v3.core.llm import LLM_SLOTS, llm_slot_fields, resolve_llm_settings
+from taskpaw_v3.core.llm import (
+    LLM_SLOTS,
+    llm_slot_fields,
+    resolve_llm_settings,
+    thinking_off_default,
+)
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.registry import PluginRegistry
@@ -175,6 +180,9 @@ def create_control_app(
                 slot=slot,
             )
             data[f"{key_field}_source"] = llm.key_source
+            data[base_field.replace("api_base", "thinking_off_auto")] = (
+                thinking_off_default(data.get(base_field))
+            )
             data[key_field] = "***" if llm.key_source != "none" else ""
         return data
 

@@ -374,3 +374,17 @@ def test_agent_config_validation_errors_never_echo_a_secret_input(tmp_path):
     with pytest.raises(ValidationError) as ei2:
         load_yaml(AgentConfig, path)
     assert marker not in str(ei2.value)
+
+
+@pytest.mark.parametrize("prefix", ["llm_", "llm_fallback1_", "llm_fallback2_"])
+@pytest.mark.parametrize(
+    "value", [None, " Auto ", "", "  ", True, False, "true", "false"]
+)
+def test_thinking_config_three_states(prefix, value):
+    field = prefix + "thinking_off"
+    assert getattr(AgentConfig(server_id="s", machine="m"), field) is None
+    cfg = AgentConfig(server_id="s", machine="m", **{field: value})
+    expected = {"true": True, "false": False}.get(value, value)
+    if isinstance(value, str) and value.strip().lower() in ("", "auto"):
+        expected = None
+    assert getattr(cfg, field) is expected

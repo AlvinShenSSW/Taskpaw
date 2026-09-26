@@ -60,6 +60,7 @@ watch; it self-creates a default config on first run.
   on (the default), the lines while it is unavailable. "Test connection" sends one
   real translation request with the current form values of that model, without
   saving them.
+  「思考」/ Thinking: automatic disables thinking on DeepSeek and MiMo; choose「不发送」to use the service default, or「关闭思考」to send the parameter explicitly; slots differing only in this setting count as the same model (the first wins).
 
 ### From source (dev)
 

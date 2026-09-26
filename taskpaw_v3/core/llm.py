@@ -30,6 +30,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -76,6 +77,20 @@ class LLMSettings:
     model: str
     api_key: str
     key_source: KeySource
+    thinking_off: bool = False
+
+
+def thinking_off_default(api_base: object) -> bool:
+    """Automatic thinking-off for DeepSeek / MiMo hosts; never trust look-alikes."""
+    if not isinstance(api_base, str):
+        return False
+    try:
+        host = urllib.parse.urlsplit(api_base).hostname or ""
+        return host in ("api.deepseek.com", "xiaomimimo.com") or host.endswith(
+            (".deepseek.com", ".xiaomimimo.com")
+        )
+    except Exception:  # malformed URL: automatic means do not send the parameter
+        return False
 
 
 def _check_slot(slot: object) -> None:
@@ -99,6 +114,7 @@ def resolve_llm_settings(
     *,
     slot: str = "primary",
     environ: Optional[Mapping[str, str]] = None,
+    thinking_off: Optional[bool] = None,
 ) -> LLMSettings:
     """Env-first key resolution: the SLOT's own env var (`LLM_SLOT_KEY_ENV`) —
     never another slot's. A whitespace-only env var or stored key counts
@@ -121,6 +137,9 @@ def resolve_llm_settings(
         model=str(model or "").strip(),
         api_key=key,
         key_source=source,
+        thinking_off=thinking_off_default(api_base)
+        if thinking_off is None
+        else thinking_off,
     )
 
 
@@ -137,6 +156,7 @@ def llm_settings_from_config(
         getattr(config, key_field),
         slot=slot,
         environ=environ,
+        thinking_off=getattr(config, base_field.replace("api_base", "thinking_off")),
     )
 
 
@@ -400,6 +420,8 @@ def chat(
             payload["max_tokens"] = max_tokens
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if settings.thinking_off:
+            payload["thinking"] = {"type": "disabled"}
         data = json.dumps(payload).encode("utf-8")
         raw = _send(settings, data, timeout, opener or _DEFAULT_OPENER)
         result = _parse(settings, raw, strict, started)

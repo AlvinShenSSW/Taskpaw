@@ -128,11 +128,18 @@ export type AgentConfigView = {
   llm_api_key_source?: LlmKeySource;
   llm_fallback1_api_key_source?: LlmKeySource;
   llm_fallback2_api_key_source?: LlmKeySource;
+  llm_thinking_off?: boolean | null;
+  llm_fallback1_thinking_off?: boolean | null;
+  llm_fallback2_thinking_off?: boolean | null;
+  llm_thinking_off_auto?: boolean;
+  llm_fallback1_thinking_off_auto?: boolean;
+  llm_fallback2_thinking_off_auto?: boolean;
   llm_failover?: boolean;
 } & Record<string, unknown>;
 
 export type LlmTestResult = {
   ok: boolean; model?: string; latency_ms?: number; error?: string;
+  note?: "thinking_unsupported";
 };
 
 declare global {

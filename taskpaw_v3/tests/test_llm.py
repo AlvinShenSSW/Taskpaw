@@ -231,7 +231,11 @@ def test_llm_settings_from_config_per_slot():
         DEFAULT_LLM_API_BASE, DEFAULT_LLM_MODEL, "k0", "config"
     )
     assert llm_settings_from_config(cfg, slot="fallback1", environ={}) == LLMSettings(
-        "https://api.deepseek.com/v1", "deepseek-chat", "k1", "config"
+        "https://api.deepseek.com/v1",
+        "deepseek-chat",
+        "k1",
+        "config",
+        thinking_off=True,
     )
     env = {LLM_FALLBACK2_KEY_ENV: "e2"}
     assert llm_settings_from_config(cfg, slot="fallback2", environ=env) == LLMSettings(
@@ -1319,3 +1323,108 @@ def test_worker_main_reads_env_and_runs_serve(monkeypatch):
     out.write("x\n")
     out.flush()
     assert out.buffer.getvalue() == b"x\n"
+
+
+@pytest.mark.parametrize(
+    "base,expected",
+    [
+        ("https://api.deepseek.com/v1", True),
+        ("https://sub.deepseek.com:443/v1", True),
+        ("https://API.DEEPSEEK.COM/v1", True),
+        ("https://user:marker@api.deepseek.com/v1", True),
+        ("https://xiaomimimo.com/v1", True),
+        ("https://API.XIAOMIMIMO.COM:443/v1", True),
+        ("https://deepseek.com", False),
+        ("https://deepseek.com.evil.test", False),
+        ("https://evildeepseek.com", False),
+        ("https://api.deepseek.com@evil.test", False),
+        ("https://xiaomimimo.com.evil.test", False),
+        ("https://evilxiaomimimo.com", False),
+        ("https://api.x.ai/v1", False),
+        ("https://[broken", False),
+        ("not a URL", False),
+        (None, False),
+        (123, False),
+    ],
+)
+def test_thinking_auto_hosts(base, expected):
+    assert llm.thinking_off_default(base) is expected
+
+
+@pytest.mark.parametrize("slot", LLM_SLOTS)
+@pytest.mark.parametrize("value", [None, True, False])
+@pytest.mark.parametrize(
+    "base", ["https://api.deepseek.com/v1", "https://other.test/v1"]
+)
+def test_thinking_resolved_per_slot(slot, value, base):
+    fb, fm, fk = llm_slot_fields(slot)
+    ft = fb.replace("api_base", "thinking_off")
+    cfg = AgentConfig(
+        server_id="s", machine="m", **{fb: base, fm: "m", fk: "", ft: value}
+    )
+    settings = llm_settings_from_config(cfg, slot=slot, environ={})
+    assert settings.thinking_off is (
+        base.startswith("https://api.deepseek") if value is None else value
+    )
+    assert model_label(settings.model, settings.api_base) == model_label("m", base)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_thinking_chat_body(value):
+    from dataclasses import replace
+
+    opener = _FakeOpener(_envelope())
+    chat(replace(_settings(), thinking_off=value), _msgs(), opener=opener)
+    body = json.loads(opener.requests[0].data)
+    assert body == {
+        "model": "m/x",
+        "messages": _msgs(),
+        "temperature": 0.3,
+        **({"thinking": {"type": "disabled"}} if value else {}),
+    }
+
+
+@pytest.mark.parametrize("value", [True, False, None, "true", 1, 0, {}, []])
+def test_thinking_worker_strict_bool(value):
+    calls = []
+    reply = json.loads(
+        handle_request(
+            _line(thinking_off=value, api_key="ignored"),
+            _settings(),
+            chat_fn=_ok_chat(calls),
+        )
+    )
+    if type(value) is bool:
+        assert reply["ok"] is True
+        assert calls[0][0].thinking_off is value
+        assert calls[0][0].api_key == KEY_MARKER
+    else:
+        assert reply["ok"] is False and reply["message"] == "invalid request"
+        assert calls == []
+
+
+def test_thinking_worker_absent_defaults_false():
+    from dataclasses import replace
+
+    calls = []
+    handle_request(
+        _line(), replace(_settings(), thinking_off=True), chat_fn=_ok_chat(calls)
+    )
+    assert calls[0][0].thinking_off is False
+
+
+def test_thinking_only_slot_difference_still_deduplicates(caplog):
+    cfg = AgentConfig(
+        server_id="s",
+        machine="m",
+        llm_api_base="http://localhost/v1",
+        llm_model="m",
+        llm_thinking_off=True,
+        llm_fallback1_api_base="http://localhost/v1",
+        llm_fallback1_model="m",
+        llm_fallback1_thinking_off=False,
+    )
+    with caplog.at_level(logging.WARNING):
+        chain = llm_chain_from_config(cfg, environ={})
+    assert len(chain) == 1 and chain[0].thinking_off is True
+    assert "same model" in caplog.text
