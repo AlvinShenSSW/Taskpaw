@@ -64,6 +64,11 @@ export function MonitorWizard({
 
   const selected = services.find((s) => s.id === selectedId) ?? null;
 
+  const enterConfig = () => {
+    setLiveFormData(mode === "edit" ? existingConfig ?? {} : formData);
+    setStep(2);
+  };
+
   // Picking a different service must drop the previous plugin's captured config —
   // its fields are invalid for the new schema (backend forbids unknown keys) and
   // would fail the add or carry the wrong name (Codex).
@@ -287,7 +292,7 @@ export function MonitorWizard({
 
       <DialogActions sx={{ px: 3, py: 1.5 }}>
         {step > 1 && mode === "add" && (
-          <Button color="inherit" onClick={() => setStep((step - 1) as 1 | 2 | 3)} disabled={busy}>
+          <Button color="inherit" onClick={() => step === 3 ? enterConfig() : setStep(1)} disabled={busy}>
             {t("wizard.back")}
           </Button>
         )}
@@ -296,7 +301,7 @@ export function MonitorWizard({
         {/* Step 1 → continue; preset step 2 → review; review → add. The plugin
             config form (step 2) submits via its own in-form button. */}
         {step === 1 && (
-          <Button variant="contained" disabled={!selected} onClick={() => setStep(2)}>
+          <Button variant="contained" disabled={!selected} onClick={enterConfig}>
             {t("wizard.continue")}
           </Button>
         )}

@@ -65,11 +65,11 @@ def registry(monkeypatch, machine=("", 1), user=("", 1)):
         r"\\?\C:\WhisperJAV\Scripts\whisperjav.exe",
         EXE + ";evil",
         EXE + '"',
-        EXE + "\n",
-        "\t" + EXE,
+        EXE.replace("Scripts", "Scr\nipts"),
+        EXE.replace("Scripts", "Scr\tipts"),
         EXE + "\x00",
         EXE + "\x7f",
-        EXE + "\x85",
+        EXE.replace("Scripts", "Scr\x85ipts"),
     ],
 )
 def test_unsafe_exe_is_ignored(discovery, exe):
@@ -87,6 +87,18 @@ def test_shared_dir_normalizes_without_requiring_a_file(discovery, monkeypatch):
     monkeypatch.setattr(F.os.path, "isfile", lambda p: p == FFMPEG)
     assert F.bundled_ffmpeg(EXE) == FFMPEG
     assert F.ffmpeg_status(EXE)["bundled"] == FFMPEG
+
+
+@pytest.mark.parametrize("whitespace", [" ", "\t", "\n", "\r\n\t ", "\x85"])
+def test_pasted_exe_is_stripped_before_validation(discovery, monkeypatch, whitespace):
+    exe = whitespace + EXE + whitespace
+    monkeypatch.setattr(F.os.path, "isfile", lambda p: p == FFMPEG)
+    assert F.bundled_ffmpeg_dir(exe) == DIR
+    assert F.bundled_ffmpeg(exe) == FFMPEG
+    status = F.ffmpeg_status(exe)
+    assert status["exe_ok"] is True
+    assert status["bundled"] == FFMPEG
+    assert child.asr_env({"Path": ""}, exe)["Path"] == DIR
 
 
 @pytest.mark.parametrize("key", ["PATH", "Path", "pAtH", None])
@@ -252,6 +264,27 @@ def test_script_static_contract():
     assert "winget install Gyan.FFmpeg" in script
 
 
+def test_script_skips_unavailable_paths_quietly():
+    script = F.setup_script()
+    assert "Join-Path" not in script
+    checks = [line for line in script.splitlines() if "Test-Path" in line]
+    assert len(checks) == 2
+    assert all("-ErrorAction SilentlyContinue" in line for line in checks)
+    assert script.count(r"($folder.TrimEnd('\') + '\ffmpeg.exe')") == 2
+    assert "\f" not in script
+
+
+def test_script_guards_localappdata_and_preserves_candidate_order():
+    script = F.setup_script([r"D:\custom\bin"])
+    assert "if ($env:LOCALAPPDATA) {" in script
+    assert (
+        script.index(r"'D:\custom\bin'")
+        < script.index("if ($env:LOCALAPPDATA) {")
+        < script.index(r"($env:LOCALAPPDATA + '\WhisperJAV\Library\bin')")
+        < script.index(r"'C:\WhisperJAV\Library\bin'")
+    )
+
+
 def powershell(script):
     exe = shutil.which("powershell")
     if not exe:
@@ -280,7 +313,11 @@ def test_script_parses_in_powershell():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows private registry hive")
-def test_script_executed_twice_in_private_app_hive(tmp_path):
+@pytest.mark.parametrize("missing_drive", [False, True])
+@pytest.mark.parametrize("empty_localappdata", [False, True])
+def test_script_executed_twice_in_private_app_hive(
+    tmp_path, missing_drive, empty_localappdata
+):
     # RegLoadAppKey creates a process-private hive. No HKCU/HKLM writes, no broadcast.
     folder = tmp_path / "O'Brien’s [tools]"
     folder.mkdir()
@@ -289,11 +326,32 @@ def test_script_executed_twice_in_private_app_hive(tmp_path):
     def literal(value):
         return "'" + re.sub("['‘’‚‛]", lambda m: m[0] * 2, str(value)) + "'"
 
+    extra_dirs = [str(folder)]
+    machine_path = "''"
+    if missing_drive:
+        drive = next(
+            (
+                chr(n)
+                for n in range(ord("Z"), ord("D") - 1, -1)
+                if not os.path.exists(f"{chr(n)}:\\")
+            ),
+            None,
+        )
+        if drive is None:
+            pytest.skip("No unavailable drive letter")
+        extra_dirs.insert(0, drive + r":\WhisperJAV\Library\bin")
+        machine_path = literal(drive + r":\stale\bin")
+    if empty_localappdata:
+        # Intercept only the drive-relative probe in this child PowerShell process.
+        # Treat it as present so the test catches an unsafe candidate without
+        # creating anything at the drive root or depending on installed tools.
+        extra_dirs = []
+        machine_path = "$( $env:LOCALAPPDATA = ''; " + machine_path + " )"
     generated = F.setup_script(
-        [str(folder)],
+        extra_dirs,
         _test_hook={
             "key": "$privateRoot.CreateSubKey('Environment')",
-            "machine_path": "''",
+            "machine_path": machine_path,
             "broadcast": False,
         },
     )
@@ -321,6 +379,19 @@ try {
     $seed = $privateRoot.CreateSubKey('Environment')
     $seed.SetValue('Path','%USERPROFILE%\x','ExpandString')
     $seed.Close()
+    $Error.Clear()
+"""
+    if empty_localappdata:
+        script += r"""
+    $script:relativeProbes = 0
+    function Test-Path {
+        param($LiteralPath, $PathType, $ErrorAction)
+        if ($LiteralPath -eq '\WhisperJAV\Library\bin\ffmpeg.exe') {
+            $script:relativeProbes++
+            return $true
+        }
+        return $LiteralPath -eq 'C:\WhisperJAV\Library\bin\ffmpeg.exe'
+    }
 """
     script += (
         generated
@@ -338,7 +409,7 @@ try {
     $second = $read.GetValue('Path','','DoNotExpandEnvironmentNames')
     $kind2 = $read.GetValueKind('Path').ToString()
     $read.Close()
-    @{first=$first;second=$second;kind1=$kind1;kind2=$kind2} | ConvertTo-Json -Compress
+    @{first=$first;second=$second;kind1=$kind1;kind2=$kind2;errors=$Error.Count;relativeProbes=$script:relativeProbes} | ConvertTo-Json -Compress
 } finally {
     $privateRoot.Close()
     $safe.Dispose()
@@ -346,7 +417,12 @@ try {
 """
     )
     result = json.loads(powershell(script).splitlines()[-1])
+    assert result["errors"] == 0
     assert result["kind1"] == result["kind2"] == "ExpandString"
+    if empty_localappdata:
+        assert result["relativeProbes"] == 0
+        assert result["first"] == result["second"] == "%USERPROFILE%\\x;" + DIR
+        return
     assert result["first"] == result["second"] == "%USERPROFILE%\\x;" + str(folder)
     assert result["second"].count(str(folder)) == 1
 

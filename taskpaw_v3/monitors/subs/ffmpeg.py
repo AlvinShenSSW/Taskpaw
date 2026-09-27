@@ -26,9 +26,9 @@ def _has_control(value: str) -> bool:
 
 def bundled_ffmpeg_dir(exe: str) -> str | None:
     """Derive the Windows install folder lexically, without accessing the exe."""
+    exe = exe.strip()
     if _has_control(exe) or ";" in exe or '"' in exe:
         return None
-    exe = exe.strip()
     if not re.match(r"^[A-Za-z]:[\\/]", exe):
         return None
     # ntpath is Windows' os.path; keep these Windows paths lexical on other OSes too.
@@ -149,9 +149,11 @@ def setup_script(
     candidates = [
         _ps_literal(folder) for folder in extra_dirs if not _has_control(folder)
     ]
-    candidates.append("($env:LOCALAPPDATA + '\\WhisperJAV\\Library\\bin')")
+    candidates.append(
+        "if ($env:LOCALAPPDATA) { ($env:LOCALAPPDATA + '\\WhisperJAV\\Library\\bin') }"
+    )
     candidates.extend(_ps_literal(folder) for folder in _FALLBACK_DIRS)
-    candidate_lines = ",\n".join("                " + value for value in candidates)
+    candidate_lines = "\n".join("                " + value for value in candidates)
     return f"""& {{
     Write-Host "当前 Windows 用户：$env:USERNAME"
     $key = {key}
@@ -163,8 +165,8 @@ def setup_script(
         foreach ($entry in ($savedPath -split ';')) {{
             $folder = $entry.Trim().Trim('"').Trim()
             if ($folder) {{
-                $exe = Join-Path $folder 'ffmpeg.exe'
-                if (Test-Path -LiteralPath $exe -PathType Leaf) {{
+                $exe = ($folder.TrimEnd('\\') + '\\ffmpeg.exe')
+                if (Test-Path -LiteralPath $exe -PathType Leaf -ErrorAction SilentlyContinue) {{
                     $found = $exe
                     break
                 }}
@@ -178,7 +180,7 @@ def setup_script(
             )
             $selected = $null
             foreach ($folder in $candidates) {{
-                if (Test-Path -LiteralPath (Join-Path $folder 'ffmpeg.exe') -PathType Leaf) {{
+                if (Test-Path -LiteralPath ($folder.TrimEnd('\\') + '\\ffmpeg.exe') -PathType Leaf -ErrorAction SilentlyContinue) {{
                     $selected = $folder
                     break
                 }}

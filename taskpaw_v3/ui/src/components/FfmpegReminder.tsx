@@ -28,6 +28,7 @@ export function FfmpegReminder({ whisperjav = "" }: { whisperjav?: string }) {
   }, [whisperjav]);
 
   const state = failed ? "error" : status ? ffmpegState(status) : "checking";
+  const candidate = status?.candidates.find((candidate) => candidate.exists);
   const neutral = state === "neutral" || state === "error" || state === "checking";
   const severity = state === "path" || state === "bundled" ? "success"
     : state === "windows" || state === "other" ? "warning" : "info";
@@ -50,9 +51,7 @@ export function FfmpegReminder({ whisperjav = "" }: { whisperjav?: string }) {
         <Typography variant="body2">{t(`ffmpeg.${state}`, { path: status?.effective })}</Typography>
         {state === "error" && <Typography variant="body2">{t("ffmpeg.readme")}</Typography>}
         {state === "windows" && <>
-          {status?.candidates.filter((candidate) => candidate.exists).map((candidate) => (
-            <Typography key={candidate.dir} variant="body2">{t("ffmpeg.candidate", { dir: candidate.dir })}</Typography>
-          ))}
+          {candidate && <Typography variant="body2">{t("ffmpeg.candidate", { dir: candidate.dir })}</Typography>}
           {status?.script && <>
             <Typography variant="body2">{t("ffmpeg.instructions")}</Typography>
             <Box component="pre" role="region" aria-label={t("ffmpeg.scriptLabel")} tabIndex={0}

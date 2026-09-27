@@ -47,6 +47,19 @@ afterEach(() => {
 Object.defineProperty(navigator, "clipboard", { configurable: true, get: () => undefined });
 
 describe("FFmpeg reminder states (#204)", () => {
+  it("names only the first existing candidate that the script will add", async () => {
+    stubStatus({ candidates: [
+      { dir: "C:\\absent", exists: false },
+      { dir: "C:\\first", exists: true },
+      { dir: "D:\\second", exists: true },
+    ] });
+    wrap(<FfmpegReminder whisperjav={EXE} />);
+    await tick();
+    expect(screen.getByRole("alert")).toHaveTextContent("已在 C:\\first 找到 ffmpeg.exe，脚本会把它加入 PATH");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("D:\\second");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("C:\\absent");
+  });
+
   const cases: Array<[string, Partial<FfmpegStatus>, string, string, string]> = [
     ["path", { on_path: FOUND, effective: FOUND }, "status", "已找到 FFmpeg：", "FFmpeg found:"],
     ["bundled", { bundled: FOUND, effective: FOUND }, "status", "将自动使用 WhisperJAV 自带的 FFmpeg：", "WhisperJAV's bundled FFmpeg will be used automatically:"],
@@ -165,13 +178,13 @@ describe("FFmpeg reminder states (#204)", () => {
   });
 });
 
-function plugin(type_id: string): PluginInfo {
+function plugin(type_id: string, defaultAv = true): PluginInfo {
   return {
     type_id, display_name: type_id, category: "task", config_version: 1, system: false,
     json_schema: { type: "object", properties: {
       name: { type: "string", title: "Name" },
       whisperjav_exe_path: { type: "string", title: "WhisperJAV path" },
-      av_translate: { type: "boolean", title: "AV translate", default: false },
+      av_translate: { type: "boolean", title: "AV translate", ...(defaultAv ? { default: false } : {}) },
     } }, ui_schema: {},
   };
 }
@@ -182,6 +195,57 @@ function choose(id: string) {
 }
 
 describe("wizard FFmpeg integration", () => {
+  // No schema defaults: a mount-time rjsf onChange must not mask stale live data.
+  const reentryProps = { ...props, plugins: [plugin("avsubs", false), plugin("jasna", false)] };
+  it.each([false, true])("re-entering step 2 queries the visible restored path (Review: %s)", async (review) => {
+    const fetcher = stubStatus();
+    wrap(<MonitorWizard mode="add" {...reentryProps} />);
+    choose("avsubs");
+    await tick();
+    const pathInput = () => screen.getByRole("textbox", { name: /whisperjav/i });
+    if (review) {
+      fireEvent.change(pathInput(), { target: { value: EXE } });
+      await tick();
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "复核" })); });
+      fireEvent.click(screen.getByRole("button", { name: "返回" }));
+      await tick();
+      expect(pathInput()).toHaveValue(EXE);
+    }
+    const edited = "D:\\edited\\Scripts\\whisperjav.exe";
+    fireEvent.change(pathInput(), { target: { value: edited } });
+    await tick();
+    expect(pathInput()).toHaveValue(edited);
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    // Re-selecting the same service is a no-op and must not mask the regression.
+    choose("avsubs");
+    expect(pathInput()).toHaveValue(review ? EXE : "");
+    fetcher.mockClear();
+    await tick();
+    const queries = fetcher.mock.calls
+      .map(([url]) => new URL(url))
+      .filter((url) => url.pathname === "/control/ffmpeg");
+    expect(queries).toHaveLength(1);
+    expect(queries[0].searchParams.get("whisperjav") ?? "").toBe((pathInput() as HTMLInputElement).value);
+  });
+
+  it("re-entering Jasna step 2 hides the reminder when the restored checkbox is unchecked", async () => {
+    const fetcher = stubStatus();
+    wrap(<MonitorWizard mode="add" {...reentryProps} />);
+    choose("jasna");
+    fireEvent.click(screen.getByRole("checkbox"));
+    await tick();
+    expect(screen.getByRole("checkbox")).toBeChecked();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    fetcher.mockClear();
+    await tick();
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("avsubs always shows above Review; copy does not submit, Review still submits", async () => {
     stubStatus();
     wrap(<MonitorWizard mode="add" {...props} />);

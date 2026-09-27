@@ -82,8 +82,8 @@ TaskPaw 会自动使用 WhisperJAV 安装目录中自带的 FFmpeg（Library\bin
         foreach ($entry in ($savedPath -split ';')) {
             $folder = $entry.Trim().Trim('"').Trim()
             if ($folder) {
-                $exe = Join-Path $folder 'ffmpeg.exe'
-                if (Test-Path -LiteralPath $exe -PathType Leaf) {
+                $exe = ($folder.TrimEnd('\') + '\ffmpeg.exe')
+                if (Test-Path -LiteralPath $exe -PathType Leaf -ErrorAction SilentlyContinue) {
                     $found = $exe
                     break
                 }
@@ -93,14 +93,14 @@ TaskPaw 会自动使用 WhisperJAV 安装目录中自带的 FFmpeg（Library\bin
             Write-Host "已找到 FFmpeg：$found"
         } else {
             $candidates = @(
-                ($env:LOCALAPPDATA + '\WhisperJAV\Library\bin'),
-                'C:\WhisperJAV\Library\bin',
-                'C:\Jasna\tools',
+                if ($env:LOCALAPPDATA) { ($env:LOCALAPPDATA + '\WhisperJAV\Library\bin') }
+                'C:\WhisperJAV\Library\bin'
+                'C:\Jasna\tools'
                 'C:\Lada\_internal\bin'
             )
             $selected = $null
             foreach ($folder in $candidates) {
-                if (Test-Path -LiteralPath (Join-Path $folder 'ffmpeg.exe') -PathType Leaf) {
+                if (Test-Path -LiteralPath ($folder.TrimEnd('\') + '\ffmpeg.exe') -PathType Leaf -ErrorAction SilentlyContinue) {
                     $selected = $folder
                     break
                 }
