@@ -59,6 +59,8 @@ def _empty_status() -> dict[str, Any]:
 
 
 def _saved_path() -> str:
+    if sys.platform != "win32":  # winreg only exists (and type-checks) on Windows
+        return ""
     import winreg
 
     entries = []
