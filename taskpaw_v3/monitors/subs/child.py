@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import collections
 import logging
+import ntpath
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -34,6 +36,7 @@ from typing import IO, Any, Callable, Mapping, Optional
 
 from taskpaw_v3.core.llm import LLM_ENV_PREFIX as LLM_ENV_PREFIX
 from taskpaw_v3.core.llm import without_llm_env
+from taskpaw_v3.monitors.subs.ffmpeg import bundled_ffmpeg
 
 try:
     import psutil
@@ -46,14 +49,32 @@ _CHUNK = 4096
 _TASKKILL_NOT_FOUND = 128  # the process is already gone — not an error
 _TASKKILL_MIN_S = 0.5  # taskkill always gets at least this long to run
 _FINAL_KILL_WAIT_S = 1.0  # the one wait after the last-resort proc.kill() (N4)
+_bundled_logged: set[str] = set()
+_bundled_log_lock = threading.Lock()
 
 
-def asr_env(base: Optional[Mapping[str, str]] = None) -> dict[str, str]:
+def asr_env(
+    base: Optional[Mapping[str, str]] = None, whisperjav_exe: str = ""
+) -> dict[str, str]:
     """A copy of `base` (default: the agent's environment) minus every
     `TASKPAW_LLM_*` variable (case-insensitive): the LLM key must never reach
     the ASR child (#177 AC10; moved here from Jasna by #179 C6). The filter is
     `core.llm.without_llm_env`, shared with the llm-worker's env (#192 C7)."""
-    return without_llm_env(base)
+    env = without_llm_env(base)
+    path_key = next((key for key in env if key.lower() == "path"), "PATH")
+    path = env.get(path_key, "")
+    if shutil.which("ffmpeg", path=path) is None:
+        ffmpeg = bundled_ffmpeg(whisperjav_exe)
+        if ffmpeg is not None:
+            folder = ntpath.dirname(ffmpeg)
+            path = path.rstrip(";")
+            env[path_key] = (path + ";" if path else "") + folder
+            with _bundled_log_lock:
+                identity = ntpath.normcase(folder)
+                if identity not in _bundled_logged:
+                    _bundled_logged.add(identity)
+                    log.info("whisperjav: using the bundled FFmpeg (%s)", folder)
+    return env
 
 
 @dataclass(frozen=True)

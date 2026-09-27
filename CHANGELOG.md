@@ -4,6 +4,19 @@
 
 ---
 
+## V3 3.9.4 — AV 翻译不再因为找不到 FFmpeg 而失败：自动用 WhisperJAV 自带的，找不到时提醒并给脚本（#204）
+
+- **自动**：AV 翻译的语音识别（WhisperJAV）需要 FFmpeg。以前它只在系统 PATH 里找，没有就每部片都「识别失败」（Jasna、Lada
+  自带的 FFmpeg 它用不上）。现在 TaskPaw 启动 WhisperJAV 时，如果系统里找不到 FFmpeg，会自动使用 WhisperJAV 安装目录里
+  自带的那份（`…\Library\bin\ffmpeg.exe`）。只影响那一次识别，不改任何系统设置，**已有的任务不用做任何操作**。
+- **提醒**：添加或修改 AV 翻译任务、以及开启了 AV 翻译的 Jasna 任务时，表单里（保存按钮上方）会显示 FFmpeg 的状态：
+  「已找到 FFmpeg」/「将自动使用 WhisperJAV 自带的 FFmpeg」/「已加入 PATH，重开 TaskPaw 后生效」；
+  真的哪里都找不到时才显示警告，并附一段可「复制脚本」的 PowerShell 命令：粘贴到普通 PowerShell 窗口运行一次，它会把找到的
+  FFmpeg 目录加入当前用户的 PATH（不会破坏已有的 PATH 设置，重复运行不会重复添加），然后关闭 TaskPaw 窗口再从开始菜单打开即可。
+- README 里也有同一段脚本（「FFmpeg（AV 翻译识别需要）」一节）。
+
+---
+
 ## V3 3.9.3 — Jasna「本轮影片」：这一轮每部片的修复、翻译结果和用了哪个模型，一页 10 部（#200）
 
 - **新的「本轮影片」卡片**：Jasna 任务（开启 AV 翻译时）的任务页中下部，列出这次点「开始」以来的每部片：

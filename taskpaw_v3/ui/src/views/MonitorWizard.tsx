@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type PluginInfo, type PresetInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
+import { FfmpegReminder } from "../components/FfmpegReminder";
 import { fieldLabel } from "../schemaI18n";
 import { ServiceIcon } from "../components/ServiceIcon";
 
@@ -49,6 +50,7 @@ export function MonitorWizard({
   const [step, setStep] = useState<1 | 2 | 3>(mode === "edit" ? 2 : 1);
   const [selectedId, setSelectedId] = useState<string | null>(editService?.id ?? null);
   const [formData, setFormData] = useState<Record<string, unknown>>(existingConfig ?? {});
+  const [liveFormData, setLiveFormData] = useState<Record<string, unknown>>(existingConfig ?? {});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -68,6 +70,7 @@ export function MonitorWizard({
   const selectService = (id: string) => {
     if (id !== selectedId) {
       setFormData({});
+      setLiveFormData({});
       setError(null);
     }
     setSelectedId(id);
@@ -229,6 +232,11 @@ export function MonitorWizard({
               uiSchema={formUiSchema}
               formData={mode === "edit" ? existingConfig : formData}
               onSubmit={onFormSubmit}
+              onChange={(data) => setLiveFormData(data as Record<string, unknown>)}
+              reminder={(selected.plugin.type_id === "avsubs" ||
+                (selected.plugin.type_id === "jasna" && liveFormData.av_translate === true))
+                ? <FfmpegReminder whisperjav={typeof liveFormData.whisperjav_exe_path === "string"
+                  ? liveFormData.whisperjav_exe_path : ""} /> : null}
               typeId={selected.plugin.type_id}
             />
           </>

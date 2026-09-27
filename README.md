@@ -62,6 +62,82 @@ watch; it self-creates a default config on first run.
   saving them.
   「思考」/ Thinking: automatic disables thinking on DeepSeek and MiMo; choose「不发送」to use the service default, or「关闭思考」to send the parameter explicitly; slots differing only in this setting count as the same model (the first wins).
 
+### FFmpeg（AV 翻译识别需要）
+
+TaskPaw 会自动使用 WhisperJAV 安装目录中自带的 FFmpeg（Library\bin），
+用于独立 AV 翻译和 Jasna 的 AV 翻译识别；已在 PATH 上的 FFmpeg 优先。
+如果没有找到可用的 FFmpeg，将下面的脚本粘贴到普通 PowerShell 窗口运行
+（不要另存为 .ps1）；只修改当前 Windows 用户的设置。
+完成后请关闭 TaskPaw 窗口（会完全退出），再从开始菜单重新打开。
+
+```powershell
+& {
+    Write-Host "当前 Windows 用户：$env:USERNAME"
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+    try {
+        $userPath = [string]$key.GetValue('Path','')
+        $machinePath = [Environment]::GetEnvironmentVariable('Path','Machine')
+        $savedPath = [string]$machinePath + ';' + $userPath
+        $found = $null
+        foreach ($entry in ($savedPath -split ';')) {
+            $folder = $entry.Trim().Trim('"').Trim()
+            if ($folder) {
+                $exe = Join-Path $folder 'ffmpeg.exe'
+                if (Test-Path -LiteralPath $exe -PathType Leaf) {
+                    $found = $exe
+                    break
+                }
+            }
+        }
+        if ($found) {
+            Write-Host "已找到 FFmpeg：$found"
+        } else {
+            $candidates = @(
+                ($env:LOCALAPPDATA + '\WhisperJAV\Library\bin'),
+                'C:\WhisperJAV\Library\bin',
+                'C:\Jasna\tools',
+                'C:\Lada\_internal\bin'
+            )
+            $selected = $null
+            foreach ($folder in $candidates) {
+                if (Test-Path -LiteralPath (Join-Path $folder 'ffmpeg.exe') -PathType Leaf) {
+                    $selected = $folder
+                    break
+                }
+            }
+            if ($selected) {
+                $raw = [string]$key.GetValue('Path','','DoNotExpandEnvironmentNames')
+                $present = $false
+                foreach ($entry in ($raw -split ';')) {
+                    $folder = $entry.Trim().Trim('"').Trim()
+                    if ($folder) {
+                        $folder = [Environment]::ExpandEnvironmentVariables($folder)
+                        if ($folder.TrimEnd('\') -ieq $selected.TrimEnd('\')) {
+                            $present = $true
+                        }
+                    }
+                }
+                if ($present) {
+                    Write-Host "FFmpeg 文件夹已在用户 PATH：$selected"
+                } else {
+                    $new = $raw.TrimEnd(';')
+                    if ($new) { $new += ';' }
+                    $new += $selected
+                    $key.SetValue('Path',$new,'ExpandString')
+                    [Environment]::SetEnvironmentVariable('TASKPAW_PATH_REFRESH',$null,'User')
+                    Write-Host "已加入用户 PATH：$selected"
+                }
+            } else {
+                Write-Host '未找到 FFmpeg。可运行：winget install Gyan.FFmpeg'
+            }
+        }
+    } finally {
+        $key.Close()
+    }
+    Write-Host '完成后请关闭 TaskPaw 窗口（会完全退出），再从开始菜单重新打开'
+}
+```
+
 ### From source (dev)
 
 Python 3.10+ via [`uv`](https://docs.astral.sh/uv/), Node 22, and the Rust

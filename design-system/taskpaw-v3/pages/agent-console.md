@@ -107,6 +107,7 @@ the form by monitor count:
 - **StatusHeader / live metric line** (e.g. Lada: file N/M, fps, %; ComfyUI:
   queue depth) — now the header of MonitorHero.
 - **ConfigForm**: schema-driven, collapsible, with per-field validation.
+- **FFmpeg reminder (#204)**: above submit for avsubs / AV-enabled Jasna, use localized semantic status text, wrapped paths, and a scrollable read-only script with a ≥40px copy target; keep the form within 375px.
 - **EmptyState**: "No monitors yet" + Add-monitor primary CTA.
 
 > **Deferred data note:** the design shows a **last-event time per monitor** (on

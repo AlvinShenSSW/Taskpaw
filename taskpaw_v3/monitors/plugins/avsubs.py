@@ -371,7 +371,7 @@ def _idle_note(plan: TreePlan, root: str) -> str:
 def _default_spawn(argv: list[str]) -> ChildProcess:
     # Resolved at call time so `AV.ChildProcess` can be monkeypatched (D10);
     # stdin=DEVNULL and a merged tail are ChildProcess's defaults.
-    return ChildProcess(argv, env=asr_env())
+    return ChildProcess(argv, env=asr_env(whisperjav_exe=argv[0]))
 
 
 def _remove_tree(path: Path) -> None:

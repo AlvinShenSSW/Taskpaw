@@ -95,6 +95,74 @@ def _cfg(**kw):
 
 
 @pytest.mark.parametrize(
+    "exe", ["", r"\\host\share\whisperjav.exe", r"C:\Custom\Scripts\whisperjav.exe"]
+)
+@pytest.mark.parametrize("windows", [True, False])
+def test_ffmpeg_control_only_shape(monkeypatch, exe, windows):
+    import sys
+    from types import SimpleNamespace
+
+    from taskpaw_v3.monitors.subs import ffmpeg
+
+    monkeypatch.setattr(ffmpeg.sys, "platform", "win32" if windows else "linux")
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(ffmpeg.os.path, "isfile", lambda p: False)
+
+    def missing(*args):
+        raise FileNotFoundError()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "winreg",
+        SimpleNamespace(HKEY_LOCAL_MACHINE=1, HKEY_CURRENT_USER=2, OpenKey=missing),
+    )
+    client = TestClient(create_control_app(_cfg()))
+    response = client.get("/control/ffmpeg", params={"whisperjav": exe})
+    assert response.status_code == 200
+    data = response.json()
+    assert set(data) == {
+        "on_path",
+        "bundled",
+        "effective",
+        "exe_ok",
+        "saved_path_ok",
+        "pending_restart",
+        "candidates",
+        "platform",
+        "error",
+        "script",
+    }
+    assert data["exe_ok"] is exe.startswith("C:")
+    assert data["error"] is False
+    assert data["platform"] == ("windows" if windows else "other")
+    folder = ffmpeg.bundled_ffmpeg_dir(exe)
+    assert data["script"] == (
+        ffmpeg.setup_script([folder] if folder else []) if windows else None
+    )
+    assert client.get("/control/ffmpeg").status_code == 200
+    net = TestClient(create_network_app(_cfg(), EventQueue("dev")))
+    assert net.get("/control/ffmpeg").status_code == 404
+
+
+@pytest.mark.parametrize("failed", ["ffmpeg_status", "setup_script"])
+def test_ffmpeg_internal_failure_returns_200(monkeypatch, failed):
+    from taskpaw_v3.monitors.subs import ffmpeg
+
+    monkeypatch.setattr(ffmpeg.sys, "platform", "win32")
+    monkeypatch.setattr(
+        ffmpeg, "ffmpeg_status", lambda exe: {"platform": "windows", "error": False}
+    )
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("internal test failure")
+
+    monkeypatch.setattr(ffmpeg, failed, fail)
+    response = TestClient(create_control_app(_cfg())).get("/control/ffmpeg")
+    assert response.status_code == 200
+    assert response.json()["error"] is True
+
+
+@pytest.mark.parametrize(
     "params",
     [
         {"limit": "abc"},

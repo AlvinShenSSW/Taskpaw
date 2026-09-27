@@ -521,7 +521,7 @@ def _default_spawn(argv: list[str]) -> ChildProcess:
     # Resolved at call time so `J.ChildProcess` can be monkeypatched (D10).
     # stdin=DEVNULL (D15) and a merged stdout/stderr tail are ChildProcess's
     # defaults; the env is scrubbed of the LLM key (`asr_env`, AC10).
-    return ChildProcess(argv, env=asr_env())
+    return ChildProcess(argv, env=asr_env(whisperjav_exe=argv[0]))
 
 
 def _survivor_pids(child: Optional[ChildProcess]) -> list[int]:

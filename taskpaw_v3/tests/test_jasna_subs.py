@@ -1338,6 +1338,19 @@ def test_asr_child_env_never_carries_the_llm_key(monkeypatch):
     assert "stdin_pipe" not in seen["kw"]  # stdin stays DEVNULL (D15)
 
 
+def test_default_spawn_adds_whisperjav_bundled_ffmpeg(monkeypatch):
+    from taskpaw_v3.monitors.subs import ffmpeg
+
+    seen = {}
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(ffmpeg.os.path, "isfile", lambda p: True)
+    monkeypatch.setenv("PATH", r"C:\existing;")
+    monkeypatch.setattr(J, "ChildProcess", lambda argv, **kw: seen.update(kw))
+    J._default_spawn([r"C:\WhisperJAV\Scripts\whisperjav.exe", "example.mp4"])
+    path = next(value for key, value in seen["env"].items() if key.lower() == "path")
+    assert path == r"C:\existing;C:\WhisperJAV\Library\bin"
+
+
 def test_long_failure_detail_keeps_its_head_and_is_bounded():
     text = "exit code 1: " + "x" * 5000 + " LAST"
     out = J._bounded(text)
