@@ -144,6 +144,44 @@ def test_ffmpeg_control_only_shape(monkeypatch, exe, windows):
     assert net.get("/control/ffmpeg").status_code == 404
 
 
+def test_ffmpeg_saved_path_denied_keeps_script(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from taskpaw_v3.monitors.subs import ffmpeg
+
+    monkeypatch.setattr(ffmpeg.sys, "platform", "win32")
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(ffmpeg.os.path, "isfile", lambda p: False)
+
+    def denied(*args):
+        raise PermissionError("test registry access denied")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "winreg",
+        SimpleNamespace(HKEY_LOCAL_MACHINE=1, HKEY_CURRENT_USER=2, OpenKey=denied),
+    )
+    exe = r"C:\Custom\Scripts\whisperjav.exe"
+    response = TestClient(create_control_app(_cfg())).get(
+        "/control/ffmpeg", params={"whisperjav": exe}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["error"] is False
+    assert data["saved_path_ok"] is None
+    assert data["pending_restart"] is False
+    assert data["on_path"] is None
+    assert data["bundled"] is None
+    assert data["effective"] is None
+    assert data["exe_ok"] is True
+    assert data["candidates"][0] == {
+        "dir": r"C:\Custom\Library\bin",
+        "exists": False,
+    }
+    assert data["script"] == ffmpeg.setup_script([r"C:\Custom\Library\bin"])
+
+
 @pytest.mark.parametrize("failed", ["ffmpeg_status", "setup_script"])
 def test_ffmpeg_internal_failure_returns_200(monkeypatch, failed):
     from taskpaw_v3.monitors.subs import ffmpeg

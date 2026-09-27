@@ -74,8 +74,12 @@ def _saved_path() -> str:
         try:
             with winreg.OpenKey(root, subkey) as key:
                 value, kind = winreg.QueryValueEx(key, "Path")
-        except FileNotFoundError:
-            continue  # A missing PATH value/key is an ordinary empty PATH.
+        except OSError as exc:
+            log.debug("Saved PATH key unavailable (%s)", type(exc).__name__)
+            continue  # A missing or unreadable key/value is an empty PATH.
+        if not isinstance(value, str):
+            log.debug("Saved PATH value is not a string")
+            continue
         for entry in value.split(";"):
             entry = entry.strip().strip('"').strip()
             if not entry:

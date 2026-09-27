@@ -59,7 +59,11 @@ def asr_env(
     """A copy of `base` (default: the agent's environment) minus every
     `TASKPAW_LLM_*` variable (case-insensitive): the LLM key must never reach
     the ASR child (#177 AC10; moved here from Jasna by #179 C6). The filter is
-    `core.llm.without_llm_env`, shared with the llm-worker's env (#192 C7)."""
+    `core.llm.without_llm_env`, shared with the llm-worker's env (#192 C7).
+    With `whisperjav_exe`, also append WhisperJAV's bundled `Library\\bin` to
+    the child PATH when ffmpeg is not resolvable there and the bundled
+    `ffmpeg.exe` exists (#204 AC1); the default `""` makes no PATH change.
+    """
     env = without_llm_env(base)
     path_key = next((key for key in env if key.lower() == "path"), "PATH")
     path = env.get(path_key, "")

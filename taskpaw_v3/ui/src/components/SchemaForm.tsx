@@ -7,7 +7,6 @@ import type {
   UiSchema,
   SubmitButtonProps,
 } from "@rjsf/utils";
-import { getSubmitButtonOptions } from "@rjsf/utils";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { PathWidget } from "./PathWidget";
@@ -31,8 +30,7 @@ const DefaultSubmitButton = buttonTemplates.SubmitButton;
 // a per-render template) makes rjsf restore props.formData over unsaved edits.
 function SubmitButton(props: SubmitButtonProps) {
   const reminder = useContext(ReminderContext);
-  const { submitText } = getSubmitButtonOptions(props.uiSchema);
-  return <>{reminder}<DefaultSubmitButton {...props}>{submitText}</DefaultSubmitButton></>;
+  return <>{reminder}<DefaultSubmitButton {...props} /></>;
 }
 
 const templates: Partial<TemplatesType> = {

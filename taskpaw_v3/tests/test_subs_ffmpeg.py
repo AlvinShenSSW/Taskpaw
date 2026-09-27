@@ -217,6 +217,69 @@ def test_saved_path_expands_each_expand_string_entry_only(
     assert status["pending_restart"] is True
 
 
+@pytest.mark.parametrize("operation", ["OpenKey", "QueryValueEx"])
+@pytest.mark.parametrize("failed_key", ["machine", "user"])
+def test_saved_path_access_failure_keeps_other_key(
+    discovery, monkeypatch, operation, failed_key
+):
+    registry(monkeypatch, machine=(DIR, 1), user=(DIR, 1))
+    fake = sys.modules["winreg"]
+    original = getattr(fake, operation)
+
+    def denied(key, name):
+        if key == failed_key:
+            raise PermissionError("test registry access denied")
+        return original(key, name)
+
+    monkeypatch.setattr(fake, operation, denied)
+    paths = []
+
+    def which(name, path=None):
+        paths.append(path)
+        return FFMPEG if path == DIR else None
+
+    monkeypatch.setattr(F.shutil, "which", which)
+    monkeypatch.setattr(F.os.path, "isfile", lambda p: p == FFMPEG)
+    status = F.ffmpeg_status(EXE)
+    assert status["error"] is False
+    assert paths == [None, DIR]
+    assert status["saved_path_ok"] == FFMPEG
+    assert status["on_path"] is None
+    assert status["bundled"] == status["effective"] == FFMPEG
+    assert status["pending_restart"] is False
+    assert status["candidates"][0] == {"dir": DIR, "exists": True}
+
+
+@pytest.mark.parametrize("invalid_key", ["machine", "user"])
+@pytest.mark.parametrize("other_path", ["", DIR])
+def test_saved_path_non_string_keeps_other_key(
+    discovery, monkeypatch, invalid_key, other_path
+):
+    invalid = (123, 4)
+    valid = (other_path, 1)
+    registry(
+        monkeypatch,
+        machine=invalid if invalid_key == "machine" else valid,
+        user=invalid if invalid_key == "user" else valid,
+    )
+    paths = []
+
+    def which(name, path=None):
+        paths.append(path)
+        return FFMPEG if path == DIR else None
+
+    monkeypatch.setattr(F.shutil, "which", which)
+    status = F.ffmpeg_status(EXE)
+    assert status["error"] is False
+    assert paths == [None, other_path]
+    assert status["saved_path_ok"] == (FFMPEG if other_path else None)
+    assert status["on_path"] is None
+    assert status["bundled"] is None
+    assert status["effective"] is None
+    assert status["pending_restart"] is bool(other_path)
+    assert status["candidates"][0] == {"dir": DIR, "exists": False}
+
+
 def test_status_failure_never_raises(discovery, monkeypatch):
     def fail(*args, **kwargs):
         raise OSError("test failure")
