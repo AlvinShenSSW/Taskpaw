@@ -1,12 +1,13 @@
-import Form from "@rjsf/mui";
+import Form, { Templates } from "@rjsf/mui";
 import validator from "@rjsf/validator-ajv8";
 import type {
   RegistryWidgetsType,
   RJSFSchema,
   TemplatesType,
   UiSchema,
+  SubmitButtonProps,
 } from "@rjsf/utils";
-import { useMemo } from "react";
+import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { PathWidget } from "./PathWidget";
 import { PasswordWidget } from "./PasswordWidget";
@@ -20,9 +21,22 @@ const widgets: RegistryWidgetsType = {
   password: PasswordWidget,
 };
 
+const ReminderContext = createContext<ReactNode>(null);
+// The MUI theme supplies the complete button set (its export type is partial).
+const buttonTemplates = Templates.ButtonTemplates!;
+const DefaultSubmitButton = buttonTemplates.SubmitButton;
+
+// Keep both the template and Form props stable: a reminder in formContext (or
+// a per-render template) makes rjsf restore props.formData over unsaved edits.
+function SubmitButton(props: SubmitButtonProps) {
+  const reminder = useContext(ReminderContext);
+  return <>{reminder}<DefaultSubmitButton {...props} /></>;
+}
+
 const templates: Partial<TemplatesType> = {
   // Two-column field grid with full-span support (design preview `.form`).
   ObjectFieldTemplate,
+  ButtonTemplates: { ...buttonTemplates, SubmitButton },
 };
 
 // Fields the backend marks with `ui:options.taskpawPath` (lada_cli_path, the
@@ -59,12 +73,16 @@ export function SchemaForm({
   uiSchema,
   formData,
   onSubmit,
+  onChange,
+  reminder,
   typeId,
 }: {
   schema: RJSFSchema;
   uiSchema?: UiSchema;
   formData?: unknown;
   onSubmit?: (data: unknown) => void;
+  onChange?: (data: unknown) => void;
+  reminder?: ReactNode;
   // The plugin type_id, so field labels/help can be localized (#121).
   typeId?: string;
 }) {
@@ -76,17 +94,20 @@ export function SchemaForm({
     [schema, typeId, i18n.language],
   );
   return (
-    <Form
-      schema={localizedSchema}
-      uiSchema={withPathWidgets(uiSchema)}
-      widgets={widgets}
-      templates={templates}
-      validator={validator}
-      formData={formData}
-      onSubmit={(e) => onSubmit?.(e.formData)}
-      liveValidate={false}
-      showErrorList={false}
-      focusOnFirstError
-    />
+    <ReminderContext.Provider value={reminder}>
+      <Form
+        schema={localizedSchema}
+        uiSchema={withPathWidgets(uiSchema)}
+        widgets={widgets}
+        templates={templates}
+        validator={validator}
+        formData={formData}
+        onSubmit={(e) => onSubmit?.(e.formData)}
+        onChange={(e) => onChange?.(e.formData)}
+        liveValidate={false}
+        showErrorList={false}
+        focusOnFirstError
+      />
+    </ReminderContext.Provider>
   );
 }

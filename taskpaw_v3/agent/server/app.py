@@ -12,6 +12,7 @@ monitors arrive with the plugin supervisor in #17.
 
 from __future__ import annotations
 
+import logging
 import platform
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
@@ -37,6 +38,7 @@ from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import effective_monitors, monitor_name
+from taskpaw_v3.monitors.subs import ffmpeg
 
 
 def _unauthorized() -> JSONResponse:
@@ -131,6 +133,22 @@ def create_control_app(
     @app.get("/control/ping")
     def ping() -> dict:
         return {"ok": True}
+
+    @app.get("/control/ffmpeg")
+    def ffmpeg_check(whisperjav: str = "") -> dict:
+        result = ffmpeg._empty_status()
+        result["script"] = None
+        try:
+            result.update(ffmpeg.ffmpeg_status(whisperjav))
+            if result["platform"] == "windows":
+                folder = ffmpeg.bundled_ffmpeg_dir(whisperjav)
+                result["script"] = ffmpeg.setup_script([folder] if folder else ())
+        except Exception as exc:  # Diagnostics must remain a 200/error envelope.
+            logging.getLogger(__name__).warning(
+                "FFmpeg control check failed (%s)", type(exc).__name__
+            )
+            result["error"] = True
+        return result
 
     @app.get("/control/monitors/films")
     def films(

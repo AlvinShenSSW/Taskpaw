@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type PluginInfo, type PresetInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
+import { FfmpegReminder } from "../components/FfmpegReminder";
 import { fieldLabel } from "../schemaI18n";
 import { ServiceIcon } from "../components/ServiceIcon";
 
@@ -49,6 +50,7 @@ export function MonitorWizard({
   const [step, setStep] = useState<1 | 2 | 3>(mode === "edit" ? 2 : 1);
   const [selectedId, setSelectedId] = useState<string | null>(editService?.id ?? null);
   const [formData, setFormData] = useState<Record<string, unknown>>(existingConfig ?? {});
+  const [liveFormData, setLiveFormData] = useState<Record<string, unknown>>(existingConfig ?? {});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -62,12 +64,18 @@ export function MonitorWizard({
 
   const selected = services.find((s) => s.id === selectedId) ?? null;
 
+  const enterConfig = () => {
+    setLiveFormData(mode === "edit" ? existingConfig ?? {} : formData);
+    setStep(2);
+  };
+
   // Picking a different service must drop the previous plugin's captured config —
   // its fields are invalid for the new schema (backend forbids unknown keys) and
   // would fail the add or carry the wrong name (Codex).
   const selectService = (id: string) => {
     if (id !== selectedId) {
       setFormData({});
+      setLiveFormData({});
       setError(null);
     }
     setSelectedId(id);
@@ -229,6 +237,11 @@ export function MonitorWizard({
               uiSchema={formUiSchema}
               formData={mode === "edit" ? existingConfig : formData}
               onSubmit={onFormSubmit}
+              onChange={(data) => setLiveFormData(data as Record<string, unknown>)}
+              reminder={(selected.plugin.type_id === "avsubs" ||
+                (selected.plugin.type_id === "jasna" && liveFormData.av_translate === true))
+                ? <FfmpegReminder whisperjav={typeof liveFormData.whisperjav_exe_path === "string"
+                  ? liveFormData.whisperjav_exe_path : ""} /> : null}
               typeId={selected.plugin.type_id}
             />
           </>
@@ -279,7 +292,7 @@ export function MonitorWizard({
 
       <DialogActions sx={{ px: 3, py: 1.5 }}>
         {step > 1 && mode === "add" && (
-          <Button color="inherit" onClick={() => setStep((step - 1) as 1 | 2 | 3)} disabled={busy}>
+          <Button color="inherit" onClick={() => step === 3 ? enterConfig() : setStep(1)} disabled={busy}>
             {t("wizard.back")}
           </Button>
         )}
@@ -288,7 +301,7 @@ export function MonitorWizard({
         {/* Step 1 → continue; preset step 2 → review; review → add. The plugin
             config form (step 2) submits via its own in-form button. */}
         {step === 1 && (
-          <Button variant="contained" disabled={!selected} onClick={() => setStep(2)}>
+          <Button variant="contained" disabled={!selected} onClick={enterConfig}>
             {t("wizard.continue")}
           </Button>
         )}

@@ -1954,6 +1954,19 @@ def test_default_spawn_goes_through_the_module_child_process_with_a_clean_env(
     assert "stdin_pipe" not in seen["kw"]
 
 
+def test_default_spawn_adds_whisperjav_bundled_ffmpeg(monkeypatch):
+    from taskpaw_v3.monitors.subs import ffmpeg
+
+    seen = {}
+    monkeypatch.setattr(ffmpeg.shutil, "which", lambda *a, **k: None)
+    monkeypatch.setattr(ffmpeg.os.path, "isfile", lambda p: True)
+    monkeypatch.setenv("PATH", r"C:\existing;")
+    monkeypatch.setattr(AV, "ChildProcess", lambda argv, **kw: seen.update(kw))
+    AV._default_spawn([r"C:\WhisperJAV\Scripts\whisperjav.exe", "example.mp4"])
+    path = next(value for key, value in seen["env"].items() if key.lower() == "path")
+    assert path == r"C:\existing;C:\WhisperJAV\Library\bin"
+
+
 def test_jobs_are_plain_subs_jobs_keyed_by_relpath(tmp_path, monkeypatch):
     r = _setup(tmp_path, monkeypatch, full=["x/a.mp4"])
     r.inst.start(r.emit)

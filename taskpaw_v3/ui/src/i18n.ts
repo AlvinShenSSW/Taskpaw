@@ -14,6 +14,22 @@ export const LANGS: { value: Lang; label: string }[] = [
 const STORE_KEY = "taskpaw.lang";
 
 const en = {
+  ffmpeg: {
+    checking: "Checking FFmpeg…",
+    path: "FFmpeg found: {{path}}",
+    bundled: "WhisperJAV's bundled FFmpeg will be used automatically: {{path}}",
+    restart: "FFmpeg has been added to PATH. Close the TaskPaw window and reopen it from the Start menu to apply the change (if this message remains, sign out of Windows and sign back in).",
+    neutral: "Enter the full path to whisperjav.exe so TaskPaw can automatically use its bundled FFmpeg.",
+    windows: "AV speech recognition (WhisperJAV) needs FFmpeg. None was found on PATH or alongside the configured whisperjav.exe.",
+    other: "AV speech recognition (WhisperJAV) needs FFmpeg. Install FFmpeg and add it to PATH.",
+    error: "Unable to check FFmpeg",
+    readme: "See the README section ‘FFmpeg（AV 翻译识别需要）’ (FFmpeg for AV speech recognition).",
+    candidate: "Found ffmpeg.exe in {{dir}}; the script will add it to PATH.",
+    instructions: "Paste into a normal PowerShell window (do not save as a .ps1 file); changes apply to the current Windows user only.",
+    scriptLabel: "PowerShell setup script",
+    copy: "Copy script", copied: "Copied", copyFailed: "Copy failed; select the script and copy it manually",
+    restartInstructions: "When finished, close the TaskPaw window (this exits the app completely), then reopen it from the Start menu.",
+  },
   logs: {
     title: "Logs", recent: "Recent logs", day: "Day", today: "Today", yesterday: "Yesterday",
     task: "Task", allTasks: "All tasks", severity: "Severity", allSeverities: "All severities",
@@ -311,6 +327,22 @@ const en = {
 };
 
 const zh: typeof en = {
+  ffmpeg: {
+    checking: "正在检查 FFmpeg…",
+    path: "已找到 FFmpeg：{{path}}",
+    bundled: "将自动使用 WhisperJAV 自带的 FFmpeg：{{path}}",
+    restart: "FFmpeg 已加入 PATH，关闭 TaskPaw 窗口并从开始菜单重新打开后生效（仍提示则注销并重新登录 Windows）",
+    neutral: "填写 whisperjav.exe 的完整路径后，TaskPaw 会自动使用它自带的 FFmpeg",
+    windows: "AV 翻译识别（WhisperJAV）需要 FFmpeg，但未找到：PATH 中没有，配置的 whisperjav.exe 旁也没有。",
+    other: "AV 翻译识别（WhisperJAV）需要 FFmpeg。请安装 FFmpeg 并将它加入 PATH。",
+    error: "无法检查 FFmpeg",
+    readme: "请参阅 README 中的「FFmpeg（AV 翻译识别需要）」章节。",
+    candidate: "已在 {{dir}} 找到 ffmpeg.exe，脚本会把它加入 PATH",
+    instructions: "粘贴到普通 PowerShell 窗口运行（不要另存为 .ps1）；只修改当前 Windows 用户的设置",
+    scriptLabel: "PowerShell 设置脚本",
+    copy: "复制脚本", copied: "已复制", copyFailed: "复制失败，请手动选中复制",
+    restartInstructions: "完成后请关闭 TaskPaw 窗口（会完全退出），再从开始菜单重新打开",
+  },
   logs: {
     title: "日志", recent: "最近日志", day: "日期", today: "今天", yesterday: "昨天",
     task: "任务", allTasks: "全部任务", severity: "级别", allSeverities: "全部级别",

@@ -4,6 +4,19 @@
 // origin (design §3.1); in the browser they come from Vite env / localStorage.
 // The agent control API is loopback-only; the Hub API is read-only here.
 
+export interface FfmpegStatus {
+  on_path: string | null;
+  bundled: string | null;
+  effective: string | null;
+  exe_ok: boolean;
+  saved_path_ok: string | null;
+  pending_restart: boolean;
+  candidates: Array<{ dir: string; exists: boolean }>;
+  platform: "windows" | "other";
+  error: boolean;
+  script: string | null;
+}
+
 export interface MonitorSnapshot {
   state: string;
   metrics?: Record<string, unknown>;
@@ -208,6 +221,8 @@ async function send<T>(
 const q = (name: string) => `?name=${encodeURIComponent(name)}`;
 
 export const api = {
+  ffmpeg: (whisperjav?: string) => get<FfmpegStatus>("agent",
+    `/control/ffmpeg${whisperjav === undefined ? "" : `?${new URLSearchParams({ whisperjav })}`}`),
   runFilms: (name: string, filter: "done" | "open" | "all", page: number, size = 10) =>
     get<unknown>("agent", `/control/monitors/run-films${q(name)}&filter=${filter}&page=${page}&size=${size}`),
   films: (name: string, page?: number, size = 10) =>
