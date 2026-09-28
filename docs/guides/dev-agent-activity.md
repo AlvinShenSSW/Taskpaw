@@ -68,6 +68,43 @@ per-tool `--path`:
 }
 ```
 
+### Windows: write the paths with forward slashes (`/`), not backslashes (`\`)
+
+On Windows, Claude Code runs hook commands through **Git Bash**, where `\` is an
+escape character. A backslash path such as `d:\WORKSPACE\Taskpaw\.venv\Scripts\python.exe`
+reaches bash as `d:WORKSPACETaskpaw.venvScriptspython.exe`. Every event then fails
+with `command not found` (exit 127) and the state file is never written (#206).
+Windows accepts forward slashes, so write every path in the command that way:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command",
+      "command": "d:/WORKSPACE/Taskpaw/.venv/Scripts/python.exe d:/WORKSPACE/Taskpaw/taskpaw_v3/integrations/activity_writer.py --tool claude --path ~/.taskpaw/agent-activity-claude.json" }] }]
+  }
+}
+```
+
+Use the same command for every hook event you wire. If a path contains a space,
+wrap it in quotes (`\"C:/Program Files/…/python.exe\"` inside the JSON string).
+
+### Check that the hook really writes
+
+A broken hook fails quietly. The monitor treats the old file as stale and falls
+back to the CPU-based estimate, so Claude still shows busy/idle, just less
+precisely (`~<cpu>%` in the console instead of a hook state). After wiring the
+hooks, or after changing a hook command, run the command once through bash with
+a sample event:
+
+```bash
+echo '{"hook_event_name":"Stop","session_id":"check"}' | bash -c 'd:/WORKSPACE/Taskpaw/.venv/Scripts/python.exe d:/WORKSPACE/Taskpaw/taskpaw_v3/integrations/activity_writer.py --tool claude --path ~/.taskpaw/agent-activity-claude.json'
+echo "exit=$?"                              # must be 0
+cat ~/.taskpaw/agent-activity-claude.json   # "state": "idle", "session": "check", current ts
+```
+
+After that, the file should update every time you send Claude a prompt. If its
+time never moves, the hook is failing.
+
 ## 3. Codex setup (notify)
 
 Codex fires its `notify` program when a turn ends. In `~/.codex/config.toml`:
@@ -80,6 +117,10 @@ notify = ["python3", "/path/to/taskpaw_v3/integrations/activity_writer.py",
 Codex invokes `notify` with its event JSON appended as a trailing argument; the
 writer ignores unrecognized args (`parse_known_args`), so the command above records
 `idle` without erroring (#168).
+
+Unlike the Claude hooks, `notify` is a list of arguments that Codex starts
+directly, without a shell, so Windows paths work there as they are. In TOML, write
+each backslash twice (`"d:\\WORKSPACE\\…"`) or use forward slashes.
 
 To also flip Codex to **busy** at turn start, wrap your Codex launch (or a shell
 alias) to call the wrapper with `--state busy --path ~/.taskpaw/agent-activity-codex.json`

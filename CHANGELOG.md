@@ -4,6 +4,20 @@
 
 ---
 
+## V3 3.9.5 — Windows 上 Claude Code 的 AI 活动 hook 修复：路径改用正斜杠（#206）
+
+- **问题**：在 Windows 上，Claude Code 通过 Git Bash 执行 hook 命令。按原来的写法用反斜杠路径
+  （`d:\WORKSPACE\...\python.exe`）时，反斜杠会被 bash 吞掉，每次都报 `command not found`，
+  `agent-activity-claude.json` 一直不更新。TaskPaw 仍能凭 CPU 占用估出 Claude 的忙 / 闲（界面上显示 `~<cpu>%`），
+  所以不容易发现，但拿不到 hook 给的准确状态（尤其是「等待你输入」）。
+- **修复**：`docs/guides/dev-agent-activity.md` 新增 Windows 写法：hook 命令里的路径一律用正斜杠
+  （`d:/WORKSPACE/Taskpaw/.venv/Scripts/python.exe d:/WORKSPACE/Taskpaw/taskpaw_v3/integrations/activity_writer.py ...`），
+  并附一条验证命令，用来确认 hook 真的写入了文件。新增测试，确保指南里的 hook 示例不再出现反斜杠。
+- **已配置过 hook 的机器**：把 `~/.claude/settings.json` 里这些 hook 命令的 `\\` 全部改成 `/`，然后重启 Claude Code
+  （或重新加载 VS Code 窗口）。Codex 的 `notify` 不经过 shell，不受影响，不用改。TaskPaw 程序本身没有改动。
+
+---
+
 ## V3 3.9.4 — AV 翻译不再因为找不到 FFmpeg 而失败：自动用 WhisperJAV 自带的，找不到时提醒并给脚本（#204）
 
 - **自动**：AV 翻译的语音识别（WhisperJAV）需要 FFmpeg。以前它只在系统 PATH 里找，没有就每部片都「识别失败」（Jasna、Lada
