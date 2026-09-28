@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -241,6 +243,31 @@ def test_writer_main_ignores_codex_notify_extra_arg(tmp_path):
     assert rc == 0
     data = json.loads(out.read_text())
     assert data["tool"] == "codex" and data["state"] == "idle"
+
+
+# ── docs: Claude hook examples must survive Git Bash on Windows (#206) ──────--
+_GUIDE = Path(__file__).parents[2] / "docs" / "guides" / "dev-agent-activity.md"
+
+
+def _guide_hook_commands() -> list[str]:
+    text = _GUIDE.read_text(encoding="utf-8")
+    cmds: list[str] = []
+    for block in re.findall(r"```json\n(.*?)```", text, re.S):
+        for groups in json.loads(block).get("hooks", {}).values():
+            for group in groups:
+                cmds += [h["command"] for h in group["hooks"]]
+    return cmds
+
+
+def test_guide_hook_commands_have_no_backslashes():
+    # Claude Code runs hook commands through Git Bash on Windows, which eats the
+    # backslashes of a `d:\...` path → `command not found` on every event and the
+    # activity file is never written (#206). Every documented command uses `/`.
+    cmds = _guide_hook_commands()
+    assert cmds, "no Claude hook examples found in the guide"
+    assert all("\\" not in c for c in cmds)
+    # ...and the guide shows the Windows form (drive letter + forward slashes).
+    assert any(re.match(r"[A-Za-z]:/", c) for c in cmds)
 
 
 # ── end-to-end: writer → plugin reads it ─────────────────────────────────--
