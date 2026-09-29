@@ -163,6 +163,15 @@ describe("log sentences", () => {
     expect(logText([e], i18n.t)).not.toContain("SECRET");
     expect(logText([e], i18n.t)).toContain("[redacted]");
   });
+  it("shows the 8K VR profile of a restore start, and nothing when unticked (#208)", () => {
+    const ticked = entry(undefined, "restore.started", { index: 1, total: 3, mode: "plain", profile: "8k-vr" });
+    expect(logDetails(ticked, i18n.t)).toContainEqual(["Profile", "8k-vr"]);
+    expect(logText([ticked], i18n.t)).toContain("  Profile: 8k-vr");
+    const plain = entry(undefined, "restore.started", { index: 1, total: 3, mode: "plain" });
+    expect(logDetails(plain, i18n.t).map(([label]) => label)).not.toContain("Profile");
+    setLang("zh-CN");
+    expect(logDetails(ticked, i18n.t)).toContainEqual(["配置", "8k-vr"]);
+  });
   it("retains no-call translation, model counts, no-speech and at-stop facts", () => {
     expect(renderLogSentence(entry(undefined, "translate.started", { model: null, lines: 4, resumed: 4 }), i18n.t)).toContain("no provider call");
     expect(renderLogSentence(entry(undefined, "translate.finished", { lines: 4, by_model: { grok: 3, deepseek: 1 }, kept_ja: 0, duration: 5 }), i18n.t)).toContain("grok: 3, deepseek: 1");

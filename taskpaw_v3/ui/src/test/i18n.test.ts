@@ -23,6 +23,25 @@ describe("i18n", () => {
     expect(i18n.t("agent.monitorsTitle", { machine: "box1" })).toContain("box1");
   });
 
+  it("carries the 8K VR hint and review-row strings in zh and en (#208)", () => {
+    // The values come from the backend profile (i18n params), never from the UI copy.
+    const profile = { detection: "model-x", clip: 31, overlap: 9 };
+    expect(i18n.t("wizard.vr8kHint", profile)).toBe(
+      "已勾选 8K VR：这个任务的所有文件都按 SBS VR 处理（2D 影片请放到另一个任务）。启动时固定使用 model-x 检测模型、--vr-mode sbs、时序重叠 9、4K 档片段长度 31、4K 档不用 unet-4x。灰显字段里保存的原值不会改变，取消勾选后恢复生效。运行中的任务保存后会从头重跑当前影片。",
+    );
+    expect(i18n.t("wizard.vr8kRow")).toBe("8K VR");
+    expect(i18n.t("wizard.vr8kOn")).toBe("已勾选（4K 档不用 unet-4x）");
+    setLang("en");
+    const en = i18n.t("wizard.vr8kHint", profile);
+    for (const part of ["SBS VR", "2D films", "model-x", "--vr-mode sbs", "temporal overlap 9",
+      "4K-tier clip size 31", "no unet-4x on the 4K tier", "untick", "restarts the current film"]) {
+      expect(en).toContain(part);
+    }
+    expect(en).not.toMatch(/\{\{|rfdetr|\b30\b|\b8\b/);
+    expect(i18n.t("wizard.vr8kRow")).toBe("8K VR");
+    expect(i18n.t("wizard.vr8kOn")).toBe("on (4K tier without unet-4x)");
+  });
+
   it("does not throw when reporting the language outside a Tauri shell (#108)", () => {
     // No window.__TASKPAW__ in the test env → the shell sync (set_ui_lang) must
     // be a safe no-op rather than blowing up the browser/dev path.

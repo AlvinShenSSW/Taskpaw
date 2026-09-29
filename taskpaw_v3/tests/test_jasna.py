@@ -201,7 +201,7 @@ def test_json_schema_exposes_the_tickbox_defaults():
     own = set(JasnaConfig.model_fields) - set(
         JasnaConfig.__bases__[0].model_fields  # type: ignore[attr-defined]
     )
-    assert len(own) == 19  # 15 restore fields + 4「AV 翻译」fields (#177)
+    assert len(own) == 20  # 15 restore + 4「AV 翻译」(#177) + 8K VR (#208)
     for name in own:
         assert props[name].get("description"), f"{name} has no description"
 
@@ -300,6 +300,76 @@ def test_extra_args_description_documents_the_override():
     assert "model_weights/*.engine" in cap
 
 
+# ── 8K VR (#208) — config ─────────────────────────────────────────────────
+def test_vr_8k_field_order_and_help_texts():
+    props = JasnaPlugin.json_schema()["properties"]
+    assert props["vr_8k"]["default"] is False
+    assert props["vr_8k"]["title"] == "8K VR"
+    assert props["vr_8k"]["description"] == (
+        "Treat every file of this task as 8K SBS VR: launch with the VR180 "
+        "detector rfdetr-vr-v1, --vr-mode sbs, 4K-tier clip 30, overlap 8 and the "
+        "4K-tier unet-4x off. The fields it overrides keep their saved values and "
+        "apply again when unticked. 2D films belong in another task. Saving this "
+        "on a running task restarts the current film."
+    )
+    # C12: the overridden / conditionally owned fields say so
+    assert (
+        "--vr-mode and --detection-model-path are rejected too"
+        in props["jasna_extra_args"]["description"]
+    )
+    assert (
+        "ignored while 8K VR is ticked (rfdetr-vr-v1 is used)"
+        in props["detection_model"]["description"]
+    )
+    for name in ("unet4x_4k", "clip_size_4k", "temporal_overlap"):
+        assert "8K VR overrides this at launch" in props[name]["description"]
+    # C4: directly before clip_size_1080p, after the WhisperJAV fields
+    order = JasnaPlugin.ui_schema()["ui:order"]
+    i = order.index("vr_8k")
+    assert order[i - 1 : i + 2] == [
+        "whisperjav_extra_args",
+        "vr_8k",
+        "clip_size_1080p",
+    ]
+
+
+def test_vr_8k_rejects_vr_mode_and_detection_model_path_in_extra_args():
+    for bad in (
+        "--vr-mode sbs-fisheye",
+        "--vr-m off",  # an argparse abbreviation
+        "--vr-mode=off",
+        "--detection-model-path x.onnx",
+    ):
+        with pytest.raises(ValueError, match="TaskPaw owns"):
+            _cfg(vr_8k=True, jasna_extra_args=bad)
+        assert _cfg(jasna_extra_args=bad).jasna_extra_args == bad  # unticked: as today
+    for ticked in (False, True):
+        with pytest.raises(ValueError, match="TaskPaw owns"):
+            _cfg(vr_8k=ticked, jasna_extra_args="--detection-model rfdetr-v6")
+    assert "--vr-mode" in owned_flags_in("--vr-m off", vr_8k=True)
+    assert owned_flags_in("--vr-mode sbs") == []
+    # the documented --secondary-restoration override keeps working under the tick
+    c = _cfg(vr_8k=True, jasna_extra_args="--secondary-restoration unet-4x")
+    assert J.secondary_overridden(c.jasna_extra_args)
+
+
+def test_vr_8k_needs_a_1080p_clip_above_twice_the_profile_overlap():
+    # unticked, the stored overlap 2 makes clip 16 valid (4 < 16)
+    assert _cfg(temporal_overlap=2, clip_size_1080p=16).clip_size_1080p == 16
+    with pytest.raises(
+        ValueError,
+        match="8K VR uses a temporal overlap of 8, so clip_size_1080p must be "
+        "larger than 16",
+    ):
+        _cfg(vr_8k=True, temporal_overlap=2, clip_size_1080p=16)
+    assert _cfg(vr_8k=True, temporal_overlap=2, clip_size_1080p=17).vr_8k is True
+    # the 4K launch is always 30/8, so a small stored 4K clip stays valid
+    assert _cfg(vr_8k=True, temporal_overlap=2, clip_size_4k=10).clip_size_4k == 10
+    # the stored values must stay valid for the untick
+    with pytest.raises(ValueError, match="temporal_overlap"):
+        _cfg(vr_8k=True, temporal_overlap=30)
+
+
 # ── pure helpers ──────────────────────────────────────────────────────────
 def test_tier_for_uses_the_pixel_count_rule():
     assert tier_for(1920, 1080) == "1080p"
@@ -357,6 +427,37 @@ def test_build_argv_respects_an_explicit_detection_model_and_appends_extra_args(
     argv = build_argv(cfg, "j", Path("a.mp4"), Path("s.mp4"), "4k", False, True)
     assert argv[argv.index("--detection-model") + 1] == "rtdetr"
     assert argv[-2:] == ["--device", "cuda:1"]  # extra args come LAST (last-wins)
+
+
+def test_build_argv_8k_vr_4k_tier_applies_the_profile():
+    cfg = _cfg(
+        vr_8k=True,
+        clip_size_4k=45,
+        temporal_overlap=6,
+        codec="h264",
+        cq=30,
+        jasna_extra_args="--device cuda:1",
+    )
+    # large_detector=True: the rfdetr-v6-large upgrade never fires under the tick
+    argv = build_argv(cfg, "j", Path("a.mp4"), Path("s.mp4"), "4k", False, True)
+    i = argv.index("--detection-model")
+    assert argv[i + 1 :] == ["rfdetr-vr-v1", "--vr-mode", "sbs", "--device", "cuda:1"]
+    assert argv.count("--vr-mode") == 1
+    assert argv[argv.index("--max-clip-size") + 1] == "30"
+    assert argv[argv.index("--temporal-overlap") + 1] == "8"
+    assert argv[argv.index("--secondary-restoration") + 1] == "none"
+    assert argv[argv.index("--codec") + 1] == "h264"  # still from the config
+    assert argv[argv.index("--cq") + 1] == "30"
+
+
+def test_build_argv_8k_vr_1080p_tier_keeps_its_own_clip():
+    cfg = _cfg(vr_8k=True, clip_size_1080p=70, temporal_overlap=6)
+    argv = build_argv(cfg, "j", Path("a.mp4"), Path("s.mp4"), "1080p", True, False)
+    i = argv.index("--detection-model")
+    assert argv[i + 1 :] == ["rfdetr-vr-v1", "--vr-mode", "sbs"]
+    assert argv[argv.index("--max-clip-size") + 1] == "70"
+    assert argv[argv.index("--temporal-overlap") + 1] == "8"
+    assert argv[argv.index("--secondary-restoration") + 1] == "unet-4x"
 
 
 def test_find_ffprobe_lookup_order(tmp_path, monkeypatch):
@@ -517,6 +618,16 @@ def test_license_and_weights_helpers(tmp_path):
     assert engines_present(None) is False
 
 
+def test_vr_detector_available(tmp_path):
+    assert J.vr_detector_available(None) is False
+    assert J.vr_detector_available(str(tmp_path)) is False
+    weights = tmp_path / "model_weights"
+    weights.mkdir()
+    (weights / "rfdetr-vr-v1.onnx").write_bytes(b"x")
+    assert J.vr_detector_available(str(tmp_path)) is True
+    assert large_detector_available(str(tmp_path)) is False  # a different file
+
+
 # ── lifecycle ─────────────────────────────────────────────────────────────
 def test_sequential_batch_renames_on_success_and_emits_one_done(tmp_path, monkeypatch):
     cfg, inp, out, _home = _managed(tmp_path)
@@ -599,6 +710,112 @@ def test_secondary_override_in_extra_args_disables_the_degrade(tmp_path, monkeyp
     assert inst._done == 1 and inst._failed == 0
     assert J.secondary_overridden("--secondary-restoration=tvai")
     assert not J.secondary_overridden("--secondary-restoration-x 1 --device cuda:1")
+
+
+def _vr_weights(home: Path) -> None:
+    (home / "model_weights").mkdir(exist_ok=True)
+    (home / "model_weights" / "rfdetr-vr-v1.onnx").write_bytes(b"x")
+
+
+def test_8k_vr_4k_launch_is_never_a_unet_launch(tmp_path, monkeypatch):
+    # #208 acceptance 4: a ticked task's 4K tier runs without unet-4x even with
+    # unet4x_4k ticked, so a failure takes the plain retry path (no degrade).
+    cfg, inp, _out, home = _managed(tmp_path, vr_8k=True, unet4x_4k=True)
+    _vr_weights(home)
+    _videos(inp, "a.mp4", "b.mp4")
+    probe = _probe({"a.mp4": (8192, 4096)})
+    launcher = _Launcher([1, 0, 0])
+    _patch(monkeypatch, launcher, probe)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+
+    inst.start(emit)  # a, 4K tier → plain launch, fails
+    for _ in range(3):
+        inst.check(emit)
+
+    assert launcher.inputs() == ["a.mp4", "a.mp4", "b.mp4"]
+    assert launcher.secondary(0) == "none"
+    assert launcher.secondary(1) == "none"  # the plain retry
+    assert launcher.arg(0, "--max-clip-size") == "30"
+    # the 1080p tier still honours unet4x_1080p and its own clip size
+    assert launcher.secondary(2) == "unet-4x"
+    assert launcher.arg(2, "--max-clip-size") == "90"
+    assert [launcher.arg(i, "--vr-mode") for i in range(3)] == ["sbs"] * 3
+    modes = [r["data"]["mode"] for r in _tasklog("restore.started")]
+    assert modes == ["plain", "plain", "unet-4x"]
+    assert inst._run_unet_disabled == {}
+    assert not [e for e in evs if "unet-4x disabled" in e[1]]
+    assert inst._done == 2 and inst._failed == 0
+
+
+def test_8k_vr_keeps_the_stored_values_and_untick_launches_with_them(
+    tmp_path, monkeypatch
+):
+    stored = dict(
+        vr_8k=True, clip_size_4k=45, detection_model="rfdetr-v6", unet4x_4k=True
+    )
+    cfg, inp, _out, home = _managed(tmp_path, **stored)
+    _vr_weights(home)
+    saved = JasnaConfig.model_validate(cfg.model_dump())  # the agent.yaml round trip
+    assert {k: getattr(saved, k) for k in stored} == stored
+    before = saved.model_dump()
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None, None])
+    _patch(monkeypatch, launcher, _probe(default=(8192, 4096)))
+    _evs, emit = _events()
+
+    ticked = JasnaInstance("j1", saved)
+    ticked.start(emit)
+    ticked.stop(timeout=0.5)
+    assert saved.model_dump() == before  # a launch never rewrites the config
+    unticked = JasnaInstance(
+        "j1", JasnaConfig.model_validate({**before, "vr_8k": False})
+    )
+    unticked.start(emit)
+
+    assert launcher.arg(0, "--max-clip-size") == "30"
+    assert launcher.arg(0, "--detection-model") == "rfdetr-vr-v1"
+    assert launcher.secondary(0) == "none"
+    assert launcher.arg(1, "--max-clip-size") == "45"
+    assert launcher.arg(1, "--detection-model") == "rfdetr-v6"
+    assert launcher.secondary(1) == "unet-4x"
+    assert "--vr-mode" not in launcher.launches[1]
+    unticked.stop(timeout=0.5)
+
+
+@pytest.mark.parametrize(
+    "ticked,weights,alerts", [(True, False, 1), (True, True, 0), (False, False, 0)]
+)
+def test_8k_vr_start_alerts_once_when_the_vr_detector_is_missing(
+    tmp_path, monkeypatch, ticked, weights, alerts
+):
+    cfg, inp, _out, home = _managed(tmp_path, vr_8k=ticked)
+    if weights:
+        _vr_weights(home)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    got = [e for e in evs if e[3] == "j1:vr8k:weights"]
+    assert len(got) == alerts
+    if alerts:
+        assert got[0][0] == "alert"
+        assert got[0][2] == (
+            "8K VR: rfdetr-vr-v1.onnx is not in Jasna's model_weights folder — "
+            "Jasna 0.10.0 or newer bundles it. Jasna cannot load the VR detector, "
+            "so each file will fail until it is installed."
+        )
+    assert launcher.n == 1  # the run still starts
+    inst.stop(timeout=0.5)
+
+
+def test_8k_vr_passive_start_never_alerts():
+    inst = JasnaInstance("j1", _cfg(vr_8k=True))
+    evs, emit = _events()
+    inst.start(emit)
+    assert not [e for e in evs if e[3] == "j1:vr8k:weights"]
 
 
 def test_always_failing_file_costs_exactly_three_launches(tmp_path, monkeypatch):
@@ -1119,6 +1336,34 @@ def test_detail_shows_the_tier_and_unet_state(tmp_path):
     )
 
 
+def _running_4k(cfg: JasnaConfig) -> str:
+    inst = JasnaInstance("j1", cfg)
+    inst._current = Path("a.mp4")
+    inst._current_tier = "4k"
+    inst._current_dims = (8192, 4096)
+    inst._current_unet = False
+    return inst._build_status("running").detail
+
+
+def test_detail_shows_the_8k_vr_profile(tmp_path):
+    cfg, _inp, _out, _home = _managed(tmp_path, vr_8k=True)
+    assert _running_4k(cfg) == "running: a.mp4 [4K 8192x4096, 8K VR, unet-4x off]"
+
+
+def test_detail_shows_the_secondary_override_from_extra_args(tmp_path):
+    # N3: with the override `_current_unet` is False by design, so "unet-4x off"
+    # would be wrong while an extra-args unet-4x runs.
+    extra = "--secondary-restoration unet-4x"
+    ticked, _inp, _out, _home = _managed(tmp_path, vr_8k=True, jasna_extra_args=extra)
+    assert _running_4k(ticked) == (
+        "running: a.mp4 [4K 8192x4096, 8K VR, secondary via extra args]"
+    )
+    plain, _inp, _out, _home = _managed(tmp_path, jasna_extra_args=extra)
+    assert _running_4k(plain) == (
+        "running: a.mp4 [4K 8192x4096, secondary via extra args]"
+    )
+
+
 def test_compiling_hint_shows_until_engines_exist(tmp_path, monkeypatch):
     cfg, inp, _out, home = _managed(tmp_path)
     _videos(inp, "a.mp4")
@@ -1522,6 +1767,25 @@ def test_plugin_is_registered_and_self_describing():
     assert reg.has("lada")  # jasna does not replace lada in the registry
 
 
+def test_ui_schema_carries_the_8k_vr_profile_from_the_constants():
+    # N4: the wizard's lock reads this — one source with build_argv.
+    ui = JasnaPlugin.ui_schema()
+    profile = ui["vr_8k"]["ui:options"]["taskpawProfile"]
+    assert profile == {
+        "unet4x_4k": J._VR8K_UNET4X_4K,
+        "detection_model": J._VR8K_DETECTION_MODEL,
+        "clip_size_4k": J._VR8K_CLIP_SIZE_4K,
+        "temporal_overlap": J._VR8K_TEMPORAL_OVERLAP,
+    }
+    assert profile == {
+        "unet4x_4k": False,
+        "detection_model": "rfdetr-vr-v1",
+        "clip_size_4k": 30,
+        "temporal_overlap": 8,
+    }
+    assert set(profile) <= set(JasnaConfig.model_fields)
+
+
 def test_manual_start_only_for_managed(tmp_path):
     plugin = JasnaPlugin()
     cfg, _inp, _out, _home = _managed(tmp_path)
@@ -1561,6 +1825,26 @@ def test_tasklog_restore_publish_paths(tmp_path, monkeypatch, path):
         inst.check(emit)
         assert len(_tasklog("task.done")) == 1
     inst.stop()
+
+
+@pytest.mark.parametrize("ticked", [True, False])
+def test_tasklog_restore_started_carries_the_profile_only_when_ticked(
+    tmp_path, monkeypatch, ticked
+):
+    cfg, inp, _out, home = _managed(tmp_path, vr_8k=ticked)
+    _vr_weights(home)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    data = _tasklog("restore.started")[0]["data"]
+    if ticked:
+        assert data["profile"] == "8k-vr"
+    else:
+        assert "profile" not in data
+    inst.stop(timeout=0.5)
 
 
 @pytest.mark.parametrize("rc", [None, 7])

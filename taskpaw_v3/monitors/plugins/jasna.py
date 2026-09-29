@@ -21,6 +21,11 @@ progress) but is built around Jasna's CLI:
     succeeds, unet-4x is disabled for THAT TIER for the rest of the run and one
     alert is emitted.
 
+8K VR (#208, `vr_8k`): one tickbox applies a fixed launch profile (the VR180
+detector, `--vr-mode sbs`, overlap 8, 4K-tier clip 30, 4K-tier unet-4x off) to
+every file of the task AT LAUNCH ONLY — the operator's own fields are never
+rewritten, so unticking launches with them again.
+
 Passive mode (no exe path) just watches an externally-running `jasna` process,
 exactly like lada's passive mode.
 
@@ -196,6 +201,10 @@ _OWNED_FLAGS = (
     "--cq",
     "--detection-model",
 )
+# Owned only while 8K VR is ticked (#208 AC2): the profile forces --vr-mode, and
+# --detection-model-path would silently swap the pinned VR detector's weights.
+# With the tick off both pass through (e.g. a hand-set sbs-fisheye).
+_VR8K_OWNED_FLAGS = ("--vr-mode", "--detection-model-path")
 
 _PROBE_TIMEOUT = 5.0  # fits the supervisor's 5s stop / 10s reconfigure budgets
 _ORPHAN_STAGING_AGE = 60.0  # don't sweep a staging file another run may be writing
@@ -203,6 +212,15 @@ _ABORT_AFTER_FAILURES = 3
 _DEFAULT_DETECTION_MODEL = "rfdetr-v6"
 _LARGE_DETECTION_MODEL = "rfdetr-v6-large"
 _COMPILING_HINT = "compiling TensorRT engines (first run, 15-60 min): "
+
+# The 8K VR profile (#208). Applied by `build_argv` / `_launch_locked` at launch
+# only; `ui_schema()` hands the same values to the wizard's lock (N4).
+_VR8K_DETECTION_MODEL = "rfdetr-vr-v1"  # bundled with Jasna 0.10.0 and newer
+_VR8K_VR_MODE = "sbs"
+_VR8K_TEMPORAL_OVERLAP = 8  # every tier
+_VR8K_CLIP_SIZE_4K = 30  # 4K tier only; the 1080p tier keeps clip_size_1080p
+_VR8K_UNET4X_4K = False  # 4K tier only; the 1080p tier keeps unet4x_1080p
+_VR8K_PROFILE = "8k-vr"  # the `restore.started` task-log `profile` value
 
 # 「AV 翻译」(#177). The staging root lives INSIDE the output folder (D16):
 # `plan_queue` scans the input folder only and `sweep_orphan_staging` only looks
@@ -586,15 +604,26 @@ def sweep_orphan_staging(
     return removed
 
 
-def large_detector_available(exe_dir: Optional[str]) -> bool:
-    """Whether the 4K-grade detector weights ship with this Jasna install."""
+def _weights_available(exe_dir: Optional[str], model: str) -> bool:
+    """Whether `<exe dir>/model_weights/<model>.onnx` exists — where Jasna loads
+    RF-DETR weights from."""
     if not exe_dir:
         return False
     try:
-        weights = Path(exe_dir) / "model_weights" / f"{_LARGE_DETECTION_MODEL}.onnx"
-        return weights.is_file()
+        return (Path(exe_dir) / "model_weights" / f"{model}.onnx").is_file()
     except OSError:
         return False
+
+
+def large_detector_available(exe_dir: Optional[str]) -> bool:
+    """Whether the 4K-grade detector weights ship with this Jasna install."""
+    return _weights_available(exe_dir, _LARGE_DETECTION_MODEL)
+
+
+def vr_detector_available(exe_dir: Optional[str]) -> bool:
+    """Whether the 8K VR profile's VR180 detector weights ship with this Jasna
+    install (#208 AC5 start alert)."""
+    return _weights_available(exe_dir, _VR8K_DETECTION_MODEL)
 
 
 def engines_present(exe_dir: Optional[str]) -> bool:
@@ -780,15 +809,16 @@ def _selects(name: str, flag: str) -> bool:
     return name == flag or (len(name) > 2 and flag.startswith(name))
 
 
-def owned_flags_in(extra: str) -> list[str]:
+def owned_flags_in(extra: str, vr_8k: bool = False) -> list[str]:
     """Which plugin-owned flags `extra` sets — by exact name, `--flag=value`, or
     an argparse abbreviation (`--inp x` would silently override the generated
     `--input` and restore the wrong file under every queue item's name — Codex
     外门). A substring test would wrongly reject `--input-size` (lada's Codex
-    finding), so the check is prefix-of-flag, never flag-in-token."""
+    finding), so the check is prefix-of-flag, never flag-in-token. With `vr_8k`
+    the 8K VR profile's `_VR8K_OWNED_FLAGS` are owned too (#208)."""
     names = _flag_names(extra)
     found: list[str] = []
-    for flag in _OWNED_FLAGS:
+    for flag in _OWNED_FLAGS + (_VR8K_OWNED_FLAGS if vr_8k else ()):
         if any(_selects(n, flag) for n in names):
             found.append(flag)
     return found
@@ -865,7 +895,8 @@ class JasnaConfig(BaseMonitorConfig):
     unet4x_4k: bool = Field(
         False,
         description="4K tier: run the supporter-only unet-4x secondary "
-        "restoration. Off by default — it does not fit in 8 GB of VRAM at 4K.",
+        "restoration. Off by default — it does not fit in 8 GB of VRAM at 4K. "
+        "8K VR overrides this at launch.",
     )
     av_translate: bool = Field(
         False,
@@ -913,6 +944,17 @@ class JasnaConfig(BaseMonitorConfig):
         "rejected. --translate* options are always rejected (they "
         "would put an API key on the command line).",
     )
+    vr_8k: bool = Field(
+        False,
+        title="8K VR",
+        description="Treat every file of this task as 8K SBS VR: launch with the "
+        f"VR180 detector {_VR8K_DETECTION_MODEL}, --vr-mode {_VR8K_VR_MODE}, "
+        f"4K-tier clip {_VR8K_CLIP_SIZE_4K}, overlap {_VR8K_TEMPORAL_OVERLAP} and "
+        f"the 4K-tier unet-4x {'on' if _VR8K_UNET4X_4K else 'off'}. The fields it "
+        "overrides keep their saved values and apply again when unticked. 2D "
+        "films belong in another task. Saving this on a running task restarts "
+        "the current film.",
+    )
     clip_size_1080p: int = Field(
         90,
         ge=8,
@@ -924,13 +966,15 @@ class JasnaConfig(BaseMonitorConfig):
         ge=8,
         description="Frames per clip (--max-clip-size) for the 4K tier. A file "
         "counts as 4K when its pixel count exceeds 1.5x 1920x1080 (about 3.1 MP, "
-        "so 2560x1440 and up); 1920x1200 and 2560x1080 stay 1080p.",
+        "so 2560x1440 and up); 1920x1200 and 2560x1080 stay 1080p. 8K VR "
+        "overrides this at launch.",
     )
     temporal_overlap: int = Field(
         8,
         ge=0,
         description="Frames of overlap between clips (--temporal-overlap). Jasna "
-        "requires 2 x overlap to be smaller than the smallest clip size.",
+        "requires 2 x overlap to be smaller than the smallest clip size. 8K VR "
+        "overrides this at launch.",
     )
     codec: Literal["hevc", "h264", "av1"] = Field(
         "hevc",
@@ -945,7 +989,8 @@ class JasnaConfig(BaseMonitorConfig):
     )
     detection_model: str = Field(
         _DEFAULT_DETECTION_MODEL,
-        description="Detection model (--detection-model). Left at the default, 4K "
+        description="Detection model (--detection-model) — ignored while 8K VR "
+        f"is ticked ({_VR8K_DETECTION_MODEL} is used). Left at the default, 4K "
         "files are automatically upgraded to rfdetr-v6-large when those weights "
         "are installed next to jasna.exe.",
     )
@@ -959,7 +1004,8 @@ class JasnaConfig(BaseMonitorConfig):
         description="Extra Jasna flags appended verbatim to every launch, e.g. "
         "--device cuda:1. The flags TaskPaw owns (--input, --output, "
         "--output-pattern, --max-clip-size, --temporal-overlap, --codec, --cq, "
-        "--detection-model) are rejected here — use the fields above. "
+        "--detection-model) are rejected here — use the fields above. While 8K "
+        "VR is ticked, --vr-mode and --detection-model-path are rejected too. "
         "`--secondary-restoration` here overrides the tickboxes for every file "
         "and disables the automatic unet-4x degrade (the relaunch would carry the "
         "same flag). Passing `--encoder-settings cq=...` alongside --cq is Jasna's "
@@ -1003,7 +1049,7 @@ class JasnaConfig(BaseMonitorConfig):
                     "jasna_input_folder and jasna_output_folder must be different "
                     "folders"
                 )
-        owned = owned_flags_in(self.jasna_extra_args)
+        owned = owned_flags_in(self.jasna_extra_args, vr_8k=self.vr_8k)
         if owned:
             raise ValueError(
                 "jasna_extra_args must not set the flags TaskPaw owns "
@@ -1023,6 +1069,13 @@ class JasnaConfig(BaseMonitorConfig):
                 f"smaller than the smallest clip size ({smallest}) — Jasna's own "
                 "rule"
             )
+        # #208: the 1080p launch keeps its own clip but takes the profile's overlap
+        # (the 4K launch is the profile's own, always valid, pair).
+        if self.vr_8k and 2 * _VR8K_TEMPORAL_OVERLAP >= self.clip_size_1080p:
+            raise ValueError(
+                f"8K VR uses a temporal overlap of {_VR8K_TEMPORAL_OVERLAP}, so "
+                f"clip_size_1080p must be larger than {2 * _VR8K_TEMPORAL_OVERLAP}"
+            )
         return self
 
 
@@ -1037,11 +1090,20 @@ def build_argv(
 ) -> list[str]:
     """Pure: the exact argv for one file. Operator extra args come LAST so
     argparse's last-wins makes the documented `--secondary-restoration` override
-    work. A list (shell=False) — constitution §2."""
-    clip = cfg.clip_size_4k if tier == "4k" else cfg.clip_size_1080p
-    detection = cfg.detection_model
+    work. A list (shell=False) — constitution §2.
+
+    `cfg.vr_8k` (#208): the 8K VR profile replaces the detector (no
+    rfdetr-v6-large upgrade), the overlap and the 4K clip, and adds
+    `--vr-mode sbs` right after the detector; `unet_enabled` arrives already
+    resolved (`_launch_locked` reads the 4K tickbox as the profile's)."""
+    vr = cfg.vr_8k
+    clip_4k = _VR8K_CLIP_SIZE_4K if vr else cfg.clip_size_4k
+    clip = clip_4k if tier == "4k" else cfg.clip_size_1080p
+    overlap = _VR8K_TEMPORAL_OVERLAP if vr else cfg.temporal_overlap
+    detection = _VR8K_DETECTION_MODEL if vr else cfg.detection_model
     if tier == "4k" and large_detector and detection == _DEFAULT_DETECTION_MODEL:
         detection = _LARGE_DETECTION_MODEL
+    vr_mode = ["--vr-mode", _VR8K_VR_MODE] if vr else []
     return [
         exe,
         "--input",
@@ -1051,7 +1113,7 @@ def build_argv(
         "--max-clip-size",
         str(clip),
         "--temporal-overlap",
-        str(cfg.temporal_overlap),
+        str(overlap),
         "--secondary-restoration",
         "unet-4x" if unet_enabled else "none",
         "--codec",
@@ -1060,6 +1122,7 @@ def build_argv(
         str(cfg.cq),
         "--detection-model",
         detection,
+        *vr_mode,
         *_split_args(cfg.jasna_extra_args),
     ]
 
@@ -1341,6 +1404,19 @@ class JasnaInstance(MonitorInstance):
                 "the 1080p tier. Jasna itself requires ffprobe, so the launches are "
                 "likely to fail until it is installed.",
                 dedupe_key=f"{self.instance_id}:ffprobe",
+            )
+        if cfg.vr_8k and not vr_detector_available(self._exe_dir()):
+            # #208 AC5: Jasna cannot load missing RF-DETR weights, so every launch
+            # would fail. The run still starts: the failed-file path and the
+            # 3-failure abort take it from there.
+            emit(
+                "alert",
+                f"{cfg.name}: 8K VR detector missing",
+                f"8K VR: {_VR8K_DETECTION_MODEL}.onnx is not in Jasna's "
+                "model_weights folder — Jasna 0.10.0 or newer bundles it. Jasna "
+                "cannot load the VR detector, so each file will fail until it is "
+                "installed.",
+                dedupe_key=f"{self.instance_id}:vr8k:weights",
             )
 
         try:
@@ -1865,7 +1941,13 @@ class JasnaInstance(MonitorInstance):
                     log.warning("jasna: could not clear staging file %s: %s", stale, e)
 
             exe_dir = self._exe_dir()
-            tickbox = cfg.unet4x_4k if tier == "4k" else cfg.unet4x_1080p
+            if tier == "4k":
+                # #208: under 8K VR the 4K tier's tickbox reads as the profile's
+                # (off), so a 4K launch is never a unet-4x launch — no degrade
+                # path, `_run_unet_disabled` never set for it.
+                tickbox = _VR8K_UNET4X_4K if cfg.vr_8k else cfg.unet4x_4k
+            else:
+                tickbox = cfg.unet4x_1080p
             unet = (
                 bool(tickbox)
                 and not self._run_unet_disabled.get(tier, False)
@@ -1934,6 +2016,13 @@ class JasnaInstance(MonitorInstance):
                     self.instance_id, "task.gpu_acquired", task_type="jasna"
                 )
                 self._log_gpu_wait = False
+            started: dict[str, object] = {
+                "index": self._done + self._failed + 1,
+                "total": self._total,
+                "mode": "unet-4x" if self._current_unet else "plain",
+            }
+            if cfg.vr_8k:
+                started["profile"] = _VR8K_PROFILE  # #208: only when ticked
             get_task_log().record(
                 self.instance_id,
                 "restore.started",
@@ -1941,11 +2030,7 @@ class JasnaInstance(MonitorInstance):
                 film=video.name,
                 pid=getattr(proc, "pid", None),
                 proc=Path(cfg.jasna_exe_path).name,
-                data={
-                    "index": self._done + self._failed + 1,
-                    "total": self._total,
-                    "mode": "unet-4x" if self._current_unet else "plain",
-                },
+                data=started,
             )
             # #189: a retry of the same file keeps the first stamp
             self._tracker.start(video.name, RESTORE, time.monotonic())
@@ -3467,8 +3552,16 @@ class JasnaInstance(MonitorInstance):
         dims = ""
         if self._current_dims:
             dims = f" {self._current_dims[0]}x{self._current_dims[1]}"
-        unet = "unet-4x" if self._current_unet else "unet-4x off"
-        return f" [{label}{dims}, {unet}]"
+        parts = [f"{label}{dims}"]
+        if self._cfg.vr_8k:
+            parts.append("8K VR")
+        if secondary_overridden(self._cfg.jasna_extra_args):
+            # #208 N3: the extra args choose the secondary restoration (and
+            # `_current_unet` is False on that path by design).
+            parts.append("secondary via extra args")
+        else:
+            parts.append("unet-4x" if self._current_unet else "unet-4x off")
+        return f" [{', '.join(parts)}]"
 
     def _detail(self, state: str, m: dict) -> str:
         # A clean one-line summary with "·" separators (lada parity); the rich
@@ -3557,6 +3650,7 @@ class JasnaPlugin(MonitorPlugin):
                 "whisperjav_exe_path",
                 "whisperjav_engine",
                 "whisperjav_extra_args",
+                "vr_8k",
                 "clip_size_1080p",
                 "clip_size_4k",
                 "temporal_overlap",
@@ -3575,6 +3669,18 @@ class JasnaPlugin(MonitorPlugin):
             "jasna_input_folder": {"ui:options": {"taskpawPath": "directory"}},
             "jasna_output_folder": {"ui:options": {"taskpawPath": "directory"}},
             "whisperjav_exe_path": {"ui:options": {"taskpawPath": "file"}},
+            # #208 N4: the values the wizard greys the overridden fields with —
+            # the same constants the launch uses (one source).
+            "vr_8k": {
+                "ui:options": {
+                    "taskpawProfile": {
+                        "unet4x_4k": _VR8K_UNET4X_4K,
+                        "detection_model": _VR8K_DETECTION_MODEL,
+                        "clip_size_4k": _VR8K_CLIP_SIZE_4K,
+                        "temporal_overlap": _VR8K_TEMPORAL_OVERLAP,
+                    }
+                }
+            },
         }
 
     def manual_start(self, config: BaseMonitorConfig) -> bool:

@@ -47,7 +47,7 @@ const en = {
       title: "Alert title", message: "Original alert", level: "Alert level", output: "Output", srt: "Subtitle file",
       reason: "Reason", detail: "Detail", step: "Step", elapsed: "Elapsed", reconstructed: "Inferred",
       at_stop: "Failed when stopped", version: "Version", previous_exit: "Previous exit", last_ts: "Last activity",
-      fields: "Changed fields", index: "Index", total: "Total", mode: "Mode", engine: "Engine",
+      fields: "Changed fields", index: "Index", total: "Total", mode: "Mode", profile: "Profile", engine: "Engine",
       holder: "GPU holder", minutes: "Pause (minutes)", no_speech: "No speech", since_cap: "Daily alert cap reached",
     },
     kinds: {
@@ -169,6 +169,10 @@ const en = {
     closeTitle: "Discard this monitor?",
     closeBody: "Your entries will be lost.",
     discard: "Discard",
+    // #208 Jasna「8K VR」: the values come from the backend profile.
+    vr8kHint: "8K VR is on: every file of this task is processed as SBS VR (put 2D films in another task). Launches always use the {{detection}} detection model, --vr-mode sbs, temporal overlap {{overlap}}, 4K-tier clip size {{clip}} and no unet-4x on the 4K tier. The saved values in the greyed fields do not change and apply again when you untick. Saving a running task restarts the current film from the beginning.",
+    vr8kRow: "8K VR",
+    vr8kOn: "on (4K tier without unet-4x)",
   },
   services: {
     lada: "Subtitle/translation pipeline — files, fps, GPU.",
@@ -360,7 +364,7 @@ const zh: typeof en = {
       title: "提醒标题", message: "原始提醒", level: "提醒级别", output: "输出", srt: "字幕文件",
       reason: "原因", detail: "详情", step: "步骤", elapsed: "已用时间", reconstructed: "推断记录",
       at_stop: "停止时已失败", version: "版本", previous_exit: "上次退出", last_ts: "上次活动",
-      fields: "变更字段", index: "序号", total: "总数", mode: "模式", engine: "识别引擎",
+      fields: "变更字段", index: "序号", total: "总数", mode: "模式", profile: "配置", engine: "识别引擎",
       holder: "GPU 占用者", minutes: "暂停（分钟）", no_speech: "无语音", since_cap: "已达每日提醒上限",
     },
     kinds: {
@@ -481,6 +485,9 @@ const zh: typeof en = {
     closeTitle: "放弃这个监控?",
     closeBody: "你填写的内容会丢失。",
     discard: "放弃",
+    vr8kHint: "已勾选 8K VR：这个任务的所有文件都按 SBS VR 处理（2D 影片请放到另一个任务）。启动时固定使用 {{detection}} 检测模型、--vr-mode sbs、时序重叠 {{overlap}}、4K 档片段长度 {{clip}}、4K 档不用 unet-4x。灰显字段里保存的原值不会改变，取消勾选后恢复生效。运行中的任务保存后会从头重跑当前影片。",
+    vr8kRow: "8K VR",
+    vr8kOn: "已勾选（4K 档不用 unet-4x）",
   },
   services: {
     lada: "字幕/翻译流水线 —— 文件、帧率、GPU。",
