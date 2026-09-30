@@ -242,6 +242,8 @@ class DevActivityInstance(MonitorInstance):
         super().__init__(instance_id, config)
         # Active class of the previous check: "busy" | "waiting" | "off".
         self._prev_class: Optional[str] = None
+        self._announced_class: Optional[str] = None
+        self._idle_pending: bool = False
         self._compiled = {
             tool: re.compile(config.process_patterns[tool])
             if tool in config.process_patterns
@@ -455,9 +457,14 @@ class DevActivityInstance(MonitorInstance):
         # isn't noisy AND a busy→waiting transition surfaces the actionable
         # "needs input" signal instead of a misleading "idle" (Codex 外门).
         cls = "busy" if is_busy else "waiting" if headline == "waiting" else "off"
+        if cls != "off":
+            self._idle_pending = False
+        elif self._prev_class in _ACTIVE and (errors or limited):
+            self._idle_pending = True
         if (
             self._prev_class is not None
-            and cls != self._prev_class
+            and (cls != self._prev_class or self._idle_pending)
+            and cls != self._announced_class
             and not (cls == "off" and (errors or limited))
         ):
             if cls == "busy":
@@ -481,7 +488,9 @@ class DevActivityInstance(MonitorInstance):
                     "no AI task running",
                     dedupe_key=None,
                 )
-        # Suppress unavailable idle notifications without losing the next active edge.
+            self._announced_class = cls
+            self._idle_pending = False
+        # Observations advance even when an idle notification must wait for recovery.
         self._prev_class = cls
 
         detail = (

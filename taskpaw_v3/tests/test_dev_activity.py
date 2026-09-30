@@ -282,6 +282,52 @@ def test_busy_to_waiting_emits_waiting_not_idle(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("failure", ["error", "limited"])
+@pytest.mark.parametrize("recovered", ["idle", "busy", "waiting"])
+def test_suppressed_idle_recovers_without_duplicate_events(
+    tmp_path, monkeypatch, failure, recovered
+):
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude"], observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    emit = lambda *a, **k: events.append(a)  # noqa: E731
+    try:
+        _write(tmp_path, "claude", "idle", time.time())
+        inst.check(emit)
+        _write(tmp_path, "claude", "busy", time.time())
+        inst.check(emit)
+        assert [e[1] for e in events] == ["ai: AI busy"]
+
+        if failure == "error":
+            (tmp_path / "agent-activity-claude.json").write_text("invalid JSON")
+        else:
+            _write(tmp_path, "claude", "idle", time.time())
+            monkeypatch.setattr(
+                da, "scan_activity", lambda *a: {"claude": {"limited": True}}
+            )
+        for _ in range(2):
+            st = inst.check(emit)
+            assert st.metrics["probe_errors"] or st.metrics["probe_limited"]
+            assert [e[1] for e in events] == ["ai: AI busy"]
+
+        _snapshot(monkeypatch, {})
+        _write(tmp_path, "claude", recovered, time.time())
+        expected = ["ai: AI busy"]
+        if recovered == "idle":
+            expected.append("ai: AI idle")
+        elif recovered == "waiting":
+            expected.append("ai: AI waiting for input")
+        for _ in range(2):
+            st = inst.check(emit)
+            assert st.metrics["ai_state"] == recovered
+            assert not st.metrics["probe_errors"] and not st.metrics["probe_limited"]
+            assert [e[1] for e in events] == expected
+    finally:
+        inst.stop()
+
+
 def test_read_tool_state_rejects_far_future_ts(tmp_path):
     # A far-future timestamp must NOT read as "fresh forever" (Kimi 终审).
     now = 1000.0
