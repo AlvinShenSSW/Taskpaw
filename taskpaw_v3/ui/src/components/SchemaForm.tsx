@@ -11,7 +11,7 @@ import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { PathWidget } from "./PathWidget";
 import { PasswordWidget } from "./PasswordWidget";
-import { ObjectFieldTemplate } from "./ObjectFieldTemplate";
+import { LockedFieldsProvider, ObjectFieldTemplate, type LockedFields } from "./ObjectFieldTemplate";
 import { localizeSchema } from "../schemaI18n";
 
 const widgets: RegistryWidgetsType = {
@@ -75,6 +75,7 @@ export function SchemaForm({
   onSubmit,
   onChange,
   reminder,
+  locked,
   typeId,
 }: {
   schema: RJSFSchema;
@@ -83,6 +84,9 @@ export function SchemaForm({
   onSubmit?: (data: unknown) => void;
   onChange?: (data: unknown) => void;
   reminder?: ReactNode;
+  // Fields shown greyed with fixed values while rjsf keeps the stored ones (#208);
+  // provided by context like the reminder, so the Form props never change.
+  locked?: LockedFields;
   // The plugin type_id, so field labels/help can be localized (#121).
   typeId?: string;
 }) {
@@ -95,19 +99,21 @@ export function SchemaForm({
   );
   return (
     <ReminderContext.Provider value={reminder}>
-      <Form
-        schema={localizedSchema}
-        uiSchema={withPathWidgets(uiSchema)}
-        widgets={widgets}
-        templates={templates}
-        validator={validator}
-        formData={formData}
-        onSubmit={(e) => onSubmit?.(e.formData)}
-        onChange={(e) => onChange?.(e.formData)}
-        liveValidate={false}
-        showErrorList={false}
-        focusOnFirstError
-      />
+      <LockedFieldsProvider value={locked}>
+        <Form
+          schema={localizedSchema}
+          uiSchema={withPathWidgets(uiSchema)}
+          widgets={widgets}
+          templates={templates}
+          validator={validator}
+          formData={formData}
+          onSubmit={(e) => onSubmit?.(e.formData)}
+          onChange={(e) => onChange?.(e.formData)}
+          liveValidate={false}
+          showErrorList={false}
+          focusOnFirstError
+        />
+      </LockedFieldsProvider>
     </ReminderContext.Provider>
   );
 }

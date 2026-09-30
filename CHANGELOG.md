@@ -4,6 +4,23 @@
 
 ---
 
+## V3 3.9.6 — Jasna「8K VR」一键配置（#208）
+
+- **一个勾选框**：Jasna 任务表单新增「8K VR」。勾选后，这个任务的每个文件在启动 Jasna 时都固定使用 8K VR 配置：
+  检测模型 `rfdetr-vr-v1`（Jasna 0.10.0 起自带的 VR180 检测模型）、`--vr-mode sbs`、时序重叠 8、4K 档片段长度 30、
+  4K 档不用 unet-4x（8 GB 显卡上 8K + unet-4x 实测只有约 0.3 fps）。1080p 档仍按自己的片段长度和 unet-4x 勾选。
+- **原来的设置不会丢**：被覆盖的四项（4K 档 unet-4x、检测模型、4K 档片段长度、时序重叠）勾选时变灰并显示 8K VR 的值，
+  但保存的仍是你原来的值；取消勾选后，下一次启动就恢复使用它们。点「保存」即可，不需要其他按钮。添加任务时的确认页会列出
+  「8K VR」一行，以及被覆盖的值（例如 `60 → 30`）。
+- **整个任务按 SBS VR 处理**：2D 影片请放到另一个任务。在运行中的任务上保存会从头重跑当前影片（原有行为）。
+- 勾选时，「额外参数」里不能再写 `--vr-mode` 和 `--detection-model-path`（会和 8K VR 冲突）；`--secondary-restoration unet-4x`
+  仍可用来在显存更大的显卡上打开 4K 档的 unet-4x，此时状态行显示 `secondary via extra args`。
+- 状态行显示 `[4K 8192x4096, 8K VR, unet-4x off]`；日志里「开始修复」记录的详情多一项「配置：8k-vr」。
+- 勾选时如果 Jasna 的 `model_weights` 文件夹里没有 `rfdetr-vr-v1.onnx`，点「开始」会提醒一次（需要 Jasna 0.10.0 或更新版本）。
+- 8K 的 H.264 片源无法用 NVIDIA 硬件解码（H.264 硬解最高 4K），会很慢，建议先转码成 HEVC。README 新增 Jasna「8K VR」一节。
+
+---
+
 ## V3 3.9.5 — Windows 上 Claude Code 的 AI 活动 hook 修复：路径改用正斜杠（#206）
 
 - **问题**：在 Windows 上，Claude Code 通过 Git Bash 执行 hook 命令。按原来的写法用反斜杠路径

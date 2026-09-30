@@ -78,6 +78,35 @@ describe("localizeSchema (#121)", () => {
     });
   });
 
+  it("translates the jasna 8K VR tickbox and the clauses on the fields it overrides (#208)", () => {
+    const s: RJSFSchema = {
+      type: "object",
+      properties: Object.fromEntries(
+        ["vr_8k", "unet4x_4k", "clip_size_4k", "temporal_overlap", "detection_model", "jasna_extra_args"]
+          .map((k) => [k, { type: "string", title: k, description: "English" }]),
+      ),
+    };
+    const p = localizeSchema(s, "jasna", "zh-CN").properties as Record<
+      string,
+      { title: string; description?: string }
+    >;
+    expect(fieldLabel("vr_8k", "jasna", "zh-CN")).toBe("8K VR");
+    expect(p.vr_8k.title).toBe("8K VR");
+    for (const part of [
+      "所有文件都按 8K SBS VR 处理", "rfdetr-vr-v1", "--vr-mode sbs", "时序重叠 8", "4K 档片段长度 30",
+      "4K 档不用 unet-4x", "保存的值", "取消勾选", "2D 影片", "从头重跑当前影片",
+    ]) {
+      expect(p.vr_8k.description).toContain(part);
+    }
+    // C12: the fields the tick overrides say so, in their own help text.
+    for (const k of ["unet4x_4k", "clip_size_4k", "temporal_overlap"]) {
+      expect(p[k].description).toContain("勾选「8K VR」时，启动时由 8K VR 覆盖此项");
+    }
+    expect(p.unet4x_4k.description).toContain("默认关");
+    expect(p.detection_model.description).toContain("勾选「8K VR」时忽略此项（使用 rfdetr-vr-v1）");
+    expect(p.jasna_extra_args.description).toContain("勾选「8K VR」时，--vr-mode 和 --detection-model-path 也会被拒绝");
+  });
+
   it("does not cross-attribute a same-named field across plugins", () => {
     const s: RJSFSchema = { type: "object", properties: { host: { type: "string", title: "Host" } } };
     // comfyui.host has a description; tcp_check.host is just 主机 (no ComfyUI wording).

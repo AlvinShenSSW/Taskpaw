@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { MonitorWizard } from "../views/MonitorWizard";
 import { theme } from "../theme";
@@ -23,9 +23,16 @@ const ladaPlugin: apiModule.PluginInfo = {
   ui_schema: {},
 };
 
+// The #208 8K VR profile exactly as the backend's static ui_schema carries it
+// (`vr_8k.ui:options.taskpawProfile`, built from jasna.py's _VR8K_* constants).
+const VR8K_PROFILE = {
+  unet4x_4k: false, detection_model: "rfdetr-vr-v1", clip_size_4k: 30, temporal_overlap: 8,
+};
+
 // A jasna-shaped plugin (#173): the two unet-4x tickboxes, with the backend's
 // defaults (1080p on, 4K off) carried in the json_schema; plus the #177「AV 翻译」
-// tickbox (default off).
+// tickbox (default off); plus the #208「8K VR」tickbox and the fields it locks,
+// in the real plugin's ui:order, with the backend's profile in its ui:options.
 const jasnaPlugin: apiModule.PluginInfo = {
   type_id: "jasna",
   display_name: "Jasna (video restore)",
@@ -40,9 +47,35 @@ const jasnaPlugin: apiModule.PluginInfo = {
       unet4x_1080p: { type: "boolean", title: "Unet4X 1080P", default: true },
       unet4x_4k: { type: "boolean", title: "Unet4X 4K", default: false },
       av_translate: { type: "boolean", title: "AV 翻译", default: false },
+      vr_8k: {
+        type: "boolean", title: "8K VR", default: false,
+        description: "Treat every file of this task as 8K SBS VR.",
+      },
+      clip_size_4k: {
+        type: "integer", title: "Clip Size 4K", default: 60, minimum: 8,
+        description: "Frames per clip (--max-clip-size) for the 4K tier.",
+      },
+      temporal_overlap: {
+        type: "integer", title: "Temporal Overlap", default: 8, minimum: 0,
+        description: "Frames of overlap between clips (--temporal-overlap).",
+      },
+      detection_model: {
+        type: "string", title: "Detection Model", default: "rfdetr-v6",
+        description: "Detection model (--detection-model).",
+      },
     },
   },
-  ui_schema: {},
+  ui_schema: {
+    "ui:order": [
+      "name", "jasna_exe_path", "jasna_input_folder", "jasna_output_folder",
+      "unet4x_1080p", "unet4x_4k", "av_translate", "whisperjav_exe_path",
+      "whisperjav_engine", "whisperjav_extra_args", "vr_8k", "clip_size_1080p",
+      "clip_size_4k", "temporal_overlap", "codec", "cq", "detection_model",
+      "process_name", "jasna_extra_args", "jasna_gpu_monitor", "jasna_capture_progress",
+      "poll_interval", "timeout", "*",
+    ],
+    vr_8k: { "ui:options": { taskpawProfile: VR8K_PROFILE } },
+  },
 };
 
 const hostMetrics: apiModule.PluginInfo = {
@@ -228,5 +261,211 @@ describe("MonitorWizard", () => {
     await screen.findByText("lada-1");
     fireEvent.click(screen.getByRole("button", { name: /Add monitor|添加监控/ }));
     expect(await screen.findByText(/already exists/)).toBeInTheDocument();
+  });
+});
+
+// #208: the Jasna「8K VR」tickbox. The lock travels by React context (a uiSchema
+// change would reset the rjsf form), so the four profile fields show decorative,
+// disabled display controls while the real rjsf fields stay mounted but hidden.
+// Queries go by role: getByLabelText would also match the hidden real input.
+const VR8K = /8K VR/;
+const UNET4K = /4K 档：使用 unet-4x 二次修复|Unet4X 4K/;
+const CLIP4K = /4K 档片段长度|Clip Size 4K/;
+const OVERLAP = /时序重叠帧数|Temporal Overlap/;
+const DETECTION = /检测模型|Detection Model/;
+const HINT = /已勾选 8K VR：这个任务的所有文件都按 SBS VR 处理|8K VR is on: every file of this task/;
+const NAME = /名称|Monitor name/;
+const lockedIds = () => [...document.querySelectorAll("input[id^='locked_']")].map((el) => el.id).sort();
+// The rjsf field around a real input: visibility is asserted there, because a MUI
+// checkbox input is always transparent (opacity 0) and never "visible" itself.
+const fieldOf = (input: HTMLElement) => input.closest(".MuiFormControl-root") as HTMLElement;
+
+function chooseJasna(plugins = [ladaPlugin, jasnaPlugin], label = "Jasna (video restore)") {
+  wrap(<MonitorWizard mode="add" {...baseProps} plugins={plugins} />);
+  fireEvent.click(screen.getByText(label));
+  fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
+}
+
+describe("MonitorWizard jasna 8K VR (#208)", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("ticking keeps the typed name and locks the four fields to the profile; unticking restores them", () => {
+    chooseJasna();
+    fireEvent.change(screen.getByRole("textbox", { name: NAME }), { target: { value: "vr-1" } });
+    // The operator's own values, distinct from the profile where the defaults match it.
+    fireEvent.change(screen.getByRole("spinbutton", { name: OVERLAP }), { target: { value: "12" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: UNET4K }));
+    const realClip = screen.getByRole("spinbutton", { name: CLIP4K });
+    const realOverlap = screen.getByRole("spinbutton", { name: OVERLAP });
+    const realDetection = screen.getByRole("textbox", { name: DETECTION });
+    const realUnet = screen.getByRole("checkbox", { name: UNET4K });
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+    expect(lockedIds()).toEqual([]);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: VR8K }));
+
+    // No form reset (the #204 N3-1 trap): the tick and the typed name survive.
+    expect(screen.getByRole("checkbox", { name: VR8K })).toBeChecked();
+    expect(screen.getByRole("textbox", { name: NAME })).toHaveValue("vr-1");
+    // The display controls: disabled, the profile values, their own ids.
+    const clip = screen.getByRole("textbox", { name: CLIP4K });
+    const overlap = screen.getByRole("textbox", { name: OVERLAP });
+    const detection = screen.getByRole("textbox", { name: DETECTION });
+    const unet = screen.getByRole("checkbox", { name: UNET4K });
+    expect(clip).toHaveAttribute("id", "locked_clip_size_4k");
+    expect(detection).toHaveAttribute("id", "locked_detection_model");
+    expect(unet).toHaveAttribute("id", "locked_unet4x_4k");
+    for (const control of [clip, overlap, detection, unet]) expect(control).toBeDisabled();
+    expect(clip).toHaveValue("30");
+    expect(overlap).toHaveValue("8");
+    expect(detection).toHaveValue("rfdetr-vr-v1");
+    expect(unet).not.toBeChecked();
+    expect(lockedIds()).toEqual([
+      "locked_clip_size_4k", "locked_detection_model", "locked_temporal_overlap", "locked_unet4x_4k",
+    ]);
+    // The localized help (with its "8K VR overrides this" clause) is the display control's helper text.
+    expect(clip).toHaveAccessibleDescription(/启动时由 8K VR 覆盖此项/);
+    // The real fields stay mounted (rjsf keeps and submits them) but hidden.
+    for (const real of [realClip, realOverlap, realDetection, realUnet]) {
+      expect(real).toBeInTheDocument();
+      expect(fieldOf(real)).not.toBeVisible();
+    }
+    // The hint sits in its own row right under the switch, with the profile values.
+    const hint = screen.getByText(HINT);
+    expect(hint).toBeVisible();
+    expect(hint).toHaveTextContent(/rfdetr-vr-v1/);
+    expect(hint).toHaveTextContent(/时序重叠 8|temporal overlap 8/);
+    expect(hint).toHaveTextContent(/4K 档片段长度 30|4K-tier clip size 30/);
+    expect(
+      screen.getByRole("checkbox", { name: VR8K }).compareDocumentPosition(hint) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(hint.compareDocumentPosition(clip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: VR8K }));
+
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+    expect(lockedIds()).toEqual([]);
+    // The same DOM nodes come back (never remounted), enabled, with the stored values.
+    expect(screen.getByRole("spinbutton", { name: CLIP4K })).toBe(realClip);
+    expect(screen.getByRole("spinbutton", { name: OVERLAP })).toBe(realOverlap);
+    expect(screen.getByRole("textbox", { name: DETECTION })).toBe(realDetection);
+    expect(screen.getByRole("checkbox", { name: UNET4K })).toBe(realUnet);
+    for (const real of [realClip, realOverlap, realDetection, realUnet]) {
+      expect(fieldOf(real)).toBeVisible();
+      expect(real).toBeEnabled();
+    }
+    expect(realClip).toHaveValue(60);
+    expect(realOverlap).toHaveValue(12);
+    expect(realDetection).toHaveValue("rfdetr-v6");
+    expect(realUnet).toBeChecked();
+    expect(screen.getByRole("textbox", { name: NAME })).toHaveValue("vr-1");
+  });
+
+  it("keeps an invalid typed value visible instead of locking it, and Review does not advance", async () => {
+    const addMonitor = vi.spyOn(apiModule.api, "addMonitor").mockResolvedValue({} as never);
+    chooseJasna();
+    fireEvent.change(screen.getByRole("textbox", { name: NAME }), { target: { value: "vr-1" } });
+    const realClip = screen.getByRole("spinbutton", { name: CLIP4K });
+    fireEvent.change(realClip, { target: { value: "5" } }); // minimum 8
+    fireEvent.click(screen.getByRole("checkbox", { name: VR8K }));
+
+    // The invalid field is not hidden (a hidden invalid input blocks submit silently).
+    expect(screen.getByRole("spinbutton", { name: CLIP4K })).toBe(realClip);
+    expect(realClip).toBeVisible();
+    expect(realClip).toBeEnabled();
+    expect(realClip).toBeInvalid();
+    expect(screen.queryByRole("textbox", { name: CLIP4K })).not.toBeInTheDocument();
+    // The other three are locked.
+    expect(lockedIds()).toEqual(["locked_detection_model", "locked_temporal_overlap", "locked_unet4x_4k"]);
+    expect(screen.getByRole("textbox", { name: OVERLAP })).toBeDisabled();
+    expect(screen.getByText(HINT)).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
+    await Promise.resolve();
+    expect(screen.queryByRole("button", { name: /Add monitor|添加监控/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: VR8K })).toBeChecked();
+    expect(addMonitor).not.toHaveBeenCalled();
+
+    // A valid value locks it again, and the hidden valid field no longer blocks Review.
+    fireEvent.change(realClip, { target: { value: "45" } });
+    expect(screen.getByRole("textbox", { name: CLIP4K })).toHaveValue("30");
+    expect(realClip).not.toBeVisible();
+    expect(realClip).toBeValid();
+    fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
+    expect(await screen.findByRole("button", { name: /Add monitor|添加监控/ })).toBeInTheDocument();
+    expect(addMonitor).not.toHaveBeenCalled();
+  });
+
+  it("edit mode: a saved tick locks on open, and Save submits the stored values untouched", async () => {
+    const updateMonitor = vi.spyOn(apiModule.api, "updateMonitor").mockResolvedValue({} as never);
+    const saved = {
+      name: "vr-1", vr_8k: true, clip_size_4k: 45, unet4x_4k: true,
+      detection_model: "rfdetr-v6", temporal_overlap: 10,
+    };
+    wrap(
+      <MonitorWizard mode="edit" name="vr-1" existingType="jasna" existingConfig={saved}
+        {...baseProps} plugins={[jasnaPlugin]} />,
+    );
+    expect(screen.getByText(HINT)).toBeVisible();
+    expect(screen.getByRole("textbox", { name: CLIP4K })).toHaveValue("30");
+    expect(screen.getByRole("textbox", { name: CLIP4K })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: UNET4K })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: UNET4K })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /Save changes|保存更改/ }));
+
+    await waitFor(() => expect(updateMonitor).toHaveBeenCalledWith("vr-1", {
+      config: expect.objectContaining({
+        vr_8k: true, clip_size_4k: 45, unet4x_4k: true, detection_model: "rfdetr-v6", temporal_overlap: 10,
+      }),
+    }));
+  });
+
+  it("add-mode review lists the 8K VR row first and the overridden values as stored → profile", async () => {
+    chooseJasna();
+    fireEvent.change(screen.getByRole("textbox", { name: NAME }), { target: { value: "vr-1" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: VR8K }));
+    fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
+    await screen.findByRole("button", { name: /Add monitor|添加监控/ });
+
+    const typeRow = screen.getByText(/服务类型|Service type/).parentElement as HTMLElement;
+    const vrRow = typeRow.nextElementSibling as HTMLElement;
+    expect(within(vrRow).getByText("8K VR")).toBeInTheDocument();
+    expect(within(vrRow).getByText(/已勾选（4K 档不用 unet-4x）|on \(4K tier without unet-4x\)/)).toBeInTheDocument();
+    expect(screen.getByText("60 → 30")).toBeInTheDocument();
+    expect(screen.getByText("rfdetr-v6 → rfdetr-vr-v1")).toBeInTheDocument();
+    // An equal pair (overlap 8 = profile 8) shows the value once.
+    const overlapRow = screen.getByText(OVERLAP).parentElement as HTMLElement;
+    expect(within(overlapRow).getByText("8")).toBeInTheDocument();
+    expect(screen.getAllByText(/→/)).toHaveLength(2);
+
+    // Back, untick, Review → neither the row nor an arrow.
+    fireEvent.click(screen.getByRole("button", { name: /Back|返回/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: VR8K }));
+    fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
+    await screen.findByRole("button", { name: /Add monitor|添加监控/ });
+    expect(screen.queryByText("8K VR")).not.toBeInTheDocument();
+    expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+    expect(screen.getByText("60")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["a non-jasna plugin", { ...jasnaPlugin, type_id: "lada", display_name: "Lada VR" }, "Lada VR"],
+    ["an older jasna catalog without the profile", {
+      ...jasnaPlugin, ui_schema: { "ui:order": jasnaPlugin.ui_schema["ui:order"] },
+    }, "Jasna (video restore)"],
+  ])("no lock, hint or review row for %s", async (_case, plugin, label) => {
+    chooseJasna([plugin], label);
+    fireEvent.change(screen.getByRole("textbox", { name: NAME }), { target: { value: "vr-1" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: VR8K }));
+    expect(screen.getByRole("checkbox", { name: VR8K })).toBeChecked();
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+    expect(lockedIds()).toEqual([]);
+    expect(screen.getByRole("spinbutton", { name: CLIP4K })).toBeVisible();
+    expect(screen.getByRole("spinbutton", { name: CLIP4K })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
+    await screen.findByRole("button", { name: /Add monitor|添加监控/ });
+    expect(screen.queryByText("8K VR")).not.toBeInTheDocument();
+    expect(screen.queryByText(/→/)).not.toBeInTheDocument();
   });
 });

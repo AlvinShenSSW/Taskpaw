@@ -110,6 +110,34 @@ export function MonitorWizard({
     return v !== null && typeof v === "object" ? JSON.stringify(v) : String(v);
   };
 
+  // #208: the Jasna「8K VR」profile — one source, the backend's static ui_schema
+  // (built from jasna.py's _VR8K_* constants). An older agent's catalog carries
+  // none → no lock, no review rows.
+  const vr8kProfile = useMemo(() => {
+    if (selected?.kind !== "plugin" || selected.plugin.type_id !== "jasna") return undefined;
+    const ui = selected.plugin.ui_schema as
+      | { vr_8k?: { "ui:options"?: { taskpawProfile?: unknown } } } | undefined;
+    const profile = ui?.vr_8k?.["ui:options"]?.taskpawProfile;
+    return profile && typeof profile === "object" && !Array.isArray(profile)
+      ? (profile as Record<string, string | number | boolean>) : undefined;
+  }, [selected]);
+  // While ticked, the profile's fields show greyed with the profile values and
+  // the hint sits under the switch; rjsf keeps and submits the stored values.
+  const vr8kLocked = vr8kProfile && liveFormData.vr_8k === true ? {
+    after: "vr_8k",
+    note: (
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+        {t("wizard.vr8kHint", {
+          detection: vr8kProfile.detection_model,
+          clip: vr8kProfile.clip_size_4k,
+          overlap: vr8kProfile.temporal_overlap,
+        })}
+      </Typography>
+    ),
+    fields: Object.fromEntries(Object.entries(vr8kProfile).map(([k, value]) => [k, { value }])),
+  } : undefined;
+  const vr8kReview = vr8kProfile && formData.vr_8k === true ? vr8kProfile : undefined;
+
   const formUiSchema = useMemo(() => {
     if (selected?.kind !== "plugin") return {};
     const base = (selected.plugin.ui_schema as Record<string, unknown>) ?? {};
@@ -242,6 +270,7 @@ export function MonitorWizard({
                 (selected.plugin.type_id === "jasna" && liveFormData.av_translate === true))
                 ? <FfmpegReminder whisperjav={typeof liveFormData.whisperjav_exe_path === "string"
                   ? liveFormData.whisperjav_exe_path : ""} /> : null}
+              locked={vr8kLocked}
               typeId={selected.plugin.type_id}
             />
           </>
@@ -271,6 +300,8 @@ export function MonitorWizard({
           <>
             <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
               <ReviewRow k={t("wizard.svctype")} v={selected.kind === "preset" ? selected.preset.id : selected.plugin.type_id} />
+              {/* 8K VR (#208): booleans are otherwise not listed, so this row is how the unet-4x override shows. */}
+              {selected.kind === "plugin" && vr8kReview && <ReviewRow k={t("wizard.vr8kRow")} v={t("wizard.vr8kOn")} />}
               {selected.kind === "plugin"
                 ? Object.entries(formData)
                     .filter(([, v]) => typeof v !== "boolean")
@@ -279,7 +310,10 @@ export function MonitorWizard({
                       const props = selected.plugin.json_schema.properties as
                         | Record<string, { title?: string }> | undefined;
                       const label = fieldLabel(k, selected.plugin.type_id, i18n.language, props?.[k]?.title);
-                      return <ReviewRow key={k} k={label} v={mask(k, v)} />;
+                      // A value the 8K VR profile overrides at launch reads `stored → profile`.
+                      const launched = vr8kReview && Object.hasOwn(vr8kReview, k) ? vr8kReview[k] : v;
+                      return <ReviewRow key={k} k={label}
+                        v={launched === v ? mask(k, v) : `${mask(k, v)} → ${String(launched)}`} />;
                     })
                 : selected.preset.monitors.map((m) => <ReviewRow key={m.name} k={m.name} v={m.type_id} />)}
             </Box>

@@ -28,7 +28,7 @@ file/folder pickers for path fields.
 |---------|---------|
 | `lada` | LADA video restore — managed (TaskPaw launches `lada-cli`, parses progress) or passive (detect an external run); file queue, GPU/VRAM, CPU/RAM |
 | `avsubs` | Standalone「AV 翻译」— walk a library folder (recursive by default) and give every MP4 that has no subtitles yet a `<name>.srt` (zh, global LLM API) next to it, via a `<name>.ja.srt` transcript (WhisperJAV) that is deleted once the `.srt` is written (kept as the resume point when translation does not finish); translation is resumable line by line (a Stop or an outage loses at most the request in flight), lines the primary model refuses go to up to two fallback models, a line every model refuses keeps its Japanese text, and a video with no translation service for 2 h is paused and continued at the next Start; a video already has subtitles when its folder holds `<name>.srt` (or `.ass`/`.ssa`/`.vtt`), a `<name>.<tag>.srt` with a non-Japanese tag (e.g. `.chs.srt`), or it is the folder's only video and there is any non-Japanese subtitle — an unreadable folder skips the video for the run and an existing subtitle is never overwritten; takes turns on the GPU with Jasna per file (in-process GPU lease) |
-| `jasna` | Jasna video restore — managed (TaskPaw runs one `jasna.exe` per video: skip/resume, per-resolution `unet-4x`, retry + degrade) or passive; file queue with failures, GPU/VRAM, CPU/RAM. Output `<name>-破解.mp4`; a legacy `<name>_restored.mp4` still counts as restored. Optional「AV 翻译」: after each restore, WhisperJAV (ja ASR) + the global LLM API write `<name>-破解.srt` (zh) next to the restored video — always named like that video (`<name>_restored.srt` for a legacy file); the `.ja.srt` transcript is deleted once the `.srt` is written; translation is resumable and uses the fallback models, as in `avsubs` |
+| `jasna` | Jasna video restore — managed (TaskPaw runs one `jasna.exe` per video: skip/resume, per-resolution `unet-4x`, retry + degrade) or passive; file queue with failures, GPU/VRAM, CPU/RAM. Output `<name>-破解.mp4`; a legacy `<name>_restored.mp4` still counts as restored. Optional「AV 翻译」: after each restore, WhisperJAV (ja ASR) + the global LLM API write `<name>-破解.srt` (zh) next to the restored video — always named like that video (`<name>_restored.srt` for a legacy file); the `.ja.srt` transcript is deleted once the `.srt` is written; translation is resumable and uses the fallback models, as in `avsubs`. An「8K VR」tick launches every file of the task with the 8K SBS VR profile and leaves the task's own settings untouched (see Jasna「8K VR」below) |
 | `comfyui` | ComfyUI queue (idle = complete) + error diagnostics from its log |
 | `folder` | A downloads dir — a file is "done" once its size is stable |
 | `process` | Any process by name/pattern (running ↔ exited) |
@@ -137,6 +137,28 @@ TaskPaw 会自动使用 WhisperJAV 安装目录中自带的 FFmpeg（Library\bin
     Write-Host '完成后请关闭 TaskPaw 窗口（会完全退出），再从开始菜单重新打开'
 }
 ```
+
+### Jasna「8K VR」
+
+在 Jasna 任务的表单里勾选「8K VR」后，这个任务的**每个文件**都按 8K SBS VR（VR180 左右并排）处理，
+每次启动 Jasna 时固定使用下面的配置：
+
+| 参数 | 8K VR 使用的值 |
+|---|---|
+| 检测模型 `--detection-model` | `rfdetr-vr-v1`（Jasna 0.10.0 起自带；4K 档不再自动换成 `rfdetr-v6-large`） |
+| `--vr-mode` | `sbs` |
+| 时序重叠 `--temporal-overlap` | 8（所有档位） |
+| 4K 档片段长度 `--max-clip-size` | 30（1080p 档仍用「1080p 档片段长度」） |
+| 4K 档 unet-4x | 关（1080p 档仍按「1080p 档：使用 unet-4x 二次修复」的勾选） |
+
+- 勾选后，表单里被覆盖的四项（4K 档 unet-4x、检测模型、4K 档片段长度、时序重叠）变灰并显示上面的值；
+  **你保存的原值不会被改写**，取消勾选后下一次启动就恢复使用它们。
+- 勾选后整个任务的所有文件都按 SBS VR 处理，**2D 影片请放到另一个任务**。
+- 在运行中的任务上保存（包括勾选 / 取消勾选）会停止当前的 Jasna，并从头重跑当前影片。
+- 显存更大、想在 4K 档也用 unet-4x：在「额外参数」里加 `--secondary-restoration unet-4x`
+  （对这个任务的每个文件都生效，并关闭自动的 unet-4x 降级重试）；状态行会显示 `secondary via extra args`。
+- 8K 的 **H.264** 片源：NVIDIA 硬件解码（NVDEC）的 H.264 最高只支持到 4K，8K H.264 会改用 CPU 解码，非常慢；
+  请先转码成 HEVC（H.265）再放进输入文件夹。
 
 ### From source (dev)
 

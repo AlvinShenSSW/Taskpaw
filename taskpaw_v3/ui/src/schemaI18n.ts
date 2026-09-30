@@ -164,7 +164,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     unet4x_4k: {
       title: "4K 档：使用 unet-4x 二次修复",
       description:
-        "默认关：8 GB 显存放不下 4K 的 unet-4x。4K 档指像素数 > 1920×1080×1.5（约 3.1 MP，即 2560×1440 及以上）的视频。显存更大时可以打开。",
+        "默认关：8 GB 显存放不下 4K 的 unet-4x。4K 档指像素数 > 1920×1080×1.5（约 3.1 MP，即 2560×1440 及以上）的视频。显存更大时可以打开。勾选「8K VR」时，启动时由 8K VR 覆盖此项。",
     },
     av_translate: {
       title: "AV 翻译",
@@ -178,6 +178,11 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     },
     whisperjav_engine: { title: "识别引擎", description: WHISPERJAV_ENGINE_ZH },
     whisperjav_extra_args: { title: "WhisperJAV 额外参数", description: WHISPERJAV_EXTRA_ARGS_ZH },
+    vr_8k: {
+      title: "8K VR",
+      description:
+        "勾选后，这个任务的所有文件都按 8K SBS VR 处理：启动时使用 VR180 检测模型 rfdetr-vr-v1、--vr-mode sbs、时序重叠 8、4K 档片段长度 30，4K 档不用 unet-4x。被覆盖的字段保留各自保存的值，取消勾选后重新生效。2D 影片请放到另一个任务。运行中的任务保存这个设置后会从头重跑当前影片。",
+    },
     clip_size_1080p: {
       title: "1080p 档片段长度",
       description:
@@ -186,12 +191,12 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     clip_size_4k: {
       title: "4K 档片段长度",
       description:
-        "4K 档每次送进模型的帧数（--max-clip-size）。越大越稳定但更吃显存；8 GB 显存建议 60。",
+        "4K 档每次送进模型的帧数（--max-clip-size）。越大越稳定但更吃显存；8 GB 显存建议 60。勾选「8K VR」时，启动时由 8K VR 覆盖此项。",
     },
     temporal_overlap: {
       title: "时序重叠帧数",
       description:
-        "相邻片段之间重叠的帧数（--temporal-overlap），减少接缝闪烁。建议 8–20；Jasna 要求 2×重叠 必须小于片段长度（两个档位都要满足）。",
+        "相邻片段之间重叠的帧数（--temporal-overlap），减少接缝闪烁。建议 8–20；Jasna 要求 2×重叠 必须小于片段长度（两个档位都要满足）。勾选「8K VR」时，启动时由 8K VR 覆盖此项。",
     },
     codec: {
       title: "编码器",
@@ -205,12 +210,12 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     detection_model: {
       title: "检测模型",
       description:
-        "马赛克检测模型（--detection-model）。保持默认 rfdetr-v6 时，4K 档会在 model_weights 里存在 rfdetr-v6-large.onnx 的情况下自动升级为 rfdetr-v6-large；手动指定则原样使用。",
+        "马赛克检测模型（--detection-model）。保持默认 rfdetr-v6 时，4K 档会在 model_weights 里存在 rfdetr-v6-large.onnx 的情况下自动升级为 rfdetr-v6-large；手动指定则原样使用。勾选「8K VR」时忽略此项（使用 rfdetr-vr-v1）。",
     },
     jasna_extra_args: {
       title: "额外参数",
       description:
-        "原样追加到命令行末尾的额外参数，例如 --device cuda:1。不要在这里重复 TaskPaw 已经控制的参数（--input --output --max-clip-size --temporal-overlap --codec --cq --detection-model）。特例：在这里写 --secondary-restoration（如 tvai / rtx-super-res / none）会对每个文件覆盖上面两个勾选框，并关闭自动的 unet-4x 降级重试。另外 --encoder-settings cq= 与上面的 CQ 冲突，Jasna 自己会报错。",
+        "原样追加到命令行末尾的额外参数，例如 --device cuda:1。不要在这里重复 TaskPaw 已经控制的参数（--input --output --max-clip-size --temporal-overlap --codec --cq --detection-model）。特例：在这里写 --secondary-restoration（如 tvai / rtx-super-res / none）会对每个文件覆盖上面两个勾选框，并关闭自动的 unet-4x 降级重试。另外 --encoder-settings cq= 与上面的 CQ 冲突，Jasna 自己会报错。勾选「8K VR」时，--vr-mode 和 --detection-model-path 也会被拒绝。",
     },
     jasna_gpu_monitor: {
       title: "GPU 监控",
