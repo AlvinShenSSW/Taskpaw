@@ -296,5 +296,17 @@ describe("#210 actual Hub task cards", () => {
       expect(screen.getByText("invalid-task").parentElement?.querySelector("svg")).toBeNull();
     } finally { view.unmount(); await i18n.changeLanguage("zh-CN"); }
   });
+});
 
+it("shows online activity provenance and hides an offline stale badge", async () => {
+  const { default: i18n } = await import("../i18n");
+  await i18n.changeLanguage("en");
+  const metrics = { ai_state: "busy", busy_tools: ["codex"], tools: [{tool:"codex",state:"busy",present:true,age_s:null,source:"session",host:"vscode"}] };
+  const status = { ...STATUS, servers: [true,false].map((online,n) => ({id:n+1,name:`activity-${n}`,ip:"10.0.0.1",port:5680,enabled:1,online,snapshot:{monitors:{ai:{state:"running",type_id:"dev_activity",metrics}}}})) };
+  vi.stubGlobal("fetch",vi.fn((url:string)=>Promise.resolve({ok:true,json:()=>Promise.resolve(url.includes("/status")?status:{events:[]})})));
+  renderHub();
+  const on = (await screen.findByText("activity-0")).closest(".MuiCard-root") as HTMLElement;
+  const off = (await screen.findByText("activity-1")).closest(".MuiCard-root") as HTMLElement;
+  expect(within(on).getByText("codex · Session activity · VS Code")).toBeInTheDocument();
+  expect(within(off).queryByText(/Running AI/)).not.toBeInTheDocument();
 });

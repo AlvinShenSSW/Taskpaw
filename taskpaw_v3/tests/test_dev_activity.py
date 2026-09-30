@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import pytest
 
@@ -18,14 +19,19 @@ from taskpaw_v3.monitors.registry import default_registry
 
 
 @pytest.fixture(autouse=True)
-def _no_real_cpu_probe(monkeypatch):
-    """#163: the observe probe defaults on, so keep the real psutil CPU scan out of
-    every test (the CI/dev host may itself run claude/code) — report nothing present.
-    Observation tests override da.scan_activity with their own sample."""
+def _no_real_observation(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    _snapshot(monkeypatch, {})
+
+
+def _snapshot(monkeypatch, present):
     monkeypatch.setattr(
         da,
         "scan_activity",
-        lambda compiled: {t: {"present": False, "cpu_seconds": 0.0} for t in compiled},
+        lambda patterns: {
+            tool: {"present": value, "roots": [], "cpus": {}, "complete": True}
+            for tool, value in present.items()
+        },
     )
 
 
@@ -128,7 +134,7 @@ def test_invalid_process_pattern_rejected_at_config_time():
 
 
 def _check(cfg, monkeypatch, present):
-    monkeypatch.setattr(da, "_detect_present", lambda patterns: present)
+    _snapshot(monkeypatch, present)
     inst = DevActivityPlugin().create("ai", cfg)
     events = []
     st = inst.check(lambda *a, **k: events.append((a, k)))
@@ -168,9 +174,9 @@ def test_check_none_when_absent_and_no_files(tmp_path, monkeypatch):
 def _check_obs(cfg, monkeypatch, present, cpu):
     """A check() where the external CPU probe is stubbed to return `cpu` (a
     {tool: percent} dict), so observation is deterministic (no real timing)."""
-    monkeypatch.setattr(da, "_detect_present", lambda patterns: present)
+    _snapshot(monkeypatch, present)
     inst = DevActivityPlugin().create("ai", cfg)
-    monkeypatch.setattr(inst, "_observe", lambda: cpu)
+    monkeypatch.setattr(da, "cpu_percents", lambda *a: (cpu, {}))
     events: list = []
     st = inst.check(lambda *a, **k: events.append((a, k)))
     return inst, st, events
@@ -222,7 +228,8 @@ def test_observed_vscode_busy_does_not_drive_ai_headline(tmp_path, monkeypatch):
     _, st, _ = _check_obs(cfg, monkeypatch, {"vscode": True}, {"vscode": 80.0})
     assert st.metrics["ai_state"] == "none"  # not "busy"
     vs = next(t for t in st.metrics["tools"] if t["tool"] == "vscode")
-    assert vs["state"] == "busy" and vs["ai"] is False and vs["observed"] is True
+    assert vs["state"] == "idle" and vs["ai"] is False and vs["observed"] is False
+    assert vs["cpu"] is None
 
 
 def test_observe_disabled_is_presence_only(tmp_path, monkeypatch):
@@ -231,10 +238,10 @@ def test_observe_disabled_is_presence_only(tmp_path, monkeypatch):
         name="ai", state_dir=str(tmp_path), tools=["claude"], observe=False
     )
     inst = DevActivityPlugin().create("ai", cfg)
-    monkeypatch.setattr(da, "_detect_present", lambda patterns: {"claude": True})
+    _snapshot(monkeypatch, {"claude": True})
     # If observe were on, _observe would be called; assert it is NOT.
     monkeypatch.setattr(
-        inst, "_observe", lambda: (_ for _ in ()).throw(AssertionError("probed"))
+        da, "cpu_percents", lambda *a: (_ for _ in ()).throw(AssertionError("probed"))
     )
     st = inst.check(lambda *a, **k: None)
     assert st.metrics["ai_state"] == "present_only"
@@ -242,7 +249,7 @@ def test_observe_disabled_is_presence_only(tmp_path, monkeypatch):
 
 def test_check_emits_on_busy_edge_only(tmp_path, monkeypatch):
     cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
-    monkeypatch.setattr(da, "_detect_present", lambda patterns: {"claude": True})
+    _snapshot(monkeypatch, {"claude": True})
     inst = DevActivityPlugin().create("ai", cfg)
     events: list = []
     emit = lambda *a, **k: events.append(a)  # noqa: E731
@@ -258,7 +265,7 @@ def test_check_emits_on_busy_edge_only(tmp_path, monkeypatch):
 def test_busy_to_waiting_emits_waiting_not_idle(tmp_path, monkeypatch):
     # busy→waiting (Claude Notification) must surface "waiting for input", not "idle".
     cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
-    monkeypatch.setattr(da, "_detect_present", lambda patterns: {"claude": True})
+    _snapshot(monkeypatch, {"claude": True})
     inst = DevActivityPlugin().create("ai", cfg)
     events: list = []
     emit = lambda *a, **k: events.append(a)  # noqa: E731
@@ -273,6 +280,104 @@ def test_busy_to_waiting_emits_waiting_not_idle(tmp_path, monkeypatch):
         and "waiting" in events[-1][1].lower()
         and "idle" not in events[-1][1].lower()
     )
+
+
+@pytest.mark.parametrize("failure", ["error", "limited", "process_error", "all"])
+@pytest.mark.parametrize("recovered", ["idle", "busy", "waiting"])
+def test_suppressed_idle_recovers_without_duplicate_events(
+    tmp_path, monkeypatch, failure, recovered
+):
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude"], observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    emit = lambda *a, **k: events.append(a)  # noqa: E731
+    try:
+        _write(tmp_path, "claude", "idle", time.time())
+        inst.check(emit)
+        _write(tmp_path, "claude", "busy", time.time())
+        inst.check(emit)
+        assert [e[1] for e in events] == ["ai: AI busy"]
+
+        if failure == "error":
+            (tmp_path / "agent-activity-claude.json").write_text("invalid JSON")
+        else:
+            # Without a fresh hook, failed process evidence must still defer idle.
+            (tmp_path / "agent-activity-claude.json").unlink()
+            if failure == "all":
+
+                def unavailable(*a):
+                    raise RuntimeError("unavailable")
+
+                monkeypatch.setattr(da, "scan_activity", unavailable)
+            else:
+                sample = (
+                    {"limited": True}
+                    if failure == "limited"
+                    else {"errors": ["denied"]}
+                )
+                monkeypatch.setattr(da, "scan_activity", lambda *a: {"claude": sample})
+        for _ in range(2):
+            st = inst.check(emit)
+            assert st.metrics["probe_errors"] or st.metrics["probe_limited"]
+            assert [e[1] for e in events] == ["ai: AI busy"]
+
+        _snapshot(monkeypatch, {})
+        _write(tmp_path, "claude", recovered, time.time())
+        expected = ["ai: AI busy"]
+        if recovered == "idle":
+            expected.append("ai: AI idle")
+        elif recovered == "waiting":
+            expected.append("ai: AI waiting for input")
+        for _ in range(2):
+            st = inst.check(emit)
+            assert st.metrics["ai_state"] == recovered
+            assert not st.metrics["probe_errors"] and not st.metrics["probe_limited"]
+            assert [e[1] for e in events] == expected
+    finally:
+        inst.stop()
+
+
+@pytest.mark.parametrize("failure", ["limited", "error", "all"])
+def test_process_failure_does_not_suppress_fresh_hook_idle(
+    tmp_path, monkeypatch, failure
+):
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude", "codex"]
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    emit = lambda *a, **k: events.append(a)  # noqa: E731
+    try:
+        _write(tmp_path, "claude", "busy", time.time())
+        inst.check(emit)
+        if failure == "all":
+
+            def unavailable(*a):
+                raise RuntimeError("unavailable")
+
+            monkeypatch.setattr(da, "scan_activity", unavailable)
+        else:
+            sample = (
+                {"limited": True} if failure == "limited" else {"errors": ["denied"]}
+            )
+            monkeypatch.setattr(da, "scan_activity", lambda *a: {"claude": sample})
+        for state in ("idle", "idle", "busy", "busy"):
+            _write(tmp_path, "claude", state, time.time())
+            st = inst.check(emit)
+            assert st.metrics["tools"][0]["source"] == "hook"
+            assert st.metrics["ai_state"] == state
+            assert st.metrics["probe_errors"] or st.metrics["probe_limited"]
+            if failure != "limited":
+                assert st.state == "degraded"
+            expected = ["ai: AI idle"]
+            if state == "busy":
+                expected.append("ai: AI busy")
+            assert [e[1] for e in events] == expected
+            assert not inst._idle_pending
+    finally:
+        inst.stop()
 
 
 def test_read_tool_state_rejects_far_future_ts(tmp_path):
@@ -291,7 +396,7 @@ def test_present_scan_error_degrades_not_crash(tmp_path, monkeypatch):
     def boom(patterns, search_cmdline=True):
         raise PermissionError("denied")
 
-    monkeypatch.setattr(da, "scan_matches", boom)
+    monkeypatch.setattr(da, "scan_activity", boom)
     _write(tmp_path, "claude", "busy", time.time())
     cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
     inst = DevActivityPlugin().create("ai", cfg)
@@ -304,7 +409,7 @@ def test_duty_ratio_accumulates(tmp_path, monkeypatch):
     cfg = DevActivityConfig(
         name="ai", state_dir=str(tmp_path), tools=["claude"], window_seconds=3600
     )
-    monkeypatch.setattr(da, "_detect_present", lambda patterns: {"claude": True})
+    _snapshot(monkeypatch, {"claude": True})
     inst = DevActivityPlugin().create("ai", cfg)
     emit = lambda *a, **k: None  # noqa: E731
     _write(tmp_path, "claude", "busy", time.time())
@@ -314,3 +419,308 @@ def test_duty_ratio_accumulates(tmp_path, monkeypatch):
     st = inst.check(emit)
     # 2 busy of 3 samples → ratio ~0.67
     assert 0.6 <= st.metrics["duty"]["ratio"] <= 0.7
+
+
+@pytest.mark.parametrize("state", ["bogus", 1, True])
+def test_unknown_hook_falls_through(tmp_path, state):
+    _write(tmp_path, "claude", state, 1000)
+    assert read_tool_state(str(tmp_path), "claude", 300, 1000)[0] is None
+
+
+def test_wrong_tag_hook_invalid(tmp_path):
+    (tmp_path / "agent-activity-claude.json").write_text(
+        json.dumps({"tool": "codex", "state": "busy", "ts": 1000})
+    )
+    assert read_tool_state(str(tmp_path), "claude", 300, 1000)[0] is None
+
+
+def test_tool_deduplication(tmp_path, monkeypatch):
+    _write(tmp_path, "claude", "busy", time.time())
+    _, st, _ = _check(
+        DevActivityConfig(
+            name="ai", state_dir=str(tmp_path), tools=["claude", "claude"]
+        ),
+        monkeypatch,
+        {"claude": True},
+    )
+    assert st.metrics["busy_tools"] == ["claude"]
+    assert len(st.metrics["tools"]) == 1
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    [("vscode", "busy"), ("mixed", None), ("unknown", None), ("other", None)],
+)
+def test_hook_context_attribution(tmp_path, monkeypatch, host, expected):
+    from taskpaw_v3.monitors import process_util as pu
+
+    _write(tmp_path, "claude", "busy", time.time())
+    roots = [{"pid": 10, "created": 1, "host": host}]
+    if host == "mixed":
+        roots = [
+            {"pid": 10, "created": 1, "host": "vscode"},
+            {"pid": 11, "created": 1, "host": "other"},
+        ]
+    monkeypatch.setattr(
+        da,
+        "scan_activity",
+        lambda p: {
+            "claude": {"present": True, "roots": roots, "cpus": {}, "complete": True},
+            "vscode": {"present": True, "roots": [], "cpus": {}, "complete": True},
+        },
+    )
+    monkeypatch.setattr(pu, "WINDOWS", False)
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude", "vscode"]
+    )
+    st = DevActivityPlugin().create("ai", cfg).check(lambda *a, **k: None)
+    ai, vs = st.metrics["tools"]
+    assert ai["source"] == "hook" and ai["host"] == host
+    assert ai["vscode_state"] == expected
+    assert vs["state"] == (expected or "idle") and not vs["observed"]
+    assert st.metrics["busy_tools"] == ["claude"]
+
+
+def test_session_precedence_controls_and_failure_transition(tmp_path, monkeypatch):
+    cfg = DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
+    monkeypatch.setattr(
+        da,
+        "scan_activity",
+        lambda p: {
+            "claude": {
+                "present": True,
+                "roots": [{"pid": 10, "created": 1, "host": "vscode"}],
+                "cpus": {},
+                "complete": True,
+            }
+        },
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    monkeypatch.setattr(
+        inst._sessions,
+        "sample",
+        lambda *a: {
+            "claude": {
+                "state": "busy",
+                "age_s": 7,
+                "host": "vscode",
+                "vscode_state": "busy",
+                "errors": [],
+                "limited": False,
+            }
+        },
+    )
+    events = []
+    st = inst.check(lambda *a, **k: events.append(a))
+    assert st.metrics["tools"][0]["source"] == "session"
+    _write(tmp_path, "claude", "idle", time.time())
+    assert inst.check(lambda *a, **k: None).metrics["tools"][0]["source"] == "hook"
+    (tmp_path / "agent-activity-claude.json").unlink()
+    inst.check(lambda *a, **k: None)
+    monkeypatch.setattr(
+        inst._sessions,
+        "sample",
+        lambda *a: {"claude": {"state": None, "errors": ["denied"], "limited": False}},
+    )
+    st = inst.check(lambda *a, **k: events.append(a))
+    assert st.state == "degraded" and st.metrics["probe_errors"]
+    assert not events
+    inst.stop()
+
+
+def test_new_root_cannot_inherit_idle_cpu(tmp_path, monkeypatch):
+    from taskpaw_v3.monitors import process_util as pu
+
+    roots = [{"pid": 10, "created": 1, "host": "other"}]
+    sample = {
+        "claude": {
+            "present": True,
+            "complete": True,
+            "roots": roots,
+            "cpus": {(10, 1): (1, (10, 1))},
+        }
+    }
+    monkeypatch.setattr(da, "scan_activity", lambda *a: sample)
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), session_activity=False, tools=["claude"]
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    inst.check(lambda *a, **k: None)
+    roots.append({"pid": 11, "created": 2, "host": "vscode"})
+    sample["claude"]["cpus"][(11, 2)] = (100, (11, 2))
+    # Snapshot dictionaries are fresh in production; preserve independent baseline.
+    inst._prev_cpu = {"claude": {(10, 1): (1, (10, 1))}}
+    st = inst.check(lambda *a, **k: None)
+    assert st.metrics["ai_state"] == "present_only"
+    assert pu.cpu_percents({}, 0, sample, 1)[0] == {}
+
+
+@pytest.mark.parametrize("budget", ["entries", "directories"])
+def test_busy_off_busy_events_across_discovery_yields(tmp_path, monkeypatch, budget):
+    from taskpaw_v3.monitors import session_activity as sa
+
+    root = tmp_path / "sessions"
+    root.mkdir()
+    for n in range(1600 if budget == "entries" else 200):
+        path = root / str(n)
+        path.touch() if budget == "entries" else path.mkdir()
+    monkeypatch.setattr(sa, "WINDOWS", True)
+    monkeypatch.setattr(sa.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(
+        da,
+        "scan_activity",
+        lambda *a: {
+            "claude": {
+                "present": True,
+                "roots": [{"pid": 10, "created": 1, "host": "other"}],
+                "cpus": {},
+                "complete": True,
+            }
+        },
+    )
+    cpu = [20.0]
+    monkeypatch.setattr(da, "cpu_percents", lambda *a: ({"claude": cpu[0]}, {}))
+    cfg = DevActivityConfig(
+        name="ai",
+        state_dir=str(tmp_path),
+        tools=["claude"],
+        session_roots={"claude": [str(root)]},
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    try:
+        for percent, state in [(20.0, "busy"), (0.0, "idle"), (20.0, "busy")]:
+            cpu[0] = percent
+            st = inst.check(lambda *a, **k: events.append(a))
+            assert st.metrics["ai_state"] == state
+            assert not st.metrics["probe_limited"]
+            assert inst._sessions.queues  # Discovery still resumes next tick.
+        assert [e[1] for e in events] == ["ai: AI idle", "ai: AI busy"]
+    finally:
+        inst.stop()
+
+
+@pytest.mark.parametrize("cap", ["queue", "depth"])
+def test_persistent_session_cycle_limit_allows_cpu_idle_busy_events(
+    tmp_path, monkeypatch, cap
+):
+    from taskpaw_v3.monitors import session_activity as sa
+
+    root = tmp_path / "sessions"
+    root.mkdir()
+    if cap == "queue":
+        for n in range(300):
+            (root / str(n)).mkdir()
+    else:
+        root.joinpath(*[str(n) for n in range(10)]).mkdir(parents=True)
+    monkeypatch.setattr(sa, "WINDOWS", True)  # No native open-file inspection.
+    clock = [1.0]
+    total_cpu = [0.0]
+    monkeypatch.setattr(da.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        da,
+        "scan_activity",
+        lambda *a: {
+            "claude": {
+                "present": True,
+                "roots": [{"pid": 10, "created": 1, "host": "other"}],
+                "cpus": {(10, 1): (total_cpu[0], (10, 1))},
+                "complete": True,
+            }
+        },
+    )
+    inst = DevActivityPlugin().create(
+        "ai",
+        DevActivityConfig(
+            name="ai",
+            state_dir=str(tmp_path),
+            tools=["claude"],
+            session_roots={"claude": [str(root)]},
+        ),
+    )
+    events = []
+    try:
+        inst.check(lambda *a, **k: None)  # CPU baseline.
+        for total, state in [(60.0, "busy"), (60.0, "idle"), (120.0, "busy")]:
+            clock[0] += 60
+            total_cpu[0] = total
+            st = inst.check(lambda *a, **k: events.append(a))
+            assert st.metrics["ai_state"] == state
+            assert st.metrics["tools"][0]["source"] == "cpu"
+            assert st.metrics["probe_limited"]
+            assert not st.metrics["probe_errors"]
+            assert inst._sessions.cycle_limited["claude"]
+            assert not inst._idle_pending
+        assert [e[1] for e in events] == ["ai: AI busy", "ai: AI idle", "ai: AI busy"]
+    finally:
+        inst.stop()
+
+
+def test_session_limit_does_not_suppress_fresh_hook_idle(tmp_path, monkeypatch):
+    inst = DevActivityPlugin().create(
+        "ai", DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
+    )
+    monkeypatch.setattr(
+        inst._sessions, "sample", lambda *a: {"claude": {"limited": True}}
+    )
+    events = []
+    try:
+        for state in ("busy", "idle", "busy"):
+            _write(tmp_path, "claude", state, time.time())
+            st = inst.check(lambda *a, **k: events.append(a))
+            assert st.metrics["tools"][0]["source"] == "hook"
+            assert st.metrics["probe_limited"]
+        assert [e[1] for e in events] == ["ai: AI idle", "ai: AI busy"]
+    finally:
+        inst.stop()
+
+
+@pytest.mark.parametrize("active", ["busy", "waiting"])
+def test_persistent_hook_error_preserves_next_active_event(
+    tmp_path, monkeypatch, active
+):
+    (tmp_path / "agent-activity-codex.json").write_text("invalid JSON")
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude", "codex"]
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    try:
+        for state in (active, "idle", active, active):
+            _write(tmp_path, "claude", state, time.time())
+            st = inst.check(lambda *a, **k: events.append(a))
+            assert st.state == "degraded" and st.metrics["probe_errors"]
+        title = "AI busy" if active == "busy" else "AI waiting for input"
+        assert [e[1] for e in events] == ["ai: AI idle", f"ai: {title}"]
+    finally:
+        inst.stop()
+
+
+@pytest.mark.parametrize("failure", ["hook", "process_limited", "session_limited"])
+def test_unrelated_tool_failure_does_not_suppress_fresh_hook_idle(
+    tmp_path, monkeypatch, failure
+):
+    _snapshot(monkeypatch, {"claude": True})
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude", "codex"]
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    try:
+        _write(tmp_path, "claude", "busy", time.time())
+        inst.check(lambda *a, **k: events.append(a))
+        if failure == "hook":
+            (tmp_path / "agent-activity-codex.json").write_text("invalid JSON")
+        elif failure == "process_limited":
+            monkeypatch.setattr(
+                da, "scan_activity", lambda *a: {"codex": {"limited": True}}
+            )
+        else:
+            monkeypatch.setattr(
+                inst._sessions, "sample", lambda *a: {"codex": {"limited": True}}
+            )
+        _write(tmp_path, "claude", "idle", time.time())
+        inst.check(lambda *a, **k: events.append(a))
+        assert [e[1] for e in events] == ["ai: AI idle"]
+    finally:
+        inst.stop()

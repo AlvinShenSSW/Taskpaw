@@ -1,0 +1,135 @@
+{
+  "provenance": {
+    "synthetic": true,
+    "source": "https://learn.chatgpt.com/docs/hooks",
+    "note": "Documentation-derived E2; no captured payloads."
+  },
+  "cases": [
+    {
+      "input": {
+        "hook_event_name": "SessionStart",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "PreCompact",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "PostCompact",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "SubagentStart",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "SubagentStop",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "PermissionRequest",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "waiting"
+    },
+    {
+      "input": {
+        "hook_event_name": "Stop",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "idle"
+    },
+    {
+      "input": {
+        "hook_event_name": "Interrupt",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "idle"
+    },
+    {
+      "input": {
+        "hook_event_name": "SessionEnd",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": "idle"
+    },
+    {
+      "input": {
+        "hook_event_name": "Notification",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": null
+    },
+    {
+      "input": {
+        "hook_event_name": "Unknown",
+        "session_id": "synthetic",
+        "cwd": "/synthetic",
+        "transcript_path": null
+      },
+      "state": null
+    }
+  ]
+}

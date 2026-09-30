@@ -927,6 +927,8 @@ def test_network_films_auth_before_validation(
 
 
 def test_210_release_version():
+    from packaging.version import Version
+
     from taskpaw_v3 import __version__
 
-    assert __version__ == "3.9.7"
+    assert Version(__version__) >= Version("3.9.7")

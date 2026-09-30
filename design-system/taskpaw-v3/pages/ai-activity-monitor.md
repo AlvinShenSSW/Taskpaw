@@ -189,3 +189,22 @@ from stored transitions (or precomputed by the agent for the current window).
 - [ ] 5s refresh uses a subtle "updating" affordance, no layout shift.
 - [ ] "AI 在场·未上报" clearly distinguished from "AI 空闲" (the core bug fix).
 - [ ] Keyboard: agent pills/hero + hub rows in visual tab order.
+
+## #211 — shipped provenance and editor context (3.9.8)
+
+Agent rows and the online Hub badge share optional `source` (hook/session/cpu/
+presence) and `host` (vscode/other/mixed/unknown) labels in English and Chinese.
+Badge summaries include state-bearing/present AI tools once, excluding VS Code
+context. Labels wrap at 375px and remain readable without hover. Old agents omit
+unknown provenance; `observed=true` alone retains its CPU meaning. Unknown enums
+use localized unknown text. CPU percentages appear only for CPU-derived rows.
+`age_s` is explicitly hook age; `session_age_s` is separately labeled session age.
+
+VS Code's active row reads “Vibe coding” / “AI 编程中” plus busy/waiting only when
+chosen AI evidence has attributable `vscode_state`; editor CPU never drives it.
+Its row remains `ai=false`, `observed=false`, `cpu=null`, with host vscode.
+Ambiguous mixed-host tool-wide evidence does not propagate activity to the editor.
+`probe_errors` shows a visible activity-probe warning and `probe_limited` an
+incomplete-scan note on both surfaces; neither requires hover. Preserve shared
+status dots, theme colors, reduced motion and online-only badges. Duty remains
+the existing in-memory sampled approximation, not persisted timeline segments.

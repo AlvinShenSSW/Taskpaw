@@ -141,3 +141,10 @@ describe("SchemaForm localization (#121)", () => {
     expect((await screen.findAllByText("Lada Cli Path")).length).toBeGreaterThan(0);
   });
 });
+
+it("localizes activity session controls without changing English", () => {
+  expect(fieldLabel("session_activity", "dev_activity", "zh-CN")).toBe("会话活动探测");
+  expect(fieldLabel("session_roots", "dev_activity", "zh-CN")).toBe("会话目录");
+  const schema: RJSFSchema = { type: "object", properties: { session_activity: { type: "boolean", title: "Session activity" } } };
+  expect(localizeSchema(schema,"dev_activity","en")).toEqual(schema);
+});

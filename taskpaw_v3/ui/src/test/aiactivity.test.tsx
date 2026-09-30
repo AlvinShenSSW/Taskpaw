@@ -61,3 +61,38 @@ describe("AiActivity (#154)", () => {
     expect(screen.getByText(RE.busy)).toBeInTheDocument();
   });
 });
+
+// T8: language is explicit for every provenance assertion.
+describe("activity provenance #211", () => {
+  it.each(["en", "zh-CN"])("shows session/host, distinct ages and warnings in %s", async (locale) => {
+    const { default: i18n } = await import("../i18n");
+    await i18n.changeLanguage(locale);
+    const m = { ai_state: "busy", busy_tools: ["claude"], probe_errors: [{ tool: "codex", layer: "session", code: "denied" }], probe_limited: true,
+      tools: [{ tool: "claude", state: "busy", present: true, age_s: 600, source: "session", host: "vscode", session_age_s: 7, observed: false, cpu: 99 }] };
+    const view = wrap(<AiActivity metrics={m} />);
+    expect(screen.getByText(locale === "en" ? /Session activity/ : /会话活动/)).toBeInTheDocument();
+    expect(screen.getByText(/VS Code/)).toBeInTheDocument();
+    expect(screen.getByText(locale === "en" ? /Hook.*600/ : /钩子.*600/)).toBeInTheDocument();
+    expect(screen.getByText(locale === "en" ? /Session.*7/ : /会话.*7/)).toBeInTheDocument();
+    expect(screen.queryByText("~99%")).not.toBeInTheDocument();
+    expect(screen.getByText(locale === "en" ? /probe unavailable/i : /探测不可用/)).toBeInTheDocument();
+    view.unmount();
+    wrap(<AiBadge metrics={m} />);
+    expect(screen.getByText(locale === "en" ? /claude · Session activity · VS Code/ : /claude · 会话活动 · VS Code/)).toBeInTheDocument();
+  });
+});
+
+it.each(["en", "zh-CN"])("renders legacy CPU, unknown enums and editor waiting in %s", async locale => {
+  const { default: i18n } = await import("../i18n");
+  await i18n.changeLanguage(locale);
+  wrap(<AiActivity metrics={{ai_state:"waiting",tools:[
+    {tool:"legacy",state:"busy",present:true,age_s:null,observed:true,cpu:12},
+    {tool:"old",state:"idle",present:true,age_s:null},
+    {tool:"vscode",state:"waiting",present:true,age_s:null,ai:false,source:"hook",host:"vscode"},
+    {tool:"future",state:"new-state",present:true,age_s:null,source:"future",host:"future"},
+  ]}} />);
+  expect(screen.getByText("~12%")).toBeInTheDocument();
+  expect(screen.getByText(locale === "en" ? /Vibe coding · waiting/ : /AI 编程中 · 等待/)).toBeInTheDocument();
+  expect(screen.getByText(locale === "en" ? /Unknown source · Host unknown/ : /来源未知 · 宿主未知/)).toBeInTheDocument();
+  expect(screen.queryByText("new-state")).not.toBeInTheDocument();
+});

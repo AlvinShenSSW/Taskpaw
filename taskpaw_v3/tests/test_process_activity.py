@@ -22,6 +22,7 @@ class _Proc:
     def __init__(self, pid, ppid, name, cmdline, user=0.0, system=0.0):
         self.info = {
             "pid": pid,
+            "create_time": 1.0,
             "ppid": ppid,
             "name": name,
             "cmdline": cmdline,
@@ -30,6 +31,8 @@ class _Proc:
 
 
 class _FakePsutil:
+    STATUS_ZOMBIE = "zombie"
+
     class NoSuchProcess(Exception): ...
 
     class AccessDenied(Exception): ...
@@ -64,7 +67,8 @@ def test_scan_activity_sums_subtree_cpu(monkeypatch):
 def test_scan_activity_absent_tool(monkeypatch):
     monkeypatch.setattr(pu, "psutil", _FakePsutil([_Proc(99, 1, "nginx", ["nginx"])]))
     out = pu.scan_activity(_pat(claude=r"\bclaude\b"))
-    assert out["claude"] == {"present": False, "cpu_seconds": 0.0}
+    assert out["claude"]["present"] is False
+    assert out["claude"]["cpu_seconds"] == 0.0
 
 
 def test_scan_activity_no_psutil(monkeypatch):
@@ -101,30 +105,333 @@ def test_scan_activity_matching_descendant_counted_once(monkeypatch):
     assert out["claude"]["cpu_seconds"] == pytest.approx(7.0)  # 1+2+4, each once
 
 
+def _sample(cpu=4.0, present=True):
+    return {
+        "claude": {
+            "present": present,
+            "complete": True,
+            "roots": [{"pid": 10, "created": 1}],
+            "cpus": {(10, 1): (cpu, (10, 1))},
+        }
+    }
+
+
 def test_cpu_percents_first_sample_is_zero():
-    sample = {"claude": {"present": True, "cpu_seconds": 4.0}}
-    pct, new_prev = pu.cpu_percents({}, 0.0, sample, 2.0)
-    assert pct == {}  # no prior → no percent yet
-    assert new_prev == {"claude": 4.0}
+    pct, prev = pu.cpu_percents({}, 0, _sample(), 2)
+    assert pct == {} and "claude" in prev
 
 
 def test_cpu_percents_delta():
-    prev = {"claude": 4.0}
-    sample = {"claude": {"present": True, "cpu_seconds": 6.0}}
-    pct, new_prev = pu.cpu_percents(prev, 0.0, sample, 2.0)
-    assert pct["claude"] == pytest.approx(100.0)  # 2 cpu-s over 2 s = 100% of a core
-    assert new_prev == {"claude": 6.0}
+    _, prev = pu.cpu_percents({}, 0, _sample(), 1)
+    assert pu.cpu_percents(prev, 1, _sample(6), 3)[0]["claude"] == 100
 
 
 def test_cpu_percents_exited_child_clamps_to_zero():
-    prev = {"claude": 10.0}
-    sample = {"claude": {"present": True, "cpu_seconds": 8.0}}  # dropped (child exited)
-    pct, _ = pu.cpu_percents(prev, 0.0, sample, 2.0)
-    assert pct["claude"] == 0.0
+    _, prev = pu.cpu_percents({}, 0, _sample(10), 1)
+    assert pu.cpu_percents(prev, 1, _sample(8), 3)[0]["claude"] == 0
 
 
 def test_cpu_percents_absent_tool_omitted():
-    prev = {"claude": 4.0}
-    sample = {"claude": {"present": False, "cpu_seconds": 0.0}}
-    pct, new_prev = pu.cpu_percents(prev, 0.0, sample, 2.0)
-    assert pct == {} and new_prev == {}
+    assert pu.cpu_percents({}, 0, _sample(present=False), 1) == ({}, {})
+
+
+# T1: exact identity fixtures reconstructed from the issue, not private captures.
+def _record(pid, ppid, exe, cpu=0, created=1, name=None, args=()):
+    p = _Proc(pid, ppid, name or exe.rsplit("/", 1)[-1], [exe, *args], user=cpu)
+    p.info.update(exe=exe, create_time=created)
+    return p
+
+
+def test_exact_identity_renderer_and_real_chatgpt_codex(monkeypatch):
+    monkeypatch.setattr(pu, "WINDOWS", False)  # macOS bundle identities.
+    procs = [
+        _record(1, 0, "/sbin/init"),
+        _record(
+            2,
+            1,
+            "/Applications/ChatGPT.app/Contents/Frameworks/Renderer",
+            43.7,
+            args=("codex",),
+        ),
+        _record(3, 1, "/Applications/ChatGPT.app/Contents/MacOS/codex", 0.7),
+        _record(4, 1, "/Applications/Claude.app/Contents/MacOS/Claude", 50),
+        _record(5, 1, "/bin/node", 60, args=("claude MCP disclaimer",)),
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity({"claude": None, "codex": None})
+    assert not out["claude"]["present"]
+    assert out["codex"]["cpu_seconds"] == 0.7
+
+
+def test_global_nearest_cpu_ownership_and_hosts(monkeypatch):
+    monkeypatch.setattr(pu, "WINDOWS", False)  # macOS bundle identities.
+    procs = [
+        _record(1, 0, "/sbin/init"),
+        _record(
+            2,
+            1,
+            "/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+            name="Code",
+        ),
+        _record(3, 2, "/bin/bash"),
+        _record(4, 3, "/bin/claude", 1),
+        _record(5, 4, "/bin/codex", 2),
+        _record(6, 5, "/bin/worker", 4),
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity({"claude": None, "codex": None, "vscode": None})
+    assert out["claude"]["cpu_seconds"] == 1
+    assert out["codex"]["cpu_seconds"] == 6
+    assert out["claude"]["roots"][0]["host"] == "vscode"
+    assert out["vscode"]["cpu_seconds"] == 0
+
+
+@pytest.mark.parametrize(
+    "exe,name,windows,expected",
+    [
+        (r"C:\Tools\CODEX.EXE", "codex", True, True),
+        ("/bin/Codex", "Codex", False, False),
+        ("/bin/node", "codex", False, True),
+        ("", "Claude", False, False),
+    ],
+)
+def test_identity_platform_and_name_fallback(monkeypatch, exe, name, windows, expected):
+    monkeypatch.setattr(pu, "WINDOWS", windows, raising=False)
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([_record(3, 0, exe, name=name)]))
+    assert pu.scan_activity({"codex": None})["codex"]["present"] is expected
+
+
+@pytest.mark.parametrize(
+    "exe,argv,tool",
+    [
+        (
+            "/home/user/.local/share/claude/versions/2.1.206",
+            ["/home/user/.local/bin/claude"],
+            "claude",
+        ),
+        (
+            "/usr/bin/node",
+            ["node", "/usr/lib/node_modules/@moonshot-ai/kimi-code/dist/main.mjs"],
+            "kimi",
+        ),
+        ("/usr/bin/node", ["node", "@moonshot-ai/kimi-code/dist/main.mjs"], "kimi"),
+        ("/usr/bin/python3", ["python3", "-m", "kimi_cli"], "kimi"),
+        ("/usr/bin/python3", ["python3", "/home/user/.local/bin/kimi"], "kimi"),
+        ("/usr/bin/node", ["node", "/usr/bin/kimi-cli"], "kimi"),
+    ],
+)
+def test_cli_launcher_identity_provides_live_root(monkeypatch, exe, argv, tool):
+    monkeypatch.setattr(pu, "WINDOWS", False)
+    proc = _record(3, 0, exe, cpu=2)
+    proc.info["cmdline"] = argv
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([proc]))
+    out = pu.scan_activity({tool: None})[tool]
+    assert out["present"] and out["cpu_seconds"] == 2
+    assert out["roots"] == [{"pid": 3, "created": 1, "host": "other"}]
+
+
+@pytest.mark.parametrize(
+    "exe,args,expected",
+    [
+        (
+            r"C:\Users\x\AppData\Local\AnthropicClaude\app-1.0.0\claude.exe",
+            [],
+            None,
+        ),
+        (
+            r"C:\Users\x\AppData\Local\AnthropicClaude\app-1.0.0\claude.exe",
+            ["--type=renderer"],
+            None,
+        ),
+        (r"C:\Program Files\WindowsApps\Claude_1.0.0_x64\app\claude.exe", [], None),
+        (r"C:\Users\x\AppData\Local\Programs\claude\claude.exe", [], "claude"),
+    ],
+    ids=["squirrel-main", "squirrel-renderer", "msix", "cli"],
+)
+def test_windows_claude_desktop_excluded_but_cli_accepted(
+    monkeypatch, exe, args, expected
+):
+    monkeypatch.setattr(pu, "WINDOWS", True)
+    proc = _record(3, 0, exe, cpu=20, name="claude.exe")
+    proc.info["cmdline"] = [exe, *args]
+    patterns = _pat(claude=r"\bclaude\b")
+    assert pu._identity(proc.info, patterns) == expected
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([proc]))
+    out = pu.scan_activity(patterns)["claude"]
+    assert out["present"] is (expected == "claude")
+    assert out["cpu_seconds"] == (20 if expected else 0)
+
+
+@pytest.mark.parametrize(
+    "exe,argv,name",
+    [
+        ("/Applications/Claude.app/Contents/MacOS/Claude", ["claude"], "claude"),
+        ("/Applications/ChatGPT.app/Contents/Frameworks/Renderer", ["codex"], "codex"),
+        ("/bin/bash", ["bash", "claude"], "bash"),
+        ("/bin/node", ["node", "/unrelated/main.mjs", "kimi"], "node"),
+        ("/bin/node", ["node", "--eval", "claude"], "node"),
+        ("/bin/python3", ["python3", "-c", "kimi_cli"], "python3"),
+        ("/bin/python3", ["python3", "-m", "kimi_cli_other"], "python3"),
+    ],
+)
+def test_identity_fallback_still_excludes_gui_and_unrelated_arguments(
+    monkeypatch, exe, argv, name
+):
+    monkeypatch.setattr(pu, "WINDOWS", False)
+    proc = _record(3, 0, exe, name=name)
+    proc.info["cmdline"] = argv
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([proc]))
+    out = pu.scan_activity({"claude": None, "codex": None, "kimi": None})
+    assert not any(sample["present"] for sample in out.values())
+
+
+@pytest.mark.parametrize("editor_created,expected", [(2, "vscode"), (5, "unknown")])
+def test_windows_vscode_host_before_missing_explorer_parent(
+    monkeypatch, editor_created, expected
+):
+    monkeypatch.setattr(pu, "WINDOWS", True)
+    procs = [
+        _record(1, 99, r"C:\Windows\explorer.exe", created=1),
+        _record(2, 1, r"C:\VSCode\CODE.EXE", created=editor_created),
+        _record(3, 2, r"C:\VSCode\CODE HELPER.EXE", created=editor_created),
+        _record(4, 3, r"C:\Tools\CLAUDE.EXE", created=4),
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity({"claude": None})["claude"]
+    assert out["roots"][0]["host"] == expected
+
+
+def test_cpu_identity_new_child_exit_reuse_and_missing(monkeypatch):
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([_record(3, 0, "/bin/codex", 1)]))
+    first = pu.scan_activity({"codex": None})
+    pct, prev = pu.cpu_percents({}, 0, first, 1)
+    assert pct == {}
+    monkeypatch.setattr(
+        pu,
+        "psutil",
+        _FakePsutil(
+            [_record(3, 0, "/bin/codex", 1.007), _record(4, 3, "/bin/worker", 100)]
+        ),
+    )
+    pct, prev = pu.cpu_percents(prev, 1, pu.scan_activity({"codex": None}), 2)
+    assert pct["codex"] == pytest.approx(0.7)
+    monkeypatch.setattr(
+        pu, "psutil", _FakePsutil([_record(3, 0, "/bin/codex", 300, created=2)])
+    )
+    assert pu.cpu_percents(prev, 2, pu.scan_activity({"codex": None}), 3)[0] == {}
+
+
+def test_process_and_descendant_bounds_not_idle(monkeypatch):
+    procs = [_record(1, 0, "/bin/claude")] + [
+        _record(n, 1, "/bin/worker") for n in range(2, 8300)
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity({"claude": None})
+    assert out["claude"]["limited"] and not out["claude"]["complete"]
+    assert len(out["claude"]["cpus"]) <= 501
+
+
+def test_host_and_nested_ownership_independent_of_selected_tools(monkeypatch):
+    monkeypatch.setattr(pu, "WINDOWS", False)  # macOS bundle identities.
+    procs = [
+        _record(1, 0, "/sbin/init"),
+        _record(2, 1, "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"),
+        _record(3, 2, "/bin/claude", 1),
+        _record(4, 3, "/bin/codex", 100),
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity({"claude": None})["claude"]
+    assert out["roots"][0]["host"] == "vscode"
+    assert out["cpu_seconds"] == 1
+
+
+@pytest.mark.parametrize("parent,created", [(99, 1), (2, 1), (1, 0)])
+def test_incomplete_reused_cyclic_ancestry_unknown(monkeypatch, parent, created):
+    procs = [
+        _record(1, 0, "/sbin/init", created=1),
+        _record(2, parent, "/bin/claude", created=created),
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    assert pu.scan_activity({"claude": None})["claude"]["roots"][0]["host"] == "unknown"
+
+
+def test_missing_cpu_unavailable_and_regex_only_basename(monkeypatch):
+    p = _record(1, 0, "/bin/claude")
+    p.info["cpu_times"] = None
+    monkeypatch.setattr(
+        pu,
+        "psutil",
+        _FakePsutil([p, _record(2, 0, "/bin/node", args=("magic-agent",))]),
+    )
+    out = pu.scan_activity({"claude": None, "custom": re.compile("magic-agent")})
+    assert not out["claude"]["complete"] and out["claude"]["errors"]
+    assert not out["custom"]["present"]
+
+
+@pytest.mark.parametrize(
+    "status", ["zombie", "gone", "zombie_exception", "denied", "running"]
+)
+def test_unavailable_descendant_cpu_distinguishes_exit_from_denial(monkeypatch, status):
+    child = _record(2, 1, "/bin/worker", created=2)
+    child.info["cpu_times"] = None
+
+    def get_status():
+        if status == "gone":
+            raise _FakePsutil.NoSuchProcess
+        if status == "zombie_exception":
+            raise _FakePsutil.ZombieProcess
+        if status == "denied":
+            raise _FakePsutil.AccessDenied
+        return status
+
+    child.status = get_status
+    monkeypatch.setattr(
+        pu,
+        "psutil",
+        _FakePsutil(
+            [
+                _record(1, 0, "/bin/claude", cpu=1),
+                child,
+                _record(3, 1, "/bin/worker", cpu=2),
+            ]
+        ),
+    )
+    out = pu.scan_activity({"claude": None})["claude"]
+    exited = status in {"zombie", "gone", "zombie_exception"}
+    assert out["complete"] is exited
+    assert out["errors"] == ([] if exited else ["unavailable"])
+    assert out["cpu_seconds"] == 3
+    assert set(out["cpus"]) == {(1, 1), (3, 1)}
+
+
+@pytest.mark.parametrize(
+    "exe,argv,name,expected",
+    [
+        ("/bin/Cursor", ["other"], "other", True),
+        ("/bin/electron", ["/bin/Cursor"], "other", True),
+        ("/bin/electron", ["electron"], "Cursor", True),
+        ("/Cursor/electron", ["/Cursor/electron", "Cursor"], "electron", False),
+    ],
+)
+def test_override_matches_identity_basenames_only(
+    monkeypatch, exe, argv, name, expected
+):
+    from taskpaw_v3.monitors.plugins.dev_activity import (
+        DevActivityConfig,
+        DevActivityInstance,
+    )
+
+    proc = _record(1, 0, exe, name=name)
+    proc.info["cmdline"] = argv
+    monkeypatch.setattr(pu, "WINDOWS", False)
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([proc]))
+    inst = DevActivityInstance(
+        "ai",
+        DevActivityConfig(
+            name="ai", tools=["custom"], process_patterns={"custom": "cursor"}
+        ),
+    )
+    try:
+        assert pu.scan_activity(inst._compiled)["custom"]["present"] is expected
+    finally:
+        inst.stop()

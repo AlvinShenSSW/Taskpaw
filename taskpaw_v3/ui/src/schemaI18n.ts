@@ -27,6 +27,17 @@ const WHISPERJAV_EXTRA_ARGS_ZH =
 
 // Per-plugin field translations (type_id → field → zh title/description).
 const BY_TYPE: Record<string, Record<string, FieldT>> = {
+  dev_activity: {
+    observe: { title: "活动推测", description: "启用会话元数据与 CPU 推测；关闭后只使用钩子和进程在场。" },
+    busy_cpu_percent: { title: "CPU 忙碌阈值", description: "归属 AI 进程树占单核百分比；编辑器 CPU 不计入。" },
+    process_patterns: { title: "进程匹配覆盖", description: "只匹配可执行文件基本名称，不匹配命令参数。" },
+    session_activity: { title: "会话活动探测", description: "钩子优先，其次会话元数据，再其次 CPU；不读取会话内容。" },
+    session_busy_seconds: { title: "会话忙碌窗口", description: "最近写入窗口（秒），默认 30。" },
+    session_idle_seconds: { title: "会话空闲窗口", description: "静默会话可推测空闲的最长时间（秒），默认 300。" },
+    session_scan_interval_seconds: { title: "会话扫描间隔", description: "发现会话文件的刷新间隔（秒），默认 30。" },
+    session_max_files: { title: "会话候选上限", description: "每个工具保留的最新已发现文件数，默认 64。" },
+    session_roots: { title: "会话目录", description: "按工具覆盖目录；空列表禁用该工具的会话探测。Windows 仅使用修改时间。" },
+  },
   process: {
     pattern: {
       title: "匹配模式",
