@@ -78,6 +78,7 @@ Package: `build.bat` (Windows .exe), `build_hub.sh` (macOS).
 
 ## Conventions
 
+- Design docs use repo-relative paths only; never include machine-local home, AFK run, or plugin-cache paths.
 - Python ≥ 3.10. Standard library first; runtime deps limited to `psutil`
   (always) and `pystray`/`Pillow` (the optional `tray` extra, GUI only).
 - Match the surrounding file's style. V2 files are large single-module scripts by
