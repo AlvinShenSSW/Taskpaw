@@ -222,7 +222,14 @@ def test_tasklog_invalid_parameters_have_boot_envelope(params):
     assert client.get("/control/events?limit=abc").status_code == 422
 
 
-def test_film_page_control_api_shape_defaults_clamps_and_network_absence():
+def _film_app(surface, **providers):
+    if surface == "control":
+        return create_control_app(_cfg(), **providers)
+    return create_network_app(_cfg(), EventQueue("dev"), **providers)
+
+
+@pytest.mark.parametrize("surface", ["control", "network"])
+def test_film_page_control_api_shape_defaults_clamps_and_network_absence(surface):
     from taskpaw_v3.monitors.subs.progress import AVSUBS_STEPS, FilmTracker, LiveFacts
 
     tracker = FilmTracker(AVSUBS_STEPS)
@@ -235,15 +242,18 @@ def test_film_page_control_api_shape_defaults_clamps_and_network_absence():
         calls.append((name, page, size))
         return tracker.page(page, size)
 
-    client = TestClient(create_control_app(_cfg(), films_provider=provider))
-    response = client.get("/control/monitors/films", params={"name": "AV/library"})
+    client = TestClient(_film_app(surface, films_provider=provider))
+    response = client.get(
+        f"{'/control' if surface == 'control' else ''}/monitors/films",
+        params={"name": "AV/library"},
+    )
     assert response.status_code == 200
     assert response.json() == tracker.page(None, 10)
     assert calls == [("AV/library", None, 10)]
     assert response.json()["page"] == 2
     for size, expected in [(0, 1), (-1, 1), (99, 50)]:
         result = client.get(
-            "/control/monitors/films",
+            f"{'/control' if surface == 'control' else ''}/monitors/films",
             params={"name": "AV/library", "page": 99, "size": size},
         )
         assert result.status_code == 200
@@ -272,26 +282,32 @@ def test_film_page_control_api_shape_defaults_clamps_and_network_absence():
         {"name": "AV", "size": "false"},
     ],
 )
-def test_film_page_control_api_invalid_parameters_are_400(params):
+@pytest.mark.parametrize("surface", ["control", "network"])
+def test_film_page_control_api_invalid_parameters_are_400(params, surface):
     calls = []
-    client = TestClient(
-        create_control_app(_cfg(), films_provider=lambda *a: calls.append(a))
+    client = TestClient(_film_app(surface, films_provider=lambda *a: calls.append(a)))
+    response = client.get(
+        f"{'/control' if surface == 'control' else ''}/monitors/films", params=params
     )
-    response = client.get("/control/monitors/films", params=params)
     assert response.status_code == 400
     assert set(response.json()) == {"detail"}
     assert calls == []
 
 
 @pytest.mark.parametrize("provider", [None, lambda *a: None])
-def test_film_page_control_api_no_list_is_404(provider):
-    client = TestClient(create_control_app(_cfg(), films_provider=provider))
-    response = client.get("/control/monitors/films", params={"name": "unknown"})
+@pytest.mark.parametrize("surface", ["control", "network"])
+def test_film_page_control_api_no_list_is_404(provider, surface):
+    client = TestClient(_film_app(surface, films_provider=provider))
+    response = client.get(
+        f"{'/control' if surface == 'control' else ''}/monitors/films",
+        params={"name": "unknown"},
+    )
     assert response.status_code == 404
     assert response.json() == {"detail": "no film list"}
 
 
-def test_run_films_api_shape_defaults_clamps_network_absence():
+@pytest.mark.parametrize("surface", ["control", "network"])
+def test_run_films_api_shape_defaults_clamps_network_absence(surface):
     from taskpaw_v3.monitors.subs.progress import JASNA_STEPS, FilmTracker
 
     tracker = FilmTracker(JASNA_STEPS, wall_clock=lambda: 42)
@@ -303,8 +319,8 @@ def test_run_films_api_shape_defaults_clamps_network_absence():
         calls.append((name, filter, page, size))
         return tracker.run_films(filter, page, size)
 
-    client = TestClient(create_control_app(_cfg(), run_films_provider=provider))
-    path = "/control/monitors/run-films"
+    client = TestClient(_film_app(surface, run_films_provider=provider))
+    path = f"{'/control' if surface == 'control' else ''}/monitors/run-films"
     result = client.get(path, params={"name": "task/library"})
     assert result.status_code == 200
     assert result.json() == tracker.run_films("done", 1, 10)
@@ -335,7 +351,12 @@ def test_run_films_api_shape_defaults_clamps_network_absence():
             assert result.status_code == 200
             assert calls[-1] == ("task/library", filter, 99, expected)
     net = TestClient(create_network_app(_cfg(), EventQueue("dev")))
-    assert net.get(path, params={"name": "task/library"}).status_code == 404
+    assert (
+        net.get(
+            "/control/monitors/run-films", params={"name": "task/library"}
+        ).status_code
+        == 404
+    )
 
 
 @pytest.mark.parametrize(
@@ -349,21 +370,29 @@ def test_run_films_api_shape_defaults_clamps_network_absence():
         *({"name": "task", "filter": v} for v in ("", "DONE", "other")),
     ],
 )
-def test_run_films_api_invalid_400(params):
+@pytest.mark.parametrize("surface", ["control", "network"])
+def test_run_films_api_invalid_400(params, surface):
     calls = []
     client = TestClient(
-        create_control_app(_cfg(), run_films_provider=lambda *a: calls.append(a))
+        _film_app(surface, run_films_provider=lambda *a: calls.append(a))
     )
-    response = client.get("/control/monitors/run-films", params=params)
+    response = client.get(
+        f"{'/control' if surface == 'control' else ''}/monitors/run-films",
+        params=params,
+    )
     assert response.status_code == 400
     assert set(response.json()) == {"detail"}
     assert not calls
 
 
 @pytest.mark.parametrize("provider", [None, lambda *a: None])
-def test_run_films_api_404(provider):
-    client = TestClient(create_control_app(_cfg(), run_films_provider=provider))
-    response = client.get("/control/monitors/run-films", params={"name": "unknown"})
+@pytest.mark.parametrize("surface", ["control", "network"])
+def test_run_films_api_404(provider, surface):
+    client = TestClient(_film_app(surface, run_films_provider=provider))
+    response = client.get(
+        f"{'/control' if surface == 'control' else ''}/monitors/run-films",
+        params={"name": "unknown"},
+    )
     assert response.status_code == 404 and response.json() == {"detail": "no film list"}
 
 
@@ -834,3 +863,70 @@ def test_thinking_config_get_auto_uses_stored_bases():
     assert data["llm_thinking_off_auto"] is True
     assert data["llm_fallback1_thinking_off_auto"] is True
     assert data["llm_fallback2_thinking_off_auto"] is False
+
+
+@pytest.mark.parametrize("provided", [False, True])
+def test_network_status_authoritative_version_without_mutation(provided):
+    from taskpaw_v3 import __version__
+
+    original = {"machine": "fixture", "version": "untrusted", "monitors": {}}
+    client = TestClient(
+        create_network_app(
+            _cfg(), EventQueue("dev"), (lambda: original) if provided else None
+        )
+    )
+    body = client.get("/status").json()
+    assert body["version"] == __version__
+    assert original["version"] == "untrusted"
+    if provided:
+        assert body == {**original, "version": __version__}
+
+
+@pytest.mark.parametrize("resource", ["films", "run-films"])
+@pytest.mark.parametrize("params", [{"name": "AV/翻译 & #?"}, {"page": "bad"}])
+@pytest.mark.parametrize(
+    "token,header,authorized",
+    [
+        ("secret", None, False),
+        ("secret", "Bearer wrong", False),
+        ("secret", "Bearer secret", True),
+        ("   ", None, True),
+        ("", None, True),
+    ],
+)
+def test_network_films_auth_before_validation(
+    resource, params, token, header, authorized
+):
+    calls = []
+    queue = EventQueue("dev")
+    queue.add("m", "pending")
+    before = queue.payload(ack_id=0)
+    client = TestClient(
+        create_network_app(
+            _cfg(api_token=token),
+            queue,
+            films_provider=lambda *a: calls.append(a) or {"films": []},
+            run_films_provider=lambda *a: calls.append(a) or {"films": []},
+        )
+    )
+    response = client.get(
+        f"/monitors/{resource}",
+        params=params,
+        headers={"Authorization": header} if header else {},
+    )
+    assert (
+        response.status_code == (200 if "name" in params else 400)
+        if authorized
+        else response.status_code == 401
+    )
+    if not authorized:
+        assert response.json() == {"error": "unauthorized"}
+        assert response.headers["www-authenticate"] == 'Bearer realm="TaskPaw"'
+    assert bool(calls) == (authorized and "name" in params)
+    assert queue.payload(ack_id=0) == before
+
+
+def test_210_release_version():
+    from taskpaw_v3 import __version__
+
+    assert __version__ == "3.9.7"

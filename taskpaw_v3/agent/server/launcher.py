@@ -205,12 +205,20 @@ def run_agent(
             "machine": config.machine,
             "server_id": config.server_id,
             "os": platform.platform(),
+            "version": __version__,
             "monitors": monitors,
         }
 
     net = uvicorn.Server(
         uvicorn.Config(
-            create_network_app(config, queue, _status_provider), log_level="warning"
+            create_network_app(
+                config,
+                queue,
+                _status_provider,
+                films_provider=supervisor.film_page,
+                run_films_provider=supervisor.run_films,
+            ),
+            log_level="warning",
         )
     )
     ctl = uvicorn.Server(

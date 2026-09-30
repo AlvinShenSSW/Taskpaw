@@ -1294,3 +1294,71 @@ def test_189_error_state_hides_the_stage_and_lada_is_unchanged():
     assert _lada_line(render_status_md(_lada_row(base), "t")) == (
         "- LADA: 5/10 done (5 left) | clip.mp4 | 47% · ETA 30:47 · 112fps"
     )
+
+
+def test_210_version_preserves_full_status_md_fixture_bytes():
+    # Pinned existing fixture text, not regenerated from the implementation.
+    for metrics, state, expected_line in _FIXTURES:
+        status = {
+            "monitors": {
+                "JASNA": {"type_id": "jasna", "state": state, "metrics": metrics}
+            }
+        }
+        expected = f"# TaskPaw Hub Status\n\nLast updated: fixed\n\n## box: ONLINE\n{expected_line}\n".encode()
+        for version in (None, "3.9.7"):
+            payload = {**status, **({"version": version} if version else {})}
+            rows = [{"name": "box", "reachable": 1, "status_json": json.dumps(payload)}]
+            assert render_status_md(rows, "fixed").encode("utf-8") == expected
+    cases = [
+        (
+            {
+                "AV": {
+                    "type_id": "avsubs",
+                    "state": "running",
+                    "metrics": {
+                        "steps": [{"key": "asr", "state": "active", "percent": 43}]
+                    },
+                }
+            },
+            "- AV: 识别 43%",
+        ),
+        (
+            {
+                "LADA": {
+                    "state": "running",
+                    "metrics": {
+                        "queue_completed": 1,
+                        "queue_total": 2,
+                        "queue_remaining": 1,
+                    },
+                }
+            },
+            "- LADA: 1/2 done (1 left)",
+        ),
+        ({"host": {"state": "ok", "metrics": {"cpu_pct": 42}}}, "- host: ok"),
+        ([{"name": "legacy", "status": "idle"}], "- legacy: idle"),
+    ]
+    for monitors, line in cases:
+        for reachable in (0, 1):
+            expected = (
+                f"# TaskPaw Hub Status\n\nLast updated: fixed\n\n## box: {'ONLINE' if reachable else 'OFFLINE'}\n"
+                + (f"{line}\n" if reachable else "")
+            )
+            for version in (None, "3.9.7"):
+                payload = {
+                    "monitors": monitors,
+                    **({"version": version} if version else {}),
+                }
+                assert (
+                    render_status_md(
+                        [
+                            {
+                                "name": "box",
+                                "reachable": reachable,
+                                "status_json": json.dumps(payload),
+                            }
+                        ],
+                        "fixed",
+                    ).encode()
+                    == expected.encode()
+                )

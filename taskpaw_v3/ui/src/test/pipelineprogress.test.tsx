@@ -546,10 +546,10 @@ describe("MonitorMetrics with / without steps (#189 D13)", () => {
 describe("PipelineProgress — malformed input never crashes (#189)", () => {
   afterEach(reset);
 
-  it("steps not an array → today's rendering (raw tile), no pipeline", () => {
+  it("steps not an array stays reserved, no pipeline", () => {
     wrap(<MonitorMetrics metrics={{ ...GAUGES, steps: "abc", phase: "restore" }} />);
     expect(screen.queryByTestId("pipeline-progress")).toBeNull();
-    expect(screen.getByText("steps")).toBeInTheDocument();
+    expect(screen.queryByText("steps")).toBeNull();
     expect(screen.getByText("phase")).toBeInTheDocument();
   });
 
@@ -716,5 +716,20 @@ describe("PipelineProgress — resumable translation numbers (#192)", () => {
     expect(p?.steps[1].paused).toBeUndefined();
     expect(p?.steps[1].deferred).toBeUndefined();
     expect(p?.steps[1].cues_resumed).toBeUndefined();
+  });
+});
+
+describe("#210 scalar-only metric tiles", () => {
+  afterEach(reset);
+  it.each([null, undefined, {}, { nested: 1 }, [{ key: "x" }], ["x"], NaN, Infinity, -Infinity])("omits non-scalar/finite metric %#", value => {
+    wrap(<MonitorMetrics metrics={{ rejected: value, zero: 0, flag: false, text: "ok", empty: "" }} />);
+    expect(screen.queryByText("rejected")).toBeNull();
+    for (const label of ["zero", "flag", "text", "empty"]) expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText("0")).toBeInTheDocument(); expect(screen.getByText("false")).toBeInTheDocument();
+  });
+  it("always reserves structural keys but retains scalar fallback model/phase/subs", () => {
+    wrap(<MonitorMetrics metrics={{ steps: "bad", films: 3, films_more: false, model: "m", phase: "p", subs_custom: 0 }} />);
+    for (const label of ["steps", "films", "films more"]) expect(screen.queryByText(label)).toBeNull();
+    for (const label of ["model", "phase", "subs custom"]) expect(screen.getByText(label)).toBeInTheDocument();
   });
 });

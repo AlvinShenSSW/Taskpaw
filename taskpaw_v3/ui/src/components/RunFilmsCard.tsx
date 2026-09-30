@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, useState } from "react";
+import { Fragment, useEffect, useMemo, useId, useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Box, Button, Chip, Table, TableBody, TableCell, TableHead, TableRow, Typography, useMediaQuery } from "@mui/material";
 import { alpha, useTheme } from "@mui/material/styles";
@@ -7,7 +7,9 @@ import CloseIcon from "@mui/icons-material/Close";
 import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import { FilmList } from "./FilmList";
-import { BOX, MONO, type Pipeline } from "./pipelineProgress.helpers";
+import { FilmListFeedback } from "./FilmListFeedback";
+import { AGENT_SOURCE, filmQueryPrefix, filmFailure, type FilmSource, type FilmFailure } from "./filmSource.helpers";
+import { BOX, MONO, type FilmFallback } from "./pipelineProgress.helpers";
 import { toneSx, type Tone } from "./filmList.helpers";
 import { TINT } from "./monitorMetrics.helpers";
 import { RUN_FILTERS, RUN_TOTALS, readRunFilms, restoreLabel, translationLabel, runDuration, runFinishedAt, visuallyHidden,
@@ -68,17 +70,40 @@ function FilmRow({ row, focus, desktop }: { row: RunFilm; focus: boolean; deskto
 }
 
 // Mounted with key={taskName}; lastGood and query cursors belong to one task.
-export function RunFilmsCard({ name, fallback }: { name: string; fallback?: Pipeline }) {
+type Props = { name: string; fallback?: FilmFallback; source?: FilmSource; };
+
+export function RunFilmsCard(props: Props) {
+  const source = props.source ?? AGENT_SOURCE;
+  return <RunFilmsCardContent key={JSON.stringify([source.kind, source.kind === "hub" ? source.serverId : null, props.name])} {...props} />;
+}
+
+function RunFilmsCardContent({ name, fallback, source = AGENT_SOURCE }: Props) {
   const { t } = useTranslation();
   const headingId = useId();
   const desktop = useMediaQuery(useTheme().breakpoints.up("sm"));
   const queryClient = useQueryClient();
+  const hub = source.kind === "hub";
+  const serverId = source.kind === "hub" ? source.serverId : undefined;
+  const prefix = useMemo(() => filmQueryPrefix("runFilms", name,
+    serverId === undefined ? AGENT_SOURCE : { kind: "hub", serverId }), [name, serverId]);
+  const [failure, setFailure] = useState<FilmFailure>();
   const [request, setRequest] = useState<{ filter: RunFilter; page: number }>({ filter: "done", page: 1 });
   const { filter, page } = request;
   const [lastGood, setLastGood] = useState<{ data: RunFilms; request: typeof request }>();
   const query = useQuery({
-    queryKey: ["runFilms", name, filter, page],
-    queryFn: async () => readRunFilms(await api.runFilms(name, filter, page, 10)),
+    queryKey: [...prefix, filter, page],
+    queryFn: async context => {
+      const signal = hub ? context.signal : undefined;
+      try {
+        const data = readRunFilms(await (hub ? api.hubRunFilms(serverId!, name, filter, page, 10) : api.runFilms(name, filter, page, 10)));
+        if (hub && !signal?.aborted) setFailure(undefined);
+        return data;
+      } catch (error) {
+        if (hub && !signal?.aborted) setFailure(filmFailure(error));
+        throw error;
+      }
+    },
+    ...(hub ? { retry: false } : {}),
     refetchInterval: 5000,
     placeholderData: keepPreviousData,
     gcTime: 0,
@@ -87,9 +112,9 @@ export function RunFilmsCard({ name, fallback }: { name: string; fallback?: Pipe
   // Recovery seeds can inherit a longer client gcTime; remove them immediately
   // on departure so a later filter/page visit never flashes abandoned data.
   useEffect(() => {
-    queryClient.removeQueries({ queryKey: ["runFilms", name], predicate: q => q.getObserversCount() === 0 });
-  }, [filter, page, queryClient, name]);
-  useEffect(() => () => queryClient.removeQueries({ queryKey: ["runFilms", name] }), [queryClient, name]);
+    queryClient.removeQueries({ queryKey: prefix, predicate: q => q.getObserversCount() === 0 });
+  }, [filter, page, queryClient, prefix]);
+  useEffect(() => () => queryClient.removeQueries({ queryKey: prefix }), [queryClient, prefix]);
 
   useEffect(() => {
     if (query.data && !query.isPlaceholderData && !query.isError) {
@@ -104,19 +129,27 @@ export function RunFilmsCard({ name, fallback }: { name: string; fallback?: Pipe
       if (filter !== restored.filter || page !== restored.page) {
         // Seed recovery before changing the cursor: it is a background refresh,
         // so both filters and pager remain usable even if that refresh stalls.
-        queryClient.setQueryData(["runFilms", name, restored.filter, restored.page], lastGood.data);
+        queryClient.setQueryData([...prefix, restored.filter, restored.page], lastGood.data);
         setRequest(restored);
       }
     }
-  }, [query.data, query.isPlaceholderData, query.isError, lastGood, filter, page, queryClient, name]);
+  }, [query.data, query.isPlaceholderData, query.isError, lastGood, filter, page, queryClient, prefix]);
 
   const data = query.data && !query.isPlaceholderData && !query.isError ? query.data : lastGood?.data;
+  if (hub && (failure?.definite || (failure && !lastGood))) {
+    return <FilmListFeedback fallback={fallback} noteKeys={[failure.note]} />;
+  }
   if (!data || (data.counts.all === 0 && fallback && fallback.films.length > 0)) {
+    if (hub) return <FilmListFeedback fallback={fallback} noteKeys={failure
+      ? [failure.note, "hub.films.stale"] : [data ? "hub.films.resyncing" : "hub.films.loading"]} />;
     return fallback ? <FilmList films={fallback.films} filmsMore={fallback.filmsMore} focus={fallback.film} /> : null;
   }
+  const feedback = hub && failure
+    ? <FilmListFeedback compact={false} noteKeys={[failure.note, "hub.films.stale"]} /> : null;
   const inFlight = query.isPlaceholderData;
   return <Box component="section" role="region" aria-labelledby={headingId}
     sx={{ ...BOX, borderColor: "success.main", bgcolor: "background.paper", minWidth: 0, maxWidth: "100%" }}>
+    {feedback}
     <Box sx={{ p: 2 }}>
       <Typography id={headingId} component="h3" sx={{ fontFamily: MONO, fontWeight: 600 }}>{t("runFilms.title")}</Typography>
       <Typography variant="caption" color="text.secondary">{t(`runFilms.order.${data.filter}`)}</Typography>

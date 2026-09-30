@@ -14,6 +14,8 @@ import { AiBadge } from "../components/AiActivity";
 import { isAiMetrics } from "../components/aiActivity.helpers";
 import { HubAgentManager } from "../components/HubAgentManager";
 import { Settings } from "./Settings";
+import { ServiceIcon } from "../components/ServiceIcon";
+import { compareSemver, hubFilmKind } from "./hubDashboard.helpers";
 
 // ── fleet health (design pages/hub-dashboard.md "Fleet health") ──────────────
 // Derived from #96's per-server `online` + `snapshot` (NOT `acks`, which is an
@@ -29,7 +31,7 @@ function monitorProblem(m: MonitorSnapshot): boolean {
   return m.alive === false || m.degraded === true || PROBLEM_STATES.has(m.state);
 }
 function serverHealth(s: HubServer): Health {
-  if (!s.online) return "offline";
+  if (!s.online || !s.enabled) return "offline";
   const mons = s.snapshot?.monitors ?? {};
   return Object.values(mons).some(monitorProblem) ? "degraded" : "ok";
 }
@@ -223,11 +225,13 @@ function HealthCount({ health, label, n }: { health: Health; label: string; n: n
 function MachineRow({ server: s }: { server: HubServer }) {
   const { t } = useTranslation();
   const health = serverHealth(s);
-  const online = !!s.online;
+  const online = !!s.online && !!s.enabled;
   const disabled = !s.enabled;
   const metrics = online ? hostMetrics(s) : null;
   const monitors = online ? (s.snapshot?.monitors ?? {}) : {};
   const monitorNames = Object.keys(monitors);
+  const version = typeof s.snapshot?.version === "string" && s.snapshot.version ? s.snapshot.version : undefined;
+  const newer = compareSemver(version, __APP_VERSION__) === 1;
   // The dev_activity monitor's `ai` block, surfaced as a header badge (#154) so the
   // fleet view shows at a glance which machines are actively running AI.
   const aiMon = online
@@ -239,9 +243,11 @@ function MachineRow({ server: s }: { server: HubServer }) {
         {/* Header — a single wrapping line. */}
         <Stack direction="row" alignItems="center" spacing={1} sx={{ flexWrap: "wrap", rowGap: 0.5 }}>
           <StatusDot state={HEALTH_STATE[health]} />
-          <Typography variant="subtitle1">{s.name}</Typography>
+          <Typography variant="subtitle1" sx={{ minWidth: 0, overflowWrap: "anywhere" }}>{s.name}</Typography>
           <Typography variant="body2" color="text.secondary"
-            sx={{ fontFamily: '"Fira Code", monospace' }}>{s.ip}:{s.port}</Typography>
+            sx={{ fontFamily: '"Fira Code", monospace', minWidth: 0, overflowWrap: "anywhere" }}>{s.ip}:{s.port}</Typography>
+          {version && <Typography variant="caption" aria-label={t("hub.agentVersion", { version })}
+            sx={{ minWidth: 0, overflowWrap: "anywhere" }}>v{version}</Typography>}
           {/* A disabled server is forced offline by the backend; label it disabled
               (not just offline) so the two are distinguishable (Kimi). */}
           <Chip size="small"
@@ -262,25 +268,34 @@ function MachineRow({ server: s }: { server: HubServer }) {
           </Typography>
         </Stack>
 
+        {newer && <Alert severity="warning" sx={{ mt: 1, minWidth: 0, overflowWrap: "anywhere" }}>
+          {t("hub.versionSkew", { hub: __APP_VERSION__, agent: version })}
+        </Alert>}
+
         {/* Monitors flush beneath — no indent, thin dividers between (online only). */}
         {online && monitorNames.length > 0 && (
           <Stack sx={{ mt: 1.5 }} divider={<Divider flexItem />} spacing={1}>
             {monitorNames.map((name) => {
               const m = monitors[name];
+              const typeId = typeof m.type_id === "string" && m.type_id ? m.type_id : undefined;
+              const filmKind = hubFilmKind(typeId, m.metrics);
               return (
                 <Box key={name}>
-                  <Stack direction="row" alignItems="center" spacing={1}>
+                  <Stack direction="row" alignItems="center" spacing={1} sx={{ flexWrap: "wrap", rowGap: 0.5 }}>
                     <StatusDot state={m.state} />
-                    <Typography variant="body2" sx={{ flex: 1 }}>{name}</Typography>
+                    {typeId && <ServiceIcon id={typeId} />}
+                    <Typography variant="body2" sx={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "anywhere" }}>{name}</Typography>
+                    {typeId && <Chip size="small" label={t(`monitorType.${typeId}`, { defaultValue: typeId })}
+                      sx={{ maxWidth: "100%", height: "auto", "& .MuiChip-label": { whiteSpace: "normal", overflowWrap: "anywhere" } }} />}
                     {m.detail && (
                       <Typography variant="caption" color="text.secondary"
                         sx={{ textAlign: "right", wordBreak: "break-all" }}>{m.detail}</Typography>
                     )}
                   </Stack>
                   {/* Full metric gauges (CPU/GPU/VRAM/queue/fps), flush (no indent). */}
-                  {m.metrics && Object.keys(m.metrics).length > 0 && (
-                    <MonitorMetrics metrics={m.metrics} />
-                  )}
+                  <MonitorMetrics metrics={m.metrics} taskType={typeId}
+                    taskName={filmKind ? name : undefined}
+                    filmSource={filmKind ? { kind: "hub", serverId: s.id } : undefined} />
                 </Box>
               );
             })}

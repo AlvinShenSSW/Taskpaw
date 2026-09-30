@@ -16,7 +16,7 @@ import logging
 import platform
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -50,10 +50,83 @@ def _unauthorized() -> JSONResponse:
     )
 
 
+def _register_validation_handler(
+    app: FastAPI, prefix: str, authorize=None, *, control: bool = False
+) -> None:
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        if request.url.path in (f"{prefix}/films", f"{prefix}/run-films"):
+            if authorize is not None and not authorize(request):
+                return _unauthorized()
+            return JSONResponse(
+                {"detail": "invalid film list parameters"}, status_code=400
+            )
+        if control and request.url.path == "/control/logs":
+            return JSONResponse(
+                {"boot": get_task_log().boot, "error": "invalid task log parameters"},
+                status_code=400,
+            )
+        return await request_validation_exception_handler(request, exc)
+
+
+def _register_film_routes(
+    app: FastAPI,
+    prefix: str,
+    films_provider: Optional[Callable[[str, object, object], Optional[dict]]],
+    run_films_provider: Optional[
+        Callable[[str, object, object, object], Optional[dict]]
+    ],
+    authorize: Optional[Callable[[Request], bool]] = None,
+) -> None:
+    @app.get(f"{prefix}/films")
+    def films(
+        request: Request,
+        name: str,
+        page: Optional[int] = Query(default=None, ge=1),
+        size: int = 10,
+    ):
+        if authorize is not None and not authorize(request):
+            return _unauthorized()
+        if not name.strip():
+            raise HTTPException(status_code=400, detail="name must not be blank")
+        result = (
+            films_provider(name, page, max(1, min(50, size)))
+            if films_provider is not None
+            else None
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="no film list")
+        return result
+
+    @app.get(f"{prefix}/run-films")
+    def run_films(
+        request: Request,
+        name: str = Query(pattern=r"\S"),
+        filter: Literal["done", "open", "all"] = "done",
+        page: int = Query(default=1, ge=1),
+        size: int = 10,
+    ):
+        if authorize is not None and not authorize(request):
+            return _unauthorized()
+        result = (
+            run_films_provider(name, filter, page, max(1, min(50, size)))
+            if run_films_provider is not None
+            else None
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="no film list")
+        return result
+
+
 def create_network_app(
     config: AgentConfig,
     queue: EventQueue,
     status_provider: Optional[Callable[[], dict]] = None,
+    *,
+    films_provider: Optional[Callable[[str, object, object], Optional[dict]]] = None,
+    run_films_provider: Optional[
+        Callable[[str, object, object, object], Optional[dict]]
+    ] = None,
 ) -> FastAPI:
     app = FastAPI(title="TaskPaw Agent", docs_url=None, redoc_url=None)
 
@@ -70,11 +143,12 @@ def create_network_app(
         if not _auth(request):
             return _unauthorized()
         if status_provider is not None:
-            return status_provider()
+            return {**status_provider(), "version": __version__}
         return {
             "machine": config.machine,
             "server_id": config.server_id,
             "os": platform.platform(),
+            "version": __version__,
             # Match the production status_provider shape: a dict keyed by monitor
             # name (supervisor.snapshot()), NOT a list — same endpoint, one wire
             # shape (Kimi). effective_monitors so it includes auto-injected ones.
@@ -90,6 +164,8 @@ def create_network_app(
             return _unauthorized()
         return queue.payload(ack_id=ack)
 
+    _register_validation_handler(app, "/monitors", _auth)
+    _register_film_routes(app, "/monitors", films_provider, run_films_provider, _auth)
     return app
 
 
@@ -114,21 +190,7 @@ def create_control_app(
     app = FastAPI(title="TaskPaw Agent Control", docs_url=None, redoc_url=None)
     add_ui_cors(app)
 
-    @app.exception_handler(RequestValidationError)
-    async def validation_error(request: Request, exc: RequestValidationError):
-        if request.url.path in (
-            "/control/monitors/films",
-            "/control/monitors/run-films",
-        ):
-            return JSONResponse(
-                {"detail": "invalid film list parameters"}, status_code=400
-            )
-        if request.url.path == "/control/logs":
-            return JSONResponse(
-                {"boot": get_task_log().boot, "error": "invalid task log parameters"},
-                status_code=400,
-            )
-        return await request_validation_exception_handler(request, exc)
+    _register_validation_handler(app, "/control/monitors", control=True)
 
     @app.get("/control/ping")
     def ping() -> dict:
@@ -150,36 +212,7 @@ def create_control_app(
             result["error"] = True
         return result
 
-    @app.get("/control/monitors/films")
-    def films(
-        name: str, page: Optional[int] = Query(default=None, ge=1), size: int = 10
-    ):
-        if not name.strip():
-            raise HTTPException(status_code=400, detail="name must not be blank")
-        result = (
-            films_provider(name, page, max(1, min(50, size)))
-            if films_provider is not None
-            else None
-        )
-        if result is None:
-            raise HTTPException(status_code=404, detail="no film list")
-        return result
-
-    @app.get("/control/monitors/run-films")
-    def run_films(
-        name: str = Query(pattern=r"\S"),
-        filter: Literal["done", "open", "all"] = "done",
-        page: int = Query(default=1, ge=1),
-        size: int = 10,
-    ):
-        result = (
-            run_films_provider(name, filter, page, max(1, min(50, size)))
-            if run_films_provider is not None
-            else None
-        )
-        if result is None:
-            raise HTTPException(status_code=404, detail="no film list")
-        return result
+    _register_film_routes(app, "/control/monitors", films_provider, run_films_provider)
 
     @app.get("/control/status")
     def control_status() -> dict:

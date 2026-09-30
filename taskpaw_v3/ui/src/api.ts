@@ -33,6 +33,7 @@ export interface MonitorSnapshot {
 }
 
 export interface AgentStatus {
+  version?: string;
   machine: string;
   server_id?: string;
   os?: string;
@@ -188,6 +189,35 @@ async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+const FILM_ERROR_CODES = new Set([
+  "invalid_parameters", "unknown_server", "agent_disabled", "agent_offline",
+  "film_list_unavailable", "agent_auth_failed", "agent_timeout",
+  "invalid_agent_response", "agent_request_failed",
+]);
+
+export class FilmRequestError extends Error {
+  constructor(public readonly status: number, public readonly code: string) {
+    super("Film list request failed");
+  }
+}
+
+async function hubFilmGet(path: string): Promise<unknown> {
+  const { baseUrl, apiKey } = cfg("hub");
+  const res = await fetch(`${baseUrl}${path}`, {
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+  });
+  if (!res.ok) {
+    let code = "agent_request_failed";
+    try {
+      const body: unknown = await res.json();
+      if (body && typeof body === "object" && "error" in body
+        && typeof body.error === "string" && FILM_ERROR_CODES.has(body.error)) code = body.error;
+    } catch { /* Non-JSON failures get the fixed generic code, never raw body text. */ }
+    throw new FilmRequestError(res.status, code);
+  }
+  return res.json();
+}
+
 // Non-GET control calls (#57). On error, surface the backend's `detail` (the
 // admin's ValueError message → 400) so the UI can show why an edit was rejected.
 async function send<T>(
@@ -221,6 +251,10 @@ async function send<T>(
 const q = (name: string) => `?name=${encodeURIComponent(name)}`;
 
 export const api = {
+  hubFilms: (serverId: number, name: string, page?: number, size = 10) =>
+    hubFilmGet(`/servers/${serverId}/monitors/films${q(name)}${page === undefined ? "" : `&page=${page}`}&size=${size}`),
+  hubRunFilms: (serverId: number, name: string, filter: "done" | "open" | "all", page: number, size = 10) =>
+    hubFilmGet(`/servers/${serverId}/monitors/run-films${q(name)}&filter=${filter}&page=${page}&size=${size}`),
   ffmpeg: (whisperjav?: string) => get<FfmpegStatus>("agent",
     `/control/ffmpeg${whisperjav === undefined ? "" : `?${new URLSearchParams({ whisperjav })}`}`),
   runFilms: (name: string, filter: "done" | "open" | "all", page: number, size = 10) =>

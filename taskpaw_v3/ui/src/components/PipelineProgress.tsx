@@ -1,3 +1,4 @@
+import type { FilmSource } from "./filmSource.helpers";
 import { Fragment } from "react";
 import { Box, Chip, LinearProgress, Stack, Typography } from "@mui/material";
 import { alpha } from "@mui/material/styles";
@@ -381,9 +382,13 @@ function QueueCard({ pipeline, metrics }: { pipeline: Pipeline; metrics: Metrics
 }
 
 // ── the view ────────────────────────────────────────────────────────────────
-export function PipelineProgress({ pipeline, metrics, taskName }: { pipeline: Pipeline; metrics: Metrics; taskName?: string }) {
+export function PipelineProgress({ pipeline, metrics, taskName, filmSource, taskType }: {
+  pipeline: Pipeline; metrics: Metrics; taskName?: string; filmSource?: FilmSource; taskType?: string;
+}) {
   const { t } = useTranslation();
   const { steps } = pipeline;
+  const jasna = filmSource?.kind === "hub" ? taskType === "jasna" : steps.some(s => s.key === "restore");
+  const filmKey = JSON.stringify([filmSource?.kind ?? "agent", filmSource?.kind === "hub" ? filmSource.serverId : null, taskName, taskType]);
   const focus = focusStep(steps);
   const heading = steps.some((s) => s.state === "active") ? t("events.nowProcessing")
     : steps.every((s) => isTerminal(s.state)) ? t("pipeline.lastFinished") : t("pipeline.upNext");
@@ -410,9 +415,9 @@ export function PipelineProgress({ pipeline, metrics, taskName }: { pipeline: Pi
         {focus && <StepPanel step={focus} pipeline={pipeline} metrics={metrics} />}
       </Box>
       <QueueCard pipeline={pipeline} metrics={metrics} />
-      {taskName !== undefined ? (steps.some(s => s.key === "restore")
-        ? <RunFilmsCard key={taskName} name={taskName} fallback={pipeline} />
-        : <PagedFilmList key={taskName} name={taskName} fallback={pipeline} />)
+      {taskName !== undefined ? (jasna
+        ? <RunFilmsCard key={filmKey} name={taskName} fallback={pipeline} source={filmSource} />
+        : <PagedFilmList key={filmKey} name={taskName} fallback={pipeline} source={filmSource} />)
         : <FilmList films={pipeline.films} filmsMore={pipeline.filmsMore} focus={pipeline.film} />}
     </Stack>
   );
