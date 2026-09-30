@@ -13,9 +13,11 @@ import re
 import sqlite3
 import threading
 import time
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from taskpaw_v3 import __version__
@@ -23,6 +25,11 @@ from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
 from taskpaw_v3.core.net import guard_bind_exposure
+from taskpaw_v3.hub.server.film_proxy import (
+    FilmProxyError,
+    FilmResource,
+    fetch_agent_film_page,
+)
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
@@ -195,6 +202,80 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         # Bearer-gate the read API (#106). Empty api_token = auth disabled (V2
         # parity), mirroring the agent's network app.
         return token_ok(config.api_token, request.headers.get("Authorization"))
+
+    def _film_error(code: str) -> JSONResponse:
+        exc = FilmProxyError.for_code(code)
+        return JSONResponse(
+            {"error": exc.code, "detail": exc.detail}, status_code=exc.status_code
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        if re.fullmatch(
+            r"/servers/[^/]+/monitors/(?:films|run-films)", request.url.path
+        ):
+            if not _auth(request):
+                return _unauthorized()
+            return _film_error("invalid_parameters")
+        return await request_validation_exception_handler(request, exc)
+
+    def _film_page(request: Request, sid: int, resource: FilmResource, params: dict):
+        if not _auth(request):
+            return _unauthorized()
+        if not params["name"].strip():
+            return _film_error("invalid_parameters")
+        server = store.get_server(sid)
+        if server is None:
+            return _film_error("unknown_server")
+        if not server["enabled"]:
+            return _film_error("agent_disabled")
+        if not service.poller.snapshot_statuses().get(sid, {}).get("online"):
+            return _film_error("agent_offline")
+        params["size"] = max(1, min(50, params["size"]))
+        try:
+            # The helper returns validated JSON-native values. Avoid FastAPI's
+            # extra recursive model conversion of arbitrary additive agent keys.
+            return JSONResponse(
+                fetch_agent_film_page(
+                    server,
+                    resource,
+                    params,
+                    service.poller._auth_headers(),
+                    timeout=service.poller.http_timeout,
+                )
+            )
+        except FilmProxyError as exc:
+            return JSONResponse(
+                {"error": exc.code, "detail": exc.detail}, status_code=exc.status_code
+            )
+
+    @app.get("/servers/{sid}/monitors/films")
+    def films(
+        request: Request,
+        sid: int,
+        name: str,
+        page: Optional[int] = Query(default=None, ge=1),
+        size: int = 10,
+    ):
+        return _film_page(
+            request, sid, "films", {"name": name, "page": page, "size": size}
+        )
+
+    @app.get("/servers/{sid}/monitors/run-films")
+    def run_films(
+        request: Request,
+        sid: int,
+        name: str = Query(pattern=r"\S"),
+        filter: Literal["done", "open", "all"] = "done",
+        page: int = Query(default=1, ge=1),
+        size: int = 10,
+    ):
+        return _film_page(
+            request,
+            sid,
+            "run-films",
+            {"name": name, "filter": filter, "page": page, "size": size},
+        )
 
     @app.get("/ping")
     def ping() -> dict:

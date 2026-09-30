@@ -50,6 +50,18 @@ Settings **and** Manage stay reachable even when the Hub itself is unreachable
     detail, then its **full metric gauges** (GPU/CPU/MEM/VRAM/queue/fps) shown
     **flush** (no left indent). Monitors separated by thin dividers.
   - **Offline machine:** single header row, no monitor list.
+  - **Task observation (#210):** header includes wrapping Agent version text and,
+    when newer than this Hub build, a labelled update-Hub warning. Each typed
+    monitor shows its service icon and localized short type name.
+  - Jasna with AV translation uses the shared stepper and “This run’s films”
+    done/open/all list; AV translate uses the shared paged film list, including
+    extras-only snapshots. Pages contain 10 rows; controls remain keyboard-accessible.
+  - Online cards show compact snapshot rows with a localized loading/unavailable
+    note, or last-good full rows with a labelled stale note for transient errors.
+    A missing snapshot gets an explicit no-details notice. Offline/disabled cards
+    remain header-only and unmount film readers; no offline compact-list exception.
+  - Version, warning, task/type and detail text wrap at 375 px. Status feedback
+    is textual, never color-only; film controls retain visible keyboard focus.
   - **No management controls and no events feed on this page** — the dashboard is
     purely for observing. (Both moved to their own tabs; see below.)
 - **管理 (Manage):** a list of registered agents, each row with an enable toggle,

@@ -5,7 +5,10 @@ import { isAiMetrics } from "./aiActivity.helpers";
 import { TINT, utilTint } from "./monitorMetrics.helpers";
 import { PipelineProgress } from "./PipelineProgress";
 import { PagedFilmList } from "./PagedFilmList";
-import { hiddenWithPipeline, readPipeline } from "./pipelineProgress.helpers";
+import { RunFilmsCard } from "./RunFilmsCard";
+import type { FilmSource } from "./filmSource.helpers";
+import { hubFilmKind } from "../views/hubDashboard.helpers";
+import { hiddenWithPipeline, readPipeline, readFilmFallback } from "./pipelineProgress.helpers";
 import { Tile } from "./Tile";
 
 // Live metrics dashboard for a monitor's status pane (design-system
@@ -58,10 +61,12 @@ const KNOWN = new Set([
   // absolute RAM (shown as the MEM gauge's GB sub-label, not raw tiles)
   "mem_used_mb", "mem_total_mb",
   // #189 queue counters (an empty AV 翻译 tracker leaves them without `steps`)
-  "queue_restored", "queue_pre_done",
+  "queue_restored", "queue_pre_done", "steps", "films", "films_more",
 ]);
 
-export function MonitorMetrics({ metrics, taskName }: { metrics?: Record<string, unknown>; taskName?: string }) {
+export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
+  metrics?: Record<string, unknown>; taskName?: string; filmSource?: FilmSource; taskType?: string;
+}) {
   const { t } = useTranslation();
   // The dev_activity monitor (#154) carries an `ai` block, not gauges — render its
   // dedicated view instead of the generic metric tiles.
@@ -73,7 +78,9 @@ export function MonitorMetrics({ metrics, taskName }: { metrics?: Record<string,
     typeof m[k] === "number" && Number.isFinite(m[k] as number) ? (m[k] as number) : undefined;
   const str = (k: string) => (typeof m[k] === "string" ? (m[k] as string) : undefined);
 
-  if (Object.keys(m).length === 0) return null;
+  const hubKind = filmSource?.kind === "hub" ? hubFilmKind(taskType, m) : null;
+  const filmKey = JSON.stringify([filmSource?.kind ?? "agent", filmSource?.kind === "hub" ? filmSource.serverId : null, taskName, taskType]);
+  if (Object.keys(m).length === 0 && !hubKind) return null;
 
   const currentFile = str("current_file");
   const qDone = num("queue_completed");
@@ -108,14 +115,16 @@ export function MonitorMetrics({ metrics, taskName }: { metrics?: Record<string,
   for (const [k, val] of Object.entries(m)) {
     if (KNOWN.has(k)) continue;
     if (pipe && hiddenWithPipeline(k)) continue;
-    tiles.push({ label: k.replace(/_/g, " "), value: typeof val === "number" ? String(val) : String(val) });
+    if (typeof val !== "string" && typeof val !== "boolean"
+      && !(typeof val === "number" && Number.isFinite(val))) continue;
+    tiles.push({ label: k.replace(/_/g, " "), value: String(val) });
   }
 
   const vramPct = vramUsed !== undefined && vramTotal ? (vramUsed / vramTotal) * 100 : undefined;
 
   return (
     <Stack spacing={2} sx={{ mt: 2 }}>
-      {pipe && <PipelineProgress pipeline={pipe} metrics={m} taskName={taskName} />}
+      {pipe && <PipelineProgress pipeline={pipe} metrics={m} taskName={taskName} filmSource={filmSource} taskType={taskType} />}
 
       {/* Now-processing banner + current-file progress */}
       {!pipe && currentFile && (
@@ -161,8 +170,12 @@ export function MonitorMetrics({ metrics, taskName }: { metrics?: Record<string,
         </Box>
       )}
 
-      {!pipe && taskName !== undefined && typeof m.queue_pre_done === "number"
-        && <PagedFilmList key={taskName} name={taskName} />}
+      {!pipe && taskName !== undefined && (hubKind === "jasna"
+        ? <RunFilmsCard key={filmKey} name={taskName} source={filmSource} fallback={readFilmFallback(m)} />
+        : hubKind === "avsubs"
+          ? <PagedFilmList key={filmKey} name={taskName} source={filmSource} fallback={readFilmFallback(m)} showSingle />
+          : filmSource?.kind !== "hub" && typeof m.queue_pre_done === "number"
+            ? <PagedFilmList key={filmKey} name={taskName} /> : null)}
 
       {/* Utilization gauges */}
       {gauges.length > 0 && (

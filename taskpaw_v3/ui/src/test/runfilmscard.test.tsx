@@ -235,7 +235,7 @@ describe("RunFilmsCard #200", () => {
     await screen.findByText(lang === "en" ? "No films this run" : "本轮还没有影片");
     expect(card().queryByRole("button", { name: /Next|下一页/ })).toBeNull();
     serve = () => response(page("all")); await poll();
-    expect(card().getByText(lang === "en" ? "Page 1 / 4 · 38 films" : pager(1, 38))).toBeInTheDocument();
+    expect(await card().findByText(lang === "en" ? "Page 1 / 4 · 38 films" : pager(1, 38))).toBeInTheDocument();
     expect(next()).toHaveAccessibleName(lang === "en" ? "Next" : "下一页");
   });
 
@@ -348,4 +348,61 @@ describe("strict response reader", () => {
       typeof v === "object" ? keys(v, `${prefix}${key}.`) : [`${prefix}${key}`]);
     expect(keys(i18n.getResource("en", "translation", "runFilms"))).toEqual(keys(i18n.getResource("zh-CN", "translation", "runFilms")));
   });
+});
+
+describe("#210 Hub run films", () => {
+  const mountHub = (serverId = 1) => render(<MonitorMetrics key={serverId} metrics={metrics}
+    taskName="jasna/main" taskType="jasna" filmSource={{ kind: "hub", serverId }} />, { wrapper });
+  it("reads Hub done/open/all, counts and ten-row pages", async () => {
+    mountHub(); await screen.findByText(pager(1));
+    expect(requests[0].pathname).toBe("/servers/1/monitors/run-films");
+    expect(card().getAllByTestId("run-film-row")).toHaveLength(10);
+    fireEvent.click(next()); await screen.findByText(pager(2));
+    for (const f of ["open", "all", "done"] as const) {
+      fireEvent.click(filterButton(f)); await waitFor(() => expect(filterButton(f)).toHaveAttribute("aria-pressed", "true"));
+      expect(requests.at(-1)?.searchParams.get("page")).toBe("1");
+    }
+  });
+  it.each([404, 504])("retains the %s reason when cursor recovery is only a cache seed", async status => {
+    mountHub(); await screen.findByText(pager(1));
+    const failed = deferred(); serve = () => failed.promise; fireEvent.click(filterButton("open"));
+    const recovery = deferred(); serve = () => recovery.promise;
+    await act(async () => failed.resolve({ ok: false, status, json: async () => ({ error: status === 404 ? "film_list_unavailable" : "agent_timeout" }) }));
+    await waitFor(() => expect(requests.filter(u => u.searchParams.get("filter") === "done")).toHaveLength(2));
+    if (status === 404) {
+      expect(screen.getByText("PQRS-fallback-1.mp4")).toBeInTheDocument();
+      expect(screen.queryByText("LMNO-done-1.mp4")).toBeNull();
+    } else {
+      expect(screen.getByText("显示上次成功读取的列表。")).toBeInTheDocument(); expect(filterButton("open")).toBeEnabled();
+    }
+    await act(async () => recovery.resolve(response(page())));
+    await screen.findByText("LMNO-done-1.mp4");
+    await waitFor(() => expect(screen.queryByText("显示上次成功读取的列表。")).toBeNull());
+  });
+  it("isolates same-name servers/local data, cleanup and delayed responses", async () => {
+    serve = url => response(smallPage([row(`${url.pathname}-film`)], "done"));
+    const a = mountHub(1); mountHub(2); mount();
+    await screen.findByText("/servers/1/monitors/run-films-film");
+    await screen.findByText("/servers/2/monitors/run-films-film");
+    await screen.findByText("/control/monitors/run-films-film");
+    const delayed = deferred(); serve = () => delayed.promise;
+    act(() => { void qc.invalidateQueries({ queryKey: ["hubRunFilms", 1] }); });
+    a.unmount();
+    expect(qc.getQueryCache().findAll({ queryKey: ["hubRunFilms", 1] })).toHaveLength(0);
+    expect(qc.getQueryCache().findAll({ queryKey: ["hubRunFilms", 2] })).toHaveLength(1);
+    expect(qc.getQueryCache().findAll({ queryKey: ["runFilms"] })).toHaveLength(1);
+    await act(async () => delayed.resolve(response(smallPage([row("late-wrong-server")], "done"))));
+    expect(screen.queryByText("late-wrong-server")).toBeNull();
+  });
+});
+
+it("#210 SR-2: empty-success restart fallback retains the transient error reason", async () => {
+  serve = () => response(smallPage([], "done"));
+  render(<MonitorMetrics metrics={metrics} taskName="same" taskType="jasna" filmSource={{ kind: "hub", serverId: 1 }} />, { wrapper });
+  await screen.findByText("正在同步新一轮影片，暂时显示状态中的影片。");
+  serve = () => ({ ok: false, status: 504, json: async () => ({ error: "agent_timeout" }) });
+  await act(async () => { await qc.invalidateQueries({ queryKey: ["hubRunFilms"] }); });
+  expect(await screen.findByText("读取影片列表超时，将自动重试。")).toBeInTheDocument();
+  expect(screen.getByText("显示上次成功读取的列表。")).toBeInTheDocument();
+  expect(screen.getByText("PQRS-fallback-1.mp4")).toBeInTheDocument();
 });

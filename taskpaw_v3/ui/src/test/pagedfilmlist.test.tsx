@@ -320,3 +320,81 @@ describe("film paging (#198)", () => {
     expect(screen.getByText("23 more")).toBeInTheDocument();
   });
 });
+
+describe("#210 Hub paged films", () => {
+  const hubMount = (m: Record<string, unknown> = metrics, serverId = 1) => render(
+    <ThemeProvider theme={theme}><QueryClientProvider client={qc}>
+      <MonitorMetrics key={serverId} metrics={m} taskName="translate/翻译 & #?" taskType="avsubs" filmSource={{ kind: "hub", serverId }} />
+    </QueryClientProvider></ThemeProvider>);
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn((input: string) => { const url = new URL(input); requests.push(url); return Promise.resolve(serve(url)); }));
+  });
+  it("uses Hub URL/auth with encoded name, follows focus and pages 23 rows", async () => {
+    window.__TASKPAW__ = { apiKey: "hub-key" };
+    try {
+      serve = url => response(page(Number(url.searchParams.get("page") ?? 2), 23));
+      hubMount(); await screen.findByText(text(2, 3, 23));
+      expect(requests[0].origin).toBe("http://127.0.0.1:5690");
+      expect(requests[0].pathname).toBe("/servers/1/monitors/films");
+      expect(requests[0].searchParams.get("name")).toBe("translate/翻译 & #?");
+      expect(vi.mocked(fetch).mock.calls[0][1]?.headers).toEqual({ Authorization: "Bearer hub-key" });
+      expect(screen.getAllByTestId("film-row")).toHaveLength(10);
+      fireEvent.click(next()); await screen.findByText(text(3, 3, 23));
+      expect(screen.getAllByTestId("film-row")).toHaveLength(3);
+      fireEvent.click(back()); await screen.findByText(text(2, 3, 23));
+    } finally { delete window.__TASKPAW__; }
+  });
+  it.each([404, 503, 502, 504, 200])("preserves failure feedback during pending recovery (%s)", async status => {
+    hubMount(); await screen.findByText(text(2));
+    const failed = deferred(); serve = () => failed.promise; fireEvent.click(next());
+    const recovery = deferred(); serve = () => recovery.promise;
+    await act(async () => failed.resolve({ ok: status === 200, status,
+      json: async () => ({ error: status === 404 ? "film_list_unavailable" : status === 503 ? "agent_offline" : status === 504 ? "agent_timeout" : "agent_request_failed" }) }));
+    await waitFor(() => expect(requests.filter(u => !u.searchParams.has("page"))).toHaveLength(2));
+    if (status === 404 || status === 503) {
+      expect(screen.getByText("PQRS-fallback-1.mp4")).toBeInTheDocument();
+      expect(screen.queryByText("LMNO-11.mp4")).toBeNull();
+    } else {
+      expect(screen.getByText("Showing the last successfully loaded list.")).toBeInTheDocument();
+      expect(screen.getByText("LMNO-11.mp4")).toBeInTheDocument(); expect(next()).toBeEnabled();
+    }
+    await act(async () => recovery.resolve(response(page(2))));
+    await waitFor(() => expect(screen.queryByText("Showing the last successfully loaded list.")).toBeNull());
+    expect(screen.queryByText("PQRS-fallback-1.mp4")).toBeNull();
+  });
+  it("shows a singleton without steps and distinguishes successful empty from no snapshot failure", async () => {
+    serve = () => response(page(1, 1, { focus: null, focus_page: null }));
+    hubMount({ queue_pre_done: 1 });
+    expect(await screen.findByText("LMNO-1.mp4")).toBeInTheDocument();
+    serve = () => response(page(1, 0, { focus: null, focus_page: null }));
+    await act(async () => { await qc.invalidateQueries({ queryKey: ["hubFilms"] }); });
+    expect(await screen.findByText("No films this run.")).toBeInTheDocument();
+    serve = () => response({ error: "film_list_unavailable" }, false);
+    await act(async () => { await qc.invalidateQueries({ queryKey: ["hubFilms"] }); });
+    expect(await screen.findByText("No film details in the last status.")).toBeInTheDocument();
+    expect(screen.queryByText("No films this run.")).toBeNull();
+  });
+  it("isolates same-name servers and local queries on cleanup", async () => {
+    serve = url => response(page(1, 2, { focus: null, focus_page: null, films: [row(`${url.pathname}-1`), row(`${url.pathname}-2`)] }));
+    const a = hubMount(metrics, 1); hubMount(metrics, 2); mount(metrics, "translate/翻译 & #?");
+    await screen.findByText("/servers/1/monitors/films-1"); await screen.findByText("/servers/2/monitors/films-1");
+    await screen.findByText("/control/monitors/films-1"); a.unmount();
+    expect(qc.getQueryCache().findAll({ queryKey: ["hubFilms", 1] })).toHaveLength(0);
+    expect(qc.getQueryCache().findAll({ queryKey: ["hubFilms", 2] })).toHaveLength(1);
+    expect(qc.getQueryCache().findAll({ queryKey: ["films"] })).toHaveLength(1);
+  });
+});
+
+it("#210 SR-2: an empty-success resync keeps subsequent transient failure visible", async () => {
+  vi.stubGlobal("fetch", vi.fn((input: string) => Promise.resolve(serve(new URL(input)))));
+  serve = () => response(page(1, 0, { focus: null, focus_page: null }));
+  render(<ThemeProvider theme={theme}><QueryClientProvider client={qc}>
+    <MonitorMetrics metrics={metrics} taskName="same" taskType="avsubs" filmSource={{ kind: "hub", serverId: 1 }} />
+  </QueryClientProvider></ThemeProvider>);
+  await screen.findByText("Syncing the new run; showing films from status for now.");
+  serve = () => ({ ok: false, status: 504, json: async () => ({ error: "agent_timeout" }) });
+  await act(async () => { await qc.invalidateQueries({ queryKey: ["hubFilms"] }); });
+  expect(await screen.findByText("Film list request timed out; retrying automatically.")).toBeInTheDocument();
+  expect(screen.getByText("Showing the last successfully loaded list.")).toBeInTheDocument();
+  expect(screen.getByText("PQRS-fallback-1.mp4")).toBeInTheDocument();
+});

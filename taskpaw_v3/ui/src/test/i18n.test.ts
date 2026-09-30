@@ -52,3 +52,19 @@ describe("i18n", () => {
     }).not.toThrow();
   });
 });
+
+describe("#210 Hub observation translations", () => {
+  afterEach(() => setLang("zh-CN"));
+  it.each(["en", "zh-CN"] as const)("resolves every type and feedback key (%s)", lang => {
+    setLang(lang);
+    const keys = ["hub.agentVersion", "hub.versionSkew",
+      ...["loading", "unavailable", "offline", "disabled", "unknown", "authFailed", "hubAuthFailed", "timeout", "failed", "stale", "resyncing", "noSnapshot", "empty"].map(k => `hub.films.${k}`),
+      ...["jasna", "avsubs", "lada", "comfyui", "process", "heartbeat", "tcp_check", "host_metrics", "folder", "custom_cmd", "state_file", "dev_activity"].map(k => `monitorType.${k}`)];
+    for (const key of keys) {
+      expect(i18n.getResource(lang, "translation", key), key).toBeTypeOf("string");
+      const value = i18n.t(key, { version: "3.9.7", hub: "3.9.6", agent: "3.9.7" });
+      expect(value).not.toBe(key); expect(value).not.toContain("{{");
+    }
+    expect(i18n.t("hub.versionSkew", { hub: "3.9.6", agent: "3.9.7" })).toMatch(/Update the Hub|请更新 Hub/);
+  });
+});

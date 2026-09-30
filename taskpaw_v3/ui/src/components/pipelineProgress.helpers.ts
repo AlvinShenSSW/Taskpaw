@@ -149,17 +149,24 @@ export function readPipeline(m: Rec): Pipeline | null {
   if (!Array.isArray(m.steps)) return null;
   const steps = m.steps.map(readStep).filter((s): s is Step => s !== null);
   if (steps.length === 0) return null;
-  const films = Array.isArray(m.films)
-    ? m.films.map(readRow).filter((r): r is FilmRow => r !== null)
-    : [];
-  const more = fin(m.films_more);
   return {
     kind: steps.some((s) => s.key === "restore") ? "jasna" : "avsubs",
-    film: str(m.film) || str(m.current_file) || undefined,
+    ...readFilmFallback(m),
     steps,
+    model: str(m.model) || undefined,
+  };
+}
+
+export type FilmFallback = Pick<Pipeline, "film" | "films" | "filmsMore">;
+
+export function readFilmFallback(m: Rec): FilmFallback {
+  const films = Array.isArray(m.films)
+    ? m.films.map(readRow).filter((r): r is FilmRow => r !== null) : [];
+  const more = fin(m.films_more);
+  return {
+    film: str(m.film) || str(m.current_file) || undefined,
     films,
     filmsMore: more !== undefined && more > 0 ? Math.floor(more) : 0,
-    model: str(m.model) || undefined,
   };
 }
 

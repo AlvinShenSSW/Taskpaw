@@ -306,6 +306,13 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
 
     supervisor = _FakeSupervisor()
     control_kwargs = {}
+    network_kwargs = {}
+    create_network_app = app.create_network_app
+
+    def capture_network_app(*args, **kwargs):
+        network_kwargs.update(kwargs)
+        return create_network_app(*args, **kwargs)
+
     create_control_app = app.create_control_app
 
     def capture_control_app(*args, **kwargs):
@@ -318,6 +325,7 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
     monkeypatch.setattr(launcher, "claim_port", lambda *a, **k: socket.socket())
     monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **k: supervisor)
     monkeypatch.setattr(app, "create_control_app", capture_control_app)
+    monkeypatch.setattr(app, "create_network_app", capture_network_app)
     monkeypatch.setattr(uvicorn, "Server", _FakeServer)
     monkeypatch.setattr(uvicorn, "Config", lambda *a, **k: None)
     monkeypatch.setattr(launcher, "announce_ready", lambda *a, **k: None)
@@ -328,6 +336,11 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
         launcher.run_agent(_llm_cfg(), shutdown=shutdown, block=False)
         assert control_kwargs.get("films_provider") == supervisor.film_page
         assert control_kwargs.get("run_films_provider") == supervisor.run_films
+        from taskpaw_v3 import __version__
+
+        assert network_kwargs.get("films_provider") == supervisor.film_page
+        assert network_kwargs.get("run_films_provider") == supervisor.run_films
+        assert control_kwargs["status_provider"]()["version"] == __version__
         s = started["settings"]
         assert (s.model, s.api_key, s.key_source) == (
             "cfg/model",

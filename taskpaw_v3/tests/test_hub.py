@@ -402,6 +402,7 @@ def test_poller_keeps_latest_status_snapshot(tmp_path, monkeypatch):
 
         agent_status = {
             "machine": "box1",
+            "version": "3.9.7",
             "monitors": {"host": {"state": "ok", "metrics": {"cpu": 12}}},
         }
 
@@ -482,9 +483,24 @@ def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypa
         # self_monitor off → deterministic empty `self`, no host probing in tests.
         app, svc = create_hub_app(HubConfig(self_monitor=False), s)
 
-        agent_status = {"machine": "box1", "monitors": {"h": {"state": "ok"}}}
+        agent_status = {
+            "machine": "box1",
+            "version": "3.9.7",
+            "monitors": {
+                "h": {
+                    "state": "ok",
+                    "metrics": {
+                        "steps": [{"key": "asr", "state": "active"}],
+                        "films": [{"name": "film", "steps": {}}],
+                    },
+                }
+            },
+        }
+
+        destinations = []
 
         def ok_urlopen(req, timeout):
+            destinations.append(req.full_url)
             if "/status" in req.full_url:
                 return FakeResp(agent_status)
             return FakeResp({"events": []})
@@ -494,6 +510,10 @@ def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypa
 
         r = TestClient(app).get("/status")
         assert r.status_code == 200
+        assert destinations == [
+            "http://127.0.0.1:5680/status",
+            "http://127.0.0.1:5680/events?ack=-1",
+        ]
         body = r.json()
         # Existing contract preserved.
         assert body["machine"] == HubConfig().machine

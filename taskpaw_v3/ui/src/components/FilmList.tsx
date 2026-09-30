@@ -56,13 +56,13 @@ function RowChip({ stepKey, state, percent }: { stepKey: string; state: StepStat
   );
 }
 
-export function FilmList({ films, filmsMore = 0, focus: focusName, total = films.length + filmsMore }: {
-  films: (FilmRow | PageRow)[]; filmsMore?: number; focus?: string; total?: number;
+export function FilmList({ films, filmsMore = 0, focus: focusName, total = films.length + filmsMore, showSingle = false }: {
+  films: (FilmRow | PageRow)[]; filmsMore?: number; focus?: string; total?: number; showSingle?: boolean;
 }) {
   const { t } = useTranslation();
 
   // A single film is already the header above — the list is for batches.
-  if (total < 2 && filmsMore === 0) return null;
+  if (total < 2 && filmsMore === 0 && !(showSingle && total === 1)) return null;
   return (
     <Box data-testid="pipeline-films" sx={{ ...BOX, py: 0.5 }}>
       <Typography variant="overline" color="text.secondary" sx={{ px: 2, display: "block" }}>

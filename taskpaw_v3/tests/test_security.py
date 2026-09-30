@@ -363,3 +363,19 @@ def test_cors_allows_windows_tauri_origin():
     client = TestClient(create_control_app(cfg))
     r = client.get("/control/ping", headers={"Origin": "http://tauri.localhost"})
     assert r.headers.get("access-control-allow-origin") == "http://tauri.localhost"
+
+
+@pytest.mark.parametrize("resource", ["films", "run-films"])
+def test_network_films_read_only_no_cors(resource):
+    _, _, client = _net()
+    path = f"/monitors/{resource}?name=task"
+    assert client.get(path).status_code == 401
+    headers = {"Authorization": f"Bearer {SECRET}", "Origin": "http://localhost:5173"}
+    response = client.get(path, headers=headers)
+    assert response.status_code == 404
+    assert "access-control-allow-origin" not in response.headers
+    for method in ("post", "patch", "delete", "put"):
+        assert getattr(client, method)(path, headers=headers).status_code == 405
+    assert (
+        client.get(f"/control/monitors/{resource}", headers=headers).status_code == 404
+    )
