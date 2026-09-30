@@ -2,22 +2,56 @@
 
 import importlib
 import json
+import ntpath
 import shlex
-from pathlib import Path
+import sys
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
 
 @pytest.fixture
-def setup(tmp_path, monkeypatch):
+def setup(tmp_path, monkeypatch, request):
     s = importlib.import_module("taskpaw_v3.integrations.activity_setup")
+    # Generic reconciliation/undo tests use the POSIX tool policy (both tools).
+    # Only shell transport is replaced on Windows; verify_writer still validates
+    # argv, runs the real Python writer and checks its nonce/state/timestamp.
+    monkeypatch.setattr(s, "WINDOWS", False)
+    if getattr(request, "param", sys.platform) == "win32":
+        native_run = s.subprocess.run
+        native_which = s.shutil.which
+
+        def direct_writer(argv, **kwargs):
+            assert argv[1] == "-c"
+            words = shlex.split(argv[2])
+            assert words[0] == "exec"
+            return native_run(words[1:], **kwargs)
+
+        monkeypatch.setattr(s.subprocess, "run", direct_writer)
+        monkeypatch.setattr(
+            s.shutil,
+            "which",
+            lambda name: (
+                "synthetic-shell" if name in {"bash", "sh"} else native_which(name)
+            ),
+        )
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("CODEX_HOME", raising=False)
     return s, tmp_path
 
 
-def run(s, home, action, tool="all", *extra):
-    return s.main([action, "--home", str(home), "--tool", tool, *extra])
+@pytest.fixture
+def run(capsys):
+    def invoke(s, home, action, tool="all", *extra, expected=0):
+        code = s.main([action, "--home", str(home), "--tool", tool, *extra])
+        if code != expected:
+            captured = capsys.readouterr()
+            pytest.fail(
+                f"{action} {tool}: exit {code}, expected {expected}\n"
+                f"stdout:\n{captured.out}\nstderr:\n{captured.err}"
+            )
+
+    return invoke
 
 
 def target(home, tool):
@@ -32,7 +66,7 @@ def put(home, tool, data):
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_install_idempotent_check_exact_uninstall(setup, existing):
+def test_install_idempotent_check_exact_uninstall(setup, existing, run):
     s, home = setup
     original = b'{"unrelated": 1, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "do-not-run"}]}]}}'
     if existing:
@@ -40,29 +74,29 @@ def test_install_idempotent_check_exact_uninstall(setup, existing):
             p = target(home, tool)
             p.parent.mkdir()
             p.write_bytes(original)
-    assert run(s, home, "install") == 0
+    run(s, home, "install")
     before = {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
-    assert run(s, home, "install") == 0
+    run(s, home, "install")
     assert before == {p: p.read_bytes() for p in home.rglob("*") if p.is_file()}
-    assert run(s, home, "check") == 0
+    run(s, home, "check")
     assert not list((home / ".taskpaw").glob("agent-activity*"))
     for tool in ("claude", "codex"):
         hooks = json.loads(target(home, tool).read_text())["hooks"]
         assert ("SubagentStop" in hooks) is (tool == "codex")
         if tool == "claude":
             assert hooks["Notification"][0]["matcher"] == "permission_prompt"
-    assert run(s, home, "uninstall") == 0
+    run(s, home, "uninstall")
     for tool in ("claude", "codex"):
         assert (
             target(home, tool).read_bytes() == original
             if existing
             else not target(home, tool).exists()
         )
-    assert run(s, home, "uninstall") == 0
-    assert run(s, home, "install") == 0
+    run(s, home, "uninstall")
+    run(s, home, "install")
 
 
-def test_reinstall_reconciles_legacy_notification_matcher(setup, monkeypatch):
+def test_reinstall_reconciles_legacy_notification_matcher(setup, monkeypatch, run):
     s, home = setup
     required = s.required
 
@@ -73,15 +107,15 @@ def test_reinstall_reconciles_legacy_notification_matcher(setup, monkeypatch):
 
     with monkeypatch.context() as legacy:
         legacy.setattr(s, "required", legacy_required)
-        assert run(s, home, "install", "claude") == 0
+        run(s, home, "install", "claude")
     p = target(home, "claude")
     data = json.loads(p.read_text())
     unrelated = {"type": "command", "command": "user-notification-handler"}
     data["hooks"]["Notification"][0]["hooks"].append(unrelated)
     p.write_text(json.dumps(data))
-    assert run(s, home, "check", "claude") == 1
-    assert run(s, home, "install", "claude") == 0
-    assert run(s, home, "check", "claude") == 0
+    run(s, home, "check", "claude", expected=1)
+    run(s, home, "install", "claude")
+    run(s, home, "check", "claude")
     groups = json.loads(p.read_text())["hooks"]["Notification"]
     assert groups[0] == {
         "matcher": "permission_prompt|idle_prompt",
@@ -92,7 +126,7 @@ def test_reinstall_reconciles_legacy_notification_matcher(setup, monkeypatch):
     assert len(groups[1]["hooks"]) == 1
     assert s.owned(groups[1]["hooks"][0], "claude")
     before = p.read_bytes()
-    assert run(s, home, "install", "claude") == 0
+    run(s, home, "install", "claude")
     assert p.read_bytes() == before
 
 
@@ -112,17 +146,17 @@ def test_exact_marker_ownership(setup, command, owned):
     assert s.owned({"type": "command", "command": command}, "claude") is owned
 
 
-def test_selective_uninstall_preserves_later_edits_and_unowned_groups(setup):
+def test_selective_uninstall_preserves_later_edits_and_unowned_groups(setup, run):
     s, home = setup
     p = put(home, "claude", {"hooks": {"Stop": [{"matcher": "old", "hooks": []}]}})
-    assert run(s, home, "install", "claude") == 0
+    run(s, home, "install", "claude")
     data = json.loads(p.read_text())
     data["later"] = True
     data["hooks"]["Stop"].append(
         {"matcher": "new", "hooks": [{"type": "command", "command": "unrelated"}]}
     )
     p.write_text(json.dumps(data))
-    assert run(s, home, "uninstall", "claude") == 0
+    run(s, home, "uninstall", "claude")
     result = json.loads(p.read_text())
     assert result["later"] and result["hooks"]["Stop"] == [
         {"matcher": "old", "hooks": []},
@@ -132,27 +166,46 @@ def test_selective_uninstall_preserves_later_edits_and_unowned_groups(setup):
 
 @pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("tool", ["claude", "codex"])
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        "writer",
+        pytest.param(
+            "python-symlink",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="Executes Python via an extensionless POSIX symlink; Windows symlinks also require privileges",
+            ),
+        ),
+    ],
+)
 def test_reinstall_after_external_edit_revokes_whole_file_restore(
-    setup, existing, tool
+    setup, existing, tool, changed_path, run
 ):
     s, home = setup
     if existing:
         put(home, tool, {"baseline": True})
-    assert run(s, home, "install", tool) == 0
+    run(s, home, "install", tool)
     p = target(home, tool)
     data = json.loads(p.read_text())
     data["external"] = True
     handler = {"type": "command", "command": "user-hook-never-executed"}
     data["hooks"]["Stop"][0]["hooks"].append(handler)
     p.write_text(json.dumps(data))
-    python = home / "python-alias"
-    python.symlink_to(s.sys.executable)
-    assert run(s, home, "install", tool, "--python", str(python)) == 0
+    if changed_path == "python-symlink":
+        replacement = home / "python-alias"
+        replacement.symlink_to(s.sys.executable)
+        option = "--python"
+    else:
+        replacement = home / "writer-copy.py"
+        replacement.write_bytes(s.WRITER.read_bytes())
+        option = "--writer"
+    run(s, home, "install", tool, option, str(replacement))
     record = json.loads((home / f".taskpaw/hook-setup/{tool}.json").read_text())
     assert not {"original_exists", "baseline", "baseline_hash"} & record.keys()
     # A subsequent update must not regain whole-file restoration authority.
-    assert run(s, home, "install", tool) == 0
-    assert run(s, home, "uninstall", tool) == 0
+    run(s, home, "install", tool)
+    run(s, home, "uninstall", tool)
     result = json.loads(p.read_text())
     assert result["external"]
     assert result.get("baseline", False) is existing
@@ -162,11 +215,11 @@ def test_reinstall_after_external_edit_revokes_whole_file_restore(
     assert handlers == [handler]
 
 
-def test_missing_record_never_removes_empty_groups(setup):
+def test_missing_record_never_removes_empty_groups(setup, run):
     s, home = setup
-    assert run(s, home, "install", "claude") == 0
+    run(s, home, "install", "claude")
     (home / ".taskpaw/hook-setup/claude.json").unlink()
-    assert run(s, home, "uninstall", "claude") == 0
+    run(s, home, "uninstall", "claude")
     assert json.loads(target(home, "claude").read_text())["hooks"]["Stop"] == [
         {"hooks": []}
     ]
@@ -175,19 +228,25 @@ def test_missing_record_never_removes_empty_groups(setup):
 @pytest.mark.parametrize(
     "bad", ["{", '{"hooks":{},"hooks":{}}', '{"hooks":[]}', '{"hooks":{"Stop":[{}]}}']
 )
-def test_malformed_settings_never_replaced(setup, bad):
+def test_malformed_settings_never_replaced(setup, bad, run):
     s, home = setup
     p = put(home, "claude", {})
     p.write_text(bad)
-    assert run(s, home, "install", "claude") == 1
+    run(s, home, "install", "claude", expected=1)
     assert p.read_text() == bad
 
 
-def test_windows_codex_all_preflight_no_edits(setup, monkeypatch, capsys):
+def test_windows_codex_all_preflight_no_edits(setup, monkeypatch, capsys, run):
     s, home = setup
     monkeypatch.setattr(s, "WINDOWS", True)
-    monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", s.shutil.which("bash"))
-    assert run(s, home, "install") == 1
+    bash = home / "Git/bin/bash.exe"
+    bash.parent.mkdir(parents=True)
+    bash.touch()
+    monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(bash))
+    # Shell dispatch is irrelevant: all-tool preflight must refuse Codex before
+    # writing settings even when Claude's writer has successfully verified.
+    monkeypatch.setattr(s, "verify_writer", lambda *args: None)
+    run(s, home, "install", expected=1)
     assert "Windows Codex hook dispatch not verified" in capsys.readouterr().out
     assert not target(home, "claude").exists()
 
@@ -206,30 +265,33 @@ def test_quoted_paths_literal_and_windows_slashes(setup):
     assert "\\" not in command
 
 
-def test_check_rejects_edited_owned_command_without_execution(setup):
+def test_check_rejects_edited_owned_command_without_execution(setup, run):
     s, home = setup
-    assert run(s, home, "install", "claude") == 0
+    run(s, home, "install", "claude")
     p = target(home, "claude")
     data = json.loads(p.read_text())
     data["hooks"]["Stop"][0]["hooks"][0]["command"] += " ; touch INJECTION_SENTINEL"
     p.write_text(json.dumps(data))
-    assert run(s, home, "check", "claude") == 1
+    run(s, home, "check", "claude", expected=1)
     assert not (home / "INJECTION_SENTINEL").exists()
 
 
-def test_backup_failure_and_hash_conflict_prevent_edit(setup, monkeypatch):
+def test_backup_failure_and_hash_conflict_prevent_edit(setup, monkeypatch, run):
     s, home = setup
     p = put(home, "claude", {"keep": True})
     original = p.read_bytes()
     monkeypatch.setattr(
         s, "backup", lambda *a: (_ for _ in ()).throw(OSError("synthetic"))
     )
-    assert run(s, home, "install", "claude") == 1
+    run(s, home, "install", "claude", expected=1)
     assert p.read_bytes() == original
 
 
 @pytest.mark.parametrize("linked_directory", [False, True])
-def test_settings_symlink_refused(setup, linked_directory):
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Creating real symlinks requires Windows privileges"
+)
+def test_settings_symlink_refused(setup, linked_directory, run):
     s, home = setup
     other = home / "other.json"
     other.write_text("{}")
@@ -241,13 +303,16 @@ def test_settings_symlink_refused(setup, linked_directory):
     else:
         p.parent.mkdir()
     p.symlink_to(other)
-    assert run(s, home, "install", "claude") == 1
+    run(s, home, "install", "claude", expected=1)
     assert other.read_text() == "{}"
     assert p.is_symlink()
 
 
 @pytest.mark.parametrize("linked_directory", [False, True])
-def test_setup_through_symlinked_home_or_tool_directory(setup, linked_directory):
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Creating real symlinks requires Windows privileges"
+)
+def test_setup_through_symlinked_home_or_tool_directory(setup, linked_directory, run):
     s, home = setup
     real_home = home / "real-home"
     real_home.mkdir()
@@ -265,22 +330,22 @@ def test_setup_through_symlinked_home_or_tool_directory(setup, linked_directory)
         path = target(home, tool)
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(original)
-    assert run(s, home, "install") == 0
-    assert run(s, home, "check") == 0
-    assert run(s, home, "uninstall") == 0
+    run(s, home, "install")
+    run(s, home, "check")
+    run(s, home, "uninstall")
     for tool in ("claude", "codex"):
         assert target(home, tool).read_bytes() == original
 
 
-def test_missing_executables_and_usage_codes(setup):
+def test_missing_executables_and_usage_codes(setup, run):
     s, home = setup
-    assert run(s, home, "install", "claude", "--python", str(home / "absent")) == 1
+    run(s, home, "install", "claude", "--python", str(home / "absent"), expected=1)
     with pytest.raises(SystemExit) as e:
         s.main(["nonsense"])
     assert e.value.code == 2
 
 
-def test_hash_conflict_preserves_concurrent_settings(setup, monkeypatch):
+def test_hash_conflict_preserves_concurrent_settings(setup, monkeypatch, run):
     s, home = setup
     p = put(home, "claude", {"baseline": 1})
     original_fsync = s.os.fsync
@@ -291,14 +356,16 @@ def test_hash_conflict_preserves_concurrent_settings(setup, monkeypatch):
             p.write_text('{"concurrent":true}')
 
     monkeypatch.setattr(s.os, "fsync", conflict)
-    assert run(s, home, "install", "claude") == 1
+    run(s, home, "install", "claude", expected=1)
     assert json.loads(p.read_text()) == {"concurrent": True}
     backups = list((home / ".taskpaw/hook-setup/backups").glob("*.bak"))
     assert len(backups) == 1 and json.loads(backups[0].read_text()) == {"baseline": 1}
 
 
 @pytest.mark.parametrize("failure", ["replace", "record"])
-def test_write_failures_report_and_keep_backup(setup, monkeypatch, capsys, failure):
+def test_write_failures_report_and_keep_backup(
+    setup, monkeypatch, capsys, failure, run
+):
     s, home = setup
     p = put(home, "claude", {"baseline": 1})
     original = s.atomic_write
@@ -311,7 +378,7 @@ def test_write_failures_report_and_keep_backup(setup, monkeypatch, capsys, failu
         original(path, raw, expected)
 
     monkeypatch.setattr(s, "atomic_write", fail)
-    assert run(s, home, "install", "claude") == 1
+    run(s, home, "install", "claude", expected=1)
     output = capsys.readouterr().out
     assert "backup retained" in output and "PRIVATE DETAIL" not in output
     assert list((home / ".taskpaw/hook-setup/backups").glob("*.bak"))
@@ -320,9 +387,11 @@ def test_write_failures_report_and_keep_backup(setup, monkeypatch, capsys, failu
 @pytest.mark.parametrize(
     "fault", ["state", "nonce", "stale", "timeout", "missing", "nonfinite", "exit"]
 )
-def test_check_rejects_bad_writer_output_and_cleans_temp(setup, monkeypatch, fault):
+def test_check_rejects_bad_writer_output_and_cleans_temp(
+    setup, monkeypatch, fault, run
+):
     s, home = setup
-    assert run(s, home, "install", "claude") == 0
+    run(s, home, "install", "claude")
 
     def fake_run(argv, **kwargs):
         import time
@@ -351,27 +420,31 @@ def test_check_rejects_bad_writer_output_and_cleans_temp(setup, monkeypatch, fau
         return SimpleNamespace(returncode=1 if fault == "exit" else 0)
 
     monkeypatch.setattr(s.subprocess, "run", fake_run)
-    assert run(s, home, "check", "claude") == 1
+    run(s, home, "check", "claude", expected=1)
     assert not list((home / ".taskpaw").glob(".activity-check-*"))
     assert not list((home / ".taskpaw").glob("agent-activity*"))
 
 
-def test_literal_metacharacter_paths_execute_without_injection(setup):
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Executes the generated command through real POSIX bash",
+)
+@pytest.mark.parametrize("setup", ["posix"], indirect=True)
+def test_literal_metacharacter_paths_execute_without_injection(setup, run):
     s, home = setup
     directory = home / "目录 ' space $(touch INJECTION_SENTINEL)"
     directory.mkdir()
     writer = directory / "writer.py"
     writer.write_bytes(s.WRITER.read_bytes())
-    assert run(s, home, "install", "claude", "--writer", str(writer)) == 0
-    assert run(s, home, "check", "claude") == 0
+    run(s, home, "install", "claude", "--writer", str(writer))
+    run(s, home, "check", "claude")
     assert not (Path.cwd() / "INJECTION_SENTINEL").exists()
     assert not (home / "INJECTION_SENTINEL").exists()
 
 
-def test_backup_precedes_replace_and_permissions(setup, monkeypatch):
+def test_backup_precedes_replace(setup, monkeypatch, run):
     s, home = setup
     p = put(home, "claude", {"baseline": 1})
-    p.chmod(0o640)
     replace = s.os.replace
     seen = []
 
@@ -383,20 +456,33 @@ def test_backup_precedes_replace_and_permissions(setup, monkeypatch):
         replace(src, dst)
 
     monkeypatch.setattr(s.os, "replace", guarded)
-    assert run(s, home, "install", "claude") == 0
-    assert seen and p.stat().st_mode & 0o777 == 0o640
-    assert seen[0].stat().st_mode & 0o777 == 0o600
+    run(s, home, "install", "claude")
+    assert seen and json.loads(seen[0].read_text()) == {"baseline": 1}
 
 
-def test_preflight_all_malformed_second_tool_never_edits_first(setup):
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows chmod does not implement POSIX permission bits",
+)
+def test_install_preserves_posix_permissions(setup, run):
+    s, home = setup
+    p = put(home, "claude", {"baseline": 1})
+    p.chmod(0o640)
+    run(s, home, "install", "claude")
+    assert p.stat().st_mode & 0o777 == 0o640
+    backups = list((home / ".taskpaw/hook-setup/backups").glob("*.bak"))
+    assert len(backups) == 1 and backups[0].stat().st_mode & 0o777 == 0o600
+
+
+def test_preflight_all_malformed_second_tool_never_edits_first(setup, run):
     s, home = setup
     p = put(home, "codex", {})
     p.write_text("{")
-    assert run(s, home, "install") == 1
+    run(s, home, "install", expected=1)
     assert not target(home, "claude").exists()
 
 
-def test_partial_io_failure_reports_both_tools(setup, monkeypatch, capsys):
+def test_partial_io_failure_reports_both_tools(setup, monkeypatch, capsys, run):
     s, home = setup
     write = s.atomic_write
 
@@ -406,15 +492,15 @@ def test_partial_io_failure_reports_both_tools(setup, monkeypatch, capsys):
         write(path, raw, expected)
 
     monkeypatch.setattr(s, "atomic_write", fail)
-    assert run(s, home, "install") == 1
+    run(s, home, "install", expected=1)
     out = capsys.readouterr().out
     assert "claude: install succeeded" in out and "codex: local I/O failed" in out
     assert target(home, "claude").exists() and not target(home, "codex").exists()
 
 
-def test_changed_marker_handler_removed_unmarked_preserved(setup):
+def test_changed_marker_handler_removed_unmarked_preserved(setup, run):
     s, home = setup
-    assert run(s, home, "install", "claude") == 0
+    run(s, home, "install", "claude")
     p = target(home, "claude")
     data = json.loads(p.read_text())
     data["hooks"]["Stop"][0]["hooks"][0]["command"] = (
@@ -424,18 +510,18 @@ def test_changed_marker_handler_removed_unmarked_preserved(setup):
     unmarked["command"] = "unmarked edited command"
     data["later"] = True
     p.write_text(json.dumps(data))
-    assert run(s, home, "uninstall", "claude") == 0
+    run(s, home, "uninstall", "claude")
     data = json.loads(p.read_text())
     assert data["hooks"]["Stop"] == []
     assert data["hooks"]["SessionEnd"][0]["hooks"] == [unmarked]
 
 
-def test_missing_shell_and_nondefault_codex_home_refused(setup, monkeypatch):
+def test_missing_shell_and_nondefault_codex_home_refused(setup, monkeypatch, run):
     s, home = setup
     monkeypatch.setenv("CODEX_HOME", str(home / "custom"))
-    assert run(s, home, "install", "codex") == 1
+    run(s, home, "install", "codex", expected=1)
     monkeypatch.setattr(s.shutil, "which", lambda *a: None)
-    assert run(s, home, "install", "claude") == 1
+    run(s, home, "install", "claude", expected=1)
     assert not target(home, "claude").exists()
 
 
@@ -502,3 +588,55 @@ def test_windows_git_bash_env_takes_precedence(setup, monkeypatch):
     monkeypatch.setenv("ProgramFiles", str(home))
     with pytest.raises(s.SetupError, match="Git Bash missing"):
         s.shell_for("claude")
+
+
+@pytest.mark.parametrize("git_directory", ["cmd", "bin"])
+@pytest.mark.parametrize("relative", ["bin/bash.exe", "usr/bin/bash.exe"])
+def test_windows_git_bash_drive_path_resolution(
+    setup, monkeypatch, git_directory, relative
+):
+    s, _ = setup
+    monkeypatch.setattr(s, "WINDOWS", True)
+    for key in ("CLAUDE_CODE_GIT_BASH_PATH", "ProgramFiles", "LOCALAPPDATA"):
+        monkeypatch.delenv(key, raising=False)
+    root = r"C:\Program Files\Git"
+    git = ntpath.join(root, git_directory, "git.exe")
+    expected = ntpath.normpath(ntpath.join(root, relative))
+    checked = []
+
+    class SyntheticWindowsPath(PureWindowsPath):
+        def resolve(self):
+            return self
+
+        def is_file(self):
+            checked.append(str(self))
+            return str(self) == expected
+
+    # Real Windows lexical rules, with file existence supplied independently.
+    monkeypatch.setattr(s, "Path", SyntheticWindowsPath)
+    monkeypatch.setattr(
+        s.shutil, "which", lambda name: git if name == "git.exe" else None
+    )
+    assert s.shell_for("claude") == expected
+    assert checked[-1] == expected
+    assert all(ntpath.isabs(path) for path in checked)
+
+
+@pytest.mark.parametrize("setup", ["win32"], indirect=True)
+def test_windows_claude_install_check_uninstall(setup, monkeypatch, run):
+    s, home = setup
+    monkeypatch.setattr(s, "WINDOWS", True)
+    bash = home / "Program Files/Git/bin/bash.exe"
+    bash.parent.mkdir(parents=True)
+    bash.touch()
+    monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(bash))
+    # The fixture replaces only shell transport, retaining the real writer and
+    # Windows command rendering plus the complete install/check/undo lifecycle.
+    run(s, home, "install", "claude")
+    record = json.loads((home / ".taskpaw/hook-setup/claude.json").read_text())
+    words = shlex.split(record["command"])
+    assert words[0] == str(Path(s.sys.executable).absolute()).replace("\\", "/")
+    assert "\\" not in record["command"]
+    run(s, home, "check", "claude")
+    run(s, home, "uninstall", "claude")
+    assert not target(home, "claude").exists()

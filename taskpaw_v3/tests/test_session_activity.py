@@ -2,6 +2,7 @@
 
 import importlib
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -71,8 +72,7 @@ def session(home, tool, age, name=None):
 )
 def test_session_mtime_boundaries_and_privacy(probe, monkeypatch, age, state):
     sa, p, _, home = probe
-    f = session(home, "claude", age)
-    f.chmod(0)
+    session(home, "claude", age)
     monkeypatch.setattr(
         Path, "read_text", lambda *a, **k: pytest.fail("session content read")
     )
@@ -83,8 +83,9 @@ def test_session_mtime_boundaries_and_privacy(probe, monkeypatch, age, state):
     assert p.sample(live(), set(), 1000)["claude"]["state"] == state
 
 
-def test_open_old_rollout_outside_cache_and_no_stale_positive(probe):
-    _, p, handles, home = probe
+def test_open_old_rollout_outside_cache_and_no_stale_positive(probe, monkeypatch):
+    sa, p, handles, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", False)
     old = session(home, "codex", 196, "rollout-old.jsonl")
     for n in range(70):
         session(home, "codex", 100, f"rollout-{n}.jsonl")
@@ -106,12 +107,13 @@ def test_live_root_required_and_hook_short_circuit(probe, monkeypatch):
     assert p.sample(live(), {"claude"}, 1000) == {}
 
 
-def test_windows_never_calls_handles(probe, monkeypatch):
+@pytest.mark.parametrize("age,state", [(7, "busy"), (196, "idle"), (400, None)])
+def test_windows_never_calls_handles(probe, monkeypatch, age, state):
     sa, p, _, home = probe
     monkeypatch.setattr(sa, "WINDOWS", True)
     monkeypatch.setattr(sa.psutil, "Process", lambda *a: pytest.fail("Windows handles"))
-    session(home, "codex", 196)
-    assert p.sample(live("codex"), set(), 1000)["codex"]["state"] == "idle"
+    session(home, "codex", age, "ROLLOUT-TEST.JSONL")
+    assert p.sample(live("codex"), set(), 1000)["codex"]["state"] == state
 
 
 @pytest.mark.parametrize("denied", [True, False])
@@ -119,6 +121,7 @@ def test_denied_handles_not_idle_but_positive_mtime_survives(
     probe, monkeypatch, denied
 ):
     sa, p, _, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", False)
     f = session(home, "claude", 100)
 
     class Proc:
@@ -140,6 +143,7 @@ def test_denied_handles_not_idle_but_positive_mtime_survives(
 
 def test_handle_caps_round_robin_and_pid_reuse(probe, monkeypatch):
     sa, p, _, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", False)
     old = session(home, "claude", 100)
     calls = []
 
@@ -164,10 +168,24 @@ def test_handle_caps_round_robin_and_pid_reuse(probe, monkeypatch):
     assert set(calls) > first
 
 
-def test_symlink_nonregular_deleted_and_empty_roots(probe):
+@pytest.mark.parametrize(
+    "linked",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="Creating a real symlink requires Windows privileges",
+            ),
+        ),
+    ],
+)
+def test_nonregular_deleted_and_empty_roots(probe, linked):
     _, p, _, home = probe
     target = session(home, "claude", 7)
-    (home / "claude" / "link.jsonl").symlink_to(target)
+    if linked:
+        (home / "claude" / "link.jsonl").symlink_to(target)
     (home / "claude" / "dir.jsonl").mkdir()
     assert p.sample(live(), set(), 1000)["claude"]["state"] == "busy"
     target.unlink()
@@ -214,8 +232,9 @@ def test_lexical_alias_roots_rejected(tmp_path):
         )
 
 
-def test_handle_cannot_escape_root_via_dotdot(probe):
-    _, p, handles, home = probe
+def test_handle_cannot_escape_root_via_dotdot(probe, monkeypatch):
+    sa, p, handles, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", False)
     outside = home / "outside.jsonl"
     outside.write_text("private")
     os.utime(outside, (800, 800))
@@ -293,6 +312,7 @@ def test_discovery_budget_and_depth_limit(probe, monkeypatch):
 
 def test_handle_identity_rechecked_after_native_call(probe, monkeypatch):
     sa, p, _, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", False)
     f = session(home, "claude", 400)
     calls = [0]
 
@@ -306,6 +326,7 @@ def test_handle_identity_rechecked_after_native_call(probe, monkeypatch):
 
     monkeypatch.setattr(sa.psutil, "Process", lambda pid: Proc())
     assert p.sample(live(), set(), 1000)["claude"]["state"] is None
+    assert calls[0] == 2
 
 
 def test_unavailable_live_identity_cannot_use_positive_metadata(probe, monkeypatch):
@@ -321,6 +342,9 @@ def test_unavailable_live_identity_cannot_use_positive_metadata(probe, monkeypat
 
 @pytest.mark.parametrize("custom", [False, True])
 @pytest.mark.parametrize("linked_root", [False, True])
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Creating real symlinks requires Windows privileges"
+)
 def test_session_root_with_symlink_alias(probe, monkeypatch, custom, linked_root):
     sa, _, handles, home = probe
     real = home / "real"
@@ -353,6 +377,9 @@ def test_session_root_with_symlink_alias(probe, monkeypatch, custom, linked_root
         p.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Creating real symlinks requires Windows privileges"
+)
 def test_session_symlinks_outside_root_ignored(probe, monkeypatch):
     sa, p, handles, home = probe
     outside = session(home, "outside", 7)
@@ -367,7 +394,19 @@ def test_session_symlinks_outside_root_ignored(probe, monkeypatch):
     assert not p.candidates["claude"]
 
 
-@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize(
+    "linked",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="Creating a real symlink requires Windows privileges",
+            ),
+        ),
+    ],
+)
 def test_session_file_root_rejected(tmp_path, linked):
     root = tmp_path / "file"
     root.write_text("private")
@@ -377,3 +416,35 @@ def test_session_file_root_rejected(tmp_path, linked):
         root = alias
     with pytest.raises(ValueError, match="regular directory"):
         DevActivityConfig(name="ai", session_roots={"claude": [str(root)]})
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows chmod cannot remove POSIX read permission"
+)
+def test_unreadable_session_still_uses_metadata(probe, monkeypatch):
+    sa, p, _, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", False)
+    f = session(home, "claude", 7)
+    f.chmod(0)
+    try:
+        assert p.sample(live(), set(), 1000)["claude"]["state"] == "busy"
+    finally:
+        f.chmod(0o600)
+
+
+@pytest.mark.parametrize("component", ["file", "parent"])
+def test_windows_reparse_components_refused(probe, monkeypatch, component):
+    sa, _, _, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", True)
+    f = session(home, "claude", 7)
+    reparse = f if component == "file" else f.parent
+    original = Path.lstat
+
+    def lstat(path):
+        info = original(path)
+        if path == reparse:
+            return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400)
+        return info
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    assert not sa.safe_path(f)

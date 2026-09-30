@@ -143,6 +143,7 @@ def _record(pid, ppid, exe, cpu=0, created=1, name=None, args=()):
 
 
 def test_exact_identity_renderer_and_real_chatgpt_codex(monkeypatch):
+    monkeypatch.setattr(pu, "WINDOWS", False)  # macOS bundle identities.
     procs = [
         _record(1, 0, "/sbin/init"),
         _record(
@@ -163,6 +164,7 @@ def test_exact_identity_renderer_and_real_chatgpt_codex(monkeypatch):
 
 
 def test_global_nearest_cpu_ownership_and_hosts(monkeypatch):
+    monkeypatch.setattr(pu, "WINDOWS", False)  # macOS bundle identities.
     procs = [
         _record(1, 0, "/sbin/init"),
         _record(
@@ -290,9 +292,9 @@ def test_windows_vscode_host_before_missing_explorer_parent(
     monkeypatch.setattr(pu, "WINDOWS", True)
     procs = [
         _record(1, 99, r"C:\Windows\explorer.exe", created=1),
-        _record(2, 1, r"C:\VSCode\Code.exe", created=editor_created),
-        _record(3, 2, r"C:\VSCode\Code Helper.exe", created=editor_created),
-        _record(4, 3, r"C:\Tools\claude.exe", created=4),
+        _record(2, 1, r"C:\VSCode\CODE.EXE", created=editor_created),
+        _record(3, 2, r"C:\VSCode\CODE HELPER.EXE", created=editor_created),
+        _record(4, 3, r"C:\Tools\CLAUDE.EXE", created=4),
     ]
     monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
     out = pu.scan_activity({"claude": None})["claude"]
@@ -330,6 +332,7 @@ def test_process_and_descendant_bounds_not_idle(monkeypatch):
 
 
 def test_host_and_nested_ownership_independent_of_selected_tools(monkeypatch):
+    monkeypatch.setattr(pu, "WINDOWS", False)  # macOS bundle identities.
     procs = [
         _record(1, 0, "/sbin/init"),
         _record(2, 1, "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"),
