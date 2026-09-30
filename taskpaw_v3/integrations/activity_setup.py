@@ -338,8 +338,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.action != "install" and (args.python or args.writer):
         parser.error("--python and --writer are install options")
-    home = (args.home or Path.home()).expanduser().absolute()
-    state_dir = (args.state_dir or home / ".taskpaw").expanduser().absolute()
+    home = Path(os.path.realpath((args.home or Path.home()).expanduser()))
+    state_dir = Path(
+        os.path.realpath((args.state_dir or home / ".taskpaw").expanduser())
+    )
     tools = ("claude", "codex") if args.tool == "all" else (args.tool,)
     prepared = []
     current_tool = "all"
@@ -353,16 +355,14 @@ def main(argv: list[str] | None = None) -> int:
                 tool == "codex"
                 and args.action != "uninstall"
                 and os.environ.get("CODEX_HOME")
-                and Path(os.environ["CODEX_HOME"]).expanduser().absolute()
-                != home / ".codex"
+                and Path(os.path.realpath(Path(os.environ["CODEX_HOME"]).expanduser()))
+                != Path(os.path.realpath(home / ".codex"))
             ):
                 raise SetupError(
                     "nondefault CODEX_HOME: use manual configuration; default installer cannot verify wiring"
                 )
-            path = (
-                home
-                / f".{tool}"
-                / ("settings.json" if tool == "claude" else "hooks.json")
+            path = Path(os.path.realpath(home / f".{tool}")) / (
+                "settings.json" if tool == "claude" else "hooks.json"
             )
             raw = read_bytes(path)
             data = settings(raw)

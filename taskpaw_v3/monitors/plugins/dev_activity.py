@@ -102,7 +102,7 @@ class DevActivityConfig(BaseMonitorConfig):
         for paths in self.session_roots.values():
             if len(paths) > 8:
                 raise ValueError("at most eight session roots per tool")
-            normalized = [Path(os.path.abspath(Path(p).expanduser())) for p in paths]
+            normalized = [Path(os.path.realpath(Path(p).expanduser())) for p in paths]
             for i, path in enumerate(normalized):
                 if any(
                     path.is_relative_to(other) or other.is_relative_to(path)
@@ -481,8 +481,8 @@ class DevActivityInstance(MonitorInstance):
                     "no AI task running",
                     dedupe_key=None,
                 )
-        if not (cls == "off" and (errors or limited)):
-            self._prev_class = cls
+        # Suppress unavailable idle notifications without losing the next active edge.
+        self._prev_class = cls
 
         detail = (
             f"running AI: {', '.join(busy_tools)}"

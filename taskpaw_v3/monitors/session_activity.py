@@ -49,7 +49,7 @@ class SessionActivity:
         }
         self.roots = {
             t: [
-                Path(os.path.abspath(Path(p).expanduser()))
+                Path(os.path.realpath(Path(p).expanduser()))
                 for p in cfg.session_roots.get(t, defaults.get(t, []))
             ]
             for t in dict.fromkeys(cfg.tools)
@@ -119,7 +119,7 @@ class SessionActivity:
         limited = False
         while queue is not None and (queue or tool in self.cursors):
             if entries >= 512 or directories >= 64 or time.monotonic() >= deadline:
-                limited = True
+                # Yield without exclusions; the saved cursor keeps this incomplete.
                 break
             if tool not in self.cursors:
                 path, depth = queue.popleft()
@@ -261,6 +261,8 @@ class SessionActivity:
                             out["complete"] = False
                             break
                         path = Path(os.path.abspath(opened.path))
+                        # Resolve directory aliases, retaining the leaf for no-follow checks.
+                        path = Path(os.path.realpath(path.parent)) / path.name
                         if not any(path.is_relative_to(r) for r in self.roots[tool]):
                             continue
                         item = self._metadata(tool, path, now, mono, out["errors"])

@@ -183,7 +183,8 @@ def test_discovery_bounded_resumes_and_stop_closes(probe):
     for n in range(600):
         session(home, "claude", 100, f"{n}.jsonl")
     out = p.sample(live(), set(), 1000)["claude"]
-    assert out["limited"] and out["state"] is None
+    assert not out["complete"] and out["state"] is None
+    assert not out["limited"]
     assert len(p.candidates["claude"]) <= 64
     p.close()
     assert not p.cursors
@@ -244,7 +245,8 @@ def test_cursor_resumes_cache_evicts_after_denial(probe, monkeypatch):
     monkeypatch.setattr(sa.time, "monotonic", lambda: now[0])
     for n in range(600):
         session(home, "claude", 100, f"{n}.jsonl")
-    assert p.sample(live(), set(), 1000)["claude"]["limited"]
+    out = p.sample(live(), set(), 1000)["claude"]
+    assert not out["complete"] and not out["limited"]
     assert p.cursors
     assert p.sample(live(), set(), 1000)["claude"]["state"] == "idle"
     assert not p.cursors and len(p.candidates["claude"]) == 64
@@ -281,7 +283,8 @@ def test_discovery_budget_and_depth_limit(probe, monkeypatch):
     sa, p, _, home = probe
     clock = iter([0, 0.2, 0.4, 0.6, 0.8, 1, 1.2])
     monkeypatch.setattr(sa.time, "monotonic", lambda: next(clock, 2))
-    assert p.sample(live(), set(), 1000)["claude"]["limited"]
+    out = p.sample(live(), set(), 1000)["claude"]
+    assert not out["complete"] and not out["limited"]
     monkeypatch.setattr(sa.time, "monotonic", lambda: 3)
     session(home, "claude", 7, "a/b/c/d/e/f/g/h/i/too-deep.jsonl")
     out = p.sample(live(), set(), 1000)["claude"]
@@ -314,3 +317,63 @@ def test_unavailable_live_identity_cannot_use_positive_metadata(probe, monkeypat
     snapshot["claude"]["complete"] = False
     out = p.sample(snapshot, set(), 1000)["claude"]
     assert out["state"] is None and out["errors"]
+
+
+@pytest.mark.parametrize("custom", [False, True])
+@pytest.mark.parametrize("linked_root", [False, True])
+def test_session_root_with_symlink_alias(probe, monkeypatch, custom, linked_root):
+    sa, _, handles, home = probe
+    real = home / "real"
+    root = real if linked_root else real / "projects"
+    root.mkdir(parents=True)
+    alias = home / ".claude"
+    if linked_root:
+        alias.mkdir()
+        (alias / "projects").symlink_to(root, target_is_directory=True)
+    else:
+        alias.symlink_to(real, target_is_directory=True)
+    f = root / "test.jsonl"
+    f.write_text("private")
+    os.utime(f, (993, 993))
+    cfg = DevActivityConfig(
+        name="ai",
+        tools=["claude"],
+        session_roots={"claude": [str(alias / "projects")]} if custom else {},
+    )
+    monkeypatch.setattr(sa, "WINDOWS", False)
+    p = sa.SessionActivity(cfg)
+    try:
+        out = p.sample(live(), set(), 1000)["claude"]
+        assert out["state"] == "busy" and not out["errors"]
+        # Handle paths can still use the configured alias after roots resolve.
+        os.utime(f, (600, 600))
+        handles.append(alias / "projects/test.jsonl")
+        assert p.sample(live(), set(), 1000)["claude"]["state"] == "busy"
+    finally:
+        p.close()
+
+
+def test_session_symlinks_outside_root_ignored(probe, monkeypatch):
+    sa, p, handles, home = probe
+    outside = session(home, "outside", 7)
+    link = home / "claude/link.jsonl"
+    link.symlink_to(outside)
+    directory = home / "claude/linked-dir"
+    directory.symlink_to(outside.parent, target_is_directory=True)
+    handles.extend([link, directory / outside.name])
+    monkeypatch.setattr(sa, "WINDOWS", False)
+    out = p.sample(live(), set(), 1000)["claude"]
+    assert out["state"] is None and not out["errors"]
+    assert not p.candidates["claude"]
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_session_file_root_rejected(tmp_path, linked):
+    root = tmp_path / "file"
+    root.write_text("private")
+    if linked:
+        alias = tmp_path / "alias"
+        alias.symlink_to(root)
+        root = alias
+    with pytest.raises(ValueError, match="regular directory"):
+        DevActivityConfig(name="ai", session_roots={"claude": [str(root)]})

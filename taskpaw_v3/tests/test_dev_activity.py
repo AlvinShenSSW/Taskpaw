@@ -455,3 +455,69 @@ def test_new_root_cannot_inherit_idle_cpu(tmp_path, monkeypatch):
     st = inst.check(lambda *a, **k: None)
     assert st.metrics["ai_state"] == "present_only"
     assert pu.cpu_percents({}, 0, sample, 1)[0] == {}
+
+
+@pytest.mark.parametrize("budget", ["entries", "directories"])
+def test_busy_off_busy_events_across_discovery_yields(tmp_path, monkeypatch, budget):
+    from taskpaw_v3.monitors import session_activity as sa
+
+    root = tmp_path / "sessions"
+    root.mkdir()
+    for n in range(1600 if budget == "entries" else 200):
+        path = root / str(n)
+        path.touch() if budget == "entries" else path.mkdir()
+    monkeypatch.setattr(sa, "WINDOWS", True)
+    monkeypatch.setattr(sa.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(
+        da,
+        "scan_activity",
+        lambda *a: {
+            "claude": {
+                "present": True,
+                "roots": [{"pid": 10, "created": 1, "host": "other"}],
+                "cpus": {},
+                "complete": True,
+            }
+        },
+    )
+    cpu = [20.0]
+    monkeypatch.setattr(da, "cpu_percents", lambda *a: ({"claude": cpu[0]}, {}))
+    cfg = DevActivityConfig(
+        name="ai",
+        state_dir=str(tmp_path),
+        tools=["claude"],
+        session_roots={"claude": [str(root)]},
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    try:
+        for percent, state in [(20.0, "busy"), (0.0, "idle"), (20.0, "busy")]:
+            cpu[0] = percent
+            st = inst.check(lambda *a, **k: events.append(a))
+            assert st.metrics["ai_state"] == state
+            assert not st.metrics["probe_limited"]
+            assert inst._sessions.queues  # Discovery still resumes next tick.
+        assert [e[1] for e in events] == ["ai: AI idle", "ai: AI busy"]
+    finally:
+        inst.stop()
+
+
+@pytest.mark.parametrize("active", ["busy", "waiting"])
+def test_persistent_hook_error_preserves_next_active_event(
+    tmp_path, monkeypatch, active
+):
+    (tmp_path / "agent-activity-codex.json").write_text("invalid JSON")
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude", "codex"]
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    try:
+        for state in (active, "idle", active, active):
+            _write(tmp_path, "claude", state, time.time())
+            st = inst.check(lambda *a, **k: events.append(a))
+            assert st.state == "degraded" and st.metrics["probe_errors"]
+        title = "AI busy" if active == "busy" else "AI waiting for input"
+        assert [e[1] for e in events] == [f"ai: {title}"]
+    finally:
+        inst.stop()

@@ -159,15 +159,48 @@ def test_backup_failure_and_hash_conflict_prevent_edit(setup, monkeypatch):
     assert p.read_bytes() == original
 
 
-def test_settings_symlink_refused(setup):
+@pytest.mark.parametrize("linked_directory", [False, True])
+def test_settings_symlink_refused(setup, linked_directory):
     s, home = setup
     other = home / "other.json"
     other.write_text("{}")
     p = target(home, "claude")
-    p.parent.mkdir()
+    if linked_directory:
+        directory = home / "dotfiles"
+        directory.mkdir()
+        p.parent.symlink_to(directory, target_is_directory=True)
+    else:
+        p.parent.mkdir()
     p.symlink_to(other)
     assert run(s, home, "install", "claude") == 1
     assert other.read_text() == "{}"
+    assert p.is_symlink()
+
+
+@pytest.mark.parametrize("linked_directory", [False, True])
+def test_setup_through_symlinked_home_or_tool_directory(setup, linked_directory):
+    s, home = setup
+    real_home = home / "real-home"
+    real_home.mkdir()
+    if linked_directory:
+        for tool in ("claude", "codex"):
+            directory = real_home / f".{tool}"
+            directory.mkdir()
+            (home / f".{tool}").symlink_to(directory, target_is_directory=True)
+    else:
+        alias = home / "home-alias"
+        alias.symlink_to(real_home, target_is_directory=True)
+        home = alias
+    original = b'{"unrelated": true}'
+    for tool in ("claude", "codex"):
+        path = target(home, tool)
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(original)
+    assert run(s, home, "install") == 0
+    assert run(s, home, "check") == 0
+    assert run(s, home, "uninstall") == 0
+    for tool in ("claude", "codex"):
+        assert target(home, tool).read_bytes() == original
 
 
 def test_missing_executables_and_usage_codes(setup):
