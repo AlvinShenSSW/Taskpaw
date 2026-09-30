@@ -229,6 +229,38 @@ def test_cli_launcher_identity_provides_live_root(monkeypatch, exe, argv, tool):
 
 
 @pytest.mark.parametrize(
+    "exe,args,expected",
+    [
+        (
+            r"C:\Users\x\AppData\Local\AnthropicClaude\app-1.0.0\claude.exe",
+            [],
+            None,
+        ),
+        (
+            r"C:\Users\x\AppData\Local\AnthropicClaude\app-1.0.0\claude.exe",
+            ["--type=renderer"],
+            None,
+        ),
+        (r"C:\Program Files\WindowsApps\Claude_1.0.0_x64\app\claude.exe", [], None),
+        (r"C:\Users\x\AppData\Local\Programs\claude\claude.exe", [], "claude"),
+    ],
+    ids=["squirrel-main", "squirrel-renderer", "msix", "cli"],
+)
+def test_windows_claude_desktop_excluded_but_cli_accepted(
+    monkeypatch, exe, args, expected
+):
+    monkeypatch.setattr(pu, "WINDOWS", True)
+    proc = _record(3, 0, exe, cpu=20, name="claude.exe")
+    proc.info["cmdline"] = [exe, *args]
+    patterns = _pat(claude=r"\bclaude\b")
+    assert pu._identity(proc.info, patterns) == expected
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([proc]))
+    out = pu.scan_activity(patterns)["claude"]
+    assert out["present"] is (expected == "claude")
+    assert out["cpu_seconds"] == (20 if expected else 0)
+
+
+@pytest.mark.parametrize(
     "exe,argv,name",
     [
         ("/Applications/Claude.app/Contents/MacOS/Claude", ["claude"], "claude"),

@@ -292,15 +292,15 @@ class DevActivityInstance(MonitorInstance):
         now = time.time()
         errors: list[dict] = []
         uncertain_tools: set[str] = set()
+        process_unavailable = False
         try:
             snapshot = scan_activity(self._compiled)
         except (OSError, RuntimeError):
             snapshot = {}
+            process_unavailable = True
             errors.append({"tool": "all", "layer": "process", "code": "unavailable"})
         limited = any(s.get("limited", False) for s in snapshot.values())
         for tool, sample in snapshot.items():
-            if sample.get("errors") or sample.get("limited"):
-                uncertain_tools.add(tool)
             for code in sample.get("errors", []):
                 errors.append(
                     {
@@ -400,6 +400,11 @@ class DevActivityInstance(MonitorInstance):
                         vscode_state = (
                             "busy" if vs_cpu >= cfg.busy_cpu_percent else "idle"
                         )
+            # Fresh hooks resolve activity even when process observation fails.
+            if source != "hook" and (
+                process_unavailable or sample.get("errors") or sample.get("limited")
+            ):
+                uncertain_tools.add(tool)
             # A discovery cap is informational when an independent, complete
             # layer resolved this tool. Unresolved session evidence still defers idle.
             if session.get("limited") and not (
@@ -476,9 +481,7 @@ class DevActivityInstance(MonitorInstance):
         # isn't noisy AND a busy→waiting transition surfaces the actionable
         # "needs input" signal instead of a misleading "idle" (Codex 外门).
         cls = "busy" if is_busy else "waiting" if headline == "waiting" else "off"
-        uncertain_active = bool(self._active_tools & uncertain_tools) or any(
-            e["tool"] == "all" for e in errors
-        )
+        uncertain_active = bool(self._active_tools & uncertain_tools)
         if cls != "off":
             self._idle_pending = False
         elif self._prev_class in _ACTIVE and uncertain_active:

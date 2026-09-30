@@ -282,7 +282,7 @@ def test_busy_to_waiting_emits_waiting_not_idle(tmp_path, monkeypatch):
     )
 
 
-@pytest.mark.parametrize("failure", ["error", "limited"])
+@pytest.mark.parametrize("failure", ["error", "limited", "process_error", "all"])
 @pytest.mark.parametrize("recovered", ["idle", "busy", "waiting"])
 def test_suppressed_idle_recovers_without_duplicate_events(
     tmp_path, monkeypatch, failure, recovered
@@ -303,10 +303,21 @@ def test_suppressed_idle_recovers_without_duplicate_events(
         if failure == "error":
             (tmp_path / "agent-activity-claude.json").write_text("invalid JSON")
         else:
-            _write(tmp_path, "claude", "idle", time.time())
-            monkeypatch.setattr(
-                da, "scan_activity", lambda *a: {"claude": {"limited": True}}
-            )
+            # Without a fresh hook, failed process evidence must still defer idle.
+            (tmp_path / "agent-activity-claude.json").unlink()
+            if failure == "all":
+
+                def unavailable(*a):
+                    raise RuntimeError("unavailable")
+
+                monkeypatch.setattr(da, "scan_activity", unavailable)
+            else:
+                sample = (
+                    {"limited": True}
+                    if failure == "limited"
+                    else {"errors": ["denied"]}
+                )
+                monkeypatch.setattr(da, "scan_activity", lambda *a: {"claude": sample})
         for _ in range(2):
             st = inst.check(emit)
             assert st.metrics["probe_errors"] or st.metrics["probe_limited"]
@@ -324,6 +335,47 @@ def test_suppressed_idle_recovers_without_duplicate_events(
             assert st.metrics["ai_state"] == recovered
             assert not st.metrics["probe_errors"] and not st.metrics["probe_limited"]
             assert [e[1] for e in events] == expected
+    finally:
+        inst.stop()
+
+
+@pytest.mark.parametrize("failure", ["limited", "error", "all"])
+def test_process_failure_does_not_suppress_fresh_hook_idle(
+    tmp_path, monkeypatch, failure
+):
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude", "codex"]
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    emit = lambda *a, **k: events.append(a)  # noqa: E731
+    try:
+        _write(tmp_path, "claude", "busy", time.time())
+        inst.check(emit)
+        if failure == "all":
+
+            def unavailable(*a):
+                raise RuntimeError("unavailable")
+
+            monkeypatch.setattr(da, "scan_activity", unavailable)
+        else:
+            sample = (
+                {"limited": True} if failure == "limited" else {"errors": ["denied"]}
+            )
+            monkeypatch.setattr(da, "scan_activity", lambda *a: {"claude": sample})
+        for state in ("idle", "idle", "busy", "busy"):
+            _write(tmp_path, "claude", state, time.time())
+            st = inst.check(emit)
+            assert st.metrics["tools"][0]["source"] == "hook"
+            assert st.metrics["ai_state"] == state
+            assert st.metrics["probe_errors"] or st.metrics["probe_limited"]
+            if failure != "limited":
+                assert st.state == "degraded"
+            expected = ["ai: AI idle"]
+            if state == "busy":
+                expected.append("ai: AI busy")
+            assert [e[1] for e in events] == expected
+            assert not inst._idle_pending
     finally:
         inst.stop()
 

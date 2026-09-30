@@ -75,8 +75,16 @@ def _identity(d: dict, patterns: dict) -> str | None:
     identity = _basename(exe or (argv[0] if argv else "") or d.get("name") or "")
     # Desktop apps/helpers cannot borrow a CLI identity from argv or name.
     bundle_path = exe.replace("\\", "/").lower()
-    if "/claude.app/" in bundle_path or (
-        "/chatgpt.app/" in bundle_path and identity != "codex"
+    if (
+        "/claude.app/" in bundle_path
+        or ("/chatgpt.app/" in bundle_path and identity != "codex")
+        or (
+            identity == "claude"
+            and (
+                "/anthropicclaude/" in bundle_path
+                or "/windowsapps/claude_" in bundle_path
+            )
+        )
     ):
         return None
     if identity in {"claude", "codex", "kimi"}:
