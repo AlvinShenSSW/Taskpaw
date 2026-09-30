@@ -73,11 +73,32 @@ def _identity(d: dict, patterns: dict) -> str | None:
     exe = d.get("exe") or ""
     argv = d.get("cmdline") or []
     identity = _basename(exe or (argv[0] if argv else "") or d.get("name") or "")
-    # Desktop Claude is never the CLI, even if an override is broad.
-    if "/claude.app/" in exe.replace("\\", "/").lower():
+    # Desktop apps/helpers cannot borrow a CLI identity from argv or name.
+    bundle_path = exe.replace("\\", "/").lower()
+    if "/claude.app/" in bundle_path or (
+        "/chatgpt.app/" in bundle_path and identity != "codex"
+    ):
         return None
     if identity in {"claude", "codex", "kimi"}:
         return identity
+    for candidate in [argv[0] if argv else "", d.get("name") or ""]:
+        tool = _basename(candidate)
+        if tool in {"claude", "codex", "kimi"}:
+            return tool
+    # Interpreter launchers expose their entry point after argv[0]. Only these
+    # exact script/module identities are accepted; never scan other arguments.
+    launcher = _basename(argv[0]) if argv else ""
+    python = re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", launcher)
+    if (launcher in {"node", "nodejs"} or python) and len(argv) > 1:
+        script = _basename(argv[1])
+        if script in {"claude", "codex", "kimi"}:
+            return script
+        if script == "kimi-cli" or ("/" + argv[1].replace("\\", "/")).endswith(
+            "/@moonshot-ai/kimi-code/dist/main.mjs"
+        ):
+            return "kimi"
+        if python and argv[1:3] == ["-m", "kimi_cli"]:
+            return "kimi"
     editor_names = {"code", "Code", "Visual Studio Code", "Code Helper"}
     editor_names.update(f"Code Helper ({r})" for r in ("GPU", "Plugin", "Renderer"))
     if WINDOWS:
@@ -105,12 +126,11 @@ def common_host(roots: list[dict]) -> str:
 
 def _host(pid: int, records: dict[int, dict], identities: dict[int, str]) -> str:
     seen = {pid}
-    found = False
     for _ in range(_MAX_ANCESTORS):
         child = records[pid]
         parent = child.get("ppid")
         if parent == 0:
-            return "vscode" if found else "other"
+            return "other"
         if parent in seen or parent not in records:
             return "unknown"
         ancestor = records[parent]
@@ -120,7 +140,8 @@ def _host(pid: int, records: dict[int, dict], identities: dict[int, str]) -> str
             or ancestor["created"] > child["created"]
         ):
             return "unknown"
-        found |= identities.get(parent) == "vscode"
+        if identities.get(parent) == "vscode":
+            return "vscode"
         seen.add(parent)
         pid = parent
     return "unknown"

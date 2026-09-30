@@ -42,6 +42,8 @@ unchanged installer-created groups may be deleted when empty. Without the undo
 record, uninstall cannot restore the whole file or delete groups. Backups remain
 for manual recovery; activity state files remain untouched. Partial I/O failures
 are reported per tool with the backup locator; rerun to reconcile.
+Reinstalling over externally edited settings revokes whole-file restoration,
+so subsequent uninstall preserves those edits even after command updates.
 
 Exit codes: **0 success, 1 failure, 2 CLI usage error**. Malformed/duplicate-key
 JSON, symlinks, unsupported file types, missing executables and concurrent edits
@@ -88,7 +90,11 @@ Use `install --tool claude` and `check --tool claude`. Native Windows Codex and
 `--tool all` refuse before settings edits with:
 **Windows Codex hook dispatch not verified**. Claude's Git Bash commands must
 use forward slashes and literal quoting for paths with spaces or metacharacters
-(#206). A manual Claude example:
+(#206). Setup resolves Git Bash from `CLAUDE_CODE_GIT_BASH_PATH` when set;
+otherwise it checks `bin/bash.exe` and `usr/bin/bash.exe` under the Git install
+located via `git.exe` on PATH, `%ProgramFiles%/Git`, or
+`%LOCALAPPDATA%/Programs/Git`. System32 paths (including the WSL bash launcher)
+are rejected. A manual Claude example:
 
 ```json
 {
@@ -193,10 +199,12 @@ fast, but Linux timing and universal handle completeness remain unverified.
 Fresh hooks bypass session probes. Stop/reconfigure closes discovery iterators.
 
 CLI identity uses exact executable basenames (`claude`, `codex`, `kimi`), then
-argv[0]/name only when the executable is unavailable. Windows strips `.exe` and
-ignores case. A real `codex` inside ChatGPT.app counts; renderer/framework CPU,
+exact argv[0]/name basenames when the executable is not a known CLI. Windows
+strips `.exe` and ignores case. A real `codex` inside ChatGPT.app counts; renderer/framework CPU,
 Claude desktop, prompt arguments mentioning tools, Code core and Kilo do not.
-Interpreter launchers require explicit basename overrides or hooks.
+Node/Python launchers also accept exact tool script names, `kimi-cli`, the Kimi
+entry `@moonshot-ai/kimi-code/dist/main.mjs`, and Python's `-m kimi_cli`.
+Other arguments do not establish tool identity.
 `process_patterns` still accepts regexes but **only matches basenames in this
 monitor**; the generic process plugin retains full-command matching.
 CPU belongs to the nearest AI root once, including its children (at most 500).
@@ -213,11 +221,14 @@ have distinct labels. The sampled duty ratio is unchanged and resets on restart.
 Bounded `probe_errors` show tool/layer/error codes only; failures set the monitor
 to degraded while retaining useful independent evidence. `probe_limited` means
 incomplete observation, not idle. Failed observation alone does not emit an idle
-completion. Paths, session IDs, process IDs and command arguments are never Hub
-metrics or diagnostics.
+completion for the previously active tools; unrelated-tool failures do not
+suppress their idle transition. Paths, session IDs, process IDs and command
+arguments are never Hub metrics or diagnostics.
 
 Host attribution is conservative: mixed same-tool roots are “Multiple hosts”;
-missing/denied/reused/cyclic ancestry is “Host unknown”. A tool-wide hook/recent
+missing/denied/reused/cyclic ancestry before a validated VS Code ancestor is
+“Host unknown”. Once that ancestor is validated, older missing parents do not
+invalidate the VS Code host. A tool-wide hook/recent
 write cannot identify which of mixed hosts is active, so it does not mark VS Code
 busy. Root-specific CPU or open handles can. VS Code is never in `busy_tools`.
 

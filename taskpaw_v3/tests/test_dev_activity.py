@@ -564,6 +564,36 @@ def test_persistent_hook_error_preserves_next_active_event(
             st = inst.check(lambda *a, **k: events.append(a))
             assert st.state == "degraded" and st.metrics["probe_errors"]
         title = "AI busy" if active == "busy" else "AI waiting for input"
-        assert [e[1] for e in events] == [f"ai: {title}"]
+        assert [e[1] for e in events] == ["ai: AI idle", f"ai: {title}"]
+    finally:
+        inst.stop()
+
+
+@pytest.mark.parametrize("failure", ["hook", "process_limited", "session_limited"])
+def test_unrelated_tool_failure_does_not_suppress_fresh_hook_idle(
+    tmp_path, monkeypatch, failure
+):
+    _snapshot(monkeypatch, {"claude": True})
+    cfg = DevActivityConfig(
+        name="ai", state_dir=str(tmp_path), tools=["claude", "codex"]
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    try:
+        _write(tmp_path, "claude", "busy", time.time())
+        inst.check(lambda *a, **k: events.append(a))
+        if failure == "hook":
+            (tmp_path / "agent-activity-codex.json").write_text("invalid JSON")
+        elif failure == "process_limited":
+            monkeypatch.setattr(
+                da, "scan_activity", lambda *a: {"codex": {"limited": True}}
+            )
+        else:
+            monkeypatch.setattr(
+                inst._sessions, "sample", lambda *a: {"codex": {"limited": True}}
+            )
+        _write(tmp_path, "claude", "idle", time.time())
+        inst.check(lambda *a, **k: events.append(a))
+        assert [e[1] for e in events] == ["ai: AI idle"]
     finally:
         inst.stop()

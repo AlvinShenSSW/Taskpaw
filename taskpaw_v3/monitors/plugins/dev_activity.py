@@ -244,6 +244,7 @@ class DevActivityInstance(MonitorInstance):
         self._prev_class: Optional[str] = None
         self._announced_class: Optional[str] = None
         self._idle_pending: bool = False
+        self._active_tools: set[str] = set()
         self._compiled = {
             tool: re.compile(config.process_patterns[tool])
             if tool in config.process_patterns
@@ -290,6 +291,7 @@ class DevActivityInstance(MonitorInstance):
         cfg: DevActivityConfig = self.config  # type: ignore[assignment]
         now = time.time()
         errors: list[dict] = []
+        uncertain_tools: set[str] = set()
         try:
             snapshot = scan_activity(self._compiled)
         except (OSError, RuntimeError):
@@ -297,6 +299,8 @@ class DevActivityInstance(MonitorInstance):
             errors.append({"tool": "all", "layer": "process", "code": "unavailable"})
         limited = any(s.get("limited", False) for s in snapshot.values())
         for tool, sample in snapshot.items():
+            if sample.get("errors") or sample.get("limited"):
+                uncertain_tools.add(tool)
             for code in sample.get("errors", []):
                 errors.append(
                     {
@@ -323,6 +327,8 @@ class DevActivityInstance(MonitorInstance):
             hooks[tool] = read_tool_state(
                 cfg.state_dir, tool, cfg.freshness_seconds, now, hook_errors
             )
+            if hook_errors:
+                uncertain_tools.add(tool)
             errors.extend(
                 {"tool": self._diagnostic_tool(tool), "layer": "hook", "code": code}
                 for code in dict.fromkeys(hook_errors)
@@ -348,6 +354,8 @@ class DevActivityInstance(MonitorInstance):
             source = "hook" if state is not None else "presence"
             vscode_state = state if host == "vscode" else None
             session = sessions.get(tool, {})
+            if session.get("errors") or session.get("limited"):
+                uncertain_tools.add(tool)
             for code in session.get("errors", []):
                 errors.append(
                     {
@@ -457,15 +465,18 @@ class DevActivityInstance(MonitorInstance):
         # isn't noisy AND a busy→waiting transition surfaces the actionable
         # "needs input" signal instead of a misleading "idle" (Codex 外门).
         cls = "busy" if is_busy else "waiting" if headline == "waiting" else "off"
+        uncertain_active = bool(self._active_tools & uncertain_tools) or any(
+            e["tool"] == "all" for e in errors
+        )
         if cls != "off":
             self._idle_pending = False
-        elif self._prev_class in _ACTIVE and (errors or limited):
+        elif self._prev_class in _ACTIVE and uncertain_active:
             self._idle_pending = True
         if (
             self._prev_class is not None
             and (cls != self._prev_class or self._idle_pending)
             and cls != self._announced_class
-            and not (cls == "off" and (errors or limited))
+            and not (cls == "off" and uncertain_active)
         ):
             if cls == "busy":
                 emit(
@@ -492,6 +503,10 @@ class DevActivityInstance(MonitorInstance):
             self._idle_pending = False
         # Observations advance even when an idle notification must wait for recovery.
         self._prev_class = cls
+        if cls != "off":
+            self._active_tools = set(busy_tools if is_busy else waiting_tools)
+        elif not self._idle_pending:
+            self._active_tools.clear()
 
         detail = (
             f"running AI: {', '.join(busy_tools)}"

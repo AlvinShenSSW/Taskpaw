@@ -94,6 +94,38 @@ def test_selective_uninstall_preserves_later_edits_and_unowned_groups(setup):
     ]
 
 
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("tool", ["claude", "codex"])
+def test_reinstall_after_external_edit_revokes_whole_file_restore(
+    setup, existing, tool
+):
+    s, home = setup
+    if existing:
+        put(home, tool, {"baseline": True})
+    assert run(s, home, "install", tool) == 0
+    p = target(home, tool)
+    data = json.loads(p.read_text())
+    data["external"] = True
+    handler = {"type": "command", "command": "user-hook-never-executed"}
+    data["hooks"]["Stop"][0]["hooks"].append(handler)
+    p.write_text(json.dumps(data))
+    python = home / "python-alias"
+    python.symlink_to(s.sys.executable)
+    assert run(s, home, "install", tool, "--python", str(python)) == 0
+    record = json.loads((home / f".taskpaw/hook-setup/{tool}.json").read_text())
+    assert not {"original_exists", "baseline", "baseline_hash"} & record.keys()
+    # A subsequent update must not regain whole-file restoration authority.
+    assert run(s, home, "install", tool) == 0
+    assert run(s, home, "uninstall", tool) == 0
+    result = json.loads(p.read_text())
+    assert result["external"]
+    assert result.get("baseline", False) is existing
+    handlers = [
+        h for groups in result["hooks"].values() for g in groups for h in g["hooks"]
+    ]
+    assert handlers == [handler]
+
+
 def test_missing_record_never_removes_empty_groups(setup):
     s, home = setup
     assert run(s, home, "install", "claude") == 0
@@ -118,6 +150,7 @@ def test_malformed_settings_never_replaced(setup, bad):
 def test_windows_codex_all_preflight_no_edits(setup, monkeypatch, capsys):
     s, home = setup
     monkeypatch.setattr(s, "WINDOWS", True)
+    monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", s.shutil.which("bash"))
     assert run(s, home, "install") == 1
     assert "Windows Codex hook dispatch not verified" in capsys.readouterr().out
     assert not target(home, "claude").exists()
@@ -368,3 +401,68 @@ def test_missing_shell_and_nondefault_codex_home_refused(setup, monkeypatch):
     monkeypatch.setattr(s.shutil, "which", lambda *a: None)
     assert run(s, home, "install", "claude") == 1
     assert not target(home, "claude").exists()
+
+
+@pytest.mark.parametrize("relative", ["bin/bash.exe", "usr/bin/bash.exe"])
+@pytest.mark.parametrize(
+    "location", ["git_path", "program_files", "local_app_data", "env"]
+)
+def test_windows_git_bash_discovery(setup, monkeypatch, relative, location):
+    s, home = setup
+    monkeypatch.setattr(s, "WINDOWS", True)
+    for key in ("CLAUDE_CODE_GIT_BASH_PATH", "ProgramFiles", "LOCALAPPDATA"):
+        monkeypatch.delenv(key, raising=False)
+    root = home / "Git"
+    if location == "local_app_data":
+        root = home / "Programs/Git"
+    bash = root / relative
+    bash.parent.mkdir(parents=True)
+    bash.touch()
+    calls = []
+
+    def which(name):
+        calls.append(name)
+        return str(root / "cmd/git.exe") if location == "git_path" else None
+
+    monkeypatch.setattr(s.shutil, "which", which)
+    if location == "program_files":
+        monkeypatch.setenv("ProgramFiles", str(home))
+    elif location == "local_app_data":
+        monkeypatch.setenv("LOCALAPPDATA", str(home))
+    elif location == "env":
+        monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(bash))
+    assert s.shell_for("claude") == str(bash)
+    assert calls == ([] if location == "env" else ["git.exe"])
+
+
+@pytest.mark.parametrize("source", ["env", "path", "default"])
+def test_windows_system32_bash_rejected(setup, monkeypatch, source):
+    s, home = setup
+    monkeypatch.setattr(s, "WINDOWS", True)
+    for key in ("CLAUDE_CODE_GIT_BASH_PATH", "ProgramFiles", "LOCALAPPDATA"):
+        monkeypatch.delenv(key, raising=False)
+    root = home / "Windows/sYsTeM32"
+    bash = root / ("Git/bin/bash.exe" if source == "default" else "bash.exe")
+    bash.parent.mkdir(parents=True)
+    bash.touch()
+    monkeypatch.setattr(
+        s.shutil, "which", lambda name: str(bash) if name == "bash" else None
+    )
+    if source == "env":
+        monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(bash))
+    elif source == "default":
+        monkeypatch.setenv("ProgramFiles", str(root))
+    with pytest.raises(s.SetupError, match="Git Bash missing"):
+        s.shell_for("claude")
+
+
+def test_windows_git_bash_env_takes_precedence(setup, monkeypatch):
+    s, home = setup
+    monkeypatch.setattr(s, "WINDOWS", True)
+    monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(home / "missing/bash.exe"))
+    bash = home / "Git/bin/bash.exe"
+    bash.parent.mkdir(parents=True)
+    bash.touch()
+    monkeypatch.setenv("ProgramFiles", str(home))
+    with pytest.raises(s.SetupError, match="Git Bash missing"):
+        s.shell_for("claude")

@@ -69,6 +69,36 @@ def render_command(
 def shell_for(tool: str) -> str:
     if WINDOWS and tool == "codex":
         raise SetupError("Windows Codex hook dispatch not verified")
+    if WINDOWS:
+        override = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+        candidates = []
+        if override:
+            candidates.append(Path(override))
+        else:
+            roots = []
+            git = shutil.which("git.exe")
+            if git:
+                roots.append(Path(git).parent.parent)
+            for variable, suffix in (
+                ("ProgramFiles", "Git"),
+                ("LOCALAPPDATA", "Programs/Git"),
+            ):
+                directory = os.environ.get(variable)
+                if directory:
+                    roots.append(Path(directory) / suffix)
+            candidates.extend(
+                root / relative
+                for root in roots
+                for relative in ("bin/bash.exe", "usr/bin/bash.exe")
+            )
+        for candidate in candidates:
+            if "system32" in str(candidate.resolve()).replace("\\", "/").lower().split(
+                "/"
+            ):
+                continue
+            if candidate.is_file():
+                return str(candidate)
+        raise SetupError("Git Bash missing; set CLAUDE_CODE_GIT_BASH_PATH")
     shell = shutil.which("bash" if tool == "claude" else "sh")
     if not shell:
         raise SetupError("required shell missing")
@@ -432,13 +462,20 @@ def main(argv: list[str] | None = None) -> int:
                             baseline=str(saved) if saved else None,
                             baseline_hash=digest(raw),
                         )
+                    elif digest(raw) != record.get("last_hash"):
+                        # External edits revoke whole-file restoration, including
+                        # deletion of a file that was originally absent.
+                        for key in ("original_exists", "baseline", "baseline_hash"):
+                            new_record.pop(key, None)
                     private_dir(record_path.parent)
                     atomic_write(record_path, encode(new_record), record_raw)
                 validate_installed(settings(read_bytes(path)), tool, command)
                 verify_writer(command, tool, state_dir)
             elif args.action == "uninstall":
                 updated = raw
-                if record and digest(raw) == record.get("last_hash"):
+                if "original_exists" in record and digest(raw) == record.get(
+                    "last_hash"
+                ):
                     if record.get("original_exists"):
                         updated = read_bytes(Path(record["baseline"]))
                         if updated is None or digest(updated) != record.get(
