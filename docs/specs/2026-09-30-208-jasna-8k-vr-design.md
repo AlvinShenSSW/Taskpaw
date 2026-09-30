@@ -147,7 +147,7 @@ Launch-time override + context-driven lock with decorative display controls. Alt
 
 ## Execution surface
 - Writes: the files above. Reads/executes: `uv run pytest`, `uv run ruff check . && uv run ruff format --check taskpaw_v3 tests scripts && uv run mypy`, `cd taskpaw_v3/ui && npm run lint && npx tsc -b && npx vitest run`. No live agent config, no `C:\Jasna` writes, no film files.
-- pytest basetemp: `C:/Users/304/AppData/Local/Temp/t208/pt` (short, MAX_PATH) — `mkdir -p` the parent first.
+- pytest basetemp: use a short temporary directory to avoid MAX_PATH limits; create its parent first.
 
 ## Key implementation notes
 - `build_argv` order: `… --detection-model <d> [--vr-mode sbs] <extra args>`; the existing argv tests assert exact lists for the unticked case, so append the new flag only when ticked.

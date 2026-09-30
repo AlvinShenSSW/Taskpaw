@@ -1,8 +1,11 @@
 # #210 — Hub task views for Jasna / AV 翻译; version 3.9.7
 
 Date: 2026-09-30. Planner handoff, design v2. Run: `2026-09-30-issue-210`.
-Target: `/Users/alvinshen/Documents/Workspace/Taskpaw-issue-210`, branch
-`issue-210-hub-task-adapt`; inspected HEAD and local `origin/main` both
+
+Historical notice: PR #212 implemented this design. Planning-stage status,
+assumptions and handoff instructions below record the pre-implementation state.
+
+Target branch: `issue-210-hub-task-adapt`; inspected HEAD and local `origin/main` both
 `30d24c2e4215905586152ce494995a6be67aa1f1`. All source citations below refer to that
 revision, unless explicitly marked otherwise. Paths are repository-relative.
 Proposed APIs, names and behaviors below are implementation decisions, not claims
@@ -26,16 +29,14 @@ stepper and film-list experience, make mixed agent/Hub versions visible, and sto
 structured or null metrics leaking into generic tiles. This is read-only
 observation across the existing LAN trust boundary.
 
-Requirement source: issue #210, supplied fallback
-`/Users/alvinshen/Documents/Workspace/Taskpaw/.afk/runs/2026-09-30-issue-210/codex/issue-210.md:40–70`.
+Requirement source: the supplied fallback snapshot of issue #210.
 `gh issue view 210 --repo AlvinShenSSW/Taskpaw`, its `--comments` variant, and
 `gh pr list --repo AlvinShenSSW/Taskpaw --state open --limit 20` all failed with
 `error connecting to api.github.com`. The snapshot includes the title/body but
 does not establish current labels, comments or open-PR state. No online claim is
 inferred from those failures. For v2, the driver confirms issue #210 has 0
 comments, labels `bug`/`enhancement`/`v3`, and 0 open PRs as of 2026-09-30 (A1).
-The supplied planner contract at
-`/Users/alvinshen/.claude/plugins/cache/afk/afk-skills/1.3.1/skills/afk-spec-planner/SKILL.md`
+The supplied `afk-spec-planner` skill contract
 and its environment/output/continuity references were read. This is a child
 planning stage, not a claim or resume of the driver's run directory.
 
@@ -674,7 +675,7 @@ Run focused suites during implementation, then once the final changes settle:
    must have no diff. Version-only files must have no dependency churn.
 
 The configured command set is also recorded read-only at
-`/Users/alvinshen/Documents/Workspace/Taskpaw/.afk/config.md:3–6`; source CI
+`.afk/config.md:3–6`; source CI
 gates are `.github/workflows/ci.yml:26–39,63–86`. Failed/unavailable checks must
 be reported as such, never assumed green.
 
@@ -686,11 +687,12 @@ labelled stale/warning states and no task controls. MASTER requests responsive
 and focus checks (`design-system/taskpaw-v3/MASTER.md:184–208`); unit jsdom tests
 alone do not prove browser layout. No live deployment is necessary.
 
-## Handoff notes
+## Historical handoff notes
 
-- Deliverable is this file only; no implementation, tests or publication has
-  occurred. Initial worktree was clean. Planner has not written the run folder
-  or edited the driver's ledger; driver owns evidence retention and next stage.
+- At the planner stage, the deliverable was this file only; no implementation,
+  tests or publication had occurred. Initial worktree was clean. The planner had
+  not written the run folder or edited the driver's ledger; the driver owned
+  evidence retention and the next stage.
 - Baseline is the supplied issue snapshot plus this Frozen issue contract,
   separate from Git base `30d24c2`. Driver resolved comments/labels/PR state
   (A1) and confirmed no `v3.9.7` tag on origin (A4). Local main has later commit
