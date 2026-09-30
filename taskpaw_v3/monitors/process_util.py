@@ -8,7 +8,11 @@ processes)).
 
 from __future__ import annotations
 
+import math
+import ntpath
+import os
 import re
+import sys
 
 try:
     import psutil
@@ -53,103 +57,206 @@ def scan_one(rx: "re.Pattern[str]", search_cmdline: bool = True) -> bool:
     return scan_matches({"_": rx}, search_cmdline)["_"]
 
 
-# Cap the per-tool subtree walk so a pathological/looping tree can't wedge a check.
+# Activity observation is deliberately separate from generic full-command regexes.
+WINDOWS = sys.platform == "win32"
 _MAX_SUBTREE = 500
+_MAX_PROCESSES = 8192
+_MAX_ANCESTORS = 32
 
 
-def _cpu_seconds(cpu_times) -> float:
-    """user+system CPU seconds from a psutil cpu_times tuple, or 0.0 if unavailable."""
-    try:
-        return float(cpu_times.user) + float(cpu_times.system)
-    except (AttributeError, TypeError, ValueError):
-        return 0.0
+def _basename(value: str) -> str:
+    name = ntpath.basename(value) if WINDOWS else os.path.basename(value)
+    return name.lower().removesuffix(".exe") if WINDOWS else name
 
 
-def scan_activity(
-    patterns: dict[str, "re.Pattern[str]"],
-) -> dict[str, dict]:
-    """One sweep → per-tool observed CPU. For each precompiled `{tool: regex}` this
-    finds the matching ROOT processes (name/cmdline) and sums `cpu_times` (user+system
-    seconds) over each root's process SUBTREE, so a CLI's tool-execution children count
-    too. Returns `{tool: {"present": bool, "cpu_seconds": float}}`.
+def _identity(d: dict, patterns: dict) -> str | None:
+    exe = d.get("exe") or ""
+    argv = d.get("cmdline") or []
+    identity = _basename(exe or (argv[0] if argv else "") or d.get("name") or "")
+    # Desktop Claude is never the CLI, even if an override is broad.
+    if "/claude.app/" in exe.replace("\\", "/").lower():
+        return None
+    if identity in {"claude", "codex", "kimi"}:
+        return identity
+    editor_names = {"code", "Code", "Visual Studio Code", "Code Helper"}
+    editor_names.update(f"Code Helper ({r})" for r in ("GPU", "Plugin", "Renderer"))
+    if WINDOWS:
+        editor_names = {n.lower() for n in editor_names}
+    is_editor = identity in editor_names
+    # macOS's main executable is Electron; require the actual VS Code bundle.
+    if identity == "Electron" and "/Visual Studio Code.app/Contents/" in exe:
+        is_editor = True
+    if is_editor and exe and identity.startswith("Code Helper"):
+        is_editor = "/Visual Studio Code.app/Contents/" in exe
+    if is_editor:
+        return "vscode"
+    for tool, rx in patterns.items():
+        if tool != "vscode" and rx is not None and rx.search(identity):
+            return tool
+    return None
 
-    Pure external observation (no writes to / no impact on the tools) and same-user
-    process info needs no root on macOS. Raises RuntimeError if psutil is unavailable
-    (caller degrades); per-process races are swallowed.
+
+def common_host(roots: list[dict]) -> str:
+    hosts = {r["host"] for r in roots}
+    if not hosts or "unknown" in hosts:
+        return "unknown"
+    return next(iter(hosts)) if len(hosts) == 1 else "mixed"
+
+
+def _host(pid: int, records: dict[int, dict], identities: dict[int, str]) -> str:
+    seen = {pid}
+    found = False
+    for _ in range(_MAX_ANCESTORS):
+        child = records[pid]
+        parent = child.get("ppid")
+        if parent == 0:
+            return "vscode" if found else "other"
+        if parent in seen or parent not in records:
+            return "unknown"
+        ancestor = records[parent]
+        if (
+            ancestor["created"] is None
+            or child["created"] is None
+            or ancestor["created"] > child["created"]
+        ):
+            return "unknown"
+        found |= identities.get(parent) == "vscode"
+        seen.add(parent)
+        pid = parent
+    return "unknown"
+
+
+def scan_activity(patterns: dict[str, re.Pattern[str] | None]) -> dict[str, dict]:
+    """One bounded sweep. Paths/argv are discarded after identity classification.
+
+    `cpus` is keyed by (pid, creation time), with nearest AI root ownership.
+    Inaccessible/truncated data is unavailable, never evidence of zero CPU.
     """
     result: dict[str, dict] = {
-        k: {"present": False, "cpu_seconds": 0.0} for k in patterns
+        t: {
+            "present": False,
+            "cpu_seconds": 0.0,
+            "cpus": {},
+            "roots": [],
+            "complete": True,
+            "limited": False,
+            "errors": [],
+        }
+        for t in patterns
     }
-    if not patterns:
-        return result
     if psutil is None:
-        raise RuntimeError("psutil not available")
-
-    # One sweep: collect (name, cmdline, cpu_seconds) per pid + a ppid→children index.
-    info: dict[int, dict] = {}
-    children: dict[int, list[int]] = {}
-    for proc in psutil.process_iter(["pid", "ppid", "name", "cmdline", "cpu_times"]):
-        try:
-            d = proc.info
-            pid = d.get("pid")
-            if pid is None:
+        raise RuntimeError("unavailable")
+    records: dict[int, dict] = {}
+    identities: dict[int, str] = {}
+    errors: list[str] = []
+    limited = False
+    fields = ["pid", "ppid", "exe", "name", "cmdline", "create_time", "cpu_times"]
+    try:
+        for index, proc in enumerate(psutil.process_iter(fields)):
+            if index >= _MAX_PROCESSES:
+                limited = True
+                break
+            try:
+                d = proc.info
+                pid = d.get("pid")
+                if not isinstance(pid, int):
+                    continue
+                created = d.get("create_time")
+                if not isinstance(created, (int, float)) or not math.isfinite(created):
+                    created = None
+                cpu_times = d.get("cpu_times")
+                cpu = None
+                if cpu_times is not None:
+                    value = float(cpu_times.user) + float(cpu_times.system)
+                    if math.isfinite(value) and value >= 0:
+                        cpu = value
+                records[pid] = {"ppid": d.get("ppid"), "created": created, "cpu": cpu}
+                tool = _identity(d, patterns)
+                if tool:
+                    identities[pid] = tool
+            except psutil.AccessDenied:
+                errors.append("denied")
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue
-            info[pid] = {
-                "name": d.get("name") or "",
-                "cmd": " ".join(d.get("cmdline") or []),
-                "cpu": _cpu_seconds(d.get("cpu_times")),
-            }
-            children.setdefault(d.get("ppid"), []).append(pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+    except (OSError, psutil.AccessDenied):
+        errors.append("denied")
+    children: dict[int, list[int]] = {}
+    for pid, d in records.items():
+        children.setdefault(d["ppid"], []).append(pid)
+    for pid, tool in identities.items():
+        if tool not in result:
             continue
-
-    # Roots per tool: every process whose name/cmdline matches the tool's regex.
-    roots: dict[str, list[int]] = {k: [] for k in patterns}
-    for pid, meta in info.items():
-        for key, rx in patterns.items():
-            if rx.search(meta["name"]) or (meta["cmd"] and rx.search(meta["cmd"])):
-                roots[key].append(pid)
-
-    # Sum cpu over the UNION of each tool's roots' subtrees, counting every pid ONCE —
-    # so a matching descendant (e.g. `claude` → `claude-worker`) isn't double-counted
-    # through both its own root and its parent's subtree (Codex 外门). BFS is bounded +
-    # cycle-safe via the shared `seen` set.
-    for key, root_pids in roots.items():
-        if not root_pids:
+        out = result[tool]
+        out["present"] = True
+        if tool == "vscode":
             continue
-        result[key]["present"] = True
+        root = {
+            "pid": pid,
+            "created": records[pid]["created"],
+            "host": _host(pid, records, identities),
+        }
+        out["roots"].append(root)
         seen: set[int] = set()
-        queue = list(root_pids)
-        while queue and len(seen) < _MAX_SUBTREE:
+        queue = [pid]
+        while queue and len(seen) <= _MAX_SUBTREE:
             cur = queue.pop()
-            if cur in seen or cur not in info:
+            if cur in seen:
+                continue
+            # Nested AI roots own their subtree; editor core never belongs to AI.
+            if cur != pid and cur in identities:
                 continue
             seen.add(cur)
-            result[key]["cpu_seconds"] += info[cur]["cpu"]
-            queue.extend(children.get(cur, ()))
+            d = records[cur]
+            if d["created"] is None or d["cpu"] is None:
+                out["complete"] = False
+                out["errors"].append("unavailable")
+            else:
+                out["cpus"][(cur, d["created"])] = (d["cpu"], (pid, root["created"]))
+                out["cpu_seconds"] += d["cpu"]
+            for child in children.get(cur, []):
+                c = records[child]
+                if (
+                    d["created"] is None
+                    or c["created"] is None
+                    or c["created"] < d["created"]
+                ):
+                    out["complete"] = False
+                    continue
+                queue.append(child)
+        if queue:
+            out["limited"] = True
+            out["complete"] = False
+    for out in result.values():
+        out["errors"] = list(dict.fromkeys(out["errors"] + errors))
+        out["limited"] |= limited
+        out["complete"] &= not limited and not errors
     return result
 
 
 def cpu_percents(
-    prev: dict[str, float],
-    prev_mono: float,
-    sample: dict[str, dict],
-    now_mono: float,
-) -> tuple[dict[str, float], dict[str, float]]:
-    """Turn two `scan_activity` cpu_seconds snapshots into a per-tool CPU percent.
-
-    `pct = 100 * max(0, cur - prev) / elapsed` — the first sample (no prev, or
-    elapsed<=0) yields 0.0, and a drop (a busy child exited between samples) clamps to
-    0 rather than going negative. Returns `(percents, new_prev)`; a tool with no root
-    (`present` False) is omitted from `percents` (observation unavailable)."""
+    prev: dict, prev_mono: float, sample: dict[str, dict], now_mono: float
+) -> tuple[dict[str, float], dict]:
+    """Only identities in consecutive complete samples contribute to a delta."""
     elapsed = now_mono - prev_mono
     percents: dict[str, float] = {}
-    new_prev: dict[str, float] = {}
+    new_prev: dict = {}
     for tool, s in sample.items():
-        if not s.get("present"):
+        s["root_cpu"] = {}
+        if not s.get("present") or not s.get("complete") or tool == "vscode":
             continue
-        cur = float(s.get("cpu_seconds", 0.0))
-        new_prev[tool] = cur
-        if tool in prev and elapsed > 0:
-            percents[tool] = 100.0 * max(0.0, cur - prev[tool]) / elapsed
+        cpus = s["cpus"]
+        new_prev[tool] = cpus
+        old = prev.get(tool, {})
+        if elapsed <= 0:
+            continue
+        # A newly created root cannot inherit the lifetime CPU of its children.
+        roots = {(r["pid"], r["created"]) for r in s["roots"]}
+        valid_roots = roots & old.keys() & cpus.keys()
+        s["cpu_complete"] = roots == valid_roots
+        for identity, (cpu, root) in cpus.items():
+            if identity in old and root in valid_roots and old[identity][1] == root:
+                delta = max(0.0, cpu - old[identity][0]) * 100.0 / elapsed
+                s["root_cpu"][root] = s["root_cpu"].get(root, 0.0) + delta
+        if s["root_cpu"]:
+            percents[tool] = sum(s["root_cpu"].values())
     return percents, new_prev

@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -42,23 +43,46 @@ _CLAUDE_EVENT_STATE = {
     "PreToolUse": "busy",
     "PostToolUse": "busy",
     "Notification": "waiting",
+    "PermissionRequest": "waiting",
     "Stop": "idle",
     "SubagentStop": "idle",
     "SessionEnd": "idle",
 }
 
 
-def state_from_stdin(raw: str) -> tuple[Optional[str], Optional[str]]:
+_CODEX_EVENT_STATE = {
+    **dict.fromkeys(
+        (
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "PreCompact",
+            "PostCompact",
+            "SubagentStart",
+            "SubagentStop",
+        ),
+        "busy",
+    ),
+    "PermissionRequest": "waiting",
+    **dict.fromkeys(("Stop", "Interrupt", "SessionEnd"), "idle"),
+}
+
+
+def state_from_stdin(
+    raw: str, tool: str = "claude"
+) -> tuple[Optional[str], Optional[str]]:
     """Map a Claude Code hook payload to (state, session_id). Best-effort."""
     try:
         data = json.loads(raw)
-    except Exception:
+    except (ValueError, TypeError):
         return None, None
     if not isinstance(data, dict):
         return None, None
     event = data.get("hook_event_name") or data.get("hookEventName") or ""
     session = data.get("session_id") or data.get("sessionId")
-    return _CLAUDE_EVENT_STATE.get(str(event)), (str(session) if session else None)
+    mapping = _CODEX_EVENT_STATE if tool == "codex" else _CLAUDE_EVENT_STATE
+    return mapping.get(str(event)), (session if isinstance(session, str) else None)
 
 
 def write_activity(
@@ -77,9 +101,16 @@ def write_activity(
         "session": session or "",
         "ts": time.time() if ts is None else ts,
     }
-    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    os.replace(tmp, p)
+    fd, name = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=p.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, p)
+    finally:
+        tmp.unlink(missing_ok=True)
     return p
 
 
@@ -101,11 +132,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     # break the host's notify/hook chain (#168). The trade-off — a mistyped flag is
     # silently ignored rather than erroring — is acceptable for a fire-and-forget
     # writer whose contract is "never disrupt the caller".
+    ap.add_argument("--taskpaw-hook-id", default=None)
     args, _ = ap.parse_known_args(argv)
 
     state, session = args.state, args.session
     if state is None and not sys.stdin.isatty():
-        detected, sess = state_from_stdin(sys.stdin.read())
+        detected, sess = state_from_stdin(sys.stdin.read(), args.tool)
         state = detected
         session = session or sess
     if state is None:
@@ -113,7 +145,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         # the host hook chain.
         return 0
 
-    write_activity(args.path, args.tool, state, session)
+    try:
+        write_activity(args.path, args.tool, state, session)
+    except OSError:
+        print("activity writer: state write failed", file=sys.stderr)
+        return 1
     return 0
 
 

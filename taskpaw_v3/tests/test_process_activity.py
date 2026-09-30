@@ -22,6 +22,7 @@ class _Proc:
     def __init__(self, pid, ppid, name, cmdline, user=0.0, system=0.0):
         self.info = {
             "pid": pid,
+            "create_time": 1.0,
             "ppid": ppid,
             "name": name,
             "cmdline": cmdline,
@@ -64,7 +65,8 @@ def test_scan_activity_sums_subtree_cpu(monkeypatch):
 def test_scan_activity_absent_tool(monkeypatch):
     monkeypatch.setattr(pu, "psutil", _FakePsutil([_Proc(99, 1, "nginx", ["nginx"])]))
     out = pu.scan_activity(_pat(claude=r"\bclaude\b"))
-    assert out["claude"] == {"present": False, "cpu_seconds": 0.0}
+    assert out["claude"]["present"] is False
+    assert out["claude"]["cpu_seconds"] == 0.0
 
 
 def test_scan_activity_no_psutil(monkeypatch):
@@ -101,30 +103,163 @@ def test_scan_activity_matching_descendant_counted_once(monkeypatch):
     assert out["claude"]["cpu_seconds"] == pytest.approx(7.0)  # 1+2+4, each once
 
 
+def _sample(cpu=4.0, present=True):
+    return {
+        "claude": {
+            "present": present,
+            "complete": True,
+            "roots": [{"pid": 10, "created": 1}],
+            "cpus": {(10, 1): (cpu, (10, 1))},
+        }
+    }
+
+
 def test_cpu_percents_first_sample_is_zero():
-    sample = {"claude": {"present": True, "cpu_seconds": 4.0}}
-    pct, new_prev = pu.cpu_percents({}, 0.0, sample, 2.0)
-    assert pct == {}  # no prior → no percent yet
-    assert new_prev == {"claude": 4.0}
+    pct, prev = pu.cpu_percents({}, 0, _sample(), 2)
+    assert pct == {} and "claude" in prev
 
 
 def test_cpu_percents_delta():
-    prev = {"claude": 4.0}
-    sample = {"claude": {"present": True, "cpu_seconds": 6.0}}
-    pct, new_prev = pu.cpu_percents(prev, 0.0, sample, 2.0)
-    assert pct["claude"] == pytest.approx(100.0)  # 2 cpu-s over 2 s = 100% of a core
-    assert new_prev == {"claude": 6.0}
+    _, prev = pu.cpu_percents({}, 0, _sample(), 1)
+    assert pu.cpu_percents(prev, 1, _sample(6), 3)[0]["claude"] == 100
 
 
 def test_cpu_percents_exited_child_clamps_to_zero():
-    prev = {"claude": 10.0}
-    sample = {"claude": {"present": True, "cpu_seconds": 8.0}}  # dropped (child exited)
-    pct, _ = pu.cpu_percents(prev, 0.0, sample, 2.0)
-    assert pct["claude"] == 0.0
+    _, prev = pu.cpu_percents({}, 0, _sample(10), 1)
+    assert pu.cpu_percents(prev, 1, _sample(8), 3)[0]["claude"] == 0
 
 
 def test_cpu_percents_absent_tool_omitted():
-    prev = {"claude": 4.0}
-    sample = {"claude": {"present": False, "cpu_seconds": 0.0}}
-    pct, new_prev = pu.cpu_percents(prev, 0.0, sample, 2.0)
-    assert pct == {} and new_prev == {}
+    assert pu.cpu_percents({}, 0, _sample(present=False), 1) == ({}, {})
+
+
+# T1: exact identity fixtures reconstructed from the issue, not private captures.
+def _record(pid, ppid, exe, cpu=0, created=1, name=None, args=()):
+    p = _Proc(pid, ppid, name or exe.rsplit("/", 1)[-1], [exe, *args], user=cpu)
+    p.info.update(exe=exe, create_time=created)
+    return p
+
+
+def test_exact_identity_renderer_and_real_chatgpt_codex(monkeypatch):
+    procs = [
+        _record(1, 0, "/sbin/init"),
+        _record(
+            2,
+            1,
+            "/Applications/ChatGPT.app/Contents/Frameworks/Renderer",
+            43.7,
+            args=("codex",),
+        ),
+        _record(3, 1, "/Applications/ChatGPT.app/Contents/MacOS/codex", 0.7),
+        _record(4, 1, "/Applications/Claude.app/Contents/MacOS/Claude", 50),
+        _record(5, 1, "/bin/node", 60, args=("claude MCP disclaimer",)),
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity({"claude": None, "codex": None})
+    assert not out["claude"]["present"]
+    assert out["codex"]["cpu_seconds"] == 0.7
+
+
+def test_global_nearest_cpu_ownership_and_hosts(monkeypatch):
+    procs = [
+        _record(1, 0, "/sbin/init"),
+        _record(
+            2,
+            1,
+            "/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+            name="Code",
+        ),
+        _record(3, 2, "/bin/bash"),
+        _record(4, 3, "/bin/claude", 1),
+        _record(5, 4, "/bin/codex", 2),
+        _record(6, 5, "/bin/worker", 4),
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity({"claude": None, "codex": None, "vscode": None})
+    assert out["claude"]["cpu_seconds"] == 1
+    assert out["codex"]["cpu_seconds"] == 6
+    assert out["claude"]["roots"][0]["host"] == "vscode"
+    assert out["vscode"]["cpu_seconds"] == 0
+
+
+@pytest.mark.parametrize(
+    "exe,name,windows,expected",
+    [
+        (r"C:\Tools\CODEX.EXE", "codex", True, True),
+        ("/bin/Codex", "Codex", False, False),
+        ("/bin/node", "codex", False, False),
+        ("", "Claude", False, False),
+    ],
+)
+def test_identity_platform_and_contradicting_exe(
+    monkeypatch, exe, name, windows, expected
+):
+    monkeypatch.setattr(pu, "WINDOWS", windows, raising=False)
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([_record(3, 0, exe, name=name)]))
+    assert pu.scan_activity({"codex": None})["codex"]["present"] is expected
+
+
+def test_cpu_identity_new_child_exit_reuse_and_missing(monkeypatch):
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([_record(3, 0, "/bin/codex", 1)]))
+    first = pu.scan_activity({"codex": None})
+    pct, prev = pu.cpu_percents({}, 0, first, 1)
+    assert pct == {}
+    monkeypatch.setattr(
+        pu,
+        "psutil",
+        _FakePsutil(
+            [_record(3, 0, "/bin/codex", 1.007), _record(4, 3, "/bin/worker", 100)]
+        ),
+    )
+    pct, prev = pu.cpu_percents(prev, 1, pu.scan_activity({"codex": None}), 2)
+    assert pct["codex"] == pytest.approx(0.7)
+    monkeypatch.setattr(
+        pu, "psutil", _FakePsutil([_record(3, 0, "/bin/codex", 300, created=2)])
+    )
+    assert pu.cpu_percents(prev, 2, pu.scan_activity({"codex": None}), 3)[0] == {}
+
+
+def test_process_and_descendant_bounds_not_idle(monkeypatch):
+    procs = [_record(1, 0, "/bin/claude")] + [
+        _record(n, 1, "/bin/worker") for n in range(2, 8300)
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity({"claude": None})
+    assert out["claude"]["limited"] and not out["claude"]["complete"]
+    assert len(out["claude"]["cpus"]) <= 501
+
+
+def test_host_and_nested_ownership_independent_of_selected_tools(monkeypatch):
+    procs = [
+        _record(1, 0, "/sbin/init"),
+        _record(2, 1, "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"),
+        _record(3, 2, "/bin/claude", 1),
+        _record(4, 3, "/bin/codex", 100),
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    out = pu.scan_activity({"claude": None})["claude"]
+    assert out["roots"][0]["host"] == "vscode"
+    assert out["cpu_seconds"] == 1
+
+
+@pytest.mark.parametrize("parent,created", [(99, 1), (2, 1), (1, 0)])
+def test_incomplete_reused_cyclic_ancestry_unknown(monkeypatch, parent, created):
+    procs = [
+        _record(1, 0, "/sbin/init", created=1),
+        _record(2, parent, "/bin/claude", created=created),
+    ]
+    monkeypatch.setattr(pu, "psutil", _FakePsutil(procs))
+    assert pu.scan_activity({"claude": None})["claude"]["roots"][0]["host"] == "unknown"
+
+
+def test_missing_cpu_unavailable_and_regex_only_basename(monkeypatch):
+    p = _record(1, 0, "/bin/claude")
+    p.info["cpu_times"] = None
+    monkeypatch.setattr(
+        pu,
+        "psutil",
+        _FakePsutil([p, _record(2, 0, "/bin/node", args=("magic-agent",))]),
+    )
+    out = pu.scan_activity({"claude": None, "custom": re.compile("magic-agent")})
+    assert not out["claude"]["complete"] and out["claude"]["errors"]
+    assert not out["custom"]["present"]

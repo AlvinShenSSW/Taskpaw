@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import time
 from pathlib import Path
 
@@ -267,7 +268,7 @@ def test_guide_hook_commands_have_no_backslashes():
     assert cmds, "no Claude hook examples found in the guide"
     assert all("\\" not in c for c in cmds)
     # ...and the guide shows the Windows form (drive letter + forward slashes).
-    assert any(re.match(r"[A-Za-z]:/", c) for c in cmds)
+    assert any(re.match(r"[A-Za-z]:/", shlex.split(c)[0]) for c in cmds)
 
 
 # ── end-to-end: writer → plugin reads it ─────────────────────────────────--
@@ -280,3 +281,43 @@ def test_writer_then_plugin_reads_state(tmp_path):
     aw.write_activity(str(out), "claude", "idle")
     assert inst.check(emit).state == "idle"
     assert any(a[0] == "done" for a, _ in events)
+
+
+def test_codex_documented_synthetic_events():
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures/activity_hooks/codex.json").read_text()
+    )
+    assert fixture["provenance"]["synthetic"] is True
+    for case in fixture["cases"]:
+        assert (
+            aw.state_from_stdin(json.dumps(case["input"]), tool="codex")[0]
+            == case["state"]
+        )
+
+
+def test_writer_ignores_sensitive_fields_and_cleans_failure(
+    tmp_path, monkeypatch, capsys
+):
+    import io
+
+    payload = {
+        "hookEventName": "PermissionRequest",
+        "sessionId": "synthetic",
+        "prompt": "PRIVATE SENTINEL",
+    }
+    monkeypatch.setattr(aw.sys, "stdin", io.StringIO(json.dumps(payload)))
+    out = tmp_path / "out.json"
+    assert aw.main(["--tool", "codex", "--path", str(out)]) == 0
+    assert set(json.loads(out.read_text())) == {"tool", "state", "session", "ts"}
+    monkeypatch.setattr(
+        aw.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("PRIVATE SENTINEL"))
+    )
+    assert aw.main(["--tool", "codex", "--state", "idle", "--path", str(out)]) == 1
+    assert "PRIVATE SENTINEL" not in str(capsys.readouterr())
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_issue_211_release_is_398():
+    from taskpaw_v3 import __version__
+
+    assert __version__ == "3.9.8"
