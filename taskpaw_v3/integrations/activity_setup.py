@@ -225,11 +225,7 @@ def required(tool: str, command: str) -> dict[str, dict]:
     events = _CLAUDE_EVENT_STATE if tool == "claude" else _CODEX_EVENT_STATE
     return {
         event: {
-            **(
-                {"matcher": "permission_prompt|idle_prompt"}
-                if event == "Notification"
-                else {}
-            ),
+            **({"matcher": "permission_prompt"} if event == "Notification" else {}),
             "hooks": [{"type": "command", "command": command, "timeout": 3}],
         }
         for event in events

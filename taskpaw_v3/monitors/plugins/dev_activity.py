@@ -246,7 +246,7 @@ class DevActivityInstance(MonitorInstance):
         self._idle_pending: bool = False
         self._active_tools: set[str] = set()
         self._compiled = {
-            tool: re.compile(config.process_patterns[tool])
+            tool: re.compile(config.process_patterns[tool], re.IGNORECASE)
             if tool in config.process_patterns
             else None
             for tool in config.tools
@@ -354,7 +354,7 @@ class DevActivityInstance(MonitorInstance):
             source = "hook" if state is not None else "presence"
             vscode_state = state if host == "vscode" else None
             session = sessions.get(tool, {})
-            if session.get("errors") or session.get("limited"):
+            if session.get("errors"):
                 uncertain_tools.add(tool)
             for code in session.get("errors", []):
                 errors.append(
@@ -400,6 +400,17 @@ class DevActivityInstance(MonitorInstance):
                         vscode_state = (
                             "busy" if vs_cpu >= cfg.busy_cpu_percent else "idle"
                         )
+            # A discovery cap is informational when an independent, complete
+            # layer resolved this tool. Unresolved session evidence still defers idle.
+            if session.get("limited") and not (
+                source == "hook"
+                or (
+                    source == "cpu"
+                    and sample.get("complete", False)
+                    and sample.get("cpu_complete", False)
+                )
+            ):
+                uncertain_tools.add(tool)
             tools.append(
                 {
                     "tool": tool,

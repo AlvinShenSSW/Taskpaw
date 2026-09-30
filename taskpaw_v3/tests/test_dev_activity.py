@@ -548,6 +548,81 @@ def test_busy_off_busy_events_across_discovery_yields(tmp_path, monkeypatch, bud
         inst.stop()
 
 
+@pytest.mark.parametrize("cap", ["queue", "depth"])
+def test_persistent_session_cycle_limit_allows_cpu_idle_busy_events(
+    tmp_path, monkeypatch, cap
+):
+    from taskpaw_v3.monitors import session_activity as sa
+
+    root = tmp_path / "sessions"
+    root.mkdir()
+    if cap == "queue":
+        for n in range(300):
+            (root / str(n)).mkdir()
+    else:
+        root.joinpath(*[str(n) for n in range(10)]).mkdir(parents=True)
+    monkeypatch.setattr(sa, "WINDOWS", True)  # No native open-file inspection.
+    clock = [1.0]
+    total_cpu = [0.0]
+    monkeypatch.setattr(da.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        da,
+        "scan_activity",
+        lambda *a: {
+            "claude": {
+                "present": True,
+                "roots": [{"pid": 10, "created": 1, "host": "other"}],
+                "cpus": {(10, 1): (total_cpu[0], (10, 1))},
+                "complete": True,
+            }
+        },
+    )
+    inst = DevActivityPlugin().create(
+        "ai",
+        DevActivityConfig(
+            name="ai",
+            state_dir=str(tmp_path),
+            tools=["claude"],
+            session_roots={"claude": [str(root)]},
+        ),
+    )
+    events = []
+    try:
+        inst.check(lambda *a, **k: None)  # CPU baseline.
+        for total, state in [(60.0, "busy"), (60.0, "idle"), (120.0, "busy")]:
+            clock[0] += 60
+            total_cpu[0] = total
+            st = inst.check(lambda *a, **k: events.append(a))
+            assert st.metrics["ai_state"] == state
+            assert st.metrics["tools"][0]["source"] == "cpu"
+            assert st.metrics["probe_limited"]
+            assert not st.metrics["probe_errors"]
+            assert inst._sessions.cycle_limited["claude"]
+            assert not inst._idle_pending
+        assert [e[1] for e in events] == ["ai: AI busy", "ai: AI idle", "ai: AI busy"]
+    finally:
+        inst.stop()
+
+
+def test_session_limit_does_not_suppress_fresh_hook_idle(tmp_path, monkeypatch):
+    inst = DevActivityPlugin().create(
+        "ai", DevActivityConfig(name="ai", state_dir=str(tmp_path), tools=["claude"])
+    )
+    monkeypatch.setattr(
+        inst._sessions, "sample", lambda *a: {"claude": {"limited": True}}
+    )
+    events = []
+    try:
+        for state in ("busy", "idle", "busy"):
+            _write(tmp_path, "claude", state, time.time())
+            st = inst.check(lambda *a, **k: events.append(a))
+            assert st.metrics["tools"][0]["source"] == "hook"
+            assert st.metrics["probe_limited"]
+        assert [e[1] for e in events] == ["ai: AI idle", "ai: AI busy"]
+    finally:
+        inst.stop()
+
+
 @pytest.mark.parametrize("active", ["busy", "waiting"])
 def test_persistent_hook_error_preserves_next_active_event(
     tmp_path, monkeypatch, active

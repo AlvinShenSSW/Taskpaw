@@ -63,7 +63,9 @@ A successful check verifies the writer, not the host's policy, trust or dispatch
 Claude uses bash (Git Bash on Windows). New wiring covers SessionStart,
 UserPromptSubmit, PreToolUse, PostToolUse (busy), PermissionRequest and Notification
 (waiting), Stop and SessionEnd (idle). Notification is filtered to
-`permission_prompt|idle_prompt`. New installs omit SubagentStop: a child finishing
+`permission_prompt` only; `idle_prompt` inactivity reminders do not mean waiting.
+Reinstalling updates existing TaskPaw handlers to this matcher.
+New installs omit SubagentStop: a child finishing
 must not mark its parent idle. The writer retains its legacy parser behavior.
 All handlers are synchronous commands with a three-second timeout.
 
@@ -176,8 +178,10 @@ Overrides replace only that tool's defaults, for example
 `session_roots: {codex: ["/local/sessions"], kimi: []}`. Empty lists disable lookup.
 Paths expand home, not shell variables; relative roots resolve against startup
 cwd. `CODEX_HOME` is not silently substituted. Roots must not overlap within a
-tool; at most eight are accepted. Symlinks/junctions and non-directories are
-rejected. Missing default directories are normal; denied metadata is degraded.
+tool; at most eight are accepted. Root symlink/junction aliases are resolved to
+their real paths; non-directories are rejected. Symlinked files/directories
+inside a root are ignored, including links leading outside it. Missing default
+directories are normal; denied metadata is degraded.
 
 A live CLI is required for session inference. Writes at age ≤30s mean busy;
 with complete checks, ages >30s and ≤300s can mean idle. Older archives allow CPU

@@ -15,9 +15,12 @@ Usage:
 
     # auto-detect from a Claude Code hook payload on stdin (hook_event_name):
     #   UserPromptSubmit / SessionStart -> busy
-    #   Notification                    -> waiting
+    #   Notification (permission_prompt matcher only) -> waiting
     #   Stop / SubagentStop             -> idle
     activity_writer.py --tool claude            # reads stdin JSON
+
+The installer filters Claude Notification to permission_prompt; idle_prompt is
+an inactivity reminder, not an approval request.
 
 The default path is ~/.taskpaw/agent-activity.json; pass --path to use a separate
 file per tool when monitoring both Claude and Codex on one machine.

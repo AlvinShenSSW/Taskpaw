@@ -49,6 +49,8 @@ def test_install_idempotent_check_exact_uninstall(setup, existing):
     for tool in ("claude", "codex"):
         hooks = json.loads(target(home, tool).read_text())["hooks"]
         assert ("SubagentStop" in hooks) is (tool == "codex")
+        if tool == "claude":
+            assert hooks["Notification"][0]["matcher"] == "permission_prompt"
     assert run(s, home, "uninstall") == 0
     for tool in ("claude", "codex"):
         assert (
@@ -58,6 +60,40 @@ def test_install_idempotent_check_exact_uninstall(setup, existing):
         )
     assert run(s, home, "uninstall") == 0
     assert run(s, home, "install") == 0
+
+
+def test_reinstall_reconciles_legacy_notification_matcher(setup, monkeypatch):
+    s, home = setup
+    required = s.required
+
+    def legacy_required(tool, command):
+        groups = required(tool, command)
+        groups["Notification"]["matcher"] = "permission_prompt|idle_prompt"
+        return groups
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(s, "required", legacy_required)
+        assert run(s, home, "install", "claude") == 0
+    p = target(home, "claude")
+    data = json.loads(p.read_text())
+    unrelated = {"type": "command", "command": "user-notification-handler"}
+    data["hooks"]["Notification"][0]["hooks"].append(unrelated)
+    p.write_text(json.dumps(data))
+    assert run(s, home, "check", "claude") == 1
+    assert run(s, home, "install", "claude") == 0
+    assert run(s, home, "check", "claude") == 0
+    groups = json.loads(p.read_text())["hooks"]["Notification"]
+    assert groups[0] == {
+        "matcher": "permission_prompt|idle_prompt",
+        "hooks": [unrelated],
+    }
+    assert len(groups) == 2
+    assert groups[1]["matcher"] == "permission_prompt"
+    assert len(groups[1]["hooks"]) == 1
+    assert s.owned(groups[1]["hooks"][0], "claude")
+    before = p.read_bytes()
+    assert run(s, home, "install", "claude") == 0
+    assert p.read_bytes() == before
 
 
 @pytest.mark.parametrize(

@@ -111,9 +111,10 @@ def _identity(d: dict, patterns: dict) -> str | None:
         is_editor = "/Visual Studio Code.app/Contents/" in exe
     if is_editor:
         return "vscode"
-    for tool, rx in patterns.items():
-        if tool != "vscode" and rx is not None and rx.search(identity):
-            return tool
+    for candidate in [exe, argv[0] if argv else "", d.get("name") or ""]:
+        for tool, rx in patterns.items():
+            if tool != "vscode" and rx is not None and rx.search(_basename(candidate)):
+                return tool
     return None
 
 
@@ -191,7 +192,12 @@ def scan_activity(patterns: dict[str, re.Pattern[str] | None]) -> dict[str, dict
                     value = float(cpu_times.user) + float(cpu_times.system)
                     if math.isfinite(value) and value >= 0:
                         cpu = value
-                records[pid] = {"ppid": d.get("ppid"), "created": created, "cpu": cpu}
+                records[pid] = {
+                    "ppid": d.get("ppid"),
+                    "created": created,
+                    "cpu": cpu,
+                    "process": proc if cpu is None else None,
+                }
                 tool = _identity(d, patterns)
                 if tool:
                     identities[pid] = tool
@@ -228,10 +234,20 @@ def scan_activity(patterns: dict[str, re.Pattern[str] | None]) -> dict[str, dict
                 continue
             seen.add(cur)
             d = records[cur]
-            if d["created"] is None or d["cpu"] is None:
+            exited = False
+            if cur != pid and d["cpu"] is None:
+                # attrs substitutes None for both denied and zombie CPU reads.
+                # Only confirmed descendant exit races can be omitted safely.
+                try:
+                    exited = d["process"].status() == psutil.STATUS_ZOMBIE
+                except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                    exited = True
+                except psutil.AccessDenied:
+                    exited = False
+            if not exited and (d["created"] is None or d["cpu"] is None):
                 out["complete"] = False
                 out["errors"].append("unavailable")
-            else:
+            elif not exited:
                 out["cpus"][(cur, d["created"])] = (d["cpu"], (pid, root["created"]))
                 out["cpu_seconds"] += d["cpu"]
             for child in children.get(cur, []):

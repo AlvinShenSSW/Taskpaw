@@ -31,6 +31,8 @@ class _Proc:
 
 
 class _FakePsutil:
+    STATUS_ZOMBIE = "zombie"
+
     class NoSuchProcess(Exception): ...
 
     class AccessDenied(Exception): ...
@@ -329,3 +331,72 @@ def test_missing_cpu_unavailable_and_regex_only_basename(monkeypatch):
     out = pu.scan_activity({"claude": None, "custom": re.compile("magic-agent")})
     assert not out["claude"]["complete"] and out["claude"]["errors"]
     assert not out["custom"]["present"]
+
+
+@pytest.mark.parametrize(
+    "status", ["zombie", "gone", "zombie_exception", "denied", "running"]
+)
+def test_unavailable_descendant_cpu_distinguishes_exit_from_denial(monkeypatch, status):
+    child = _record(2, 1, "/bin/worker", created=2)
+    child.info["cpu_times"] = None
+
+    def get_status():
+        if status == "gone":
+            raise _FakePsutil.NoSuchProcess
+        if status == "zombie_exception":
+            raise _FakePsutil.ZombieProcess
+        if status == "denied":
+            raise _FakePsutil.AccessDenied
+        return status
+
+    child.status = get_status
+    monkeypatch.setattr(
+        pu,
+        "psutil",
+        _FakePsutil(
+            [
+                _record(1, 0, "/bin/claude", cpu=1),
+                child,
+                _record(3, 1, "/bin/worker", cpu=2),
+            ]
+        ),
+    )
+    out = pu.scan_activity({"claude": None})["claude"]
+    exited = status in {"zombie", "gone", "zombie_exception"}
+    assert out["complete"] is exited
+    assert out["errors"] == ([] if exited else ["unavailable"])
+    assert out["cpu_seconds"] == 3
+    assert set(out["cpus"]) == {(1, 1), (3, 1)}
+
+
+@pytest.mark.parametrize(
+    "exe,argv,name,expected",
+    [
+        ("/bin/Cursor", ["other"], "other", True),
+        ("/bin/electron", ["/bin/Cursor"], "other", True),
+        ("/bin/electron", ["electron"], "Cursor", True),
+        ("/Cursor/electron", ["/Cursor/electron", "Cursor"], "electron", False),
+    ],
+)
+def test_override_matches_identity_basenames_only(
+    monkeypatch, exe, argv, name, expected
+):
+    from taskpaw_v3.monitors.plugins.dev_activity import (
+        DevActivityConfig,
+        DevActivityInstance,
+    )
+
+    proc = _record(1, 0, exe, name=name)
+    proc.info["cmdline"] = argv
+    monkeypatch.setattr(pu, "WINDOWS", False)
+    monkeypatch.setattr(pu, "psutil", _FakePsutil([proc]))
+    inst = DevActivityInstance(
+        "ai",
+        DevActivityConfig(
+            name="ai", tools=["custom"], process_patterns={"custom": "cursor"}
+        ),
+    )
+    try:
+        assert pu.scan_activity(inst._compiled)["custom"]["present"] is expected
+    finally:
+        inst.stop()
