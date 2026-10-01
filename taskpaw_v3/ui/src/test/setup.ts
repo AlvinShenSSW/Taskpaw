@@ -7,3 +7,13 @@ import "../i18n";
 // Fill jsdom's object URL gaps so deferred export cleanup survives restored globals.
 URL.createObjectURL ??= () => "blob:jsdom";
 URL.revokeObjectURL ??= () => {};
+
+// Existing component fixtures use isolated, in-memory local control credentials.
+import { beforeEach } from "vitest";
+import { clearControlCredentials, setDevControlCredential } from "../api";
+beforeEach(() => {
+  delete window.__TASKPAW__;
+  clearControlCredentials();
+  setDevControlCredential("agent", "test-agent-control");
+  setDevControlCredential("hub", "test-hub-control");
+});

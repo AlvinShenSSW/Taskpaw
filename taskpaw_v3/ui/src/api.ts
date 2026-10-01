@@ -1,8 +1,7 @@
 // Minimal REST client for the V3 backends.
 //
-// In the Tauri shell the backend base URL + api key are injected on the loopback
-// origin (design §3.1); in the browser they come from Vite env / localStorage.
-// The agent control API is loopback-only; the Hub API is read-only here.
+// Native credentials are injected into the trusted main frame; development
+// credentials remain in memory, isolated by role. Both APIs are local control.
 
 export interface FfmpegStatus {
   on_path: string | null;
@@ -156,35 +155,93 @@ export type LlmTestResult = {
   note?: "thinking_unsupported";
 };
 
+export type ControlRole = "agent" | "hub";
 declare global {
   interface Window {
-    // Injected by the Tauri shell on the loopback origin (main.rs init_script).
-    // `role` drives single-role navigation (App.tsx, #58).
-    __TASKPAW__?: { baseUrl?: string; apiKey?: string; role?: "agent" | "hub" };
+    __TASKPAW__?: { baseUrl?: string; controlToken?: string; role?: ControlRole; bootId?: string };
   }
 }
-
-// The agent console talks to the agent's loopback CONTROL API (5681) — the
-// network API (5680) is the Hub-facing, CORS-free read surface. The Hub
-// dashboard talks to the Hub API (5690). An injected baseUrl (shell) or
-// VITE_TASKPAW_BASE (browser) overrides both.
-const DEFAULT_PORT = { agent: 5681, hub: 5690 } as const;
-
-function cfg(role: "agent" | "hub") {
-  const injected = window.__TASKPAW__ || {};
-  const baseUrl =
-    injected.baseUrl ||
-    (import.meta.env.VITE_TASKPAW_BASE as string) ||
-    `http://127.0.0.1:${DEFAULT_PORT[role]}`;
-  const apiKey = injected.apiKey || (import.meta.env.VITE_TASKPAW_TOKEN as string) || "";
-  return { baseUrl, apiKey };
+const DEFAULT_PORT = { agent: 5681, hub: 5691 } as const;
+type Credential = { baseUrl: string; controlToken: string; verified: boolean };
+const credentials: Partial<Record<ControlRole, Credential>> = {};
+const roleBases: Record<ControlRole, string> = { agent: "http://127.0.0.1:5681", hub: "http://127.0.0.1:5691" };
+export const controlBaseForRole = (role: ControlRole) => roleBases[role];
+let consumedInjection: Window["__TASKPAW__"];
+let revision = 0;
+const listeners = new Set<() => void>();
+const changed = () => { revision++; listeners.forEach(fn => fn()); };
+export const subscribeControlCredentials = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; };
+export const controlCredentialRevision = () => revision;
+export class ControlCredentialError extends Error {
+  constructor() { super("Local control credentials are unavailable or expired"); }
+}
+export function canonicalControlBase(base: string): boolean {
+  try {
+    const url = new URL(base);
+    return ["http:", "https:"].includes(url.protocol)
+      && ["127.0.0.1", "[::1]"].includes(url.hostname)
+      && !url.username && !url.password && !url.search && !url.hash
+      && url.pathname === "/"
+      && base === `${url.protocol}//${url.hostname}:${url.port || (url.protocol === "http:" ? "80" : "443")}`;
+  } catch { return false; }
+}
+function validToken(token: string): boolean { return /^[\x21-\x7e]{1,1024}$/.test(token); }
+function consumeInjection() {
+  const injected = window.__TASKPAW__;
+  if (!injected || consumedInjection === injected) return;
+  consumedInjection = injected;
+  if ((injected.role === "agent" || injected.role === "hub")
+    && typeof injected.baseUrl === "string" && canonicalControlBase(injected.baseUrl)
+    && typeof injected.controlToken === "string" && validToken(injected.controlToken)
+    && /^[0-9a-f]{32}$/.test(injected.bootId ?? "")) {
+    credentials[injected.role] = { baseUrl: injected.baseUrl, controlToken: injected.controlToken, verified: true };
+  }
+}
+export function hasControlCredential(role: ControlRole): boolean { consumeInjection(); return credentials[role]?.verified === true; }
+export function clearControlCredentials(role?: ControlRole) {
+  if (role) delete credentials[role];
+  else { delete credentials.agent; delete credentials.hub; roleBases.agent = "http://127.0.0.1:5681"; roleBases.hub = "http://127.0.0.1:5691"; }
+  if (!role || window.__TASKPAW__?.role === role) {
+    if (window.__TASKPAW__) delete window.__TASKPAW__.controlToken;
+    consumedInjection = window.__TASKPAW__;
+  }
+  changed();
+}
+export function setDevControlCredential(role: ControlRole, token: string, baseUrl = `http://127.0.0.1:${DEFAULT_PORT[role]}`) {
+  if (!import.meta.env.DEV || window.__TASKPAW__ || !validToken(token) || !canonicalControlBase(baseUrl)) throw new ControlCredentialError();
+  roleBases[role] = baseUrl;
+  credentials[role] = { baseUrl, controlToken: token, verified: true };
+  changed();
+}
+export async function connectDevControlCredential(role: ControlRole, token: string, baseUrl = controlBaseForRole(role)) {
+  if (!import.meta.env.DEV || window.__TASKPAW__ || !validToken(token) || !canonicalControlBase(baseUrl)) throw new ControlCredentialError();
+  roleBases[role] = baseUrl;
+  credentials[role] = { baseUrl, controlToken: token, verified: false };
+  try {
+    await (role === "agent" ? api.agentStatus() : api.hubStatus());
+    const candidate = credentials[role];
+    if (!candidate || candidate.controlToken !== token) throw new ControlCredentialError();
+    candidate.verified = true; changed();
+  } catch {
+    clearControlCredentials(role); throw new ControlCredentialError();
+  }
+}
+function cfg(role: ControlRole): Credential {
+  consumeInjection();
+  const value = credentials[role];
+  if (!value) throw new ControlCredentialError();
+  return value;
+}
+function checkUnauthorized(role: ControlRole, res: Response) {
+  if (res.status === 401) { clearControlCredentials(role); throw new ControlCredentialError(); }
 }
 
 async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
-  const { baseUrl, apiKey } = cfg(role);
+  const { baseUrl, controlToken } = cfg(role);
   const res = await fetch(`${baseUrl}${path}`, {
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    headers: { Authorization: `Bearer ${controlToken}` },
   });
+  checkUnauthorized(role, res);
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
   return res.json() as Promise<T>;
 }
@@ -202,10 +259,11 @@ export class FilmRequestError extends Error {
 }
 
 async function hubFilmGet(path: string): Promise<unknown> {
-  const { baseUrl, apiKey } = cfg("hub");
+  const { baseUrl, controlToken } = cfg("hub");
   const res = await fetch(`${baseUrl}${path}`, {
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    headers: { Authorization: `Bearer ${controlToken}` },
   });
+  checkUnauthorized("hub", res);
   if (!res.ok) {
     let code = "agent_request_failed";
     try {
@@ -226,15 +284,16 @@ async function send<T>(
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const { baseUrl, apiKey } = cfg(role);
+  const { baseUrl, controlToken } = cfg(role);
   const res = await fetch(`${baseUrl}${path}`, {
     method,
     headers: {
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      Authorization: `Bearer ${controlToken}`,
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  checkUnauthorized(role, res);
   if (!res.ok) {
     let detail = `${path} → ${res.status}`;
     try {

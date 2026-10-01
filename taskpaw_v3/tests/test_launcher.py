@@ -130,7 +130,7 @@ def test_tasklog_launcher_order_and_direct_failure_alert(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "build_supervisor", build)
     monkeypatch.setattr(uvicorn, "Server", lambda *a, **kw: Mock())
     monkeypatch.setattr(uvicorn, "Config", lambda *a, **kw: None)
-    monkeypatch.setattr(launcher, "announce_ready", lambda *a: None)
+    monkeypatch.setattr(launcher, "announce_ready", lambda *a, **k: None)
     launcher.run_agent(
         _llm_cfg(),
         queue=queue,
@@ -298,6 +298,8 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
             return None
 
     class _FakeServer:
+        started = True
+
         def __init__(self, config):
             self.should_exit = False
 
@@ -352,3 +354,548 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
     finally:
         shutdown.shutdown()
     assert started.get("stopped") is True
+
+
+# R01 lifecycle failures use isolated mocked sockets/runtime; real wire smoke
+# below uses only tmp_path files and ephemeral numeric-loopback ports.
+@pytest.mark.parametrize("role", ["agent", "hub"])
+@pytest.mark.parametrize(
+    "failure", ["second_claim", "bootstrap", "app", "runtime_start", "second_thread"]
+)
+def test_control_startup_rollback_all_phases(
+    role, failure, tmp_path, monkeypatch, capsys
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import uvicorn
+
+    from taskpaw_v3.agent.server import app as agent_app
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core import control, net
+    from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+    from taskpaw_v3.core.tasklog import get_task_log
+    from taskpaw_v3.hub.server import app as hub_app
+    from taskpaw_v3.hub.server.store import HubStore
+    from taskpaw_v3.monitors import runtime
+
+    order = []
+    sockets = [Mock(), Mock()]
+    claimed = []
+    sessions = []
+    original_bootstrap = control.bootstrap_control
+    original_revoke = control.revoke_control
+
+    def claim(*args):
+        if len(claimed) == 1 and failure == "second_claim":
+            raise OSError("second socket failed")
+        sock = sockets[len(claimed)]
+        claimed.append(sock)
+        return sock
+
+    def bootstrap(*args):
+        assert len(claimed) == 2
+        assert not (tmp_path / "logs").exists()
+        assert get_task_log().query()["entries"] == []
+        if failure == "bootstrap":
+            raise control.ControlCredentialError("Control credentials unavailable")
+        session = original_bootstrap(args[0], args[1], None)
+        sessions.append(session)
+        order.append("published")
+        return session
+
+    def revoke(session):
+        original_revoke(session)
+        order.append("inactive")
+
+    class Thread:
+        count = 0
+
+        def __init__(self, *a, **kw):
+            self.ident = None
+            Thread.count += 1
+            self.n = Thread.count
+
+        def start(self):
+            if failure == "second_thread" and self.n == 2:
+                raise RuntimeError("thread start failed")
+            self.ident = self.n
+
+        def join(self, timeout=None):
+            order.append("joined")
+
+        def is_alive(self):
+            return False
+
+    def start():
+        order.append("runtime_start")
+        if failure == "runtime_start":
+            raise RuntimeError("runtime start failed")
+
+    def stop():
+        assert not sessions[0].is_active()
+        order.append("runtime_stop")
+        return True
+
+    monkeypatch.setattr(launcher, "claim_port", claim)
+    monkeypatch.setattr(net, "claim_port", claim)
+    monkeypatch.setattr(launcher, "bootstrap_control", bootstrap)
+    monkeypatch.setattr(control, "bootstrap_control", bootstrap)
+    monkeypatch.setattr(launcher, "revoke_control", revoke)
+    monkeypatch.setattr(control, "revoke_control", revoke)
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **k: None
+    )
+    monkeypatch.setattr(net, "reclaim_ports_from_stale_instance", lambda *a, **k: None)
+    monkeypatch.setattr(launcher.threading, "Thread", Thread)
+    monkeypatch.setattr(
+        uvicorn, "Server", lambda *a, **kw: SimpleNamespace(should_exit=False)
+    )
+    monkeypatch.setattr(uvicorn, "Config", lambda *a, **kw: None)
+    sup = Mock()
+    sup.start.side_effect = start
+    sup.stop.side_effect = stop
+    monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **kw: sup)
+    monkeypatch.setattr(hub_app.HubService, "start", lambda self: start())
+    monkeypatch.setattr(hub_app.HubService, "stop", lambda self: stop())
+    if failure == "app":
+        factory = agent_app if role == "agent" else hub_app
+        key = "create_control_app" if role == "agent" else "create_hub_control_app"
+        monkeypatch.setattr(factory, key, Mock(side_effect=RuntimeError("app failed")))
+    shutdown = GracefulShutdown()
+    monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
+    store = HubStore(tmp_path / "hub.db")
+    try:
+        with pytest.raises((OSError, RuntimeError, control.ControlCredentialError)):
+            if role == "agent":
+                launcher.run_agent(
+                    _llm_cfg(),
+                    shutdown=shutdown,
+                    config_path=tmp_path / "agent.yaml",
+                    block=False,
+                )
+            else:
+                hub_app.run_hub(
+                    HubConfig(self_monitor=False, bind_port=15690, control_port=15691),
+                    store,
+                    shutdown=shutdown,
+                    config_path=tmp_path / "hub.yaml",
+                    block=False,
+                )
+        for sock in claimed:
+            sock.close.assert_called_once()
+        assert "taskpaw_ready" not in capsys.readouterr().out
+        if sessions:
+            assert not sessions[0].is_active()
+        if failure in ("second_claim", "bootstrap"):
+            assert not (tmp_path / "logs").exists()
+            assert "runtime_start" not in order
+        if "runtime_stop" in order:
+            assert order.index("inactive") < order.index("runtime_stop")
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("role", ["agent", "hub"])
+def test_control_revoke_failure_still_stops_runtime_and_sockets(
+    role, tmp_path, monkeypatch, caplog
+):
+    from unittest.mock import Mock
+
+    import uvicorn
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core import control, net
+    from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+    from taskpaw_v3.hub.server import app as hub_app
+    from taskpaw_v3.hub.server.store import HubStore
+    from taskpaw_v3.monitors import runtime
+
+    sockets = [Mock(), Mock()]
+    claims = iter(sockets)
+    sessions = []
+    original = control.bootstrap_control
+
+    def bootstrap(role, base, path):
+        session = original(role, base, None)
+        sessions.append(session)
+        return session
+
+    def revoke(session):
+        session._active.clear()
+        raise control.ControlCredentialError("fixed credential failure")
+
+    monkeypatch.setattr(launcher, "bootstrap_control", bootstrap)
+    monkeypatch.setattr(control, "bootstrap_control", bootstrap)
+    monkeypatch.setattr(launcher, "revoke_control", revoke)
+    monkeypatch.setattr(control, "revoke_control", revoke)
+    monkeypatch.setattr(launcher, "claim_port", lambda *a: next(claims))
+    monkeypatch.setattr(net, "claim_port", lambda *a: next(claims))
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(net, "reclaim_ports_from_stale_instance", lambda *a, **kw: None)
+    monkeypatch.setattr(uvicorn, "Server", lambda *a, **kw: Mock())
+    monkeypatch.setattr(uvicorn, "Config", lambda *a, **kw: None)
+    monkeypatch.setattr(launcher, "announce_ready", lambda *a, **kw: None)
+    monkeypatch.setattr(net, "announce_ready", lambda *a, **kw: None)
+    sup = Mock()
+    sup.stop.side_effect = lambda: not sessions[0].is_active()
+    monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **kw: sup)
+    stopped = []
+    monkeypatch.setattr(hub_app.HubService, "start", lambda self: None)
+
+    def stop(self):
+        assert not sessions[0].is_active()
+        stopped.append(True)
+        return True
+
+    monkeypatch.setattr(hub_app.HubService, "stop", stop)
+    store = HubStore(tmp_path / "hub.db")
+    shutdown = GracefulShutdown()
+    monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
+    if role == "agent":
+        launcher.run_agent(_llm_cfg(), shutdown=shutdown, block=False)
+    else:
+        hub_app.run_hub(
+            HubConfig(self_monitor=False), store, shutdown=shutdown, block=False
+        )
+    shutdown.shutdown()
+    assert not sessions[0].is_active()
+    for sock in sockets:
+        sock.close.assert_called_once()
+    assert "Could not revoke" in caplog.text
+    assert sessions[0].token not in caplog.text
+    if role == "agent":
+        sup.stop.assert_called_once()
+    else:
+        assert stopped == [True]
+    store.close()
+
+
+def _ephemeral_pair(host):
+    from taskpaw_v3.core.net import claim_port
+
+    first = claim_port(host, 0, "test read")
+    try:
+        second = claim_port(host, 0, "test control")
+        try:
+            return first.getsockname()[1], second.getsockname()[1]
+        finally:
+            second.close()
+    finally:
+        first.close()
+
+
+def _http_status(url, token=None, *, method="GET", body=None):
+    import http.client
+    import json
+    import time
+    from urllib.parse import urlsplit
+
+    endpoint = urlsplit(url)
+    deadline = time.monotonic() + 5
+    while True:
+        connection = http.client.HTTPConnection(
+            endpoint.hostname, endpoint.port, timeout=0.5
+        )
+        try:
+            headers = {"Authorization": "Bearer " + token} if token else {}
+            data = json.dumps(body).encode() if body is not None else None
+            if data is not None:
+                headers["Content-Type"] = "application/json"
+            connection.request(
+                method,
+                endpoint.path + ("?" + endpoint.query if endpoint.query else ""),
+                body=data,
+                headers=headers,
+            )
+            response = connection.getresponse()
+            response.read()
+            return response.status
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+        finally:
+            # Close the client before stopping the listener: server-side
+            # TIME_WAIT from Connection: close is not a leaked listening socket.
+            connection.close()
+
+
+@pytest.mark.parametrize("role", ["agent", "hub"])
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+def test_control_real_dual_listener_descriptor_restart_and_cleanup(
+    role, host, tmp_path, monkeypatch, capsys, caplog
+):
+    import json
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core import net
+    from taskpaw_v3.core.config import HubConfig, save_yaml
+    from taskpaw_v3.core.control import read_control_descriptor
+    from taskpaw_v3.hub.server import app as hub_app
+    from taskpaw_v3.hub.server.store import HubStore
+
+    try:
+        read_port, control_port = _ephemeral_pair(host)
+    except OSError:
+        if host == "::1":
+            pytest.skip("IPv6 loopback unavailable")
+        raise
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(net, "reclaim_ports_from_stale_instance", lambda *a, **kw: None)
+    config_path = tmp_path / (role + ".yaml")
+    descriptor_path = tmp_path / (role + ".control.json")
+    previous = None
+    for _ in range(2):
+        monkeypatch.setenv("TASKPAW_CONTROL_TOKEN", "fake-static-env-marker")
+        kwargs = dict(
+            bind_host=host,
+            bind_port=read_port,
+            control_host=host,
+            control_port=control_port,
+            api_token="fake-read",
+        )
+        cfg = (
+            AgentConfig(server_id="s", machine="m", host_metrics=False, **kwargs)
+            if role == "agent"
+            else HubConfig(
+                self_monitor=False,
+                write_status_md=False,
+                data_dir=str(tmp_path),
+                **kwargs,
+            )
+        )
+        save_yaml(cfg, config_path)
+        store = HubStore(tmp_path / "hub.db") if role == "hub" else None
+        shutdown = (
+            launcher.run_agent(cfg, config_path=config_path, block=False)
+            if role == "agent"
+            else hub_app.run_hub(cfg, store, config_path=config_path, block=False)
+        )
+        try:
+            descriptor = read_control_descriptor(descriptor_path)
+            expected_base = net.loopback_url(host, control_port)
+            ready = next(
+                json.loads(line)
+                for line in capsys.readouterr().out.splitlines()
+                if "taskpaw_ready" in line
+            )
+            assert ready == {
+                "taskpaw_ready": True,
+                "role": role,
+                "base_url": expected_base,
+                "control_credential_file": str(descriptor_path),
+                "boot_id": descriptor.boot_id,
+            }
+            assert descriptor.base_url == expected_base
+            assert descriptor.control_token != "fake-static-env-marker"
+            prefix = "/control" if role == "agent" else ""
+            assert (
+                _http_status(
+                    expected_base + prefix + "/status", descriptor.control_token
+                )
+                == 200
+            )
+            assert _http_status(expected_base + prefix + "/status", "fake-read") == 401
+            assert (
+                _http_status(net.loopback_url(host, read_port) + "/status", "fake-read")
+                == 200
+            )
+            if previous is not None:
+                assert descriptor.control_token != previous.control_token
+                assert descriptor.boot_id != previous.boot_id
+                assert (
+                    _http_status(
+                        expected_base + prefix + "/status", previous.control_token
+                    )
+                    == 401
+                )
+            previous = descriptor
+            assert descriptor.control_token not in caplog.text
+            assert descriptor.control_token not in config_path.read_text()
+        finally:
+            shutdown.shutdown()
+        assert not descriptor_path.exists()
+        assert net.port_available(host, read_port)
+        assert net.port_available(host, control_port)
+
+
+@pytest.mark.parametrize("role", ["agent", "hub"])
+def test_stale_key_seen_by_fake_port_holder_never_authorizes_restart(
+    role, tmp_path, monkeypatch
+):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core import net
+    from taskpaw_v3.core.config import HubConfig, save_yaml
+    from taskpaw_v3.core.control import read_control_descriptor
+    from taskpaw_v3.hub.server import app as hub_app
+    from taskpaw_v3.hub.server.store import HubStore
+
+    read_port, control_port = _ephemeral_pair("127.0.0.1")
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(net, "reclaim_ports_from_stale_instance", lambda *a, **kw: None)
+    common = dict(bind_port=read_port, control_port=control_port, api_token="fake-read")
+    cfg = (
+        AgentConfig(server_id="s", machine="m", host_metrics=False, **common)
+        if role == "agent"
+        else HubConfig(
+            self_monitor=False, write_status_md=False, data_dir=str(tmp_path), **common
+        )
+    )
+    config = tmp_path / (role + ".yaml")
+    descriptor_path = tmp_path / (role + ".control.json")
+    save_yaml(cfg, config)
+    prefix = "/control" if role == "agent" else ""
+    store = HubStore(tmp_path / "hub.db") if role == "hub" else None
+
+    def start():
+        if role == "agent":
+            return launcher.run_agent(cfg, config_path=config, block=False)
+        return hub_app.run_hub(cfg, store, config_path=config, block=False)
+
+    shutdown = start()
+    try:
+        first = read_control_descriptor(descriptor_path)
+        assert (
+            _http_status(first.base_url + prefix + "/status", first.control_token)
+            == 200
+        )
+    finally:
+        shutdown.shutdown()
+    captured = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            captured.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    fake = HTTPServer(("127.0.0.1", control_port), Handler)
+    thread = threading.Thread(target=fake.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert (
+            _http_status(first.base_url + prefix + "/status", first.control_token)
+            == 200
+        )
+        assert captured == ["Bearer " + first.control_token]
+    finally:
+        fake.shutdown()
+        fake.server_close()
+        thread.join(timeout=3)
+    if role == "hub":
+        store = HubStore(tmp_path / "hub.db")
+        store.set_config("polling_token", "initial-poll")
+    shutdown = start()
+
+    def snapshot():
+        if store is None:
+            return config.read_bytes(), cfg.model_dump()
+        with store._lock:
+            return list(store._conn.iterdump()), cfg.model_dump()
+
+    try:
+        second = read_control_descriptor(descriptor_path)
+        assert second.control_token != first.control_token
+        assert second.boot_id != first.boot_id
+        path = second.base_url + prefix + "/config"
+        body = (
+            {"api_token": "updated-read"}
+            if role == "agent"
+            else {"polling_token": "updated-poll"}
+        )
+        before = snapshot()
+        assert _http_status(path, first.control_token, method="PATCH", body=body) == 401
+        assert snapshot() == before
+        assert (
+            _http_status(path, second.control_token, method="PATCH", body=body) == 200
+        )
+        assert snapshot() != before
+        if role == "agent":
+            assert cfg.api_token == "updated-read"
+        else:
+            assert store.get_config("polling_token") == "updated-poll"
+        assert (
+            _http_status(second.base_url + prefix + "/status", first.control_token)
+            == 401
+        )
+        assert (
+            _http_status(second.base_url + prefix + "/status", second.control_token)
+            == 200
+        )
+    finally:
+        shutdown.shutdown()
+
+
+@pytest.mark.parametrize("role", ["agent", "hub"])
+def test_api_server_startup_failure_never_announces_ready(
+    role, tmp_path, monkeypatch, capsys
+):
+    from unittest.mock import Mock
+
+    import uvicorn
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core import net
+    from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.hub.server import app as hub_app
+    from taskpaw_v3.hub.server.store import HubStore
+    from taskpaw_v3.monitors import runtime
+
+    read_port, control_port = _ephemeral_pair("127.0.0.1")
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(net, "reclaim_ports_from_stale_instance", lambda *a, **kw: None)
+    monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **kw: Mock())
+    monkeypatch.setattr(hub_app.HubService, "start", lambda self: None)
+    monkeypatch.setattr(hub_app.HubService, "stop", lambda self: True)
+
+    class Server:
+        started = False
+        should_exit = False
+
+        def __init__(self, *a, **kw):
+            pass
+
+        def run(self, sockets):
+            raise RuntimeError("fake startup failure")
+
+    monkeypatch.setattr(uvicorn, "Server", Server)
+    cfgargs = dict(bind_port=read_port, control_port=control_port)
+    store = HubStore(tmp_path / "hub.db")
+    try:
+        with pytest.raises(RuntimeError, match="startup failed"):
+            if role == "agent":
+                launcher.run_agent(
+                    AgentConfig(
+                        server_id="s", machine="m", host_metrics=False, **cfgargs
+                    ),
+                    block=False,
+                )
+            else:
+                hub_app.run_hub(
+                    HubConfig(self_monitor=False, **cfgargs), store, block=False
+                )
+        assert "taskpaw_ready" not in capsys.readouterr().out
+        assert net.port_available("127.0.0.1", read_port)
+        assert net.port_available("127.0.0.1", control_port)
+    finally:
+        store.close()

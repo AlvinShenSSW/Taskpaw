@@ -232,7 +232,16 @@ def test_enabled_must_be_a_real_boolean(tmp_path):
     with pytest.raises(ValueError):
         admin.set_enabled("w1", "false")
     # via the PATCH route → 400
-    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            admin=admin,
+            registry=reg,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     r = client.patch(
         "/control/monitors", params={"name": "w1"}, json={"enabled": "false"}
     )
@@ -271,7 +280,16 @@ def test_control_cors_allows_patch_delete(tmp_path):
     cfg = _agent_config()
     reg = _registry()
     admin = MonitorAdmin(cfg, None, reg, tmp_path / "a.yaml")
-    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            admin=admin,
+            registry=reg,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     r = client.options(
         "/control/monitors",
         headers={
@@ -289,7 +307,16 @@ def test_slash_named_monitor_is_manageable(tmp_path):
     cfg = _agent_config()
     reg = _registry()
     admin = MonitorAdmin(cfg, None, reg, tmp_path / "a.yaml")
-    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            admin=admin,
+            registry=reg,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     assert (
         client.post(
             "/control/monitors",
@@ -309,7 +336,16 @@ def test_patch_config_invalid_does_not_flip_enabled(tmp_path):
     reg = _registry()
     admin = MonitorAdmin(cfg, None, reg, tmp_path / "a.yaml")
     admin.add({"type_id": "fake", "config": {"name": "w1"}})  # enabled True
-    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            admin=admin,
+            registry=reg,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
 
     r = client.patch(
         "/control/monitors",
@@ -332,7 +368,16 @@ def test_rejected_combined_patch_changes_nothing(tmp_path, enabled):
     before = cfg.model_dump()
     disk = path.read_bytes()
     rows = get_task_log().query()["entries"]
-    client = TestClient(create_control_app(cfg, admin=admin, registry=reg))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            admin=admin,
+            registry=reg,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     response = client.patch(
         "/control/monitors",
         params={"name": "w1"},
@@ -1112,7 +1157,15 @@ def test_update_config_400_never_echoes_a_secret_input(tmp_path):
     # name but never the value (pydantic input hidden at the model level).
     cfg = _agent_config()
     admin = MonitorAdmin(cfg, None, _registry(), tmp_path / "a.yaml")
-    client = TestClient(create_control_app(cfg, admin=admin))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            admin=admin,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     marker = "sk-super-secret-marker"
     for field in (
         "llm_api_key",
@@ -1346,7 +1399,15 @@ def test_thinking_patch_live_persistence(tmp_path, prefix):
     )
     path = tmp_path / "agent.yaml"
     admin = MonitorAdmin(cfg, None, _registry(), path)
-    client = TestClient(create_control_app(cfg, admin=admin))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            admin=admin,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     field = prefix + "thinking_off"
     for value in (True, False, None):
         response = client.patch("/control/config", json={field: value})

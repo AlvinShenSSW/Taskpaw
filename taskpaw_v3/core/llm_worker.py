@@ -43,6 +43,7 @@ import sys
 import threading
 from typing import Any, BinaryIO, Callable, Mapping, Optional, TextIO
 
+from taskpaw_v3.core.control import without_control_env
 from taskpaw_v3.core.llm import (
     DEFAULT_LLM_API_BASE,
     DEFAULT_LLM_MODEL,
@@ -80,7 +81,7 @@ def worker_env(
     other providers' keys, a stale base/model — C7), then only this worker's own
     base, model and key are set; the key only when non-empty, so a keyless (e.g.
     local Ollama) worker gets none. Never mutates `os.environ`."""
-    env = without_llm_env(base)
+    env = without_control_env(without_llm_env(base))
     env[ENV_BASE] = settings.api_base
     env[ENV_MODEL] = settings.model
     if settings.api_key:

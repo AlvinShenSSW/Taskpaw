@@ -158,7 +158,7 @@ def run_from_config(
             )
             return 1
     store = HubStore(resolved_db)
-    run_hub(config, store, block=True)
+    run_hub(config, store, block=True, config_path=path)
     return 0
 
 

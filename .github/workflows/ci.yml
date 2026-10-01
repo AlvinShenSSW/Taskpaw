@@ -134,3 +134,39 @@ jobs:
       - name: Verify a .deb bundle was produced
         run: |
           ls -la taskpaw_v3/src-tauri/target/release/bundle/deb/*.deb
+
+  windows-control-credentials:
+    name: Windows local control credentials (Python → Rust)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - name: Build real Windows backend sidecar for Tauri
+        run: |
+          uv sync --frozen --group dev --extra build --extra v3 --python 3.12
+          uv run python scripts/build.py --skip-tauri
+      - name: Native Windows Rust tests
+        working-directory: taskpaw_v3/src-tauri
+        run: cargo test --locked
+      - name: Python writer → Rust reader interop
+        shell: pwsh
+        run: |
+          $env:TASKPAW_TEST_CONTROL_FIXTURES = Join-Path $env:RUNNER_TEMP ("taskpaw-control-" + [guid]::NewGuid().ToString())
+          try {
+            uv run python -m taskpaw_v3.tests.windows_control_fixture
+            if ($LASTEXITCODE -ne 0) { throw "Python control fixture generation failed" }
+            Push-Location taskpaw_v3/src-tauri
+            try {
+              $result = cargo test --locked tests::windows_python_credential_interop -- --exact --ignored 2>&1
+              $result | Write-Output
+              if ($LASTEXITCODE -ne 0 -or ($result -join "`n") -notmatch '1 passed; 0 failed') {
+                throw "The required Windows Python-to-Rust interop case did not execute successfully"
+              }
+            } finally { Pop-Location }
+          } finally {
+            if (Test-Path $env:TASKPAW_TEST_CONTROL_FIXTURES) { Remove-Item -Recurse -Force $env:TASKPAW_TEST_CONTROL_FIXTURES }
+          }
