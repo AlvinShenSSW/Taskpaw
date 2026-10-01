@@ -1,5 +1,7 @@
 # #179 — Standalone「AV 翻译」task (`avsubs`) + in-process GPU lease shared with Jasna; version 3.5.0
 
+> **Evidence reconciliation — 2026-10-02:** This is a historical design, delivered in [PR #184](https://github.com/AlvinShenSSW/Taskpaw/pull/184). The original acceptance text is preserved. A checked item records the source/test contract described in the table below; it does not certify an installed app, external service or every native platform. Unchecked items retain superseded, partial or unverified clauses. Current audit work is indexed in [the follow-up](../audits/2026-10-02-audit-follow-up.md).
+
 Date: 2026-09-24 (design v3 — rounds 1–2: D1–D13, M1–M15, N1–N9 folded in)
 Issue: #179 (depends on #178 and #177, both shipped in v3.4.0)
 Driver: `/afk` (Claude Opus 5.5 leads; Opus subagents implement → internal review → Codex 外门
@@ -30,16 +32,16 @@ continues (retry, restore → ASR), given when the file's GPU work ends.
 
 ## Acceptance criteria
 
-- [ ] AC1 `taskpaw_v3/core/gpu_lease.py`: process-wide lease keyed by `RunId = (instance_id,
+- [x] AC1 `taskpaw_v3/core/gpu_lease.py`: process-wide lease keyed by `RunId = (instance_id,
   generation)`; `try_acquire(run, poll_interval, label="") -> bool`, `release(run) -> bool`,
   `withdraw(run) -> None`, `holder() -> Optional[RunId]`, `blocking_label() -> str`; fair hand-off
   with a reservation window `max(30 s, 2 × waiter poll_interval)`; stale-waiter pruning after
   `max(30 s, 3 × poll_interval)` without a try; a leaf lock; never blocks; never logs under its
   lock.
-- [ ] AC2 Plugin `avsubs` (`type_id="avsubs"`, display「AV 翻译 (subtitles)」, category `task`,
+- [x] AC2 Plugin `avsubs` (`type_id="avsubs"`, display「AV 翻译 (subtitles)」, category `task`,
   managed only, `manual_start()` always True) in `default_registry`; config fields per the issue
   with descriptions; zh/en UI strings; ServiceIcon glyph; About mention; README row.
-- [ ] AC3 Pure `plan_tree(root, recursive, extensions)`: skip hidden dirs, link/junction dirs
+- [x] AC3 Pure `plan_tree(root, recursive, extensions)`: skip hidden dirs, link/junction dirs
   (Python 3.10-safe, C1/M1), Windows HIDDEN|SYSTEM dirs (M2), `.tmp.` files, names not encodable
   as UTF-8 (D10, reported); case-insensitive extensions; classify done / translate_only / full;
   reserve ja+zh targets in sorted order; report collisions and unreadable subfolders;
@@ -67,10 +69,10 @@ continues (retry, restore → ASR), given when the file's GPU work ends.
 - [ ] AC8 Stop/restart per #177, both plugins: translator cancelled first, bounded tree kill, one
   deadline, the lock-timeout branch kills without the lock (D13), every thread joined, lease
   released + withdrawn; temporaries swept at the next Start with an age gate (C3, M12).
-- [ ] AC9 Status/Hub: `queue_completed/total/remaining/failed/skipped`, `current_file` (relpath),
+- [x] AC9 Status/Hub: `queue_completed/total/remaining/failed/skipped`, `current_file` (relpath),
   `phase ∈ asr | translate | waiting_gpu` (M6), `subs_translating`, cpu/mem/gpu; `status_md`
   renders `avsubs` through the lada/jasna queue block; openclaw guide rows.
-- [ ] AC10 Shared helpers moved, not duplicated (C6/D1/M3): `asr_env()` and
+- [x] AC10 Shared helpers moved, not duplicated (C6/D1/M3): `asr_env()` and
   `validate_fields(...)` live in the `subs` package; each plugin keeps its own tiny
   `_default_spawn` bound to its module's `ChildProcess` (the D10 test seam).
 - [ ] AC11 Version 3.4.0 → 3.5.0 (six files); CHANGELOG; README; openclaw guide.
@@ -586,3 +588,22 @@ Start again → all skipped. With a Jasna task running at the same time, one sho
   still released (C11 decision); the other task could then fail to allocate VRAM. The survivor
   alert names it. Out of scope (IR7): the ASR tree is not in a kill-on-close Job object, so a hard
   agent crash (not a Stop) can orphan WhisperJAV — pre-existing since #177.
+
+## Acceptance evidence — 2026-10-02
+
+Baseline source: [91f7745](https://github.com/AlvinShenSSW/Taskpaw/commit/91f7745564f17a0039f81fab8293a9c150232236). Historical delivery: [PR #184](https://github.com/AlvinShenSSW/Taskpaw/pull/184), merge [7de4956](https://github.com/AlvinShenSSW/Taskpaw/commit/7de4956e04b7d46e64b08ddef3bcb081afee817d). [Recorded CI](https://github.com/AlvinShenSSW/Taskpaw/actions/runs/36081893519/job/107905450935) applies to that historical head, not every prose clause or installed machine. Source/test links below describe the baseline; historical version/default statements remain unchanged. The later source version 3.9.8 is recorded in [PR #214](https://github.com/AlvinShenSSW/Taskpaw/pull/214); it supersedes earlier version clauses without proving installation.
+
+| AC | Disposition | Source / automated evidence | Qualification |
+|---|---|---|---|
+| AC1 | Implemented; automated evidence | [gpu_lease.py: GpuLease](../../taskpaw_v3/core/gpu_lease.py); [gpu_lease.py: _prune](../../taskpaw_v3/core/gpu_lease.py); [gpu_lease.py: release](../../taskpaw_v3/core/gpu_lease.py); [gpu_lease.py: withdraw](../../taskpaw_v3/core/gpu_lease.py); tests: [test_gpu_lease.py: test_reservation_window_uses_the_waiters_poll_interval](../../taskpaw_v3/tests/test_gpu_lease.py); [test_gpu_lease.py: test_stale_waiter_pruning](../../taskpaw_v3/tests/test_gpu_lease.py); [test_gpu_lease.py: test_eight_thread_hammer_never_sees_two_holders](../../taskpaw_v3/tests/test_gpu_lease.py) | Pure per-process arbiter implements fairness/generation/leaf-lock behavior with fake-clock and concurrent tests; this does not establish GPU child cleanup. |
+| AC2 | Implemented; automated evidence | [avsubs.py: AvsubsPlugin](../../taskpaw_v3/monitors/plugins/avsubs.py); [avsubs.py: AvsubsConfig](../../taskpaw_v3/monitors/plugins/avsubs.py); [avsubs.py: manual_start](../../taskpaw_v3/monitors/plugins/avsubs.py); tests: [test_avsubs.py: test_config_defaults_schema_and_plugin_identity](../../taskpaw_v3/tests/test_avsubs.py); [avsubs.test.tsx](../../taskpaw_v3/ui/src/test/avsubs.test.tsx) | Plugin/schema/manual-start identity is implemented; avsubs/schema UI tests and [#184](https://github.com/AlvinShenSSW/Taskpaw/pull/184) document registration, labels, icon and About/README. No external tool launch is claimed. |
+| AC3 | Implemented; automated evidence | [avsubs.py: plan_tree](../../taskpaw_v3/monitors/plugins/avsubs.py); [avsubs.py: _is_link_dir](../../taskpaw_v3/monitors/plugins/avsubs.py); [avsubs.py: _should_descend](../../taskpaw_v3/monitors/plugins/avsubs.py); tests: [test_avsubs.py: test_plan_tree_cross_extension_and_cross_role_collisions](../../taskpaw_v3/tests/test_avsubs.py); [test_avsubs.py: test_plan_tree_skips_a_windows_junction](../../taskpaw_v3/tests/test_avsubs.py); [test_avsubs.py: test_plan_tree_order_is_stable_and_deterministic](../../taskpaw_v3/tests/test_avsubs.py) | Planner test_avsubs covers hidden/reparse directories, classification, identity errors, collision reservation and ordering; native Windows CI recorded in [#184](https://github.com/AlvinShenSSW/Taskpaw/pull/184), not a user's library audit. |
+| AC4 | Unchecked; see qualification | [avsubs.py: _settle](../../taskpaw_v3/monitors/plugins/avsubs.py); [avsubs.py: _run_deferred](../../taskpaw_v3/monitors/plugins/avsubs.py); [avsubs.py: _dispatch](../../taskpaw_v3/monitors/plugins/avsubs.py); tests: [test_avsubs.py: test_full_lifecycle_in_order_asr_translate_done](../../taskpaw_v3/tests/test_avsubs.py); [test_avsubs.py: test_each_done_condition_alone_blocks_done](../../taskpaw_v3/tests/test_avsubs.py) | Normal single-writer settlement, deferred side effects and dispatch/done guards are tested with controlled jobs. Stop can leave planned jobs without terminal settlement; the inherited whole #177 lifecycle guarantee is therefore not established. |
+| AC5 | Unchecked; see qualification | [avsubs.py: _abort](../../taskpaw_v3/monitors/plugins/avsubs.py); [avsubs.py: _fail_unreadable_ja](../../taskpaw_v3/monitors/plugins/avsubs.py); [avsubs.py: _maybe_done](../../taskpaw_v3/monitors/plugins/avsubs.py); tests: [test_avsubs.py: test_three_failures_abort_in_the_c7_order_in_the_same_check](../../taskpaw_v3/tests/test_avsubs.py); [test_avsubs.py: test_unreadable_existing_ja_fails_without_counting_the_streak](../../taskpaw_v3/tests/test_avsubs.py) | Abort ordering/unreadable transcript cases exist; no-live-child predicate cannot prove untracked descendants gone (R08 [#225](https://github.com/AlvinShenSSW/Taskpaw/issues/225)). |
+| AC6 | Unchecked; see qualification | [avsubs.py: _gpu_rel](../../taskpaw_v3/monitors/plugins/avsubs.py); [avsubs.py: _note_survivor](../../taskpaw_v3/monitors/plugins/avsubs.py); tests: [test_avsubs.py: test_a_false_kill_alerts_survivor_once_and_still_releases](../../taskpaw_v3/tests/test_avsubs.py) | Historical survivor-alert-and-release decision conflicts with cleanup-before-GPU-handoff requirement tracked in R08 ([#225](https://github.com/AlvinShenSSW/Taskpaw/issues/225)). Leave the compound guarantee unchecked. |
+| AC7 | Unchecked; see qualification | [jasna.py: _gpu_take](../../taskpaw_v3/monitors/plugins/jasna.py); [jasna.py: _gpu_transfer](../../taskpaw_v3/monitors/plugins/jasna.py); [jasna.py: _gpu_give](../../taskpaw_v3/monitors/plugins/jasna.py); tests: [test_jasna_subs.py: test_stop_racing_the_asr_retry_releases_the_gpu_once](../../taskpaw_v3/tests/test_jasna_subs.py) | Per-file hold transfer/retry cases exist in test_jasna_lease; full descendant cleanup before release remains R08 ([#225](https://github.com/AlvinShenSSW/Taskpaw/issues/225)). |
+| AC8 | Unchecked; see qualification | [avsubs.py: stop](../../taskpaw_v3/monitors/plugins/avsubs.py); [jasna.py: stop](../../taskpaw_v3/monitors/plugins/jasna.py); [child.py: terminate_tree](../../taskpaw_v3/monitors/subs/child.py); tests: [test_avsubs.py: test_stop_lock_timeout_branch_kills_without_the_lock](../../taskpaw_v3/tests/test_avsubs.py); [test_avsubs.py: test_stop_while_a_request_hangs_joins_within_the_budget](../../taskpaw_v3/tests/test_avsubs.py) | Controlled timeout/restart cases do not close known native ownership and Windows force-close gaps (R08/R09). |
+| AC9 | Implemented; automated evidence | [avsubs.py: _build_status](../../taskpaw_v3/monitors/plugins/avsubs.py); [jasna.py: _build_status](../../taskpaw_v3/monitors/plugins/jasna.py); [status_md.py: render_status_md](../../taskpaw_v3/hub/server/status_md.py); tests: [test_avsubs.py: test_metrics_phase_and_detail_contract](../../taskpaw_v3/tests/test_avsubs.py); [test_status_md.py: test_avsubs_renders_queue_and_current_file_like_jasna](../../taskpaw_v3/tests/test_status_md.py) | Metrics/status.md contracts are implemented with exact fixtures; live external GPU/media telemetry remains deployment validation. |
+| AC10 | Implemented; automated evidence | [child.py: asr_env](../../taskpaw_v3/monitors/subs/child.py); [avsubs.py: _default_spawn](../../taskpaw_v3/monitors/plugins/avsubs.py); tests: [test_avsubs.py: test_default_spawn_goes_through_the_module_child_process_with_a_clean_env](../../taskpaw_v3/tests/test_avsubs.py) | Shared environment/validation helpers and patchable default-spawn seam exist; module imports and shared subs tests support reuse. |
+| AC11 | Unchecked; see qualification | [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py); tests: [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py) | Historical 3.5.0/docs delivered by [#184](https://github.com/AlvinShenSSW/Taskpaw/pull/184); later versions supersede it. |
+| AC12 | Unchecked; see qualification | [avsubs.py: stop](../../taskpaw_v3/monitors/plugins/avsubs.py); [gpu_lease.py: GpuLease](../../taskpaw_v3/core/gpu_lease.py); tests: [test_avsubs.py: test_supervisor_register_unregister_register_and_reconfigure](../../taskpaw_v3/tests/test_avsubs.py); [test_gpu_lease.py: test_eight_thread_hammer_never_sees_two_holders](../../taskpaw_v3/tests/test_gpu_lease.py) | Published [#184](https://github.com/AlvinShenSSW/Taskpaw/pull/184) CI passed; native media/GPU cleanup and full original test-plan certification are not implied by modeled cases (R08/R09). |

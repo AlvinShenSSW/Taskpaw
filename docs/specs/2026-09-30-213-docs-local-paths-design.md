@@ -1,5 +1,7 @@
 # #213 — Public design-doc path hygiene
 
+> **Evidence reconciliation — 2026-10-02:** This is a historical design, delivered in [PR #215](https://github.com/AlvinShenSSW/Taskpaw/pull/215). The original acceptance text is preserved. A checked item records the source/test contract described in the table below; it does not certify an installed app, external service or every native platform. Unchecked items retain superseded, partial or unverified clauses. Current audit work is indexed in [the follow-up](../audits/2026-10-02-audit-follow-up.md).
+
 Date: 2026-09-30. Branch: `issue-213-docs-local-paths`. Base: `origin/main` at `bdd8ebe`.
 
 ## Spec review
@@ -12,11 +14,11 @@ Include only that additional line's cleanup: a guard covering every spec cannot 
 
 ## Acceptance criteria
 
-- [ ] #210 uses repo-relative references or prose; original technical decisions remain intact, and planner-stage claims are explicitly historical after PR #212.
-- [ ] The additional #208 basetemp reference contains no private home path; its short-path/MAX_PATH guidance remains.
-- [ ] The issue's exact `git grep` acceptance command returns no matches (exit 1 is the expected no-match result).
-- [ ] Every direct `docs/specs/*.md`, including this plan, passes the guard; each prohibited pattern fails a fixture with a filename and one-based line number.
-- [ ] The fixed placeholder set passes, including when multiple paths occur on one line; allowed paths never excuse a forbidden neighbor.
+- [x] #210 uses repo-relative references or prose; original technical decisions remain intact, and planner-stage claims are explicitly historical after PR #212.
+- [x] The additional #208 basetemp reference contains no private home path; its short-path/MAX_PATH guidance remains.
+- [x] The issue's exact `git grep` acceptance command returns no matches (exit 1 is the expected no-match result).
+- [x] Every direct `docs/specs/*.md`, including this plan, passes the guard; each prohibited pattern fails a fixture with a filename and one-based line number.
+- [x] The fixed placeholder set passes, including when multiple paths occur on one line; allowed paths never excuse a forbidden neighbor.
 - [ ] One AGENTS.md convention is added; full pytest, Ruff lint/format, mypy and lock checks pass; no version bump.
 
 ## Frozen issue contract
@@ -103,3 +105,18 @@ No deployment, commits, pushes, PR creation or merge authority is granted by thi
 
 Plan only: no implementation or test results are claimed. Implement the bounded changes, preserving historical decisions and the additional #208 inventory correction; return failures honestly to the driver.
 Keep forbidden example strings in Python fixtures, not specs. The future guard must pass this design without a special exemption; rebased #211 must pass independently.
+
+## Acceptance evidence — 2026-10-02
+
+Baseline source: [91f7745](https://github.com/AlvinShenSSW/Taskpaw/commit/91f7745564f17a0039f81fab8293a9c150232236). Historical delivery: [PR #215](https://github.com/AlvinShenSSW/Taskpaw/pull/215), merge [0e75874](https://github.com/AlvinShenSSW/Taskpaw/commit/0e75874119a1d96019f48fd915bf02c248fa19d3). [Recorded CI](https://github.com/AlvinShenSSW/Taskpaw/actions/runs/36680613943/job/109775015424) applies to that historical head, not every prose clause or installed machine. Source/test links below describe the baseline; historical version/default statements remain unchanged.
+
+AC1–AC6 below are local ordinals for the six original, unnumbered checklist items, in their original order.
+
+| AC | Disposition | Source / automated evidence | Qualification |
+|---|---|---|---|
+| AC1 | Implemented; automated evidence | [test_docs_paths.py: _validate_specs](../../taskpaw_v3/tests/test_docs_paths.py); tests: [test_docs_paths.py: test_specs_have_no_machine_local_paths](../../taskpaw_v3/tests/test_docs_paths.py) | [#215](https://github.com/AlvinShenSSW/Taskpaw/pull/215) source diff preserves #210 decisions, removes local references and keeps its historical [#212](https://github.com/AlvinShenSSW/Taskpaw/pull/212) notice; unchanged original acceptance blocks are separately verified. |
+| AC2 | Implemented; automated evidence | [test_docs_paths.py: _validate_specs](../../taskpaw_v3/tests/test_docs_paths.py); tests: [test_docs_paths.py: test_specs_have_no_machine_local_paths](../../taskpaw_v3/tests/test_docs_paths.py) | #208 uses a short temporary-directory instruction preserving MAX_PATH guidance; source line inspected, guard covers it. |
+| AC3 | Implemented; automated evidence | [test_docs_paths.py: _validate_specs](../../taskpaw_v3/tests/test_docs_paths.py); tests: [test_docs_paths.py: test_specs_have_no_machine_local_paths](../../taskpaw_v3/tests/test_docs_paths.py) | The exact public issue #213 git grep command is rerun; exit1/no output is the no-match success criterion. No forbidden literal is added to specs. |
+| AC4 | Implemented; automated evidence | [test_docs_paths.py: _validate_specs](../../taskpaw_v3/tests/test_docs_paths.py); tests: [test_docs_paths.py: test_rejected_paths_report_filename_and_line](../../taskpaw_v3/tests/test_docs_paths.py); [test_docs_paths.py: test_fenced_paths_are_rejected_with_one_based_line_numbers](../../taskpaw_v3/tests/test_docs_paths.py) | Existing guard scans all direct spec Markdown; fixtures assert each forbidden class and filename/one-based line diagnostics. |
+| AC5 | Implemented; automated evidence | [test_docs_paths.py: ALLOWED_USERS](../../taskpaw_v3/tests/test_docs_paths.py); [test_docs_paths.py: _validate_specs](../../taskpaw_v3/tests/test_docs_paths.py); tests: [test_docs_paths.py: test_exact_placeholders_are_allowed](../../taskpaw_v3/tests/test_docs_paths.py); [test_docs_paths.py: test_allowed_path_never_masks_forbidden_neighbor](../../taskpaw_v3/tests/test_docs_paths.py); [test_docs_paths.py: test_multiple_allowed_paths_and_repo_references_pass](../../taskpaw_v3/tests/test_docs_paths.py) | Fixed placeholder/multiple-neighbor cases directly exercise the same scanner; guard unchanged. |
+| AC6 | Unchecked; see qualification | [test_docs_paths.py: _validate_specs](../../taskpaw_v3/tests/test_docs_paths.py); tests: [test_docs_paths.py: test_specs_have_no_machine_local_paths](../../taskpaw_v3/tests/test_docs_paths.py) | AGENTS convention and no version change delivered by [#215](https://github.com/AlvinShenSSW/Taskpaw/pull/215); published CI passed, but its public body records local Mac baseline failure. Do not convert merge/CI into an unconditional historical all-checks claim. |
