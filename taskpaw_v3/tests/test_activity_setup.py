@@ -82,7 +82,7 @@ def test_install_idempotent_check_exact_uninstall(setup, existing, run):
     assert not list((home / ".taskpaw").glob("agent-activity*"))
     for tool in ("claude", "codex"):
         hooks = json.loads(target(home, tool).read_text())["hooks"]
-        assert ("SubagentStop" in hooks) is (tool == "codex")
+        assert "SubagentStart" in hooks and "SubagentStop" in hooks
         if tool == "claude":
             assert hooks["Notification"][0]["matcher"] == "permission_prompt"
     run(s, home, "uninstall")
@@ -160,6 +160,7 @@ def test_selective_uninstall_preserves_later_edits_and_unowned_groups(setup, run
     result = json.loads(p.read_text())
     assert result["later"] and result["hooks"]["Stop"] == [
         {"matcher": "old", "hooks": []},
+        {"hooks": []},
         {"matcher": "new", "hooks": [{"type": "command", "command": "unrelated"}]},
     ]
 
@@ -512,7 +513,7 @@ def test_changed_marker_handler_removed_unmarked_preserved(setup, run):
     p.write_text(json.dumps(data))
     run(s, home, "uninstall", "claude")
     data = json.loads(p.read_text())
-    assert data["hooks"]["Stop"] == []
+    assert data["hooks"]["Stop"] == [{"hooks": []}]
     assert data["hooks"]["SessionEnd"][0]["hooks"] == [unmarked]
 
 
@@ -640,3 +641,79 @@ def test_windows_claude_install_check_uninstall(setup, monkeypatch, run):
     run(s, home, "check", "claude")
     run(s, home, "uninstall", "claude")
     assert not target(home, "claude").exists()
+
+
+def test_i216_reinstall_repairs_lost_record_without_false_baseline(setup, run):
+    s, home = setup
+    run(s, home, "install", "claude")
+    path = target(home, "claude")
+    record_path = home / ".taskpaw/hook-setup/claude.json"
+    record_path.unlink()
+    before = path.read_bytes()
+    backups = list((home / ".taskpaw/hook-setup/backups").glob("*.bak"))
+    run(s, home, "install", "claude")
+    assert record_path.exists()
+    record = json.loads(record_path.read_text())
+    assert not {"original_exists", "baseline", "baseline_hash"} & record.keys()
+    assert path.read_bytes() == before
+    assert list((home / ".taskpaw/hook-setup/backups").glob("*.bak")) == backups
+    run(s, home, "uninstall", "claude")
+    assert not any(
+        s.owned(h, "claude")
+        for groups in json.loads(path.read_text())["hooks"].values()
+        for group in groups
+        for h in group["hooks"]
+    )
+
+
+@pytest.mark.parametrize("fault", ["missing", "changed", "denied"])
+def test_i216_missing_baseline_uses_selective_uninstall(
+    setup, run, monkeypatch, capsys, fault
+):
+    s, home = setup
+    path = put(home, "claude", {"keep": True})
+    run(s, home, "install", "claude")
+    record = json.loads((home / ".taskpaw/hook-setup/claude.json").read_text())
+    baseline = Path(record["baseline"])
+    if fault == "missing":
+        baseline.unlink()
+    elif fault == "changed":
+        baseline.write_text("PRIVATE CORRUPT")
+    else:
+        original = s.read_bytes
+
+        def denied(p):
+            if p == baseline:
+                raise PermissionError("PRIVATE DENIED")
+            return original(p)
+
+        monkeypatch.setattr(s, "read_bytes", denied)
+    run(s, home, "uninstall", "claude")
+    data = json.loads(path.read_text())
+    assert data["keep"] is True
+    assert not any(
+        s.owned(h, "claude")
+        for groups in data["hooks"].values()
+        for group in groups
+        for h in group["hooks"]
+    )
+    output = capsys.readouterr().out
+    assert "selective" in output and "PRIVATE" not in output
+    assert not (home / ".taskpaw/hook-setup/claude.json").exists()
+
+
+def test_i216_selective_cleanup_preserves_shifted_empty_user_group(setup, run):
+    s, home = setup
+    path = put(home, "claude", {"hooks": {"Stop": [{"hooks": []}]}})
+    run(s, home, "install", "claude")
+    data = json.loads(path.read_text())
+    # Shift the preexisting empty group into the recorded created group's index.
+    data["hooks"]["Stop"].insert(
+        0, {"hooks": [{"type": "command", "command": "user-never-run"}]}
+    )
+    data["user_edit"] = True
+    path.write_text(json.dumps(data))
+    run(s, home, "uninstall", "claude")
+    groups = json.loads(path.read_text())["hooks"]["Stop"]
+    assert groups[1] == {"hooks": []}
+    assert len(groups) == 3

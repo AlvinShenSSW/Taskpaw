@@ -18,6 +18,7 @@ from typing import Optional
 
 from pydantic import Field, field_validator, model_validator
 
+from taskpaw_v3.integrations.activity_writer import ActivityStoreError, read_facts
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -124,6 +125,10 @@ class DevActivityConfig(BaseMonitorConfig):
         # Reject a bad override at config time (like ProcessConfig) — else it would
         # raise re.error on every check() and degrade the monitor (Codex 外门).
         for tool, pat in v.items():
+            if tool == "vscode":
+                raise ValueError(
+                    "VS Code is context only; process_patterns override is unsupported"
+                )
             if not pat:
                 # An empty regex matches every process → every tool false-present.
                 raise ValueError(f"process pattern for tool {tool!r} must not be empty")
@@ -202,6 +207,210 @@ def read_tool_state(
     return state, age
 
 
+def read_hook_activity(
+    state_dir: str,
+    tool: str,
+    freshness: float,
+    now: float,
+    sample: dict,
+    bound: set[tuple],
+    errors: list[str],
+    stop_event: threading.Event | None = None,
+) -> dict:
+    """Commutative bounded facts; no arrival order or expired-unresolved idle."""
+    facts: dict[str, dict] = {}
+    summaries: dict[tuple, dict] = {}
+    unknown = False
+    unresolved = False
+    limited = False
+    watermark = None
+    projections = []
+    for path in (_state_file(state_dir, tool), _shared_file(state_dir)):
+        if stop_event is not None and stop_event.is_set():
+            break
+        projection = _load(path, errors)
+        if stop_event is not None and stop_event.is_set():
+            break
+        if projection is not None and projection.get("tool", tool) == tool:
+            projections.append(projection)
+        try:
+            store = read_facts(path, tool)
+        except ActivityStoreError:
+            errors.append("unavailable")
+            unknown = unresolved = True
+            continue
+        if stop_event is not None and stop_event.is_set():
+            break
+        unknown |= store["overflow"]
+        unresolved |= store["overflow"]
+        limited |= store["overflow"]
+        value = store["watermark"]
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value <= now + min(freshness, 5)
+        ):
+            watermark = max(watermark or value, value)
+        for row in store["facts"]:
+            if row["id"] not in facts or row["ts"] < facts[row["id"]]["ts"]:
+                facts[row["id"]] = row
+        for row in store["summaries"]:
+            summaries[
+                tuple(
+                    row[k]
+                    for k in ("tool", "session", "turn", "actor", "pid", "created")
+                )
+            ] = row
+    roots = {
+        (r.get("pid"), r.get("created")): r
+        for r in sample.get("roots", [])
+        if r.get("created") is not None
+    }
+    for row in facts.values():
+        if (row["pid"], row["created"]) in roots:
+            bound.add((tool, row["pid"], row["created"]))
+    scan_complete = (
+        sample.get("complete", False)
+        and not sample.get("errors")
+        and not sample.get("limited")
+    )
+    finals = [r for r in facts.values() if r["kind"] in ("interrupt", "session_end")]
+
+    def scope(row):
+        return tuple(
+            row[k] for k in ("tool", "session", "turn", "actor", "pid", "created")
+        )
+
+    def proven(row):
+        pair = (row["pid"], row["created"])
+        was_bound = (tool, *pair) in bound
+        if was_bound and scan_complete and pair not in roots:
+            return True
+        for final in finals:
+            if (
+                final["kind"] == "interrupt"
+                and row["actor"] == "parent"
+                and scope(row) == scope(final)
+            ):
+                return True
+            if (
+                final["kind"] == "session_end"
+                and was_bound
+                and row["session"]
+                and (row["session"], *pair)
+                == (final["session"], final["pid"], final["created"])
+            ):
+                return True
+        return False
+
+    groups: dict[tuple, list[dict]] = {}
+    for row in facts.values():
+        groups.setdefault(scope(row), []).append(row)
+    for row in summaries.values():
+        if not proven(row):
+            unknown = unresolved = True
+    states: list[str] = []
+    ages: list[float] = []
+    state: str | None
+    covered: set[tuple] = set()
+    for rows in groups.values():
+        row = rows[0]
+        kinds = {r["kind"] for r in rows}
+        if proven(row):
+            state = "idle"
+        elif kinds <= {"presence"}:
+            continue
+        elif "stop_attempt" in kinds or "unknown" in kinds:
+            unknown = unresolved = True
+            continue
+        else:
+            fresh = [
+                r
+                for r in rows
+                if isinstance(r["ts"], (int, float))
+                and math.isfinite(r["ts"])
+                and -min(freshness, 5) <= now - r["ts"] <= min(freshness, 86400)
+            ]
+            if not fresh:
+                unknown = unresolved = True
+                continue
+            if "waiting" in kinds:
+                # Both official PermissionRequest schemas omit tool_use_id.
+                # A call-unit progress conflicts with an unpaired request; no order.
+                if any(r["kind"] == "busy" and r["unit"] for r in fresh):
+                    unknown = unresolved = True
+                    continue
+                state = "waiting"
+            elif any(r["kind"] == "busy" for r in fresh):
+                state = "busy"
+            else:
+                unknown = unresolved = True
+                continue
+        states.append(state)
+        ages.extend(max(0, now - r["ts"]) for r in rows if math.isfinite(r["ts"]))
+        if (row["pid"], row["created"]) in roots:
+            covered.add((row["pid"], row["created"]))
+    for data in projections:
+        ts = data.get("ts")
+        state = data.get("state")
+        if (
+            not isinstance(ts, (int, float))
+            or isinstance(ts, bool)
+            or not math.isfinite(ts)
+            or state not in ("busy", "waiting", "idle")
+            or now - ts < -min(freshness, 5)
+        ):
+            continue
+        if state == "idle":
+            watermark = max(watermark or ts, ts)
+        if data.get("activity_schema") == 2:
+            if data.get("fact_committed") is True and data.get("fact_id") in facts:
+                continue
+            # A rich projection cannot be treated as a second independent idle.
+            unknown = unresolved = True
+            continue
+        # Legacy/missing identities never prove whole-tool idle; fresh positives
+        # remain useful without inventing ordering or host attribution.
+        unknown = True
+        unresolved |= state in _ACTIVE
+        if now - ts <= freshness and state in _ACTIVE:
+            states.append(state)
+            ages.append(max(0, now - ts))
+    state = (
+        "busy"
+        if "busy" in states
+        else "waiting"
+        if "waiting" in states
+        else None
+        if unknown
+        else "idle"
+        if "idle" in states
+        else None
+    )
+    if unknown:
+        covered.clear()
+    host = common_host([roots[pair] for pair in covered]) if covered else "unknown"
+    relevant = {
+        (tool, r["pid"], r["created"])
+        for r in [*facts.values(), *summaries.values()]
+        if r["pid"]
+    }
+    bound.difference_update(
+        {pair for pair in bound if pair[0] == tool and pair not in relevant}
+    )
+    return {
+        "state": state,
+        "unresolved": unresolved,
+        "limited": limited,
+        "age": min(ages) if ages else None,
+        "unknown": unknown or bool(errors),
+        "covered": covered,
+        "host": host,
+        "watermark": watermark,
+    }
+
+
 def aggregate(tools: list[dict]) -> tuple[str, list[str]]:
     """Machine headline (最忙者胜) + the list of currently-busy tools.
     tools = [{tool,state,present,age_s,ai}]; state is busy|waiting|idle|None(unknown).
@@ -252,8 +461,13 @@ class DevActivityInstance(MonitorInstance):
             for tool in config.tools
         }
         self._lock = threading.RLock()
+        self._probe_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._cleanup_complete = False
         self._stopped = False
-        self._sessions = SessionActivity(config)
+        self._bound_producers: set[tuple] = set()
+        self._watermarks: dict[str, float] = {}
+        self._sessions = SessionActivity(config, self._stop_event)
         # (ts, is_busy) samples for the duty bar. Size the ring to actually hold the
         # configured window at the configured cadence (+margin), so a low
         # poll_interval + large window isn't silently truncated (Kimi 终审).
@@ -263,13 +477,24 @@ class DevActivityInstance(MonitorInstance):
         # monotonic timestamp of that sample, for the busy/idle CPU% delta.
         self._prev_cpu: dict = {}
         self._prev_mono: Optional[float] = None
+        self._prev_wall: Optional[float] = None
 
     def stop(self, timeout: float = 5.0) -> None:
-        # Coordinate iterator teardown with the current check; native calls finish
-        # in-process, with no hard cancellation guarantee.
-        with self._lock:
-            self._stopped = True
+        deadline = time.monotonic() + max(0.0, timeout)
+        self._stop_event.set()
+        self._stopped = True
+        if self._probe_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            try:
+                self._close_owned()
+            finally:
+                self._probe_lock.release()
+        else:
+            log.warning("activity probe: all/lifecycle/late_cleanup")
+
+    def _close_owned(self) -> None:
+        if not self._cleanup_complete:
             self._sessions.close()
+            self._cleanup_complete = True
 
     def _duty(self, cfg: DevActivityConfig, now: float) -> dict:
         window = cfg.window_seconds
@@ -282,10 +507,21 @@ class DevActivityInstance(MonitorInstance):
         return {"busy_s": round(ratio * span, 1), "ratio": round(ratio, 3)}
 
     def check(self, emit: EventEmitter) -> MonitorStatus:
-        with self._lock:
-            if self._stopped:
+        while not self._stop_event.is_set():
+            if self._probe_lock.acquire(timeout=0.01):
+                break
+        else:
+            return MonitorStatus(state="stopped")
+        try:
+            if self._stop_event.is_set():
                 return MonitorStatus(state="stopped")
             return self._check(emit)
+        finally:
+            try:
+                if self._stop_event.is_set():
+                    self._close_owned()
+            finally:
+                self._probe_lock.release()
 
     def _check(self, emit: EventEmitter) -> MonitorStatus:
         cfg: DevActivityConfig = self.config  # type: ignore[assignment]
@@ -299,6 +535,8 @@ class DevActivityInstance(MonitorInstance):
             snapshot = {}
             process_unavailable = True
             errors.append({"tool": "all", "layer": "process", "code": "unavailable"})
+        if self._stop_event.is_set():
+            return MonitorStatus(state="stopped")
         limited = any(s.get("limited", False) for s in snapshot.values())
         for tool, sample in snapshot.items():
             for code in sample.get("errors", []):
@@ -310,6 +548,7 @@ class DevActivityInstance(MonitorInstance):
                     }
                 )
         mono = time.monotonic()
+        cpu_wall = time.time()
         cpu: dict[str, float] = {}
         if cfg.observe:
             cpu, self._prev_cpu = cpu_percents(
@@ -317,39 +556,71 @@ class DevActivityInstance(MonitorInstance):
                 self._prev_mono if self._prev_mono is not None else mono,
                 snapshot,
                 mono,
+                self._prev_wall,
+                cpu_wall,
             )
             self._prev_mono = mono
+            self._prev_wall = cpu_wall
+        if self._stop_event.is_set():
+            return MonitorStatus(state="stopped")
         hooks = {}
+        uncovered = {}
         for tool in cfg.tools:
             if tool == "vscode":
                 continue
             hook_errors: list[str] = []
-            hooks[tool] = read_tool_state(
-                cfg.state_dir, tool, cfg.freshness_seconds, now, hook_errors
+            hooks[tool] = read_hook_activity(
+                cfg.state_dir,
+                tool,
+                cfg.freshness_seconds,
+                now,
+                snapshot.get(tool, {}),
+                self._bound_producers,
+                hook_errors,
+                self._stop_event,
             )
-            if hook_errors:
+            if self._stop_event.is_set():
+                return MonitorStatus(state="stopped")
+            hook = hooks[tool]
+            limited |= hook["limited"]
+            if hook["unknown"]:
                 uncertain_tools.add(tool)
+            if hook["watermark"] is not None:
+                self._watermarks[tool] = max(
+                    self._watermarks.get(tool, hook["watermark"]), hook["watermark"]
+                )
+            self._sessions.watermarks = self._watermarks
             errors.extend(
                 {"tool": self._diagnostic_tool(tool), "layer": "hook", "code": code}
                 for code in dict.fromkeys(hook_errors)
             )
+            data = snapshot.get(tool, {})
+            roots = [
+                r
+                for r in data.get("roots", [])
+                if (r.get("pid"), r.get("created")) not in hook["covered"]
+            ]
+            uncovered[tool] = {**data, "roots": roots}
         sessions = (
-            self._sessions.sample(
-                snapshot,
-                {t for t, (state, _) in hooks.items() if state is not None},
-                now,
-            )
+            self._sessions.sample(uncovered, set(), now)
             if cfg.observe and cfg.session_activity
             else {}
         )
+        if self._stop_event.is_set():
+            return MonitorStatus(state="stopped")
         tools: list[dict] = []
-        for tool, (state, age) in hooks.items():
+        for tool, hook in hooks.items():
+            state, age = hook["state"], hook["age"]
             sample = snapshot.get(tool, {})
             roots = sample.get("roots", [])
             host = (
-                common_host(roots)
-                if not sample.get("limited") and not sample.get("errors")
-                else "unknown"
+                hook["host"]
+                if state is not None
+                else (
+                    common_host(roots)
+                    if not sample.get("limited") and not sample.get("errors")
+                    else "unknown"
+                )
             )
             source = "hook" if state is not None else "presence"
             vscode_state = state if host == "vscode" else None
@@ -367,39 +638,63 @@ class DevActivityInstance(MonitorInstance):
             limited |= session.get("limited", False)
             cpu_pct = None
             session_age = None
-            if state is None and session.get("state") is not None:
-                state, source = session["state"], "session"
+            # Hook authority covers only a proven producer root. Other roots'
+            # positive observations remain useful even while one hook is idle.
+            root_cpu = sample.get("root_cpu", {})
+            uncovered_cpu = (
+                sum(
+                    value
+                    for pair, value in root_cpu.items()
+                    if pair not in hook["covered"]
+                )
+                if root_cpu
+                else 0.0
+                if roots
+                and all((r["pid"], r["created"]) in hook["covered"] for r in roots)
+                else cpu.get(tool)
+            )
+            if state != "busy" and session.get("state") == "busy":
+                state, source = "busy", "session"
                 host, vscode_state = session["host"], session["vscode_state"]
                 session_age = session["age_s"]
-            elif state is None and tool in cpu:
-                # Negative CPU evidence cannot declare idle when a configured
-                # observation failed; positive CPU remains independently useful.
-                if cpu[tool] >= cfg.busy_cpu_percent or (
-                    not session.get("errors") and sample.get("cpu_complete", True)
+            elif (
+                state != "busy"
+                and uncovered_cpu is not None
+                and uncovered_cpu >= cfg.busy_cpu_percent
+            ):
+                state, source, cpu_pct = "busy", "cpu", round(uncovered_cpu, 1)
+            elif state is None and tool not in uncertain_tools:
+                if session.get("state") == "idle":
+                    state, source = "idle", "session"
+                    host, vscode_state = session["host"], session["vscode_state"]
+                    session_age = session["age_s"]
+                elif (
+                    tool in cpu
+                    and not session.get("errors")
+                    and sample.get("cpu_complete", True)
                 ):
-                    cpu_pct = round(cpu[tool], 1)
-                    state = "busy" if cpu[tool] >= cfg.busy_cpu_percent else "idle"
-                    source = "cpu"
-                    root_cpu = sample.get("root_cpu", {})
-                    active_roots = [
-                        r for r in roots if (r["pid"], r["created"]) in root_cpu
-                    ]
-                    if state == "busy":
-                        active_roots = [
-                            r
-                            for r in active_roots
-                            if root_cpu[(r["pid"], r["created"])] > 0
-                        ]
-                    host = common_host(active_roots)
-                    vs_cpu = sum(
-                        root_cpu[(r["pid"], r["created"])]
-                        for r in active_roots
-                        if r["host"] == "vscode"
+                    state, source, cpu_pct = "idle", "cpu", round(cpu[tool], 1)
+            if source == "cpu":
+                active_roots = [
+                    r
+                    for r in roots
+                    if (r["pid"], r["created"]) not in hook["covered"]
+                    and (
+                        state == "idle" or root_cpu.get((r["pid"], r["created"]), 0) > 0
                     )
-                    if any(r["host"] == "vscode" for r in active_roots):
-                        vscode_state = (
-                            "busy" if vs_cpu >= cfg.busy_cpu_percent else "idle"
+                ]
+                host = common_host(active_roots)
+                if any(r["host"] == "vscode" for r in active_roots):
+                    vscode_state = (
+                        "busy"
+                        if sum(
+                            root_cpu.get((r["pid"], r["created"]), 0)
+                            for r in active_roots
+                            if r["host"] == "vscode"
                         )
+                        >= cfg.busy_cpu_percent
+                        else "idle"
+                    )
             # Fresh hooks resolve activity even when process observation fails.
             if source != "hook" and (
                 process_unavailable or sample.get("errors") or sample.get("limited")
@@ -468,83 +763,101 @@ class DevActivityInstance(MonitorInstance):
             log.warning(
                 "activity probe: %s/%s/%s", error["tool"], error["layer"], error["code"]
             )
-        headline, busy_tools = aggregate(tools)
-        is_busy = headline == "busy"
-        self._samples.append((now, is_busy))
-
-        active = [t["tool"] for t in tools if t["state"] in _ACTIVE and t["ai"]]
-        waiting_tools = [
-            t["tool"] for t in tools if t["state"] == "waiting" and t["ai"]
-        ]
-
-        # Emit only when the active class changes (busy / waiting / off), so the log
-        # isn't noisy AND a busy→waiting transition surfaces the actionable
-        # "needs input" signal instead of a misleading "idle" (Codex 外门).
-        cls = "busy" if is_busy else "waiting" if headline == "waiting" else "off"
-        uncertain_active = bool(self._active_tools & uncertain_tools)
-        if cls != "off":
-            self._idle_pending = False
-        elif self._prev_class in _ACTIVE and uncertain_active:
-            self._idle_pending = True
-        if (
-            self._prev_class is not None
-            and (cls != self._prev_class or self._idle_pending)
-            and cls != self._announced_class
-            and not (cls == "off" and uncertain_active)
-        ):
-            if cls == "busy":
-                emit(
-                    "info",
-                    f"{cfg.name}: AI busy",
-                    f"running AI: {', '.join(busy_tools)}",
-                    dedupe_key=None,
+        with self._lock:
+            if self._stop_event.is_set():
+                return MonitorStatus(state="stopped")
+            headline, busy_tools = aggregate(tools)
+            unresolved_hooks = any(h["unresolved"] for h in hooks.values())
+            if headline == "idle" and unresolved_hooks:
+                headline = (
+                    "present_only"
+                    if any(t["present"] and t["ai"] for t in tools)
+                    else "none"
                 )
-            elif cls == "waiting":
-                emit(
-                    "info",
-                    f"{cfg.name}: AI waiting for input",
-                    f"waiting: {', '.join(waiting_tools)}",
-                    dedupe_key=None,
-                )
-            else:
-                emit(
-                    "info",
-                    f"{cfg.name}: AI idle",
-                    "no AI task running",
-                    dedupe_key=None,
-                )
-            self._announced_class = cls
-            self._idle_pending = False
-        # Observations advance even when an idle notification must wait for recovery.
-        self._prev_class = cls
-        if cls != "off":
-            self._active_tools = set(busy_tools if is_busy else waiting_tools)
-        elif not self._idle_pending:
-            self._active_tools.clear()
+            is_busy = headline == "busy"
+            self._samples.append((now, is_busy))
 
-        detail = (
-            f"running AI: {', '.join(busy_tools)}"
-            if busy_tools
-            else {
-                "waiting": f"AI waiting: {', '.join(active)}",
-                "idle": "AI idle",
-                "present_only": "AI present (no activity reported)",
-                "none": "no AI activity",
-            }[headline]
-        )
-        return MonitorStatus(
-            state="degraded" if errors else _STATE_MAP[headline],
-            detail=detail,
-            metrics={
-                "ai_state": headline,
-                "busy_tools": busy_tools,
-                "tools": tools,
-                "window_s": int(cfg.window_seconds),
-                "duty": self._duty(cfg, now),
-                "probe_errors": errors,
-                "probe_limited": limited,
-            },
-        )
+            active = [t["tool"] for t in tools if t["state"] in _ACTIVE and t["ai"]]
+            waiting_tools = [
+                t["tool"] for t in tools if t["state"] == "waiting" and t["ai"]
+            ]
+
+            # Emit only when the active class changes (busy / waiting / off), so the log
+            # isn't noisy AND a busy→waiting transition surfaces the actionable
+            # "needs input" signal instead of a misleading "idle" (Codex 外门).
+            cls = "busy" if is_busy else "waiting" if headline == "waiting" else "off"
+            uncertain_active = unresolved_hooks or bool(
+                self._active_tools & uncertain_tools
+            )
+            if cls != "off":
+                self._idle_pending = False
+            elif self._prev_class in _ACTIVE and uncertain_active:
+                self._idle_pending = True
+            if (
+                self._prev_class is not None
+                and (cls != self._prev_class or self._idle_pending)
+                and cls != self._announced_class
+                and not (cls == "off" and uncertain_active)
+            ):
+                if self._stop_event.is_set():
+                    return MonitorStatus(state="stopped")
+                if cls == "busy":
+                    emit(
+                        "info",
+                        f"{cfg.name}: AI busy",
+                        f"running AI: {', '.join(busy_tools)}",
+                        dedupe_key=None,
+                    )
+                elif cls == "waiting":
+                    emit(
+                        "info",
+                        f"{cfg.name}: AI waiting for input",
+                        f"waiting: {', '.join(waiting_tools)}",
+                        dedupe_key=None,
+                    )
+                else:
+                    emit(
+                        "info",
+                        f"{cfg.name}: AI idle",
+                        "no AI task running",
+                        dedupe_key=None,
+                    )
+                self._announced_class = cls
+                self._idle_pending = False
+            # Observations advance even when an idle notification must wait for recovery.
+            self._prev_class = cls
+            if cls != "off":
+                self._active_tools = set(busy_tools if is_busy else waiting_tools) | (
+                    self._active_tools & uncertain_tools
+                )
+            elif not self._idle_pending:
+                self._active_tools.clear()
+
+            detail = (
+                f"running AI: {', '.join(busy_tools)}"
+                if busy_tools
+                else {
+                    "waiting": f"AI waiting: {', '.join(active)}",
+                    "idle": "AI idle",
+                    "present_only": "AI present (no activity reported)",
+                    "none": "AI activity unknown"
+                    if unresolved_hooks
+                    else "no AI activity",
+                }[headline]
+            )
+            return MonitorStatus(
+                state="degraded" if errors else _STATE_MAP[headline],
+                detail=detail,
+                metrics={
+                    "ai_state": headline,
+                    "busy_tools": busy_tools,
+                    "tools": tools,
+                    "window_s": int(cfg.window_seconds),
+                    "duty": self._duty(cfg, now),
+                    "probe_errors": errors,
+                    "probe_limited": limited,
+                },
+            )
 
     @staticmethod
     def _diagnostic_tool(tool: str) -> str:

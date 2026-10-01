@@ -1,0 +1,95 @@
+{
+  "provenance": {
+    "synthetic": true,
+    "source": "https://code.claude.com/docs/en/hooks",
+    "note": "Documentation-derived fixed identity/event fields, not captured/native dispatch. prompt_id requires2.1.196+; PermissionRequest lacks tool_use_id."
+  },
+  "cases": [
+    {
+      "input": {
+        "hook_event_name": "SessionStart",
+        "session_id": "synthetic-session"
+      },
+      "state": "busy",
+      "rich_kind": "presence"
+    },
+    {
+      "input": {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "synthetic-session",
+        "prompt_id": "synthetic-prompt"
+      },
+      "state": "busy",
+      "rich_kind": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "PreToolUse",
+        "session_id": "synthetic-session",
+        "prompt_id": "synthetic-prompt",
+        "tool_use_id": "synthetic-call"
+      },
+      "state": "busy",
+      "rich_kind": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "PostToolUse",
+        "session_id": "synthetic-session",
+        "prompt_id": "synthetic-prompt",
+        "tool_use_id": "synthetic-call"
+      },
+      "state": "busy",
+      "rich_kind": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "PermissionRequest",
+        "session_id": "synthetic-session",
+        "prompt_id": "synthetic-prompt"
+      },
+      "state": "waiting",
+      "rich_kind": "waiting"
+    },
+    {
+      "input": {
+        "hook_event_name": "SubagentStart",
+        "session_id": "synthetic-session",
+        "prompt_id": "synthetic-prompt",
+        "agent_id": "synthetic-child"
+      },
+      "state": "busy",
+      "rich_kind": "busy"
+    },
+    {
+      "input": {
+        "hook_event_name": "SubagentStop",
+        "session_id": "synthetic-session",
+        "prompt_id": "synthetic-prompt",
+        "agent_id": "synthetic-child",
+        "stop_hook_active": false
+      },
+      "state": "idle",
+      "rich_kind": "stop_attempt"
+    },
+    {
+      "input": {
+        "hook_event_name": "Stop",
+        "session_id": "synthetic-session",
+        "prompt_id": "synthetic-prompt",
+        "stop_hook_active": false
+      },
+      "state": "idle",
+      "rich_kind": "stop_attempt"
+    },
+    {
+      "input": {
+        "hook_event_name": "SessionEnd",
+        "session_id": "synthetic-session",
+        "prompt_id": "synthetic-prompt"
+      },
+      "state": "idle",
+      "rich_kind": "session_end"
+    }
+  ]
+}
