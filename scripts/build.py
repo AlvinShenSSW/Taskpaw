@@ -44,6 +44,18 @@ TAURI_CLI = "@tauri-apps/cli@2.11.3"
 
 
 def run(cmd: list[str], **kw) -> None:
+    stage = kw.pop("mac_stage", None)
+    if stage:
+        macos_tools().tool(stage, cmd, **kw)
+        return
+    kw.setdefault(
+        "env",
+        {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("APPLE_", "TASKPAW_MACOS_", "TASKPAW_PYI_"))
+        },
+    )
     print("+", " ".join(map(str, cmd)), flush=True)
     # Resolve the program (npm/npx are .cmd shims on Windows, found via PATHEXT)
     # so subprocess locates them WITHOUT shell=True (constitution §2) (#50).
@@ -77,7 +89,7 @@ def target_triple() -> str:
     return f"{arch}-unknown-linux-gnu"
 
 
-def build_backend() -> Path:
+def build_backend(plan=None) -> Path:
     """PyInstaller → build/backend/taskpaw-backend[.exe]."""
     dist = ROOT / "build" / "backend"
     run(
@@ -93,6 +105,11 @@ def build_backend() -> Path:
             "-y",
         ],
         cwd=ROOT,
+        **(
+            {"env": pyinstaller_env(plan), "mac_stage": "pyinstaller", "timeout": 5400}
+            if plan
+            else {}
+        ),
     )
     built = dist / f"taskpaw-backend{EXE_EXT}"
     if not built.exists():
@@ -100,9 +117,9 @@ def build_backend() -> Path:
     return built
 
 
-def place_sidecar(built: Path) -> Path:
+def place_sidecar(built: Path, plan=None) -> Path:
     """Copy the backend to the Tauri externalBin path with the target-triple suffix."""
-    triple = target_triple()
+    triple = plan.target if plan else target_triple()
     bin_dir = SRC_TAURI / "binaries"
     bin_dir.mkdir(parents=True, exist_ok=True)
     sidecar = bin_dir / f"taskpaw-backend-{triple}{EXE_EXT}"
@@ -112,146 +129,78 @@ def place_sidecar(built: Path) -> Path:
     return sidecar
 
 
-def build_tauri() -> None:
-    ui = ROOT / "taskpaw_v3" / "ui"
-    # Build the UI HERE with an explicit absolute --prefix (cwd-independent), then
-    # drop tauri's beforeBuildCommand — so the release bundle never depends on
-    # Tauri's hook working directory (which differs from frontendDist's base; see
-    # #50 where the relative-prefix hook broke the build). `ci` = reproducible.
-    run(["npm", "--prefix", str(ui), "ci"], cwd=ROOT)
-    run(["npm", "--prefix", str(ui), "run", "build"], cwd=ROOT)
-    # Role-specific identifier + name so the agent and hub installers don't
-    # overwrite each other on one machine (Kimi). Role from TASKPAW_BUILD_ROLE
-    # (also baked into the binary via option_env! in main.rs).
+def macos_tools():
+    # The direct script's sys.path starts in scripts/, while pytest uses repo root.
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts import macos_release
+
+    return macos_release
+
+
+def pyinstaller_env(plan):
+    env = macos_tools().child_env(os.environ)
+    env["TASKPAW_PYI_TARGET_ARCH"] = plan.arch
+    env["TASKPAW_PYI_ENTITLEMENTS_FILE"] = str(plan.entitlements(ROOT))
+    if plan.mode == "formal":
+        env["TASKPAW_PYI_CODESIGN_IDENTITY"] = plan.identity
+    return env
+
+
+def bundle_config():
     role = os.environ.get("TASKPAW_BUILD_ROLE", "agent").strip().lower()
     if role not in ("agent", "hub"):
         role = "agent"
-    cfg = {
-        "identifier": f"com.taskpaw.app.{role}",
-        "productName": f"TaskPaw {role.capitalize()}",
-    }
-    # Stamp the release version from the tag (TASKPAW_BUILD_VERSION, leading 'v'
-    # stripped) so a v3.1.0 tag doesn't ship "3.0.0" installers (Kimi). Unset
-    # (e.g. workflow_dispatch) → fall back to tauri.conf.json's version. Always set it
-    # in cfg so the ad-hoc DMG filename (_adhoc_finalize_macos) matches the app version
-    # even when the env var is absent.
     ver = os.environ.get("TASKPAW_BUILD_VERSION", "").strip().lstrip("vV")
     if not ver:
         ver = json.loads((SRC_TAURI / "tauri.conf.json").read_text())["version"]
-    cfg["version"] = ver
-    # macOS: ad-hoc sign local/unsigned builds so the .app + .dmg aren't rejected as
-    # "damaged" on Apple Silicon (an unsigned/inconsistently-signed bundle fails
-    # Gatekeeper). ONLY when no release identity is configured — a real
-    # APPLE_SIGNING_IDENTITY (release.yml #49) must win so Developer-ID signing +
-    # notarization still happen. Kept out of tauri.conf so the release path is
-    # untouched.
-    adhoc = (
-        sys.platform == "darwin"
-        and not os.environ.get("APPLE_SIGNING_IDENTITY", "").strip()
-    )
-    if adhoc:
-        cfg["bundle"] = {"macOS": {"signingIdentity": "-"}}
-    overrides = json.dumps(cfg)
-    # --ci: never prompt (headless runners would hang). Pin the CLI for
-    # reproducible bundles; beforeBuildCommand builds the UI.
-    cmd = ["npx", "--yes", TAURI_CLI, "build", "--ci", "--config", overrides]
-    # Optional target restriction (#54 bundle smoke): e.g. TASKPAW_BUNDLE_TARGETS=deb
-    # builds only a .deb on a Linux PR smoke (no AppImage tooling), without
-    # affecting release.yml (which leaves it unset → tauri.conf "all").
-    targets = os.environ.get("TASKPAW_BUNDLE_TARGETS", "").strip()
-    if adhoc:
-        # Build the .app ONLY (Tauri deletes the .app right after it makes the DMG, and
-        # would ad-hoc-sign the sidecar WITHOUT the library-validation entitlement it
-        # needs to load its bundled libpython on another mac). We post-process the .app
-        # and build the DMG ourselves (_adhoc_finalize_macos).
-        run(cmd + ["--bundles", "app"], cwd=SRC_TAURI)
-        _adhoc_finalize_macos(cfg, targets)
+    return {
+        "identifier": f"com.taskpaw.app.{role}",
+        "productName": f"TaskPaw {role.capitalize()}",
+        "version": ver,
+    }
+
+
+def build_tauri(plan=None, isolation=None) -> None:
+    ui = ROOT / "taskpaw_v3" / "ui"
+    cfg = bundle_config()
+    kwargs = {}
+    if sys.platform == "darwin":
+        if plan is None or isolation is None:
+            raise macos_tools().BuildError("macos_smoke_isolation_required")
+        isolation.require()
+        kwargs = {
+            "env": macos_tools().child_env(os.environ),
+            "mac_stage": "tauri",
+            "timeout": 5400,
+        }
+        bundle = plan.bundle_root(ROOT)
+        # Only generated artifacts for this role, never supplied user paths.
+        for folder in (bundle / "macos", bundle / "dmg"):
+            if folder.is_dir():
+                for old in folder.glob(cfg["productName"] + "*"):
+                    if old.suffix in {".app", ".dmg", ".zip"}:
+                        if old.is_dir() and not old.is_symlink():
+                            shutil.rmtree(old)
+                        else:
+                            old.unlink()
+        (bundle / "macos-verification.json").unlink(missing_ok=True)
+    run(["npm", "--prefix", str(ui), "ci"], cwd=ROOT, **kwargs)
+    run(["npm", "--prefix", str(ui), "run", "build"], cwd=ROOT, **kwargs)
+    cmd = ["npx", "--yes", TAURI_CLI, "build", "--ci", "--config", json.dumps(cfg)]
+    if plan:
+        cmd += ["--no-sign", "--bundles", "app", "--target", plan.target]
     else:
+        targets = os.environ.get("TASKPAW_BUNDLE_TARGETS", "").strip()
         if targets:
             cmd += ["--bundles", targets]
-        run(cmd, cwd=SRC_TAURI)
-    print("bundle -> " + str(SRC_TAURI / "target" / "release" / "bundle"), flush=True)
-
-
-def _adhoc_finalize_macos(cfg: dict, targets: str) -> None:
-    """After an ad-hoc `--bundles app` build: re-sign the PyInstaller sidecar with the
-    library-validation-disabling entitlement, re-seal the .app, then build the DMG.
-
-    Why: the onefile backend extracts its bundled libpython at runtime and dlopen()s it;
-    that dylib's code-signature Team ID differs from the ad-hoc exe, so macOS library
-    validation refuses it ("different Team IDs") and the backend never starts on any mac
-    but the build host. The entitlement lets the process load its own differently-signed
-    libraries. Tauri's own signing can't carry this (it doesn't apply the app
-    entitlements to the nested sidecar), so we do it here.
-    """
-    bundle_dir = SRC_TAURI / "target" / "release" / "bundle"
-    macos_dir = bundle_dir / "macos"
-    # Select THIS role's app by productName — `--bundles app` doesn't delete the .app,
-    # so a prior role's bundle (e.g. "TaskPaw Agent.app") can still sit alongside it and
-    # a naive sorted()[0] would grab the wrong one.
-    app = macos_dir / f"{cfg['productName']}.app"
-    if not app.is_dir():
-        raise SystemExit(f"ad-hoc build produced no {app.name} under {macos_dir}")
-    entitlements = SRC_TAURI / "macos-adhoc-entitlements.plist"
-
-    sidecars = [p for p in app.rglob("taskpaw-backend*") if p.is_file()]
-    if not sidecars:
-        raise SystemExit(f"no taskpaw-backend sidecar found inside {app}")
-    for side in sidecars:
-        # Re-sign the sidecar ad-hoc WITH the entitlement (disable library validation).
-        run(
-            [
-                "codesign",
-                "--force",
-                "--sign",
-                "-",
-                "--entitlements",
-                str(entitlements),
-                "--timestamp=none",
-                str(side),
-            ]
+    run(cmd, cwd=SRC_TAURI, **kwargs)
+    if plan:
+        macos_tools().finalize(plan, isolation, kwargs["env"], ROOT, cfg)
+    else:
+        print(
+            "bundle -> " + str(SRC_TAURI / "target" / "release" / "bundle"), flush=True
         )
-    # Re-seal the app WITHOUT --deep, so the sidecar's fresh entitlement survives (a
-    # deep re-sign would re-sign the sidecar and strip it). Tauri already ad-hoc-signed
-    # the other nested code (frameworks/helpers); this just re-computes the outer seal
-    # over the now-entitled sidecar.
-    run(["codesign", "--force", "--sign", "-", str(app)])
-    run(["codesign", "--verify", "--strict", str(app)])
-
-    # Build the DMG ourselves (Tauri would have; we deferred it). UDZO = compressed.
-    if targets and "dmg" not in {t.strip() for t in targets.split(",")}:
-        return  # caller only wanted the .app (e.g. a smoke build)
-    dmg_dir = bundle_dir / "dmg"
-    dmg_dir.mkdir(parents=True, exist_ok=True)
-    triple = target_triple()
-    arch = "aarch64" if triple.startswith("aarch64") else "x64"
-    ver = cfg.get("version") or "3.0.0"
-    dmg = dmg_dir / f"{cfg['productName']}_{ver}_{arch}.dmg"
-    if dmg.exists():
-        dmg.unlink()
-    # Stage the .app + an /Applications symlink so the DMG is drag-to-install.
-    staging = bundle_dir / "_dmg_staging"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    shutil.copytree(app, staging / app.name, symlinks=True)
-    os.symlink("/Applications", staging / "Applications")
-    run(
-        [
-            "hdiutil",
-            "create",
-            "-volname",
-            cfg["productName"],
-            "-srcfolder",
-            str(staging),
-            "-ov",
-            "-format",
-            "UDZO",
-            str(dmg),
-        ]
-    )
-    shutil.rmtree(staging)
-    print(f"dmg -> {dmg}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -263,6 +212,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
+    if sys.platform == "darwin":
+        mac = macos_tools()
+        try:
+            plan = mac.normalize(
+                os.environ, mac.native_target(os.environ, skip_tauri=args.skip_tauri)
+            )
+            with mac.build_session(
+                plan, os.environ, ROOT, skip_tauri=args.skip_tauri
+            ) as isolation:
+                mac.preflight(plan, mac.child_env(os.environ), ROOT)
+                built = build_backend(plan)
+                mac.arches(built, plan, mac.child_env(os.environ))
+                mac.signature(
+                    built, plan, mac.child_env(os.environ), ROOT, backend=True
+                )
+                mac.verify_archive(built, plan, mac.child_env(os.environ), ROOT)
+                place_sidecar(built, plan)
+                if not args.skip_tauri:
+                    build_tauri(plan, isolation)
+            return 0
+        except (mac.BuildError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            message = (
+                str(exc) if isinstance(exc, mac.BuildError) else "macos_build_failed"
+            )
+            print(message, file=sys.stderr)
+            return 1
     place_sidecar(build_backend())
     if args.skip_tauri:
         print("skipped tauri build (--skip-tauri)")

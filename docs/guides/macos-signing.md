@@ -1,47 +1,142 @@
-# macOS code-signing + notarization (#49)
+# Native macOS release builds
 
-The `release` workflow builds the macOS `.app`/`.dmg` via `tauri build`. With the
-secrets below configured, it **Developer ID–signs and notarizes** them so
-Gatekeeper opens them on a double-click. Without the secrets the build still
-succeeds but is **unsigned** (open via right-click → Open, or
-`xattr -dr com.apple.quarantine <app>`).
+The release workflow builds Agent installers on `macos-15` (arm64) and
+`macos-15-intel` (x86_64). Windows keeps its existing installer/signing path.
+Mac artifacts are a DMG and an app ZIP; raw `.app` uploads lose executable file
+permissions. The ZIP preserves them. These are Actions artifacts, not an
+automatic GitHub Release or deployment.
 
-Signing requires an **Apple Developer account** ($99/yr) — it can't be done
-without one, which is why this is operator-provided.
+## Signing modes and migration
 
-## Repo secrets to add
+Unset, empty and whitespace-only signing inputs select **ad-hoc signing**.
+Ad-hoc is signed, but is neither Developer ID distribution nor notarization.
+Partial configuration is an error. A failed formal build never retries ad-hoc.
 
-`Settings → Secrets and variables → Actions → New repository secret`:
+Traditional `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID` and
+`APPLE_PASSWORD` automation is retired, including a complete six-variable group.
+Tauri CLI 2.11.3 passes these passwords through native command arguments, which
+violates the repository security contract. Alternate Tauri API-key variables are
+also rejected; do not mix credential transports. Remove the deprecated inputs
+and migrate explicitly. The identity display name must be replaced by its exact
+certificate fingerprint. Diagnostics name fields without printing values.
 
-| Secret | What it is | How to get it |
-|--------|------------|---------------|
-| `APPLE_CERTIFICATE` | base64 of your **Developer ID Application** cert as a `.p12` | In Keychain Access export the cert+key to `cert.p12`, then `base64 -i cert.p12 \| pbcopy` |
-| `APPLE_CERTIFICATE_PASSWORD` | the password you set on that `.p12` | — |
-| `APPLE_SIGNING_IDENTITY` | the identity string | e.g. `Developer ID Application: Your Name (TEAMID)` — `security find-identity -v -p codesigning` |
-| `APPLE_ID` | your Apple ID email | — |
-| `APPLE_PASSWORD` | an **app-specific password** for notarization | appleid.apple.com → Sign-In and Security → App-Specific Passwords |
-| `APPLE_TEAM_ID` | your 10-char Team ID | developer.apple.com → Membership |
+A formal build requires **all four public references**:
 
-> Alternative to `APPLE_ID`/`APPLE_PASSWORD`: an App Store Connect **API key**
-> (`APPLE_API_KEY` / `APPLE_API_ISSUER` / a `.p8` key file). The Apple-ID path is
-> wired here because it needs no key file in CI.
+| Variable | Value |
+| --- | --- |
+| `APPLE_SIGNING_IDENTITY` | Exact 40-hex SHA-1 fingerprint of Developer ID Application certificate |
+| `APPLE_TEAM_ID` | 10 uppercase alphanumeric team identifier |
+| `TASKPAW_MACOS_SIGNING_KEYCHAIN` | Absolute path to an existing private, owner-only keychain outside the repository/artifacts |
+| `TASKPAW_MACOS_NOTARY_PROFILE` | Existing profile name; 1–128 ASCII alphanumeric/dot/underscore/hyphen characters, starting alphanumeric |
 
-## How it works
+The operator pre-provisions the private keychain/profile through approved Apple
+interfaces. It must already be unlocked, be in the user's existing search list,
+and allow unattended `codesign` access to that exact identity. The build never
+imports/unlocks credentials, changes a search list/ACL/trust setting, or deletes
+an operator keychain/profile. `notarytool` uses only profile/keychain references.
+[Apple TN3147](https://developer.apple.com/documentation/technotes/tn3147-migrating-to-the-latest-notarization-tool)
+describes secure password prompting for profile provisioning; do not put a
+password in command arguments or shell history.
 
-`tauri build` reads the `APPLE_*` env vars (the release step maps them from the
-secrets). When `APPLE_SIGNING_IDENTITY` is set it imports `APPLE_CERTIFICATE` into
-a temporary keychain, signs the app + the bundled `taskpaw-backend` sidecar with
-the hardened runtime, then notarizes with the Apple-ID credentials and staples
-the ticket. Empty vars ⇒ no signing.
+GitHub-hosted VMs do not automatically contain this pre-provisioned material.
+They build ad-hoc by default. Repository reference variables cannot provision a
+keychain: a configured formal mode without its keychain/profile fails early.
+The hosted workflow also detects deprecated secret presence and fails rather
+than silently ignoring an old formal configuration. Formal automation on hosted
+VMs needs a separately approved safe provisioning process; this guide does not
+add one. Formal builds are supported on operator-provisioned **dedicated clean
+disposable native Intel/arm64 runners or VMs**, not a shared signing Mac.
 
-## Verifying a build (on a Mac)
+## Required runtime-smoke isolation
 
-```bash
-codesign -dv --verbose=4 "TaskPaw Agent.app"     # signed + hardened runtime
-spctl -a -vvv -t install "TaskPaw Agent.app"     # "accepted" (Gatekeeper)
-xcrun stapler validate "TaskPaw Agent.dmg"       # notarization ticket stapled
+Every actual app, ZIP and DMG backend smoke needs a clean dedicated disposable
+host with **no real TaskPaw and no independent concurrent TaskPaw launch** during
+the entire session. A temporary HOME and released ephemeral ports do not provide
+atomic isolation: production startup has an existing stale-instance reclaim
+path. This change does not alter that production behavior.
+
+The reviewed fresh hosted job sets
+`TASKPAW_MACOS_SMOKE_ISOLATION=github-hosted-fresh` and validates native GitHub job
+metadata. Its fixtures run serially, and no other step starts TaskPaw. Generic
+CI=true, self-hosted/reused runners or merely copying that flag are insufficient.
+
+For a genuinely disposable native host, the trusted operator/provisioner creates
+an owner-only, nonsymlink JSON attestation outside the repository/artifacts,
+then sets `TASKPAW_MACOS_SMOKE_ISOLATION=disposable-native` and
+`TASKPAW_MACOS_SMOKE_ATTESTATION` to its absolute path. The exact record is:
+
+```json
+{
+  "version": 1,
+  "kind": "disposable-native",
+  "session_id": "<UUID for this exclusive session>",
+  "boot_session_uuid": "<current kern.bootsessionuuid>",
+  "target": "<aarch64-apple-darwin or x86_64-apple-darwin>",
+  "dedicated": true,
+  "clean": true,
+  "disposable": true,
+  "no_real_taskpaw": true,
+  "no_independent_taskpaw_launches": true
+}
 ```
 
-If notarization rejects an **unsigned nested binary**, confirm the
-`taskpaw-backend` sidecar got signed (it's signed as part of the `.app`); a custom
-entitlements file may be needed if the app later gains privileged capabilities.
+Record the disposable runner/VM identity and the controller enforcing exclusivity
+in the manual check record. The file is a trusted execution assertion, not proof
+of physical isolation, and must not relabel a shared machine. The build cannot
+self-issue it. Boot/target/flags and immutable session contents are checked before
+every backend spawn; a cooperating-helper lock only serializes these helpers.
+Missing/shared/invalidated context refuses runtime verification before spawning.
+Structural/signature-only evidence is partial and cannot pass the full build
+or authorize installer upload. `--skip-tauri` does not run the backend and makes
+no runtime or installer acceptance claim.
+
+## Build and automatic verification
+
+On the qualified native host, install the locked build dependencies and run:
+
+```bash
+uv sync --frozen --group dev --extra build --extra v3
+uv run python scripts/build.py
+```
+
+Optional `TASKPAW_BUILD_TARGET` must match the native CPU/Python/rustc host.
+Cross/Rosetta/universal builds are rejected. Mac `TASKPAW_BUNDLE_TARGETS` accepts
+`app`, `dmg`, `app,dmg`, or empty (both). Version/role stamping is unchanged.
+
+PyInstaller signs native archive contents and the onefile backend before
+embedding them. Formal code shares the selected Developer ID/Team and an empty
+entitlement profile with library validation enabled. The historical ad-hoc
+backend permissions remain for compatibility; this is not a claim that each is
+necessary. Tauri builds the app with signing disabled, then the build helper
+signs nested code inside out and verifies every native archive entry. It never
+uses deep signing as a repair.
+
+The isolated frozen backend must announce the right readiness role/base and
+return actual host-metrics CPU/memory/disk/network values. This exercises its
+Python, pydantic_core and psutil extensions. ZIP extraction and read-only DMG
+mount/copy repeat signatures, architecture and actual readiness; nothing is
+installed into Applications. Fixtures use their own config and ephemeral ports,
+then stop only their owned process group and verify released sockets.
+
+Formal mode requires accepted app and DMG notarization, staples/validates the
+app before the final ZIP and validates the DMG ticket. Timeout/rejection is an
+error, never success. The verification JSON excludes credential references,
+account/history, tokens/descriptors and raw native output. **Notarization
+traceability is incomplete:** durable submission-ID/submitted-hash/final-byte
+mapping remains deferred. Accepted/staple booleans do not close that acceptance.
+
+## Manual distribution boundary
+
+Actual formal credentials, clean dual-architecture downloads, installation and
+Gatekeeper require operator evidence; local unit tests or build-host smoke do
+not establish them. On corresponding clean disposable/exclusive Intel and arm64
+Macs, record source/version/architecture, signing identity/Team consistency,
+hardened runtime/timestamp, accepted notarization and app/DMG ticket validation,
+Gatekeeper assessment, GUI start and actual sidecar readiness/native metrics.
+Normal desktop-close ownership acceptance depends on the separate lifecycle
+work; do not infer it from this smoke cleanup.
+
+For ad-hoc downloads, expect an unidentified-developer warning. If the operator
+trusts the artifact, follow Apple's current
+[Privacy & Security / Open Anyway guidance](https://support.apple.com/102445).
+Do not remove quarantine or disable Gatekeeper to manufacture acceptance.
