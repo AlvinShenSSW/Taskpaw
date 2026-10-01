@@ -594,13 +594,14 @@ def _ephemeral_pair(host):
     "when", ["already_stopped", "before_start", "during_start", "during_start_thread"]
 )
 def test_startup_cancellation_does_not_restart_or_leak_resources(
-    role, when, tmp_path, monkeypatch, capsys
+    role, when, tmp_path, monkeypatch, capsys, caplog
 ):
     """A synchronous signal can return into start(), which then acquires more.
 
     Real isolated children/poller threads and bound sockets must be reclaimed;
     API servers/readiness must never start after the cancellation.
     """
+    import logging
     import subprocess
     import sys
     import threading
@@ -618,6 +619,7 @@ def test_startup_cancellation_does_not_restart_or_leak_resources(
 
     read_port, control_port = _ephemeral_pair("127.0.0.1")
     shutdown = GracefulShutdown()
+    caplog.set_level(logging.INFO, logger="taskpaw.lifecycle")
     sessions, order, api_runs = [], [], []
     children, pollers = [], []
     stoppers, store_closes = [], []
@@ -629,10 +631,21 @@ def test_startup_cancellation_does_not_restart_or_leak_resources(
         sessions.append(session)
         return session
 
+    def assert_deferred_cleanup():
+        assert shutdown.is_stopping
+        assert not sessions[0].is_active()
+        assert not shutdown.stopped.is_set()
+        assert "Graceful shutdown complete" not in caplog.text
+
+    def stop_before_start():
+        shutdown.shutdown()
+        assert_deferred_cleanup()
+
     def start(*args):
         order.append("start")
         if when == "during_start":
             shutdown.shutdown()
+            assert_deferred_cleanup()
         elif when == "during_start_thread":
             stopper = threading.Thread(
                 target=shutdown.shutdown, name="test-cancel-caller"
@@ -643,6 +656,9 @@ def test_startup_cancellation_does_not_restart_or_leak_resources(
             while not shutdown.is_stopping and time.monotonic() < deadline:
                 time.sleep(0.001)
             assert shutdown.is_stopping
+            while sessions[0].is_active() and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert_deferred_cleanup()
         assert not store_closes  # Hub must not close the DB while start can use it.
         # Deliberately acquire after cancellation, like a partially completed
         # monitor/service start. A boolean checked only before start cannot fix it.
@@ -709,7 +725,7 @@ def test_startup_cancellation_does_not_restart_or_leak_resources(
     monkeypatch.setattr(
         shutdown,
         "install_signal_handlers",
-        shutdown.shutdown if when == "before_start" else lambda: None,
+        stop_before_start if when == "before_start" else lambda: None,
     )
     store = HubStore(tmp_path / "hub.db")
     original_close = store.close
@@ -743,6 +759,7 @@ def test_startup_cancellation_does_not_restart_or_leak_resources(
             stopper.join(timeout=3)
             assert not stopper.is_alive()
         assert shutdown.stopped.is_set()
+        assert caplog.text.count("Graceful shutdown complete") == 1
         assert not sessions[0].is_active()
         assert not api_runs
         assert all(child.poll() is not None for child in children)

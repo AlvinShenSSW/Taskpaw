@@ -158,6 +158,35 @@ def generate(root: Path) -> dict:
     parent = published("unsafe_parent")
     _security_change(parent.parent, dacl=private + "(A;;0x2;;;WD)")
     record("unsafe_parent", parent, "reject")
+    owner_rights = published("trusted_owner_rights")
+    owner_acl = private + "(A;OICI;FA;;;S-1-3-4)"
+    _security_change(owner_rights.parent, dacl=owner_acl)
+    # Mandatory actual writer acceptance after OWNER_RIGHTS is installed.
+    lease = files.CredentialLease(owner_rights.parent, "agent.control.json")
+    try:
+        lease.publish(descriptor)
+    finally:
+        lease.close()
+    record("trusted_owner_rights", owner_rights, "accept")
+    everyone = published("everyone_owner_rights")
+    _security_change(everyone.parent, dacl=owner_acl + "(A;;FA;;;WD)")
+    record("everyone_owner_rights", everyone, "reject")
+    file_rights = published("file_owner_rights")
+    _security_change(file_rights, dacl=owner_acl)
+    record("file_owner_rights", file_rights, "reject")
+    installer_acl = published("trusted_installer_file_acl")
+    _security_change(
+        installer_acl, dacl=private + f"(A;;FR;;;{files._TRUSTED_INSTALLER})"
+    )
+    record("trusted_installer_file_acl", installer_acl, "reject")
+    unknown = published("unknown_owner_rights")
+    _security_change(unknown.parent, dacl=owner_acl)
+    try:
+        _security_change(unknown.parent, owner_sid="S-1-5-32-545")
+    except files.ControlCredentialError:
+        record("unknown_owner_rights", unknown, "skip", "owner_privilege_unavailable")
+    else:
+        record("unknown_owner_rights", unknown, "reject")
     wrong = published("wrong_owner")
     try:
         _security_change(wrong, owner_sid="S-1-5-18")
@@ -168,6 +197,7 @@ def generate(root: Path) -> dict:
     for name, sid in (
         ("trusted_system_parent", "S-1-5-18"),
         ("trusted_admins_parent", "S-1-5-32-544"),
+        ("trusted_installer_parent", files._TRUSTED_INSTALLER),
     ):
         trusted = published(name)
         try:
@@ -183,6 +213,18 @@ def generate(root: Path) -> dict:
             finally:
                 lease.close()
             record(name, trusted, "accept")
+    trusted_file = published("trusted_installer_file")
+    try:
+        _security_change(trusted_file, owner_sid=files._TRUSTED_INSTALLER)
+    except files.ControlCredentialError:
+        record(
+            "trusted_installer_file",
+            trusted_file,
+            "skip",
+            "owner_privilege_unavailable",
+        )
+    else:
+        record("trusted_installer_file", trusted_file, "reject")
     for name, directory in (("reparse_file", False), ("reparse_parent", True)):
         link = root / (name + ".link")
         try:

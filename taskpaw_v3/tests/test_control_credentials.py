@@ -335,7 +335,15 @@ def test_windows_production_writer_fixtures_match_acceptance(tmp_path):
     assert cases["broad_acl"]["expect"] == "reject"
     assert cases["null_acl"]["expect"] == "reject"
     assert cases["unsafe_parent"]["expect"] == "reject"
-    for name in ("trusted_system_parent", "trusted_admins_parent"):
+    assert cases["trusted_owner_rights"]["expect"] == "accept"
+    assert cases["everyone_owner_rights"]["expect"] == "reject"
+    assert cases["file_owner_rights"]["expect"] == "reject"
+    assert cases["trusted_installer_file_acl"]["expect"] == "reject"
+    for name in (
+        "trusted_system_parent",
+        "trusted_admins_parent",
+        "trusted_installer_parent",
+    ):
         assert cases[name]["expect"] in {"accept", "skip"}
     for case in cases.values():
         if case["expect"] == "accept":

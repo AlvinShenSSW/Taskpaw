@@ -541,7 +541,9 @@ mod platform {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSidToSidW, GetSecurityInfo, SE_FILE_OBJECT,
+    };
     use windows_sys::Win32::Security::*;
     use windows_sys::Win32::Storage::FileSystem::*;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -565,6 +567,8 @@ mod platform {
         user: Vec<usize>,
         system: Vec<u32>,
         admins: Vec<u32>,
+        trusted_installer: Vec<u32>,
+        owner_rights: Vec<u32>,
     }
     impl Identities {
         fn user_sid(&self) -> PSID {
@@ -575,6 +579,7 @@ mod platform {
                 EqualSid(sid, self.user_sid()) != 0
                     || EqualSid(sid, self.system.as_ptr() as PSID) != 0
                     || (!file && EqualSid(sid, self.admins.as_ptr() as PSID) != 0)
+                    || (!file && EqualSid(sid, self.trusted_installer.as_ptr() as PSID) != 0)
             }
         }
     }
@@ -612,10 +617,29 @@ mod platform {
                 }
                 Ok(data)
             }
+            fn named(sid: &str) -> Result<Vec<u32>, CredentialError> {
+                let wide: Vec<u16> = sid.encode_utf16().chain([0]).collect();
+                let mut result = null_mut();
+                unsafe {
+                    if ConvertStringSidToSidW(wide.as_ptr(), &mut result) == 0 {
+                        return Err(CredentialError);
+                    }
+                    let _lease = SecurityDescriptor(result);
+                    if result.is_null() || IsValidSid(result) == 0 {
+                        return Err(CredentialError);
+                    }
+                    let length = GetLengthSid(result) as usize;
+                    Ok(std::slice::from_raw_parts(result as *const u32, length / 4).to_vec())
+                }
+            }
             Ok(Identities {
                 user,
                 system: known(WinLocalSystemSid)?,
                 admins: known(WinBuiltinAdministratorsSid)?,
+                trusted_installer: named(
+                    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+                )?,
+                owner_rights: named("S-1-3-4")?,
             })
         }
     }
@@ -737,7 +761,11 @@ mod platform {
                 if IsValidSid(sid) == 0 {
                     return Err(CredentialError);
                 }
-                if ids.trusted(sid, file) {
+                // OWNER_RIGHTS maps to this HANDLE's owner, already verified
+                // as trusted above. The strict descriptor-file ACL is unchanged.
+                if ids.trusted(sid, file)
+                    || (!file && EqualSid(sid, ids.owner_rights.as_ptr() as PSID) != 0)
+                {
                     continue;
                 }
                 let unsafe_mask = 0x10

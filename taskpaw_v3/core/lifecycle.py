@@ -19,10 +19,13 @@ log = logging.getLogger("taskpaw.lifecycle")
 
 class GracefulShutdown:
     def __init__(self, child_timeout: float = 5.0) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._callbacks: list[tuple[str, Callable[[], None]]] = []
         self._children: list[tuple[str, subprocess.Popen]] = []
         self._done = False
+        self._callbacks_done = False
+        self._completion_holds = 0
+        self._completion_claimed = False
         self._child_timeout = child_timeout
         self.stopped = threading.Event()
 
@@ -35,8 +38,45 @@ class GracefulShutdown:
     def is_stopping(self) -> bool:
         """Sticky stop request, including while callbacks are still running."""
         # This flag only transitions False -> True. Do not hold the registry's
-        # non-reentrant lock across a checkpoint that a signal can interrupt.
+        # mutex across a checkpoint that a signal can interrupt.
         return self._done
+
+    def hold_completion(self) -> Callable[[], None]:
+        """Defer the completed-stop event while a launcher can acquire resources.
+
+        The returned release is idempotent. A completed caller-supplied registry
+        remains completed; the launcher must check its sticky stop request.
+        """
+        with self._lock:
+            if self._completion_claimed:
+                return lambda: None
+            self._completion_holds += 1
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            with self._lock:
+                if released:
+                    return
+                released = True
+                self._completion_holds -= 1
+            self._complete_if_ready()
+
+        return release
+
+    def _complete_if_ready(self) -> None:
+        with self._lock:
+            complete = (
+                self._done
+                and self._callbacks_done
+                and self._completion_holds == 0
+                and not self._completion_claimed
+            )
+            if complete:
+                self._completion_claimed = True
+        if complete:
+            self.stopped.set()
+            log.info("Graceful shutdown complete")
 
     def register_child(self, name: str, proc: subprocess.Popen) -> None:
         """Register a managed child process (e.g. lada-cli) to terminate on stop."""
@@ -75,8 +115,9 @@ class GracefulShutdown:
         for name, proc in children:
             self._terminate_child(name, proc)
 
-        self.stopped.set()
-        log.info("Graceful shutdown complete")
+        with self._lock:
+            self._callbacks_done = True
+        self._complete_if_ready()
 
     def _terminate_child(self, name: str, proc: subprocess.Popen) -> None:
         if proc.poll() is not None:
@@ -118,6 +159,7 @@ class StartupShutdown:
         self._starting = True
         self._deactivated = False
         self._cleaned = False
+        self._release_completion = shutdown.hold_completion()
 
     def checkpoint(self) -> None:
         if self._cancelled.is_set() or self._shutdown.is_stopping:
@@ -137,15 +179,18 @@ class StartupShutdown:
             self._cleanup()
 
     def finish(self) -> None:
-        with self._lock:
-            self._starting = False
-            clean = (
-                self._cancelled.is_set() or self._shutdown.is_stopping
-            ) and not self._cleaned
+        try:
+            with self._lock:
+                self._starting = False
+                clean = (
+                    self._cancelled.is_set() or self._shutdown.is_stopping
+                ) and not self._cleaned
+                if clean:
+                    self._cleaned = True
             if clean:
-                self._cleaned = True
-        if clean:
-            # Ensure deactivation has completed before teardown. This also
-            # covers an already-stopped registry whose callback never ran.
-            self.stop()
-            self._cleanup()
+                # Ensure deactivation has completed before teardown. This also
+                # covers an already-stopped registry whose callback never ran.
+                self.stop()
+                self._cleanup()
+        finally:
+            self._release_completion()

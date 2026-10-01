@@ -1108,6 +1108,10 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
         let mut rejected = 0;
         let mut secure_seen = false;
         let mut broad_seen = false;
+        let mut owner_rights_seen = false;
+        let mut everyone_owner_rights_seen = false;
+        let mut file_owner_rights_seen = false;
+        let mut installer_file_acl_seen = false;
         for case in manifest.cases {
             if case.name == "secure" {
                 assert_eq!(case.expect, "accept");
@@ -1116,6 +1120,22 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
             if case.name == "broad_acl" {
                 assert_eq!(case.expect, "reject");
                 broad_seen = true;
+            }
+            if case.name == "trusted_owner_rights" {
+                assert_eq!(case.expect, "accept");
+                owner_rights_seen = true;
+            }
+            if case.name == "everyone_owner_rights" {
+                assert_eq!(case.expect, "reject");
+                everyone_owner_rights_seen = true;
+            }
+            if case.name == "file_owner_rights" {
+                assert_eq!(case.expect, "reject");
+                file_owner_rights_seen = true;
+            }
+            if case.name == "trusted_installer_file_acl" {
+                assert_eq!(case.expect, "reject");
+                installer_file_acl_seen = true;
             }
             match case.expect.as_str() {
                 "accept" => {
@@ -1137,7 +1157,15 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
                 }
                 "skip" => {
                     assert!(
-                        !matches!(case.name.as_str(), "secure" | "broad_acl"),
+                        !matches!(
+                            case.name.as_str(),
+                            "secure"
+                                | "broad_acl"
+                                | "trusted_owner_rights"
+                                | "everyone_owner_rights"
+                                | "file_owner_rights"
+                                | "trusted_installer_file_acl"
+                        ),
                         "Basic interop fixtures must never skip"
                     );
                     eprintln!("Windows optional fixture unavailable: {}", case.name);
@@ -1146,7 +1174,14 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
             }
         }
         assert!(
-            accepted >= 1 && rejected >= 1 && secure_seen && broad_seen,
+            accepted >= 2
+                && rejected >= 4
+                && secure_seen
+                && broad_seen
+                && owner_rights_seen
+                && everyone_owner_rights_seen
+                && file_owner_rights_seen
+                && installer_file_acl_seen,
             "Interop requires safe and broad-ACL real files"
         );
     }

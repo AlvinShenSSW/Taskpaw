@@ -227,9 +227,18 @@ to the control listener. Offline Hub commands such as `add-server` and
 
 After both ports are claimed, each backend creates a fresh random credential in
 `agent.control.json` or `hub.control.json` next to the YAML it actually loaded.
-The config directory must be private and owned by the service account; unsafe
-files, links or permissions fail startup. On POSIX the descriptor is mode 0600;
-on Windows its protected ACL grants access only to the current user and SYSTEM.
+The config directory must be private; unsafe files, links or permissions fail
+startup. On POSIX the directory belongs to the service account and the descriptor
+is mode 0600. On Windows, every directory owner/modifying principal must be the
+current user, SYSTEM, Administrators, or the exact TrustedInstaller service SID.
+Directory `OWNER_RIGHTS` applies only to that already-verified owner. Unknown
+owners and Everyone write access still fail. The descriptor itself must remain
+owned by the current user, with a protected non-inherited ACL allowing only the
+current user and SYSTEM; neither TrustedInstaller nor `OWNER_RIGHTS` broadens
+file access. Select a private user config directory with a trusted parent chain.
+For example, CI's unknown-owner D: runner root stays rejected; its interop
+fixture creates a new private directory in Python's user Temp on C: instead,
+without altering existing parent ACLs.
 Keep these local files out of backups or shared folders. The credential is not
 stored in YAML and is independent of `api_token`, `polling_token` and LLM keys.
 `TASKPAW_CONTROL_TOKEN`, `TASKPAW_UI_TOKEN` and `VITE_TASKPAW_TOKEN` cannot supply

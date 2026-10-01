@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 _LIMIT = 16 * 1024
 _BOOT = re.compile(r"[0-9a-f]{32}\Z")
 _FIELDS = {"version", "role", "base_url", "boot_id", "control_token"}
+_TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 
 if sys.platform == "darwin":
     import ctypes
@@ -539,7 +540,11 @@ if os.name == "nt":  # pragma: no cover - executed by the Windows CI job
         _win_ok(result == 0)
         try:
             system, admins = _named_sid("S-1-5-18"), _named_sid("S-1-5-32-544")
-            trusted = {user, system, admins} if directory else {user, system}
+            trusted = (
+                {user, system, admins, _named_sid(_TRUSTED_INSTALLER)}
+                if directory
+                else {user, system}
+            )
             if _sid_bytes(owner) not in (trusted if directory else {user}):
                 raise ControlCredentialError("unsafe_control_owner")
             control, revision = wt.WORD(), wt.DWORD()
@@ -562,6 +567,10 @@ if os.name == "nt":  # pragma: no cover - executed by the Windows CI job
                     if ace.kind != 0 or ace.flags & 0x10 or principal not in trusted:
                         raise ControlCredentialError("unsafe_control_acl")
                 elif ace.kind == 0 and principal not in trusted:
+                    # OWNER_RIGHTS represents this object's current owner,
+                    # already verified above. It grants no rights to others.
+                    if principal == _named_sid("S-1-3-4"):
+                        continue
                     mask = _PARENT_UNSAFE if final else _DIR_UNSAFE
                     if ace.mask & mask:
                         raise ControlCredentialError("unsafe_control_directory")

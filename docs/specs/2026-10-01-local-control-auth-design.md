@@ -75,6 +75,16 @@ anchor publication and cleanup. Unsafe existing files fail closed. Writes use
 an exclusive temporary file, durable flush and atomic replacement; readers
 validate and read the same opened object, with bounded content and fixed schema.
 
+Windows directory owners and modifying principals must be the current user,
+SYSTEM, Administrators, or the exact fixed TrustedInstaller service SID.
+Directory `OWNER_RIGHTS` refers to the already-validated owner; it cannot bypass
+unknown ownership or an Everyone write grant. All ancestor HANDLEs stay pinned
+without delete sharing. Credential files remain owned by the current user with
+protected, non-inherited explicit current-user/SYSTEM access; TrustedInstaller
+ownership and `OWNER_RIGHTS` are not accepted for files. These identities follow
+[Windows Resource Protection](https://learn.microsoft.com/en-us/windows/win32/wfp/about-windows-file-protection)
+and [Microsoft's Owner Rights semantics](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-special-identities-groups#owner-rights).
+
 On macOS, extended ACLs can grant access independently of permission bits. Both
 Python and Rust inspect each opened directory and credential fd with the native
 ACL API; Python also inspects its new temporary fd before writing any secret.
@@ -192,3 +202,12 @@ interop. Real packaged macOS/Windows WebView behavior, installation and
 cross-account/native attack checks require platform validation; simulated HTTP
 and JavaScript tests alone do not establish those results. A WebView that sends
 `Origin: null` must be investigated without broadening the whitelist.
+
+Windows interop creates its own private root directly under Python's user Temp.
+Native CI identified TrustedInstaller ownership on its C: root, and an unknown
+owner on its D: runner-temp root. The latter remains rejected; tests select a
+directory satisfying the production policy instead of changing a drive or
+existing parent ACL. Mandatory fixtures exercise safe reads, broad-ACL rejection,
+trusted-owner `OWNER_RIGHTS`, Everyone full control with `OWNER_RIGHTS`, and the
+unchanged strict file ACL. Owner mutations unavailable without extra privileges
+are explicit optional skips, not acceptance evidence.

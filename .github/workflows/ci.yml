@@ -163,7 +163,11 @@ jobs:
       - name: Python writer → Rust reader interop
         shell: pwsh
         run: |
-          $env:TASKPAW_TEST_CONTROL_FIXTURES = Join-Path $env:RUNNER_TEMP ("taskpaw-control-" + [guid]::NewGuid().ToString())
+          # Use Python's actual user Temp; RUNNER_TEMP's D: root may have an
+          # unknown owner and must remain rejected by the production policy.
+          $fixtureParent = uv run python -c "import tempfile; print(tempfile.gettempdir())"
+          if ($LASTEXITCODE -ne 0) { throw "Python fixture parent unavailable" }
+          $env:TASKPAW_TEST_CONTROL_FIXTURES = Join-Path $fixtureParent ("taskpaw-control-" + [guid]::NewGuid().ToString())
           try {
             uv run python -m taskpaw_v3.tests.windows_control_fixture
             if ($LASTEXITCODE -ne 0) { throw "Python control fixture generation failed" }
