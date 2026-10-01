@@ -6,6 +6,7 @@ import copy
 import io
 import json
 import os
+import re
 import sys
 import time
 from datetime import date
@@ -724,6 +725,38 @@ def test_workflow_permissions_and_manual_periodic_scan():
         and "|| true" not in text
     )
     assert "timeout-minutes: 30" in text and "retention-days: 30" in text
+
+
+@pytest.mark.parametrize(
+    "event_name,ref_name", [("pull_request", "246/merge"), ("push", "fix/r15")]
+)
+def test_workflow_artifact_name_accepts_pr_and_slash_branch(event_name, ref_name):
+    text = (ROOT / ".github/workflows/dependency-scan.yml").read_text()
+    upload = text.split("uses: actions/upload-artifact@", 1)[1]
+    template = re.search(r"^\s+name:\s*(.+)$", upload, re.MULTILINE).group(1)
+    context = {
+        "event_name": event_name,
+        "ref_name": ref_name,
+        "run_id": "36903583488",
+        "run_attempt": "1",
+    }
+
+    def render(values):
+        name = re.sub(
+            r"\$\{\{\s*github\.(\w+)\s*\}\}",
+            lambda match: values[match.group(1)],
+            template,
+        )
+        assert "${{" not in name, "unsupported artifact-name expression"
+        # upload-artifact rejects these filesystem characters. The actual PR
+        # failure was a slash after rendering github.ref_name as 246/merge.
+        assert name and not re.search(r'[":<>|*?\r\n\\/]', name), name
+        return name
+
+    first = render(context)
+    retry = render({**context, "run_attempt": "2"})
+    next_run = render({**context, "run_id": "36903583489"})
+    assert len({first, retry, next_run}) == 3, "run/attempt artifacts must be distinct"
 
 
 def test_registry_window_concurrency_and_total_response_budget(monkeypatch, rust_items):

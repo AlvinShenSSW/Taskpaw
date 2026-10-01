@@ -51,7 +51,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: dependency-scan-${{ github.ref_name }}-${{ github.run_id }}
+          name: dependency-scan-${{ github.event_name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: build/dependency-scan
           if-no-files-found: error
           retention-days: 30
