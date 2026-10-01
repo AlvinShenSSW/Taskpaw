@@ -85,6 +85,20 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
     if dst.exists() and not force:
         return dst, False
     text = Path(src).read_text(encoding="utf-8")
+    existing_identity = None
+    if role == "agent" and dst.exists():
+        from taskpaw_v3.core.config import AgentConfig, load_yaml
+
+        try:
+            existing_cfg: AgentConfig = load_yaml(AgentConfig, dst)  # type: ignore[assignment]
+            existing_identity = existing_cfg.server_id
+        except (ValueError, TypeError):
+            if dst.with_name("agent.state.json").exists():
+                raise
+            print(
+                "overwriting invalid config without event state; explicit event initialization is still required",
+                file=sys.stderr,
+            )
     if role == "agent":
         # Give each fresh agent a UNIQUE identity so multiple LAN installs don't
         # all advertise "my-agent" (display/log collisions) (Kimi). `machine` is the
@@ -107,6 +121,12 @@ def scaffold(role: str, force: bool = False) -> tuple[Path, bool]:
         text = text.replace(
             "server_id: my-agent", f"server_id: {slug}-{uuid.uuid4().hex[:6]}"
         )
+        if existing_identity:
+            text = re.sub(
+                r"(?m)^server_id:.*$",
+                f"server_id: {json.dumps(existing_identity)}",
+                text,
+            )
         text = text.replace(
             "machine: my-machine",
             f"machine: {json.dumps(friendly, ensure_ascii=False)}",
@@ -140,7 +160,8 @@ def apply_agent_edits(
     cfg: AgentConfig = load_yaml(AgentConfig, config_path)  # type: ignore[assignment]
     if preset == "moomoo":
         cfg.machine = "moomoo"
-        cfg.server_id = "moomoo-prod"
+        if not config_path.with_name("agent.state.json").exists():
+            cfg.server_id = "moomoo-prod"
         cfg.monitors = moomoo_preset()
     if bind_host:
         cfg.bind_host = bind_host
@@ -212,6 +233,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--force", action="store_true", help="overwrite an existing config")
     ap.add_argument("--run", action="store_true", help="launch the service after setup")
     ap.add_argument(
+        "--initialize-events",
+        action="store_true",
+        help="agent only: confirm new pairing (retire old Hub registrations first)",
+    )
+    ap.add_argument(
         "--agent",
         action="append",
         default=[],
@@ -235,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.agent and args.role != "hub":
         print("error: --agent is only valid for the hub role", file=sys.stderr)
         return 2
-    if (args.preset or args.bind_host) and args.role != "agent":
+    if (
+        args.preset or args.bind_host or args.initialize_events
+    ) and args.role != "agent":
         print(
             "error: --preset/--bind-host are only valid for the agent role",
             file=sys.stderr,
@@ -277,6 +305,14 @@ def main(argv: list[str] | None = None) -> int:
         print("registered agents:")
         print("\n".join(lines))
 
+    if args.initialize_events:
+        from taskpaw_v3.agent.state import main as state_main
+
+        result = state_main(
+            ["--config", str(path), "initialize", "--confirm-new-pairing"]
+        )
+        if result:
+            return result
     print()
     if args.run:
         print(f"starting {args.role}…  (Ctrl-C to stop)")

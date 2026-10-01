@@ -25,6 +25,7 @@ from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown
 from taskpaw_v3.core.net import guard_bind_exposure
+from taskpaw_v3.core.state import FileLease, db_lease_path
 from taskpaw_v3.hub.server.film_proxy import (
     FilmProxyError,
     FilmResource,
@@ -75,6 +76,7 @@ class HubService:
     def __init__(self, config: HubConfig, store: HubStore) -> None:
         self.config = config
         self.store = store
+        self._event_cursor_lease: FileLease | None = None
         self.poller = Poller(
             store=store,
             openclaw_url=config.openclaw_url,
@@ -291,6 +293,7 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         # id/name/ip/port/enabled keys are preserved; `online`/`last_seen`/`snapshot`
         # are added. `snapshot` is the agent's parsed /status (None if never polled).
         snaps = service.poller.snapshot_statuses()
+        channels = service.poller.snapshot_event_channels()
         servers = []
         for s in store.list_servers():
             snap = snaps.get(s["id"], {})
@@ -303,6 +306,14 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
                     "online": bool(snap.get("online", False)) and bool(s["enabled"]),
                     "last_seen": snap.get("last_seen"),
                     "snapshot": snap.get("snapshot"),
+                    "event_channel": channels.get(
+                        s["id"],
+                        {
+                            "state": "paused",
+                            "reason": "not_polled",
+                            "recovery_hint": "Wait for a current status poll.",
+                        },
+                    ),
                 }
             )
         return {
@@ -511,58 +522,99 @@ def run_hub(
     reclaim_port_from_stale_instance(
         config.bind_host, config.bind_port, role="hub", what="hub API"
     )
-    sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
-    # Auth-disabled visibility (#145): the guard already refuses a non-loopback
-    # bind with no token, so reaching here with auth off means a loopback-only API.
-    # Warn only now the port is claimed (the service is actually starting).
-    if auth_disabled(config.api_token):
-        log.warning(
-            "hub API auth is DISABLED (no api_token set) — /status and /events "
-            "accept any request. The bind guard keeps this loopback-only (%s); set "
-            "an api_token to require a Bearer token or to bind a LAN address.",
-            config.bind_host,
-        )
-    app, service = create_hub_app(config, store)
-    service.start()
+    lease = FileLease(db_lease_path(store.db_path)).acquire()
+    service = None
+    server_thread = None
 
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
+    def _writers_alive() -> bool:
+        if server_thread is not None and server_thread.is_alive():
+            return True
+        if service is not None:
+            if service._thread is not None and service._thread.is_alive():
+                return True
+            sup = service.self_supervisor
+            if sup is not None:
+                if any(v.get("alive") for v in sup.snapshot().values()):
+                    return True
+                if sup._watchdog is not None and sup._watchdog.is_alive():
+                    return True
+        return False
 
-    def _serve() -> None:
-        try:
-            server.run(sockets=[sock])
-        except Exception as e:  # a failed server must not hang run_hub forever
-            log.error("Hub API server crashed: %s", e)
-            shutdown.shutdown()
-
-    server_thread = threading.Thread(target=_serve, name="hub-api", daemon=True)
-
-    def _stop() -> None:
-        stopped = service.stop()  # join the poll thread FIRST
-        server.should_exit = True
-        server_thread.join(timeout=10)
-        try:
-            sock.close()
-        except OSError:
-            pass
-        # Closing the shared SQLite connection is only safe once BOTH the poller
-        # and the API thread have truly exited.
-        if stopped and not server_thread.is_alive():
-            store.close()
+    def _release_cursor_lease() -> None:
+        if _writers_alive():
+            log.error("Hub writers still alive; retaining cursor maintenance lease")
         else:
-            log.error(
-                "A hub thread is still alive; leaving the DB connection open to avoid a race"
+            lease.close()
+
+    shutdown.register("hub-cursor-lease", _release_cursor_lease)
+    try:
+        sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
+        # Auth-disabled visibility (#145): the guard already refuses a non-loopback
+        # bind with no token, so reaching here with auth off means a loopback-only API.
+        # Warn only now the port is claimed (the service is actually starting).
+        if auth_disabled(config.api_token):
+            log.warning(
+                "hub API auth is DISABLED (no api_token set) — /status and /events "
+                "accept any request. The bind guard keeps this loopback-only (%s); set "
+                "an api_token to require a Bearer token or to bind a LAN address.",
+                config.bind_host,
             )
+        shutdown.register("hub-socket", sock.close)
+        app, service = create_hub_app(config, store)
+        service._event_cursor_lease = lease
+        service.start()
 
-    shutdown.register("hub", _stop)
-    shutdown.install_signal_handlers()
-    server_thread.start()
-    log.info("Hub up on %s:%s", config.bind_host, config.bind_port)
-    # §3.1 readiness handshake (#48) — one stdout line the Tauri shell reads
-    # before loading the webview; injects this loopback base_url (custom port
-    # supported). A wildcard/IPv6 bind maps to the reachable loopback host so the
-    # local dashboard hits the socket that's actually listening.
-    announce_ready("hub", loopback_url(config.bind_host, config.bind_port))
+        server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
 
-    if block:
-        shutdown.stopped.wait()
-    return shutdown
+        def _serve() -> None:
+            try:
+                server.run(sockets=[sock])
+            except Exception as e:  # a failed server must not hang run_hub forever
+                log.error("Hub API server crashed: %s", e)
+                shutdown.shutdown()
+
+        server_thread = threading.Thread(target=_serve, name="hub-api", daemon=True)
+
+        def _stop() -> None:
+            stopped = service.stop()  # join the poll thread FIRST
+            server.should_exit = True
+            if (
+                server_thread.is_alive()
+                and server_thread is not threading.current_thread()
+            ):
+                server_thread.join(timeout=10)
+            try:
+                sock.close()
+            except OSError:
+                pass
+            # Closing the shared SQLite connection is only safe once BOTH the poller
+            # and the API thread have truly exited.
+            if stopped and not server_thread.is_alive() and not _writers_alive():
+                lease.close()
+                store.close()
+            else:
+                log.error(
+                    "A hub thread is still alive; leaving the DB connection open to avoid a race"
+                )
+
+        shutdown.register("hub", _stop)
+        shutdown.install_signal_handlers()
+        server_thread.start()
+        log.info("Hub up on %s:%s", config.bind_host, config.bind_port)
+        # §3.1 readiness handshake (#48) — one stdout line the Tauri shell reads
+        # before loading the webview; injects this loopback base_url (custom port
+        # supported). A wildcard/IPv6 bind maps to the reachable loopback host so the
+        # local dashboard hits the socket that's actually listening.
+        announce_ready("hub", loopback_url(config.bind_host, config.bind_port))
+
+        if block:
+            shutdown.stopped.wait()
+        return shutdown
+    except BaseException:
+        if service is not None:
+            try:
+                service.stop()
+            except Exception:
+                log.error("Hub startup cleanup could not stop all writers")
+        shutdown.shutdown()
+        raise

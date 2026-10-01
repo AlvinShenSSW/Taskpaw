@@ -7,13 +7,23 @@ due index), and local-ISO timestamps compared lexically (consistent format).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import secrets
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from taskpaw_v3.core.state import (
+    StateError,
+    StateRecord,
+    integer,
+    parse_cursor,
+    strict_json,
+)
 
 log = logging.getLogger("taskpaw.hub")
 
@@ -143,6 +153,34 @@ class HubStore:
                 "CREATE INDEX IF NOT EXISTS idx_status_log_reachable "
                 "ON status_log(server_id, timestamp, id) WHERE reachable = 1"
             )
+            had_cursors = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_cursors'"
+            ).fetchone()
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS event_cursors (server_id INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE, state TEXT NOT NULL, identity_json TEXT, boot_id TEXT, resume_floor INTEGER)"
+            )
+            if not had_cursors:
+                # Capture pre-upgrade evidence once, before new status can replace it.
+                for (sid,) in c.execute("SELECT id FROM servers").fetchall():
+                    previous = c.execute(
+                        "SELECT status_json FROM status_log WHERE server_id=? ORDER BY id DESC LIMIT 1",
+                        (sid,),
+                    ).fetchone()
+                    identity = None
+                    if previous and previous[0]:
+                        try:
+                            cursor = parse_cursor(
+                                json.loads(previous[0]).get("event_cursor")
+                            )
+                            identity = json.dumps(
+                                {k: cursor[k] for k in ("server_id", "stream_id")}
+                            )
+                        except (ValueError, TypeError, AttributeError):
+                            pass  # no usable proof; registration remains visibly unverified
+                    c.execute(
+                        "INSERT INTO event_cursors(server_id,state,identity_json) VALUES(?, 'unverified', ?)",
+                        (sid, identity),
+                    )
             self._conn.commit()
 
     def _legacy_event_tables(self) -> list[str]:
@@ -244,9 +282,14 @@ class HubStore:
                     "INSERT INTO servers(name, ip, port, enabled) VALUES(?, ?, ?, ?)",
                     (name, ip, port, int(enabled)),
                 )
+                assert cur.lastrowid is not None
+                sid = cur.lastrowid
+                self._conn.execute(
+                    "INSERT INTO event_cursors(server_id,state) VALUES(?, 'fresh')",
+                    (sid,),
+                )
                 self._conn.commit()
-                assert cur.lastrowid is not None  # set by INSERT
-                return cur.lastrowid
+                return sid
             except Exception:
                 self._conn.rollback()
                 raise
@@ -591,6 +634,147 @@ class HubStore:
                     "DELETE FROM delivery_outbox WHERE delivery_state='dead_letter' "
                     "AND created_at < ?",
                     (cutoff,),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def get_event_cursor(self, server_id: int) -> dict:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state,identity_json,boot_id,resume_floor FROM event_cursors WHERE server_id=?",
+                (server_id,),
+            ).fetchone()
+            if row is None:
+                return {
+                    "state": "unverified",
+                    "identity": None,
+                    "boot_id": None,
+                    "resume_floor": None,
+                }
+            try:
+                identity = strict_json(row[1]) if row[1] else None
+                if identity is not None and (
+                    not isinstance(identity, dict)
+                    or set(identity) != {"server_id", "stream_id"}
+                    or not all(isinstance(v, str) and v for v in identity.values())
+                ):
+                    raise ValueError("invalid identity")
+                if row[0] not in ("fresh", "unverified", "bound") or (
+                    row[0] == "bound" and identity is None
+                ):
+                    raise ValueError("invalid state")
+                if identity is not None:
+                    StateRecord.parse(
+                        {
+                            "version": 2,
+                            **identity,
+                            "lineage_origin": "legacy_migration",
+                            "next_event_id": 1,
+                        }
+                    )
+                if row[2] is None:
+                    if row[3] is not None:
+                        raise ValueError("incomplete boot evidence")
+                else:
+                    floor = integer(row[3], 0, (1 << 63) - 1)
+                    parse_cursor(
+                        {
+                            "version": 1,
+                            "durable": True,
+                            **(identity or {}),
+                            "boot_id": row[2],
+                            "resume_floor": floor,
+                            "offered_highwater": floor,
+                            "next_event_id": floor + 1,
+                        }
+                    )
+            except (ValueError, TypeError) as exc:
+                raise StateError("cursor_store_invalid") from exc
+            return {
+                "state": row[0],
+                "identity": identity,
+                "boot_id": row[2],
+                "resume_floor": row[3],
+            }
+
+    def read_acks(self) -> dict[int, int]:
+        raw = self.get_config("last_event_ids", "")
+        if not raw:
+            return {}
+        try:
+            value = strict_json(raw)
+            if not isinstance(value, dict):
+                raise ValueError("invalid ack map")
+            result = {}
+            for key, number in value.items():
+                if (
+                    not isinstance(key, str)
+                    or not key.isdecimal()
+                    or str(int(key)) != key
+                    or int(key) < 1
+                ):
+                    raise ValueError("invalid ack key")
+                result[int(key)] = integer(number, -1, (1 << 63) - 1)
+            return result
+        except (ValueError, TypeError) as exc:
+            raise StateError("cursor_store_invalid") from exc
+
+    def event_floor(self, server_id: int, acks: dict[int, int]) -> int:
+        with self._lock:
+            floor = integer(acks.get(server_id, -1), -1, (1 << 63) - 1)
+            maximum = self._conn.execute(
+                "SELECT MAX(event_id), MIN(event_id) FROM events WHERE server_id=?",
+                (server_id,),
+            ).fetchone()
+            if maximum[0] is not None:
+                integer(maximum[1])
+                floor = max(floor, integer(maximum[0], 1, (1 << 63) - 1))
+            prefix = f"{server_id}:"
+            for (key,) in self._conn.execute(
+                "SELECT dedupe_key FROM delivery_outbox WHERE dedupe_key LIKE ?",
+                (prefix + "%",),
+            ):
+                suffix = key[len(prefix) :]
+                if not suffix.isdecimal() or str(int(suffix)) != suffix:
+                    raise StateError("cursor_store_invalid")
+                floor = max(floor, integer(int(suffix), 1, (1 << 63) - 1))
+            return floor
+
+    def commit_event_cursor(
+        self,
+        server_id: int,
+        binding: dict,
+        acks: dict[int, int],
+        *,
+        require_disabled: bool = False,
+        diagnostic: str | None = None,
+    ) -> None:
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                server = self.get_server(server_id)
+                if server is None or (require_disabled and server["enabled"]):
+                    raise StateError("cursor_adoption_requires_disabled_server")
+                if diagnostic is not None:
+                    self._conn.execute(
+                        "INSERT INTO config(key,value) VALUES(?,?)",
+                        ("last_event_ids.fault-" + secrets.token_hex(16), diagnostic),
+                    )
+                self._conn.execute(
+                    "INSERT INTO event_cursors(server_id,state,identity_json,boot_id,resume_floor) VALUES(?,?,?,?,?) ON CONFLICT(server_id) DO UPDATE SET state=excluded.state,identity_json=excluded.identity_json,boot_id=excluded.boot_id,resume_floor=excluded.resume_floor",
+                    (
+                        server_id,
+                        binding["state"],
+                        json.dumps(binding["identity"]),
+                        binding.get("boot_id"),
+                        binding.get("resume_floor"),
+                    ),
+                )
+                self._conn.execute(
+                    "INSERT INTO config(key,value) VALUES('last_event_ids',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (json.dumps(acks),),
                 )
                 self._conn.commit()
             except Exception:

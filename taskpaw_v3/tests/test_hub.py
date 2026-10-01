@@ -11,6 +11,33 @@ from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
 
+def _cursor():
+    return {
+        "version": 1,
+        "durable": True,
+        "server_id": "fixture",
+        "stream_id": "1" * 32,
+        "boot_id": "2" * 32,
+        "resume_floor": 2,
+        "offered_highwater": 99,
+        "next_event_id": 100,
+    }
+
+
+def _bind(p, sid):
+    cursor = _cursor()
+    p.store.commit_event_cursor(
+        sid,
+        {
+            "state": "bound",
+            "identity": {k: cursor[k] for k in ("server_id", "stream_id")},
+            "boot_id": cursor["boot_id"],
+            "resume_floor": cursor["resume_floor"],
+        },
+        p.last_event_ids,
+    )
+
+
 class FakeResp:
     def __init__(self, payload):
         self._b = json.dumps(payload).encode("utf-8")
@@ -104,20 +131,24 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
             s, "http://oc/hook", get_active=lambda: True, get_token=lambda: "tok"
         )
         p.last_event_ids = {sid: 2}
+        _bind(p, sid)
 
         seen = []
         sent = []
 
         def fake_urlopen(req, timeout):
+            if "/status" in req.full_url:
+                return FakeResp({"event_cursor": _cursor()})
             if "/events" in req.full_url:
                 seen.append(req.full_url)
                 return FakeResp(
                     {
+                        "event_cursor": _cursor(),
                         "events": [
                             {"id": 2, "message": "seen"},
                             {"id": 3, "message": "new"},
                             {"id": 4, "message": "newer"},
-                        ]
+                        ],
                     }
                 )
             sent.append(json.loads(req.data.decode()))
@@ -126,7 +157,12 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
         monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
         p.poll_once()
 
-        assert seen == ["http://127.0.0.1:5680/events?ack=2"]
+        assert seen == [
+            "http://127.0.0.1:5680/events?ack=2&cursor_stream="
+            + "1" * 32
+            + "&cursor_boot="
+            + "2" * 32
+        ]
         assert p.last_event_ids[sid] == 4
         assert json.loads(s.get_config("last_event_ids")) == {str(sid): 4}
         msgs = [
@@ -147,7 +183,7 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
         s.close()
 
 
-def test_poller_404_fallback_for_legacy_agent(tmp_path, monkeypatch):
+def test_poller_legacy_agent_pauses_before_destructive_fallback(tmp_path, monkeypatch):
     import urllib.error
 
     s = _store(tmp_path)
@@ -165,11 +201,11 @@ def test_poller_404_fallback_for_legacy_agent(tmp_path, monkeypatch):
 
         monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
         evs = p.fetch_events(s.list_servers()[0])
-        assert [e["id"] for e in evs] == [3]
-        assert seen == [
-            "http://127.0.0.1:5680/events?ack=2",
-            "http://127.0.0.1:5680/events",
-        ]
+        assert evs == []
+        assert seen == ["http://127.0.0.1:5680/status"]
+        assert (
+            p.snapshot_event_channels()[sid]["reason"] == "legacy_cursor_unverifiable"
+        )
     finally:
         s.close()
 
@@ -185,9 +221,9 @@ def test_events_from_payload_shapes():
     assert _events_from_payload(5) is None
 
 
-def test_fetch_events_tolerates_bare_list(tmp_path, monkeypatch):
+def test_fetch_events_pauses_unverifiable_bare_list_agent(tmp_path, monkeypatch):
     # A foreign/older agent that returns a bare JSON list (not {"events": [...]}) must
-    # not crash with "'list' object has no attribute 'get'" — the events are ingested.
+    # not crash; without cursor evidence the event channel is visibly paused.
     s = _store(tmp_path)
     try:
         sid = s.add_server("SnowLeopard", "127.0.0.1", 5680)
@@ -199,7 +235,10 @@ def test_fetch_events_tolerates_bare_list(tmp_path, monkeypatch):
             lambda req, timeout: FakeResp([{"id": 3, "message": "new"}, {"id": 2}]),
         )
         evs = p.fetch_events(s.list_servers()[0])
-        assert [e["id"] for e in evs] == [3]  # id>last_id filter still applies
+        assert evs == []
+        assert (
+            p.snapshot_event_channels()[sid]["reason"] == "current_status_unavailable"
+        )
     finally:
         s.close()
 
@@ -226,9 +265,12 @@ def test_poller_disabled_stores_without_outbox(tmp_path, monkeypatch):
         sid = s.add_server("agent", "127.0.0.1", 5680)
         p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
         p.last_event_ids = {sid: 2}
+        _bind(p, sid)
 
         def fake_urlopen(req, timeout):
-            return FakeResp({"events": [{"id": 3, "message": "new"}]})
+            return FakeResp(
+                {"event_cursor": _cursor(), "events": [{"id": 3, "message": "new"}]}
+            )
 
         monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
         p.poll_once()
@@ -512,7 +554,6 @@ def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypa
         assert r.status_code == 200
         assert destinations == [
             "http://127.0.0.1:5680/status",
-            "http://127.0.0.1:5680/events?ack=-1",
         ]
         body = r.json()
         # Existing contract preserved.

@@ -27,14 +27,19 @@ def test_build_queue_without_state_is_in_memory():
 
 def test_build_queue_persists_and_resumes_id_across_restart(tmp_path):
     state = tmp_path / "next_id.json"
+    from taskpaw_v3.core.state import initialize_state
+
+    initialize_state(state, _cfg().server_id)
     q1 = build_queue(_cfg(), state)
     first = q1.add("mon", "m", level="info")["id"]
 
     # A fresh queue from the same state file must NOT reissue an already-used id —
     # the persisted counter resumes past it (no duplicate ids after a restart).
+    q1.close()
     q2 = build_queue(_cfg(), state)
     nxt = q2.add("mon", "m", level="info")["id"]
     assert nxt > first
+    q2.close()
 
 
 # ── LLM settings holder initialised at boot (#178 AC5) ─────────────────────

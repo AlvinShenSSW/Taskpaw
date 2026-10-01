@@ -879,7 +879,11 @@ def test_network_status_authoritative_version_without_mutation(provided):
     assert body["version"] == __version__
     assert original["version"] == "untrusted"
     if provided:
-        assert body == {**original, "version": __version__}
+        assert {k: v for k, v in body.items() if k != "event_cursor"} == {
+            **original,
+            "version": __version__,
+        }
+        assert body["event_cursor"]["durable"] is False
 
 
 @pytest.mark.parametrize("resource", ["films", "run-films"])
