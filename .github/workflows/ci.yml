@@ -52,6 +52,10 @@ jobs:
         include:
           - os: windows-latest
             python-version: "3.12"
+          # Catch Mac Hub/backend regressions, including the existing real
+          # subprocess lifecycle tests, alongside Windows and Linux.
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v5
 
