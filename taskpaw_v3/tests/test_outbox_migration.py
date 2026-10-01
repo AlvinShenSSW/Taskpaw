@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import os
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -500,8 +500,9 @@ def test_failed_initial_migration_is_atomic_and_closes_connection(
 
 def test_missing_schema_and_future_version_fail_closed(tmp_path):
     path = tmp_path / "hub.db"
-    with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE delivery_outbox(id INTEGER PRIMARY KEY)")
+    with closing(sqlite3.connect(path)) as conn:
+        with conn:
+            conn.execute("CREATE TABLE delivery_outbox(id INTEGER PRIMARY KEY)")
     with pytest.raises(migration.MigrationError, match="invalid_outbox_schema"):
         HubStore(path)
     path.unlink()
