@@ -50,6 +50,7 @@ def _events_from_payload(data: object) -> Optional[list]:
 
 
 from .openclaw import send_payload  # noqa: E402
+from .outbox_migration import RowError, validate_row  # noqa: E402
 from .store import HubStore  # noqa: E402
 
 log = logging.getLogger("taskpaw.hub.poller")
@@ -312,52 +313,59 @@ class Poller:
         if not self.get_token():
             return
         now = _now()
-        for row in self.store.due_deliveries(now=now, limit=10):
+        try:
+            rows = self.store.due_deliveries(now=now, limit=10)
+        except Exception:
+            log.error("Outbox due query failed")
+            return
+        for row in rows:
             try:
-                attempts = int(row["attempts"])
-                created_at = datetime.fromisoformat(row["created_at"])
-                payload = json.loads(row["payload_json"])
-            except Exception as e:
-                log.error("Dropping malformed outbox row id=%s: %s", row.get("id"), e)
-                self.store.delete_delivery(row["id"])
-                continue
-
-            if attempts >= 10 or now - created_at > timedelta(hours=24):
-                reason = "attempt cap" if attempts >= 10 else "age>24h"
-                if self.store.mark_delivery_dead_letter(row["id"], attempts, reason):
-                    self.emit_local_alert(
-                        f"OpenClaw delivery dead-lettered id={row['id']}: {reason}"
-                    )
-                continue
-
-            try:
-                send_payload(
-                    self.openclaw_url, self.get_token(), payload, self.http_timeout
-                )
-                self.store.delete_delivery(row["id"])
-            except Exception as e:
-                attempts += 1
-                if attempts >= 10:
+                try:
+                    created, _next_at, payload = validate_row(row)
+                except RowError as exc:
+                    self.store.quarantine_delivery(row["id"], exc.reason, exc.column)
+                    continue
+                attempts = row["attempts"]
+                created_at = datetime.fromisoformat(created)
+                if attempts >= 10 or now - created_at > timedelta(hours=24):
+                    reason = "attempt cap" if attempts >= 10 else "age>24h"
                     if self.store.mark_delivery_dead_letter(
-                        row["id"], attempts, str(e)
+                        row["id"], attempts, reason
                     ):
                         self.emit_local_alert(
-                            f"OpenClaw delivery dead-lettered id={row['id']}: {e}"
+                            f"OpenClaw delivery dead-lettered id={row['id']}: {reason}"
+                        )
+                    continue
+                try:
+                    send_payload(
+                        self.openclaw_url, self.get_token(), payload, self.http_timeout
+                    )
+                except Exception as exc:
+                    attempts += 1
+                    if attempts >= 10:
+                        if self.store.mark_delivery_dead_letter(
+                            row["id"], attempts, str(exc)
+                        ):
+                            self.emit_local_alert(
+                                f"OpenClaw delivery dead-lettered id={row['id']}: delivery failed"
+                            )
+                    else:
+                        self.store.mark_delivery_failed(
+                            row["id"],
+                            attempts,
+                            str(exc),
+                            now + timedelta(seconds=self._retry_delay(attempts)),
                         )
                 else:
-                    self.store.mark_delivery_failed(
-                        row["id"],
-                        attempts,
-                        str(e),
-                        now + timedelta(seconds=self._retry_delay(attempts)),
-                    )
+                    self.store.delete_delivery(row["id"])
+            except Exception:
+                # Includes quarantine, age arithmetic, and state persistence.
+                # No stored payload or raw exception enters this diagnostic.
+                log.error("Outbox row processing failed id=%s", row.get("id"))
 
     # ── one poll cycle ───────────────────────────────────────────────────
     def poll_once(self) -> None:
         active = self.get_active()
-        if active:
-            self.drain_outbox()
-
         for server in self.store.list_servers():
             if not server["enabled"]:
                 continue
