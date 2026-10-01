@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from taskpaw_v3 import __version__
 from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import HubConfig
-from taskpaw_v3.core.lifecycle import GracefulShutdown
+from taskpaw_v3.core.lifecycle import GracefulShutdown, StartupShutdown
 from taskpaw_v3.core.net import guard_bind_exposure
 from taskpaw_v3.hub.server.film_proxy import (
     FilmProxyError,
@@ -560,11 +560,13 @@ def run_hub(
     servers: list[uvicorn.Server] = []
     threads: list[threading.Thread] = []
 
-    def _stop() -> None:
+    def _deactivate() -> None:
         try:
             revoke_control(session)
         except Exception:
             log.error("Could not revoke Hub control credentials")
+
+    def _stop() -> None:
         stopped = False
         try:
             stopped = service.stop() if service is not None else True
@@ -590,8 +592,10 @@ def run_hub(
                     "A hub thread is still alive; leaving the DB connection open to avoid a race"
                 )
 
-    shutdown.register("hub", _stop)
+    startup = StartupShutdown(shutdown, _deactivate, _stop)
+    shutdown.register("hub", startup.stop)
     try:
+        startup.checkpoint()
         if auth_disabled(config.api_token):
             log.warning(
                 "hub read API auth is DISABLED (no api_token set) — /status and /events "
@@ -631,11 +635,16 @@ def run_hub(
                 )
             )
         shutdown.install_signal_handlers()
+        startup.checkpoint()
         service.start()
+        startup.checkpoint()
         for thread in threads:
+            startup.checkpoint()
             thread.start()
+            startup.checkpoint()
         deadline = time.monotonic() + 10
         while not all(server.started for server in servers):
+            startup.checkpoint()
             if (
                 not session.is_active()
                 or any(not thread.is_alive() for thread in threads)
@@ -645,6 +654,7 @@ def run_hub(
             time.sleep(0.01)
         if not session.is_active():
             raise RuntimeError("Hub API startup failed")
+        startup.checkpoint()
         log.info(
             "Hub up: read %s:%s, control %s:%s",
             config.bind_host,
@@ -662,6 +672,8 @@ def run_hub(
     except BaseException:
         shutdown.shutdown()
         raise
+    finally:
+        startup.finish()
 
     if block:
         shutdown.stopped.wait()

@@ -589,6 +589,182 @@ def _ephemeral_pair(host):
         first.close()
 
 
+@pytest.mark.parametrize("role", ["agent", "hub"])
+@pytest.mark.parametrize(
+    "when", ["already_stopped", "before_start", "during_start", "during_start_thread"]
+)
+def test_startup_cancellation_does_not_restart_or_leak_resources(
+    role, when, tmp_path, monkeypatch, capsys
+):
+    """A synchronous signal can return into start(), which then acquires more.
+
+    Real isolated children/poller threads and bound sockets must be reclaimed;
+    API servers/readiness must never start after the cancellation.
+    """
+    import subprocess
+    import sys
+    import threading
+    import time
+
+    import uvicorn
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core import control, net
+    from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+    from taskpaw_v3.hub.server import app as hub_app
+    from taskpaw_v3.hub.server.store import HubStore
+    from taskpaw_v3.monitors import runtime
+
+    read_port, control_port = _ephemeral_pair("127.0.0.1")
+    shutdown = GracefulShutdown()
+    sessions, order, api_runs = [], [], []
+    children, pollers = [], []
+    stoppers, store_closes = [], []
+    poller_stop = threading.Event()
+    original_bootstrap = control.bootstrap_control
+
+    def bootstrap(*args):
+        session = original_bootstrap(args[0], args[1], None)
+        sessions.append(session)
+        return session
+
+    def start(*args):
+        order.append("start")
+        if when == "during_start":
+            shutdown.shutdown()
+        elif when == "during_start_thread":
+            stopper = threading.Thread(
+                target=shutdown.shutdown, name="test-cancel-caller"
+            )
+            stoppers.append(stopper)
+            stopper.start()
+            deadline = time.monotonic() + 3
+            while not shutdown.is_stopping and time.monotonic() < deadline:
+                time.sleep(0.001)
+            assert shutdown.is_stopping
+        assert not store_closes  # Hub must not close the DB while start can use it.
+        # Deliberately acquire after cancellation, like a partially completed
+        # monitor/service start. A boolean checked only before start cannot fix it.
+        if role == "agent":
+            children.append(
+                subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+            )
+        else:
+            thread = threading.Thread(
+                target=poller_stop.wait, name="test-cancel-poller"
+            )
+            pollers.append(thread)
+            thread.start()
+        order.append("acquired")
+
+    def stop(*args):
+        assert not sessions[0].is_active()
+        order.append("stop")
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=3)
+        poller_stop.set()
+        for thread in pollers:
+            thread.join(timeout=3)
+        return True
+
+    class Runtime:
+        def snapshot(self):
+            return {}
+
+        def film_page(self, *args, **kwargs):
+            return None
+
+        def run_films(self, *args, **kwargs):
+            return None
+
+        def start(self):
+            start()
+
+        def stop(self):
+            return stop()
+
+    class Server:
+        started = False
+        should_exit = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, sockets):
+            api_runs.append(True)
+
+    monkeypatch.setattr(launcher, "bootstrap_control", bootstrap)
+    monkeypatch.setattr(control, "bootstrap_control", bootstrap)
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **k: None
+    )
+    monkeypatch.setattr(net, "reclaim_ports_from_stale_instance", lambda *a, **k: None)
+    monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **k: Runtime())
+    monkeypatch.setattr(hub_app.HubService, "start", start)
+    monkeypatch.setattr(hub_app.HubService, "stop", stop)
+    monkeypatch.setattr(uvicorn, "Server", Server)
+    monkeypatch.setattr(
+        shutdown,
+        "install_signal_handlers",
+        shutdown.shutdown if when == "before_start" else lambda: None,
+    )
+    store = HubStore(tmp_path / "hub.db")
+    original_close = store.close
+
+    def close_store():
+        store_closes.append(True)
+        original_close()
+
+    monkeypatch.setattr(store, "close", close_store)
+    if when == "already_stopped":
+        shutdown.shutdown()
+    cfgargs = dict(bind_port=read_port, control_port=control_port)
+    try:
+        with pytest.raises(RuntimeError, match="startup"):
+            if role == "agent":
+                launcher.run_agent(
+                    AgentConfig(
+                        server_id="s", machine="m", host_metrics=False, **cfgargs
+                    ),
+                    shutdown=shutdown,
+                    block=False,
+                )
+            else:
+                hub_app.run_hub(
+                    HubConfig(self_monitor=False, **cfgargs),
+                    store,
+                    shutdown=shutdown,
+                    block=False,
+                )
+        for stopper in stoppers:
+            stopper.join(timeout=3)
+            assert not stopper.is_alive()
+        assert shutdown.stopped.is_set()
+        assert not sessions[0].is_active()
+        assert not api_runs
+        assert all(child.poll() is not None for child in children)
+        assert all(not thread.is_alive() for thread in pollers)
+        if when in {"already_stopped", "before_start"}:
+            assert "start" not in order
+        else:
+            assert order.index("acquired") < order.index("stop")
+        assert "taskpaw_ready" not in capsys.readouterr().out
+        assert net.port_available("127.0.0.1", read_port)
+        assert net.port_available("127.0.0.1", control_port)
+        shutdown.shutdown()  # remains idempotent after the failed startup
+        if role == "hub":
+            assert store_closes == [True]
+        assert order.count("stop") == (0 if when == "already_stopped" else 1)
+    finally:
+        stop()
+        for stopper in stoppers:
+            stopper.join(timeout=3)
+        store.close()
+
+
 def _http_status(url, token=None, *, method="GET", body=None):
     import http.client
     import json

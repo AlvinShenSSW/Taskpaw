@@ -17,7 +17,7 @@ from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.control import bootstrap_control, revoke_control, strip_control_env
 from taskpaw_v3.core.datadir import set_data_dir
-from taskpaw_v3.core.lifecycle import GracefulShutdown
+from taskpaw_v3.core.lifecycle import GracefulShutdown, StartupShutdown
 from taskpaw_v3.core.llm import (
     llm_settings_from_config,
     set_llm_chain,
@@ -147,11 +147,13 @@ def run_agent(
     task_log = None
     runtime_started = False
 
-    def _stop() -> None:
+    def _deactivate() -> None:
         try:
             revoke_control(session)
         except Exception:
             log.error("Could not revoke agent control credentials")
+
+    def _stop() -> None:
         try:
             if runtime_started and task_log is not None:
                 task_log.record("", "agent.stopping", task_type="agent")
@@ -172,8 +174,10 @@ def run_agent(
                 except OSError:
                     log.error("Could not close an agent API socket")
 
-    shutdown.register("agent", _stop)
+    startup = StartupShutdown(shutdown, _deactivate, _stop)
+    shutdown.register("agent", startup.stop)
     try:
+        startup.checkpoint()
         # #196 L19: no store scan/append until reclaim AND both claims succeeded.
         task_log = TaskLog(config_path.parent if config_path is not None else None)
         set_task_log(task_log)
@@ -307,12 +311,17 @@ def run_agent(
         )
         shutdown.install_signal_handlers()
         # Cleanup is already registered even if start() fails part way through.
+        startup.checkpoint()
         supervisor.start()
         runtime_started = True
+        startup.checkpoint()
         for thread in threads:
+            startup.checkpoint()
             thread.start()
+            startup.checkpoint()
         deadline = time.monotonic() + 10
         while not all(server.started for server in servers):
+            startup.checkpoint()
             if (
                 not session.is_active()
                 or any(not thread.is_alive() for thread in threads)
@@ -322,6 +331,7 @@ def run_agent(
             time.sleep(0.01)
         if not session.is_active():
             raise RuntimeError("Agent API startup failed")
+        startup.checkpoint()
         log.info(
             "Agent up: network %s:%s, control %s:%s",
             config.bind_host,
@@ -339,6 +349,8 @@ def run_agent(
     except BaseException:
         shutdown.shutdown()
         raise
+    finally:
+        startup.finish()
 
     if block:
         shutdown.stopped.wait()

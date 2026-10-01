@@ -26,6 +26,19 @@ def inspect_directory(path: Path) -> dict:
         files._named_sid("S-1-5-18"): "system",
         files._named_sid("S-1-5-32-544"): "administrators",
     }
+    # Fixed public identities only. Never stringify an arbitrary SID or user.
+    for name, sid in {
+        "everyone": "S-1-1-0",
+        "creator_owner": "S-1-3-0",
+        "creator_group": "S-1-3-1",
+        "owner_rights": "S-1-3-4",
+        "authenticated_users": "S-1-5-11",
+        "builtin_users": "S-1-5-32-545",
+        "all_application_packages": "S-1-15-2-1",
+        "all_restricted_application_packages": "S-1-15-2-2",
+        "trusted_installer": "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+    }.items():
+        identities[files._named_sid(sid)] = name
     result: dict = {"drive": path.drive, "components": []}
     handles = []
     components = [Path(path.anchor)]

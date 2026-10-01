@@ -31,6 +31,13 @@ class GracefulShutdown:
         with self._lock:
             self._callbacks.append((name, callback))
 
+    @property
+    def is_stopping(self) -> bool:
+        """Sticky stop request, including while callbacks are still running."""
+        # This flag only transitions False -> True. Do not hold the registry's
+        # non-reentrant lock across a checkpoint that a signal can interrupt.
+        return self._done
+
     def register_child(self, name: str, proc: subprocess.Popen) -> None:
         """Register a managed child process (e.g. lada-cli) to terminate on stop."""
         with self._lock:
@@ -84,3 +91,61 @@ class GracefulShutdown:
                 proc.wait(timeout=self._child_timeout)
         except Exception as e:
             log.error("Failed to terminate child %r: %s", name, e)
+
+
+class StartupShutdown:
+    """Coordinate one launcher's startup with its registered stop callback.
+
+    A signal on the startup thread may return into a partially finished start().
+    Revoke immediately, but defer teardown until that operation unwinds, so its
+    newly acquired resources are included. The startup stack owns this deferred
+    cleanup; a server thread requesting stop must return so cleanup can join it.
+    Once cancelled, checkpoints prevent further starts.
+    """
+
+    def __init__(
+        self,
+        shutdown: GracefulShutdown,
+        deactivate: Callable[[], None],
+        cleanup: Callable[[], None],
+    ) -> None:
+        self._shutdown = shutdown
+        self._deactivate = deactivate
+        self._cleanup = cleanup
+        self._lock = threading.RLock()
+        self._revoke_lock = threading.RLock()
+        self._cancelled = threading.Event()
+        self._starting = True
+        self._deactivated = False
+        self._cleaned = False
+
+    def checkpoint(self) -> None:
+        if self._cancelled.is_set() or self._shutdown.is_stopping:
+            raise RuntimeError("API startup failed: cancelled")
+
+    def stop(self) -> None:
+        self._cancelled.set()
+        with self._revoke_lock:
+            if not self._deactivated:
+                self._deactivated = True
+                self._deactivate()
+        with self._lock:
+            clean = not self._starting and not self._cleaned
+            if clean:
+                self._cleaned = True
+        if clean:
+            self._cleanup()
+
+    def finish(self) -> None:
+        with self._lock:
+            self._starting = False
+            clean = (
+                self._cancelled.is_set() or self._shutdown.is_stopping
+            ) and not self._cleaned
+            if clean:
+                self._cleaned = True
+        if clean:
+            # Ensure deactivation has completed before teardown. This also
+            # covers an already-stopped registry whose callback never ran.
+            self.stop()
+            self._cleanup()
