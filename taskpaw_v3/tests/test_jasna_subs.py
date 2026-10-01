@@ -2382,7 +2382,22 @@ def test_plan_subs_never_credits_another_films_subtitle_f1(tmp_path):
     assert plan.subs_only == [inp / "A.mp4"] and plan.total == 1
 
 
-def test_plan_subs_prefers_the_new_media_name_from_the_listing(tmp_path):
+@pytest.mark.parametrize(
+    "platform,expected_media_name,expected_kind",
+    [
+        ("win32", "C-破解.MP4", "full"),
+        ("darwin", "C-破解.MP4", "full"),
+        ("linux", "c_restored.mp4", "none"),
+    ],
+)
+def test_plan_subs_prefers_the_new_media_name_from_the_listing(
+    tmp_path, monkeypatch, platform, expected_media_name, expected_kind
+):
+    from taskpaw_v3.monitors.subs import existing as E
+
+    # Exercise the explicit matching policies on every runner; normcase does
+    # not describe the temporary directory's filesystem on macOS.
+    monkeypatch.setattr(E, "_PLATFORM", platform)
     inp, out = tmp_path / "in", tmp_path / "out"
     inp.mkdir()
     out.mkdir()
@@ -2391,12 +2406,10 @@ def test_plan_subs_prefers_the_new_media_name_from_the_listing(tmp_path):
     (out / "c_restored.srt").write_text(LIB_ZH, encoding="utf-8")
     (out / "C-破解.MP4").write_bytes(b"new")  # case-variant on disk
     plan = plan_subs(str(inp), str(out), [], [])
-    if os.path.normcase("A") == os.path.normcase("a"):
-        assert plan.media[inp / "c.mp4"] == out / "c-破解.mp4"
-        assert plan.kinds[inp / "c.mp4"] == "full"  # the new file's own subs
-    else:
-        assert plan.media[inp / "c.mp4"] == out / "c_restored.mp4"
-        assert plan.kinds[inp / "c.mp4"] == "none"
+    media = plan.media[inp / "c.mp4"]
+    assert media.name == expected_media_name
+    assert media.samefile(out / expected_media_name)
+    assert plan.kinds[inp / "c.mp4"] == expected_kind
 
 
 def test_plan_subs_counts_a_missing_output_folder_as_empty(tmp_path):
