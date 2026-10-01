@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -64,7 +65,7 @@ FAKE_ID = "A" * 40
 FORMAL = {
     "APPLE_SIGNING_IDENTITY": FAKE_ID,
     "APPLE_TEAM_ID": "FAKE123456",
-    "TASKPAW_MACOS_SIGNING_KEYCHAIN": "/fake/private.keychain-db",
+    "TASKPAW_MACOS_SIGNING_KEYCHAIN": str(ROOT / "fake-private.keychain-db"),
     "TASKPAW_MACOS_NOTARY_PROFILE": "fixture-profile",
 }
 HOSTED = {
@@ -436,8 +437,12 @@ def test_malformed_metrics_are_rejected(monitor):
 
 
 def test_native_target_probe_strips_apple_inputs(monkeypatch):
+    # Reproduce the Windows os surface while keeping this contract runnable.
+    monkeypatch.delattr(mac.os, "uname", raising=False)
     monkeypatch.setattr(mac.platform, "machine", lambda: "arm64")
-    monkeypatch.setattr(mac.os, "uname", lambda: SimpleNamespace(machine="arm64"))
+    monkeypatch.setattr(
+        mac.os, "uname", lambda: SimpleNamespace(machine="arm64"), raising=False
+    )
     calls = []
 
     def probe(*args, **kwargs):
@@ -521,17 +526,24 @@ def test_arch_mismatch_is_failure(monkeypatch):
 
 def test_required_native_inventory_and_every_binary_verified(monkeypatch):
     entries = [
-        ("Python", b"fake"),
-        ("pydantic_core/_pydantic_core.so", b"fake"),
-        ("psutil/_psutil_osx.so", b"fake"),
-        ("another-extension.so", b"fake"),
+        ("Python", macho_header(6)),
+        ("pydantic_core/_pydantic_core.so", macho_header(6)),
+        ("psutil/_psutil_osx.so", macho_header(8)),
+        ("another-extension.so", macho_header(8)),
+        ("nested/main.so", macho_header(2)),
     ]
     checked = []
     monkeypatch.setattr(mac, "archive_entries", lambda p: iter(entries))
     monkeypatch.setattr(mac, "arches", lambda p, *a: checked.append(p.name))
-    monkeypatch.setattr(mac, "signature", lambda *a, **k: None)
-    assert mac.verify_archive(Path("fake"), mac.normalize({}, TARGET), {}, ROOT) == 4
-    assert len(checked) == 4
+    contexts = []
+    monkeypatch.setattr(
+        mac,
+        "signature",
+        lambda *a, **k: contexts.append((k["backend"], k["native_library"])),
+    )
+    assert mac.verify_archive(Path("fake"), mac.normalize({}, TARGET), {}, ROOT) == 5
+    assert len(checked) == 5
+    assert contexts == [(False, True)] * 4 + [(True, False)]
     entries.pop(2)
     with pytest.raises(mac.BuildError, match="required_extension_missing"):
         mac.verify_archive(Path("fake"), mac.normalize({}, TARGET), {}, ROOT)
@@ -587,24 +599,18 @@ def test_owned_tiny_macho_codesign_and_corruption(tmp_path):
 
 
 def test_release_windows_sign_step_is_unchanged():
-    before = subprocess.run(
-        ["git", "show", "HEAD:.github/workflows/release.yml"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
     after = (ROOT / ".github/workflows/release.yml").read_text()
     marker = "      - name: Sign Windows installers"
-    old = before[
-        before.index(marker) : before.index("      - name: Collect installers")
-    ]
-    new = after[
+    block = after[
         after.index(marker) : after.index(
             "      - name: Collect verified Mac installers"
         )
     ]
-    assert old == new
+    # Exact Windows step frozen from 91f7745564f17a0039f81fab8293a9c150232236.
+    # This oracle needs neither HEAD's content nor repository history in CI.
+    assert hashlib.sha256(block.encode()).hexdigest() == (
+        "0b6b3ccc73ec50e1c780f943b1c6488bc245b0e2f3ea664a5a057a4d54235faf"
+    )
     assert "os: windows-latest\n            label: windows" in after
     assert "macos-13" not in after
 
@@ -1511,3 +1517,123 @@ def test_recorded_cancel_interrupts_pipe_closed_child_wait(sig, monkeypatch):
                 mac.stop_group(p, grace=1)
             p.stdout.close()
             p.stderr.close()
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="owned native library, never executed"
+)
+@pytest.mark.parametrize("link_mode", ["-dynamiclib", "-bundle"])
+def test_owned_tiny_library_empty_entitlements(tmp_path, link_mode):
+    arch = "arm64" if os.uname().machine == "arm64" else "x86_64"
+    target = next(t for t, a in mac.TARGETS.items() if a == arch)
+    plan = mac.normalize({}, target)
+    binary = tmp_path / "owned-library"
+    mac.tool(
+        "fixture_compile",
+        ["xcrun", "clang", "-arch", arch, link_mode, "-x", "c", "-o", str(binary), "-"],
+        input_data=b"int fixture_value(void) { return 1; }\n",
+        timeout=30,
+    )
+    # Empty profile: no library privilege grants, no keychain and no execution.
+    mac.sign(binary, plan, {}, ROOT)
+    mac.arches(binary, plan, {})
+    mac.signature(binary, plan, {}, ROOT, native_library=True)
+
+
+def macho_header(kind, *, byteorder="little", bits=64):
+    magic = 0xFEEDFACF if bits == 64 else 0xFEEDFACE
+    return (
+        magic.to_bytes(4, byteorder)
+        + bytes(8)
+        + kind.to_bytes(4, byteorder)
+        + bytes(16 if bits == 64 else 12)
+    )
+
+
+@pytest.mark.parametrize("kind", [2, 6, 8])
+@pytest.mark.parametrize("byteorder", ["little", "big"])
+@pytest.mark.parametrize("bits", [32, 64])
+def test_macho_type_comes_from_native_header(tmp_path, kind, byteorder, bits):
+    path = tmp_path / "misleading.exe"
+    path.write_bytes(macho_header(kind, byteorder=byteorder, bits=bits))
+    assert mac.macho_filetype(path) == kind
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"fake", macho_header(1), macho_header(6)[:16], b"\xca\xfe\xba\xbe" + bytes(28)],
+)
+def test_unknown_or_fat_macho_type_is_rejected(tmp_path, data):
+    path = tmp_path / "fake.so"
+    path.write_bytes(data)
+    with pytest.raises(mac.BuildError, match="macho_type_invalid"):
+        mac.macho_filetype(path)
+
+
+@pytest.mark.parametrize("mode", ["adhoc", "formal"])
+@pytest.mark.parametrize("kind", [2, 6, 8])
+@pytest.mark.parametrize("valid", [True, False])
+def test_actual_code_type_entitlement_profile_is_exact(
+    tmp_path, monkeypatch, mode, kind, valid
+):
+    cert = b"owned fake certificate bytes"
+    inputs = {**FORMAL, "APPLE_SIGNING_IDENTITY": hashlib.sha1(cert).hexdigest()}
+    plan = mac.normalize(inputs if mode == "formal" else {}, TARGET)
+    binary = tmp_path / "misleading.so"
+    binary.write_bytes(macho_header(kind))
+    expected = (
+        {k: True for k in mac.ADHOC_KEYS} if mode == "adhoc" and kind == 2 else {}
+    )
+    reported = (
+        expected if valid else ({} if expected else {k: True for k in mac.ADHOC_KEYS})
+    )
+    stages = []
+
+    def fake_tool(stage, cmd, **kwargs):
+        stages.append(stage)
+        if stage == "signature_metadata":
+            return b"", (
+                b"Signature=adhoc\n"
+                if mode == "adhoc"
+                else b"TeamIdentifier=FAKE123456\nTimestamp=fake\nflags=0x10000(runtime)\n"
+            )
+        if stage == "certificate_verify":
+            Path(cmd[-2] + "0").write_bytes(cert)
+        if stage == "entitlements_verify":
+            return plistlib.dumps(reported) if reported else b"", b""
+        return b"", b""
+
+    monkeypatch.setattr(mac, "tool", fake_tool)
+    if valid:
+        mac.signature(
+            binary, plan, {}, ROOT, backend=kind == 2, native_library=kind in {6, 8}
+        )
+    else:
+        with pytest.raises(mac.BuildError, match="entitlements_invalid"):
+            mac.signature(
+                binary, plan, {}, ROOT, backend=kind == 2, native_library=kind in {6, 8}
+            )
+    if mode == "formal":
+        assert "developer_id_verify" in stages and "certificate_verify" in stages
+
+
+@pytest.mark.parametrize(
+    "kind,backend,library", [(6, True, False), (8, True, False), (2, False, True)]
+)
+def test_main_and_library_context_cannot_be_swapped(
+    tmp_path, monkeypatch, kind, backend, library
+):
+    path = tmp_path / "fake-code"
+    path.write_bytes(macho_header(kind))
+    monkeypatch.setattr(
+        mac, "tool", lambda *a, **k: pytest.fail("wrong-kind reached codesign")
+    )
+    with pytest.raises(mac.BuildError, match="macho_type_invalid"):
+        mac.signature(
+            path,
+            mac.normalize({}, TARGET),
+            {},
+            ROOT,
+            backend=backend,
+            native_library=library,
+        )

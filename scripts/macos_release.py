@@ -612,7 +612,27 @@ def sign(path, plan, env, root, *, backend=False, dmg=False):
     tool("code_sign", cmd + [str(path)], env=env)
 
 
-def signature(path, plan, env, root, *, backend=False, dmg=False):
+def macho_filetype(path):
+    # Native builds contain thin headers; never infer code kind from its filename.
+    with Path(path).open("rb") as f:
+        header = f.read(32)
+    magic = header[:4]
+    big = {b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf"}
+    little = {b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe"}
+    minimum = 32 if magic in {b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe"} else 28
+    if magic not in big | little or len(header) < minimum:
+        raise BuildError("macos_macho_type_invalid")
+    kind = int.from_bytes(header[12:16], "big" if magic in big else "little")
+    if kind not in {2, 6, 8}:  # MH_EXECUTE, MH_DYLIB, MH_BUNDLE (Apple loader.h).
+        raise BuildError("macos_macho_type_invalid")
+    return kind
+
+
+def signature(path, plan, env, root, *, backend=False, dmg=False, native_library=False):
+    if backend or native_library:
+        kind = macho_filetype(path)
+        if (native_library and kind not in {6, 8}) or (backend and kind != 2):
+            raise BuildError("macos_macho_type_invalid")
     tool("signature_verify", ["codesign", "--verify", "--strict", str(path)], env=env)
     _, display = tool(
         "signature_metadata",
@@ -795,7 +815,15 @@ def verify_archive(sidecar, plan, env, root):
                 path.write_bytes(data)
                 path.chmod(0o600)
                 arches(path, plan, env)
-                signature(path, plan, env, root, backend=True)
+                kind = macho_filetype(path)
+                signature(
+                    path,
+                    plan,
+                    env,
+                    root,
+                    backend=kind == 2,
+                    native_library=kind in {6, 8},
+                )
                 count += 1
     except (OSError, ValueError, zlib.error):
         raise BuildError("macos_archive_invalid") from None

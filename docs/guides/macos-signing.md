@@ -106,8 +106,11 @@ Cross/Rosetta/universal builds are rejected. Mac `TASKPAW_BUNDLE_TARGETS` accept
 PyInstaller signs native archive contents and the onefile backend before
 embedding them. Formal code shares the selected Developer ID/Team and an empty
 entitlement profile with library validation enabled. The historical ad-hoc
-backend permissions remain for compatibility; this is not a claim that each is
-necessary. Tauri builds the app with signing disabled, then the build helper
+backend main-executable permissions remain for compatibility; this is not a
+claim that each is necessary. Native archive code is classified by its Mach-O
+header: main executables retain that exact profile, while dylibs and bundles
+require an empty profile (macOS 15 signing omits library entitlements by default).
+The build does not force library privilege grants. Tauri builds the app with signing disabled, then the build helper
 signs nested code inside out and verifies every native archive entry. It never
 uses deep signing as a repair.
 
