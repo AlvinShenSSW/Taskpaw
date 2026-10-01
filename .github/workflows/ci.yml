@@ -70,6 +70,11 @@ jobs:
       - name: Sync dev environment
         run: uv sync --group dev --python ${{ matrix.python-version }}
 
+      - name: Nonsecret native directory HANDLE and ACL diagnostics
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: uv run python -m taskpaw_v3.tests.windows_control_diagnostics
+
       - name: Run tests (with V3 coverage report; no hard threshold yet)
         run: uv run --python ${{ matrix.python-version }} pytest --cov=taskpaw_v3 --cov-report=term-missing
 
@@ -152,6 +157,9 @@ jobs:
       - name: Native Windows Rust tests
         working-directory: taskpaw_v3/src-tauri
         run: cargo test --locked
+      - name: Nonsecret native directory HANDLE and ACL diagnostics
+        continue-on-error: true
+        run: uv run python -m taskpaw_v3.tests.windows_control_diagnostics
       - name: Python writer → Rust reader interop
         shell: pwsh
         run: |
