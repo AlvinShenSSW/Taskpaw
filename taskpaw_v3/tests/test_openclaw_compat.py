@@ -475,7 +475,7 @@ def test_fetch_status_unreachable_returns_false(tmp_path, monkeypatch):
     def boom(*a, **k):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(mod.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(mod._opener, "open", boom)
     reachable, body = p.fetch_status({"name": "x", "ip": "10.0.0.9", "port": 5680})
     assert reachable is False and body is None
     s.close()
