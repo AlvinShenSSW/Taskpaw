@@ -45,3 +45,7 @@ taskpaw_v3/ui/*.tsbuildinfo
 # V3 packaging build artifacts (#40/#41)
 /build/
 taskpaw_v3/src-tauri/binaries/
+
+# Complete private Hub snapshots / temporary outbox migration backups
+*.outbox-v1-*.bak
+*.outbox-v1-*.tmp

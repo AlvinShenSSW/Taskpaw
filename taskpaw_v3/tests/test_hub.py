@@ -373,15 +373,28 @@ def test_prune_dead_letters_uses_utc_not_naive_local(tmp_path, monkeypatch):
 def test_no_hardcoded_timezone_offset_in_hub_and_core():
     """#152 invariant: the time authority follows the Hub *host* clock — no source
     may pin a timezone/offset (that would break when the Hub is deployed elsewhere)."""
+    import ast
     import re
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    banned = re.compile(r"Asia/|America/|Europe/|\+0[0-9]:00|pytz|ZoneInfo\(")
+    banned = re.compile(r"Asia/|America/|Europe/|\+0[1-9]:00|pytz")
     offenders = []
     for sub in ("hub", "core"):
         for py in (root / sub).rglob("*.py"):
-            if banned.search(py.read_text(encoding="utf-8")):
+            source = py.read_text(encoding="utf-8")
+            hardcoded_zone = any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "ZoneInfo"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                for node in ast.walk(ast.parse(source))
+            )
+            # Operator-provided migration zones are explicit input, never the
+            # Hub clock authority. Canonical UTC (+00:00) is neutral; literal
+            # local zones and fixed nonzero offsets remain forbidden.
+            if banned.search(source) or hardcoded_zone:
                 offenders.append(str(py.relative_to(root)))
     assert not offenders, f"hardcoded timezone/offset in: {offenders}"
 

@@ -96,6 +96,31 @@ Manage agents anytime: `list-servers`, `enable-server --id N`,
 
 ---
 
+## Existing V2 Hub queue
+
+Before starting V3 against an existing Hub DB, stop the old Hub and perform a
+read-only queue preview:
+
+```bash
+python -m taskpaw_v3.hub.server.outbox_migration --db hub.db
+```
+
+V2 did not record its source timezone. V3 normalizes aware timestamps but retains
+unknown naive or malformed rows in persistent quarantine, allowing healthy Agent
+polling and notifications to continue. Supply a legacy zone only when it is known
+from trustworthy records; never infer it from today's host offset. Apply/retry
+operations require an offline Hub and create a complete WAL-aware private backup
+before their writes. That backup reflects the DB at apply/retry start, **after**
+any earlier manual edits; snapshot separately before editing to retain old values.
+
+See [the outbox migration contract](../specs/2026-10-02-outbox-timestamp-migration.md)
+for preview/apply/retry commands, DST/Windows TZif handling, reason codes, failure
+rollback and safe restoration. Do not hand a normalized queue back to V2; restore
+a pre-conversion snapshot for downgrade. Restoring after sends can replay notices
+and requires operator reconciliation.
+
+---
+
 ## 2. Mac agent machine (self-monitor)
 
 If a Mac (e.g. the Hub's own box) should monitor itself, run an agent on it.

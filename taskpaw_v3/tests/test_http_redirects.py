@@ -596,7 +596,9 @@ def test_redirect_at_attempt_cap_has_one_safe_dead_letter_alert(
     row = outbox_row(store)
     assert (row["delivery_state"], row["attempts"]) == ("dead_letter", 10)
     assert row["last_error"] == f"HTTP Error {status}: HTTP redirect refused"
-    assert len(alerts) == 1 and "HTTP redirect refused" in alerts[0]
+    assert alerts == [
+        f"OpenClaw delivery dead-lettered id={row['id']}: delivery failed"
+    ]
     assert NOTIFY_TOKEN not in alerts[0] + row["last_error"]
     assert len(source.requests) == 1 and target.requests == []
 
