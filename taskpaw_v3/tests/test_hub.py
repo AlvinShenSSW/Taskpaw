@@ -645,12 +645,21 @@ def test_manage_servers_add_update_delete(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
 
         # add
         r = c.post(
@@ -700,12 +709,21 @@ def test_manage_set_polling_token_and_auth(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         assert c.patch("/config", json={"polling_token": "tok123"}).status_code == 200
         assert s.get_config("polling_token") == "tok123"
     finally:
@@ -715,14 +733,22 @@ def test_manage_set_polling_token_and_auth(tmp_path):
     s2 = _store(tmp_path / "b")
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="sek"), s2)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s2,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            )
+        )
         assert (
             c.post("/servers", json={"name": "x", "ip": "1.1.1.1"}).status_code == 401
         )
         r = c.post(
             "/servers",
             json={"name": "x", "ip": "1.1.1.1"},
-            headers={"Authorization": "Bearer sek"},
+            headers={"Authorization": "Bearer test-control-token"},
         )
         assert r.status_code == 200
     finally:
@@ -735,12 +761,21 @@ def test_manage_validation_and_atomicity(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         sid = c.post(
             "/servers", json={"name": "a", "ip": "1.1.1.1", "port": 5678}
         ).json()["id"]
@@ -775,7 +810,15 @@ def test_manage_validation_and_atomicity(tmp_path):
     s2 = _store(tmp_path / "c")
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="k"), s2)
-        r = TestClient(app).post("/servers", json={"name": "x", "ip": "1.1.1.1"})
+        r = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s2,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            )
+        ).post("/servers", json={"name": "x", "ip": "1.1.1.1"})
         assert r.status_code == 401 and "WWW-Authenticate" in r.headers
     finally:
         s2.close()
@@ -787,12 +830,21 @@ def test_manage_port_and_token_edgecases(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         # A Unicode-digit string is isdigit()=True but int() rejects it → must 400.
         assert (
             c.post(
@@ -816,11 +868,21 @@ def test_manage_rejects_non_string_name_ip(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
-        c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
+        _, svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(
+            create_hub_control_app(
+                svc.config,
+                s,
+                svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         assert (
             c.post("/servers", json={"name": [1, 2], "ip": "1.1.1.1"}).status_code
             == 400
@@ -840,11 +902,21 @@ def test_manage_ip_and_token_sanitization(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
-        c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
+        _, svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(
+            create_hub_control_app(
+                svc.config,
+                s,
+                svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         # host:port / path / scheme in the IP field → 400.
         for bad in ("192.168.1.80:5678", "foo/bar", "http://1.2.3.4", "a b", "x@y"):
             assert (

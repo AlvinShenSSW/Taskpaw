@@ -180,15 +180,23 @@ def create_control_app(
     run_films_provider: Optional[
         Callable[[str, object, object, object], Optional[dict]]
     ] = None,
+    *,
+    control_token: str,
+    control_active: Callable[[], bool],
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""
     from fastapi import HTTPException
 
-    from taskpaw_v3.core.cors import add_ui_cors
+    from taskpaw_v3.core.control import add_control_guard
 
     app = FastAPI(title="TaskPaw Agent Control", docs_url=None, redoc_url=None)
-    add_ui_cors(app)
+    add_control_guard(
+        app,
+        control_token=control_token,
+        is_active=control_active,
+        ping_path="/control/ping",
+    )
 
     _register_validation_handler(app, "/control/monitors", control=True)
 

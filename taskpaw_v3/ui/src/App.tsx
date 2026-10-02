@@ -1,3 +1,7 @@
+import { useEffect, useSyncExternalStore } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { hasControlCredential, subscribeControlCredentials, controlCredentialRevision } from "./api";
+import { ControlCredentialGate } from "./components/ControlCredentialGate";
 import { AppBar, Box, Tab, Tabs, Toolbar, Typography } from "@mui/material";
 import { create } from "zustand";
 import { useTranslation } from "react-i18next";
@@ -32,10 +36,14 @@ const useRole = create<{ role: Role; set: (r: Role) => void }>((set) => ({
 export function App() {
   const { role, set } = useRole();
   const { t } = useTranslation();
+  const revision = useSyncExternalStore(subscribeControlCredentials, controlCredentialRevision);
+  const ready = hasControlCredential(role);
+  const qc = useQueryClient();
+  useEffect(() => { if (!ready) { void qc.cancelQueries(); qc.clear(); } }, [ready, revision, qc]);
   const label = (r: Role) => t(`app.${r}`);
   // Show the Agent/Hub switcher ONLY when no role was injected (dev/browser).
   // A packaged agent build must NOT expose the Hub tab (and vice versa) (#58).
-  const showSwitcher = INJECTED_ROLE === null;
+  const showSwitcher = INJECTED_ROLE === null && import.meta.env.DEV;
   return (
     // Transparent so the body blueprint grid + radial glow (theme.ts #89) shows
     // through; cards/appbar paint their own surfaces over it.
@@ -154,7 +162,7 @@ export function App() {
       <Box sx={{ p: 2 }}>
         {/* Settings now lives as a tab INSIDE each role view (next to
             Monitors/Events, Fleet/Events) — no app-bar gear (#87). */}
-        {role === "agent" ? <AgentConsole /> : <HubDashboard />}
+        {ready ? (role === "agent" ? <AgentConsole /> : <HubDashboard />) : <ControlCredentialGate key={role} role={role} desktop={INJECTED_ROLE !== null || !import.meta.env.DEV} />}
       </Box>
     </Box>
   );
