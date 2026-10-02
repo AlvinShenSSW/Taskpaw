@@ -15,10 +15,19 @@ platform locations.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 from taskpaw_v3.core.config import HubConfig, load_yaml
+from taskpaw_v3.core.state import (
+    FileLease,
+    StateError,
+    StateRecord,
+    db_lease_path,
+    strict_json,
+)
 from taskpaw_v3.hub.server.service import (
     db_path_for,
     default_config_path,
@@ -99,7 +108,110 @@ def _print_servers(store: HubStore) -> None:
         )
 
 
-def main(argv: list[str] | None = None) -> int:
+def _cursor_command(args) -> int:
+    if not args.db or not Path(args.db).expanduser().is_file():
+        print("cursor operation requires an explicit existing --db", file=sys.stderr)
+        return 2
+    db = Path(args.db).expanduser().resolve()
+    try:
+        guard = (
+            FileLease(db_lease_path(db))
+            if args.cmd == "adopt-event-cursor"
+            else nullcontext()
+        )
+        with guard:
+            store = HubStore(db)
+            try:
+                server = store.get_server(args.id)
+                if server is None:
+                    raise StateError("unknown_server")
+                binding = store.get_event_cursor(args.id)
+                diagnostic = None
+                try:
+                    acks = store.read_acks()
+                except StateError:
+                    diagnostic = store.get_config("last_event_ids")
+                    acks = {}
+                floor = store.event_floor(args.id, acks)
+                if args.cmd == "event-cursor":
+                    print(
+                        json.dumps(
+                            {
+                                "binding": binding,
+                                "received_floor": floor,
+                                "ack_store_invalid": diagnostic is not None,
+                            }
+                        )
+                    )
+                    return 0
+                if server["enabled"]:
+                    raise StateError("cursor_adoption_requires_disabled_server")
+                report = strict_json(
+                    Path(args.state_report).read_text(encoding="utf-8")
+                )
+                if (
+                    not isinstance(report, dict)
+                    or set(report) != {"report_version", "verified", "record"}
+                    or type(report["report_version"]) is not int
+                    or report["report_version"] != 1
+                    or report["verified"] is not True
+                ):
+                    raise StateError("invalid_state_report")
+                record = StateRecord.parse(report["record"])
+                identity = {
+                    "server_id": record.server_id,
+                    "stream_id": record.stream_id,
+                }
+                if binding["identity"] is not None and binding["identity"] != identity:
+                    raise StateError("state_identity_changed")
+                if (
+                    record.lineage_origin == "new_pairing"
+                    and binding["state"] != "fresh"
+                    and binding["identity"] != identity
+                ):
+                    raise StateError("new_pairing_requires_new_registration")
+                if record.next_event_id <= floor:
+                    raise StateError("cursor_floor_regressed")
+                acks[args.id] = floor
+                store.commit_event_cursor(
+                    args.id,
+                    {
+                        "state": "bound",
+                        "identity": identity,
+                        "boot_id": None,
+                        "resume_floor": None,
+                    },
+                    acks,
+                    require_disabled=True,
+                    diagnostic=diagnostic,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "result": "adopted",
+                            "server_id": args.id,
+                            "ack": floor,
+                            "retained_events": len(store.recent_events(args.id)),
+                        }
+                    )
+                )
+                return 0
+            finally:
+                store.close()
+    except (ValueError, OSError) as exc:
+        print(
+            exc.reason if isinstance(exc, StateError) else "cursor_operation_failed",
+            file=sys.stderr,
+        )
+        return 2
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    allowed_commands: frozenset[str] | None = None,
+    require_explicit_db: bool = False,
+) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m taskpaw_v3.hub",
         description="Run the TaskPaw V3 Hub and manage polled agents.",
@@ -129,8 +241,23 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name)
         p.add_argument("--id", type=int, required=True)
 
+    for name in ("event-cursor", "adopt-event-cursor"):
+        command = sub.add_parser(name)
+        command.add_argument("--id", type=int, required=True)
+        if name == "adopt-event-cursor":
+            command.add_argument("--state-report", required=True)
     args = ap.parse_args(argv)
     cmd = args.cmd or "run"
+    if allowed_commands is not None and (
+        args.cmd not in allowed_commands or (require_explicit_db and not args.db)
+    ):
+        print(
+            "unsupported offline cursor command or missing explicit --db",
+            file=sys.stderr,
+        )
+        return 2
+    if cmd in ("event-cursor", "adopt-event-cursor"):
+        return _cursor_command(args)
 
     if cmd == "run":
         return run_from_config(

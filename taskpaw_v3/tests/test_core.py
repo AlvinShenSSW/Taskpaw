@@ -289,10 +289,12 @@ def test_hub_config_defaults():
 
 
 def test_agent_state_persists_event_id(tmp_path):
-    from taskpaw_v3.core.state import load_next_id, save_next_id
+    from taskpaw_v3.core.state import initialize_state, load_next_id, save_next_id
 
     p = tmp_path / "agent.state.json"
-    assert load_next_id(p) == 1
+    with pytest.raises(ValueError):
+        load_next_id(p)
+    initialize_state(p, "fixture", 41)
     save_next_id(p, 42)
     assert load_next_id(p) == 42
 
@@ -302,12 +304,17 @@ def test_build_queue_persists_across_restart(tmp_path):
 
     cfg = AgentConfig(server_id="s", machine="dev")
     state = tmp_path / "agent.state.json"
+    from taskpaw_v3.core.state import initialize_state
+
+    initialize_state(state, cfg.server_id)
     q1 = build_queue(cfg, state)
     assert q1.add("mon", "a")["id"] == 1
     assert q1.add("mon", "b")["id"] == 2
     # New queue (simulated restart) resumes from the persisted counter.
+    q1.close()
     q2 = build_queue(cfg, state)
     assert q2.add("mon", "c")["id"] == 3
+    q2.close()
 
 
 def test_bind_host_normalized_on_both_configs():

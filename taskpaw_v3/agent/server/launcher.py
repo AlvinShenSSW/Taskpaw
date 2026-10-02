@@ -33,7 +33,7 @@ from taskpaw_v3.core.net import (  # re-export
     reclaim_ports_from_stale_instance,
 )
 from taskpaw_v3.core.protocol import EventQueue
-from taskpaw_v3.core.state import load_next_id, save_next_id
+from taskpaw_v3.core.state import StateSession
 from taskpaw_v3.core.tasklog import TaskLog, set_task_log
 from taskpaw_v3.monitors.runtime import (
     effective_monitors,  # re-export (moved to runtime)
@@ -62,10 +62,12 @@ def build_queue(config: AgentConfig, state_path: Optional[Path]) -> EventQueue:
     """EventQueue with persisted monotonic id (constitution §3)."""
     if state_path is None:
         return EventQueue(machine=config.machine)
+    session = StateSession.open(state_path, config.server_id)
     return EventQueue(
         machine=config.machine,
-        start_id=load_next_id(state_path),
-        persist_counter=lambda n: save_next_id(state_path, n),
+        start_id=session.record.next_event_id,
+        persist_counter=session.reserve,
+        state_session=session,
         on_overflow=lambda dropped: log.error(
             "Agent event queue overflow (Hub not acking?); dropped %d oldest", dropped
         ),
@@ -121,26 +123,28 @@ def run_agent(
         role="agent",
     )
 
-    # Race-free claim: hold the sockets, hand them to uvicorn.
-    net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
+    # Validate after stale-instance reclaim, before fresh claims or writers.
+    queue = queue if queue is not None else build_queue(config, state_path)
+    shutdown = shutdown or GracefulShutdown()
+    net_sock = ctl_sock = None
     try:
+        net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
         ctl_sock = claim_port(
             config.control_host, config.control_port, "agent control API"
         )
-    except BaseException:
-        net_sock.close()
-        raise
-
-    try:
         session = bootstrap_control(
             "agent", loopback_url(config.control_host, config.control_port), config_path
         )
     except BaseException:
-        net_sock.close()
-        ctl_sock.close()
+        for sock in (net_sock, ctl_sock):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    log.error("Could not close an agent API socket")
+        queue.close()
         raise
 
-    shutdown = shutdown or GracefulShutdown()
     supervisor = None
     servers: list[uvicorn.Server] = []
     threads: list[threading.Thread] = []
@@ -160,19 +164,23 @@ def run_agent(
             if supervisor is not None:
                 supervisor.stop()
         finally:
-            for server in servers:
-                server.should_exit = True
-            for thread in threads:
-                if (
-                    thread.ident is not None
-                    and thread is not threading.current_thread()
-                ):
-                    thread.join(timeout=10)
-            for sock in (net_sock, ctl_sock):
-                try:
-                    sock.close()
-                except OSError:
-                    log.error("Could not close an agent API socket")
+            try:
+                for server in servers:
+                    server.should_exit = True
+                for thread in threads:
+                    if (
+                        thread.ident is not None
+                        and thread is not threading.current_thread()
+                    ):
+                        thread.join(timeout=10)
+                for sock in (net_sock, ctl_sock):
+                    try:
+                        sock.close()
+                    except OSError:
+                        log.error("Could not close an agent API socket")
+            finally:
+                # Sticky close retains an admitted in-flight reservation lease.
+                queue.close()
 
     startup = StartupShutdown(shutdown, _deactivate, _stop)
     shutdown.register("agent", startup.stop)
@@ -202,8 +210,6 @@ def run_agent(
                 "address.",
                 config.bind_host,
             )
-
-        queue = queue if queue is not None else build_queue(config, state_path)
 
         def _log_failure(message: str) -> None:
             queue.add(

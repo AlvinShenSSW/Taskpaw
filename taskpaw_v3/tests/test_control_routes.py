@@ -316,20 +316,28 @@ def test_local_agent_reads_leave_queue_and_config_unchanged(agent):
     assert snapshot() == before
 
 
-def test_agent_network_ack_contract_stays_independent():
+def test_agent_network_ack_contract_stays_independent(tmp_path):
+    from taskpaw_v3.agent.server.launcher import build_queue
+    from taskpaw_v3.core.state import initialize_state
+
     cfg = AgentConfig(server_id="s", machine="m", api_token=READ)
-    queue = EventQueue("m")
-    ev = queue.add("w", "pending")
-    client = TestClient(create_network_app(cfg, queue))
-    assert client.get(f"/events?ack={ev['id']}", headers=AUTH).status_code == 401
-    assert len(queue) == 1
-    assert (
-        client.get(
-            f"/events?ack={ev['id']}", headers={"Authorization": f"Bearer {READ}"}
-        ).status_code
-        == 200
-    )
-    assert len(queue) == 0
+    state_path = tmp_path / "agent.state.json"
+    initialize_state(state_path, cfg.server_id)
+    queue = build_queue(cfg, state_path)
+    try:
+        ev = queue.add("w", "pending")
+        client = TestClient(create_network_app(cfg, queue))
+        assert client.get(f"/events?ack={ev['id']}", headers=AUTH).status_code == 401
+        assert len(queue) == 1
+        headers = {"Authorization": f"Bearer {READ}"}
+        offer = client.get("/events?ack=-1", headers=headers)
+        assert offer.status_code == 200
+        assert [row["id"] for row in offer.json()["events"]] == [ev["id"]]
+        assert len(queue) == 1
+        assert client.get(f"/events?ack={ev['id']}", headers=headers).status_code == 200
+        assert len(queue) == 0
+    finally:
+        queue.close()
 
 
 def test_rejected_stop_preserves_managed_child_and_rejected_start_never_spawns(

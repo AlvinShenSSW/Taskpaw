@@ -323,6 +323,11 @@ TaskPaw 用**已有的 `state_file` 插件**读它（无需新插件类型）：
 
 ## 6. 事件投递：保留现有协议 + 针对性优化
 
+事件计数器的双锚预留、可选游标证明及故障/混合版本的明确降级合同见
+[事件计数器与离线恢复](../guides/event-cursor-recovery.md)。端点与原事件必填字段
+保持；未知状态不得回退到低 ID，旧 Agent 在新 Hub 上仍可采样 status，事件读取
+暂停至升级与可靠采纳。既有 clear-on-read 边界保留，不承诺 exactly-once。
+
 > **operator 约束**：agent↔Hub 通信稳定数月，**不大改、只优化**。
 > 故 V3 **保留** poll + `/events` + 单调 `id` + Hub `last_event_ids` 去重这套机制。
 > 下述评审的"大改"建议（Codex P1#1 cursor/ack/outbox 重写、Kimi P1#2 V2 桥接、Kimi P1#4 push bootstrap）**降级为可选优化或不采纳**，理由：现有机制已含单调 id + 持久 next_event_id + Hub 去重，实战未现丢事件。

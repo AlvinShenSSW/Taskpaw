@@ -26,6 +26,7 @@ from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import HubConfig
 from taskpaw_v3.core.lifecycle import GracefulShutdown, StartupShutdown
 from taskpaw_v3.core.net import guard_bind_exposure
+from taskpaw_v3.core.state import FileLease, db_lease_path
 from taskpaw_v3.hub.server.film_proxy import (
     FilmProxyError,
     FilmResource,
@@ -76,6 +77,7 @@ class HubService:
     def __init__(self, config: HubConfig, store: HubStore) -> None:
         self.config = config
         self.store = store
+        self._event_cursor_lease: FileLease | None = None
         self.poller = Poller(
             store=store,
             openclaw_url=config.openclaw_url,
@@ -287,6 +289,7 @@ def _register_read_routes(
         # id/name/ip/port/enabled keys are preserved; `online`/`last_seen`/`snapshot`
         # are added. `snapshot` is the agent's parsed /status (None if never polled).
         snaps = service.poller.snapshot_statuses()
+        channels = service.poller.snapshot_event_channels()
         servers = []
         for s in store.list_servers():
             snap = snaps.get(s["id"], {})
@@ -299,6 +302,14 @@ def _register_read_routes(
                     "online": bool(snap.get("online", False)) and bool(s["enabled"]),
                     "last_seen": snap.get("last_seen"),
                     "snapshot": snap.get("snapshot"),
+                    "event_channel": channels.get(
+                        s["id"],
+                        {
+                            "state": "paused",
+                            "reason": "not_polled",
+                            "recovery_hint": "Wait for a current status poll.",
+                        },
+                    ),
                 }
             )
         return {
@@ -539,26 +550,43 @@ def run_hub(
         ],
         role="hub",
     )
-    read_sock = claim_port(config.bind_host, config.bind_port, "hub read API")
+    lease = FileLease(db_lease_path(store.db_path)).acquire()
+    read_sock = control_sock = None
     try:
+        read_sock = claim_port(config.bind_host, config.bind_port, "hub read API")
         control_sock = claim_port(
             config.control_host, config.control_port, "hub control API"
         )
-    except BaseException:
-        read_sock.close()
-        raise
-    try:
         session = bootstrap_control(
             "hub", loopback_url(config.control_host, config.control_port), config_path
         )
     except BaseException:
-        read_sock.close()
-        control_sock.close()
+        for sock in (read_sock, control_sock):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    log.error("Could not close a Hub API socket")
+        lease.close()
         raise
 
     service: HubService | None = None
     servers: list[uvicorn.Server] = []
     threads: list[threading.Thread] = []
+
+    def _writers_alive() -> bool:
+        if any(thread.is_alive() for thread in threads):
+            return True
+        if service is not None:
+            if service._thread is not None and service._thread.is_alive():
+                return True
+            sup = service.self_supervisor
+            if sup is not None:
+                if any(v.get("alive") for v in sup.snapshot().values()):
+                    return True
+                if sup._watchdog is not None and sup._watchdog.is_alive():
+                    return True
+        return False
 
     def _deactivate() -> None:
         try:
@@ -585,7 +613,8 @@ def run_hub(
                 except OSError:
                     log.error("Could not close a Hub API socket")
             # Do not close a connection still used by a live poller/API thread.
-            if stopped and not any(thread.is_alive() for thread in threads):
+            if stopped and not _writers_alive():
+                lease.close()
                 store.close()
             else:
                 log.error(
@@ -604,6 +633,7 @@ def run_hub(
                 config.bind_host,
             )
         app, service = create_hub_app(config, store)
+        service._event_cursor_lease = lease
         control = create_hub_control_app(
             config,
             store,

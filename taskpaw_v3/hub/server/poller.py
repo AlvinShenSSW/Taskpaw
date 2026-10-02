@@ -1,7 +1,8 @@
 """Hub poller: the end-to-end loop (poll → store → OpenClaw outbox).
 
-Carries forward the V2 #14 contract exactly:
-- poll `/events?ack=<durable last id>`; fall back to `/events` on 404 (legacy);
+Retains the V2 #14 persistence/outbox ordering after cursor admission:
+- sample current `/status`, then poll `/events?ack=<durable last id>` only for
+  verified durable lineage; legacy agents remain visible through status;
 - store the event (idempotent) AND enqueue the outbox row, THEN advance + persist
   the ack — at-least-once (a crash re-fetches, never loses);
 - drain the outbox with exponential backoff; dead-letter after 10 attempts or
@@ -23,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from taskpaw_v3.core.http import NoRedirectHandler
+from taskpaw_v3.core.state import MAX_EVENT_ID, StateError, integer, parse_cursor
 
 _opener = urllib.request.build_opener(NoRedirectHandler())
 
@@ -87,6 +89,9 @@ class Poller:
         )
         self.http_timeout = http_timeout
         self._acks_lock = threading.Lock()
+        self._ack_store_invalid = False
+        self._channel_lock = threading.Lock()
+        self._event_channels: dict[int, dict] = {}
         self.last_event_ids: dict[int, int] = self._load_acks()
         # In-memory current-poll snapshot per server (reachable + last good
         # status + last_seen) — the source for status.md, like V2's in-memory
@@ -211,14 +216,72 @@ class Poller:
 
     # ── ack cursor persistence ───────────────────────────────────────────
     def _load_acks(self) -> dict[int, int]:
-        raw = self.store.get_config("last_event_ids", "")
-        if not raw:
-            return {}
         try:
-            return {int(k): int(v) for k, v in json.loads(raw).items()}
-        except Exception as e:
-            log.error("Failed to load last_event_ids: %s", e)
+            return self.store.read_acks()
+        except StateError:
+            self._ack_store_invalid = True
+            log.error("Event cursor config invalid; offline adoption required")
             return {}
+
+    def snapshot_event_channels(self) -> dict[int, dict]:
+        with self._channel_lock:
+            return {sid: dict(value) for sid, value in self._event_channels.items()}
+
+    def _channel(self, sid: int, reason: str | None = None) -> None:
+        value = {
+            "state": "paused" if reason else "ready",
+            "reason": reason,
+            "recovery_hint": "Upgrade/inspect the Agent and use verified offline cursor adoption."
+            if reason
+            else None,
+        }
+        with self._channel_lock:
+            changed = self._event_channels.get(sid) != value
+            self._event_channels[sid] = value
+        if changed and reason:
+            log.warning("Event channel paused for server %s: %s", sid, reason)
+
+    def _admit_cursor(self, server: dict, status: object) -> dict:
+        sid = server["id"]
+        if self._ack_store_invalid:
+            raise StateError("cursor_store_invalid")
+        cursor = parse_cursor(
+            status.get("event_cursor") if isinstance(status, dict) else None
+        )
+        binding = self.store.get_event_cursor(sid)
+        identity = {k: cursor[k] for k in ("server_id", "stream_id")}
+        floor = self.store.event_floor(sid, self.last_event_ids)
+        acks = dict(self.last_event_ids)
+        if binding["state"] == "fresh":
+            if floor != -1:
+                raise StateError("cursor_adoption_required")
+            acks[sid] = -1
+        elif binding["state"] != "bound":
+            raise StateError("cursor_adoption_required")
+        else:
+            if sid not in acks:
+                raise StateError("cursor_store_invalid")
+            if binding["identity"] != identity:
+                raise StateError("state_identity_changed")
+            if binding["boot_id"] != cursor["boot_id"]:
+                if cursor["resume_floor"] < floor:
+                    raise StateError("cursor_floor_regressed")
+            elif (
+                binding["resume_floor"] != cursor["resume_floor"]
+                or cursor["offered_highwater"] < floor
+            ):
+                raise StateError("cursor_floor_regressed")
+        new_binding = {
+            "state": "bound",
+            "identity": identity,
+            "boot_id": cursor["boot_id"],
+            "resume_floor": cursor["resume_floor"],
+        }
+        if binding != new_binding:
+            self.store.commit_event_cursor(sid, new_binding, acks)
+            with self._acks_lock:
+                self.last_event_ids = acks
+        return cursor
 
     def _persist_acks(self) -> bool:
         try:
@@ -272,38 +335,64 @@ class Poller:
             log.warning("Failed to fetch status from %s: %s", server.get("name"), e)
             return False, None
 
-    def fetch_events(self, server: dict) -> list[dict]:
-        base = _agent_base_url(server["ip"], server["port"])
-        last_id = self.last_event_ids.get(server["id"], -1)
-        q = urllib.parse.urlencode({"ack": last_id})
+    def fetch_events(self, server: dict, current_status: object = None) -> list[dict]:
+        sid = server["id"]
         try:
-            try:
-                req = urllib.request.Request(
-                    f"{base}/events?{q}", headers=self._auth_headers()
+            if current_status is None:
+                reachable, raw = self.fetch_status(server)
+                current_status = self._parse_status(raw) if reachable else None
+            if current_status is None:
+                raise StateError("current_status_unavailable")
+            cursor = self._admit_cursor(server, current_status)
+            last_id = self.last_event_ids.get(sid, -1)
+            q = urllib.parse.urlencode(
+                {
+                    "ack": last_id,
+                    "cursor_stream": cursor["stream_id"],
+                    "cursor_boot": cursor["boot_id"],
+                }
+            )
+            base = _agent_base_url(server["ip"], server["port"])
+            req = urllib.request.Request(
+                f"{base}/events?{q}", headers=self._auth_headers()
+            )
+            with _opener.open(req, timeout=self.http_timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            if not isinstance(data, dict):
+                raise StateError("invalid_cursor_response")
+            proof = parse_cursor(data.get("event_cursor"))
+            if (
+                any(
+                    proof[k] != cursor[k]
+                    for k in ("server_id", "stream_id", "boot_id", "resume_floor")
                 )
-                resp = _opener.open(req, timeout=self.http_timeout)
-            except urllib.error.HTTPError as e:
-                if e.code != 404:
-                    raise
-                req = urllib.request.Request(
-                    f"{base}/events", headers=self._auth_headers()
-                )
-                resp = _opener.open(req, timeout=self.http_timeout)
-            data = json.loads(resp.read().decode("utf-8"))
+                or proof["next_event_id"] < cursor["next_event_id"]
+                or proof["offered_highwater"] < cursor["offered_highwater"]
+            ):
+                raise StateError("event_cursor_mismatch")
             events = _events_from_payload(data)
-            if events is None:
-                log.warning(
-                    "Unexpected /events response shape from %s (%s) — skipping",
-                    server.get("name"),
-                    type(data).__name__,
-                )
-                return []
-            return [
-                e for e in events if isinstance(e, dict) and e.get("id", -1) > last_id
-            ]
-        except Exception as e:
-            log.warning("Failed to fetch events from %s: %s", server.get("name"), e)
-            return []
+            if events is None or not isinstance(data.get("events"), list):
+                raise StateError("invalid_cursor_response")
+            for event in events:
+                if (
+                    not isinstance(event, dict)
+                    or integer(event.get("id"), 1, MAX_EVENT_ID)
+                    > proof["offered_highwater"]
+                ):
+                    raise StateError("invalid_cursor_response")
+            self._channel(sid)
+            return [event for event in events if event["id"] > last_id]
+        except StateError as exc:
+            self._channel(sid, exc.reason)
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            self._channel(sid, "event_http_refused")
+        except (ValueError, UnicodeError):
+            self._channel(sid, "invalid_cursor_response")
+        except Exception as exc:
+            log.warning("Failed to fetch events from %s: %s", server.get("name"), exc)
+            self._channel(sid, "event_fetch_failed")
+        return []
 
     # ── retry/backoff ────────────────────────────────────────────────────
     def _retry_delay(self, attempts: int) -> float:
@@ -417,7 +506,10 @@ class Poller:
                     "last_seen": prev.get("last_seen"),
                 }
 
-        new_events = self.fetch_events(server)
+        if not reachable:
+            self._channel(server["id"], "current_status_unavailable")
+            return
+        new_events = self.fetch_events(server, self._parse_status(status_json))
         if not new_events:
             return
 

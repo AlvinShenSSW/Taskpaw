@@ -25,12 +25,48 @@ from taskpaw_v3.hub.server.store import HubStore
 
 POLL_TOKEN = "fake-r02-poll-only"
 NOTIFY_TOKEN = "fake-r02-notify-only"
+CURSOR = {
+    "version": 1,
+    "durable": True,
+    "server_id": "fixture",
+    "stream_id": "1" * 32,
+    "boot_id": "2" * 32,
+    "resume_floor": 2,
+    "offered_highwater": 99,
+    "next_event_id": 100,
+}
+CURRENT_STATUS = {"event_cursor": CURSOR}
+
+
+def event_path(ack=2):
+    return f"/events?ack={ack}&cursor_stream={CURSOR['stream_id']}&cursor_boot={CURSOR['boot_id']}"
+
+
+def bind_cursor(value, sid):
+    value.store.commit_event_cursor(
+        sid,
+        {
+            "state": "bound",
+            "identity": {k: CURSOR[k] for k in ("server_id", "stream_id")},
+            "boot_id": CURSOR["boot_id"],
+            "resume_floor": CURSOR["resume_floor"],
+        },
+        value.last_event_ids,
+    )
 
 
 @dataclass
 class Reply:
     status: int = 200
-    body: bytes = b'{"ok": true, "monitors": {}, "events": [{"id": 3, "message": "fixture"}], "films": []}'
+    body: bytes = json.dumps(
+        {
+            "ok": True,
+            "monitors": {},
+            "event_cursor": CURSOR,
+            "events": [{"id": 3, "message": "fixture"}],
+            "films": [],
+        }
+    ).encode()
     headers: tuple[tuple[str, str], ...] = ()
     reason: str | None = None
     delay: float = 0
@@ -186,6 +222,7 @@ def make_poller(store, source):
         get_polling_token=lambda: POLL_TOKEN,
         http_timeout=1,
     )
+    bind_cursor(value, sid)
     return value, store.list_servers()[0]
 
 
@@ -198,7 +235,7 @@ def test_real_cross_port_redirect_never_requests_target(endpoints, store, consum
     if consumer == "status":
         result = value.fetch_status(server)
     elif consumer == "events":
-        result = value.fetch_events(server)
+        result = value.fetch_events(server, CURRENT_STATUS)
     else:
         try:
             openclaw.send_payload(
@@ -229,7 +266,7 @@ def test_redirect_reason_location_never_enter_logs_or_outbox(endpoints, store, c
         reason=f"{POLL_TOKEN} {NOTIFY_TOKEN}",
     )
     value, server = make_poller(store, source)
-    assert value.fetch_events(server) == []
+    assert value.fetch_events(server, CURRENT_STATUS) == []
     delivery = store.enqueue_delivery("fixture-agent", "event", '{"text": "fixture"}')
     value.drain_outbox()
     row = store._conn.execute(
@@ -245,7 +282,7 @@ def test_redirect_reason_location_never_enter_logs_or_outbox(endpoints, store, c
 
 
 REDIRECT_CODES = (301, 302, 303, 307, 308)
-CONSUMERS = ("status", "events", "fallback", "notify", "films", "run-films")
+CONSUMERS = ("status", "events", "notify", "films", "run-films")
 
 
 def invoke_refused(
@@ -253,8 +290,8 @@ def invoke_refused(
 ):
     if consumer == "status":
         assert value.fetch_status(server) == (False, None)
-    elif consumer in ("events", "fallback"):
-        assert value.fetch_events(server) == []
+    elif consumer == "events":
+        assert value.fetch_events(server, CURRENT_STATUS) == []
     elif consumer == "notify":
         with pytest.raises(HTTPError) as caught:
             openclaw.send_payload(
@@ -298,9 +335,7 @@ def test_real_redirect_matrix(
     target.requests.clear()
     value, server = make_poller(store, source)
     path = (
-        "/events"
-        if consumer == "fallback"
-        else "/events?ack=2"
+        event_path()
         if consumer == "events"
         else "/status"
         if consumer == "status"
@@ -322,13 +357,9 @@ def test_real_redirect_matrix(
         headers=(("Location", locations[location_kind]),),
         reason=f"{POLL_TOKEN} {NOTIFY_TOKEN}",
     )
-    if consumer == "fallback":
-        source.routes["/events?ack=2"] = Reply(404)
     invoke_refused(consumer, value, server, status)
     assert target.requests == []
-    assert [request["path"] for request in source.requests] == (
-        ["/events?ack=2", "/events"] if consumer == "fallback" else [path]
-    )
+    assert [request["path"] for request in source.requests] == [path]
     token = NOTIFY_TOKEN if consumer == "notify" else POLL_TOKEN
     assert all(request["auth"] == f"Bearer {token}" for request in source.requests)
     assert source.requests[-1]["method"] == ("POST" if consumer == "notify" else "GET")
@@ -467,12 +498,13 @@ def test_real_hostile_redirect_fields_are_fixed_failures(
 
 
 @pytest.mark.parametrize("status", REDIRECT_CODES)
-@pytest.mark.parametrize("fallback", [False, True])
-def test_redirect_keeps_status_and_ack_until_direct_recovery(
-    endpoints, store, status, fallback
-):
+def test_redirect_keeps_status_and_ack_until_direct_recovery(endpoints, store, status):
     source, target = endpoints(), endpoints()
-    source.default = Reply(body=b'{"monitors": {}, "version": "last-good"}')
+    source.default = Reply(
+        body=json.dumps(
+            {"monitors": {}, "version": "last-good", **CURRENT_STATUS}
+        ).encode()
+    )
     value, server = make_poller(store, source)
     sid = server["id"]
     value._poll_server(server, active=False)
@@ -480,8 +512,6 @@ def test_redirect_keeps_status_and_ack_until_direct_recovery(
     status_rows = store._conn.execute("SELECT * FROM status_log").fetchall()
     redirect = Reply(status, headers=(("Location", target.base + "/target"),))
     source.default = redirect
-    if fallback:
-        source.routes["/events?ack=2"] = Reply(404)
     source.requests.clear()
     value._poll_server(server, active=True)
     after = value.snapshot_statuses()[sid]
@@ -495,17 +525,12 @@ def test_redirect_keeps_status_and_ack_until_direct_recovery(
     assert store._conn.execute("SELECT COUNT(*) FROM delivery_outbox").fetchone() == (
         0,
     )
-    assert [r["path"] for r in source.requests] == (
-        ["/status", "/events?ack=2", "/events"]
-        if fallback
-        else ["/status", "/events?ack=2"]
-    )
+    # A failed current status cannot authorize an events request.
+    assert [r["path"] for r in source.requests] == ["/status"]
     assert target.requests == []
 
     source.default = Reply()
     source.routes.clear()
-    if fallback:
-        source.routes["/events?ack=2"] = Reply(404)
     value._poll_server(server, active=True)
     assert value.snapshot_statuses()[sid]["online"] is True
     assert value.snapshot_acks() == {sid: 3}
@@ -610,6 +635,7 @@ def test_redirect_device_and_notification_do_not_stall_healthy_device(endpoints,
     good_id = store.add_server("healthy-agent", "127.0.0.1", healthy.server.server_port)
     value.last_event_ids[good_id] = 2
     value._persist_acks()
+    bind_cursor(value, good_id)
     first = store.enqueue_delivery(
         "fixture-agent", "event", '{"text": "prior"}', dedupe_key="prior"
     )
@@ -636,9 +662,9 @@ def test_redirect_device_and_notification_do_not_stall_healthy_device(endpoints,
     ]
     assert [r["path"] for r in healthy.requests] == [
         "/status",
-        "/events?ack=2",
+        event_path(),
         "/status",
-        "/events?ack=3",
+        event_path(3),
     ]
     assert target.requests == []
 
@@ -672,7 +698,7 @@ def test_direct_notification_keeps_method_body_auth_and_timeout(
 
 
 @pytest.mark.parametrize("token", ["", POLL_TOKEN])
-def test_direct_status_events_fallback_and_films_keep_request_contract(
+def test_direct_status_events_and_films_keep_request_contract(
     endpoints, store, monkeypatch, token
 ):
     source = endpoints()
@@ -689,10 +715,9 @@ def test_direct_status_events_fallback_and_films_keep_request_contract(
 
         monkeypatch.setattr(module._opener, "open", observed)
     assert value.fetch_status(server)[0] is True
-    assert value.fetch_events(server) == [{"id": 3, "message": "fixture"}]
-    source.routes["/events?ack=2"] = Reply(404)
-    source.routes["/events"] = Reply(body=b'[{"id":3,"message":"legacy"}]')
-    assert value.fetch_events(server) == [{"id": 3, "message": "legacy"}]
+    assert value.fetch_events(server, CURRENT_STATUS) == [
+        {"id": 3, "message": "fixture"}
+    ]
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     for resource in ("films", "run-films"):
         assert (
@@ -701,12 +726,10 @@ def test_direct_status_events_fallback_and_films_keep_request_contract(
             )["films"]
             == []
         )
-    assert timeouts == [0.7] * 6
+    assert timeouts == [0.7] * 4
     assert [r["path"] for r in source.requests] == [
         "/status",
-        "/events?ack=2",
-        "/events?ack=2",
-        "/events",
+        event_path(),
         "/monitors/films?name=fixture",
         "/monitors/run-films?name=fixture",
     ]
@@ -717,17 +740,34 @@ def test_direct_status_events_fallback_and_films_keep_request_contract(
 
 
 @pytest.mark.parametrize("status", REDIRECT_CODES)
+def test_supported_cursor_404_does_not_fallback(endpoints, store, status):
+    source, target = endpoints(), endpoints()
+    value, server = make_poller(store, source)
+    source.routes[event_path()] = Reply(404)
+    source.routes["/events"] = Reply(
+        status, headers=(("Location", target.base + "/target"),)
+    )
+    assert value.fetch_events(server, CURRENT_STATUS) == []
+    assert [r["path"] for r in source.requests] == [event_path()]
+    assert source.requests[0]["auth"] == f"Bearer {POLL_TOKEN}"
+    assert not target.requests
+    assert value.snapshot_acks() == {server["id"]: 2}
+    assert store._conn.execute("SELECT count(*) FROM events").fetchone() == (0,)
+    assert store._conn.execute("SELECT count(*) FROM delivery_outbox").fetchone() == (
+        0,
+    )
+
+
+@pytest.mark.parametrize("status", REDIRECT_CODES)
 @pytest.mark.parametrize("consumer", CONSUMERS)
 def test_empty_token_still_refuses_redirect(endpoints, store, status, consumer):
     source, target = endpoints(), endpoints()
     source.default = Reply(status, headers=(("Location", target.base + "/target"),))
-    if consumer == "fallback":
-        source.routes["/events?ack=2"] = Reply(404)
     value, server = make_poller(store, source)
     value.get_polling_token = lambda: ""
     invoke_refused(consumer, value, server, status, poll_token="", notify_token="")
     assert target.requests == []
-    assert len(source.requests) == (2 if consumer == "fallback" else 1)
+    assert len(source.requests) == 1
     assert all(r["auth"] is None for r in source.requests)
 
 
@@ -742,7 +782,7 @@ def test_direct_response_timeout_keeps_existing_failure_mapping(
     if consumer == "status":
         assert value.fetch_status(server) == (False, None)
     elif consumer == "events":
-        assert value.fetch_events(server) == []
+        assert value.fetch_events(server, CURRENT_STATUS) == []
     elif consumer == "notify":
         with pytest.raises((TimeoutError, URLError)):
             openclaw.send_payload(

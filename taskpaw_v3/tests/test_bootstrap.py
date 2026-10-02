@@ -253,3 +253,56 @@ def test_preset_force_reapplies(home):
     assert bootstrap.main(["agent", "--preset", "moomoo", "--force"]) == 0
     cfg: AgentConfig = load_yaml(AgentConfig, p)
     assert len(cfg.monitors) == 4
+
+
+def test_explicit_initialization_follows_edits_before_run(home, monkeypatch):
+    from taskpaw_v3.agent.server import service
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.core.state import StateSession
+
+    seen = []
+
+    def run():
+        config_path = service.default_config_path()
+        cfg = load_yaml(AgentConfig, config_path)
+        session = StateSession.open(
+            config_path.with_name("agent.state.json"), cfg.server_id
+        )
+        try:
+            assert cfg.machine == "moomoo" and cfg.bind_host == "127.0.0.2"
+            assert cfg.server_id != "moomoo-prod" and session.record.next_event_id == 1
+            seen.append(True)
+        finally:
+            session.close()
+        return 0
+
+    monkeypatch.setattr(service, "main", run)
+    assert (
+        bootstrap.main(
+            [
+                "agent",
+                "--preset",
+                "moomoo",
+                "--bind-host",
+                "127.0.0.2",
+                "--initialize-events",
+                "--run",
+            ]
+        )
+        == 0
+    )
+    assert seen == [True]
+
+
+def test_force_and_preset_preserve_verified_lineage(home):
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.core.state import initialize_state, load_next_id
+
+    path, _ = bootstrap.scaffold("agent")
+    cfg = load_yaml(AgentConfig, path)
+    state = path.with_name("agent.state.json")
+    initialize_state(state, cfg.server_id, 901)
+    bootstrap.scaffold("agent", force=True)
+    bootstrap.apply_agent_edits(path, "moomoo")
+    assert load_yaml(AgentConfig, path).server_id == cfg.server_id
+    assert load_next_id(state) == 901

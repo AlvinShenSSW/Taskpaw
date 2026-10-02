@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import sqlite3
 from contextlib import closing, contextmanager
@@ -57,7 +58,9 @@ def test_real_v2_naive_rows_do_not_stop_two_agent_poll_cycles(tmp_path, monkeypa
             "fetch_status",
             lambda server: (sampled.append(server["name"]) or True, "{}"),
         )
-        monkeypatch.setattr(poller, "fetch_events", lambda server: [])
+        monkeypatch.setattr(
+            poller, "fetch_events", lambda server, current_status=None: []
+        )
         for _ in range(2):
             poller.poll_once()
         assert sampled == ["one", "two", "one", "two"]
@@ -534,7 +537,9 @@ def test_runtime_corrupt_row_state_failure_and_send_failure_do_not_stop_healthy_
             "fetch_status",
             lambda server: (order.append(server["name"]) or True, "{}"),
         )
-        monkeypatch.setattr(poller, "fetch_events", lambda server: [])
+        monkeypatch.setattr(
+            poller, "fetch_events", lambda server, current_status=None: []
+        )
         monkeypatch.setattr(poller_module, "_now", lambda: now + timedelta(seconds=1))
 
         def send(url, token, payload, timeout):
@@ -578,7 +583,9 @@ def test_drain_failure_boundaries_leave_polling_live(tmp_path, monkeypatch, faul
             "fetch_status",
             lambda server: (sampled.append(server["name"]) or True, "{}"),
         )
-        monkeypatch.setattr(poller, "fetch_events", lambda server: [])
+        monkeypatch.setattr(
+            poller, "fetch_events", lambda server, current_status=None: []
+        )
         monkeypatch.setattr(
             poller_module,
             "send_payload",
@@ -653,9 +660,29 @@ def test_disabled_backlog_acks_and_reenable_young_old_quarantine(
         )
         sent, alerts = [], []
         monkeypatch.setattr(poller_module, "_now", lambda: now + timedelta(seconds=1))
-        monkeypatch.setattr(poller, "fetch_status", lambda server: (True, "{}"))
+        from taskpaw_v3.tests.test_hub import FakeResp
+
+        cursor = {
+            "version": 1,
+            "durable": True,
+            "server_id": "fixture",
+            "stream_id": "1" * 32,
+            "boot_id": "2" * 32,
+            "resume_floor": 0,
+            "offered_highwater": 1,
+            "next_event_id": 2,
+        }
         monkeypatch.setattr(
-            poller, "fetch_events", lambda server: [{"id": 1, "message": "fake"}]
+            poller,
+            "fetch_status",
+            lambda server: (True, json.dumps({"event_cursor": cursor})),
+        )
+        monkeypatch.setattr(
+            poller_module._opener,
+            "open",
+            lambda request, timeout: FakeResp(
+                {"event_cursor": cursor, "events": [{"id": 1, "message": "fake"}]}
+            ),
         )
         monkeypatch.setattr(
             poller_module,
@@ -677,7 +704,6 @@ def test_disabled_backlog_acks_and_reenable_young_old_quarantine(
         assert poller.last_event_ids[sid] == 1
         assert store._conn.execute("SELECT COUNT(*) FROM events").fetchone() == (1,)
         switch.update(enabled=True, token="fake")
-        monkeypatch.setattr(poller, "fetch_events", lambda server: [])
         poller.poll_once()
         poller.poll_once()
         assert sent == [{"text": "young"}] and len(alerts) == 1
@@ -884,7 +910,9 @@ def test_deep_json_legacy_preview_startup_double_start_and_healthy_polling(
                 "fetch_status",
                 lambda server: (sampled.append(server["name"]) or True, "{}"),
             )
-            monkeypatch.setattr(poller, "fetch_events", lambda server: [])
+            monkeypatch.setattr(
+                poller, "fetch_events", lambda server, current_status=None: []
+            )
             monkeypatch.setattr(
                 poller_module,
                 "send_payload",
@@ -1078,3 +1106,74 @@ def test_prune_failure_rolls_back_quarantine_and_valid_deletion(tmp_path, caplog
             (invalid,)
         ]
         assert expired != invalid
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_merge244_cursor_schema_and_outbox_upgrade_share_transaction(
+    tmp_path, monkeypatch, fail
+):
+    from taskpaw_v3.tests.test_hub import _cursor
+
+    path = tmp_path / "hub.db"
+    legacy_db(path)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute(
+            "CREATE TABLE servers(id INTEGER PRIMARY KEY,name TEXT UNIQUE,ip TEXT,port INTEGER,enabled INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE status_log(id INTEGER PRIMARY KEY,server_id INTEGER,timestamp TEXT,reachable INTEGER,status_json TEXT)"
+        )
+        conn.execute("INSERT INTO servers VALUES(1,'old','127.0.0.1',15680,1)")
+        conn.execute(
+            "INSERT INTO status_log VALUES(1,1,'old',1,?)",
+            (json.dumps({"event_cursor": _cursor()}),),
+        )
+        original = conn.execute("SELECT * FROM delivery_outbox").fetchall()
+    real_apply = store_module.apply_plan
+    observed = []
+
+    def apply(conn, plan, backup):
+        assert conn.in_transaction and backup is not None
+        assert conn.execute("SELECT state FROM event_cursors").fetchall() == [
+            ("unverified",)
+        ]
+        observed.append(True)
+        if fail:
+            raise sqlite3.OperationalError("owned schema fault")
+        return real_apply(conn, plan, backup)
+
+    monkeypatch.setattr(store_module, "apply_plan", apply)
+    if fail:
+        with pytest.raises(sqlite3.OperationalError, match="owned schema fault"):
+            HubStore(path)
+        with closing(sqlite3.connect(path)) as conn:
+            assert conn.execute("SELECT * FROM delivery_outbox").fetchall() == original
+            assert (
+                conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name IN ('event_cursors','outbox_quarantine','outbox_migrations')"
+                ).fetchall()
+                == []
+            )
+    else:
+        with HubStoreContext(path) as store:
+            cursor = store.get_event_cursor(1)
+            assert cursor["state"] == "unverified"
+            assert cursor["identity"] == {
+                k: _cursor()[k] for k in ("server_id", "stream_id")
+            }
+            assert (
+                store._conn.execute("SELECT * FROM delivery_outbox").fetchall()[0][:5]
+                == original[0][:5]
+            )
+            assert store._conn.execute(
+                "SELECT reason FROM outbox_quarantine"
+            ).fetchall() == [("source_timezone_required",)]
+        monkeypatch.setattr(store_module, "apply_plan", real_apply)
+        backups = list(tmp_path.glob("hub.db.outbox-v1-*.bak"))
+        with HubStoreContext(path) as store:
+            assert store.get_event_cursor(1) == cursor
+            assert store._conn.execute(
+                "SELECT count(*) FROM outbox_migrations"
+            ).fetchone() == (1,)
+        assert list(tmp_path.glob("hub.db.outbox-v1-*.bak")) == backups
+    assert observed == [True]

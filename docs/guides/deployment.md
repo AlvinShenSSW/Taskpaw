@@ -209,8 +209,8 @@ OpenClaw hook URL; a proxy must serve the response directly rather than redirect
 the client. Refusal reports the HTTP status without forwarding the Bearer or
 logging the redirect address/reason. A failed events fetch does not advance the
 Hub's acknowledgement, and an unconfirmed notification keeps the existing
-outbox retry/dead-letter policy. The legacy `/events` fallback still applies
-only to a genuine 404. Local automated tests verify this policy; they do not
+outbox retry/dead-letter policy. Agents without supported durable cursor proof remain status-only. A cursor-
+verified events fetch that returns 404 fails without a bare `/events` fallback. Local automated tests verify this policy; they do not
 establish compatibility with your LAN proxy configuration.
 
 The Hub also writes `~/.taskpaw-hub/hub.db` (SQLite `status_log`) and
