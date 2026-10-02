@@ -1,10 +1,11 @@
-import { Box, Chip, Stack, Typography } from "@mui/material";
+import { Alert, Box, Button, Chip, Stack, Typography } from "@mui/material";
 import { useTranslation } from "react-i18next";
 import type { EventItem } from "../api";
+import { requestTime, useResponseOutdated } from "./requestEvidence";
 
 // Shared event-log renderer (#44): a dense, newest-first list the operator can
-// scan without reading files. Used by the Agent Console (local events) and the
-// Hub Dashboard (aggregated history). Tolerates both event shapes.
+// scan without reading files. HubDashboard owns the query and passes explicit
+// request evidence. The row renderer tolerates both event shapes.
 
 const LEVEL_COLOR: Record<string, "default" | "info" | "success" | "warning" | "error"> = {
   info: "info",
@@ -20,17 +21,33 @@ function fmtTime(iso?: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleTimeString();
 }
 
-export function EventLog({ events }: { events?: EventItem[] }) {
-  const { t } = useTranslation();
+export function EventLog({ events, hasData, fetching = false, failed = false, lastSuccessAt = 0, onRetry }: {
+  events?: EventItem[];
+  hasData: boolean;
+  fetching?: boolean;
+  failed?: boolean;
+  lastSuccessAt?: number;
+  onRetry?: () => void;
+}) {
+  const { t, i18n } = useTranslation();
+  const outdated = useResponseOutdated(lastSuccessAt);
   const rows = events ?? [];
-  if (rows.length === 0) {
-    return (
-      <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
-        {t("events.none")}
-      </Typography>
-    );
-  }
   return (
+    <Stack spacing={1}>
+      {failed && <Alert severity="error" action={onRetry && (
+        <Button color="inherit" disabled={fetching} onClick={onRetry}>{t("events.retry")}</Button>
+      )}>{t("events.failed")}</Alert>}
+      <Box role="status" aria-label={t("events.requestStatus")}>
+        {fetching && <Typography variant="body2">{t(hasData ? "common.updating" : "events.loading")}</Typography>}
+        {hasData && (failed || outdated) && <Typography variant="body2">{t("events.stale")}</Typography>}
+        {hasData && lastSuccessAt > 0 && <Typography variant="caption">
+          {t("connection.lastSuccess", { time: requestTime(lastSuccessAt, i18n.language) })}
+        </Typography>}
+      </Box>
+      {hasData && rows.length === 0 && !failed && !outdated && (
+        <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>{t("events.none")}</Typography>
+      )}
+      {hasData && rows.length > 0 && (
     <Stack divider={<Box sx={{ borderBottom: 1, borderColor: "divider" }} />} sx={{ mt: 1 }}>
       {rows.map((e, i) => {
         const level = (e.level ?? "info").toLowerCase();
@@ -57,6 +74,8 @@ export function EventLog({ events }: { events?: EventItem[] }) {
           </Stack>
         );
       })}
+    </Stack>
+      )}
     </Stack>
   );
 }

@@ -1,10 +1,184 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { HubDashboard } from "../views/HubDashboard";
 import { theme } from "../theme";
 import i18n from "../i18n";
+
+describe("R14 Hub event request evidence", () => {
+  const clients: QueryClient[] = [];
+  beforeEach(() => { void i18n.changeLanguage("en"); });
+  afterEach(() => { clients.splice(0).forEach(qc => qc.clear()); vi.unstubAllGlobals(); void i18n.changeLanguage("zh-CN"); });
+  const showEvents = async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    clients.push(qc);
+    const view = render(<QueryClientProvider client={qc}><HubDashboard /></QueryClientProvider>);
+    await screen.findByText(/hub-box/);
+    fireEvent.click(screen.getByRole("tab", { name: "Events" }));
+    return { ...view, qc };
+  };
+  it("shows loading rather than No events before the first response", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => url.includes("/status")
+      ? Promise.resolve({ ok: true, json: async () => ({ machine: "hub-box", servers: [], self: {}, acks: {} }) })
+      : new Promise(() => {})));
+    await showEvents();
+    expect(screen.queryByText(/No events yet/)).not.toBeInTheDocument();
+    expect(screen.getByText("Loading events…")).toBeInTheDocument();
+  });
+  it("shows a safe first error and Retry rather than No events", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => url.includes("/status")
+      ? Promise.resolve({ ok: true, json: async () => ({ machine: "hub-box", servers: [], self: {}, acks: {} }) })
+      : Promise.reject(new Error("PRIVATE-UPSTREAM"))));
+    await showEvents();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load events");
+    expect(screen.queryByText(/No events yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/PRIVATE-UPSTREAM/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+  it("retains old event rows and marks refresh failure", async () => {
+    let fail = false;
+    let retryPending = false;
+    let finishRetry!: (value: Response) => void;
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/status")) return Promise.resolve({ ok: true, json: async () => ({ machine: "hub-box", servers: [], self: {}, acks: {} }) });
+      if (retryPending) return new Promise<Response>(resolve => { finishRetry = resolve; });
+      if (fail) return Promise.reject(new Error("PRIVATE-UPSTREAM"));
+      return Promise.resolve({ ok: true, json: async () => ({ events: [{ id: 1, message: "retained fixture" }] }) });
+    }));
+    const { qc } = await showEvents();
+    await screen.findByText("retained fixture");
+    fail = true;
+    await act(async () => { await qc.refetchQueries({ queryKey: ["hubEvents"] }); });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load events");
+    expect(screen.getByText("retained fixture")).toBeInTheDocument();
+    expect(screen.getByText(/Showing the last successfully loaded events/)).toBeInTheDocument();
+    retryPending = true;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled());
+    expect(screen.getByText("retained fixture")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load events");
+    await act(async () => { finishRetry(new Response(JSON.stringify({ events: [{ id: 2, message: "replacement fixture" }] }))); });
+    await screen.findByText("replacement fixture");
+    expect(screen.queryByText("retained fixture")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps the first failure visible during manual retry, joins pending work, then recovers", async () => {
+    let finish!: (value: Response) => void;
+    let eventCalls = 0;
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/status")) return Promise.resolve(new Response(JSON.stringify({ machine: "hub-box", servers: [], self: {}, acks: {} })));
+      if (++eventCalls === 1) return Promise.reject(new Error("PRIVATE-UPSTREAM"));
+      return new Promise<Response>(resolve => { finish = resolve; });
+    }));
+    const { qc } = await showEvents();
+    await screen.findByRole("alert");
+    const retry = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(retry); fireEvent.click(retry);
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not load events");
+    await waitFor(() => expect(retry).toBeDisabled());
+    expect(screen.queryByText(/No events yet/)).not.toBeInTheDocument();
+    const joined = qc.refetchQueries({ queryKey: ["hubEvents"] }, { cancelRefetch: false });
+    expect(eventCalls).toBe(2);
+    await act(async () => { finish(new Response(JSON.stringify({ events: [{ id: 2, message: "retry recovery" }] }))); await joined; });
+    await screen.findByText("retry recovery");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not show a successful empty result as current after refresh failure", async () => {
+    let fail = false;
+    vi.stubGlobal("fetch", vi.fn((url: string) => url.includes("/status")
+      ? Promise.resolve(new Response(JSON.stringify({ machine: "hub-box", servers: [], self: {}, acks: {} })))
+      : fail ? Promise.resolve(new Response("private body", { status: 503 })) : Promise.resolve(new Response('{"events":[]}'))));
+    const { qc } = await showEvents();
+    await screen.findByText(/No events yet/);
+    fail = true;
+    await qc.refetchQueries({ queryKey: ["hubEvents"] });
+    await screen.findByRole("alert");
+    expect(screen.queryByText(/No events yet/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Showing the last successfully loaded events/)).toBeInTheDocument();
+    expect(screen.queryByText(/private body/)).not.toBeInTheDocument();
+  });
+
+  it("shows event history while status loads or fails, and keeps Settings reachable", async () => {
+    let rejectStatus!: (error: Error) => void;
+    vi.stubGlobal("fetch", vi.fn((url: string) => url.includes("/status")
+      ? new Promise((_resolve, reject) => { rejectStatus = reject; })
+      : Promise.resolve(new Response(JSON.stringify({ events: [{ id: 1, message: "independent events" }] })))));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } }); clients.push(qc);
+    render(<QueryClientProvider client={qc}><HubDashboard /></QueryClientProvider>);
+    fireEvent.click(screen.getByRole("tab", { name: "Events" }));
+    await screen.findByText("independent events");
+    expect(screen.getByRole("alert")).toHaveTextContent("Local status is unavailable");
+    await act(async () => { rejectStatus(new Error("status unavailable")); });
+    expect(screen.getByText("independent events")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+    expect(screen.getByText("Language")).toBeInTheDocument();
+  });
+
+  it("preserves the server filter on failed status and resets only proven removal", async () => {
+    let failStatus = false;
+    let removed = false;
+    const fetcher = vi.fn((url: string) => {
+      if (url.includes("/status")) return failStatus ? Promise.reject(new Error("offline"))
+        : Promise.resolve(new Response(JSON.stringify({ machine: "hub-box", servers: removed ? [] : [{ id: 7, name: "server fixture", enabled: 0, online: false }], self: {}, acks: {} })));
+      return Promise.resolve(new Response('{"events":[]}'));
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const { qc } = await showEvents();
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "Server" }));
+    fireEvent.click(await screen.findByRole("option", { name: "server fixture" }));
+    await waitFor(() => expect(fetcher.mock.calls.some(([url]) => url.includes("server=7"))).toBe(true));
+    failStatus = true; await qc.refetchQueries({ queryKey: ["hubStatus"] });
+    await screen.findByRole("alert");
+    expect(screen.getByRole("combobox", { name: "Server" })).toHaveTextContent("server fixture");
+    await qc.refetchQueries({ queryKey: ["hubEvents"] });
+    expect(fetcher.mock.calls.at(-1)?.[0]).toContain("server=7");
+    failStatus = false; removed = true; await qc.refetchQueries({ queryKey: ["hubStatus"] });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Server" })).not.toHaveTextContent("server fixture"));
+    await waitFor(() => expect(fetcher.mock.calls.at(-1)?.[0]).toMatch(/\/events\?limit=200$/));
+  });
+
+  it("ignores a late response from the previous level filter", async () => {
+    let finishOld!: (value: Response) => void;
+    vi.stubGlobal("fetch", vi.fn((url: string) => url.includes("/status")
+      ? Promise.resolve(new Response(JSON.stringify({ machine: "hub-box", servers: [], self: {}, acks: {} })))
+      : url.includes("level=warn") ? Promise.resolve(new Response(JSON.stringify({ events: [{ id: 2, message: "new filtered fixture" }] })))
+      : new Promise<Response>(resolve => { finishOld = resolve; })));
+    await showEvents();
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "Level" }));
+    fireEvent.click(await screen.findByRole("option", { name: "warn" }));
+    await screen.findByText("new filtered fixture");
+    await act(async () => { finishOld(new Response(JSON.stringify({ events: [{ id: 1, message: "old filter fixture" }] }))); });
+    expect(screen.queryByText("old filter fixture")).not.toBeInTheDocument();
+    expect(screen.getByText("new filtered fixture")).toBeInTheDocument();
+  });
+
+  it("polls events only while open and leaves no display timers after unmount", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-02T12:00:00Z"));
+    try {
+      const fetcher = vi.fn((url: string) => Promise.resolve(new Response(JSON.stringify(url.includes("/status")
+        ? { machine: "hub-box", servers: [], self: {}, acks: {} } : { events: [] }))));
+      vi.stubGlobal("fetch", fetcher);
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } }); clients.push(qc);
+      const view = render(<QueryClientProvider client={qc}><HubDashboard /></QueryClientProvider>);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(fetcher.mock.calls.filter(([url]) => url.includes("/events"))).toHaveLength(0);
+      fireEvent.click(screen.getByRole("tab", { name: "Events" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      const count = fetcher.mock.calls.filter(([url]) => url.includes("/events")).length;
+      expect(count).toBe(2);
+      fireEvent.click(screen.getByRole("tab", { name: "Settings" }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+      expect(fetcher.mock.calls.filter(([url]) => url.includes("/events"))).toHaveLength(count);
+      view.unmount(); qc.clear();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+});
 
 // Four machines: two healthy, one online-but-degraded (a monitor in alert), one
 // offline → counts 2 / 1 / 1 (distinct, so the tally assertions are meaningful).
