@@ -177,6 +177,17 @@ curl -s http://127.0.0.1:5690/status | python -m json.tool   # on the Hub
 fans completion events to OpenClaw if enabled. The Tauri UI (#19) renders the
 same data through the authenticated loopback control listener on port 5691.
 
+The Hub refuses HTTP 301/302/303/307/308 redirects for Agent status, events,
+film lists and OpenClaw notifications, including relative or same-origin
+redirects. Configure the Agent's directly serving host/port and the final
+OpenClaw hook URL; a proxy must serve the response directly rather than redirect
+the client. Refusal reports the HTTP status without forwarding the Bearer or
+logging the redirect address/reason. A failed events fetch does not advance the
+Hub's acknowledgement, and an unconfirmed notification keeps the existing
+outbox retry/dead-letter policy. The legacy `/events` fallback still applies
+only to a genuine 404. Local automated tests verify this policy; they do not
+establish compatibility with your LAN proxy configuration.
+
 The Hub also writes `~/.taskpaw-hub/hub.db` (SQLite `status_log`) and
 `~/.taskpaw-hub/status.md` each poll for OpenClaw to read without an API — see
 **[openclaw-integration.md](openclaw-integration.md)** for the schema, the metric

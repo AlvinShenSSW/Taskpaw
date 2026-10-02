@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from taskpaw_v3.hub.server import openclaw as openclaw_mod
 from taskpaw_v3.hub.server import poller as poller_mod
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
@@ -123,7 +124,8 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
             sent.append(json.loads(req.data.decode()))
             return FakeResp({"ok": True})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", fake_urlopen)
+        monkeypatch.setattr(openclaw_mod._opener, "open", fake_urlopen)
         p.poll_once()
 
         assert seen == ["http://127.0.0.1:5680/events?ack=2"]
@@ -163,7 +165,7 @@ def test_poller_404_fallback_for_legacy_agent(tmp_path, monkeypatch):
                 raise urllib.error.HTTPError(req.full_url, 404, "nf", None, None)
             return FakeResp({"events": [{"id": 3, "message": "new"}]})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", fake_urlopen)
         evs = p.fetch_events(s.list_servers()[0])
         assert [e["id"] for e in evs] == [3]
         assert seen == [
@@ -194,8 +196,8 @@ def test_fetch_events_tolerates_bare_list(tmp_path, monkeypatch):
         p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
         p.last_event_ids = {sid: 2}
         monkeypatch.setattr(
-            poller_mod.urllib.request,
-            "urlopen",
+            poller_mod._opener,
+            "open",
             lambda req, timeout: FakeResp([{"id": 3, "message": "new"}, {"id": 2}]),
         )
         evs = p.fetch_events(s.list_servers()[0])
@@ -211,8 +213,8 @@ def test_fetch_events_skips_unexpected_shape(tmp_path, monkeypatch):
         s.add_server("Weird", "127.0.0.1", 5680)
         p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
         monkeypatch.setattr(
-            poller_mod.urllib.request,
-            "urlopen",
+            poller_mod._opener,
+            "open",
             lambda req, timeout: FakeResp("not an events object"),
         )
         assert p.fetch_events(s.list_servers()[0]) == []
@@ -230,7 +232,7 @@ def test_poller_disabled_stores_without_outbox(tmp_path, monkeypatch):
         def fake_urlopen(req, timeout):
             return FakeResp({"events": [{"id": 3, "message": "new"}]})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", fake_urlopen)
         p.poll_once()
         assert s._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
         assert (
@@ -265,7 +267,7 @@ def test_outbox_dead_letters_once(tmp_path, monkeypatch):
         def fail(req, timeout):
             raise urllib.error.URLError("down")
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fail)
+        monkeypatch.setattr(openclaw_mod._opener, "open", fail)
         p.drain_outbox()
         p.drain_outbox()
         row = s._conn.execute(
@@ -411,7 +413,7 @@ def test_poller_keeps_latest_status_snapshot(tmp_path, monkeypatch):
                 return FakeResp(agent_status)
             return FakeResp({"events": []})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", ok_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", ok_urlopen)
         p.poll_once()
 
         snaps = p.snapshot_statuses()
@@ -424,7 +426,7 @@ def test_poller_keeps_latest_status_snapshot(tmp_path, monkeypatch):
         def down_urlopen(req, timeout):
             raise OSError("connection refused")
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", down_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", down_urlopen)
         p.poll_once()
         snaps = p.snapshot_statuses()
         assert snaps[sid]["online"] is False
@@ -448,7 +450,7 @@ def test_snapshot_statuses_parsed_at_write_not_on_read(tmp_path, monkeypatch):
                 return FakeResp(agent_status)
             return FakeResp({"events": []})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", ok_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", ok_urlopen)
         p.poll_once()  # parses once, here
 
         # After the poll, reads must not re-parse — trip json.loads if they do.
@@ -505,7 +507,7 @@ def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypa
                 return FakeResp(agent_status)
             return FakeResp({"events": []})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", ok_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", ok_urlopen)
         svc.poller.poll_once()
 
         r = TestClient(app).get("/status")

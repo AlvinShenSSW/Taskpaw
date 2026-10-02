@@ -245,7 +245,7 @@ def test_film_proxy_redirect_never_issues_second_request():
     from email.message import Message
     from urllib.request import BaseHandler, build_opener
 
-    from taskpaw_v3.hub.server import film_proxy
+    from taskpaw_v3.core.http import NoRedirectHandler
 
     calls = []
 
@@ -264,7 +264,7 @@ def test_film_proxy_redirect_never_issues_second_request():
             return result
 
     # Exercise urllib's real redirect/error handler chain without a bound socket.
-    opener = build_opener(film_proxy._NoRedirect(), RedirectingTransport())
+    opener = build_opener(NoRedirectHandler(), RedirectingTransport())
     with pytest.raises(HTTPError) as caught:
         opener.open("http://agent.invalid/monitors/films?name=x")
     caught.value.close()
