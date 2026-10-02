@@ -300,7 +300,12 @@ def test_network_status_resolves_name_from_config():
 
 def test_control_plugins_endpoint():
     cfg = AgentConfig(server_id="a", machine="m")
-    client = TestClient(create_control_app(cfg))
+    client = TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     r = client.get("/control/plugins")
     assert r.status_code == 200
     body = r.json()

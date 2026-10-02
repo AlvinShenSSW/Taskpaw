@@ -41,7 +41,12 @@ def test_network_app_does_not_expose_control_routes():
 
 def test_control_app_does_not_expose_network_routes():
     cfg = AgentConfig(server_id="s1", machine="dev", api_token=SECRET)
-    client = TestClient(create_control_app(cfg))
+    client = TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     assert client.get("/status").status_code == 404
     assert client.get("/events").status_code == 404
 
@@ -76,7 +81,12 @@ def test_secret_never_in_status_or_config():
     ok = net_client.get("/status", headers={"Authorization": f"Bearer {SECRET}"})
     assert ok.status_code == 200 and SECRET not in ok.text
 
-    ctl_client = TestClient(create_control_app(cfg))
+    ctl_client = TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     cr = ctl_client.get("/control/config")
     assert cr.status_code == 200
     assert SECRET not in cr.text and cr.json()["api_token"] == "***"
@@ -85,7 +95,12 @@ def test_secret_never_in_status_or_config():
 def test_token_not_logged(caplog, tmp_path):
     """No token-bearing endpoint may log the secret (agent + Hub paths)."""
     cfg, _, client = _net()
-    ctl = TestClient(create_control_app(cfg))
+    ctl = TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     auth = {"Authorization": f"Bearer {SECRET}"}
     with caplog.at_level(logging.DEBUG):
         client.get("/ping")
@@ -150,12 +165,22 @@ def test_auth_disabled_helper_is_exact_negation_of_token_ok_shortcircuit():
 def test_control_config_reports_auth_disabled_and_still_masks_token():
     # #145: the console reads the auth posture from /control/config to show a banner.
     open_cr = TestClient(
-        create_control_app(AgentConfig(server_id="s", machine="m", api_token=""))
+        create_control_app(
+            AgentConfig(server_id="s", machine="m", api_token=""),
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
     ).get("/control/config")
     assert open_cr.status_code == 200 and open_cr.json()["auth_disabled"] is True
 
     tok_cr = TestClient(
-        create_control_app(AgentConfig(server_id="s", machine="m", api_token=SECRET))
+        create_control_app(
+            AgentConfig(server_id="s", machine="m", api_token=SECRET),
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
     ).get("/control/config")
     body = tok_cr.json()
     assert body["auth_disabled"] is False
@@ -316,7 +341,12 @@ def test_no_token_bearing_cli_flags_in_v3_sources():
 # ── UI CORS (design §3.2): control + hub APIs allow the UI origins ──────────
 def test_control_api_has_cors_for_ui_origin():
     cfg = AgentConfig(server_id="s", machine="dev")
-    client = TestClient(create_control_app(cfg))
+    client = TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     r = client.get("/control/ping", headers={"Origin": "tauri://localhost"})
     assert r.headers.get("access-control-allow-origin") == "tauri://localhost"
 
@@ -330,7 +360,10 @@ def test_control_status_served_from_provider():
                 "machine": "dev",
                 "monitors": {"x": {"state": "ok"}},
             },
-        )
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
     )
     r = client.get("/control/status")
     assert r.status_code == 200 and r.json()["monitors"]["x"]["state"] == "ok"
@@ -360,7 +393,12 @@ def test_hub_api_has_cors_for_ui_origin(tmp_path):
 
 def test_cors_allows_windows_tauri_origin():
     cfg = AgentConfig(server_id="s", machine="dev")
-    client = TestClient(create_control_app(cfg))
+    client = TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     r = client.get("/control/ping", headers={"Origin": "http://tauri.localhost"})
     assert r.headers.get("access-control-allow-origin") == "http://tauri.localhost"
 
@@ -379,3 +417,22 @@ def test_network_films_read_only_no_cors(resource):
     assert (
         client.get(f"/control/monitors/{resource}", headers=headers).status_code == 404
     )
+
+
+def test_hub_control_bind_defaults_and_validation():
+    assert HubConfig().control_host == "127.0.0.1"
+    assert HubConfig().control_port == 5691
+    assert HubConfig(control_host="::1", control_port=6001).control_host == "::1"
+    for host in (
+        "localhost",
+        "0.0.0.0",
+        "::",
+        "192.168.1.5",
+        "[::1]",
+        "127.0.0.1.evil",
+    ):
+        with pytest.raises(ValidationError):
+            HubConfig(control_host=host)
+    for port in (0, 65536):
+        with pytest.raises(ValidationError):
+            HubConfig(control_port=port)

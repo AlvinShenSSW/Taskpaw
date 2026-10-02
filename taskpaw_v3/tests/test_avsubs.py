@@ -3259,6 +3259,14 @@ def test_tasklog_wait_stop_never_acquires(tmp_path, monkeypatch):
 
 
 def test_tasklog_launch_errors_do_not_copy_argv(tmp_path, monkeypatch):
+    from datetime import datetime
+
+    from taskpaw_v3.core.tasklog import get_task_log
+
+    # Reproduce the Windows CI timestamp collision deterministically.
+    get_task_log()._clock = lambda: datetime.fromisoformat(
+        "2026-10-01T15:46:32.432158+00:00"
+    )
     h = _setup(
         tmp_path,
         monkeypatch,
@@ -3272,7 +3280,14 @@ def test_tasklog_launch_errors_do_not_copy_argv(tmp_path, monkeypatch):
     h.inst._spawn = fail
     h.inst.start(h.emit)
     assert _tasklog("task.error")
-    text = str(_tasklog())
+    # Inspect all observed message/payload fields, not generated timestamps/IDs
+    # whose digits may coincidentally match the planted private port.
+    text = str(
+        [
+            {key: value for key, value in row.items() if key not in {"ts", "id"}}
+            for row in _tasklog()
+        ]
+    )
     for forbidden in (
         "PLANTED_SECRET",
         "user:pass",

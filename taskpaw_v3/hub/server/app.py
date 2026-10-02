@@ -13,7 +13,8 @@ import re
 import sqlite3
 import threading
 import time
-from typing import Literal, Optional
+from pathlib import Path
+from typing import Callable, Literal, Optional
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -23,7 +24,7 @@ from fastapi.responses import JSONResponse
 from taskpaw_v3 import __version__
 from taskpaw_v3.core.auth import auth_disabled, token_ok
 from taskpaw_v3.core.config import HubConfig
-from taskpaw_v3.core.lifecycle import GracefulShutdown
+from taskpaw_v3.core.lifecycle import GracefulShutdown, StartupShutdown
 from taskpaw_v3.core.net import guard_bind_exposure
 from taskpaw_v3.core.state import FileLease, db_lease_path
 from taskpaw_v3.hub.server.film_proxy import (
@@ -193,18 +194,13 @@ class HubService:
         return True
 
 
-def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubService]:
-    from taskpaw_v3.core.cors import add_ui_cors
-
-    app = FastAPI(title="TaskPaw Hub", docs_url=None, redoc_url=None)
-    add_ui_cors(app)  # the Hub dashboard UI talks to this API (design §3.2)
-    service = HubService(config, store)
-
-    def _auth(request: Request) -> bool:
-        # Bearer-gate the read API (#106). Empty api_token = auth disabled (V2
-        # parity), mirroring the agent's network app.
-        return token_ok(config.api_token, request.headers.get("Authorization"))
-
+def _register_read_routes(
+    app: FastAPI,
+    config: HubConfig,
+    store: HubStore,
+    service: HubService,
+    authorize: Callable[[Request], bool],
+) -> None:
     def _film_error(code: str) -> JSONResponse:
         exc = FilmProxyError.for_code(code)
         return JSONResponse(
@@ -216,13 +212,13 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         if re.fullmatch(
             r"/servers/[^/]+/monitors/(?:films|run-films)", request.url.path
         ):
-            if not _auth(request):
+            if not authorize(request):
                 return _unauthorized()
             return _film_error("invalid_parameters")
         return await request_validation_exception_handler(request, exc)
 
     def _film_page(request: Request, sid: int, resource: FilmResource, params: dict):
-        if not _auth(request):
+        if not authorize(request):
             return _unauthorized()
         if not params["name"].strip():
             return _film_error("invalid_parameters")
@@ -286,7 +282,7 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
 
     @app.get("/status")
     def status(request: Request):
-        if not _auth(request):
+        if not authorize(request):
             return _unauthorized()
         # Attach each server's latest poll snapshot (#96) so the dashboard can show
         # per-machine state + metrics + last_seen. Additive: the existing
@@ -334,7 +330,7 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
         level: Optional[str] = None,
         limit: int = 200,
     ):
-        if not _auth(request):
+        if not authorize(request):
             return _unauthorized()
         # Durable event history aggregated from all polled agents (#44), newest
         # first, optionally filtered by server id / level. Clamp the limit.
@@ -343,8 +339,39 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             "events": store.recent_events(server_id=server, level=level, limit=limit)
         }
 
-    # ── manage the polled agents from the dashboard (#124) — same Bearer gate as
-    # the read API (#106): open on loopback, token-required on a LAN Hub (#114). ──
+
+def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubService]:
+    """Network read API, retaining its independent Bearer and polling contract."""
+    from taskpaw_v3.core.cors import add_ui_cors
+
+    app = FastAPI(title="TaskPaw Hub", docs_url=None, redoc_url=None)
+    add_ui_cors(app)
+    service = HubService(config, store)
+
+    def authorize(request: Request) -> bool:
+        return token_ok(config.api_token, request.headers.get("Authorization"))
+
+    _register_read_routes(app, config, store, service, authorize)
+    return app, service
+
+
+def create_hub_control_app(
+    config: HubConfig,
+    store: HubStore,
+    service: HubService,
+    *,
+    control_token: str,
+    control_active: Callable[[], bool],
+) -> FastAPI:
+    """Local dashboard API, sharing the network app's single service and store."""
+    from taskpaw_v3.core.control import add_control_guard
+
+    app = FastAPI(title="TaskPaw Hub Control", docs_url=None, redoc_url=None)
+    add_control_guard(
+        app, control_token=control_token, is_active=control_active, ping_path="/ping"
+    )
+    # The shared ASGI gate authorizes before parsing or route validation.
+    _register_read_routes(app, config, store, service, lambda request: True)
     from fastapi import HTTPException
 
     def _valid_name(v) -> str:
@@ -406,8 +433,6 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
 
     @app.post("/servers")
     def add_server(request: Request, body: dict):
-        if not _auth(request):
-            return _unauthorized()  # same 401 shape as the read API (Kimi)
         name = _valid_name(body.get("name"))
         ip = _valid_ip(body.get("ip"))
         port = _valid_port(body.get("port", 5680))
@@ -429,8 +454,6 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
 
     @app.patch("/servers/{sid}")
     def update_server(request: Request, sid: int, body: dict):
-        if not _auth(request):
-            return _unauthorized()
         if store.get_server(sid) is None:
             raise HTTPException(status_code=404, detail=f"no server with id {sid}")
         # Validate EVERYTHING (incl. enabled) before any store write, so a rejected
@@ -461,8 +484,6 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
 
     @app.delete("/servers/{sid}")
     def delete_server(request: Request, sid: int):
-        if not _auth(request):
-            return _unauthorized()
         if not store.remove_server(sid):
             raise HTTPException(status_code=404, detail=f"no server with id {sid}")
         log.info("hub: removed agent id=%s (#124)", sid)
@@ -470,8 +491,6 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
 
     @app.patch("/config")
     def update_config(request: Request, body: dict):
-        if not _auth(request):
-            return _unauthorized()
         if "polling_token" in body:
             tok = body["polling_token"]
             if tok is None:
@@ -496,7 +515,7 @@ def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubServ
             )
         return {"ok": True}
 
-    return app, service
+    return app
 
 
 def run_hub(
@@ -504,30 +523,59 @@ def run_hub(
     store: HubStore,
     shutdown: GracefulShutdown | None = None,
     block: bool = True,
+    *,
+    config_path: Path | None = None,
 ) -> GracefulShutdown:
     import uvicorn
 
+    from taskpaw_v3.core.control import (
+        bootstrap_control,
+        revoke_control,
+        strip_control_env,
+    )
     from taskpaw_v3.core.net import (
         announce_ready,
         claim_port,
         loopback_url,
-        reclaim_port_from_stale_instance,
+        reclaim_ports_from_stale_instance,
     )
 
     shutdown = shutdown or GracefulShutdown()
-    _guard_bind_exposure(config)  # refuse an unsafe LAN exposure before binding (#114)
-    # Seamless updates: reclaim the port from OUR OWN stale hub backend if one is
-    # still running (e.g. right after installing a new version); foreign services
-    # are left untouched (claim_port then fails loudly).
-    reclaim_port_from_stale_instance(
-        config.bind_host, config.bind_port, role="hub", what="hub API"
+    _guard_bind_exposure(config)
+    strip_control_env()
+    reclaim_ports_from_stale_instance(
+        [
+            (config.bind_host, config.bind_port, "hub read API"),
+            (config.control_host, config.control_port, "hub control API"),
+        ],
+        role="hub",
     )
     lease = FileLease(db_lease_path(store.db_path)).acquire()
-    service = None
-    server_thread = None
+    read_sock = control_sock = None
+    try:
+        read_sock = claim_port(config.bind_host, config.bind_port, "hub read API")
+        control_sock = claim_port(
+            config.control_host, config.control_port, "hub control API"
+        )
+        session = bootstrap_control(
+            "hub", loopback_url(config.control_host, config.control_port), config_path
+        )
+    except BaseException:
+        for sock in (read_sock, control_sock):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    log.error("Could not close a Hub API socket")
+        lease.close()
+        raise
+
+    service: HubService | None = None
+    servers: list[uvicorn.Server] = []
+    threads: list[threading.Thread] = []
 
     def _writers_alive() -> bool:
-        if server_thread is not None and server_thread.is_alive():
+        if any(thread.is_alive() for thread in threads):
             return True
         if service is not None:
             if service._thread is not None and service._thread.is_alive():
@@ -540,56 +588,32 @@ def run_hub(
                     return True
         return False
 
-    def _release_cursor_lease() -> None:
-        if _writers_alive():
-            log.error("Hub writers still alive; retaining cursor maintenance lease")
-        else:
-            lease.close()
+    def _deactivate() -> None:
+        try:
+            revoke_control(session)
+        except Exception:
+            log.error("Could not revoke Hub control credentials")
 
-    shutdown.register("hub-cursor-lease", _release_cursor_lease)
-    try:
-        sock = claim_port(config.bind_host, config.bind_port, "hub API")  # race-free
-        # Auth-disabled visibility (#145): the guard already refuses a non-loopback
-        # bind with no token, so reaching here with auth off means a loopback-only API.
-        # Warn only now the port is claimed (the service is actually starting).
-        if auth_disabled(config.api_token):
-            log.warning(
-                "hub API auth is DISABLED (no api_token set) — /status and /events "
-                "accept any request. The bind guard keeps this loopback-only (%s); set "
-                "an api_token to require a Bearer token or to bind a LAN address.",
-                config.bind_host,
-            )
-        shutdown.register("hub-socket", sock.close)
-        app, service = create_hub_app(config, store)
-        service._event_cursor_lease = lease
-        service.start()
-
-        server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-
-        def _serve() -> None:
-            try:
-                server.run(sockets=[sock])
-            except Exception as e:  # a failed server must not hang run_hub forever
-                log.error("Hub API server crashed: %s", e)
-                shutdown.shutdown()
-
-        server_thread = threading.Thread(target=_serve, name="hub-api", daemon=True)
-
-        def _stop() -> None:
-            stopped = service.stop()  # join the poll thread FIRST
-            server.should_exit = True
-            if (
-                server_thread.is_alive()
-                and server_thread is not threading.current_thread()
-            ):
-                server_thread.join(timeout=10)
-            try:
-                sock.close()
-            except OSError:
-                pass
-            # Closing the shared SQLite connection is only safe once BOTH the poller
-            # and the API thread have truly exited.
-            if stopped and not server_thread.is_alive() and not _writers_alive():
+    def _stop() -> None:
+        stopped = False
+        try:
+            stopped = service.stop() if service is not None else True
+        finally:
+            for server in servers:
+                server.should_exit = True
+            for thread in threads:
+                if (
+                    thread.ident is not None
+                    and thread is not threading.current_thread()
+                ):
+                    thread.join(timeout=10)
+            for sock in (read_sock, control_sock):
+                try:
+                    sock.close()
+                except OSError:
+                    log.error("Could not close a Hub API socket")
+            # Do not close a connection still used by a live poller/API thread.
+            if stopped and not _writers_alive():
                 lease.close()
                 store.close()
             else:
@@ -597,24 +621,90 @@ def run_hub(
                     "A hub thread is still alive; leaving the DB connection open to avoid a race"
                 )
 
-        shutdown.register("hub", _stop)
-        shutdown.install_signal_handlers()
-        server_thread.start()
-        log.info("Hub up on %s:%s", config.bind_host, config.bind_port)
-        # §3.1 readiness handshake (#48) — one stdout line the Tauri shell reads
-        # before loading the webview; injects this loopback base_url (custom port
-        # supported). A wildcard/IPv6 bind maps to the reachable loopback host so the
-        # local dashboard hits the socket that's actually listening.
-        announce_ready("hub", loopback_url(config.bind_host, config.bind_port))
+    startup = StartupShutdown(shutdown, _deactivate, _stop)
+    shutdown.register("hub", startup.stop)
+    try:
+        startup.checkpoint()
+        if auth_disabled(config.api_token):
+            log.warning(
+                "hub read API auth is DISABLED (no api_token set) — /status and /events "
+                "accept any request. The bind guard keeps this loopback-only (%s); "
+                "set an api_token to require a Bearer token or to bind a LAN address.",
+                config.bind_host,
+            )
+        app, service = create_hub_app(config, store)
+        service._event_cursor_lease = lease
+        control = create_hub_control_app(
+            config,
+            store,
+            service,
+            control_token=session.token,
+            control_active=session.is_active,
+        )
+        servers.extend(
+            uvicorn.Server(uvicorn.Config(surface, log_level="warning"))
+            for surface in (app, control)
+        )
 
-        if block:
-            shutdown.stopped.wait()
-        return shutdown
-    except BaseException:
-        if service is not None:
+        def _serve(server, sock, label):
             try:
-                service.stop()
+                server.run(sockets=[sock])
             except Exception:
-                log.error("Hub startup cleanup could not stop all writers")
+                log.error("Hub %s API server crashed", label)
+                shutdown.shutdown()
+
+        for server, sock, label in zip(
+            servers, (read_sock, control_sock), ("read", "control")
+        ):
+            threads.append(
+                threading.Thread(
+                    target=_serve,
+                    args=(server, sock, label),
+                    name=f"hub-{label}",
+                    daemon=True,
+                )
+            )
+        shutdown.install_signal_handlers()
+        startup.checkpoint()
+        service.start()
+        startup.checkpoint()
+        for thread in threads:
+            startup.checkpoint()
+            thread.start()
+            startup.checkpoint()
+        deadline = time.monotonic() + 10
+        while not all(server.started for server in servers):
+            startup.checkpoint()
+            if (
+                not session.is_active()
+                or any(not thread.is_alive() for thread in threads)
+                or time.monotonic() >= deadline
+            ):
+                raise RuntimeError("Hub API startup failed")
+            time.sleep(0.01)
+        if not session.is_active():
+            raise RuntimeError("Hub API startup failed")
+        startup.checkpoint()
+        log.info(
+            "Hub up: read %s:%s, control %s:%s",
+            config.bind_host,
+            config.bind_port,
+            config.control_host,
+            config.control_port,
+        )
+        ready = {}
+        if session.credential_file is not None:
+            ready = {
+                "control_credential_file": str(session.credential_file),
+                "boot_id": session.boot_id,
+            }
+        announce_ready("hub", session.base_url, **ready)
+    except BaseException:
         shutdown.shutdown()
         raise
+    finally:
+        startup.finish()
+
+    if block:
+        shutdown.stopped.wait()
+    return shutdown

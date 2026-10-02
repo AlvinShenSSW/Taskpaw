@@ -1428,3 +1428,25 @@ def test_thinking_only_slot_difference_still_deduplicates(caplog):
         chain = llm_chain_from_config(cfg, environ={})
     assert len(chain) == 1 and chain[0].thinking_off is True
     assert "same model" in caplog.text
+
+
+def test_worker_env_drops_controller_credentials_from_real_child(monkeypatch):
+    import json
+    import subprocess
+
+    base = dict(os.environ)
+    base["TASKPAW_CONTROL_TOKEN"] = "FAKE-CONTROL-SECRET"
+    base["taskpaw_ui_token"] = "FAKE-OLD-UI-SECRET"
+    env = worker_env(_settings(), base)
+    assert base["TASKPAW_CONTROL_TOKEN"] == "FAKE-CONTROL-SECRET"
+    result = subprocess.run(
+        [sys.executable, "-c", "import os,json; print(json.dumps(sorted(os.environ)))"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    names = json.loads(result.stdout)
+    assert not any(name.upper().startswith("TASKPAW_CONTROL_") for name in names)
+    assert not any(name.upper() == "TASKPAW_UI_TOKEN" for name in names)
+    assert ENV_KEY in names  # this worker still gets its own LLM credential

@@ -46,3 +46,21 @@ def test_announce_ready_role_passthrough(capsys):
     announce_ready("hub", "http://[::1]:5690")
     obj = json.loads(capsys.readouterr().out.strip())
     assert obj["role"] == "hub" and obj["base_url"] == "http://[::1]:5690"
+
+
+def test_ready_descriptor_metadata_is_optional_and_contains_no_credential(capsys):
+    announce_ready(
+        "hub",
+        "http://[::1]:5691",
+        control_credential_file="config/hub.control.json",
+        boot_id="b" * 32,
+    )
+    ready = json.loads(capsys.readouterr().out)
+    assert ready == {
+        "taskpaw_ready": True,
+        "role": "hub",
+        "base_url": "http://[::1]:5691",
+        "control_credential_file": "config/hub.control.json",
+        "boot_id": "b" * 32,
+    }
+    assert "control_token" not in ready

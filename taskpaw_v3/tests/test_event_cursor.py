@@ -661,7 +661,7 @@ def test_old_agent_current_status_continues_without_any_event_request(
             assert request.full_url.endswith("/status")
             return FakeResp({"machine": "old", "monitors": {}})
 
-        monkeypatch.setattr(poller_module.urllib.request, "urlopen", transport)
+        monkeypatch.setattr(poller_module._opener, "open", transport)
         poller.poll_once()
         assert len(seen) == 1
         assert poller.snapshot_statuses()[sid]["online"] is True
@@ -824,7 +824,7 @@ def test_hub_claim_failure_releases_maintenance_lease(tmp_path, monkeypatch):
     from taskpaw_v3.core.state import FileLease, db_lease_path
     from taskpaw_v3.hub.server import app
 
-    monkeypatch.setattr(net, "reclaim_port_from_stale_instance", lambda *a, **kw: None)
+    monkeypatch.setattr(net, "reclaim_ports_from_stale_instance", lambda *a, **kw: None)
 
     def fail(*a, **kw):
         raise net.PortInUseError("fixture occupied")
@@ -879,7 +879,7 @@ def test_startup_failure_stops_actual_writer_before_lease_release(
 ):
     from unittest.mock import Mock
 
-    from taskpaw_v3.agent.server import app, launcher
+    from taskpaw_v3.agent.server import launcher
     from taskpaw_v3.monitors import runtime
 
     config, queue = trusted_queue(tmp_path)
@@ -901,6 +901,7 @@ def test_startup_failure_stops_actual_writer_before_lease_release(
     def start():
         writer.start()
         assert started.wait(2)
+        raise RuntimeError("fixture partial start interruption")
 
     def stop():
         # State must still be exclusively owned while this writer lives.
@@ -917,12 +918,8 @@ def test_startup_failure_stops_actual_writer_before_lease_release(
     monkeypatch.setattr(launcher, "claim_port", lambda *a, **kw: Mock())
     monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **kw: supervisor)
 
-    def fail_control(*a, **kw):
-        raise RuntimeError("fixture app setup interruption")
-
-    monkeypatch.setattr(app, "create_control_app", fail_control)
     try:
-        with pytest.raises(RuntimeError, match="fixture app setup"):
+        with pytest.raises(RuntimeError, match="fixture partial start"):
             launcher.run_agent(
                 config, queue=queue, config_path=tmp_path / "agent.yaml", block=False
             )
@@ -946,7 +943,7 @@ def test_hub_held_db_lease_refuses_before_claim_or_service(tmp_path, monkeypatch
     from taskpaw_v3.hub.server import app
 
     store = HubStore(tmp_path / "custom-name.db")
-    monkeypatch.setattr(net, "reclaim_port_from_stale_instance", lambda *a, **kw: None)
+    monkeypatch.setattr(net, "reclaim_ports_from_stale_instance", lambda *a, **kw: None)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("held maintenance lease must precede writers/claims")
@@ -1166,7 +1163,7 @@ def test_closing_actual_unregister_launcher_retains_inflight_lease(
     """SR001 production chain with owned plugin/thread/files, no socket/reclaim."""
     from unittest.mock import Mock
 
-    from taskpaw_v3.agent.server import app, launcher
+    from taskpaw_v3.agent.server import launcher
     from taskpaw_v3.monitors import runtime
     from taskpaw_v3.monitors.base import (
         BaseMonitorConfig,
@@ -1219,7 +1216,13 @@ def test_closing_actual_unregister_launcher_retains_inflight_lease(
     )
     monkeypatch.setattr(launcher, "claim_port", lambda *a, **kw: Mock())
     monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **kw: supervisor)
-    monkeypatch.setattr(app, "create_control_app", cancel_setup)
+    original_start = supervisor.start
+
+    def partial_start():
+        original_start()
+        cancel_setup()
+
+    monkeypatch.setattr(supervisor, "start", partial_start)
     try:
         with pytest.raises(RuntimeError, match="owned fixture setup failure"):
             launcher.run_agent(
@@ -1318,3 +1321,153 @@ def test_closing_rejects_add_already_waiting_for_queue_lock(tmp_path, monkeypatc
         assert resumed.add("fixture", "new owner")["id"] == 2
     finally:
         resumed.close()
+
+
+@pytest.mark.parametrize("role", ["agent", "hub"])
+@pytest.mark.parametrize("failure", ["second_claim", "bootstrap"])
+def test_merge244_early_failure_releases_both_socket_and_state_owners(
+    tmp_path, monkeypatch, role, failure
+):
+    from unittest.mock import Mock
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core import control, net
+    from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.core.state import FileLease, db_lease_path
+    from taskpaw_v3.hub.server import app
+
+    sockets = []
+
+    def claim(*args):
+        if failure == "second_claim" and len(sockets) == 1:
+            raise net.PortInUseError("owned second claim")
+        sock = Mock()
+        sockets.append(sock)
+        return sock
+
+    def bootstrap(*args):
+        raise RuntimeError("owned bootstrap failure")
+
+    target = launcher if role == "agent" else net
+    monkeypatch.setattr(
+        target, "reclaim_ports_from_stale_instance", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(target, "claim_port", claim)
+    monkeypatch.setattr(
+        launcher if role == "agent" else control, "bootstrap_control", bootstrap
+    )
+    error = net.PortInUseError if failure == "second_claim" else RuntimeError
+    if role == "agent":
+        config = AgentConfig(
+            server_id="fixture", machine="fixture", bind_port=15680, control_port=15681
+        )
+        state = tmp_path / "agent.state.json"
+        initialize_state(state, config.server_id)
+        with pytest.raises(error):
+            launcher.run_agent(
+                config,
+                state_path=state,
+                config_path=tmp_path / "agent.yaml",
+                block=False,
+            )
+        session = StateSession.open(state, config.server_id)
+        session.close()
+    else:
+        store = HubStore(tmp_path / "hub.db")
+        try:
+            with pytest.raises(error):
+                app.run_hub(
+                    HubConfig(machine="fixture", bind_port=15690),
+                    store,
+                    block=False,
+                    config_path=tmp_path / "hub.yaml",
+                )
+            with FileLease(db_lease_path(store.db_path)):
+                pass
+        finally:
+            store.close()
+    assert len(sockets) == (1 if failure == "second_claim" else 2)
+    for sock in sockets:
+        sock.close.assert_called_once()
+
+
+@pytest.mark.parametrize("control_alive", [False, True])
+def test_merge244_control_thread_owns_db_lease_until_actual_exit(
+    tmp_path, monkeypatch, control_alive
+):
+    import sqlite3
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from taskpaw_v3.core import net
+    from taskpaw_v3.core.config import HubConfig
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+    from taskpaw_v3.core.state import FileLease, db_lease_path
+    from taskpaw_v3.hub.server import app
+
+    threads = []
+
+    class Thread:
+        def __init__(self, *, name, **kwargs):
+            self.name, self.ident, self.alive = name, None, False
+            threads.append(self)
+
+        def start(self):
+            self.ident, self.alive = 7, True
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout):
+            self.alive = control_alive and self.name == "hub-control"
+
+    service = SimpleNamespace(
+        _thread=None,
+        self_supervisor=None,
+        start=Mock(),
+        stop=Mock(return_value=True),
+    )
+    monkeypatch.setattr(net, "reclaim_ports_from_stale_instance", lambda *a, **kw: None)
+    monkeypatch.setattr(net, "claim_port", lambda *a, **kw: Mock())
+    monkeypatch.setattr(net, "announce_ready", lambda *a, **kw: None)
+    monkeypatch.setattr(app, "create_hub_app", lambda *a: (object(), service))
+    monkeypatch.setattr(app, "create_hub_control_app", lambda *a, **kw: object())
+    monkeypatch.setattr(app.threading, "Thread", Thread)
+    monkeypatch.setattr(uvicorn, "Config", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        uvicorn,
+        "Server",
+        lambda *a, **kw: SimpleNamespace(started=True, should_exit=False),
+    )
+    store = HubStore(tmp_path / "hub.db")
+    close = Mock(wraps=store.close)
+    monkeypatch.setattr(store, "close", close)
+    shutdown = GracefulShutdown()
+    monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
+    try:
+        app.run_hub(
+            HubConfig(self_monitor=False), store, shutdown=shutdown, block=False
+        )
+        shutdown.shutdown()
+        service.stop.assert_called_once()
+        assert not threads[0].is_alive()
+        if control_alive:
+            assert threads[1].is_alive()
+            close.assert_not_called()
+            assert store.list_servers() == []
+            with pytest.raises(StateError):
+                FileLease(db_lease_path(store.db_path)).acquire()
+        else:
+            assert not threads[1].is_alive()
+            close.assert_called_once()
+            with pytest.raises(sqlite3.ProgrammingError):
+                store._conn.execute("SELECT 1")
+            with FileLease(db_lease_path(store.db_path)):
+                pass
+    finally:
+        # These are owned simulated threads only; release the deliberately retained
+        # lease after the assertions so no native lock survives this fixture.
+        for thread in threads:
+            thread.alive = False
+        service._event_cursor_lease.close()
+        store.close()

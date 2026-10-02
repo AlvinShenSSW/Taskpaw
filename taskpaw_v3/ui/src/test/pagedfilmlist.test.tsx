@@ -330,11 +330,11 @@ describe("#210 Hub paged films", () => {
     vi.stubGlobal("fetch", vi.fn((input: string) => { const url = new URL(input); requests.push(url); return Promise.resolve(serve(url)); }));
   });
   it("uses Hub URL/auth with encoded name, follows focus and pages 23 rows", async () => {
-    window.__TASKPAW__ = { apiKey: "hub-key" };
+    window.__TASKPAW__ = { role: "hub", baseUrl: "http://127.0.0.1:5691", controlToken: "hub-key", bootId: "0123456789abcdef0123456789abcdef" };
     try {
       serve = url => response(page(Number(url.searchParams.get("page") ?? 2), 23));
       hubMount(); await screen.findByText(text(2, 3, 23));
-      expect(requests[0].origin).toBe("http://127.0.0.1:5690");
+      expect(requests[0].origin).toBe("http://127.0.0.1:5691");
       expect(requests[0].pathname).toBe("/servers/1/monitors/films");
       expect(requests[0].searchParams.get("name")).toBe("translate/翻译 & #?");
       expect(vi.mocked(fetch).mock.calls[0][1]?.headers).toEqual({ Authorization: "Bearer hub-key" });

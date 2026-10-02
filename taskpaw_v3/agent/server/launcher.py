@@ -8,14 +8,16 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
 from taskpaw_v3 import __version__
 from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
+from taskpaw_v3.core.control import bootstrap_control, revoke_control, strip_control_env
 from taskpaw_v3.core.datadir import set_data_dir
-from taskpaw_v3.core.lifecycle import GracefulShutdown
+from taskpaw_v3.core.lifecycle import GracefulShutdown, StartupShutdown
 from taskpaw_v3.core.llm import (
     llm_settings_from_config,
     set_llm_chain,
@@ -94,6 +96,7 @@ def run_agent(
     # — so a hand-edited agent.yaml / bootstrap can't bind wildcard/public/non-
     # loopback-without-token unguarded (#114/Kimi). Raised BEFORE any socket claim.
     guard_bind_exposure(config.bind_host, config.api_token, label="agent network API")
+    strip_control_env()
 
     # Publish the global LLM settings (#178) BEFORE the stale-port reclaim, any
     # socket claim and the supervisor, so the first check() of any monitor reads
@@ -120,30 +123,69 @@ def run_agent(
         role="agent",
     )
 
-    # Validate the counter after existing reclaim, before claims/task-log/writers.
+    # Validate after stale-instance reclaim, before fresh claims or writers.
     queue = queue if queue is not None else build_queue(config, state_path)
     shutdown = shutdown or GracefulShutdown()
-    supervisor = None
-    net_thread = ctl_thread = None
-
-    def _close_state() -> None:
-        # Registry snapshots omit unregistered sinks still reserving an ID.
-        # Sticky close rejects new adds; the session retains its lease until any
-        # already-admitted reservation unwinds, without waiting on storage here.
-        queue.close()
-
-    # First registration runs last, after the ordinary writer stop callbacks.
-    shutdown.register("agent-event-state", _close_state)
+    net_sock = ctl_sock = None
     try:
-        # Race-free claim: hold the sockets, hand them to uvicorn.
         net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
-        shutdown.register("agent-net-socket", net_sock.close)
         ctl_sock = claim_port(
             config.control_host, config.control_port, "agent control API"
         )
+        session = bootstrap_control(
+            "agent", loopback_url(config.control_host, config.control_port), config_path
+        )
+    except BaseException:
+        for sock in (net_sock, ctl_sock):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    log.error("Could not close an agent API socket")
+        queue.close()
+        raise
 
-        shutdown.register("agent-control-socket", ctl_sock.close)
+    supervisor = None
+    servers: list[uvicorn.Server] = []
+    threads: list[threading.Thread] = []
+    task_log = None
+    runtime_started = False
 
+    def _deactivate() -> None:
+        try:
+            revoke_control(session)
+        except Exception:
+            log.error("Could not revoke agent control credentials")
+
+    def _stop() -> None:
+        try:
+            if runtime_started and task_log is not None:
+                task_log.record("", "agent.stopping", task_type="agent")
+            if supervisor is not None:
+                supervisor.stop()
+        finally:
+            try:
+                for server in servers:
+                    server.should_exit = True
+                for thread in threads:
+                    if (
+                        thread.ident is not None
+                        and thread is not threading.current_thread()
+                    ):
+                        thread.join(timeout=10)
+                for sock in (net_sock, ctl_sock):
+                    try:
+                        sock.close()
+                    except OSError:
+                        log.error("Could not close an agent API socket")
+            finally:
+                # Sticky close retains an admitted in-flight reservation lease.
+                queue.close()
+
+    startup = StartupShutdown(shutdown, _deactivate, _stop)
+    shutdown.register("agent", startup.stop)
+    try:
+        startup.checkpoint()
         # #196 L19: no store scan/append until reclaim AND both claims succeeded.
         task_log = TaskLog(config_path.parent if config_path is not None else None)
         set_task_log(task_log)
@@ -194,8 +236,6 @@ def run_agent(
         # add the FIRST monitor live (#57). build_supervisor validates each spec and
         # skips ones marked enabled:false.
         supervisor = build_supervisor(registry, monitors, queue, config.machine)
-        shutdown.register("supervisor", lambda: supervisor.stop())
-        supervisor.start()
 
         # Live add/remove/update/enable/disable, persisted to config_path (#57).
         admin = MonitorAdmin(config, supervisor, registry, config_path)
@@ -238,6 +278,8 @@ def run_agent(
             uvicorn.Config(
                 create_control_app(
                     config,
+                    control_token=session.token,
+                    control_active=session.is_active,
                     on_command=admin.handle,
                     status_provider=_status_provider,
                     registry=registry,
@@ -250,46 +292,52 @@ def run_agent(
             )
         )
 
+        servers.extend((net, ctl))
+
         def _serve(server, sock, label):
             try:
                 server.run(sockets=[sock])
-            except Exception as e:  # a failed server must not hang run_agent forever
-                log.error("Agent %s server crashed: %s", label, e)
+            except Exception:
+                log.error("Agent %s server crashed", label)
                 shutdown.shutdown()
 
-        net_thread = threading.Thread(
-            target=lambda: _serve(net, net_sock, "network"),
-            name="agent-net",
-            daemon=True,
-        )
-        ctl_thread = threading.Thread(
-            target=lambda: _serve(ctl, ctl_sock, "control"),
-            name="agent-ctl",
-            daemon=True,
-        )
-
-        def _stop_servers() -> None:
-            net.should_exit = True
-            ctl.should_exit = True
-            for t in (net_thread, ctl_thread):
-                if t.is_alive() and t is not threading.current_thread():
-                    t.join(timeout=10)
-            for s in (net_sock, ctl_sock):
-                try:
-                    s.close()
-                except OSError:
-                    pass
-
-        shutdown.register("agent-servers", _stop_servers)
-        # Callbacks are LIFO: log before servers and supervisor stop (N3/W5).
-        shutdown.register(
-            "agent-tasklog",
-            lambda: task_log.record("", "agent.stopping", task_type="agent"),
+        threads.extend(
+            (
+                threading.Thread(
+                    target=lambda: _serve(net, net_sock, "network"),
+                    name="agent-net",
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=lambda: _serve(ctl, ctl_sock, "control"),
+                    name="agent-ctl",
+                    daemon=True,
+                ),
+            )
         )
         shutdown.install_signal_handlers()
-
-        net_thread.start()
-        ctl_thread.start()
+        # Cleanup is already registered even if start() fails part way through.
+        startup.checkpoint()
+        supervisor.start()
+        runtime_started = True
+        startup.checkpoint()
+        for thread in threads:
+            startup.checkpoint()
+            thread.start()
+            startup.checkpoint()
+        deadline = time.monotonic() + 10
+        while not all(server.started for server in servers):
+            startup.checkpoint()
+            if (
+                not session.is_active()
+                or any(not thread.is_alive() for thread in threads)
+                or time.monotonic() >= deadline
+            ):
+                raise RuntimeError("Agent API startup failed")
+            time.sleep(0.01)
+        if not session.is_active():
+            raise RuntimeError("Agent API startup failed")
+        startup.checkpoint()
         log.info(
             "Agent up: network %s:%s, control %s:%s",
             config.bind_host,
@@ -297,17 +345,19 @@ def run_agent(
             config.control_host,
             config.control_port,
         )
-        # Readiness handshake (design §3.1, #48): ONE machine-readable line on stdout
-        # once the sockets are bound + servers started — the Tauri shell reads it
-        # before loading the webview and injects this base_url (so a custom
-        # control_port works and the UI never races the backend). All other logs go
-        # to stderr (logging.basicConfig). The UI talks to the loopback CONTROL API on
-        # its CONFIGURED host (so an IPv6 `::1` control_host is announced correctly).
-        announce_ready("agent", loopback_url(config.control_host, config.control_port))
-
-        if block:
-            shutdown.stopped.wait()
-        return shutdown
+        ready = {}
+        if session.credential_file is not None:
+            ready = {
+                "control_credential_file": str(session.credential_file),
+                "boot_id": session.boot_id,
+            }
+        announce_ready("agent", session.base_url, **ready)
     except BaseException:
         shutdown.shutdown()
         raise
+    finally:
+        startup.finish()
+
+    if block:
+        shutdown.stopped.wait()
+    return shutdown

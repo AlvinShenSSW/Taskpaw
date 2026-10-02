@@ -179,6 +179,94 @@ def test_graceful_shutdown_continues_if_callback_raises():
     assert ran == [1]  # the other callback still ran
 
 
+def test_shutdown_completion_hold_waits_for_callbacks_and_children(caplog):
+    import logging
+    import subprocess
+    import sys
+    import threading
+
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+
+    caplog.set_level(logging.INFO, logger="taskpaw.lifecycle")
+    gs = GracefulShutdown(child_timeout=3)
+    release = gs.hold_completion()
+    entered, proceed = threading.Event(), threading.Event()
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    def callback():
+        entered.set()
+        assert proceed.wait(timeout=3)
+
+    gs.register("blocked callback", callback)
+    gs.register_child("fixture child", child)
+    caller = threading.Thread(target=gs.shutdown)
+    try:
+        caller.start()
+        assert entered.wait(timeout=3)
+        assert gs.is_stopping
+        release()
+        release()  # double release must not underflow or publish twice
+        assert not gs.stopped.is_set()
+        assert child.poll() is None
+        assert "Graceful shutdown complete" not in caplog.text
+        proceed.set()
+        caller.join(timeout=5)
+        assert not caller.is_alive()
+        assert child.poll() is not None
+        assert gs.stopped.is_set()
+        gs.shutdown()
+        assert caplog.text.count("Graceful shutdown complete") == 1
+    finally:
+        proceed.set()
+        caller.join(timeout=5)
+        if child.poll() is None:
+            child.terminate()
+            child.wait(timeout=3)
+
+
+def test_startup_completion_hold_released_even_if_cleanup_raises():
+    from taskpaw_v3.core.lifecycle import GracefulShutdown, StartupShutdown
+
+    gs = GracefulShutdown()
+
+    def failed_cleanup():
+        raise RuntimeError("fixture cleanup failed")
+
+    startup = StartupShutdown(gs, lambda: None, failed_cleanup)
+    gs.register("startup", startup.stop)
+    gs.shutdown()
+    assert gs.is_stopping and not gs.stopped.is_set()
+    with pytest.raises(RuntimeError, match="fixture cleanup failed"):
+        startup.finish()
+    assert gs.stopped.is_set()
+    startup.finish()  # release and cleanup remain idempotent
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows os.kill SIGTERM terminates directly"
+)
+def test_shutdown_signal_reentry_does_not_deadlock_registry():
+    # Install real handlers only in an isolated process; force signal delivery
+    # during a registry operation instead of relying on a timing stress loop.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import os, signal
+from taskpaw_v3.core.lifecycle import GracefulShutdown
+shutdown = GracefulShutdown()
+shutdown.install_signal_handlers()
+with shutdown._lock:
+    os.kill(os.getpid(), signal.SIGTERM)
+assert shutdown.is_stopping and shutdown.stopped.is_set()
+""",
+        ],
+        check=True,
+        timeout=5,
+    )
+
+
 # ── config ──────────────────────────────────────────────────────────────--
 def test_agent_config_roundtrip_and_secret_masking(tmp_path):
     cfg = AgentConfig(server_id="s1", machine="dev", api_token="secret")

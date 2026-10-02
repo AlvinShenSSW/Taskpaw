@@ -9,12 +9,14 @@
 //     so when the shell exits the OS terminates the entire process tree.
 //
 // Locked down (design §3.1): withGlobalTauri=false, empty capabilities (no
-// IPC/FS). The webview talks ONLY to the local backend over HTTP; the api key +
+// IPC/FS). The webview talks ONLY to the local backend over HTTP; control token +
 // base url + role are injected at runtime on the loopback origin via an init
 // script (so packaged builds don't rely on compile-time env).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod control_credentials;
+use control_credentials::{CredentialError, Descriptor, Ready};
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -98,8 +100,8 @@ mod jobobj {
     use std::process::Child;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
 
@@ -153,12 +155,20 @@ fn ui_role() -> String {
     let raw = std::env::var("TASKPAW_UI_ROLE")
         .ok()
         .and_then(nonblank)
-        .or_else(|| option_env!("TASKPAW_BUILD_ROLE").map(str::to_string).and_then(nonblank))
+        .or_else(|| {
+            option_env!("TASKPAW_BUILD_ROLE")
+                .map(str::to_string)
+                .and_then(nonblank)
+        })
         .unwrap_or_else(|| "agent".into());
     // Normalize + validate: the frontend (App.tsx) and backend expect exactly
     // "agent"/"hub"; anything else (e.g. "AGENT", typo) falls back to agent (Kimi).
     let role = raw.trim().to_ascii_lowercase();
-    if matches!(role.as_str(), "agent" | "hub") { role } else { "agent".into() }
+    if matches!(role.as_str(), "agent" | "hub") {
+        role
+    } else {
+        "agent".into()
+    }
 }
 
 /// Resolve the backend command: an explicit dev override, else the bundled
@@ -201,8 +211,8 @@ fn backend_command() -> Option<(String, Vec<String>)> {
         format!("taskpaw-backend-{triple}{ext}"),
     ];
     let mut bases = vec![
-        dir.to_path_buf(),                       // next to the app binary (release)
-        dir.join("../Resources"),                // macOS .app resources fallback
+        dir.to_path_buf(),        // next to the app binary (release)
+        dir.join("../Resources"), // macOS .app resources fallback
     ];
     // Only probe binaries/ in debug — release bundles place the sidecar next to
     // the exe, and probing binaries/ could pick up a stale/wrong-arch dev artifact
@@ -288,7 +298,10 @@ fn macos_backend_log_path(home: &std::path::Path, role: &str) -> std::path::Path
 /// rotation logic is unit-testable without the env-derived per-OS path.
 #[cfg(any(target_os = "macos", windows, test))]
 fn roll_log_if_oversized(path: &std::path::Path, max_bytes: u64) {
-    if std::fs::metadata(path).map(|m| m.len() > max_bytes).unwrap_or(false) {
+    if std::fs::metadata(path)
+        .map(|m| m.len() > max_bytes)
+        .unwrap_or(false)
+    {
         let mut rotated = path.as_os_str().to_owned();
         rotated.push(".1");
         let rotated = std::path::PathBuf::from(rotated);
@@ -296,7 +309,9 @@ fn roll_log_if_oversized(path: &std::path::Path, max_bytes: u64) {
         // normal case (no prior backup) — only warn on a real removal failure.
         if let Err(e) = std::fs::remove_file(&rotated) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("taskpaw: cannot remove stale log backup {rotated:?}: {e}; rotation may stall");
+                eprintln!(
+                    "taskpaw: cannot remove stale log backup {rotated:?}: {e}; rotation may stall"
+                );
             }
         }
         // If the roll itself fails, the live log keeps growing unbounded — surface
@@ -318,14 +333,17 @@ fn roll_log_if_oversized(path: &std::path::Path, max_bytes: u64) {
 /// backend_log_hint() points at the real log only when it exists AND we wrote to it
 /// — never at a stale log left by a prior run when this run's open failed (Kimi).
 #[cfg(any(target_os = "macos", windows))]
-static BACKEND_LOG_OPENED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BACKEND_LOG_OPENED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(any(target_os = "macos", windows))]
 fn open_backend_log() -> Option<std::fs::File> {
     let path = backend_log_path()?;
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("taskpaw: cannot create backend log dir {dir:?}: {e}; backend stderr discarded");
+            eprintln!(
+                "taskpaw: cannot create backend log dir {dir:?}: {e}; backend stderr discarded"
+            );
             return None;
         }
     }
@@ -381,7 +399,13 @@ fn spawn_backend() -> Option<Child> {
         unsafe {
             command.pre_exec(|| {
                 // async-signal-safe; runs in the child between fork and exec.
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong, 0, 0, 0);
+                libc::prctl(
+                    libc::PR_SET_PDEATHSIG,
+                    libc::SIGTERM as libc::c_ulong,
+                    0,
+                    0,
+                    0,
+                );
                 Ok(())
             });
         }
@@ -394,7 +418,11 @@ fn spawn_backend() -> Option<Child> {
         #[cfg(target_os = "macos")]
         if !cfg!(debug_assertions) {
             use std::process::Stdio;
-            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
+            command.stderr(
+                open_backend_log()
+                    .map(Stdio::from)
+                    .unwrap_or_else(Stdio::null),
+            );
         }
     }
     #[cfg(windows)]
@@ -413,7 +441,11 @@ fn spawn_backend() -> Option<Child> {
         // sees logs. stdout stays piped (above) for the readiness handshake.
         if !cfg!(debug_assertions) {
             use std::process::Stdio;
-            command.stderr(open_backend_log().map(Stdio::from).unwrap_or_else(Stdio::null));
+            command.stderr(
+                open_backend_log()
+                    .map(Stdio::from)
+                    .unwrap_or_else(Stdio::null),
+            );
         }
     }
     match command.spawn() {
@@ -425,39 +457,40 @@ fn spawn_backend() -> Option<Child> {
     }
 }
 
-/// Read the backend's stdout until the §3.1 readiness line (#48) and return its
-/// `base_url`, or None on timeout. A reader thread parses each line as JSON,
-/// sends the base_url from the first `{"taskpaw_ready":true,...}` line, then keeps
-/// draining stdout to EOF so a full pipe can never block the backend. We wait on
-/// the channel with a timeout so a backend that never reports ready can't hang the
-/// shell (the caller fails loud instead of opening a UI that can't reach the API).
-fn read_readiness(stdout: std::process::ChildStdout, timeout: Duration) -> Option<String> {
+/// Parse nonsecret startup metadata; malformed data fails without echoing it.
+fn parse_ready_line(line: &str) -> Option<Result<Ready, CredentialError>> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    if value.get("taskpaw_ready").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    Some(serde_json::from_value(value).map_err(|_| CredentialError))
+}
+fn read_readiness(
+    stdout: std::process::ChildStdout,
+    timeout: Duration,
+) -> Result<Ready, CredentialError> {
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc;
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut found = false;
         for line in BufReader::new(stdout).lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break, // pipe closed (backend exited)
+            let Ok(line) = line else {
+                break;
             };
             if !found {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if v.get("taskpaw_ready").and_then(|b| b.as_bool()) == Some(true) {
-                        if let Some(b) = v.get("base_url").and_then(|b| b.as_str()) {
-                            let _ = tx.send(b.to_string());
-                            found = true;
-                            continue;
-                        }
-                    }
+                if let Some(ready) = parse_ready_line(&line) {
+                    let _ = tx.send(ready);
+                    found = true;
+                } else {
+                    // Never echo untrusted readiness/stdout data (it may contain
+                    // credentials or invalid URLs with embedded userinfo).
+                    eprintln!("[backend] pre-readiness output omitted");
                 }
-                eprintln!("[backend] {line}"); // stray pre-readiness stdout
             }
-            // After readiness: keep reading (and discarding) to drain the pipe.
         }
     });
-    rx.recv_timeout(timeout).ok()
+    rx.recv_timeout(timeout).map_err(|_| CredentialError)?
 }
 
 // Signal the backend's whole process GROUP on Unix (negative pid), so a wedged
@@ -563,7 +596,7 @@ fn fatal_startup(message: &str, app: Option<&tauri::AppHandle>) -> ! {
             let deadline = Instant::now() + Duration::from_secs(15);
             loop {
                 match child.try_wait() {
-                    Ok(Some(_)) => break,                 // user dismissed
+                    Ok(Some(_)) => break, // user dismissed
                     Ok(None) if Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(100))
                     }
@@ -577,95 +610,82 @@ fn fatal_startup(message: &str, app: Option<&tauri::AppHandle>) -> ! {
     std::process::exit(1);
 }
 
-/// Accept only a loopback base URL (design §3.1: the shell loopback-validates the
-/// backend base_url before injecting it). A tampered/non-local TASKPAW_UI_BASE is
-/// dropped so the frontend can't be pointed at a remote backend with the api key.
-/// Empty string (the common bundled case) is allowed → frontend uses its safe
-/// per-role loopback defaults.
-fn loopback_base(raw: &str) -> String {
-    use std::net::{Ipv4Addr, Ipv6Addr};
-    use url::{Host, Url};
-
-    let v = raw.trim();
-    if v.is_empty() {
-        return String::new();
-    }
-    // Add a scheme for scheme-less input ("127.0.0.1:5681") so a full URL parses;
-    // a real "http(s)://…" is left untouched. Use a real parser (#54) — robust to
-    // IDN/punycode, percent-encoding, and weird authorities, with browser parity.
-    let candidate = if v.contains("://") { v.to_string() } else { format!("http://{v}") };
-    let url = match Url::parse(&candidate) {
-        Ok(u) => u,
-        Err(_) => {
-            eprintln!("TASKPAW_UI_BASE {v:?} is not a valid URL — ignoring");
-            return String::new();
-        }
-    };
-    // Reject ANY credentials: "http://127.0.0.1:8000@evil.com" parses with host
-    // evil.com (a browser would hit evil.com) — refuse rather than strip, so the
-    // injected api key can't leak to a remote origin (Codex/Kimi P1, #54).
-    if !url.username().is_empty() || url.password().is_some() {
-        eprintln!("TASKPAW_UI_BASE {v:?} carries credentials — ignoring");
-        return String::new();
-    }
-    // Only http(s); reject e.g. ftp:// (the frontend speaks HTTP) (Kimi).
-    if !matches!(url.scheme(), "http" | "https") {
-        eprintln!("TASKPAW_UI_BASE {v:?} has a non-http(s) scheme — ignoring");
-        return String::new();
-    }
-    // CANONICAL loopback only — in exact lockstep with the init-script origin guard
-    // AND the CSP connect-src (localhost / 127.0.0.1 / ::1). The parser normalizes
-    // browser forms (e.g. "127.1" → 127.0.0.1), so this matches what the webview
-    // would actually request.
-    let is_loopback = match url.host() {
-        Some(Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
-        Some(Host::Ipv4(ip)) => ip == Ipv4Addr::LOCALHOST,
-        Some(Host::Ipv6(ip)) => ip == Ipv6Addr::LOCALHOST,
-        None => false,
-    };
-    if !is_loopback {
-        eprintln!("TASKPAW_UI_BASE {v:?} is not loopback — ignoring");
-        return String::new();
-    }
-    // Reconstruct a clean scheme://host[:port]path (host_str() brackets IPv6); drop
-    // a normalized empty path "/" so the result matches the bare input, and drop
-    // any query/fragment (a base URL carries none).
-    let host = url.host_str().unwrap_or("");
-    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
-    let path = url.path();
-    let path = if path == "/" { "" } else { path };
-    format!("{}://{}{}{}", url.scheme(), host, port, path)
-}
-
-/// Runtime config injected on the loopback origin (design §3.1) — packaged
-/// builds can't use compile-time Vite env, so the shell injects it here.
-fn init_script(base_url: &str) -> String {
-    // Prefer the backend-reported base_url from the readiness handshake (#48) — it
-    // reflects the ACTUAL (possibly custom) port. Fall back to TASKPAW_UI_BASE for
-    // dev (Vite) when empty. Both are loopback-validated before injection.
-    let raw = if base_url.is_empty() {
-        std::env::var("TASKPAW_UI_BASE").unwrap_or_default()
+#[cfg(test)]
+fn loopback_base(value: &str) -> String {
+    if control_credentials::canonical_base(value) {
+        value.to_string()
     } else {
-        base_url.to_string()
+        String::new()
+    }
+}
+fn default_credential_path(role: &str) -> Result<std::path::PathBuf, CredentialError> {
+    use std::path::PathBuf;
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .ok_or(CredentialError)?
+        .join("TaskPaw");
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or(CredentialError)?
+        .join("Library/Application Support/TaskPaw");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let base = PathBuf::from("/etc/taskpaw");
+    Ok(base.join(format!("{role}.control.json")))
+}
+fn load_credentials(ready: Option<Ready>, role: &str) -> Result<Descriptor, CredentialError> {
+    let descriptor = if let Some(ready) = ready {
+        if !ready.valid_for(role) {
+            return Err(CredentialError);
+        }
+        let descriptor = control_credentials::read_descriptor(&ready.control_credential_file)?;
+        if !descriptor.matches_ready(&ready) {
+            return Err(CredentialError);
+        }
+        descriptor
+    } else {
+        let path = std::env::var_os("TASKPAW_CONTROL_CREDENTIAL_FILE")
+            .map(std::path::PathBuf::from)
+            .map(Ok)
+            .unwrap_or_else(|| default_credential_path(role))?;
+        let descriptor = control_credentials::read_descriptor(&path)?;
+        if descriptor.role != role {
+            return Err(CredentialError);
+        }
+        descriptor
     };
-    let base = loopback_base(&raw);
-    let token = std::env::var("TASKPAW_UI_TOKEN").unwrap_or_default();
-    let role = ui_role();
-    // serde_json escapes the values safely.
-    let cfg = serde_json::json!({ "baseUrl": base, "apiKey": token, "role": role });
-    // Guard by origin so the api key is never exposed if the webview ever
-    // navigates away from the local frontend to a non-loopback page (Kimi).
-    // Allowed origins: loopback hosts, the macOS tauri: protocol, AND the
-    // Exact canonical loopback set — in lockstep with loopback_base() and the CSP
-    // connect-src. Plus the packaged webview host tauri.localhost (Windows
-    // https://tauri.localhost, per core/cors.py) and the macOS tauri: protocol —
-    // else the injected config is dropped in packaged builds (Codex).
-    format!(
-        "{{ const h = location.hostname; \
-         if (h==='localhost'||h==='127.0.0.1'||h==='[::1]'||h==='::1'||h==='tauri.localhost'|| \
-             location.protocol==='tauri:') \
-           {{ window.__TASKPAW__ = {cfg}; }} }}"
-    )
+    if let Ok(expected) = std::env::var("TASKPAW_UI_BASE") {
+        if expected != descriptor.base_url {
+            return Err(CredentialError);
+        }
+    }
+    Ok(descriptor)
+}
+fn trusted_ui_navigation(url: &url::Url, debug: bool) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let host = url.host_str().unwrap_or("");
+    let packaged = url.port().is_none()
+        && ((url.scheme() == "tauri" && host == "localhost")
+            || (matches!(url.scheme(), "http" | "https") && host == "tauri.localhost"));
+    packaged
+        || (debug
+            && url.scheme() == "http"
+            && matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+            && url.port() == Some(5173))
+}
+fn init_script(descriptor: &Descriptor, debug: bool) -> String {
+    let cfg = serde_json::json!({ "baseUrl": descriptor.base_url, "controlToken": descriptor.control_token, "role": descriptor.role, "bootId": descriptor.boot_id });
+    let dev = if debug {
+        "|| (p==='http:' && n==='5173' && (h==='localhost'||h==='127.0.0.1'||h==='[::1]'))"
+    } else {
+        ""
+    };
+    format!("(()=>{{ if(window.top!==window) return; const p=location.protocol,h=location.hostname,n=location.port; const u=new URL(location.href); if(u.username||u.password) return; if ((n==='' && ((p==='tauri:'&&h==='localhost')||((p==='http:'||p==='https:')&&h==='tauri.localhost'))) {dev}) {{ window.__TASKPAW__={cfg}; }} }})();")
 }
 
 fn main() {
@@ -683,23 +703,11 @@ fn main() {
             // `mut`: the Windows Job-Object failure kill path AND taking the
             // backend's stdout for the readiness handshake (#48).
             let mut child = spawn_backend();
-            // Release bundled mode (no dev override): a missing/failed sidecar
-            // means the UI would open with no backend — fail LOUD rather than
-            // silently broken (Kimi). Skip in debug so `cargo tauri dev` works
-            // without a sidecar; dev (explicit TASKPAW_BACKEND_CMD) stays lenient.
-            if !cfg!(debug_assertions)
-                && child.is_none()
-                && std::env::var_os("TASKPAW_BACKEND_CMD").is_none()
-            {
-                // Abort launch instead of opening a UI with no backend (Kimi) —
-                // but exit cleanly, not via a setup-Err panic (see fatal_startup).
-                // No child spawned here, so nothing to kill.
-                fatal_startup(
-                    "TaskPaw's bundled backend 'taskpaw-backend' was not found or \
-                     failed to start, so the app cannot reach its local API. Try \
-                     reinstalling the app.",
-                    None, // nothing managed yet
-                );
+            // Only an explicit empty command selects attach. Failed spawns must
+            // not silently attach to an unrelated already-running backend.
+            let attach = std::env::var("TASKPAW_BACKEND_CMD").map(|value| value.trim().is_empty()).unwrap_or(false);
+            if child.is_none() && !attach {
+                fatal_startup("TaskPaw's backend could not be started. Please check the backend installation or command.", None);
             }
             // Take the backend's piped stdout now (before it's moved into managed
             // state) so we can read the readiness handshake below.
@@ -737,35 +745,18 @@ fn main() {
             // closes.
             let has_backend = child.is_some();
             app.manage(Backend(Mutex::new(child)));
-            // §3.1 readiness handshake (#48): wait for the backend to report its
-            // base_url on stdout BEFORE loading the webview — so the UI never races
-            // the backend and a CUSTOM control/bind port is reflected. If it never
-            // arrives, fail loud rather than open a UI that can't reach the API
-            // (the managed Backend's Drop terminates the child on this Err → no
-            // orphan). With no piped stdout (dev/no-backend) we fall back to the
-            // TASKPAW_UI_BASE / loopback defaults.
-            let base_url = match backend_stdout {
+            // Spawn metadata must bind the protected descriptor to this boot;
+            // explicit attach reads the current protected descriptor directly.
+            let ready = match backend_stdout {
                 Some(out) => match read_readiness(out, Duration::from_secs(30)) {
-                    Some(b) => b,
-                    None => {
-                        // The backend was spawned but never reported readiness —
-                        // most often its local API port is already taken (another
-                        // instance, a V2 agent, or another service). fatal_startup
-                        // kills the managed backend first (process::exit skips Drop),
-                        // then exits cleanly with a friendly dialog rather than a
-                        // setup-Err panic/abort.
-                        let hint = backend_log_hint();
-                        fatal_startup(
-                            &format!(
-                                "TaskPaw's backend did not start within 30s. Its local \
-                                 API port may be in use by another TaskPaw instance, a \
-                                 V2 agent, or another service.\n\nDetails: {hint}"
-                            ),
-                            Some(app.handle()),
-                        );
-                    }
+                    Ok(ready) => Some(ready),
+                    Err(_) => fatal_startup("TaskPaw's backend did not report valid startup metadata. Its local API may be unavailable. Please check the backend log.", Some(app.handle())),
                 },
-                None => String::new(), // dev: Vite + TASKPAW_UI_BASE fallback
+                None => None,
+            };
+            let descriptor = match load_credentials(ready, &ui_role()) {
+                Ok(descriptor) => descriptor,
+                Err(_) => fatal_startup("TaskPaw could not securely read this backend's current local control credentials. Please restart or reopen TaskPaw.", Some(app.handle())),
             };
             // Build the window in code so we can inject the runtime config script
             // (the validated base_url) BEFORE the page loads, only on the
@@ -774,7 +765,8 @@ fn main() {
                 .title("TaskPaw")
                 .inner_size(1100.0, 720.0)
                 .min_inner_size(720.0, 480.0)
-                .initialization_script(&init_script(&base_url))
+                .initialization_script(init_script(&descriptor, cfg!(debug_assertions)))
+                .on_navigation(|url| trusted_ui_navigation(url, cfg!(debug_assertions)))
                 .build()?;
             // Closing the window kills the backend; warn first so the operator
             // doesn't accidentally stop background monitoring — and, for a Hub,
@@ -863,10 +855,14 @@ mod tests {
         let backup = dir.join("taskpaw-backend-agent.log.1");
 
         std::fs::write(&backup, b"stale-old-backup").unwrap(); // pre-existing .1
-        std::fs::write(&log, vec![b'x'; 11]).unwrap();         // 11 bytes > max 10
+        std::fs::write(&log, vec![b'x'; 11]).unwrap(); // 11 bytes > max 10
         roll_log_if_oversized(&log, 10);
         assert!(!log.exists(), "oversized live log should be rolled away");
-        assert_eq!(std::fs::read(&backup).unwrap(), vec![b'x'; 11], "stale .1 overwritten by the rolled log");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            vec![b'x'; 11],
+            "stale .1 overwritten by the rolled log"
+        );
 
         // Under threshold: left in place, no spurious roll.
         std::fs::write(&log, b"tiny").unwrap();
@@ -895,7 +891,9 @@ mod tests {
             hub,
             std::path::Path::new("/Users/example/Library/Logs/TaskPaw/taskpaw-backend-hub.log")
         );
-        assert!(agent.to_string_lossy().ends_with("taskpaw-backend-agent.log"));
+        assert!(agent
+            .to_string_lossy()
+            .ends_with("taskpaw-backend-agent.log"));
         assert_ne!(hub, agent);
     }
 
@@ -935,13 +933,16 @@ mod tests {
 
     #[test]
     fn accepts_loopback_forms() {
-        assert_eq!(loopback_base("http://127.0.0.1:5681"), "http://127.0.0.1:5681");
-        assert_eq!(loopback_base("http://localhost:5690"), "http://localhost:5690");
+        assert_eq!(
+            loopback_base("http://127.0.0.1:5681"),
+            "http://127.0.0.1:5681"
+        );
+        assert_eq!(loopback_base("http://localhost:5690"), "");
         assert_eq!(loopback_base("http://[::1]:5681"), "http://[::1]:5681");
-        assert_eq!(loopback_base("http://[::1]"), "http://[::1]");
+        assert_eq!(loopback_base("http://[::1]"), "");
         assert_eq!(loopback_base(""), "");
         // scheme-less → default http:// so the frontend sees an absolute origin
-        assert_eq!(loopback_base("127.0.0.1:5681"), "http://127.0.0.1:5681");
+        assert_eq!(loopback_base("127.0.0.1:5681"), "");
     }
 
     #[test]
@@ -970,8 +971,8 @@ mod tests {
     fn normalizes_browser_ipv4_forms() {
         // The real parser normalizes browser IPv4 spellings the webview would
         // actually request (#54 browser/CSP parity): "127.1" == 127.0.0.1.
-        assert_eq!(loopback_base("http://127.1:8000"), "http://127.0.0.1:8000");
-        assert_eq!(loopback_base("http://127.0.0.1/x"), "http://127.0.0.1/x");
+        assert_eq!(loopback_base("http://127.1:8000"), "");
+        assert_eq!(loopback_base("http://127.0.0.1/x"), "");
     }
 
     #[test]
@@ -981,5 +982,268 @@ mod tests {
         for r in ["agent", "hub"] {
             assert!(matches!(r, "agent" | "hub"));
         }
+    }
+    #[test]
+    fn readiness_metadata_is_typed_and_bound_to_role_and_boot() {
+        let mut ready = super::parse_ready_line(r#"{"taskpaw_ready":true,"role":"hub","base_url":"http://[::1]:5691","boot_id":"0123456789abcdef0123456789abcdef","control_credential_file":"/private/fixture/hub.control.json"}"#).unwrap().unwrap();
+        ready.control_credential_file = std::env::temp_dir().join("hub.control.json");
+        assert!(ready.valid_for("hub"));
+        assert!(!ready.valid_for("agent"));
+        assert!(super::parse_ready_line(
+            r#"{"taskpaw_ready":true,"base_url":"http://127.0.0.1:5681"}"#
+        )
+        .unwrap()
+        .is_err());
+        assert!(super::parse_ready_line("not JSON fake-test-marker").is_none());
+        assert!(super::parse_ready_line(r#"{"taskpaw_ready":false}"#).is_none());
+    }
+    #[test]
+    fn navigation_is_independently_limited_to_exact_ui_origins() {
+        for raw in [
+            "tauri://localhost/index.html",
+            "https://tauri.localhost/index.html",
+            "http://tauri.localhost/",
+        ] {
+            assert!(super::trusted_ui_navigation(
+                &url::Url::parse(raw).unwrap(),
+                false
+            ));
+        }
+        for raw in [
+            "http://localhost:5173/",
+            "http://127.0.0.1:5173/",
+            "http://[::1]:5173/",
+        ] {
+            assert!(super::trusted_ui_navigation(
+                &url::Url::parse(raw).unwrap(),
+                true
+            ));
+            assert!(!super::trusted_ui_navigation(
+                &url::Url::parse(raw).unwrap(),
+                false
+            ));
+        }
+        for raw in [
+            "http://localhost:5681/",
+            "tauri://evil/",
+            "https://tauri.localhost.evil/",
+            "file:///tmp/ui.html",
+            "data:text/html,hi",
+            "http://u:p@localhost:5173/",
+        ] {
+            assert!(!super::trusted_ui_navigation(
+                &url::Url::parse(raw).unwrap(),
+                true
+            ));
+        }
+    }
+    #[test]
+    fn generated_initialization_javascript_executes_only_on_trusted_top_frame() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let descriptor = super::control_credentials::parse_descriptor(br#"{"version":1,"role":"agent","base_url":"http://127.0.0.1:5681","boot_id":"0123456789abcdef0123456789abcdef","control_token":"fake-init-marker"}"#).unwrap();
+        // Execute the actual Rust-generated script, using an independent VM
+        // harness and explicit expected values rather than string assertions.
+        let harness = r#"
+const vm=require('node:vm'), assert=require('node:assert/strict');
+let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
+ const scripts=JSON.parse(input);
+ for(const debug of [false,true]) {
+  const script=scripts[debug?'debug':'release'];
+  for(const href of ['tauri://localhost/index.html','http://tauri.localhost/','https://tauri.localhost/','http://localhost:5173/','http://127.0.0.1:5173/','http://[::1]:5173/','http://localhost:5681/','http://127.0.0.1:9999/','http://evil.example/','http://localhost.evil:5173/','http://10.0.0.1:5173/','tauri://evil/','data:text/html,hi','file:///tmp/index.html','about:blank','blob:http://localhost:5173/id','http://u:p@localhost:5173/']) {
+   for(const frame of ['top','same-origin-child','cross-origin-child']) {
+    const location=new URL(href);const window={};window.top=frame==='top'?window:{};
+    const context={window,location,URL};vm.runInNewContext(script,context);
+    const trusted=['tauri://localhost/index.html','http://tauri.localhost/','https://tauri.localhost/'].includes(href)||(debug&&['http://localhost:5173/','http://127.0.0.1:5173/','http://[::1]:5173/'].includes(href));
+    if(frame==='top'&&trusted) assert.equal(JSON.stringify(window.__TASKPAW__),JSON.stringify({baseUrl:'http://127.0.0.1:5681',bootId:'0123456789abcdef0123456789abcdef',controlToken:'fake-init-marker',role:'agent'}));
+    else assert.equal(window.__TASKPAW__,undefined);
+   }
+  }
+ }
+});"#;
+        let mut child = Command::new("node")
+            .args(["-e", harness])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Node is required for initialization-script execution tests");
+        let input = serde_json::json!({"debug":super::init_script(&descriptor,true),"release":super::init_script(&descriptor,false)});
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "Initialization-script execution failed"
+        );
+    }
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Requires the production Python writer's Windows fixtures"]
+    fn windows_python_credential_interop() {
+        #[derive(serde::Deserialize)]
+        struct Manifest {
+            version: u8,
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            path: std::path::PathBuf,
+            expect: String,
+        }
+        let directory = std::env::var_os("TASKPAW_TEST_CONTROL_FIXTURES")
+            .expect("Interop fixture directory is required");
+        let manifest: Manifest = serde_json::from_slice(
+            &std::fs::read(std::path::Path::new(&directory).join("manifest.json"))
+                .expect("Interop manifest is required"),
+        )
+        .expect("Interop manifest must be valid");
+        assert_eq!(manifest.version, 1);
+        let mut accepted = 0;
+        let mut rejected = 0;
+        let mut secure_seen = false;
+        let mut broad_seen = false;
+        let mut owner_rights_seen = false;
+        let mut everyone_owner_rights_seen = false;
+        let mut file_owner_rights_seen = false;
+        let mut installer_file_acl_seen = false;
+        for case in manifest.cases {
+            if case.name == "secure" {
+                assert_eq!(case.expect, "accept");
+                secure_seen = true;
+            }
+            if case.name == "broad_acl" {
+                assert_eq!(case.expect, "reject");
+                broad_seen = true;
+            }
+            if case.name == "trusted_owner_rights" {
+                assert_eq!(case.expect, "accept");
+                owner_rights_seen = true;
+            }
+            if case.name == "everyone_owner_rights" {
+                assert_eq!(case.expect, "reject");
+                everyone_owner_rights_seen = true;
+            }
+            if case.name == "file_owner_rights" {
+                assert_eq!(case.expect, "reject");
+                file_owner_rights_seen = true;
+            }
+            if case.name == "trusted_installer_file_acl" {
+                assert_eq!(case.expect, "reject");
+                installer_file_acl_seen = true;
+            }
+            match case.expect.as_str() {
+                "accept" => {
+                    let descriptor = super::control_credentials::read_descriptor(&case.path)
+                        .expect("Python safe fixture must be readable");
+                    assert_eq!(descriptor.role, "agent");
+                    assert_eq!(descriptor.base_url, "http://127.0.0.1:5681");
+                    assert_eq!(descriptor.boot_id, "0123456789abcdef0123456789abcdef");
+                    assert_eq!(descriptor.control_token, "fake-python-rust-interop-token");
+                    accepted += 1;
+                }
+                "reject" => {
+                    assert!(
+                        super::control_credentials::read_descriptor(&case.path).is_err(),
+                        "Unsafe Python fixture accepted: {}",
+                        case.name
+                    );
+                    rejected += 1;
+                }
+                "skip" => {
+                    assert!(
+                        !matches!(
+                            case.name.as_str(),
+                            "secure"
+                                | "broad_acl"
+                                | "trusted_owner_rights"
+                                | "everyone_owner_rights"
+                                | "file_owner_rights"
+                                | "trusted_installer_file_acl"
+                        ),
+                        "Basic interop fixtures must never skip"
+                    );
+                    eprintln!("Windows optional fixture unavailable: {}", case.name);
+                }
+                _ => panic!("Invalid interop expectation"),
+            }
+        }
+        assert!(
+            accepted >= 2
+                && rejected >= 4
+                && secure_seen
+                && broad_seen
+                && owner_rights_seen
+                && everyone_owner_rights_seen
+                && file_owner_rights_seen
+                && installer_file_acl_seen,
+            "Interop requires safe and broad-ACL real files"
+        );
+    }
+    #[test]
+    fn readiness_eof_timeout_and_invalid_metadata_fail_closed() {
+        use std::process::{Command, Stdio};
+        for (program, timeout) in [
+            ("process.exit(0)", std::time::Duration::from_secs(2)),
+            ("setTimeout(()=>{},1000)", std::time::Duration::from_millis(10)),
+            ("process.stdout.write(JSON.stringify({taskpaw_ready:true,base_url:'http://127.0.0.1:5681'})+'\\n')", std::time::Duration::from_secs(2)),
+        ] {
+            let mut child=Command::new("node").args(["-e",program]).stdout(Stdio::piped()).spawn().unwrap();
+            assert!(super::read_readiness(child.stdout.take().unwrap(), timeout).is_err());
+            let _=child.kill(); let _=child.wait();
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn spawned_credentials_must_match_the_current_role_base_and_boot() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "taskpaw-spawn-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("hub.control.json");
+        std::fs::write(&path,br#"{"version":1,"role":"hub","base_url":"http://[::1]:15991","boot_id":"0123456789abcdef0123456789abcdef","control_token":"fake-spawn-key"}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let ready = super::Ready {
+            role: "hub".into(),
+            base_url: "http://[::1]:15991".into(),
+            boot_id: "0123456789abcdef0123456789abcdef".into(),
+            control_credential_file: path,
+        };
+        assert!(super::load_credentials(Some(ready.clone()), "hub").is_ok());
+        assert!(super::load_credentials(Some(ready.clone()), "agent").is_err());
+        let mut stale = ready.clone();
+        stale.boot_id = "ffffffffffffffffffffffffffffffff".into();
+        assert!(super::load_credentials(Some(stale), "hub").is_err());
+        let mut wrong_base = ready;
+        wrong_base.base_url = "http://127.0.0.1:15991".into();
+        assert!(super::load_credentials(Some(wrong_base), "hub").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Requires a descriptor made by the production Python writer"]
+    fn darwin_python_credential_interop() {
+        let path = std::env::var_os("TASKPAW_TEST_DARWIN_CONTROL_FIXTURE")
+            .expect("Production writer fixture is required");
+        let descriptor = super::control_credentials::read_descriptor(std::path::Path::new(&path))
+            .expect("Safe production Python descriptor must be readable");
+        assert_eq!(descriptor.role, "agent");
+        assert_eq!(descriptor.base_url, "http://127.0.0.1:5681");
+        assert_eq!(descriptor.boot_id, "0123456789abcdef0123456789abcdef");
+        assert_eq!(descriptor.control_token, "fake-python-rust-interop-token");
     }
 }
