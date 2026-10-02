@@ -58,7 +58,7 @@ if stage == "preview": print("owned read-only migration preview")
 if stage == "yaml": print("monitors: []\n# complete migration fixture")
 if stage == "bootstrap":
     target = root / "agent.yaml"
-    if not target.exists(): target.write_text("# complete bootstrap fixture\n", encoding="utf-8")
+    if not target.exists(): target.write_bytes(b"# complete bootstrap fixture\n")
 """
 
 WRAPPER = r"""
