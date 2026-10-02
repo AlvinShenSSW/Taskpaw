@@ -365,16 +365,15 @@ def test_actual_http_sqlite_replay_hub_restart_and_agent_restart(tmp_path, monke
             poller.poll_once()
             assert len(queue) == 0
             queue.add("fixture", "second")
-            original = store.set_config
-
-            def fail(key, value):
-                if key == "last_event_ids":
-                    raise OSError("fixture ack failure")
-                return original(key, value)
-
-            with monkeypatch.context() as patch:
-                patch.setattr(store, "set_config", fail)
+            store._conn.execute(
+                "CREATE TRIGGER owned_ack_failure BEFORE UPDATE ON config WHEN NEW.key='last_event_ids' BEGIN SELECT RAISE(FAIL,'owned ack failure'); END"
+            )
+            try:
                 poller.poll_once()
+            finally:
+                store._conn.execute("DROP TRIGGER owned_ack_failure")
+            # The whole ingest transaction rolled back, including event2.
+            assert len(store.recent_events(sid)) == 1
             assert poller.snapshot_acks() == {sid: 1} and len(queue) == 1
             poller.poll_once()
             assert poller.snapshot_acks() == {sid: 2}
@@ -421,25 +420,28 @@ def test_actual_http_outbox_failure_replays_without_loss(
             )
             # Exercise admission/store/enqueue/ack without making any OpenClaw request.
             poller.fetch_events(store.get_server(sid))
-            original = store.set_config
-            with monkeypatch.context() as patch:
-
-                def fail(*args, **kwargs):
-                    raise OSError("fixture persistence interruption")
-
-                if failure == "ack":
-                    patch.setattr(
-                        store,
-                        "set_config",
-                        lambda key, value: (
-                            fail() if key == "last_event_ids" else original(key, value)
-                        ),
-                    )
-                    poller._poll_server(store.get_server(sid), True)
-                else:
-                    patch.setattr(store, failure, fail)
-                    with pytest.raises(OSError):
-                        poller._poll_server(store.get_server(sid), True)
+            table = {
+                "store_event": "events",
+                "enqueue_delivery": "delivery_outbox",
+                "ack": "config",
+            }[failure]
+            operation = "UPDATE" if failure == "ack" else "INSERT"
+            condition = " WHEN NEW.key='last_event_ids'" if failure == "ack" else ""
+            store._conn.execute(
+                f"CREATE TRIGGER owned_ingest_failure BEFORE {operation} ON {table}{condition} BEGIN SELECT RAISE(FAIL,'owned persistence interruption'); END"
+            )
+            try:
+                poller._poll_server(store.get_server(sid), True)
+                assert (
+                    poller.snapshot_event_channels()[sid]["reason"]
+                    == "event_store_failed"
+                )
+                assert store.recent_events(sid) == []
+                assert store._conn.execute(
+                    "SELECT count(*) FROM delivery_outbox"
+                ).fetchone() == (0,)
+            finally:
+                store._conn.execute("DROP TRIGGER owned_ingest_failure")
             assert poller.snapshot_acks() == {sid: -1}
             assert len(queue) == 1
             poller._poll_server(store.get_server(sid), True)
@@ -646,7 +648,6 @@ def test_counter_exhaustion_refuses_before_visibility(tmp_path):
 def test_old_agent_current_status_continues_without_any_event_request(
     tmp_path, monkeypatch
 ):
-    from taskpaw_v3.hub.server import poller as poller_module
     from taskpaw_v3.tests.test_hub import FakeResp
 
     store = HubStore(tmp_path / "hub.db")
@@ -661,7 +662,11 @@ def test_old_agent_current_status_continues_without_any_event_request(
             assert request.full_url.endswith("/status")
             return FakeResp({"machine": "old", "monitors": {}})
 
-        monkeypatch.setattr(poller_module._opener, "open", transport)
+        from taskpaw_v3.tests.test_hub import fake_request
+
+        monkeypatch.setattr(
+            poller, "_request", lambda req: fake_request(req, transport)
+        )
         poller.poll_once()
         assert len(seen) == 1
         assert poller.snapshot_statuses()[sid]["online"] is True
