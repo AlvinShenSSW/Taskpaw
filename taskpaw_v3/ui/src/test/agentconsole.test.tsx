@@ -160,3 +160,61 @@ describe("AgentConsole", () => {
     expect(screen.queryByText(BANNER)).not.toBeInTheDocument();
   });
 });
+
+describe("R07 partial lifecycle controls", () => {
+  const install = (snap: Record<string, unknown>, operations = {}) => {
+    const fetcher = vi.fn((url: string) => Promise.resolve(new Response(JSON.stringify(
+      url.includes("/control/status") ? { machine: "owned", monitors: { owned: { type_id: "fake", state: "idle", ...snap } } }
+      : url.includes("/control/config") ? { monitors: [], monitor_operations: operations }
+      : url.includes("/control/plugins") ? { plugins: [], presets: [] }
+      : url.includes("/stop?") ? { ok: false, name: "owned", operation: "stop", outcome: "applied_not_persisted", persistence: "failed", runtime: "stopped", retryable: true, error_code: "persistence_failed" }
+      : { boot: "owned", entries: [], next_before: null, days: [] }
+    ))));
+    vi.stubGlobal("fetch", fetcher);
+    return fetcher;
+  };
+  it("a retained deleted instance stays stoppable and cannot start or edit", async () => {
+    install({ lifecycle: "remove_pending", configured: false });
+    renderConsole();
+    expect(await screen.findByRole("button", { name: /^Stop$|^停止$/ })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /^Start$|^启动$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Edit config|编辑配置/ })).toBeDisabled();
+  });
+  it("a validation reservation still permits independent Stop", async () => {
+    install({ lifecycle: "stopped", state: "stopped" }, { owned: { stage: "validation_expired", retryable: false } });
+    renderConsole();
+    expect(await screen.findByRole("button", { name: /^Stop$|^停止$/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /Edit config|编辑配置/ })).toBeDisabled();
+  });
+  it("partial Stop refreshes both queries and explains restart risk", async () => {
+    const fetcher = install({ lifecycle: "running" });
+    renderConsole();
+    fireEvent.click(await screen.findByRole("button", { name: /^Stop$|^停止$/ }));
+    expect(await screen.findByText(/Restart may run it again|重启可能再次运行/)).toBeInTheDocument();
+    await waitFor(() => {
+      for (const route of ["/control/status", "/control/config"]) expect(fetcher.mock.calls.filter(([url]) => url.includes(route)).length).toBeGreaterThan(1);
+    });
+  });
+  it("Stop remains enabled while the prior HTTP Stop waits", async () => {
+    const fetcher = install({ lifecycle: "stopping" });
+    fetcher.mockImplementation((url: string) => url.includes("/stop?") ? new Promise<Response>(() => {}) : Promise.resolve(new Response(JSON.stringify(
+      url.includes("/control/status") ? { machine: "owned", monitors: { owned: { type_id: "fake", state: "idle", lifecycle: "stopping" } } }
+      : url.includes("/control/config") ? { monitors: [] } : { entries: [] }
+    ))));
+    renderConsole();
+    const stop = await screen.findByRole("button", { name: /^Stop$|^停止$/ });
+    fireEvent.click(stop);
+    expect(stop).toBeEnabled();
+  });
+});
+
+it("R07 stopped but unsaved status offers Stop retry rather than restarting", async () => {
+  vi.stubGlobal("fetch", vi.fn((url: string) => Promise.resolve(new Response(JSON.stringify(
+    url.includes("/control/status") ? { machine: "owned", monitors: { owned: { type_id: "fake", state: "stopped", lifecycle: "stopped", persistence: "failed" } } }
+    : url.includes("/control/config") ? { monitors: [] } : { entries: [], plugins: [], presets: [] }
+  )))));
+  renderConsole();
+  expect(await screen.findByRole("button", { name: /^Stop$|^停止$/ })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: /^Start$|^启动$/ })).not.toBeInTheDocument();
+  expect(screen.getByText(/Restart may run it again|重启可能再次运行/)).toBeInTheDocument();
+});

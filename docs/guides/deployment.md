@@ -298,3 +298,27 @@ with `read_control_descriptor`, construct Authorization in Python memory and
 disable redirects. Do not put a token in a command argument or print the JSON.
 The [local control contract](../specs/2026-10-01-local-control-auth-design.md)
 contains Agent stop and Hub CRUD examples that print only HTTP status.
+
+## Monitor changes and partial failures
+
+The YAML configuration is the saved desired state; monitor status reports the
+actual lifecycle separately. Add, Start, Edit and Delete save a candidate before
+changing runtime. If runtime apply then fails, that candidate stays saved: use
+Start/Edit or Stop/Delete to reconcile it. A deleted monitor whose cleanup is
+unfinished remains visible and stoppable until its existing owner is released.
+Retry does not create another instance while initialization or cleanup is pending.
+
+Standalone Stop requests local cancellation before disk or plugin validation. If
+it reports **stopped but not saved**, restarting the agent can run a passive
+monitor whose saved `enabled` is still true. Retry Stop to save `enabled: false`.
+A timeout means the API stopped waiting, not that all resources were released.
+A combined Edit containing `enabled: false` must first validate its entire config;
+validation timeout means the edit was not applied and did not request Stop. Use
+standalone Stop independently; configuration retry waits for that validator to
+exit. No late validator result is applied automatically.
+
+Manual Start preserves the saved enable policy: the default `enabled: false`
+stays false, and an existing explicit true stays true. R07 confirms worker exit
+and the current plugin stop acknowledgement; full descendant/GPU cleanup and
+native Windows file-lock/disk-exhaustion acceptance remain separate, unverified
+platform work.

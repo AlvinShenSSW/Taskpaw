@@ -1206,8 +1206,9 @@ def test_closing_actual_unregister_launcher_retains_inflight_lease(
         nonlocal owned_worker
         assert entered.wait(3)
         owned_worker = supervisor._monitors["owned-fixture"].thread
-        supervisor.unregister("owned-fixture", timeout=0.01)
-        assert supervisor.snapshot() == {} and owned_worker.is_alive()
+        result = supervisor.unregister("owned-fixture", timeout=0.01)
+        assert not result["complete"] and owned_worker.is_alive()
+        assert supervisor.snapshot()["owned-fixture"]["lifecycle"] == "stopping"
         raise RuntimeError("owned fixture setup failure")
 
     monkeypatch.setattr(state_module, "write_pair", stalled)

@@ -484,3 +484,119 @@ def test_hub_control_film_uses_only_polling_token(hub, resource, monkeypatch):
     assert downstream == [{"Authorization": f"Bearer {POLL}"}]
     assert CONTROL not in str(downstream)
     assert snapshot() == before
+
+
+def test_r07_http_partial_and_command_keep_precise_safe_outcomes(agent, monkeypatch):
+    from taskpaw_v3.agent.server import admin as admin_mod
+
+    client, _, admin, sup, _ = agent
+    monkeypatch.setattr(
+        admin_mod,
+        "save_yaml",
+        lambda *a: (_ for _ in ()).throw(OSError("PLANTED_SECRET_PATH")),
+    )
+    response = client.post("/control/monitors/stop?name=w", headers=AUTH)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["outcome"] == "applied_not_persisted" and body["runtime"] == "stopped"
+    assert (
+        body["persistence"] == "failed" and body["error_code"] == "persistence_failed"
+    )
+    assert "PLANTED" not in response.text and not sup.has("w")
+    response = client.post(
+        "/control/command", headers=AUTH, json={"command": "start_monitor", "name": "w"}
+    )
+    assert response.status_code == 200
+    assert response.json()["outcome"] == "not_applied"
+    assert response.json()["error_code"] == "persistence_failed"
+    assert not sup.has("w") and admin.config_view()["monitors"][0]["enabled"] is True
+
+
+def test_r07_http_validation_timeout_and_busy_do_not_apply_or_repeat(
+    agent, monkeypatch
+):
+    import threading
+
+    client, _, admin, sup, _ = agent
+    entered, release = threading.Event(), threading.Event()
+    plugin = admin._reg.get("fake")
+    original = plugin.validate_config
+    calls = []
+
+    def validate(cfg):
+        calls.append(1)
+        entered.set()
+        assert release.wait(3)
+        return original(cfg)
+
+    monkeypatch.setattr(plugin, "validate_config", validate)
+    admin._timeout = 0.05
+    before = admin._path.read_bytes()
+    try:
+        body = {"config": {"poll_interval": 13}, "enabled": False}
+        response = client.patch("/control/monitors?name=w", headers=AUTH, json=body)
+        assert entered.is_set() and response.status_code == 200
+        assert response.json()["error_code"] == "validation_timeout"
+        assert response.json()["persistence"] == "not_requested" and sup.has("w")
+        response = client.patch("/control/monitors?name=w", headers=AUTH, json=body)
+        assert response.status_code == 409 and response.json()["outcome"] == "busy"
+        assert calls == [1] and admin._path.read_bytes() == before
+        assert (
+            client.post("/control/monitors/stop?name=w", headers=AUTH).json()["runtime"]
+            == "stopped"
+        )
+        owner = admin._owners["w"]
+    finally:
+        release.set()
+        for owner in list(admin._owners.values()):
+            if owner.thread:
+                owner.thread.join(1)
+    assert admin.config_view()["monitor_operations"] == {}
+    assert admin.config_view()["monitors"][0]["config"] == {"name": "w"}
+
+
+@pytest.mark.parametrize("route", ["rest", "command"])
+def test_r07_sr003_validator_launch_fault_is_safe_http_result_and_retryable(
+    agent, monkeypatch, route
+):
+    import threading
+
+    client, _, admin, sup, _ = agent
+    original = threading.Thread.start
+    before = admin._path.read_bytes()
+    owned = sup._monitors["w"]
+
+    def failed(t):
+        if t.name == "validate-w":
+            raise RuntimeError("PLANTED_LAUNCH_SECRET")
+        return original(t)
+
+    def request():
+        if route == "rest":
+            return client.patch(
+                "/control/monitors?name=w",
+                headers=AUTH,
+                json={"config": {"poll_interval": 13}},
+            )
+        return client.post(
+            "/control/command",
+            headers=AUTH,
+            json={
+                "command": "update_monitor",
+                "name": "w",
+                "config": {"poll_interval": 13},
+            },
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", failed)
+        response = request()
+        assert response.status_code == 200
+        assert response.json()["outcome"] == "not_applied"
+        assert (
+            response.json()["error_code"] == "start_failed"
+            and "PLANTED" not in response.text
+        )
+        assert admin.config_view()["monitor_operations"] == {}
+        assert admin._path.read_bytes() == before and sup._monitors["w"] is owned
+    assert request().json()["ok"]
