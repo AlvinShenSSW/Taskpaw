@@ -1,5 +1,7 @@
 # #189 — AV 翻译 progress redesign: per-film 修复 → 识别 → 翻译 stepper, stage progress, model shown, queue counts fully-done films; version 3.7.0
 
+> **Evidence reconciliation — 2026-10-02:** This is a historical design, delivered in [PR #193](https://github.com/AlvinShenSSW/Taskpaw/pull/193). The original acceptance text is preserved. A checked item records the source/test contract described in the table below; it does not certify an installed app, external service or every native platform. Unchecked items retain superseded, partial or unverified clauses. Current audit work is indexed in [the follow-up](../audits/2026-10-02-audit-follow-up.md).
+
 Date: 2026-09-25 (design v5, FROZEN — debate rounds 1–5: D1–D14, N1–N8, M1–M4, R1–R2, W1; round 5 CLEAN)
 Issue: #189. Mockup (owner-approved; owner addition "show the model while translating"):
 https://claude.ai/artifact/8xnvaM7SqSwqVoH2HZJVgL — boards ② 修复中, ③ 识别中, ④ 翻译中,
@@ -19,23 +21,23 @@ how it settles changes.
 
 ## Acceptance criteria
 
-- [ ] AC1 **WhisperJAV progress parser** (`subs/progress.py`, pure): from the ASR child's captured
+- [x] AC1 **WhisperJAV progress parser** (`subs/progress.py`, pure): from the ASR child's captured
   output → `{phase, phase_n: 8, scene, scenes, percent, eta_s, elapsed_s}`; anchored patterns;
   phase inferred from later-phase markers (D2); monotonic; never raises; non-qwen engines → elapsed
   only (D9).
-- [ ] AC2 **Translator progress**: `Translator.progress()` → the in-flight request's counters and the
+- [x] AC2 **Translator progress**: `Translator.progress()` → the in-flight request's counters and the
   **model label** `<model> · <api host>`; `None` when idle **and after `cancel()`** (D5); fresh dict;
   never the key or userinfo.
-- [ ] AC3 **Film tracker**: start stamps + sticky terminal outcomes recorded at the plugins' existing
+- [x] AC3 **Film tracker**: start stamps + sticky terminal outcomes recorded at the plugins' existing
   counter points; `active / queued / waiting_gpu` **derived at status time** from live facts (D3);
   rows hard-capped (D4); fresh objects (D12).
-- [ ] AC4 **Metrics** (additive, one documented semantic change): `film`, `steps`, `films`,
+- [x] AC4 **Metrics** (additive, one documented semantic change): `film`, `steps`, `films`,
   `films_more`, `model` (while translating); Jasna `queue_restored`; avsubs `queue_pre_done`; with
   AV 翻译 on Jasna's `queue_completed` = **fully done** and `queue_remaining` = total − completed −
   failed (D1); the Jasna detail's "X/Y done" follows the same numbers (D6).
-- [ ] AC5 **UI** `PipelineProgress` per the mockup, replacing exactly the now-processing banner, the
+- [x] AC5 **UI** `PipelineProgress` per the mockup, replacing exactly the now-processing banner, the
   queue bar and the fps/ETA tiles when `steps` is present (D13); zh + en.
-- [ ] AC6 **Hub status.md**: exact lines per stage (fixtures below, D7); lada line byte-identical.
+- [x] AC6 **Hub status.md**: exact lines per stage (fixtures below, D7); lada line byte-identical.
 - [ ] AC7 Version 3.6.0 → 3.7.0; CHANGELOG; openclaw guide (new keys + both semantic notes, avsubs
   line format).
 - [ ] AC8 Tests per the plan; `uv run pytest`, ruff, mypy, UI lint, vitest green.
@@ -324,3 +326,18 @@ Pilot split: **A** = `subs/progress.py` (parser + tracker) + job/translate acces
 (after A) = Jasna + avsubs metrics/tracker marks + status_md + guide + tests; **C** (parallel with A) =
 UI coded against the metrics shapes above. Driver: version, CHANGELOG, sweep, commit/PR. Never touch the
 owner's live agent/config/library; no WhisperJAV/GPU runs.
+
+## Acceptance evidence — 2026-10-02
+
+Baseline source: [91f7745](https://github.com/AlvinShenSSW/Taskpaw/commit/91f7745564f17a0039f81fab8293a9c150232236). Historical delivery: [PR #193](https://github.com/AlvinShenSSW/Taskpaw/pull/193), merge [852a8eb](https://github.com/AlvinShenSSW/Taskpaw/commit/852a8ebeac419d2b68735d809233c7b75b2262c9). [Recorded CI](https://github.com/AlvinShenSSW/Taskpaw/actions/runs/36112133484/job/107997771257) applies to that historical head, not every prose clause or installed machine. Source/test links below describe the baseline; historical version/default statements remain unchanged. The later source version 3.9.8 is recorded in [PR #214](https://github.com/AlvinShenSSW/Taskpaw/pull/214); it supersedes earlier version clauses without proving installation.
+
+| AC | Disposition | Source / automated evidence | Qualification |
+|---|---|---|---|
+| AC1 | Implemented; automated evidence | [progress.py: AsrProgress](../../taskpaw_v3/monitors/subs/progress.py); tests: [test_subs_progress.py: test_recorded_run_phases_scene_and_final](../../taskpaw_v3/tests/test_subs_progress.py); [test_subs_progress.py: test_garbage_and_partial_lines_never_raise_nor_move_the_scene](../../taskpaw_v3/tests/test_subs_progress.py); [test_subs_progress.py: test_gate_closed_balanced_pipeline_is_elapsed_only](../../taskpaw_v3/tests/test_subs_progress.py) | Anchored monotonic parser and elapsed-only gate have direct deterministic tests; phase weights remain approximate as the original design states. |
+| AC2 | Implemented; automated evidence | [translate.py: progress](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: model_label](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_subs_translate.py: test_progress_none_after_cancel_mid_batch](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_progress_model_label_never_carries_the_key_userinfo_or_port](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_progress_counts_batches_and_a_split_batch_once](../../taskpaw_v3/tests/test_subs_translate.py) | Counter snapshots and safe label/cancel behavior are tested; labels are metadata, not proof of remote model execution. |
+| AC3 | Implemented; automated evidence | [progress.py: FilmTracker](../../taskpaw_v3/monitors/subs/progress.py); [progress.py: view](../../taskpaw_v3/monitors/subs/progress.py); [progress.py: rows](../../taskpaw_v3/monitors/subs/progress.py); tests: [test_subs_progress.py: test_sticky_terminal_states_and_marks_on_terminal_steps_ignored](../../taskpaw_v3/tests/test_subs_progress.py); [test_subs_progress.py: test_rows_hard_cap_keeps_the_focus_film_and_plan_order](../../taskpaw_v3/tests/test_subs_progress.py); [test_subs_progress.py: test_rows_and_records_are_fresh_objects](../../taskpaw_v3/tests/test_subs_progress.py) | Tracker timestamps, derived live states, cap and fresh rows are directly tested with controlled facts. |
+| AC4 | Implemented; automated evidence | [jasna.py: _progress_view](../../taskpaw_v3/monitors/plugins/jasna.py); [avsubs.py: _progress_view](../../taskpaw_v3/monitors/plugins/avsubs.py); [jasna.py: _detail](../../taskpaw_v3/monitors/plugins/jasna.py); tests: [test_jasna_subs.py: test_progress_queue_completed_counts_a_film_once_its_job_settles](../../taskpaw_v3/tests/test_jasna_subs.py); [test_avsubs.py: test_progress_mixed_run_rows_match_the_queue_counts](../../taskpaw_v3/tests/test_avsubs.py) | Additive metrics and fully-subtitled Jasna queue semantics are directly exercised; no scheduling guarantee is inferred. |
+| AC5 | Implemented; automated evidence | [PipelineProgress.tsx: PipelineProgress](../../taskpaw_v3/ui/src/components/PipelineProgress.tsx); [MonitorMetrics.tsx: MonitorMetrics](../../taskpaw_v3/ui/src/components/MonitorMetrics.tsx); tests: [pipelineprogress.test.tsx](../../taskpaw_v3/ui/src/test/pipelineprogress.test.tsx) | Render tests cover all phases, model, queue/bar replacement and both languages. This is component behavior, not a native-window/manual layout acceptance. |
+| AC6 | Implemented; automated evidence | [status_md.py: render_status_md](../../taskpaw_v3/hub/server/status_md.py); tests: [test_status_md.py: test_189_jasna_fixture_lines_are_byte_exact](../../taskpaw_v3/tests/test_status_md.py); [test_status_md.py: test_189_avsubs_fixture_line_is_byte_exact](../../taskpaw_v3/tests/test_status_md.py); [test_status_md.py: test_189_error_state_hides_the_stage_and_lada_is_unchanged](../../taskpaw_v3/tests/test_status_md.py) | Exact stage fixtures and unchanged Lada bytes are automated assertions. |
+| AC7 | Unchecked; see qualification | [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py); tests: [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py) | Historical 3.7.0/docs delivered by [#193](https://github.com/AlvinShenSSW/Taskpaw/pull/193); later versions supersede it. |
+| AC8 | Unchecked; see qualification | [progress.py: AsrProgress](../../taskpaw_v3/monitors/subs/progress.py); [PipelineProgress.tsx: PipelineProgress](../../taskpaw_v3/ui/src/components/PipelineProgress.tsx); tests: [test_subs_progress.py: test_recorded_run_phases_scene_and_final](../../taskpaw_v3/tests/test_subs_progress.py); [pipelineprogress.test.tsx](../../taskpaw_v3/ui/src/test/pipelineprogress.test.tsx) | [#193](https://github.com/AlvinShenSSW/Taskpaw/pull/193) recorded required automated checks passing; complete original test-plan mapping is not established solely from that rollup. |

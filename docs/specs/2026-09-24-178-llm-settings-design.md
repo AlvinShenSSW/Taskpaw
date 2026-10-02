@@ -1,5 +1,7 @@
 # #178 — Global LLM API setting (agent-level) + terminable `llm-worker` sidecar; version 3.3.0
 
+> **Evidence reconciliation — 2026-10-02:** This is a historical design, delivered in [PR #180](https://github.com/AlvinShenSSW/Taskpaw/pull/180). The original acceptance text is preserved. A checked item records the source/test contract described in the table below; it does not certify an installed app, external service or every native platform. Unchecked items retain superseded, partial or unverified clauses. Current audit work is indexed in [the follow-up](../audits/2026-10-02-audit-follow-up.md).
+
 Date: 2026-09-24 (design v4 after adversarial debate rounds 1–3 — D1–D17 folded in)
 Issue: #178 (dependency order #178 → #177 → #179)
 Driver: `/afk` (Claude Fable 5.1 leads; Opus subagents implement → internal review → Codex 外门
@@ -58,16 +60,16 @@ keeps it (D12); the Job Object is a best-effort extra layer, never the guarantee
   a stdin watcher thread that calls `os._exit(0)` **unconditionally** on EOF (D5), a
   catch-all in request handling (D2), and a parent-side Windows kill-on-close Job Object
   helper documented as best-effort (D6).
-- [ ] AC4 Control API: the three fields are editable and **live-safe** (no
+- [x] AC4 Control API: the three fields are editable and **live-safe** (no
   `restart_required`); `update_config` live-applies them and refreshes the holder only after a
   successful save; PATCH with blank/`***` keeps the stored key and `null` clears it (D12); GET
   `/control/config` masks `llm_api_key` to `***` and adds `llm_api_key_source: env|config|none`
   computed by the same resolver (D1); new `POST /control/llm-test` (and `llm_test` command)
   tests candidate values without persisting, calls `chat()` outside the admin lock (D11), and
   never returns any exception text (D1).
-- [ ] AC5 Launcher initialises the holder before the stale-port reclaim, any socket claim, and
+- [x] AC5 Launcher initialises the holder before the stale-port reclaim, any socket claim, and
   the supervisor.
-- [ ] AC6 Settings page gains an "LLM API" card (agent role): base URL, model, key (password,
+- [x] AC6 Settings page gains an "LLM API" card (agent role): base URL, model, key (password,
   placeholder `***`, disabled with a hint when the source is `env`), "Save LLM settings",
   "Clear key", and "Test connection" against the current form values; zh + en strings.
 - [ ] AC7 Version 3.2.1 → 3.3.0 in all six files (`test_version.py` guards); CHANGELOG section;
@@ -555,3 +557,19 @@ one request line, read one reply line, close stdin → exit 0 within 1 s.
 - On Windows the dev `python.exe` inside the uv venv is itself a launcher (critic E6): the
   process doing HTTP is its child. That is one more reason the tests assert the close-stdin
   path, not `kill()`.
+
+## Acceptance evidence — 2026-10-02
+
+Baseline source: [91f7745](https://github.com/AlvinShenSSW/Taskpaw/commit/91f7745564f17a0039f81fab8293a9c150232236). Historical delivery: [PR #180](https://github.com/AlvinShenSSW/Taskpaw/pull/180), merge [5da29c1](https://github.com/AlvinShenSSW/Taskpaw/commit/5da29c1a5360c3155081579302885f809cc280a8). [Recorded CI](https://github.com/AlvinShenSSW/Taskpaw/actions/runs/35980023844/job/107569438980) applies to that historical head, not every prose clause or installed machine. Source/test links below describe the baseline; historical version/default statements remain unchanged. The later source version 3.9.8 is recorded in [PR #214](https://github.com/AlvinShenSSW/Taskpaw/pull/214); it supersedes earlier version clauses without proving installation.
+
+| AC | Disposition | Source / automated evidence | Qualification |
+|---|---|---|---|
+| AC1 | Unchecked; see qualification | [config.py: AgentConfig](../../taskpaw_v3/core/config.py); [llm.py: DEFAULT_LLM_API_BASE](../../taskpaw_v3/core/llm.py); tests: [test_llm.py: test_holder_defaults_set_get_reset](../../taskpaw_v3/tests/test_llm.py) | Original OpenRouter defaults delivered by [#180](https://github.com/AlvinShenSSW/Taskpaw/pull/180), superseded by xAI defaults in [#182](https://github.com/AlvinShenSSW/Taskpaw/pull/182) and provider-chain behavior in [#195](https://github.com/AlvinShenSSW/Taskpaw/pull/195). Preserve the old statement. |
+| AC2 | Unchecked; see qualification | [llm.py: LLMSettings](../../taskpaw_v3/core/llm.py); [llm.py: chat](../../taskpaw_v3/core/llm.py); [llm.py: _NoRedirect](../../taskpaw_v3/core/llm.py); [llm.py: LLMError](../../taskpaw_v3/core/llm.py); tests: [test_llm.py: test_chat_exception_mapping](../../taskpaw_v3/tests/test_llm.py); [test_llm.py: test_chat_default_opener_does_not_follow_redirect](../../taskpaw_v3/tests/test_llm.py); [test_llm.py: test_chat_logs_never_carry_key_prompt_or_body](../../taskpaw_v3/tests/test_llm.py) | Envelope/error mapping and redirect behavior have direct automated cases. Successful chat logs also include the served model, so the original kind/status/latency-only logging restriction is not met. Fake-key/controlled-response tests do not validate a live provider. |
+| AC3 | Unchecked; see qualification | [llm_worker.py: serve](../../taskpaw_v3/core/llm_worker.py); [llm_worker.py: assign_kill_on_close_job](../../taskpaw_v3/core/llm_worker.py); [translate.py: _teardown](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_llm.py: test_serve_exits_on_eof_while_request_in_flight](../../taskpaw_v3/tests/test_llm.py); [test_llm.py: test_job_object_kills_child_on_close](../../taskpaw_v3/tests/test_llm.py) | Worker EOF/Job tests exist; complete worker/descendant containment is limited by R08 ([#225](https://github.com/AlvinShenSSW/Taskpaw/issues/225)). Best-effort assignment is not a universal Windows ownership guarantee. |
+| AC4 | Implemented; automated evidence | [admin.py: update_config](../../taskpaw_v3/agent/server/admin.py); [admin.py: llm_test](../../taskpaw_v3/agent/server/admin.py); [admin.py: config_view](../../taskpaw_v3/agent/server/admin.py); tests: [test_admin.py: test_update_config_llm_failed_save_leaves_holder](../../taskpaw_v3/tests/test_admin.py); [test_admin.py: test_llm_test_uses_candidate_without_persisting](../../taskpaw_v3/tests/test_admin.py); [test_agent.py: test_control_config_masks_llm_key_and_reports_source](../../taskpaw_v3/tests/test_agent.py) | The LLM-only save/holder/masking/test-candidate contract is directly covered. This does not resolve unrelated monitor mutation rollback in R07 ([#224](https://github.com/AlvinShenSSW/Taskpaw/issues/224)). |
+| AC5 | Implemented; automated evidence | [launcher.py: run_agent](../../taskpaw_v3/agent/server/launcher.py); tests: [test_launcher.py: test_run_agent_sets_llm_holder_before_port_reclaim](../../taskpaw_v3/tests/test_launcher.py) | Launch-order regression explicitly checks holder publication before reclaim/claims/supervisor setup; launch itself was faked, no user process was reclaimed. |
+| AC6 | Implemented; automated evidence | [Settings.tsx: Settings](../../taskpaw_v3/ui/src/views/Settings.tsx); tests: [settings.test.tsx](../../taskpaw_v3/ui/src/test/settings.test.tsx) | Password, environment-source, clear/save and current-form test flows are implemented and covered by settings.test.tsx in [#180](https://github.com/AlvinShenSSW/Taskpaw/pull/180); real WebView operation remains separate. |
+| AC7 | Unchecked; see qualification | [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py); tests: [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py) | Historical 3.3.0/docs delivered in [#180](https://github.com/AlvinShenSSW/Taskpaw/pull/180) and superseded by later versions; not a present installation claim. |
+| AC8 | Unchecked; see qualification | [llm.py: chat](../../taskpaw_v3/core/llm.py); [llm_worker.py: serve](../../taskpaw_v3/core/llm_worker.py); tests: [test_llm.py: test_worker_subprocess_round_trip_error_and_secrets](../../taskpaw_v3/tests/test_llm.py); [settings.test.tsx](../../taskpaw_v3/ui/src/test/settings.test.tsx) | Published [#180](https://github.com/AlvinShenSSW/Taskpaw/pull/180) CI and named hermetic cases exist; complete original plan-by-plan coverage is not inferred from the green rollup. |
+| AC9 | Unchecked; see qualification | [llm.py: _send](../../taskpaw_v3/core/llm.py); [llm_worker.py: worker_env](../../taskpaw_v3/core/llm_worker.py); [admin.py: llm_test](../../taskpaw_v3/agent/server/admin.py); tests: [test_llm.py: test_chat_logs_never_carry_key_prompt_or_body](../../taskpaw_v3/tests/test_llm.py); [test_llm.py: test_worker_subprocess_round_trip_error_and_secrets](../../taskpaw_v3/tests/test_llm.py); [test_admin.py: test_llm_test_errors_never_carry_exception_text](../../taskpaw_v3/tests/test_admin.py) | Planted-secret/error/redirect tests support bounded paths. Universal no-secret guarantees across exceptions and child containment are not certified; R08 and control-origin R01 remain independent boundaries. |
