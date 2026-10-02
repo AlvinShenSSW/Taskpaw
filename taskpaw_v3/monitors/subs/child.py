@@ -34,6 +34,7 @@ import time
 from dataclasses import dataclass
 from typing import IO, Any, Callable, Mapping, Optional
 
+from taskpaw_v3.core.control import without_control_env
 from taskpaw_v3.core.llm import LLM_ENV_PREFIX as LLM_ENV_PREFIX
 from taskpaw_v3.core.llm import without_llm_env
 from taskpaw_v3.monitors.subs.ffmpeg import bundled_ffmpeg
@@ -64,7 +65,7 @@ def asr_env(
     the child PATH when ffmpeg is not resolvable there and the bundled
     `ffmpeg.exe` exists (#204 AC1); the default `""` makes no PATH change.
     """
-    env = without_llm_env(base)
+    env = without_control_env(without_llm_env(base))
     path_key = next((key for key in env if key.lower() == "path"), "PATH")
     path = env.get(path_key, "")
     if shutil.which("ffmpeg", path=path) is None:

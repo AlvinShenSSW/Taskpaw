@@ -8,16 +8,22 @@
 
 machine: hub                   # display name for the Hub's own machine
 
-# Hub API (the UI / dashboards read this). Loopback by default; expose to the
-# LAN only if other machines render the dashboard.
+# Hub read API. Loopback by default; expose to a LAN NIC only when remote
+# read clients need it. Management routes are not registered on this listener.
 bind_host: 127.0.0.1
 bind_port: 5690
+
+# Local UI / management API. Numeric loopback only; every runtime creates a
+# separate control credential in hub.control.json next to the actual hub.yaml.
+control_host: 127.0.0.1
+control_port: 5691
 
 poll_interval: 60              # seconds between polling each agent
 
 # Bearer token for the Hub's OWN read API (/status, /events). Empty = open
 # (V2 parity, fine on loopback). If set (recommended when bind_host is a LAN
-# address), the dashboard's TASKPAW_UI_TOKEN must match it.
+# address), read clients must send its Bearer token. The desktop control UI
+# uses its own runtime credential and never uses api_token or TASKPAW_UI_TOKEN.
 api_token: ""
 
 # Bearer sent to agents when polling. Must match each agent's api_token (leave

@@ -32,6 +32,8 @@ dist/
 config.json
 agent.yaml
 hub.yaml
+*.control.json
+.*.control.json.*.tmp
 
 # V3 frontend / Tauri shell build artifacts
 taskpaw_v3/ui/node_modules/

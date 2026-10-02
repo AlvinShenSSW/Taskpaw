@@ -22,6 +22,10 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
+from taskpaw_v3.core.http import NoRedirectHandler
+
+_opener = urllib.request.build_opener(NoRedirectHandler())
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -235,7 +239,7 @@ class Poller:
         base = _agent_base_url(server["ip"], server["port"])
         try:
             req = urllib.request.Request(f"{base}/status", headers=self._auth_headers())
-            with urllib.request.urlopen(req, timeout=self.http_timeout) as resp:
+            with _opener.open(req, timeout=self.http_timeout) as resp:
                 body = resp.read().decode("utf-8")
             try:
                 json.loads(body)  # validate it's JSON before persisting
@@ -277,14 +281,14 @@ class Poller:
                 req = urllib.request.Request(
                     f"{base}/events?{q}", headers=self._auth_headers()
                 )
-                resp = urllib.request.urlopen(req, timeout=self.http_timeout)
+                resp = _opener.open(req, timeout=self.http_timeout)
             except urllib.error.HTTPError as e:
                 if e.code != 404:
                     raise
                 req = urllib.request.Request(
                     f"{base}/events", headers=self._auth_headers()
                 )
-                resp = urllib.request.urlopen(req, timeout=self.http_timeout)
+                resp = _opener.open(req, timeout=self.http_timeout)
             data = json.loads(resp.read().decode("utf-8"))
             events = _events_from_payload(data)
             if events is None:

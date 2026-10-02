@@ -14,6 +14,7 @@ export const LANGS: { value: Lang; label: string }[] = [
 const STORE_KEY = "taskpaw.lang";
 
 const en = {
+  control: { title: "Connect to {{role}}", help: "Read this running backend’s protected control descriptor in your local editor, then enter its base_url and control token. This role’s endpoint and credentials stay in memory; VITE_TASKPAW_BASE is no longer used.", endpoint: "Control endpoint", token: "Control token", connect: "Connect", failed: "Could not authenticate or reach the local backend. Read its current descriptor and try again.", reopen: "The backend may have restarted or startup credentials are unavailable. Please reopen TaskPaw." },
   ffmpeg: {
     checking: "Checking FFmpeg…",
     path: "FFmpeg found: {{path}}",
@@ -357,6 +358,7 @@ const en = {
 };
 
 const zh: typeof en = {
+  control: { title: "连接 {{role}}", help: "在本地编辑器读取当前后端的受保护控制凭据文件，再填写 base_url 和控制令牌。端点和凭据仅在当前角色的内存中保存；不再使用 VITE_TASKPAW_BASE。", endpoint: "控制端点", token: "控制令牌", connect: "连接", failed: "无法验证凭据或连接本地后端。请读取当前凭据文件后重试。", reopen: "后端可能已重启，或启动凭据不可用。请重新打开 TaskPaw。" },
   ffmpeg: {
     checking: "正在检查 FFmpeg…",
     path: "已找到 FFmpeg：{{path}}",

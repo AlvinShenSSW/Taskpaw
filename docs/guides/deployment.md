@@ -7,7 +7,7 @@ both (e.g. the Mac is the Hub *and* an agent for itself).
 | Role          | Config file | Run command                         | Listens |
 |---------------|-------------|-------------------------------------|---------|
 | Agent         | `agent.yaml`| `python -m taskpaw_v3.agent`        | `bind_port` 5680 (LAN), control 5681 (loopback) |
-| Hub           | `hub.yaml`  | `python -m taskpaw_v3.hub run`      | `bind_port` 5690 |
+| Hub           | `hub.yaml`  | `python -m taskpaw_v3.hub run`      | `bind_port` 5690 (read), control 5691 (loopback) |
 
 Config locations per OS:
 
@@ -85,7 +85,7 @@ python -m taskpaw_v3.hub add-server --name mac-self --ip 127.0.0.1     --port 56
 python -m taskpaw_v3.hub list-servers
 
 # 3. run
-python -m taskpaw_v3.hub run        # Hub API on 127.0.0.1:5690
+python -m taskpaw_v3.hub run        # read API :5690; local control :5691
 ```
 
 Manage agents anytime: `list-servers`, `enable-server --id N`,
@@ -200,7 +200,18 @@ curl -s http://127.0.0.1:5690/status | python -m json.tool   # on the Hub
 
 `servers` lists each registered agent; the Hub polls every `poll_interval` and
 fans completion events to OpenClaw if enabled. The Tauri UI (#19) renders the
-same data — point it at the Hub for the dashboard.
+same data through the authenticated loopback control listener on port 5691.
+
+The Hub refuses HTTP 301/302/303/307/308 redirects for Agent status, events,
+film lists and OpenClaw notifications, including relative or same-origin
+redirects. Configure the Agent's directly serving host/port and the final
+OpenClaw hook URL; a proxy must serve the response directly rather than redirect
+the client. Refusal reports the HTTP status without forwarding the Bearer or
+logging the redirect address/reason. A failed events fetch does not advance the
+Hub's acknowledgement, and an unconfirmed notification keeps the existing
+outbox retry/dead-letter policy. The legacy `/events` fallback still applies
+only to a genuine 404. Local automated tests verify this policy; they do not
+establish compatibility with your LAN proxy configuration.
 
 The Hub also writes `~/.taskpaw-hub/hub.db` (SQLite `status_log`) and
 `~/.taskpaw-hub/status.md` each poll for OpenClaw to read without an API — see
@@ -241,3 +252,49 @@ a bad config or a port clash reports it there.
 > holding its port. Find it with `pgrep -fl taskpaw-backend` and clear the right one
 > with `pkill -f "taskpaw-backend.*<role>"` (e.g. `…agent`) before relaunching — a
 > relaunch that can't bind its port is the symptom.
+
+## Local UI and HTTP management
+
+Agent control uses `control_host/control_port` (default `127.0.0.1:5681`); Hub
+control uses the same fields (default `127.0.0.1:5691`). Only `127.0.0.1` or `::1`
+is accepted. Hub port 5690 is read-only: move existing HTTP management requests
+to the control listener. Offline Hub commands such as `add-server` and
+`remove-server` still access the local database and do not need HTTP credentials.
+
+After both ports are claimed, each backend creates a fresh random credential in
+`agent.control.json` or `hub.control.json` next to the YAML it actually loaded.
+The config directory must be private; unsafe files, links or permissions fail
+startup. On POSIX the directory belongs to the service account and the descriptor
+is mode 0600. On Windows, every directory owner/modifying principal must be the
+current user, SYSTEM, Administrators, or the exact TrustedInstaller service SID.
+Directory `OWNER_RIGHTS` applies only to that already-verified owner. Unknown
+owners and Everyone write access still fail. The descriptor itself must remain
+owned by the current user, with a protected non-inherited ACL allowing only the
+current user and SYSTEM; neither TrustedInstaller nor `OWNER_RIGHTS` broadens
+file access. Select a private user config directory with a trusted parent chain.
+For example, CI's unknown-owner D: runner root stays rejected; its interop
+fixture creates a new private directory in Python's user Temp on C: instead,
+without altering existing parent ACLs.
+Keep these local files out of backups or shared folders. The credential is not
+stored in YAML and is independent of `api_token`, `polling_token` and LLM keys.
+`TASKPAW_CONTROL_TOKEN`, `TASKPAW_UI_TOKEN` and `VITE_TASKPAW_TOKEN` cannot supply
+control credentials.
+
+Tauri reads the protected descriptor for its own backend automatically. When
+explicitly attaching to an existing backend, set the nonsecret
+`TASKPAW_CONTROL_CREDENTIAL_FILE` path if the config location is custom.
+`TASKPAW_UI_BASE`, if supplied, must equal the descriptor's endpoint. Direct
+Vite development on port 5173 asks for each role's endpoint and credential.
+Copy `base_url` from the current descriptor into that role's endpoint field
+(defaults: Agent 5681, Hub 5691), then enter its credential in the password
+field; read both locally with a trusted editor. Only a canonical numeric
+loopback origin is accepted before any request sends the credential.
+`VITE_TASKPAW_BASE` does not provide an automatic endpoint fallback. The UI keeps it in memory and
+clears it on reload or a 401. After a backend restart, reopen the desktop or
+re-enter the new development credential; failed mutations are never replayed.
+
+For HTTP scripts, read the current protected descriptor for every operation
+with `read_control_descriptor`, construct Authorization in Python memory and
+disable redirects. Do not put a token in a command argument or print the JSON.
+The [local control contract](../specs/2026-10-01-local-control-auth-design.md)
+contains Agent stop and Hub CRUD examples that print only HTTP status.
