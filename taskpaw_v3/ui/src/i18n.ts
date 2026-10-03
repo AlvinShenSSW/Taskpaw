@@ -246,7 +246,9 @@ const en = {
     deleteAgentTitle: 'Remove agent "{{name}}"?',
     deleteAgentBody: "The Hub will stop polling it and forget its history. This can't be undone.",
   },
+  connection: { title: "Local API connection", checking: "Checking", connected: "Connected", failed: "Connection failed", outdated: "Last response outdated", credentials: "Credentials required", lastSuccess: "Last successful API response: {{time}}" },
   events: {
+    requestStatus: "Event request status", loading: "Loading events…", failed: "Could not load events. Please retry.", retry: "Retry", stale: "Showing the last successfully loaded events; the response is outdated.", statusUnavailable: "Local status is unavailable; event history is queried separately.",
     none: "No events yet — they appear here as monitors report activity.",
     nowProcessing: "Now processing", currentFile: "current file",
     queue: "queue", queueDone: "{{done}} / {{total}} done", queueLeft: " · {{n}} left",
@@ -597,7 +599,9 @@ const zh: typeof en = {
     deleteAgentTitle: "删除 agent「{{name}}」?",
     deleteAgentBody: "Hub 会停止轮询它并清除其历史记录，无法撤销。",
   },
+  connection: { title: "本地 API 连接", checking: "正在检查", connected: "已连接", failed: "连接失败", outdated: "上次响应已过期", credentials: "需要控制凭据", lastSuccess: "上次成功的 API 响应：{{time}}" },
   events: {
+    requestStatus: "事件请求状态", loading: "正在加载事件…", failed: "无法加载事件，请重试。", retry: "重试", stale: "显示上次成功读取的事件；响应已过期。", statusUnavailable: "本地状态暂不可用；事件历史会独立查询。",
     none: "暂无事件 —— 监控产生活动时会显示在这里。",
     nowProcessing: "正在处理", currentFile: "当前文件",
     queue: "队列", queueDone: "{{done}} / {{total}} 完成", queueLeft: " · 剩 {{n}}",

@@ -1,5 +1,7 @@
 # #210 — Hub task views for Jasna / AV 翻译; version 3.9.7
 
+> **Evidence reconciliation — 2026-10-02:** This is a historical design, delivered in [PR #212](https://github.com/AlvinShenSSW/Taskpaw/pull/212). The original acceptance text is preserved. A checked item records the source/test contract described in the table below; it does not certify an installed app, external service or every native platform. Unchecked items retain superseded, partial or unverified clauses. Current audit work is indexed in [the follow-up](../audits/2026-10-02-audit-follow-up.md).
+
 Date: 2026-09-30. Planner handoff, design v2. Run: `2026-09-30-issue-210`.
 
 Historical notice: PR #212 implemented this design. Planning-stage status,
@@ -67,27 +69,27 @@ Style follows the concrete contracts and regression boundaries of #189/#198/#200
 The eight issue acceptance bullets map one-to-one below; scope bullet 6 (zh/en)
 is additionally pinned by AC9. Test identifiers are specified in Test plan.
 
-- [ ] **AC1 — safe tiles (issue acceptance 1):** Both task types on actual Hub
+- [x] **AC1 — safe tiles (issue acceptance 1):** Both task types on actual Hub
   cards, and the shared agent renderer, never stringify arrays, objects, null,
   undefined, NaN or infinities into generic tiles. Unknown strings (including
   empty strings), finite numbers (including zero) and booleans retain scalar
   behavior. `steps`, `films`, `films_more` never become tiles, even if malformed
   scalar values or every step is rejected. Tests T1/T5.
-- [ ] **AC2 — stepper parity (bullet 2):** Valid Jasna restore/asr/translate and
+- [x] **AC2 — stepper parity (bullet 2):** Valid Jasna restore/asr/translate and
   avsubs asr/translate metrics render the existing stepper on the Hub, with stage
   labels, active progress and model. Gauges and queue rendering retain their
   meanings; a rejected pipeline does not fabricate steps. Tests T1/T5.
-- [ ] **AC3 — versions (bullet 3):** Every successful new-agent network `/status`
+- [x] **AC3 — versions (bullet 3):** Every successful new-agent network `/status`
   includes `version = taskpaw_v3.__version__`, with and without an injected
   provider. Hub headers display a present nonempty string as `v<version>`.
   A labelled update-Hub warning appears iff two valid versions compare agent >
   `__APP_VERSION__`. Equal, older, missing and malformed inputs never warn.
   Prerelease/build precedence and multi-digit components are covered. Tests T2/T3/T6.
-- [ ] **AC4 — task identity (bullet 4):** Each typed Hub monitor row shows its
+- [x] **AC4 — task identity (bullet 4):** Each typed Hub monitor row shows its
   ServiceIcon and localized short type name, including Jasna and AV 翻译. Unknown
   string types retain their raw id with the generic icon; missing/invalid ids
   show neither invented type nor broken label. Tests T5/T9.
-- [ ] **AC5 — network reads and Hub proxy (bullet 5):** Two GET-only network
+- [x] **AC5 — network reads and Hub proxy (bullet 5):** Two GET-only network
   routes mirror the control reads' payloads, query validation and clamps, with
   the `/status` Bearer posture. Missing/wrong credentials return the existing
   401 envelope and cannot call providers. Hub routes authenticate the caller,
@@ -95,7 +97,7 @@ is additionally pinned by AC9. Test identifiers are specified in Test plan.
   return the upstream payload or the documented error. Unknown, disabled,
   offline and old agents have explicit outcomes; timeout/transport/auth/bad-body
   failures do not become 500s. Polling never requests film lists. Tests T2/T3/T4.
-- [ ] **AC6 — full lists and fallback (bullet 6):** Jasna AV-on has 本轮影片 with
+- [x] **AC6 — full lists and fallback (bullet 6):** Jasna AV-on has 本轮影片 with
   done/open/all and paging; avsubs has 影片 with paging/focus-following, including
   an extras-only `queue_pre_done` snapshot without steps. Reuse existing list
   components, size 10, keepPreviousData and cursor recovery. Failed on-demand
@@ -106,7 +108,7 @@ is additionally pinned by AC9. Test identifiers are specified in Test plan.
   disabled machines remain header-only; fetching components unmount and issue
   no film requests. Two servers with identically named tasks cannot share data
   or cleanup. Tests T5/T7/T8.
-- [ ] **AC7 — compatibility bytes (bullet 7):** Existing status.md fixtures keep
+- [x] **AC7 — compatibility bytes (bullet 7):** Existing status.md fixtures keep
   their exact bytes, including when status gains a top-level version. Event
   payloads/ids/acks, status metric shapes and V2 stay unchanged. Tests T3/T4/T10.
 - [ ] **AC8 — checks/version (bullet 8):** Version 3.9.7 in all six V3 version
@@ -714,3 +716,19 @@ alone do not prove browser layout. No live deployment is necessary.
 - Next step: return this bounded plan to the AFK driver for its design-review /
   implementation handoff. This document grants no commit, push, PR, merge,
   release or deployment permission; those remain outside this planner request.
+
+## Acceptance evidence — 2026-10-02
+
+Baseline source: [91f7745](https://github.com/AlvinShenSSW/Taskpaw/commit/91f7745564f17a0039f81fab8293a9c150232236). Historical delivery: [PR #212](https://github.com/AlvinShenSSW/Taskpaw/pull/212), merge [bdd8ebe](https://github.com/AlvinShenSSW/Taskpaw/commit/bdd8ebe0e748ce9690db4f3af35e9b6dae07287d). [Recorded CI](https://github.com/AlvinShenSSW/Taskpaw/actions/runs/36673499599/job/109753373368) applies to that historical head, not every prose clause or installed machine. Source/test links below describe the baseline; historical version/default statements remain unchanged. The later source version 3.9.8 is recorded in [PR #214](https://github.com/AlvinShenSSW/Taskpaw/pull/214); it supersedes earlier version clauses without proving installation.
+
+| AC | Disposition | Source / automated evidence | Qualification |
+|---|---|---|---|
+| AC1 | Implemented; automated evidence | [MonitorMetrics.tsx: MonitorMetrics](../../taskpaw_v3/ui/src/components/MonitorMetrics.tsx); tests: [hubdashboard.test.tsx](../../taskpaw_v3/ui/src/test/hubdashboard.test.tsx) | Safe scalar tiles/pipeline-key exclusion are implemented; actual Hub and shared renderer tests exercise malformed/scalar values, not merely helper tests. |
+| AC2 | Implemented; automated evidence | [MonitorMetrics.tsx: MonitorMetrics](../../taskpaw_v3/ui/src/components/MonitorMetrics.tsx); [PipelineProgress.tsx: PipelineProgress](../../taskpaw_v3/ui/src/components/PipelineProgress.tsx); tests: [hubdashboard.test.tsx](../../taskpaw_v3/ui/src/test/hubdashboard.test.tsx); [pipelineprogress.test.tsx](../../taskpaw_v3/ui/src/test/pipelineprogress.test.tsx) | Actual Hub stepper render tests cover both task types, gauges, model and rejected pipelines. |
+| AC3 | Implemented; automated evidence | [app.py: create_network_app](../../taskpaw_v3/agent/server/app.py); [HubDashboard.tsx: HubDashboard](../../taskpaw_v3/ui/src/views/HubDashboard.tsx); tests: [test_agent.py: test_network_status_authoritative_version_without_mutation](../../taskpaw_v3/tests/test_agent.py); [hubdashboard.test.tsx](../../taskpaw_v3/ui/src/test/hubdashboard.test.tsx) | Authoritative status version and strict semver comparison/warning behavior are covered, including prerelease and malformed values; no installed version is inferred. |
+| AC4 | Implemented; automated evidence | [HubDashboard.tsx: HubDashboard](../../taskpaw_v3/ui/src/views/HubDashboard.tsx); tests: [hubdashboard.test.tsx](../../taskpaw_v3/ui/src/test/hubdashboard.test.tsx) | Actual Hub card tests cover ServiceIcon/localized types and raw unknown/missing behavior. |
+| AC5 | Implemented; automated evidence | [app.py: _register_film_routes](../../taskpaw_v3/agent/server/app.py); [app.py: create_hub_app](../../taskpaw_v3/hub/server/app.py); [film_proxy.py: fetch_agent_film_page](../../taskpaw_v3/hub/server/film_proxy.py); tests: [test_agent.py: test_network_films_auth_before_validation](../../taskpaw_v3/tests/test_agent.py); [test_hub_films.py: test_hub_films_target_payload_token_and_no_side_effects](../../taskpaw_v3/tests/test_hub_films.py); [test_hub_films.py: test_hub_films_preflight_and_auth_first](../../taskpaw_v3/tests/test_hub_films.py); [test_hub_films.py: test_hub_films_http_errors_closed_sanitized_no_retry](../../taskpaw_v3/tests/test_hub_films.py) | GET/auth-first/provider/token and explicit transport/body/error outcomes are exercised with controlled HTTP. Poller does not request lists; later R02 covers other outbound clients. |
+| AC6 | Implemented; automated evidence | [HubDashboard.tsx: HubDashboard](../../taskpaw_v3/ui/src/views/HubDashboard.tsx); [PagedFilmList.tsx: PagedFilmList](../../taskpaw_v3/ui/src/components/PagedFilmList.tsx); tests: [hubdashboard.test.tsx](../../taskpaw_v3/ui/src/test/hubdashboard.test.tsx); [pagedfilmlist.test.tsx](../../taskpaw_v3/ui/src/test/pagedfilmlist.test.tsx) | Actual card tests cover lists, stale/fallback/error notes, offline unmount and same-task server separation. Online snapshot truthfulness remains separately R14 ([#230](https://github.com/AlvinShenSSW/Taskpaw/issues/230)). |
+| AC7 | Implemented; automated evidence | [status_md.py: render_status_md](../../taskpaw_v3/hub/server/status_md.py); [app.py: create_network_app](../../taskpaw_v3/agent/server/app.py); tests: [test_status_md.py: test_210_version_preserves_full_status_md_fixture_bytes](../../taskpaw_v3/tests/test_status_md.py); [test_agent.py: test_events_ack_trims_but_401_does_not_drain](../../taskpaw_v3/tests/test_agent.py) | Exact status.md fixtures and existing event/ack tests retain shapes/bytes; this does not close counter-recovery issue R05 ([#221](https://github.com/AlvinShenSSW/Taskpaw/issues/221)). |
+| AC8 | Unchecked; see qualification | [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py); tests: [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py) | Historical 3.9.7/docs/no-new-runtime-deps delivered by [#212](https://github.com/AlvinShenSSW/Taskpaw/pull/212) and published CI passed; later3.9.8 supersedes version and PR body records a local macOS filesystem test failure later addressed by [#229](https://github.com/AlvinShenSSW/Taskpaw/pull/229). |
+| AC9 | Unchecked; see qualification | [HubDashboard.tsx: HubDashboard](../../taskpaw_v3/ui/src/views/HubDashboard.tsx); [PagedFilmList.tsx: PagedFilmList](../../taskpaw_v3/ui/src/components/PagedFilmList.tsx); tests: [hubdashboard.test.tsx](../../taskpaw_v3/ui/src/test/hubdashboard.test.tsx); [pagedfilmlist.test.tsx](../../taskpaw_v3/ui/src/test/pagedfilmlist.test.tsx) | zh/en and non-color-only warning/stale/keyboard components have automated tests; original manual 375px layout acceptance has no public proof. |

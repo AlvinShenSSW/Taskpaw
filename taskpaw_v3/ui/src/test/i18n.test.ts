@@ -68,3 +68,16 @@ describe("#210 Hub observation translations", () => {
     expect(i18n.t("hub.versionSkew", { hub: "3.9.6", agent: "3.9.7" })).toMatch(/Update the Hub|请更新 Hub/);
   });
 });
+
+describe("R14 request-state translations", () => {
+  afterEach(() => setLang("zh-CN"));
+  it.each(["en", "zh-CN"] as const)("resolves local API and event request feedback (%s)", lang => {
+    setLang(lang);
+    const keys = [...["title", "checking", "connected", "failed", "outdated", "credentials", "lastSuccess"].map(key => `connection.${key}`),
+      ...["requestStatus", "loading", "failed", "retry", "stale", "statusUnavailable"].map(key => `events.${key}`)];
+    for (const key of keys) {
+      expect(i18n.getResource(lang, "translation", key), key).toBeTypeOf("string");
+      expect(i18n.t(key, { time: "12:00:00" })).not.toMatch(/\{\{|^connection\.|^events\./);
+    }
+  });
+});

@@ -1,5 +1,7 @@
 # #192 + #190 — resumable translation (断点续翻) with two fallback models; version 3.8.0
 
+> **Evidence reconciliation — 2026-10-02:** This is a historical design, delivered in [PR #195](https://github.com/AlvinShenSSW/Taskpaw/pull/195). The original acceptance text is preserved. A checked item records the source/test contract described in the table below; it does not certify an installed app, external service or every native platform. Unchecked items retain superseded, partial or unverified clauses. Current audit work is indexed in [the follow-up](../audits/2026-10-02-audit-follow-up.md).
+
 Date: 2026-09-25 (design v4, FROZEN — debate rounds 1–4: G1–G13, H1–H8, I1; round 4 CLEAN)
 Issues: #192 (per-cue checkpoint, resume, retry without loss, per-provider breaker, failover) and #190
 (two fallback models in Settings, probe, bisection, keep Japanese). One design, one PR.
@@ -24,7 +26,7 @@ fallbacks refuse a line, keep its Japanese text; translation must resume and nev
   Settings fix resets its state (G8). The chain is re-read at every routing decision and every wake-up
   (G8); every wait is sliced to ≤ 60 s so a Settings change is acted on within a minute, and the worker
   of a fingerprint that left the chain is torn down at the next re-read (H2).
-- [ ] AC2 **Per-cue state.** `zh` (or none), `by` (label), `refused_by` (labels). done = has `zh`;
+- [x] AC2 **Per-cue state.** `zh` (or none), `by` (label), `refused_by` (labels). done = has `zh`;
   **exhausted (H1)** = the current chain is non-empty AND `refused_by` contains every label of
   `seen` — the union of the chain's labels observed since the film was dequeued (so a provider removed
   mid-film can never make a line "exhausted"; such a film defers and, if the provider never returns,
@@ -40,9 +42,9 @@ fallbacks refuse a line, keep its Japanese text; translation must resume and nev
   translator start. Corrupt / unknown version / cue-count mismatch → renamed `.bad` (or ignored),
   start over, warning. Holds labels only — never a key, userinfo or port. A write failure never fails
   the film: log + one notice per run; translation goes on in memory.
-- [ ] AC4 **Resume.** Only open cues are sent; a provider in a cue's `refused_by` is never asked again
+- [x] AC4 **Resume.** Only open cues are sent; a provider in a cue's `refused_by` is never asked again
   for it, incl. after resume; a new label is asked.
-- [ ] AC5 **Transient schedule (top-level requests only).** network / timeout / 5xx / 408 / 429 / 503 /
+- [x] AC5 **Transient schedule (top-level requests only).** network / timeout / 5xx / 408 / 429 / 503 /
   `finish_reason=length` / an empty reply / other `bad_response`: retry the same batch after 10 s, 30 s,
   90 s (cancellable; 429/503 use `Retry-After` delta-seconds when given, capped 300 s). Still failing →
   **probe** (AC6). Invalid output (`content`: bad JSON / id mismatch / empty value) → bisect at once.
@@ -78,7 +80,7 @@ fallbacks refuse a line, keep its Japanese text; translation must resume and nev
     successful probe (≥ 5 min apart). So each (cue, provider) pair ends done or refused, or its provider
     stays open — and then the film ends through AC8's cap. Every film ends translated (AC9), paused
     (AC8) or no-key (AC2).
-- [ ] AC7 **Breaker + failover.** A provider opens on a failed probe: level 1 = 5 min, then 15, then 30
+- [x] AC7 **Breaker + failover.** A provider opens on a failed probe: level 1 = 5 min, then 15, then 30
   (a failed probe at a cool-down end escalates); auth / 402 / content-policy start at 30 min. At a
   cool-down end the next routing that needs it probes it; OK closes it (level reset). **Failover**
   (default on; Settings switch 「主模型不可用时改用备用模型」, #192 §4): while a provider is open, a cue that
@@ -98,21 +100,21 @@ fallbacks refuse a line, keep its Japanese text; translation must resume and nev
   one, or, when only deferred films remain, the deferred film with the earliest deadline; `queued()`
   counts every OTHER queued or deferred film (so `queued() + in_flight()` = the unsettled films);
   `progress()` reports that same film (`paused: true`, `deferred: n` when it is a deferred one).
-- [ ] AC9 **Outcomes.** Every cue done or exhausted → `translated` (exhausted cues carry their Japanese
+- [x] AC9 **Outcomes.** Every cue done or exhausted → `translated` (exhausted cues carry their Japanese
   text) with counts `resumed`, `fallback`, `kept_ja` and `checkpoint_key`. `failed` only for an I/O or
   internal error. Plugins: `translated` → publish as today; kept-ja → one info log per film and the
   `done` text gains `; N lines kept in Japanese` only when N > 0; `paused` → AC8.
-- [ ] AC10 **Key check chain-aware; one rule in both plugins (G11).** A film is `skipped no_llm_key`
+- [x] AC10 **Key check chain-aware; one rule in both plugins (G11).** A film is `skipped no_llm_key`
   only when the chain is empty. The translator's own "no LLM key" result settles `skipped no_llm_key` in
   BOTH plugins (Jasna today: failed + alert + streak — unified with avsubs).
-- [ ] AC11 **Settings UI + API.** Two fallback sections (base, model, write-only key with Save / Clear /
+- [x] AC11 **Settings UI + API.** Two fallback sections (base, model, write-only key with Save / Clear /
   Test) under the primary + the failover switch (`llm_failover`, default true); env overrides
   `TASKPAW_LLM_FALLBACK1_API_KEY` / `TASKPAW_LLM_FALLBACK2_API_KEY`; `GET /control/config` masks both new
   keys `***` + `…_source` (by name; a test asserts no stored key value is returned anywhere); keep on
   blank / `***`, `null` clears; `llm_test(candidate, slot)` sends **the real probe** (G5) for any slot,
   with the same 400 → no-json retry and the same OK rule (H4);
   live apply after Save; zh + en.
-- [ ] AC12 **Progress.** `Translator.progress()` adds `cues_resumed`, `cues_fallback`, `cues_kept_ja`,
+- [x] AC12 **Progress.** `Translator.progress()` adds `cues_resumed`, `cues_fallback`, `cues_kept_ja`,
   `paused` (bool: the current film is deferred/waiting), `deferred` (count); `model` = the provider in
   use right now. The translate panel shows 已续翻 / 备用模型 / 保留日文 tiles when > 0 and a 等待翻译服务
   chip while paused. No new step state (C8).
@@ -255,3 +257,23 @@ Pilot split: **A** core (llm/worker status + Retry-After, config fields + chain/
 admin/app/launcher, conftest) → **B** engine + checkpoint store (after A's API) → **D** plugins + docs
 (after B); **C** UI (Settings sections + switch, progress tiles) in parallel with A. Never touch the
 owner's live agent/config/library; no network; no real keys; no WhisperJAV/GPU.
+
+## Acceptance evidence — 2026-10-02
+
+Baseline source: [91f7745](https://github.com/AlvinShenSSW/Taskpaw/commit/91f7745564f17a0039f81fab8293a9c150232236). Historical delivery: [PR #195](https://github.com/AlvinShenSSW/Taskpaw/pull/195), merge [44d5042](https://github.com/AlvinShenSSW/Taskpaw/commit/44d50422cbb15b893b8c69e4b47f998de3906907). [Recorded CI](https://github.com/AlvinShenSSW/Taskpaw/actions/runs/36150320520/job/108121649259) applies to that historical head, not every prose clause or installed machine. Source/test links below describe the baseline; historical version/default statements remain unchanged. The later source version 3.9.8 is recorded in [PR #214](https://github.com/AlvinShenSSW/Taskpaw/pull/214); it supersedes earlier version clauses without proving installation.
+
+| AC | Disposition | Source / automated evidence | Qualification |
+|---|---|---|---|
+| AC1 | Unchecked; see qualification | [translate.py: llm_chain_from_config](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _refresh_chain](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _fingerprint](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_subs_translate.py: test_settings_change_wakes_a_deferred_wait_within_60s_and_retires](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_duplicate_labels_in_the_chain_first_wins](../../taskpaw_v3/tests/test_subs_translate.py) | Usable ordered chain, safe fingerprints and deferred-wait wakeup/retirement are tested with fake providers/clock. Active response waits do not re-read the chain and may re-arm their deadline; the original one-minute Settings guarantee and every departed worker teardown are not established. Native worker ownership remains R08 (#225). |
+| AC2 | Implemented; automated evidence | [translate.py: _CueState](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _exhausted](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _refresh_chain](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_subs_translate.py: test_a_provider_removed_mid_film_defers_never_kept_japanese](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_chain_emptied_mid_film_gives_no_key_and_keeps_the_checkpoint](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_blank_cues_are_done_at_load_and_never_sent](../../taskpaw_v3/tests/test_subs_translate.py) | Cue-state/exhaustion, seen-label, empty-chain and blank-cue contracts have direct tests. |
+| AC3 | Unchecked; see qualification | [checkpoint.py: CheckpointStore](../../taskpaw_v3/monitors/subs/checkpoint.py); [translate.py: _save](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_subs_checkpoint.py: test_key_equal_for_asr_cues_and_the_reloaded_ja_srt](../../taskpaw_v3/tests/test_subs_checkpoint.py); [test_subs_checkpoint.py: test_atomic_no_partial_file_on_replace_failure](../../taskpaw_v3/tests/test_subs_checkpoint.py); [test_subs_translate.py: test_checkpoint_write_failure_continues_with_one_notice](../../taskpaw_v3/tests/test_subs_translate.py) | Atomic/load/prune/privacy/retry behaviors are tested. Original 20,000-case critic experiment has no independent published reproduction here; whole compound item stays unchecked. |
+| AC4 | Implemented; automated evidence | [translate.py: _open_cues](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _dequeue](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_subs_translate.py: test_resume_never_asks_a_provider_that_refused_the_cue](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_stop_mid_film_then_a_new_translator_resumes_only_open_cues](../../taskpaw_v3/tests/test_subs_translate.py) | Resume tests use real checkpoint files and controlled workers; only open/unrefused cues are routed. |
+| AC5 | Implemented; automated evidence | [translate.py: _attempt](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _retry_delay](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_subs_translate.py: test_transient_schedule_is_10_30_90_on_the_same_batch](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_retry_after_for_429_and_503_capped](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_retryable_error_kinds_follow_the_schedule](../../taskpaw_v3/tests/test_subs_translate.py) | Top-level schedules, caps, cancellation and immediate invalid-content split are automated with fake clocks/responses. |
+| AC6 | Unchecked; see qualification | [translate.py: _probe](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _bisect](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _attempt](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_subs_translate.py: test_h8_one_confirming_probe_for_all_failed_leaves](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_i1_outage_mid_bisection_opens_within_log2n_nodes_and_fails_over](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_h2_a_provider_retired_mid_attempt_ends_it_without_respawn](../../taskpaw_v3/tests/test_subs_translate.py) | Routing/probe/bisection cases are extensive; universal termination also depends on worker containment and bounded teardown, still R08 ([#225](https://github.com/AlvinShenSSW/Taskpaw/issues/225)). Later parameter retry behavior in [#202](https://github.com/AlvinShenSSW/Taskpaw/pull/202) is additive. |
+| AC7 | Implemented; automated evidence | [translate.py: _open](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _half_open](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _route](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_subs_translate.py: test_breaker_escalates_5_15_30_and_closes_on_probe_ok](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_failover_switch](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_h7_failover_off_with_an_unusable_primary_uses_chain0](../../taskpaw_v3/tests/test_subs_translate.py) | Breaker/escalation/failover semantics are directly covered by simulated failures and time. |
+| AC8 | Unchecked; see qualification | [translate.py: _defer](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: _idle](../../taskpaw_v3/monitors/subs/translate.py); [translate.py: in_flight](../../taskpaw_v3/monitors/subs/translate.py); tests: [test_subs_translate.py: test_all_providers_down_every_film_deferred_then_paused_at_2h](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_h6_deferral_accumulates_across_intervals](../../taskpaw_v3/tests/test_subs_translate.py); [test_subs_translate.py: test_h3_only_deferred_films_in_flight_queued_and_progress](../../taskpaw_v3/tests/test_subs_translate.py) | Fake-clock tests prove cap/count semantics; unconditional never-block/bounded-done also depends on native worker teardown (R08). No two-hour production soak was run. |
+| AC9 | Implemented; automated evidence | [translate.py: _finish](../../taskpaw_v3/monitors/subs/translate.py); [avsubs.py: _settle_results](../../taskpaw_v3/monitors/plugins/avsubs.py); [jasna.py: _settle_results](../../taskpaw_v3/monitors/plugins/jasna.py); tests: [test_subs_translate.py: test_refused_by_every_provider_keeps_japanese](../../taskpaw_v3/tests/test_subs_translate.py); [test_avsubs.py: test_kept_japanese_lines_are_logged_per_film_and_suffix_the_done_text](../../taskpaw_v3/tests/test_avsubs.py) | Translated/kept-Japanese counts and plugin suffix/publish paths are tested; real translation quality is outside this proof. |
+| AC10 | Implemented; automated evidence | [avsubs.py: _alert_no_key](../../taskpaw_v3/monitors/plugins/avsubs.py); [jasna.py: _alert_no_key](../../taskpaw_v3/monitors/plugins/jasna.py); tests: [test_avsubs.py: test_a_no_llm_key_translator_result_is_a_skip](../../taskpaw_v3/tests/test_avsubs.py); [test_jasna_subs.py: test_a_no_key_result_is_a_skip_with_one_alert_never_a_failure](../../taskpaw_v3/tests/test_jasna_subs.py) | Both plugins use chain-aware no-key skips with shared translator outcomes and direct cases. |
+| AC11 | Implemented; automated evidence | [admin.py: update_config](../../taskpaw_v3/agent/server/admin.py); [admin.py: llm_test](../../taskpaw_v3/agent/server/admin.py); [Settings.tsx: Settings](../../taskpaw_v3/ui/src/views/Settings.tsx); tests: [test_admin.py: test_update_config_fallbacks_and_failover_are_live_and_publish_the_chain](../../taskpaw_v3/tests/test_admin.py); [test_agent.py: test_control_config_never_returns_a_stored_or_env_key_value](../../taskpaw_v3/tests/test_agent.py); [test_admin.py: test_llm_test_ok_only_when_the_reply_is_a_valid_translation](../../taskpaw_v3/tests/test_admin.py); [settings.test.tsx](../../taskpaw_v3/ui/src/test/settings.test.tsx) | Fallback fields, mask/keep/clear/env, live holders and candidate probe validation are implemented and covered. Local-origin authorization remains separate R01; this row only asserts this AC's field/probe contract. |
+| AC12 | Implemented; automated evidence | [translate.py: progress](../../taskpaw_v3/monitors/subs/translate.py); [PipelineProgress.tsx: PipelineProgress](../../taskpaw_v3/ui/src/components/PipelineProgress.tsx); tests: [test_subs_translate.py: test_progress_reports_resumed_fallback_kept_and_the_model_in_use](../../taskpaw_v3/tests/test_subs_translate.py); [pipelineprogress.test.tsx](../../taskpaw_v3/ui/src/test/pipelineprogress.test.tsx) | Resumed/fallback/kept/paused/deferred/model fields and zh/en conditional tiles are covered by translator/component tests. |
+| AC13 | Unchecked; see qualification | [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py); tests: [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py) | Historical 3.8.0/docs and recorded checks delivered by [#195](https://github.com/AlvinShenSSW/Taskpaw/pull/195); version later superseded. No complete original plan certification or installed/provider claim. |

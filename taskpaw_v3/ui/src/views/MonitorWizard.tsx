@@ -100,7 +100,7 @@ export function MonitorWizard({
   const secretKeys = useMemo(() => {
     const keys = new Set<string>();
     if (selected?.kind === "plugin") {
-      const ui = selected.plugin.ui_schema as Record<string, any>;
+      const ui = selected.plugin.ui_schema as Record<string, { "ui:widget"?: unknown } | null | undefined>;
       for (const [k, v] of Object.entries(ui ?? {})) {
         if (v?.["ui:widget"] === "password") keys.add(k);
       }

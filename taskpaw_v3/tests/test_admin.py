@@ -1569,6 +1569,7 @@ def test_r07_d1_actual_validator_deadline_single_owner_and_independent_stop(
     import threading
     from pathlib import Path
 
+    from taskpaw_v3.agent.server import admin as module
     from taskpaw_v3.core.config import save_yaml
     from taskpaw_v3.monitors.plugins import dev_activity
 
@@ -1600,6 +1601,9 @@ def test_r07_d1_actual_validator_deadline_single_owner_and_independent_stop(
     adm = MonitorAdmin(cfg, sup, reg, path)
     adm._timeout = 0.06  # test wait budget, never a production env bypass
     entered, release = threading.Event(), threading.Event()
+    save_entered, save_release = threading.Event(), threading.Event()
+    original_save = module.save_yaml
+    stop_save = None
     calls, results = [], []
 
     def metadata(path):
@@ -1608,6 +1612,13 @@ def test_r07_d1_actual_validator_deadline_single_owner_and_independent_stop(
         assert release.wait(3)
         return True
 
+    def gated_save(*args):
+        if threading.current_thread().name == "persist-stop-owned":
+            save_entered.set()
+            assert save_release.wait(3)
+        original_save(*args)
+
+    monkeypatch.setattr(module, "save_yaml", gated_save)
     monkeypatch.setattr(dev_activity.os.path, "realpath", lambda p: str(p))
     monkeypatch.setattr(dev_activity, "safe_path", metadata)
     monkeypatch.setattr(Path, "exists", lambda p: False)
@@ -1631,11 +1642,18 @@ def test_r07_d1_actual_validator_deadline_single_owner_and_independent_stop(
         owner = adm._owners["owned"]
         stopped = adm.set_enabled("owned", False)
         assert stopped["runtime"] == "stopped" and not sup.has("owned")
+        stop_save = adm._stop_records["owned"]
+        assert save_entered.wait(1) and stopped["persistence"] == "pending"
+        assert not stop_save.done.is_set() and path.read_bytes() == before
         assert adm._owners["owned"] is owner and len(calls) == 1
         release.set()
         owner.thread.join(1)
         assert not owner.thread.is_alive()
         assert cfg.monitors[0]["config"].get("poll_interval", 10) != 20
+        save_release.set()
+        assert stop_save.done.wait(1)
+        stop_save.thread.join(1)
+        assert not stop_save.thread.is_alive() and stop_save.validated == "saved"
         assert load_yaml(AgentConfig, path).monitors[0]["enabled"] is False
         assert not sup.has("owned")
         assert not adm.config_view()["monitor_operations"]
@@ -1643,7 +1661,11 @@ def test_r07_d1_actual_validator_deadline_single_owner_and_independent_stop(
         assert len(calls) == 2
     finally:
         release.set()
+        save_release.set()
         first.join(1)
+        stop_save = stop_save or adm._stop_records.get("owned")
+        if stop_save is not None and stop_save.thread is not None:
+            stop_save.thread.join(1)
         sup.stop(timeout=1)
 
 
@@ -2182,3 +2204,387 @@ def test_r07_sr002_edit_recovery_preserves_stop_and_manual_policy(
             assert "owned" in admin._overrides
     finally:
         sup.stop(1)
+
+
+@pytest.mark.parametrize("second_name", ["owned", "other"])
+def test_r07_ir001_add_rechecks_eligibility_after_overlapping_validation(
+    tmp_path, second_name
+):
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+
+    class Plugin(_FakePlugin):
+        creates = 0
+
+        def validate_config(self, raw):
+            if threading.current_thread().name == "first-add":
+                entered.set()
+                assert release.wait(3)
+            return super().validate_config(raw)
+
+        def create(self, iid, cfg):
+            self.creates += 1
+            return super().create(iid, cfg)
+
+    plugin = Plugin()
+    registry = PluginRegistry()
+    registry.register(plugin)
+    cfg = _agent_config()
+    path = tmp_path / "owned.yaml"
+    admin = MonitorAdmin(cfg, None, registry, path)
+    results, errors = [], []
+
+    def first_add():
+        try:
+            results.append(admin.add({"type_id": "fake", "config": {"name": "owned"}}))
+        except ValueError as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=first_add, name="first-add")
+    rebuilt = None
+    worker.start()
+    try:
+        assert entered.wait(1)
+        assert admin.add({"type_id": "fake", "config": {"name": second_name}})["ok"]
+        committed = path.read_bytes()
+        release.set()
+        worker.join(1)
+        assert not worker.is_alive()
+        if second_name == "owned":
+            assert len(errors) == 1 and "already exists" in str(errors[0])
+            assert results == [] and path.read_bytes() == committed
+        else:
+            assert errors == [] and len(results) == 1 and results[0]["ok"]
+        saved = load_yaml(AgentConfig, path)
+        expected = {"owned", second_name}
+        assert len(saved.monitors) == len(expected)
+        assert {item["name"] for item in saved.monitors} == expected
+        assert saved.monitors == cfg.monitors and plugin.creates == 0
+        # The actual next-start consumer must accept the persisted configuration.
+        rebuilt = build_supervisor(registry, saved.monitors, EventQueue("m"), "m")
+        assert set(rebuilt.snapshot()) == expected and plugin.creates == len(expected)
+    finally:
+        release.set()
+        worker.join(1)
+        if rebuilt is not None:
+            rebuilt.stop(1)
+
+
+def test_r07_ir001_add_active_owner_is_busy_and_partial_retry_is_exact(
+    tmp_path, monkeypatch
+):
+    import threading
+
+    from taskpaw_v3.agent.server import admin as module
+    from taskpaw_v3.monitors.supervisor import Supervisor
+
+    class Plugin(_FakePlugin):
+        broken = True
+        creates = 0
+
+        def create(self, iid, cfg):
+            self.creates += 1
+            if self.broken:
+                raise RuntimeError("owned-create-fault")
+            return super().create(iid, cfg)
+
+    plugin = Plugin()
+    registry = PluginRegistry()
+    registry.register(plugin)
+    cfg = _agent_config()
+    path = tmp_path / "owned.yaml"
+    sup = Supervisor(lambda *a: None)
+    admin = MonitorAdmin(cfg, sup, registry, path)
+    entered, release = threading.Event(), threading.Event()
+    original = module.save_yaml
+
+    def gated_save(*args):
+        entered.set()
+        assert release.wait(3)
+        original(*args)
+
+    results = []
+    spec = {"type_id": "fake", "config": {"name": "owned"}}
+    worker = threading.Thread(target=lambda: results.append(admin.add(spec)))
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "save_yaml", gated_save)
+            worker.start()
+            assert entered.wait(1)
+            assert admin.add(spec)["outcome"] == "busy" and plugin.creates == 0
+            release.set()
+            worker.join(1)
+            assert not worker.is_alive()
+        assert results[0]["outcome"] == "persisted_runtime_failed"
+        committed = path.read_bytes()
+        with pytest.raises(ValueError, match="already exists"):
+            admin.add(
+                {"type_id": "fake", "config": {"name": "owned", "poll_interval": 13}}
+            )
+        assert path.read_bytes() == committed and plugin.creates == 1
+        plugin.broken = False
+        assert admin.add(spec)["ok"] and plugin.creates == 2
+        assert (
+            len(cfg.monitors) == 1
+            and load_yaml(AgentConfig, path).monitors == cfg.monitors
+        )
+    finally:
+        release.set()
+        if worker.ident is not None:
+            worker.join(1)
+        sup.stop(1)
+
+
+@pytest.mark.parametrize("second_interval", [10, 13])
+def test_r07_ir001_overlapping_add_uses_current_partial_retry_spec(
+    tmp_path, second_interval
+):
+    import threading
+
+    from taskpaw_v3.monitors.supervisor import Supervisor
+
+    entered, release = threading.Event(), threading.Event()
+
+    class Plugin(_FakePlugin):
+        broken = True
+        creates = 0
+
+        def validate_config(self, raw):
+            if threading.current_thread().name == "first-add":
+                entered.set()
+                assert release.wait(3)
+            return super().validate_config(raw)
+
+        def create(self, iid, cfg):
+            self.creates += 1
+            if self.broken:
+                raise RuntimeError("owned-create-fault")
+            return super().create(iid, cfg)
+
+    plugin = Plugin()
+    registry = PluginRegistry()
+    registry.register(plugin)
+    cfg = _agent_config()
+    path = tmp_path / "owned.yaml"
+    sup = Supervisor(lambda *a: None)
+    admin = MonitorAdmin(cfg, sup, registry, path)
+    results, errors = [], []
+
+    def first_add():
+        try:
+            results.append(admin.add({"type_id": "fake", "config": {"name": "owned"}}))
+        except ValueError as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=first_add, name="first-add")
+    worker.start()
+    try:
+        assert entered.wait(1)
+        partial = admin.add(
+            {
+                "type_id": "fake",
+                "config": {"name": "owned", "poll_interval": second_interval},
+            }
+        )
+        assert partial["outcome"] == "persisted_runtime_failed"
+        committed = path.read_bytes()
+        plugin.broken = False
+        release.set()
+        worker.join(1)
+        assert not worker.is_alive() and len(cfg.monitors) == 1
+        if second_interval == 10:
+            assert errors == [] and results[0]["ok"] and plugin.creates == 2
+            assert sup.has("owned")
+        else:
+            assert len(errors) == 1 and "already exists" in str(errors[0])
+            assert results == [] and plugin.creates == 1 and not sup.has("owned")
+            assert path.read_bytes() == committed
+        assert load_yaml(AgentConfig, path).monitors == cfg.monitors
+    finally:
+        release.set()
+        worker.join(1)
+        sup.stop(1)
+
+
+@pytest.mark.parametrize("phase", ["construct", "start"])
+def test_r07_ir002_stop_writer_launch_failure_releases_unstarted_owner(
+    tmp_path, monkeypatch, phase
+):
+    import threading
+
+    from taskpaw_v3.agent.server import admin as module
+    from taskpaw_v3.core.config import save_yaml
+
+    registry = _registry()
+    cfg = _agent_config(
+        monitors=[{"type_id": "fake", "config": {"name": "owned"}, "enabled": True}]
+    )
+    path = tmp_path / "owned.yaml"
+    save_yaml(cfg, path)
+    before = path.read_bytes()
+    sup = build_supervisor(registry, cfg.monitors, EventQueue("m"), "m")
+    admin = MonitorAdmin(cfg, sup, registry, path, operation_timeout=0.05)
+    original_thread, original_start = threading.Thread, threading.Thread.start
+
+    def construct(*args, **kwargs):
+        if kwargs.get("name") == "persist-stop-owned":
+            raise MemoryError("PLANTED_CONSTRUCTOR_SECRET")
+        return original_thread(*args, **kwargs)
+
+    def start(thread):
+        if thread.name == "persist-stop-owned":
+            raise RuntimeError("PLANTED_START_SECRET")
+        return original_start(thread)
+
+    try:
+        with monkeypatch.context() as patch:
+            if phase == "construct":
+                patch.setattr(module.threading, "Thread", construct)
+            else:
+                patch.setattr(threading.Thread, "start", start)
+            result = admin.set_enabled("owned", False)
+        assert result["runtime"] == "stopped" and not sup.has("owned")
+        assert (
+            result["persistence"] == "failed"
+            and result["error_code"] == "persistence_failed"
+        )
+        assert "PLANTED" not in str(result)
+        save = admin._stop_records["owned"]
+        assert save.done.is_set() and save.validated == "failed"
+        assert "owned" not in admin._stop_saves and not admin._mutation.locked()
+        assert admin.status_view()["owned"]["persistence"] == "failed"
+        assert path.read_bytes() == before and "owned" in admin._overrides
+        assert admin.add(
+            {"type_id": "fake", "config": {"name": "other"}, "enabled": False}
+        )["ok"]
+        assert admin.set_enabled("owned", False)["persistence"] == "saved"
+        assert load_yaml(AgentConfig, path).monitors[0]["enabled"] is False
+    finally:
+        # Baseline constructor fault has no writer; release only that local leak.
+        save = admin._stop_records.get("owned")
+        if save is not None and save.thread is None and admin._mutation.locked():
+            admin._mutation.release()
+        sup.stop(1)
+
+
+def test_r07_ir002_started_writer_survives_raising_start_wrapper(tmp_path, monkeypatch):
+    import threading
+
+    from taskpaw_v3.agent.server import admin as module
+    from taskpaw_v3.core.config import save_yaml
+
+    registry = _registry()
+    cfg = _agent_config(
+        monitors=[
+            {"type_id": "fake", "config": {"name": name}, "enabled": True}
+            for name in ("owned", "other")
+        ]
+    )
+    path = tmp_path / "owned.yaml"
+    save_yaml(cfg, path)
+    before = path.read_bytes()
+    sup = build_supervisor(registry, cfg.monitors, EventQueue("m"), "m")
+    admin = MonitorAdmin(cfg, sup, registry, path, operation_timeout=0.03)
+    entered, release = threading.Event(), threading.Event()
+    original_save, original_start = module.save_yaml, threading.Thread.start
+    writers = []
+
+    def gated_save(*args):
+        writers.append(threading.current_thread())
+        entered.set()
+        assert release.wait(5)
+        original_save(*args)
+
+    def start(thread):
+        result = original_start(thread)
+        if thread.name == "persist-stop-owned":
+            raise RuntimeError("PLANTED_STARTED_SECRET")
+        return result
+
+    save = None
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "save_yaml", gated_save)
+            patch.setattr(threading.Thread, "start", start)
+            result = admin.set_enabled("owned", False)
+            assert entered.wait(1)
+            save = admin._stop_records["owned"]
+            assert result["runtime"] == "stopped" and result["persistence"] == "pending"
+            assert "PLANTED" not in str(result)
+            assert save.thread.ident is not None and save.thread.is_alive()
+            assert admin._stop_saves["owned"] is save and admin._mutation.locked()
+            assert not save.done.is_set() and path.read_bytes() == before
+            assert admin.set_enabled("owned", False)["persistence"] == "pending"
+            assert admin._stop_saves["owned"] is save and len(writers) == 1
+            independent = admin.set_enabled("other", False)
+            assert (
+                independent["runtime"] == "stopped"
+                and independent["persistence"] == "pending"
+            )
+            assert not sup.has("owned") and not sup.has("other")
+            assert (
+                admin.add({"type_id": "fake", "config": {"name": "third"}})["outcome"]
+                == "busy"
+            )
+            release.set()
+            assert save.done.wait(1)
+            save.thread.join(1)
+        assert save.validated == "saved" and not save.thread.is_alive()
+        assert (
+            not admin._stop_saves and not admin._mutation.locked() and len(writers) == 1
+        )
+        saved = load_yaml(AgentConfig, path).monitors
+        assert saved[0]["enabled"] is False and saved[1]["enabled"] is True
+        # The independent Stop preceded storage admission; its override keeps
+        # actual execution stopped while an explicit retry persists that intent.
+        assert "other" in admin._overrides and not sup.has("other")
+        assert admin.status_view()["owned"]["persistence"] == "saved"
+        assert admin.set_enabled("other", False)["persistence"] == "saved"
+        assert all(
+            item["enabled"] is False for item in load_yaml(AgentConfig, path).monitors
+        )
+        assert admin.add(
+            {"type_id": "fake", "config": {"name": "third"}, "enabled": False}
+        )["ok"]
+    finally:
+        release.set()
+        if save is not None and save.thread is not None:
+            save.thread.join(1)
+        sup.stop(1)
+
+
+def test_r07_ir002_completed_writer_survives_raising_start_wrapper(
+    tmp_path, monkeypatch
+):
+    import threading
+
+    from taskpaw_v3.agent.server import admin as module
+    from taskpaw_v3.core.config import save_yaml
+
+    registry = _registry()
+    cfg = _agent_config(
+        monitors=[{"type_id": "fake", "config": {"name": "owned"}, "enabled": True}]
+    )
+    path = tmp_path / "owned.yaml"
+    save_yaml(cfg, path)
+    admin = MonitorAdmin(cfg, None, registry, path)
+    original_start = threading.Thread.start
+
+    def start(thread):
+        result = original_start(thread)
+        if thread.name == "persist-stop-owned":
+            thread.join(1)
+            assert not thread.is_alive()
+            raise RuntimeError("PLANTED_COMPLETED_SECRET")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.threading.Thread, "start", start)
+        result = admin.set_enabled("owned", False)
+    save = admin._stop_records["owned"]
+    assert save.thread.ident is not None and not save.thread.is_alive()
+    assert save.done.is_set() and save.validated == "saved"
+    assert result["persistence"] == "saved" and "PLANTED" not in str(result)
+    assert not admin._stop_saves and not admin._mutation.locked()
+    assert load_yaml(AgentConfig, path).monitors[0]["enabled"] is False

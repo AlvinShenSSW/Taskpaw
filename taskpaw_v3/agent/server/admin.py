@@ -395,9 +395,24 @@ class MonitorAdmin:
                 return self._busy(iid, "add")
             try:
                 with self._lock:
-                    # Another name's commit must not be lost by an old snapshot.
+                    # Validation precedes admission: recheck eligibility against
+                    # the latest commit, including a same-name overlapping Add.
                     latest = copy.deepcopy(self._config.monitors)
-                    if not existing:
+                    current = self._find(iid)
+                    partial = (
+                        self._results.get(iid, {}).get("outcome")
+                        == "persisted_runtime_failed"
+                    )
+                    if current is not None:
+                        if not partial or current != added:
+                            raise ValueError(f"a monitor named {iid!r} already exists")
+                    elif iid in {
+                        monitor_name(m) for m in effective_monitors(self._config)
+                    }:
+                        raise ValueError(f"a monitor named {iid!r} already exists")
+                    if iid in self._removed:
+                        return self._busy(iid, "add")
+                    if current is None:
                         latest.append(added)
                 try:
                     persistence = self._commit(op, latest)
@@ -578,17 +593,21 @@ class MonitorAdmin:
                             del self._stop_saves[iid]
                 get_task_log().record(iid, "operator.stop", task_type=spec["type_id"])
 
-            save.thread = threading.Thread(
-                target=persist_stop, name=f"persist-stop-{iid}", daemon=True
-            )
             try:
+                save.thread = threading.Thread(
+                    target=persist_stop, name=f"persist-stop-{iid}", daemon=True
+                )
                 save.thread.start()
             except Exception:
-                save.validated = "failed"
-                save.done.set()
-                self._mutation.release()
-                with self._lock:
-                    self._stop_saves.pop(iid, None)
+                if save.thread is None or save.thread.ident is None:
+                    # Only an unstarted writer can return its admission here.
+                    # A started writer owns completion even if start() raised.
+                    with self._lock:
+                        save.validated = "failed"
+                        save.done.set()
+                        if self._stop_saves.get(iid) is save:
+                            del self._stop_saves[iid]
+                    self._mutation.release()
         if save is not None:
             save.done.wait(max(0, deadline - time.monotonic()))
             persistence = save.validated if save.done.is_set() else "pending"

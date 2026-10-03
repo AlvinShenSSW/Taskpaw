@@ -1,0 +1,57 @@
+name: Dependency security scan
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - taskpaw_v3/ui/package.json
+      - taskpaw_v3/ui/package-lock.json
+      - taskpaw_v3/src-tauri/Cargo.toml
+      - taskpaw_v3/src-tauri/Cargo.lock
+      - scripts/dependency_scan.py
+      - tests/test_dependency_scan.py
+      - tests/test_dependency_compatibility.py
+      - docs/security/dependency-exceptions.json
+      - .github/workflows/dependency-scan.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Install pinned cargo-audit in runner-owned tooling
+        env:
+          CARGO_HOME: ${{ runner.temp }}/dependency-tool-cargo-home
+        run: cargo install cargo-audit --locked --version 0.22.2 --root "$RUNNER_TEMP/dependency-tools"
+      - name: Scan exact locks without app installation or remediation
+        run: >-
+          uv run --no-project --python 3.12 python scripts/dependency_scan.py
+          --cargo-audit "$RUNNER_TEMP/dependency-tools/bin/cargo-audit"
+          --output-dir build/dependency-scan
+      - name: Retain sanitized reports even on scan failure
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: dependency-scan-${{ github.event_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/dependency-scan
+          if-no-files-found: error
+          retention-days: 30
