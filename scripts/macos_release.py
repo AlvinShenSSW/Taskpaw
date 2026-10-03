@@ -878,10 +878,10 @@ def ready_line(line, base):
         return False
 
 
-def metrics_ok(record, version):
+def metrics_ok(record, version, expected_server_id):
     if (
         not isinstance(record, dict)
-        or record.get("server_id") != "release-smoke"
+        or record.get("server_id") != expected_server_id
         or record.get("machine") != "release-smoke"
         or record.get("version") != version
     ):
@@ -948,6 +948,29 @@ def smoke(sidecar, plan, isolation, env, version):
             HOME=str(home), TMPDIR=str(extraction), PATH="/usr/bin:/bin:/usr/sbin:/sbin"
         )
         isolation.require()
+        tool(
+            "smoke_state_initialize",
+            [
+                str(sidecar),
+                "agent-state",
+                "--config",
+                str(config),
+                "initialize",
+                "--confirm-new-pairing",
+            ],
+            env=runtime_env,
+            cwd=tmp,
+        )
+        try:
+            state = json.loads(
+                config.with_name("agent.state.json").read_text(encoding="utf-8")
+            )
+            expected_server_id = state["server_id"]
+            if not isinstance(expected_server_id, str) or not expected_server_id:
+                raise ValueError
+        except (OSError, ValueError, TypeError, KeyError):
+            raise BuildError("macos_smoke_state_invalid") from None
+        isolation.require()
         try:
             with owned_child(
                 [str(sidecar), "agent"],
@@ -1003,7 +1026,9 @@ def smoke(sidecar, plan, isolation, env, version):
                                 if (
                                     response.status == 200
                                     and len(body) <= 1024 * 1024
-                                    and metrics_ok(json.loads(body), version)
+                                    and metrics_ok(
+                                        json.loads(body), version, expected_server_id
+                                    )
                                 ):
                                     success = True
                                     break

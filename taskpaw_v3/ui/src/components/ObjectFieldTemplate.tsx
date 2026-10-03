@@ -1,5 +1,5 @@
 import { Box, Checkbox, FormControlLabel, FormHelperText, TextField, Typography } from "@mui/material";
-import type { ObjectFieldTemplateProps, RJSFSchema } from "@rjsf/utils";
+import type { ObjectFieldTemplateProps, RJSFSchema, UiSchema } from "@rjsf/utils";
 import { createContext, useContext, type ReactNode } from "react";
 
 // Two-column form grid (#94, design preview `.form` / `.full`). Each property is a
@@ -10,9 +10,9 @@ import { createContext, useContext, type ReactNode } from "react";
 //   - booleans (a switch reads better on its own line)
 // Single column on narrow widths (the add/edit dialog is ~480px).
 function spansFull(name: string, props: ObjectFieldTemplateProps): boolean {
-  const schemaProps = (props.schema.properties ?? {}) as Record<string, any>;
+  const schemaProps = (props.schema.properties ?? {}) as Record<string, RJSFSchema>;
   const field = schemaProps[name] ?? {};
-  const ui = (props.uiSchema?.[name] ?? {}) as Record<string, any>;
+  const ui = (props.uiSchema?.[name] ?? {}) as UiSchema<unknown>;
   const opts = ui["ui:options"] ?? {};
   if (opts.full === true) return true;
   if (field.type === "object" || field.type === "array") return true;

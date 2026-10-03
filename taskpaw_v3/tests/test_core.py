@@ -179,6 +179,94 @@ def test_graceful_shutdown_continues_if_callback_raises():
     assert ran == [1]  # the other callback still ran
 
 
+def test_shutdown_completion_hold_waits_for_callbacks_and_children(caplog):
+    import logging
+    import subprocess
+    import sys
+    import threading
+
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+
+    caplog.set_level(logging.INFO, logger="taskpaw.lifecycle")
+    gs = GracefulShutdown(child_timeout=3)
+    release = gs.hold_completion()
+    entered, proceed = threading.Event(), threading.Event()
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+
+    def callback():
+        entered.set()
+        assert proceed.wait(timeout=3)
+
+    gs.register("blocked callback", callback)
+    gs.register_child("fixture child", child)
+    caller = threading.Thread(target=gs.shutdown)
+    try:
+        caller.start()
+        assert entered.wait(timeout=3)
+        assert gs.is_stopping
+        release()
+        release()  # double release must not underflow or publish twice
+        assert not gs.stopped.is_set()
+        assert child.poll() is None
+        assert "Graceful shutdown complete" not in caplog.text
+        proceed.set()
+        caller.join(timeout=5)
+        assert not caller.is_alive()
+        assert child.poll() is not None
+        assert gs.stopped.is_set()
+        gs.shutdown()
+        assert caplog.text.count("Graceful shutdown complete") == 1
+    finally:
+        proceed.set()
+        caller.join(timeout=5)
+        if child.poll() is None:
+            child.terminate()
+            child.wait(timeout=3)
+
+
+def test_startup_completion_hold_released_even_if_cleanup_raises():
+    from taskpaw_v3.core.lifecycle import GracefulShutdown, StartupShutdown
+
+    gs = GracefulShutdown()
+
+    def failed_cleanup():
+        raise RuntimeError("fixture cleanup failed")
+
+    startup = StartupShutdown(gs, lambda: None, failed_cleanup)
+    gs.register("startup", startup.stop)
+    gs.shutdown()
+    assert gs.is_stopping and not gs.stopped.is_set()
+    with pytest.raises(RuntimeError, match="fixture cleanup failed"):
+        startup.finish()
+    assert gs.stopped.is_set()
+    startup.finish()  # release and cleanup remain idempotent
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows os.kill SIGTERM terminates directly"
+)
+def test_shutdown_signal_reentry_does_not_deadlock_registry():
+    # Install real handlers only in an isolated process; force signal delivery
+    # during a registry operation instead of relying on a timing stress loop.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import os, signal
+from taskpaw_v3.core.lifecycle import GracefulShutdown
+shutdown = GracefulShutdown()
+shutdown.install_signal_handlers()
+with shutdown._lock:
+    os.kill(os.getpid(), signal.SIGTERM)
+assert shutdown.is_stopping and shutdown.stopped.is_set()
+""",
+        ],
+        check=True,
+        timeout=5,
+    )
+
+
 # ── config ──────────────────────────────────────────────────────────────--
 def test_agent_config_roundtrip_and_secret_masking(tmp_path):
     cfg = AgentConfig(server_id="s1", machine="dev", api_token="secret")
@@ -201,10 +289,12 @@ def test_hub_config_defaults():
 
 
 def test_agent_state_persists_event_id(tmp_path):
-    from taskpaw_v3.core.state import load_next_id, save_next_id
+    from taskpaw_v3.core.state import initialize_state, load_next_id, save_next_id
 
     p = tmp_path / "agent.state.json"
-    assert load_next_id(p) == 1
+    with pytest.raises(ValueError):
+        load_next_id(p)
+    initialize_state(p, "fixture", 41)
     save_next_id(p, 42)
     assert load_next_id(p) == 42
 
@@ -214,12 +304,17 @@ def test_build_queue_persists_across_restart(tmp_path):
 
     cfg = AgentConfig(server_id="s", machine="dev")
     state = tmp_path / "agent.state.json"
+    from taskpaw_v3.core.state import initialize_state
+
+    initialize_state(state, cfg.server_id)
     q1 = build_queue(cfg, state)
     assert q1.add("mon", "a")["id"] == 1
     assert q1.add("mon", "b")["id"] == 2
     # New queue (simulated restart) resumes from the persisted counter.
+    q1.close()
     q2 = build_queue(cfg, state)
     assert q2.add("mon", "c")["id"] == 3
+    q2.close()
 
 
 def test_bind_host_normalized_on_both_configs():

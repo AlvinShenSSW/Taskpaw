@@ -1,10 +1,14 @@
+import { useEffect, useSyncExternalStore } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { hasControlCredential, subscribeControlCredentials, controlCredentialRevision } from "./api";
+import { ControlCredentialGate } from "./components/ControlCredentialGate";
 import { AppBar, Box, Tab, Tabs, Toolbar, Typography } from "@mui/material";
 import { create } from "zustand";
 import { useTranslation } from "react-i18next";
 import { AgentConsole } from "./views/AgentConsole";
 import { HubDashboard } from "./views/HubDashboard";
 import { Logo } from "./components/Logo";
-import { StatusDot } from "./components/StatusDot";
+import { LocalApiBadge } from "./components/LocalApiBadge";
 
 // Both role-views ship in one app (design §7); the active one is chosen by role.
 type Role = "agent" | "hub";
@@ -32,10 +36,14 @@ const useRole = create<{ role: Role; set: (r: Role) => void }>((set) => ({
 export function App() {
   const { role, set } = useRole();
   const { t } = useTranslation();
+  const revision = useSyncExternalStore(subscribeControlCredentials, controlCredentialRevision);
+  const ready = hasControlCredential(role);
+  const qc = useQueryClient();
+  useEffect(() => { if (!ready) { void qc.cancelQueries(); qc.clear(); } }, [ready, revision, qc]);
   const label = (r: Role) => t(`app.${r}`);
   // Show the Agent/Hub switcher ONLY when no role was injected (dev/browser).
   // A packaged agent build must NOT expose the Hub tab (and vice versa) (#58).
-  const showSwitcher = INJECTED_ROLE === null;
+  const showSwitcher = INJECTED_ROLE === null && import.meta.env.DEV;
   return (
     // Transparent so the body blueprint grid + radial glow (theme.ts #89) shows
     // through; cards/appbar paint their own surfaces over it.
@@ -129,9 +137,7 @@ export function App() {
             </Typography>
           )}
           <Box sx={{ flexGrow: 1 }} />
-          {/* Health badge: live dot + text (status never color-only). The real
-              Hub-reachability probe is deferred (issue #91 scope); the dot reflects
-              the shell being up. */}
+          {/* Local status API evidence, separate from monitor and fleet health. */}
           <Box
             sx={{
               display: "inline-flex",
@@ -145,8 +151,7 @@ export function App() {
               bgcolor: "background.default",
             }}
           >
-            <StatusDot state="ok" live />
-            <Typography variant="body2">{t("app.online")}</Typography>
+            <LocalApiBadge role={role} ready={ready} />
           </Box>
           <Typography variant="body2" sx={{ ml: 1.5, color: "text.secondary" }}>{`v${__APP_VERSION__}`}</Typography>
         </Toolbar>
@@ -154,7 +159,7 @@ export function App() {
       <Box sx={{ p: 2 }}>
         {/* Settings now lives as a tab INSIDE each role view (next to
             Monitors/Events, Fleet/Events) — no app-bar gear (#87). */}
-        {role === "agent" ? <AgentConsole /> : <HubDashboard />}
+        {ready ? (role === "agent" ? <AgentConsole /> : <HubDashboard />) : <ControlCredentialGate key={role} role={role} desktop={INJECTED_ROLE !== null || !import.meta.env.DEV} />}
       </Box>
     </Box>
   );

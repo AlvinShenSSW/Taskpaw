@@ -1,5 +1,7 @@
 # #191 — AV 翻译 library safety: recognise existing subtitles, fail-closed scan, never overwrite; version 3.7.1
 
+> **Evidence reconciliation — 2026-10-02:** This is a historical design, delivered in [PR #194](https://github.com/AlvinShenSSW/Taskpaw/pull/194). The original acceptance text is preserved. A checked item records the source/test contract described in the table below; it does not certify an installed app, external service or every native platform. Unchecked items retain superseded, partial or unverified clauses. Current audit work is indexed in [the follow-up](../audits/2026-10-02-audit-follow-up.md).
+
 Date: 2026-09-25 (design v4, FROZEN — debate rounds 1–4: F1–F19 folded in; round 4 CLEAN)
 Issue: #191. Driver: `/afk` (Opus 5.5 leads; Opus pilot; Codex 外门 gpt-6-astra high; Kimi 终审). Merge: leave-open.
 Upstream: #179 (avsubs), #177 (Jasna AV 翻译), #187 (naming), #189 (progress, v3.7.0).
@@ -31,7 +33,7 @@ existing file.
 
 ## Acceptance criteria
 
-- [ ] AC1 **Shared recognition** (`subs/existing.py`, new, pure, never raises) — from ONE directory
+- [x] AC1 **Shared recognition** (`subs/existing.py`, new, pure, never raises) — from ONE directory
   listing (file names):
   - `norm(s) = NFC(s).casefold()`; subtitle extensions `.srt .ass .ssa .vtt`; names starting `._`
     are never subtitles (nor videos); our temp names (`… .tmp`) are not subtitles (extension).
@@ -60,12 +62,12 @@ existing file.
   - `judge(video_name, names, is_video, *, rule_c: bool, extra_videos=()) -> Existing(chinese:
     Optional[str], ja_transcript: Optional[str])` — the matching file names; `ja_transcript` =
     `<stem>.ja.srt` present.
-- [ ] AC2 **avsubs scan** (`plan_tree`): each video is judged (rule_c on) from the listing of its own
+- [x] AC2 **avsubs scan** (`plan_tree`): each video is judged (rule_c on) from the listing of its own
   directory that the walk already holds — no per-file existence probe for subtitle state remains
   (the per-video `source_identity` stat and per-entry errors stay; both already fail closed).
   Recognised → counted in `done` (`queue_pre_done`, 已有字幕). `translate_only` = not Chinese and
   `ja_transcript`. An unreadable directory stays an error + skip (existing).
-- [ ] AC3 **Jasna** (`plan_subs`, rule_c **off** — C4/F1): ONE `os.scandir(output_folder)` name
+- [x] AC3 **Jasna** (`plan_subs`, rule_c **off** — C4/F1): ONE `os.scandir(output_folder)` name
   listing per planning pass. A `FileNotFoundError` counts as an empty listing ONLY when the output
   folder is not a root (its parent differs from itself and its `pathlib` name — `Path(out).name`, which
   ignores a trailing separator — is non-empty; F18: a share or
@@ -77,7 +79,7 @@ existing file.
   legacy `_restored`, else the future new name) is resolved **from the same listing** (F6), and
   `SubsPlan` carries each film's kind **and** media; `_setup_subs` uses them and never judges or
   probes again. Not-yet-restored media are passed as `extra_videos` for attribution.
-- [ ] AC4 **Never overwrite** (`SubsJob._publish`): write `<target>.<gen>.tmp`, then move it into place
+- [x] AC4 **Never overwrite** (`SubsJob._publish`): write `<target>.<gen>.tmp`, then move it into place
   without replacing: pre-check (target present → refuse) then Windows `os.rename` (refuses an
   existing target: `FileExistsError`, verified on NTFS incl. case-variant, read-only, open and
   directory targets) or POSIX `os.link(tmp, target)` + `tmp.unlink()` (EEXIST refuses); a filesystem
@@ -86,7 +88,7 @@ existing file.
   (F8) — `PublishResult` = `ok` | `exists` | `error(text)` — so mypy flags every unconverted caller:
   avsubs 741, 743, 946, 954, 1212, 1255; Jasna 1461, 2306, 2455, 2463, 2584 (Stop-path callers only
   log). The no-speech empty pair: `.srt` refused → the empty `.ja.srt` this call just wrote is removed.
-- [ ] AC5 **Re-check before work** (placement pinned, F7):
+- [x] AC5 **Re-check before work** (placement pinned, F7):
   - **Before ASR** — avsubs in `_start_asr` after the GPU hold is held; Jasna in `_start_subs` after
     the carried-hold transfer / `take` (so `_carried` is already consumed and no per-poll listing
     happens while the GPU is refused). The directory listing is taken **outside** the plugin's lock;
@@ -105,7 +107,7 @@ existing file.
   - Chinese present → settle `skipped`, reason `subtitle exists` (已有字幕); listing error → settle
     `skipped`, reason `subtitle state unreadable` (fail closed; retried next Start). A skip neither
     adds to nor resets the failure streak (existing behaviour).
-- [ ] AC6 **Refused publish / skip outcome:** `.srt` refused or AC5 "subtitle exists" → settle
+- [x] AC6 **Refused publish / skip outcome:** `.srt` refused or AC5 "subtitle exists" → settle
   `skipped` (`subtitle exists`) and **discard the `.ja.srt` only if this job published it in this
   run** (F9; a pre-existing library transcript stays). `.ja.srt` refused (a transcript appeared
   mid-run) → settle `skipped` (`transcript exists`); next Start plans it `translate_only`. Reporting:
@@ -197,3 +199,18 @@ idle note, field text), `plugins/jasna.py` (`plan_subs`/`SubsPlan`/`subs_kind`, 
 
 One Opus pilot, tests first. The evidence table gives every name needed; no library access. Never
 touch the live agent/config/library; no WhisperJAV/GPU; no network.
+
+## Acceptance evidence — 2026-10-02
+
+Baseline source: [91f7745](https://github.com/AlvinShenSSW/Taskpaw/commit/91f7745564f17a0039f81fab8293a9c150232236). Historical delivery: [PR #194](https://github.com/AlvinShenSSW/Taskpaw/pull/194), merge [6ae162a](https://github.com/AlvinShenSSW/Taskpaw/commit/6ae162ad48d173a84d20978e20d78fb4f4f41574). [Recorded CI](https://github.com/AlvinShenSSW/Taskpaw/actions/runs/36126478923/job/108043651197) applies to that historical head, not every prose clause or installed machine. Source/test links below describe the baseline; historical version/default statements remain unchanged. The later source version 3.9.8 is recorded in [PR #214](https://github.com/AlvinShenSSW/Taskpaw/pull/214); it supersedes earlier version clauses without proving installation.
+
+| AC | Disposition | Source / automated evidence | Qualification |
+|---|---|---|---|
+| AC1 | Implemented; automated evidence | [existing.py: judge](../../taskpaw_v3/monitors/subs/existing.py); [existing.py: norm](../../taskpaw_v3/monitors/subs/existing.py); [existing.py: _owner](../../taskpaw_v3/monitors/subs/existing.py); tests: [test_subs_existing.py: test_evidence_table_rows_are_recognised](../../taskpaw_v3/tests/test_subs_existing.py); [test_subs_existing.py: test_extra_videos_own_their_subtitles_before_they_exist](../../taskpaw_v3/tests/test_subs_existing.py); [test_subs_existing.py: test_rule_c_residual_x_jp_is_recognised](../../taskpaw_v3/tests/test_subs_existing.py) | Pure recognition suite covers attribution, tags, all extensions, NFC/case, extra owners and accepted residual; names-only fixtures are not a live library inspection. |
+| AC2 | Implemented; automated evidence | [avsubs.py: plan_tree](../../taskpaw_v3/monitors/plugins/avsubs.py); [existing.py: judge](../../taskpaw_v3/monitors/subs/existing.py); tests: [test_avsubs.py: test_plan_tree_judges_every_film_from_its_folder_listing](../../taskpaw_v3/tests/test_avsubs.py); [test_avsubs.py: test_plan_tree_unreadable_subdir_is_reported_and_root_raises](../../taskpaw_v3/tests/test_avsubs.py) | Single-listing planner classification/error behavior is directly tested with temporary folders and scan spies. |
+| AC3 | Implemented; automated evidence | [jasna.py: plan_subs](../../taskpaw_v3/monitors/plugins/jasna.py); [jasna.py: _setup_subs](../../taskpaw_v3/monitors/plugins/jasna.py); [existing.py: list_names_missing_ok](../../taskpaw_v3/monitors/subs/existing.py); tests: [test_jasna_subs.py: test_plan_subs_judges_every_film_from_one_output_listing](../../taskpaw_v3/tests/test_jasna_subs.py); [test_subs_existing.py: test_a_share_or_drive_root_is_never_missing](../../taskpaw_v3/tests/test_subs_existing.py); [test_jasna_subs.py: test_setup_subs_uses_the_plan_and_never_probes_again](../../taskpaw_v3/tests/test_jasna_subs.py) | One-listing media/kind carry and missing-vs-unreachable/root distinction are directly covered; mocked network errors do not certify SMB servers. |
+| AC4 | Implemented; automated evidence | [job.py: _move_into_place](../../taskpaw_v3/monitors/subs/job.py); [job.py: PublishResult](../../taskpaw_v3/monitors/subs/job.py); [job.py: _publish](../../taskpaw_v3/monitors/subs/job.py); tests: [test_subs_job.py: test_windows_rename_refuses_a_case_variant_target](../../taskpaw_v3/tests/test_subs_job.py); [test_subs_job.py: test_publish_never_overwrites_an_existing_target](../../taskpaw_v3/tests/test_subs_job.py); [test_subs_job.py: test_no_hard_links_fall_back_to_a_checked_replace](../../taskpaw_v3/tests/test_subs_job.py) | Conditional refusing rename/link, typed results and owned-empty cleanup are tested; [#194](https://github.com/AlvinShenSSW/Taskpaw/pull/194) records native NTFS and Windows CI. The explicitly permitted no-hard-link fallback retains its race; SMB error classification is a recorded residual. |
+| AC5 | Implemented; automated evidence | [avsubs.py: _recheck](../../taskpaw_v3/monitors/plugins/avsubs.py); [jasna.py: _recheck](../../taskpaw_v3/monitors/plugins/jasna.py); [existing.py: list_names](../../taskpaw_v3/monitors/subs/existing.py); tests: [test_avsubs.py: test_a_subtitle_dropped_in_before_the_asr_skips_and_hands_the_gpu_on](../../taskpaw_v3/tests/test_avsubs.py); [test_jasna_subs.py: test_a_skipped_translate_only_film_lets_the_subs_only_walk_continue](../../taskpaw_v3/tests/test_jasna_subs.py); [test_subs_existing.py: test_list_names_reads_any_failure_as_unreadable](../../taskpaw_v3/tests/test_subs_existing.py) | Placement, lock/lease refusal and fail-closed skip branches are directly covered by both plugin suites. No real NAS/media run is claimed. |
+| AC6 | Implemented; automated evidence | [job.py: discard_own_ja](../../taskpaw_v3/monitors/subs/job.py); [avsubs.py: _skip_existing](../../taskpaw_v3/monitors/plugins/avsubs.py); [jasna.py: _skip_existing](../../taskpaw_v3/monitors/plugins/jasna.py); tests: [test_subs_job.py: test_discard_own_ja_only_removes_a_transcript_this_job_published](../../taskpaw_v3/tests/test_subs_job.py); [test_avsubs.py: test_an_unreadable_folder_before_the_asr_skips_with_one_alert](../../taskpaw_v3/tests/test_avsubs.py) | Typed refusal, owned transcript cleanup and deduplicated skip/alert outcomes are tested in both plugin suites. |
+| AC7 | Unchecked; see qualification | [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py); tests: [test_version.py: test_version_matches_python_source_of_truth](../../taskpaw_v3/tests/test_version.py) | Historical 3.7.1/texts delivered by [#194](https://github.com/AlvinShenSSW/Taskpaw/pull/194); later versions supersede it. |
+| AC8 | Unchecked; see qualification | [existing.py: judge](../../taskpaw_v3/monitors/subs/existing.py); [job.py: _move_into_place](../../taskpaw_v3/monitors/subs/job.py); tests: [test_subs_existing.py: test_evidence_table_rows_are_recognised](../../taskpaw_v3/tests/test_subs_existing.py); [test_subs_job.py: test_windows_rename_refuses_a_case_variant_target](../../taskpaw_v3/tests/test_subs_job.py) | [#194](https://github.com/AlvinShenSSW/Taskpaw/pull/194) public body/checks report all listed commands green. Full historical plan mapping and remote filesystem behavior are not independently established here. |

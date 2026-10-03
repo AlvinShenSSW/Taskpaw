@@ -411,9 +411,10 @@ def test_ready_and_metrics_require_actual_fixture_contract():
             }
         },
     }
-    assert mac.metrics_ok(record, "3.9.8")
+    assert mac.metrics_ok(record, "3.9.8", "release-smoke")
+    assert not mac.metrics_ok(record, "3.9.8", "another-pairing")
     record["monitors"]["release-smoke-metrics"]["state"] = "unknown"
-    assert not mac.metrics_ok(record, "3.9.8")
+    assert not mac.metrics_ok(record, "3.9.8", "release-smoke")
 
 
 def test_adhoc_preflight_never_calls_keychain(tmp_path, monkeypatch):
@@ -433,7 +434,7 @@ def test_malformed_metrics_are_rejected(monitor):
         "version": "3.9.8",
         "monitors": {"release-smoke-metrics": monitor},
     }
-    assert not mac.metrics_ok(record, "3.9.8")
+    assert not mac.metrics_ok(record, "3.9.8", "release-smoke")
 
 
 def test_native_target_probe_strips_apple_inputs(monkeypatch):
@@ -599,7 +600,7 @@ def test_owned_tiny_macho_codesign_and_corruption(tmp_path):
 
 
 def test_release_windows_sign_step_is_unchanged():
-    after = (ROOT / ".github/workflows/release.yml").read_text()
+    after = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     marker = "      - name: Sign Windows installers"
     block = after[
         after.index(marker) : after.index(
@@ -800,6 +801,87 @@ def test_native_tool_output_never_leaks_and_is_bounded(scenario, capsys):
     assert "FAKE-SENSITIVE" not in output.out + output.err
 
 
+def test_smoke_initializes_owned_state_before_agent_launch(monkeypatch):
+    from taskpaw_v3.agent import state
+    from taskpaw_v3.core.state import StateSession
+
+    calls = []
+    gates = []
+
+    class LaunchObserved(Exception):
+        pass
+
+    def initialize(stage, command, **kwargs):
+        assert stage == "smoke_state_initialize"
+        assert command[1] == "agent-state"
+        assert command[-2:] == ["initialize", "--confirm-new-pairing"]
+        config = Path(command[3])
+        assert config.is_relative_to(Path(kwargs["env"]["HOME"]))
+        assert str(config.parents[4]) == kwargs["cwd"]
+        assert gates
+        assert state.main(command[2:]) == 0
+        calls.append(command)
+        return b"", b""
+
+    def launch(command, **kwargs):
+        config = (
+            Path(kwargs["env"]["HOME"])
+            / "Library/Application Support/TaskPaw/agent.yaml"
+        )
+        primary = config.with_name("agent.state.json")
+        assert primary.exists(), "smoke must explicitly initialize its owned pairing"
+        session = StateSession.open(primary)
+        try:
+            assert session.record.server_id.startswith("agent-")
+            assert session.record.next_event_id == 1
+        finally:
+            session.close()
+        assert len(gates) == 3
+        assert command == ["FAKE-SIDECAR", "agent"]
+        raise LaunchObserved
+
+    monkeypatch.setattr(mac, "tool", initialize)
+    monkeypatch.setattr(mac, "owned_child", launch)
+    with pytest.raises(LaunchObserved):
+        mac.smoke(
+            Path("FAKE-SIDECAR"),
+            mac.normalize({}, TARGET),
+            SimpleNamespace(require=lambda: gates.append("gate")),
+            {},
+            "3.9.8",
+        )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("mode", ["failed", "missing", "json", "identity"])
+def test_smoke_bad_initialization_never_launches_agent(monkeypatch, capsys, mode):
+    def initialize(stage, command, **kwargs):
+        if mode == "failed":
+            raise mac.BuildError("smoke_state_initialize_failed")
+        path = Path(command[3]).with_name("agent.state.json")
+        if mode == "json":
+            path.write_text("FAKE-SENSITIVE-METADATA")
+        elif mode == "identity":
+            path.write_text(json.dumps({"server_id": []}))
+        return b"", b""
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("agent must not launch after bad initialization")
+
+    monkeypatch.setattr(mac, "tool", initialize)
+    monkeypatch.setattr(mac, "owned_child", forbidden)
+    with pytest.raises(mac.BuildError, match="smoke_state"):
+        mac.smoke(
+            Path("FAKE-SIDECAR"),
+            mac.normalize({}, TARGET),
+            SimpleNamespace(require=lambda: None),
+            {},
+            "3.9.8",
+        )
+    output = capsys.readouterr()
+    assert "FAKE-SENSITIVE" not in output.out + output.err
+
+
 @pytest.mark.skipif(
     sys.platform != "darwin", reason="Mac native-group protocol fixture"
 )
@@ -808,12 +890,35 @@ def test_smoke_protocol_with_python_fixture_not_product(tmp_path, monkeypatch):
     # makes no listener. This is protocol/cleanup evidence, never product readiness.
     real_popen = subprocess.Popen
     calls = []
-    emitted = "import os,json,time; from pathlib import Path; c=json.loads((Path(os.environ['HOME'])/'Library/Application Support/TaskPaw/agent.yaml').read_text()); print(json.dumps({'taskpaw_ready':True,'role':'agent','base_url':'http://127.0.0.1:'+str(c['control_port'])}),flush=True); time.sleep(60)"
 
     def fake_backend(cmd, **kwargs):
+        from taskpaw_v3.core.config import AgentConfig, load_yaml
+
+        config = (
+            Path(kwargs["env"]["HOME"])
+            / "Library/Application Support/TaskPaw/agent.yaml"
+        )
+        loaded = load_yaml(AgentConfig, config)
+        body["server_id"] = loaded.server_id
+        ready = {
+            "taskpaw_ready": True,
+            "role": "agent",
+            "base_url": f"http://127.0.0.1:{loaded.control_port}",
+        }
+        emitted = (
+            f"import time; print({json.dumps(ready)!r},flush=True); time.sleep(60)"
+        )
         calls.append(cmd)
         return real_popen([sys.executable, "-c", emitted], **kwargs)
 
+    def initialize(stage, cmd, **kwargs):
+        from taskpaw_v3.agent import state
+
+        assert stage == "smoke_state_initialize"
+        assert state.main(cmd[2:]) == 0
+        return b"", b""
+
+    monkeypatch.setattr(mac, "tool", initialize)
     monkeypatch.setattr(mac.subprocess, "Popen", fake_backend)
     body = {
         "server_id": "release-smoke",
@@ -858,7 +963,7 @@ def test_smoke_protocol_with_python_fixture_not_product(tmp_path, monkeypatch):
         Path("FAKE-PROTOCOL-EMITTER"), mac.normalize({}, TARGET), isolation, {}, "3.9.8"
     )
     assert (
-        len(contexts) == 2
+        len(contexts) == 3
         and len(calls) == 1
         and calls[0] == ["FAKE-PROTOCOL-EMITTER", "agent"]
     )

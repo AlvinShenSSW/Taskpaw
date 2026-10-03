@@ -138,16 +138,23 @@ def loopback_url(host: str, port: int) -> str:
     return f"http://{bracketed}:{port}"
 
 
-def announce_ready(role: str, base_url: str) -> None:
+def announce_ready(
+    role: str,
+    base_url: str,
+    *,
+    control_credential_file: str | None = None,
+    boot_id: str | None = None,
+) -> None:
     """Print the §3.1 readiness handshake line to stdout (#48): one machine-
     readable JSON object the Tauri shell reads before loading the webview, then
     injects this base_url (so a custom port works and the UI never races the
     backend). All logs go to stderr (logging.basicConfig), so stdout carries only
     this line; flushed so a piped shell sees it immediately."""
-    print(
-        json.dumps({"taskpaw_ready": True, "role": role, "base_url": base_url}),
-        flush=True,
-    )
+    ready = {"taskpaw_ready": True, "role": role, "base_url": base_url}
+    if control_credential_file is not None:
+        ready["control_credential_file"] = control_credential_file
+        ready["boot_id"] = boot_id
+    print(json.dumps(ready), flush=True)
 
 
 def _family(host: str) -> int:

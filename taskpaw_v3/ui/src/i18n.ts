@@ -14,6 +14,7 @@ export const LANGS: { value: Lang; label: string }[] = [
 const STORE_KEY = "taskpaw.lang";
 
 const en = {
+  control: { title: "Connect to {{role}}", help: "Read this running backend’s protected control descriptor in your local editor, then enter its base_url and control token. This role’s endpoint and credentials stay in memory; VITE_TASKPAW_BASE is no longer used.", endpoint: "Control endpoint", token: "Control token", connect: "Connect", failed: "Could not authenticate or reach the local backend. Read its current descriptor and try again.", reopen: "The backend may have restarted or startup credentials are unavailable. Please reopen TaskPaw." },
   ffmpeg: {
     checking: "Checking FFmpeg…",
     path: "FFmpeg found: {{path}}",
@@ -236,7 +237,9 @@ const en = {
     deleteAgentTitle: 'Remove agent "{{name}}"?',
     deleteAgentBody: "The Hub will stop polling it and forget its history. This can't be undone.",
   },
+  connection: { title: "Local API connection", checking: "Checking", connected: "Connected", failed: "Connection failed", outdated: "Last response outdated", credentials: "Credentials required", lastSuccess: "Last successful API response: {{time}}" },
   events: {
+    requestStatus: "Event request status", loading: "Loading events…", failed: "Could not load events. Please retry.", retry: "Retry", stale: "Showing the last successfully loaded events; the response is outdated.", statusUnavailable: "Local status is unavailable; event history is queried separately.",
     none: "No events yet — they appear here as monitors report activity.",
     nowProcessing: "Now processing", currentFile: "current file",
     queue: "queue", queueDone: "{{done}} / {{total}} done", queueLeft: " · {{n}} left",
@@ -357,6 +360,7 @@ const en = {
 };
 
 const zh: typeof en = {
+  control: { title: "连接 {{role}}", help: "在本地编辑器读取当前后端的受保护控制凭据文件，再填写 base_url 和控制令牌。端点和凭据仅在当前角色的内存中保存；不再使用 VITE_TASKPAW_BASE。", endpoint: "控制端点", token: "控制令牌", connect: "连接", failed: "无法验证凭据或连接本地后端。请读取当前凭据文件后重试。", reopen: "后端可能已重启，或启动凭据不可用。请重新打开 TaskPaw。" },
   ffmpeg: {
     checking: "正在检查 FFmpeg…",
     path: "已找到 FFmpeg：{{path}}",
@@ -577,7 +581,9 @@ const zh: typeof en = {
     deleteAgentTitle: "删除 agent「{{name}}」?",
     deleteAgentBody: "Hub 会停止轮询它并清除其历史记录，无法撤销。",
   },
+  connection: { title: "本地 API 连接", checking: "正在检查", connected: "已连接", failed: "连接失败", outdated: "上次响应已过期", credentials: "需要控制凭据", lastSuccess: "上次成功的 API 响应：{{time}}" },
   events: {
+    requestStatus: "事件请求状态", loading: "正在加载事件…", failed: "无法加载事件，请重试。", retry: "重试", stale: "显示上次成功读取的事件；响应已过期。", statusUnavailable: "本地状态暂不可用；事件历史会独立查询。",
     none: "暂无事件 —— 监控产生活动时会显示在这里。",
     nowProcessing: "正在处理", currentFile: "当前文件",
     queue: "队列", queueDone: "{{done}} / {{total}} 完成", queueLeft: " · 剩 {{n}}",

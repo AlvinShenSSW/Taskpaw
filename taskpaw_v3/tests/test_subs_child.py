@@ -813,3 +813,32 @@ def test_exists_quietly_treats_an_invalid_path_as_missing(tmp_path, monkeypatch)
     finally:
         monkeypatch.undo()  # pytest itself calls Path.exists when reporting
     assert got is False
+
+
+def test_asr_environment_drops_controller_credentials_in_actual_child():
+    import json
+    import os
+    import subprocess
+
+    base = dict(os.environ)
+    base.update(
+        {
+            "TASKPAW_CONTROL_TOKEN": "FAKE-CONTROL-SECRET",
+            "taskpaw_ui_token": "FAKE-OLD-UI-SECRET",
+            "TASKPAW_LLM_API_KEY": "FAKE-LLM-SECRET",
+        }
+    )
+    env = child_mod.asr_env(base)
+    assert base["TASKPAW_CONTROL_TOKEN"] == "FAKE-CONTROL-SECRET"
+    result = subprocess.run(
+        [sys.executable, "-c", "import os,json; print(json.dumps(sorted(os.environ)))"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    names = json.loads(result.stdout)
+    assert not any(
+        name.upper().startswith(("TASKPAW_CONTROL_", "TASKPAW_LLM_")) for name in names
+    )
+    assert not any(name.upper() == "TASKPAW_UI_TOKEN" for name in names)

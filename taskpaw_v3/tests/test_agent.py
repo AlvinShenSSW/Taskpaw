@@ -36,8 +36,13 @@ def test_tasklog_queries_accept_non_dict_by_model(tmp_path, by_model):
     )
     set_task_log(TaskLog(tmp_path, clock=clock))
     client = TestClient(
-        create_control_app(AgentConfig(server_id="s", machine="m")),
+        create_control_app(
+            AgentConfig(server_id="s", machine="m"),
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
         raise_server_exceptions=False,
+        headers={"Authorization": "Bearer test-control-token"},
     )
     for params in (
         {"day": "20260926"},
@@ -68,7 +73,12 @@ def test_tasklog_control_api_shapes_filters_clamp_and_network_absence():
     for _ in range(502):
         store.record("b", "task.done", task_type="jasna", severity="warn")
     cfg = AgentConfig(server_id="s", machine="m")
-    client = TestClient(create_control_app(cfg))
+    client = TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     response = client.get(
         "/control/logs",
         params={"day": "20260926", "q": "grok", "severity": "info,error"},
@@ -116,7 +126,12 @@ def test_ffmpeg_control_only_shape(monkeypatch, exe, windows):
         "winreg",
         SimpleNamespace(HKEY_LOCAL_MACHINE=1, HKEY_CURRENT_USER=2, OpenKey=missing),
     )
-    client = TestClient(create_control_app(_cfg()))
+    client = TestClient(
+        create_control_app(
+            _cfg(), control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     response = client.get("/control/ffmpeg", params={"whisperjav": exe})
     assert response.status_code == 200
     data = response.json()
@@ -163,9 +178,12 @@ def test_ffmpeg_saved_path_denied_keeps_script(monkeypatch):
         SimpleNamespace(HKEY_LOCAL_MACHINE=1, HKEY_CURRENT_USER=2, OpenKey=denied),
     )
     exe = r"C:\Custom\Scripts\whisperjav.exe"
-    response = TestClient(create_control_app(_cfg())).get(
-        "/control/ffmpeg", params={"whisperjav": exe}
-    )
+    response = TestClient(
+        create_control_app(
+            _cfg(), control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    ).get("/control/ffmpeg", params={"whisperjav": exe})
     assert response.status_code == 200
     data = response.json()
     assert data["error"] is False
@@ -195,7 +213,12 @@ def test_ffmpeg_internal_failure_returns_200(monkeypatch, failed):
         raise RuntimeError("internal test failure")
 
     monkeypatch.setattr(ffmpeg, failed, fail)
-    response = TestClient(create_control_app(_cfg())).get("/control/ffmpeg")
+    response = TestClient(
+        create_control_app(
+            _cfg(), control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    ).get("/control/ffmpeg")
     assert response.status_code == 200
     assert response.json()["error"] is True
 
@@ -214,7 +237,12 @@ def test_ffmpeg_internal_failure_returns_200(monkeypatch, failed):
 def test_tasklog_invalid_parameters_have_boot_envelope(params):
     from taskpaw_v3.core.tasklog import get_task_log
 
-    client = TestClient(create_control_app(_cfg()))
+    client = TestClient(
+        create_control_app(
+            _cfg(), control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     response = client.get("/control/logs", params=params)
     assert response.status_code == 400
     assert response.json()["boot"] == get_task_log().boot
@@ -224,7 +252,12 @@ def test_tasklog_invalid_parameters_have_boot_envelope(params):
 
 def _film_app(surface, **providers):
     if surface == "control":
-        return create_control_app(_cfg(), **providers)
+        return create_control_app(
+            _cfg(),
+            **providers,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        )
     return create_network_app(_cfg(), EventQueue("dev"), **providers)
 
 
@@ -242,7 +275,12 @@ def test_film_page_control_api_shape_defaults_clamps_and_network_absence(surface
         calls.append((name, page, size))
         return tracker.page(page, size)
 
-    client = TestClient(_film_app(surface, films_provider=provider))
+    client = TestClient(
+        _film_app(surface, films_provider=provider),
+        headers={"Authorization": "Bearer test-control-token"}
+        if surface == "control"
+        else {},
+    )
     response = client.get(
         f"{'/control' if surface == 'control' else ''}/monitors/films",
         params={"name": "AV/library"},
@@ -285,7 +323,12 @@ def test_film_page_control_api_shape_defaults_clamps_and_network_absence(surface
 @pytest.mark.parametrize("surface", ["control", "network"])
 def test_film_page_control_api_invalid_parameters_are_400(params, surface):
     calls = []
-    client = TestClient(_film_app(surface, films_provider=lambda *a: calls.append(a)))
+    client = TestClient(
+        _film_app(surface, films_provider=lambda *a: calls.append(a)),
+        headers={"Authorization": "Bearer test-control-token"}
+        if surface == "control"
+        else {},
+    )
     response = client.get(
         f"{'/control' if surface == 'control' else ''}/monitors/films", params=params
     )
@@ -297,7 +340,12 @@ def test_film_page_control_api_invalid_parameters_are_400(params, surface):
 @pytest.mark.parametrize("provider", [None, lambda *a: None])
 @pytest.mark.parametrize("surface", ["control", "network"])
 def test_film_page_control_api_no_list_is_404(provider, surface):
-    client = TestClient(_film_app(surface, films_provider=provider))
+    client = TestClient(
+        _film_app(surface, films_provider=provider),
+        headers={"Authorization": "Bearer test-control-token"}
+        if surface == "control"
+        else {},
+    )
     response = client.get(
         f"{'/control' if surface == 'control' else ''}/monitors/films",
         params={"name": "unknown"},
@@ -319,7 +367,12 @@ def test_run_films_api_shape_defaults_clamps_network_absence(surface):
         calls.append((name, filter, page, size))
         return tracker.run_films(filter, page, size)
 
-    client = TestClient(_film_app(surface, run_films_provider=provider))
+    client = TestClient(
+        _film_app(surface, run_films_provider=provider),
+        headers={"Authorization": "Bearer test-control-token"}
+        if surface == "control"
+        else {},
+    )
     path = f"{'/control' if surface == 'control' else ''}/monitors/run-films"
     result = client.get(path, params={"name": "task/library"})
     assert result.status_code == 200
@@ -374,7 +427,10 @@ def test_run_films_api_shape_defaults_clamps_network_absence(surface):
 def test_run_films_api_invalid_400(params, surface):
     calls = []
     client = TestClient(
-        _film_app(surface, run_films_provider=lambda *a: calls.append(a))
+        _film_app(surface, run_films_provider=lambda *a: calls.append(a)),
+        headers={"Authorization": "Bearer test-control-token"}
+        if surface == "control"
+        else {},
     )
     response = client.get(
         f"{'/control' if surface == 'control' else ''}/monitors/run-films",
@@ -388,7 +444,12 @@ def test_run_films_api_invalid_400(params, surface):
 @pytest.mark.parametrize("provider", [None, lambda *a: None])
 @pytest.mark.parametrize("surface", ["control", "network"])
 def test_run_films_api_404(provider, surface):
-    client = TestClient(_film_app(surface, run_films_provider=provider))
+    client = TestClient(
+        _film_app(surface, run_films_provider=provider),
+        headers={"Authorization": "Bearer test-control-token"}
+        if surface == "control"
+        else {},
+    )
     response = client.get(
         f"{'/control' if surface == 'control' else ''}/monitors/run-films",
         params={"name": "unknown"},
@@ -414,7 +475,15 @@ def test_control_events_returns_recent_non_destructive(_=None):
     q = EventQueue("dev")
     for i in range(3):
         q.add("mon", f"e{i}", level="info")
-    client = TestClient(create_control_app(cfg, events_provider=q.recent))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            events_provider=q.recent,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     r = client.get("/control/events?limit=2")
     assert r.status_code == 200
     assert [e["message"] for e in r.json()["events"]] == [
@@ -423,9 +492,12 @@ def test_control_events_returns_recent_non_destructive(_=None):
     ]  # last 2, newest last
     assert len(q.payload(ack_id=0)["events"]) == 3  # not consumed
     # no provider wired → empty, not an error
-    assert TestClient(create_control_app(cfg)).get("/control/events").json() == {
-        "events": []
-    }
+    assert TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    ).get("/control/events").json() == {"events": []}
 
 
 def test_control_events_filters_by_monitor():
@@ -436,7 +508,15 @@ def test_control_events_filters_by_monitor():
     q.add("lada", "l0")
     q.add("folder", "f0")
     q.add("lada", "l1")
-    client = TestClient(create_control_app(cfg, events_provider=q.recent))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            events_provider=q.recent,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     both = client.get("/control/events").json()["events"]
     assert [e["message"] for e in both] == ["l0", "f0", "l1"]
     only = client.get("/control/events?monitor=lada").json()["events"]
@@ -482,7 +562,12 @@ def test_events_legacy_no_ack_clears():
 
 def test_control_config_masks_token():
     cfg = _cfg(api_token="secret")
-    client = TestClient(create_control_app(cfg))
+    client = TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     r = client.get("/control/config")
     assert r.status_code == 200 and r.json()["api_token"] == "***"
     # #178: the LLM key fields are always present (masked; none configured here).
@@ -546,8 +631,21 @@ def _control_clients(cfg):
 
     admin = MonitorAdmin(cfg, None, PluginRegistry(), None)
     return [
-        TestClient(create_control_app(cfg)),
-        TestClient(create_control_app(cfg, admin=admin)),
+        TestClient(
+            create_control_app(
+                cfg, control_token="test-control-token", control_active=lambda: True
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        ),
+        TestClient(
+            create_control_app(
+                cfg,
+                admin=admin,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        ),
     ]
 
 
@@ -608,7 +706,15 @@ def test_control_llm_test_route(monkeypatch):
     monkeypatch.setattr(adminmod, "chat", fake_chat)
     cfg = _cfg(llm_api_key=_LLM_KEY)
     admin = MonitorAdmin(cfg, None, PluginRegistry(), None)
-    client = TestClient(create_control_app(cfg, admin=admin))
+    client = TestClient(
+        create_control_app(
+            cfg,
+            admin=admin,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     r = client.post("/control/llm-test", json={"llm_model": "cand/m"})
     assert r.status_code == 200
     assert r.json() == {"ok": True, "model": "served/m", "latency_ms": 5}
@@ -620,7 +726,12 @@ def test_control_llm_test_route(monkeypatch):
     assert "llm_api_base" in r.json()["detail"] and _LLM_KEY not in r.text
     assert len(calls) == 1
     # Not mounted without an admin (like the other mutation routes).
-    plain = TestClient(create_control_app(cfg))
+    plain = TestClient(
+        create_control_app(
+            cfg, control_token="test-control-token", control_active=lambda: True
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
     assert plain.post("/control/llm-test", json={}).status_code in (404, 405)
 
 
@@ -720,7 +831,15 @@ def _admin_client(cfg, tmp_path=None):
 
     path = None if tmp_path is None else tmp_path / "agent.yaml"
     admin = MonitorAdmin(cfg, None, PluginRegistry(), path)
-    return TestClient(create_control_app(cfg, admin=admin))
+    return TestClient(
+        create_control_app(
+            cfg,
+            admin=admin,
+            control_token="test-control-token",
+            control_active=lambda: True,
+        ),
+        headers={"Authorization": "Bearer test-control-token"},
+    )
 
 
 def test_patch_config_fallback_shapes_from_the_settings_ui(tmp_path):
@@ -858,7 +977,16 @@ def test_thinking_config_get_auto_uses_stored_bases():
         llm_fallback1_api_base="https://api.xiaomimimo.com/v1",
         llm_fallback2_api_base="https://api.deepseek.com@evil.test",
     )
-    data = TestClient(create_control_app(cfg)).get("/control/config").json()
+    data = (
+        TestClient(
+            create_control_app(
+                cfg, control_token="test-control-token", control_active=lambda: True
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
+        .get("/control/config")
+        .json()
+    )
     assert data["llm_thinking_off"] is False
     assert data["llm_thinking_off_auto"] is True
     assert data["llm_fallback1_thinking_off_auto"] is True
@@ -879,7 +1007,11 @@ def test_network_status_authoritative_version_without_mutation(provided):
     assert body["version"] == __version__
     assert original["version"] == "untrusted"
     if provided:
-        assert body == {**original, "version": __version__}
+        assert {k: v for k, v in body.items() if k != "event_cursor"} == {
+            **original,
+            "version": __version__,
+        }
+        assert body["event_cursor"]["durable"] is False
 
 
 @pytest.mark.parametrize("resource", ["films", "run-films"])

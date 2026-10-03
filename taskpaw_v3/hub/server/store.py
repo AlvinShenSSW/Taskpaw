@@ -2,18 +2,38 @@
 
 Carries forward V2 #14 hardening: WAL + foreign_keys + busy_timeout, rollback on
 write failure, the durable delivery outbox (pending/failed/dead_letter with the
-due index), and local-ISO timestamps compared lexically (consistent format).
+due index), and canonical UTC outbox timestamps; local status history remains unchanged.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import secrets
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from taskpaw_v3.core.state import (
+    StateError,
+    StateRecord,
+    integer,
+    parse_cursor,
+    strict_json,
+)
+
+from .outbox_migration import (
+    RowError,
+    apply_plan,
+    backup_database,
+    outbox_time,
+    plan_migration,
+    report_quarantine,
+    validate_row,
+)
 
 log = logging.getLogger("taskpaw.hub")
 
@@ -44,106 +64,152 @@ class HubStore:
         self._conn = sqlite3.connect(
             str(self.db_path), check_same_thread=False, timeout=10
         )
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._init_schema()
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._init_schema()
+        except BaseException:
+            self._conn.close()
+            raise
 
     def _init_schema(self) -> None:
         with self._lock:
-            c = self._conn.cursor()
-            # Migrate existing tables FIRST — before any CREATE INDEX — so an index
-            # (e.g. delivery_outbox.dedupe_key) is never built on a column a
-            # pre-existing V2/old-V3 table doesn't have yet (Codex).
-            self._migrate(c)
-            c.execute(
-                """
-                CREATE TABLE IF NOT EXISTS servers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    ip TEXT NOT NULL,
-                    port INTEGER NOT NULL DEFAULT 5680,
-                    enabled INTEGER NOT NULL DEFAULT 1
+            try:
+                c = self._conn.cursor()
+                self._conn.execute("BEGIN IMMEDIATE")
+                plan = plan_migration(self._conn)
+                existing = self._conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+                ).fetchone()
+                backup = (
+                    backup_database(self.db_path) if plan.changed and existing else None
                 )
-                """
-            )
-            c.execute(
-                """
-                CREATE TABLE IF NOT EXISTS status_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-                    timestamp TEXT NOT NULL,
-                    reachable INTEGER NOT NULL,
-                    status_json TEXT
+                # Migrate existing tables FIRST — before any CREATE INDEX — so an index
+                # (e.g. delivery_outbox.dedupe_key) is never built on a column a
+                # pre-existing V2/old-V3 table doesn't have yet (Codex).
+                self._migrate(c)
+                c.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS servers (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE,
+                        ip TEXT NOT NULL,
+                        port INTEGER NOT NULL DEFAULT 5680,
+                        enabled INTEGER NOT NULL DEFAULT 1
+                    )
+                    """
                 )
-                """
-            )
-            c.execute(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-                    event_id INTEGER NOT NULL,
-                    monitor TEXT,
-                    message TEXT,
-                    level TEXT,
-                    received_at TEXT NOT NULL,
-                    UNIQUE(server_id, event_id)
+                c.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS status_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                        timestamp TEXT NOT NULL,
+                        reachable INTEGER NOT NULL,
+                        status_json TEXT
+                    )
+                    """
                 )
-                """
-            )
-            c.execute(
-                """
-                CREATE TABLE IF NOT EXISTS delivery_outbox (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    server_name TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    kind TEXT NOT NULL CHECK (kind IN ('event', 'summary')),
-                    delivery_state TEXT NOT NULL DEFAULT 'pending'
-                        CHECK (delivery_state IN ('pending', 'failed', 'dead_letter')),
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    next_attempt_at TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    dead_letter_alerted INTEGER NOT NULL DEFAULT 0,
-                    dedupe_key TEXT
+                c.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                        event_id INTEGER NOT NULL,
+                        monitor TEXT,
+                        message TEXT,
+                        level TEXT,
+                        received_at TEXT NOT NULL,
+                        UNIQUE(server_id, event_id)
+                    )
+                    """
                 )
-                """
-            )
-            c.execute(
-                "CREATE INDEX IF NOT EXISTS idx_delivery_outbox_due "
-                "ON delivery_outbox(delivery_state, next_attempt_at)"
-            )
-            # Idempotent enqueue: at-least-once replay (crash before ack persist)
-            # must not create duplicate OpenClaw deliveries.
-            c.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_outbox_dedupe "
-                "ON delivery_outbox(dedupe_key) WHERE dedupe_key IS NOT NULL"
-            )
-            c.execute(
-                """
-                CREATE TABLE IF NOT EXISTS config (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
+                c.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS delivery_outbox (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        server_name TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        kind TEXT NOT NULL CHECK (kind IN ('event', 'summary')),
+                        delivery_state TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (delivery_state IN ('pending', 'failed', 'dead_letter')),
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        last_error TEXT,
+                        next_attempt_at TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        dead_letter_alerted INTEGER NOT NULL DEFAULT 0,
+                        dedupe_key TEXT
+                    )
+                    """
                 )
-                """
-            )
-            # status_log grows one row per server per poll; index the access paths
-            # (latest-per-server + prune-by-time) to avoid full scans (Kimi).
-            c.execute(
-                "CREATE INDEX IF NOT EXISTS idx_status_log_server_time "
-                "ON status_log(server_id, timestamp, id)"
-            )
-            c.execute(
-                "CREATE INDEX IF NOT EXISTS idx_status_log_time "
-                "ON status_log(timestamp)"
-            )
-            # Partial index for the last_seen (last reachable) subquery.
-            c.execute(
-                "CREATE INDEX IF NOT EXISTS idx_status_log_reachable "
-                "ON status_log(server_id, timestamp, id) WHERE reachable = 1"
-            )
-            self._conn.commit()
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_delivery_outbox_due "
+                    "ON delivery_outbox(delivery_state, next_attempt_at)"
+                )
+                # Idempotent enqueue: at-least-once replay (crash before ack persist)
+                # must not create duplicate OpenClaw deliveries.
+                c.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_outbox_dedupe "
+                    "ON delivery_outbox(dedupe_key) WHERE dedupe_key IS NOT NULL"
+                )
+                c.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS config (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    )
+                    """
+                )
+                # status_log grows one row per server per poll; index the access paths
+                # (latest-per-server + prune-by-time) to avoid full scans (Kimi).
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_status_log_server_time "
+                    "ON status_log(server_id, timestamp, id)"
+                )
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_status_log_time "
+                    "ON status_log(timestamp)"
+                )
+                # Partial index for the last_seen (last reachable) subquery.
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_status_log_reachable "
+                    "ON status_log(server_id, timestamp, id) WHERE reachable = 1"
+                )
+                had_cursors = c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_cursors'"
+                ).fetchone()
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS event_cursors (server_id INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE, state TEXT NOT NULL, identity_json TEXT, boot_id TEXT, resume_floor INTEGER)"
+                )
+                if not had_cursors:
+                    # Capture pre-upgrade evidence once, before new status can replace it.
+                    for (sid,) in c.execute("SELECT id FROM servers").fetchall():
+                        previous = c.execute(
+                            "SELECT status_json FROM status_log WHERE server_id=? ORDER BY id DESC LIMIT 1",
+                            (sid,),
+                        ).fetchone()
+                        identity = None
+                        if previous and previous[0]:
+                            try:
+                                cursor = parse_cursor(
+                                    json.loads(previous[0]).get("event_cursor")
+                                )
+                                identity = json.dumps(
+                                    {k: cursor[k] for k in ("server_id", "stream_id")}
+                                )
+                            except (ValueError, TypeError, AttributeError):
+                                pass  # no usable proof; registration remains visibly unverified
+                        c.execute(
+                            "INSERT INTO event_cursors(server_id,state,identity_json) VALUES(?, 'unverified', ?)",
+                            (sid, identity),
+                        )
+                apply_plan(self._conn, plan, backup)
+                self._conn.commit()
+                report_quarantine(plan)
+            except BaseException:
+                self._conn.rollback()
+                raise
 
     def _legacy_event_tables(self) -> list[str]:
         """Names of preserved V2 event tables (events_v2_legacy[_N]) currently
@@ -244,9 +310,14 @@ class HubStore:
                     "INSERT INTO servers(name, ip, port, enabled) VALUES(?, ?, ?, ?)",
                     (name, ip, port, int(enabled)),
                 )
+                assert cur.lastrowid is not None
+                sid = cur.lastrowid
+                self._conn.execute(
+                    "INSERT INTO event_cursors(server_id,state) VALUES(?, 'fresh')",
+                    (sid,),
+                )
                 self._conn.commit()
-                assert cur.lastrowid is not None  # set by INSERT
-                return cur.lastrowid
+                return sid
             except Exception:
                 self._conn.rollback()
                 raise
@@ -498,8 +569,8 @@ class HubStore:
                         delivery_state,
                         attempts,
                         last_error,
-                        _dt(next_attempt_at),
-                        _dt(),
+                        outbox_time(next_attempt_at),
+                        outbox_time(),
                         dedupe_key,
                     ),
                 )
@@ -519,11 +590,32 @@ class HubStore:
                 "SELECT id, server_name, payload_json, kind, delivery_state, attempts, "
                 "       last_error, next_attempt_at, created_at, dead_letter_alerted "
                 "FROM delivery_outbox WHERE delivery_state IN ('pending','failed') "
+                "AND NOT EXISTS (SELECT 1 FROM outbox_quarantine q WHERE q.delivery_id=delivery_outbox.id) "
                 "AND next_attempt_at <= ? ORDER BY next_attempt_at, id LIMIT ?",
-                (_dt(now), limit),
+                (outbox_time(now), limit),
             )
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def quarantine_delivery(self, delivery_id: int, reason: str, column: str) -> None:
+        """Persist a malformed row's exclusion without deleting its original data."""
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO outbox_quarantine(delivery_id,reason,field,quarantined_at) VALUES(?,?,?,?)",
+                    (delivery_id, reason, column, outbox_time()),
+                )
+                self._conn.commit()
+                if cur.rowcount:
+                    log.error(
+                        "Outbox quarantined id=%s reason=%s field=%s",
+                        delivery_id,
+                        reason,
+                        column,
+                    )
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def delete_delivery(self, delivery_id: int) -> None:
         with self._lock:
@@ -548,7 +640,7 @@ class HubStore:
                 self._conn.execute(
                     "UPDATE delivery_outbox SET delivery_state='failed', attempts=?, "
                     "last_error=?, next_attempt_at=? WHERE id=?",
-                    (attempts, last_error, _dt(next_attempt_at), delivery_id),
+                    (attempts, last_error, outbox_time(next_attempt_at), delivery_id),
                 )
                 self._conn.commit()
             except Exception:
@@ -584,13 +676,186 @@ class HubStore:
         # created_at is UTC-aware ISO (_dt), so the cutoff MUST be UTC too — a naive
         # host-local cutoff would be off by the host's UTC offset and mis-prune on a
         # non-UTC Hub (#152). UTC follows no fixed tz; it's the Hub's absolute clock.
-        cutoff = _dt(datetime.now(timezone.utc) - timedelta(days=days))
+        cutoff = outbox_time(datetime.now(timezone.utc) - timedelta(days=days))
         with self._lock:
             try:
-                self._conn.execute(
-                    "DELETE FROM delivery_outbox WHERE delivery_state='dead_letter' "
+                self._conn.execute("BEGIN IMMEDIATE")
+                cur = self._conn.execute(
+                    "SELECT * FROM delivery_outbox WHERE delivery_state='dead_letter' "
+                    "AND NOT EXISTS (SELECT 1 FROM outbox_quarantine q WHERE q.delivery_id=delivery_outbox.id) "
                     "AND created_at < ?",
                     (cutoff,),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+                quarantined = []
+                expired = []
+                for row in rows:
+                    try:
+                        created, _, _ = validate_row(row)
+                    except RowError as exc:
+                        quarantined.append((row["id"], exc.reason, exc.column))
+                    else:
+                        if created < cutoff:
+                            expired.append((row["id"],))
+                timestamp = outbox_time()
+                self._conn.executemany(
+                    "INSERT INTO outbox_quarantine(delivery_id,reason,field,quarantined_at) VALUES(?,?,?,?)",
+                    [
+                        (i, reason, column, timestamp)
+                        for i, reason, column in quarantined
+                    ],
+                )
+                self._conn.executemany(
+                    "DELETE FROM delivery_outbox WHERE id=?", expired
+                )
+                self._conn.commit()
+                for row_id, reason, column in quarantined:
+                    log.error(
+                        "Outbox quarantined id=%s reason=%s field=%s",
+                        row_id,
+                        reason,
+                        column,
+                    )
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def get_event_cursor(self, server_id: int) -> dict:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT state,identity_json,boot_id,resume_floor FROM event_cursors WHERE server_id=?",
+                (server_id,),
+            ).fetchone()
+            if row is None:
+                return {
+                    "state": "unverified",
+                    "identity": None,
+                    "boot_id": None,
+                    "resume_floor": None,
+                }
+            try:
+                identity = strict_json(row[1]) if row[1] else None
+                if identity is not None and (
+                    not isinstance(identity, dict)
+                    or set(identity) != {"server_id", "stream_id"}
+                    or not all(isinstance(v, str) and v for v in identity.values())
+                ):
+                    raise ValueError("invalid identity")
+                if row[0] not in ("fresh", "unverified", "bound") or (
+                    row[0] == "bound" and identity is None
+                ):
+                    raise ValueError("invalid state")
+                if identity is not None:
+                    StateRecord.parse(
+                        {
+                            "version": 2,
+                            **identity,
+                            "lineage_origin": "legacy_migration",
+                            "next_event_id": 1,
+                        }
+                    )
+                if row[2] is None:
+                    if row[3] is not None:
+                        raise ValueError("incomplete boot evidence")
+                else:
+                    floor = integer(row[3], 0, (1 << 63) - 1)
+                    parse_cursor(
+                        {
+                            "version": 1,
+                            "durable": True,
+                            **(identity or {}),
+                            "boot_id": row[2],
+                            "resume_floor": floor,
+                            "offered_highwater": floor,
+                            "next_event_id": floor + 1,
+                        }
+                    )
+            except (ValueError, TypeError) as exc:
+                raise StateError("cursor_store_invalid") from exc
+            return {
+                "state": row[0],
+                "identity": identity,
+                "boot_id": row[2],
+                "resume_floor": row[3],
+            }
+
+    def read_acks(self) -> dict[int, int]:
+        raw = self.get_config("last_event_ids", "")
+        if not raw:
+            return {}
+        try:
+            value = strict_json(raw)
+            if not isinstance(value, dict):
+                raise ValueError("invalid ack map")
+            result = {}
+            for key, number in value.items():
+                if (
+                    not isinstance(key, str)
+                    or not key.isdecimal()
+                    or str(int(key)) != key
+                    or int(key) < 1
+                ):
+                    raise ValueError("invalid ack key")
+                result[int(key)] = integer(number, -1, (1 << 63) - 1)
+            return result
+        except (ValueError, TypeError) as exc:
+            raise StateError("cursor_store_invalid") from exc
+
+    def event_floor(self, server_id: int, acks: dict[int, int]) -> int:
+        with self._lock:
+            floor = integer(acks.get(server_id, -1), -1, (1 << 63) - 1)
+            maximum = self._conn.execute(
+                "SELECT MAX(event_id), MIN(event_id) FROM events WHERE server_id=?",
+                (server_id,),
+            ).fetchone()
+            if maximum[0] is not None:
+                integer(maximum[1])
+                floor = max(floor, integer(maximum[0], 1, (1 << 63) - 1))
+            prefix = f"{server_id}:"
+            for (key,) in self._conn.execute(
+                "SELECT dedupe_key FROM delivery_outbox WHERE dedupe_key LIKE ?",
+                (prefix + "%",),
+            ):
+                suffix = key[len(prefix) :]
+                if not suffix.isdecimal() or str(int(suffix)) != suffix:
+                    raise StateError("cursor_store_invalid")
+                floor = max(floor, integer(int(suffix), 1, (1 << 63) - 1))
+            return floor
+
+    def commit_event_cursor(
+        self,
+        server_id: int,
+        binding: dict,
+        acks: dict[int, int],
+        *,
+        require_disabled: bool = False,
+        diagnostic: str | None = None,
+    ) -> None:
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                server = self.get_server(server_id)
+                if server is None or (require_disabled and server["enabled"]):
+                    raise StateError("cursor_adoption_requires_disabled_server")
+                if diagnostic is not None:
+                    self._conn.execute(
+                        "INSERT INTO config(key,value) VALUES(?,?)",
+                        ("last_event_ids.fault-" + secrets.token_hex(16), diagnostic),
+                    )
+                self._conn.execute(
+                    "INSERT INTO event_cursors(server_id,state,identity_json,boot_id,resume_floor) VALUES(?,?,?,?,?) ON CONFLICT(server_id) DO UPDATE SET state=excluded.state,identity_json=excluded.identity_json,boot_id=excluded.boot_id,resume_floor=excluded.resume_floor",
+                    (
+                        server_id,
+                        binding["state"],
+                        json.dumps(binding["identity"]),
+                        binding.get("boot_id"),
+                        binding.get("resume_floor"),
+                    ),
+                )
+                self._conn.execute(
+                    "INSERT INTO config(key,value) VALUES('last_event_ids',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (json.dumps(acks),),
                 )
                 self._conn.commit()
             except Exception:
