@@ -404,7 +404,9 @@ def test_status_snapshot_seeded_from_store_on_init(tmp_path):
     # (not show every server OFFLINE until first poll) (Kimi).
     s = HubStore(tmp_path / "hub.db")
     sid = s.add_server("m", "1.1.1.1")
-    s.log_status(sid, True, json.dumps({"monitors": {"x": {"state": "ok"}}}))
+    # A fresh R06 observation has canonical UTC receipt metadata; the separate
+    # legacy-seed test below deliberately retains its offset-less timestamp.
+    s.record_status(sid, json.dumps({"monitors": {"x": {"state": "ok"}}}), None)
     p = _poller(s)  # constructed fresh (= restart)
     snap = p.status_snapshot()[0]
     assert snap["reachable"] is True and "ok" in snap["status_json"]
@@ -467,15 +469,19 @@ def test_status_snapshot_offline_keeps_last_good(tmp_path, monkeypatch):
 
 
 def test_fetch_status_unreachable_returns_false(tmp_path, monkeypatch):
-    import taskpaw_v3.hub.server.poller as mod
-
     s = HubStore(tmp_path / "hub.db")
+    sid = s.add_server("x", "10.0.0.9", 5680)
     p = _poller(s)
+    calls = []
 
-    def boom(*a, **k):
-        raise OSError("connection refused")
+    def refuse(request):
+        calls.append(request)
+        return {"ok": False, "reason": "upstream_failed"}
 
-    monkeypatch.setattr(mod._opener, "open", boom)
-    reachable, body = p.fetch_status({"name": "x", "ip": "10.0.0.9", "port": 5680})
+    # Intercept the current transport boundary: no subprocess or real endpoint.
+    monkeypatch.setattr(p, "_request", refuse)
+    reachable, body = p.fetch_status(s.get_server(sid))
     assert reachable is False and body is None
+    assert len(calls) == 1 and calls[0]["kind"] == "status"
+    assert calls[0]["url"] == "http://10.0.0.9:5680/status"
     s.close()

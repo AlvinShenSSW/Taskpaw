@@ -13,10 +13,12 @@ Retains the V2 #14 persistence/outbox ordering after cursor admission:
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import random
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,7 +26,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 from taskpaw_v3.core.http import NoRedirectHandler
-from taskpaw_v3.core.state import MAX_EVENT_ID, StateError, integer, parse_cursor
+from taskpaw_v3.core.state import StateError, parse_cursor
+
+from .upstream_worker import Transport, UpstreamError, decode_status
 
 _opener = urllib.request.build_opener(NoRedirectHandler())
 
@@ -96,45 +100,66 @@ class Poller:
         # In-memory current-poll snapshot per server (reachable + last good
         # status + last_seen) — the source for status.md, like V2's in-memory
         # server_statuses. status_log itself only gets SUCCESSFUL polls (#38).
+        self._transport = Transport()
+        self._batches: dict[int, dict] = {}
+        self._fetch_errors: dict[int, str] = {}
         self._snap_lock = threading.Lock()
         self._status_snapshot: dict[int, dict] = self._seed_snapshot()
 
     def _seed_snapshot(self) -> dict[int, dict]:
-        """Seed from the persisted last-good status so status.md after a restart
-        reflects known state instead of showing every server OFFLINE until the
-        first poll (Kimi). status_log holds only successful rows, so a present
-        row means it was last reachable."""
-        seed: dict[int, dict] = {}
+        seed = {}
         try:
-            for row in self.store.latest_statuses():
-                if row.get("status_json") is None:
-                    continue  # never polled
-                ts = row.get("last_seen") or row.get("timestamp")
-                reachable = bool(row.get("reachable"))
-                if reachable and self.seed_fresh_seconds and ts:
-                    # A stale last-success (older than ~a poll) shouldn't seed
-                    # ONLINE — the agent may have stopped while the Hub was off.
-                    try:
-                        age = (
-                            datetime.now() - datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-                        ).total_seconds()
-                        if age > self.seed_fresh_seconds:
-                            reachable = False
-                    except (ValueError, TypeError):
-                        pass
-                seed[row["id"]] = {
-                    "reachable": reachable,
-                    "status_json": row.get("status_json"),
-                    # Parse once at seed time so the first /status (pre-poll) is
-                    # also parse-free (#107).
-                    "parsed_status": self._parse_status(row.get("status_json")),
-                    "last_seen": ts,
-                }
-        except Exception as e:
-            # Don't fail hub startup on a transient read race, but make a real
-            # corrupt-store/schema problem visible (Kimi).
-            log.error("Could not seed status snapshot: %s", e)
+            self.store.recover_statuses()
+            for row in self.store.upstream_statuses():
+                # An old offset-less local timestamp does not establish freshness.
+                reachable = False
+                if row["last_good_at"] and not row["error_code"]:
+                    age = (
+                        _now() - datetime.fromisoformat(row["last_good_at"])
+                    ).total_seconds()
+                    reachable = age >= 0 and (
+                        not self.seed_fresh_seconds or age <= self.seed_fresh_seconds
+                    )
+                seed[row["id"]] = {**row, "reachable": reachable}
+        except Exception:
+            log.error("Status seed failed")
         return seed
+
+    def stop(self) -> None:
+        self._transport.cancel()
+
+    def stopped(self) -> bool:
+        return self._transport.retry_cleanup() and self._transport.clean()
+
+    @staticmethod
+    def _health(snap: dict) -> dict:
+        age = None
+        error = snap.get("error_code")
+        if snap.get("good_monotonic") is not None:
+            age = max(0.0, time.monotonic() - snap["good_monotonic"])
+        elif snap.get("last_good_at"):
+            age = (
+                _now() - datetime.fromisoformat(snap["last_good_at"])
+            ).total_seconds()
+            if age < 0:
+                age = None
+                error = error or "clock_changed"
+        state = (
+            "error"
+            if error
+            else "ok"
+            if snap.get("status_json") is not None
+            else "never"
+        )
+        if not snap.get("scan_done", True) and not snap.get("status_json"):
+            state = "recovering"
+        return {
+            "state": state,
+            "error_code": error,
+            "attempted_at": snap.get("attempted_at"),
+            "last_good_at": snap.get("last_good_at"),
+            "age_seconds": age,
+        }
 
     def status_snapshot(self) -> list[dict]:
         """Current status of each ENABLED server for status.md (registration
@@ -168,22 +193,19 @@ class Poller:
                     "reachable": bool(snap.get("reachable", False)),
                     "status_json": snap.get("status_json"),
                     "last_seen": snap.get("last_seen"),
+                    "status_health": self._health(snap),
                 }
             )
         return out
 
     @staticmethod
     def _parse_status(raw: Optional[str]) -> Optional[dict]:
-        """Parse an agent's /status JSON to a dict, or None if absent/unparseable.
-        Centralizes the dict-only rule so the parse happens once at write time
-        (#107), not on every /status request."""
-        if not raw:
+        if raw is None:
             return None
         try:
-            loaded = json.loads(raw)
-        except (ValueError, TypeError):
+            return decode_status(raw)[0]
+        except UpstreamError:
             return None
-        return loaded if isinstance(loaded, dict) else None
 
     def snapshot_acks(self) -> dict[int, int]:
         """Thread-safe copy of the ack cursor for the API thread (/status)."""
@@ -210,7 +232,8 @@ class Poller:
                 "online": bool(snap.get("reachable", False)),
                 "last_seen": snap.get("last_seen"),
                 # Pre-parsed at write time (#107) — no json.loads on the request path.
-                "snapshot": snap.get("parsed_status"),
+                "snapshot": copy.deepcopy(snap.get("parsed_status")),
+                "status_health": self._health(snap),
             }
         return out
 
@@ -243,6 +266,8 @@ class Poller:
 
     def _admit_cursor(self, server: dict, status: object) -> dict:
         sid = server["id"]
+        if not self._transport.admit_result():
+            raise StateError("helper_cancelled")
         if self._ack_store_invalid:
             raise StateError("cursor_store_invalid")
         cursor = parse_cursor(
@@ -278,8 +303,10 @@ class Poller:
             "resume_floor": cursor["resume_floor"],
         }
         if binding != new_binding:
-            self.store.commit_event_cursor(sid, new_binding, acks)
             with self._acks_lock:
+                if not self._transport.admit_result():
+                    raise StateError("helper_cancelled")
+                self.store.commit_event_cursor(sid, new_binding, acks)
                 self.last_event_ids = acks
         return cursor
 
@@ -296,47 +323,29 @@ class Poller:
         token = self.get_polling_token()
         return {"Authorization": f"Bearer {token}"} if token else {}
 
+    def _request(self, request: dict) -> dict:
+        return self._transport.request(request, self.http_timeout)
+
     def fetch_status(self, server: dict) -> tuple[bool, Optional[str]]:
-        """GET the agent's /status. Returns (reachable, raw_json_or_None). A bad
-        response / unreachable host → (False, None), not an exception (#38)."""
-        base = _agent_base_url(server["ip"], server["port"])
-        try:
-            req = urllib.request.Request(f"{base}/status", headers=self._auth_headers())
-            with _opener.open(req, timeout=self.http_timeout) as resp:
-                body = resp.read().decode("utf-8")
-            try:
-                json.loads(body)  # validate it's JSON before persisting
-            except json.JSONDecodeError as e:
-                # Reachable but returned junk → a misconfigured agent, not an
-                # outage. Log distinctly with a body snippet (Kimi).
-                log.warning(
-                    "Bad /status JSON from %s: %s | body[:120]=%r",
-                    server.get("name"),
-                    e,
-                    body[:120],
-                )
-                return False, None
-            return True, body
-        except urllib.error.HTTPError as e:
-            # Surface 401/403 distinctly — a token mismatch is a config/security
-            # problem, not a down agent (Kimi).
-            if e.code in (401, 403):
-                log.warning(
-                    "Auth failed polling %s (HTTP %s) — check polling_token",
-                    server.get("name"),
-                    e.code,
-                )
-            else:
-                log.warning(
-                    "HTTP %s fetching status from %s", e.code, server.get("name")
-                )
-            return False, None
-        except Exception as e:
-            log.warning("Failed to fetch status from %s: %s", server.get("name"), e)
-            return False, None
+        result = self._request(
+            {
+                "kind": "status",
+                "url": _agent_base_url(server["ip"], server["port"]) + "/status",
+                "headers": self._auth_headers(),
+                "timeout": self.http_timeout,
+            }
+        )
+        if result.get("ok"):
+            self._fetch_errors.pop(server["id"], None)
+            return True, result["raw"]
+        reason = result.get("reason", "upstream_failed")
+        self._fetch_errors[server["id"]] = reason
+        log.warning("Upstream status refused server=%s reason=%s", server["id"], reason)
+        return False, None
 
     def fetch_events(self, server: dict, current_status: object = None) -> list[dict]:
         sid = server["id"]
+        self._batches.pop(sid, None)
         try:
             if current_status is None:
                 reachable, raw = self.fetch_status(server)
@@ -344,23 +353,31 @@ class Poller:
             if current_status is None:
                 raise StateError("current_status_unavailable")
             cursor = self._admit_cursor(server, current_status)
-            last_id = self.last_event_ids.get(sid, -1)
             q = urllib.parse.urlencode(
                 {
-                    "ack": last_id,
+                    "ack": self.last_event_ids.get(sid, -1),
                     "cursor_stream": cursor["stream_id"],
                     "cursor_boot": cursor["boot_id"],
                 }
             )
-            base = _agent_base_url(server["ip"], server["port"])
-            req = urllib.request.Request(
-                f"{base}/events?{q}", headers=self._auth_headers()
+            result = self._request(
+                {
+                    "kind": "events",
+                    "url": _agent_base_url(server["ip"], server["port"])
+                    + "/events?"
+                    + q,
+                    "headers": self._auth_headers(),
+                    "timeout": self.http_timeout,
+                }
             )
-            with _opener.open(req, timeout=self.http_timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            if not isinstance(data, dict):
-                raise StateError("invalid_cursor_response")
-            proof = parse_cursor(data.get("event_cursor"))
+            if not result.get("ok"):
+                reason = result.get("reason", "event_fetch_failed")
+                raise StateError(
+                    "event_http_refused"
+                    if reason in ("http_refused", "http_auth")
+                    else reason
+                )
+            proof = parse_cursor(result["proof"])
             if (
                 any(
                     proof[k] != cursor[k]
@@ -370,28 +387,19 @@ class Poller:
                 or proof["offered_highwater"] < cursor["offered_highwater"]
             ):
                 raise StateError("event_cursor_mismatch")
-            events = _events_from_payload(data)
-            if events is None or not isinstance(data.get("events"), list):
-                raise StateError("invalid_cursor_response")
-            for event in events:
-                if (
-                    not isinstance(event, dict)
-                    or integer(event.get("id"), 1, MAX_EVENT_ID)
-                    > proof["offered_highwater"]
-                ):
-                    raise StateError("invalid_cursor_response")
+            if not self._transport.admit_result():
+                raise StateError("helper_cancelled")
+            self._batches[sid] = result
             self._channel(sid)
-            return [event for event in events if event["id"] > last_id]
+            return [
+                e
+                for e in result["events"]
+                if e["id"] > self.last_event_ids.get(sid, -1)
+            ]
         except StateError as exc:
             self._channel(sid, exc.reason)
-        except urllib.error.HTTPError as exc:
-            exc.close()
-            self._channel(sid, "event_http_refused")
-        except (ValueError, UnicodeError):
+        except Exception:
             self._channel(sid, "invalid_cursor_response")
-        except Exception as exc:
-            log.warning("Failed to fetch events from %s: %s", server.get("name"), exc)
-            self._channel(sid, "event_fetch_failed")
         return []
 
     # ── retry/backoff ────────────────────────────────────────────────────
@@ -458,15 +466,26 @@ class Poller:
 
     # ── one poll cycle ───────────────────────────────────────────────────
     def poll_once(self) -> None:
+        if self._transport._stopped.is_set():
+            return
+        self.store.recover_statuses()
+        recovered = {row["id"]: row for row in self.store.upstream_statuses()}
+        with self._snap_lock:
+            for sid, row in recovered.items():
+                if not self._status_snapshot.get(sid, {}).get(
+                    "status_json"
+                ) and row.get("status_json"):
+                    self._status_snapshot[sid] = {**row, "reachable": False}
         active = self.get_active()
         for server in self.store.list_servers():
+            if self._transport._stopped.is_set():
+                break
             if not server["enabled"]:
                 continue
             try:
                 self._poll_server(server, active)
-            except Exception as e:
-                # One bad agent must not stall polling for the rest (Kimi).
-                log.error("Polling server %s failed: %s", server.get("name"), e)
+            except Exception:
+                log.error("Polling server failed id=%s", server["id"])
 
         if active:
             self.drain_outbox()
@@ -477,63 +496,61 @@ class Poller:
             log.error("Dead-letter prune failed: %s", e)
 
     def _poll_server(self, server: dict, active: bool) -> None:
-        # Snapshot the agent's status (reachable + raw /status JSON) so status.md
-        # stays fresh for OpenClaw — independent of whether there are new events.
+        sid = server["id"]
         reachable, status_json = self.fetch_status(server)
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if reachable:
-            # V2 only wrote status_log on a SUCCESSFUL poll, so OpenClaw reading
-            # the latest row directly always sees the last GOOD status — never a
-            # failure placeholder during an outage (#38 review).
-            self.store.log_status(server["id"], True, status_json)
+        parsed = self._parse_status(status_json) if reachable else None
+        if reachable and parsed is None:
+            reachable = False
+            self._fetch_errors[sid] = "status_type"
+        if not self._transport.admit_result():
+            return
+        try:
+            self.store.record_status(
+                sid,
+                status_json if reachable else None,
+                self._fetch_errors.get(sid, "upstream_failed"),
+            )
+        except Exception:
+            reachable = False
+            self._fetch_errors[sid] = "status_store_failed"
         with self._snap_lock:
-            prev = self._status_snapshot.get(server["id"], {})
+            prev = self._status_snapshot.get(sid, {})
             if reachable:
-                self._status_snapshot[server["id"]] = {
-                    "reachable": True,
+                now = _now().isoformat(timespec="microseconds")
+                snap = {
                     "status_json": status_json,
-                    # Parse once here (#107) so /status reads are parse-free.
-                    "parsed_status": self._parse_status(status_json),
-                    "last_seen": now_str,
+                    "parsed_status": parsed,
+                    "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_good_at": now,
+                    "attempted_at": now,
+                    "error_code": None,
+                    "good_monotonic": time.monotonic(),
+                    "scan_done": True,
                 }
             else:
-                # Keep the last good payload + last_seen for status.md; don't
-                # pollute status_log with an empty row.
-                self._status_snapshot[server["id"]] = {
-                    "reachable": False,
-                    "status_json": prev.get("status_json"),
-                    "parsed_status": prev.get("parsed_status"),
-                    "last_seen": prev.get("last_seen"),
+                snap = {
+                    **prev,
+                    "attempted_at": _now().isoformat(timespec="microseconds"),
+                    "error_code": self._fetch_errors.get(sid, "upstream_failed"),
                 }
-
+            self._status_snapshot[sid] = {**snap, "reachable": reachable}
         if not reachable:
-            self._channel(server["id"], "current_status_unavailable")
+            self._channel(sid, "current_status_unavailable")
             return
-        new_events = self.fetch_events(server, self._parse_status(status_json))
-        if not new_events:
+        self.fetch_events(server, parsed)
+        batch = self._batches.pop(sid, None)
+        if batch is None or self._transport._stopped.is_set():
             return
-
-        max_id = self.last_event_ids.get(server["id"], -1)
-        for ev in new_events:
-            self.store.store_event(server["id"], ev)
-            if active:
-                msg = f"TaskPaw Event | {server['name']}: {ev.get('message', 'Unknown event')}"
-                # Idempotent: a crash before ack-persist re-fetches the same
-                # event; the dedupe key keeps OpenClaw from being double-sent.
-                self.store.enqueue_delivery(
-                    server_name=server["name"],
-                    kind="event",
-                    payload_json=json.dumps({"text": msg}),
-                    dedupe_key=f"{server['id']}:{ev.get('id')}",
+        try:
+            with self._acks_lock:
+                if not self._transport.admit_result():
+                    return
+                self.last_event_ids = self.store.commit_upstream_batch(
+                    server, batch, active
                 )
-            max_id = max(max_id, ev.get("id", max_id))
-
-        with self._acks_lock:  # serialize vs snapshot_acks() (API thread)
-            prev_ack = self.last_event_ids.get(server["id"])
-            self.last_event_ids[server["id"]] = max_id
-            if not self._persist_acks():
-                # Roll back the in-memory ack so the next poll re-fetches.
-                if prev_ack is None:
-                    self.last_event_ids.pop(server["id"], None)
-                else:
-                    self.last_event_ids[server["id"]] = prev_ack
+            summary = self.store.quarantine_summary(sid)
+            with self._channel_lock:
+                self._event_channels[sid]["quarantine"] = summary
+        except Exception:
+            self._channel(sid, "event_store_failed")
+            log.error("Upstream batch transaction failed server=%s", sid)
