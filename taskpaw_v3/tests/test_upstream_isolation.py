@@ -836,7 +836,24 @@ def _observe_upstream_transport(monkeypatch, transport, phases, snapshots):
                 getattr(rec.proc, name) is None for name in ("process", "thread", "job")
             )
             and not rec.proc.handles
-            and not rec.proc.fds,
+            and not rec.proc.fds
+            and all(m.closed for m in rec.proc.members),
+            "member_coverage": len([m for m in rec.proc.members if m.valid])
+            if native
+            else None,
+            "final_accounting": rec.proc.final_accounting if native else None,
+            "member_receipts": [
+                {
+                    "pid": m.pid,
+                    "created": m.created,
+                    "valid": m.valid,
+                    "signaled": m.signaled,
+                    "closed": m.closed,
+                }
+                for m in rec.proc.members
+            ]
+            if native
+            else None,
         }
 
     def observed_cleanup(rec, cancel):
@@ -928,7 +945,10 @@ def test_windows_owned_cleanup_failure_retains_exact_record(assigned, failure):
             return 0 if assigned or not self.live else None
 
         def wait(self, handle, timeout):
-            assert not self.live or assigned
+            if self.live and not assigned:
+                raise __import__("subprocess").TimeoutExpired(
+                    "owned unassigned", timeout
+                )
             return 0
 
         def kill(self, handle):
@@ -945,10 +965,19 @@ def test_windows_owned_cleanup_failure_retains_exact_record(assigned, failure):
                 raise OSError("owned termination failed")
             self.live = False
 
-        def active(self, handle):
+        def identity(self, handle, job):
+            return 17, 100
+
+        def members(self, job):
+            return [17]
+
+        def accounting(self, job):
             if self.failure == "query":
                 raise OSError("owned query failed")
-            return int(self.live and assigned)
+            return 1, int(self.live and assigned)
+
+        def active(self, handle):
+            return self.accounting(handle)[1]
 
         def close(self, handle):
             if self.failure == "close":
@@ -1659,7 +1688,7 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
             fault_api = rec.proc.api
             fault_method = {
                 "terminate-fail": "terminate_job",
-                "query-fail": "active",
+                "query-fail": "accounting",
                 "close-fail": "close",
             }[case]
             original_method = getattr(fault_api, fault_method)
@@ -2163,3 +2192,279 @@ def test_global_history_python_admission_budget(tmp_path, monkeypatch):
         )
     finally:
         store.close()
+
+
+@pytest.fixture
+def windows_census_model():
+    """Actual Transport, fake native boundary with delayed runtime rundown."""
+    import subprocess
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    class Native:
+        def __init__(self):
+            self.total, self.running = 2, True
+            self.runtime_signal = False
+            self.signal_on_wait = True
+            self.fail = None
+            self.closed, self.waits, self.opened = [], [], []
+            self.identities = {11: (17, 100), 21: (18, 101)}
+            self.listed = [17, 18]
+            self.account_calls = []
+
+        def identity(self, handle, job):
+            if self.fail == "identity":
+                raise OSError("owned identity query")
+            if self.fail == "membership":
+                raise OSError("wrong private job")
+            return self.identities[handle]
+
+        def members(self, job):
+            if self.fail == "list":
+                raise OSError("truncated native list")
+            return self.listed if self.running else []
+
+        def open_process(self, pid):
+            if self.fail == "open":
+                raise OSError("owned open failure")
+            handle = next(
+                h for h, identity in self.identities.items() if identity[0] == pid
+            )
+            self.opened.append(handle)
+            return handle
+
+        def accounting(self, job):
+            if self.fail == "accounting":
+                raise OSError("owned accounting failure")
+            self.account_calls.append(
+                (self.total, int(self.running), self.runtime_signal)
+            )
+            return self.total, int(self.running)
+
+        def active(self, job):
+            return self.accounting(job)[1]
+
+        def terminate_job(self, job):
+            assert job == 13
+            if self.fail == "terminate":
+                raise OSError("owned terminate failure")
+            self.running = False
+
+        def poll(self, handle):
+            if self.fail == "poll":
+                raise OSError("owned process status query")
+            return 0 if not self.running else None
+
+        def wait(self, handle, timeout):
+            self.waits.append((handle, timeout))
+            if self.fail == "wait":
+                raise OSError("owned process wait failed")
+            if handle != 11:
+                if self.signal_on_wait:
+                    self.runtime_signal = True
+                if not self.runtime_signal:
+                    raise subprocess.TimeoutExpired("owned runtime", timeout)
+            return 0
+
+        def close(self, handle):
+            if self.fail == "close" or self.fail == ("close", handle):
+                raise OSError("owned checked close")
+            assert handle not in self.closed, "native handle double-close"
+            self.closed.append(handle)
+
+    native = Native()
+    proc = uw._WindowsProcess(native)
+    proc.process, proc.thread, proc.job = 11, 12, 13
+    proc.pid, proc.assigned = 17, True
+    rec = uw._Owned(proc, -1)
+    transport = uw.Transport()
+    transport._owned = rec
+    return transport, rec, native
+
+
+def test_windows_census_waits_runtime_after_active_zero(windows_census_model):
+    transport, rec, native = windows_census_model
+    assert transport.retry_cleanup() and transport.clean()
+    assert native.runtime_signal, "active0/launcher exit cannot certify runtime exit"
+    assert [handle for handle, _ in native.waits] == [11, 11, 21]
+    assert native.account_calls[-1] == (2, 0, True)
+    assert sorted(native.closed) == [11, 12, 13, 21]
+    assert rec.proc.poll() == rec.proc.wait(0) == 0
+
+
+def test_windows_census_unsignaled_member_retains_and_retry(windows_census_model):
+    transport, rec, native = windows_census_model
+    native.signal_on_wait = False
+    assert not transport.retry_cleanup() and transport._owned is rec
+    assert not native.closed and len(rec.proc.members) == 2
+    assert transport.request({}, 1)["reason"] == "helper_cleanup_failed"
+    native.signal_on_wait = True
+    assert transport.retry_cleanup() and transport.clean()
+    assert native.opened == [21]
+
+
+def test_windows_census_birth_race_gone_generation_cannot_clear(windows_census_model):
+    transport, rec, native = windows_census_model
+    terminate = native.terminate_job
+
+    def birth(job):
+        native.total = 3  # Birth after the complete pre-kill snapshot.
+        terminate(job)
+
+    native.terminate_job = birth
+    assert not transport.retry_cleanup() and transport._owned is rec
+    assert native.runtime_signal and not native.closed
+    assert not transport.retry_cleanup()  # Empty later list is not exit coverage.
+    assert len(native.opened) == 1 and len(rec.proc.members) == 2
+
+
+def test_windows_census_late_member_can_complete_retry(windows_census_model):
+    transport, rec, native = windows_census_model
+    native.total = 3
+    native.identities[22] = (19, 102)
+    assert not transport.retry_cleanup()
+    native.members = lambda job: [19]
+    assert transport.retry_cleanup() and transport.clean()
+    assert native.opened == [21, 22]
+    assert sorted(native.closed) == [11, 12, 13, 21, 22]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "open",
+        "identity",
+        "membership",
+        "list",
+        "accounting",
+        "terminate",
+        "poll",
+        "wait",
+    ],
+)
+def test_windows_census_capture_fault_still_terminates_and_retries(
+    windows_census_model, fault
+):
+    transport, rec, native = windows_census_model
+    native.fail = fault
+    assert not transport.retry_cleanup() and transport._owned is rec
+    assert native.running == (fault == "terminate")
+    assert len(rec.proc.members) <= 16
+    native.fail = None
+    # Restore access to any uncaptured but still retained actual process object.
+    native.members = lambda job: [17, 18]
+    assert transport.retry_cleanup() and transport.clean()
+    assert sorted(native.closed) == [11, 12, 13, 21]
+
+
+def test_windows_census_pending_validation_close_failure_is_bounded(
+    windows_census_model,
+):
+    transport, rec, native = windows_census_model
+    rec.proc.capture_launcher()
+    identity, close = native.identity, native.close
+    native.identity = lambda handle, job: (
+        identity(handle, job)
+        if handle == 11
+        else (_ for _ in ()).throw(OSError("pending identity"))
+    )
+    native.close = lambda handle: (
+        close(handle)
+        if handle != 21
+        else (_ for _ in ()).throw(OSError("pending close"))
+    )
+    native.members = lambda job: [17, 18]
+    for _ in range(20):
+        assert not transport.retry_cleanup()
+        assert transport._owned is rec and len(rec.proc.members) == 2
+    assert native.opened == [21]  # Retry owns the original failed handle.
+    native.identity, native.close = identity, close
+    assert transport.retry_cleanup() and transport.clean()
+    assert sorted(native.closed) == [11, 12, 13, 21]
+
+
+@pytest.mark.parametrize("handle", [21, 11, 13])
+def test_windows_census_partial_close_receipts_survive_retry(
+    windows_census_model, handle
+):
+    transport, rec, native = windows_census_model
+    native.fail = ("close", handle)
+    assert not transport.retry_cleanup() and transport._owned is rec
+    assert native.runtime_signal
+    identities = [(m.pid, m.created) for m in rec.proc.members]
+    native.fail = None
+    assert transport.retry_cleanup() and transport.clean()
+    assert [(m.pid, m.created) for m in rec.proc.members] == identities
+    assert sorted(native.closed) == [11, 12, 13, 21]
+    assert all(m.closed and m.signaled for m in rec.proc.members)
+
+
+@pytest.mark.parametrize("total,active", [(0, 0), (17, 0), (2**32, 0), (2, 3), (1, 0)])
+def test_windows_census_invalid_or_regressing_accounting_retains(
+    windows_census_model, total, active
+):
+    transport, rec, native = windows_census_model
+    rec.proc.capture_members()
+    native.accounting = lambda job: (total, active)
+    assert not transport.retry_cleanup() and transport._owned is rec
+    assert not native.closed
+    if total == 17:
+        native.accounting = lambda job: (2, 0)
+        assert not transport.retry_cleanup()  # Rejected high-water cannot disappear.
+
+
+def test_windows_census_capacity_reserved_before_open(windows_census_model):
+    transport, rec, native = windows_census_model
+    rec.proc.capture_members()
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    rec.proc.members.extend(
+        uw._WindowsMember(100 + i, None, i, True, True, True) for i in range(14)
+    )
+    native.members = lambda job: [19]
+    assert not transport.retry_cleanup() and transport._owned is rec
+    assert native.opened == [21] and len(rec.proc.members) == 16
+
+
+def test_windows_census_shared_cleanup_end(windows_census_model, monkeypatch):
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    transport, rec, native = windows_census_model
+    clock = [100.0]
+    monkeypatch.setattr(uw.time, "monotonic", lambda: clock[0])
+    wait = native.wait
+
+    def elapsed(handle, timeout):
+        result = wait(handle, timeout)
+        clock[0] += 0.3
+        return result
+
+    native.wait = elapsed
+    assert transport.retry_cleanup()
+    assert [remaining for _, remaining in native.waits] == pytest.approx([1, 0.7, 0.4])
+
+
+def test_windows_census_duplicate_failed_close_does_not_inflate_coverage(
+    windows_census_model,
+):
+    transport, rec, native = windows_census_model
+    rec.proc.capture_members()
+    member = rec.proc.members[1]
+    # A checked-closed proven identity remains in the lifetime receipt table.
+    native.running, native.runtime_signal = False, True
+    member.signaled = True
+    native.close(21)
+    member.handle, member.closed = None, True
+    native.identities[22] = (18, 101)  # Another handle to that same object.
+    native.members = lambda job: [18]
+    native.open_process = lambda pid: native.opened.append(22) or 22
+    native.fail = ("close", 22)
+    for _ in range(3):
+        assert not transport.retry_cleanup() and transport._owned is rec
+        assert sum(m.valid for m in rec.proc.members) == 2
+        assert len(rec.proc.members) == 3
+    assert native.opened == [21, 22]
+    native.fail = None
+    assert transport.retry_cleanup() and transport.clean()
+    assert len(rec.proc.members) == 2
+    assert sorted(native.closed) == [11, 12, 13, 21, 22]

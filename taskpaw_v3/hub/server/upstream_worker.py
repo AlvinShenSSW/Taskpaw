@@ -467,7 +467,16 @@ class _WindowsAPI:
                 )
             ]
 
-        self.extended, self.accounting = Extended, Accounting
+        class ProcessList(ctypes.Structure):
+            _fields_ = [
+                ("NumberOfAssignedProcesses", w.DWORD),
+                ("NumberOfProcessIdsInList", w.DWORD),
+                ("ProcessIdList", ctypes.c_size_t * 16),
+            ]
+
+        self.extended, self.accounting_type = Extended, Accounting
+        self.process_list = ProcessList
+        self.filetime = w.FILETIME
         for name, args, result in (
             ("CreateJobObjectW", [w.LPVOID, w.LPCWSTR], w.HANDLE),
             (
@@ -484,6 +493,11 @@ class _WindowsAPI:
             ),
             ("ResumeThread", [w.HANDLE], w.DWORD),
             ("CloseHandle", [w.HANDLE], w.BOOL),
+            ("OpenProcess", [w.DWORD, w.BOOL, w.DWORD], w.HANDLE),
+            ("GetProcessId", [w.HANDLE], w.DWORD),
+            ("IsProcessInJob", [w.HANDLE, w.HANDLE, ctypes.POINTER(w.BOOL)], w.BOOL),
+            ("GetHandleInformation", [w.HANDLE, ctypes.POINTER(w.DWORD)], w.BOOL),
+            ("GetProcessTimes", [w.HANDLE] + [ctypes.POINTER(w.FILETIME)] * 4, w.BOOL),
         ):
             fn = getattr(kernel, name)
             fn.argtypes, fn.restype = args, result
@@ -548,8 +562,11 @@ class _WindowsAPI:
             raise OSError("helper resume failed")
 
     def poll(self, process: int) -> int | None:
-        if self.winapi.WaitForSingleObject(process, 0) == self.winapi.WAIT_TIMEOUT:
+        result = self.winapi.WaitForSingleObject(process, 0)
+        if result == self.winapi.WAIT_TIMEOUT:
             return None
+        if result != self.winapi.WAIT_OBJECT_0:
+            raise OSError("helper process wait failed")
         return int(self.winapi.GetExitCodeProcess(process))
 
     def wait(self, process: int, timeout: float | None) -> int:
@@ -558,9 +575,12 @@ class _WindowsAPI:
             if timeout is None
             else math.ceil(max(0, timeout) * 1000)
         )
-        if self.winapi.WaitForSingleObject(process, millis) == self.winapi.WAIT_TIMEOUT:
+        result = self.winapi.WaitForSingleObject(process, millis)
+        if result == self.winapi.WAIT_TIMEOUT:
             assert timeout is not None
             raise subprocess.TimeoutExpired("upstream-http", timeout)
+        if result != self.winapi.WAIT_OBJECT_0:
+            raise OSError("helper process wait failed")
         return int(self.winapi.GetExitCodeProcess(process))
 
     def kill(self, process: int) -> None:
@@ -569,14 +589,48 @@ class _WindowsAPI:
     def terminate_job(self, job: int) -> None:
         self.checked(self.kernel.TerminateJobObject(job, 1))
 
-    def active(self, job: int) -> int:
-        info = self.accounting()
+    def accounting(self, job: int) -> tuple[int, int]:
+        info = self.accounting_type()
         self.checked(
             self.kernel.QueryInformationJobObject(
                 job, 1, self.ctypes.byref(info), self.ctypes.sizeof(info), None
             )
         )
-        return int(info.ActiveProcesses)
+        return int(info.TotalProcesses), int(info.ActiveProcesses)
+
+    def active(self, job: int) -> int:
+        return self.accounting(job)[1]
+
+    def members(self, job: int) -> list[int]:
+        info = self.process_list()
+        self.checked(
+            self.kernel.QueryInformationJobObject(
+                job, 3, self.ctypes.byref(info), self.ctypes.sizeof(info), None
+            )
+        )
+        count = int(info.NumberOfProcessIdsInList)
+        if count != info.NumberOfAssignedProcesses or not 0 <= count <= 16:
+            raise OSError("helper member list incomplete")
+        return [int(info.ProcessIdList[i]) for i in range(count)]
+
+    def open_process(self, pid: int) -> int:
+        return int(self.checked(self.kernel.OpenProcess(0x101000, False, pid)))
+
+    def identity(self, handle: int, job: int) -> tuple[int, int]:
+        from ctypes import wintypes as w
+
+        pid = int(self.checked(self.kernel.GetProcessId(handle)))
+        times = [self.filetime() for _ in range(4)]
+        self.checked(
+            self.kernel.GetProcessTimes(handle, *(self.ctypes.byref(t) for t in times))
+        )
+        member, flags = w.BOOL(), w.DWORD()
+        self.checked(self.kernel.IsProcessInJob(handle, job, self.ctypes.byref(member)))
+        self.checked(self.kernel.GetHandleInformation(handle, self.ctypes.byref(flags)))
+        if not member.value or flags.value & 1:
+            raise OSError("helper member ownership invalid")
+        created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        return pid, created
 
     def close(self, handle: int) -> None:
         self.checked(self.kernel.CloseHandle(handle))
@@ -584,6 +638,17 @@ class _WindowsAPI:
 
 def _windows_stdin_pipe(api: _WindowsAPI) -> tuple[int, int]:
     return api.pipe()
+
+
+@dataclass
+class _WindowsMember:
+    pid: int
+    handle: int | None
+    created: int | None = None
+    valid: bool = False
+    signaled: bool = False
+    closed: bool = False
+    launcher: bool = False
 
 
 class _WindowsProcess:
@@ -601,6 +666,10 @@ class _WindowsProcess:
         self.assigned = False
         self.handles: set[int] = set()
         self.fds: set[int] = set()
+        self.members: list[_WindowsMember] = []
+        self.total_seen = 0
+        self.final_accounting: tuple[int, int] | None = None
+        self.exit_proven = False
 
     def _pipe_file(self, handle: int, mode: str) -> io.FileIO:
         fd = self.api.fd(handle, os.O_RDONLY if mode == "rb" else os.O_WRONLY)
@@ -633,6 +702,7 @@ class _WindowsProcess:
         )
         self.api.assign(self.job, self.process)
         self.assigned = True
+        self.capture_launcher()
         self.close_setup()
 
     def close_setup(self) -> None:
@@ -672,20 +742,134 @@ class _WindowsProcess:
         else:
             self.kill()  # Assignment failure leaves a suspended unassigned child.
 
+    def _validate_member(self, member: _WindowsMember) -> None:
+        assert member.handle is not None and self.job is not None
+        pid, created = self.api.identity(member.handle, self.job)
+        if pid != member.pid or type(created) is not int or not 0 <= created < 1 << 64:
+            raise OSError("helper member identity invalid")
+        member.created = created
+        for old in self.members:
+            if (
+                old is not member
+                and old.valid
+                and (old.pid, old.created) == (pid, created)
+            ):
+                self.api.close(member.handle)
+                member.handle, member.closed = None, True
+                self.members.remove(member)
+                return
+        member.valid = True
+
+    def capture_launcher(self) -> None:
+        if self.process is None or not self.assigned:
+            return
+        member = next((m for m in self.members if m.launcher), None)
+        if member is None:
+            member = _WindowsMember(self.pid, self.process, launcher=True)
+            self.members.append(member)  # Alias the original creation handle once.
+        if not member.valid:
+            self._validate_member(member)
+
+    def _accounting(self) -> tuple[int, int]:
+        total, active = self.api.accounting(self.job)
+        previous = self.total_seen
+        if type(total) is int and 0 <= total <= 0xFFFFFFFF:
+            self.total_seen = max(previous, total)  # Rejected totals still observed.
+        if (
+            type(total) is not int
+            or type(active) is not int
+            or not 1 <= total <= 16
+            or not 0 <= active <= total
+            or total < previous
+        ):
+            raise OSError("helper lifetime accounting invalid")
+        return total, active
+
+    def capture_members(self) -> None:
+        if not self.assigned or self.job is None:
+            return
+        self.capture_launcher()
+        pids = self.api.members(self.job)
+        if len(pids) > 16 or len(set(pids)) != len(pids):
+            raise OSError("helper member list invalid")
+        for pid in pids:
+            if type(pid) is not int or not 1 <= pid <= 0xFFFFFFFF:
+                raise OSError("helper member PID invalid")
+            member = next(
+                (m for m in self.members if m.pid == pid and m.handle is not None), None
+            )
+            if member is not None:
+                if not member.valid:
+                    self._validate_member(member)
+                continue
+            if len(self.members) >= 16:
+                raise OSError("helper member capacity exhausted")
+            member = _WindowsMember(pid, None)
+            self.members.append(member)  # Reserve before acquiring a native handle.
+            try:
+                member.handle = self.api.open_process(pid)
+            except OSError:
+                self.members.remove(member)
+                raise
+            self._validate_member(member)
+        self._accounting()
+
+    def close_pending(self) -> bool:
+        cleaned = True
+        for member in tuple(self.members):
+            if member.valid or member.launcher:
+                continue
+            try:
+                if member.handle is not None:
+                    self.api.close(member.handle)
+                self.members.remove(member)
+            except OSError:
+                cleaned = False
+        return cleaned
+
     def drained(self, end: float) -> bool:
-        while self.job is not None and self.api.active(self.job):
-            if time.monotonic() >= end:
+        if not self.assigned:
+            # Never-resumed child was directly waited; still check the empty job.
+            if self.job is not None:
+                total, active = self.api.accounting(self.job)
+                return 0 <= total <= 1 and active == 0
+            return True
+        if self.job is None:
+            return self.exit_proven and all(m.closed for m in self.members)
+        for member in self.members:
+            if not member.valid:
                 return False
-            time.sleep(min(0.01, max(0, end - time.monotonic())))
+            if not member.signaled:
+                assert member.handle is not None
+                try:
+                    self.api.wait(member.handle, max(0, end - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    return False
+                member.signaled = True
+        self.final_accounting = self._accounting()  # One snapshot AFTER all signals.
+        total, active = self.final_accounting
+        if total != len(self.members) or active:
+            return False
+        self.exit_proven = True
         return True
 
     def close(self) -> None:
         self.close_setup()
+        if not self.close_pending():
+            raise OSError("helper pending handle closure failed")
+        for member in self.members:
+            if member.handle is not None and not member.launcher:
+                self.api.close(member.handle)
+                member.handle, member.closed = None, True
         for name in ("thread", "process", "job"):
             handle = getattr(self, name)
             if handle is not None:
                 self.api.close(handle)
                 setattr(self, name, None)
+                if name == "process":
+                    for member in self.members:
+                        if member.launcher:
+                            member.handle, member.closed = None, True
 
 
 @dataclass
@@ -777,17 +961,29 @@ class Transport:
 
     def _cleanup(self, rec: _Owned, cancel: bool) -> bool:
         end = time.monotonic() + 1
+        native = isinstance(rec.proc, _WindowsProcess)
+        failed = False
         rec.cancel.set()
         if rec.keeper >= 0:
             os.close(rec.keeper)
             rec.keeper = -1
-        if cancel and rec.proc.poll() is None:
+        try:
+            live = cancel and rec.proc.poll() is None
+        except OSError:
+            if not native:
+                raise
+            failed, live = True, False
+        if live:
             if rec.writer_done.is_set():
                 try:
                     rec.proc.wait(timeout=min(0.25, max(0, end - time.monotonic())))
                 except subprocess.TimeoutExpired:
                     pass
-            if rec.proc.poll() is None and not isinstance(rec.proc, _WindowsProcess):
+                except OSError:
+                    if not native:
+                        raise
+                    failed = True
+            if not native and rec.proc.poll() is None:
                 if os.name == "posix":
                     try:
                         os.killpg(rec.proc.pid, signal.SIGKILL)
@@ -795,25 +991,47 @@ class Transport:
                         pass
                 else:
                     rec.proc.kill()
-        if isinstance(rec.proc, _WindowsProcess):
-            # A launcher exit says nothing about wrapper/interpreter ownership.
-            rec.proc.terminate_owned()
+        if native:
+            assert isinstance(rec.proc, _WindowsProcess)
+            try:
+                rec.proc.capture_members()  # This pass shares the cleanup end.
+            except OSError:
+                failed = True
+            try:
+                rec.proc.terminate_owned()
+            except OSError:
+                failed = True
         try:
             rec.proc.wait(timeout=max(0, end - time.monotonic()))
         except subprocess.TimeoutExpired:
-            return False
+            if not native:
+                return False
+            failed = True
+        except OSError:
+            if not native:
+                raise
+            failed = True
         for thread in rec.threads:
             if thread.ident is not None:
                 thread.join(max(0, end - time.monotonic()))
-        if any(t.is_alive() for t in rec.threads):
-            return False
-        for pipe in (rec.proc.stdin, rec.proc.stdout):
-            if pipe is not None and not pipe.closed:
-                pipe.close()
-        if isinstance(rec.proc, _WindowsProcess):
-            if not rec.proc.drained(end):
+        joined = not any(t.is_alive() for t in rec.threads)
+        if joined:
+            for pipe in (rec.proc.stdin, rec.proc.stdout):
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+        if native:
+            assert isinstance(rec.proc, _WindowsProcess)
+            if not rec.proc.close_pending():
+                failed = True
+            try:
+                drained = rec.proc.drained(end)
+            except OSError:
+                drained = False
+            if failed or not joined or not drained:
                 return False
             rec.proc.close()
+        elif not joined:
+            return False
         return True
 
     def retry_cleanup(self) -> bool:
@@ -893,6 +1111,8 @@ class Transport:
                     rec.threads.append(thread)
                     thread.start()
             while not rec.cancel.is_set():
+                if isinstance(proc, _WindowsProcess):
+                    proc.capture_members()
                 if self._stopped.is_set():
                     rec.cancel.set()
                     break
