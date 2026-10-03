@@ -731,21 +731,136 @@ def test_parent_result_capture_is_independently_bounded(monkeypatch):
     assert transport.clean()
 
 
+def _capture_upstream_process(monkeypatch, captured, callback=None, phases=None):
+    import os
+    import time
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    if os.name == "nt":
+        original = uw._WindowsProcess.start
+
+        def start(proc, *args, **kwargs):
+            captured.append(proc)
+            if phases is not None:
+                phases["spawn_enter"] = time.monotonic()
+            original(proc, *args, **kwargs)
+            if phases is not None:
+                phases["spawn_return"] = time.monotonic()
+            if callback:
+                callback()
+
+        monkeypatch.setattr(uw._WindowsProcess, "start", start)
+    else:
+        original = uw.subprocess.Popen
+
+        def popen(*args, **kwargs):
+            if phases is not None:
+                phases["spawn_enter"] = time.monotonic()
+            proc = original(*args, **kwargs)
+            captured.append(proc)
+            if phases is not None:
+                phases["spawn_return"] = time.monotonic()
+            if callback:
+                callback()
+            return proc
+
+        monkeypatch.setattr(uw.subprocess, "Popen", popen)
+
+
+def _observe_upstream_transport(monkeypatch, transport, phases, snapshots):
+    import time
+
+    import psutil
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    write, read, cleanup = transport._write, transport._read, transport._cleanup
+
+    class ObservedPipe:
+        def __init__(self, pipe):
+            self.pipe = pipe
+
+        def read(self, size):
+            part = self.pipe.read(size)
+            if part:
+                phases.setdefault("first_stdout", time.monotonic())
+            return part
+
+        def __getattr__(self, name):
+            return getattr(self.pipe, name)
+
+    def writer(rec, raw):
+        try:
+            write(rec, raw)
+        finally:
+            phases["writer_complete"] = time.monotonic()
+
+    def reader(rec):
+        rec.proc.stdout = ObservedPipe(rec.proc.stdout)
+        try:
+            read(rec)
+        finally:
+            phases["reader_complete"] = time.monotonic()
+
+    def snapshot(rec):
+        owned = []
+        try:
+            if rec.proc.pid <= 0:
+                raise psutil.NoSuchProcess(rec.proc.pid)
+            parent = psutil.Process(rec.proc.pid)
+            owned = [
+                {"pid": p.pid, "created": p.create_time()}
+                for p in [parent, *parent.children(recursive=True)]
+            ]
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        native = isinstance(rec.proc, uw._WindowsProcess)
+        active = None
+        if native and rec.proc.job is not None:
+            try:
+                active = rec.proc.api.active(rec.proc.job)
+            except OSError:
+                pass  # Observation cannot change the cleanup outcome.
+        return {
+            "owned_identities": owned,
+            "joined": not any(t.is_alive() for t in rec.threads),
+            "keeper_closed": rec.keeper < 0,
+            "pipes_closed": all(
+                p is None or p.closed for p in (rec.proc.stdin, rec.proc.stdout)
+            ),
+            "reaped": rec.proc.returncode is not None,
+            "job_active": active,
+            "native_handles_closed": native
+            and all(
+                getattr(rec.proc, name) is None for name in ("process", "thread", "job")
+            )
+            and not rec.proc.handles
+            and not rec.proc.fds,
+        }
+
+    def observed_cleanup(rec, cancel):
+        snapshots["before_cleanup"] = snapshot(rec)
+        phases["cleanup_enter"] = time.monotonic()
+        try:
+            return cleanup(rec, cancel)
+        finally:
+            phases["cleanup_return"] = time.monotonic()
+            snapshots["after_cleanup"] = snapshot(rec)
+
+    monkeypatch.setattr(transport, "_write", writer)
+    monkeypatch.setattr(transport, "_read", reader)
+    monkeypatch.setattr(transport, "_cleanup", observed_cleanup)
+
+
 def test_partial_thread_start_still_reaps_owned_child(monkeypatch):
-    import subprocess
     import sys
     import threading
 
     from taskpaw_v3.hub.server import upstream_worker as uw
 
     captured = []
-    original_popen = subprocess.Popen
     original_start = threading.Thread.start
-
-    def popen(*args, **kwargs):
-        proc = original_popen(*args, **kwargs)
-        captured.append(proc)
-        return proc
 
     def start(thread):
         if thread.name == "upstream-writer":
@@ -755,7 +870,7 @@ def test_partial_thread_start_still_reaps_owned_child(monkeypatch):
     monkeypatch.setattr(
         uw, "worker_argv", lambda: [sys.executable, "-c", "import time; time.sleep(30)"]
     )
-    monkeypatch.setattr(uw.subprocess, "Popen", popen)
+    _capture_upstream_process(monkeypatch, captured)
     monkeypatch.setattr(threading.Thread, "start", start)
     transport = uw.Transport()
     try:
@@ -773,30 +888,117 @@ def test_partial_thread_start_still_reaps_owned_child(monkeypatch):
 
 
 def test_cancel_during_popen_publication_is_sticky(monkeypatch):
-    import subprocess
     import sys
 
     from taskpaw_v3.hub.server import upstream_worker as uw
 
-    original = subprocess.Popen
     transport = uw.Transport()
     captured = []
 
-    def create(*args, **kwargs):
-        proc = original(*args, **kwargs)
-        captured.append(proc)
+    def cancel():
         transport.cancel()
         transport.cancel()
-        return proc
 
     monkeypatch.setattr(
         uw, "worker_argv", lambda: [sys.executable, "-c", "import time; time.sleep(30)"]
     )
-    monkeypatch.setattr(uw.subprocess, "Popen", create)
+    _capture_upstream_process(monkeypatch, captured, cancel)
     assert transport.request({}, 0.3)["reason"] == "helper_cancelled"
     assert transport.clean() and captured[0].poll() is not None
     assert transport.request({}, 0.3)["reason"] == "helper_cancelled"
     assert len(captured) == 1
+
+
+@pytest.mark.parametrize("assigned", [False, True])
+@pytest.mark.parametrize(
+    "failure", ["terminate", "query", "close", "after-close", None]
+)
+def test_windows_owned_cleanup_failure_retains_exact_record(assigned, failure):
+    """Hermetic model: an exited launcher is not proof its job is empty."""
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    class Native:
+        def __init__(self):
+            self.failure = failure
+            self.live = True
+            self.closed = []
+            self.killed = []
+
+        def poll(self, handle):
+            return 0 if assigned or not self.live else None
+
+        def wait(self, handle, timeout):
+            assert not self.live or assigned
+            return 0
+
+        def kill(self, handle):
+            self.killed.append(("process", handle))
+            if self.failure == "terminate":
+                raise OSError("owned termination failed")
+            self.live = False
+
+        def terminate_job(self, handle):
+            self.killed.append(("job", handle))
+            if handle is None:
+                raise OSError("NULL is not an owned job handle")
+            if self.failure == "terminate":
+                raise OSError("owned termination failed")
+            self.live = False
+
+        def active(self, handle):
+            if self.failure == "query":
+                raise OSError("owned query failed")
+            return int(self.live and assigned)
+
+        def close(self, handle):
+            if self.failure == "close":
+                raise OSError("owned closure failed")
+            self.closed.append(handle)
+
+    native = Native()
+    proc = uw._WindowsProcess(native)
+    proc.process, proc.thread, proc.job = 11, 12, 13
+    proc.pid, proc.assigned = 17, assigned
+    rec = uw._Owned(proc, -1)
+    transport = uw.Transport()
+    transport._owned = rec
+    cleanup = transport._cleanup
+    if failure == "after-close":
+        transport._cleanup = lambda rec, cancel: cleanup(rec, cancel) and False
+    if failure:
+        assert not transport.retry_cleanup() and transport._owned is rec
+        assert transport.request({}, 1)["reason"] == "helper_cleanup_failed"
+        native.failure = None
+        transport._cleanup = cleanup
+    assert transport.retry_cleanup() and transport.clean()
+    assert not native.live
+    assert native.killed[0] == (
+        "job" if assigned else "process",
+        13 if assigned else 11,
+    )
+    assert sorted(native.closed) == [11, 12, 13]
+    assert all(handle is not None for _, handle in native.killed)
+    # Fixtures and subprocess consumers may inspect after native handles close.
+    assert proc.poll() == proc.wait(timeout=0) == proc.returncode == 0
+
+
+@pytest.mark.skipif(
+    __import__("os").name == "nt", reason="existing POSIX launch expiry"
+)
+def test_expiry_during_posix_creation_preserves_existing_reason(monkeypatch):
+    import sys
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    captured = []
+    _capture_upstream_process(monkeypatch, captured)
+    monkeypatch.setattr(
+        uw, "worker_argv", lambda: [sys.executable, "-c", "import time; time.sleep(30)"]
+    )
+    transport = uw.Transport()
+    assert transport.request({}, 0) == {"ok": False, "reason": "helper_cancelled"}
+    assert transport.clean() and captured[0].poll() is not None
+    assert captured[0].stdin.closed and captured[0].stdout.closed
 
 
 def test_retained_cleanup_denies_replacement_and_can_retry(monkeypatch):
@@ -859,12 +1061,14 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
     entered = threading.Event()
     release = threading.Event()
     forwarded = []
+    phases, snapshots = {}, {}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
+            phases["handler_enter"] = time.monotonic()
             entered.set()
             try:
                 if self.path == "/forbidden":
@@ -926,6 +1130,12 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            finally:
+                try:
+                    self.wfile.flush()
+                    phases["http_response_complete"] = time.monotonic()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
 
     class Server(ThreadingHTTPServer):
         daemon_threads = False
@@ -936,18 +1146,10 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
     transport = uw.Transport()
     results = []
     captured = []
-    import subprocess
-
     import psutil
 
-    original_popen = subprocess.Popen
-
-    def capture(*args, **kwargs):
-        proc = original_popen(*args, **kwargs)
-        captured.append(proc)
-        return proc
-
-    monkeypatch.setattr(uw.subprocess, "Popen", capture)
+    _capture_upstream_process(monkeypatch, captured, phases=phases)
+    _observe_upstream_transport(monkeypatch, transport, phases, snapshots)
     request = {
         "kind": "status",
         "url": f"http://127.0.0.1:{server.server_port}/status",
@@ -958,9 +1160,14 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
     raw_bytes = len((uw.canonical(request) + "\n").encode())
     assert 30000 < raw_bytes <= uw.REQUEST_BYTES
     started = time.monotonic()
-    caller = threading.Thread(
-        target=lambda: results.append(transport.request(request, 3))
-    )
+
+    def call():
+        try:
+            results.append(transport.request(request, 3))
+        finally:
+            phases["caller_complete"] = time.monotonic()
+
+    caller = threading.Thread(target=call)
     try:
         caller.start()
         assert entered.wait(10)
@@ -1010,20 +1217,44 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
             except psutil.NoSuchProcess:
                 pass
         assert time.monotonic() - started < 5
+    finally:
+        # Emit even when the handler barrier/result oracle fails, before release
+        # or any fixture teardown changes the observed lifecycle.
         evidence = {
             "mode": mode,
             "frozen": frozen,
-            "result": result.get("reason", "ok"),
+            "result": results[0].get("reason", "ok") if results else None,
             "request_bytes": raw_bytes,
             "clean": transport.clean(),
-            "reaped": captured[0].poll() is not None,
-            "pipes_closed": captured[0].stdin.closed and captured[0].stdout.closed,
-            "observed_owned_descendants": len(owned_descendants),
+            "parent_budget": 3,
+            "deadline": 3,
+            "elapsed": time.monotonic() - started,
+            "caller_alive": caller.is_alive(),
+            "phases": {
+                name: phases.get(name) - started if name in phases else None
+                for name in (
+                    "spawn_enter",
+                    "spawn_return",
+                    "writer_complete",
+                    "handler_enter",
+                    "http_response_complete",
+                    "first_stdout",
+                    "reader_complete",
+                    "cleanup_enter",
+                    "cleanup_return",
+                    "caller_complete",
+                )
+            },
+            **snapshots,
+            "architecture": __import__("platform").machine(),
+            "python": __import__("sys").version.split()[0],
+            "source_sha256": hashlib.sha256(
+                __import__("pathlib").Path(uw.__file__).read_bytes()
+            ).hexdigest(),
         }
         if frozen:
             evidence["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
         print("R06_HELPER_NATIVE " + json.dumps(evidence, sort_keys=True))
-    finally:
         release.set()
         transport.cancel()
         caller.join(5)
@@ -1057,79 +1288,35 @@ raise SystemExit(upstream_worker.main())
 """
 
 
-def _windows_preread_popen(original, captured):
-    """Fixture-owned 4KiB raw anonymous pipe, same production I/O owners."""
+def _windows_preread_pipe(capacities):
+    """Provision only: production owns the real 4KiB pipe and native spawn."""
     import ctypes
-    import io
-    import msvcrt
-    import os
     from ctypes import wintypes as w
 
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    class SA(ctypes.Structure):
-        _fields_ = [("length", w.DWORD), ("descriptor", w.LPVOID), ("inherit", w.BOOL)]
-
-    kernel.CreatePipe.argtypes = [
-        ctypes.POINTER(w.HANDLE),
-        ctypes.POINTER(w.HANDLE),
-        ctypes.POINTER(SA),
-        w.DWORD,
-    ]
-    kernel.CreatePipe.restype = w.BOOL
-    kernel.GetNamedPipeInfo.argtypes = [
-        w.HANDLE,
-        ctypes.POINTER(w.DWORD),
-        ctypes.POINTER(w.DWORD),
-        ctypes.POINTER(w.DWORD),
-        ctypes.POINTER(w.DWORD),
-    ]
-    kernel.GetNamedPipeInfo.restype = w.BOOL
-    kernel.CloseHandle.argtypes = [w.HANDLE]
-    kernel.CloseHandle.restype = w.BOOL
-
-    def create(*args, **kwargs):
-        read, write = w.HANDLE(), w.HANDLE()
-        attrs = SA(ctypes.sizeof(SA), None, True)
-        assert kernel.CreatePipe(
-            ctypes.byref(read), ctypes.byref(write), ctypes.byref(attrs), 4096
-        ), ctypes.get_last_error()
-        read_file = write_file = None
+    def create(api):
+        read, write = api.pipe(4096)
         try:
+            query = api.kernel.GetNamedPipeInfo
+            query.argtypes = [
+                w.HANDLE,
+                ctypes.POINTER(w.DWORD),
+                ctypes.POINTER(w.DWORD),
+                ctypes.POINTER(w.DWORD),
+                ctypes.POINTER(w.DWORD),
+            ]
+            query.restype = w.BOOL
             outgoing, incoming = w.DWORD(), w.DWORD()
-            assert kernel.GetNamedPipeInfo(
+            assert query(
                 read, None, ctypes.byref(outgoing), ctypes.byref(incoming), None
             ), ctypes.get_last_error()
             capacity = max(outgoing.value, incoming.value)
             assert 0 < capacity < 30000, "real backpressure not established"
-            read_file = io.FileIO(
-                msvcrt.open_osfhandle(read.value, os.O_RDONLY | os.O_BINARY),
-                "rb",
-                closefd=True,
-            )
-            read = w.HANDLE()
-            write_file = io.FileIO(
-                msvcrt.open_osfhandle(write.value, os.O_WRONLY | os.O_BINARY),
-                "wb",
-                closefd=True,
-            )
-            write = w.HANDLE()
-            os.set_inheritable(write_file.fileno(), False)
-            kwargs["stdin"] = read_file
-            proc = original(*args, **kwargs)
-            proc.stdin = write_file
-            captured.append((proc, capacity))
-            write_file = None  # now owned by production writer/cleanup
-            return proc
-        finally:
-            if read_file is not None:
-                read_file.close()
-            if write_file is not None:
-                write_file.close()
-            if read.value:
-                kernel.CloseHandle(read)
-            if write.value:
-                kernel.CloseHandle(write)
+            capacities.append(capacity)
+            return read, write
+        except BaseException:
+            api.close(read)
+            api.close(write)
+            raise
 
     return create
 
@@ -1186,7 +1373,18 @@ def frozen_preread_fixture(tmp_path_factory):
     __import__("os").name != "nt", reason="actual Windows anonymous pipe required"
 )
 @pytest.mark.parametrize("frozen", [False, True], ids=["source", "frozen-preread"])
-@pytest.mark.parametrize("case", ["deadline", "stop", "success", "error"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "deadline",
+        "stop",
+        "success",
+        "error",
+        "terminate-fail",
+        "query-fail",
+        "close-fail",
+    ],
+)
 def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, case):
     import hashlib
     import subprocess
@@ -1217,11 +1415,12 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
         )
         argv = [sys.executable, str(entry), str(release), str(ready)]
     monkeypatch.setattr(uw, "worker_argv", lambda: argv)
-    captured = []
-    monkeypatch.setattr(
-        uw.subprocess, "Popen", _windows_preread_popen(subprocess.Popen, captured)
-    )
+    captured, capacities = [], []
+    phases, snapshots = {}, {}
+    _capture_upstream_process(monkeypatch, captured, phases=phases)
+    monkeypatch.setattr(uw, "_windows_stdin_pipe", _windows_preread_pipe(capacities))
     transport = uw.Transport()
+    _observe_upstream_transport(monkeypatch, transport, phases, snapshots)
     results = []
     server = server_thread = None
     payload = {
@@ -1253,12 +1452,37 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
         )
     input_bytes = len((uw.canonical(payload) + "\n").encode())
     assert 32000 < input_bytes <= uw.REQUEST_BYTES
-    caller = threading.Thread(
-        target=lambda: results.append(transport.request(payload, 10))
-    )
+
+    def call():
+        try:
+            results.append(transport.request(payload, 10))
+        finally:
+            phases["caller_complete"] = time.monotonic()
+
+    caller = threading.Thread(target=call)
     marked = None
+    fault_api = fault_method = original_method = None
+    sibling = sibling_identity = None
+    sibling_release, sibling_ready = (
+        tmp_path / "sibling-release",
+        tmp_path / "sibling-ready.json",
+    )
+    if case == "stop":
+        sibling_argv = [*argv[:-2], str(sibling_release), str(sibling_ready)]
+        sibling = subprocess.Popen(
+            sibling_argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
     started = time.monotonic()
     try:
+        if sibling is not None:
+            while not sibling_ready.exists() and time.monotonic() - started < 8:
+                time.sleep(0.01)
+            assert sibling_ready.exists(), "owned independent sibling barrier"
+            sibling_identity = json.loads(sibling_ready.read_text())
+            started = time.monotonic()
         caller.start()
         while not ready.exists() and time.monotonic() - started < 8:
             time.sleep(0.01)
@@ -1267,9 +1491,26 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
         assert marked["consumed"] == 0
         rec = transport._owned
         assert rec is not None and not rec.writer_done.is_set()
-        assert captured[0][1] < 32000 <= uw.REQUEST_BYTES
+        assert capacities[0] < 32000 <= uw.REQUEST_BYTES
         assert any(t.name == "upstream-writer" and t.is_alive() for t in rec.threads)
-        if case == "stop":
+        if case.endswith("-fail"):
+            fault_api = rec.proc.api
+            fault_method = {
+                "terminate-fail": "terminate_job",
+                "query-fail": "active",
+                "close-fail": "close",
+            }[case]
+            original_method = getattr(fault_api, fault_method)
+            job = rec.proc.job
+
+            def fail(handle):
+                if handle == job:
+                    raise OSError("owned native cleanup failure")
+                return original_method(handle)
+
+            monkeypatch.setattr(fault_api, fault_method, fail)
+            transport.cancel()
+        elif case == "stop":
             transport.cancel()
             transport.cancel()
         elif case in ("success", "error"):
@@ -1282,6 +1523,9 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
             "stop": "helper_cancelled",
             "success": "ok",
             "error": "request_invalid",
+            "terminate-fail": "helper_cleanup_failed",
+            "query-fail": "helper_cleanup_failed",
+            "close-fail": "helper_cleanup_failed",
         }[case]
         reason = result.get("reason", "ok" if result.get("ok") else "invalid_result")
         assert reason in (expected, "helper_cleanup_failed")
@@ -1300,15 +1544,22 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
                 "helper_cleanup_failed",
                 "helper_cancelled",
             )
+            assert len(captured) == 1
         else:
             assert transport.clean() and not inner_alive
+        if sibling_identity is not None:
+            sibling_process = psutil.Process(sibling_identity["pid"])
+            assert (
+                sibling_process.is_running()
+                and sibling_process.create_time() == sibling_identity["created"]
+            )
         print(
             "R06_PREREAD_NATIVE "
             + json.dumps(
                 {
                     "frozen": frozen,
                     "case": case,
-                    "capacity": captured[0][1],
+                    "capacity": capacities[0],
                     "request_bytes": input_bytes,
                     "result": reason,
                     "inner_alive": inner_alive,
@@ -1321,23 +1572,53 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
                     else None,
                     "architecture": __import__("platform").machine(),
                     "python": sys.version.split()[0],
-                    "popen_pid": captured[0][0].pid,
+                    "popen_pid": captured[0].pid,
                     "owned_pid": marked["pid"],
                     "owned_created": marked["created"],
                     "elapsed": round(time.monotonic() - started, 4),
                     "joined": not any(t.is_alive() for t in rec.threads),
                     "keeper_closed": rec.keeper < 0,
-                    "pipes_closed": captured[0][0].stdin.closed
-                    and captured[0][0].stdout.closed,
-                    "popen_reaped": captured[0][0].poll() is not None,
+                    "pipes_closed": captured[0].stdin.closed
+                    and captured[0].stdout.closed,
+                    "popen_reaped": captured[0].poll() is not None,
                 },
                 sort_keys=True,
             )
         )
         # Required native cleanup acceptance is distinct from the retained
         # negative safety invariant above. A live wrapper/interpreter is RED.
-        assert reason == expected and transport.clean() and not inner_alive
+        if case.endswith("-fail"):
+            assert reason == expected and transport._owned is rec
+            monkeypatch.setattr(fault_api, fault_method, original_method)
+            assert transport.retry_cleanup() and transport.clean()
+            assert rec.proc.process is rec.proc.thread is rec.proc.job is None
+            assert rec.proc.poll() == rec.proc.wait(timeout=0) == rec.proc.returncode
+            try:
+                owned = psutil.Process(marked["pid"])
+                assert owned.create_time() != marked["created"]
+            except psutil.NoSuchProcess:
+                pass
+        else:
+            assert reason == expected and transport.clean() and not inner_alive
     finally:
+        print(
+            "R06_PREREAD_PHASES "
+            + json.dumps(
+                {
+                    "case": case,
+                    "frozen": frozen,
+                    "result": results[0] if results else None,
+                    "phases": {name: value - started for name, value in phases.items()},
+                    "caller_alive": caller.is_alive(),
+                    "clean": transport.clean(),
+                    "sibling_identity": sibling_identity,
+                    **snapshots,
+                },
+                sort_keys=True,
+            )
+        )
+        if original_method is not None:
+            monkeypatch.setattr(fault_api, fault_method, original_method)
         # Only this fixture's barrier and PID: no process scan or production tree control.
         release.touch()
         if marked:
@@ -1350,15 +1631,138 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
                 owned.wait(timeout=3)
             except psutil.NoSuchProcess:
                 pass
-        caller.join(12)
+        if caller.ident is not None:
+            caller.join(12)
         transport.cancel()
-        assert transport.retry_cleanup() and transport.clean()
-        for proc, _ in captured:
-            assert proc.poll() is not None and proc.stdin.closed and proc.stdout.closed
+        cleaned = transport.retry_cleanup() and transport.clean()
+        if sibling is not None:
+            sibling_release.touch()
+            sibling.communicate(b"\n", timeout=5)
+            assert sibling.poll() is not None
         if server is not None:
             server.shutdown()
             server.server_close()
             server_thread.join(3)
+        assert cleaned
+        for proc in captured:
+            assert proc.poll() is not None and proc.stdin.closed and proc.stdout.closed
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="native Windows ownership")
+@pytest.mark.parametrize("frozen", [False, True], ids=["source", "frozen-preread"])
+@pytest.mark.parametrize(
+    "fault", ["job", "configure", "assign", "resume", "stop", "deadline"]
+)
+def test_windows_preread_backpressure_before_resume(
+    tmp_path, monkeypatch, request, frozen, fault
+):
+    """Even an assignment failure owns the suspended unassigned process."""
+    import sys
+
+    import psutil
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    ready, release = tmp_path / "ready.json", tmp_path / "release"
+    if frozen:
+        binary = request.getfixturevalue("frozen_preread_fixture")
+        argv = [str(binary), str(release), str(ready)]
+    else:
+        argv = [sys.executable, "-c", "raise SystemExit('must never execute')"]
+    monkeypatch.setattr(uw, "worker_argv", lambda: argv)
+    transport = uw.Transport()
+    captured, identities, resumes = [], [], []
+    _capture_upstream_process(monkeypatch, captured)
+    create, assign, resume = (
+        uw._WindowsAPI.create_process,
+        uw._WindowsAPI.assign,
+        uw._WindowsAPI.resume,
+    )
+
+    def created(api, *args):
+        value = create(api, *args)
+        proc = psutil.Process(value[2])
+        identities.append((proc.pid, proc.create_time()))
+        return value
+
+    def assigned(api, *args):
+        if fault == "assign":
+            raise OSError("owned assignment failure")
+        assign(api, *args)
+        if fault == "stop":
+            transport.cancel()
+            transport.cancel()
+
+    def resumed(api, thread):
+        resumes.append(thread)
+        if fault == "resume":
+            raise OSError("owned resume failure")
+        resume(api, thread)
+
+    def fail(*args):
+        raise OSError("owned job setup failure")
+
+    monkeypatch.setattr(uw._WindowsAPI, "create_process", created)
+    monkeypatch.setattr(uw._WindowsAPI, "assign", assigned)
+    monkeypatch.setattr(uw._WindowsAPI, "resume", resumed)
+    if fault in ("job", "configure"):
+        monkeypatch.setattr(
+            uw._WindowsAPI, "create_job" if fault == "job" else "configure_job", fail
+        )
+    result = transport.request({}, 0 if fault == "deadline" else 3)
+    expected = (
+        "helper_cancelled"
+        if fault == "stop"
+        else "upstream_deadline"
+        if fault == "deadline"
+        else "helper_failed"
+    )
+    print(
+        "R06_SETUP_NATIVE "
+        + json.dumps(
+            {
+                "frozen": frozen,
+                "fault": fault,
+                "result": result,
+                "clean": transport.clean(),
+                "owned_identities": identities,
+                "resume_calls": len(resumes),
+            },
+            sort_keys=True,
+        )
+    )
+    try:
+        assert result == {"ok": False, "reason": expected}
+        assert transport.clean() and not ready.exists()
+        assert len(resumes) == int(fault == "resume")
+        proc = captured[0]
+        assert proc.process is proc.thread is proc.job is None
+        assert not proc.handles and not proc.fds
+        assert proc.poll() == proc.wait(timeout=0) == proc.returncode
+        for pid, created_time in identities:
+            assert (
+                not psutil.pid_exists(pid)
+                or psutil.Process(pid).create_time() != created_time
+            )
+    finally:
+        release.touch()
+        transport.cancel()
+        assert transport.retry_cleanup()
+
+
+@pytest.mark.parametrize("count", [0, 2, 0xFFFFFFFF, 1])
+def test_windows_resume_checks_previous_suspend_count(count):
+    from types import SimpleNamespace
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    api = uw._WindowsAPI.__new__(uw._WindowsAPI)
+    api.kernel = SimpleNamespace(ResumeThread=lambda handle: count)
+    if count == 1:
+        api.resume(11)
+    else:
+        with pytest.raises(OSError, match="resume"):
+            api.resume(11)
 
 
 @pytest.mark.parametrize(

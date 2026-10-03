@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import importlib
+import io
 import json
 import math
 import os
@@ -397,9 +399,298 @@ def worker_argv() -> list[str]:
     return [sys.executable, "-m", "taskpaw_v3.hub.server.upstream_worker"]
 
 
+class _WindowsAPI:
+    """Native operations for this one helper, loaded only on Windows."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes as w
+
+        self.ctypes: Any = ctypes
+        self.winapi = importlib.import_module("_winapi")
+        self.msvcrt = importlib.import_module("msvcrt")
+        kernel = self.ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel = kernel
+
+        class IO(ctypes.Structure):
+            _fields_ = [
+                (name, ctypes.c_ulonglong)
+                for name in (
+                    "ReadOperationCount",
+                    "WriteOperationCount",
+                    "OtherOperationCount",
+                    "ReadTransferCount",
+                    "WriteTransferCount",
+                    "OtherTransferCount",
+                )
+            ]
+
+        class Limits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", w.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", w.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", w.DWORD),
+                ("SchedulingClass", w.DWORD),
+            ]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", Limits),
+                ("IoInfo", IO),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [
+                (name, ctypes.c_longlong)
+                for name in (
+                    "TotalUserTime",
+                    "TotalKernelTime",
+                    "ThisPeriodTotalUserTime",
+                    "ThisPeriodTotalKernelTime",
+                )
+            ] + [
+                (name, w.DWORD)
+                for name in (
+                    "TotalPageFaultCount",
+                    "TotalProcesses",
+                    "ActiveProcesses",
+                    "TotalTerminatedProcesses",
+                )
+            ]
+
+        self.extended, self.accounting = Extended, Accounting
+        for name, args, result in (
+            ("CreateJobObjectW", [w.LPVOID, w.LPCWSTR], w.HANDLE),
+            (
+                "SetInformationJobObject",
+                [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD],
+                w.BOOL,
+            ),
+            ("AssignProcessToJobObject", [w.HANDLE, w.HANDLE], w.BOOL),
+            ("TerminateJobObject", [w.HANDLE, w.UINT], w.BOOL),
+            (
+                "QueryInformationJobObject",
+                [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD, w.LPVOID],
+                w.BOOL,
+            ),
+            ("ResumeThread", [w.HANDLE], w.DWORD),
+            ("CloseHandle", [w.HANDLE], w.BOOL),
+        ):
+            fn = getattr(kernel, name)
+            fn.argtypes, fn.restype = args, result
+
+    def checked(self, value: Any) -> Any:
+        if not value:
+            raise self.ctypes.WinError(self.ctypes.get_last_error())
+        return value
+
+    def create_job(self) -> int:
+        return int(self.checked(self.kernel.CreateJobObjectW(None, None)))
+
+    def configure_job(self, job: int) -> None:
+        limits = self.extended()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE only
+        self.checked(
+            self.kernel.SetInformationJobObject(
+                job, 9, self.ctypes.byref(limits), self.ctypes.sizeof(limits)
+            )
+        )
+
+    def pipe(self, size: int = 0) -> tuple[int, int]:
+        return cast(tuple[int, int], self.winapi.CreatePipe(None, size))
+
+    def fd(self, handle: int, flags: int) -> int:
+        return int(self.msvcrt.open_osfhandle(handle, flags | cast(Any, os).O_BINARY))
+
+    def oshandle(self, fd: int) -> int:
+        return int(self.msvcrt.get_osfhandle(fd))
+
+    def inherit(self, handle: int, value: bool) -> None:
+        cast(Any, os).set_handle_inheritable(handle, value)
+
+    def create_process(
+        self, argv: list[str], env: dict, handles: list[int]
+    ) -> tuple[int, int, int, int]:
+        startup = cast(Any, subprocess).STARTUPINFO()
+        startup.dwFlags |= self.winapi.STARTF_USESTDHANDLES
+        startup.hStdInput, startup.hStdOutput, startup.hStdError = handles
+        startup.lpAttributeList = {"handle_list": handles}
+        return cast(
+            tuple[int, int, int, int],
+            self.winapi.CreateProcess(
+                None,
+                subprocess.list2cmdline(argv),
+                None,
+                None,
+                True,
+                0x4,  # CREATE_SUSPENDED; _winapi adds EXTENDED_STARTUPINFO_PRESENT.
+                env,
+                None,
+                startup,
+            ),
+        )
+
+    def assign(self, job: int, process: int) -> None:
+        self.checked(self.kernel.AssignProcessToJobObject(job, process))
+
+    def resume(self, thread: int) -> None:
+        # ResumeThread returns the previous suspend count, not a BOOL.
+        if self.kernel.ResumeThread(thread) != 1:
+            raise OSError("helper resume failed")
+
+    def poll(self, process: int) -> int | None:
+        if self.winapi.WaitForSingleObject(process, 0) == self.winapi.WAIT_TIMEOUT:
+            return None
+        return int(self.winapi.GetExitCodeProcess(process))
+
+    def wait(self, process: int, timeout: float | None) -> int:
+        millis = (
+            self.winapi.INFINITE
+            if timeout is None
+            else math.ceil(max(0, timeout) * 1000)
+        )
+        if self.winapi.WaitForSingleObject(process, millis) == self.winapi.WAIT_TIMEOUT:
+            assert timeout is not None
+            raise subprocess.TimeoutExpired("upstream-http", timeout)
+        return int(self.winapi.GetExitCodeProcess(process))
+
+    def kill(self, process: int) -> None:
+        self.winapi.TerminateProcess(process, 1)
+
+    def terminate_job(self, job: int) -> None:
+        self.checked(self.kernel.TerminateJobObject(job, 1))
+
+    def active(self, job: int) -> int:
+        info = self.accounting()
+        self.checked(
+            self.kernel.QueryInformationJobObject(
+                job, 1, self.ctypes.byref(info), self.ctypes.sizeof(info), None
+            )
+        )
+        return int(info.ActiveProcesses)
+
+    def close(self, handle: int) -> None:
+        self.checked(self.kernel.CloseHandle(handle))
+
+
+def _windows_stdin_pipe(api: _WindowsAPI) -> tuple[int, int]:
+    return api.pipe()
+
+
+class _WindowsProcess:
+    """Popen-compatible owned handle set, published before any native setup."""
+
+    def __init__(self, api: Any = None) -> None:
+        self.api = api
+        self.stdin: io.FileIO | None = None
+        self.stdout: io.FileIO | None = None
+        self.pid = 0
+        self.returncode: int | None = None
+        self.process: int | None = None
+        self.thread: int | None = None
+        self.job: int | None = None
+        self.assigned = False
+        self.handles: set[int] = set()
+        self.fds: set[int] = set()
+
+    def _pipe_file(self, handle: int, mode: str) -> io.FileIO:
+        fd = self.api.fd(handle, os.O_RDONLY if mode == "rb" else os.O_WRONLY)
+        self.handles.remove(handle)  # CRT now owns this native handle.
+        self.fds.add(fd)
+        pipe = io.FileIO(fd, mode, closefd=True)
+        self.fds.remove(fd)  # FileIO now owns the fd.
+        return pipe
+
+    def start(self, argv: list[str], env: dict) -> None:
+        if self.api is None:
+            self.api = _WindowsAPI()
+        self.job = self.api.create_job()
+        self.api.configure_job(self.job)
+        read, write = _windows_stdin_pipe(self.api)
+        self.handles.update((read, write))
+        self.stdin = self._pipe_file(write, "wb")
+        out_read, out_write = self.api.pipe()
+        self.handles.update((out_read, out_write))
+        self.stdout = self._pipe_file(out_read, "rb")
+        null = os.open(os.devnull, os.O_WRONLY)
+        self.fds.add(null)
+        child = [read, out_write, self.api.oshandle(null)]
+        for handle in child:
+            self.api.inherit(handle, True)
+        # Parent pipes, job and all other handles stay non-inheritable. The
+        # explicit list allows only these child standard handles to transfer.
+        self.process, self.thread, self.pid, _ = self.api.create_process(
+            argv, env, child
+        )
+        self.api.assign(self.job, self.process)
+        self.assigned = True
+        self.close_setup()
+
+    def close_setup(self) -> None:
+        for handle in tuple(self.handles):
+            self.api.close(handle)
+            self.handles.remove(handle)
+        for fd in tuple(self.fds):
+            os.close(fd)
+            self.fds.remove(fd)
+
+    def resume(self) -> None:
+        assert self.thread is not None and self.assigned
+        self.api.resume(self.thread)
+        self.api.close(self.thread)
+        self.thread = None
+
+    def poll(self) -> int | None:
+        if self.returncode is None and self.process is not None:
+            self.returncode = self.api.poll(self.process)
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = (
+                self.api.wait(self.process, timeout) if self.process is not None else 0
+            )
+        return self.returncode
+
+    def kill(self) -> None:
+        if self.process is not None and self.poll() is None:
+            self.api.kill(self.process)
+
+    def terminate_owned(self) -> None:
+        if self.assigned:
+            if self.job is not None:
+                self.api.terminate_job(self.job)
+        else:
+            self.kill()  # Assignment failure leaves a suspended unassigned child.
+
+    def drained(self, end: float) -> bool:
+        while self.job is not None and self.api.active(self.job):
+            if time.monotonic() >= end:
+                return False
+            time.sleep(min(0.01, max(0, end - time.monotonic())))
+        return True
+
+    def close(self) -> None:
+        self.close_setup()
+        for name in ("thread", "process", "job"):
+            handle = getattr(self, name)
+            if handle is not None:
+                self.api.close(handle)
+                setattr(self, name, None)
+
+
 @dataclass
 class _Owned:
-    proc: subprocess.Popen
+    proc: subprocess.Popen | _WindowsProcess
     keeper: int
     cancel: threading.Event = field(default_factory=threading.Event)
     writer_done: threading.Event = field(default_factory=threading.Event)
@@ -488,15 +779,15 @@ class Transport:
         end = time.monotonic() + 1
         rec.cancel.set()
         if rec.keeper >= 0:
-            keeper, rec.keeper = rec.keeper, -1
-            os.close(keeper)
+            os.close(rec.keeper)
+            rec.keeper = -1
         if cancel and rec.proc.poll() is None:
             if rec.writer_done.is_set():
                 try:
                     rec.proc.wait(timeout=min(0.25, max(0, end - time.monotonic())))
                 except subprocess.TimeoutExpired:
                     pass
-            if rec.proc.poll() is None:
+            if rec.proc.poll() is None and not isinstance(rec.proc, _WindowsProcess):
                 if os.name == "posix":
                     try:
                         os.killpg(rec.proc.pid, signal.SIGKILL)
@@ -504,6 +795,9 @@ class Transport:
                         pass
                 else:
                     rec.proc.kill()
+        if isinstance(rec.proc, _WindowsProcess):
+            # A launcher exit says nothing about wrapper/interpreter ownership.
+            rec.proc.terminate_owned()
         try:
             rec.proc.wait(timeout=max(0, end - time.monotonic()))
         except subprocess.TimeoutExpired:
@@ -516,6 +810,10 @@ class Transport:
         for pipe in (rec.proc.stdin, rec.proc.stdout):
             if pipe is not None and not pipe.closed:
                 pipe.close()
+        if isinstance(rec.proc, _WindowsProcess):
+            if not rec.proc.drained(end):
+                return False
+            rec.proc.close()
         return True
 
     def retry_cleanup(self) -> bool:
@@ -555,24 +853,36 @@ class Transport:
         deadline = time.monotonic() + timeout
         rec = None
         try:
-            proc = subprocess.Popen(
-                worker_argv(),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                bufsize=0,
-                start_new_session=os.name == "posix",
-                env=without_control_env(without_llm_env()),
-            )
+            if os.name == "nt":
+                native = _WindowsProcess()
+                proc: subprocess.Popen | _WindowsProcess = native
+                rec = _Owned(proc, -1)
+                with self._lock:
+                    self._owned = rec
+                native.start(worker_argv(), without_control_env(without_llm_env()))
+            else:
+                proc = subprocess.Popen(
+                    worker_argv(),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    bufsize=0,
+                    start_new_session=os.name == "posix",
+                    env=without_control_env(without_llm_env()),
+                )
+                rec = _Owned(proc, -1)
+                with self._lock:
+                    self._owned = rec
             assert proc.stdin is not None
-            rec = _Owned(proc, -1)
-            with self._lock:
-                self._owned = rec
             rec.keeper = os.dup(proc.stdin.fileno())
             os.set_inheritable(rec.keeper, False)
             if self._stopped.is_set() or time.monotonic() >= deadline:
+                if isinstance(proc, _WindowsProcess) and not self._stopped.is_set():
+                    rec.error = "upstream_deadline"
                 rec.cancel.set()
             else:
+                if isinstance(proc, _WindowsProcess):
+                    proc.resume()
                 for fn, args, name in (
                     (self._read, (rec,), "upstream-reader"),
                     (self._write, (rec, raw), "upstream-writer"),

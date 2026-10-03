@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { AgentConsole } from "./views/AgentConsole";
 import { HubDashboard } from "./views/HubDashboard";
 import { Logo } from "./components/Logo";
-import { StatusDot } from "./components/StatusDot";
+import { LocalApiBadge } from "./components/LocalApiBadge";
 
 // Both role-views ship in one app (design §7); the active one is chosen by role.
 type Role = "agent" | "hub";
@@ -137,9 +137,7 @@ export function App() {
             </Typography>
           )}
           <Box sx={{ flexGrow: 1 }} />
-          {/* Health badge: live dot + text (status never color-only). The real
-              Hub-reachability probe is deferred (issue #91 scope); the dot reflects
-              the shell being up. */}
+          {/* Local status API evidence, separate from monitor and fleet health. */}
           <Box
             sx={{
               display: "inline-flex",
@@ -153,8 +151,7 @@ export function App() {
               bgcolor: "background.default",
             }}
           >
-            <StatusDot state="ok" live />
-            <Typography variant="body2">{t("app.online")}</Typography>
+            <LocalApiBadge role={role} ready={ready} />
           </Box>
           <Typography variant="body2" sx={{ ml: 1.5, color: "text.secondary" }}>{`v${__APP_VERSION__}`}</Typography>
         </Toolbar>

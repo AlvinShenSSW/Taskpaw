@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { CSSObject } from "@mui/material/styles";
 import { theme, statusColors } from "../theme";
 
 // Theme base smoke (#89): CJK font fallback, deepened background, starting state,
@@ -21,7 +22,7 @@ describe("theme", () => {
   });
 
   it("resets uppercase/tracking for Chinese label variants", () => {
-    const css = theme.components?.MuiCssBaseline?.styleOverrides as Record<string, any>;
+    const css = theme.components?.MuiCssBaseline?.styleOverrides as Record<string, CSSObject>;
     // `|="zh"` so it matches the real document lang "zh-CN", not just bare "zh".
     const zhOverline = css?.['html[lang|="zh"] .MuiTypography-overline'];
     expect(zhOverline?.textTransform).toBe("none");

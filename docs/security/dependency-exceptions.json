@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "exceptions": [
+    {
+      "ecosystem": "rust",
+      "package": "glib",
+      "versions": ["0.18.5"],
+      "advisory_id": "RUSTSEC-2024-0429",
+      "aliases": ["GHSA-wrw7-89jp-8q8g"],
+      "classification": "unsound",
+      "source_url": "https://rustsec.org/advisories/RUSTSEC-2024-0429.html",
+      "exposure": "Linux GTK 0.18 normal/runtime graph. The released installer matrix is macOS/Windows, but Linux CI and supported builds remain inventoried. No selected project/Tauri/GTK/WebKit VariantStrIter call was found; transitive runtime reachability remains unproven and potentially exposed.",
+      "reason": "Patched glib >=0.20 cannot satisfy the current GTK ^0.18 stack. Moving GTK/glib requires a Tauri framework migration outside this targeted dependency repair. This does not assert non-exploitability.",
+      "owner": "@AlvinShenSSW",
+      "reviewed_on": "2026-10-01",
+      "expires_on": "2026-10-31",
+      "removal_conditions": [
+        "A compatible glib/GTK/Tauri fix or backport becomes available.",
+        "VariantStrIter usage or a reachable trigger is discovered.",
+        "The supported target/build graph or locked version changes.",
+        "The exclusive UTC expiry is reached."
+      ]
+    },
+    {
+      "ecosystem": "rust",
+      "package": "proc-macro-error",
+      "versions": ["1.0.4"],
+      "advisory_id": "RUSTSEC-2024-0370",
+      "aliases": [],
+      "classification": "unmaintained",
+      "source_url": "https://rustsec.org/advisories/RUSTSEC-2024-0370.html",
+      "exposure": "Linux GTK/glib macro build dependency; compiler-side maintenance risk, not a demonstrated packaged runtime exploit.",
+      "reason": "No patched release is published. Replacing the upstream macro plumbing requires the GTK stack migration rather than a compatible locked-crate update.",
+      "owner": "@AlvinShenSSW",
+      "reviewed_on": "2026-10-01",
+      "expires_on": "2026-10-31",
+      "removal_conditions": [
+        "A compatible upstream GTK macro replacement becomes available.",
+        "A new exploit advisory is published; it requires its own evaluation and is not waived by this ID.",
+        "The graph or locked version changes.",
+        "The exclusive UTC expiry is reached."
+      ]
+    }
+  ]
+}
