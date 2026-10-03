@@ -1909,9 +1909,19 @@ def test_i216_d02_partial_local_commit_no_off_and_retry(tmp_path, monkeypatch, f
                         other.execute("PRAGMA user_version=99")
                 elif fault == "identity":
                     raw = target_db.read_bytes()
-                    target_db.unlink()
-                    target_db.write_bytes(raw)
-                    target_db.chmod(0o600)
+                    old = target_db.stat()
+                    # Allocate while the old inode still exists: unlink/recreate
+                    # may reuse its identity and miss the intended fault.
+                    replacement = tmp_path / "owned-identity-replacement.sqlite3"
+                    replacement.write_bytes(raw)
+                    replacement.chmod(0o600)
+                    allocated = replacement.stat()
+                    old_pair = (old.st_dev, old.st_ino)
+                    new_pair = (allocated.st_dev, allocated.st_ino)
+                    assert new_pair != old_pair
+                    replacement.replace(target_db)
+                    observed = target_db.stat()
+                    assert (observed.st_dev, observed.st_ino) == new_pair != old_pair
                 elif fault == "stop":
                     inst._stop_event.set()
 
