@@ -53,6 +53,7 @@ def merge_status(config: AgentConfig, live: dict[str, Any]) -> dict[str, Any]:
         entry = dict(snap)
         spec = configured.get(name)
         entry["enabled"] = bool(spec.get("enabled", True)) if spec else True
+        entry["configured"] = spec is not None
         if spec is not None:
             entry["type_id"] = spec.get("type_id")
         out[name] = entry
@@ -60,7 +61,10 @@ def merge_status(config: AgentConfig, live: dict[str, Any]) -> dict[str, Any]:
         if name not in out:  # configured but not running → disabled
             out[name] = {
                 "state": "stopped",
-                "detail": "disabled",
+                "detail": "disabled"
+                if not spec.get("enabled", True)
+                else "not running",
+                "lifecycle": "stopped",
                 "metrics": {},
                 "alive": False,
                 "failures": 0,

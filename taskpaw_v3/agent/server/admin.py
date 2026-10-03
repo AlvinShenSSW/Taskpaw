@@ -5,12 +5,9 @@ The read-only console (#15) could only *show* monitors; this lets the local UI
 plugin, persisting `agent.yaml` atomically, and applying the change to the
 running Supervisor with NO agent restart.
 
-Source of truth = the on-disk config (`agent.yaml`). Every mutation: (1) edits
-the in-memory `AgentConfig.monitors` via the pure `catalog` helpers, (2) writes
-it atomically (`save_yaml` = tmp+fsync+replace), (3) reflects it into the live
-Supervisor (register a fresh instance / unregister / reconfigure). Step 2 before
-step 3 so a persisted change is never lost if the live-apply errors; all three
-are serialized under one lock (loopback control API → low contention).
+Disk is desired state; Supervisor owns actual instances. Candidate writes publish only
+on success. Emergency stop admission is memory-only and independent of disk I/O.
+Partial results remain queryable and retiring instances retain their names.
 
 `enabled` lives at the spec top level ({type_id, name, config, enabled}) — the
 pydantic config model forbids extra keys, so it can't go inside `config`.
@@ -18,9 +15,12 @@ pydantic config model forbids extra keys, so it can't go inside `config`.
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
-from dataclasses import replace
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -73,6 +73,23 @@ def _validation_summary(e: ValidationError) -> str:
 from taskpaw_v3.core.net import guard_bind_exposure  # noqa: E402
 
 
+@dataclass
+class _Reservation:
+    name: str
+    operation: str
+    spec: dict
+    revision: int
+    deadline: float
+    cancel: threading.Event = field(default_factory=threading.Event)
+    done: threading.Event = field(default_factory=threading.Event)
+    generation: int = 0
+    stage: str = "applying"
+    thread: threading.Thread | None = None
+    validated: Any = None
+    error: ValueError | None = None
+    expired: bool = False
+
+
 class MonitorAdmin:
     """Serialized add/remove/update/enable/disable for one agent's monitors."""
 
@@ -82,12 +99,26 @@ class MonitorAdmin:
         supervisor: Optional[Supervisor],
         registry: PluginRegistry,
         config_path: Optional[Path] = None,
+        *,
+        operation_timeout: float = 10.0,
     ) -> None:
         self._config = config
         self._sup = supervisor
         self._reg = registry
         self._path = config_path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # memory only; no plugin or storage calls
+        self._mutation = threading.Lock()
+        self._timeout = operation_timeout
+        self._revision = 0
+        self._sequence = 0
+        self._epochs: dict[str, int] = {}
+        self._stopping: set[str] = set()
+        self._owners: dict[str, _Reservation] = {}
+        self._stop_saves: dict[str, _Reservation] = {}
+        self._stop_records: dict[str, _Reservation] = {}
+        self._results: dict[str, dict] = {}
+        self._removed: dict[str, dict] = {}
+        self._overrides: set[str] = set()
         # The DESIRED editable scalars (what's persisted / will apply on the next
         # restart). The running `_config` keeps its BOOT values for non-live fields
         # (sockets, the EventQueue machine tag, supervisor membership are bound at
@@ -97,171 +128,747 @@ class MonitorAdmin:
         # difference between desired and running.
         self._desired = {f: getattr(config, f) for f in self._EDITABLE_CONFIG}
 
-    # ── internals ──────────────────────────────────────────────────────────
-    def _save(self, desired: dict) -> None:
-        """Write the running monitors PLUS the given DESIRED editable scalars. The
-        running _config holds BOOT values for non-live fields, so writing it
-        directly would revert a pending (restart-required) config edit (Codex #43
-        r6). Takes `desired` explicitly so update_config can persist a candidate
-        BEFORE committing it to self._desired (atomic on failure, r7)."""
-        if self._path is None:
-            return
-        save_yaml(AgentConfig(**{**self._config.model_dump(), **desired}), self._path)
+    # ── candidate persistence / short state admission ─────────────────────
+    @contextmanager
+    def _settings_admission(self):
+        if not self._mutation.acquire(timeout=1):
+            raise ValueError("operation_busy")
+        try:
+            yield
+        finally:
+            self._mutation.release()
 
-    def _persist(self) -> None:
-        self._save(self._desired)
+    def _candidate(
+        self,
+        monitors: list[dict],
+        desired: dict | None = None,
+        start: str | None = None,
+    ) -> AgentConfig:
+        with self._lock:
+            items = copy.deepcopy(monitors)
+            for item in items:
+                if (
+                    monitor_name(item) in self._overrides
+                    and monitor_name(item) != start
+                ):
+                    item["enabled"] = False
+            return AgentConfig(
+                **{
+                    **self._config.model_dump(),
+                    **(desired or self._desired),
+                    "monitors": items,
+                }
+            )
+
+    def _save(self, desired: dict) -> None:
+        candidate = self._candidate(self._config.monitors, desired)
+        if self._path is not None:
+            save_yaml(candidate, self._path)
+        with self._lock:
+            self._config.monitors = copy.deepcopy(candidate.monitors)
+            self._revision += 1
 
     def _find(self, name: str) -> Optional[dict]:
-        name = str(name).strip()
-        for m in self._config.monitors:
-            if monitor_name(m) == name:
-                return m
-        return None
+        return next(
+            (m for m in self._config.monitors if monitor_name(m) == str(name).strip()),
+            None,
+        )
 
     def _validated_config(self, spec: dict):
-        """Plugin + validated pydantic config for a stored spec dict. Mirrors
-        build_supervisor(): inject the resolved name into the raw config when the
-        spec uses the top-level `name` shape (no config.name), so a monitor that
-        starts fine at boot is also re-enable-able from the control API (Codex)."""
         plugin = self._reg.get(spec["type_id"])
         raw = dict(spec.get("config") or {})
         name = canonical_name(spec)
-        if name and "name" not in raw:
+        if name:
             raw["name"] = name
-        cfg = plugin.validate_config(raw)
-        return plugin, cfg
+        return plugin, plugin.validate_config(raw)
 
-    # ── operations (each: mutate config → persist → live-apply) ────────────
-    def add(self, spec: dict) -> dict[str, Any]:
+    def _result(
+        self,
+        iid: str,
+        operation: str,
+        persistence: str,
+        runtime: str,
+        code: str | None = None,
+        *,
+        retryable: bool = True,
+        owner: _Reservation | None = None,
+        **extra,
+    ) -> dict:
+        if runtime == "stopping":
+            outcome = "stop_incomplete"
+        elif persistence == "failed":
+            outcome = "applied_not_persisted" if runtime == "stopped" else "not_applied"
+        elif persistence in {"pending", "not_requested"}:
+            outcome = "applied_not_persisted" if runtime == "stopped" else "not_applied"
+        elif runtime == "starting":
+            outcome = "persisted_runtime_pending"
+        elif runtime == "failed":
+            outcome = "persisted_runtime_failed"
+        else:
+            outcome = "applied"
+        if outcome != "applied":
+            extra.pop("monitor", None)
+        result = {
+            "ok": outcome == "applied",
+            "name": iid,
+            "operation": operation,
+            "outcome": outcome,
+            "persistence": persistence,
+            "runtime": runtime,
+            "retryable": retryable,
+            "error_code": code,
+            **extra,
+        }
         with self._lock:
-            # Reject a name that collides with an EFFECTIVE monitor BEFORE
-            # persisting — catalog.add_monitor only checks config.monitors, so the
-            # auto-injected host_metrics ("<machine>-host", not in config.monitors
-            # but a live instance id) would otherwise pass validation, get written
-            # to agent.yaml, and only THEN fail at register() — leaving config
-            # changed after a failed request (Codex #57a).
-            resolved = canonical_name(spec)  # raises on top/config name conflict
-            if resolved and resolved in {
+            if owner is None or self._epochs.get(iid) == owner.generation:
+                self._results[iid] = result
+                if operation == "stop" and runtime in {"stopped", "unavailable"}:
+                    self._stopping.discard(iid)
+                if operation == "remove" and runtime in {"stopped", "unavailable"}:
+                    self._removed.pop(iid, None)
+                    self._overrides.discard(iid)
+        return dict(result)
+
+    def _busy(self, iid: str, operation: str) -> dict:
+        return {
+            "ok": False,
+            "name": iid,
+            "operation": operation,
+            "outcome": "busy",
+            "persistence": "not_requested",
+            "runtime": "unchanged",
+            "error_code": "operation_busy",
+            "retryable": False,
+        }
+
+    def _prune_validation(self) -> None:
+        for iid, op in list(self._owners.items()):
+            if (
+                (op.expired or op.cancel.is_set())
+                and op.done.is_set()
+                and (op.thread is None or not op.thread.is_alive())
+            ):
+                self._release(op)
+
+    def _refresh_stops(self) -> None:
+        with self._lock:
+            stopped = {iid: self._epochs.get(iid) for iid in self._stopping}
+        for iid, generation in stopped.items():
+            if self._sup is None or not self._sup.has(iid):
+                with self._lock:
+                    if self._epochs.get(iid) == generation:
+                        self._stopping.discard(iid)
+
+    def _reserve(
+        self, iid: str, operation: str, spec: dict, deadline: float
+    ) -> _Reservation | None:
+        self._refresh_stops()
+        with self._lock:
+            self._prune_validation()
+            if iid in self._owners or iid in self._stop_saves or iid in self._stopping:
+                return None
+            op = _Reservation(
+                iid, operation, copy.deepcopy(spec), self._revision, deadline
+            )
+            self._sequence += 1
+            op.generation = self._sequence
+            self._epochs[iid] = op.generation
+            self._owners[iid] = op
+            return op
+
+    def _release(self, op: _Reservation) -> None:
+        with self._lock:
+            if self._owners.get(op.name) is op:
+                del self._owners[op.name]
+            if (
+                self._find(op.name) is None
+                and op.name not in self._removed
+                and op.name not in self._owners
+                and op.name not in self._stop_saves
+            ):
+                self._results.pop(op.name, None)
+                self._stop_records.pop(op.name, None)
+                self._epochs.pop(op.name, None)
+                self._overrides.discard(op.name)
+
+    def _commit(
+        self, op: _Reservation, monitors: list[dict], *, start: bool = False
+    ) -> str:
+        candidate = self._candidate(monitors, start=op.name if start else None)
+        if self._path is not None:
+            save_yaml(candidate, self._path)
+        with self._lock:
+            self._config.monitors = copy.deepcopy(candidate.monitors)
+            self._revision += 1
+            if start and not op.cancel.is_set():
+                self._overrides.discard(op.name)
+        return "in_memory" if self._path is None else "saved"
+
+    def _runtime_apply(
+        self, op: _Reservation, plugin, cfg, *, start=False, reconcile=False
+    ) -> tuple[str, str | None]:
+        sup = self._sup
+        if sup is None:
+            return "unavailable", None
+        if op.cancel.is_set():
+            return "stopping" if sup.has(
+                op.name
+            ) else "stopped", "stop_timeout" if sup.has(op.name) else None
+        try:
+            if reconcile and not sup.has(op.name):
+                with self._lock:
+                    committed = self._find(op.name)
+                    should_run = bool(
+                        committed
+                        and committed.get("enabled", True)
+                        and op.name not in self._overrides
+                    )
+                # Edit recovery follows effective committed passive policy; it
+                # never turns manual/disabled/explicitly stopped config into Start.
+                if should_run and not plugin.manual_start(cfg):
+                    start = True
+            if sup.has(op.name):
+                view = sup.snapshot().get(op.name, {})
+                if view.get("lifecycle") == "stopping":
+                    return "stopping", "stop_timeout"
+                if (
+                    not start
+                    or sup.config_matches(op.name, cfg.model_dump()) is not True
+                ):
+                    sup.reconfigure(
+                        op.name,
+                        cfg,
+                        max(0, op.deadline - time.monotonic()),
+                        cancel=op.cancel,
+                    )
+            elif start:
+                sup.register(
+                    plugin,
+                    cfg,
+                    instance_id=op.name,
+                    cancel=op.cancel,
+                    deadline=op.deadline,
+                )
+            else:
+                return "applied", None
+            r = sup.activation_result(op.name, max(0, op.deadline - time.monotonic()))
+            return r["runtime"], r["error_code"]
+        except Exception as exc:
+            code = (
+                str(exc)
+                if str(exc) in {"operation_busy", "stop_timeout"}
+                else "create_failed"
+            )
+            return "stopping" if code == "stop_timeout" else "failed", code
+
+    def add(self, spec: dict) -> dict[str, Any]:
+        iid = canonical_name(spec)
+        with self._lock:
+            monitors = copy.deepcopy(self._config.monitors)
+            existing = self._find(iid)
+            partial = (
+                self._results.get(iid, {}).get("outcome") == "persisted_runtime_failed"
+            )
+            if existing is not None and not partial:
+                raise ValueError(f"a monitor named {iid!r} already exists")
+            if existing is None and iid in {
                 monitor_name(m) for m in effective_monitors(self._config)
             }:
-                raise ValueError(f"a monitor named {resolved!r} already exists")
-            # catalog.add_monitor validates against the plugin, rejects unknown
-            # type / system plugin / duplicate name, and emits {type_id,name,config}.
-            new_list = catalog.add_monitor(self._config.monitors, spec, self._reg)
-            added = dict(new_list[-1])
-            # Default-enabled UNLESS the plugin wants a manual start: managed Lada
-            # LAUNCHES lada-cli on start, so (V2 parity) add it STOPPED and let the
-            # operator click Start — adding the monitor must not kick off video
-            # processing unbidden. An explicit `enabled` in the request still wins.
-            plugin, cfg = self._validated_config(added)
-            default_enabled = not plugin.manual_start(cfg)
-            added["enabled"] = _as_bool(spec.get("enabled", default_enabled))
+                raise ValueError(f"a monitor named {iid!r} already exists")
+            if iid in self._removed:
+                return self._busy(iid, "add")
+        new_list = catalog.add_monitor([] if existing else monitors, spec, self._reg)
+        added = dict(new_list[-1])
+        plugin, cfg = self._validated_config(added)
+        added["enabled"] = _as_bool(spec.get("enabled", not plugin.manual_start(cfg)))
+        if existing:
+            if existing != added:
+                raise ValueError(f"a monitor named {iid!r} already exists")
+            new_list = monitors
+        else:
             new_list[-1] = added
-            get_task_log().record(
-                monitor_name(added), "operator.add", task_type=added["type_id"]
-            )
-            # Register live BEFORE persisting, so a config that can't actually run
-            # is never written to agent.yaml (Codex). add_monitor already
-            # validated, but registering can still surface a real failure.
-            if added["enabled"] and self._sup is not None:
-                self._sup.register(plugin, cfg, instance_id=monitor_name(added))
-            self._config.monitors = new_list
-            self._persist()
-            return {"ok": True, "monitor": added}
+        op = self._reserve(iid, "add", added, time.monotonic() + self._timeout)
+        if op is None:
+            return self._busy(iid, "add")
+        try:
+            if not self._mutation.acquire(timeout=1):
+                return self._busy(iid, "add")
+            try:
+                with self._lock:
+                    # Validation precedes admission: recheck eligibility against
+                    # the latest commit, including a same-name overlapping Add.
+                    latest = copy.deepcopy(self._config.monitors)
+                    current = self._find(iid)
+                    partial = (
+                        self._results.get(iid, {}).get("outcome")
+                        == "persisted_runtime_failed"
+                    )
+                    if current is not None:
+                        if not partial or current != added:
+                            raise ValueError(f"a monitor named {iid!r} already exists")
+                    elif iid in {
+                        monitor_name(m) for m in effective_monitors(self._config)
+                    }:
+                        raise ValueError(f"a monitor named {iid!r} already exists")
+                    if iid in self._removed:
+                        return self._busy(iid, "add")
+                    if current is None:
+                        latest.append(added)
+                try:
+                    persistence = self._commit(op, latest)
+                except Exception:
+                    return self._result(
+                        iid,
+                        "add",
+                        "failed",
+                        "unchanged",
+                        "persistence_failed",
+                        owner=op,
+                        monitor=added,
+                    )
+                get_task_log().record(iid, "operator.add", task_type=added["type_id"])
+                runtime, code = self._runtime_apply(
+                    op, plugin, cfg, start=bool(added["enabled"])
+                )
+                return self._result(
+                    iid, "add", persistence, runtime, code, owner=op, monitor=added
+                )
+            finally:
+                self._mutation.release()
+        finally:
+            self._release(op)
 
     def remove(self, name: str) -> dict[str, Any]:
+        iid = str(name).strip()
         with self._lock:
-            iid = str(name).strip()
-            # raises ValueError if absent or duplicate (no silent data loss).
-            remaining = catalog.remove_monitor(self._config.monitors, iid)
-            removed = self._find(iid)
-            assert removed is not None  # catalog just validated its existence
-            get_task_log().record(iid, "operator.remove", task_type=removed["type_id"])
-            self._config.monitors = remaining
-            self._persist()
-            if self._sup is not None and self._sup.has(iid):
-                self._sup.unregister(iid)
-            return {"ok": True, "removed": iid}
+            spec = copy.deepcopy(self._find(iid) or self._removed.get(iid))
+        if spec is None:
+            raise ValueError(f"no monitor named {iid!r}")
+        op = self._reserve(iid, "remove", spec, time.monotonic() + self._timeout)
+        if op is None:
+            return self._busy(iid, "remove")
+        try:
+            if not self._mutation.acquire(timeout=1):
+                return self._busy(iid, "remove")
+            try:
+                with self._lock:
+                    remaining = [
+                        copy.deepcopy(m)
+                        for m in self._config.monitors
+                        if monitor_name(m) != iid
+                    ]
+                try:
+                    persistence = self._commit(op, remaining)
+                except Exception:
+                    return self._result(
+                        iid,
+                        "remove",
+                        "failed",
+                        "unchanged",
+                        "persistence_failed",
+                        owner=op,
+                    )
+                with self._lock:
+                    self._removed[iid] = spec
+                get_task_log().record(iid, "operator.remove", task_type=spec["type_id"])
+                if self._sup is not None and self._sup.has(iid):
+                    r = self._sup.unregister(
+                        iid, max(0, op.deadline - time.monotonic())
+                    )
+                    runtime, code = (
+                        ("stopped", None)
+                        if r["complete"]
+                        else ("stopping", r["error_code"])
+                    )
+                else:
+                    runtime, code = (
+                        ("stopped", None) if self._sup else ("unavailable", None)
+                    )
+                return self._result(
+                    iid, "remove", persistence, runtime, code, owner=op, removed=iid
+                )
+            finally:
+                self._mutation.release()
+        finally:
+            self._release(op)
+
+    def _stop(
+        self,
+        iid: str,
+        *,
+        candidate: dict | None = None,
+        parent: _Reservation | None = None,
+        deadline: float | None = None,
+    ) -> dict:
+        deadline = (
+            deadline if deadline is not None else time.monotonic() + self._timeout
+        )
+        with self._lock:
+            if parent is not None and (
+                parent.cancel.is_set()
+                or self._epochs.get(iid) != parent.generation
+                or time.monotonic() >= deadline
+            ):
+                return self._result(
+                    iid,
+                    "update",
+                    "not_requested",
+                    "unchanged",
+                    "validation_timeout"
+                    if time.monotonic() >= deadline
+                    else "validation_cancelled",
+                    owner=parent,
+                )
+            spec = copy.deepcopy(
+                self._find(iid)
+                or self._removed.get(iid)
+                or (self._owners[iid].spec if iid in self._owners else None)
+            )
+            if spec is None:
+                raise ValueError(f"no monitor named {iid!r}")
+            owner = self._owners.get(iid)
+            if owner is not None and owner is not parent:
+                owner.cancel.set()
+            self._overrides.add(iid)
+            self._stopping.add(iid)
+            stop_op = parent or _Reservation(
+                iid, "stop", spec, self._revision, deadline
+            )
+            if parent is None:
+                self._sequence += 1
+                stop_op.generation = self._sequence
+                self._epochs[iid] = stop_op.generation
+        if self._sup is not None:
+            self._sup.request_stop(iid, max(0, deadline - time.monotonic()))
+        # No save/log/validator precedes the stop signal above.
+        with self._lock:
+            save = self._stop_saves.get(iid)
+        if save is None and self._mutation.acquire(blocking=False):
+            save = _Reservation(
+                iid,
+                "stop",
+                spec,
+                self._revision,
+                deadline,
+                generation=stop_op.generation,
+            )
+            with self._lock:
+                self._stop_saves[iid] = save
+                self._stop_records[iid] = save
+
+            def persist_stop():
+                try:
+                    with self._lock:
+                        monitors = copy.deepcopy(self._config.monitors)
+                        if (
+                            candidate is not None
+                            and parent is not None
+                            and not parent.cancel.is_set()
+                        ):
+                            monitors = [
+                                copy.deepcopy(candidate)
+                                if monitor_name(m) == iid
+                                else m
+                                for m in monitors
+                            ]
+                        unchanged = monitors == self._config.monitors and not any(
+                            monitor_name(m) == iid and m.get("enabled", True)
+                            for m in monitors
+                        )
+                    try:
+                        persistence = (
+                            ("in_memory" if self._path is None else "saved")
+                            if unchanged
+                            else self._commit(save, monitors)
+                        )
+                    except Exception:
+                        persistence = "failed"
+                    with self._lock:
+                        save.validated = persistence
+                finally:
+                    self._mutation.release()
+                    save.done.set()
+                    with self._lock:
+                        if self._stop_saves.get(iid) is save:
+                            del self._stop_saves[iid]
+                get_task_log().record(iid, "operator.stop", task_type=spec["type_id"])
+
+            try:
+                save.thread = threading.Thread(
+                    target=persist_stop, name=f"persist-stop-{iid}", daemon=True
+                )
+                save.thread.start()
+            except Exception:
+                if save.thread is None or save.thread.ident is None:
+                    # Only an unstarted writer can return its admission here.
+                    # A started writer owns completion even if start() raised.
+                    with self._lock:
+                        save.validated = "failed"
+                        save.done.set()
+                        if self._stop_saves.get(iid) is save:
+                            del self._stop_saves[iid]
+                    self._mutation.release()
+        if save is not None:
+            save.done.wait(max(0, deadline - time.monotonic()))
+            persistence = save.validated if save.done.is_set() else "pending"
+        else:
+            persistence = "pending"
+        if self._sup is None:
+            runtime, code = "unavailable", None
+        else:
+            r = self._sup.stop_result(iid, max(0, deadline - time.monotonic()))
+            runtime, code = (
+                ("stopped", None) if r["complete"] else ("stopping", r["error_code"])
+            )
+        if persistence == "failed" and code is None:
+            code = "persistence_failed"
+        return self._result(
+            iid, "stop", persistence, runtime, code, owner=stop_op, enabled=False
+        )
 
     def set_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
         enabled = _as_bool(enabled)
-        with self._lock:
-            m = self._find(name)
-            if m is None:
-                raise ValueError(f"no monitor named {str(name).strip()!r}")
-            iid = monitor_name(m)
-            if enabled:
-                # Validate BEFORE registering/persisting: a monitor whose stored
-                # config no longer validates (e.g. a plugin schema change while it
-                # sat disabled) must not be persisted enabled and then fail the
-                # next boot (Codex).
-                plugin, cfg = self._validated_config(m)
-                get_task_log().record(iid, "operator.start", task_type=m["type_id"])
-                if self._sup is not None and not self._sup.has(iid):
-                    self._sup.register(plugin, cfg, instance_id=iid)  # launches now
-                # A manual-start monitor (managed Lada LAUNCHES lada-cli) is a
-                # per-SESSION runtime toggle: Start launches it now but enabled
-                # stays false, so it does NOT auto-start on the next boot — the
-                # operator clicks Start each session (#70). Every other monitor
-                # persists enabled:true and auto-starts at boot.
-                if not plugin.manual_start(cfg):
-                    m["enabled"] = True
-                    self._persist()
-            else:
-                get_task_log().record(iid, "operator.stop", task_type=m["type_id"])
-                m["enabled"] = False
-                self._persist()
-                if self._sup is not None and self._sup.has(iid):
-                    self._sup.unregister(iid)
-            return {"ok": True, "name": iid, "enabled": bool(enabled)}
+        iid = str(name).strip()
+        if not enabled:
+            return self._stop(iid)
+        return self._patch(iid, {"enabled": True}, operation="start", bounded=False)
 
     def patch(self, name: str, body: dict) -> dict[str, Any]:
         if "config" not in body and "enabled" not in body:
             raise ValueError("patch needs 'config' and/or 'enabled'")
-        # Validate the toggle before update() can log or apply the config.
         if "enabled" in body:
             _as_bool(body["enabled"])
-        out: dict[str, Any] = {"ok": True, "name": name}
-        if "config" in body:
-            out = self.update(name, body["config"])
-        if "enabled" in body:
-            out = self.set_enabled(name, body["enabled"])
-        return out
+        if "config" not in body and body.get("enabled") is False:
+            return self._stop(str(name).strip())
+        return self._patch(
+            str(name).strip(), body, operation="update", bounded="config" in body
+        )
 
     def update(self, name: str, config: dict) -> dict[str, Any]:
+        return self._patch(
+            str(name).strip(), {"config": config}, operation="update", bounded=True
+        )
+
+    def _patch(self, iid: str, body: dict, *, operation: str, bounded: bool) -> dict:
+        deadline = time.monotonic() + self._timeout
+        if "config" in body and not isinstance(body["config"], dict):
+            raise ValueError("monitor config must be an object")
         with self._lock:
-            m = self._find(name)
-            if m is None:
-                raise ValueError(f"no monitor named {str(name).strip()!r}")
-            if not isinstance(config, dict):
-                raise ValueError("monitor config must be an object")
-            plugin = self._reg.get(m["type_id"])
-            iid = monitor_name(m)
-            # PATCH semantics: merge the incoming fields OVER the existing config
-            # so a partial update (e.g. just poll_interval) keeps required
-            # plugin fields (folder.path, tcp_check.port, …) and doesn't reset
-            # omitted optional fields to defaults (Codex #57a). Force the stable
-            # id: a config update must not rename the monitor (breaks Hub grouping).
-            raw = {**(m.get("config") or {}), **config}
-            raw["name"] = iid
-            cfg = plugin.validate_config(raw)  # authoritative validation
-            changed = sorted(
-                k
-                for k, v in cfg.model_dump().items()
-                if v != (m.get("config") or {}).get(k)
+            original = copy.deepcopy(self._find(iid))
+        if original is None:
+            raise ValueError(f"no monitor named {iid!r}")
+        if (
+            self._sup is not None
+            and self._sup.snapshot().get(iid, {}).get("lifecycle") == "stopping"
+        ):
+            return self._busy(iid, operation)
+        op = self._reserve(iid, operation, original, deadline)
+        if op is None:
+            return self._busy(iid, operation)
+        accepted = False
+        try:
+            spec = copy.deepcopy(original)
+            spec["config"] = {
+                **(spec.get("config") or {}),
+                **body.get("config", {}),
+                "name": iid,
+            }
+
+            def validate():
+                try:
+                    op.validated = self._validated_config(spec)
+                except Exception:
+                    op.error = ValueError("invalid monitor config")
+                finally:
+                    op.done.set()
+
+            if bounded:
+                op.stage = "validating"
+                try:
+                    op.thread = threading.Thread(
+                        target=validate, name=f"validate-{iid}", daemon=True
+                    )
+                    op.thread.start()
+                except Exception:
+                    if op.thread is None or op.thread.ident is None:
+                        # Known unstarted owner: nothing can later finish/apply it.
+                        op.done.set()
+                        return self._result(
+                            iid,
+                            operation,
+                            "not_requested",
+                            "unchanged",
+                            "start_failed",
+                            owner=op,
+                        )
+                    # A live owner remains tracked and follows the same deadline.
+                op.done.wait(max(0, deadline - time.monotonic()))
+                with self._lock:
+                    if not op.done.is_set() or time.monotonic() >= deadline:
+                        op.expired = True
+                        op.stage = "validation_expired"
+                        return self._result(
+                            iid,
+                            operation,
+                            "not_requested",
+                            "unchanged",
+                            "validation_timeout",
+                            retryable=op.done.is_set(),
+                            owner=op,
+                        )
+            else:
+                validate()
+            with self._lock:
+                if op.cancel.is_set() or op.revision != self._revision:
+                    op.stage = "validation_cancelled"
+                    return self._result(
+                        iid,
+                        operation,
+                        "not_requested",
+                        "unchanged",
+                        "validation_cancelled",
+                        owner=op,
+                    )
+                if op.error is not None:
+                    raise op.error
+                plugin, cfg = op.validated
+                spec["config"] = cfg.model_dump()
+                if "enabled" in body:
+                    if not body["enabled"] or not plugin.manual_start(cfg):
+                        spec["enabled"] = body["enabled"]
+                op.stage = "applying"
+            if body.get("enabled") is False:
+                accepted = True
+                return self._stop(iid, candidate=spec, parent=op, deadline=deadline)
+            if not self._mutation.acquire(
+                timeout=max(0, min(1, deadline - time.monotonic()))
+            ):
+                return self._busy(iid, operation)
+            try:
+                with self._lock:
+                    if (
+                        op.cancel.is_set()
+                        or (bounded and time.monotonic() >= deadline)
+                        or op.revision != self._revision
+                    ):
+                        return self._result(
+                            iid,
+                            operation,
+                            "not_requested",
+                            "unchanged",
+                            "validation_cancelled",
+                            owner=op,
+                        )
+                    monitors = [
+                        spec if monitor_name(m) == iid else copy.deepcopy(m)
+                        for m in self._config.monitors
+                    ]
+                try:
+                    persistence = self._commit(
+                        op, monitors, start=body.get("enabled") is True
+                    )
+                except Exception:
+                    return self._result(
+                        iid, operation, "failed", "unchanged", "persistence_failed"
+                    )
+                fields = sorted(
+                    k
+                    for k, v in spec["config"].items()
+                    if v != original.get("config", {}).get(k)
+                )
+                get_task_log().record(
+                    iid,
+                    "operator.start" if operation == "start" else "operator.update",
+                    task_type=spec["type_id"],
+                    data={"fields": fields} if operation == "update" else None,
+                )
+                runtime, code = self._runtime_apply(
+                    op,
+                    plugin,
+                    cfg,
+                    start=body.get("enabled") is True,
+                    reconcile=operation == "update",
+                )
+                return self._result(
+                    iid,
+                    operation,
+                    persistence,
+                    runtime,
+                    code,
+                    owner=op,
+                    **({"enabled": True} if operation == "start" else {}),
+                )
+            finally:
+                self._mutation.release()
+        finally:
+            if not bounded or (op.done.is_set() and not op.expired) or accepted:
+                self._release(op)
+
+    def status_view(self) -> dict:
+        from taskpaw_v3.monitors.runtime import merge_status
+
+        with self._lock:
+            config = self._config.model_copy(deep=True)
+            removed = copy.deepcopy(self._removed)
+            results = copy.deepcopy(self._results)
+            for iid, result in results.items():
+                save = self._stop_records.get(iid)
+                if (
+                    result.get("operation") == "stop"
+                    and save is not None
+                    and save.done.is_set()
+                ):
+                    result["persistence"] = save.validated
+                    if save.validated == "failed":
+                        result["error_code"] = "persistence_failed"
+            for iid in list(self._stop_records):
+                if iid not in results:
+                    self._stop_records.pop(iid, None)
+            overrides = set(self._overrides)
+        live = self._sup.snapshot() if self._sup else {}
+        out = merge_status(config, live)
+        for iid, spec in removed.items():
+            if iid in live:
+                out[iid].update(
+                    type_id=spec["type_id"],
+                    configured=False,
+                    lifecycle="remove_pending",
+                )
+            else:
+                with self._lock:
+                    self._removed.pop(iid, None)
+                    if iid not in self._owners and iid not in self._stop_saves:
+                        self._results.pop(iid, None)
+                        self._stop_records.pop(iid, None)
+                        self._epochs.pop(iid, None)
+                        self._overrides.discard(iid)
+                        self._stopping.discard(iid)
+        for iid, entry in out.items():
+            entry["configured"] = self._find(iid) is not None
+            entry["desired_enabled"] = entry.get("enabled", True)
+            if iid in overrides and iid not in live:
+                entry["lifecycle"] = "stopped"
+            latest_result = results.get(iid)
+            if latest_result:
+                entry["persistence"] = latest_result["persistence"]
+                entry["runtime_error_code"] = latest_result["error_code"]
+                if latest_result["operation"] == "stop" and iid not in live:
+                    # A late successful retirement is now proven by the registry;
+                    # the earlier wait timeout is not an ongoing cleanup failure.
+                    entry["runtime_error_code"] = (
+                        "persistence_failed"
+                        if latest_result["persistence"] == "failed"
+                        else None
+                    )
+            configured_spec = next(
+                (m for m in config.monitors if monitor_name(m) == iid), None
             )
-            get_task_log().record(
-                iid, "operator.update", task_type=m["type_id"], data={"fields": changed}
+            entry["config_in_sync"] = (
+                self._sup.config_matches(iid, configured_spec.get("config", {}))
+                if self._sup and configured_spec
+                else None
             )
-            # Live-apply BEFORE persisting: if reconfigure() fails (e.g. a wedged
-            # worker that won't stop in time → RuntimeError), don't leave disk
-            # ahead of runtime (Codex). reconfigure rolls back to the old config
-            # on failure, so nothing is half-applied.
-            if self._sup is not None and self._sup.has(iid):
-                self._sup.reconfigure(iid, cfg)
-            m["config"] = cfg.model_dump()
-            self._persist()
-            return {"ok": True, "name": iid}
+        return out
 
     # Editable top-level agent settings (NOT monitors — that's the monitor API —
     # and NOT server_id, the stable identity used for Hub grouping).
@@ -323,7 +930,19 @@ class MonitorAdmin:
         stale running values back (which would revert a pending change). The token
         is masked by the route, not here."""
         with self._lock:
-            return {**self._config.model_dump(), **self._desired}
+            self._prune_validation()
+            return {
+                **copy.deepcopy(self._config.model_dump()),
+                **self._desired,
+                "monitor_operations": {
+                    iid: {
+                        **self._results.get(iid, {}),
+                        "stage": op.stage,
+                        "retryable": False,
+                    }
+                    for iid, op in self._owners.items()
+                },
+            }
 
     def update_config(self, patch: dict) -> dict[str, Any]:
         """Edit top-level agent config (machine/ports/token) from the Settings UI
@@ -333,7 +952,7 @@ class MonitorAdmin:
         restart_required while they differ from the running config."""
         if not isinstance(patch, dict):
             raise ValueError("config patch must be an object")
-        with self._lock:
+        with self._settings_admission():
             p = dict(patch)
             # The GET masks the token as "***"; an unchanged/blank token in the
             # patch must NOT clobber the real one.

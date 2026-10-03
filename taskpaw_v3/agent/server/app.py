@@ -356,7 +356,10 @@ def create_control_app(
 
         def _guard(fn, *a):
             try:
-                return fn(*a)
+                result = fn(*a)
+                if isinstance(result, dict) and result.get("outcome") == "busy":
+                    return JSONResponse(result, status_code=409)
+                return result
             except ValueError as e:  # unknown type / dup / invalid config
                 raise HTTPException(status_code=400, detail=str(e))
             except KeyError as e:  # not registered in the supervisor

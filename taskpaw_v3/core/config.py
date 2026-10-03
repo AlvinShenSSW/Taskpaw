@@ -211,14 +211,24 @@ def load_yaml(model: type[BaseModel], path: Path) -> BaseModel:
 
 def save_yaml(cfg: BaseModel, path: Path) -> None:
     """Atomically persist a config model to YAML (tmp + fsync + replace)."""
+    import logging
     import os
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     text = yaml.safe_dump(cfg.model_dump(), sort_keys=False, allow_unicode=True)
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())  # durable before replace (no empty file on power-loss)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            # Preserve the original save failure; cleanup cannot claim a commit.
+            logging.getLogger("taskpaw.config").warning(
+                "config_temporary_cleanup_failed"
+            )
