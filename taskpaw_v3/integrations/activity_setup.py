@@ -19,6 +19,7 @@ from pathlib import Path
 from taskpaw_v3.integrations.activity_writer import (
     _CLAUDE_EVENT_STATE,
     _CODEX_EVENT_STATE,
+    _projection_matches,
     read_facts,
 )
 from taskpaw_v3.monitors.session_activity import safe_path
@@ -320,14 +321,7 @@ def verify_writer(command: str, tool: str, state_dir: Path) -> None:
                 or not started <= ts <= time.time() + 5
             ):
                 raise SetupError("writer output missing, stale or incorrect")
-            if (
-                data.get("activity_schema") != 2
-                or data.get("fact_committed") is not True
-                or not any(
-                    row["id"] == data.get("fact_id")
-                    for row in read_facts(output, tool)["facts"]
-                )
-            ):
+            if not _projection_matches(data, read_facts(output, tool)):
                 raise SetupError("writer fact output missing or incorrect")
 
 

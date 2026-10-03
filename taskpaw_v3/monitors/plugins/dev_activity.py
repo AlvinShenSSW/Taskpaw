@@ -18,7 +18,12 @@ from typing import Optional
 
 from pydantic import Field, field_validator, model_validator
 
-from taskpaw_v3.integrations.activity_writer import ActivityStoreError, read_facts
+from taskpaw_v3.integrations.activity_writer import (
+    ActivityStoreError,
+    _confirm_session_ends,
+    _projection_matches,
+    read_facts,
+)
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -216,6 +221,7 @@ def read_hook_activity(
     bound: set[tuple],
     errors: list[str],
     stop_event: threading.Event | None = None,
+    confirmed: dict | None = None,
 ) -> dict:
     """Commutative bounded facts; no arrival order or expired-unresolved idle."""
     facts: dict[str, dict] = {}
@@ -231,8 +237,6 @@ def read_hook_activity(
         projection = _load(path, errors)
         if stop_event is not None and stop_event.is_set():
             break
-        if projection is not None and projection.get("tool", tool) == tool:
-            projections.append(projection)
         try:
             store = read_facts(path, tool)
         except ActivityStoreError:
@@ -241,6 +245,38 @@ def read_hook_activity(
             continue
         if stop_event is not None and stop_event.is_set():
             break
+        if confirmed is not None:
+            expected = confirmed.get(path)
+            local = {r["id"]: r for r in store["facts"]}
+            if (
+                expected is None
+                or store["identity"] != expected["identity"]
+                or any(local.get(i) != w for i, w in expected["witnesses"].items())
+            ):
+                unknown = unresolved = True
+        link = store["projection_link"]
+        rich = projection is not None and any(
+            k in projection
+            for k in ("activity_schema", "fact_id", "fact_committed", "link_nonce")
+        )
+        matched = bool(
+            rich and projection is not None and _projection_matches(projection, store)
+        )
+        # Compare the one physical projection/slot BEFORE filtering its tool.
+        owner = projection.get("tool") if projection is not None else None
+        if rich and (
+            not isinstance(owner, str)
+            or not owner
+            or len(owner.encode("utf-8", errors="replace")) > 256
+        ):
+            errors.append("unavailable")
+            unknown = unresolved = True
+        if not matched and (
+            (link is not None and link["tool"] == tool) or (rich and owner == tool)
+        ):
+            unknown = unresolved = True
+        if projection is not None and projection.get("tool", tool) == tool:
+            projections.append((projection, link if matched else None, rich))
         unknown |= store["overflow"]
         unresolved |= store["overflow"]
         limited |= store["overflow"]
@@ -253,7 +289,20 @@ def read_hook_activity(
         ):
             watermark = max(watermark or value, value)
         for row in store["facts"]:
-            if row["id"] not in facts or row["ts"] < facts[row["id"]]["ts"]:
+            old = facts.get(row["id"])
+            if old is not None and any(old[k] != row[k] for k in row if k != "ts"):
+                unknown = unresolved = True
+                errors.append("unavailable")
+                continue
+            if (
+                old is not None
+                and row["kind"] == "verified_session_end"
+                and old["ts"] != row["ts"]
+            ):
+                unknown = unresolved = True
+                errors.append("unavailable")
+                continue
+            if old is None or row["ts"] < old["ts"]:
                 facts[row["id"]] = row
         for row in store["summaries"]:
             summaries[
@@ -275,7 +324,12 @@ def read_hook_activity(
         and not sample.get("errors")
         and not sample.get("limited")
     )
-    finals = [r for r in facts.values() if r["kind"] in ("interrupt", "session_end")]
+    finals = [
+        r
+        for r in facts.values()
+        if r["kind"] in ("interrupt", "session_end", "verified_session_end")
+        and -min(freshness, 5) <= now - r["ts"] <= 86400
+    ]
 
     def scope(row):
         return tuple(
@@ -288,6 +342,8 @@ def read_hook_activity(
         if was_bound and scan_complete and pair not in roots:
             return True
         for final in finals:
+            if row.get("ts", final["ts"]) > final["ts"] + 86400:
+                continue
             if (
                 final["kind"] == "interrupt"
                 and row["actor"] == "parent"
@@ -295,8 +351,8 @@ def read_hook_activity(
             ):
                 return True
             if (
-                final["kind"] == "session_end"
-                and was_bound
+                final["kind"] in ("session_end", "verified_session_end")
+                and (was_bound or final["kind"] == "verified_session_end")
                 and row["session"]
                 and (row["session"], *pair)
                 == (final["session"], final["pid"], final["created"])
@@ -306,6 +362,8 @@ def read_hook_activity(
 
     groups: dict[tuple, list[dict]] = {}
     for row in facts.values():
+        if row["kind"] in ("verified_session_end", "interrupt") and row not in finals:
+            continue  # Expired proof is not unresolved work or current authority.
         groups.setdefault(scope(row), []).append(row)
     for row in summaries.values():
         if not proven(row):
@@ -351,7 +409,7 @@ def read_hook_activity(
         ages.extend(max(0, now - r["ts"]) for r in rows if math.isfinite(r["ts"]))
         if (row["pid"], row["created"]) in roots:
             covered.add((row["pid"], row["created"]))
-    for data in projections:
+    for data, link, rich in projections:
         ts = data.get("ts")
         state = data.get("state")
         if (
@@ -362,14 +420,20 @@ def read_hook_activity(
             or now - ts < -min(freshness, 5)
         ):
             continue
-        if state == "idle":
-            watermark = max(watermark or ts, ts)
-        if data.get("activity_schema") == 2:
-            if data.get("fact_committed") is True and data.get("fact_id") in facts:
+        if rich:
+            if link is not None:
+                if link["resolved"] is not None:
+                    states.append("idle")
+                    ages.append(max(0, now - link["resolved"]["ts"]))
+                    pair = (link["fact"]["pid"], link["fact"]["created"])
+                    if pair in roots:
+                        covered.add(pair)
                 continue
             # A rich projection cannot be treated as a second independent idle.
             unknown = unresolved = True
             continue
+        if state == "idle":
+            watermark = max(watermark or ts, ts)
         # Legacy/missing identities never prove whole-tool idle; fresh positives
         # remain useful without inventing ordering or host attribution.
         unknown = True
@@ -569,6 +633,27 @@ class DevActivityInstance(MonitorInstance):
             if tool == "vscode":
                 continue
             hook_errors: list[str] = []
+            sample = snapshot.get(tool, {})
+            self._bound_producers.update(
+                (tool, r["pid"], r["created"])
+                for r in sample.get("roots", [])
+                if r.get("pid") and r.get("created") is not None
+            )
+            confirmation_failed = False
+            try:
+                confirmed = _confirm_session_ends(
+                    (_state_file(cfg.state_dir, tool), _shared_file(cfg.state_dir)),
+                    tool,
+                    self._bound_producers,
+                    now,
+                    self._stop_event,
+                )
+            except ActivityStoreError:
+                confirmed = None
+                confirmation_failed = True
+                hook_errors.append("unavailable")
+            if self._stop_event.is_set():
+                return MonitorStatus(state="stopped")
             hooks[tool] = read_hook_activity(
                 cfg.state_dir,
                 tool,
@@ -578,10 +663,16 @@ class DevActivityInstance(MonitorInstance):
                 self._bound_producers,
                 hook_errors,
                 self._stop_event,
+                confirmed,
             )
             if self._stop_event.is_set():
                 return MonitorStatus(state="stopped")
             hook = hooks[tool]
+            if confirmation_failed:
+                hook["unknown"] = hook["unresolved"] = True
+                hook["covered"].clear()
+                if hook["state"] == "idle":
+                    hook["state"] = None
             limited |= hook["limited"]
             if hook["unknown"]:
                 uncertain_tools.add(tool)

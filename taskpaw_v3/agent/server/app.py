@@ -34,7 +34,7 @@ from taskpaw_v3.core.llm import (
     resolve_llm_settings,
     thinking_off_default,
 )
-from taskpaw_v3.core.protocol import EventQueue
+from taskpaw_v3.core.protocol import EventAdmissionError, EventQueue
 from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import effective_monitors, monitor_name
@@ -143,12 +143,17 @@ def create_network_app(
         if not _auth(request):
             return _unauthorized()
         if status_provider is not None:
-            return {**status_provider(), "version": __version__}
+            return {
+                **status_provider(),
+                "version": __version__,
+                "event_cursor": queue.cursor_snapshot(),
+            }
         return {
             "machine": config.machine,
             "server_id": config.server_id,
             "os": platform.platform(),
             "version": __version__,
+            "event_cursor": queue.cursor_snapshot(),
             # Match the production status_provider shape: a dict keyed by monitor
             # name (supervisor.snapshot()), NOT a list — same endpoint, one wire
             # shape (Kimi). effective_monitors so it includes auto-injected ones.
@@ -159,10 +164,30 @@ def create_network_app(
         }
 
     @app.get("/events")
-    def events(request: Request, ack: Optional[int] = None):
+    def events(request: Request):
         if not _auth(request):
             return _unauthorized()
-        return queue.payload(ack_id=ack)
+        params = request.query_params
+        try:
+            if any(
+                len(params.getlist(key)) > 1
+                for key in ("ack", "cursor_stream", "cursor_boot")
+            ):
+                raise EventAdmissionError("event_cursor_mismatch")
+            ack = int(params["ack"]) if "ack" in params else None
+            return queue.network_payload(
+                ack, params.get("cursor_stream"), params.get("cursor_boot")
+            )
+        except ValueError as exc:
+            code = (
+                str(exc)
+                if isinstance(exc, EventAdmissionError)
+                else "event_ack_unoffered"
+            )
+            return JSONResponse(
+                {"error": code, "recovery_hint": "Verify the event cursor pairing."},
+                status_code=409,
+            )
 
     _register_validation_handler(app, "/monitors", _auth)
     _register_film_routes(app, "/monitors", films_provider, run_films_provider, _auth)
@@ -180,15 +205,23 @@ def create_control_app(
     run_films_provider: Optional[
         Callable[[str, object, object, object], Optional[dict]]
     ] = None,
+    *,
+    control_token: str,
+    control_active: Callable[[], bool],
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""
     from fastapi import HTTPException
 
-    from taskpaw_v3.core.cors import add_ui_cors
+    from taskpaw_v3.core.control import add_control_guard
 
     app = FastAPI(title="TaskPaw Agent Control", docs_url=None, redoc_url=None)
-    add_ui_cors(app)
+    add_control_guard(
+        app,
+        control_token=control_token,
+        is_active=control_active,
+        ping_path="/control/ping",
+    )
 
     _register_validation_handler(app, "/control/monitors", control=True)
 

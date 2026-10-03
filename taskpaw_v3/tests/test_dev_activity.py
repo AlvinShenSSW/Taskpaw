@@ -87,17 +87,7 @@ def _write(tmp_path, tool, state, ts):
     )
     fact = aw.hook_fact(raw, tool, ts, (10, 1.0))
     assert fact is not None
-    aw.publish_fact(path, fact)
-    aw._write_projection(
-        str(path),
-        tool,
-        state,
-        session,
-        ts,
-        activity_schema=2,
-        fact_id=fact["id"],
-        fact_committed=True,
-    )
+    assert aw.publish_hook(path, fact, state, session, ts)
 
 
 def test_registered_in_default_registry():
@@ -1138,16 +1128,13 @@ def test_i216_default_cli300_and_helper60_reclamation(
         else:
             fact = aw.hook_fact(json.dumps(payload), "codex", clock[0])
             assert fact is not None
-            aw.publish_fact(path, fact, freshness=writer_freshness)
-            aw._write_projection(
-                str(path),
-                "codex",
+            assert aw.publish_hook(
+                path,
+                fact,
                 "idle" if event == "Interrupt" else "busy",
                 session,
                 clock[0],
-                activity_schema=2,
-                fact_id=fact["id"],
-                fact_committed=True,
+                freshness=writer_freshness,
             )
 
     try:
@@ -1472,17 +1459,7 @@ def test_i216_sr002_unavailable_store_defers_other_final(
         (10, 1.0),
     )
     assert fact is not None
-    aw.publish_fact(path, fact)
-    aw._write_projection(
-        str(path),
-        "claude",
-        "busy",
-        "A",
-        1000,
-        activity_schema=2,
-        fact_id=fact["id"],
-        fact_committed=True,
-    )
+    assert aw.publish_hook(path, fact, "busy", "A", 1000)
     original = aw.sidecar_path(path).read_bytes()
     cfg = DevActivityConfig(
         name="ai", tools=["claude", "codex"], state_dir=str(tmp_path), observe=False
@@ -1521,7 +1498,7 @@ def test_i216_sr002_unavailable_store_defers_other_final(
             (10, 1.0),
         )
         assert final is not None
-        aw.publish_fact(path, final)
+        assert aw.publish_hook(path, final, "idle", "A", 1000)
         assert (
             inst.check(lambda *a, **k: events.append(a)).metrics["ai_state"] == "idle"
         )
@@ -1638,3 +1615,756 @@ def test_i216_sr003_actual_main_2048_refusal_survives_B_and_restart(
         assert not any("AI idle" in event[1] for event in events)
     finally:
         inst.stop()
+
+
+@pytest.mark.parametrize("summary_first", [False, True])
+@pytest.mark.parametrize("current_event", ["SessionEnd", "PostToolUse", "Stop"])
+def test_i216_x1_actual_main_confirmed_end_survives_reclamation(
+    tmp_path, monkeypatch, summary_first, current_event
+):
+    """A proved closed session must not return as unknown after writer cleanup."""
+    import io
+
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    clock = [1000.0]
+    monkeypatch.setattr(aw.time, "time", lambda: clock[0])
+    monkeypatch.setattr(aw, "_producer_identity", lambda: (10, 1.0))
+    monkeypatch.setattr(aw, "_FACT_CAP", 4)
+    _snapshot(monkeypatch, {"codex": True})
+    path = tmp_path / "agent-activity-codex.json"
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+
+    def send(event, session="A", unit=None):
+        raw = {
+            "hook_event_name": event,
+            "session_id": session,
+            "turn_id": "turn-" + session,
+        }
+        if unit is not None:
+            raw["tool_use_id"] = unit
+        monkeypatch.setattr(aw.sys, "stdin", io.StringIO(json.dumps(raw)))
+        assert aw.main(["--tool", "codex", "--path", str(path)]) == 0
+
+    try:
+        send("UserPromptSubmit")
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "busy"
+        if summary_first:
+            send("PostToolUse", "B", "one")
+            send("PostToolUse", "B", "two")
+            clock[0] = 1301.0
+            send("Interrupt", "B")
+        clock[0] += 1
+        send("SessionEnd")
+        if summary_first:
+            assert aw.read_facts(path, "codex")["summaries"]
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+        if current_event != "SessionEnd":
+            clock[0] += 1
+            send(
+                current_event,
+                unit="delayed" if current_event == "PostToolUse" else None,
+            )
+            assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+        clock[0] = 90000.0
+        send("Interrupt", "B")  # Actual rich publisher drives normal >24h cleanup.
+        assert not aw.read_facts(path, "codex")["summaries"]
+        inst.stop(0)
+        restarted = DevActivityPlugin().create("restart", cfg)
+        try:
+            status = restarted.check(lambda *a, **k: pytest.fail("restart event"))
+            assert status.metrics["ai_state"] == "idle"
+            assert status.metrics["tools"][0]["state"] == "idle"
+        finally:
+            restarted.stop(0)
+    finally:
+        inst.stop(0)
+
+
+def _x1_main(
+    monkeypatch,
+    path,
+    event,
+    ts,
+    *,
+    session="A",
+    producer=(10, 1.0),
+    unit=None,
+    turn=None,
+):
+    import io
+
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    raw = {
+        "hook_event_name": event,
+        "session_id": session,
+        "turn_id": turn or "turn-" + session,
+    }
+    if unit is not None:
+        raw["tool_use_id"] = unit
+    monkeypatch.setattr(aw.sys, "stdin", io.StringIO(json.dumps(raw)))
+    monkeypatch.setattr(aw.time, "time", lambda: ts)
+    monkeypatch.setattr(aw, "_producer_identity", lambda: producer)
+    assert aw.main(["--tool", "codex", "--path", str(path)]) == 0
+
+
+@pytest.mark.parametrize("current_event", ["SessionEnd", "PostToolUse", "Stop"])
+def test_i216_d01_current_projection_resolves_after_witness_expiry(
+    tmp_path, monkeypatch, current_event
+):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    path = tmp_path / "agent-activity-codex.json"
+    _snapshot(monkeypatch, {"codex": True})
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    try:
+        _x1_main(monkeypatch, path, "UserPromptSubmit", 1000)
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "busy"
+        _x1_main(monkeypatch, path, "SessionEnd", 1001)
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+        if current_event != "SessionEnd":
+            _x1_main(monkeypatch, path, current_event, 1002, unit="delayed")
+        before_json = path.read_bytes()
+        # This existing fact-only API must reclaim without inventing a JSON slot.
+        cleanup = aw.hook_fact(
+            json.dumps({"hook_event_name": "SessionStart", "session_id": "B"}),
+            "codex",
+            90000,
+            (20, 2.0),
+        )
+        assert cleanup is not None
+        aw.publish_fact(path, cleanup)
+        assert path.read_bytes() == before_json
+        store = aw.read_facts(path, "codex")
+        assert not any(r["session"] == aw._hash("A") for r in store["facts"])
+        assert (
+            not store["summaries"] and store["projection_link"]["resolved"] is not None
+        )
+        assert aw._projection_matches(json.loads(path.read_text()), store)
+        monkeypatch.setattr(aw.time, "time", lambda: 90000)
+        inst.stop(0)
+        inst = DevActivityPlugin().create("restart", cfg)
+        assert (
+            inst.check(lambda *a, **k: pytest.fail("restart event")).metrics["ai_state"]
+            == "idle"
+        )
+        # The receipt cannot close a new continuable callback beyond the horizon.
+        _x1_main(monkeypatch, path, "Stop", 90001, unit="beyond-horizon")
+        status = inst.check(lambda *a, **k: pytest.fail("false completion"))
+        assert status.metrics["tools"][0]["state"] is None
+        assert status.metrics["ai_state"] != "idle"
+        assert aw.read_facts(path, "codex")["projection_link"]["resolved"] is None
+    finally:
+        inst.stop(0)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("summary_first", [False, True])
+def test_i216_d02_two_store_confirmation_then_independent_reclaim(
+    tmp_path, monkeypatch, reverse, summary_first
+):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    paths = (tmp_path / "agent-activity-codex.json", tmp_path / "agent-activity.json")
+    target, source = paths if not reverse else paths[::-1]
+    monkeypatch.setattr(aw, "_FACT_CAP", 4)
+    _snapshot(monkeypatch, {"codex": True})
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    try:
+        _x1_main(monkeypatch, target, "Stop", 1000)
+        if summary_first:
+            _x1_main(monkeypatch, target, "PostToolUse", 1000, session="B", unit="one")
+            _x1_main(monkeypatch, target, "PostToolUse", 1000, session="B", unit="two")
+            _x1_main(monkeypatch, target, "Interrupt", 1301, session="B")
+            _x1_main(
+                monkeypatch,
+                target,
+                "SessionStart",
+                1302,
+                session="neutral",
+                producer=(20, 2.0),
+            )
+            assert aw.read_facts(target, "codex")["summaries"]
+            _x1_main(monkeypatch, target, "Stop", 1303)
+        final_ts = 1304 if summary_first else 1001
+        _x1_main(monkeypatch, source, "SessionEnd", final_ts)
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+        copies = []
+        for path in paths:
+            store = aw.read_facts(path, "codex")
+            assert not store["summaries"]
+            copies.append(
+                [r for r in store["facts"] if r["kind"] == "verified_session_end"]
+            )
+        assert (
+            copies[0] == copies[1]
+            and len(copies[0]) == 1
+            and copies[0][0]["ts"] == final_ts
+        )
+        for index, path in enumerate(paths):
+            cleanup = aw.hook_fact(
+                json.dumps(
+                    {"hook_event_name": "SessionStart", "session_id": "neutral"}
+                ),
+                "codex",
+                90000,
+                (20, 2.0),
+            )
+            assert cleanup is not None
+            aw.publish_fact(path, cleanup)
+            monkeypatch.setattr(aw.time, "time", lambda: 90000)
+            inst.stop(0)
+            inst = DevActivityPlugin().create("restart-" + str(index), cfg)
+            assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+            assert not aw.read_facts(path, "codex")["summaries"]
+    finally:
+        inst.stop(0)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "insert",
+        "link",
+        "summary",
+        "delete",
+        "commit",
+        "lock",
+        "cap",
+        "schema",
+        "identity",
+        "stop",
+    ],
+)
+def test_i216_d02_partial_local_commit_no_off_and_retry(tmp_path, monkeypatch, fault):
+    import sqlite3
+    from contextlib import closing
+    from types import SimpleNamespace
+
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    source, target = (
+        tmp_path / "agent-activity-codex.json",
+        tmp_path / "agent-activity.json",
+    )
+    _snapshot(monkeypatch, {"codex": True})
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    events = []
+    _x1_main(monkeypatch, target, "Stop", 1000)
+    _x1_main(monkeypatch, source, "SessionEnd", 1001)
+    target_db = aw.sidecar_path(target)
+    row = aw.read_facts(target, "codex")["facts"][0]
+    lock = None
+    with closing(sqlite3.connect(target_db)) as conn, conn:
+        conn.execute(
+            "INSERT INTO summaries VALUES(?,?,?,?,?,?,?)",
+            tuple(
+                row[k] for k in ("tool", "session", "turn", "actor", "pid", "created")
+            )
+            + (2,),
+        )
+        clauses = {
+            "insert": "BEFORE INSERT ON facts WHEN NEW.kind='verified_session_end'",
+            "link": "BEFORE UPDATE OF resolved ON projection_link",
+            "summary": "BEFORE DELETE ON summaries",
+            "delete": "BEFORE DELETE ON facts",
+        }
+        if fault in clauses:
+            conn.execute(
+                f"CREATE TRIGGER injected {clauses[fault]} BEGIN SELECT RAISE(ABORT,'PRIVATE_SENTINEL'); END"
+            )
+    if fault == "cap":
+        _x1_main(monkeypatch, target, "Stop", 1000, unit="another")
+        monkeypatch.setattr(aw, "_FACT_CAP", 2)
+    if fault == "lock":
+        lock = sqlite3.connect(target_db)
+        lock.execute("BEGIN IMMEDIATE")
+    original = aw._open_store
+
+    def opened(p, **kwargs):
+        conn = original(p, **kwargs)
+        if not kwargs["writable"] or kwargs.get("create", True):
+            return conn
+
+        def commit():
+            if Path(p) == target_db and fault == "commit":
+                raise sqlite3.OperationalError("PRIVATE_SENTINEL")
+            conn.commit()
+            if Path(p) == aw.sidecar_path(source):
+                if fault == "schema":
+                    with closing(sqlite3.connect(target_db)) as other, other:
+                        other.execute("PRAGMA user_version=99")
+                elif fault == "identity":
+                    raw = target_db.read_bytes()
+                    target_db.unlink()
+                    target_db.write_bytes(raw)
+                    target_db.chmod(0o600)
+                elif fault == "stop":
+                    inst._stop_event.set()
+
+        return SimpleNamespace(
+            execute=conn.execute,
+            rollback=conn.rollback,
+            close=conn.close,
+            commit=commit,
+        )
+
+    def tables():
+        with closing(sqlite3.connect(target_db)) as conn:
+            return {
+                name: conn.execute(f"SELECT * FROM {name} ORDER BY 1,2").fetchall()
+                for name in ("facts", "summaries", "tools", "projection_link")
+            }
+
+    before = tables()
+    monkeypatch.setattr(aw, "_open_store", opened)
+    try:
+        status = inst.check(lambda *a, **k: events.append(a))
+        assert (
+            status.state == "stopped"
+            if fault == "stop"
+            else status.metrics["ai_state"] != "idle"
+        )
+        assert not events
+        committed = aw.read_facts(source, "codex")
+        witnesses = [
+            r for r in committed["facts"] if r["kind"] == "verified_session_end"
+        ]
+        assert len(witnesses) == 1 and witnesses[0]["ts"] == 1001
+        assert not any(r["kind"] == "session_end" for r in committed["facts"])
+        assert tables() == before, (
+            "failed target effects roll back; source stays committed"
+        )
+    finally:
+        monkeypatch.setattr(aw, "_open_store", original)
+        if lock is not None:
+            lock.rollback()
+            lock.close()
+        with closing(sqlite3.connect(target_db)) as conn, conn:
+            conn.execute("DROP TRIGGER IF EXISTS injected")
+            if fault == "schema":
+                conn.execute(
+                    "PRAGMA user_version=2"
+                )  # Restore only the injected fixture header.
+        monkeypatch.setattr(aw, "_FACT_CAP", 2048)
+    try:
+        if fault == "stop":
+            inst.stop(0)
+            inst = DevActivityPlugin().create("retry", cfg)
+        monkeypatch.setattr(aw.time, "time", lambda: 1500)
+        assert (
+            inst.check(lambda *a, **k: events.append(a)).metrics["ai_state"] == "idle"
+        )
+        target_witness = [
+            r
+            for r in aw.read_facts(target, "codex")["facts"]
+            if r["kind"] == "verified_session_end"
+        ]
+        assert target_witness == witnesses and target_witness[0]["ts"] == 1001
+        assert not aw.read_facts(target, "codex")["summaries"]
+    finally:
+        inst.stop(0)
+
+
+@pytest.mark.parametrize("fault", ["insert", "commit"])
+def test_i216_d02_source_failure_rolls_back_both_then_later_retry(
+    tmp_path, monkeypatch, fault
+):
+    import sqlite3
+    from contextlib import closing
+    from types import SimpleNamespace
+
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    source, target = (
+        tmp_path / "agent-activity-codex.json",
+        tmp_path / "agent-activity.json",
+    )
+    _snapshot(monkeypatch, {"codex": True})
+    _x1_main(monkeypatch, target, "Stop", 1000)
+    _x1_main(monkeypatch, source, "SessionEnd", 1001)
+    source_db = aw.sidecar_path(source)
+    if fault == "insert":
+        with closing(sqlite3.connect(source_db)) as conn, conn:
+            conn.execute(
+                "CREATE TRIGGER injected BEFORE INSERT ON facts WHEN NEW.kind='verified_session_end' BEGIN SELECT RAISE(ABORT,'PRIVATE_SENTINEL'); END"
+            )
+    before = [aw.read_facts(path, "codex") for path in (source, target)]
+    original = aw._open_store
+
+    def opened(p, **kwargs):
+        conn = original(p, **kwargs)
+        if (
+            fault == "commit"
+            and kwargs["writable"]
+            and not kwargs.get("create", True)
+            and Path(p) == source_db
+        ):
+            return SimpleNamespace(
+                execute=conn.execute,
+                rollback=conn.rollback,
+                close=conn.close,
+                commit=lambda: (_ for _ in ()).throw(
+                    sqlite3.OperationalError("PRIVATE_SENTINEL")
+                ),
+            )
+        return conn
+
+    monkeypatch.setattr(aw, "_open_store", opened)
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    try:
+        status = inst.check(lambda *a, **k: pytest.fail("failed source completion"))
+        assert status.metrics["ai_state"] != "idle"
+        assert [aw.read_facts(p, "codex") for p in (source, target)] == before
+        monkeypatch.setattr(aw, "_open_store", original)
+        with closing(sqlite3.connect(source_db)) as conn, conn:
+            conn.execute("DROP TRIGGER IF EXISTS injected")
+        monkeypatch.setattr(aw.time, "time", lambda: 1500)
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+        copies = [
+            [
+                r
+                for r in aw.read_facts(p, "codex")["facts"]
+                if r["kind"] == "verified_session_end"
+            ]
+            for p in (source, target)
+        ]
+        assert copies[0] == copies[1] and copies[0][0]["ts"] == 1001
+    finally:
+        monkeypatch.setattr(aw, "_open_store", original)
+        inst.stop(0)
+
+
+def test_i216_d01_expired_stored_proof_does_not_close_fresh_work(tmp_path, monkeypatch):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    path = tmp_path / "agent-activity-codex.json"
+    _snapshot(monkeypatch, {"codex": True})
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    try:
+        _x1_main(monkeypatch, path, "SessionEnd", 1001)
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+        assert any(
+            r["kind"] == "verified_session_end" and r["ts"] == 1001
+            for r in aw.read_facts(path, "codex")["facts"]
+        )
+        # No intervening cleanup: fresh work arrives with the expired witness
+        # physically retained. The normal publisher must retire, not renew, it.
+        _x1_main(monkeypatch, path, "Stop", 90001, unit="fresh")
+        stored = aw.read_facts(path, "codex")
+        assert not any(r["kind"] == "verified_session_end" for r in stored["facts"])
+        assert any(
+            r["kind"] == "stop_attempt" and r["ts"] == 90001 for r in stored["facts"]
+        )
+        assert stored["projection_link"]["resolved"] is None
+        status = inst.check(lambda *a, **k: pytest.fail("expired proof completion"))
+        assert status.metrics["tools"][0]["state"] is None
+        assert status.metrics["ai_state"] != "idle"
+    finally:
+        inst.stop(0)
+
+
+def test_i216_c3_s04_expired_interrupt_retires_current_progress_only(
+    tmp_path, monkeypatch
+):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    path = tmp_path / "agent-activity-codex.json"
+    _x1_main(monkeypatch, path, "PostToolUse", 1000, unit="old")
+    for session, event, ts in (
+        ("A", "Interrupt", 1001),
+        ("neutral", "SessionStart", 90000),
+    ):
+        fact = aw.hook_fact(
+            json.dumps(
+                {
+                    "hook_event_name": event,
+                    "session_id": session,
+                    "turn_id": "turn-" + session,
+                }
+            ),
+            "codex",
+            ts,
+            (10, 1.0),
+        )
+        assert fact is not None
+        aw.publish_fact(path, fact)
+    stored = aw.read_facts(path, "codex")
+    assert not stored["summaries"]
+    assert stored["projection_link"]["resolved"]["ts"] == 1001
+    assert aw._projection_matches(json.loads(path.read_text()), stored)
+    assert (
+        da.read_hook_activity(str(tmp_path), "codex", 300, 90000, {}, set(), [])[
+            "state"
+        ]
+        == "idle"
+    )
+    _x1_main(monkeypatch, path, "Stop", 90001, unit="fresh")
+    out = da.read_hook_activity(str(tmp_path), "codex", 300, 90001, {}, set(), [])
+    assert out["unknown"] and out["unresolved"] and out["state"] is None
+    assert aw.read_facts(path, "codex")["projection_link"]["resolved"] is None
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+@pytest.mark.parametrize("has_final", [False, True])
+def test_i216_d02_complete_exit_uses_only_prior_exact_binding(
+    tmp_path, monkeypatch, foreign, has_final
+):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    source, target = (
+        tmp_path / "agent-activity-codex.json",
+        tmp_path / "agent-activity.json",
+    )
+    _snapshot(monkeypatch, {"codex": True})
+    _x1_main(monkeypatch, source, "UserPromptSubmit", 1000)
+    _x1_main(monkeypatch, target, "Stop", 1001)
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    try:
+        inst.check(lambda *a, **k: None)  # Bind only the real sampled fixture pair.
+        if foreign:
+            _x1_main(monkeypatch, target, "Stop", 1002, session="B", producer=(20, 2.0))
+        _snapshot(monkeypatch, {"codex": False})
+        if has_final:
+            # Only the prior exact binding may validate this real callback
+            # observed after the sampled root has disappeared.
+            _x1_main(monkeypatch, source, "SessionEnd", 1003)
+        monkeypatch.setattr(aw.time, "time", lambda: 1500)
+        status = inst.check(lambda *a, **k: None)
+        assert (status.metrics["ai_state"] == "idle") is (not foreign)
+        copies = [
+            [
+                r
+                for r in aw.read_facts(path, "codex")["facts"]
+                if r["kind"] == "verified_session_end"
+            ]
+            for path in (source, target)
+        ]
+        if has_final:
+            assert copies[0] == copies[1] and len(copies[0]) == 1
+            assert copies[0][0]["ts"] == 1003
+        else:
+            assert copies == [[], []], (
+                "Complete exit alone cannot mint a durable witness"
+            )
+        restarted = DevActivityPlugin().create("restart", cfg)
+        try:
+            state = restarted.check(lambda *a, **k: pytest.fail("restart off")).metrics[
+                "ai_state"
+            ]
+            assert (state == "idle") is (has_final and not foreign)
+        finally:
+            restarted.stop(0)
+    finally:
+        inst.stop(0)
+
+
+def test_i216_d02_expired_partial_proof_cannot_resolve_target(tmp_path, monkeypatch):
+    import sqlite3
+    from types import SimpleNamespace
+
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    source, target = (
+        tmp_path / "agent-activity-codex.json",
+        tmp_path / "agent-activity.json",
+    )
+    _snapshot(monkeypatch, {"codex": True})
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    _x1_main(monkeypatch, target, "Stop", 1000)
+    _x1_main(monkeypatch, source, "SessionEnd", 1001)
+    original = aw._open_store
+
+    def opened(p, **kwargs):
+        conn = original(p, **kwargs)
+        if (
+            kwargs["writable"]
+            and not kwargs.get("create", True)
+            and Path(p) == aw.sidecar_path(target)
+        ):
+            return SimpleNamespace(
+                execute=conn.execute,
+                rollback=conn.rollback,
+                close=conn.close,
+                commit=lambda: (_ for _ in ()).throw(
+                    sqlite3.OperationalError("synthetic")
+                ),
+            )
+        return conn
+
+    monkeypatch.setattr(aw, "_open_store", opened)
+    try:
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] != "idle"
+        monkeypatch.setattr(aw, "_open_store", original)
+        monkeypatch.setattr(aw.time, "time", lambda: 90000)
+        inst.stop(0)
+        inst = DevActivityPlugin().create("expired", cfg)
+        status = inst.check(lambda *a, **k: pytest.fail("unconverged off"))
+        assert status.metrics["tools"][0]["state"] is None
+        assert status.metrics["ai_state"] != "idle"
+        assert not any(
+            r["kind"] == "verified_session_end"
+            for r in aw.read_facts(target, "codex")["facts"]
+        )
+    finally:
+        monkeypatch.setattr(aw, "_open_store", original)
+        inst.stop(0)
+
+
+def test_i216_d02_unrelated_scope_and_wrong_incarnation_stay_unresolved(
+    tmp_path, monkeypatch
+):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    source, target = (
+        tmp_path / "agent-activity-codex.json",
+        tmp_path / "agent-activity.json",
+    )
+    _snapshot(monkeypatch, {"codex": True})
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    try:
+        _x1_main(monkeypatch, target, "Stop", 1000, session="B")
+        _x1_main(
+            monkeypatch,
+            target,
+            "Stop",
+            1000,
+            producer=(10, 2.0),
+            unit="wrong-incarnation",
+        )
+        _x1_main(monkeypatch, source, "SessionEnd", 1001)
+        status = inst.check(lambda *a, **k: None)
+        assert status.metrics["ai_state"] != "idle"
+        stored = aw.read_facts(target, "codex")["facts"]
+        assert any(r["session"] == aw._hash("B") for r in stored)
+        assert any(r["created"] == 2.0 and r["kind"] == "stop_attempt" for r in stored)
+        _x1_main(monkeypatch, target, "UserPromptSubmit", 1002, session="positive")
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "busy"
+    finally:
+        inst.stop(0)
+
+
+def test_i216_pure_hook_readers_leave_projection_and_database_unchanged(
+    tmp_path, monkeypatch
+):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    path = tmp_path / "agent-activity-codex.json"
+    _x1_main(monkeypatch, path, "SessionEnd", 1000)
+    before = (path.read_bytes(), aw.sidecar_path(path).read_bytes())
+    for _ in range(3):
+        store = aw.read_facts(path, "codex")
+        assert all(r["kind"] != "verified_session_end" for r in store["facts"])
+        da.read_hook_activity(
+            str(tmp_path),
+            "codex",
+            300,
+            1001,
+            {"complete": True, "roots": [{"pid": 10, "created": 1.0, "host": "other"}]},
+            set(),
+            [],
+        )
+        assert (path.read_bytes(), aw.sidecar_path(path).read_bytes()) == before
+    assert not aw.sidecar_path(tmp_path / "agent-activity.json").exists()
+
+
+@pytest.mark.parametrize("event", ["SessionEnd", "Stop", "PostToolUse"])
+def test_i216_c3_s02_same_current_id_keeps_first_time_after_retirement(
+    tmp_path, monkeypatch, event
+):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    path = tmp_path / "agent-activity-codex.json"
+    _snapshot(monkeypatch, {"codex": True})
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    try:
+        _x1_main(monkeypatch, path, "SessionEnd", 1000)
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+        _x1_main(monkeypatch, path, event, 1001 if event != "SessionEnd" else 1000)
+        first = json.loads(path.read_text())
+        cleanup = aw.hook_fact(
+            json.dumps({"hook_event_name": "SessionStart", "session_id": "neutral"}),
+            "codex",
+            90000,
+            (20, 2.0),
+        )
+        assert cleanup is not None
+        aw.publish_fact(path, cleanup)
+        _x1_main(monkeypatch, path, event, 90001)
+        current = json.loads(path.read_text())
+        assert current["fact_id"] == first["fact_id"]
+        assert current["link_nonce"] != first["link_nonce"]
+        assert current["fact_ts"] == first["fact_ts"]
+        assert current["ts"] == 90001, (
+            "attempt time must not rewind to the first receipt"
+        )
+        assert aw.read_facts(path, "codex")["projection_link"]["resolved"] is None
+        status = inst.check(lambda *a, **k: None)
+        assert status.metrics["tools"][0]["state"] is None
+        assert status.metrics["ai_state"] != "idle"
+        assert not any(
+            r["kind"] == "verified_session_end"
+            for r in aw.read_facts(path, "codex")["facts"]
+        )
+    finally:
+        inst.stop(0)
+
+
+def test_i216_c3_s02_distinct_session_final_witnesses_keep_local_coverage(
+    tmp_path, monkeypatch
+):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    path = tmp_path / "agent-activity-codex.json"
+    _snapshot(monkeypatch, {"codex": True})
+    cfg = DevActivityConfig(
+        name="ai", tools=["codex"], state_dir=str(tmp_path), observe=False
+    )
+    inst = DevActivityPlugin().create("ai", cfg)
+    try:
+        _x1_main(monkeypatch, path, "SessionEnd", 1000)
+        _x1_main(monkeypatch, path, "SessionEnd", 1001, turn="different-final-turn")
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+        witnesses = [
+            r
+            for r in aw.read_facts(path, "codex")["facts"]
+            if r["kind"] == "verified_session_end"
+        ]
+        assert len(witnesses) == 2 and sorted(r["ts"] for r in witnesses) == [
+            1000,
+            1001,
+        ]
+        assert not aw.sidecar_path(tmp_path / "agent-activity.json").exists()
+    finally:
+        inst.stop(0)

@@ -40,6 +40,41 @@ See `docs/guides/dev-agent-activity.md` for operational limits and recovery. Nat
 >5min TUI, VS Code, Windows npm/elevation and host dispatch remain UNVERIFIED.
 
 
+### #216 bound SessionEnd retention correction
+
+The monitor adds an explicit private-sidecar confirmation stage using its existing
+validated same-tool PID/create-time binding, including previously validated exact
+bindings. Only this stage creates internal `verified_session_end` facts from
+stored SessionEnd; hook fields/nonzero parent metadata cannot mint proof. Pure
+fact readers remain read-only and confirmation never creates a missing store.
+Each existing participating per-tool/shared store commits witness admission,
+scoped summary clear and covered-row retirement together. Two stores do not
+commit atomically: partial success remains unknown and cannot emit all-idle/off;
+retry uses a retained copy with the original timestamp. Unbound/helper and
+wrong-incarnation finals retain uncertainty. Copy/replay/retry never renews the
+original 24h horizon; expired proof cannot close newly arriving callbacks.
+
+Each physical JSON/sidecar pair has one current `projection_link` singleton,
+not one per tool. Rich publication serializes fact admission, singleton update
+and owned JSON replacement in one SQLite write transaction, with a fresh nonce
+even for duplicate fact IDs. JSON and DB are not jointly atomic: JSON failure
+may preserve committed facts while reporting projection failure; DB commit
+failure leaves the new nonce unmatched. Compare owner/nonce/ID before tool
+filtering: a parseable mismatch makes both identified owners unknown; missing
+JSON makes only the singleton owner unknown. Normal shared A→B publication
+replaces the link and leaves A's other evidence reducible without an A JSON.
+Covered retirement resolves only the exact current link in the same transaction.
+Its bounded receipt may validate that projection after proof expiry, but cannot
+clear another subject, unknown summary, overflow or future callback. No history
+or indefinitely authoritative final is added; existing caps remain unchanged.
+
+This unmerged format uses SQLite schema 2 and rich JSON schema 3, retaining the
+`.activity-v2.sqlite3` filename. Reject experimental schema 1/unknown/future stores
+unchanged as unavailable; no shipped-format migration is established. Update
+copied standalone writers and reinstall hooks before using the new format;
+reinstall cannot erase or migrate experimental stores. Legacy four-field JSON
+compatibility remains separate. This correction makes no native acceptance claim.
+
 ## Revision log
 
 - **v2, 2026-09-30, debate round 1 — DR-1 (P1), accepted.** Independently

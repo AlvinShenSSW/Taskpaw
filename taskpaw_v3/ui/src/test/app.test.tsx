@@ -33,9 +33,9 @@ describe("App shell", () => {
     expect(container.querySelector('img[src*="logo"]')).toBeInTheDocument();
   });
 
-  it("shows a health badge with text (status not color-only)", () => {
+  it("shows a local API badge with accessible text (status not color-only)", () => {
     renderApp();
-    expect(screen.getAllByText(/在线|Online/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("status", { name: /Local API connection|本地 API 连接/ })).toHaveTextContent(/Checking|正在检查/);
   });
 
   it("offers a segmented role switcher with correct aria-selected", () => {

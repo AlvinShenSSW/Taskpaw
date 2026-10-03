@@ -13,6 +13,7 @@ from pathlib import Path
 
 from taskpaw_v3.agent.server.launcher import run_agent
 from taskpaw_v3.core.config import AgentConfig, load_yaml
+from taskpaw_v3.core.state import StateError
 
 
 def default_config_path() -> Path:
@@ -53,7 +54,23 @@ def main() -> int:
     # Persist the monotonic event-id counter next to the config.
     state_path = path.with_name("agent.state.json")
     # Pass the config path so the control API can persist add/remove/enable (#57).
-    run_agent(config, state_path=state_path, config_path=path, block=True)
+    try:
+        run_agent(config, state_path=state_path, config_path=path, block=True)
+    except StateError as exc:
+        print(f"event state: {exc.reason}; config: {path}", file=sys.stderr)
+        for backup in exc.backups:
+            print(f"fault backup: {backup}", file=sys.stderr)
+        prefix = (
+            f'"{sys.executable}" agent-state'
+            if getattr(sys, "frozen", False)
+            else "python -m taskpaw_v3.agent.state"
+        )
+        print(f'{prefix} --config "{path}" inspect', file=sys.stderr)
+        print(
+            "Use explicit initialize/migrate/recover only after verifying pairing or intact evidence (see event-cursor-recovery guide).",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

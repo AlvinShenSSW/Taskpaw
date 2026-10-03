@@ -6,9 +6,37 @@ import json
 
 import pytest
 
+from taskpaw_v3.hub.server import openclaw as openclaw_mod
 from taskpaw_v3.hub.server import poller as poller_mod
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
+
+
+def _cursor():
+    return {
+        "version": 1,
+        "durable": True,
+        "server_id": "fixture",
+        "stream_id": "1" * 32,
+        "boot_id": "2" * 32,
+        "resume_floor": 2,
+        "offered_highwater": 99,
+        "next_event_id": 100,
+    }
+
+
+def _bind(p, sid):
+    cursor = _cursor()
+    p.store.commit_event_cursor(
+        sid,
+        {
+            "state": "bound",
+            "identity": {k: cursor[k] for k in ("server_id", "stream_id")},
+            "boot_id": cursor["boot_id"],
+            "resume_floor": cursor["resume_floor"],
+        },
+        p.last_event_ids,
+    )
 
 
 class FakeResp:
@@ -104,29 +132,39 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
             s, "http://oc/hook", get_active=lambda: True, get_token=lambda: "tok"
         )
         p.last_event_ids = {sid: 2}
+        _bind(p, sid)
 
         seen = []
         sent = []
 
         def fake_urlopen(req, timeout):
+            if "/status" in req.full_url:
+                return FakeResp({"event_cursor": _cursor()})
             if "/events" in req.full_url:
                 seen.append(req.full_url)
                 return FakeResp(
                     {
+                        "event_cursor": _cursor(),
                         "events": [
                             {"id": 2, "message": "seen"},
                             {"id": 3, "message": "new"},
                             {"id": 4, "message": "newer"},
-                        ]
+                        ],
                     }
                 )
             sent.append(json.loads(req.data.decode()))
             return FakeResp({"ok": True})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", fake_urlopen)
+        monkeypatch.setattr(openclaw_mod._opener, "open", fake_urlopen)
         p.poll_once()
 
-        assert seen == ["http://127.0.0.1:5680/events?ack=2"]
+        assert seen == [
+            "http://127.0.0.1:5680/events?ack=2&cursor_stream="
+            + "1" * 32
+            + "&cursor_boot="
+            + "2" * 32
+        ]
         assert p.last_event_ids[sid] == 4
         assert json.loads(s.get_config("last_event_ids")) == {str(sid): 4}
         msgs = [
@@ -147,7 +185,7 @@ def test_poller_stores_enqueues_then_advances_ack(tmp_path, monkeypatch):
         s.close()
 
 
-def test_poller_404_fallback_for_legacy_agent(tmp_path, monkeypatch):
+def test_poller_legacy_agent_pauses_before_destructive_fallback(tmp_path, monkeypatch):
     import urllib.error
 
     s = _store(tmp_path)
@@ -163,13 +201,13 @@ def test_poller_404_fallback_for_legacy_agent(tmp_path, monkeypatch):
                 raise urllib.error.HTTPError(req.full_url, 404, "nf", None, None)
             return FakeResp({"events": [{"id": 3, "message": "new"}]})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", fake_urlopen)
         evs = p.fetch_events(s.list_servers()[0])
-        assert [e["id"] for e in evs] == [3]
-        assert seen == [
-            "http://127.0.0.1:5680/events?ack=2",
-            "http://127.0.0.1:5680/events",
-        ]
+        assert evs == []
+        assert seen == ["http://127.0.0.1:5680/status"]
+        assert (
+            p.snapshot_event_channels()[sid]["reason"] == "legacy_cursor_unverifiable"
+        )
     finally:
         s.close()
 
@@ -185,21 +223,24 @@ def test_events_from_payload_shapes():
     assert _events_from_payload(5) is None
 
 
-def test_fetch_events_tolerates_bare_list(tmp_path, monkeypatch):
+def test_fetch_events_pauses_unverifiable_bare_list_agent(tmp_path, monkeypatch):
     # A foreign/older agent that returns a bare JSON list (not {"events": [...]}) must
-    # not crash with "'list' object has no attribute 'get'" — the events are ingested.
+    # not crash; without cursor evidence the event channel is visibly paused.
     s = _store(tmp_path)
     try:
         sid = s.add_server("SnowLeopard", "127.0.0.1", 5680)
         p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
         p.last_event_ids = {sid: 2}
         monkeypatch.setattr(
-            poller_mod.urllib.request,
-            "urlopen",
+            poller_mod._opener,
+            "open",
             lambda req, timeout: FakeResp([{"id": 3, "message": "new"}, {"id": 2}]),
         )
         evs = p.fetch_events(s.list_servers()[0])
-        assert [e["id"] for e in evs] == [3]  # id>last_id filter still applies
+        assert evs == []
+        assert (
+            p.snapshot_event_channels()[sid]["reason"] == "current_status_unavailable"
+        )
     finally:
         s.close()
 
@@ -211,8 +252,8 @@ def test_fetch_events_skips_unexpected_shape(tmp_path, monkeypatch):
         s.add_server("Weird", "127.0.0.1", 5680)
         p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
         monkeypatch.setattr(
-            poller_mod.urllib.request,
-            "urlopen",
+            poller_mod._opener,
+            "open",
             lambda req, timeout: FakeResp("not an events object"),
         )
         assert p.fetch_events(s.list_servers()[0]) == []
@@ -226,11 +267,14 @@ def test_poller_disabled_stores_without_outbox(tmp_path, monkeypatch):
         sid = s.add_server("agent", "127.0.0.1", 5680)
         p = Poller(s, "http://oc/hook", get_active=lambda: False, get_token=lambda: "")
         p.last_event_ids = {sid: 2}
+        _bind(p, sid)
 
         def fake_urlopen(req, timeout):
-            return FakeResp({"events": [{"id": 3, "message": "new"}]})
+            return FakeResp(
+                {"event_cursor": _cursor(), "events": [{"id": 3, "message": "new"}]}
+            )
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", fake_urlopen)
         p.poll_once()
         assert s._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
         assert (
@@ -265,7 +309,7 @@ def test_outbox_dead_letters_once(tmp_path, monkeypatch):
         def fail(req, timeout):
             raise urllib.error.URLError("down")
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", fail)
+        monkeypatch.setattr(openclaw_mod._opener, "open", fail)
         p.drain_outbox()
         p.drain_outbox()
         row = s._conn.execute(
@@ -371,15 +415,28 @@ def test_prune_dead_letters_uses_utc_not_naive_local(tmp_path, monkeypatch):
 def test_no_hardcoded_timezone_offset_in_hub_and_core():
     """#152 invariant: the time authority follows the Hub *host* clock — no source
     may pin a timezone/offset (that would break when the Hub is deployed elsewhere)."""
+    import ast
     import re
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    banned = re.compile(r"Asia/|America/|Europe/|\+0[0-9]:00|pytz|ZoneInfo\(")
+    banned = re.compile(r"Asia/|America/|Europe/|\+0[1-9]:00|pytz")
     offenders = []
     for sub in ("hub", "core"):
         for py in (root / sub).rglob("*.py"):
-            if banned.search(py.read_text(encoding="utf-8")):
+            source = py.read_text(encoding="utf-8")
+            hardcoded_zone = any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "ZoneInfo"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                for node in ast.walk(ast.parse(source))
+            )
+            # Operator-provided migration zones are explicit input, never the
+            # Hub clock authority. Canonical UTC (+00:00) is neutral; literal
+            # local zones and fixed nonzero offsets remain forbidden.
+            if banned.search(source) or hardcoded_zone:
                 offenders.append(str(py.relative_to(root)))
     assert not offenders, f"hardcoded timezone/offset in: {offenders}"
 
@@ -411,7 +468,7 @@ def test_poller_keeps_latest_status_snapshot(tmp_path, monkeypatch):
                 return FakeResp(agent_status)
             return FakeResp({"events": []})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", ok_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", ok_urlopen)
         p.poll_once()
 
         snaps = p.snapshot_statuses()
@@ -424,7 +481,7 @@ def test_poller_keeps_latest_status_snapshot(tmp_path, monkeypatch):
         def down_urlopen(req, timeout):
             raise OSError("connection refused")
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", down_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", down_urlopen)
         p.poll_once()
         snaps = p.snapshot_statuses()
         assert snaps[sid]["online"] is False
@@ -448,7 +505,7 @@ def test_snapshot_statuses_parsed_at_write_not_on_read(tmp_path, monkeypatch):
                 return FakeResp(agent_status)
             return FakeResp({"events": []})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", ok_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", ok_urlopen)
         p.poll_once()  # parses once, here
 
         # After the poll, reads must not re-parse — trip json.loads if they do.
@@ -505,14 +562,13 @@ def test_status_endpoint_attaches_snapshot_and_keeps_contract(tmp_path, monkeypa
                 return FakeResp(agent_status)
             return FakeResp({"events": []})
 
-        monkeypatch.setattr(poller_mod.urllib.request, "urlopen", ok_urlopen)
+        monkeypatch.setattr(poller_mod._opener, "open", ok_urlopen)
         svc.poller.poll_once()
 
         r = TestClient(app).get("/status")
         assert r.status_code == 200
         assert destinations == [
             "http://127.0.0.1:5680/status",
-            "http://127.0.0.1:5680/events?ack=-1",
         ]
         body = r.json()
         # Existing contract preserved.
@@ -645,12 +701,21 @@ def test_manage_servers_add_update_delete(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
 
         # add
         r = c.post(
@@ -700,12 +765,21 @@ def test_manage_set_polling_token_and_auth(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         assert c.patch("/config", json={"polling_token": "tok123"}).status_code == 200
         assert s.get_config("polling_token") == "tok123"
     finally:
@@ -715,14 +789,22 @@ def test_manage_set_polling_token_and_auth(tmp_path):
     s2 = _store(tmp_path / "b")
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="sek"), s2)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s2,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            )
+        )
         assert (
             c.post("/servers", json={"name": "x", "ip": "1.1.1.1"}).status_code == 401
         )
         r = c.post(
             "/servers",
             json={"name": "x", "ip": "1.1.1.1"},
-            headers={"Authorization": "Bearer sek"},
+            headers={"Authorization": "Bearer test-control-token"},
         )
         assert r.status_code == 200
     finally:
@@ -735,12 +817,21 @@ def test_manage_validation_and_atomicity(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         sid = c.post(
             "/servers", json={"name": "a", "ip": "1.1.1.1", "port": 5678}
         ).json()["id"]
@@ -775,7 +866,15 @@ def test_manage_validation_and_atomicity(tmp_path):
     s2 = _store(tmp_path / "c")
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False, api_token="k"), s2)
-        r = TestClient(app).post("/servers", json={"name": "x", "ip": "1.1.1.1"})
+        r = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s2,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            )
+        ).post("/servers", json={"name": "x", "ip": "1.1.1.1"})
         assert r.status_code == 401 and "WWW-Authenticate" in r.headers
     finally:
         s2.close()
@@ -787,12 +886,21 @@ def test_manage_port_and_token_edgecases(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
         app, _svc = create_hub_app(HubConfig(self_monitor=False), s)
-        c = TestClient(app)
+        c = TestClient(
+            create_hub_control_app(
+                _svc.config,
+                s,
+                _svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         # A Unicode-digit string is isdigit()=True but int() rejects it → must 400.
         assert (
             c.post(
@@ -816,11 +924,21 @@ def test_manage_rejects_non_string_name_ip(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
-        c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
+        _, svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(
+            create_hub_control_app(
+                svc.config,
+                s,
+                svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         assert (
             c.post("/servers", json={"name": [1, 2], "ip": "1.1.1.1"}).status_code
             == 400
@@ -840,11 +958,21 @@ def test_manage_ip_and_token_sanitization(tmp_path):
     from fastapi.testclient import TestClient
 
     from taskpaw_v3.core.config import HubConfig
-    from taskpaw_v3.hub.server.app import create_hub_app
+    from taskpaw_v3.hub.server.app import create_hub_app, create_hub_control_app
 
     s = _store(tmp_path)
     try:
-        c = TestClient(create_hub_app(HubConfig(self_monitor=False), s)[0])
+        _, svc = create_hub_app(HubConfig(self_monitor=False), s)
+        c = TestClient(
+            create_hub_control_app(
+                svc.config,
+                s,
+                svc,
+                control_token="test-control-token",
+                control_active=lambda: True,
+            ),
+            headers={"Authorization": "Bearer test-control-token"},
+        )
         # host:port / path / scheme in the IP field → 400.
         for bad in ("192.168.1.80:5678", "foo/bar", "http://1.2.3.4", "a b", "x@y"):
             assert (

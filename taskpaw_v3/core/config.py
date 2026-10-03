@@ -148,6 +148,9 @@ class HubConfig(BaseModel):
     machine: str = "hub"
     bind_host: str = "127.0.0.1"
     bind_port: int = 5690
+    # Local management is a separate, authenticated loopback surface.
+    control_host: str = "127.0.0.1"
+    control_port: int = 5691
     poll_interval: int = 60
     # Inbound Bearer for the Hub's OWN read API (/status, /events); empty = auth
     # disabled (V2 parity, like AgentConfig.api_token). Distinct from
@@ -175,10 +178,15 @@ class HubConfig(BaseModel):
         # the guard classifies is the value handed to claim_port/loopback_url (#114).
         return v.strip().strip("[]")
 
-    @field_validator("bind_port")
+    @field_validator("bind_port", "control_port")
     @classmethod
     def _ports(cls, v: int) -> int:
         return _valid_port(v)
+
+    @field_validator("control_host")
+    @classmethod
+    def _control_is_loopback(cls, v: str) -> str:
+        return AgentConfig._control_is_loopback(v)
 
     @field_validator("data_dir")
     @classmethod

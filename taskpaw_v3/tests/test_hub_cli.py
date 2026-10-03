@@ -224,3 +224,18 @@ def test_remove_server_purges_queued_deliveries(tmp_path):
     remaining = s.due_deliveries()
     assert len(remaining) == 1 and remaining[0]["server_name"] == "other"
     s.close()
+
+
+def test_headless_custom_config_reaches_credential_launcher(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from taskpaw_v3.core.config import HubConfig, save_yaml
+
+    path = tmp_path / "custom-hub.yaml"
+    database = tmp_path / "custom.db"
+    save_yaml(HubConfig(self_monitor=False, data_dir=str(tmp_path)), path)
+    launch = Mock(side_effect=lambda config, store, **kwargs: store.close())
+    monkeypatch.setattr(service, "run_hub", launch)
+    assert service.run_from_config(config_path=path, db_path=database) == 0
+    assert launch.call_args.kwargs == {"block": True, "config_path": path}
+    assert launch.call_args.args[1].db_path == database

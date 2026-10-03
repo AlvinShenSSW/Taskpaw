@@ -8,8 +8,9 @@ from http.client import HTTPException
 from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request, build_opener
 
+from taskpaw_v3.core.http import NoRedirectHandler
 from taskpaw_v3.hub.server.poller import _agent_base_url
 
 FilmResource = Literal["films", "run-films"]
@@ -42,12 +43,7 @@ class FilmProxyError(Exception):
         return cls(status, code, detail)
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_opener = build_opener(_NoRedirect())
+_opener = build_opener(NoRedirectHandler())
 _MAX_BODY = 1024 * 1024
 
 

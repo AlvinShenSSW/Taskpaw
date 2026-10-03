@@ -16,6 +16,7 @@ import { HubAgentManager } from "../components/HubAgentManager";
 import { Settings } from "./Settings";
 import { ServiceIcon } from "../components/ServiceIcon";
 import { compareSemver, hubFilmKind } from "./hubDashboard.helpers";
+import { requestFailed } from "../components/requestEvidence";
 
 // ── fleet health (design pages/hub-dashboard.md "Fleet health") ──────────────
 // Derived from #96's per-server `online` + `snapshot` (NOT `acks`, which is an
@@ -73,10 +74,11 @@ function fmtSeen(iso?: string | null): string {
 // self-monitor, and an aggregated event log (#44). No marketing hero/CTA.
 export function HubDashboard() {
   const { t } = useTranslation();
-  const { data, error, isLoading } = useQuery({
+  const status = useQuery({
     queryKey: ["hubStatus"], queryFn: api.hubStatus,
     refetchInterval: 5000, // #95: auto-refresh like the agent console.
   });
+  const { data, error, isLoading } = status;
   const [tab, setTab] = useState<"fleet" | "manage" | "events" | "settings">("fleet");
   const [level, setLevel] = useState<string>("");
   const [serverFilter, setServerFilter] = useState<string>(""); // "" = all servers
@@ -103,10 +105,10 @@ export function HubDashboard() {
   // Reset the events server filter if the selected server is removed, so the
   // Select can't hold a stale id that yields an empty feed (Kimi #133).
   useEffect(() => {
-    if (serverFilter && !servers.some((s) => String(s.id) === serverFilter)) {
+    if (status.isSuccess && serverFilter && !servers.some((s) => String(s.id) === serverFilter)) {
       setServerFilter("");
     }
-  }, [servers, serverFilter]);
+  }, [servers, serverFilter, status.isSuccess]);
 
   const counts = { ok: 0, degraded: 0, offline: 0 };
   for (const s of servers) counts[serverHealth(s)] += 1;
@@ -127,13 +129,10 @@ export function HubDashboard() {
         // Settings, it stays reachable when the Hub is unreachable — the agent
         // list may be empty but the add form still shows (#87 rationale).
         <HubAgentManager servers={servers} />
-      ) : isLoading ? (
-        <Typography>{t("common.loading")}</Typography>
-      ) : error ? (
-        <Alert severity="error">{t("hub.unreachable", { error: String(error) })}</Alert>
       ) : tab === "events" ? (
         <Card>
           <CardContent>
+            {(isLoading || error) && <Alert severity="warning">{t("events.statusUnavailable")}</Alert>}
             <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
               <Typography variant="overline" color="text.secondary">{t("hub.eventHistory")}</Typography>
               <Stack direction="row" spacing={1}>
@@ -153,9 +152,17 @@ export function HubDashboard() {
                 </TextField>
               </Stack>
             </Stack>
-            <EventLog events={events.data?.events} />
+            <EventLog events={events.data?.events} hasData={events.data !== undefined}
+              fetching={events.isFetching}
+              failed={requestFailed(events.failureCount, events.errorUpdatedAt, events.dataUpdatedAt, events.error)}
+              lastSuccessAt={events.dataUpdatedAt}
+              onRetry={() => { void events.refetch({ cancelRefetch: false }); }} />
           </CardContent>
         </Card>
+      ) : isLoading ? (
+        <Typography>{t("common.loading")}</Typography>
+      ) : error ? (
+        <Alert severity="error">{t("hub.unreachable", { error: String(error) })}</Alert>
       ) : (
         <Stack spacing={2}>
           <Stack direction="row" alignItems="center" spacing={2} sx={{ flexWrap: "wrap" }}>
@@ -327,4 +334,3 @@ function MiniBar({ label, pct }: { label: string; pct: number }) {
     </Box>
   );
 }
-

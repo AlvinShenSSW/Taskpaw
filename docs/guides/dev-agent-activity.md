@@ -27,6 +27,14 @@ These are explicit local commands, never monitor startup actions. They edit only
 `--python PATH` and `--writer PATH`; generated commands use absolute paths.
 Keep the interpreter and writer at those locations after installation.
 
+Before using the updated sidecar format, update any copied standalone writer
+and reinstall the hooks using that writer's path. The new, unmerged format uses
+SQLite schema 2 and rich JSON schema 3; the `.activity-v2.sqlite3` filename stays
+unchanged. Experimental schema 1 and unknown/future stores are rejected unchanged
+and remain unknown. Reinstall does not migrate, erase or rebuild those stores;
+their handling requires a separate operator decision. Four-field legacy JSON
+remains supported independently.
+
 Pause host settings edits and run one setup at a time. Unrelated settings, hooks,
 notify and trust records are preserved. Existing unmarked TaskPaw hooks are
 reported and preserved too; they can produce duplicate writes. A correct reinstall
@@ -285,15 +293,35 @@ complete confirmed exit/reuse of a previously bound producer. None closes an
 unrelated turn/session/child. Any independent valid busy wins; unresolved activity
 defers completion rather than turning silence into success.
 
+For SessionEnd, the monitor has a separate write stage that records an internal
+`verified_session_end` witness using its existing exact same-tool root binding.
+Hook payloads and a nonzero parent PID cannot create that proof. Fact readers
+stay read-only; confirmation opens only existing sidecars. Each participating
+per-tool/shared store commits its own witness and scoped retirement together.
+The commits are not jointly atomic: partial publication remains unknown and
+cannot announce all-idle/off. Retry uses the durable copy without renewing its
+original 24h horizon. Unbound or wrong-incarnation finals cannot clear activity.
+
+There is one current rich projection link per physical JSON/sidecar pair, shared
+across tools. Every publication uses a fresh nonce, including duplicate facts.
+JSON replacement and SQLite commit are not jointly atomic: failed JSON writes
+may still commit facts; failed commits cannot borrow an older duplicate's link.
+Mismatched linkage remains unknown. A resolved link validates only that exact
+current projection after covered fact retirement, not future callbacks or other
+subjects. Publishing another tool replaces the link; the previous tool's stored
+facts still reduce normally without requiring its own JSON.
+
 Facts cap at2048, current sessions64/turns256/tools64, with256 exact unknown
 summaries and64 possible tool overflow latches, within8MiB. CLI reclamation uses
 300s; a monitor with shorter freshness retires busy to unknown earlier, not
 permission for the standalone writer to delete it earlier. Transactional expiry/
 reclamation transfers unresolved evidence into persistent unknown before deleting
 it. Any transfer/delete/insert/commit failure rolls back; unknown schema/corruption
-is unavailable and never silently rebuilt. Resolved tombstones retain24h; unknown
-summaries and file idle watermarks do not expire. A's summary survives B ending,
-time, restart and reinstall. A collapsed overflow latch has lost identity and
+is unavailable and never silently rebuilt. Resolved tombstones retain their
+original 24h horizon; copies/retries do not renew it. Covered stored facts and
+summaries retire transactionally; expired proof cannot close new callbacks.
+Unknown summaries and file idle watermarks do not expire. A's summary survives
+B ending, time, restart and reinstall. A collapsed overflow latch has lost identity and
 cannot automatically clear; persistent unknown is an explicit bounded-storage
 cost, not zombie busy. No reset UI or automatic cache deletion is provided.
 

@@ -322,8 +322,11 @@ def test_writer_ignores_sensitive_fields_and_cleans_failure(
         "activity_schema",
         "fact_id",
         "fact_committed",
+        "fact_ts",
+        "link_nonce",
     }
-    assert data["activity_schema"] == 2 and data["fact_committed"] is True
+    assert data["activity_schema"] == 3 and data["fact_committed"] is True
+    assert aw._projection_matches(data, aw.read_facts(out, "codex"))
     assert "PRIVATE SENTINEL" not in aw.sidecar_path(out).read_bytes().decode("latin1")
     monkeypatch.setattr(
         aw.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("PRIVATE SENTINEL"))
@@ -933,3 +936,309 @@ def test_i216_sr003_fallback_sql_failure_full_rollback(tmp_path, monkeypatch, fa
     # No product connection survives the failed transaction (native Windows
     # runs the same unlink after every owned fixture connection has closed).
     aw.sidecar_path(path).unlink()
+
+
+def _main_rich(
+    monkeypatch,
+    path,
+    event="UserPromptSubmit",
+    *,
+    tool="codex",
+    session="A",
+    ts=1000.0,
+    unit=None,
+):
+    import io
+
+    raw = {
+        "hook_event_name": event,
+        "session_id": session,
+        "turn_id" if tool == "codex" else "prompt_id": "turn-" + session,
+    }
+    if unit is not None:
+        raw["tool_use_id"] = unit
+    monkeypatch.setattr(aw.sys, "stdin", io.StringIO(json.dumps(raw)))
+    monkeypatch.setattr(aw.time, "time", lambda: ts)
+    monkeypatch.setattr(aw, "_producer_identity", lambda: (10, 1.0))
+    return aw.main(["--tool", tool, "--path", str(path)])
+
+
+def test_i216_d01_duplicate_nonce_precommit_and_failed_commit(tmp_path, monkeypatch):
+    import sqlite3
+    from types import SimpleNamespace
+
+    from taskpaw_v3.monitors.plugins import dev_activity as da
+
+    path = tmp_path / "agent-activity.json"
+    assert _main_rich(monkeypatch, path) == 0
+    before = aw.read_facts(path, "codex")
+    projection = json.loads(path.read_text())
+    original_open, original_write = aw._open_store, aw._write_projection
+    visible = []
+
+    def opened(p, **kwargs):
+        conn = original_open(p, **kwargs)
+        if not kwargs["writable"]:
+            return conn
+        return SimpleNamespace(
+            execute=conn.execute,
+            rollback=conn.rollback,
+            close=conn.close,
+            commit=lambda: (_ for _ in ()).throw(
+                sqlite3.OperationalError("PRIVATE_SENTINEL")
+            ),
+        )
+
+    def replaced(*args, **kwargs):
+        result = original_write(*args, **kwargs)
+        if kwargs.get("fact_committed") is True:
+            current = json.loads(path.read_text())
+            # An already-existing ID cannot borrow its previous committed nonce.
+            assert current["fact_id"] == projection["fact_id"]
+            assert current["link_nonce"] != projection["link_nonce"]
+            out = da.read_hook_activity(
+                str(tmp_path), "codex", 300, 1001, {}, set(), []
+            )
+            visible.append(out["unknown"] and out["unresolved"])
+        return result
+
+    monkeypatch.setattr(aw, "_open_store", opened)
+    monkeypatch.setattr(aw, "_write_projection", replaced)
+    assert _main_rich(monkeypatch, path, ts=1001) == 1
+    assert visible == [True]
+    assert aw.read_facts(path, "codex") == before
+    assert json.loads(path.read_text())["fact_committed"] is False
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_i216_d01_json_failure_commits_fact_and_routes_both_owners(
+    tmp_path, monkeypatch
+):
+    from taskpaw_v3.monitors.plugins import dev_activity as da
+
+    path = tmp_path / "agent-activity.json"
+    assert _main_rich(monkeypatch, path) == 0
+    old = path.read_bytes()
+    monkeypatch.setattr(
+        aw,
+        "_write_projection",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("PRIVATE_SENTINEL")),
+    )
+    assert _main_rich(monkeypatch, path, tool="claude", session="B", ts=1001) == 1
+    assert path.read_bytes() == old
+    assert len(aw.read_facts(path, "claude")["facts"]) == 1
+    assert aw.read_facts(path, "claude")["projection_link"]["tool"] == "claude"
+    for tool in ("codex", "claude"):
+        out = da.read_hook_activity(str(tmp_path), tool, 300, 1002, {}, set(), [])
+        assert out["unknown"] and out["unresolved"]
+
+
+def test_i216_d01_same_store_writers_serialize_actual_main(tmp_path, monkeypatch):
+    import io
+    import sqlite3
+    import threading
+    from types import SimpleNamespace
+
+    path = tmp_path / "agent-activity.json"
+    assert _main_rich(monkeypatch, path, session="seed", ts=999) == 0
+    first_json, second_begin, release = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    first_committed = threading.Event()
+    original_open, original_write = aw._open_store, aw._write_projection
+    results, failures = {}, []
+
+    def opened(p, **kwargs):
+        conn = original_open(p, **kwargs)
+        if not kwargs["writable"]:
+            return conn
+
+        def execute(sql, *args):
+            if threading.current_thread().name == "second" and sql == "BEGIN IMMEDIATE":
+                # Observe real SQLite exclusion while first is paused inside its
+                # JSON publication; no scheduler delay or longer lock budget.
+                conn.execute("PRAGMA busy_timeout=0")
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    conn.execute(sql, *args)
+                conn.execute("PRAGMA busy_timeout=100")
+                second_begin.set()
+                assert first_committed.wait(3)
+            return conn.execute(sql, *args)
+
+        def commit():
+            conn.commit()
+            if threading.current_thread().name == "first":
+                first_committed.set()
+
+        return SimpleNamespace(
+            execute=execute,
+            rollback=conn.rollback,
+            close=conn.close,
+            commit=commit,
+        )
+
+    def replaced(*args, **kwargs):
+        if threading.current_thread().name == "first":
+            first_json.set()
+            assert release.wait(3)
+        return original_write(*args, **kwargs)
+
+    def call(name):
+        try:
+            results[name] = aw.main(["--tool", "codex", "--path", str(path)])
+        except BaseException as exc:
+            failures.append(exc)
+
+    monkeypatch.setattr(aw, "_open_store", opened)
+    monkeypatch.setattr(aw, "_write_projection", replaced)
+    monkeypatch.setattr(
+        aw.time,
+        "time",
+        lambda: 1000 if threading.current_thread().name == "first" else 1001,
+    )
+    threads = [
+        threading.Thread(target=call, args=(name,), name=name)
+        for name in ("first", "second")
+    ]
+    try:
+        monkeypatch.setattr(
+            aw.sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "first",
+                        "turn_id": "T",
+                    }
+                )
+            ),
+        )
+        threads[0].start()
+        assert first_json.wait(3), "first owns write transaction before replacement"
+        monkeypatch.setattr(
+            aw.sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": "second",
+                        "turn_id": "T",
+                    }
+                )
+            ),
+        )
+        threads[1].start()
+        assert second_begin.wait(3), "actual BEGIN is excluded until JSON/commit finish"
+        assert not first_committed.is_set() and "second" not in results
+    finally:
+        release.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(3)
+    assert not failures and not any(t.is_alive() for t in threads)
+    assert results == {"first": 0, "second": 0}
+    data = json.loads(path.read_text())
+    assert data["session"] == "second"
+    assert aw._projection_matches(data, aw.read_facts(path, "codex"))
+
+
+@pytest.mark.parametrize("fault", ["missing", "nonce", "owner", "future", "corrupt"])
+def test_i216_d01_shared_singleton_routing_before_tool_filter(
+    tmp_path, monkeypatch, fault
+):
+    import sqlite3
+    from contextlib import closing
+
+    from taskpaw_v3.monitors.plugins import dev_activity as da
+
+    path = tmp_path / "agent-activity.json"
+    for n in range(8):
+        tool = "codex" if n % 2 == 0 else "claude"
+        assert _main_rich(monkeypatch, path, tool=tool, session=tool, ts=1000 + n) == 0
+        with closing(sqlite3.connect(aw.sidecar_path(path))) as conn:
+            assert (
+                conn.execute("SELECT count(*) FROM projection_link").fetchone()[0] == 1
+            )
+        for requested in ("codex", "claude"):
+            out = da.read_hook_activity(
+                str(tmp_path), requested, 300, 1008, {}, set(), []
+            )
+            assert out["state"] == ("busy" if n or requested == "codex" else None)
+            assert not out["unknown"]
+    data = json.loads(path.read_text())
+    if fault == "missing":
+        path.unlink()
+    elif fault == "corrupt":
+        path.write_text("owned-invalid-json")
+    else:
+        data[
+            {"nonce": "link_nonce", "owner": "tool", "future": "activity_schema"}[fault]
+        ] = {"nonce": "0" * 32, "owner": "codex", "future": 999}[fault]
+        path.write_text(json.dumps(data))
+    for tool in ("codex", "claude"):
+        out = da.read_hook_activity(str(tmp_path), tool, 300, 1008, {}, set(), [])
+        assert out["unknown"] == (tool == "claude" or fault in ("owner", "corrupt"))
+
+
+@pytest.mark.parametrize("owner", [None, []])
+def test_i216_c3_s03_unidentifiable_rich_owner_is_unknown_before_filter(
+    tmp_path, monkeypatch, owner
+):
+    from taskpaw_v3.monitors.plugins import dev_activity as da
+
+    path = tmp_path / "agent-activity.json"
+    assert _main_rich(monkeypatch, path, session="B", event="Interrupt") == 0
+    assert _main_rich(monkeypatch, path, tool="claude", session="A", ts=1001) == 0
+    data = json.loads(path.read_text())
+    data["tool"] = owner
+    path.write_text(json.dumps(data))
+    errors = []
+    out = da.read_hook_activity(str(tmp_path), "codex", 300, 1002, {}, set(), errors)
+    assert out["unknown"] and out["unresolved"]
+    assert out["state"] != "idle"
+    assert errors == ["unavailable"]
+
+
+@pytest.mark.parametrize("version", [1, 99])
+def test_i216_new_schema_rejects_experimental_and_future_unchanged(tmp_path, version):
+    import sqlite3
+    from contextlib import closing
+
+    path = tmp_path / "state.json"
+    aw.publish_fact(path, _fact("UserPromptSubmit", "A", 1000))
+    db = aw.sidecar_path(path)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute(f"PRAGMA user_version={version}")
+    before = db.read_bytes()
+    for operation in (
+        lambda: aw.read_facts(path, "codex"),
+        lambda: aw.publish_fact(path, _fact("Interrupt", "A", 1001)),
+        lambda: aw._confirm_session_ends(
+            (path,), "codex", {("codex", 10, 1.0)}, 1001, None
+        ),
+    ):
+        with pytest.raises(aw.ActivityStoreError):
+            operation()
+        assert db.read_bytes() == before
+    assert not path.exists()
+
+
+def test_i216_hook_parser_cannot_mint_internal_witness(tmp_path):
+    raw = json.dumps(
+        {
+            "hook_event_name": "SessionEnd",
+            "session_id": "A",
+            "kind": "verified_session_end",
+            "verified": True,
+            "root_bound": True,
+        }
+    )
+    fact = aw.hook_fact(raw, "codex", 1000, (10, 1.0))
+    assert fact is not None and fact["kind"] == "session_end"
+    witness = aw._witness(fact)
+    with pytest.raises(aw.ActivityStoreError):
+        aw.publish_fact(tmp_path / "state.json", witness)
