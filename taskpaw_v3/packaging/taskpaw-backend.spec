@@ -1,6 +1,7 @@
 # PyInstaller spec for the bundled backend (taskpaw-backend) (#40/#41).
 # Build:  pyinstaller taskpaw_v3/packaging/taskpaw-backend.spec  (run from repo root)
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -61,4 +62,8 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=False,
+    # Build-only settings validated by scripts/build.py; never product runtime env.
+    target_arch=os.environ.get("TASKPAW_PYI_TARGET_ARCH") if sys.platform == "darwin" else None,
+    codesign_identity=os.environ.get("TASKPAW_PYI_CODESIGN_IDENTITY") if sys.platform == "darwin" else None,
+    entitlements_file=os.environ.get("TASKPAW_PYI_ENTITLEMENTS_FILE") if sys.platform == "darwin" else None,
 )

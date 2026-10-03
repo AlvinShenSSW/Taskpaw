@@ -1,14 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Entitlements for the ad-hoc-signed PyInstaller backend sidecar (scripts/build.py).
-  The onefile backend extracts its bundled libpython at runtime and dlopen()s it; that
-  dylib carries a different (non-platform) code-signature Team ID than the ad-hoc exe,
-  so macOS library validation refuses to load it ("different Team IDs") and the backend
-  never starts on a machine other than the build host. disable-library-validation lets
-  the process load its own differently-signed libraries; the allow-* keys cover CPython
-  JIT/dyld needs. Used ONLY for local/ad-hoc builds — the Developer-ID + notarized
-  release path (APPLE_SIGNING_IDENTITY) is untouched.
+  Historical ad-hoc backend permissions, retained for compatibility.
+  Used for collected PyInstaller native code and the final backend sidecar only.
+  Formal builds use the empty release profile and same-identity library validation.
+  No claim is made that all three ad-hoc permissions are required by CPython.
 -->
 <plist version="1.0">
 <dict>
