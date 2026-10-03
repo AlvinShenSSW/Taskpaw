@@ -1754,7 +1754,12 @@ def test_actual_code_type_entitlement_profile_is_exact(
                 else b"TeamIdentifier=FAKE123456\nTimestamp=fake\nflags=0x10000(runtime)\n"
             )
         if stage == "certificate_verify":
-            Path(cmd[-2] + "0").write_bytes(cert)
+            prefix = next(
+                arg.removeprefix("--extract-certificates=")
+                for arg in cmd
+                if arg.startswith("--extract-certificates=")
+            )
+            Path(prefix + "0").write_bytes(cert)
         if stage == "entitlements_verify":
             return plistlib.dumps(reported) if reported else b"", b""
         return b"", b""
@@ -1771,6 +1776,50 @@ def test_actual_code_type_entitlement_profile_is_exact(
             )
     if mode == "formal":
         assert "developer_id_verify" in stages and "certificate_verify" in stages
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="actual codesign parser on owned ad-hoc fixture"
+)
+def test_formal_certificate_prefix_native_parser_with_fake_identity(
+    tmp_path, monkeypatch
+):
+    binary = tmp_path / "owned-parser-fixture"
+    mac.tool(
+        "fixture_compile",
+        ["xcrun", "clang", "-x", "c", "-o", str(binary), "-"],
+        input_data=b"int main(void) { return 0; }\n",
+        timeout=30,
+    )
+    mac.sign(binary, mac.normalize({}, TARGET), {}, ROOT)
+    cert = b"explicitly fake leaf; no formal signing identity used"
+    plan = mac.normalize(
+        {**FORMAL, "APPLE_SIGNING_IDENTITY": hashlib.sha1(cert).hexdigest()}, TARGET
+    )
+    native_tool = mac.tool
+    extracted = []
+
+    def tool(stage, cmd, **kwargs):
+        if stage == "signature_metadata":
+            return b"", b"TeamIdentifier=FAKE123456\nTimestamp=fake\nflags=(runtime)\n"
+        if stage == "developer_id_verify":
+            return b"", b""
+        result = native_tool(stage, cmd, cwd=tmp_path, **kwargs)
+        if stage == "certificate_verify":
+            # Execute the actual production argv first. This tests native argument
+            # parsing only: ad-hoc code has no certificate chain to extract.
+            prefix = cmd[-2].split("=", 1)[1]
+            leaf = Path(prefix + "0")
+            assert not leaf.exists()
+            leaf.write_bytes(cert)
+            extracted.append(leaf)
+        return result
+
+    monkeypatch.setattr(mac, "tool", tool)
+    mac.signature(binary, plan, {}, ROOT, backend=True)
+    assert len(extracted) == 1 and not extracted[0].exists()
+    assert not list(tmp_path.glob("codesign*"))
+    # The fixture is never executed; no real keychain, identity or formal claim.
 
 
 @pytest.mark.parametrize(

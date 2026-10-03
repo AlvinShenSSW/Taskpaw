@@ -668,8 +668,7 @@ def signature(path, plan, env, root, *, backend=False, dmg=False, native_library
                 [
                     "codesign",
                     "--display",
-                    "--extract-certificates",
-                    str(prefix),
+                    "--extract-certificates=" + str(prefix),
                     str(path),
                 ],
                 env=env,
