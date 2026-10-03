@@ -1160,10 +1160,13 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
     raw_bytes = len((uw.canonical(request) + "\n").encode())
     assert 30000 < raw_bytes <= uw.REQUEST_BYTES
     started = time.monotonic()
+    # Semantic refusals use the existing production-default total budget;
+    # deadline/Stop controls keep their distinct short budget (cycle5 contract).
+    parent_budget = 3 if mode in ("drip", "body-drip", "chunk-drip", "stop") else 5
 
     def call():
         try:
-            results.append(transport.request(request, 3))
+            results.append(transport.request(request, parent_budget))
         finally:
             phases["caller_complete"] = time.monotonic()
 
@@ -1226,8 +1229,8 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
             "result": results[0].get("reason", "ok") if results else None,
             "request_bytes": raw_bytes,
             "clean": transport.clean(),
-            "parent_budget": 3,
-            "deadline": 3,
+            "parent_budget": parent_budget,
+            "deadline": parent_budget,
             "elapsed": time.monotonic() - started,
             "caller_alive": caller.is_alive(),
             "phases": {
@@ -1286,6 +1289,158 @@ class FirstRead:
 sys.stdin = FirstRead()
 raise SystemExit(upstream_worker.main())
 """
+
+
+class _WindowsProcessObserver:
+    """Test-owned identity handle; independent of production Job accounting."""
+
+    def __init__(self, pid, created, kernel=None):
+        import ctypes
+        from ctypes import wintypes as w
+
+        self.ctypes, self.w = ctypes, w
+        self.kernel = (
+            kernel
+            if kernel is not None
+            else ctypes.WinDLL("kernel32", use_last_error=True)
+        )
+        self.pid, self.created = pid, created
+        self.handle = None
+        self.closed_receipt = None
+        self.last_wait = None
+        for name, args, result in (
+            ("OpenProcess", [w.DWORD, w.BOOL, w.DWORD], w.HANDLE),
+            (
+                "GetProcessTimes",
+                [w.HANDLE, *([ctypes.POINTER(w.FILETIME)] * 4)],
+                w.BOOL,
+            ),
+            ("GetHandleInformation", [w.HANDLE, ctypes.POINTER(w.DWORD)], w.BOOL),
+            ("WaitForSingleObject", [w.HANDLE, w.DWORD], w.DWORD),
+            ("CloseHandle", [w.HANDLE], w.BOOL),
+        ):
+            fn = getattr(self.kernel, name)
+            fn.argtypes, fn.restype = args, result
+        self.handle = self.checked(
+            self.kernel.OpenProcess(0x101000, False, pid), "OpenProcess"
+        )
+        try:
+            assert self.creation_time() == created, "observer process identity mismatch"
+            flags = w.DWORD()
+            self.checked(
+                self.kernel.GetHandleInformation(self.handle, ctypes.byref(flags)),
+                "GetHandleInformation",
+            )
+            assert not flags.value & 1, "observer handle must not be inherited"
+        except BaseException:
+            self.close()
+            raise
+
+    def checked(self, value, operation):
+        if not value:
+            error = getattr(self.ctypes, "get_last_error", lambda: 0)()
+            raise OSError(error, "owned observer " + operation + " failed")
+        return value
+
+    def creation_time(self):
+        times = [self.w.FILETIME() for _ in range(4)]
+        self.checked(
+            self.kernel.GetProcessTimes(
+                self.handle, *(self.ctypes.byref(t) for t in times)
+            ),
+            "GetProcessTimes",
+        )
+        ticks = (times[0].dwHighDateTime << 32) + times[0].dwLowDateTime
+        # Match pinned psutil5.9.8: integer subtraction BEFORE double conversion.
+        return float(ticks - 116444736000000000) / 10000000
+
+    def wait(self, milliseconds=0):
+        result = self.kernel.WaitForSingleObject(self.handle, milliseconds)
+        self.last_wait = result
+        if result not in (0, 258):
+            raise OSError("owned observer WaitForSingleObject failed")
+        return result
+
+    def require_live(self):
+        assert self.wait() == 258, "owned observer unexpectedly terminated"
+
+    def require_terminated(self):
+        assert self.wait() == 0, "owned interpreter still executing after cleanup"
+        assert self.creation_time() == self.created, "observer process identity changed"
+
+    def close(self):
+        if self.handle is not None:
+            self.checked(self.kernel.CloseHandle(self.handle), "CloseHandle")
+            self.handle = None
+            self.closed_receipt = True
+
+
+@pytest.mark.parametrize(
+    "fault", [None, "open", "identity", "times", "inherit", "wait", "close"]
+)
+def test_windows_process_observer_rejects_uncertain_or_live_identity(fault):
+    """Signal proves termination even while the same object stays queryable."""
+    from types import SimpleNamespace
+
+    ticks = 116444736000000000 + 17910166258845840
+    created = float(ticks - 116444736000000000) / 10000000
+    closed = []
+
+    def open_process(access, inherit, pid):
+        assert access == 0x101000 and inherit is False and pid == 17
+        return 0 if fault == "open" else 11
+
+    def times(handle, creation, *unused):
+        assert handle == 11
+        creation._obj.dwLowDateTime = ticks & 0xFFFFFFFF
+        creation._obj.dwHighDateTime = ticks >> 32
+        return fault != "times"
+
+    def info(handle, flags):
+        flags._obj.value = int(fault == "inherit")
+        return True
+
+    def close(handle):
+        if fault == "close":
+            return False
+        closed.append(handle)
+        return True
+
+    kernel = SimpleNamespace(
+        OpenProcess=open_process,
+        GetProcessTimes=times,
+        GetHandleInformation=info,
+        WaitForSingleObject=lambda handle, timeout: 258,
+        CloseHandle=close,
+    )
+    if fault in ("open", "identity", "times", "inherit"):
+        with pytest.raises((OSError, AssertionError)):
+            _WindowsProcessObserver(17, created + int(fault == "identity"), kernel)
+        assert closed == ([] if fault == "open" else [11])
+        return
+    observer = _WindowsProcessObserver(17, created, kernel)
+    try:
+        observer.require_live()
+        with pytest.raises(AssertionError, match="still executing"):
+            observer.require_terminated()
+        if fault == "wait":
+            kernel.WaitForSingleObject = lambda handle, timeout: 0xFFFFFFFF
+            with pytest.raises(OSError):
+                observer.require_terminated()
+        else:
+            kernel.WaitForSingleObject = lambda handle, timeout: 0
+            observer.require_terminated()
+            assert observer.creation_time() == created
+        if fault == "close":
+            with pytest.raises(OSError):
+                observer.close()
+            assert observer.handle == 11 and observer.closed_receipt is None
+            kernel.CloseHandle = lambda handle: closed.append(handle) or True
+    finally:
+        observer.close()
+    assert observer.closed_receipt is True and closed == [11]
+    observer.close()
+    assert closed == [11]
 
 
 def _windows_preread_pipe(capacities):
@@ -1392,8 +1547,6 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
     import threading
     import time
 
-    import psutil
-
     from taskpaw_v3.hub.server import upstream_worker as uw
 
     release, ready = tmp_path / "release", tmp_path / "ready.json"
@@ -1461,6 +1614,8 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
 
     caller = threading.Thread(target=call)
     marked = None
+    observer = sibling_observer = None
+    observer_initial_wait = None
     fault_api = fault_method = original_method = None
     sibling = sibling_identity = None
     sibling_release, sibling_ready = (
@@ -1482,6 +1637,10 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
                 time.sleep(0.01)
             assert sibling_ready.exists(), "owned independent sibling barrier"
             sibling_identity = json.loads(sibling_ready.read_text())
+            sibling_observer = _WindowsProcessObserver(
+                sibling_identity["pid"], sibling_identity["created"]
+            )
+            sibling_observer.require_live()
             started = time.monotonic()
         caller.start()
         while not ready.exists() and time.monotonic() - started < 8:
@@ -1489,6 +1648,9 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
         assert ready.exists(), "real helper first-read barrier not reached"
         marked = json.loads(ready.read_text())
         assert marked["consumed"] == 0
+        observer = _WindowsProcessObserver(marked["pid"], marked["created"])
+        observer.require_live()
+        observer_initial_wait = observer.last_wait
         rec = transport._owned
         assert rec is not None and not rec.writer_done.is_set()
         assert capacities[0] < 32000 <= uw.REQUEST_BYTES
@@ -1531,13 +1693,7 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
         assert reason in (expected, "helper_cleanup_failed")
         if case == "success" and reason == "ok":
             assert result["status"] == {"owned": True}
-        try:
-            owned = psutil.Process(marked["pid"])
-            inner_alive = (
-                owned.is_running() and owned.create_time() == marked["created"]
-            )
-        except psutil.NoSuchProcess:
-            inner_alive = False
+        inner_alive = observer.wait() == 258
         if reason == "helper_cleanup_failed":
             assert not transport.clean() and transport._owned is rec
             assert transport.request({}, 0.01)["reason"] in (
@@ -1546,13 +1702,10 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
             )
             assert len(captured) == 1
         else:
-            assert transport.clean() and not inner_alive
-        if sibling_identity is not None:
-            sibling_process = psutil.Process(sibling_identity["pid"])
-            assert (
-                sibling_process.is_running()
-                and sibling_process.create_time() == sibling_identity["created"]
-            )
+            assert transport.clean()
+            observer.require_terminated()
+        if sibling_observer is not None:
+            sibling_observer.require_live()
         print(
             "R06_PREREAD_NATIVE "
             + json.dumps(
@@ -1563,6 +1716,9 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
                     "request_bytes": input_bytes,
                     "result": reason,
                     "inner_alive": inner_alive,
+                    "observer_initial_wait": observer_initial_wait,
+                    "observer_wait": observer.last_wait,
+                    "observer_closed": observer.closed_receipt,
                     "clean": transport.clean(),
                     "source_sha256": hashlib.sha256(
                         __import__("pathlib").Path(uw.__file__).read_bytes()
@@ -1593,11 +1749,7 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
             assert transport.retry_cleanup() and transport.clean()
             assert rec.proc.process is rec.proc.thread is rec.proc.job is None
             assert rec.proc.poll() == rec.proc.wait(timeout=0) == rec.proc.returncode
-            try:
-                owned = psutil.Process(marked["pid"])
-                assert owned.create_time() != marked["created"]
-            except psutil.NoSuchProcess:
-                pass
+            observer.require_terminated()
         else:
             assert reason == expected and transport.clean() and not inner_alive
     finally:
@@ -1612,40 +1764,73 @@ def test_windows_preread_backpressure(tmp_path, monkeypatch, request, frozen, ca
                     "caller_alive": caller.is_alive(),
                     "clean": transport.clean(),
                     "sibling_identity": sibling_identity,
+                    "observer_initial_wait": observer_initial_wait,
+                    "observer_wait": observer.last_wait if observer else None,
+                    "observer_closed": observer.closed_receipt if observer else None,
+                    "sibling_wait": sibling_observer.last_wait
+                    if sibling_observer
+                    else None,
+                    "sibling_observer_closed": sibling_observer.closed_receipt
+                    if sibling_observer
+                    else None,
                     **snapshots,
                 },
                 sort_keys=True,
             )
         )
-        if original_method is not None:
-            monkeypatch.setattr(fault_api, fault_method, original_method)
-        # Only this fixture's barrier and PID: no process scan or production tree control.
-        release.touch()
-        if marked:
-            try:
-                owned = psutil.Process(marked["pid"])
-                if owned.create_time() == marked["created"]:
-                    owned.wait(timeout=3)
-            except psutil.TimeoutExpired:
-                owned.kill()
-                owned.wait(timeout=3)
-            except psutil.NoSuchProcess:
-                pass
-        if caller.ident is not None:
-            caller.join(12)
-        transport.cancel()
-        cleaned = transport.retry_cleanup() and transport.clean()
-        if sibling is not None:
+        try:
+            if original_method is not None:
+                monkeypatch.setattr(fault_api, fault_method, original_method)
+            # Release only fixture barriers; keep the original Job cleanup owner.
+            release.touch()
             sibling_release.touch()
-            sibling.communicate(b"\n", timeout=5)
-            assert sibling.poll() is not None
-        if server is not None:
-            server.shutdown()
-            server.server_close()
-            server_thread.join(3)
-        assert cleaned
-        for proc in captured:
-            assert proc.poll() is not None and proc.stdin.closed and proc.stdout.closed
+            transport.cancel()
+            try:
+                if caller.ident is not None:
+                    caller.join(12)
+                cleaned = transport.retry_cleanup() and transport.clean()
+            finally:
+                try:
+                    if sibling is not None:
+                        sibling.communicate(b"\n", timeout=5)
+                        assert sibling.poll() is not None
+                finally:
+                    if server is not None:
+                        server.shutdown()
+                        server.server_close()
+                        server_thread.join(3)
+            assert cleaned
+            if observer is not None:
+                assert observer.wait(3000) == 0
+            if sibling_observer is not None:
+                assert sibling_observer.wait(3000) == 0
+            for proc in captured:
+                assert (
+                    proc.poll() is not None and proc.stdin.closed and proc.stdout.closed
+                )
+        finally:
+            try:
+                if observer is not None:
+                    observer.close()
+            finally:
+                if sibling_observer is not None:
+                    sibling_observer.close()
+                print(
+                    "R06_OBSERVER_CLOSED "
+                    + json.dumps(
+                        {
+                            "case": case,
+                            "frozen": frozen,
+                            "observer_closed": observer.closed_receipt
+                            if observer
+                            else None,
+                            "sibling_observer_closed": sibling_observer.closed_receipt
+                            if sibling_observer
+                            else None,
+                        },
+                        sort_keys=True,
+                    )
+                )
 
 
 @pytest.mark.skipif(__import__("os").name != "nt", reason="native Windows ownership")
