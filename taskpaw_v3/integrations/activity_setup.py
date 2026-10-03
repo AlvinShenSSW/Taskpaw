@@ -19,6 +19,8 @@ from pathlib import Path
 from taskpaw_v3.integrations.activity_writer import (
     _CLAUDE_EVENT_STATE,
     _CODEX_EVENT_STATE,
+    _projection_matches,
+    read_facts,
 )
 from taskpaw_v3.monitors.session_activity import safe_path
 
@@ -229,7 +231,6 @@ def required(tool: str, command: str) -> dict[str, dict]:
             "hooks": [{"type": "command", "command": command, "timeout": 3}],
         }
         for event in events
-        if not (tool == "claude" and event == "SubagentStop")
     }
 
 
@@ -292,7 +293,13 @@ def verify_writer(command: str, tool: str, state_dir: Path) -> None:
                 # exec replaces the shell, so timeout kills the writer itself.
                 completed = subprocess.run(
                     [shell, "-c", "exec " + shlex.join(args)],
-                    input=json.dumps({"hook_event_name": event, "session_id": nonce}),
+                    input=json.dumps(
+                        {
+                            "hook_event_name": event,
+                            "session_id": nonce,
+                            "prompt_id" if tool == "claude" else "turn_id": nonce,
+                        }
+                    ),
                     text=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -314,21 +321,17 @@ def verify_writer(command: str, tool: str, state_dir: Path) -> None:
                 or not started <= ts <= time.time() + 5
             ):
                 raise SetupError("writer output missing, stale or incorrect")
+            if not _projection_matches(data, read_facts(output, tool)):
+                raise SetupError("writer fact output missing or incorrect")
 
 
 def remove_owned(data: dict, tool: str, created: list) -> None:
     hooks = data.get("hooks", {})
     for event, groups in list(hooks.items()):
-        for index in range(len(groups) - 1, -1, -1):
-            group = groups[index]
+        for group in groups:
             group["hooks"] = [h for h in group["hooks"] if not owned(h, tool)]
-            fields = {k: v for k, v in group.items() if k != "hooks"}
-            if (
-                not group["hooks"]
-                and {"event": event, "index": index, "fields": fields} in created
-            ):
-                groups.pop(index)
-        # Do not delete pre-existing empty event arrays without restoration proof.
+        # Indices/fields cannot prove who created an empty group after edits.
+        # Selective cleanup preserves all empty scaffolding, including user groups.
 
 
 def reconcile(data: dict, tool: str, command: str, record: dict) -> tuple[dict, list]:
@@ -465,22 +468,41 @@ def main(argv: list[str] | None = None) -> int:
                             new_record.pop(key, None)
                     private_dir(record_path.parent)
                     atomic_write(record_path, encode(new_record), record_raw)
+                elif not record:
+                    # Settings already correct, but a lost/failed undo record
+                    # cannot invent original absence or adopt an old backup.
+                    new_record = {
+                        "target": str(path),
+                        "last_hash": digest(raw),
+                        "groups": groups,
+                        "command": command,
+                    }
+                    private_dir(record_path.parent)
+                    atomic_write(record_path, encode(new_record), record_raw)
                 validate_installed(settings(read_bytes(path)), tool, command)
                 verify_writer(command, tool, state_dir)
             elif args.action == "uninstall":
                 updated = raw
-                if "original_exists" in record and digest(raw) == record.get(
+                restore = "original_exists" in record and digest(raw) == record.get(
                     "last_hash"
-                ):
-                    if record.get("original_exists"):
-                        updated = read_bytes(Path(record["baseline"]))
+                )
+                if restore and record.get("original_exists"):
+                    try:
+                        baseline = record.get("baseline")
+                        if not isinstance(baseline, str):
+                            raise SetupError("baseline unavailable")
+                        updated = read_bytes(Path(baseline))
                         if updated is None or digest(updated) != record.get(
                             "baseline_hash"
                         ):
-                            raise SetupError("baseline backup missing or changed")
-                    else:
-                        updated = None
-                else:
+                            raise SetupError("baseline unavailable")
+                    except (OSError, SetupError):
+                        restore = False
+                        updated = raw
+                        print(f"{tool}: baseline unavailable; selective uninstall")
+                elif restore:
+                    updated = None
+                if not restore:
                     before = encode(data)
                     remove_owned(data, tool, record.get("groups", []))
                     if encode(data) != before:

@@ -448,3 +448,137 @@ def test_windows_reparse_components_refused(probe, monkeypatch, component):
 
     monkeypatch.setattr(Path, "lstat", lstat)
     assert not sa.safe_path(f)
+
+
+def test_i216_old_handle_is_gated_by_retained_idle_watermark(probe, monkeypatch):
+    sa, p, handles, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", False)
+    old = session(home, "codex", 400)
+    handles.append(old)
+    p.watermarks = {"codex": 700.0}
+    assert p.sample(live("codex"), set(), 1000)["codex"]["state"] is None
+    os.utime(old, (700, 700))
+    assert p.sample(live("codex"), set(), 1100)["codex"]["state"] is None
+    os.utime(old, (701, 701))
+    assert p.sample(live("codex"), set(), 1100)["codex"]["state"] == "busy"
+
+
+def test_i216_date_tokens_once_per_discovery(probe, monkeypatch):
+    sa, p, _, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", True)
+    for i in range(20):
+        (home / "claude" / str(i)).mkdir()
+    original = sa.time.strftime
+    calls = []
+    monkeypatch.setattr(
+        sa.time, "strftime", lambda *a: (calls.append(a), original(*a))[1]
+    )
+    p.sample(live(), set(), 1000)
+    assert len(calls) == 1
+
+
+def test_i216_current_date_admitted_after_queue_overflow(probe, monkeypatch):
+    sa, p, _, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", True)
+    monkeypatch.setattr(sa.time, "monotonic", lambda: 1.0)
+    root = home / "claude"
+    for n in range(270):
+        (root / f"archive-{n:03}").mkdir()
+    current = root / "1970"
+    current.mkdir()
+    f = current / "active.jsonl"
+    f.write_text("SENTINEL PRIVATE CONTENT")
+    os.utime(f, (993, 993))
+    original = sa.os.scandir
+
+    class Ordered:
+        def __init__(self, path):
+            self.native = original(path)
+            self.entries = iter(sorted(self.native, key=lambda e: e.name == "1970"))
+
+        def __next__(self):
+            return next(self.entries)
+
+        def close(self):
+            self.native.close()
+
+    monkeypatch.setattr(sa.os, "scandir", Ordered)
+    out = p.sample(live(), set(), 1000)["claude"]
+    assert out["state"] == "busy" and out["limited"]
+    assert f in p.candidates["claude"]
+
+
+def test_i216_completed_coverage_survives_ordinary_cursor_yield(probe, monkeypatch):
+    sa, p, _, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", True)
+    clock = [1.0]
+    monkeypatch.setattr(sa.time, "monotonic", lambda: clock[0])
+    for n in range(600):
+        session(home, "claude", 120, f"{n:03}.jsonl")
+    assert p.sample(live(), set(), 1000)["claude"]["state"] is None
+    assert p.sample(live(), set(), 1000)["claude"]["state"] == "idle"
+    clock[0] += p.cfg.session_scan_interval_seconds
+    out = p.sample(live(), set(), 1000)["claude"]
+    assert "claude" in p.cursors, "the next cycle must actually yield"
+    assert out["state"] == "idle" and out["complete"]
+    clock[0] += 3 * max(p.cfg.session_scan_interval_seconds, p.cfg.poll_interval)
+    # Invalidate the old proof with changed producer identity even if cached
+    # metadata is still quiet; an incomplete discovery is not fresh coverage.
+    changed = live()
+    changed["claude"]["roots"][0]["created"] = 2.0
+    p.cursors["claude"][0].close()
+    p.cursors.clear()
+    p.queues.clear()
+    out = p.sample(changed, set(), 1000)["claude"]
+    assert out["state"] is None and not out["complete"]
+
+
+def test_i216_full_cached_priority_keeps_root_and_rotates_omission(probe, monkeypatch):
+    sa, p, _, home = probe
+    monkeypatch.setattr(sa, "WINDOWS", True)
+    clock = [1.0]
+    monkeypatch.setattr(sa.time, "monotonic", lambda: clock[0])
+    p.cfg.session_max_files = 256
+    root = home / "claude"
+    parents = set()
+    for n in range(256):
+        f = session(home, "claude", 120, f"cached-{n:03}/old.jsonl")
+        parents.add(f.parent)
+        p.candidates["claude"][f] = (120, f.stat().st_mtime_ns, 1.0)
+    current = root / "1970"
+    current.mkdir()
+    new = current / "active.jsonl"
+    new.write_text("SENTINEL PRIVATE CONTENT")
+    os.utime(new, (993, 993))
+    calls = []
+    original = sa.os.scandir
+
+    def scandir(path):
+        calls.append(path)
+        return original(path)
+
+    monkeypatch.setattr(sa.os, "scandir", scandir)
+
+    def cycle():
+        p.sample(live(), set(), 1000)
+        admitted = (set(calls) | {path for path, _ in p.queues["claude"]}) & parents
+        for _ in range(12):
+            p.sample(live(), set(), 1000)
+            if "claude" not in p.queues:
+                return admitted
+        pytest.fail("bounded discovery cycle did not finish")
+
+    first = cycle()
+    assert root in calls and new in p.candidates["claude"]
+    assert len(p.candidates["claude"]) == 256
+    # Restore the same prior candidate set to compare fair admission, rather
+    # than letting eviction of an old file manufacture a changed priority set.
+    p.candidates["claude"].pop(new)
+    missing = next(iter(parents - {f.parent for f in p.candidates["claude"]}))
+    old = missing / "old.jsonl"
+    p.candidates["claude"][old] = (120, old.stat().st_mtime_ns, 1.0)
+    calls.clear()
+    clock[0] += p.cfg.session_scan_interval_seconds
+    second = cycle()
+    assert first != second and first | second == parents
+    assert len(first) == len(second) == 255

@@ -1,5 +1,80 @@
 # #211 — Accurate AI activity and VS Code attribution (V3 3.9.8) — design v2
 
+## #216 follow-up amendment — V3 3.9.9
+
+This amendment supersedes the historical #211 single-file ordering/finality and
+selective empty-group rules below; the original review log stays historical.
+Independent local hook facts use hashed session/turn/child scope in a bounded
+stdlib SQLite sidecar inside `activity_writer.py`; existing four-field direct
+JSON/state_file/notify compatibility remains. Stop/SubagentStop are continuable
+attempts, never irreversible tombstones. Same-scope continuation vs delayed
+progress is unknown without source finality; only documented Codex Interrupt,
+exactly bound SessionEnd or complete confirmed previously bound producer exit
+resolves its own scope. Receipt timestamps measure freshness, not event order.
+Claude prompt_id requires2.1.196+; missing IDs and both hosts' unpaired official
+PermissionRequest remain conservative, with no content/config inspection.
+
+Known unresolved deletion must atomically transfer to persistent unknown:
+2048 facts,64 tools/64 current sessions/256 current turns,256 exact summaries plus
+64 tool overflow latches, within8MiB. Time/restart/unrelated terminal never clears
+an unresolved A. Transfer/delete/insert/commit failure rolls back; lost-identity
+overflow cannot automatically clear and may remain unknown. CLI default300s
+reclamation differs conservatively from shorter monitor freshness; the helper's
+explicit60s test oracle is not claimed as CLI configuration. Resolved tombstones
+have24h replay retention; unknown summaries/watermarks have no TTL.
+
+Positive CPU outranks quiet mtime; only strictly newer-than-idle-watermark handles/
+writes are positive. Readable CPU survives partial reads, with continuous-root
+and creation-time rules for new children. Priority directory admission/date-once
+and bounded completed-coverage validity close yield/queue false idle. Stop intent
+precedes timed probe ownership; native I/O stays outside short state locks. The
+probe owns late cleanup, discards stopped results/emissions, and cannot reopen.
+API timeout is not resource-completion or forced cancellation of a hung syscall.
+Supervisor uses a common stop/unregister deadline and rejects old managed emitters.
+
+Setup repairs missing records selectively without inventing baseline authority;
+unavailable baseline falls back to exact marker removal. Selective paths preserve
+all empty groups because index equality cannot prove creation ownership. Six V3
+release files move together to3.9.9. No generic process/wire/UI/V2/dependency change.
+See `docs/guides/dev-agent-activity.md` for operational limits and recovery. Native
+>5min TUI, VS Code, Windows npm/elevation and host dispatch remain UNVERIFIED.
+
+
+### #216 bound SessionEnd retention correction
+
+The monitor adds an explicit private-sidecar confirmation stage using its existing
+validated same-tool PID/create-time binding, including previously validated exact
+bindings. Only this stage creates internal `verified_session_end` facts from
+stored SessionEnd; hook fields/nonzero parent metadata cannot mint proof. Pure
+fact readers remain read-only and confirmation never creates a missing store.
+Each existing participating per-tool/shared store commits witness admission,
+scoped summary clear and covered-row retirement together. Two stores do not
+commit atomically: partial success remains unknown and cannot emit all-idle/off;
+retry uses a retained copy with the original timestamp. Unbound/helper and
+wrong-incarnation finals retain uncertainty. Copy/replay/retry never renews the
+original 24h horizon; expired proof cannot close newly arriving callbacks.
+
+Each physical JSON/sidecar pair has one current `projection_link` singleton,
+not one per tool. Rich publication serializes fact admission, singleton update
+and owned JSON replacement in one SQLite write transaction, with a fresh nonce
+even for duplicate fact IDs. JSON and DB are not jointly atomic: JSON failure
+may preserve committed facts while reporting projection failure; DB commit
+failure leaves the new nonce unmatched. Compare owner/nonce/ID before tool
+filtering: a parseable mismatch makes both identified owners unknown; missing
+JSON makes only the singleton owner unknown. Normal shared A→B publication
+replaces the link and leaves A's other evidence reducible without an A JSON.
+Covered retirement resolves only the exact current link in the same transaction.
+Its bounded receipt may validate that projection after proof expiry, but cannot
+clear another subject, unknown summary, overflow or future callback. No history
+or indefinitely authoritative final is added; existing caps remain unchanged.
+
+This unmerged format uses SQLite schema 2 and rich JSON schema 3, retaining the
+`.activity-v2.sqlite3` filename. Reject experimental schema 1/unknown/future stores
+unchanged as unavailable; no shipped-format migration is established. Update
+copied standalone writers and reinstall hooks before using the new format;
+reinstall cannot erase or migrate experimental stores. Legacy four-field JSON
+compatibility remains separate. This correction makes no native acceptance claim.
+
 ## Revision log
 
 - **v2, 2026-09-30, debate round 1 — DR-1 (P1), accepted.** Independently
@@ -237,8 +312,13 @@ Native validation limitations remain visible to the driver's design review.
 
 Replace activity's two broad sweeps with one typed snapshot in `process_util.py`;
 leave `scan_matches`/`scan_one` untouched for the generic process plugin.
-Collect PID, PPID, creation time, name, executable, argv[0], and CPU times. Discard
-the rest of cmdline immediately; never use argv[1:] to infer identity. If psutil
+Shipped-source clarification (#216): collect PID, PPID, creation time, name,
+executable and CPU metadata. Identity prefers exact executable basename then
+exact argv[0]/name fallback, with explicit desktop exclusions. Interpreter entry
+identity may use only its actual script/module position: exact tool scripts,
+kimi-cli/Kimi package main.mjs, python -m kimi_cli, and the package-qualified
+Windows Claude cli.js/Codex bin/codex.js. Never scan prompt or other arguments;
+discard cmdline after classification. If psutil
 returns `None` for an inaccessible field, that is unknown, not a numeric zero.
 
 Built-in CLI identity requires an exact basename `claude`, `codex`, or `kimi`
@@ -249,9 +329,9 @@ case-sensitive CLI names, avoiding the GUI's `Claude` name when its path is hidd
 Exclude the Claude desktop bundle executables/helpers; reject ChatGPT renderers,
 framework helpers and computer-use services by identity. Do **not** reject every
 path containing ChatGPT.app: an exact `codex` executable there remains Codex.
-Interpreter-only launchers (`node cli.js`, `python -m ...`) are not magically
-recognized; hooks still work and an explicit executable-basename override is
-available. `process_patterns` stays a validated regex map but, for this activity
+An unrelated node cli.js is not recognized; supported package-qualified and
+explicit interpreter entry points above are. Basename overrides remain available
+for AI tools, while a vscode override is rejected as context-only. `process_patterns` stays a validated regex map but, for this activity
 monitor only, searches executable/name basenames instead of complete commands.
 Document that intentional narrowing.
 
@@ -302,7 +382,8 @@ file extensions count. Use `Path.home()` on the agent; setup/test `--home` resol
 the equivalent explicit home. Do not silently reinterpret `CODEX_HOME` in the
 monitor; overrides are explicit and documented. Relative overrides resolve once
 against startup cwd, then remain fixed. Reject duplicate/overlapping roots within
-a tool, symlinks/junctions, non-directories, and more than 8 roots per tool; a
+a tool, non-directories, and more than 8 roots per tool. Shipped roots canonicalize
+symlink aliases once; descendant links/junctions remain no-follow. A
 missing default directory is normal, not an error.
 
 For each tool with a live root, stat cached candidates each check (at most
@@ -440,10 +521,10 @@ Proposed event policy:
 
 New Claude install wires SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
 PermissionRequest, Notification, Stop, SessionEnd. Notification matcher is
-`permission_prompt|idle_prompt`, so unrelated notifications do not indicate
-waiting. Omit Claude SubagentStop from installation: finishing one child must
-not declare its parent idle. Keep its explicit legacy parser behavior to avoid
-changing existing wiring. Codex installs the exact 12 E1 event names; omit
+`permission_prompt` only (idle_prompt is an inactivity reminder, not approval).
+The #216 follow-up includes Claude SubagentStart/SubagentStop as child facts; child
+stopping attempts cannot declare the parent ended. Keep the legacy JSON projection
+separate from rich conservative reduction. Codex installs the exact 12 E1 event names; omit
 matchers for all-events coverage. All handlers are synchronous `type=command`,
 `timeout=3`; no async reordering and no output directing the host's decisions.
 

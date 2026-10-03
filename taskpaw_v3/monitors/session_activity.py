@@ -6,6 +6,7 @@ import math
 import os
 import stat
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -39,8 +40,15 @@ def eligible(tool: str, path: Path) -> bool:
 
 
 class SessionActivity:
-    def __init__(self, cfg: DevActivityConfig):
+    def __init__(
+        self, cfg: DevActivityConfig, stop_event: threading.Event | None = None
+    ):
         self.cfg = cfg
+        self.stop_event = stop_event or threading.Event()
+        self.closed = False
+        self.watermarks: dict[str, float] = {}
+        self.completed: dict[str, tuple[float, frozenset]] = {}
+        self.priority_offset: dict[str, int] = {}
         home = Path.home()
         defaults = {
             "claude": [home / ".claude/projects"],
@@ -66,6 +74,7 @@ class SessionActivity:
         self.handle_offset = 0
 
     def close(self) -> None:
+        self.closed = True
         for cursor, _ in self.cursors.values():
             cursor.close()
         self.cursors.clear()
@@ -75,9 +84,13 @@ class SessionActivity:
         self, tool: str, path: Path, now: float, mono: float, errors: list[str]
     ) -> tuple[float, int, float] | None:
         try:
+            if self.closed or self.stop_event.is_set():
+                return None
             if not eligible(tool, path) or not safe_path(path):
                 return None
             info = path.stat(follow_symlinks=False)
+            if self.stop_event.is_set():
+                return None
             if not stat.S_ISREG(info.st_mode):
                 return None
             age = now - info.st_mtime
@@ -98,6 +111,10 @@ class SessionActivity:
     ) -> tuple[list[str], bool, bool]:
         cache = self.candidates[tool]
         errors: list[str] = []
+        current_date = set(time.strftime("%Y %m %d", time.localtime(now)).split())
+        active_parents = {p.parent for p in cache}
+        if self.closed or self.stop_event.is_set():
+            return [], False, False
         for path, previous in list(cache.items()):
             candidate_errors: list[str] = []
             item = self._metadata(tool, path, now, mono, candidate_errors)
@@ -111,13 +128,34 @@ class SessionActivity:
                 cache[path] = (math.inf, previous[1], previous[2])
         if tool not in self.queues and mono >= self.next_scan.get(tool, 0):
             roots = self.roots[tool]
-            self.queues[tool] = deque((p, 0) for p in roots)
+            active = sorted(active_parents - set(roots))
+            capacity = 256 - len(roots)
+            offset = self.priority_offset.get(tool, 0) % max(1, len(active))
+            active = active[offset:] + active[:offset]
+            if len(active) > capacity:
+                self.priority_offset[tool] = offset + 1
+            # Keep root discovery alive when the cached priority set fills the
+            # queue; rotate equal-priority omissions across completed cycles.
+            seeds = [*active[:capacity], *roots]
+            self.queues[tool] = deque(
+                (
+                    p,
+                    min(
+                        len(p.parts) - len(r.parts)
+                        for r in roots
+                        if p.is_relative_to(r)
+                    ),
+                )
+                for p in seeds[:256]
+            )
             self.cycle_errors[tool] = []
-            self.cycle_limited[tool] = False
+            self.cycle_limited[tool] = len(active) > capacity
         entries = directories = 0
         queue = self.queues.get(tool)
         limited = False
         while queue is not None and (queue or tool in self.cursors):
+            if self.closed or self.stop_event.is_set():
+                break
             if entries >= 512 or directories >= 64 or time.monotonic() >= deadline:
                 # Yield without exclusions; the saved cursor keeps this incomplete.
                 break
@@ -128,7 +166,11 @@ class SessionActivity:
                         if path.exists():
                             errors.append("invalid_root")
                         continue
-                    self.cursors[tool] = (os.scandir(path), depth)
+                    cursor = os.scandir(path)
+                    if self.closed or self.stop_event.is_set():
+                        cursor.close()
+                        break
+                    self.cursors[tool] = (cursor, depth)
                     directories += 1
                 except FileNotFoundError:
                     continue
@@ -150,25 +192,43 @@ class SessionActivity:
                 cursor.close()
                 del self.cursors[tool]
                 continue
+            if self.closed or self.stop_event.is_set():
+                break
             entries += 1
             path = Path(entry.path)
             try:
                 info = entry.stat(follow_symlinks=False)
+                if self.closed or self.stop_event.is_set():
+                    break
                 if (
                     stat.S_ISLNK(info.st_mode)
                     or getattr(info, "st_file_attributes", 0) & 0x400
                 ):
                     continue
                 if stat.S_ISDIR(info.st_mode):
-                    if depth >= 8 or len(queue) >= 256:
+                    priority = path in active_parents or path.name in current_date
+                    if depth >= 8:
                         self.cycle_limited[tool] = True
                     else:
-                        # Recent date partitions and previously active directories first.
-                        active = any(p.parent == path for p in cache)
-                        current_date = time.strftime(
-                            "%Y %m %d", time.localtime(now)
-                        ).split()
-                        if active or path.name in current_date:
+                        if len(queue) >= 256:
+                            self.cycle_limited[tool] = True
+                            if not priority:
+                                continue
+                            # Priority must be admitted before overflow rejection.
+                            lower = next(
+                                (
+                                    i
+                                    for i in range(len(queue) - 1, -1, -1)
+                                    if queue[i][0] not in active_parents
+                                    and queue[i][0].name not in current_date
+                                ),
+                                None,
+                            )
+                            if lower is None:
+                                lower = self.priority_offset.get(tool, 0) % len(queue)
+                                self.priority_offset[tool] = lower + 1
+                            del queue[lower]
+                        if priority:
                             queue.appendleft((path, depth + 1))
                         else:
                             queue.append((path, depth + 1))
@@ -198,11 +258,15 @@ class SessionActivity:
     def sample(
         self, snapshot: dict[str, dict], skip: set[str], now: float
     ) -> dict[str, dict]:
+        if self.closed or self.stop_event.is_set():
+            return {}
         mono = time.monotonic()
         deadline = mono + 0.1
         result: dict[str, dict] = {}
         pending: list[tuple[str, dict]] = []
         for tool, roots in self.roots.items():
+            if self.stop_event.is_set():
+                return {}
             data = snapshot.get(tool, {})
             if tool in skip or not data.get("present") or not data.get("roots"):
                 continue
@@ -222,6 +286,26 @@ class SessionActivity:
             if identity_unavailable:
                 errors.append("unavailable")
                 complete = False
+            root_ids = frozenset((r["pid"], r["created"]) for r in live_roots)
+            if complete and data.get("complete", False):
+                self.completed[tool] = (mono, root_ids)
+            elif errors or limited or identity_unavailable:
+                self.completed.pop(tool, None)
+            previous = self.completed.get(tool)
+            if (
+                previous is not None
+                and previous[1] == root_ids
+                and mono - previous[0]
+                <= max(
+                    2 * self.cfg.session_scan_interval_seconds,
+                    2 * self.cfg.poll_interval,
+                )
+                and not errors
+                and not limited
+            ):
+                complete = True
+            elif previous is not None:
+                self.completed.pop(tool, None)
             age = (
                 min((v[0] for v in self.candidates[tool].values()), default=math.inf)
                 if live_roots
@@ -236,6 +320,14 @@ class SessionActivity:
                 "limited": limited,
                 "complete": complete and data.get("complete", False),
                 "mtime_age": age,
+                "write_age": min(
+                    (
+                        v[0]
+                        for v in self.candidates[tool].values()
+                        if v[1] / 1e9 > self.watermarks.get(tool, -math.inf)
+                    ),
+                    default=math.inf,
+                ),
                 "positive_handles": [],
             }
             if not WINDOWS and roots:
@@ -248,6 +340,8 @@ class SessionActivity:
                 result[tool]["limited"] = True
                 result[tool]["complete"] = False
             for tool, root in ordered[:16]:
+                if self.stop_event.is_set():
+                    return {}
                 out = result[tool]
                 try:
                     proc = psutil.Process(root["pid"])
@@ -255,7 +349,12 @@ class SessionActivity:
                         out["complete"] = False
                         continue
                     positives = []
-                    for index, opened in enumerate(proc.open_files()):
+                    opened_files = proc.open_files()
+                    if self.stop_event.is_set():
+                        return {}
+                    for index, opened in enumerate(opened_files):
+                        if self.stop_event.is_set():
+                            return {}
                         if index >= 256:
                             out["limited"] = True
                             out["complete"] = False
@@ -266,8 +365,12 @@ class SessionActivity:
                         if not any(path.is_relative_to(r) for r in self.roots[tool]):
                             continue
                         item = self._metadata(tool, path, now, mono, out["errors"])
-                        if item is not None:
+                        if item is not None and item[1] / 1e9 > self.watermarks.get(
+                            tool, -math.inf
+                        ):
                             positives.append((item[0], root["host"]))
+                    if self.stop_event.is_set():
+                        return {}
                     # Revalidate identity after the native call; never reuse positives.
                     if psutil.Process(root["pid"]).create_time() == root["created"]:
                         out["positive_handles"].extend(positives)
@@ -284,13 +387,15 @@ class SessionActivity:
         for out in result.values():
             handles = out.pop("positive_handles")
             age = out.pop("mtime_age")
+            write_age = out.pop("write_age")
             if handles:
                 age, _ = min(handles)
                 out["state"] = "busy"
                 out["host"] = common_host([{"host": host} for _, host in handles])
                 if any(host == "vscode" for _, host in handles):
                     out["vscode_state"] = "busy"
-            elif age <= self.cfg.session_busy_seconds:
+            elif write_age <= self.cfg.session_busy_seconds:
+                age = write_age
                 out["state"] = "busy"
             elif (
                 age <= self.cfg.session_idle_seconds

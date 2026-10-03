@@ -2,7 +2,7 @@
   "provenance": {
     "synthetic": true,
     "source": "https://learn.chatgpt.com/docs/hooks",
-    "note": "Documentation-derived E2; no captured payloads."
+    "note": "Documentation-derived synthetic legacy projection cases; no captured payloads or native dispatch claims. Turn/child fields are event-specific; PermissionRequest has no tool_use_id."
   },
   "cases": [
     {
@@ -19,7 +19,8 @@
         "hook_event_name": "UserPromptSubmit",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn"
       },
       "state": "busy"
     },
@@ -28,7 +29,9 @@
         "hook_event_name": "PreToolUse",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn",
+        "tool_use_id": "synthetic-call"
       },
       "state": "busy"
     },
@@ -37,7 +40,9 @@
         "hook_event_name": "PostToolUse",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn",
+        "tool_use_id": "synthetic-call"
       },
       "state": "busy"
     },
@@ -46,7 +51,8 @@
         "hook_event_name": "PreCompact",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn"
       },
       "state": "busy"
     },
@@ -55,7 +61,8 @@
         "hook_event_name": "PostCompact",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn"
       },
       "state": "busy"
     },
@@ -64,7 +71,9 @@
         "hook_event_name": "SubagentStart",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn",
+        "agent_id": "synthetic-child"
       },
       "state": "busy"
     },
@@ -73,7 +82,10 @@
         "hook_event_name": "SubagentStop",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn",
+        "agent_id": "synthetic-child",
+        "stop_hook_active": false
       },
       "state": "busy"
     },
@@ -82,7 +94,8 @@
         "hook_event_name": "PermissionRequest",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn"
       },
       "state": "waiting"
     },
@@ -91,7 +104,9 @@
         "hook_event_name": "Stop",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn",
+        "stop_hook_active": false
       },
       "state": "idle"
     },
@@ -100,7 +115,8 @@
         "hook_event_name": "Interrupt",
         "session_id": "synthetic",
         "cwd": "/synthetic",
-        "transcript_path": null
+        "transcript_path": null,
+        "turn_id": "synthetic-turn"
       },
       "state": "idle"
     },

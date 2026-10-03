@@ -240,20 +240,20 @@ class Supervisor:
         """Stop + remove ONE monitor live (no agent restart) — used by the control
         API's remove/disable. Serialized against register/reconfigure/stop via the
         lifecycle lock. Raises KeyError if the instance isn't registered."""
-        with self._life:
+        deadline = time.monotonic() + max(0.0, timeout)
+        if not self._life.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise TimeoutError("unregister lifecycle lock timeout")
+        try:
             with self._lock:
                 m = self._monitors.pop(instance_id, None)
             if m is None:
                 raise KeyError(instance_id)
-            # Signal the worker, release the instance's resources first (this can
-            # unblock a running check() so the join doesn't burn the budget), then
-            # join. The worker also exits via its `_monitors.get(id) is not m`
-            # guard now that the entry is gone — and the watchdog won't restart a
-            # popped instance (its `m is None` makes `dead` False).
             m.stop.set()
-            self._cleanup_instance(m.instance, timeout)
+            self._cleanup_instance(m.instance, max(0.0, deadline - time.monotonic()))
             if m.thread:
-                m.thread.join(timeout=timeout)
+                m.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        finally:
+            self._life.release()
 
     @staticmethod
     def _cleanup_instance(instance: MonitorInstance, timeout: float) -> None:
@@ -404,7 +404,7 @@ class Supervisor:
     # ── emit (throttle + dedupe) ───────────────────────────────────────────
     def _emitter_for(self, instance_id: str, m: _Managed) -> EventEmitter:
         def emit(level, title, message, data=None, dedupe_key=None):
-            self._emit(instance_id, level, title, message, data, dedupe_key)
+            self._emit(instance_id, level, title, message, data, dedupe_key, expected=m)
 
         return emit
 
@@ -464,13 +464,23 @@ class Supervisor:
         return True
 
     def _emit(
-        self, instance_id, level, title, message, data=None, dedupe_key=None
+        self,
+        instance_id,
+        level,
+        title,
+        message,
+        data=None,
+        dedupe_key=None,
+        *,
+        expected: _Managed | None = None,
     ) -> None:
         folded_msg = None
         deliver = False
         with self._lock:
             m = self._monitors.get(instance_id)
-            if m is None:
+            if m is None or (
+                expected is not None and (m is not expected or m.stop.is_set())
+            ):
                 return
             if dedupe_key is not None and dedupe_key in m.seen_dedupe:
                 return
