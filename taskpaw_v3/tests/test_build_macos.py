@@ -11,6 +11,7 @@ import plistlib
 import subprocess
 import sys
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -801,12 +802,44 @@ def test_native_tool_output_never_leaks_and_is_bounded(scenario, capsys):
     assert "FAKE-SENSITIVE" not in output.out + output.err
 
 
-def test_smoke_initializes_owned_state_before_agent_launch(monkeypatch):
+@pytest.mark.parametrize(
+    "alias",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="POSIX macOS temporary-directory alias"
+            ),
+        ),
+    ],
+)
+def test_smoke_initializes_owned_state_before_agent_launch(
+    monkeypatch, tmp_path, alias
+):
     from taskpaw_v3.agent import state
+    from taskpaw_v3.core.control_file import ControlCredentialError, CredentialLease
     from taskpaw_v3.core.state import StateSession
 
     calls = []
     gates = []
+    homes = []
+    temp_alias = tmp_path.resolve() / "temporary-alias"
+    if alias:
+        original_temporary_directory = mac.tempfile.TemporaryDirectory
+
+        @contextmanager
+        def alias_directory(**kwargs):
+            with original_temporary_directory(**kwargs) as directory:
+                temp_alias.symlink_to(
+                    Path(directory).resolve(), target_is_directory=True
+                )
+                try:
+                    yield str(temp_alias)
+                finally:
+                    temp_alias.unlink()
+
+        monkeypatch.setattr(mac.tempfile, "TemporaryDirectory", alias_directory)
 
     class LaunchObserved(Exception):
         pass
@@ -836,6 +869,22 @@ def test_smoke_initializes_owned_state_before_agent_launch(monkeypatch):
             assert session.record.next_event_id == 1
         finally:
             session.close()
+        if os.name != "nt":
+            # Real credential admission, without starting a product service.
+            lease = CredentialLease(config.parent, "agent.control.json")
+            lease.close()
+            if alias:
+                with pytest.raises(
+                    ControlCredentialError, match="unsafe_control_directory"
+                ):
+                    CredentialLease(
+                        temp_alias / "HOME/Library/Application Support/TaskPaw",
+                        "agent.control.json",
+                    )
+        home = Path(kwargs["env"]["HOME"])
+        assert home == home.resolve()
+        assert Path(kwargs["env"]["TMPDIR"]) == home.parent / "extraction"
+        homes.append(home)
         assert len(gates) == 3
         assert command == ["FAKE-SIDECAR", "agent"]
         raise LaunchObserved
@@ -851,6 +900,8 @@ def test_smoke_initializes_owned_state_before_agent_launch(monkeypatch):
             "3.9.8",
         )
     assert len(calls) == 1
+    assert homes and not homes[0].exists()
+    assert not temp_alias.is_symlink()
 
 
 @pytest.mark.parametrize("mode", ["failed", "missing", "json", "identity"])

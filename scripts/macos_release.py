@@ -905,10 +905,13 @@ def smoke(sidecar, plan, isolation, env, version):
     # This is intentionally before HOME/ports or any backend Popen.
     isolation.require()
     with tempfile.TemporaryDirectory(prefix="taskpaw-release-smoke-") as tmp:
-        home = Path(tmp) / "HOME"
+        # Canonicalize only this newly owned fixture, not user credential paths.
+        # macOS's /var alias must not reach the no-symlink credential guard.
+        temporary_root = Path(tmp).resolve()
+        home = temporary_root / "HOME"
         config = home / "Library/Application Support/TaskPaw/agent.yaml"
         config.parent.mkdir(parents=True, mode=0o700)
-        extraction = Path(tmp) / "extraction"
+        extraction = temporary_root / "extraction"
         extraction.mkdir(mode=0o700)
         token = secrets.token_urlsafe(32)
         reservations = [socket.socket(), socket.socket()]
@@ -959,7 +962,7 @@ def smoke(sidecar, plan, isolation, env, version):
                 "--confirm-new-pairing",
             ],
             env=runtime_env,
-            cwd=tmp,
+            cwd=str(temporary_root),
         )
         try:
             state = json.loads(
