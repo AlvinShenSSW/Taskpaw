@@ -1,5 +1,5 @@
 # TEMP diagnostic branch transport only. Never merge into main or R13.
-name: I216 CI002 bounded native diagnosis
+name: I216 CI002 coverage-context diagnosis
 on:
   workflow_dispatch:
 permissions:
@@ -8,7 +8,7 @@ jobs:
   diagnose:
     if: github.ref == 'refs/heads/afk/i216-ci002-native-diag'
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - name: Checkout diagnostic helper revision
         uses: actions/checkout@v5
@@ -27,19 +27,19 @@ jobs:
       - name: Sync exact product dev dependencies
         working-directory: product
         run: uv sync --frozen --group dev --python 3.12
-      - name: Diagnose existing owned reinstall tests only
+      - name: Diagnose original full coverage context once
         working-directory: product
         shell: pwsh
         run: |
-          $probe = Join-Path $env:GITHUB_WORKSPACE 'diagnostic-helper/scripts/ci002_native_probe.py'
-          $out = Join-Path $env:RUNNER_TEMP 'i216-ci002-diagnostic-receipt'
-          uv run --frozen --python 3.12 python $probe --product (Get-Location).Path --output $out --rounds 4
+          $probe = Join-Path $env:GITHUB_WORKSPACE 'diagnostic-helper/scripts/ci002_context_probe.py'
+          $out = Join-Path $env:RUNNER_TEMP 'i216-ci002-context-receipt'
+          uv run --frozen --python 3.12 python $probe --product (Get-Location).Path --output $out
           exit $LASTEXITCODE
       - name: Upload bounded sanitized diagnostic receipt
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: i216-ci002-native-diagnosis-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/i216-ci002-diagnostic-receipt/*.json
+          name: i216-ci002-coverage-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/i216-ci002-context-receipt/*.json
           if-no-files-found: error
           retention-days: 14
