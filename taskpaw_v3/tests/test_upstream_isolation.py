@@ -1066,6 +1066,7 @@ def test_retained_cleanup_denies_replacement_and_can_retry(monkeypatch):
         "redirect",
         "auth",
         "stop",
+        "default-deadline",
     ],
 )
 @pytest.mark.parametrize("frozen", [False, True], ids=["source", "shipped"])
@@ -1087,6 +1088,15 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
         binary = Path(supplied).resolve()
         assert binary.is_file()
         monkeypatch.setattr(uw, "worker_argv", lambda: [str(binary), "upstream-http"])
+    adverse = mode in ("drip", "body-drip", "chunk-drip", "stop")
+    default_deadline = mode == "default-deadline"
+    # Cycle8 separates configurable Windows-shipped behavior from default5 proof.
+    windows_shipped_envelope = os.name == "nt" and frozen and not default_deadline
+    parent_budget = (
+        30 if windows_shipped_envelope else 3 if adverse and not frozen else 5
+    )
+    operation_timeout = 60 if windows_shipped_envelope or default_deadline else 10
+    server_stall_guard = 65 if windows_shipped_envelope or default_deadline else 15
     entered = threading.Event()
     prefix_flushed = threading.Event()
     release = threading.Event()
@@ -1105,6 +1115,11 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
                     forwarded.append(self.headers.get("Authorization"))
                     self.send_error(500)
                     return
+                if default_deadline:
+                    # No complete reply even if startup reaches HTTP. This mode
+                    # proves default expiry, not admission of an adverse phase.
+                    release.wait(server_stall_guard)
+                    return
                 if mode in ("redirect", "auth"):
                     self.send_response(302 if mode == "redirect" else 401)
                     if mode == "redirect":
@@ -1121,7 +1136,7 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
                     if mode == "body-drip":
                         phases["prefix_flushed"] = time.monotonic()
                         prefix_flushed.set()
-                        release.wait(15)
+                        release.wait(server_stall_guard)
                     self.close_connection = True
                     return
                 if mode == "chunk-drip":
@@ -1131,7 +1146,7 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
                     self.wfile.flush()
                     phases["prefix_flushed"] = time.monotonic()
                     prefix_flushed.set()
-                    release.wait(15)
+                    release.wait(server_stall_guard)
                     return
                 if mode in ("drip", "stop"):
                     self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Owned: ")
@@ -1139,7 +1154,7 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
                     phases["prefix_flushed"] = time.monotonic()
                     prefix_flushed.set()
                     # No bytes after this partial header; parent deadline must win.
-                    release.wait(15)
+                    release.wait(server_stall_guard)
                     return
                 if mode == "header":
                     self.wfile.write(
@@ -1184,27 +1199,46 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
     captured = []
     import psutil
 
-    _capture_upstream_process(monkeypatch, captured, phases=phases)
+    default_observer = None
+    default_initial_wait = None
+
+    def bind_default_launcher():
+        nonlocal default_observer, default_initial_wait
+        proc = captured[-1]
+        default_observer = _WindowsProcessObserver(
+            proc.pid, psutil.Process(proc.pid).create_time()
+        )
+        default_observer.require_live()
+        default_initial_wait = default_observer.last_wait
+
+    _capture_upstream_process(
+        monkeypatch,
+        captured,
+        callback=bind_default_launcher
+        if default_deadline and os.name == "nt"
+        else None,
+        phases=phases,
+    )
     _observe_upstream_transport(monkeypatch, transport, phases, snapshots)
     request = {
         "kind": "status",
         "url": f"http://127.0.0.1:{server.server_port}/status",
         "headers": {"Authorization": "Bearer fake-r06-only"},
-        "timeout": 10,
+        "timeout": operation_timeout,
         "padding": "x" * 30000,
     }
     raw_bytes = len((uw.canonical(request) + "\n").encode())
     assert 30000 < raw_bytes <= uw.REQUEST_BYTES
     started = time.monotonic()
-    adverse = mode in ("drip", "body-drip", "chunk-drip", "stop")
-    # Cycle7 explicitly gives cold shipped adverse phases the production default;
-    # source adverse controls retain 3s. No deadline is reset after readiness.
-    parent_budget = 3 if adverse and not frozen else 5
     cleanup_grace, scheduling_margin = (
         1,
         1,
     )  # Existing lifecycle room, not a new budget.
-    elapsed_bound = parent_budget + cleanup_grace + scheduling_margin if adverse else 5
+    elapsed_bound = (
+        parent_budget + cleanup_grace + scheduling_margin
+        if adverse or default_deadline
+        else parent_budget
+    )
     test_end = started + elapsed_bound
 
     def call():
@@ -1217,8 +1251,9 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
     caller = threading.Thread(target=call)
     try:
         caller.start()
-        assert entered.wait(max(0, test_end - time.monotonic()))
-        original_deadline = phases["request_entry"] + parent_budget
+        if not default_deadline:
+            assert entered.wait(max(0, test_end - time.monotonic()))
+        original_deadline = phases.get("request_entry", started) + parent_budget
         if adverse:
             assert prefix_flushed.wait(max(0, test_end - time.monotonic()))
             assert phases["handler_enter"] < original_deadline
@@ -1227,7 +1262,7 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
         # Inspect only descendants of this fixture's returned Popen, never a
         # system process scan. Frozen bootloader/interpreter acceptance is real.
         owned_descendants = []
-        if frozen:
+        if frozen and not default_deadline:
             try:
                 owned_descendants = psutil.Process(captured[0].pid).children(
                     recursive=True
@@ -1270,12 +1305,44 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
                 "redirect": "http_refused",
                 "auth": "http_auth",
                 "stop": "helper_cancelled",
+                "default-deadline": "upstream_deadline",
             }[mode]
             expected = {"ok": False, "reason": reason}
             if mode in ("redirect", "auth"):
                 expected["status_code"] = 302 if mode == "redirect" else 401
             assert result == expected
             assert not forwarded
+        if default_deadline:
+            assert parent_budget <= phases["caller_complete"] - phases["request_entry"]
+            assert not release.is_set() and "http_response_complete" not in phases
+            after = snapshots["after_cleanup"]
+            assert all(
+                after[name]
+                for name in ("joined", "keeper_closed", "pipes_closed", "reaped")
+            )
+            if os.name == "nt":
+                assert default_observer is not None and default_initial_wait == 258
+                default_observer.require_terminated()
+                total, active = after["final_accounting"]
+                members = after["member_receipts"]
+                assert active == 0 and total >= 1
+                assert total == after["member_coverage"] == len(members)
+                assert all(
+                    member[name]
+                    for member in members
+                    for name in ("valid", "signaled", "closed")
+                )
+                assert after["native_handles_closed"]
+            else:
+                for identity in snapshots["before_cleanup"]["owned_identities"]:
+                    try:
+                        owned = psutil.Process(identity["pid"])
+                        assert (
+                            owned.create_time() != identity["created"]
+                            or not owned.is_running()
+                        )
+                    except psutil.NoSuchProcess:
+                        pass
         assert transport.clean()
         assert captured[0].poll() is not None
         assert captured[0].stdin.closed and captured[0].stdout.closed
@@ -1295,6 +1362,9 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
             "request_bytes": raw_bytes,
             "clean": transport.clean(),
             "parent_budget": parent_budget,
+            "operation_timeout": operation_timeout,
+            "server_stall_guard": server_stall_guard,
+            "HTTP_phase_required": not default_deadline,
             "deadline": parent_budget,
             "elapsed": (
                 phases.get("caller_complete", time.monotonic())
@@ -1305,6 +1375,17 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
             "scheduling_margin": scheduling_margin,
             "release_set": release.is_set(),
             "caller_alive": caller.is_alive(),
+            "default_observer_pid": default_observer.pid if default_observer else None,
+            "default_observer_created": default_observer.created
+            if default_observer
+            else None,
+            "default_observer_initial_wait": default_initial_wait,
+            "default_observer_wait": default_observer.last_wait
+            if default_observer
+            else None,
+            "default_observer_closed": default_observer.closed_receipt
+            if default_observer
+            else None,
             "phases": {
                 name: phases.get(name) - started if name in phases else None
                 for name in (
@@ -1333,13 +1414,33 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
         if frozen:
             evidence["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
         print("R06_HELPER_NATIVE " + json.dumps(evidence, sort_keys=True))
-        release.set()
-        transport.cancel()
-        caller.join(5)
-        transport.retry_cleanup()
-        server.shutdown()
-        server.server_close()
-        server_thread.join(3)
+        try:
+            release.set()
+            transport.cancel()
+            caller.join(5)
+            transport.retry_cleanup()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(3)
+        finally:
+            if default_deadline and os.name == "nt":
+                try:
+                    if default_observer is not None:
+                        default_observer.close()
+                finally:
+                    print(
+                        "R06_DEFAULT_OBSERVER_CLOSED "
+                        + json.dumps(
+                            {
+                                "mode": mode,
+                                "frozen": frozen,
+                                "observer_closed": default_observer.closed_receipt
+                                if default_observer
+                                else None,
+                            },
+                            sort_keys=True,
+                        )
+                    )
 
 
 # This fixture entry is generated only in an owned pytest directory. It imports
