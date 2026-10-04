@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import hashlib
 import json
 import os
 import shlex
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -19,6 +21,7 @@ from pathlib import Path
 from taskpaw_v3.integrations.activity_writer import (
     _CLAUDE_EVENT_STATE,
     _CODEX_EVENT_STATE,
+    ActivityStoreError,
     _projection_matches,
     read_facts,
 )
@@ -356,6 +359,110 @@ def reconcile(data: dict, tool: str, command: str, record: dict) -> tuple[dict, 
     return data, groups_created
 
 
+def _io_diagnostic(exc: OSError, stage: str) -> str:
+    """Fixed, bounded error metadata; never format exception text or traceback."""
+    try:
+        classes: dict[type, str] = {
+            getattr(builtins, name): name
+            for name in (
+                "OSError",
+                "FileNotFoundError",
+                "PermissionError",
+                "FileExistsError",
+                "NotADirectoryError",
+                "IsADirectoryError",
+                "TimeoutError",
+                "InterruptedError",
+                "BlockingIOError",
+                "ChildProcessError",
+                "ConnectionError",
+                "BrokenPipeError",
+            )
+        }
+        classes.update(
+            {
+                getattr(sqlite3, name): "sqlite3." + name
+                for name in (
+                    "Error",
+                    "InterfaceError",
+                    "DatabaseError",
+                    "DataError",
+                    "OperationalError",
+                    "IntegrityError",
+                    "InternalError",
+                    "ProgrammingError",
+                    "NotSupportedError",
+                )
+            }
+        )
+        classes.update(
+            {ActivityStoreError: "ActivityStoreError", SetupError: "SetupError"}
+        )
+        operations = {
+            id(function.__code__): (priority, label)
+            for function, priority, label in (
+                (verify_writer, 0, "verify_writer"),
+                (backup, 1, "backup"),
+                (atomic_write, 1, "atomic_write"),
+                (private_dir, 2, "private_dir"),
+                (read_bytes, 2, "read_bytes"),
+                (subprocess.run, 3, "writer_subprocess"),
+                (read_facts, 4, "verify_fact_read"),
+                (tempfile.TemporaryDirectory.__init__, 4, "verify_temp_create"),
+                (tempfile.TemporaryDirectory.__exit__, 4, "verify_temp_cleanup"),
+            )
+        }
+        parts, seen, remaining = [f"stage={stage}"], set(), 32
+        current: BaseException | None = exc
+        relation = "exception"
+        truncated = False
+        for _ in range(3):
+            if current is None:
+                break
+            if id(current) in seen:
+                truncated = True
+                break
+            seen.add(id(current))
+            label = classes.get(type(current))
+            if label is None:
+                label = (
+                    "OSErrorSubclass"
+                    if isinstance(current, OSError)
+                    else "sqlite3.ErrorSubclass"
+                    if isinstance(current, sqlite3.Error)
+                    else "unknown"
+                )
+            parts.append(f"{relation}={label}")
+            operation = (-1, "unknown")
+            tb = current.__traceback__
+            while tb is not None and remaining:
+                remaining -= 1
+                candidate = operations.get(id(tb.tb_frame.f_code))
+                if candidate is not None and candidate[0] >= operation[0]:
+                    operation = candidate
+                tb = tb.tb_next
+            truncated |= tb is not None
+            parts.append(f"operation={operation[1]}")
+            for field in ("errno", "winerror", "sqlite_errorcode"):
+                value = getattr(current, field, None)
+                if type(value) is int and -(1 << 31) <= value < (1 << 31):
+                    parts.append(f"{field}={value}")
+            if current.__cause__ is not None:
+                current, relation = current.__cause__, "cause"
+            else:
+                current, relation = current.__context__, "context"
+        truncated |= current is not None
+        if truncated:
+            parts.append("truncated=true")
+        result = " [" + " ".join(parts) + "]"
+        if len(result.encode("ascii")) <= 1024:
+            return result
+    except Exception:
+        # A diagnostic must never replace the original setup failure/return code.
+        return " [diagnostic=unavailable]"
+    return " [diagnostic=unavailable]"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("install", "check", "uninstall"))
@@ -374,11 +481,14 @@ def main(argv: list[str] | None = None) -> int:
     tools = ("claude", "codex") if args.tool == "all" else (args.tool,)
     prepared = []
     current_tool = "all"
+    stage = "preflight_prepare"
     try:
         # Preflight every requested tool before any settings edits.
         for tool in tools:
             current_tool = tool
+            stage = "preflight_prepare"
             if args.action != "uninstall":
+                stage = "preflight_shell"
                 shell_for(tool)
             if (
                 tool == "codex"
@@ -393,15 +503,18 @@ def main(argv: list[str] | None = None) -> int:
             path = Path(os.path.realpath(home / f".{tool}")) / (
                 "settings.json" if tool == "claude" else "hooks.json"
             )
+            stage = "preflight_settings_read"
             raw = read_bytes(path)
             data = settings(raw)
             record_path = state_dir / "hook-setup" / f"{tool}.json"
+            stage = "preflight_undo_read"
             record_raw = read_bytes(record_path)
             record = decode(record_raw)
             if record and record.get("target") != str(path):
                 raise SetupError(
                     "undo record target differs; use the original home/state directory"
                 )
+            stage = "preflight_command"
             command = render_command(
                 str(Path(args.python or sys.executable).absolute()),
                 str(Path(args.writer or WRITER).absolute()),
@@ -411,23 +524,27 @@ def main(argv: list[str] | None = None) -> int:
             )
             if args.action == "check":
                 command = record.get("command", command)
+                stage = "preflight_validate"
                 validate_installed(data, tool, command)
+                stage = "preflight_writer_verify"
                 verify_writer(command, tool, state_dir)
             elif args.action == "install":
                 if data.get("disableAllHooks") or data.get("disabled"):
                     raise SetupError("hooks disabled; enable them before installation")
+                stage = "preflight_writer_verify"
                 verify_writer(command, tool, state_dir)
             prepared.append(
                 (tool, path, raw, data, record_path, record_raw, record, command)
             )
     except (SetupError, OSError) as exc:
         print(
-            f"{current_tool}: {exc if isinstance(exc, SetupError) else 'local I/O failed'}"
+            f"{current_tool}: {exc if isinstance(exc, SetupError) else 'local I/O failed' + _io_diagnostic(exc, stage)}"
         )
         return 1
     failed = False
     for tool, path, raw, data, record_path, record_raw, record, command in prepared:
         saved = None
+        stage = "settings_prepare"
         updated: bytes | None
         try:
             if args.action == "install":
@@ -439,6 +556,7 @@ def main(argv: list[str] | None = None) -> int:
                         for g in groups
                         for h in g["hooks"]
                     ):
+                        stage = "message_publication"
                         print(
                             f"{tool}: existing unmarked TaskPaw hook preserved; duplicate writes possible"
                         )
@@ -446,7 +564,9 @@ def main(argv: list[str] | None = None) -> int:
                 data, groups = reconcile(data, tool, command, record)
                 updated = encode(data)
                 if updated != before:
+                    stage = "settings_backup"
                     saved = backup(tool, raw, state_dir)
+                    stage = "settings_write"
                     atomic_write(path, updated, raw)
                     new_record = {
                         **record,
@@ -466,7 +586,9 @@ def main(argv: list[str] | None = None) -> int:
                         # deletion of a file that was originally absent.
                         for key in ("original_exists", "baseline", "baseline_hash"):
                             new_record.pop(key, None)
+                    stage = "undo_directory"
                     private_dir(record_path.parent)
+                    stage = "undo_write"
                     atomic_write(record_path, encode(new_record), record_raw)
                 elif not record:
                     # Settings already correct, but a lost/failed undo record
@@ -477,9 +599,13 @@ def main(argv: list[str] | None = None) -> int:
                         "groups": groups,
                         "command": command,
                     }
+                    stage = "undo_directory"
                     private_dir(record_path.parent)
+                    stage = "undo_write"
                     atomic_write(record_path, encode(new_record), record_raw)
+                stage = "final_settings_validate"
                 validate_installed(settings(read_bytes(path)), tool, command)
+                stage = "final_writer_verify"
                 verify_writer(command, tool, state_dir)
             elif args.action == "uninstall":
                 updated = raw
@@ -491,6 +617,7 @@ def main(argv: list[str] | None = None) -> int:
                         baseline = record.get("baseline")
                         if not isinstance(baseline, str):
                             raise SetupError("baseline unavailable")
+                        stage = "uninstall_baseline_read"
                         updated = read_bytes(Path(baseline))
                         if updated is None or digest(updated) != record.get(
                             "baseline_hash"
@@ -508,10 +635,14 @@ def main(argv: list[str] | None = None) -> int:
                     if encode(data) != before:
                         updated = encode(data)
                 if updated != raw:
+                    stage = "uninstall_backup"
                     saved = backup(tool, raw, state_dir)
+                    stage = "uninstall_settings_write"
                     atomic_write(path, updated, raw)
                 if record_raw is not None:
+                    stage = "uninstall_undo_remove"
                     atomic_write(record_path, None, record_raw)
+            stage = "message_publication"
             print(
                 f"{tool}: {args.action} succeeded"
                 + (f"; backup: {saved}" if saved else "")
@@ -523,7 +654,7 @@ def main(argv: list[str] | None = None) -> int:
         except (SetupError, OSError) as exc:
             failed = True
             print(
-                f"{tool}: {exc if isinstance(exc, SetupError) else 'local I/O failed'}"
+                f"{tool}: {exc if isinstance(exc, SetupError) else 'local I/O failed' + _io_diagnostic(exc, stage)}"
                 + (f"; backup retained: {saved}" if saved else "")
             )
     return 1 if failed else 0
