@@ -32,6 +32,21 @@ def main(argv: list[str] | None = None) -> int:
         from taskpaw_v3.agent.state import main as state_main
 
         return state_main(argv[1:])
+    if role == "agent-desktop-state":
+        # Fixed desktop actions: confirmation and the platform config path are
+        # mandatory. This route never exposes reset/recover or arbitrary paths.
+        if argv[1:] not in (
+            ["migrate", "--confirm-intact-legacy-counter"],
+            ["initialize", "--confirm-new-pairing"],
+        ):
+            print(
+                "desktop state action requires explicit confirmation", file=sys.stderr
+            )
+            return 2
+        from taskpaw_v3.agent.server.service import default_config_path
+        from taskpaw_v3.agent.state import main as state_main
+
+        return state_main(argv[1:], desktop_config=default_config_path())
     if role == "hub-cursor":
         from taskpaw_v3.hub.__main__ import main as cursor_main
 

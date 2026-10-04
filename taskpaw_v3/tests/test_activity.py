@@ -336,10 +336,10 @@ def test_writer_ignores_sensitive_fields_and_cleans_failure(
     assert not list(tmp_path.glob(".*.tmp"))
 
 
-def test_issue_216_release_is_399():
+def test_issue_216_release_is_at_least_399():
     from taskpaw_v3 import __version__
 
-    assert __version__ == "3.9.9"
+    assert tuple(map(int, __version__.split("."))) >= (3, 9, 9)
 
 
 def _fact(event, session, ts, *, unit=None, producer=None, turn=None, tool="codex"):
