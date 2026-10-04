@@ -1,163 +1,44 @@
-name: release
-
-# Build downloadable V3 desktop installers (#40/#41). Trigger manually
-# (Actions → release → Run workflow) or by pushing a v* tag; download the
-# installers from the run's artifacts.
-#
-# macOS: native arm64/Intel builds are explicitly ad-hoc without references.
-# Formal builds require a provisioned private keychain/profile on a dedicated
-# disposable native host. Hosted runners do not provision these credentials.
-# Legacy raw APPLE credential groups fail with migration guidance; no downgrade.
-# See docs/guides/macos-signing.md for the manual distribution acceptance gate.
-#
-# Windows signing: when the WINDOWS_* repo secrets are configured (see
-# docs/guides/windows-signing.md), the .exe/.msi are Authenticode-signed so the
-# install has no unknown-publisher SmartScreen/UAC warning. WITHOUT them the
-# installers ship UNSIGNED (the prior behaviour) — nothing breaks (#112).
+# Temporary diagnostic transport. NEVER MERGE into product branches.
+name: R13 CI004 copied writer diagnosis
 on:
   workflow_dispatch:
-  push:
-    tags: ["v[0-9]*"]
-
+permissions:
+  contents: read
 jobs:
-  bundle:
-    strategy:
-      fail-fast: false
-      # AGENT installers only. The Hub runs HEADLESS (design §7.1: `python -m
-      # taskpaw_v3.hub run`); a GUI that spawns+kills the Hub backend on window
-      # close would risk silently stopping aggregation — a dashboard-only client
-      # is tracked separately (#52). macOS ARM64 + Intel + Windows.
-      matrix:
-        include:
-          - os: macos-15
-            label: macos-arm64
-            target: aarch64-apple-darwin
-            bundle_root: taskpaw_v3/src-tauri/target/aarch64-apple-darwin/release/bundle
-          - os: macos-15-intel
-            label: macos-intel
-            target: x86_64-apple-darwin
-            bundle_root: taskpaw_v3/src-tauri/target/x86_64-apple-darwin/release/bundle
-          - os: windows-latest
-            label: windows
-    runs-on: ${{ matrix.os }}
-    env:
-      TASKPAW_BUILD_ROLE: agent
-      TASKPAW_BUILD_TARGET: ${{ matrix.target || '' }}
-      # On a v* tag, stamp the bundle version from the tag (build.py strips the
-      # leading v); empty on workflow_dispatch → tauri.conf version.
-      TASKPAW_BUILD_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+  diagnose:
+    if: github.ref == 'refs/heads/afk/r13-ci004-native-diag'
+    runs-on: windows-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout diagnostic helper revision
+        uses: actions/checkout@v5
         with:
-          persist-credentials: false   # release build only needs the source
-
-      - uses: actions/setup-node@v6
+          ref: ${{ github.sha }}
+          path: diagnostic-helper
+          persist-credentials: false
+      - name: Checkout immutable product F
+        uses: actions/checkout@v5
         with:
-          node-version: "22"
-
-      - uses: dtolnay/rust-toolchain@1.96.0   # pinned for reproducible bundles
-
+          ref: 3247dccdce661c25f34e891464099659b3845e6b
+          path: product
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v7
-
-      - name: Install Python + build deps
-        run: uv sync --frozen --extra build --extra v3
-
-      - name: Build backend sidecar + Tauri bundle
-        # Every actual Mac smoke runs serially on this fresh, dedicated job VM.
-        # No other step launches a TaskPaw service or independent Agent here.
-        # Public references do not provision credentials; absent -> ad-hoc.
-        # Nonempty legacy inputs are passed only to fail early with migration.
-        env:
-          # Deprecated inputs: any nonblank value is a migration error on Mac.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY || secrets.APPLE_SIGNING_IDENTITY }}
-          # Raw Apple-ID/password transport is also rejected on Mac.
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
-          TASKPAW_MACOS_SIGNING_KEYCHAIN: ${{ vars.TASKPAW_MACOS_SIGNING_KEYCHAIN }}
-          TASKPAW_MACOS_NOTARY_PROFILE: ${{ vars.TASKPAW_MACOS_NOTARY_PROFILE }}
-          TASKPAW_MACOS_SMOKE_ISOLATION: ${{ runner.os == 'macOS' && 'github-hosted-fresh' || '' }}
-        run: uv run python scripts/build.py
-
-      - name: Sign Windows installers (gated on secrets)
-        # Authenticode-sign the produced .exe/.msi when the WINDOWS_* secrets are
-        # configured (see docs/guides/windows-signing.md) — removes the unknown-
-        # publisher SmartScreen/UAC warning on install. WITHOUT the secrets the
-        # step is a clean no-op and the installers ship UNSIGNED (parity with the
-        # unsigned-macOS path), so a fork/PR/secret-less run never fails (#112).
-        if: runner.os == 'Windows'
+      - name: Sync exact product dev dependencies
+        working-directory: product
+        run: uv sync --frozen --group dev --python 3.12
+      - name: Bounded reproduction and exception observation
+        working-directory: product
         shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE)) {
-            Write-Host "No WINDOWS_CERTIFICATE secret — leaving installers unsigned."
-            exit 0
-          }
-          # NB: this job runs on GitHub-hosted, EPHEMERAL windows-latest runners, so the
-          # imported key container dies with the VM. On a PERSISTENT/self-hosted runner
-          # the imported private key could outlive the job — don't run release there
-          # without additional key hygiene (Kimi).
-          # Resolve signtool: PATH first, then any installed Windows SDK (not a single
-          # hardcoded SDK version/dir, which can break if the runner image changes) (Kimi).
-          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
-          if (-not $signtool) {
-            $signtool = Get-ChildItem "C:\Program Files*\Windows Kits\*\bin\*\x64\signtool.exe" `
-              -ErrorAction SilentlyContinue | Sort-Object FullName -Descending |
-              Select-Object -First 1 -ExpandProperty FullName
-          }
-          if (-not $signtool) { Write-Error "signtool.exe not found on PATH or in any Windows SDK"; exit 1 }
-          # Materialize the PFX from the base64 secret (removed in finally).
-          $pfx = Join-Path $env:RUNNER_TEMP "taskpaw-signing.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $cert = $null
-          try {
-            # Import into the ephemeral runner's user store and sign BY THUMBPRINT so
-            # the PFX password never appears on a native command line / process list (Kimi).
-            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
-            $bundle = "taskpaw_v3/src-tauri/target/release/bundle"
-            $artifacts = Get-ChildItem -Path $bundle -Recurse -Include *.exe, *.msi
-            if (-not $artifacts) { Write-Error "no .exe/.msi found under $bundle to sign"; exit 1 }
-            foreach ($a in $artifacts) {
-              & $signtool sign /sha1 $cert.Thumbprint `
-                /fd SHA256 /tr https://timestamp.digicert.com /td SHA256 $a.FullName
-              if ($LASTEXITCODE -ne 0) { Write-Error "signtool sign failed: $($a.FullName)"; exit 1 }
-              # Advisory: /pa needs the cert's full chain in the runner's trusted root,
-              # which an org-internal CA won't have — don't fail a successful sign on it (Kimi).
-              & $signtool verify /pa $a.FullName
-              if ($LASTEXITCODE -ne 0) {
-                Write-Warning "verify /pa failed for $($a.Name) (expected for an internal-CA cert whose root isn't trusted on the runner); the file was signed."
-              }
-              Write-Host "Signed $($a.Name)"
-            }
-          } finally {
-            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
-            if ($cert) { Remove-Item ("Cert:\CurrentUser\My\" + $cert.Thumbprint) -Force -ErrorAction SilentlyContinue }
-          }
-
-      - name: Collect verified Mac installers
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v7
+          $probe = Join-Path $env:GITHUB_WORKSPACE 'diagnostic-helper/scripts/ci004_probe.py'
+          $out = Join-Path $env:RUNNER_TEMP 'r13-ci004-receipt'
+          uv run --frozen --python 3.12 python $probe --product (Get-Location).Path --output $out
+          exit $LASTEXITCODE
+      - name: Upload sanitized bounded JSON only
+        if: always()
+        uses: actions/upload-artifact@v6
         with:
-          name: taskpaw-agent-${{ matrix.label }}
+          name: r13-ci004-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/r13-ci004-receipt/*.json
           if-no-files-found: error
-          path: |
-            ${{ matrix.bundle_root }}/**/*.dmg
-            ${{ matrix.bundle_root }}/**/*.app.zip
-            ${{ matrix.bundle_root }}/macos-verification.json
-
-      - name: Collect Windows installers
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: taskpaw-agent-${{ matrix.label }}
-          if-no-files-found: error
-          path: |
-            taskpaw_v3/src-tauri/target/release/bundle/**/*.dmg
-            taskpaw_v3/src-tauri/target/release/bundle/**/*.app
-            taskpaw_v3/src-tauri/target/release/bundle/**/*.msi
-            taskpaw_v3/src-tauri/target/release/bundle/**/*.exe
+          retention-days: 14
