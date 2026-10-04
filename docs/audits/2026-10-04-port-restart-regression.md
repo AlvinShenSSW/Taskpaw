@@ -133,3 +133,31 @@ An existing remote 3.9.11 build at `306e0c7` was inspected. It does not contain
 the Windows native error/recovery dialogs added in this repair tree, so its
 successful Windows packaging is not evidence that this repair has passed native
 Windows acceptance. A new Windows build of the repaired source is still needed.
+
+The operator subsequently installed the local Hub package on SunnyPig. Both
+installed executable hashes matched the verified package, and the installed
+app passed deep/strict signature verification. Gatekeeper initially blocked the
+unnotarized app. After the operator explicitly authorized its app-specific
+exception, the 3.9.11 Hub dashboard opened and connected to its local API. Live
+polling then showed all seven registered machines online, including ThunderPig
+and BlackGoldPig, with the older-Hub version warning absent. This verifies the
+observed upgrade launch and polling; it is not clean-machine or notification
+delivery certification.
+
+## Native Windows build and delivery
+
+The operator authorized committing and pushing the repair branch. Commit
+`f5d56374e9991cac4a4aa8b17b10fe4a93e91852` was built by release run
+`37215547511`. The Windows job completed successfully, producing both NSIS and
+MSI installers for 3.9.11. Its migration/first-install/version checks passed all
+47 tests. Native Rust tests passed 26 tests, including recovery policy, Unicode
+dialog handling and helper descendant cleanup after success or timeout. One
+pre-existing Python credential interoperability test was ignored because it
+requires dedicated production-writer fixtures.
+
+The Windows installers were downloaded and copied alongside the Hub DMG into
+the operator-requested desktop delivery folder. Copy hashes matched and a
+checksum manifest and separate validation records were supplied. No Windows
+signing certificate was configured, so the installers are unsigned. Target
+Windows upgrade installation remains an operator acceptance step; the native
+build and tests do not establish that installation result.
