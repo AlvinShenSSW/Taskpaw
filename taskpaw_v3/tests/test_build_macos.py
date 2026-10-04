@@ -1053,7 +1053,7 @@ def finalizer_fixture(tmp_path, monkeypatch, mode="adhoc"):
             or (p / "Contents/MacOS/taskpaw-backend", 4)
         ),
     )
-    monkeypatch.setattr(mac, "smoke", lambda *a: events.append(("smoke",)))
+    monkeypatch.setattr(mac, "smoke", lambda *a, **k: events.append(("smoke",)))
 
     def zip_app(app, path, env):
         events.append(("zip", path.name))
@@ -1841,4 +1841,263 @@ def test_main_and_library_context_cannot_be_swapped(
             ROOT,
             backend=backend,
             native_library=library,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="owned POSIX smoke protocol fixture")
+def test_finalizer_migrates_legacy_before_ready_and_reopens_same_lineage(
+    tmp_path, monkeypatch
+):
+    # Actual offline backend dispatch/state files plus a plain ready emitter.
+    # The native release gate, not this emitter, proves packaged readiness.
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    from taskpaw_v3.agent.server import service
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.core.state import StateSession
+    from taskpaw_v3.packaging import backend_main
+
+    real_smoke, real_popen = mac.smoke, subprocess.Popen
+    plan, cfg, bundle, events = finalizer_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(mac, "smoke", real_smoke)
+    other_tool = mac.tool
+    phases, records, children, homes, headers = [], [], [], [], []
+    metrics = {}
+
+    def default_config(env):
+        home = Path(env["HOME"])
+        assert home == home.resolve()
+        assert Path(env["TMPDIR"]) == home.parent / "extraction"
+        homes.append(home)
+        return home / "Library/Application Support/TaskPaw/agent.yaml"
+
+    def runtime_refusal(config, *, state_path, **kwargs):
+        session = StateSession.open(state_path, config.server_id)
+        session.close()
+        pytest.fail("the refusal fixture must not reach a valid runtime state")
+
+    def offline_tool(stage, command, **kwargs):
+        if not stage.startswith("smoke_"):
+            return other_tool(stage, command, **kwargs)
+        config = default_config(kwargs["env"])
+        phases.append((stage, command[1:]))
+        out, err = io.StringIO(), io.StringIO()
+        with monkeypatch.context() as patch:
+            patch.setattr(service, "default_config_path", lambda: config)
+            patch.setattr(service, "run_agent", runtime_refusal)
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = backend_main.main(command[1:])
+        assert rc == kwargs.get("expected_returncode", 0)
+        return out.getvalue().encode(), err.getvalue().encode()
+
+    def emitter(command, **kwargs):
+        config = default_config(kwargs["env"])
+        loaded = load_yaml(AgentConfig, config)
+        session = StateSession.open(config.with_name("agent.state.json"))
+        try:
+            record = session.record
+            assert record.lineage_origin == "legacy_migration", (
+                "release acceptance must exercise the existing counter, not replace pairing"
+            )
+            assert record.server_id == loaded.server_id == "release-smoke"
+            assert record.next_event_id == 32560 + len(records)
+            records.append(record)
+            session.reserve(record.next_event_id + 1)
+        finally:
+            session.close()
+        (config.parent / "logs").mkdir(exist_ok=True)
+        assert command[1:] == ["agent"]
+        metrics.update(
+            server_id=loaded.server_id,
+            machine="release-smoke",
+            version=cfg["version"],
+            monitors={
+                "release-smoke-metrics": {
+                    "state": "ok",
+                    "metrics": dict.fromkeys(
+                        ("cpu_pct", "mem_pct", "disk_pct", "net_in_bps", "net_out_bps"),
+                        0,
+                    ),
+                }
+            },
+        )
+        ready = {
+            "taskpaw_ready": True,
+            "role": "agent",
+            "base_url": f"http://127.0.0.1:{loaded.control_port}",
+        }
+        process = real_popen(
+            [
+                sys.executable,
+                "-c",
+                f"import time; print({json.dumps(ready)!r},flush=True); time.sleep(60)",
+            ],
+            **kwargs,
+        )
+        children.append(process)
+        return process
+
+    class Connection:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, method, path, *, headers):
+            assert method == "GET" and path == "/status"
+            assert headers["Authorization"].startswith("Bearer ")
+            headers_seen.append(headers)
+
+        def getresponse(self):
+            return SimpleNamespace(
+                status=200, read=lambda n: json.dumps(metrics).encode()
+            )
+
+        def close(self):
+            pass
+
+    headers_seen = headers
+    monkeypatch.setattr(mac, "tool", offline_tool)
+    monkeypatch.setattr(mac.subprocess, "Popen", emitter)
+    monkeypatch.setattr(mac.http.client, "HTTPConnection", Connection)
+    try:
+        mac.finalize(plan, SimpleNamespace(require=lambda: None), {}, tmp_path, cfg)
+        assert len(records) == 2 and records[0].stream_id == records[1].stream_id
+        assert len(children) == len(headers) == 2
+        assert [x[1] for x in phases] == [
+            ["agent"],
+            ["agent-desktop-state", "migrate", "--confirm-intact-legacy-counter"],
+            ["agent"],
+        ]
+        assert all(
+            p.poll() is not None and p.stdout.closed and p.stderr.closed
+            for p in children
+        )
+        assert homes and all(not home.exists() for home in homes)
+    finally:
+        for process in children:
+            if process.poll() is None:
+                mac.stop_group(process, grace=1)
+            process.stdout.close()
+            process.stderr.close()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "ready",
+        "wrong-code",
+        "extra",
+        "boolean",
+        "reset",
+        "anchor",
+        "config",
+        "no-backup",
+    ],
+)
+def test_smoke_refusal_never_accepts_ready_or_changes_to_owned_state(
+    tmp_path, monkeypatch, fault
+):
+    from taskpaw_v3.core.state import StateError, StateSession
+
+    config = tmp_path / "agent.yaml"
+    config.write_bytes(b"owned config with FAKE-TOKEN")
+    primary = config.with_name("agent.state.json")
+    primary.write_bytes(b'{"next_event_id":32560}')
+
+    def refused(stage, command, **kwargs):
+        assert command == ["FAKE-SIDECAR", "agent"]
+        assert kwargs["expected_returncode"] == 1 and kwargs["exact_output"] is True
+        with pytest.raises(StateError, match="migration_required") as caught:
+            StateSession.open(primary)
+        frame = {
+            "taskpaw_startup_error": 1,
+            "role": "agent",
+            "code": "migration_required",
+        }
+        if fault == "wrong-code":
+            frame["code"] = "initialization_required"
+        elif fault == "extra":
+            frame["debug"] = "unexpected"
+        elif fault == "boolean":
+            frame["taskpaw_startup_error"] = True
+        elif fault == "reset":
+            primary.write_bytes(b'{"next_event_id":1}')
+        elif fault == "anchor":
+            config.with_name("agent.state.highwater.json").write_bytes(b"unexpected")
+        elif fault == "config":
+            config.write_bytes(b"silently replaced pairing")
+        elif fault == "no-backup":
+            for backup in caught.value.backups:
+                backup.unlink()
+        out = json.dumps(frame).encode()
+        if fault == "ready":
+            out = b'{"taskpaw_ready":true,"role":"agent"}\n' + out
+        return out, b"ignored fixed stderr"
+
+    monkeypatch.setattr(mac, "tool", refused)
+    with pytest.raises(mac.BuildError, match="^macos_smoke_state_refusal_invalid$"):
+        mac.smoke_refusal(
+            Path("FAKE-SIDECAR"),
+            SimpleNamespace(require=lambda: None),
+            {},
+            tmp_path,
+            config,
+            "migration_required",
+        )
+
+
+@pytest.mark.parametrize("fault", ["reset", "identity", "anchor", "origin"])
+def test_smoke_reopen_cannot_accept_counter_rollback_or_lineage_change(tmp_path, fault):
+    from taskpaw_v3.core.state import StateRecord, write_pair
+
+    config = tmp_path / "agent.yaml"
+    primary = config.with_name("agent.state.json")
+    original = StateRecord(2, "release-smoke", "a" * 32, "legacy_migration", 32560)
+    write_pair(primary, original)
+    previous = mac.smoke_lineage(config)
+    updated = StateRecord(2, "release-smoke", "a" * 32, "legacy_migration", 32561)
+    write_pair(primary, updated)
+    assert mac.smoke_lineage(config, previous)["next_event_id"] == 32561
+    previous = mac.smoke_lineage(config, previous)
+    changed = json.loads(primary.read_text())
+    changed[
+        {
+            "reset": "next_event_id",
+            "identity": "stream_id",
+            "anchor": "next_event_id",
+            "origin": "lineage_origin",
+        }[fault]
+    ] = {
+        "reset": 32560,
+        "identity": "b" * 32,
+        "anchor": 32562,
+        "origin": "new_pairing",
+    }[fault]
+    primary.write_text(json.dumps(changed))
+    if fault != "anchor":
+        config.with_name("agent.state.highwater.json").write_text(json.dumps(changed))
+    with pytest.raises(mac.BuildError, match="^macos_smoke_lineage_invalid$"):
+        mac.smoke_lineage(config, previous)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="owned POSIX process group fixture")
+def test_expected_startup_failure_tool_requires_exact_exit_and_bounded_output():
+    output = "print('typed-refusal',flush=True); "
+    out, err = mac.tool(
+        "fixture_refusal",
+        [sys.executable, "-c", output + "raise SystemExit(1)"],
+        expected_returncode=1,
+        exact_output=True,
+    )
+    assert out == b"typed-refusal\n" and err == b""
+    with pytest.raises(mac.BuildError, match="^fixture_refusal_failed$"):
+        mac.tool(
+            "fixture_refusal", [sys.executable, "-c", output], expected_returncode=1
+        )
+    with pytest.raises(mac.BuildError, match="^fixture_refusal_output_limit$"):
+        mac.tool(
+            "fixture_refusal",
+            [sys.executable, "-c", "print('x'*200000); raise SystemExit(1)"],
+            expected_returncode=1,
+            exact_output=True,
         )

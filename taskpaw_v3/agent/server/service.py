@@ -11,8 +11,11 @@ import os
 import sys
 from pathlib import Path
 
+import yaml
+
 from taskpaw_v3.agent.server.launcher import run_agent
 from taskpaw_v3.core.config import AgentConfig, load_yaml
+from taskpaw_v3.core.startup import emit_startup_error, startup_code
 from taskpaw_v3.core.state import StateError
 
 
@@ -27,7 +30,7 @@ def default_config_path() -> Path:
     return base / "agent.yaml"
 
 
-def main() -> int:
+def _main() -> int:
     logging.basicConfig(level=logging.INFO)
     path = default_config_path()
     if not path.exists():
@@ -38,26 +41,35 @@ def main() -> int:
 
         try:
             bootstrap.scaffold("agent")
-        except OSError as e:
+        except OSError:
             # e.g. Linux /etc/taskpaw without root — fail cleanly, don't crash (Kimi).
             print(
-                f"No agent config at {path} and could not auto-create it: {e}\n"
+                f"No agent config at {path} and could not auto-create it.\n"
                 f"  Create it manually (see taskpaw_v3/examples/agent.example.yaml) "
                 f"or run with write access to that directory.",
                 file=sys.stderr,
             )
+            emit_startup_error("config_unwritable")
             return 1
         logging.getLogger("taskpaw.agent").info(
             "created default agent config at %s", path
         )
-    config: AgentConfig = load_yaml(AgentConfig, path)  # type: ignore[assignment]
+    try:
+        config: AgentConfig = load_yaml(AgentConfig, path)  # type: ignore[assignment]
+    except (OSError, ValueError, TypeError, yaml.YAMLError):
+        print(
+            "Agent config is invalid or unreadable; check agent.yaml.", file=sys.stderr
+        )
+        emit_startup_error("config_invalid")
+        return 1
     # Persist the monotonic event-id counter next to the config.
     state_path = path.with_name("agent.state.json")
     # Pass the config path so the control API can persist add/remove/enable (#57).
     try:
         run_agent(config, state_path=state_path, config_path=path, block=True)
     except StateError as exc:
-        print(f"event state: {exc.reason}; config: {path}", file=sys.stderr)
+        code = startup_code(exc, state_path=state_path)
+        print(f"event state: {code}; config: {path}", file=sys.stderr)
         for backup in exc.backups:
             print(f"fault backup: {backup}", file=sys.stderr)
         prefix = (
@@ -70,8 +82,24 @@ def main() -> int:
             "Use explicit initialize/migrate/recover only after verifying pairing or intact evidence (see event-cursor-recovery guide).",
             file=sys.stderr,
         )
+        emit_startup_error(code)
+        return 1
+    except Exception as exc:
+        code = startup_code(exc)
+        print(f"Agent startup failed: {code}.", file=sys.stderr)
+        emit_startup_error(code)
         return 1
     return 0
+
+
+def main() -> int:
+    try:
+        return _main()
+    except Exception as exc:
+        code = startup_code(exc)
+        print(f"Agent startup failed: {code}.", file=sys.stderr)
+        emit_startup_error(code)
+        return 1
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod control_credentials;
+mod startup;
 use control_credentials::{CredentialError, Descriptor, Ready};
 use std::process::{Child, Command};
 use std::sync::Mutex;
@@ -375,8 +376,8 @@ fn open_backend_log() -> Option<std::fs::File> {
     }
 }
 
-fn spawn_backend() -> Option<Child> {
-    let (program, args) = backend_command()?;
+fn spawn_backend(command: Option<(String, Vec<String>)>) -> Option<Child> {
+    let (program, args) = command?;
     let mut command = Command::new(&program);
     command.args(args);
     // Pipe stdout on EVERY platform so the shell can read the §3.1 readiness line
@@ -465,10 +466,32 @@ fn parse_ready_line(line: &str) -> Option<Result<Ready, CredentialError>> {
     }
     Some(serde_json::from_value(value).map_err(|_| CredentialError))
 }
+enum StartupStatus {
+    Ready(Ready),
+    Failed(startup::Code),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StartupReadError {
+    Eof,
+    Timeout,
+    InvalidMetadata,
+}
+
+impl StartupReadError {
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Eof => "后端在报告启动状态前退出。请查看本次后端日志。",
+            Self::Timeout => "后端在 30 秒内未报告启动状态。请查看本次后端日志。",
+            Self::InvalidMetadata => "后端返回的启动 metadata 无效。为保护本地 API 凭据，已拒绝连接。",
+        }
+    }
+}
+
 fn read_readiness(
     stdout: std::process::ChildStdout,
     timeout: Duration,
-) -> Result<Ready, CredentialError> {
+) -> Result<StartupStatus, StartupReadError> {
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc;
     let (tx, rx) = mpsc::channel();
@@ -479,8 +502,13 @@ fn read_readiness(
                 break;
             };
             if !found {
-                if let Some(ready) = parse_ready_line(&line) {
-                    let _ = tx.send(ready);
+                let status = if let Some(failure) = startup::parse_failure(&line) {
+                    Some(failure.map(StartupStatus::Failed).map_err(|_| StartupReadError::InvalidMetadata))
+                } else {
+                    parse_ready_line(&line).map(|ready| ready.map(StartupStatus::Ready).map_err(|_| StartupReadError::InvalidMetadata))
+                };
+                if let Some(status) = status {
+                    let _ = tx.send(status);
                     found = true;
                 } else {
                     // Never echo untrusted readiness/stdout data (it may contain
@@ -489,8 +517,14 @@ fn read_readiness(
                 }
             }
         }
+        if !found {
+            let _ = tx.send(Err(StartupReadError::Eof));
+        }
     });
-    rx.recv_timeout(timeout).map_err(|_| CredentialError)?
+    rx.recv_timeout(timeout).map_err(|err| match err {
+        mpsc::RecvTimeoutError::Timeout => StartupReadError::Timeout,
+        mpsc::RecvTimeoutError::Disconnected => StartupReadError::Eof,
+    })?
 }
 
 // Signal the backend's whole process GROUP on Unix (negative pid), so a wedged
@@ -610,6 +644,35 @@ fn fatal_startup(message: &str, app: Option<&tauri::AppHandle>) -> ! {
     std::process::exit(1);
 }
 
+#[cfg(target_os = "macos")]
+fn confirm_startup_recovery(action: startup::Action) -> bool {
+    if std::env::var_os("TASKPAW_NO_STARTUP_DIALOG").is_some() {
+        return false;
+    }
+    let script = format!(
+        "set answer to display dialog \"{}\" with title \"TaskPaw — 启动恢复\" buttons {{\"取消\", \"确认并继续\"}} default button \"取消\" cancel button \"取消\" with icon caution giving up after 120\nif gave up of answer or button returned of answer is not \"确认并继续\" then error number -128",
+        applescript_escape(action.confirmation())
+    );
+    startup::run_owned(
+        Command::new("/usr/bin/osascript")
+            .args(["-e", &script])
+            .stderr(std::process::Stdio::null()),
+        Duration::from_secs(125),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn recover_desktop_state(code: startup::Code, program: &str, eligible: bool, attempted: &mut bool) -> Result<(), startup::RecoveryError> {
+    startup::recover_once(code, eligible, attempted, confirm_startup_recovery, |action| {
+        startup::run_owned(
+            Command::new(program)
+                .args(action.args())
+                .stderr(open_backend_log().map(std::process::Stdio::from).unwrap_or_else(std::process::Stdio::null)),
+            Duration::from_secs(30),
+        )
+    })
+}
+
 #[cfg(test)]
 fn loopback_base(value: &str) -> String {
     if control_credentials::canonical_base(value) {
@@ -702,7 +765,12 @@ fn main() {
         .setup(|app| {
             // `mut`: the Windows Job-Object failure kill path AND taking the
             // backend's stdout for the readiness handshake (#48).
-            let mut child = spawn_backend();
+            let command = backend_command();
+            #[cfg(target_os = "macos")]
+            let own_bundled = !cfg!(debug_assertions)
+                && std::env::var_os("TASKPAW_BACKEND_CMD").is_none()
+                && option_env!("TASKPAW_BUILD_ROLE").unwrap_or("agent") == "agent";
+            let mut child = spawn_backend(command.clone());
             // Only an explicit empty command selects attach. Failed spawns must
             // not silently attach to an unrelated already-running backend.
             let attach = std::env::var("TASKPAW_BACKEND_CMD").map(|value| value.trim().is_empty()).unwrap_or(false);
@@ -711,7 +779,7 @@ fn main() {
             }
             // Take the backend's piped stdout now (before it's moved into managed
             // state) so we can read the readiness handshake below.
-            let backend_stdout = child.as_mut().and_then(|c| c.stdout.take());
+            let mut backend_stdout = child.as_mut().and_then(|c| c.stdout.take());
             #[cfg(windows)]
             {
                 // If we spawned a backend but couldn't put it in a kill-on-close
@@ -747,12 +815,45 @@ fn main() {
             app.manage(Backend(Mutex::new(child)));
             // Spawn metadata must bind the protected descriptor to this boot;
             // explicit attach reads the current protected descriptor directly.
-            let ready = match backend_stdout {
-                Some(out) => match read_readiness(out, Duration::from_secs(30)) {
-                    Ok(ready) => Some(ready),
-                    Err(_) => fatal_startup("TaskPaw's backend did not report valid startup metadata. Its local API may be unavailable. Please check the backend log.", Some(app.handle())),
-                },
-                None => None,
+            #[cfg(target_os = "macos")]
+            let mut recovery_attempted = false;
+            let ready = loop {
+                let Some(out) = backend_stdout.take() else { break None; };
+                match read_readiness(out, Duration::from_secs(30)) {
+                    Ok(StartupStatus::Ready(ready)) => break Some(ready),
+                    Err(error) => fatal_startup(&format!("{}\n{}", error.message(), backend_log_hint()), Some(app.handle())),
+                    Ok(StartupStatus::Failed(code)) => {
+                        // No offline state write may race the failed service. On
+                        // Mac also stop group members when its leader already exited.
+                        #[cfg(target_os = "macos")]
+                        if let Some(state) = app.try_state::<Backend>() {
+                            if let Ok(guard) = state.0.lock() {
+                                if let Some(child) = guard.as_ref() {
+                                    signal_group(child, libc::SIGKILL);
+                                }
+                            }
+                        }
+                        kill_backend(app.handle());
+                        #[cfg(target_os = "macos")]
+                        if let Some((program, args)) = command.as_ref() {
+                            let eligible = startup::recovery_eligible(true, own_bundled, &ui_role(), args);
+                            match recover_desktop_state(code, program, eligible, &mut recovery_attempted) {
+                                Ok(()) => {
+                                    let Some(mut child) = spawn_backend(command.clone()) else {
+                                        fatal_startup(&format!("状态操作已完成，但 Agent 无法重新启动。\n{}", backend_log_hint()), Some(app.handle()));
+                                    };
+                                    backend_stdout = child.stdout.take();
+                                    *app.state::<Backend>().0.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+                                    continue;
+                                }
+                                Err(startup::RecoveryError::Cancelled) => fatal_startup("已取消启动恢复。没有执行状态迁移或初始化；请退出后核对旧记录与配对。", Some(app.handle())),
+                                Err(startup::RecoveryError::HelperFailed) => fatal_startup(&format!("状态操作失败；未继续启动。请查看本次后端日志并按恢复指南检查，不要删除状态文件。\n{}", backend_log_hint()), Some(app.handle())),
+                                Err(startup::RecoveryError::Unavailable) => {}
+                            }
+                        }
+                        fatal_startup(&format!("{}\n{}", code.message(), backend_log_hint()), Some(app.handle()));
+                    }
+                }
             };
             let descriptor = match load_credentials(ready, &ui_role()) {
                 Ok(descriptor) => descriptor,
@@ -1186,15 +1287,32 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
         );
     }
     #[test]
+    fn typed_startup_failure_is_received_before_eof() {
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("node")
+            .args(["-e", "process.stdout.write(JSON.stringify({taskpaw_startup_error:1,role:'agent',code:'migration_required'})+'\\n')"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let result = super::read_readiness(
+            child.stdout.take().unwrap(),
+            std::time::Duration::from_secs(2),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(matches!(result, Ok(super::StartupStatus::Failed(super::startup::Code::MigrationRequired))), "a supported state admission failure must reach the shell as typed startup status");
+    }
+
+    #[test]
     fn readiness_eof_timeout_and_invalid_metadata_fail_closed() {
         use std::process::{Command, Stdio};
-        for (program, timeout) in [
-            ("process.exit(0)", std::time::Duration::from_secs(2)),
-            ("setTimeout(()=>{},1000)", std::time::Duration::from_millis(10)),
-            ("process.stdout.write(JSON.stringify({taskpaw_ready:true,base_url:'http://127.0.0.1:5681'})+'\\n')", std::time::Duration::from_secs(2)),
+        for (program, timeout, expected) in [
+            ("process.exit(0)", std::time::Duration::from_secs(2), super::StartupReadError::Eof),
+            ("setTimeout(()=>{},1000)", std::time::Duration::from_millis(10), super::StartupReadError::Timeout),
+            ("process.stdout.write(JSON.stringify({taskpaw_ready:true,base_url:'http://127.0.0.1:5681'})+'\\n')", std::time::Duration::from_secs(2), super::StartupReadError::InvalidMetadata),
         ] {
             let mut child=Command::new("node").args(["-e",program]).stdout(Stdio::piped()).spawn().unwrap();
-            assert!(super::read_readiness(child.stdout.take().unwrap(), timeout).is_err());
+            assert!(matches!(super::read_readiness(child.stdout.take().unwrap(), timeout), Err(error) if error == expected));
             let _=child.kill(); let _=child.wait();
         }
     }

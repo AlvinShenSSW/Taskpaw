@@ -274,7 +274,17 @@ def stop_group(proc, *, grace=10):
     raise BuildError("macos_child_cleanup_failed")
 
 
-def tool(stage: str, cmd, *, env=None, cwd=None, timeout=60, input_data=None):
+def tool(
+    stage: str,
+    cmd,
+    *,
+    env=None,
+    cwd=None,
+    timeout=60,
+    input_data=None,
+    expected_returncode=0,
+    exact_output=False,
+):
     """Drain both pipes, keep bounded tails, never print upstream output/argv."""
     if env is None:
         env = child_env(os.environ)
@@ -309,6 +319,8 @@ def tool(stage: str, cmd, *, env=None, cwd=None, timeout=60, input_data=None):
                         selector.unregister(key.fileobj)
                     else:
                         key.data.extend(chunk)
+                        if exact_output and len(key.data) > TAIL_LIMIT:
+                            raise BuildError(stage + "_output_limit")
                         del key.data[:-TAIL_LIMIT]
             while proc.poll() is None:
                 cancellation_checkpoint()
@@ -317,7 +329,7 @@ def tool(stage: str, cmd, *, env=None, cwd=None, timeout=60, input_data=None):
                 time.sleep(0.05)
             cancellation_checkpoint()
             rc = proc.returncode
-            if rc:
+            if rc != expected_returncode:
                 raise BuildError(stage + "_failed")
             return bytes(out), bytes(err)
 
@@ -900,7 +912,93 @@ def metrics_ok(record, version, expected_server_id):
     )
 
 
-def smoke(sidecar, plan, isolation, env, version):
+def smoke_refusal(sidecar, isolation, runtime_env, temporary_root, config, code):
+    # Only this newly owned HOME is inspected. No real user state is read.
+    def snapshot():
+        try:
+            paths = list(config.parent.iterdir())
+            if any(p.is_symlink() or not p.is_file() for p in paths):
+                raise ValueError
+            return {p.name: p.read_bytes() for p in paths}
+        except (OSError, ValueError):
+            raise BuildError("macos_smoke_state_refusal_invalid") from None
+
+    before = snapshot()
+    isolation.require()
+    out, _ = tool(
+        "smoke_state_refusal",
+        [str(sidecar), "agent"],
+        env=runtime_env,
+        cwd=str(temporary_root),
+        timeout=30,
+        expected_returncode=1,
+        exact_output=True,
+    )
+    try:
+        frame = json.loads(out)
+        if (
+            frame != {"taskpaw_startup_error": 1, "role": "agent", "code": code}
+            or type(frame["taskpaw_startup_error"]) is not int
+        ):
+            raise ValueError
+        # A single exact failure frame also excludes readiness before refusal.
+        after = snapshot()
+        if any(after.get(name) != value for name, value in before.items()):
+            raise ValueError
+        backups = []
+        for name in after.keys() - before.keys():
+            if name == "agent.state.lock":
+                continue
+            source, separator, suffix = name.partition(".fault-")
+            if (
+                not separator
+                or source not in {"agent.state.json", "agent.state.highwater.json"}
+                or source not in before
+                or not re.fullmatch(r"[0-9]{8}T[0-9]{6}-[0-9a-f]{16}", suffix)
+                or after[name] != before[source]
+            ):
+                raise ValueError
+            backups.append(name)
+        if not backups:
+            raise ValueError
+    except (OSError, ValueError, TypeError, KeyError):
+        raise BuildError("macos_smoke_state_refusal_invalid") from None
+
+
+def smoke_lineage(config, previous=None):
+    try:
+        record = json.loads(config.with_name("agent.state.json").read_text("utf-8"))
+        anchor = json.loads(
+            config.with_name("agent.state.highwater.json").read_text("utf-8")
+        )
+        if (
+            record != anchor
+            or set(record)
+            != {"version", "server_id", "stream_id", "lineage_origin", "next_event_id"}
+            or type(record["version"]) is not int
+            or record["version"] != 2
+            or record["server_id"] != "release-smoke"
+            or record["lineage_origin"] != "legacy_migration"
+            or not isinstance(record["stream_id"], str)
+            or not re.fullmatch(r"[0-9a-f]{32}", record["stream_id"])
+            or type(record["next_event_id"]) is not int
+            or not 32560 <= record["next_event_id"] <= (1 << 63)
+        ):
+            raise ValueError
+        if previous is None:
+            if record["next_event_id"] != 32560:
+                raise ValueError
+        elif (
+            any(record[k] != previous[k] for k in record if k != "next_event_id")
+            or record["next_event_id"] < previous["next_event_id"]
+        ):
+            raise ValueError
+        return record
+    except (OSError, ValueError, TypeError, KeyError):
+        raise BuildError("macos_smoke_lineage_invalid") from None
+
+
+def smoke(sidecar, plan, isolation, env, version, *, upgrade=False):
     # This is intentionally before HOME/ports or any backend Popen.
     isolation.require()
     with tempfile.TemporaryDirectory(prefix="taskpaw-release-smoke-") as tmp:
@@ -949,20 +1047,63 @@ def smoke(sidecar, plan, isolation, env, version):
         runtime_env.update(
             HOME=str(home), TMPDIR=str(extraction), PATH="/usr/bin:/bin:/usr/sbin:/sbin"
         )
-        isolation.require()
-        tool(
-            "smoke_state_initialize",
-            [
-                str(sidecar),
-                "agent-state",
-                "--config",
-                str(config),
-                "initialize",
-                "--confirm-new-pairing",
-            ],
-            env=runtime_env,
-            cwd=str(temporary_root),
-        )
+        lineage = None
+        if upgrade:
+            legacy = b'{"next_event_id":32560}\n'
+            primary = config.with_name("agent.state.json")
+            primary.write_bytes(legacy)
+            primary.chmod(0o600)
+            original_config = config.read_bytes()
+            smoke_refusal(
+                sidecar,
+                isolation,
+                runtime_env,
+                temporary_root,
+                config,
+                "migration_required",
+            )
+            backups_before = set(config.parent.glob("agent.state.json.fault-*"))
+            isolation.require()
+            out, _ = tool(
+                "smoke_state_migrate",
+                [
+                    str(sidecar),
+                    "agent-desktop-state",
+                    "migrate",
+                    "--confirm-intact-legacy-counter",
+                ],
+                env=runtime_env,
+                cwd=str(temporary_root),
+                timeout=30,
+                exact_output=True,
+            )
+            try:
+                backups_after = set(config.parent.glob("agent.state.json.fault-*"))
+                if (
+                    json.loads(out) != {"result": "migrate"}
+                    or config.read_bytes() != original_config
+                    or not backups_after - backups_before
+                    or any(p.read_bytes() != legacy for p in backups_after)
+                ):
+                    raise ValueError
+            except (OSError, ValueError, TypeError):
+                raise BuildError("macos_smoke_migration_invalid") from None
+            lineage = smoke_lineage(config)
+        else:
+            isolation.require()
+            tool(
+                "smoke_state_initialize",
+                [
+                    str(sidecar),
+                    "agent-state",
+                    "--config",
+                    str(config),
+                    "initialize",
+                    "--confirm-new-pairing",
+                ],
+                env=runtime_env,
+                cwd=str(temporary_root),
+            )
         try:
             state = json.loads(
                 config.with_name("agent.state.json").read_text(encoding="utf-8")
@@ -972,82 +1113,114 @@ def smoke(sidecar, plan, isolation, env, version):
                 raise ValueError
         except (OSError, ValueError, TypeError, KeyError):
             raise BuildError("macos_smoke_state_invalid") from None
-        isolation.require()
-        try:
-            with owned_child(
-                [str(sidecar), "agent"],
-                stage="smoke",
-                grace=10,
-                reject_forced=True,
-                env=runtime_env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            ) as proc:
-                base = f"http://127.0.0.1:{ctl_port}"
-                success = False
-                pending = bytearray()
-                with selectors.DefaultSelector() as selector:
-                    cancellation_checkpoint()
-                    selector.register(proc.stdout, selectors.EVENT_READ, "out")
-                    cancellation_checkpoint()
-                    selector.register(proc.stderr, selectors.EVENT_READ, "err")
-                    cancellation_checkpoint()
-                    ready = False
-                    deadline = time.monotonic() + 30
-                    while time.monotonic() < deadline and proc.poll() is None:
+        for _ in range(2 if upgrade else 1):
+            isolation.require()
+            try:
+                with owned_child(
+                    [str(sidecar), "agent"],
+                    stage="smoke",
+                    grace=10,
+                    reject_forced=True,
+                    env=runtime_env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ) as proc:
+                    base = f"http://127.0.0.1:{ctl_port}"
+                    success = False
+                    pending = bytearray()
+                    with selectors.DefaultSelector() as selector:
                         cancellation_checkpoint()
-                        for key, _ in selector.select(0.1):
-                            chunk = os.read(key.fileobj.fileno(), 8192)
-                            if not chunk:
-                                selector.unregister(key.fileobj)
-                            elif key.data == "out":
-                                pending.extend(chunk)
-                                if len(pending) > TAIL_LIMIT:
-                                    raise BuildError("macos_smoke_output_limit")
-                                while b"\n" in pending:
-                                    line, _, remaining = pending.partition(b"\n")
-                                    pending[:] = remaining
-                                    if len(line) > 16384:
+                        selector.register(proc.stdout, selectors.EVENT_READ, "out")
+                        cancellation_checkpoint()
+                        selector.register(proc.stderr, selectors.EVENT_READ, "err")
+                        cancellation_checkpoint()
+                        ready = False
+                        deadline = time.monotonic() + 30
+                        while time.monotonic() < deadline and proc.poll() is None:
+                            cancellation_checkpoint()
+                            for key, _ in selector.select(0.1):
+                                chunk = os.read(key.fileobj.fileno(), 8192)
+                                if not chunk:
+                                    selector.unregister(key.fileobj)
+                                elif key.data == "out":
+                                    pending.extend(chunk)
+                                    if len(pending) > TAIL_LIMIT:
                                         raise BuildError("macos_smoke_output_limit")
-                                    ready = ready or ready_line(line, base)
-                                if len(pending) > 16384:
-                                    raise BuildError("macos_smoke_output_limit")
-                        if ready:
-                            connection = http.client.HTTPConnection(
-                                "127.0.0.1", net_port, timeout=2
-                            )
-                            try:
-                                connection.request(
-                                    "GET",
-                                    "/status",
-                                    headers={"Authorization": "Bearer " + token},
+                                    while b"\n" in pending:
+                                        line, _, remaining = pending.partition(b"\n")
+                                        pending[:] = remaining
+                                        if len(line) > 16384:
+                                            raise BuildError("macos_smoke_output_limit")
+                                        ready = ready or ready_line(line, base)
+                                    if len(pending) > 16384:
+                                        raise BuildError("macos_smoke_output_limit")
+                            if ready:
+                                connection = http.client.HTTPConnection(
+                                    "127.0.0.1", net_port, timeout=2
                                 )
-                                response = connection.getresponse()
-                                body = response.read(1024 * 1024 + 1)
-                                if (
-                                    response.status == 200
-                                    and len(body) <= 1024 * 1024
-                                    and metrics_ok(
-                                        json.loads(body), version, expected_server_id
+                                try:
+                                    connection.request(
+                                        "GET",
+                                        "/status",
+                                        headers={"Authorization": "Bearer " + token},
                                     )
-                                ):
-                                    success = True
-                                    break
-                            except (OSError, ValueError, http.client.HTTPException):
-                                # Expected while the isolated fixture is still starting.
-                                time.sleep(0.05)
-                            finally:
-                                connection.close()
-                    if not success:
-                        raise BuildError("macos_smoke_readiness_failed")
-        finally:
-            for port in (net_port, ctl_port):
-                try:
-                    with socket.socket() as check:
-                        check.bind(("127.0.0.1", port))
-                except OSError:
-                    raise BuildError("macos_smoke_listener_cleanup_failed") from None
+                                    response = connection.getresponse()
+                                    body = response.read(1024 * 1024 + 1)
+                                    if (
+                                        response.status == 200
+                                        and len(body) <= 1024 * 1024
+                                        and metrics_ok(
+                                            json.loads(body),
+                                            version,
+                                            expected_server_id,
+                                        )
+                                    ):
+                                        success = True
+                                        break
+                                except (OSError, ValueError, http.client.HTTPException):
+                                    # Expected while the isolated fixture is still starting.
+                                    time.sleep(0.05)
+                                finally:
+                                    connection.close()
+                        if not success:
+                            raise BuildError("macos_smoke_readiness_failed")
+            finally:
+                for port in (net_port, ctl_port):
+                    try:
+                        with socket.socket() as check:
+                            check.bind(("127.0.0.1", port))
+                    except OSError:
+                        raise BuildError(
+                            "macos_smoke_listener_cleanup_failed"
+                        ) from None
+            if upgrade:
+                lineage = smoke_lineage(config, lineage)
+        if upgrade:
+            # Separate owned HOME keeps the verified upgrade lineage intact and
+            # excludes ordinary runtime logs/directories from this refusal fixture.
+            corrupt_home = temporary_root / "CORRUPT_HOME"
+            corrupt_config = (
+                corrupt_home / "Library/Application Support/TaskPaw/agent.yaml"
+            )
+            corrupt_config.parent.mkdir(parents=True, mode=0o700)
+            corrupt_config.write_bytes(config.read_bytes())
+            corrupt_config.chmod(0o600)
+            corrupt_primary = corrupt_config.with_name("agent.state.json")
+            corrupt_primary.write_bytes(b'{"next_event_id":"bad"}')
+            corrupt_primary.chmod(0o600)
+            smoke_refusal(
+                sidecar,
+                isolation,
+                {**runtime_env, "HOME": str(corrupt_home)},
+                temporary_root,
+                corrupt_config,
+                "state_recovery_required",
+            )
+            print(
+                "macos packaged legacy migration, restart and corrupt refusal passed",
+                flush=True,
+            )
     print("macos packaged readiness and native metrics passed", flush=True)
 
 
@@ -1149,7 +1322,7 @@ def finalize(plan, isolation, env, root, cfg):
         for path in [*bundles, staged_app]:
             sign(path, plan, env, root)
         sidecar, count = verify_app(staged_app, plan, env, root)
-        smoke(sidecar, plan, isolation, env, cfg["version"])
+        smoke(sidecar, plan, isolation, env, cfg["version"], upgrade=True)
         if plan.mode == "formal":
             submitted_zip = work / "submitted-app.zip"
             zip_app(staged_app, submitted_zip, env)
