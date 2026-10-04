@@ -477,10 +477,9 @@ def test_i216_future_foreign_store_not_rebuilt_and_connections_close(tmp_path):
     db.unlink()
 
 
-def test_i216_copied_absolute_writer_concurrent_sessions(tmp_path):
+def _copied_activity_writer(tmp_path):
     import subprocess
     import sys
-    from concurrent.futures import ThreadPoolExecutor
 
     writer = tmp_path / "writer-copy.py"
     writer.write_bytes(Path(aw.__file__).read_bytes())
@@ -502,14 +501,72 @@ def test_i216_copied_absolute_writer_concurrent_sessions(tmp_path):
             check=False,
         )
 
-    # Initialize first, then exercise actual multi-process transactions. The
-    # copied script probes only its own controlled Python test parent.
-    assert invoke(0).returncode == 0
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(invoke, range(1, 13)))
-    assert all(r.returncode == 0 for r in results)
-    assert len(aw.read_facts(path, "codex")["facts"]) == 13
+    return path, invoke
+
+
+def test_i216_copied_absolute_writer_multi_session_persistence(tmp_path):
+    path, invoke = _copied_activity_writer(tmp_path)
+    # Fresh copied processes reopen one store. Uncontrolled simultaneous writers
+    # may legitimately exhaust the 100ms lock budget; refusal is tested below.
+    for index in range(13):
+        result = invoke(index)
+        assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    store = aw.read_facts(path, "codex")
+    facts = store["facts"]
+    assert len(facts) == 13
+    assert {row["session"] for row in facts} == {
+        _fact("UserPromptSubmit", "fake-" + str(index), 1000)["session"]
+        for index in range(13)
+    }
+    assert aw._projection_matches(json.loads(path.read_text()), store)
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_i216_copied_absolute_writer_held_lock_refusal(tmp_path):
+    import sqlite3
+
+    path, invoke = _copied_activity_writer(tmp_path)
+    seed = invoke(0)
+    assert (seed.returncode, seed.stdout, seed.stderr) == (0, "", "")
+    before = aw.read_facts(path, "codex")
+    db = aw.sidecar_path(path)
+    before_bytes = db.read_bytes()
+    holder = sqlite3.connect(db, timeout=0)
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        # The lock remains held for the whole child invocation: no scheduling
+        # delay, retry or release race determines whether admission is refused.
+        refused = invoke(1)
+        assert (refused.returncode, refused.stdout, refused.stderr) == (
+            1,
+            "",
+            "activity writer: fact write failed\n",
+        )
+        assert db.read_bytes() == before_bytes
+        assert aw.read_facts(path, "codex") == before
+        projection = json.loads(path.read_text())
+        assert projection["fact_committed"] is False
+        assert projection["link_nonce"] != before["projection_link"]["nonce"]
+        assert not aw._projection_matches(projection, before)
+        assert not list(tmp_path.glob(".*.tmp"))
+    finally:
+        holder.rollback()
+        holder.close()
+
+    # A different new session succeeds after release; the refused input is
+    # never replayed, and the original committed fact remains intact.
+    fresh = invoke(2)
+    assert (fresh.returncode, fresh.stdout, fresh.stderr) == (0, "", "")
+    after = aw.read_facts(path, "codex")
+    assert len(after["facts"]) == 2
+    assert before["facts"][0] in after["facts"]
+    assert {row["session"] for row in after["facts"]} == {
+        _fact("UserPromptSubmit", "fake-" + str(index), 1000)["session"]
+        for index in (0, 2)
+    }
+    assert aw._projection_matches(json.loads(path.read_text()), after)
+    assert not list(tmp_path.glob(".*.tmp"))
+    db.unlink()  # All parent/child connections have closed (native Windows).
 
 
 @pytest.mark.parametrize("kind,cap", [("sessions", 64), ("turns", 256)])
