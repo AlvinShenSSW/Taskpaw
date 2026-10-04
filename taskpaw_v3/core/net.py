@@ -8,6 +8,7 @@ the server actually owns the socket.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import logging
@@ -461,7 +462,8 @@ def reclaim_ports_from_stale_instance(
                 to_kill[proc.pid] = proc
         elif not port_available(host, port):
             log.warning(
-                "not reclaiming the %s ports: %s (%s:%d) is held by a foreign process "
+                "not reclaiming the %s ports: %s (%s:%d) is unavailable "
+                "and has no identified TaskPaw listener "
                 "— leaving any stale %s backend running rather than killing it when "
                 "startup can't succeed here; claim_port will fail loudly.",
                 role,
@@ -536,25 +538,47 @@ def reclaim_port_from_stale_instance(
     return reclaimed
 
 
-def claim_port(host: str, port: int, what: str) -> socket.socket:
+def claim_port(
+    host: str, port: int, what: str, *, deadline: float | None = None
+) -> socket.socket:
     """Bind (host, port) and return the listening socket, or raise PortInUseError.
 
     The returned socket is owned by the caller and should be passed to
     `uvicorn.Server.run(sockets=[sock])` (or closed). No TOCTOU gap.
 
-    No SO_REUSEADDR — we WANT bind to fail if another instance already owns the
-    port (the "refuse to start if in use" contract); on macOS SO_REUSEADDR would
-    silently allow a second agent to share 5680.
+    Keep exclusive binding: BSD SO_REUSEADDR can coexist with a live wildcard
+    listener. An optional monotonic deadline allows a caller to wait for closed
+    connections to expire, but only when a bounded probe receives ECONNREFUSED.
+    Live, unreachable or uncertain listeners fail immediately; never reuse/steal.
     """
-    s = socket.socket(_family(host), socket.SOCK_STREAM)
-    try:
-        s.bind((host, port))
-        s.listen(128)
-    except OSError as e:
-        s.close()
-        raise PortInUseError(
-            f"{what} port {host}:{port} is already in use. Another TaskPaw "
-            f"instance, a V2 agent (default 5678), or another service may hold "
-            f"it. Stop it or change the port before starting."
-        ) from e
-    return s
+    waiting_logged = False
+    while True:
+        s = socket.socket(_family(host), socket.SOCK_STREAM)
+        try:
+            s.bind((host, port))
+            s.listen(128)
+            return s
+        except OSError as e:
+            s.close()
+            remaining = 0 if deadline is None else deadline - time.monotonic()
+            if e.errno == errno.EADDRINUSE and deadline is not None and remaining > 0:
+                with socket.socket(_family(host), socket.SOCK_STREAM) as probe:
+                    probe.settimeout(min(0.2, remaining))
+                    try:
+                        refused = probe.connect_ex((host, port)) == errno.ECONNREFUSED
+                    except OSError:
+                        refused = False
+                remaining = deadline - time.monotonic()
+                if refused and remaining > 0:
+                    if not waiting_logged:
+                        log.info(
+                            "Waiting for closed TCP connections to release %s", what
+                        )
+                        waiting_logged = True
+                    time.sleep(min(0.2, remaining))
+                    continue
+            raise PortInUseError(
+                f"{what} port {host}:{port} is already in use. Another TaskPaw "
+                f"instance, a V2 agent (default 5678), or another service may hold "
+                f"it. Stop it or change the port before starting."
+            ) from e

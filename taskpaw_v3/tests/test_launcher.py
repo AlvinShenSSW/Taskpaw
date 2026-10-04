@@ -75,7 +75,7 @@ def test_tasklog_failed_claim_creates_no_store_or_line(tmp_path, monkeypatch, fa
         if fail_at == "reclaim":
             raise launcher.PortInUseError("occupied")
 
-    def claim(host, port, label):
+    def claim(host, port, label, **kwargs):
         assert not (tmp_path / "logs").exists()
         if fail_at in label:
             raise launcher.PortInUseError("occupied")
@@ -392,7 +392,7 @@ def test_control_startup_rollback_all_phases(
     original_bootstrap = control.bootstrap_control
     original_revoke = control.revoke_control
 
-    def claim(*args):
+    def claim(*args, **kwargs):
         if len(claimed) == 1 and failure == "second_claim":
             raise OSError("second socket failed")
         sock = sockets[len(claimed)]
@@ -536,8 +536,8 @@ def test_control_revoke_failure_still_stops_runtime_and_sockets(
     monkeypatch.setattr(control, "bootstrap_control", bootstrap)
     monkeypatch.setattr(launcher, "revoke_control", revoke)
     monkeypatch.setattr(control, "revoke_control", revoke)
-    monkeypatch.setattr(launcher, "claim_port", lambda *a: next(claims))
-    monkeypatch.setattr(net, "claim_port", lambda *a: next(claims))
+    monkeypatch.setattr(launcher, "claim_port", lambda *a, **kw: next(claims))
+    monkeypatch.setattr(net, "claim_port", lambda *a, **kw: next(claims))
     monkeypatch.setattr(
         launcher, "reclaim_ports_from_stale_instance", lambda *a, **kw: None
     )
@@ -1097,3 +1097,34 @@ def test_api_server_startup_failure_never_announces_ready(
         assert net.port_available("127.0.0.1", control_port)
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+def test_agent_port_wait_has_one_shared_mac_only_deadline(monkeypatch, platform):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from taskpaw_v3.agent.server import launcher
+
+    claims = []
+    first = Mock()
+    queue = Mock()
+
+    def claim(*args, **kwargs):
+        claims.append(kwargs)
+        if len(claims) == 2:
+            raise launcher.PortInUseError("owned fixture")
+        return first
+
+    monkeypatch.setattr(launcher, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(launcher, "time", SimpleNamespace(monotonic=lambda: 123.0))
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **k: None
+    )
+    monkeypatch.setattr(launcher, "claim_port", claim)
+    with pytest.raises(launcher.PortInUseError):
+        launcher.run_agent(_llm_cfg(), queue=queue, block=False)
+    expected = {"deadline": 168.0} if platform == "darwin" else {}
+    assert claims == [expected, expected]
+    first.close.assert_called_once()
+    queue.close.assert_called_once()

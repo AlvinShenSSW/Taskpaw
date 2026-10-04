@@ -1344,7 +1344,7 @@ def test_merge244_early_failure_releases_both_socket_and_state_owners(
 
     sockets = []
 
-    def claim(*args):
+    def claim(*args, **kwargs):
         if failure == "second_claim" and len(sockets) == 1:
             raise net.PortInUseError("owned second claim")
         sock = Mock()

@@ -482,7 +482,7 @@ impl StartupReadError {
     fn message(&self) -> &'static str {
         match self {
             Self::Eof => "后端在报告启动状态前退出。请查看本次后端日志。",
-            Self::Timeout => "后端在 30 秒内未报告启动状态。请查看本次后端日志。",
+            Self::Timeout => "后端未在限定时间内报告启动状态。请查看本次后端日志。",
             Self::InvalidMetadata => "后端返回的启动 metadata 无效。为保护本地 API 凭据，已拒绝连接。",
         }
     }
@@ -751,6 +751,12 @@ fn init_script(descriptor: &Descriptor, debug: bool) -> String {
     format!("(()=>{{ if(window.top!==window) return; const p=location.protocol,h=location.hostname,n=location.port; const u=new URL(location.href); if(u.username||u.password) return; if ((n==='' && ((p==='tauri:'&&h==='localhost')||((p==='http:'||p==='https:')&&h==='tauri.localhost'))) {dev}) {{ window.__TASKPAW__={cfg}; }} }})();")
 }
 
+fn readiness_timeout(role: &str) -> Duration {
+    // Mac Agent can spend up to 45 seconds waiting for old TCP connections.
+    // Keep room for extraction, stale-process shutdown and normal server startup.
+    Duration::from_secs(if cfg!(target_os = "macos") && role == "agent" { 90 } else { 30 })
+}
+
 fn main() {
     tauri::Builder::default()
         // Native file/directory picker for the add-monitor path fields (#71). The
@@ -819,7 +825,7 @@ fn main() {
             let mut recovery_attempted = false;
             let ready = loop {
                 let Some(out) = backend_stdout.take() else { break None; };
-                match read_readiness(out, Duration::from_secs(30)) {
+                match read_readiness(out, readiness_timeout(&ui_role())) {
                     Ok(StartupStatus::Ready(ready)) => break Some(ready),
                     Err(error) => fatal_startup(&format!("{}\n{}", error.message(), backend_log_hint()), Some(app.handle())),
                     Ok(StartupStatus::Failed(code)) => {
@@ -1301,6 +1307,12 @@ let input='';process.stdin.on('data',x=>input+=x);process.stdin.on('end',()=>{
         let _ = child.kill();
         let _ = child.wait();
         assert!(matches!(result, Ok(super::StartupStatus::Failed(super::startup::Code::MigrationRequired))), "a supported state admission failure must reach the shell as typed startup status");
+    }
+
+    #[test]
+    fn readiness_budget_accommodates_mac_agent_port_wait_only() {
+        assert_eq!(super::readiness_timeout("agent").as_secs(), if cfg!(target_os = "macos") { 90 } else { 30 });
+        assert_eq!(super::readiness_timeout("hub").as_secs(), 30);
     }
 
     #[test]
