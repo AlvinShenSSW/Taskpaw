@@ -24,6 +24,10 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     role = argv[0].lower() if argv else "agent"
+    if role == "upstream-http":
+        from taskpaw_v3.hub.server.upstream_worker import main as upstream_main
+
+        return upstream_main()
     if role == "agent-state":
         from taskpaw_v3.agent.state import main as state_main
 

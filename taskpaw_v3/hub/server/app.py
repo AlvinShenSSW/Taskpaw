@@ -184,14 +184,15 @@ class HubService:
         """Stop the poll loop. Returns True iff the thread actually exited
         (so the caller knows it's safe to close the shared store)."""
         self._running.clear()
+        self.poller.stop()
         if self.self_supervisor:
             self.self_supervisor.stop()
         if self._thread:
             # Generous: a cycle may be mid-urlopen (<= http timeout) or in a
             # slow transaction. Cover that before the store is closed.
             self._thread.join(timeout=20)
-            return not self._thread.is_alive()
-        return True
+            return not self._thread.is_alive() and self.poller.stopped()
+        return self.poller.stopped()
 
 
 def _register_read_routes(
@@ -302,6 +303,7 @@ def _register_read_routes(
                     "online": bool(snap.get("online", False)) and bool(s["enabled"]),
                     "last_seen": snap.get("last_seen"),
                     "snapshot": snap.get("snapshot"),
+                    "status_health": snap.get("status_health"),
                     "event_channel": channels.get(
                         s["id"],
                         {

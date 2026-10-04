@@ -12,7 +12,7 @@ from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
 
 
-def _cursor():
+def _cursor(highwater=4):
     return {
         "version": 1,
         "durable": True,
@@ -20,8 +20,8 @@ def _cursor():
         "stream_id": "1" * 32,
         "boot_id": "2" * 32,
         "resume_floor": 2,
-        "offered_highwater": 99,
-        "next_event_id": 100,
+        "offered_highwater": highwater,
+        "next_event_id": highwater + 1,
     }
 
 
@@ -37,6 +37,49 @@ def _bind(p, sid):
         },
         p.last_event_ids,
     )
+
+
+def fake_request(request, opener):
+    import urllib.error
+    import urllib.request
+
+    from taskpaw_v3.hub.server.upstream_worker import (
+        UpstreamError,
+        decode_events,
+        decode_status,
+    )
+
+    try:
+        req = urllib.request.Request(request["url"], headers=request["headers"])
+        with opener(req, timeout=request["timeout"]) as response:
+            body = response.read()
+        if request["kind"] == "status":
+            status, raw = decode_status(body)
+            return {"ok": True, "status": status, "raw": raw}
+        return {"ok": True, **decode_events(body)}
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return {
+            "ok": False,
+            "reason": "http_auth" if exc.code in (401, 403) else "http_refused",
+        }
+    except UpstreamError as exc:
+        return {"ok": False, "reason": exc.reason}
+    except Exception:
+        return {"ok": False, "reason": "upstream_failed"}
+
+
+@pytest.fixture(autouse=True)
+def owned_fake_transport(monkeypatch):
+    def request(self, req):
+        # These tests exclusively use fake openers; never bypass a parent mock
+        # into a real helper that could reach a fixed operator port.
+        assert getattr(poller_mod._opener.open, "__self__", None) is None, (
+            "missing owned fake HTTP fixture"
+        )
+        return fake_request(req, poller_mod._opener.open)
+
+    monkeypatch.setattr(Poller, "_request", request)
 
 
 class FakeResp:
@@ -271,7 +314,7 @@ def test_poller_disabled_stores_without_outbox(tmp_path, monkeypatch):
 
         def fake_urlopen(req, timeout):
             return FakeResp(
-                {"event_cursor": _cursor(), "events": [{"id": 3, "message": "new"}]}
+                {"event_cursor": _cursor(3), "events": [{"id": 3, "message": "new"}]}
             )
 
         monkeypatch.setattr(poller_mod._opener, "open", fake_urlopen)

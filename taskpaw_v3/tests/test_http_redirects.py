@@ -32,8 +32,8 @@ CURSOR = {
     "stream_id": "1" * 32,
     "boot_id": "2" * 32,
     "resume_floor": 2,
-    "offered_highwater": 99,
-    "next_event_id": 100,
+    "offered_highwater": 3,
+    "next_event_id": 4,
 }
 CURRENT_STATUS = {"event_cursor": CURSOR}
 
@@ -194,7 +194,7 @@ def endpoints(monkeypatch, tls_contexts):
         endpoint.close()
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def trusted_transport(monkeypatch, tls_contexts):
     """Real urllib handlers; only test trust/proxy discovery are replaced."""
     for module in (poller, openclaw, film_proxy):
@@ -202,6 +202,13 @@ def trusted_transport(monkeypatch, tls_contexts):
             NoRedirectHandler(), ProxyHandler({}), HTTPSHandler(context=tls_contexts[1])
         )
         monkeypatch.setattr(module, "_opener", opener)
+    # Real owned HTTP/TLS handlers in this regression suite, with pure R06
+    # admission in the caller; separate native helper tests exercise process IPC.
+    from taskpaw_v3.tests.test_hub import fake_request
+
+    monkeypatch.setattr(
+        Poller, "_request", lambda self, req: fake_request(req, poller._opener.open)
+    )
 
 
 @pytest.fixture
