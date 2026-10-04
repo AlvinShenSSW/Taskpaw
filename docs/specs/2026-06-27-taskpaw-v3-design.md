@@ -128,6 +128,17 @@ MacSubs (macsubs.py, :5679) 同协议 ──poll──────────�
 
 ### 4.1 实例与生命周期（评审 P1#4 —— `run/health` 太薄，补 supervisor）
 
+Monitor 管理以原子保存的 YAML 为 desired authority，Supervisor 持有的实例、worker 和
+cleanup owner 为 actual authority。Add/Start/Edit/Delete 先提交候选，再推进 runtime；
+保存失败不发布候选，保存后 runtime 失败不伪回滚。Stop/disable 只做内存 admission，先
+发布 cancellation 再尝试保存；已停止但未保存必须提示按旧 YAML 重启的风险。实例只有
+stop callback 确认且 worker 退出才释放同名 slot；超时保留唯一 owner，不重复 start/cleanup。
+含 config 的 combined PATCH 从入口共享 10s 预算，受追踪 validator 仅生成结果，过期或
+取消结果不 commit/stop/start，配置重试等 owner 退出；独立 Stop 不依赖它。API 使用
+`ok/outcome/persistence/runtime/retryable/error_code` 安全结果区分部分完成，busy 返回 typed
+409；UI 刷新 desired/actual，遗留 remove_pending 仍可 Stop，preset 重试不重复添加已保存项。
+manual Start 保留原 enabled 策略。此合同不证明任意后代/GPU 资源已释放，完整树验收另行进行。
+
 ```python
 class MonitorPlugin(ABC):
     type_id: str

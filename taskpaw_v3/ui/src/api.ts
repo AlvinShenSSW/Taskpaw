@@ -29,6 +29,12 @@ export interface MonitorSnapshot {
   // ISO time of this monitor's most recent local event (#130), stamped by the
   // agent status provider. Absent when the monitor has emitted no events yet.
   last_event_at?: string;
+  configured?: boolean;
+  desired_enabled?: boolean;
+  lifecycle?: "starting" | "running" | "stopping" | "stopped" | "remove_pending";
+  config_in_sync?: boolean | null;
+  persistence?: MonitorMutationResult["persistence"];
+  runtime_error_code?: string | null;
 }
 
 export interface AgentStatus {
@@ -138,6 +144,7 @@ export type LlmKeySource = "env" | "config" | "none";
 // failover switch (absent from an older agent → treated as on, its default).
 export type AgentConfigView = {
   monitors: MonitorSpec[];
+  monitor_operations?: Record<string, { stage: string; retryable: boolean }>;
   llm_api_key_source?: LlmKeySource;
   llm_fallback1_api_key_source?: LlmKeySource;
   llm_fallback2_api_key_source?: LlmKeySource;
@@ -149,6 +156,42 @@ export type AgentConfigView = {
   llm_fallback2_thinking_off_auto?: boolean;
   llm_failover?: boolean;
 } & Record<string, unknown>;
+
+export interface MonitorMutationResult {
+  ok: boolean;
+  name: string;
+  operation: "add" | "remove" | "start" | "stop" | "update";
+  outcome: "applied" | "not_applied" | "persisted_runtime_pending" | "persisted_runtime_failed" | "applied_not_persisted" | "stop_incomplete" | "busy";
+  persistence: "saved" | "in_memory" | "failed" | "pending" | "not_requested";
+  runtime: "applied" | "stopped" | "unchanged" | "starting" | "stopping" | "failed" | "unavailable";
+  retryable: boolean;
+  error_code: string | null;
+}
+const MONITOR_CODES = new Set(["persistence_failed", "create_failed", "start_failed", "cleanup_failed", "stop_timeout", "operation_busy", "validation_timeout", "validation_cancelled"]);
+export class MonitorOperationError extends Error {
+  constructor(public readonly result: MonitorMutationResult) { super("Monitor operation did not complete"); }
+}
+export function monitorOperationMessageKey(result: MonitorMutationResult): string {
+  if (result.error_code === "validation_timeout" || result.error_code === "validation_cancelled") return "agent.validationNotApplied";
+  if (result.runtime === "stopping") return "agent.stopIncomplete";
+  if (result.outcome === "busy") return "agent.operationBusy";
+  if (result.runtime === "stopped" && !["saved", "in_memory"].includes(result.persistence)) return "agent.stopNotSaved";
+  if (result.outcome === "persisted_runtime_failed") return "agent.savedRuntimeFailed";
+  if (result.outcome === "persisted_runtime_pending") return "agent.runtimePending";
+  return "agent.operationNotApplied";
+}
+function monitorResult(body: unknown): MonitorMutationResult | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  if (typeof b.ok !== "boolean" || typeof b.name !== "string" || typeof b.retryable !== "boolean"
+    || !["add", "remove", "start", "stop", "update"].includes(String(b.operation))
+    || !["applied", "not_applied", "persisted_runtime_pending", "persisted_runtime_failed", "applied_not_persisted", "stop_incomplete", "busy"].includes(String(b.outcome))
+    || !["saved", "in_memory", "failed", "pending", "not_requested"].includes(String(b.persistence))
+    || !["applied", "stopped", "unchanged", "starting", "stopping", "failed", "unavailable"].includes(String(b.runtime))
+    || !(b.error_code === null || (typeof b.error_code === "string" && MONITOR_CODES.has(b.error_code)))) return null;
+  return { ok: b.ok, name: b.name, operation: b.operation, outcome: b.outcome,
+    persistence: b.persistence, runtime: b.runtime, retryable: b.retryable, error_code: b.error_code } as MonitorMutationResult;
+}
 
 export type LlmTestResult = {
   ok: boolean; model?: string; latency_ms?: number; error?: string;
@@ -294,17 +337,24 @@ async function send<T>(
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   checkUnauthorized(role, res);
+  const monitor = role === "agent" && path.startsWith("/control/monitors");
+  let payload: unknown;
+  if (monitor) {
+    try { payload = await res.json(); } catch { /* Generic HTTP handling below. */ }
+    const result = monitorResult(payload);
+    if (result && (!result.ok || result.outcome !== "applied")) throw new MonitorOperationError(result);
+  }
   if (!res.ok) {
     let detail = `${path} → ${res.status}`;
     try {
-      const j = await res.json();
+      const j = monitor ? payload as { detail?: unknown } : await res.json();
       if (j?.detail) detail = String(j.detail);
     } catch {
       /* non-JSON error body */
     }
     throw new Error(detail);
   }
-  return res.json() as Promise<T>;
+  return monitor ? payload as T : res.json() as Promise<T>;
 }
 
 const q = (name: string) => `?name=${encodeURIComponent(name)}`;
@@ -343,12 +393,12 @@ export const api = {
   // one". Failures come back as {ok: false, error} and never carry the key.
   llmTest: (candidate: Record<string, unknown>, slot: LlmSlot) =>
     send<LlmTestResult>("agent", "POST", "/control/llm-test", { ...candidate, slot }),
-  addMonitor: (spec: MonitorSpec) => send("agent", "POST", "/control/monitors", spec),
-  removeMonitor: (name: string) => send("agent", "DELETE", `/control/monitors${q(name)}`),
+  addMonitor: (spec: MonitorSpec) => send<MonitorMutationResult>("agent", "POST", "/control/monitors", spec),
+  removeMonitor: (name: string) => send<MonitorMutationResult>("agent", "DELETE", `/control/monitors${q(name)}`),
   updateMonitor: (name: string, patch: { config?: Record<string, unknown>; enabled?: boolean }) =>
-    send("agent", "PATCH", `/control/monitors${q(name)}`, patch),
-  startMonitor: (name: string) => send("agent", "POST", `/control/monitors/start${q(name)}`),
-  stopMonitor: (name: string) => send("agent", "POST", `/control/monitors/stop${q(name)}`),
+    send<MonitorMutationResult>("agent", "PATCH", `/control/monitors${q(name)}`, patch),
+  startMonitor: (name: string) => send<MonitorMutationResult>("agent", "POST", `/control/monitors/start${q(name)}`),
+  stopMonitor: (name: string) => send<MonitorMutationResult>("agent", "POST", `/control/monitors/stop${q(name)}`),
   // The Hub reads durable aggregated event history, by server id + level.
   hubEvents: (p: { server?: number; level?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();

@@ -6,7 +6,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type MonitorSnapshot, type PluginInfo, type PresetInfo } from "../api";
+import { api, MonitorOperationError, monitorOperationMessageKey, type MonitorSnapshot, type PluginInfo, type PresetInfo } from "../api";
 import { StatusDot } from "../components/StatusDot";
 import { SkeletonRows } from "../components/SkeletonRows";
 import { MonitorMetrics } from "../components/MonitorMetrics";
@@ -40,7 +40,7 @@ export function AgentConsole() {
   const plugins = useQuery({ queryKey: ["agentPlugins"], queryFn: api.plugins });
   // #145: surface when the network API has no token (auth disabled). The backend's
   // bind guard keeps this loopback-only, but the operator should see it.
-  const config = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
+  const config = useQuery({ queryKey: ["agentConfig"], queryFn: api.config, refetchInterval: 5000 });
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<null | { mode: "add" } | { mode: "edit"; name: string }>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,7 +50,10 @@ export function AgentConsole() {
     qc.invalidateQueries({ queryKey: ["agentStatus"] });
     qc.invalidateQueries({ queryKey: ["agentConfig"] });
   };
-  const onErr = (e: unknown) => setError(e instanceof Error ? e.message : String(e));
+  const onErr = (e: unknown) => {
+    invalidate();
+    setError(e instanceof MonitorOperationError ? t(monitorOperationMessageKey(e.result)) : e instanceof Error ? e.message : String(e));
+  };
 
   // NOTE: no early return on status loading/error — Settings must stay reachable
   // (it holds the config editor needed to FIX a bad host/port/token) even when the
@@ -105,6 +108,7 @@ export function AgentConsole() {
             name={names[0]} snap={monitors[names[0]]} updatedAt={status.dataUpdatedAt}
             onEdit={() => setDialog({ mode: "edit", name: names[0] })}
             onChanged={invalidate} onError={onErr}
+            operationPending={Boolean(config.data?.monitor_operations?.[names[0]])}
           />
         </Stack>
       ) : (
@@ -132,6 +136,7 @@ export function AgentConsole() {
               name={current} snap={monitors[current]} updatedAt={status.dataUpdatedAt}
               onEdit={() => setDialog({ mode: "edit", name: current })}
               onChanged={invalidate} onError={onErr}
+              operationPending={Boolean(config.data?.monitor_operations?.[current])}
             />
           )}
         </Stack>
@@ -181,6 +186,7 @@ type MonitorDetailProps = {
   name: string;
   snap: MonitorSnapshot;
   updatedAt?: number;
+  operationPending?: boolean;
   onEdit: () => void;
   onChanged: () => void;
   onError: (e: unknown) => void;
@@ -198,14 +204,17 @@ function MonitorHero(props: MonitorDetailProps) {
 }
 
 function MonitorDetail({
-  name, snap, updatedAt, onEdit, onChanged, onError,
+  name, snap, updatedAt, onEdit, onChanged, onError, operationPending,
 }: MonitorDetailProps) {
   const { t } = useTranslation();
   const [confirmDel, setConfirmDel] = useState(false);
   // Live-state, not the persisted `enabled`: a managed Lada is launched per
   // session (Start) without persisting enabled, so "running" must follow whether
   // it's actually live (anything but stopped), else it'd show Start while running.
-  const running = snap.state !== "stopped";
+  const running = snap.lifecycle ? snap.lifecycle !== "stopped" : snap.state !== "stopped";
+  const removed = snap.lifecycle === "remove_pending";
+  const stopRetry = snap.lifecycle === "stopped" && ["failed", "pending"].includes(snap.persistence ?? "");
+  const pending = operationPending || snap.lifecycle === "starting" || snap.lifecycle === "stopping" || removed;
   // Only operator-configured monitors are mutable. The auto-injected host_metrics
   // self-monitor is live but NOT in config (no type_id from merge_status), so the
   // control API can't start/stop/edit/delete it — don't show controls that would
@@ -218,7 +227,10 @@ function MonitorDetail({
   const del = useMutation({
     mutationFn: () => api.removeMonitor(name),
     onSuccess: () => { setConfirmDel(false); onChanged(); },
-    onError,
+    onError: (e) => {
+      if (e instanceof MonitorOperationError && ["saved", "in_memory"].includes(e.result.persistence)) setConfirmDel(false);
+      onError(e);
+    },
   });
 
   return (
@@ -248,19 +260,22 @@ function MonitorDetail({
         {manageable ? (
           <>
             <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-              {running ? (
-                <Button size="small" variant="outlined" color="inherit" disabled={stop.isPending}
+              {running || pending || stopRetry ? (
+                <Button size="small" variant="outlined" color="inherit"
                   onClick={() => stop.mutate()}>{t("common.stop")}</Button>
               ) : (
-                <Button size="small" variant="contained" color="primary" disabled={start.isPending}
+                <Button size="small" variant="contained" color="primary" disabled={start.isPending || pending}
                   onClick={() => start.mutate()}>{t("common.start")}</Button>
               )}
-              <Button size="small" variant="outlined" color="info" onClick={onEdit}>{t("common.editConfig")}</Button>
+              <Button size="small" variant="outlined" color="info" disabled={!!pending} onClick={onEdit}>{t("common.editConfig")}</Button>
               <Box sx={{ flex: 1 }} />
               <Button size="small" color="error" variant="outlined"
                 onClick={() => setConfirmDel(true)}>{t("common.delete")}</Button>
             </Stack>
-            {!running && (
+            {snap.lifecycle === "stopping" || removed ? <Alert severity="warning" sx={{ mt: 1 }}>{t("agent.stopIncomplete")}</Alert>
+              : snap.persistence === "failed" || snap.persistence === "pending" ? <Alert severity="warning" sx={{ mt: 1 }}>{t(snap.lifecycle === "stopped" ? "agent.stopNotSaved" : "agent.operationNotApplied")}</Alert>
+              : snap.runtime_error_code ? <Alert severity="warning" sx={{ mt: 1 }}>{t("agent.savedRuntimeFailed")}</Alert> : null}
+            {!running && snap.persistence !== "failed" && snap.persistence !== "pending" && (
               <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: "block" }}>
                 {t("agent.stoppedHint")}
               </Typography>
@@ -304,7 +319,7 @@ function WizardLauncher({
 }) {
   const { t } = useTranslation();
   const config = useQuery({
-    queryKey: ["agentConfig"], queryFn: api.config, enabled: mode === "edit",
+    queryKey: ["agentConfig"], queryFn: api.config, enabled: mode === "edit", refetchInterval: 5000,
   });
   const existing = mode === "edit"
     ? config.data?.monitors?.find((m) => (m.config?.name ?? m.name) === name)
@@ -326,6 +341,7 @@ function WizardLauncher({
       name={name}
       existingConfig={existing?.config}
       existingType={existing?.type_id ?? undefined}
+      operationPending={Boolean(name && config.data?.monitor_operations?.[name])}
       plugins={pluginsData?.plugins ?? []}
       presets={pluginsData?.presets ?? []}
       onClose={onClose}
