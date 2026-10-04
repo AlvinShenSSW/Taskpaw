@@ -1,6 +1,6 @@
 [package]
 name = "taskpaw"
-version = "3.9.10"
+version = "3.9.11"
 description = "TaskPaw V3 desktop shell"
 authors = ["TaskPaw"]
 edition = "2021"
@@ -33,4 +33,4 @@ libc = "0.2"
 # Win32_System_Threading is REQUIRED here — without it the build fails E0432 on
 # JOBOBJECT_EXTENDED_LIMIT_INFORMATION (empirically confirmed on the Windows
 # build, #50; windows-sys gates parts of that type's deps behind it).
-windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+windows-sys = { version = "0.59", features = ["Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_UI_WindowsAndMessaging"] }

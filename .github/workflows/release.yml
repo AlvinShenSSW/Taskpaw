@@ -81,6 +81,15 @@ jobs:
           TASKPAW_MACOS_SMOKE_ISOLATION: ${{ runner.os == 'macOS' && 'github-hosted-fresh' || '' }}
         run: uv run python scripts/build.py
 
+      - name: Windows migration and first-install regression tests
+        if: runner.os == 'Windows'
+        run: uv run --frozen --extra build --extra v3 pytest taskpaw_v3/tests/test_desktop_startup.py taskpaw_v3/tests/test_version.py
+
+      - name: Windows native startup dialog and helper ownership tests
+        if: runner.os == 'Windows'
+        working-directory: taskpaw_v3/src-tauri
+        run: cargo test --locked
+
       - name: Sign Windows installers (gated on secrets)
         # Authenticode-sign the produced .exe/.msi when the WINDOWS_* secrets are
         # configured (see docs/guides/windows-signing.md) — removes the unknown-

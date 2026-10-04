@@ -90,8 +90,13 @@ impl Action {
     }
 }
 
-pub fn recovery_eligible(macos: bool, bundled: bool, role: &str, args: &[String]) -> bool {
-    macos && bundled && role == "agent" && args == ["agent"]
+pub fn recovery_eligible(
+    supported_desktop: bool,
+    bundled: bool,
+    role: &str,
+    args: &[String],
+) -> bool {
+    supported_desktop && bundled && role == "agent" && args == ["agent"]
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -181,9 +186,26 @@ pub fn run_owned(command: &mut Command, timeout: Duration) -> bool {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     let end = Instant::now() + timeout;
     let Ok(child) = command.spawn() else {
         return false;
+    };
+    // Keep this job alive until after the owned helper has been reaped; closing
+    // it also removes PyInstaller descendants on timeout/failure.
+    #[cfg(windows)]
+    let _job = match super::jobobj::assign(&child) {
+        Some(job) => job,
+        None => {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
     };
     let mut child = OwnedChild(Some(child));
     let success = loop {
@@ -230,7 +252,7 @@ mod tests {
         assert!(parse_failure("not-json fake-secret").is_none());
     }
     #[test]
-    fn recovery_only_for_owned_mac_agent_with_fixed_arguments() {
+    fn recovery_only_for_owned_supported_desktop_agent_with_fixed_arguments() {
         let args = vec!["agent".to_string()];
         assert!(recovery_eligible(true, true, "agent", &args));
         assert!(!recovery_eligible(false, true, "agent", &args));
@@ -343,6 +365,52 @@ mod tests {
             Command::new("node").args(["-e", "process.exit(0)"]),
             Duration::from_secs(2)
         ));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_owned_helper_job_removes_children_after_success_or_timeout() {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "taskpaw-windows-helper-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for timeout in [false, true] {
+            let path = root.join(if timeout { "timeout.pid" } else { "exit.pid" });
+            let child_script = "require('fs').writeFileSync(process.argv[1],String(process.pid));setInterval(()=>{},1000)";
+            let parent_script = "const {spawn}=require('child_process');const fs=require('fs');spawn(process.execPath,['-e',process.argv[1],process.argv[2]],{stdio:'ignore'});const t=setInterval(()=>{if(fs.existsSync(process.argv[2])){clearInterval(t);if(process.argv[3]==='exit')process.exit(0)}},5);setInterval(()=>{},1000)";
+            let result = run_owned(
+                Command::new("node")
+                    .args(["-e", parent_script, child_script])
+                    .arg(&path)
+                    .arg(if timeout { "timeout" } else { "exit" }),
+                Duration::from_secs(3),
+            );
+            assert_eq!(result, !timeout);
+            let pid: u32 = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+            let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            if handle.is_null() {
+                assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(87));
+            } else {
+                let status = unsafe { WaitForSingleObject(handle, 2000) };
+                unsafe {
+                    CloseHandle(handle);
+                }
+                assert_ne!(
+                    status, WAIT_TIMEOUT,
+                    "helper's descendant survived Job closure"
+                );
+                assert_eq!(status, WAIT_OBJECT_0);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[cfg(target_os = "macos")]
     #[test]

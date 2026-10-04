@@ -8,6 +8,7 @@ the server actually owns the socket.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import logging
@@ -44,7 +45,11 @@ _BACKEND_SOURCE_SUFFIX = "taskpaw_v3/packaging/backend_main.py"
 _BACKEND_MODULE = "taskpaw_v3.packaging.backend_main"
 
 
-class PortInUseError(RuntimeError):
+class PortBindError(RuntimeError):
+    """The requested API address could not be bound or listened on."""
+
+
+class PortInUseError(PortBindError):
     pass
 
 
@@ -162,18 +167,18 @@ def _family(host: str) -> int:
 
 
 def port_available(host: str, port: int) -> bool:
-    """Best-effort probe (advisory; prefer claim_port for the real bind).
+    """Advisory probe with the SAME bind + listen semantics as startup.
 
-    Deliberately does NOT set SO_REUSEADDR: on macOS/BSD it would let this bind
-    succeed even when another listener already holds the port, defeating the
-    "is it in use?" check on the primary platform.
+    On BSD/macOS SO_REUSEADDR can permit bind beside a listener, but listen
+    still rejects the conflict. A bind-only probe would give a false positive;
+    omitting reuse instead mistakes closed connections in TIME_WAIT for a
+    foreign service and prevents immediate restarts.
     """
-    with socket.socket(_family(host), socket.SOCK_STREAM) as s:
-        try:
-            s.bind((host, port))
+    try:
+        with claim_port(host, port, "API probe"):
             return True
-        except OSError:
-            return False
+    except PortBindError:
+        return False
 
 
 def _has_m_module(cmd: list[str], module: str) -> bool:
@@ -461,7 +466,8 @@ def reclaim_ports_from_stale_instance(
                 to_kill[proc.pid] = proc
         elif not port_available(host, port):
             log.warning(
-                "not reclaiming the %s ports: %s (%s:%d) is held by a foreign process "
+                "not reclaiming the %s ports: %s (%s:%d) is unavailable "
+                "and has no identified TaskPaw listener "
                 "— leaving any stale %s backend running rather than killing it when "
                 "startup can't succeed here; claim_port will fail loudly.",
                 role,
@@ -537,24 +543,36 @@ def reclaim_port_from_stale_instance(
 
 
 def claim_port(host: str, port: int, what: str) -> socket.socket:
-    """Bind (host, port) and return the listening socket, or raise PortInUseError.
+    """Return a listening socket, or raise an actionable PortBindError.
 
     The returned socket is owned by the caller and should be passed to
     `uvicorn.Server.run(sockets=[sock])` (or closed). No TOCTOU gap.
 
-    No SO_REUSEADDR — we WANT bind to fail if another instance already owns the
-    port (the "refuse to start if in use" contract); on macOS SO_REUSEADDR would
-    silently allow a second agent to share 5680.
+    POSIX SO_REUSEADDR permits immediate restart after accepted connections
+    enter TIME_WAIT. BOTH bind and listen must succeed: on macOS a second bind
+    may succeed, but a second listener cannot. Never enable SO_REUSEPORT.
+    Windows retains its default behavior: SO_REUSEADDR there can steal a live
+    listener's port, unlike POSIX.
     """
     s = socket.socket(_family(host), socket.SOCK_STREAM)
     try:
+        if os.name == "posix":
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((host, port))
         s.listen(128)
     except OSError as e:
         s.close()
-        raise PortInUseError(
-            f"{what} port {host}:{port} is already in use. Another TaskPaw "
-            f"instance, a V2 agent (default 5678), or another service may hold "
-            f"it. Stop it or change the port before starting."
-        ) from e
+        if e.errno == errno.EADDRINUSE:
+            raise PortInUseError(
+                f"{what} port {host}:{port} is already in use. Another TaskPaw "
+                f"instance, a V2 agent (default 5678), or another service may hold "
+                f"it. Stop it or change the port before starting."
+            ) from e
+        if e.errno == errno.EADDRNOTAVAIL:
+            raise PortBindError(
+                f"{what} address {host}:{port} is not available on this machine. "
+                "Its LAN address may have changed or the network is disconnected. "
+                "Check the configured bind address and network connection."
+            ) from e
+        raise PortBindError(f"Could not bind {what} at {host}:{port}: {e}") from e
     return s

@@ -24,6 +24,7 @@ from taskpaw_v3.core.llm import (
     set_llm_settings,
 )
 from taskpaw_v3.core.net import (  # re-export
+    PortBindError,
     PortInUseError,
     announce_ready,
     claim_port,
@@ -44,6 +45,7 @@ log = logging.getLogger("taskpaw.agent")
 
 __all__ = [
     "run_agent",
+    "PortBindError",
     "PortInUseError",
     "claim_port",
     "port_available",
@@ -85,8 +87,8 @@ def run_agent(
     """Claim ports, start the network + control servers, wire shutdown.
 
     Ports are bound up front via claim_port() (race-free) and handed to uvicorn,
-    so a taken port fails with an actionable PortInUseError, never a generic
-    bind error mid-startup.
+    so startup fails with an actionable PortBindError (PortInUseError for a
+    conflict), never a generic bind error mid-startup.
     """
     import uvicorn
 

@@ -17,6 +17,8 @@
 
 mod control_credentials;
 mod startup;
+#[cfg(any(windows, test))]
+mod windows_dialog;
 use control_credentials::{CredentialError, Descriptor, Ready};
 use std::process::{Child, Command};
 use std::sync::Mutex;
@@ -568,13 +570,18 @@ fn terminate_child(child: &mut Child) {
 fn kill_backend(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Backend>() {
         if let Ok(mut guard) = state.0.lock() {
-            if let Some(child) = guard.as_mut() {
-                terminate_child(child);
+            if let Some(mut child) = guard.take() {
+                terminate_child(&mut child);
             }
         }
     }
-    // On Windows the Job Object (KILL_ON_JOB_CLOSE) terminates any remaining
-    // descendants when its handle drops as the process exits.
+    // Recovery must release the entire failed backend tree BEFORE its offline
+    // state helper runs, not only when the desktop eventually exits.
+    #[cfg(windows)]
+    if let Some(state) = app.try_state::<JobHandle>() {
+        let job = state.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        drop(job);
+    }
 }
 
 /// Escape a string for safe interpolation into an AppleScript double-quoted
@@ -639,8 +646,11 @@ fn fatal_startup(message: &str, app: Option<&tauri::AppHandle>) -> ! {
             }
         }
     }
-    // Windows/Linux: the message is already on stderr (→ OS log / journal); a
-    // native Windows dialog is a low-risk follow-up.
+    #[cfg(windows)]
+    if std::env::var_os("TASKPAW_NO_STARTUP_DIALOG").is_none() {
+        windows_dialog::show(message, windows_dialog::Kind::Error);
+    }
+    // Linux keeps the stderr/journal diagnostic.
     std::process::exit(1);
 }
 
@@ -661,7 +671,13 @@ fn confirm_startup_recovery(action: startup::Action) -> bool {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(windows)]
+fn confirm_startup_recovery(action: startup::Action) -> bool {
+    std::env::var_os("TASKPAW_NO_STARTUP_DIALOG").is_none()
+        && windows_dialog::show(action.confirmation(), windows_dialog::Kind::Confirm)
+}
+
+#[cfg(any(target_os = "macos", windows))]
 fn recover_desktop_state(code: startup::Code, program: &str, eligible: bool, attempted: &mut bool) -> Result<(), startup::RecoveryError> {
     startup::recover_once(code, eligible, attempted, confirm_startup_recovery, |action| {
         startup::run_owned(
@@ -766,7 +782,7 @@ fn main() {
             // `mut`: the Windows Job-Object failure kill path AND taking the
             // backend's stdout for the readiness handshake (#48).
             let command = backend_command();
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             let own_bundled = !cfg!(debug_assertions)
                 && std::env::var_os("TASKPAW_BACKEND_CMD").is_none()
                 && option_env!("TASKPAW_BUILD_ROLE").unwrap_or("agent") == "agent";
@@ -815,7 +831,7 @@ fn main() {
             app.manage(Backend(Mutex::new(child)));
             // Spawn metadata must bind the protected descriptor to this boot;
             // explicit attach reads the current protected descriptor directly.
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             let mut recovery_attempted = false;
             let ready = loop {
                 let Some(out) = backend_stdout.take() else { break None; };
@@ -834,7 +850,7 @@ fn main() {
                             }
                         }
                         kill_backend(app.handle());
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", windows))]
                         if let Some((program, args)) = command.as_ref() {
                             let eligible = startup::recovery_eligible(true, own_bundled, &ui_role(), args);
                             match recover_desktop_state(code, program, eligible, &mut recovery_attempted) {
@@ -842,6 +858,15 @@ fn main() {
                                     let Some(mut child) = spawn_backend(command.clone()) else {
                                         fatal_startup(&format!("状态操作已完成，但 Agent 无法重新启动。\n{}", backend_log_hint()), Some(app.handle()));
                                     };
+                                    #[cfg(windows)]
+                                    {
+                                        let Some(job) = jobobj::assign(&child) else {
+                                            let _ = child.kill();
+                                            let _ = child.wait();
+                                            fatal_startup("恢复后无法取得 Agent 进程树所有权，已停止启动。", Some(app.handle()));
+                                        };
+                                        *app.state::<JobHandle>().0.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
+                                    }
                                     backend_stdout = child.stdout.take();
                                     *app.state::<Backend>().0.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                                     continue;
@@ -916,7 +941,10 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error while building TaskPaw")
+        .unwrap_or_else(|_| fatal_startup(
+            "TaskPaw 无法创建桌面窗口。Windows 用户请检查 Microsoft Edge WebView2 Runtime 是否已正确安装；详情见系统应用程序日志。",
+            None,
+        ))
         .run(|app, event| {
             if let RunEvent::ExitRequested { .. } = event {
                 kill_backend(app);
