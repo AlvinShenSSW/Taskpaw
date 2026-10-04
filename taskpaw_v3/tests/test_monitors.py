@@ -81,7 +81,8 @@ def test_i216_supervisor_shared_deadline_with_two_late_native_probes(
         start = time.monotonic()
         sup.stop(0.03)
         elapsed = time.monotonic() - start
-        assert elapsed < 0.25 and unrelated and unrelated[0] <= 0.03
+        # Deadline subtraction may round a few ULPs above the original budget.
+        assert elapsed < 0.25 and unrelated and unrelated[0] <= 0.03 + 1e-6
         assert all(m.stop.is_set() for m in managed)
         assert all(m.instance._stop_event.is_set() for m in managed[:2])
         assert all(not m.instance._cleanup_complete for m in managed[:2])

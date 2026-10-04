@@ -51,11 +51,14 @@ def test_real_listener_survives_probe_and_claim_refusal(host, reuse):
             foreign.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         foreign.bind((host, 0))
         foreign.listen()
-        address = ("127.0.0.1", foreign.getsockname()[1])
+        # Winsock permits same-user wildcard-to-specific binding; exercise a
+        # same-address conflict there, and the BSD wildcard hazard on POSIX.
+        probe_host = host if sys.platform == "win32" else "127.0.0.1"
+        address = (probe_host, foreign.getsockname()[1])
         assert not port_available(*address)
         with pytest.raises(PortInUseError):
             claim_port(*address, "owned refusal fixture", deadline=time.monotonic() + 2)
-        with socket.create_connection(address, timeout=2):
+        with socket.create_connection(("127.0.0.1", address[1]), timeout=2):
             connection, _ = foreign.accept()
             connection.close()
 
