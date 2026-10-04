@@ -1008,6 +1008,8 @@ def test_smoke_protocol_with_python_fixture_not_product(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(mac.http.client, "HTTPConnection", Connection)
+    close_ports = []
+    monkeypatch.setattr(mac, "smoke_server_close", close_ports.append)
     contexts = []
     isolation = SimpleNamespace(require=lambda: contexts.append("gate"))
     mac.smoke(
@@ -1020,6 +1022,7 @@ def test_smoke_protocol_with_python_fixture_not_product(tmp_path, monkeypatch):
     )
     assert headers_seen[0]["Authorization"].startswith("Bearer ")
     assert headers_seen[0]["Authorization"] not in str(calls)
+    assert len(close_ports) == len(set(close_ports)) == 2
 
 
 def finalizer_fixture(tmp_path, monkeypatch, mode="adhoc"):
@@ -1959,10 +1962,13 @@ def test_finalizer_migrates_legacy_before_ready_and_reopens_same_lineage(
     monkeypatch.setattr(mac, "tool", offline_tool)
     monkeypatch.setattr(mac.subprocess, "Popen", emitter)
     monkeypatch.setattr(mac.http.client, "HTTPConnection", Connection)
+    close_ports = []
+    monkeypatch.setattr(mac, "smoke_server_close", close_ports.append)
     try:
         mac.finalize(plan, SimpleNamespace(require=lambda: None), {}, tmp_path, cfg)
         assert len(records) == 2 and records[0].stream_id == records[1].stream_id
         assert len(children) == len(headers) == 2
+        assert len(close_ports) == 4 and close_ports[:2] == close_ports[2:]
         assert [x[1] for x in phases] == [
             ["agent"],
             ["agent-desktop-state", "migrate", "--confirm-intact-legacy-counter"],
@@ -2101,3 +2107,82 @@ def test_expected_startup_failure_tool_requires_exact_exit_and_bounded_output():
             expected_returncode=1,
             exact_output=True,
         )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="owned POSIX server FIN/TIME_WAIT fixture")
+def test_server_close_probe_actually_leaves_server_side_time_wait():
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            assert self.path == "/ping"
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            self.close_connection = True
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    address = server.server_address
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01))
+    thread.start()
+    try:
+        mac.smoke_server_close(address[1])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+    with socket.socket() as probe:
+        with pytest.raises(OSError):
+            probe.bind(address)
+
+
+@pytest.mark.parametrize(
+    "fault", ["empty", "invalid", "oversize", "timeout", "deadline"]
+)
+def test_server_close_probe_refuses_missing_or_unbounded_eof(monkeypatch, fault):
+    chunks = {
+        "empty": [b""],
+        "invalid": [b"not-http", b""],
+        "oversize": [b"HTTP/1.1 " + b"x" * (1024 * 1024)],
+        "timeout": [TimeoutError("fixture-private-detail")],
+        "deadline": [],
+    }[fault]
+    closed = []
+
+    class Client:
+        def sendall(self, data):
+            assert b"Connection: close" in data
+
+        def settimeout(self, value):
+            assert 0 < value <= 2
+
+        def recv(self, size):
+            chunk = chunks.pop(0)
+            if isinstance(chunk, Exception):
+                raise chunk
+            return chunk
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            closed.append(True)
+
+    monkeypatch.setattr(mac.socket, "create_connection", lambda *a, **k: Client())
+    if fault == "deadline":
+        values = iter([0, 6])
+        monkeypatch.setattr(mac.time, "monotonic", lambda: next(values))
+    with pytest.raises(mac.BuildError, match="^macos_smoke_server_close_") as failure:
+        mac.smoke_server_close(9999)
+    assert closed == [True]
+    assert "fixture-private-detail" not in str(failure.value)

@@ -998,6 +998,38 @@ def smoke_lineage(config, previous=None):
         raise BuildError("macos_smoke_lineage_invalid") from None
 
 
+def smoke_server_close(port):
+    """Observe server FIN before client close, exercising server-side TIME_WAIT.
+
+    Only called for the isolated fixture's loopback ports after authenticated
+    readiness. A normal HTTPConnection.close() closes the client first and can
+    miss restart failures caused by the server's closed connections.
+    """
+    deadline = time.monotonic() + 5
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+            client.sendall(
+                b"GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+            )
+            received = bytearray()
+            while True:
+                cancellation_checkpoint()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise BuildError("macos_smoke_server_close_timeout")
+                client.settimeout(min(2, remaining))
+                chunk = client.recv(8192)
+                if not chunk:
+                    if not received.startswith((b"HTTP/1.0 ", b"HTTP/1.1 ")):
+                        raise BuildError("macos_smoke_server_close_invalid")
+                    return
+                received.extend(chunk)
+                if len(received) > 1024 * 1024:
+                    raise BuildError("macos_smoke_server_close_output_limit")
+    except OSError:
+        raise BuildError("macos_smoke_server_close_failed") from None
+
+
 def smoke(sidecar, plan, isolation, env, version, *, upgrade=False):
     # This is intentionally before HOME/ports or any backend Popen.
     isolation.require()
@@ -1136,7 +1168,7 @@ def smoke(sidecar, plan, isolation, env, version, *, upgrade=False):
                         selector.register(proc.stderr, selectors.EVENT_READ, "err")
                         cancellation_checkpoint()
                         ready = False
-                        deadline = time.monotonic() + 30
+                        deadline = time.monotonic() + 90
                         while time.monotonic() < deadline and proc.poll() is None:
                             cancellation_checkpoint()
                             for key, _ in selector.select(0.1):
@@ -1185,11 +1217,21 @@ def smoke(sidecar, plan, isolation, env, version, *, upgrade=False):
                                     connection.close()
                         if not success:
                             raise BuildError("macos_smoke_readiness_failed")
+                        for port in (net_port, ctl_port):
+                            smoke_server_close(port)
+                        print(
+                            "macos packaged server-initiated close verified", flush=True
+                        )
             finally:
                 for port in (net_port, ctl_port):
                     try:
                         with socket.socket() as check:
+                            if os.name == "posix":
+                                check.setsockopt(
+                                    socket.SOL_SOCKET, socket.SO_REUSEADDR, 1
+                                )
                             check.bind(("127.0.0.1", port))
+                            check.listen(1)
                     except OSError:
                         raise BuildError(
                             "macos_smoke_listener_cleanup_failed"

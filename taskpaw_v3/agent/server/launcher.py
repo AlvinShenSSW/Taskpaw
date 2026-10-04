@@ -7,6 +7,7 @@ modes — the difference is who calls `run_agent()` and who sends the stop signa
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from pathlib import Path
@@ -127,10 +128,20 @@ def run_agent(
     queue = queue if queue is not None else build_queue(config, state_path)
     shutdown = shutdown or GracefulShutdown()
     net_sock = ctl_sock = None
+    # BSD keeps recently closed TCP connections after the old process exits.
+    # Share one bounded wait across both exclusive claims; never enable port reuse.
+    claim_options = (
+        {"deadline": time.monotonic() + 45} if sys.platform == "darwin" else {}
+    )
     try:
-        net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
+        net_sock = claim_port(
+            config.bind_host, config.bind_port, "agent network API", **claim_options
+        )
         ctl_sock = claim_port(
-            config.control_host, config.control_port, "agent control API"
+            config.control_host,
+            config.control_port,
+            "agent control API",
+            **claim_options,
         )
         session = bootstrap_control(
             "agent", loopback_url(config.control_host, config.control_port), config_path
