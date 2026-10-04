@@ -165,6 +165,32 @@ def test_agent_service_scaffold_oserror_clean_exit(tmp_path, monkeypatch):
     assert svc.main() == 1
 
 
+def test_pyinstaller_native_signing_is_before_archive_construction():
+    # EXE forwards these to PKG native entries; not merely outer app re-signing.
+    import ast
+
+    spec = (
+        Path(__file__).resolve().parents[2]
+        / "taskpaw_v3/packaging/taskpaw-backend.spec"
+    )
+    tree = ast.parse(spec.read_text())
+    exe = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id == "EXE"
+    )
+    keys = {k.arg: ast.unparse(k.value) for k in exe.keywords}
+    for key, env in (
+        ("target_arch", "TASKPAW_PYI_TARGET_ARCH"),
+        ("codesign_identity", "TASKPAW_PYI_CODESIGN_IDENTITY"),
+        ("entitlements_file", "TASKPAW_PYI_ENTITLEMENTS_FILE"),
+    ):
+        assert env in keys[key]
+        assert "darwin" in keys[key] and "else None" in keys[key]
+
+
 @pytest.mark.parametrize(
     "verb,args",
     [
