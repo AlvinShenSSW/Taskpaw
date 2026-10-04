@@ -1242,3 +1242,93 @@ def test_i216_hook_parser_cannot_mint_internal_witness(tmp_path):
     witness = aw._witness(fact)
     with pytest.raises(aw.ActivityStoreError):
         aw.publish_fact(tmp_path / "state.json", witness)
+
+
+def _i216_writer_main(monkeypatch, path, rich):
+    import io
+
+    monkeypatch.setattr(aw, "_producer_identity", lambda: (10, 1.0))
+    monkeypatch.setattr(
+        aw.sys,
+        "stdin",
+        io.StringIO(
+            json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "owned"})
+        ),
+    )
+    args = ["--tool", "codex", "--path", str(path)]
+    if not rich:
+        args += ["--state", "idle"]
+    return aw.main(args)
+
+
+@pytest.mark.skipif(aw.os.name == "nt", reason="POSIX directory mode contract")
+@pytest.mark.parametrize("rich", [False, True])
+@pytest.mark.parametrize("mode", [0o750, 0o755])
+def test_i216_r2_writer_preserves_existing_parent_mode(
+    tmp_path, monkeypatch, rich, mode
+):
+    import stat
+
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(mode)
+    path = parent / "activity.json"
+    assert _i216_writer_main(monkeypatch, path, rich) == 0
+    assert stat.S_IMODE(parent.stat().st_mode) == mode
+    assert stat.S_IMODE(aw.sidecar_path(path).stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(aw.os.name == "nt", reason="POSIX directory mode contract")
+@pytest.mark.parametrize("rich", [False, True])
+def test_i216_r2_writer_creates_private_leaf(tmp_path, monkeypatch, rich):
+    import stat
+
+    path = tmp_path / "new" / "activity.json"
+    old_umask = aw.os.umask(0o022)
+    try:
+        assert _i216_writer_main(monkeypatch, path, rich) == 0
+    finally:
+        aw.os.umask(old_umask)
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(aw.sidecar_path(path).stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(aw.os.name == "nt", reason="POSIX directory mode contract")
+def test_i216_r2_failed_fact_fallback_creates_private_leaf(
+    tmp_path, monkeypatch, capsys
+):
+    import stat
+
+    path = tmp_path / "fallback" / "activity.json"
+
+    def fail(*a, **k):
+        raise aw.ActivityStoreError("PLANTED_PRIVATE_PATH")
+
+    monkeypatch.setattr(aw, "publish_hook", fail)
+    old_umask = aw.os.umask(0o022)
+    try:
+        assert _i216_writer_main(monkeypatch, path, True) == 1
+    finally:
+        aw.os.umask(old_umask)
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert json.loads(path.read_text())["fact_committed"] is False
+    assert not aw.sidecar_path(path).exists()
+    assert "PLANTED" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("rich", [False, True])
+def test_i216_r2_denied_parent_creation_stays_failed(
+    tmp_path, monkeypatch, capsys, rich
+):
+    path = tmp_path / "denied" / "activity.json"
+    original = Path.mkdir
+
+    def denied(self, *a, **k):
+        if self == path.parent:
+            raise PermissionError("PLANTED_PRIVATE_PATH")
+        return original(self, *a, **k)
+
+    monkeypatch.setattr(Path, "mkdir", denied)
+    assert _i216_writer_main(monkeypatch, path, rich) == 1
+    assert not path.exists() and not aw.sidecar_path(path).exists()
+    assert "PLANTED" not in capsys.readouterr().err

@@ -1362,3 +1362,33 @@ def test_210_version_preserves_full_status_md_fixture_bytes():
                     ).encode()
                     == expected.encode()
                 )
+
+
+def test_upstream_error_age_keeps_offline_grammar():
+    text = render_status_md(
+        [
+            {
+                "name": "owned",
+                "reachable": False,
+                "last_seen": "2026-10-02 01:02:03",
+                "status_health": {"error_code": "json_nonfinite", "age_seconds": 12.9},
+            }
+        ],
+        "2026-10-02 01:03:00",
+    )
+    assert "## owned: OFFLINE (last seen 01:02:03)" in text
+    assert "  Upstream: json_nonfinite · last good 12s ago" in text
+    text = render_status_md(
+        [
+            {
+                "name": "owned",
+                "reachable": False,
+                "status_health": {
+                    "error_code": "historical_status_invalid",
+                    "age_seconds": None,
+                },
+            }
+        ],
+        "now",
+    )
+    assert "  Upstream: historical_status_invalid · age unknown" in text

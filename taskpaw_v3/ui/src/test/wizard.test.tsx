@@ -469,3 +469,47 @@ describe("MonitorWizard jasna 8K VR (#208)", () => {
     expect(screen.queryByText(/→/)).not.toBeInTheDocument();
   });
 });
+
+describe("R07 committed wizard recovery", () => {
+  const failure = (name: string, saved = true) => new apiModule.MonitorOperationError({
+    ok: false, name, operation: "add", outcome: saved ? "persisted_runtime_failed" : "not_applied",
+    persistence: saved ? "saved" : "not_requested", runtime: saved ? "failed" : "unchanged", retryable: saved,
+    error_code: saved ? "start_failed" : "validation_timeout",
+  });
+  it("saved edit failure refreshes the existing monitor instead of offering another Add", async () => {
+    vi.spyOn(apiModule.api, "updateMonitor").mockRejectedValue(failure("owned"));
+    const onDone = vi.fn();
+    wrap(<MonitorWizard mode="edit" name="owned" existingType="lada" existingConfig={{ name: "owned" }} {...baseProps} onDone={onDone} />);
+    fireEvent.click(screen.getByRole("button", { name: /Save changes|保存更改/ }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith("owned"));
+  });
+  it("validation timeout retains inputs and disables configuration retry only while the owner remains", async () => {
+    vi.spyOn(apiModule.api, "updateMonitor").mockRejectedValue(failure("owned", false));
+    const props = { ...baseProps, mode: "edit" as const, name: "owned", existingType: "lada", existingConfig: { name: "owned" }, onDone: vi.fn() };
+    const view = wrap(<MonitorWizard {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /Save changes|保存更改/ }));
+    expect(await screen.findByText(/this edit did not request Stop|此次编辑未请求停止/)).toBeInTheDocument();
+    expect(props.onDone).not.toHaveBeenCalled();
+    view.rerender(<ThemeProvider theme={theme}><MonitorWizard {...props} operationPending /></ThemeProvider>);
+    expect(screen.getByRole("button", { name: /Save changes|保存更改/ })).toBeDisabled();
+    view.rerender(<ThemeProvider theme={theme}><MonitorWizard {...props} operationPending={false} /></ThemeProvider>);
+    expect(screen.getByRole("button", { name: /Save changes|保存更改/ })).toBeEnabled();
+  });
+  it("preset retry skips healthy saved items and reconciles the saved failed runtime", async () => {
+    const add = vi.spyOn(apiModule.api, "addMonitor").mockResolvedValue({} as never);
+    add.mockImplementation(async spec => { if (spec.config.name === "orchestrator") throw failure("orchestrator"); return {} as never; });
+    const start = vi.spyOn(apiModule.api, "startMonitor").mockResolvedValue({} as never);
+    const onDone = vi.fn();
+    wrap(<MonitorWizard mode="add" {...baseProps} onDone={onDone} />);
+    fireEvent.click(screen.getByText("moomoo (MQT life-signs)"));
+    fireEvent.click(screen.getByRole("button", { name: /Continue|继续/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Review$|^复核$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Add monitor$|^添加监控$/ }));
+    await screen.findByText(/Already saved:|已保存：/);
+    fireEvent.click(screen.getByRole("button", { name: /^Add monitor$|^添加监控$/ }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith("pm2"));
+    expect(add.mock.calls.map(([spec]) => spec.config.name)).toEqual(["pm2", "orchestrator", "opend", "hb"]);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith("orchestrator");
+  });
+});

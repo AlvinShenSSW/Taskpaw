@@ -2378,3 +2378,128 @@ def test_i216_c3_s02_distinct_session_final_witnesses_keep_local_coverage(
         assert not aw.sidecar_path(tmp_path / "agent-activity.json").exists()
     finally:
         inst.stop(0)
+
+
+@pytest.mark.parametrize("reclaim", [False, True])
+def test_i216_m01_expired_receipt_allows_same_root_cpu(tmp_path, monkeypatch, reclaim):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    path = tmp_path / "agent-activity-codex.json"
+    wall, mono = [1000.0], [10.0]
+    counters = {(10, 1.0): 0.0}
+    monkeypatch.setattr(da.time, "monotonic", lambda: mono[0])
+    monkeypatch.setattr(
+        da,
+        "scan_activity",
+        lambda *a: {
+            "codex": {
+                "present": True,
+                "complete": True,
+                "roots": [
+                    {"pid": p, "created": c, "host": "other"} for p, c in counters
+                ],
+                "cpus": {pair: (value, pair) for pair, value in counters.items()},
+            }
+        },
+    )
+    inst = DevActivityPlugin().create(
+        "ai",
+        DevActivityConfig(
+            name="ai", tools=["codex"], state_dir=str(tmp_path), session_activity=False
+        ),
+    )
+    events = []
+
+    def check():
+        monkeypatch.setattr(aw.time, "time", lambda: wall[0])
+        return inst.check(lambda *a, **k: events.append(a))
+
+    try:
+        _x1_main(monkeypatch, path, "UserPromptSubmit", 1000)
+        assert check().metrics["ai_state"] == "busy"
+        wall[0], mono[0] = 1001, 11
+        _x1_main(monkeypatch, path, "SessionEnd", 1001)
+        assert check().metrics["ai_state"] == "idle"
+        original = path.read_bytes()
+        if reclaim:
+            fact = aw.hook_fact(
+                json.dumps({"hook_event_name": "SessionStart", "session_id": "B"}),
+                "codex",
+                90000,
+                (20, 2.0),
+            )
+            assert fact is not None
+            aw.publish_fact(path, fact)
+            assert not any(
+                r["session"] == aw._hash("A")
+                for r in aw.read_facts(path, "codex")["facts"]
+            )
+        wall[0], mono[0] = 90000, 100
+        check()  # CPU baseline; no hook publication after the original final.
+        wall[0], mono[0], counters[(10, 1.0)] = 90001, 101, 1.8
+        status = check()
+        assert status.metrics["ai_state"] == "busy"
+        assert status.metrics["tools"][0]["source"] == "cpu"
+        assert status.metrics["tools"][0]["cpu"] == 180.0
+        wall[0], mono[0], counters[(10, 1.0)] = 90002, 102, 3.6
+        counters[(20, 2.0)] = 0.0
+        assert check().metrics["ai_state"] == "busy"
+        wall[0], mono[0], counters[(10, 1.0)] = 90003, 103, 5.4
+        counters[(20, 2.0)] = 1.8
+        assert check().metrics["ai_state"] == "busy"
+        before = len(events)
+        wall[0], mono[0], counters[(10, 1.0)] = 90004, 104, 7.2
+        del counters[(20, 2.0)]
+        assert check().metrics["ai_state"] == "busy"
+        assert len(events) == before  # Removing the independent root cannot emit off.
+        assert path.read_bytes() == original
+        assert aw.read_facts(path, "codex")["projection_link"]["resolved"]["ts"] == 1001
+    finally:
+        inst.stop(0)
+
+
+@pytest.mark.parametrize(
+    "age,expected", [(1, "idle"), (86400, "idle"), (86401, "busy")]
+)
+def test_i216_m01_receipt_horizon_for_session_positive(
+    tmp_path, monkeypatch, age, expected
+):
+    from taskpaw_v3.integrations import activity_writer as aw
+
+    path = tmp_path / "agent-activity-codex.json"
+    _snapshot(monkeypatch, {"codex": True})
+    inst = DevActivityPlugin().create(
+        "ai", DevActivityConfig(name="ai", tools=["codex"], state_dir=str(tmp_path))
+    )
+    try:
+        _x1_main(monkeypatch, path, "UserPromptSubmit", 1000)
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "busy"
+        _x1_main(monkeypatch, path, "SessionEnd", 1001)
+        assert inst.check(lambda *a, **k: None).metrics["ai_state"] == "idle"
+        monkeypatch.setattr(
+            inst._sessions,
+            "sample",
+            lambda snapshot, *a: (
+                {}
+                if not snapshot["codex"]["roots"]
+                else {
+                    "codex": {
+                        "state": "busy",
+                        "age_s": 1,
+                        "host": "other",
+                        "vscode_state": None,
+                        "errors": [],
+                        "limited": False,
+                    }
+                }
+            ),
+        )
+        monkeypatch.setattr(aw.time, "time", lambda: 1001 + age)
+        status = inst.check(lambda *a, **k: None)
+        assert status.metrics["ai_state"] == expected
+        assert status.metrics["tools"][0]["source"] == (
+            "session" if expected == "busy" else "hook"
+        )
+        assert aw.read_facts(path, "codex")["projection_link"]["resolved"]["ts"] == 1001
+    finally:
+        inst.stop(0)

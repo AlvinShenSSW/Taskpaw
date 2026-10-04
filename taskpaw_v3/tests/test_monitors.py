@@ -345,7 +345,7 @@ def test_supervisor_run_films_unknown_stopped_base_and_unlocked(monkeypatch):
         "page": 2,
         "size": 10,
     }
-    sup.stop()
+    sup._monitors["films"].stop.set()
     assert sup.run_films("films", "open", 2, 10) is None
     sup._monitors["films"].stop.clear()
 
@@ -606,9 +606,8 @@ def test_config_validators_grace_and_pattern():
         ProcessConfig(name="p", pattern="")  # empty pattern
 
 
-def test_reconfigure_abort_keeps_old_monitor_running():
-    """If the old worker is stuck (long check), an aborted reconfigure must NOT
-    kill it — stop is cleared so it keeps running on the old config."""
+def test_reconfigure_timeout_retains_stopping_old_owner():
+    """Cleanup has begun: a stuck old worker stays owned and cannot be resumed."""
     release = threading.Event()
     entered = threading.Event()
 
@@ -617,8 +616,25 @@ def test_reconfigure_abort_keeps_old_monitor_running():
         release.wait(timeout=5)  # simulate a long check
         return MonitorStatus(state="ok")
 
+    prepared_cleaned = threading.Event()
+    created = []
+
+    class Tracked(_FakeInstance):
+        stop_calls = 0
+
+        def stop(self, timeout=5):
+            self.stop_calls += 1
+            if self.config.poll_interval == 2:
+                prepared_cleaned.set()
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            item = Tracked(iid, cfg, blocking_check)
+            created.append(item)
+            return item
+
     sup = Supervisor(sink=lambda *a: None)
-    sup.register(_FakePlugin(blocking_check), _FakeConfig(name="f", poll_interval=1))
+    sup.register(Plugin(blocking_check), _FakeConfig(name="f", poll_interval=1))
     sup.start()
     try:
         assert entered.wait(timeout=3)  # worker is inside the blocking check
@@ -627,10 +643,18 @@ def test_reconfigure_abort_keeps_old_monitor_running():
             sup.reconfigure(
                 "f", _FakeConfig(name="f", poll_interval=2), stop_timeout=0.3
             )
-        # Old entry preserved, stop cleared, worker still alive.
+        # Old entry preserved with stop intent; no replacement may start.
         assert sup._monitors["f"] is old
-        assert not old.stop.is_set()
+        assert old.stop.is_set()
         assert old.thread.is_alive()
+        assert sup.snapshot()["f"]["lifecycle"] == "stopping"
+        assert prepared_cleaned.wait(1)
+        assert len(created) == 2 and created[1].stop_calls == 1
+        with pytest.raises(RuntimeError, match="operation_busy"):
+            sup.reconfigure(
+                "f", _FakeConfig(name="f", poll_interval=3), stop_timeout=0.01
+            )
+        assert len(created) == 2  # no third prepared object while old is retained
     finally:
         release.set()
         sup.stop()
@@ -723,15 +747,21 @@ def test_i216_old_emitter_cannot_reach_replacement():
     assert events == []
 
 
-def test_i216_unregister_lifecycle_acquire_uses_timeout():
-    import threading
-
+def test_i216_unregister_is_bounded_independent_of_lifecycle_lock(monkeypatch):
     sup = Supervisor(lambda *a: None)
     sup.register(
         _FakePlugin(lambda emit: MonitorStatus(state="idle")), _FakeConfig(name="same")
     )
+    old = sup._monitors["same"]
     entered, release, done = threading.Event(), threading.Event(), threading.Event()
-    errors = []
+    cleanup_entered, cleanup_release = threading.Event(), threading.Event()
+    results = []
+
+    def cleanup(timeout):
+        cleanup_entered.set()
+        assert cleanup_release.wait(2)
+
+    monkeypatch.setattr(old.instance, "stop", cleanup)
 
     def hold():
         with sup._life:
@@ -740,9 +770,7 @@ def test_i216_unregister_lifecycle_acquire_uses_timeout():
 
     def remove():
         try:
-            sup.unregister("same", 0.01)
-        except TimeoutError:
-            errors.append("timeout")
+            results.append(sup.unregister("same", 0.01))
         finally:
             done.set()
 
@@ -752,11 +780,476 @@ def test_i216_unregister_lifecycle_acquire_uses_timeout():
     try:
         assert entered.wait(1)
         remover.start()
-        assert done.wait(0.25), "unregister ignored lifecycle-acquire budget"
-        assert sup.has("same")
+        assert done.wait(0.25), "Stop waited on the unrelated lifecycle lock"
+        assert cleanup_entered.wait(1)
+        assert results == [{"complete": False, "error_code": "stop_timeout"}]
+        assert sup._monitors["same"] is old and old.stop.is_set()
+        assert sup.snapshot()["same"]["lifecycle"] == "stopping"
     finally:
         release.set()
+        cleanup_release.set()
         holder.join(2)
         if remover.ident is not None:
             remover.join(2)
-    assert errors == ["timeout"]
+        sup.stop(1)
+    assert sup.stop_result("same", 1)["complete"]
+
+
+def test_r07_unregister_retains_owned_worker_and_refuses_duplicate():
+    entered, release = threading.Event(), threading.Event()
+
+    def block(emit):
+        entered.set()
+        release.wait(3)
+        return MonitorStatus(state="ok")
+
+    plugin = _FakePlugin(block)
+    sup = Supervisor(lambda *a: None)
+    sup.register(plugin, _FakeConfig(name="owned", poll_interval=1))
+    sup.start()
+    try:
+        assert entered.wait(1)
+        old = sup._monitors["owned"]
+        result = sup.unregister("owned", timeout=0.02)
+        assert not result["complete"]
+        assert sup.has("owned") and sup._monitors["owned"] is old
+        assert sup.snapshot()["owned"]["lifecycle"] == "stopping"
+        with pytest.raises(ValueError):
+            sup.register(plugin, _FakeConfig(name="owned"))
+        release.set()
+        old.thread.join(1)
+        assert sup.stop_result("owned", timeout=1)["complete"]
+        assert not sup.has("owned")
+    finally:
+        release.set()
+        sup.stop(timeout=1)
+
+
+def test_r07_pending_create_cancelled_no_late_worker_or_duplicate():
+    entered, release = threading.Event(), threading.Event()
+
+    class BlockPlugin(_FakePlugin):
+        creates = 0
+        starts = 0
+        stops = 0
+
+        def create(self, iid, cfg):
+            self.creates += 1
+            entered.set()
+            assert release.wait(3)
+            outer = self
+
+            class Owned(_FakeInstance):
+                def start(self, emit):
+                    outer.starts += 1
+
+                def stop(self, timeout=5):
+                    outer.stops += 1
+
+            return Owned(iid, cfg, lambda emit: MonitorStatus())
+
+    plugin = BlockPlugin(lambda emit: MonitorStatus())
+    sup = Supervisor(lambda *a: None)
+    sup.start()
+    creator = threading.Thread(
+        target=lambda: sup.register(plugin, _FakeConfig(name="owned"))
+    )
+    creator.start()
+    try:
+        assert entered.wait(1)
+        sup.request_stop("owned", timeout=0.02)
+        assert not sup.stop_result("owned", timeout=0.02)["complete"]
+        with pytest.raises(ValueError):
+            sup.register(plugin, _FakeConfig(name="owned"))
+        assert plugin.creates == 1
+        release.set()
+        creator.join(1)
+        assert not creator.is_alive()
+        assert sup.stop_result("owned", timeout=1)["complete"]
+        assert plugin.starts == 0 and plugin.stops == 1
+    finally:
+        release.set()
+        creator.join(1)
+        sup.stop(timeout=1)
+
+
+def test_r07_blocked_init_cleanup_single_owner_and_late_emit():
+    entered, release_init = threading.Event(), threading.Event()
+    cleaning, release_cleanup = threading.Event(), threading.Event()
+    emitted, calls = [], []
+
+    class Owned(_FakeInstance):
+        def start(self, emit):
+            self.late_emit = emit
+            entered.set()
+            assert release_init.wait(3)
+            emit("info", "late", "late init")
+
+        def stop(self, timeout=5):
+            calls.append("stop")
+            cleaning.set()
+            assert release_cleanup.wait(3)
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            return Owned(iid, cfg, lambda emit: calls.append("check"))
+
+    sup = Supervisor(lambda *args: emitted.append(args))
+    plugin = Plugin(None)
+    sup.register(plugin, _FakeConfig(name="owned"))
+    old = sup._monitors["owned"]
+    sup.start()
+    try:
+        assert entered.wait(1)
+        sup.request_stop("owned", timeout=0.02)
+        cleanup_owner = old.cleanup_thread
+        assert not sup.stop_result("owned", timeout=0.02)["complete"]
+        # Global shutdown shares the existing retirement owner; start and stop
+        # never run concurrently on the object whose start has not returned.
+        sup.stop(timeout=0.02)
+        assert old.cleanup_thread is cleanup_owner and calls == []
+        assert sup.snapshot()["owned"]["lifecycle"] == "stopping"
+        release_init.set()
+        assert cleaning.wait(1)
+        assert emitted == [] and calls == ["stop"]
+        sup.request_stop("owned", timeout=0.02)
+        assert old.cleanup_thread is cleanup_owner
+        assert not sup.stop_result("owned", timeout=0.02)["complete"]
+        release_cleanup.set()
+        assert sup.stop_result("owned", timeout=1)["complete"]
+        assert not sup.has("owned") and calls == ["stop"]
+    finally:
+        release_init.set()
+        release_cleanup.set()
+        sup.stop(timeout=1)
+
+
+def test_r07_stop_ignores_lifecycle_lock_and_old_emitter_cannot_hit_replacement():
+    emits = []
+    sup = Supervisor(lambda *args: emits.append(args))
+    plugin = _FakePlugin(lambda emit: MonitorStatus(state="idle"))
+    sup.register(plugin, _FakeConfig(name="owned"))
+    old = sup._monitors["owned"]
+    locked, release = threading.Event(), threading.Event()
+
+    def holder():
+        with sup._life:
+            locked.set()
+            assert release.wait(3)
+
+    holder_thread = threading.Thread(target=holder)
+    holder_thread.start()
+    try:
+        assert locked.wait(1)
+        before = time.monotonic()
+        sup.request_stop("owned", timeout=0.05)
+        assert sup.stop_result("owned", timeout=0.05)["complete"]
+        assert time.monotonic() - before < 0.3
+    finally:
+        release.set()
+        holder_thread.join(1)
+    sup.register(plugin, _FakeConfig(name="owned"))
+    sup._emit("owned", "info", "old", "old generation", expected=old)
+    assert emits == [] and sup.has("owned")
+    sup._emit(
+        "owned", "info", "new", "current generation", expected=sup._monitors["owned"]
+    )
+    assert len(emits) == 1
+    sup.stop(timeout=1)
+
+
+@pytest.mark.parametrize("second", ["stop", "shutdown"])
+def test_r07_sr001_cleanup_publication_reserves_single_owner(monkeypatch, second):
+    published, allow_start = threading.Event(), threading.Event()
+    entered, release = threading.Event(), threading.Event()
+    owners, calls = [], []
+    first = [True]
+
+    class Owned(_FakeInstance):
+        def stop(self, timeout=5):
+            calls.append(threading.current_thread().ident)
+            entered.set()
+            assert release.wait(3)
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            return Owned(iid, cfg, self.behavior)
+
+    sup = Supervisor(lambda *a: None)
+    sup.register(Plugin(None), _FakeConfig(name="owned-publication"))
+    managed = sup._monitors["owned-publication"]
+    original = threading.Thread.start
+
+    def start(t):
+        if t.name == "cleanup-owned-publication":
+            owners.append(t)
+            if first[0]:
+                first[0] = False
+                published.set()
+                assert allow_start.wait(3)
+        return original(t)
+
+    caller = threading.Thread(
+        target=lambda: sup.request_stop("owned-publication", 0.03)
+    )
+    monkeypatch.setattr(threading.Thread, "start", start)
+    try:
+        caller.start()
+        assert published.wait(1)
+        before = time.monotonic()
+        if second == "stop":
+            sup.request_stop("owned-publication", 0.03)
+            assert not sup.stop_result("owned-publication", 0.03)["complete"]
+        else:
+            sup.stop(0.03)
+        assert time.monotonic() - before < 0.3
+        assert len(owners) == 1 and managed.cleanup_thread is owners[0]
+        assert sup.snapshot()["owned-publication"]["lifecycle"] == "stopping"
+        allow_start.set()
+        caller.join(1)
+        assert entered.wait(1) and len(calls) == 1
+        release.set()
+        assert sup.stop_result("owned-publication", 1)["complete"]
+    finally:
+        allow_start.set()
+        release.set()
+        caller.join(1)
+        for owner in owners:
+            if owner.ident is not None:
+                owner.join(1)
+        sup.stop(1)
+        assert not caller.is_alive() and all(not t.is_alive() for t in owners)
+
+
+def test_r07_sr001_actual_watchdog_ignores_published_unstarted_worker(monkeypatch):
+    published, allow_start = threading.Event(), threading.Event()
+    entered, release = threading.Event(), threading.Event()
+    owners, calls = [], []
+    first = [True]
+
+    class Owned(_FakeInstance):
+        def start(self, emit):
+            calls.append(threading.current_thread().ident)
+            entered.set()
+            assert release.wait(3)
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            return Owned(iid, cfg, lambda emit: MonitorStatus(state="idle"))
+
+    sup = Supervisor(lambda *a: None)
+    sup._running.set()
+    original = threading.Thread.start
+
+    def start(t):
+        if t.name == "mon-owned-publication":
+            owners.append(t)
+            if first[0]:
+                first[0] = False
+                published.set()
+                assert allow_start.wait(3)
+        return original(t)
+
+    creator = threading.Thread(
+        target=lambda: sup.register(Plugin(None), _FakeConfig(name="owned-publication"))
+    )
+    watcher = threading.Thread(target=sup._watch)
+    monkeypatch.setattr(threading.Thread, "start", start)
+    # One real production watchdog iteration, with only this fake's Event reset.
+    monkeypatch.setattr(sup_mod.time, "sleep", lambda seconds: sup._running.clear())
+    try:
+        creator.start()
+        assert published.wait(1)
+        watcher.start()
+        watcher.join(1)
+        assert not watcher.is_alive()
+        assert len(owners) == 1
+        assert sup._monitors["owned-publication"].restart_count == 0
+        allow_start.set()
+        creator.join(1)
+        assert entered.wait(1) and len(calls) == 1
+        assert sup._monitors["owned-publication"].thread is owners[0]
+    finally:
+        allow_start.set()
+        release.set()
+        sup._running.clear()
+        creator.join(1)
+        if watcher.ident is not None:
+            watcher.join(1)
+        for owner in owners:
+            if owner.ident is not None:
+                owner.join(1)
+        sup.stop(1)
+        assert all(not t.is_alive() for t in owners)
+
+
+def test_r07_sr001_known_cleanup_launch_failure_allows_one_retry(monkeypatch):
+    calls = []
+    sup = Supervisor(lambda *a: None)
+    sup.register(_FakePlugin(None), _FakeConfig(name="owned-launch"))
+    managed = sup._monitors["owned-launch"]
+    monkeypatch.setattr(managed.instance, "stop", lambda timeout: calls.append(1))
+    original = threading.Thread.start
+
+    def failed(t):
+        if t.name == "cleanup-owned-launch":
+            raise RuntimeError("PLANTED_LAUNCH_SECRET")
+        return original(t)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", failed)
+        sup.request_stop("owned-launch", 0.03)
+        assert sup.stop_result("owned-launch", 0.03) == {
+            "complete": False,
+            "error_code": "cleanup_failed",
+        }
+        assert calls == [] and sup.has("owned-launch")
+    sup.request_stop("owned-launch", 1)
+    assert sup.stop_result("owned-launch", 1)["complete"]
+    assert calls == [1] and not sup.has("owned-launch")
+    sup.stop(1)
+
+
+@pytest.mark.parametrize("phase", ["construct", "start"])
+def test_r07_sr001_known_worker_launch_failure_retires_before_explicit_retry(
+    monkeypatch, phase
+):
+    callbacks = []
+
+    class Owned(_FakeInstance):
+        def stop(self, timeout=5):
+            callbacks.append(self)
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            return Owned(iid, cfg, lambda emit: MonitorStatus(state="idle"))
+
+    sup = Supervisor(lambda *a: None)
+    plugin = Plugin(None)
+    sup.register(plugin, _FakeConfig(name="owned-launch"))
+    old = sup._monitors["owned-launch"]
+    original_thread, original_start = threading.Thread, threading.Thread.start
+
+    def construct(*args, **kwargs):
+        if kwargs.get("name") == "mon-owned-launch":
+            raise RuntimeError("PLANTED_CONSTRUCTOR_SECRET")
+        return original_thread(*args, **kwargs)
+
+    def start(t):
+        if t.name == "mon-owned-launch":
+            raise RuntimeError("PLANTED_START_SECRET")
+        return original_start(t)
+
+    try:
+        with monkeypatch.context() as patch:
+            if phase == "construct":
+                patch.setattr(sup_mod.threading, "Thread", construct)
+            else:
+                patch.setattr(threading.Thread, "start", start)
+            sup.start()
+            assert sup.stop_result("owned-launch", 1)["complete"]
+            assert not old.worker_launch_pending and old.init_error == "start_failed"
+            assert callbacks == [old.instance] and not sup.has("owned-launch")
+            assert sup.activation_result("owned-launch")["error_code"] == "start_failed"
+        sup.register(plugin, _FakeConfig(name="owned-launch"))
+        replacement = sup._monitors["owned-launch"]
+        assert (
+            replacement is not old
+            and sup.activation_result("owned-launch", 1)["runtime"] == "applied"
+        )
+        assert replacement.thread.is_alive()
+    finally:
+        sup.stop(1)
+
+
+@pytest.mark.parametrize(
+    "fails,replace_owner", [(False, False), (True, False), (True, True)]
+)
+def test_r07_or001_activation_uses_captured_initialization(
+    monkeypatch, fails, replace_owner
+):
+    entered, start_release = threading.Event(), threading.Event()
+    retiring, retire_release = threading.Event(), threading.Event()
+    stopped = []
+
+    class Owned(_FakeInstance):
+        def start(self, emit):
+            entered.set()
+            assert start_release.wait(5)
+            if fails:
+                raise RuntimeError("PLANTED_START_SECRET")
+
+        def stop(self, timeout=5):
+            stopped.append(self)
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            return Owned(iid, cfg, self.behavior)
+
+    sup = Supervisor(lambda *a: None)
+    plugin = Plugin(lambda emit: MonitorStatus(state="idle"))
+    sup.register(plugin, _FakeConfig(name="owned"))
+    owned = sup._monitors["owned"]
+    original_wait = owned.initialized.wait
+    original_retire = sup._retire
+
+    def before_retire(iid, managed, deadline):
+        if managed is owned and threading.current_thread() is managed.thread:
+            retiring.set()
+            assert retire_release.wait(5)
+        return original_retire(iid, managed, deadline)
+
+    monkeypatch.setattr(sup, "_retire", before_retire)
+    try:
+        sup.start()
+        assert entered.wait(2)
+        assert sup.activation_result("owned") == {
+            "runtime": "starting",
+            "error_code": None,
+        }
+        start_release.set()
+        assert owned.initialized.wait(2)
+        if fails:
+            assert retiring.wait(2)
+            assert owned.init_error == "start_failed" and not owned.retiring
+        if replace_owner:
+            caller = threading.current_thread()
+
+            def replace_after_wait(timeout=None):
+                done = original_wait(timeout)
+                if threading.current_thread() is not caller:
+                    return done
+                retire_release.set()
+                owned.thread.join(2)
+                assert not owned.thread.is_alive()
+                assert sup.stop_result("owned", 2)["complete"]
+                owned.cleanup_thread.join(2)
+                assert not owned.cleanup_thread.is_alive()
+                sup.register(_FakePlugin(plugin.behavior), _FakeConfig(name="owned"))
+                assert sup._monitors["owned"] is not owned
+                return done
+
+            monkeypatch.setattr(owned.initialized, "wait", replace_after_wait)
+        result = sup.activation_result("owned", 1)
+        assert result == {
+            "runtime": "failed" if fails else "applied",
+            "error_code": "start_failed" if fails else None,
+        }
+        if fails and not replace_owner:
+            retire_release.set()
+            owned.thread.join(2)
+            assert not owned.thread.is_alive()
+            assert sup.stop_result("owned", 2)["complete"]
+            owned.cleanup_thread.join(2)
+            assert not sup.has("owned") and stopped == [owned.instance]
+            assert sup.activation_result("owned")["error_code"] == "start_failed"
+    finally:
+        start_release.set()
+        retire_release.set()
+        if replace_owner:
+            monkeypatch.setattr(owned.initialized, "wait", original_wait)
+        sup.stop(2)
+        if owned.thread is not None:
+            owned.thread.join(2)
+        if owned.cleanup_thread is not None:
+            owned.cleanup_thread.join(2)

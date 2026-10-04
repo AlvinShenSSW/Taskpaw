@@ -426,7 +426,10 @@ def read_hook_activity(
                     states.append("idle")
                     ages.append(max(0, now - link["resolved"]["ts"]))
                     pair = (link["fact"]["pid"], link["fact"]["created"])
-                    if pair in roots:
+                    if (
+                        pair in roots
+                        and -min(freshness, 5) <= now - link["resolved"]["ts"] <= 86400
+                    ):
                         covered.add(pair)
                 continue
             # A rich projection cannot be treated as a second independent idle.

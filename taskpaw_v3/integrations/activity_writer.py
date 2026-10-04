@@ -104,7 +104,7 @@ def _write_projection(
     path: str, tool: str, state: str, session: Optional[str], ts: float, **extra
 ) -> Path:
     p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     payload = {
         "tool": tool,
         "state": state,
@@ -299,8 +299,6 @@ def _open_store(
             if not writable or not create:
                 return None
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if os.name != "nt":
-                path.parent.chmod(0o700)
             try:
                 fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             except FileExistsError:
