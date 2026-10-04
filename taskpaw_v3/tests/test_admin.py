@@ -3012,3 +3012,109 @@ def test_r07_or002_stop_persistence_and_late_retirement_are_preserved(
         sup.stop(2)
         if managed is not None and managed.cleanup_thread is not None:
             managed.cleanup_thread.join(2)
+
+
+def test_i216_r1_folder_update_timeout_never_resumes_retired_owner(tmp_path):
+    import threading
+
+    from taskpaw_v3.monitors.plugins.folder import FolderInstance, FolderPlugin
+    from taskpaw_v3.monitors.supervisor import Supervisor
+
+    watched = tmp_path / "watched"
+    watched.mkdir()
+    edge_entered, edge_release = threading.Event(), threading.Event()
+    prepared_cleaned = threading.Event()
+    created, events = [], []
+
+    class TrackedFolder(FolderInstance):
+        starts = 0
+        checks = 0
+        stops = 0
+
+        def start(self, emit):
+            self.starts += 1
+            super().start(emit)
+            if self is created[0]:
+                (watched / "new.txt").write_text("completed", encoding="utf-8")
+
+        def check(self, emit):
+            self.checks += 1
+            if self is created[0]:
+                super().check(emit)  # Discover the file after the real start baseline.
+
+                def completing(*a, **k):
+                    edge_entered.set()  # Real Folder has marked its record completed.
+                    assert edge_release.wait(3)
+                    emit(*a, **k)
+
+                return super().check(completing)
+            return super().check(emit)
+
+        def stop(self, timeout=5):
+            self.stops += 1
+            super().stop(timeout)
+            if self is not created[0]:
+                prepared_cleaned.set()
+
+    class TrackedPlugin(FolderPlugin):
+        def create(self, iid, cfg):
+            inst = TrackedFolder(iid, cfg)
+            created.append(inst)
+            return inst
+
+    plugin = TrackedPlugin()
+    reg = PluginRegistry()
+    reg.register(plugin)
+    cfg = _agent_config()
+    path = tmp_path / "agent.yaml"
+    sup = Supervisor(lambda *a: events.append(a))
+    adm = MonitorAdmin(cfg, sup, reg, path, operation_timeout=0.2)
+    try:
+        assert adm.add(
+            {
+                "type_id": "folder",
+                "config": {
+                    "name": "owned",
+                    "path": str(watched),
+                    "stable_seconds": 0,
+                    "poll_interval": 1,
+                },
+            }
+        )["ok"]
+        sup.start()
+        assert edge_entered.wait(1)
+        old = sup._monitors["owned"]
+        stale_emit = sup._emitter_for("owned", old)
+        assert old.instance._files["new.txt"][2] is True
+        result = adm.update("owned", {"poll_interval": 2})
+        assert (
+            result["persistence"],
+            result["runtime"],
+            result["outcome"],
+            result["error_code"],
+        ) == ("saved", "stopping", "stop_incomplete", "stop_timeout")
+        assert load_yaml(AgentConfig, path).monitors[0]["config"]["poll_interval"] == 2
+        assert sup._monitors["owned"] is old and old.stop.is_set()
+        assert old.thread.is_alive()
+        assert adm.status_view()["owned"]["lifecycle"] == "stopping"
+        assert prepared_cleaned.wait(1)
+        assert len(created) == 2 and created[1].starts == 0 and created[1].stops == 1
+        assert (
+            adm.update("owned", {"poll_interval": 3})["error_code"] == "operation_busy"
+        )
+        assert len(created) == 2
+        edge_release.set()
+        old.thread.join(1)
+        assert not old.thread.is_alive() and old.stop.is_set()
+        assert old.instance.checks == 1 and events == []
+        assert sup.stop_result("owned", 1)["complete"]
+        assert adm.set_enabled("owned", True)["ok"]
+        current = sup._monitors["owned"]
+        assert current is not old and len(created) == 3
+        stale_emit("done", "old", "old")
+        assert events == []
+        sup._emitter_for("owned", current)("done", "current", "current")
+        assert len(events) == 1 and events[0][2] == "current"
+    finally:
+        edge_release.set()
+        sup.stop(1)

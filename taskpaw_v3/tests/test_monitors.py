@@ -36,6 +36,67 @@ from taskpaw_v3.monitors.registry import PluginRegistry, default_registry
 from taskpaw_v3.monitors.supervisor import Supervisor
 
 
+def test_i216_supervisor_shared_deadline_with_two_late_native_probes(
+    tmp_path, monkeypatch
+):
+    from taskpaw_v3.monitors.plugins import dev_activity as da
+
+    entered, release = threading.Event(), threading.Event()
+    guard = threading.Lock()
+    calls = []
+
+    def scan(*args):
+        with guard:
+            calls.append(threading.get_ident())
+            if len(calls) == 2:
+                entered.set()
+        assert release.wait(2)
+        return {}
+
+    monkeypatch.setattr(da, "scan_activity", scan)
+    monkeypatch.setattr(da.Path, "home", lambda: tmp_path)
+    sup = Supervisor(lambda *a: pytest.fail("late event"))
+    for name in ("a", "b"):
+        sup.register(
+            da.DevActivityPlugin(),
+            da.DevActivityConfig(
+                name=name,
+                tools=["claude"],
+                state_dir=str(tmp_path),
+            ),
+        )
+    sup.register(
+        _FakePlugin(lambda emit: MonitorStatus(state="ok")), _FakeConfig(name="other")
+    )
+    unrelated = []
+    monkeypatch.setattr(
+        sup._monitors["other"].instance,
+        "stop",
+        lambda timeout: unrelated.append(timeout),
+    )
+    managed = list(sup._monitors.values())
+    sup.start()
+    try:
+        assert entered.wait(1)
+        start = time.monotonic()
+        sup.stop(0.03)
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.25 and unrelated and unrelated[0] <= 0.03
+        assert all(m.stop.is_set() for m in managed)
+        assert all(m.instance._stop_event.is_set() for m in managed[:2])
+        assert all(not m.instance._cleanup_complete for m in managed[:2])
+    finally:
+        release.set()
+        for m in managed:
+            if m.thread:
+                m.thread.join(2)
+        sup.stop(0.1)
+    assert all(not m.thread or not m.thread.is_alive() for m in managed)
+    assert all(
+        m.instance._cleanup_complete and not m.instance._samples for m in managed[:2]
+    )
+
+
 def test_tasklog_agent_observer_mirrors_delivered_and_folded_only():
     from taskpaw_v3.core.protocol import EventQueue
     from taskpaw_v3.core.tasklog import get_task_log
@@ -668,6 +729,70 @@ def test_heartbeat_expands_user_path(tmp_path, monkeypatch):
     )
     st = evaluate_heartbeat(HeartbeatConfig(name="hb", path="~/hb.json"))
     assert st.state == "ok"  # resolved under HOME, not reported missing
+
+
+def test_i216_old_emitter_cannot_reach_replacement():
+    events = []
+    sup = Supervisor(lambda *a: events.append(a))
+    sup.register(
+        _FakePlugin(lambda emit: MonitorStatus(state="idle")), _FakeConfig(name="same")
+    )
+    old = sup._monitors["same"]
+    emit = sup._emitter_for("same", old)
+    sup.unregister("same")
+    sup.register(
+        _FakePlugin(lambda emit: MonitorStatus(state="idle")), _FakeConfig(name="same")
+    )
+    emit("info", "late", "late")
+    assert events == []
+
+
+def test_i216_unregister_is_bounded_independent_of_lifecycle_lock(monkeypatch):
+    sup = Supervisor(lambda *a: None)
+    sup.register(
+        _FakePlugin(lambda emit: MonitorStatus(state="idle")), _FakeConfig(name="same")
+    )
+    old = sup._monitors["same"]
+    entered, release, done = threading.Event(), threading.Event(), threading.Event()
+    cleanup_entered, cleanup_release = threading.Event(), threading.Event()
+    results = []
+
+    def cleanup(timeout):
+        cleanup_entered.set()
+        assert cleanup_release.wait(2)
+
+    monkeypatch.setattr(old.instance, "stop", cleanup)
+
+    def hold():
+        with sup._life:
+            entered.set()
+            assert release.wait(2)
+
+    def remove():
+        try:
+            results.append(sup.unregister("same", 0.01))
+        finally:
+            done.set()
+
+    holder = threading.Thread(target=hold)
+    remover = threading.Thread(target=remove)
+    holder.start()
+    try:
+        assert entered.wait(1)
+        remover.start()
+        assert done.wait(0.25), "Stop waited on the unrelated lifecycle lock"
+        assert cleanup_entered.wait(1)
+        assert results == [{"complete": False, "error_code": "stop_timeout"}]
+        assert sup._monitors["same"] is old and old.stop.is_set()
+        assert sup.snapshot()["same"]["lifecycle"] == "stopping"
+    finally:
+        release.set()
+        cleanup_release.set()
+        holder.join(2)
+        if remover.ident is not None:
+            remover.join(2)
+        sup.stop(1)
+    assert sup.stop_result("same", 1)["complete"]
 
 
 def test_r07_unregister_retains_owned_worker_and_refuses_duplicate():

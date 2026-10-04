@@ -691,7 +691,7 @@ class Supervisor:
         data=None,
         dedupe_key=None,
         *,
-        expected=None,
+        expected: _Managed | None = None,
     ) -> None:
         folded_msg = None
         deliver = False
