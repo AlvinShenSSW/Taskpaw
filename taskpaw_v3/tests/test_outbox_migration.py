@@ -660,7 +660,9 @@ def test_disabled_backlog_acks_and_reenable_young_old_quarantine(
         )
         sent, alerts = [], []
         monkeypatch.setattr(poller_module, "_now", lambda: now + timedelta(seconds=1))
-        from taskpaw_v3.tests.test_hub import FakeResp
+        from urllib.parse import parse_qs, urlsplit
+
+        from taskpaw_v3.tests.test_hub import FakeResp, fake_request
 
         cursor = {
             "version": 1,
@@ -677,13 +679,20 @@ def test_disabled_backlog_acks_and_reenable_young_old_quarantine(
             "fetch_status",
             lambda server: (True, json.dumps({"event_cursor": cursor})),
         )
-        monkeypatch.setattr(
-            poller_module._opener,
-            "open",
-            lambda request, timeout: FakeResp(
-                {"event_cursor": cursor, "events": [{"id": 1, "message": "fake"}]}
-            ),
-        )
+        requests = []
+
+        def request_fake(request):
+            requests.append(request)
+            assert request["kind"] == "events"
+            return fake_request(
+                request,
+                lambda *args, **kwargs: FakeResp(
+                    {"event_cursor": cursor, "events": [{"id": 1, "message": "fake"}]}
+                ),
+            )
+
+        # Use the existing pure validator fixture; never the real parent helper.
+        monkeypatch.setattr(poller, "_request", request_fake)
         monkeypatch.setattr(
             poller_module,
             "send_payload",
@@ -701,11 +710,17 @@ def test_disabled_backlog_acks_and_reenable_young_old_quarantine(
                 "SELECT * FROM delivery_outbox ORDER BY id"
             ).fetchall()
         )
+        assert len(requests) == 1
+        assert parse_qs(urlsplit(requests[0]["url"]).query)["ack"] == ["-1"]
         assert poller.last_event_ids[sid] == 1
         assert store._conn.execute("SELECT COUNT(*) FROM events").fetchone() == (1,)
         switch.update(enabled=True, token="fake")
         poller.poll_once()
         poller.poll_once()
+        assert len(requests) == 3
+        assert [
+            parse_qs(urlsplit(request["url"]).query)["ack"] for request in requests
+        ] == [["-1"], ["1"], ["1"]]
         assert sent == [{"text": "young"}] and len(alerts) == 1
         assert store._conn.execute(
             "SELECT delivery_state,attempts FROM delivery_outbox WHERE id=?", (old,)

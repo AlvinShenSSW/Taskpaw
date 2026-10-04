@@ -82,7 +82,7 @@ def test_install_idempotent_check_exact_uninstall(setup, existing, run):
     assert not list((home / ".taskpaw").glob("agent-activity*"))
     for tool in ("claude", "codex"):
         hooks = json.loads(target(home, tool).read_text())["hooks"]
-        assert ("SubagentStop" in hooks) is (tool == "codex")
+        assert "SubagentStart" in hooks and "SubagentStop" in hooks
         if tool == "claude":
             assert hooks["Notification"][0]["matcher"] == "permission_prompt"
     run(s, home, "uninstall")
@@ -160,6 +160,7 @@ def test_selective_uninstall_preserves_later_edits_and_unowned_groups(setup, run
     result = json.loads(p.read_text())
     assert result["later"] and result["hooks"]["Stop"] == [
         {"matcher": "old", "hooks": []},
+        {"hooks": []},
         {"matcher": "new", "hooks": [{"type": "command", "command": "unrelated"}]},
     ]
 
@@ -374,13 +375,20 @@ def test_write_failures_report_and_keep_backup(
         if (failure == "replace" and path == p) or (
             failure == "record" and path.name == "claude.json"
         ):
-            raise OSError("PRIVATE DETAIL")
+            error = PermissionError(13, "PRIVATE DETAIL", "PRIVATE_FILENAME")
+            error.winerror = 32
+            raise error
         original(path, raw, expected)
 
     monkeypatch.setattr(s, "atomic_write", fail)
     run(s, home, "install", "claude", expected=1)
     output = capsys.readouterr().out
     assert "backup retained" in output and "PRIVATE DETAIL" not in output
+    assert "PRIVATE_FILENAME" not in output
+    stage = "settings_write" if failure == "replace" else "undo_write"
+    assert f"stage={stage}" in output
+    assert "exception=PermissionError" in output and "errno=13" in output
+    assert "winerror=32" in output
     assert list((home / ".taskpaw/hook-setup/backups").glob("*.bak"))
 
 
@@ -512,7 +520,7 @@ def test_changed_marker_handler_removed_unmarked_preserved(setup, run):
     p.write_text(json.dumps(data))
     run(s, home, "uninstall", "claude")
     data = json.loads(p.read_text())
-    assert data["hooks"]["Stop"] == []
+    assert data["hooks"]["Stop"] == [{"hooks": []}]
     assert data["hooks"]["SessionEnd"][0]["hooks"] == [unmarked]
 
 
@@ -640,3 +648,223 @@ def test_windows_claude_install_check_uninstall(setup, monkeypatch, run):
     run(s, home, "check", "claude")
     run(s, home, "uninstall", "claude")
     assert not target(home, "claude").exists()
+
+
+def test_i216_reinstall_repairs_lost_record_without_false_baseline(setup, run):
+    s, home = setup
+    run(s, home, "install", "claude")
+    path = target(home, "claude")
+    record_path = home / ".taskpaw/hook-setup/claude.json"
+    record_path.unlink()
+    before = path.read_bytes()
+    backups = list((home / ".taskpaw/hook-setup/backups").glob("*.bak"))
+    run(s, home, "install", "claude")
+    assert record_path.exists()
+    record = json.loads(record_path.read_text())
+    assert not {"original_exists", "baseline", "baseline_hash"} & record.keys()
+    assert path.read_bytes() == before
+    assert list((home / ".taskpaw/hook-setup/backups").glob("*.bak")) == backups
+    run(s, home, "uninstall", "claude")
+    assert not any(
+        s.owned(h, "claude")
+        for groups in json.loads(path.read_text())["hooks"].values()
+        for group in groups
+        for h in group["hooks"]
+    )
+
+
+@pytest.mark.parametrize("fault", ["missing", "changed", "denied"])
+def test_i216_missing_baseline_uses_selective_uninstall(
+    setup, run, monkeypatch, capsys, fault
+):
+    s, home = setup
+    path = put(home, "claude", {"keep": True})
+    run(s, home, "install", "claude")
+    record = json.loads((home / ".taskpaw/hook-setup/claude.json").read_text())
+    baseline = Path(record["baseline"])
+    if fault == "missing":
+        baseline.unlink()
+    elif fault == "changed":
+        baseline.write_text("PRIVATE CORRUPT")
+    else:
+        original = s.read_bytes
+
+        def denied(p):
+            if p == baseline:
+                raise PermissionError("PRIVATE DENIED")
+            return original(p)
+
+        monkeypatch.setattr(s, "read_bytes", denied)
+    run(s, home, "uninstall", "claude")
+    data = json.loads(path.read_text())
+    assert data["keep"] is True
+    assert not any(
+        s.owned(h, "claude")
+        for groups in data["hooks"].values()
+        for group in groups
+        for h in group["hooks"]
+    )
+    output = capsys.readouterr().out
+    assert "selective" in output and "PRIVATE" not in output
+    assert not (home / ".taskpaw/hook-setup/claude.json").exists()
+
+
+def test_i216_selective_cleanup_preserves_shifted_empty_user_group(setup, run):
+    s, home = setup
+    path = put(home, "claude", {"hooks": {"Stop": [{"hooks": []}]}})
+    run(s, home, "install", "claude")
+    data = json.loads(path.read_text())
+    # Shift the preexisting empty group into the recorded created group's index.
+    data["hooks"]["Stop"].insert(
+        0, {"hooks": [{"type": "command", "command": "user-never-run"}]}
+    )
+    data["user_edit"] = True
+    path.write_text(json.dumps(data))
+    run(s, home, "uninstall", "claude")
+    groups = json.loads(path.read_text())["hooks"]["Stop"]
+    assert groups[1] == {"hooks": []}
+    assert len(groups) == 3
+
+
+def test_preflight_io_diagnostic_preserves_settings(setup, monkeypatch, capsys, run):
+    s, home = setup
+    path = put(home, "claude", {"keep": True})
+    before = path.read_bytes()
+
+    def refused(*args):
+        raise PermissionError(13, "PRIVATE_MESSAGE --token=SECRET", "PRIVATE_FILENAME")
+
+    monkeypatch.setattr(s, "read_bytes", refused)
+    run(s, home, "install", "claude", expected=1)
+    output = capsys.readouterr().out
+    assert "claude: local I/O failed" in output
+    assert "stage=preflight_settings_read" in output
+    assert "exception=PermissionError" in output and "errno=13" in output
+    assert all(
+        word not in output for word in ("PRIVATE_MESSAGE", "SECRET", "PRIVATE_FILENAME")
+    )
+    assert path.read_bytes() == before and not (home / ".taskpaw").exists()
+
+
+@pytest.mark.parametrize("fault", ["facts", "cleanup"])
+def test_final_verify_io_diagnostic_distinguishes_cleanup(
+    setup, monkeypatch, capsys, run, fault
+):
+    import sqlite3
+    import time
+    from types import SimpleNamespace
+
+    from taskpaw_v3.integrations.activity_writer import ActivityStoreError
+
+    s, home = setup
+    put(home, "claude", {"keep": True})
+    original_verify = s.verify_writer
+    calls = 0
+
+    def checked(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return  # Preflight succeeds; exercise the actual postbackup main catch.
+        return original_verify(*args)
+
+    def writer(argv, **kwargs):
+        assert kwargs["timeout"] == 5
+        words = shlex.split(argv[-1])
+        output = Path(words[words.index("--path") + 1])
+        event = json.loads(kwargs["input"])
+        state = {
+            "UserPromptSubmit": "busy",
+            "PermissionRequest": "waiting",
+            "Stop": "idle",
+        }
+        output.write_text(
+            json.dumps(
+                {
+                    "tool": "claude",
+                    "state": state[event["hook_event_name"]],
+                    "session": event["session_id"],
+                    "ts": time.time(),
+                }
+            )
+        )
+        return SimpleNamespace(returncode=0)
+
+    def facts(*args):
+        if fault == "facts":
+            try:
+                error = sqlite3.OperationalError("PRIVATE_SQL SECRET")
+                error.sqlite_errorcode = 5
+                raise error
+            except sqlite3.Error:
+                raise ActivityStoreError("PRIVATE_STORE") from None
+        return {}
+
+    monkeypatch.setattr(s, "verify_writer", checked)
+    monkeypatch.setattr(s.subprocess, "run", writer)
+    monkeypatch.setattr(s, "read_facts", facts)
+    monkeypatch.setattr(s, "_projection_matches", lambda *args: True)
+    if fault == "cleanup":
+        remove = s.tempfile.TemporaryDirectory._rmtree
+
+        def cleanup(cls, *args, **kwargs):
+            remove(*args, **kwargs)
+            raise PermissionError(13, "PRIVATE_CLEANUP SECRET", "PRIVATE_FILENAME")
+
+        monkeypatch.setattr(
+            s.tempfile.TemporaryDirectory, "_rmtree", classmethod(cleanup)
+        )
+    run(s, home, "install", "claude", expected=1)
+    output = capsys.readouterr().out
+    assert "stage=final_writer_verify" in output and "backup retained" in output
+    if fault == "facts":
+        assert "operation=verify_fact_read" in output
+        assert "exception=ActivityStoreError" in output
+        assert (
+            "context=sqlite3.OperationalError" in output
+            and "sqlite_errorcode=5" in output
+        )
+    else:
+        assert "operation=verify_temp_cleanup" in output
+        assert "exception=PermissionError" in output and "errno=13" in output
+    assert all(word not in output for word in ("PRIVATE_", "SECRET"))
+    assert json.loads(target(home, "claude").read_text())["keep"] is True
+    assert list((home / ".taskpaw/hook-setup/backups").glob("*.bak"))
+    assert not list((home / ".taskpaw").glob(".activity-check-*"))
+
+
+@pytest.mark.parametrize("fault", ["bounded", "unavailable"])
+def test_io_diagnostic_private_subclass_is_bounded_and_fail_safe(
+    setup, monkeypatch, capsys, run, fault
+):
+    s, home = setup
+    path = put(home, "claude", {"keep": True})
+    before = path.read_bytes()
+
+    class SECRET_PRIVATE_CLASS(OSError):
+        def __getattribute__(self, name):
+            if fault == "unavailable" and name == "errno":
+                raise RuntimeError("SECRET_METADATA_FAILURE")
+            return super().__getattribute__(name)
+
+    def refused(*args):
+        error = SECRET_PRIVATE_CLASS(
+            1 << 100, "PRIVATE_MESSAGE SECRET", "PRIVATE_FILENAME"
+        )
+        error.winerror = True
+        error.__context__ = error
+        raise error
+
+    monkeypatch.setattr(s, "read_bytes", refused)
+    run(s, home, "install", "claude", expected=1)
+    output = capsys.readouterr().out
+    assert "claude: local I/O failed" in output
+    assert all(
+        word not in output for word in ("PRIVATE_", "SECRET", "errno=", "winerror=")
+    )
+    if fault == "bounded":
+        assert "exception=OSErrorSubclass" in output and "truncated=true" in output
+    else:
+        assert "diagnostic=unavailable" in output
+    assert len(output.encode("ascii")) <= 1100
+    assert path.read_bytes() == before and not (home / ".taskpaw").exists()

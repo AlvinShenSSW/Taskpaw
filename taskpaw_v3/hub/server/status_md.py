@@ -333,6 +333,16 @@ def render_status_md(statuses: list[dict[str, Any]], now: str) -> str:
                 if seen
                 else f"## {name}: OFFLINE"
             )
+        health = s.get("status_health") or {}
+        if health.get("error_code"):
+            reason = _inline(str(health["error_code"]), 64)
+            age = health.get("age_seconds")
+            detail = (
+                f" · last good {int(age)}s ago"
+                if isinstance(age, (int, float)) and _is_num(age) and age >= 0
+                else " · age unknown"
+            )
+            lines.append(f"  Upstream: {reason}{detail}")
         lines.append("")
     return "\n".join(lines)
 

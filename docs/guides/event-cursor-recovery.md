@@ -129,3 +129,19 @@ Hub `/status` 的注册项增加 `event_channel`，显示 `ready/paused`、具�
 此机制不把事件正文变成磁盘队列，不承诺 exactly-once，也不修复旧 clear-on-read 的
 响应丢失窗口。OS 租约和 fsync/atomic replace 面向本地文件系统；同时丢失/回滚所有
 锚、网络文件系统或硬件破坏的连续性仍须人工证明或新配对。
+
+## 完整批次中的坏事件与已消费下界
+
+新 Hub 对大小/结构都在限额内且 cursor proof 可靠的完整响应逐项准入。坏 ID、
+非有限数、不可编码字符串、重复或乱序项保留 metadata-only quarantine receipt；
+有效邻项按唯一 ID 递增入库。事件、active outbox、receipt、永久 consumed floor
+及 ack 在一个 SQLite 事务中提交，然后才更新内存 ack，并在下一请求确认本批
+proof 的 `offered_highwater`。事务失败完全回滚；不对部分前缀取 max ID 确认。
+全坏批次也可有证据地完成，不永久重放 poison item；超限/坏 envelope 整批拒绝。
+
+receipt 有七天/每注册 256 条/全库 4096 条限额，裁剪保留计数/原因/时间摘要。
+永久 consumed floor 不随它或历史清理而降低，离线采纳必须满足该下界。不要删除新
+metadata 或降低 ack 来绕过准入；损坏仍要求已验证的离线恢复，不自动 reset。
+此行为仍要求 producer 已交付 ID 单调：确认高水位后未来才出现的更低 ID 不能恢复；
+预留但未交付的间隙合法，不要求连续 ID。详见
+[upstream 隔离与固定限额](upstream-isolation.md)。

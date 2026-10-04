@@ -176,6 +176,21 @@ class HubStore:
                     "CREATE INDEX IF NOT EXISTS idx_status_log_reachable "
                     "ON status_log(server_id, timestamp, id) WHERE reachable = 1"
                 )
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS upstream_status(server_id INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,status_json TEXT,last_seen TEXT,last_good_at TEXT,attempted_at TEXT,error_code TEXT,scan_before INTEGER,scan_done INTEGER NOT NULL DEFAULT 0)"
+                )
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS upstream_consumed(server_id INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,stream_id TEXT NOT NULL,highwater INTEGER NOT NULL)"
+                )
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS upstream_quarantine(id INTEGER PRIMARY KEY,server_id INTEGER NOT NULL REFERENCES servers(id) ON DELETE CASCADE,stream_id TEXT NOT NULL,boot_id TEXT NOT NULL,offered_highwater INTEGER NOT NULL,fingerprint TEXT NOT NULL,reason TEXT NOT NULL,ordinal INTEGER NOT NULL,event_id INTEGER,byte_length INTEGER NOT NULL,first_seen TEXT NOT NULL,last_seen TEXT NOT NULL,repeat_count INTEGER NOT NULL,UNIQUE(server_id,stream_id,boot_id,fingerprint,reason))"
+                )
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_upstream_quarantine_age ON upstream_quarantine(last_seen,id)"
+                )
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS upstream_summary(server_id INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,evicted_count INTEGER NOT NULL,last_evicted_at TEXT NOT NULL,last_reason TEXT NOT NULL)"
+                )
                 had_cursors = c.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_cursors'"
                 ).fetchone()
@@ -183,27 +198,50 @@ class HubStore:
                     "CREATE TABLE IF NOT EXISTS event_cursors (server_id INTEGER PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE, state TEXT NOT NULL, identity_json TEXT, boot_id TEXT, resume_floor INTEGER)"
                 )
                 if not had_cursors:
-                    # Capture pre-upgrade evidence once, before new status can replace it.
-                    for (sid,) in c.execute("SELECT id FROM servers").fetchall():
-                        previous = c.execute(
-                            "SELECT status_json FROM status_log WHERE server_id=? ORDER BY id DESC LIMIT 1",
-                            (sid,),
-                        ).fetchone()
+                    # Capture pre-upgrade evidence once, within the same initial
+                    # history admission budget later shared with Poller recovery.
+                    from .upstream_worker import (
+                        STATUS_BYTES,
+                        UpstreamError,
+                        decode_status,
+                    )
+
+                    remaining, examined = 2 * 1024 * 1024, 0
+                    for (sid,) in c.execute(
+                        "SELECT id FROM servers ORDER BY id"
+                    ).fetchall():
+                        previous = None
+                        if examined < 128 and remaining > 0:
+                            previous = c.execute(
+                                "SELECT CASE WHEN length(CAST(status_json AS BLOB))<=? THEN substr(CAST(status_json AS BLOB),1,?) ELSE NULL END FROM status_log WHERE server_id=? ORDER BY id DESC LIMIT 1",
+                                (min(STATUS_BYTES, remaining), STATUS_BYTES, sid),
+                            ).fetchone()
+                            if previous:
+                                examined += 1
+                                remaining -= len(previous[0]) if previous[0] else 0
                         identity = None
                         if previous and previous[0]:
                             try:
                                 cursor = parse_cursor(
-                                    json.loads(previous[0]).get("event_cursor")
+                                    decode_status(previous[0])[0].get("event_cursor")
                                 )
                                 identity = json.dumps(
                                     {k: cursor[k] for k in ("server_id", "stream_id")}
                                 )
-                            except (ValueError, TypeError, AttributeError):
-                                pass  # no usable proof; registration remains visibly unverified
+                            except (
+                                ValueError,
+                                TypeError,
+                                AttributeError,
+                                UpstreamError,
+                            ):
+                                log.warning(
+                                    "Historical cursor status refused server=%s", sid
+                                )
                         c.execute(
                             "INSERT INTO event_cursors(server_id,state,identity_json) VALUES(?, 'unverified', ?)",
                             (sid, identity),
                         )
+                    self._initial_history_remaining = (remaining, examined)
                 apply_plan(self._conn, plan, backup)
                 self._conn.commit()
                 report_quarantine(plan)
@@ -422,6 +460,393 @@ class HubStore:
                 self._conn.rollback()
                 raise
 
+    # R06: admitted upstream snapshots and atomic event dispositions.
+    def record_status(self, server_id: int, raw: str | None, error: str | None) -> None:
+        from .upstream_worker import decode_status
+
+        good = decode_status(raw)[1] if raw is not None else None
+        now = outbox_time()
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO upstream_status(server_id) VALUES(?)",
+                    (server_id,),
+                )
+                if good is not None:
+                    seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self._conn.execute(
+                        "INSERT INTO status_log(server_id,timestamp,reachable,status_json) VALUES(?,?,1,?)",
+                        (server_id, seen, good),
+                    )
+                    self._conn.execute(
+                        "UPDATE upstream_status SET status_json=?,last_seen=?,last_good_at=?,attempted_at=?,error_code=NULL,scan_done=1 WHERE server_id=?",
+                        (good, seen, now, now, server_id),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE upstream_status SET attempted_at=?,error_code=? WHERE server_id=?",
+                        (now, error or "upstream_failed", server_id),
+                    )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def _receipt(
+        self, sid: int, stream: str, boot: str, offered: int, row: dict
+    ) -> None:
+        now = outbox_time()
+        self._conn.execute(
+            "INSERT INTO upstream_quarantine(server_id,stream_id,boot_id,offered_highwater,fingerprint,reason,ordinal,event_id,byte_length,first_seen,last_seen,repeat_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,1) ON CONFLICT(server_id,stream_id,boot_id,fingerprint,reason) DO UPDATE SET last_seen=excluded.last_seen,repeat_count=min(9223372036854775807,repeat_count+1)",
+            (
+                sid,
+                stream,
+                boot,
+                offered,
+                row["fingerprint"],
+                row["reason"],
+                row["ordinal"],
+                row["event_id"],
+                row["bytes"],
+                now,
+                now,
+            ),
+        )
+
+    def _retain_receipts(self) -> None:
+        cutoff = outbox_time(datetime.now(timezone.utc) - timedelta(days=7))
+        expired = self._conn.execute(
+            "SELECT id,server_id,reason FROM upstream_quarantine WHERE last_seen<? ORDER BY id",
+            (cutoff,),
+        ).fetchall()
+        ids = {r[0] for r in expired}
+        for (sid,) in self._conn.execute(
+            "SELECT DISTINCT server_id FROM upstream_quarantine"
+        ):
+            rows = self._conn.execute(
+                "SELECT id,server_id,reason FROM upstream_quarantine WHERE server_id=? ORDER BY last_seen DESC,id DESC LIMIT -1 OFFSET 256",
+                (sid,),
+            ).fetchall()
+            expired.extend(r for r in rows if r[0] not in ids)
+            ids.update(r[0] for r in rows)
+        rows = self._conn.execute(
+            "SELECT id,server_id,reason FROM upstream_quarantine ORDER BY last_seen DESC,id DESC"
+        ).fetchall()
+        remaining = [r for r in rows if r[0] not in ids]
+        expired.extend(remaining[4096:])
+        for row_id, sid, reason in expired:
+            self._conn.execute("DELETE FROM upstream_quarantine WHERE id=?", (row_id,))
+            self._conn.execute(
+                "INSERT INTO upstream_summary(server_id,evicted_count,last_evicted_at,last_reason) VALUES(?,1,?,?) ON CONFLICT(server_id) DO UPDATE SET evicted_count=min(9223372036854775807,evicted_count+1),last_evicted_at=excluded.last_evicted_at,last_reason=excluded.last_reason",
+                (sid, outbox_time(), reason),
+            )
+
+    def quarantine_summary(self, server_id: int) -> dict:
+        with self._lock:
+            count = self._conn.execute(
+                "SELECT count(*) FROM upstream_quarantine WHERE server_id=?",
+                (server_id,),
+            ).fetchone()[0]
+            row = self._conn.execute(
+                "SELECT evicted_count,last_evicted_at,last_reason FROM upstream_summary WHERE server_id=?",
+                (server_id,),
+            ).fetchone()
+            last = self._conn.execute(
+                "SELECT reason FROM upstream_quarantine WHERE server_id=? ORDER BY last_seen DESC,id DESC LIMIT 1",
+                (server_id,),
+            ).fetchone()
+            return {
+                "retained": count,
+                "evicted": integer(row[0], 0, (1 << 63) - 1) if row else 0,
+                "last_reason": last[0] if last else row[2] if row else None,
+            }
+
+    def recover_statuses(self) -> None:
+        """Bound only Python candidate admission, not SQLite VM field loading."""
+        import hashlib
+
+        from .upstream_worker import STATUS_BYTES, UpstreamError, decode_status
+
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                ids = [
+                    r[0]
+                    for r in self._conn.execute(
+                        "SELECT id FROM servers WHERE enabled=1 ORDER BY id"
+                    )
+                ]
+                for sid in ids:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO upstream_status(server_id) VALUES(?)",
+                        (sid,),
+                    )
+                # Cache reads are bounded too; a corrupt cache is not a safe seed.
+                for sid in ids:
+                    row = self._conn.execute(
+                        "SELECT substr(CAST(status_json AS BLOB),1,?) FROM upstream_status WHERE server_id=?",
+                        (STATUS_BYTES + 1, sid),
+                    ).fetchone()
+                    if row and row[0] is not None:
+                        try:
+                            decode_status(row[0])
+                        except UpstreamError:
+                            self._conn.execute(
+                                "UPDATE upstream_status SET status_json=NULL,last_good_at=NULL,error_code='status_store_invalid',scan_done=0,scan_before=NULL WHERE server_id=?",
+                                (sid,),
+                            )
+                turn = getattr(self, "_legacy_turn", 0)
+                ids = ids[turn:] + ids[:turn]
+                budget, count = getattr(
+                    self, "_initial_history_remaining", (2 * 1024 * 1024, 0)
+                )
+                self._initial_history_remaining = (2 * 1024 * 1024, 0)
+                while ids and count < 128:
+                    before_count = count
+                    next_ids = []
+                    for sid in ids:
+                        if count >= 128:
+                            break
+                        state = self._conn.execute(
+                            "SELECT scan_before,scan_done FROM upstream_status WHERE server_id=?",
+                            (sid,),
+                        ).fetchone()
+                        if state[1]:
+                            continue
+                        row = self._conn.execute(
+                            "SELECT id,substr(CAST(timestamp AS BLOB),1,65),length(CAST(status_json AS BLOB)),CASE WHEN length(CAST(status_json AS BLOB))<=? THEN substr(CAST(status_json AS BLOB),1,?) ELSE NULL END FROM status_log WHERE server_id=? AND reachable=1 AND id<? ORDER BY id DESC LIMIT 1",
+                            (
+                                min(STATUS_BYTES, budget),
+                                STATUS_BYTES,
+                                sid,
+                                state[0] if state[0] is not None else (1 << 63) - 1,
+                            ),
+                        ).fetchone()
+                        if row is None:
+                            self._conn.execute(
+                                "UPDATE upstream_status SET scan_done=1 WHERE server_id=?",
+                                (sid,),
+                            )
+                            continue
+                        row_id, stamp, length, candidate = row
+                        if (
+                            candidate is None
+                            and length is not None
+                            and length <= STATUS_BYTES
+                        ):
+                            # In-limit candidate withheld by the remaining byte
+                            # allowance: do not advance its durable continuation.
+                            next_ids.append(sid)
+                            continue
+                        admitted = (
+                            len(candidate)
+                            if isinstance(candidate, bytes)
+                            and length is not None
+                            and length <= STATUS_BYTES
+                            else 0
+                        )
+                        if admitted > budget:
+                            next_ids.append(sid)
+                            continue
+                        budget -= admitted
+                        count += 1
+                        self._conn.execute(
+                            "UPDATE upstream_status SET scan_before=? WHERE server_id=?",
+                            (row_id, sid),
+                        )
+                        try:
+                            if (
+                                not isinstance(candidate, bytes)
+                                or length > STATUS_BYTES
+                            ):
+                                raise UpstreamError("body_oversize")
+                            _, good = decode_status(candidate)
+                            try:
+                                seen = (
+                                    stamp.decode("utf-8") if stamp is not None else None
+                                )
+                                if seen is not None:
+                                    datetime.strptime(seen, "%Y-%m-%d %H:%M:%S")
+                            except (ValueError, UnicodeError):
+                                seen = None
+                            self._conn.execute(
+                                "UPDATE upstream_status SET status_json=?,last_seen=?,last_good_at=NULL,scan_done=1 WHERE server_id=?",
+                                (good, seen, sid),
+                            )
+                        except UpstreamError as exc:
+                            self._conn.execute(
+                                "UPDATE upstream_status SET error_code=coalesce(error_code,'historical_status_invalid') WHERE server_id=?",
+                                (sid,),
+                            )
+                            self._receipt(
+                                sid,
+                                "legacy",
+                                "legacy",
+                                0,
+                                {
+                                    "fingerprint": hashlib.sha256(
+                                        f"{sid}:{row_id}".encode()
+                                    ).hexdigest(),
+                                    "reason": exc.reason,
+                                    "ordinal": row_id,
+                                    "event_id": None,
+                                    "bytes": length or 0,
+                                },
+                            )
+                            next_ids.append(sid)
+                    if budget <= 0 or count == before_count:
+                        break
+                    ids = next_ids
+                self._legacy_turn = (turn + 1) % max(1, len(self.list_servers()))
+                self._retain_receipts()
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def upstream_statuses(self) -> list[dict]:
+        from .upstream_worker import STATUS_BYTES, UpstreamError, decode_status
+
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT server_id,substr(CAST(status_json AS BLOB),1,?),substr(last_seen,1,64),substr(last_good_at,1,64),substr(attempted_at,1,64),substr(error_code,1,64),scan_done FROM upstream_status",
+                (STATUS_BYTES + 1,),
+            )
+            result = []
+            for sid, candidate, seen, good_at, attempted, error, done in cur:
+                raw = parsed = None
+                if candidate is not None:
+                    try:
+                        parsed, raw = decode_status(candidate)
+                    except UpstreamError:
+                        error = "status_store_invalid"
+                for key, value in (
+                    ("seen", seen),
+                    ("good", good_at),
+                    ("attempt", attempted),
+                ):
+                    try:
+                        if value is not None:
+                            value.encode("utf-8")
+                            if key == "seen":
+                                datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+                            elif outbox_time(datetime.fromisoformat(value)) != value:
+                                raise ValueError()
+                    except (ValueError, TypeError, UnicodeError):
+                        if key == "seen":
+                            seen = None
+                        elif key == "good":
+                            good_at = None
+                        else:
+                            attempted = None
+                        error = "status_store_invalid"
+                if error is not None and not re.fullmatch("[a-z_]{1,64}", error):
+                    error = "status_store_invalid"
+                result.append(
+                    {
+                        "id": sid,
+                        "status_json": raw,
+                        "parsed_status": parsed,
+                        "last_seen": seen,
+                        "last_good_at": good_at,
+                        "attempted_at": attempted,
+                        "error_code": error,
+                        "scan_done": bool(done),
+                    }
+                )
+            return result
+
+    def commit_upstream_batch(
+        self, server: dict, batch: dict, active: bool
+    ) -> dict[int, int]:
+        from .upstream_worker import canonical, evidence
+
+        sid = server["id"]
+        proof = parse_cursor(batch["proof"])
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                binding = self.get_event_cursor(sid)
+                if (
+                    binding["state"] != "bound"
+                    or binding["identity"]
+                    != {k: proof[k] for k in ("server_id", "stream_id")}
+                    or binding["boot_id"] != proof["boot_id"]
+                    or binding["resume_floor"] != proof["resume_floor"]
+                ):
+                    raise StateError("event_cursor_mismatch")
+                acks = self.read_acks()
+                floor = self.event_floor(sid, acks)
+                if proof["offered_highwater"] < floor:
+                    raise StateError("event_cursor_mismatch")
+                receipts = list(batch["receipts"])
+                for ordinal, ev in enumerate(batch["events"]):
+                    if ev["id"] <= floor:
+                        old = self._conn.execute(
+                            "SELECT monitor,message,level FROM events WHERE server_id=? AND event_id=?",
+                            (sid, ev["id"]),
+                        ).fetchone()
+                        if (
+                            old is None
+                            or tuple(ev.get(k) for k in ("monitor", "message", "level"))
+                            != old
+                        ):
+                            receipts.append(
+                                evidence(ev, ordinal, "event_stale_conflict")
+                            )
+                        continue
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO events(server_id,event_id,monitor,message,level,received_at) VALUES(?,?,?,?,?,?)",
+                        (
+                            sid,
+                            ev["id"],
+                            ev.get("monitor"),
+                            ev.get("message"),
+                            ev.get("level"),
+                            _dt(),
+                        ),
+                    )
+                    if active:
+                        payload = canonical(
+                            {
+                                "text": f"TaskPaw Event | {server['name']}: {ev.get('message', 'Unknown event')}"
+                            }
+                        )
+                        self._conn.execute(
+                            "INSERT OR IGNORE INTO delivery_outbox(server_name,payload_json,kind,delivery_state,attempts,last_error,next_attempt_at,created_at,dedupe_key) VALUES(?,?,'event','pending',0,NULL,?,?,?)",
+                            (
+                                server["name"],
+                                payload,
+                                outbox_time(),
+                                outbox_time(),
+                                f"{sid}:{ev['id']}",
+                            ),
+                        )
+                for row in receipts:
+                    self._receipt(
+                        sid,
+                        proof["stream_id"],
+                        proof["boot_id"],
+                        proof["offered_highwater"],
+                        row,
+                    )
+                acks[sid] = proof["offered_highwater"]
+                self._conn.execute(
+                    "INSERT INTO upstream_consumed(server_id,stream_id,highwater) VALUES(?,?,?) ON CONFLICT(server_id) DO UPDATE SET stream_id=excluded.stream_id,highwater=excluded.highwater",
+                    (sid, proof["stream_id"], acks[sid]),
+                )
+                self._conn.execute(
+                    "INSERT INTO config(key,value) VALUES('last_event_ids',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (json.dumps(acks),),
+                )
+                self._retain_receipts()
+                self._conn.commit()
+                return acks
+            except BaseException:
+                self._conn.rollback()
+                raise
+
     # ── status_log (OpenClaw compat: status.md + 24h history, #38) ──────────
     def log_status(
         self, server_id: int, reachable: bool, status_json: Optional[str] = None
@@ -475,7 +900,7 @@ class HubStore:
             return 0
         with self._lock:
             cur = self._conn.execute(
-                "DELETE FROM status_log WHERE timestamp < datetime('now','localtime',?)",
+                "DELETE FROM status_log WHERE timestamp < datetime('now','localtime',?) AND NOT EXISTS (SELECT 1 FROM upstream_status u WHERE u.server_id=status_log.server_id AND u.scan_done=0)",
                 (f"-{int(days)} days",),
             )
             self._conn.commit()
@@ -821,6 +1246,18 @@ class HubStore:
                 if not suffix.isdecimal() or str(int(suffix)) != suffix:
                     raise StateError("cursor_store_invalid")
                 floor = max(floor, integer(int(suffix), 1, (1 << 63) - 1))
+            consumed = self._conn.execute(
+                "SELECT stream_id,highwater FROM upstream_consumed WHERE server_id=?",
+                (server_id,),
+            ).fetchone()
+            if consumed:
+                binding = self.get_event_cursor(server_id)
+                if (
+                    not binding["identity"]
+                    or binding["identity"]["stream_id"] != consumed[0]
+                ):
+                    raise StateError("cursor_store_invalid")
+                floor = max(floor, integer(consumed[1], 0, (1 << 63) - 1))
             return floor
 
     def commit_event_cursor(

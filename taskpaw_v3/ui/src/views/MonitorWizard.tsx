@@ -6,7 +6,7 @@ import CloseIcon from "@mui/icons-material/Close";
 import CheckIcon from "@mui/icons-material/Check";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type PluginInfo, type PresetInfo } from "../api";
+import { api, MonitorOperationError, monitorOperationMessageKey, type PluginInfo, type PresetInfo } from "../api";
 import { SchemaForm } from "../components/SchemaForm";
 import { FfmpegReminder } from "../components/FfmpegReminder";
 import { fieldLabel } from "../schemaI18n";
@@ -24,9 +24,10 @@ type Mode = "add" | "edit";
 // review. A preset (moomoo) creates several monitors at once. Edit mode jumps
 // straight to the config step with the type locked.
 export function MonitorWizard({
-  mode, name, existingConfig, existingType, plugins, presets, onClose, onDone, onError,
+  mode, name, existingConfig, existingType, plugins, presets, onClose, onDone, onError, operationPending,
 }: {
   mode: Mode;
+  operationPending?: boolean;
   name?: string;
   existingConfig?: Record<string, unknown>;
   existingType?: string;
@@ -53,6 +54,8 @@ export function MonitorWizard({
   const [liveFormData, setLiveFormData] = useState<Record<string, unknown>>(existingConfig ?? {});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [savedNames, setSavedNames] = useState<Set<string>>(new Set());
+  const [runtimeRetries, setRuntimeRetries] = useState<Set<string>>(new Set());
   const [confirmClose, setConfirmClose] = useState(false);
 
   // Edit can open before /control/plugins resolves (services empty → editService
@@ -145,14 +148,15 @@ export function MonitorWizard({
       ...base,
       "ui:submitButtonOptions": {
         submitText: mode === "edit" ? t("wizard.saveBtn") : t("wizard.review"),
+        props: { disabled: busy || operationPending },
       },
       ...(mode === "edit" ? { name: { ...(base.name as object), "ui:readonly": true } } : {}),
     };
-  }, [selected, mode, t]);
+  }, [selected, mode, t, busy, operationPending]);
 
   // ── submit ──────────────────────────────────────────────────────────────
   const finish = async (data: Record<string, unknown>) => {
-    if (!selected) return;
+    if (!selected || busy || operationPending) return;
     setBusy(true);
     setError(null);
     try {
@@ -163,20 +167,30 @@ export function MonitorWizard({
         await api.addMonitor({ type_id: selected.plugin.type_id, config: data });
         onDone(String(data.name ?? "") || undefined);
       } else {
-        // Preset: create every bundled monitor; surface the first failure but
-        // keep what succeeded (the operator can retry — already-added names error
-        // as duplicates, which is safe).
+        // Keep committed items through retries; reconcile a saved runtime failure
+        // with Start rather than submitting Add again.
         let firstName: string | undefined;
         for (const m of selected.preset.monitors) {
-          await api.addMonitor({ type_id: m.type_id, config: m.config });
           firstName ??= m.name;
+          if (runtimeRetries.has(m.name)) {
+            await api.startMonitor(m.name);
+            setRuntimeRetries(old => { const next = new Set(old); next.delete(m.name); return next; });
+          } else if (!savedNames.has(m.name)) {
+            await api.addMonitor({ type_id: m.type_id, config: m.config });
+            setSavedNames(old => new Set(old).add(m.name));
+          }
         }
         onDone(firstName);
       }
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setError(msg);
+      setError(e instanceof MonitorOperationError ? t(monitorOperationMessageKey(e.result)) : e instanceof Error ? e.message : String(e));
       onError(e);
+      if (e instanceof MonitorOperationError && ["saved", "in_memory"].includes(e.result.persistence)) {
+        if (selected.kind === "preset") {
+          setSavedNames(old => new Set(old).add(e.result.name));
+          setRuntimeRetries(old => new Set(old).add(e.result.name));
+        } else onDone(e.result.name);
+      }
     } finally {
       setBusy(false);
     }
@@ -208,6 +222,8 @@ export function MonitorWizard({
 
       <DialogContent dividers>
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        {operationPending && <Alert severity="warning" sx={{ mb: 2 }}>{t("agent.operationBusy")}</Alert>}
+        {savedNames.size > 0 && <Alert severity="info" sx={{ mb: 2 }}>{t("agent.presetSaved", { names: [...savedNames].join(", ") })}</Alert>}
 
         {step === 1 && (
           <>
@@ -343,7 +359,7 @@ export function MonitorWizard({
           <Button variant="contained" onClick={() => setStep(3)}>{t("wizard.review")}</Button>
         )}
         {step === 3 && (
-          <Button variant="contained" startIcon={<CheckIcon />} disabled={busy}
+          <Button variant="contained" startIcon={<CheckIcon />} disabled={busy || operationPending}
             onClick={() => finish(formData)}>
             {t("wizard.addBtn")}
           </Button>

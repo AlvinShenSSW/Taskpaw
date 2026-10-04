@@ -99,6 +99,14 @@ def _identity(d: dict, patterns: dict) -> str | None:
     python = re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", launcher)
     if (launcher in {"node", "nodejs"} or python) and len(argv) > 1:
         script = _basename(argv[1])
+        if WINDOWS and launcher in {"node", "nodejs"}:
+            package_script = "/" + argv[1].replace("\\", "/").lower()
+            for suffix, tool in (
+                ("/@anthropic-ai/claude-code/cli.js", "claude"),
+                ("/@openai/codex/bin/codex.js", "codex"),
+            ):
+                if package_script.endswith(suffix):
+                    return tool
         if script in {"claude", "codex", "kimi"}:
             return script
         if script == "kimi-cli" or ("/" + argv[1].replace("\\", "/")).endswith(
@@ -252,6 +260,7 @@ def scan_activity(patterns: dict[str, re.Pattern[str] | None]) -> dict[str, dict
                     exited = True
                 except psutil.AccessDenied:
                     exited = False
+                    out["errors"].append("denied")
             if not exited and (d["created"] is None or d["cpu"] is None):
                 out["complete"] = False
                 out["errors"].append("unavailable")
@@ -260,12 +269,13 @@ def scan_activity(patterns: dict[str, re.Pattern[str] | None]) -> dict[str, dict
                 out["cpu_seconds"] += d["cpu"]
             for child in children.get(cur, []):
                 c = records[child]
-                if (
-                    d["created"] is None
-                    or c["created"] is None
-                    or c["created"] < d["created"]
-                ):
+                if d["created"] is None or c["created"] is None:
                     out["complete"] = False
+                    out["errors"].append("unavailable")
+                    continue
+                if c["created"] < d["created"]:
+                    # A reused PPID cannot own an already older child.
+                    # Proven nonownership is not incomplete observation.
                     continue
                 queue.append(child)
         if queue:
@@ -279,29 +289,74 @@ def scan_activity(patterns: dict[str, re.Pattern[str] | None]) -> dict[str, dict
 
 
 def cpu_percents(
-    prev: dict, prev_mono: float, sample: dict[str, dict], now_mono: float
+    prev: dict,
+    prev_mono: float,
+    sample: dict[str, dict],
+    now_mono: float,
+    prev_wall: float | None = None,
+    now_wall: float | None = None,
 ) -> tuple[dict[str, float], dict]:
-    """Only identities in consecutive complete samples contribute to a delta."""
+    """Consecutive readable identities give CPU even under partial coverage.
+
+    Root continuity is independent of its own CPU availability. Wall timestamps
+    permit full CPU for a provably new child, never a new/reused root or old child.
+    The returned per-tool baseline is internal; older bare CPU maps remain valid.
+    """
     elapsed = now_mono - prev_mono
+    valid_elapsed = math.isfinite(elapsed) and elapsed > 0
+    valid_wall = (
+        valid_elapsed
+        and prev_wall is not None
+        and now_wall is not None
+        and math.isfinite(prev_wall)
+        and math.isfinite(now_wall)
+        and now_wall >= prev_wall
+        and abs((now_wall - prev_wall) - elapsed) <= 1.0
+    )
     percents: dict[str, float] = {}
     new_prev: dict = {}
     for tool, s in sample.items():
         s["root_cpu"] = {}
-        if not s.get("present") or not s.get("complete") or tool == "vscode":
+        s["cpu_complete"] = False
+        if not s.get("present") or tool == "vscode":
             continue
         cpus = s["cpus"]
-        new_prev[tool] = cpus
-        old = prev.get(tool, {})
-        if elapsed <= 0:
+        roots = {
+            (r["pid"], r["created"]) for r in s["roots"] if r["created"] is not None
+        }
+        new_prev[tool] = {"cpus": cpus, "roots": roots}
+        previous = prev.get(tool, {})
+        if "cpus" in previous:
+            old, old_roots = previous["cpus"], previous["roots"]
+        else:
+            old = previous
+            old_roots = {root for _, root in old.values()}
+        if not valid_elapsed:
             continue
         # A newly created root cannot inherit the lifetime CPU of its children.
-        roots = {(r["pid"], r["created"]) for r in s["roots"]}
-        valid_roots = roots & old.keys() & cpus.keys()
-        s["cpu_complete"] = roots == valid_roots
+        valid_roots = roots & old_roots
+        s["cpu_complete"] = bool(s.get("complete") and roots and roots == valid_roots)
+        old_pids = {identity[0] for identity in old}
         for identity, (cpu, root) in cpus.items():
+            delta = None
             if identity in old and root in valid_roots and old[identity][1] == root:
-                delta = max(0.0, cpu - old[identity][0]) * 100.0 / elapsed
+                delta = max(0.0, cpu - old[identity][0])
+            elif (
+                identity != root
+                and root in valid_roots
+                and identity not in old
+                and identity[0] not in old_pids
+                and valid_wall
+                and prev_wall is not None
+                and now_wall is not None
+                and prev_wall < identity[1] <= now_wall
+            ):
+                delta = cpu
+            if delta is not None:
+                delta = delta * 100.0 / elapsed
                 s["root_cpu"][root] = s["root_cpu"].get(root, 0.0) + delta
+            else:
+                s["cpu_complete"] = False
         if s["root_cpu"]:
             percents[tool] = sum(s["root_cpu"].values())
     return percents, new_prev

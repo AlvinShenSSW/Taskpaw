@@ -522,3 +522,30 @@ def test_offline_malformed_config_clean_no_defaults(tmp_path, capsys, body):
     output = capsys.readouterr()
     assert "fake-r05-never-echo" not in output.err + output.out
     assert list(tmp_path.iterdir()) == [config] and config.read_bytes() == before
+
+
+def test_dispatch_upstream_is_fixed_helper_without_bootstrap(monkeypatch):
+    from taskpaw_v3 import bootstrap
+    from taskpaw_v3.hub.server import upstream_worker
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("upstream helper must not bootstrap")
+
+    monkeypatch.setattr(bootstrap, "scaffold", forbidden)
+    monkeypatch.setattr(upstream_worker, "main", lambda: 13)
+    assert backend_main.main(["upstream-http"]) == 13
+
+
+def test_upstream_worker_argv_source_and_frozen(monkeypatch):
+    import sys
+
+    from taskpaw_v3.hub.server import upstream_worker
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    assert upstream_worker.worker_argv() == [
+        sys.executable,
+        "-m",
+        "taskpaw_v3.hub.server.upstream_worker",
+    ]
+    monkeypatch.setattr(sys, "frozen", True)
+    assert upstream_worker.worker_argv() == [sys.executable, "upstream-http"]

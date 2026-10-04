@@ -67,6 +67,7 @@ class _Managed:
     plugin: MonitorPlugin
     instance: MonitorInstance
     thread: Optional[threading.Thread] = None
+    worker_launch_pending: bool = False
     stop: threading.Event = field(default_factory=threading.Event)
     failures: int = 0
     degraded: bool = False
@@ -76,6 +77,17 @@ class _Managed:
     seen_dedupe: _BoundedKeySet = field(default_factory=_BoundedKeySet)
     restart_count: int = 0  # unexpected thread-death restarts (watchdog)
     last_restart: float = 0.0  # monotonic time of last restart
+    initialized: threading.Event = field(default_factory=threading.Event)
+    cleanup_done: threading.Event = field(default_factory=threading.Event)
+    cleanup_thread: Optional[threading.Thread] = None
+    cleanup_error: str | None = None
+    init_error: str | None = None
+    deadline: float | None = None
+    retiring: bool = False
+    cancel: threading.Event = field(default_factory=threading.Event)
+
+    def __post_init__(self) -> None:
+        self.initialized.set()  # registered but not started needs no init wait
 
 
 class Supervisor:
@@ -92,121 +104,306 @@ class Supervisor:
         self._lock = threading.RLock()  # guards _monitors + emit state
         self._life = threading.RLock()  # serializes lifecycle ops
         self._monitors: dict[str, _Managed] = {}
+        self._pending: dict[str, threading.Event] = {}
+        self._retired: dict[str, list[_Managed]] = {}
+        self._errors: dict[str, str] = {}
+        self._closed = False
         self._running = threading.Event()
         self._watchdog: Optional[threading.Thread] = None
 
     # ── registration / lifecycle ──────────────────────────────────────────
+    def _prune(self, iid: str) -> None:
+        """Called under the short registry lock; never discards uncertain cleanup."""
+
+        def complete(m: _Managed) -> bool:
+            return bool(
+                m.retiring
+                and m.cleanup_done.is_set()
+                and not m.cleanup_error
+                and not (m.thread and m.thread.is_alive())
+            )
+
+        m = self._monitors.get(iid)
+        if m is not None and complete(m):
+            if m.init_error:
+                self._errors[iid] = m.init_error
+            del self._monitors[iid]
+        held = [m for m in self._retired.get(iid, []) if not complete(m)]
+        if held:
+            self._retired[iid] = held
+        else:
+            self._retired.pop(iid, None)
+
     def register(
         self,
         plugin: MonitorPlugin,
         config: BaseMonitorConfig,
         instance_id: Optional[str] = None,
+        *,
+        cancel: threading.Event | None = None,
+        deadline: float | None = None,
     ) -> str:
-        instance_id = instance_id or config.name
-        with self._life:
-            inst = plugin.create(instance_id, config)
+        iid = instance_id or config.name
+        token = cancel or threading.Event()
+        if not self._life.acquire(timeout=1):
+            raise RuntimeError("operation_busy")
+        try:
             with self._lock:
-                if instance_id in self._monitors:
-                    raise ValueError(f"instance already registered: {instance_id}")
-                self._monitors[instance_id] = _Managed(plugin=plugin, instance=inst)
-            if self._running.is_set():
-                self._start_worker(instance_id)
-        return instance_id
+                self._prune(iid)
+                if (
+                    self._closed
+                    or iid in self._monitors
+                    or iid in self._pending
+                    or iid in self._retired
+                ):
+                    raise ValueError("instance already registered or stopping")
+                self._pending[iid] = token
+                self._errors.pop(iid, None)
+        finally:
+            self._life.release()
+        try:
+            inst = plugin.create(
+                iid, config
+            )  # no lifecycle/state lock during plugin I/O
+            m = _Managed(plugin=plugin, instance=inst, cancel=token, deadline=deadline)
+            with self._lock:
+                self._monitors[iid] = m
+                cancelled = token.is_set() or self._closed
+            if cancelled:
+                self.request_stop(iid, timeout=0)
+            elif self._running.is_set():
+                self._start_worker(iid)
+        except Exception:
+            raise
+        finally:
+            with self._lock:
+                if self._pending.get(iid) is token:
+                    del self._pending[iid]
+        return iid
 
     def start(self) -> None:
         if self._watchdog and self._watchdog.is_alive():
-            return  # idempotent — don't leak a second watchdog
-        self._running.set()
+            return
         with self._lock:
+            if self._closed:
+                return
+            self._running.set()
             ids = list(self._monitors)
         for iid in ids:
-            with self._life:
-                self._start_worker(iid)
+            self._start_worker(iid)
         self._watchdog = threading.Thread(
             target=self._watch, name="supervisor-watchdog", daemon=True
         )
         self._watchdog.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
-        self._running.clear()
-        deadline = time.monotonic() + timeout  # one budget for the whole shutdown
-        # Serialize against register/reconfigure (same lifecycle lock) so a
-        # concurrent op can't add/replace a monitor mid-shutdown. Timed acquire
-        # so a stuck lifecycle op can't block shutdown indefinitely.
-        acquired = self._life.acquire(timeout=max(0.0, timeout))
-        if not acquired:
-            log.error(
-                "stop(): could not acquire lifecycle lock in time; proceeding best-effort"
-            )
+    def _cleanup(self, iid: str, m: _Managed, deadline: float) -> None:
+        # Never stop concurrently with plugin.start(). The owner may outlive the API budget.
+        m.initialized.wait()
         try:
-            with self._lock:
-                managed = list(self._monitors.values())
-            for m in managed:
-                m.stop.set()
-            for m in managed:
-                # Call instance.stop() FIRST: for a monitor whose stop() closes a
-                # socket/file/subprocess to unblock a running check(), this lets
-                # the worker break out of a blocking check; THEN we join it. Doing
-                # it the other way could burn the budget joining a still-blocked
-                # worker and return with the thread alive + resources held.
-                self._cleanup_instance(
-                    m.instance, max(0.0, deadline - time.monotonic())
+            m.instance.stop(max(0.0, deadline - time.monotonic()))
+        except Exception:
+            m.cleanup_error = "cleanup_failed"
+        if (
+            m.thread
+            and m.thread.ident is not None
+            and m.thread is not threading.current_thread()
+        ):
+            m.thread.join(max(0.0, deadline - time.monotonic()))
+        m.cleanup_done.set()
+        with self._lock:
+            self._prune(iid)
+
+    def _retire(self, iid: str, m: _Managed, deadline: float) -> None:
+        with self._lock:
+            m.retiring = True
+            m.stop.set()
+            if m.cleanup_thread is not None and (
+                not m.cleanup_done.is_set() or m.cleanup_thread.is_alive()
+            ):
+                return  # published/unstarted is already the sole cleanup owner
+            if m.cleanup_done.is_set() and not m.cleanup_error:
+                return  # callback succeeded; only observe remaining worker
+            m.cleanup_done.clear()
+            m.cleanup_error = None
+            try:
+                t = threading.Thread(
+                    target=self._cleanup,
+                    args=(iid, m, deadline),
+                    name=f"cleanup-{iid}",
+                    daemon=True,
                 )
-                if m.thread:
-                    m.thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        finally:
-            if acquired:
-                self._life.release()
-        if self._watchdog:
-            self._watchdog.join(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:
+                m.cleanup_error = "cleanup_failed"
+                m.cleanup_done.set()
+                return
+            m.cleanup_thread = t
+        try:
+            t.start()
+        except Exception:
+            with self._lock:
+                if t.ident is None:
+                    # A known unstarted launch failure has no callback to finish.
+                    m.cleanup_error = "cleanup_failed"
+                    m.cleanup_done.set()
+                # An already-started thread keeps its owner until _cleanup ends.
+
+    def request_stop(self, iid: str, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            token = self._pending.get(iid)
+            if token is not None:
+                token.set()
+            managed = (
+                [self._monitors[iid]] if iid in self._monitors else []
+            ) + self._retired.get(iid, [])
+            for m in managed:
+                m.cancel.set()
+                m.stop.set()
+                m.retiring = True
+        for m in managed:
+            self._retire(iid, m, deadline)
+
+    def stop_result(self, iid: str, timeout: float = 0.0) -> dict:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            managed = (
+                [self._monitors[iid]] if iid in self._monitors else []
+            ) + self._retired.get(iid, [])
+        for m in managed:
+            m.cleanup_done.wait(max(0.0, deadline - time.monotonic()))
+            if (
+                m.thread
+                and m.thread.ident is not None
+                and m.thread is not threading.current_thread()
+            ):
+                m.thread.join(max(0.0, deadline - time.monotonic()))
+        with self._lock:
+            self._prune(iid)
+            held = (
+                [self._monitors[iid]] if iid in self._monitors else []
+            ) + self._retired.get(iid, [])
+            complete = not held and iid not in self._pending
+            error = (
+                "cleanup_failed"
+                if any(m.cleanup_error for m in held)
+                else (None if complete else "stop_timeout")
+            )
+            return {"complete": complete, "error_code": error}
+
+    def stop(self, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._lock:
+            self._closed = True
+            self._running.clear()
+            ids = set(self._monitors) | set(self._pending) | set(self._retired)
+        for iid in ids:
+            self.request_stop(iid, max(0.0, deadline - time.monotonic()))
+        for iid in ids:
+            self.stop_result(iid, max(0.0, deadline - time.monotonic()))
+        if self._watchdog and self._watchdog.ident is not None:
+            self._watchdog.join(max(0.0, deadline - time.monotonic()))
 
     def reconfigure(
-        self, instance_id: str, config: BaseMonitorConfig, stop_timeout: float = 10.0
+        self,
+        instance_id: str,
+        config: BaseMonitorConfig,
+        stop_timeout: float = 10.0,
+        *,
+        cancel: threading.Event | None = None,
     ) -> None:
-        # Whole sequence serialized so a worker can't run against a half-swapped
-        # entry and a concurrent reconfigure can't interleave.
-        with self._life:
+        deadline = time.monotonic() + max(0.0, stop_timeout)
+        token = cancel or threading.Event()
+        if not self._life.acquire(timeout=max(0, min(1, deadline - time.monotonic()))):
+            raise RuntimeError("operation_busy")
+        try:
             with self._lock:
-                m = self._monitors.get(instance_id)
-                if m is None:
+                self._prune(instance_id)
+                old = self._monitors.get(instance_id)
+                if old is None:
                     raise KeyError(instance_id)
-                plugin, old_instance, old_thread, old_stop = (
-                    m.plugin,
-                    m.instance,
-                    m.thread,
-                    m.stop,
-                )
-            # Build the replacement FIRST: if the new config is bad and create()
-            # raises, fail without having touched the old monitor (a failed config
-            # update must not turn a healthy monitor into a dead one).
+                if (
+                    old.retiring
+                    or instance_id in self._pending
+                    or instance_id in self._retired
+                    or self._closed
+                ):
+                    raise RuntimeError("operation_busy")
+                self._pending[instance_id] = token
+        finally:
+            self._life.release()
+        replacement = None
+        try:
             try:
-                new_instance = plugin.create(instance_id, config)
-            except Exception as e:
-                raise ValueError(
-                    f"reconfigure of {instance_id} rejected (bad config): {e}"
-                ) from e
-            old_stop.set()
-            if old_thread:
-                old_thread.join(timeout=stop_timeout)
-                if old_thread.is_alive():
-                    # The old worker is stuck (e.g. a long check). Abort WITHOUT
-                    # killing it: clear the stop flag so it keeps running on the
-                    # OLD config (resources untouched — we have NOT called its
-                    # stop() yet), and surface the failure for the caller to retry.
-                    old_stop.clear()
-                    raise RuntimeError(
-                        f"reconfigure of {instance_id} aborted: old worker did not stop"
+                inst = old.plugin.create(instance_id, config)
+            except Exception:
+                raise ValueError("reconfigure rejected: create_failed") from None
+            replacement = _Managed(
+                plugin=old.plugin, instance=inst, cancel=token, deadline=deadline
+            )
+            self._retire(instance_id, old, deadline)
+            if not self.stop_result(instance_id, max(0.0, deadline - time.monotonic()))[
+                "complete"
+            ]:
+                # The reservation is ours: pending itself is not an old runtime owner.
+                with self._lock:
+                    self._prune(instance_id)
+                    old_alive = (
+                        instance_id in self._monitors or instance_id in self._retired
                     )
-            self._cleanup_instance(old_instance, 5.0)
-            new = _Managed(plugin=plugin, instance=new_instance)
+                if old_alive:
+                    raise RuntimeError("stop_timeout")
             with self._lock:
-                self._monitors[instance_id] = new
+                if token.is_set() or self._closed:
+                    raise RuntimeError("operation_busy")
+                self._monitors[instance_id] = replacement
             if self._running.is_set():
                 self._start_worker(instance_id)
+            replacement = None  # ownership transferred to registry
+        finally:
+            if replacement is not None:
+                with self._lock:
+                    self._retired.setdefault(instance_id, []).append(replacement)
+                self._retire(instance_id, replacement, deadline)
+            with self._lock:
+                if self._pending.get(instance_id) is token:
+                    del self._pending[instance_id]
 
     def has(self, instance_id: str) -> bool:
         with self._lock:
-            return instance_id in self._monitors
+            self._prune(instance_id)
+            return (
+                instance_id in self._monitors
+                or instance_id in self._pending
+                or instance_id in self._retired
+            )
+
+    def activation_result(self, iid: str, timeout: float = 0) -> dict:
+        with self._lock:
+            m = self._monitors.get(iid)
+        if m is not None:
+            m.initialized.wait(max(0.0, timeout))
+        with self._lock:
+            if m is None or m.retiring or m.cancel.is_set():
+                return {
+                    "runtime": "failed",
+                    "error_code": (m.init_error or m.cleanup_error)
+                    if m
+                    else self._errors.pop(iid, "create_failed"),
+                }
+            if not m.initialized.is_set():
+                return {"runtime": "starting", "error_code": None}
+            if m.init_error:
+                return {"runtime": "failed", "error_code": m.init_error}
+            return {"runtime": "applied", "error_code": None}
+
+    def config_matches(self, iid: str, config: dict) -> bool | None:
+        with self._lock:
+            m = self._monitors.get(iid)
+            return (
+                m.instance.config.model_dump() == config
+                if m is not None and not m.retiring
+                else None
+            )
 
     def film_page(self, instance_id: str, page: object, size: object) -> dict | None:
         """Look up under the registry lock; read outside it like reconfigure."""
@@ -236,56 +433,76 @@ class Supervisor:
             log.warning("Monitor run films unavailable (%s)", type(exc).__name__)
             return None
 
-    def unregister(self, instance_id: str, timeout: float = 10.0) -> None:
-        """Stop + remove ONE monitor live (no agent restart) — used by the control
-        API's remove/disable. Serialized against register/reconfigure/stop via the
-        lifecycle lock. Raises KeyError if the instance isn't registered."""
-        with self._life:
-            with self._lock:
-                m = self._monitors.pop(instance_id, None)
-            if m is None:
-                raise KeyError(instance_id)
-            # Signal the worker, release the instance's resources first (this can
-            # unblock a running check() so the join doesn't burn the budget), then
-            # join. The worker also exits via its `_monitors.get(id) is not m`
-            # guard now that the entry is gone — and the watchdog won't restart a
-            # popped instance (its `m is None` makes `dead` False).
-            m.stop.set()
-            self._cleanup_instance(m.instance, timeout)
-            if m.thread:
-                m.thread.join(timeout=timeout)
-
-    @staticmethod
-    def _cleanup_instance(instance: MonitorInstance, timeout: float) -> None:
-        try:
-            instance.stop(timeout)
-        except Exception as e:
-            log.error("instance %s stop() failed: %s", instance.instance_id, e)
+    def unregister(self, instance_id: str, timeout: float = 10.0) -> dict:
+        if not self.has(instance_id):
+            raise KeyError(instance_id)
+        self.request_stop(instance_id, timeout)
+        return self.stop_result(instance_id, timeout)
 
     # ── worker ────────────────────────────────────────────────────────────
     def _start_worker(self, instance_id: str) -> None:
         with self._lock:
-            m = self._monitors[instance_id]
-            if m.thread and m.thread.is_alive():
-                return  # never run two workers for one instance
-            m.stop.clear()
-            m.thread = threading.Thread(
-                target=self._run,
-                args=(instance_id, m),
-                name=f"mon-{instance_id}",
-                daemon=True,
-            )
-            m.thread.start()
+            m = self._monitors.get(instance_id)
+            if (
+                m is None
+                or m.retiring
+                or m.stop.is_set()
+                or m.cancel.is_set()
+                or self._closed
+            ):
+                return
+            if m.worker_launch_pending or (m.thread and m.thread.is_alive()):
+                return
+            m.worker_launch_pending = True
+            m.initialized.clear()
+            try:
+                t = threading.Thread(
+                    target=self._run,
+                    args=(instance_id, m),
+                    name=f"mon-{instance_id}",
+                    daemon=True,
+                )
+            except Exception:
+                m.worker_launch_pending = False
+                m.init_error = "start_failed"
+                m.initialized.set()
+                t = None
+            m.thread = t
+        if t is None:
+            self._retire(instance_id, m, time.monotonic())
+            return
+        try:
+            t.start()
+        except Exception:
+            with self._lock:
+                unstarted = t.ident is None
+                if unstarted:
+                    m.init_error = "start_failed"
+                    m.initialized.set()
+            if unstarted:
+                self._retire(instance_id, m, time.monotonic())
+        finally:
+            with self._lock:
+                if m.thread is t:
+                    m.worker_launch_pending = False
 
     def _run(self, instance_id: str, m: _Managed) -> None:
-        # One-time init hook (open tails/subprocesses). A failure kills the
-        # worker → the watchdog restarts it with backoff (and degrades).
         try:
-            m.instance.start(self._emitter_for(instance_id, m))
-        except Exception as e:
-            log.error("monitor %s start() failed: %s", instance_id, e)
+            if not m.stop.is_set() and not m.cancel.is_set():
+                m.instance.start(self._emitter_for(instance_id, m))
+        except Exception:
+            m.init_error = "start_failed"
+            m.stop.set()
+        finally:
+            m.initialized.set()
+        if m.init_error:
+            self._retire(
+                instance_id,
+                m,
+                m.deadline if m.deadline is not None else time.monotonic() + 5,
+            )
             return
-        while not m.stop.is_set() and self._running.is_set():
+        while not m.stop.is_set() and not m.cancel.is_set() and self._running.is_set():
             # Exit if this _Managed is no longer the current one (reconfigured).
             with self._lock:
                 if self._monitors.get(instance_id) is not m:
@@ -364,7 +581,9 @@ class Supervisor:
                         dead = bool(
                             m
                             and not m.stop.is_set()
+                            and not m.worker_launch_pending
                             and m.thread
+                            and m.thread.ident is not None
                             and not m.thread.is_alive()
                         )
                         if dead:
@@ -387,9 +606,9 @@ class Supervisor:
                                         state="degraded", detail="worker keeps dying"
                                     )
                                     do_emit = True
-                    if do_restart:
-                        log.error("monitor %s thread died; restart #%d", iid, restarts)
-                        self._start_worker(iid)  # takes _lock, nested under _life
+                if do_restart:
+                    log.error("monitor %s thread died; restart #%d", iid, restarts)
+                    self._start_worker(iid)
                 # _emit OUTSIDE _life — the sink must not block lifecycle ops.
                 if do_emit:
                     self._emit(
@@ -404,7 +623,7 @@ class Supervisor:
     # ── emit (throttle + dedupe) ───────────────────────────────────────────
     def _emitter_for(self, instance_id: str, m: _Managed) -> EventEmitter:
         def emit(level, title, message, data=None, dedupe_key=None):
-            self._emit(instance_id, level, title, message, data, dedupe_key)
+            self._emit(instance_id, level, title, message, data, dedupe_key, expected=m)
 
         return emit
 
@@ -464,13 +683,26 @@ class Supervisor:
         return True
 
     def _emit(
-        self, instance_id, level, title, message, data=None, dedupe_key=None
+        self,
+        instance_id,
+        level,
+        title,
+        message,
+        data=None,
+        dedupe_key=None,
+        *,
+        expected: _Managed | None = None,
     ) -> None:
         folded_msg = None
         deliver = False
         with self._lock:
             m = self._monitors.get(instance_id)
-            if m is None:
+            if (
+                m is None
+                or m.retiring
+                or m.stop.is_set()
+                or (expected is not None and m is not expected)
+            ):
                 return
             if dedupe_key is not None and dedupe_key in m.seen_dedupe:
                 return
@@ -523,17 +755,33 @@ class Supervisor:
     # ── introspection ──────────────────────────────────────────────────────
     def snapshot(self) -> dict:
         with self._lock:
-            return {
-                iid: {
-                    "state": m.instance.snapshot().state,
-                    # The actual measured values (CPU/mem/GPU/net for host_metrics,
-                    # queue depth, etc.) — the whole point of /status.
-                    "metrics": dict(m.instance.snapshot().metrics),
-                    "detail": m.instance.snapshot().detail,
+            for iid in list(set(self._monitors) | set(self._retired)):
+                self._prune(iid)
+            out = {}
+            ids = set(self._monitors) | set(self._retired) | set(self._pending)
+            for iid in ids:
+                m = self._monitors.get(iid) or next(
+                    iter(self._retired.get(iid, [])), None
+                )
+                if m is None:
+                    out[iid] = {
+                        "state": "stopped",
+                        "alive": False,
+                        "lifecycle": "starting",
+                    }
+                    continue
+                snap = m.instance.snapshot()
+                out[iid] = {
+                    "state": snap.state,
+                    "metrics": dict(snap.metrics),
+                    "detail": snap.detail,
                     "alive": bool(m.thread and m.thread.is_alive()),
                     "failures": m.failures,
                     "degraded": m.degraded,
                     "dropped": m.dropped_in_window,
+                    "lifecycle": "stopping"
+                    if m.retiring
+                    else ("starting" if not m.initialized.is_set() else "running"),
+                    "runtime_error_code": m.init_error or m.cleanup_error,
                 }
-                for iid, m in self._monitors.items()
-            }
+            return out

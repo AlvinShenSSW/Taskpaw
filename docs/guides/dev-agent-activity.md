@@ -1,8 +1,10 @@
 # AI activity: hooks, session metadata and CPU
 
 Add a `dev_activity` monitor on each development machine. The agent resolves
-Claude Code, Codex and Kimi in this order: **fresh hook → session metadata →
-attributed CPU → process presence**. The Hub displays the agent's result.
+Claude Code, Codex and Kimi using independent hook subjects, positive session
+metadata/CPU, then eligible idle estimates and presence. A quiet file never
+outranks positive CPU. A hook covers only a proven producer root; other roots'
+positive evidence remains available. The Hub displays the agent's result.
 `busy`, `waiting`, `idle`, `present_only` and `none` retain their existing meaning.
 Presence means the tool is open, not necessarily working. VS Code core CPU never
 means AI activity: its context row says “Vibe coding” / “AI 编程中” only when a
@@ -25,6 +27,14 @@ These are explicit local commands, never monitor startup actions. They edit only
 `--python PATH` and `--writer PATH`; generated commands use absolute paths.
 Keep the interpreter and writer at those locations after installation.
 
+Before using the updated sidecar format, update any copied standalone writer
+and reinstall the hooks using that writer's path. The new, unmerged format uses
+SQLite schema 2 and rich JSON schema 3; the `.activity-v2.sqlite3` filename stays
+unchanged. Experimental schema 1 and unknown/future stores are rejected unchanged
+and remain unknown. Reinstall does not migrate, erase or rebuild those stores;
+their handling requires a separate operator decision. Four-field legacy JSON
+remains supported independently.
+
 Pause host settings edits and run one setup at a time. Unrelated settings, hooks,
 notify and trust records are preserved. Existing unmarked TaskPaw hooks are
 reported and preserved too; they can produce duplicate writes. A correct reinstall
@@ -37,9 +47,13 @@ conflicts; it is not cross-process compare-and-swap, a lock or crash recovery.
 
 Uninstall restores the exact baseline when settings are unchanged since install.
 After later user edits it removes only handlers with the exact reserved
-`--taskpaw-hook-id taskpaw-ai-activity-v1-<tool>` argument pair. Only recorded,
-unchanged installer-created groups may be deleted when empty. Without the undo
-record, uninstall cannot restore the whole file or delete groups. Backups remain
+`--taskpaw-hook-id taskpaw-ai-activity-v1-<tool>` argument pair. Exact
+unchanged baseline restoration may remove installer scaffolding. Every selective
+path preserves all empty groups: indices cannot prove ownership after edits.
+Without the undo record, uninstall cannot restore the whole file or delete groups.
+A correct reinstall with a missing record repairs a selective-only record without
+claiming the original file was absent or adopting an old backup. Missing, changed
+or unreadable baseline backups trigger reported selective removal, not restoration. Backups remain
 for manual recovery; activity state files remain untouched. Partial I/O failures
 are reported per tool with the backup locator; rerun to reconcile.
 Reinstalling over externally edited settings revokes whole-file restoration,
@@ -54,19 +68,21 @@ Backups may contain unrelated private settings: keep them local.
 
 Check verifies TaskPaw's installed handlers, then runs only the known generated
 writer through the supported shell with synthetic busy/waiting/idle stdin. A
-random session nonce, correct state and fresh timestamp must appear in isolated
+random session/turn nonce, correct legacy state, fresh timestamp and committed
+rich fact must appear in isolated
 `.activity-check-*` files under the state directory. Each invocation has a 5s
 timeout; check files are cleaned up. Live activity files and unrelated hooks are
 never executed or overwritten. Edited commands fail with a reinstall diagnostic.
 A successful check verifies the writer, not the host's policy, trust or dispatch.
 
-Claude uses bash (Git Bash on Windows). New wiring covers SessionStart,
+Claude uses bash (Git Bash on Windows). The legacy JSON projection maps SessionStart,
 UserPromptSubmit, PreToolUse, PostToolUse (busy), PermissionRequest and Notification
 (waiting), Stop and SessionEnd (idle). Notification is filtered to
 `permission_prompt` only; `idle_prompt` inactivity reminders do not mean waiting.
 Reinstalling updates existing TaskPaw handlers to this matcher.
-New installs omit SubagentStop: a child finishing
-must not mark its parent idle. The writer retains its legacy parser behavior.
+New installs include SubagentStart/SubagentStop as independent child facts;
+a child stop attempt cannot mark its parent finished. The writer retains the
+legacy four-field parser projection, which is not the rich whole-tool result.
 All handlers are synchronous commands with a three-second timeout.
 
 ### Codex lifecycle hooks and trust
@@ -80,7 +96,7 @@ default installer: use a manual hook in that configuration directory instead.
 
 The [official hook reference](https://learn.chatgpt.com/docs/hooks) supplies the
 JSON shape and synthetic fixtures. Local Codex 0.153.4 binary inspection confirmed
-event names, not host execution. UserPromptSubmit, SessionStart, PreToolUse,
+event names, not host execution. In the legacy JSON projection, UserPromptSubmit, SessionStart, PreToolUse,
 PostToolUse, PreCompact, PostCompact, SubagentStart and SubagentStop mean busy;
 PermissionRequest means waiting; Stop, Interrupt and SessionEnd mean idle.
 Notification and unknown events do not write state. Actual authenticated host
@@ -197,10 +213,14 @@ Cursors resume later; newest discovered candidates are capped at 64 (configurabl
 1–256), re-statted each check and evicted after 600s without revalidation. The
 scan does not promise the globally newest file in arbitrarily large histories.
 Up to 16 live CLI roots total are inspected round-robin per check on macOS/Linux,
-consuming at most 256 handle paths per root. Native `open_files()` returns its
-list before that cap applies; it has no hard timeout. macOS measurements were
-fast, but Linux timing and universal handle completeness remain unverified.
-Fresh hooks bypass session probes. Stop/reconfigure closes discovery iterators.
+consuming at most 256 handle paths per root. Native `open_files()` returns its list before that cap applies; it has no hard
+timeout. Native timing/completeness and idle TUI handles remain unverified.
+Fresh associated hook subjects bypass only their covered roots. Stop sets intent
+before timed acquisition and returns within the supplied/common monitor budget.
+A blocked probe owns its late cleanup; API return does not mean its resources
+are already closed. Its return/exception closes iterators exactly once and no
+late results/events are committed. A permanently hung native syscall cannot be
+force-cancelled safely. No new probe is opened by a stopped instance.
 
 CLI identity uses exact executable basenames (`claude`, `codex`, `kimi`), then
 exact argv[0]/name basenames when the executable is not a known CLI. Windows
@@ -208,13 +228,24 @@ strips `.exe` and ignores case. A real `codex` inside ChatGPT.app counts; render
 Claude desktop, prompt arguments mentioning tools, Code core and Kilo do not.
 Node/Python launchers also accept exact tool script names, `kimi-cli`, the Kimi
 entry `@moonshot-ai/kimi-code/dist/main.mjs`, and Python's `-m kimi_cli`.
+On Windows, node argv[1] additionally accepts package-qualified
+`@anthropic-ai/claude-code/cli.js` and `@openai/codex/bin/codex.js`, including
+slash/case variations. Unrelated same-basename scripts and prompt arguments do
+not match. This covers legacy Claude npm JS launchers; newer Claude packages may
+use a native executable. Actual Windows npm dispatch remains unverified.
 Other arguments do not establish tool identity.
 `process_patterns` still accepts regexes but **only matches basenames in this
-monitor**; the generic process plugin retains full-command matching.
+monitor**; the generic process plugin retains full-command matching. A vscode
+process_patterns override is rejected because VS Code is context only.
 CPU belongs to the nearest AI root once, including its children (at most 500).
 Sweeps retain at most 8192 processes and ancestry at most 32 parents. New/reused
-PIDs have no baseline; the first sample is presence-only. CPU is percent of one
-core. Network waits can look idle when hooks/session evidence are unavailable.
+roots/PIDs have no inherited baseline; the first sample is presence-only. Readable
+identity deltas survive other denied descendants, but partial coverage cannot
+prove idle. A newly observed child contributes its full CPU only if created after
+the previous sample under a continuous root; clock correction/reuse disables this
+shortcut. Children older than their apparent parent are nonownership, not partial
+CPU; elevated/denied live children remain diagnosed partial reads. CPU is percent
+of one core. Network waits can look idle when hooks/session evidence are unavailable.
 
 ## Reading diagnostics
 
@@ -236,12 +267,88 @@ invalidate the VS Code host. A tool-wide hook/recent
 write cannot identify which of mixed hosts is active, so it does not mark VS Code
 busy. Root-specific CPU or open handles can. VS Code is never in `busy_tools`.
 
-These are heuristics, not perfect per-session tracking. One last-writer hook file
-per tool means simultaneous sessions can overwrite each other. Housekeeping can
-look active; idle interactive Codex TUI handle behavior remains unverified (the
-observed idle app-server had no rollout handle). Use `session_activity: false` to
-retain CPU fallback, or `observe: false` for hooks/presence only.
+## Independent sessions and conservative unknown
 
-After deployment, the operator can install/check, review Codex `/hooks`, then send
-a normal prompt, approval and interrupt to observe busy→waiting→idle and VS Code
-attribution. This production activation is separate from automated fixture tests.
+Automatic hooks retain their legacy JSON projection and also publish a private
+`<JSON path>.activity-v2.sqlite3` cache. Both per-tool and shared default sidecars
+are read, even if the shared JSON now names another tool. Session/turn/child IDs
+are hashed in the cache; prompts, transcript contents, tool inputs/outputs and
+arbitrary argv are never stored/read for this purpose. Optional direct-parent
+PID/create-time stays local. A helper parent that cannot match a same-tool CLI
+root remains unbound; process absence alone cannot prove its session ended.
+
+Claude prompt_id requires Code v2.1.196+ and is absent before first input; Codex
+turn_id is event-specific. Older/missing IDs remain unknown for whole-tool idle
+authority. Legacy direct/--state writes and notify arguments still work with the
+four core JSON fields; fresh busy/waiting remains useful, while legacy idle cannot
+clear independently known active subjects. Both official PermissionRequest inputs
+lack tool_use_id; tool-name or receipt-time pairing is not performed.
+
+Stop/SubagentStop can be continued by other host hooks. They are stopping attempts,
+not irreversible finality; indistinguishable same-scope delayed/continued progress
+stays unknown, including observe=false and quiet model waits. Codex Stop creates
+a continuation prompt, without a guessed same/new turn_id. Narrow final proof is
+Codex Interrupt for its identified main turn, an exactly bound session end, or a
+complete confirmed exit/reuse of a previously bound producer. None closes an
+unrelated turn/session/child. Any independent valid busy wins; unresolved activity
+defers completion rather than turning silence into success.
+
+For SessionEnd, the monitor has a separate write stage that records an internal
+`verified_session_end` witness using its existing exact same-tool root binding.
+Hook payloads and a nonzero parent PID cannot create that proof. Fact readers
+stay read-only; confirmation opens only existing sidecars. Each participating
+per-tool/shared store commits its own witness and scoped retirement together.
+The commits are not jointly atomic: partial publication remains unknown and
+cannot announce all-idle/off. Retry uses the durable copy without renewing its
+original 24h horizon. Unbound or wrong-incarnation finals cannot clear activity.
+
+There is one current rich projection link per physical JSON/sidecar pair, shared
+across tools. Every publication uses a fresh nonce, including duplicate facts.
+JSON replacement and SQLite commit are not jointly atomic: failed JSON writes
+may still commit facts; failed commits cannot borrow an older duplicate's link.
+Mismatched linkage remains unknown. A resolved link validates only that exact
+current projection after covered fact retirement, not future callbacks or other
+subjects. Publishing another tool replaces the link; the previous tool's stored
+facts still reduce normally without requiring its own JSON.
+
+Facts cap at2048, current sessions64/turns256/tools64, with256 exact unknown
+summaries and64 possible tool overflow latches, within8MiB. CLI reclamation uses
+300s; a monitor with shorter freshness retires busy to unknown earlier, not
+permission for the standalone writer to delete it earlier. Transactional expiry/
+reclamation transfers unresolved evidence into persistent unknown before deleting
+it. Any transfer/delete/insert/commit failure rolls back; unknown schema/corruption
+is unavailable and never silently rebuilt. Resolved tombstones retain their
+original 24h horizon; copies/retries do not renew it. Covered stored facts and
+summaries retire transactionally; expired proof cannot close new callbacks.
+Unknown summaries and file idle watermarks do not expire. A's summary survives
+B ending, time, restart and reinstall. A collapsed overflow latch has lost identity and
+cannot automatically clear; persistent unknown is an explicit bounded-storage
+cost, not zombie busy. No reset UI or automatic cache deletion is provided.
+
+Normal capacity refusal preserves all old facts and commits bounded unknown
+coverage, while the rejected writer still returns nonzero with
+`fact_committed=false`. An admitted tool uses an exact unknown summary when space
+permits, otherwise its persistent overflow latch. A refused65th tool has no
+metadata row, so an existing row carries a fixed store-wide coverage-loss bit:
+every reader of that sidecar sees unknown, including the unadmitted tool. Later
+local overflow writes preserve this bit; time, restart and unrelated final facts
+cannot clear either latch. Independent valid busy/waiting remains usable. Actual
+SQL/I/O/commit failures still roll back the complete transaction; when the store
+cannot physically be written, new unknown evidence cannot be promised durable.
+
+Open handles and recent-write positives require mtime strictly newer than the
+retained idle watermark; expiry never re-enables an old handle. New CPU/writes
+remain independently useful. Discovery admits cached active/current-date paths
+before overflow, diagnoses exclusions, and computes date tokens once per call.
+An error-free completed cycle remains valid across ordinary yields only for the
+same roots and revalidated cache, up to max(2*scan_interval,2*poll_interval).
+
+These are bounded heuristics, not perfect per-session tracking. Native TUI idle
+>5min, VS Code host dispatch, Windows npm/elevated-process and normal packaged
+activation remain **UNVERIFIED**. Synthetic payloads, fake process metadata and
+controlled blocked threads establish their own contracts, not native host behavior.
+Use session_activity:false for CPU fallback or observe:false for hooks/presence.
+After deployment, operator-controlled disposable CLI/VS Code/Windows acceptance
+must record version/platform, state/source and limits without prompt/transcript
+contents. Activation is separate from automated fixtures and is not performed by
+this change.

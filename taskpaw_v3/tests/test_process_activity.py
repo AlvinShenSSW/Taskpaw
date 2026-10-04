@@ -399,7 +399,13 @@ def test_unavailable_descendant_cpu_distinguishes_exit_from_denial(monkeypatch, 
     out = pu.scan_activity({"claude": None})["claude"]
     exited = status in {"zombie", "gone", "zombie_exception"}
     assert out["complete"] is exited
-    assert out["errors"] == ([] if exited else ["unavailable"])
+    assert out["errors"] == (
+        []
+        if exited
+        else ["denied", "unavailable"]
+        if status == "denied"
+        else ["unavailable"]
+    )
     assert out["cpu_seconds"] == 3
     assert set(out["cpus"]) == {(1, 1), (3, 1)}
 
@@ -435,3 +441,199 @@ def test_override_matches_identity_basenames_only(
         assert pu.scan_activity(inst._compiled)["custom"]["present"] is expected
     finally:
         inst.stop()
+
+
+def _denied_cpu_child(pid, ppid, created=1):
+    child = _record(pid, ppid, "/bin/worker", created=created)
+    child.info["cpu_times"] = None
+
+    def denied():
+        raise _FakePsutil.AccessDenied
+
+    child.status = denied
+    return child
+
+
+def test_partial_readable_child_still_reports_positive_cpu(monkeypatch):
+    def sample(cpu):
+        monkeypatch.setattr(
+            pu,
+            "psutil",
+            _FakePsutil(
+                [
+                    _record(10, 0, "/bin/claude", cpu=1),
+                    _record(11, 10, "/bin/worker", cpu=cpu),
+                    _denied_cpu_child(12, 10),
+                ]
+            ),
+        )
+        return pu.scan_activity({"claude": None})
+
+    _, prev = pu.cpu_percents({}, 0, sample(1), 1)
+    current = sample(2.8)
+    pct, _ = pu.cpu_percents(prev, 1, current, 2)
+    assert pct["claude"] == pytest.approx(180)
+    assert current["claude"]["cpu_complete"] is False
+    assert "denied" in current["claude"]["errors"]
+
+
+def test_root_identity_continuity_survives_root_cpu_denial(monkeypatch):
+    def sample(cpu):
+        root = _record(10, 0, "/bin/claude")
+        root.info["cpu_times"] = None
+        monkeypatch.setattr(
+            pu, "psutil", _FakePsutil([root, _record(11, 10, "/bin/worker", cpu=cpu)])
+        )
+        return pu.scan_activity({"claude": None})
+
+    _, prev = pu.cpu_percents({}, 0, sample(1), 1)
+    current = sample(2.8)
+    assert pu.cpu_percents(prev, 1, current, 2)[0]["claude"] == pytest.approx(180)
+    assert current["claude"]["cpu_complete"] is False
+
+
+def test_older_child_proves_nonownership_without_losing_complete(monkeypatch):
+    monkeypatch.setattr(pu, "WINDOWS", True)
+    monkeypatch.setattr(
+        pu,
+        "psutil",
+        _FakePsutil(
+            [
+                _record(10, 0, r"C:\Tools\claude.exe", cpu=1, created=10),
+                _record(11, 10, r"C:\Tools\worker.exe", cpu=100, created=9),
+            ]
+        ),
+    )
+    current = pu.scan_activity({"claude": None})["claude"]
+    assert current["complete"] is True
+    assert current["errors"] == []
+    assert set(current["cpus"]) == {(10, 10)}
+
+
+def test_new_child_full_cpu_only_under_continuous_root():
+    first = _sample(cpu=1)
+    _, prev = pu.cpu_percents({}, 0, first, 1, 9, 10)
+    second = _sample(cpu=1)
+    second["claude"]["cpus"][(11, 10.5)] = (1.8, (10, 1))
+    pct, _ = pu.cpu_percents(prev, 1, second, 2, 10, 11)
+    assert pct["claude"] == pytest.approx(180)
+    assert second["claude"]["cpu_complete"] is True
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        (
+            r"C:\Users\fixture\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js",
+            "claude",
+        ),
+        ("C:/NPM/Node_Modules/@OPENAI/CODEX/BIN/CODEX.JS", "codex"),
+    ],
+)
+def test_windows_package_qualified_legacy_node_shim(monkeypatch, path, expected):
+    monkeypatch.setattr(pu, "WINDOWS", True)
+    record = _record(10, 0, r"C:\nodejs\NODE.EXE")
+    record.info["cmdline"] = [r"C:\nodejs\NODE.EXE", path]
+    assert pu._identity(record.info, {expected: None}) == expected
+
+
+@pytest.mark.parametrize(
+    "created,prev_wall,now_wall",
+    [
+        (10, 10, 11),
+        (9, 10, 11),
+        (12, 10, 11),
+        (10.5, 10, 9),
+        (10.5, 10, 30),
+        (10.5, None, 11),
+        (10.5, 10, float("inf")),
+        (10.5, float("nan"), 11),
+    ],
+)
+def test_new_child_shortcut_rejects_old_future_and_clock_corrections(
+    created, prev_wall, now_wall
+):
+    _, prev = pu.cpu_percents({}, 0, _sample(1), 1)
+    current = _sample(1)
+    current["claude"]["cpus"][(11, created)] = (50, (10, 1))
+    pct, _ = pu.cpu_percents(prev, 1, current, 2, prev_wall, now_wall)
+    assert pct["claude"] == 0
+    assert current["claude"]["cpu_complete"] is False
+
+
+def test_new_or_reused_root_never_injects_lifetime_child_cpu():
+    _, prev = pu.cpu_percents({}, 0, _sample(1), 1)
+    current = _sample(500)
+    current["claude"]["roots"] = [{"pid": 10, "created": 10.5}]
+    current["claude"]["cpus"] = {
+        (10, 10.5): (500, (10, 10.5)),
+        (11, 10.6): (500, (10, 10.5)),
+    }
+    assert pu.cpu_percents(prev, 1, current, 2, 10, 11)[0] == {}
+    assert current["claude"]["cpu_complete"] is False
+
+
+def test_reparented_or_reused_child_does_not_inherit_old_counter():
+    first = _sample(1)
+    first["claude"]["cpus"][(11, 9)] = (500, (10, 1))
+    _, prev = pu.cpu_percents({}, 0, first, 1)
+    current = _sample(1)
+    current["claude"]["cpus"][(11, 10.5)] = (50, (10, 1))
+    assert pu.cpu_percents(prev, 1, current, 2, 10, 11)[0]["claude"] == 0
+    assert current["claude"]["cpu_complete"] is False
+    current["claude"]["cpus"][(11, 9)] = (501, (20, 1))
+    assert pu.cpu_percents(prev, 1, current, 2, 10, 11)[0]["claude"] == 0
+
+
+def test_partial_baseline_recovery_and_legacy_bare_map():
+    partial = _sample(1)
+    partial["claude"]["complete"] = False
+    _, prev = pu.cpu_percents({}, 0, partial, 1)
+    recovering = _sample(1)
+    recovering["claude"]["cpus"][(11, 1)] = (100, (10, 1))
+    pct, prev = pu.cpu_percents(prev, 1, recovering, 2, 10, 11)
+    assert pct["claude"] == 0 and recovering["claude"]["cpu_complete"] is False
+    recovered = _sample(1)
+    recovered["claude"]["cpus"][(11, 1)] = (100, (10, 1))
+    pct, _ = pu.cpu_percents(prev, 2, recovered, 3, 11, 12)
+    assert pct["claude"] == 0 and recovered["claude"]["cpu_complete"] is True
+    legacy = {"claude": {(10, 1): (1, (10, 1))}}
+    assert pu.cpu_percents(legacy, 1, _sample(2.8), 2)[0]["claude"] == pytest.approx(
+        180
+    )
+
+
+def test_unknown_creation_is_partial_but_old_child_denial_is_not_probed(monkeypatch):
+    older = _denied_cpu_child(11, 10, created=9)
+    older.status = lambda: (_ for _ in ()).throw(
+        AssertionError("nonchild must not be probed")
+    )
+    unknown = _record(12, 10, "/bin/worker", created=None)
+    monkeypatch.setattr(
+        pu,
+        "psutil",
+        _FakePsutil([_record(10, 0, "/bin/claude", created=10), older, unknown]),
+    )
+    sample = pu.scan_activity({"claude": None})["claude"]
+    assert sample["complete"] is False and sample["errors"] == ["unavailable"]
+    assert set(sample["cpus"]) == {(10, 10)}
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["node", r"C:\Unrelated\cli.js"],
+        ["node", r"C:\Unrelated\codex.js"],
+        ["node", "--eval", r"C:\npm\@openai\codex\bin\codex.js"],
+        ["node", r"C:\Unrelated\script.js", r"C:\npm\@anthropic-ai\claude-code\cli.js"],
+        ["python", r"C:\npm\@anthropic-ai\claude-code\cli.js"],
+        ["node", r"C:\npm\@openai\codex-extra\bin\codex.js"],
+    ],
+)
+def test_windows_legacy_identity_only_matches_actual_qualified_node_script(
+    monkeypatch, argv
+):
+    monkeypatch.setattr(pu, "WINDOWS", True)
+    record = _record(10, 0, r"C:\Tools\node.exe")
+    record.info["cmdline"] = argv
+    assert pu._identity(record.info, {"claude": None, "codex": None}) is None
