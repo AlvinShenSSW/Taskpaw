@@ -2588,3 +2588,427 @@ def test_r07_ir002_completed_writer_survives_raising_start_wrapper(
     assert result["persistence"] == "saved" and "PLANTED" not in str(result)
     assert not admin._stop_saves and not admin._mutation.locked()
     assert load_yaml(AgentConfig, path).monitors[0]["enabled"] is False
+
+
+@pytest.fixture
+def r07_rejected_validation(monkeypatch):
+    """A real rejected Edit, retaining its live validator until the caller exits."""
+    import threading
+    from contextlib import contextmanager
+
+    @contextmanager
+    def reject(admin, plugin, kind="timeout"):
+        entered, release = threading.Event(), threading.Event()
+        responses = []
+        original = plugin.validate_config
+        owner = None
+
+        def validate(raw):
+            entered.set()
+            assert release.wait(5)
+            return original(raw)
+
+        def edit():
+            responses.append(admin.update("owned", {"poll_interval": 23}))
+
+        with monkeypatch.context() as patch:
+            patch.setattr(plugin, "validate_config", validate)
+            if kind == "launch":
+                original_start = threading.Thread.start
+
+                def start(thread):
+                    if thread.name == "validate-owned":
+                        raise RuntimeError("PLANTED_VALIDATOR_SECRET")
+                    return original_start(thread)
+
+                patch.setattr(threading.Thread, "start", start)
+            caller = threading.Thread(target=edit)
+            caller.start()
+            try:
+                if kind != "launch":
+                    assert entered.wait(2)
+                    owner = admin._owners["owned"]
+                    if kind == "cancel":
+                        # A genuine concurrent settings commit invalidates this
+                        # validator's revision without changing monitor state.
+                        assert admin.update_config({"machine": "m"})["ok"]
+                        release.set()
+                caller.join(2)
+                assert not caller.is_alive() and len(responses) == 1
+                result = responses[0]
+                assert result["outcome"] == "not_applied" and not result["ok"]
+                assert result["persistence"] == "not_requested"
+                assert result["runtime"] == "unchanged"
+                assert (
+                    result["error_code"]
+                    == {
+                        "timeout": "validation_timeout",
+                        "cancel": "validation_cancelled",
+                        "launch": "start_failed",
+                    }[kind]
+                )
+                assert "PLANTED" not in str(result)
+                yield result
+            finally:
+                release.set()
+                caller.join(2)
+                assert not caller.is_alive()
+                if owner is not None and owner.thread is not None:
+                    owner.thread.join(2)
+                    assert not owner.thread.is_alive()
+        assert not admin.config_view()["monitor_operations"]
+
+    return reject
+
+
+def test_r07_or001_add_reports_published_start_failure_before_retirement(
+    tmp_path, monkeypatch
+):
+    import threading
+
+    from taskpaw_v3.monitors.supervisor import Supervisor
+
+    entered, release = threading.Event(), threading.Event()
+    stopped, checked = [], []
+
+    class Owned(_FakeInstance):
+        def start(self, emit):
+            raise RuntimeError("PLANTED_START_SECRET")
+
+        def check(self, emit):
+            checked.append(self)
+            return super().check(emit)
+
+        def stop(self, timeout=5):
+            stopped.append(self)
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            return Owned(iid, cfg)
+
+    reg = PluginRegistry()
+    reg.register(Plugin())
+    cfg = _agent_config()
+    path = tmp_path / "owned.yaml"
+    sup = Supervisor(lambda *a: None)
+    adm = MonitorAdmin(cfg, sup, reg, path, operation_timeout=1)
+    original_retire = sup._retire
+    owners = []
+
+    def before_retire(iid, managed, deadline):
+        if threading.current_thread() is managed.thread:
+            owners.append(managed)
+            entered.set()
+            assert release.wait(5)
+        return original_retire(iid, managed, deadline)
+
+    monkeypatch.setattr(sup, "_retire", before_retire)
+    try:
+        sup.start()
+        result = adm.add({"type_id": "fake", "config": {"name": "owned"}})
+        assert entered.wait(2)
+        managed = owners[0]
+        assert managed.initialized.is_set() and not managed.retiring
+        assert managed.init_error == "start_failed" and checked == []
+        assert result["outcome"] == "persisted_runtime_failed" and not result["ok"]
+        assert result["persistence"] == "saved" and result["runtime"] == "failed"
+        assert result["error_code"] == "start_failed" and "PLANTED" not in str(result)
+        assert load_yaml(AgentConfig, path).monitors == cfg.monitors
+        assert adm.status_view()["owned"]["runtime_error_code"] == "start_failed"
+        release.set()
+        managed.thread.join(2)
+        assert not managed.thread.is_alive()
+        assert sup.stop_result("owned", 2)["complete"]
+        managed.cleanup_thread.join(2)
+        assert stopped == [managed.instance] and not sup.has("owned")
+        row = adm.status_view()["owned"]
+        assert (
+            row["lifecycle"] == "stopped"
+            and row["runtime_error_code"] == "start_failed"
+        )
+    finally:
+        release.set()
+        sup.stop(2)
+        for managed in owners:
+            managed.thread.join(2)
+            if managed.cleanup_thread is not None:
+                managed.cleanup_thread.join(2)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("rejection", ["timeout", "cancel", "launch"])
+def test_r07_or002_validation_rejection_is_response_only_for_healthy_runtime(
+    tmp_path, cached, rejection, r07_rejected_validation
+):
+    import copy
+
+    from taskpaw_v3.core.config import save_yaml
+
+    spec = {"type_id": "fake", "config": {"name": "owned"}, "enabled": True}
+    cfg = _agent_config(monitors=[] if cached else [spec])
+    reg = _registry()
+    sup = build_supervisor(reg, cfg.monitors, EventQueue("m"), "m")
+    path = tmp_path / "owned.yaml"
+    save_yaml(cfg, path)
+    adm = MonitorAdmin(
+        cfg, sup, reg, path, operation_timeout=2 if rejection == "cancel" else 0.1
+    )
+    try:
+        sup.start()
+        if cached:
+            assert adm.add(spec)["ok"]
+        managed = sup._monitors["owned"]
+        assert managed.initialized.wait(2)
+        before = copy.deepcopy(cfg.monitors)
+        disk = path.read_bytes()
+        initial = adm.status_view()["owned"]
+        assert not initial.get("runtime_error_code") and managed.thread.is_alive()
+        with r07_rejected_validation(adm, reg.get("fake"), rejection):
+            row = adm.status_view()["owned"]
+            assert not row.get("runtime_error_code")
+            assert row.get("persistence") == initial.get("persistence")
+            assert cfg.monitors == before and path.read_bytes() == disk
+            assert sup._monitors["owned"] is managed and managed.thread.is_alive()
+            if rejection == "timeout":
+                operation = adm.config_view()["monitor_operations"]["owned"]
+                assert (
+                    operation["stage"] == "validation_expired"
+                    and not operation["retryable"]
+                )
+        assert not adm.status_view()["owned"].get("runtime_error_code")
+    finally:
+        sup.stop(2)
+
+
+@pytest.mark.parametrize("fault", ["create", "start"])
+def test_r07_or002_rejected_edit_preserves_pruned_failure_and_exact_add_retry(
+    tmp_path, monkeypatch, fault, r07_rejected_validation
+):
+    from taskpaw_v3.monitors.supervisor import Supervisor
+
+    class Owned(_FakeInstance):
+        def start(self, emit):
+            if plugin.broken and fault == "start":
+                raise RuntimeError("PLANTED_START_SECRET")
+
+    class Plugin(_FakePlugin):
+        broken = True
+        creates = 0
+
+        def create(self, iid, cfg):
+            self.creates += 1
+            if self.broken and fault == "create":
+                raise RuntimeError("PLANTED_CREATE_SECRET")
+            return Owned(iid, cfg)
+
+    reg = PluginRegistry()
+    plugin = Plugin()
+    reg.register(plugin)
+    cfg = _agent_config()
+    path = tmp_path / "owned.yaml"
+    sup = Supervisor(lambda *a: None)
+    adm = MonitorAdmin(cfg, sup, reg, path, operation_timeout=0.1)
+    original_activation = sup.activation_result
+
+    def after_retirement(iid, timeout=0):
+        # Reach the real pruned-owner consumer independently of the OR001 race.
+        if plugin.broken:
+            assert sup.stop_result(iid, 2)["complete"]
+        return original_activation(iid, timeout)
+
+    monkeypatch.setattr(sup, "activation_result", after_retirement)
+    try:
+        sup.start()
+        result = adm.add({"type_id": "fake", "config": {"name": "owned"}})
+        code = "create_failed" if fault == "create" else "start_failed"
+        assert result["outcome"] == "persisted_runtime_failed"
+        assert result["error_code"] == code and not sup.has("owned")
+        before = path.read_bytes()
+        with r07_rejected_validation(adm, plugin):
+            row = adm.status_view()["owned"]
+            assert row["runtime_error_code"] == code and row["persistence"] == "saved"
+            assert row["lifecycle"] == "stopped" and path.read_bytes() == before
+        plugin.broken = False
+        # Current normalized desired spec is the only allowed duplicate Add retry.
+        retried = adm.add(dict(cfg.monitors[0]))
+        assert retried["ok"] and plugin.creates == 2
+        assert len(load_yaml(AgentConfig, path).monitors) == 1
+        assert adm.status_view()["owned"]["runtime_error_code"] is None
+        assert sup.config_matches("owned", cfg.monitors[0]["config"])
+    finally:
+        sup.stop(2)
+
+
+@pytest.mark.parametrize("live_fault", ["start", "cleanup"])
+@pytest.mark.parametrize("save_failed", [False, True])
+def test_r07_or002_live_fault_precedes_cached_action_error(
+    tmp_path, monkeypatch, live_fault, save_failed
+):
+    import threading
+
+    from taskpaw_v3.agent.server import admin as module
+    from taskpaw_v3.monitors.supervisor import Supervisor
+
+    entered, release = threading.Event(), threading.Event()
+
+    class Owned(_FakeInstance):
+        stops = 0
+
+        def start(self, emit):
+            if live_fault == "start":
+                raise RuntimeError("PLANTED_INIT_SECRET")
+
+        def stop(self, timeout=5):
+            self.stops += 1
+            if live_fault == "cleanup" and self.stops == 1:
+                raise RuntimeError("PLANTED_CLEANUP_SECRET")
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            return Owned(iid, cfg)
+
+    reg = PluginRegistry()
+    reg.register(Plugin())
+    cfg = _agent_config()
+    path = tmp_path / "owned.yaml"
+    sup = Supervisor(lambda *a: None)
+    adm = MonitorAdmin(cfg, sup, reg, path, operation_timeout=1)
+    original_retire = sup._retire
+    managed = None
+
+    def before_retire(iid, item, deadline):
+        if live_fault == "start" and threading.current_thread() is item.thread:
+            entered.set()
+            assert release.wait(5)
+        return original_retire(iid, item, deadline)
+
+    monkeypatch.setattr(sup, "_retire", before_retire)
+    try:
+        # A real Add before Supervisor.start leaves a legitimate applied cache.
+        assert adm.add({"type_id": "fake", "config": {"name": "owned"}})["ok"]
+        managed = sup._monitors["owned"]
+        before = path.read_bytes()
+        if save_failed:
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    module,
+                    "save_yaml",
+                    lambda *a: (_ for _ in ()).throw(OSError("PLANTED_SAVE_SECRET")),
+                )
+                result = adm.update("owned", {"poll_interval": 20})
+            assert (
+                result["persistence"] == "failed" and result["runtime"] == "unchanged"
+            )
+            assert result["error_code"] == "persistence_failed"
+        if live_fault == "start":
+            sup.start()
+            assert entered.wait(2)
+        else:
+            sup.request_stop("owned", 1)
+            assert managed.cleanup_done.wait(2)
+            managed.cleanup_thread.join(2)
+            assert not managed.cleanup_thread.is_alive()
+        expected = "start_failed" if live_fault == "start" else "cleanup_failed"
+        assert sup.snapshot()["owned"]["runtime_error_code"] == expected
+        row = adm.status_view()["owned"]
+        assert row["runtime_error_code"] == expected
+        assert row["persistence"] == ("failed" if save_failed else "saved")
+        assert path.read_bytes() == before and sup._monitors["owned"] is managed
+        assert "PLANTED" not in str(row)
+    finally:
+        release.set()
+        sup.stop(2)
+        if managed is not None:
+            if managed.thread is not None:
+                managed.thread.join(2)
+            if managed.cleanup_thread is not None:
+                managed.cleanup_thread.join(2)
+
+
+@pytest.mark.parametrize("persistence", ["saved", "failed", "pending"])
+def test_r07_or002_stop_persistence_and_late_retirement_are_preserved(
+    tmp_path, monkeypatch, persistence
+):
+    import threading
+
+    from taskpaw_v3.agent.server import admin as module
+    from taskpaw_v3.monitors.supervisor import Supervisor
+
+    cleanup_entered, cleanup_release = threading.Event(), threading.Event()
+    save_entered, save_release = threading.Event(), threading.Event()
+
+    class Owned(_FakeInstance):
+        def stop(self, timeout=5):
+            cleanup_entered.set()
+            assert cleanup_release.wait(5)
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            return Owned(iid, cfg)
+
+    reg = PluginRegistry()
+    reg.register(Plugin())
+    cfg = _agent_config()
+    path = tmp_path / "owned.yaml"
+    sup = Supervisor(lambda *a: None)
+    adm = MonitorAdmin(cfg, sup, reg, path, operation_timeout=0.1)
+    save = None
+    managed = None
+    original_save = module.save_yaml
+
+    def persist(*args):
+        if persistence == "pending":
+            save_entered.set()
+            assert save_release.wait(5)
+        if persistence == "failed":
+            raise OSError("PLANTED_SAVE_SECRET")
+        original_save(*args)
+
+    try:
+        assert adm.add({"type_id": "fake", "config": {"name": "owned"}})["ok"]
+        managed = sup._monitors["owned"]
+        before = path.read_bytes()
+        monkeypatch.setattr(module, "save_yaml", persist)
+        result = adm.set_enabled("owned", False)
+        save = adm._stop_records["owned"]
+        assert cleanup_entered.wait(2)
+        assert (
+            result["runtime"] == "stopping" and result["error_code"] == "stop_timeout"
+        )
+        assert result["persistence"] == persistence
+        if persistence == "pending":
+            assert save_entered.is_set() and not save.done.is_set()
+        row = adm.status_view()["owned"]
+        assert (
+            row["runtime_error_code"]
+            == ("persistence_failed" if persistence == "failed" else "stop_timeout")
+            and row["persistence"] == persistence
+        )
+        if persistence != "saved":
+            assert path.read_bytes() == before
+        cleanup_release.set()
+        assert sup.stop_result("owned", 2)["complete"]
+        managed.cleanup_thread.join(2)
+        assert not managed.cleanup_thread.is_alive() and not sup.has("owned")
+        row = adm.status_view()["owned"]
+        assert row["lifecycle"] == "stopped" and row["persistence"] == persistence
+        assert row["runtime_error_code"] == (
+            "persistence_failed" if persistence == "failed" else None
+        )
+        save_release.set()
+        assert save.done.wait(2)
+        save.thread.join(2)
+        assert not save.thread.is_alive()
+        row = adm.status_view()["owned"]
+        assert row["persistence"] == ("failed" if persistence == "failed" else "saved")
+        assert load_yaml(AgentConfig, path).monitors[0]["enabled"] is (
+            persistence == "failed"
+        )
+    finally:
+        cleanup_release.set()
+        save_release.set()
+        if save is not None and save.thread is not None:
+            save.thread.join(2)
+        sup.stop(2)
+        if managed is not None and managed.cleanup_thread is not None:
+            managed.cleanup_thread.join(2)

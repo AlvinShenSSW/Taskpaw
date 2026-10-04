@@ -1035,3 +1035,96 @@ def test_r07_sr001_known_worker_launch_failure_retires_before_explicit_retry(
         assert replacement.thread.is_alive()
     finally:
         sup.stop(1)
+
+
+@pytest.mark.parametrize(
+    "fails,replace_owner", [(False, False), (True, False), (True, True)]
+)
+def test_r07_or001_activation_uses_captured_initialization(
+    monkeypatch, fails, replace_owner
+):
+    entered, start_release = threading.Event(), threading.Event()
+    retiring, retire_release = threading.Event(), threading.Event()
+    stopped = []
+
+    class Owned(_FakeInstance):
+        def start(self, emit):
+            entered.set()
+            assert start_release.wait(5)
+            if fails:
+                raise RuntimeError("PLANTED_START_SECRET")
+
+        def stop(self, timeout=5):
+            stopped.append(self)
+
+    class Plugin(_FakePlugin):
+        def create(self, iid, cfg):
+            return Owned(iid, cfg, self.behavior)
+
+    sup = Supervisor(lambda *a: None)
+    plugin = Plugin(lambda emit: MonitorStatus(state="idle"))
+    sup.register(plugin, _FakeConfig(name="owned"))
+    owned = sup._monitors["owned"]
+    original_wait = owned.initialized.wait
+    original_retire = sup._retire
+
+    def before_retire(iid, managed, deadline):
+        if managed is owned and threading.current_thread() is managed.thread:
+            retiring.set()
+            assert retire_release.wait(5)
+        return original_retire(iid, managed, deadline)
+
+    monkeypatch.setattr(sup, "_retire", before_retire)
+    try:
+        sup.start()
+        assert entered.wait(2)
+        assert sup.activation_result("owned") == {
+            "runtime": "starting",
+            "error_code": None,
+        }
+        start_release.set()
+        assert owned.initialized.wait(2)
+        if fails:
+            assert retiring.wait(2)
+            assert owned.init_error == "start_failed" and not owned.retiring
+        if replace_owner:
+            caller = threading.current_thread()
+
+            def replace_after_wait(timeout=None):
+                done = original_wait(timeout)
+                if threading.current_thread() is not caller:
+                    return done
+                retire_release.set()
+                owned.thread.join(2)
+                assert not owned.thread.is_alive()
+                assert sup.stop_result("owned", 2)["complete"]
+                owned.cleanup_thread.join(2)
+                assert not owned.cleanup_thread.is_alive()
+                sup.register(_FakePlugin(plugin.behavior), _FakeConfig(name="owned"))
+                assert sup._monitors["owned"] is not owned
+                return done
+
+            monkeypatch.setattr(owned.initialized, "wait", replace_after_wait)
+        result = sup.activation_result("owned", 1)
+        assert result == {
+            "runtime": "failed" if fails else "applied",
+            "error_code": "start_failed" if fails else None,
+        }
+        if fails and not replace_owner:
+            retire_release.set()
+            owned.thread.join(2)
+            assert not owned.thread.is_alive()
+            assert sup.stop_result("owned", 2)["complete"]
+            owned.cleanup_thread.join(2)
+            assert not sup.has("owned") and stopped == [owned.instance]
+            assert sup.activation_result("owned")["error_code"] == "start_failed"
+    finally:
+        start_release.set()
+        retire_release.set()
+        if replace_owner:
+            monkeypatch.setattr(owned.initialized, "wait", original_wait)
+        sup.stop(2)
+        if owned.thread is not None:
+            owned.thread.join(2)
+        if owned.cleanup_thread is not None:
+            owned.cleanup_thread.join(2)

@@ -221,7 +221,10 @@ class MonitorAdmin:
         }
         with self._lock:
             if owner is None or self._epochs.get(iid) == owner.generation:
-                self._results[iid] = result
+                # A rejected request is returned to its caller, but does not
+                # replace the last actual state transition for this instance.
+                if not (persistence == "not_requested" and runtime == "unchanged"):
+                    self._results[iid] = result
                 if operation == "stop" and runtime in {"stopped", "unavailable"}:
                     self._stopping.discard(iid)
                 if operation == "remove" and runtime in {"stopped", "unavailable"}:
@@ -851,7 +854,9 @@ class MonitorAdmin:
             latest_result = results.get(iid)
             if latest_result:
                 entry["persistence"] = latest_result["persistence"]
-                entry["runtime_error_code"] = latest_result["error_code"]
+                entry["runtime_error_code"] = (
+                    entry.get("runtime_error_code") or latest_result["error_code"]
+                )
                 if latest_result["operation"] == "stop" and iid not in live:
                     # A late successful retirement is now proven by the registry;
                     # the earlier wait timeout is not an ongoing cleanup failure.

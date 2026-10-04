@@ -392,6 +392,8 @@ class Supervisor:
                 }
             if not m.initialized.is_set():
                 return {"runtime": "starting", "error_code": None}
+            if m.init_error:
+                return {"runtime": "failed", "error_code": m.init_error}
             return {"runtime": "applied", "error_code": None}
 
     def config_matches(self, iid: str, config: dict) -> bool | None:
