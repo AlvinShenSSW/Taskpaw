@@ -1088,6 +1088,7 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
         assert binary.is_file()
         monkeypatch.setattr(uw, "worker_argv", lambda: [str(binary), "upstream-http"])
     entered = threading.Event()
+    prefix_flushed = threading.Event()
     release = threading.Event()
     forwarded = []
     phases, snapshots = {}, {}
@@ -1118,6 +1119,8 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
                     self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
                     self.wfile.flush()
                     if mode == "body-drip":
+                        phases["prefix_flushed"] = time.monotonic()
+                        prefix_flushed.set()
                         release.wait(15)
                     self.close_connection = True
                     return
@@ -1126,11 +1129,15 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
                         b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;"
                     )
                     self.wfile.flush()
+                    phases["prefix_flushed"] = time.monotonic()
+                    prefix_flushed.set()
                     release.wait(15)
                     return
                 if mode in ("drip", "stop"):
                     self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Owned: ")
                     self.wfile.flush()
+                    phases["prefix_flushed"] = time.monotonic()
+                    prefix_flushed.set()
                     # No bytes after this partial header; parent deadline must win.
                     release.wait(15)
                     return
@@ -1189,12 +1196,20 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
     raw_bytes = len((uw.canonical(request) + "\n").encode())
     assert 30000 < raw_bytes <= uw.REQUEST_BYTES
     started = time.monotonic()
-    # Semantic refusals use the existing production-default total budget;
-    # deadline/Stop controls keep their distinct short budget (cycle5 contract).
-    parent_budget = 3 if mode in ("drip", "body-drip", "chunk-drip", "stop") else 5
+    adverse = mode in ("drip", "body-drip", "chunk-drip", "stop")
+    # Cycle7 explicitly gives cold shipped adverse phases the production default;
+    # source adverse controls retain 3s. No deadline is reset after readiness.
+    parent_budget = 3 if adverse and not frozen else 5
+    cleanup_grace, scheduling_margin = (
+        1,
+        1,
+    )  # Existing lifecycle room, not a new budget.
+    elapsed_bound = parent_budget + cleanup_grace + scheduling_margin if adverse else 5
+    test_end = started + elapsed_bound
 
     def call():
         try:
+            phases["request_entry"] = time.monotonic()
             results.append(transport.request(request, parent_budget))
         finally:
             phases["caller_complete"] = time.monotonic()
@@ -1202,7 +1217,13 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
     caller = threading.Thread(target=call)
     try:
         caller.start()
-        assert entered.wait(10)
+        assert entered.wait(max(0, test_end - time.monotonic()))
+        original_deadline = phases["request_entry"] + parent_budget
+        if adverse:
+            assert prefix_flushed.wait(max(0, test_end - time.monotonic()))
+            assert phases["handler_enter"] < original_deadline
+            assert phases["prefix_flushed"] < original_deadline
+            assert not release.is_set()
         # Inspect only descendants of this fixture's returned Popen, never a
         # system process scan. Frozen bootloader/interpreter acceptance is real.
         owned_descendants = []
@@ -1214,10 +1235,26 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
             except psutil.NoSuchProcess:
                 pass
         if mode == "stop":
+            phases["cancel_admitted"] = time.monotonic()
+            assert phases["cancel_admitted"] < original_deadline
             transport.cancel()
             transport.cancel()
-        caller.join(5)
+        caller_end = test_end
+        if mode == "stop":
+            caller_end = min(
+                caller_end,
+                phases["cancel_admitted"] + cleanup_grace + scheduling_margin,
+            )
+        caller.join(max(0, caller_end - time.monotonic()))
         assert not caller.is_alive() and len(results) == 1
+        assert phases["caller_complete"] - phases["request_entry"] < elapsed_bound
+        if adverse:
+            assert not release.is_set() and "http_response_complete" not in phases
+        if mode == "stop":
+            assert (
+                phases["caller_complete"] - phases["cancel_admitted"]
+                < cleanup_grace + scheduling_margin
+            )
         result = results[0]
         if mode == "success":
             assert result["ok"] and result["status"]["extension"] == {"allowed": True}
@@ -1248,7 +1285,6 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
                 assert not owned.is_running()
             except psutil.NoSuchProcess:
                 pass
-        assert time.monotonic() - started < 5
     finally:
         # Emit even when the handler barrier/result oracle fails, before release
         # or any fixture teardown changes the observed lifecycle.
@@ -1260,15 +1296,25 @@ def test_native_upstream_helper_only(tmp_path, monkeypatch, mode, frozen):
             "clean": transport.clean(),
             "parent_budget": parent_budget,
             "deadline": parent_budget,
-            "elapsed": time.monotonic() - started,
+            "elapsed": (
+                phases.get("caller_complete", time.monotonic())
+                - phases.get("request_entry", started)
+            ),
+            "elapsed_bound": elapsed_bound,
+            "cleanup_grace": cleanup_grace,
+            "scheduling_margin": scheduling_margin,
+            "release_set": release.is_set(),
             "caller_alive": caller.is_alive(),
             "phases": {
                 name: phases.get(name) - started if name in phases else None
                 for name in (
+                    "request_entry",
                     "spawn_enter",
                     "spawn_return",
                     "writer_complete",
                     "handler_enter",
+                    "prefix_flushed",
+                    "cancel_admitted",
                     "http_response_complete",
                     "first_stdout",
                     "reader_complete",
@@ -1311,13 +1357,81 @@ class FirstRead:
     def fileno(self):
         return original.fileno()
     def readline(self, size):
-        ready.write_text(json.dumps({"pid": os.getpid(), "created": psutil.Process().create_time(), "consumed": 0}))
+        temporary = ready.with_name(ready.name + ".tmp")
+        try:
+            temporary.write_text(json.dumps({"pid": os.getpid(), "created": psutil.Process().create_time(), "consumed": 0}), encoding="utf-8")
+            os.replace(temporary, ready)
+        finally:
+            temporary.unlink(missing_ok=True)
         while not release.exists():
             time.sleep(.01)
         return original.buffer.readline(size)
 sys.stdin = FirstRead()
 raise SystemExit(upstream_worker.main())
 """
+
+
+@pytest.mark.parametrize("boundary", ["publish", "write-fail", "replace-fail"])
+def test_preread_marker_publication_is_atomic(tmp_path, monkeypatch, boundary):
+    """Execute the real entry, observing its actual open and partial-write seam."""
+    import io
+    import os
+    import sys
+    from pathlib import Path
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    ready, release = tmp_path / "ready.json", tmp_path / "release"
+    release.touch()
+    observed = []
+
+    class Input(io.BytesIO):
+        @property
+        def buffer(self):
+            return self
+
+    def write(path, text, *args, **kwargs):
+        with path.open("w", encoding=kwargs.get("encoding")) as stream:
+            observed.append("opened")
+            assert not ready.exists(), "final marker exposed before content"
+            stream.write(text[:1])
+            stream.flush()
+            observed.append("partial")
+            assert not ready.exists(), "final marker exposed with partial content"
+            if boundary == "write-fail":
+                raise OSError("owned marker write failure")
+            stream.write(text[1:])
+        return len(text)
+
+    def replace(source, destination):
+        assert not ready.exists()
+        assert json.loads(Path(source).read_text())["consumed"] == 0
+        raise OSError("owned marker replace failure")
+
+    def main():
+        assert sys.stdin.buffer.readline(100) == b"owned input\n"
+        return 0
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stdin", Input(b"owned input\n"))
+        patch.setattr(sys, "argv", ["owned entry", str(release), str(ready)])
+        patch.setattr(uw, "main", main)
+        patch.setattr(Path, "write_text", write)
+        if boundary == "replace-fail":
+            patch.setattr(os, "replace", replace)
+        if boundary.endswith("-fail"):
+            with pytest.raises(OSError, match="owned marker"):
+                exec(_PREREAD_ENTRY, {})
+            assert not ready.exists()
+        else:
+            with pytest.raises(SystemExit) as exc:
+                exec(_PREREAD_ENTRY, {})
+            assert exc.value.code == 0
+            marker = json.loads(ready.read_text(encoding="utf-8"))
+            assert marker["pid"] == os.getpid() and marker["created"] > 0
+            assert marker["consumed"] == 0
+    assert observed == ["opened", "partial"]
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 class _WindowsProcessObserver:
