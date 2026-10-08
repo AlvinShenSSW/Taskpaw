@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import socket
+import sys
 import time
 
 try:
@@ -169,9 +170,10 @@ def _family(host: str) -> int:
 def port_available(host: str, port: int) -> bool:
     """Advisory probe with the SAME bind + listen semantics as startup.
 
-    Try exclusive bind + listen first. Only POSIX EADDRINUSE triggers one
-    data-less TCP connect (one-second timeout); only ECONNREFUSED permits a
-    SO_REUSEADDR retry for TIME_WAIT. Successful or uncertain probes fail closed.
+    Linux uses SO_REUSEADDR up front, without a connect probe. Other POSIX
+    platforms try exclusive bind + listen first; EADDRINUSE triggers one
+    data-less connect (one-second timeout), and only ECONNREFUSED allows reuse.
+    Windows uses neither reuse nor a connect probe.
     The claimed socket is closed here; availability is advisory, not reserved.
     """
     try:
@@ -548,21 +550,24 @@ def claim_port(host: str, port: int, what: str) -> socket.socket:
     The returned socket is owned by the caller and should be passed to
     `uvicorn.Server.run(sockets=[sock])` (or closed), retaining the reservation.
 
-    First bind + listen without reuse. On POSIX EADDRINUSE only, make one
-    data-less TCP connect to the same address with a one-second timeout. Only
-    ECONNREFUSED permits retrying bind + listen with SO_REUSEADDR for TIME_WAIT;
-    success, timeout or any other probe error preserves PortInUseError. This
-    rejects an existing wildcard listener that reuse alone can coexist with on
-    macOS. The probe is a point-in-time check, not an atomic listener exclusion.
+    Linux uses SO_REUSEADDR before the first bind for TIME_WAIT restart; its
+    kernel rejects conflicting listeners, so no connect probe is needed. Other
+    POSIX platforms bind exclusively first. On EADDRINUSE, one data-less connect
+    with a one-second timeout permits a reuse retry only on ECONNREFUSED; all
+    other outcomes preserve PortInUseError. This guards against macOS wildcard
+    listener coexistence, but the probe is only a point-in-time check.
     Never enable SO_REUSEPORT. Windows uses neither reuse nor a connect probe.
     """
     s = socket.socket(_family(host), socket.SOCK_STREAM)
+    linux = sys.platform.startswith("linux")
     try:
+        if linux:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind((host, port))
             s.listen(128)
         except OSError as bind_error:
-            if os.name != "posix" or bind_error.errno != errno.EADDRINUSE:
+            if linux or os.name != "posix" or bind_error.errno != errno.EADDRINUSE:
                 raise
             s.close()
             refused = False

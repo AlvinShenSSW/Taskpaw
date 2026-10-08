@@ -10,6 +10,7 @@ import errno
 import json
 import os
 import socket
+import sys
 
 import pytest
 
@@ -60,7 +61,7 @@ def test_live_listener_still_blocks_probe_and_claim(reuse):
     [(socket.AF_INET, "0.0.0.0", "127.0.0.1"), (socket.AF_INET6, "::", "::1")],
 )
 def test_foreign_wildcard_listener_blocks_specific_claim(
-    family, wildcard, specific, reuse
+    monkeypatch, family, wildcard, specific, reuse
 ):
     from taskpaw_v3.core.net import PortInUseError
 
@@ -83,12 +84,23 @@ def test_foreign_wildcard_listener_blocks_specific_claim(
         foreign.listen(8)
         foreign.settimeout(2)
         address = (specific, foreign.getsockname()[1])
-        assert not port_available(*address)
-        with pytest.raises(PortInUseError):
-            claim_port(*address, "test API")
-        # Both bounded probes connected but sent nothing, then closed. Drain them
-        # before checking that a subsequent client really reaches the foreign API.
-        for _ in range(2):
+        probes = []
+
+        class TrackingSocket(socket.socket):
+            def connect(self, target):
+                probes.append(target)
+                return super().connect(target)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(socket, "socket", TrackingSocket)
+            assert not port_available(*address)
+            with pytest.raises(PortInUseError):
+                claim_port(*address, "test API")
+        expected_probes = 0 if sys.platform.startswith("linux") else 2
+        assert probes == [address] * expected_probes
+        # Non-Linux POSIX probes send nothing and close. Drain them before
+        # checking that a subsequent client really reaches the foreign API.
+        for _ in range(expected_probes):
             connection, _ = foreign.accept()
             with connection:
                 connection.settimeout(2)
@@ -102,19 +114,23 @@ def test_foreign_wildcard_listener_blocks_specific_claim(
                 assert connection.recv(1) == b"x"
 
 
-def test_exclusive_claim_does_not_connect(monkeypatch):
+def test_successful_claim_does_not_connect(monkeypatch):
     class NoConnectSocket(socket.socket):
         def connect(self, address):
-            pytest.fail("an exclusive claim must not probe")
+            pytest.fail("a successful first bind must not probe")
 
     monkeypatch.setattr(socket, "socket", NoConnectSocket)
     with claim_port("127.0.0.1", 0, "test API") as claimed:
         assert claimed.getsockname()[1] > 0
-        if os.name == "posix":
-            assert claimed.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 0
+        assert claimed.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == int(
+            sys.platform.startswith("linux")
+        )
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX guarded reuse")
+@pytest.mark.skipif(
+    os.name != "posix" or sys.platform.startswith("linux"),
+    reason="connect probes exist only on non-Linux POSIX",
+)
 @pytest.mark.parametrize("probe_errno", [None, errno.EACCES, errno.EHOSTUNREACH])
 def test_uncertain_connect_probe_fails_closed(monkeypatch, probe_errno):
     from taskpaw_v3.core.net import PortInUseError
@@ -278,6 +294,11 @@ def test_guarded_reuse_error_paths_without_network(
     monkeypatch.setattr(
         net, "os", SimpleNamespace(name="nt" if stage == "windows" else "posix")
     )
+    monkeypatch.setattr(
+        net,
+        "sys",
+        SimpleNamespace(platform="win32" if stage == "windows" else "darwin"),
+    )
     monkeypatch.setattr(net.socket, "socket", FakeSocket)
     if expected_errno is None:
         with claim_port(*address, "test API") as claimed:
@@ -294,6 +315,77 @@ def test_guarded_reuse_error_paths_without_network(
     assert len(opened) == socket_count
     assert all(sock.closed for sock in opened)
     assert len(connects) == (0 if socket_count == 1 or stage == "probe_setup" else 1)
+
+
+@pytest.mark.parametrize(
+    ("stage", "expected_errno"),
+    [
+        ("success", None),
+        ("options", errno.EACCES),
+        ("bind", errno.EADDRINUSE),
+        ("listen", errno.EADDRINUSE),
+    ],
+)
+def test_linux_reuse_without_network(monkeypatch, stage, expected_errno):
+    from types import SimpleNamespace
+
+    from taskpaw_v3.core import net
+
+    opened = []
+    calls = []
+    address = ("127.0.0.1", 5680)
+
+    class FakeSocket:
+        def __init__(self, family, kind):
+            assert (family, kind) == (socket.AF_INET, socket.SOCK_STREAM)
+            self.closed = False
+            opened.append(self)
+
+        def close(self):
+            self.closed = True
+
+        def setsockopt(self, *args):
+            assert args == (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            calls.append("options")
+            if stage == "options":
+                raise OSError(errno.EACCES, "options failed")
+
+        def bind(self, target):
+            assert target == address and calls == ["options"]
+            calls.append("bind")
+            if stage == "bind":
+                raise OSError(errno.EADDRINUSE, "bind conflict")
+
+        def listen(self, backlog):
+            assert backlog == 128 and calls == ["options", "bind"]
+            calls.append("listen")
+            if stage == "listen":
+                raise OSError(errno.EADDRINUSE, "listen conflict")
+
+        def connect(self, target):
+            pytest.fail("Linux must never make a connect probe")
+
+    monkeypatch.setattr(net, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(net, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(net.socket, "socket", FakeSocket)
+    if expected_errno is None:
+        claimed = claim_port(*address, "test API")
+        try:
+            assert claimed is opened[0] and not claimed.closed
+            assert calls == ["options", "bind", "listen"]
+        finally:
+            claimed.close()
+    else:
+        error_type = (
+            net.PortInUseError
+            if expected_errno == errno.EADDRINUSE
+            else net.PortBindError
+        )
+        with pytest.raises(error_type) as failure:
+            claim_port(*address, "test API")
+        assert failure.value.__cause__.errno == expected_errno
+    assert len(opened) == 1  # no probe or retry socket, including on EADDRINUSE
+    assert all(sock.closed for sock in opened)
 
 
 @pytest.mark.parametrize("error", [errno.EADDRNOTAVAIL, errno.EACCES])
