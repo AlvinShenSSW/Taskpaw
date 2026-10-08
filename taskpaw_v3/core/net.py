@@ -8,12 +8,14 @@ the server actually owns the socket.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import logging
 import os
 import re
 import socket
+import sys
 import time
 
 try:
@@ -44,7 +46,11 @@ _BACKEND_SOURCE_SUFFIX = "taskpaw_v3/packaging/backend_main.py"
 _BACKEND_MODULE = "taskpaw_v3.packaging.backend_main"
 
 
-class PortInUseError(RuntimeError):
+class PortBindError(RuntimeError):
+    """The requested API address could not be bound or listened on."""
+
+
+class PortInUseError(PortBindError):
     pass
 
 
@@ -162,18 +168,19 @@ def _family(host: str) -> int:
 
 
 def port_available(host: str, port: int) -> bool:
-    """Best-effort probe (advisory; prefer claim_port for the real bind).
+    """Advisory probe with the SAME bind + listen semantics as startup.
 
-    Deliberately does NOT set SO_REUSEADDR: on macOS/BSD it would let this bind
-    succeed even when another listener already holds the port, defeating the
-    "is it in use?" check on the primary platform.
+    Linux uses SO_REUSEADDR up front, without a connect probe. Other POSIX
+    platforms try exclusive bind + listen first; EADDRINUSE triggers one
+    data-less connect (one-second timeout), and only ECONNREFUSED allows reuse.
+    Windows uses neither reuse nor a connect probe.
+    The claimed socket is closed here; availability is advisory, not reserved.
     """
-    with socket.socket(_family(host), socket.SOCK_STREAM) as s:
-        try:
-            s.bind((host, port))
+    try:
+        with claim_port(host, port, "API probe"):
             return True
-        except OSError:
-            return False
+    except PortBindError:
+        return False
 
 
 def _has_m_module(cmd: list[str], module: str) -> bool:
@@ -461,7 +468,8 @@ def reclaim_ports_from_stale_instance(
                 to_kill[proc.pid] = proc
         elif not port_available(host, port):
             log.warning(
-                "not reclaiming the %s ports: %s (%s:%d) is held by a foreign process "
+                "not reclaiming the %s ports: %s (%s:%d) is unavailable "
+                "and has no identified TaskPaw listener "
                 "— leaving any stale %s backend running rather than killing it when "
                 "startup can't succeed here; claim_port will fail loudly.",
                 role,
@@ -489,7 +497,7 @@ def reclaim_ports_from_stale_instance(
         deadline = time.monotonic() + wait
         for host, port, _what in specs:
             while time.monotonic() < deadline and not port_available(host, port):
-                time.sleep(0.2)
+                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
     return reclaimed
 
 
@@ -532,29 +540,69 @@ def reclaim_port_from_stale_instance(
         # Wait for the OS to actually release the socket before the caller binds.
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline and not port_available(host, port):
-            time.sleep(0.2)
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
     return reclaimed
 
 
 def claim_port(host: str, port: int, what: str) -> socket.socket:
-    """Bind (host, port) and return the listening socket, or raise PortInUseError.
+    """Return a listening socket, or raise an actionable PortBindError.
 
     The returned socket is owned by the caller and should be passed to
-    `uvicorn.Server.run(sockets=[sock])` (or closed). No TOCTOU gap.
+    `uvicorn.Server.run(sockets=[sock])` (or closed), retaining the reservation.
 
-    No SO_REUSEADDR — we WANT bind to fail if another instance already owns the
-    port (the "refuse to start if in use" contract); on macOS SO_REUSEADDR would
-    silently allow a second agent to share 5680.
+    Linux uses SO_REUSEADDR before the first bind for TIME_WAIT restart; its
+    kernel rejects conflicting listeners, so no connect probe is needed. Other
+    POSIX platforms bind exclusively first. On EADDRINUSE, one data-less connect
+    with a one-second timeout permits a reuse retry only on ECONNREFUSED; all
+    other outcomes preserve PortInUseError. This guards against macOS wildcard
+    listener coexistence, but the probe is only a point-in-time check.
+    Never enable SO_REUSEPORT. Windows uses neither reuse nor a connect probe.
     """
     s = socket.socket(_family(host), socket.SOCK_STREAM)
+    linux = sys.platform.startswith("linux")
     try:
-        s.bind((host, port))
-        s.listen(128)
+        if linux:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            s.listen(128)
+        except OSError as bind_error:
+            if linux or os.name != "posix" or bind_error.errno != errno.EADDRINUSE:
+                raise
+            s.close()
+            refused = False
+            try:
+                with socket.socket(_family(host), socket.SOCK_STREAM) as probe:
+                    probe.settimeout(1.0)
+                    try:
+                        probe.connect((host, port))
+                    except OSError as probe_error:
+                        if probe_error.errno != errno.ECONNREFUSED:
+                            raise
+                        refused = True
+            except OSError as probe_error:
+                # Probe creation/setup errors are uncertain too, even if their
+                # errno happens to be ECONNREFUSED. Only connect may authorize reuse.
+                raise bind_error from probe_error
+            if not refused:
+                raise bind_error
+            s = socket.socket(_family(host), socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((host, port))
+            s.listen(128)
     except OSError as e:
         s.close()
-        raise PortInUseError(
-            f"{what} port {host}:{port} is already in use. Another TaskPaw "
-            f"instance, a V2 agent (default 5678), or another service may hold "
-            f"it. Stop it or change the port before starting."
-        ) from e
+        if e.errno == errno.EADDRINUSE:
+            raise PortInUseError(
+                f"{what} port {host}:{port} is already in use. Another TaskPaw "
+                f"instance, a V2 agent (default 5678), or another service may hold "
+                f"it. Stop it or change the port before starting."
+            ) from e
+        if e.errno == errno.EADDRNOTAVAIL:
+            raise PortBindError(
+                f"{what} address {host}:{port} is not available on this machine. "
+                "Its LAN address may have changed or the network is disconnected. "
+                "Check the configured bind address and network connection."
+            ) from e
+        raise PortBindError(f"Could not bind {what} at {host}:{port}: {e}") from e
     return s

@@ -10,6 +10,7 @@ import pytest
 
 from taskpaw_v3.agent.server.launcher import build_queue
 from taskpaw_v3.core.config import AgentConfig
+from taskpaw_v3.core.net import PortBindError, PortInUseError
 
 
 def _cfg() -> AgentConfig:
@@ -40,6 +41,39 @@ def test_build_queue_persists_and_resumes_id_across_restart(tmp_path):
     nxt = q2.add("mon", "m", level="info")["id"]
     assert nxt > first
     q2.close()
+
+
+@pytest.mark.parametrize("failure", [PortBindError, PortInUseError])
+def test_control_bind_failure_releases_network_socket_and_state_lease(
+    tmp_path, monkeypatch, failure
+):
+    import socket
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core.state import initialize_state
+
+    config = _cfg()
+    state_path = tmp_path / "agent.state.json"
+    initialize_state(state_path, config.server_id)
+    network = socket.socket()
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **kw: False
+    )
+
+    def claim(host, port, what):
+        if "network" in what:
+            return network
+        raise failure("control API unavailable")
+
+    monkeypatch.setattr(launcher, "claim_port", claim)
+    try:
+        with pytest.raises(failure):
+            launcher.run_agent(config, state_path=state_path, block=False)
+        assert network.fileno() == -1
+        reopened = build_queue(config, state_path)
+        reopened.close()
+    finally:
+        network.close()
 
 
 # ── LLM settings holder initialised at boot (#178 AC5) ─────────────────────

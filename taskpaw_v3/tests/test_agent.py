@@ -600,7 +600,7 @@ def test_claim_port_refuses_second_binder():
     try:
         host, port = s.getsockname()
         with pytest.raises(PortInUseError):
-            claim_port(host, port, "second")  # SO_REUSEADDR no longer masks this
+            claim_port(host, port, "second")  # bind + listen must remain exclusive
     finally:
         s.close()
 
