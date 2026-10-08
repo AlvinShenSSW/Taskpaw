@@ -59,7 +59,7 @@ describe("#210 Hub observation translations", () => {
     setLang(lang);
     const keys = ["hub.agentVersion", "hub.versionSkew",
       ...["loading", "unavailable", "offline", "disabled", "unknown", "authFailed", "hubAuthFailed", "timeout", "failed", "stale", "resyncing", "noSnapshot", "empty"].map(k => `hub.films.${k}`),
-      ...["jasna", "avsubs", "lada", "comfyui", "process", "heartbeat", "tcp_check", "host_metrics", "folder", "custom_cmd", "state_file", "dev_activity"].map(k => `monitorType.${k}`)];
+      ...["jasna", "avsubs", "lada", "comfyui", "process", "heartbeat", "tcp_check", "jellyfin", "host_metrics", "folder", "custom_cmd", "state_file", "dev_activity"].map(k => `monitorType.${k}`), "services.jellyfin"];
     for (const key of keys) {
       expect(i18n.getResource(lang, "translation", key), key).toBeTypeOf("string");
       const value = i18n.t(key, { version: "3.9.7", hub: "3.9.6", agent: "3.9.7" });
