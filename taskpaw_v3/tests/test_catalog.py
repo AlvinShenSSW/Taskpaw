@@ -30,6 +30,7 @@ def test_plugin_catalog_lists_all_with_schema():
         "state_file",
         "heartbeat",
         "tcp_check",
+        "jellyfin",
         "lada",
         "jasna",
         "avsubs",

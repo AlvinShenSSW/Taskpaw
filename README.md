@@ -34,6 +34,7 @@ file/folder pickers for path fields.
 | `process` | Any process by name/pattern (running ↔ exited) |
 | `custom_cmd` | Runs a command on a schedule; exit code = status |
 | `tcp_check` | A host:port is listening |
+| `jellyfin` | A Jellyfin media server is up and healthy — `/health` plus the public server info (version, server name); no credentials |
 | `heartbeat` / `state_file` | A status/heartbeat JSON file stays fresh |
 | `host_metrics` | The machine's own CPU/mem/GPU/net (auto-on baseline) |
 

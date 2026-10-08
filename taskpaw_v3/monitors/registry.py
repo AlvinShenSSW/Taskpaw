@@ -36,7 +36,8 @@ class PluginRegistry:
 
 def default_registry() -> PluginRegistry:
     """Registry with the built-in plugins (process / heartbeat / tcp_check /
-    host_metrics) plus the V2-parity plugins (folder / comfyui / custom_cmd)."""
+    host_metrics / jellyfin) plus the V2-parity plugins (folder / comfyui /
+    custom_cmd)."""
     from taskpaw_v3.monitors.plugins.avsubs import AvsubsPlugin
     from taskpaw_v3.monitors.plugins.comfyui import ComfyUIPlugin
     from taskpaw_v3.monitors.plugins.custom_cmd import CustomCmdPlugin
@@ -45,6 +46,7 @@ def default_registry() -> PluginRegistry:
     from taskpaw_v3.monitors.plugins.heartbeat import HeartbeatPlugin
     from taskpaw_v3.monitors.plugins.host_metrics import HostMetricsPlugin
     from taskpaw_v3.monitors.plugins.jasna import JasnaPlugin
+    from taskpaw_v3.monitors.plugins.jellyfin import JellyfinPlugin
     from taskpaw_v3.monitors.plugins.lada import LadaPlugin
     from taskpaw_v3.monitors.plugins.process import ProcessPlugin
     from taskpaw_v3.monitors.plugins.state_file import StateFilePlugin
@@ -54,6 +56,7 @@ def default_registry() -> PluginRegistry:
     reg.register(ProcessPlugin())
     reg.register(HeartbeatPlugin())
     reg.register(TcpCheckPlugin())
+    reg.register(JellyfinPlugin())
     reg.register(HostMetricsPlugin())
     reg.register(FolderPlugin())
     reg.register(ComfyUIPlugin())

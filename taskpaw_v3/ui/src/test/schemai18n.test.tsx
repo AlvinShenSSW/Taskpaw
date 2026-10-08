@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import type { RJSFSchema } from "@rjsf/utils";
 import { SchemaForm } from "../components/SchemaForm";
+import { ServiceIcon } from "../components/ServiceIcon";
 import { fieldLabel, localizeSchema } from "../schemaI18n";
 import { theme } from "../theme";
 import i18n from "../i18n";
@@ -147,4 +148,14 @@ it("localizes activity session controls without changing English", () => {
   expect(fieldLabel("session_roots", "dev_activity", "zh-CN")).toBe("会话目录");
   const schema: RJSFSchema = { type: "object", properties: { session_activity: { type: "boolean", title: "Session activity" } } };
   expect(localizeSchema(schema,"dev_activity","en")).toEqual(schema);
+});
+
+it("localizes the jellyfin base URL field and gives it its own glyph (#257)", () => {
+  expect(fieldLabel("base_url", "jellyfin", "zh-CN")).toBe("服务地址");
+  const schema: RJSFSchema = { type: "object", properties: { base_url: { type: "string", title: "Base URL" } } };
+  const zh = localizeSchema(schema, "jellyfin", "zh-CN").properties as Record<string, { description?: string }>;
+  expect(zh.base_url.description).toContain("Jellyfin");
+  expect(localizeSchema(schema, "jellyfin", "en")).toEqual(schema);
+  const icon = render(<ServiceIcon id="jellyfin" />).container.innerHTML;
+  expect(icon).not.toBe(render(<ServiceIcon id="__unmapped__" />).container.innerHTML);
 });

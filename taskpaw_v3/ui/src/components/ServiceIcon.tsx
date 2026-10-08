@@ -45,6 +45,13 @@ const SHAPES: Record<string, ReactNode> = {
       <path d="M7 9v6M12 6.5h.01M12 17.5h.01" />
     </>
   ),
+  // Jellyfin (#257): a screen with a play triangle on a stand.
+  jellyfin: (
+    <>
+      <rect x="3" y="4" width="18" height="13" rx="2" />
+      <path d="M10 8l5 2.5-5 2.5zM8 21h8M12 17v4" />
+    </>
+  ),
   state_file: <><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4M9 13h6M9 17h6" /></>,
   custom_cmd: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M7 9l3 3-3 3M13 15h4" /></>,
   // Generic monitor fallback (signal waves) for unmapped types.
