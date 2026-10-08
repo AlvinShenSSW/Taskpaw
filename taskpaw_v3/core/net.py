@@ -169,10 +169,10 @@ def _family(host: str) -> int:
 def port_available(host: str, port: int) -> bool:
     """Advisory probe with the SAME bind + listen semantics as startup.
 
-    On BSD/macOS SO_REUSEADDR can permit bind beside a listener, but listen
-    still rejects the conflict. A bind-only probe would give a false positive;
-    omitting reuse instead mistakes closed connections in TIME_WAIT for a
-    foreign service and prevents immediate restarts.
+    Try exclusive bind + listen first. Only POSIX EADDRINUSE triggers one
+    data-less TCP connect (one-second timeout); only ECONNREFUSED permits a
+    SO_REUSEADDR retry for TIME_WAIT. Successful or uncertain probes fail closed.
+    The claimed socket is closed here; availability is advisory, not reserved.
     """
     try:
         with claim_port(host, port, "API probe"):
@@ -495,7 +495,7 @@ def reclaim_ports_from_stale_instance(
         deadline = time.monotonic() + wait
         for host, port, _what in specs:
             while time.monotonic() < deadline and not port_available(host, port):
-                time.sleep(0.2)
+                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
     return reclaimed
 
 
@@ -538,7 +538,7 @@ def reclaim_port_from_stale_instance(
         # Wait for the OS to actually release the socket before the caller binds.
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline and not port_available(host, port):
-            time.sleep(0.2)
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
     return reclaimed
 
 
@@ -546,20 +546,45 @@ def claim_port(host: str, port: int, what: str) -> socket.socket:
     """Return a listening socket, or raise an actionable PortBindError.
 
     The returned socket is owned by the caller and should be passed to
-    `uvicorn.Server.run(sockets=[sock])` (or closed). No TOCTOU gap.
+    `uvicorn.Server.run(sockets=[sock])` (or closed), retaining the reservation.
 
-    POSIX SO_REUSEADDR permits immediate restart after accepted connections
-    enter TIME_WAIT. BOTH bind and listen must succeed: on macOS a second bind
-    may succeed, but a second listener cannot. Never enable SO_REUSEPORT.
-    Windows retains its default behavior: SO_REUSEADDR there can steal a live
-    listener's port, unlike POSIX.
+    First bind + listen without reuse. On POSIX EADDRINUSE only, make one
+    data-less TCP connect to the same address with a one-second timeout. Only
+    ECONNREFUSED permits retrying bind + listen with SO_REUSEADDR for TIME_WAIT;
+    success, timeout or any other probe error preserves PortInUseError. This
+    rejects an existing wildcard listener that reuse alone can coexist with on
+    macOS. The probe is a point-in-time check, not an atomic listener exclusion.
+    Never enable SO_REUSEPORT. Windows uses neither reuse nor a connect probe.
     """
     s = socket.socket(_family(host), socket.SOCK_STREAM)
     try:
-        if os.name == "posix":
+        try:
+            s.bind((host, port))
+            s.listen(128)
+        except OSError as bind_error:
+            if os.name != "posix" or bind_error.errno != errno.EADDRINUSE:
+                raise
+            s.close()
+            refused = False
+            try:
+                with socket.socket(_family(host), socket.SOCK_STREAM) as probe:
+                    probe.settimeout(1.0)
+                    try:
+                        probe.connect((host, port))
+                    except OSError as probe_error:
+                        if probe_error.errno != errno.ECONNREFUSED:
+                            raise
+                        refused = True
+            except OSError as probe_error:
+                # Probe creation/setup errors are uncertain too, even if their
+                # errno happens to be ECONNREFUSED. Only connect may authorize reuse.
+                raise bind_error from probe_error
+            if not refused:
+                raise bind_error
+            s = socket.socket(_family(host), socket.SOCK_STREAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((host, port))
-        s.listen(128)
+            s.bind((host, port))
+            s.listen(128)
     except OSError as e:
         s.close()
         if e.errno == errno.EADDRINUSE:

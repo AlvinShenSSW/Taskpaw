@@ -58,6 +58,9 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     host: { title: "主机" },
     port: { title: "端口" },
   },
+  jellyfin: {
+    base_url: { title: "服务地址", description: "Jellyfin 地址，如 http://127.0.0.1:8096（仅 http/https；不含账号密码、查询参数或片段）。" },
+  },
   host_metrics: {
     cpu_alert_pct: { title: "CPU 告警阈值(%)" },
     mem_alert_pct: { title: "内存告警阈值(%)" },

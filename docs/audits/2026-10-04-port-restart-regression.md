@@ -58,6 +58,13 @@ lease. The restart regression failed against the unmodified release source.
 The repair is included in a locally rebuilt 3.9.11 macOS arm64 package. The
 installed 3.9.10 application has not been replaced.
 
+2026-10-08 follow-up: the driver reproduced unconditional POSIX reuse coexisting
+with a foreign wildcard listener and receiving its traffic outside the sandbox.
+In 3.9.12, reuse is narrowed to an exclusive-bind EADDRINUSE followed by a single
+bounded, data-less connect returning ECONNREFUSED. The previously distributed
+local 3.9.11 packages retain the unfixed behavior; the observations above remain
+historical.
+
 ## Windows startup recovery
 
 The operator also reported Windows 3.9.10 opening without a window. Inspection
