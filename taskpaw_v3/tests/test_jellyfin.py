@@ -253,6 +253,7 @@ def test_unhealthy_body_is_capped_in_detail():
         (_json([INFO]), 200),
         ((200, b"<html>hi</html>"), 200),
         ((200, b"\xff\xfe\x00not utf8"), 200),
+        ((200, b"[" * 60000), 200),  # nesting deep enough for RecursionError
         (_json({**INFO, "ProductName": 123}), 200),
         (_json({**INFO, "ProductName": None}), 200),
         ((404, b"not found"), 404),

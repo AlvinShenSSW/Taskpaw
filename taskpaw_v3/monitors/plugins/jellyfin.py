@@ -171,7 +171,9 @@ def _info_object(reply: _Reply) -> Optional[dict]:
         return None
     try:
         data = json.loads(reply.body.decode("utf-8"))
-    except ValueError:  # UnicodeDecodeError and JSONDecodeError
+    # ValueError: UnicodeDecodeError / JSONDecodeError; RecursionError: nesting
+    # too deep for the decoder (it is a RuntimeError, not a ValueError).
+    except (ValueError, RecursionError):
         return None
     if not isinstance(data, dict):
         return None
