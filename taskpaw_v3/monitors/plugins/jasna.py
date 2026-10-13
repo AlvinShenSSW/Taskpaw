@@ -2835,7 +2835,7 @@ class JasnaInstance(MonitorInstance):
         if self._settled.get(job.job_id) != ("skipped", reason):
             return
         log.info("jasna %s: %s skipped (%s)", self.instance_id, job.job_id, reason)
-        if reason == SUBTITLE_EXISTS:
+        if reason in (SUBTITLE_EXISTS, "subtitle name collision"):
             err = job.discard_own_ja()
             if err is not None:
                 log.warning("jasna %s: %s: %s", self.instance_id, job.job_id, err)

@@ -127,3 +127,16 @@ Confirm the new-version installer and checksum before publication.
 No V2 changes, existing-library migration, SMI conversion, new monitor or
 translation model, unrelated architecture work, automatic installation, or
 service restart. Historical dated design documents retain their original names.
+
+## Release validation repairs
+
+F1: a competing .ja video can appear during ASR, before the existing post-ASR
+recheck. A naming-collision skip must discard only a transcript published by
+this run, avoiding a leftover attributed to that other film. Library transcripts
+remain untouched. Both plugin regression tests demonstrate the failure before
+this two-handler correction.
+
+CI261-01: the dependency scan also fails on the pinned main revision because
+source-map-js 1.2.1 is affected by GHSA-68fv-2mgg-jv7q. The release requires the
+minimal transitive lock update to the patched 1.2.2, allowed by PostCSS's existing
+range. No direct dependency, policy exception, or other package upgrade is added.

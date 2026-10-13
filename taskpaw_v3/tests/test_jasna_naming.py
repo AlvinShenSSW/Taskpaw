@@ -78,6 +78,20 @@ def test_jasna_skips_targets_owned_by_another_restored_folder_video(
     r.inst.stop(timeout=1)
 
 
+def test_jasna_mid_asr_video_collision_removes_own_misattributed_transcript(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, restored=["a.mp4"])
+    r.inst.start(r.emit)
+    (r.out / "a-破解.ja.mp4").write_bytes(b"other video")
+    r.spawner.last.finish(0)
+    r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle name collision")
+    assert not _ja(r, "a.mp4").exists()
+    assert not _zh(r, "a.mp4").exists()
+    r.inst.stop(timeout=1)
+
+
 def test_restored_output_for_prefers_the_new_name_then_the_legacy_one(tmp_path):
     out = tmp_path / "out"
     out.mkdir()

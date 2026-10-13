@@ -2741,6 +2741,21 @@ def test_no_speech_with_a_srt_that_appeared_removes_only_our_empty_transcript(
     assert len(done) == 1 and "Queue: 0/1 done, 0 failed, 1 skipped" in done[0][2]
 
 
+def test_mid_asr_video_collision_removes_own_misattributed_transcript(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4"])
+    r.inst.start(r.emit)
+    (r.root / "a.ja.mp4").write_bytes(b"other video")
+    r.spawner.last.finish(0)
+    r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle name collision")
+    assert not _ja(r, "a.mp4").exists()
+    assert not _zh(r, "a.mp4").exists()
+    assert plan_tree(str(r.root), True, ["mp4"]).done == 0
+    r.inst.stop(timeout=1)
+
+
 def test_a_zero_cue_resume_whose_srt_appeared_keeps_the_library_transcript(
     tmp_path, monkeypatch
 ):

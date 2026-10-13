@@ -1416,7 +1416,7 @@ class AvsubsInstance(MonitorInstance):
             _printable(job.job_id),
             reason,
         )
-        if reason == SUBTITLE_EXISTS:
+        if reason in (SUBTITLE_EXISTS, "subtitle name collision"):
             err = job.discard_own_ja()
             if err is not None:
                 log.warning(
