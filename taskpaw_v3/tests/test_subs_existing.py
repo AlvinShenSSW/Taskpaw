@@ -339,6 +339,42 @@ def test_the_package_exports_the_recognition_api():
     assert {".mkv", ".mp4", ".webm"} <= E.VIDEO_EXTENSIONS
 
 
+@pytest.mark.parametrize("tag", ["ja", "zh"])
+@pytest.mark.parametrize("ext", ["mp4", "mkv", "custom"])
+def test_generated_targets_cannot_belong_to_another_video(tag, ext):
+    video = "Café.01.mp4"
+    other = f"CAFE\u0301.01.{tag.upper()}.{ext}"
+    names = [video, other]
+
+    def is_video(n):
+        return n.endswith((".mp4", ".custom"))
+
+    assert skip_reason(names, video, is_video, rule_c=True) == (
+        "subtitle name collision"
+    )
+    assert skip_reason(names, other, is_video, rule_c=True) is None
+    assert skip_reason(names + ["Café.01.srt"], video, is_video, rule_c=True) == (
+        SUBTITLE_EXISTS
+    )
+
+
+def test_pending_jasna_targets_participate_in_ownership_recheck():
+    assert (
+        skip_reason(
+            ["a.mp4"],
+            "a.mp4",
+            MP4,
+            rule_c=False,
+            extra_videos=iter(["a.zh.mp4"]),
+        )
+        == "subtitle name collision"
+    )
+    assert (
+        skip_reason(["a.mp4", "._a.zh.mp4", "a.zh.srt.tmp"], "a.mp4", MP4, rule_c=False)
+        is None
+    )
+
+
 # ── list_names: never raises (F14) ────────────────────────────────────────
 def test_list_names_lists_one_folder(tmp_path):
     (tmp_path / "a.mp4").write_bytes(b"v")

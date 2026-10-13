@@ -403,7 +403,7 @@ def _ja(r, rel: str) -> Path:
 
 
 def _zh(r, rel: str) -> Path:
-    return _stem_path(r.root, rel, ".srt")
+    return _stem_path(r.root, rel, ".zh.srt")
 
 
 def _staging_root(r) -> Path:
@@ -540,7 +540,7 @@ def test_plan_tree_recursive_and_flat(tmp_path):
     item = plan.items[1]
     assert item.source == tmp_path / "sub" / "b.mp4"
     assert item.ja_target == tmp_path / "sub" / "b.ja.srt"
-    assert item.zh_target == tmp_path / "sub" / "b.srt"
+    assert item.zh_target == tmp_path / "sub" / "b.zh.srt"
     assert item.kind == "full"
 
 
@@ -724,6 +724,21 @@ def test_plan_tree_same_stem_in_two_folders_gets_two_staging_dirs(tmp_path):
     assert len(dirs) == 2
 
 
+def test_plan_tree_zh_target_must_not_belong_to_another_video(tmp_path):
+    for name in ("片.01.mp4", "片.01.zh.mp4"):
+        _touch(tmp_path / name)
+    plan = plan_tree(str(tmp_path), True, ["mp4"])
+    assert _rels(plan) == ["片.01.zh.mp4"]
+    assert [(a.name, b.name) for a, b in plan.collisions] == [
+        ("片.01.mp4", "片.01.zh.mp4")
+    ]
+    assert plan.items[0].zh_target.name == "片.01.zh.zh.srt"
+    # Legacy output belongs to the shorter film and still makes it done.
+    (tmp_path / "片.01.srt").write_text(SRT_ZH, encoding="utf-8")
+    plan = plan_tree(str(tmp_path), True, ["mp4"])
+    assert plan.done == 1 and plan.collisions == []
+
+
 def test_plan_tree_spaces_cjk_and_case_variants(tmp_path):
     names = ("my film 01.mp4", "日本語 タイトル.mp4", "子目录/片 2.mp4")
     for rel in names:
@@ -735,7 +750,7 @@ def test_plan_tree_spaces_cjk_and_case_variants(tmp_path):
     for rel in names:
         assert rel in rels
     item = next(i for i in plan.items if i.relpath == "子目录/片 2.mp4")
-    assert item.zh_target == tmp_path / "子目录" / "片 2.srt"
+    assert item.zh_target == tmp_path / "子目录" / "片 2.zh.srt"
     if os.path.normcase("A") == os.path.normcase("a"):
         # case-insensitive targets (Windows): Case.srt and case.srt are one file
         assert [(a.name, b.name) for a, b in plan.collisions] == [
@@ -2129,7 +2144,7 @@ def test_plan_tree_skips_jasna_staging_names_old_and_new(tmp_path):
         _touch(tmp_path / rel)
     assert _rels(plan_tree(str(tmp_path), True, ["mp4"])) == ["a.mp4", "b-破解.mp4"]
     item = plan_tree(str(tmp_path), True, ["mp4"]).items[1]
-    assert item.zh_target == tmp_path / "b-破解.srt"  # same name as Jasna's
+    assert item.zh_target == tmp_path / "b-破解.zh.srt"  # same name as Jasna's
 
 
 def test_root_folder_description_states_the_ja_cleanup():
@@ -2724,6 +2739,21 @@ def test_no_speech_with_a_srt_that_appeared_removes_only_our_empty_transcript(
     assert _states(r.inst, "a.mp4") == {"asr": "done", "translate": "skipped"}
     done = _done(r.evs)
     assert len(done) == 1 and "Queue: 0/1 done, 0 failed, 1 skipped" in done[0][2]
+
+
+def test_mid_asr_video_collision_removes_own_misattributed_transcript(
+    tmp_path, monkeypatch
+):
+    r = _setup(tmp_path, monkeypatch, full=["a.mp4"])
+    r.inst.start(r.emit)
+    (r.root / "a.ja.mp4").write_bytes(b"other video")
+    r.spawner.last.finish(0)
+    r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle name collision")
+    assert not _ja(r, "a.mp4").exists()
+    assert not _zh(r, "a.mp4").exists()
+    assert plan_tree(str(r.root), True, ["mp4"]).done == 0
+    r.inst.stop(timeout=1)
 
 
 def test_a_zero_cue_resume_whose_srt_appeared_keeps_the_library_transcript(

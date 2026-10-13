@@ -2,9 +2,9 @@
 
 Points at a library folder, walks it (recursively by default) and, for every
 video that has no subtitles yet, writes `<stem>.ja.srt` (WhisperJAV) and
-`<stem>.srt` (Simplified Chinese through the agent's LLM setting) next to the
+`<stem>.zh.srt` (Simplified Chinese through the agent's LLM setting) next to the
 video. The `.ja.srt` is only the resume checkpoint (#187): it is deleted once
-the job settles `completed` with its `.srt` published — a pre-existing library
+the job settles `completed` with its `.zh.srt` published — a pre-existing library
 `.ja.srt` included — and kept on every other path, so the next Start only
 translates. Everything engine-related is the shared `taskpaw_v3.monitors.subs`
 package (#177); this module owns tree planning (`plan_tree`), the task's queue,
@@ -99,6 +99,7 @@ from taskpaw_v3.monitors.subs.existing import (
     list_names,
     qualifies,
     skip_reason,
+    target_owner_conflict,
 )
 from taskpaw_v3.monitors.subs.job import (
     SUBTITLE_EXISTS,
@@ -234,7 +235,7 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
     subfolder and a name that is not encodable as UTF-8 (D10) are reported in
     `errors` and skipped. Qualifying files (`qualifies`) are ordered by
     `(relpath.casefold(), relpath)`; in that order each reserves its
-    `<stem>.ja.srt` and `<stem>.srt` (key: `normcase(realpath(dir)/name)`) —
+    `<stem>.ja.srt` and `<stem>.zh.srt` (key: `normcase(realpath(dir)/name)`) —
     a file whose target is already reserved is a collision (M8). Then each is
     judged from the listing of its own directory the walk already holds
     (#191, rules a/b/c — no per-file probe): already subtitled (a 0-byte
@@ -296,7 +297,7 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
     done = 0
     for relpath, source, real_dir, names in candidates:
         ja = source.with_name(f"{source.stem}.ja.srt")
-        zh = source.with_name(f"{source.stem}.srt")
+        zh = source.with_name(f"{source.stem}.zh.srt")
         keys = [os.path.normcase(os.path.join(real_dir, t.name)) for t in (ja, zh)]
         owner = next((reserved[k] for k in keys if k in reserved), None)
         if owner is not None:
@@ -309,6 +310,11 @@ def plan_tree(root: str, recursive: bool, extensions: Iterable[str]) -> TreePlan
         if existing.chinese is not None:
             done += 1
             done_names.append(relpath)
+            continue
+        conflict = target_owner_conflict(source.name, names, is_video)
+        if conflict is not None:
+            collisions.append((source, source.with_name(conflict)))
+            collision_names.append(relpath)
             continue
         kind: Kind = "translate_only" if existing.ja_transcript else "full"
         if existing.ja_transcript is not None:
@@ -388,7 +394,7 @@ class AvsubsConfig(BaseMonitorConfig):
     avsubs_root_folder: str = Field(
         "",
         description="The video library folder to scan (required). Every video "
-        "that has no subtitles yet gets <name>.srt (Simplified Chinese) next to "
+        "that has no subtitles yet gets <name>.zh.srt (Simplified Chinese) next to "
         "it. A video already has subtitles, and is skipped, when (a) <name>.srt "
         "(or .ass / .ssa / .vtt) exists, (b) a <name>.<tag>.srt such as "
         "<name>.chs.srt or <name>.zh.srt exists whose tag is not Japanese (ja, jp, "
@@ -397,7 +403,7 @@ class AvsubsConfig(BaseMonitorConfig):
         "whatever its name. A folder that cannot be read is skipped for this run "
         "(one alert; it is tried again at the next Start), and an existing "
         "subtitle is never overwritten. The Japanese transcript "
-        "<name>.ja.srt is an intermediate: it is deleted once the .srt is written "
+        "<name>.ja.srt is an intermediate: it is deleted once the .zh.srt is written "
         "and kept when translation does not finish — an existing .ja.srt is "
         "reused (translation only), then deleted the same way. Hidden, "
         "linked or mounted folders, and macOS ._ metadata files, are skipped. A .avsubs working folder is created here. "
@@ -1410,7 +1416,7 @@ class AvsubsInstance(MonitorInstance):
             _printable(job.job_id),
             reason,
         )
-        if reason == SUBTITLE_EXISTS:
+        if reason in (SUBTITLE_EXISTS, "subtitle name collision"):
             err = job.discard_own_ja()
             if err is not None:
                 log.warning(

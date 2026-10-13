@@ -36,10 +36,10 @@ terminated in `stop()` (#40 no-orphan guarantee).
 「AV 翻译」(#177, `av_translate`): after each restore the published
 `<stem>-破解.mp4` is transcribed by WhisperJAV (a GPU child, serial with the
 restores) into `<stem>-破解.ja.srt`, which a background `Translator` (the
-`llm-worker` client) turns into `<stem>-破解.srt`. Subtitle names always follow
+`llm-worker` client) turns into `<stem>-破解.zh.srt`. Subtitle names always follow
 the restored file they sit next to (#187): a legacy `<stem>_restored.mp4` gets
-`<stem>_restored.srt`. The `.ja.srt` is only the resume checkpoint: it is
-deleted once the job settles `completed` with its `.srt` published, and kept
+`<stem>_restored.zh.srt`. The `.ja.srt` is only the resume checkpoint: it is
+deleted once the job settles `completed` with its `.zh.srt` published, and kept
 on every other path. The engine lives in the
 shared `taskpaw_v3.monitors.subs` package; this plugin owns planning
 (`plan_subs`), policy (retry, degrade), counters, events and settlement.
@@ -226,9 +226,9 @@ _VR8K_PROFILE = "8k-vr"  # the `restore.started` task-log `profile` value
 # `plan_queue` scans the input folder only and `sweep_orphan_staging` only looks
 # at files, so neither ever sees it. `.avsubs/tmp` is WhisperJAV's --temp-dir.
 _SUBS_STAGING = ".avsubs"
-# Subtitle targets are `<restored video stem>.ja.srt` / `.srt` (#187).
+# Subtitle targets are `<restored video stem>.ja.srt` / `.zh.srt` (#187).
 _JA_EXT = ".ja.srt"
-_ZH_EXT = ".srt"
+_ZH_EXT = ".zh.srt"
 # Publish temp names are `<target>.<generation>.tmp` (subs/job.py); Start sweeps
 # every generation's leftovers — only once they are old enough (#179 M12): an
 # `avsubs` task publishing into the same folder uses the same pattern. Both the
@@ -413,7 +413,7 @@ def ja_target_for(media: Path) -> Path:
 
 
 def zh_target_for(media: Path) -> Path:
-    """`<media stem>.srt` next to the restored `media` — the Simplified-Chinese
+    """`<media stem>.zh.srt` next to the restored `media` — the Simplified-Chinese
     subtitle, named exactly like the video so players load it (#187)."""
     return media.with_name(f"{media.stem}{_ZH_EXT}")
 
@@ -903,10 +903,10 @@ class JasnaConfig(BaseMonitorConfig):
         title="AV 翻译",
         description="After each restore, transcribe the restored video with "
         "WhisperJAV and translate it to Simplified Chinese with the agent's LLM "
-        "setting: writes <name>-破解.srt (Chinese) next to <name>-破解.mp4 — the "
+        "setting: writes <name>-破解.zh.srt (Chinese) next to <name>-破解.mp4 — the "
         "subtitle always has the video's own name, so a <name>_restored.mp4 from "
-        "TaskPaw 3.5 and earlier gets <name>_restored.srt. The Japanese transcript "
-        "(<name>-破解.ja.srt) is deleted once the Chinese .srt is written; it is "
+        "TaskPaw 3.5 and earlier gets <name>_restored.zh.srt. The Japanese transcript "
+        "(<name>-破解.ja.srt) is deleted once the Chinese .zh.srt is written; it is "
         "kept when translation does not finish, and the next Start then only "
         "translates. GPU work stays serial (restore → transcribe → next restore); "
         "translation runs in the background. Already restored files without "
@@ -2835,7 +2835,7 @@ class JasnaInstance(MonitorInstance):
         if self._settled.get(job.job_id) != ("skipped", reason):
             return
         log.info("jasna %s: %s skipped (%s)", self.instance_id, job.job_id, reason)
-        if reason == SUBTITLE_EXISTS:
+        if reason in (SUBTITLE_EXISTS, "subtitle name collision"):
             err = job.discard_own_ja()
             if err is not None:
                 log.warning("jasna %s: %s: %s", self.instance_id, job.job_id, err)

@@ -215,6 +215,33 @@ def _owner(base: str, stems: set[str]) -> Optional[str]:
             return base[:i]
 
 
+def target_owner_conflict(
+    video_name: str,
+    names: Iterable[str],
+    is_video: Callable[[str], bool],
+    *,
+    extra_videos: Iterable[str] = (),
+) -> Optional[str]:
+    """A video that would own this source's generated .ja/.zh subtitle.
+
+    Use judge's attribution pool and normalization, including pending Jasna
+    outputs. Path reservations alone miss a.mp4 alongside a.zh.mp4 (#261).
+    """
+    me = os.path.splitext(norm(video_name))[0]
+    targets = {me + ".ja", me + ".zh"}
+    for name in names:
+        if not isinstance(name, str) or not name or name.startswith("._"):
+            continue
+        stem, ext = os.path.splitext(norm(name))
+        if stem in targets and (ext in VIDEO_EXTENSIONS or is_video(name)):
+            return name
+    for name in extra_videos:
+        if isinstance(name, str) and name:
+            if os.path.splitext(norm(name))[0] in targets:
+                return name
+    return None
+
+
 def skip_reason(
     names: Optional[list[str]],
     video_name: str,
@@ -225,11 +252,17 @@ def skip_reason(
 ) -> Optional[SkipReason]:
     """The AC5 re-check of a film about to be worked on: `subtitle state
     unreadable` when its folder could not be listed (`names` is None), `subtitle
-    exists` when `judge` finds its Chinese subtitle, else None (go on)."""
+    exists` when `judge` finds its Chinese subtitle, or a naming collision
+    when another video owns a generated target; else None (go on)."""
     if names is None:
         return SUBTITLE_UNREADABLE
-    got = judge(video_name, names, is_video, rule_c=rule_c, extra_videos=extra_videos)
-    return SUBTITLE_EXISTS if got.chinese is not None else None
+    extra = tuple(extra_videos)
+    got = judge(video_name, names, is_video, rule_c=rule_c, extra_videos=extra)
+    if got.chinese is not None:
+        return SUBTITLE_EXISTS
+    if target_owner_conflict(video_name, names, is_video, extra_videos=extra):
+        return "subtitle name collision"
+    return None
 
 
 # ── listings ──────────────────────────────────────────────────────────────
