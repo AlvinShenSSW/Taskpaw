@@ -136,10 +136,10 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 > **Jasna「AV 翻译」(#177, names since 3.6.0 / #187).** Restored films are written as
 > `<name>-破解.mp4` (a `<name>_restored.mp4` from 3.5 and earlier still counts as
 > restored and is not renamed). With the tickbox on, every restored film also gets
-> `<name>-破解.srt` (Simplified Chinese) **next to `<name>-破解.mp4`** in the output
+> `<name>-破解.zh.srt` (Simplified Chinese) **next to `<name>-破解.mp4`** in the output
 > folder — the subtitle always carries its video's name, so a legacy
-> `<name>_restored.mp4` gets `<name>_restored.srt`. The Japanese transcript
-> (`<name>-破解.ja.srt`) is deleted once the `.srt` is written and kept only while
+> `<name>_restored.mp4` gets `<name>_restored.zh.srt`. The Japanese transcript
+> (`<name>-破解.ja.srt`) is deleted once the `.zh.srt` is written and kept only while
 > a translation is unfinished. Since 3.7.1 (#191) a film whose restored video already
 > has `<name>-破解.srt` (or `.ass` / `.ssa` / `.vtt`), or a `<name>-破解.<tag>.srt` whose
 > tag is not Japanese (e.g. `.chs.srt`), gets no subtitle job; the output folder is
@@ -208,8 +208,8 @@ Top-level of each `status_json`: `machine` (display name), `os`, `server_id`.
 
 > **「AV 翻译 (subtitles)」task (`avsubs`, #179).** A library task: for every video
 > under its folder (recursively by default) that has no subtitles yet, it writes
-> `<name>.srt` (Simplified Chinese) **next to the video**; the intermediate
-> `<name>.ja.srt` (Japanese) is deleted once the `.srt` is written (since 3.6.0 /
+> `<name>.zh.srt` (Simplified Chinese) **next to the video**; the intermediate
+> `<name>.ja.srt` (Japanese) is deleted once the `.zh.srt` is written (since 3.6.0 /
 > #187) and kept only while a translation is unfinished. Since 3.7.1 (#191) a video
 > already has subtitles — and is skipped, counted in `queue_pre_done` — when, from
 > its folder's listing, (a) `<name>.srt` (or `.ass` / `.ssa` / `.vtt`) exists, (b) a

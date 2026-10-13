@@ -52,15 +52,30 @@ def test_new_output_staging_and_subtitle_names(tmp_path):
     assert staging_path_for(out, v).name == "SDAB-312-破解.tmp.mp4"
     assert legacy_output_path_for(out, v).name == "SDAB-312_restored.mp4"
     new = output_path_for(out, v)
-    assert J.zh_target_for(new).name == "SDAB-312-破解.srt"
+    assert J.zh_target_for(new).name == "SDAB-312-破解.zh.srt"
     assert J.ja_target_for(new).name == "SDAB-312-破解.ja.srt"
     old = legacy_output_path_for(out, v)
-    assert J.zh_target_for(old).name == "SDAB-312_restored.srt"
+    assert J.zh_target_for(old).name == "SDAB-312_restored.zh.srt"
     assert J.ja_target_for(old).name == "SDAB-312_restored.ja.srt"
     dotted = output_path_for(out, tmp_path / "Clip.01.mkv")
     assert dotted.name == "Clip.01-破解.mp4"
-    assert J.zh_target_for(dotted).name == "Clip.01-破解.srt"
+    assert J.zh_target_for(dotted).name == "Clip.01-破解.zh.srt"
     assert J.zh_target_for(dotted).parent == dotted.parent
+
+
+@pytest.mark.parametrize("tag", ["ja", "zh"])
+def test_jasna_skips_targets_owned_by_another_restored_folder_video(
+    tmp_path, monkeypatch, tag
+):
+    r = _setup(tmp_path, monkeypatch, restored=["a.mp4"], ja=["a.mp4"])
+    (r.out / f"a-破解.{tag}.mp4").write_bytes(b"other video")
+    r.inst.start(r.emit)
+    r.inst.check(r.emit)
+    assert r.inst._settled["a.mp4"] == ("skipped", "subtitle name collision")
+    assert r.spawner.argvs == []
+    assert not _zh(r, "a.mp4").exists()
+    assert _ja(r, "a.mp4").exists()
+    r.inst.stop(timeout=1)
 
 
 def test_restored_output_for_prefers_the_new_name_then_the_legacy_one(tmp_path):
@@ -229,7 +244,7 @@ def test_cjk_name_end_to_end_gets_po_jie_subtitles_and_no_ja(tmp_path, monkeypat
     assert st.metrics["subs_translating"] == 1
     r.translators[0].answer(CJK)
     inst.check(emit)
-    zh = r.out / "SDAB-312 無修正-破解.srt"
+    zh = r.out / "SDAB-312 無修正-破解.zh.srt"
     assert zh.read_text(encoding="utf-8").count("好") == 2
     assert _files(r.out) == [media.name, zh.name]  # no .ja.srt left
     assert len(_done(r.evs)) == 1
@@ -246,7 +261,7 @@ def test_a_legacy_output_gets_restored_named_subtitles_from_that_file(
     job = inst._jobs["e.mp4"]
     assert job.media == legacy
     assert job.ja_target == r.out / "e_restored.ja.srt"
-    assert job.zh_target == r.out / "e_restored.srt"
+    assert job.zh_target == r.out / "e_restored.zh.srt"
     assert r.spawner.argvs[0][1] == str(legacy)  # WhisperJAV transcribes it
     st = inst.check(emit)
     assert st.metrics["current_file"] == "e_restored.mp4"
@@ -255,14 +270,14 @@ def test_a_legacy_output_gets_restored_named_subtitles_from_that_file(
     assert _ja(r, "e.mp4", legacy=True).exists()
     r.translators[0].answer("e.mp4")
     inst.check(emit)
-    assert _files(r.out) == ["e_restored.mp4", "e_restored.srt"]
+    assert _files(r.out) == ["e_restored.mp4", "e_restored.zh.srt"]
     assert legacy.read_bytes() == b"legacy e.mp4"  # never renamed
     assert len(_done(r.evs)) == 1
 
 
 def test_a_legacy_output_with_its_zh_needs_nothing(tmp_path, monkeypatch):
     r = _setup(tmp_path, monkeypatch, legacy=["e.mp4"], zh=["e.mp4"])
-    assert _zh(r, "e.mp4", legacy=True).exists()
+    assert (r.out / "e_restored.srt").exists()
     r.inst.start(r.emit)
     st = r.inst.check(r.emit)
     assert st.state == "idle"
@@ -277,7 +292,7 @@ def test_a_legacy_output_with_a_ja_is_translated_only(tmp_path, monkeypatch):
     assert r.spawner.argvs == []
     r.translators[0].answer("e.mp4")
     r.inst.check(r.emit)
-    assert _files(r.out) == ["e_restored.mp4", "e_restored.srt"]
+    assert _files(r.out) == ["e_restored.mp4", "e_restored.zh.srt"]
 
 
 def test_plan_subs_uses_the_legacy_file_and_prefers_the_new_one(tmp_path):
@@ -303,7 +318,7 @@ def test_both_new_and_legacy_outputs_subtitle_the_new_file(tmp_path, monkeypatch
     r.inst.start(r.emit)
     job = r.inst._jobs["e.mp4"]
     assert job.media == r.out / "e-破解.mp4"
-    assert job.zh_target == r.out / "e-破解.srt"
+    assert job.zh_target == r.out / "e-破解.zh.srt"
     assert r.spawner.argvs[0][1] == str(r.out / "e-破解.mp4")
     assert r.launcher.n == 0
     r.inst.stop(timeout=1)
@@ -471,6 +486,6 @@ def test_field_descriptions_state_the_new_names():
     assert "<name>-破解.mp4" in out and "<name>_restored.mp4" in out
     assert "*-破解.tmp.mp4" in out
     av = fields["av_translate"].description or ""
-    assert "<name>-破解.srt" in av and "<name>_restored.srt" in av
+    assert "<name>-破解.zh.srt" in av and "<name>_restored.zh.srt" in av
     assert "deleted" in av
     assert "delete its old .srt files first" in av

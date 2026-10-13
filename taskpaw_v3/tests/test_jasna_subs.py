@@ -366,7 +366,7 @@ def _ja(r, name: str, legacy: bool = False) -> Path:
 
 
 def _zh(r, name: str, legacy: bool = False) -> Path:
-    return _sub(r.out, name, ".srt", legacy)
+    return _sub(r.out, name, ".zh.srt", legacy)
 
 
 def _wait(cond, timeout: float = 8.0) -> bool:
@@ -1312,7 +1312,7 @@ def test_subs_job_is_a_plain_subs_job_keyed_by_video_name(tmp_path, monkeypatch)
     assert job.run == r.inst._run
     assert job.media == r.out / "a-破解.mp4"
     assert job.ja_target == r.out / "a-破解.ja.srt"
-    assert job.zh_target == r.out / "a-破解.srt"
+    assert job.zh_target == r.out / "a-破解.zh.srt"
     assert job.staging_root == r.out / ".avsubs"
     assert os.path.basename(job.exe) == "whisperjav.exe"
     r.inst.stop(timeout=1)
@@ -2470,7 +2470,7 @@ def test_setup_subs_uses_the_plan_and_never_probes_again(tmp_path, monkeypatch):
     }
     assert r.inst._jobs["a.mp4"].media == r.out / "a-破解.mp4"
     assert r.inst._jobs["f.mp4"].media == r.out / "f_restored.mp4"
-    assert r.inst._jobs["f.mp4"].zh_target == r.out / "f_restored.srt"
+    assert r.inst._jobs["f.mp4"].zh_target == r.out / "f_restored.zh.srt"
     r.inst.stop(timeout=1)
 
 
