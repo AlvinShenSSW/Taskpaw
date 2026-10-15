@@ -105,6 +105,7 @@ for r in rows:
 | ETA / elapsed | `eta` / `elapsed` | lada / jasna | string `MM:SS`/`H:MM:SS`; **capture mode only** |
 | Frames done / left | `processed_frames` / `remaining_frames` | lada / jasna | int; **capture mode only** |
 | Speed (fps) | `fps` | lada / jasna | float; **capture mode only** |
+| LTX stage | `ltx_stage` | jasna | string `k/n stage` (e.g. `2/4 encode`) while a 1080p LTX launch runs (#263); `percent` / `fps` are then that stage's and `eta` the whole film's; **capture mode only** |
 | Phase | `phase` | jasna | `restore` (a video is being restored, or idle), `subs` (WhisperJAV is transcribing), `translate` (only translations are running) |
 | Subtitles done / total / left | `subs_completed` / `subs_total` / `subs_remaining` | jasna | int; only with「AV 翻译」ticked |
 | Subtitles failed / skipped | `subs_failed` / `subs_skipped` | jasna | int; skipped = restore failed, no LLM key (since 3.8.0: no usable model — also when the translator finds none, formerly a failure), source changed, cancelled, whisperjav.exe missing, (3.7.1) a subtitle / transcript that appeared before it could be written (never overwritten) or an output folder that could not be read, or (3.8.0) a translation paused after 2 h without a translation service |

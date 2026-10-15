@@ -26,11 +26,22 @@ detector, `--vr-mode sbs`, overlap 8, 4K-tier clip 30, 4K-tier unet-4x off) to
 every file of the task AT LAUNCH ONLY — the operator's own fields are never
 rewritten, so unticking launches with them again.
 
+「1080p 档：使用 LTX」(#263, `ltx_1080p`): the 1080p-tier files launch with
+Jasna 0.11.1's LTX restoration model (`--restoration-model-name ltx` /
+`ltx-undistilled`, `--ltx-fast`, `--ltx-auto-split`); 4K-tier files and every
+other setting launch exactly as before (LTX cannot finish a 4K file on an 8 GB
+card). While ticked, 8K VR and the 1080p unet-4x are off at launch — their saved
+values are untouched. LTX launches keep Jasna's scratch in the output folder's
+`.jasna-work` (swept at Start), and a capture-mode launch whose model is not
+downloaded yet opens its own window once per run so Jasna's download prompt can
+be answered.
+
 Passive mode (no exe path) just watches an externally-running `jasna` process,
 exactly like lada's passive mode.
 
 Process/reader/terminate recipes and the tqdm progress parser are IMPORTED from
-`lada.py` (never duplicated, never modified there). No `shell=True`; the child is
+`lada.py` (never duplicated, never modified there); `parse_jasna_progress_line`
+only adds Jasna's own lines (LTX stages, the install check, #263) in front of it. No `shell=True`; the child is
 terminated in `stop()` (#40 no-orphan guarantee).
 
 「AV 翻译」(#177, `av_translate`): after each restore the published
@@ -80,6 +91,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import re
 import shlex
 import shutil
 import subprocess
@@ -107,6 +119,7 @@ from taskpaw_v3.monitors.base import (
     MonitorStatus,
     State,
 )
+from taskpaw_v3.monitors.plugins.avsubs import _is_link_dir
 from taskpaw_v3.monitors.plugins.host_metrics import read_gpu
 from taskpaw_v3.monitors.plugins.lada import (
     _CRASH_DETAIL_CHARS,
@@ -200,6 +213,7 @@ _OWNED_FLAGS = (
     "--codec",
     "--cq",
     "--detection-model",
+    "--restoration-model-name",  # #263: the 1080p LTX tickbox decides it
 )
 # Owned only while 8K VR is ticked (#208 AC2): the profile forces --vr-mode, and
 # --detection-model-path would silently swap the pinned VR detector's weights.
@@ -221,6 +235,47 @@ _VR8K_TEMPORAL_OVERLAP = 8  # every tier
 _VR8K_CLIP_SIZE_4K = 30  # 4K tier only; the 1080p tier keeps clip_size_1080p
 _VR8K_UNET4X_4K = False  # 4K tier only; the 1080p tier keeps unet4x_1080p
 _VR8K_PROFILE = "8k-vr"  # the `restore.started` task-log `profile` value
+
+# 「1080p 档：使用 LTX」(#263). What the wizard greys while it is ticked (one
+# source with the launch rules below, like the 8K VR profile).
+_LTX_LOCK: dict[str, bool] = {"vr_8k": False, "unet4x_1080p": False}
+_LTX_WORK_DIR = ".jasna-work"  # TaskPaw's own folder inside the output folder
+# Jasna 0.11.1's model files in `<exe dir>/model_weights/ltx-restore`, keyed by
+# (best, fast) — printed by the CLI when they are missing (verified 2026-10-16).
+_LTX_MODEL_FILES: dict[tuple[bool, bool], str] = {
+    (False, False): "ltx-restore-alpha1-distill8-int8.safetensors.enc",
+    (False, True): "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc",
+    (True, False): "ltx-restore-alpha1-int8.safetensors.enc",
+    (True, True): "ltx-restore-alpha1-nvfp4.safetensors.enc",
+}
+_LTX_SHARED_FILES = ("vae.safetensors.enc", "vae-decoder.safetensors.enc")
+# The extra args go to EVERY launch, and Jasna rejects LTX options on a
+# BasicVSR++ launch (and --ltx-trial would publish unrestored copies).
+_LTX_OPTION_FLAGS = (
+    "--ltx-fast",
+    "--no-ltx-fast",
+    "--ltx-auto-split",
+    "--ltx-seed",
+    "--ltx-large-canvas",
+    "--no-ltx-large-canvas",
+    "--ltx-trial",
+    "--no-ltx-trial",
+)
+# While ticked: flags LTX launches reject (verified on 0.11.1), the owner's
+# no-VR-under-LTX rule, and the folders the LTX launch owns.
+_LTX_CONDITIONAL_FLAGS = (
+    "--secondary-restoration",
+    "--denoise",
+    "--no-compile-basicvsrpp",
+    "--stream",
+    "--vr-mode",
+    "--restoration-model-path",
+    "--working-directory",
+)
+_LTX_SPLIT_FLAGS = (
+    "--fmp4",
+    "--segments",
+)  # "cannot be combined with --ltx-auto-split"
 
 # 「AV 翻译」(#177). The staging root lives INSIDE the output folder (D16):
 # `plan_queue` scans the input folder only and `sweep_orphan_staging` only looks
@@ -626,6 +681,65 @@ def vr_detector_available(exe_dir: Optional[str]) -> bool:
     return _weights_available(exe_dir, _VR8K_DETECTION_MODEL)
 
 
+def ltx_missing_files(exe_dir: Optional[str], best: bool, fast: bool) -> list[str]:
+    """#263 AC4: which files of the selected LTX variant are not in
+    `<exe dir>/model_weights/ltx-restore` (all of them without an exe dir)."""
+    names = [_LTX_MODEL_FILES[(best, fast)], *_LTX_SHARED_FILES]
+    if not exe_dir:
+        return names
+    folder = Path(exe_dir) / "model_weights" / "ltx-restore"
+    missing: list[str] = []
+    for name in names:
+        try:
+            present = (folder / name).is_file()
+        except OSError:
+            present = False
+        if not present:
+            missing.append(name)
+    return missing
+
+
+def _console_fallback_allowed() -> bool:
+    """#263 AC4: only Windows can give an uncaptured launch its own window."""
+    return sys.platform == "win32"
+
+
+def sweep_ltx_work(
+    output_folder: str, max_age: float = _ORPHAN_STAGING_AGE
+) -> list[Path]:
+    """#263 AC4b, best effort: remove the entries of `<output>/.jasna-work` that
+    are older than `max_age` — the scratch a killed LTX run left behind. Only a
+    REAL directory is swept: a symlink or junction `.jasna-work` (or a file of
+    that name) is left alone, so TaskPaw never deletes in a link's target. A
+    missing folder is the normal case and is skipped silently. Never raises."""
+    work = Path(output_folder) / _LTX_WORK_DIR
+    try:
+        if not work.exists() and not work.is_symlink():
+            return []
+        if _is_link_dir(work) or not work.is_dir():
+            log.warning("jasna: %s is not a plain folder — not swept", work)
+            return []
+        entries = list(work.iterdir())
+    except OSError as e:
+        log.warning("jasna: LTX scratch sweep skipped (%s)", e)
+        return []
+    now = time.time()
+    removed: list[Path] = []
+    for entry in entries:
+        try:
+            if now - entry.stat(follow_symlinks=False).st_mtime < max_age:
+                continue
+            if entry.is_dir() and not _is_link_dir(entry):
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError as e:
+            log.warning("jasna: could not sweep %s: %s", entry, e)
+            continue
+        removed.append(entry)
+    return removed
+
+
 def engines_present(exe_dir: Optional[str]) -> bool:
     """Whether any TensorRT engine has been compiled yet (A5) — drives the
     "compiling engines" detail hint only."""
@@ -824,6 +938,19 @@ def owned_flags_in(extra: str, vr_8k: bool = False) -> list[str]:
     return found
 
 
+def ltx_options_in(extra: str) -> list[str]:
+    """#263 AC3: the LTX options `extra` sets (exact, `=value`, abbreviation)."""
+    names = _flag_names(extra)
+    return [f for f in _LTX_OPTION_FLAGS if any(_selects(n, f) for n in names)]
+
+
+def ltx_conflicts_in(extra: str, auto_split: bool) -> list[str]:
+    """#263 AC3: the flags `extra` sets that an LTX launch cannot take."""
+    names = _flag_names(extra)
+    flags = _LTX_CONDITIONAL_FLAGS + (_LTX_SPLIT_FLAGS if auto_split else ())
+    return [f for f in flags if any(_selects(n, f) for n in names)]
+
+
 def secondary_overridden(extra: str) -> bool:
     """Whether `extra` carries the documented `--secondary-restoration` override
     (exact, `=value`, or an argparse abbreviation such as `--sec none`), which
@@ -890,7 +1017,8 @@ class JasnaConfig(BaseMonitorConfig):
     unet4x_1080p: bool = Field(
         True,
         description="1080p tier: run the supporter-only unet-4x secondary "
-        "restoration (more detail, more VRAM). On by default.",
+        "restoration (more detail, more VRAM). On by default. Not used while "
+        "1080p LTX is ticked.",
     )
     unet4x_4k: bool = Field(
         False,
@@ -943,6 +1071,44 @@ class JasnaConfig(BaseMonitorConfig):
         "abbreviation of them 4 or more characters long (e.g. --out), are "
         "rejected. --translate* options are always rejected (they "
         "would put an API key on the command line).",
+    )
+    ltx_1080p: bool = Field(
+        False,
+        title="1080p tier: restore with LTX",
+        description="1080p tier only: 4K files and every other setting stay as "
+        "they are. The 1080p-tier files are restored with Jasna's supporter model "
+        "LTX (Jasna 0.11.1 or newer; more detail, much slower; NVIDIA RTX). While "
+        "ticked, 8K VR and the 1080p unet-4x are not used (LTX supports neither) "
+        "and keep their saved values for when this is unticked. The first LTX "
+        "launch asks to download the model (about 9 GB with fast mode, 15 GB "
+        "without) in Jasna's window. Saving this on a running task restarts the "
+        "current film.",
+    )
+    ltx_fast: bool = Field(
+        True,
+        title="LTX fast mode",
+        description="--ltx-fast: about 1.4x faster, slightly less detail, a "
+        "smaller download. RTX 50-series GPUs only (Jasna fails on other GPUs). "
+        "On by default: the standard LTX model does not fit an 8 GB card. Only "
+        "used with 1080p LTX.",
+    )
+    ltx_auto_split: int = Field(
+        12,
+        ge=0,
+        le=100,
+        title="LTX only for big mosaics (%)",
+        description="--ltx-auto-split, in percent of the video height: mosaics "
+        "at least that big use LTX, smaller ones BasicVSR++ (without unet-4x). 12 "
+        "is Jasna's suggested start; 0 = the whole film with LTX. Jasna restores "
+        "the whole film with LTX when it finds no safe cut points. Only used with "
+        "1080p LTX.",
+    )
+    ltx_best: bool = Field(
+        False,
+        title="LTX best model",
+        description="--restoration-model-name ltx-undistilled: slightly more "
+        "detail, about 1.5-1.8x slower, its own model download. Only used with "
+        "1080p LTX.",
     )
     vr_8k: bool = Field(
         False,
@@ -1009,7 +1175,11 @@ class JasnaConfig(BaseMonitorConfig):
         "`--secondary-restoration` here overrides the tickboxes for every file "
         "and disables the automatic unet-4x degrade (the relaunch would carry the "
         "same flag). Passing `--encoder-settings cq=...` alongside --cq is Jasna's "
-        "own error.",
+        "own error. LTX options (--ltx-*, --restoration-model-name) are always "
+        "rejected — use the LTX fields; while 1080p LTX is ticked, so are "
+        "--secondary-restoration, --denoise, --no-compile-basicvsrpp, --stream, "
+        "--vr-mode, --restoration-model-path and --working-directory (and --fmp4 / "
+        "--segments with LTX only for big mosaics).",
     )
     jasna_gpu_monitor: bool = Field(
         True,
@@ -1055,6 +1225,28 @@ class JasnaConfig(BaseMonitorConfig):
                 "jasna_extra_args must not set the flags TaskPaw owns "
                 f"({', '.join(owned)}); use the dedicated fields instead"
             )
+        ltx_opts = ltx_options_in(self.jasna_extra_args)
+        if ltx_opts:
+            trial = (
+                " (and --ltx-trial would publish unrestored copies as restored)"
+                if "--ltx-trial" in ltx_opts
+                else ""
+            )
+            raise ValueError(
+                f"jasna_extra_args must not set LTX options ({', '.join(ltx_opts)}): "
+                "the extra args go to every launch and Jasna rejects LTX options "
+                f"on a BasicVSR++ launch — use the LTX fields{trial}"
+            )
+        if self.ltx_1080p:
+            conflicts = ltx_conflicts_in(
+                self.jasna_extra_args, auto_split=self.ltx_auto_split > 0
+            )
+            if conflicts:
+                raise ValueError(
+                    "with 1080p LTX ticked, jasna_extra_args must not set "
+                    f"{', '.join(conflicts)}: the extra args go to every launch and "
+                    "LTX launches reject them (the 4K tier's unet-4x is its tickbox)"
+                )
         validate_fields(
             self.whisperjav_exe_path,
             self.whisperjav_engine,
@@ -1079,6 +1271,64 @@ class JasnaConfig(BaseMonitorConfig):
         return self
 
 
+# #263 AC5: Jasna 0.11.1's LTX progress, e.g.
+#   LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]
+# Four stages, the percent restarts each stage, `run … left` is the whole film.
+_RE_LTX_STAGE = re.compile(r"^LTX\s+(\d+)/(\d+)\s+([^:：]+?)\s*[:：]\s*(\d+)\s*%")
+_RE_LTX_FPS = re.compile(r"(\d+(?:\.\d+)?)\s*frame/s")
+_RE_LTX_LEFT = re.compile(r"run\s+([\d:]+)\s+left")
+# Stage-scoped numbers an LTX line must not leave behind (C9): they would
+# describe a stage, not the film; fps only when the stage reports frame/s.
+_LTX_STALE_KEYS = ("elapsed", "processed_frames", "remaining_frames", "fps")
+
+
+def parse_jasna_progress_line(line: str, prev: dict) -> dict:
+    """Pure: lada's `parse_progress_line` plus Jasna 0.11.1's LTX stages
+    (`ltx_stage`, stage percent, frame/s, the film's `run … left` as `eta`). A
+    `Jasna: …` line (the installation check printed on every launch) is not
+    progress. Returns `prev` itself for a line that changes nothing."""
+    text = line.strip()
+    if not text or text.startswith("Jasna: "):
+        return prev
+    m = _RE_LTX_STAGE.match(text)
+    if m:
+        out = {k: v for k, v in prev.items() if k not in _LTX_STALE_KEYS}
+        out["percent"] = int(m.group(4))
+        out["ltx_stage"] = f"{m.group(1)}/{m.group(2)} {m.group(3).strip()}"
+        if fps := _RE_LTX_FPS.search(text):
+            out["fps"] = float(fps.group(1))  # the pattern only admits a number
+        if left := _RE_LTX_LEFT.search(text):
+            out["eta"] = left.group(1)
+        return out
+    out = parse_progress_line(line, prev)
+    if out is not prev and "ltx_stage" in out:
+        out = {k: v for k, v in out.items() if k != "ltx_stage"}
+    return out
+
+
+def ltx_launch(cfg: JasnaConfig, tier: Tier) -> bool:
+    """#263: whether a launch of this tier is an LTX launch (1080p tier only)."""
+    return cfg.ltx_1080p and tier == "1080p"
+
+
+def vr_profile(cfg: JasnaConfig) -> bool:
+    """#263: the effective 8K VR profile — off on every tier while 1080p LTX is
+    ticked (owner rule: VR is greyed out under LTX)."""
+    return cfg.vr_8k and not cfg.ltx_1080p
+
+
+def _ltx_label(cfg: JasnaConfig) -> str:
+    return "LTX" + (" best" if cfg.ltx_best else "") + (" fast" if cfg.ltx_fast else "")
+
+
+def _ltx_mode(cfg: JasnaConfig) -> str:
+    """The `restore.started` `mode` of an LTX launch."""
+    mode = "ltx" + (" best" if cfg.ltx_best else "") + (" fast" if cfg.ltx_fast else "")
+    if cfg.ltx_auto_split > 0:
+        mode += f" auto-split {cfg.ltx_auto_split}%"
+    return mode
+
+
 def build_argv(
     cfg: JasnaConfig,
     exe: str,
@@ -1087,6 +1337,7 @@ def build_argv(
     tier: Tier,
     unet_enabled: bool,
     large_detector: bool,
+    work_dir: Optional[Path] = None,
 ) -> list[str]:
     """Pure: the exact argv for one file. Operator extra args come LAST so
     argparse's last-wins makes the documented `--secondary-restoration` override
@@ -1095,8 +1346,14 @@ def build_argv(
     `cfg.vr_8k` (#208): the 8K VR profile replaces the detector (no
     rfdetr-v6-large upgrade), the overlap and the 4K clip, and adds
     `--vr-mode sbs` right after the detector; `unet_enabled` arrives already
-    resolved (`_launch_locked` reads the 4K tickbox as the profile's)."""
-    vr = cfg.vr_8k
+    resolved (`_launch_locked` reads the 4K tickbox as the profile's).
+
+    #263: an LTX launch (`ltx_launch`) adds `--restoration-model-name`, the LTX
+    options and `--working-directory work_dir` (when given) before the extra
+    args, never carries unet-4x, and — like every launch of a ticked task —
+    never the 8K VR profile (`vr_profile`)."""
+    ltx = ltx_launch(cfg, tier)
+    vr = vr_profile(cfg)
     clip_4k = _VR8K_CLIP_SIZE_4K if vr else cfg.clip_size_4k
     clip = clip_4k if tier == "4k" else cfg.clip_size_1080p
     overlap = _VR8K_TEMPORAL_OVERLAP if vr else cfg.temporal_overlap
@@ -1104,6 +1361,18 @@ def build_argv(
     if tier == "4k" and large_detector and detection == _DEFAULT_DETECTION_MODEL:
         detection = _LARGE_DETECTION_MODEL
     vr_mode = ["--vr-mode", _VR8K_VR_MODE] if vr else []
+    ltx_args: list[str] = []
+    if ltx:
+        ltx_args = [
+            "--restoration-model-name",
+            "ltx-undistilled" if cfg.ltx_best else "ltx",
+        ]
+        if cfg.ltx_fast:
+            ltx_args.append("--ltx-fast")
+        if cfg.ltx_auto_split > 0:
+            ltx_args += ["--ltx-auto-split", str(cfg.ltx_auto_split)]
+        if work_dir is not None:
+            ltx_args += ["--working-directory", str(work_dir)]
     return [
         exe,
         "--input",
@@ -1115,7 +1384,7 @@ def build_argv(
         "--temporal-overlap",
         str(overlap),
         "--secondary-restoration",
-        "unet-4x" if unet_enabled else "none",
+        "unet-4x" if unet_enabled and not ltx else "none",
         "--codec",
         cfg.codec,
         "--cq",
@@ -1123,6 +1392,7 @@ def build_argv(
         "--detection-model",
         detection,
         *vr_mode,
+        *ltx_args,
         *_split_args(cfg.jasna_extra_args),
     ]
 
@@ -1142,7 +1412,8 @@ class JasnaInstance(MonitorInstance):
     four-byte write — deliberately never an fsync), single-file unlinks (a
     stale staging file, a settled job's `.ja.srt` — #187), the subtitle
     publishes and the one output-folder listing right after a `.ja.srt`
-    publish (#191 F15: the same class of I/O), and `_terminate_child`,
+    publish (#191 F15: the same class of I/O), an LTX launch's `.jasna-work`
+    mkdir and model-file stats (#263, the same class), and `_terminate_child`,
     bounded by its timeout (+2 s for the kill reap)."""
 
     def __init__(self, instance_id: str, config: JasnaConfig) -> None:
@@ -1177,6 +1448,9 @@ class JasnaInstance(MonitorInstance):
         self._compiling = False
         self._idle_note = ""
         self._started = False
+        # #263 AC4: the one console-window fallback and the one model alert
+        self._ltx_console_used = False
+        self._ltx_model_alerted = False
         self._ffprobe: Optional[str] = None
         self._prev_running: Optional[bool] = None  # passive transition
         # GPU lease (#177 AC9 hooks, backed by `core.gpu_lease` since #179).
@@ -1269,6 +1543,8 @@ class JasnaInstance(MonitorInstance):
         self._batch_aborted = False
         self._compiling = False
         self._idle_note = ""
+        self._ltx_console_used = False
+        self._ltx_model_alerted = False
         self._ffprobe = None
         self._prev_running = None
         self._started = True
@@ -1278,6 +1554,7 @@ class JasnaInstance(MonitorInstance):
         self._reset_subs()
         if cfg.jasna_exe_path.strip():
             self._sweep_subs_leftovers()
+            sweep_ltx_work(cfg.jasna_output_folder)  # #263 AC4b
             self._start_managed(emit)
 
     def _reset_subs(self) -> None:
@@ -1405,7 +1682,7 @@ class JasnaInstance(MonitorInstance):
                 "likely to fail until it is installed.",
                 dedupe_key=f"{self.instance_id}:ffprobe",
             )
-        if cfg.vr_8k and not vr_detector_available(self._exe_dir()):
+        if vr_profile(cfg) and not vr_detector_available(self._exe_dir()):
             # #208 AC5: Jasna cannot load missing RF-DETR weights, so every launch
             # would fail. The run still starts: the failed-file path and the
             # 3-failure abort take it from there.
@@ -1941,11 +2218,16 @@ class JasnaInstance(MonitorInstance):
                     log.warning("jasna: could not clear staging file %s: %s", stale, e)
 
             exe_dir = self._exe_dir()
-            if tier == "4k":
+            ltx = ltx_launch(cfg, tier)
+            if ltx:
+                # #263: LTX takes no secondary restoration — an LTX launch is
+                # never a unet-4x launch (no degrade path for this tier).
+                tickbox = False
+            elif tier == "4k":
                 # #208: under 8K VR the 4K tier's tickbox reads as the profile's
                 # (off), so a 4K launch is never a unet-4x launch — no degrade
                 # path, `_run_unet_disabled` never set for it.
-                tickbox = _VR8K_UNET4X_4K if cfg.vr_8k else cfg.unet4x_4k
+                tickbox = _VR8K_UNET4X_4K if vr_profile(cfg) else cfg.unet4x_4k
             else:
                 tickbox = cfg.unet4x_1080p
             unet = (
@@ -1958,6 +2240,7 @@ class JasnaInstance(MonitorInstance):
             # sense of AC 4: a failure must take the plain retry path, never the
             # "retry without unet → degrade" path (Codex 外门 C-1).
             self._current_unet = unet and not secondary_overridden(cfg.jasna_extra_args)
+            work_dir = self._ltx_work_dir() if ltx else None
             argv = build_argv(
                 cfg,
                 cfg.jasna_exe_path,
@@ -1966,15 +2249,37 @@ class JasnaInstance(MonitorInstance):
                 tier,
                 unet,
                 large_detector_available(exe_dir),
+                work_dir,
             )
 
             capture = cfg.jasna_capture_progress
+            missing = (
+                ltx_missing_files(exe_dir, cfg.ltx_best, cfg.ltx_fast) if ltx else []
+            )
+            if missing:
+                self._alert_ltx_model(emit, missing)
+                if (
+                    capture
+                    and _console_fallback_allowed()
+                    and not self._ltx_console_used
+                ):
+                    # #263 AC4: Jasna's download prompt needs a window to be
+                    # answered — once per run, Windows only.
+                    self._ltx_console_used = True
+                    capture = False
             if sys.platform == "win32":
                 flags = _NO_WINDOW if capture else _NEW_CONSOLE
             else:
                 flags = 0
+            # stdin=DEVNULL (#263): a captured launch has no console, so a prompt
+            # must end with EOF instead of waiting on an inherited pipe.
             kw: dict = (
-                dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+                dict(
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    bufsize=0,
+                )
                 if capture
                 else {}
             )
@@ -2019,9 +2324,11 @@ class JasnaInstance(MonitorInstance):
             started: dict[str, object] = {
                 "index": self._done + self._failed + 1,
                 "total": self._total,
-                "mode": "unet-4x" if self._current_unet else "plain",
+                "mode": _ltx_mode(cfg)
+                if ltx
+                else ("unet-4x" if self._current_unet else "plain"),
             }
-            if cfg.vr_8k:
+            if vr_profile(cfg):
                 started["profile"] = _VR8K_PROFILE  # #208: only when ticked
             get_task_log().record(
                 self.instance_id,
@@ -2043,6 +2350,41 @@ class JasnaInstance(MonitorInstance):
                 )
                 self._reader.start()
             return True
+
+    def _ltx_work_dir(self) -> Optional[Path]:
+        """#263 AC4b: the output folder's `.jasna-work`, created if needed; None
+        (launch without --working-directory) when it cannot be — a scratch-folder
+        problem never stops a restore."""
+        work = Path(self._cfg.jasna_output_folder) / _LTX_WORK_DIR
+        try:
+            work.mkdir(exist_ok=True)
+        except OSError as e:
+            log.warning(
+                "jasna: cannot use %s for LTX scratch (%s); Jasna keeps it next "
+                "to the output",
+                work,
+                e,
+            )
+            return None
+        return work
+
+    def _alert_ltx_model(self, emit: EventEmitter, missing: list[str]) -> None:
+        """#263 AC4: one alert per run while the LTX model is not downloaded."""
+        if self._ltx_model_alerted:
+            return
+        self._ltx_model_alerted = True
+        emit(
+            "alert",
+            f"{self._cfg.name}: LTX model not downloaded",
+            f"LTX model not downloaded: {', '.join(missing)} are not in Jasna's "
+            "model_weights\\ltx-restore folder (about 9 GB with fast mode, 15 GB "
+            "without). Jasna asks to download it when an LTX launch has a window: "
+            "answer y there (with capture progress on, TaskPaw opens that window for "
+            "the first such launch of a run, on Windows only). Until the model is "
+            "downloaded, the other 1080p files fail — you can also download it once "
+            "in Jasna's own app (pick LTX there).",
+            dedupe_key=f"{self.instance_id}:ltx:model",
+        )
 
     # ── reader thread (capture mode) ───────────────────────────────────────
     def _reader_loop(self, proc: subprocess.Popen) -> None:
@@ -2076,7 +2418,7 @@ class JasnaInstance(MonitorInstance):
             return
         line = buf.decode("utf-8", "replace")
         with self._lock:
-            new_progress = parse_progress_line(line, self._progress)
+            new_progress = parse_jasna_progress_line(line, self._progress)
             if new_progress is not self._progress:
                 self._progress = new_progress
             elif line.strip():
@@ -3553,7 +3895,13 @@ class JasnaInstance(MonitorInstance):
         if self._current_dims:
             dims = f" {self._current_dims[0]}x{self._current_dims[1]}"
         parts = [f"{label}{dims}"]
-        if self._cfg.vr_8k:
+        if ltx_launch(self._cfg, tier):
+            # #263: an LTX launch has no unet part and never the 8K VR profile
+            parts.append(_ltx_label(self._cfg))
+            if self._cfg.ltx_auto_split > 0:
+                parts.append(f"auto-split {self._cfg.ltx_auto_split}%")
+            return f" [{', '.join(parts)}]"
+        if vr_profile(self._cfg):
             parts.append("8K VR")
         if secondary_overridden(self._cfg.jasna_extra_args):
             # #208 N3: the extra args choose the secondary restoration (and
@@ -3578,6 +3926,8 @@ class JasnaInstance(MonitorInstance):
             parts.append(head)
         else:
             parts.append(state)
+        if m.get("ltx_stage"):
+            parts.append(f"LTX {m['ltx_stage']}")  # #263: the stage the % is of
         if "percent" in m:
             parts.append(f"{m['percent']}%")
         if m.get("eta"):
@@ -3650,6 +4000,10 @@ class JasnaPlugin(MonitorPlugin):
                 "whisperjav_exe_path",
                 "whisperjav_engine",
                 "whisperjav_extra_args",
+                "ltx_1080p",
+                "ltx_fast",
+                "ltx_auto_split",
+                "ltx_best",
                 "vr_8k",
                 "clip_size_1080p",
                 "clip_size_4k",
@@ -3669,6 +4023,9 @@ class JasnaPlugin(MonitorPlugin):
             "jasna_input_folder": {"ui:options": {"taskpawPath": "directory"}},
             "jasna_output_folder": {"ui:options": {"taskpawPath": "directory"}},
             "whisperjav_exe_path": {"ui:options": {"taskpawPath": "file"}},
+            # #263: what the wizard greys while 1080p LTX is ticked (one source
+            # with the launch rules).
+            "ltx_1080p": {"ui:options": {"taskpawLock": dict(_LTX_LOCK)}},
             # #208 N4: the values the wizard greys the overridden fields with —
             # the same constants the launch uses (one source).
             "vr_8k": {

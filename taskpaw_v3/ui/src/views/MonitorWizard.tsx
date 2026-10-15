@@ -124,9 +124,32 @@ export function MonitorWizard({
     return profile && typeof profile === "object" && !Array.isArray(profile)
       ? (profile as Record<string, string | number | boolean>) : undefined;
   }, [selected]);
+  // #263: the「1080p 档：使用 LTX」tickbox greys what LTX cannot use — the same
+  // one-source rule (`ltx_1080p.ui:options.taskpawLock`, jasna.py's _LTX_LOCK).
+  // While it is ticked the 8K VR profile is off at launch, so its lock never
+  // applies at the same time.
+  const ltxLock = useMemo(() => {
+    if (selected?.kind !== "plugin" || selected.plugin.type_id !== "jasna") return undefined;
+    const ui = selected.plugin.ui_schema as
+      | { ltx_1080p?: { "ui:options"?: { taskpawLock?: unknown } } } | undefined;
+    const lock = ui?.ltx_1080p?.["ui:options"]?.taskpawLock;
+    return lock && typeof lock === "object" && !Array.isArray(lock)
+      ? (lock as Record<string, string | number | boolean>) : undefined;
+  }, [selected]);
+  const ltxOn = ltxLock !== undefined && liveFormData.ltx_1080p === true;
+  const ltxLocked = ltxLock && ltxOn ? {
+    after: "ltx_1080p",
+    note: (
+      <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+        {t("wizard.ltxHint")}
+      </Typography>
+    ),
+    fields: Object.fromEntries(Object.entries(ltxLock).map(([k, value]) => [k, { value }])),
+  } : undefined;
+  const ltxReview = ltxLock !== undefined && formData.ltx_1080p === true;
   // While ticked, the profile's fields show greyed with the profile values and
   // the hint sits under the switch; rjsf keeps and submits the stored values.
-  const vr8kLocked = vr8kProfile && liveFormData.vr_8k === true ? {
+  const vr8kLocked = vr8kProfile && !ltxOn && liveFormData.vr_8k === true ? {
     after: "vr_8k",
     note: (
       <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
@@ -139,7 +162,7 @@ export function MonitorWizard({
     ),
     fields: Object.fromEntries(Object.entries(vr8kProfile).map(([k, value]) => [k, { value }])),
   } : undefined;
-  const vr8kReview = vr8kProfile && formData.vr_8k === true ? vr8kProfile : undefined;
+  const vr8kReview = vr8kProfile && !ltxReview && formData.vr_8k === true ? vr8kProfile : undefined;
 
   const formUiSchema = useMemo(() => {
     if (selected?.kind !== "plugin") return {};
@@ -286,7 +309,7 @@ export function MonitorWizard({
                 (selected.plugin.type_id === "jasna" && liveFormData.av_translate === true))
                 ? <FfmpegReminder whisperjav={typeof liveFormData.whisperjav_exe_path === "string"
                   ? liveFormData.whisperjav_exe_path : ""} /> : null}
-              locked={vr8kLocked}
+              locked={ltxLocked ?? vr8kLocked}
               typeId={selected.plugin.type_id}
             />
           </>
@@ -316,6 +339,8 @@ export function MonitorWizard({
           <>
             <Box sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, overflow: "hidden" }}>
               <ReviewRow k={t("wizard.svctype")} v={selected.kind === "preset" ? selected.preset.id : selected.plugin.type_id} />
+              {/* 1080p LTX (#263): booleans are otherwise not listed, so this row shows what it greys. */}
+              {selected.kind === "plugin" && ltxReview && <ReviewRow k={t("wizard.ltxRow")} v={t("wizard.ltxOn")} />}
               {/* 8K VR (#208): booleans are otherwise not listed, so this row is how the unet-4x override shows. */}
               {selected.kind === "plugin" && vr8kReview && <ReviewRow k={t("wizard.vr8kRow")} v={t("wizard.vr8kOn")} />}
               {selected.kind === "plugin"

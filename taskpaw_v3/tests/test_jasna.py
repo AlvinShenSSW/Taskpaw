@@ -134,10 +134,12 @@ class _Launcher:
         self._output = output
         self._on_init = on_init
         self.launches: list[list[str]] = []
+        self.kwargs: list[dict] = []  # #263: the Popen keyword arguments per launch
         self.procs: list[_FakePopen] = []
 
     def __call__(self, argv, creationflags=0, **kw):
         self.launches.append(list(argv))
+        self.kwargs.append(dict(kw))
         rc = self._rcs.pop(0) if self._rcs else 0
         if self._on_init is not None:
             self._on_init(len(self.launches))
@@ -201,7 +203,8 @@ def test_json_schema_exposes_the_tickbox_defaults():
     own = set(JasnaConfig.model_fields) - set(
         JasnaConfig.__bases__[0].model_fields  # type: ignore[attr-defined]
     )
-    assert len(own) == 20  # 15 restore + 4「AV 翻译」(#177) + 8K VR (#208)
+    # 15 restore + 4「AV 翻译」(#177) + 8K VR (#208) + 4 LTX (#263)
+    assert len(own) == 24
     for name in own:
         assert props[name].get("description"), f"{name} has no description"
 
@@ -323,11 +326,13 @@ def test_vr_8k_field_order_and_help_texts():
     )
     for name in ("unet4x_4k", "clip_size_4k", "temporal_overlap"):
         assert "8K VR overrides this at launch" in props[name]["description"]
-    # C4: directly before clip_size_1080p, after the WhisperJAV fields
+    # C4: directly before clip_size_1080p, after the WhisperJAV fields — with the
+    # #263 LTX block (which greys it) in between
     order = JasnaPlugin.ui_schema()["ui:order"]
+    assert order[order.index("whisperjav_extra_args") + 1] == "ltx_1080p"
     i = order.index("vr_8k")
     assert order[i - 1 : i + 2] == [
-        "whisperjav_extra_args",
+        "ltx_best",
         "vr_8k",
         "clip_size_1080p",
     ]
@@ -2014,3 +2019,553 @@ def test_tasklog_jasna_launch_error_no_secret(tmp_path, monkeypatch):
     assert "user:pass" not in str(_tasklog())
     assert not _tasklog("restore.started")
     inst.stop()
+
+
+# ── #263「1080p 档：使用 LTX」 ─────────────────────────────────────────────
+# Jasna 0.11.1 lines recorded on the owner's machine (trial runs, 2026-10-16).
+_LTX_SCAN = "LTX 1/4 scan:  45%|████▌     | 136/300 [00:01<00:01, 133.25frame/s]"
+_LTX_ENCODE = (
+    "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, "
+    "run 12:12 left]"
+)
+_LTX_DENOISE = (
+    "LTX 3/4 denoise: 100%|██████████| 120/120 [04:41<00:00,  2.34s/step, "
+    "run 04:57 left]"
+)
+_LTX_COMPOSE_SLOW = (
+    "LTX 4/4 compose:  10%|█         | 30/300 [00:40<03:38,  1.37s/frame, "
+    "run 03:20 left]"
+)
+_JASNA_CHECK = "Jasna: checked 14563/19444 files (74.9%)"
+_LTX_FILES = {
+    (False, False): "ltx-restore-alpha1-distill8-int8.safetensors.enc",
+    (False, True): "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc",
+    (True, False): "ltx-restore-alpha1-int8.safetensors.enc",
+    (True, True): "ltx-restore-alpha1-nvfp4.safetensors.enc",
+}
+
+
+def _ltx_model(home: Path, best: bool = False, fast: bool = True) -> None:
+    folder = home / "model_weights" / "ltx-restore"
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in (
+        _LTX_FILES[(best, fast)],
+        "vae.safetensors.enc",
+        "vae-decoder.safetensors.enc",
+    ):
+        (folder / name).write_bytes(b"x")
+
+
+def _ltx_argv(cfg: JasnaConfig, tier="1080p", work_dir=None, large=False) -> list[str]:
+    return build_argv(
+        cfg, "jasna.exe", Path("a.mp4"), Path("a.tmp.mp4"), tier, False, large, work_dir
+    )
+
+
+def test_ltx_defaults_and_schema():
+    c = _cfg()
+    assert c.ltx_1080p is False
+    assert c.ltx_fast is True  # standard LTX does not load on 8 GB (device matrix)
+    assert c.ltx_auto_split == 12
+    assert c.ltx_best is False
+    props = JasnaPlugin.json_schema()["properties"]
+    assert props["ltx_1080p"]["default"] is False
+    assert props["ltx_1080p"]["title"] == "1080p tier: restore with LTX"
+    assert props["ltx_1080p"]["description"].startswith(
+        "1080p tier only: 4K files and every other setting stay as they are."
+    )
+    assert props["ltx_fast"]["default"] is True
+    assert props["ltx_auto_split"]["default"] == 12
+    assert props["ltx_best"]["default"] is False
+    order = JasnaPlugin.ui_schema()["ui:order"]
+    i = order.index("ltx_1080p")
+    assert order[i : i + 5] == [
+        "ltx_1080p",
+        "ltx_fast",
+        "ltx_auto_split",
+        "ltx_best",
+        "vr_8k",
+    ]
+
+
+def test_ltx_auto_split_bounds():
+    for bad in (-1, 101):
+        with pytest.raises(ValueError):
+            _cfg(ltx_auto_split=bad)
+    assert _cfg(ltx_auto_split=0).ltx_auto_split == 0
+    assert _cfg(ltx_auto_split=100).ltx_auto_split == 100
+
+
+def test_ui_schema_carries_the_ltx_lock_from_the_constants():
+    lock = JasnaPlugin.ui_schema()["ltx_1080p"]["ui:options"]["taskpawLock"]
+    assert lock == J._LTX_LOCK == {"vr_8k": False, "unet4x_1080p": False}
+
+
+def test_ltx_launch_and_vr_profile_rules():
+    on = _cfg(ltx_1080p=True, vr_8k=True)
+    assert J.ltx_launch(on, "1080p") is True
+    assert J.ltx_launch(on, "4k") is False
+    assert J.vr_profile(on) is False  # owner rule: no VR while LTX is ticked
+    off = _cfg(vr_8k=True)
+    assert J.ltx_launch(off, "1080p") is False
+    assert J.vr_profile(off) is True
+
+
+def test_build_argv_ltx_1080p_launch_exact():
+    cfg = _cfg(ltx_1080p=True, jasna_extra_args="--device cuda:1")
+    wd = Path("out") / ".jasna-work"
+    assert _ltx_argv(cfg, work_dir=wd) == [
+        "jasna.exe",
+        "--input",
+        "a.mp4",
+        "--output",
+        "a.tmp.mp4",
+        "--max-clip-size",
+        "90",
+        "--temporal-overlap",
+        "8",
+        "--secondary-restoration",
+        "none",
+        "--codec",
+        "hevc",
+        "--cq",
+        "24",
+        "--detection-model",
+        "rfdetr-v6",
+        "--restoration-model-name",
+        "ltx",
+        "--ltx-fast",
+        "--ltx-auto-split",
+        "12",
+        "--working-directory",
+        str(wd),
+        "--device",
+        "cuda:1",
+    ]
+
+
+def test_build_argv_ltx_variants():
+    best = _ltx_argv(
+        _cfg(ltx_1080p=True, ltx_best=True, ltx_fast=False, ltx_auto_split=0)
+    )
+    assert best[best.index("--restoration-model-name") + 1] == "ltx-undistilled"
+    assert "--ltx-fast" not in best and "--ltx-auto-split" not in best
+    assert "--working-directory" not in best  # work_dir None → not emitted
+    # an LTX launch never carries unet-4x, whatever the caller resolved
+    forced = build_argv(
+        _cfg(ltx_1080p=True), "j", Path("a.mp4"), Path("s.mp4"), "1080p", True, False
+    )
+    assert forced[forced.index("--secondary-restoration") + 1] == "none"
+
+
+def test_build_argv_ltx_ignores_the_stored_8k_vr_profile():
+    cfg = _cfg(ltx_1080p=True, vr_8k=True, clip_size_1080p=40, temporal_overlap=10)
+    argv = _ltx_argv(cfg)
+    assert "--vr-mode" not in argv
+    assert argv[argv.index("--detection-model") + 1] == "rfdetr-v6"
+    assert argv[argv.index("--temporal-overlap") + 1] == "10"
+    assert argv[argv.index("--max-clip-size") + 1] == "40"
+    # the 4K tier of the same task: the plain BasicVSR++ argv, no VR profile
+    four_k = _ltx_argv(cfg, tier="4k", large=True)
+    assert four_k == _ltx_argv(
+        _cfg(clip_size_1080p=40, temporal_overlap=10), tier="4k", large=True
+    )
+    assert "--restoration-model-name" not in four_k
+    assert four_k[four_k.index("--detection-model") + 1] == "rfdetr-v6-large"
+
+
+def test_build_argv_basicvsrpp_unchanged_with_ltx_options_stored():
+    stored = _cfg(ltx_fast=False, ltx_auto_split=30, ltx_best=True)
+    for tier in ("1080p", "4k"):
+        assert _ltx_argv(stored, tier=tier, work_dir=Path("w")) == _ltx_argv(
+            _cfg(), tier=tier
+        )
+
+
+@pytest.mark.parametrize("ltx_on", [False, True])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "--ltx-fast",
+        "--no-ltx-fast",
+        "--ltx-auto-split 5",
+        "--ltx-auto-split=5",
+        "--ltx-seed 7",
+        "--ltx-s 7",  # an argparse abbreviation
+        "--ltx-large-canvas",
+        "--no-ltx-large-canvas",
+        "--ltx-trial",
+        "--no-ltx-trial",
+        "--ltx",
+        "--restoration-model-name ltx",
+        "--restoration-model-n=ltx",
+    ],
+)
+def test_ltx_options_are_always_rejected_in_extra_args(ltx_on, bad):
+    with pytest.raises(ValueError, match="LTX options|TaskPaw owns"):
+        _cfg(ltx_1080p=ltx_on, jasna_extra_args=bad)
+
+
+def test_ltx_trial_rejection_explains_the_unrestored_copy():
+    with pytest.raises(ValueError, match="unrestored"):
+        _cfg(jasna_extra_args="--ltx-trial")
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--secondary-restoration tvai",
+        "--secondary-restoration=none",
+        "--sec none",
+        "--denoise low",
+        "--no-compile-basicvsrpp",
+        "--stream",
+        "--vr-mode off",
+        "--vr-m sbs",
+        "--restoration-model-path C:/w",
+        "--working-directory C:/w",
+        "--working C:/w",
+    ],
+)
+def test_ltx_conditional_flags(flag):
+    with pytest.raises(ValueError, match="with 1080p LTX ticked"):
+        _cfg(ltx_1080p=True, jasna_extra_args=flag)
+    assert _cfg(jasna_extra_args=flag).jasna_extra_args == flag  # accepted when off
+
+
+@pytest.mark.parametrize("flag", ["--fmp4", "--segments 0:00-0:05"])
+def test_fmp4_and_segments_only_clash_with_auto_split(flag):
+    with pytest.raises(ValueError, match="with 1080p LTX ticked"):
+        _cfg(ltx_1080p=True, jasna_extra_args=flag)
+    assert _cfg(ltx_1080p=True, ltx_auto_split=0, jasna_extra_args=flag)
+    assert _cfg(jasna_extra_args=flag)
+
+
+@pytest.mark.parametrize(
+    "ok",
+    [
+        "--denoise-step after_secondary",
+        "--compile-basicvsrpp",
+        "--device cuda:1",
+        "--lut x.cube",
+    ],
+)
+def test_flags_ltx_accepts_stay_accepted(ok):
+    assert _cfg(ltx_1080p=True, jasna_extra_args=ok).jasna_extra_args == ok
+
+
+def test_vr_8k_stays_valid_with_ltx_ticked():
+    # the greyed box cannot be unticked, so rejecting the pair would trap the form
+    c = _cfg(ltx_1080p=True, vr_8k=True)
+    assert c.vr_8k is True and c.ltx_1080p is True
+
+
+@pytest.mark.parametrize(("best", "fast"), list(_LTX_FILES))
+def test_ltx_missing_files_per_variant(tmp_path, best, fast):
+    assert J.ltx_missing_files(str(tmp_path), best, fast) == [
+        _LTX_FILES[(best, fast)],
+        "vae.safetensors.enc",
+        "vae-decoder.safetensors.enc",
+    ]
+    _ltx_model(tmp_path, best, fast)
+    assert J.ltx_missing_files(str(tmp_path), best, fast) == []
+    assert J.ltx_missing_files(None, best, fast) != []
+
+
+def test_mixed_queue_ltx_on_1080p_basicvsrpp_on_4k(tmp_path, monkeypatch):
+    cfg, inp, out, home = _managed(
+        tmp_path, ltx_1080p=True, unet4x_1080p=True, unet4x_4k=True
+    )
+    _ltx_model(home)
+    _videos(inp, "a.mp4", "b.mp4")
+    probe = _probe({"b.mp4": (3840, 2160)})
+    launcher = _Launcher([1, 0, 0])  # the LTX launch of a fails once
+    _patch(monkeypatch, launcher, probe)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    for _ in range(3):
+        inst.check(emit)
+
+    assert launcher.inputs() == ["a.mp4", "a.mp4", "b.mp4"]
+    for i in (0, 1):  # the LTX launch and its plain retry
+        assert launcher.arg(i, "--restoration-model-name") == "ltx"
+        assert launcher.secondary(i) == "none"
+        assert launcher.arg(i, "--working-directory") == str(out / ".jasna-work")
+    assert (out / ".jasna-work").is_dir()
+    assert "--restoration-model-name" not in launcher.launches[2]
+    assert "--working-directory" not in launcher.launches[2]
+    assert launcher.secondary(2) == "unet-4x"  # the 4K tier as before
+    modes = [r["data"]["mode"] for r in _tasklog("restore.started")]
+    assert modes == ["ltx fast auto-split 12%", "ltx fast auto-split 12%", "unet-4x"]
+    assert inst._run_unet_disabled == {}
+    assert not [e for e in evs if "unet-4x disabled" in e[1]]
+    assert not [e for e in evs if e[3] == "j1:ltx:model"]  # the model is there
+    assert inst._done == 2 and inst._failed == 0
+
+
+def test_ltx_task_never_logs_the_8k_vr_profile_or_alerts_for_its_detector(
+    tmp_path, monkeypatch
+):
+    cfg, inp, _out, home = _managed(tmp_path, ltx_1080p=True, vr_8k=True)
+    _ltx_model(home)
+    _videos(inp, "a.mp4", "b.mp4")
+    launcher = _Launcher([0, 0])
+    _patch(monkeypatch, launcher, _probe({"b.mp4": (8192, 4096)}))
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    for _ in range(2):
+        inst.check(emit)
+    assert not [e for e in evs if e[3] == "j1:vr8k:weights"]
+    assert all("profile" not in r["data"] for r in _tasklog("restore.started"))
+    assert "--vr-mode" not in launcher.launches[1]  # 4K: BasicVSR++, VR off
+    assert launcher.arg(1, "--detection-model") == "rfdetr-v6"
+
+
+def test_capture_launches_close_stdin_console_launches_do_not(tmp_path, monkeypatch):
+    for capture, expect in ((True, subprocess.DEVNULL), (False, None)):
+        cfg, inp, _out, _home = _managed(
+            tmp_path / str(capture), jasna_capture_progress=capture
+        )
+        _videos(inp, "a.mp4")
+        launcher = _Launcher([None])
+        _patch(monkeypatch, launcher)
+        inst = JasnaInstance("j1", cfg)
+        _evs, emit = _events()
+        inst.start(emit)
+        assert launcher.kwargs[0].get("stdin") == expect
+        inst.stop(timeout=0.5)
+
+
+def _missing_model_run(tmp_path, monkeypatch, windows: bool, capture: bool = True):
+    cfg, inp, _out, _home = _managed(
+        tmp_path, ltx_1080p=True, jasna_capture_progress=capture
+    )
+    _videos(inp, "a.mp4", "b.mp4")
+    launcher = _Launcher([1, 1, None])
+    _patch(monkeypatch, launcher)
+    monkeypatch.setattr(J, "_console_fallback_allowed", lambda: windows)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    for _ in range(2):
+        inst.check(emit)
+    return launcher, evs, inst
+
+
+def test_missing_model_opens_one_console_window_per_run_on_windows(
+    tmp_path, monkeypatch
+):
+    launcher, evs, inst = _missing_model_run(tmp_path, monkeypatch, windows=True)
+    assert launcher.n == 3  # a, a's retry, b
+    first, retry, nxt = launcher.kwargs
+    assert "stdout" not in first and "stdin" not in first  # its own window
+    for kw in (retry, nxt):  # later launches captured again
+        assert kw.get("stdout") is subprocess.PIPE
+        assert kw.get("stdin") == subprocess.DEVNULL
+    alerts = [e for e in evs if e[3] == "j1:ltx:model"]
+    assert len(alerts) == 1 and alerts[0][0] == "alert"
+    msg = alerts[0][2]
+    assert "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc" in msg
+    assert "answer y there" in msg and "on Windows only" in msg
+    inst.stop(timeout=0.5)
+
+
+def test_missing_model_never_opens_a_window_off_windows(tmp_path, monkeypatch):
+    launcher, evs, inst = _missing_model_run(tmp_path, monkeypatch, windows=False)
+    assert all(kw.get("stdin") == subprocess.DEVNULL for kw in launcher.kwargs)
+    assert len([e for e in evs if e[3] == "j1:ltx:model"]) == 1
+    inst.stop(timeout=0.5)
+
+
+def test_missing_model_fallback_resets_on_the_next_start(tmp_path, monkeypatch):
+    launcher, _evs, inst = _missing_model_run(tmp_path, monkeypatch, windows=True)
+    inst.stop(timeout=0.5)
+    _evs2, emit = _events()
+    inst.start(emit)
+    assert "stdout" not in launcher.kwargs[-1]  # a new run gets its one window again
+    inst.stop(timeout=0.5)
+
+
+def test_missing_model_in_console_mode_alerts_once_and_changes_nothing(
+    tmp_path, monkeypatch
+):
+    launcher, evs, inst = _missing_model_run(
+        tmp_path, monkeypatch, windows=True, capture=False
+    )
+    assert all("stdout" not in kw and "stdin" not in kw for kw in launcher.kwargs)
+    assert len([e for e in evs if e[3] == "j1:ltx:model"]) == 1
+    inst.stop(timeout=0.5)
+
+
+@pytest.mark.parametrize("ltx_on,dims", [(False, (1920, 1080)), (True, (3840, 2160))])
+def test_no_model_alert_without_an_ltx_launch(tmp_path, monkeypatch, ltx_on, dims):
+    cfg, inp, _out, _home = _managed(tmp_path, ltx_1080p=ltx_on)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher, _probe(default=dims))
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    assert not [e for e in evs if e[3] == "j1:ltx:model"]
+    inst.stop(timeout=0.5)
+
+
+def _age(path: Path, seconds: float = 3600) -> None:
+    t = time.time() - seconds
+    os.utime(path, (t, t))
+
+
+def test_start_sweeps_stale_entries_inside_jasna_work_only(tmp_path, monkeypatch):
+    cfg, _inp, out, _home = _managed(tmp_path)
+    work = out / ".jasna-work"
+    (work / ".ltx-old").mkdir(parents=True)
+    (work / ".ltx-old" / "000001.0-0.final.pt").write_bytes(b"x")
+    _age(work / ".ltx-old")
+    (work / "old.tmp").write_bytes(b"x")
+    _age(work / "old.tmp")
+    (work / ".ltx-fresh").mkdir()
+    outside = out / ".ltx-outside"
+    outside.mkdir()
+    _age(outside)
+    launcher = _Launcher([])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)  # empty input folder → idle, but the sweep ran
+    assert not (work / ".ltx-old").exists()
+    assert not (work / "old.tmp").exists()
+    assert (work / ".ltx-fresh").is_dir()
+    assert outside.is_dir()
+
+
+def _link_dir(link: Path, target: Path) -> None:
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return
+    except (OSError, NotImplementedError):
+        pass
+    if sys.platform == "win32":
+        import _winapi
+
+        try:
+            _winapi.CreateJunction(str(target), str(link))
+            return
+        except OSError:
+            pass
+    pytest.skip("cannot create a directory link here")
+
+
+def test_start_never_sweeps_through_a_linked_jasna_work(tmp_path, monkeypatch):
+    cfg, _inp, out, _home = _managed(tmp_path)
+    target = tmp_path / "elsewhere"
+    (target / "precious").mkdir(parents=True)
+    _age(target / "precious")
+    _link_dir(out / ".jasna-work", target)
+    launcher = _Launcher([])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    assert (target / "precious").is_dir()
+
+
+def test_a_file_named_jasna_work_never_stops_a_restore(tmp_path, monkeypatch, caplog):
+    cfg, inp, out, home = _managed(tmp_path, ltx_1080p=True)
+    _ltx_model(home)
+    (out / ".jasna-work").write_bytes(b"not a folder")
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
+        inst.start(emit)
+    assert launcher.n == 1
+    assert "--working-directory" not in launcher.launches[0]
+    assert launcher.arg(0, "--restoration-model-name") == "ltx"
+    assert any(".jasna-work" in r.getMessage() for r in caplog.records)
+    inst.stop(timeout=0.5)
+
+
+def test_parse_jasna_progress_ltx_lines():
+    p = J.parse_jasna_progress_line(_LTX_SCAN, {})
+    assert p == {"percent": 45, "fps": 133.25, "ltx_stage": "1/4 scan"}
+    p = J.parse_jasna_progress_line(_LTX_ENCODE, p)
+    assert p == {
+        "percent": 52,
+        "fps": 5.62,
+        "eta": "12:12",
+        "ltx_stage": "2/4 encode",
+    }
+    p = J.parse_jasna_progress_line(_LTX_DENOISE, p)  # s/step → no fps
+    assert p == {"percent": 100, "eta": "04:57", "ltx_stage": "3/4 denoise"}
+    p = J.parse_jasna_progress_line(_LTX_COMPOSE_SLOW, p)  # s/frame → no fps
+    assert p == {"percent": 10, "eta": "03:20", "ltx_stage": "4/4 compose"}
+
+
+def test_parse_jasna_progress_drops_stage_numbers_and_keeps_identity():
+    prev = {
+        "percent": 3,
+        "elapsed": "00:10",
+        "processed_frames": 9,
+        "remaining_frames": 1,
+    }
+    assert J.parse_jasna_progress_line(_LTX_SCAN, prev) == {
+        "percent": 45,
+        "fps": 133.25,
+        "ltx_stage": "1/4 scan",
+    }
+    for line in (_JASNA_CHECK, "Jasna: installation verified.", "some log line", ""):
+        assert J.parse_jasna_progress_line(line, prev) is prev
+    # a BasicVSR++ progress line after an LTX one drops the stage
+    after = J.parse_jasna_progress_line(
+        _PROGRESS.decode().strip(), {"ltx_stage": "1/4 scan"}
+    )
+    assert "ltx_stage" not in after and after["percent"] == 47
+
+
+def test_ltx_stage_rides_the_metrics_and_the_detail(tmp_path):
+    cfg, _inp, _out, _home = _managed(
+        tmp_path, ltx_1080p=True, jasna_capture_progress=True
+    )
+    inst = JasnaInstance("j1", cfg)
+    inst._started = True
+    inst._current = Path("a.mp4")
+    inst._current_tier = "1080p"
+    inst._current_dims = (1920, 1080)
+    inst._consume_output(_JASNA_CHECK.encode())
+    assert inst._progress == {}  # the install check is not progress
+    inst._consume_output(_LTX_ENCODE.encode())
+    st = inst._build_status("running")
+    assert st.metrics["ltx_stage"] == "2/4 encode"
+    assert st.detail == (
+        "running: a.mp4 [1080p 1920x1080, LTX fast, auto-split 12%] · LTX 2/4 encode"
+        " · 52% · ETA 12:12 · 5.6 fps"
+    )
+
+
+def test_detail_names_the_ltx_variant_and_keeps_4k_as_before(tmp_path):
+    cfg, _inp, _out, _home = _managed(
+        tmp_path,
+        ltx_1080p=True,
+        ltx_best=True,
+        ltx_fast=False,
+        ltx_auto_split=0,
+        vr_8k=True,
+    )
+    inst = JasnaInstance("j1", cfg)
+    inst._current = Path("a.mp4")
+    inst._current_tier = "1080p"
+    inst._current_dims = (1920, 1080)
+    assert inst._build_status("running").detail == (
+        "running: a.mp4 [1080p 1920x1080, LTX best]"
+    )
+    inst._current_tier = "4k"
+    inst._current_dims = (3840, 2160)
+    inst._current_unet = True
+    # 8K VR is stored but off under LTX
+    assert inst._build_status("running").detail == (
+        "running: a.mp4 [4K 3840x2160, unet-4x]"
+    )

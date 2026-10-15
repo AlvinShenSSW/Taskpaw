@@ -42,6 +42,26 @@ describe("i18n", () => {
     expect(i18n.t("wizard.vr8kOn")).toBe("on (4K tier without unet-4x)");
   });
 
+  it("carries the 1080p LTX hint and review-row strings in zh and en (#263)", () => {
+    const zh = i18n.t("wizard.ltxHint");
+    for (const part of ["只有 1080p 档的文件用 LTX", "4K 档和其他设置都按原来的配置", "unet-4x",
+      "「8K VR」", "灰显", "取消勾选后恢复", "约 9 GB", "约 15 GB", "输入 y", "整片都用 LTX",
+      "从头重跑当前影片"]) {
+      expect(zh).toContain(part);
+    }
+    expect(i18n.t("wizard.ltxRow")).toBe("LTX");
+    expect(i18n.t("wizard.ltxOn")).toBe("仅 1080p 档（不用 8K VR 和 1080p 档 unet-4x）");
+    setLang("en");
+    const en = i18n.t("wizard.ltxHint");
+    for (const part of ["only the 1080p-tier files use LTX", "4K files and every other setting stay as they are",
+      "8K VR", "greyed", "untick", "about 9 GB", "15 GB", "type y", "whole film with LTX",
+      "restarts the current film"]) {
+      expect(en).toContain(part);
+    }
+    expect(i18n.t("wizard.ltxRow")).toBe("LTX");
+    expect(i18n.t("wizard.ltxOn")).toBe("1080p tier only (without 8K VR and the 1080p unet-4x)");
+  });
+
   it("does not throw when reporting the language outside a Tauri shell (#108)", () => {
     // No window.__TASKPAW__ in the test env → the shell sync (set_ui_lang) must
     // be a safe no-op rather than blowing up the browser/dev path.
