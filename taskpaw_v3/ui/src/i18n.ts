@@ -191,6 +191,9 @@ const en = {
     vr8kHint: "8K VR is on: every file of this task is processed as SBS VR (put 2D films in another task). Launches always use the {{detection}} detection model, --vr-mode sbs, temporal overlap {{overlap}}, 4K-tier clip size {{clip}} and no unet-4x on the 4K tier. The saved values in the greyed fields do not change and apply again when you untick. Saving a running task restarts the current film from the beginning.",
     vr8kRow: "8K VR",
     vr8kOn: "on (4K tier without unet-4x)",
+    ltxHint: "1080p LTX is on: only the 1080p-tier files use LTX; 4K files and every other setting stay as they are (the 4K tier keeps BasicVSR++ and its unet-4x). LTX gives more detail but is much slower, and it supports neither VR side-by-side video nor unet-4x, so 8K VR and the 1080p unet-4x are greyed and not used — their saved values do not change and apply again when you untick. On the first LTX launch Jasna asks in its window whether to download the model (about 9 GB with fast mode, 15 GB without): type y. When a film has no safe cut points Jasna skips \"LTX only for big mosaics\" and restores the whole film with LTX; small mosaics restored by BasicVSR++ get no unet-4x either. Saving a running task restarts the current film from the beginning.",
+    ltxRow: "LTX",
+    ltxOn: "1080p tier only (without 8K VR and the 1080p unet-4x)",
   },
   services: {
     lada: "Subtitle/translation pipeline — files, fps, GPU.",
@@ -545,6 +548,9 @@ const zh: typeof en = {
     vr8kHint: "已勾选 8K VR：这个任务的所有文件都按 SBS VR 处理（2D 影片请放到另一个任务）。启动时固定使用 {{detection}} 检测模型、--vr-mode sbs、时序重叠 {{overlap}}、4K 档片段长度 {{clip}}、4K 档不用 unet-4x。灰显字段里保存的原值不会改变，取消勾选后恢复生效。运行中的任务保存后会从头重跑当前影片。",
     vr8kRow: "8K VR",
     vr8kOn: "已勾选（4K 档不用 unet-4x）",
+    ltxHint: "已勾选：只有 1080p 档的文件用 LTX，4K 档和其他设置都按原来的配置（4K 档继续用 BasicVSR++ 和它的 unet-4x）。LTX 细节更多但慢很多；它不支持 VR 左右并排视频和 unet-4x，所以「8K VR」和「1080p 档：使用 unet-4x 二次修复」灰显、不使用，保存的原值不变，取消勾选后恢复。第一次用 LTX 时 Jasna 会弹出窗口询问是否下载模型（快速模式约 9 GB，不开快速约 15 GB），输入 y。影片没有合适切点时 Jasna 会跳过「LTX 仅用于大马赛克」，整片都用 LTX；小马赛克走 BasicVSR++ 时也不用 unet-4x。运行中的任务保存后会从头重跑当前影片。",
+    ltxRow: "LTX",
+    ltxOn: "仅 1080p 档（不用 8K VR 和 1080p 档 unet-4x）",
   },
   services: {
     lada: "字幕/翻译流水线 —— 文件、帧率、GPU。",

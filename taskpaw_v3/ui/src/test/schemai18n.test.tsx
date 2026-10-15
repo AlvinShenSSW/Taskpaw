@@ -108,6 +108,32 @@ describe("localizeSchema (#121)", () => {
     expect(p.jasna_extra_args.description).toContain("勾选「8K VR」时，--vr-mode 和 --detection-model-path 也会被拒绝");
   });
 
+  it("translates the jasna 1080p LTX fields and the clauses on the fields it greys (#263)", () => {
+    const s: RJSFSchema = {
+      type: "object",
+      properties: Object.fromEntries(
+        ["ltx_1080p", "ltx_fast", "ltx_auto_split", "ltx_best", "vr_8k", "unet4x_1080p", "jasna_extra_args"]
+          .map((k) => [k, { type: "string", title: k, description: "English" }]),
+      ),
+    };
+    const p = localizeSchema(s, "jasna", "zh-CN").properties as Record<
+      string,
+      { title: string; description?: string }
+    >;
+    expect(fieldLabel("ltx_1080p", "jasna", "zh-CN")).toBe("1080p 档：使用 LTX");
+    expect(p.ltx_1080p.description).toContain("仅 1080p 档：4K 档的文件和其他所有设置都按原来的配置");
+    expect(p.ltx_fast.title).toBe("LTX 快速模式");
+    expect(p.ltx_fast.description).toContain("RTX 50");
+    expect(p.ltx_auto_split.title).toBe("LTX 仅用于大马赛克（%）");
+    expect(p.ltx_auto_split.description).toContain("12");
+    expect(p.ltx_best.title).toBe("LTX 最佳模型");
+    expect(p.ltx_best.description).toContain("ltx-undistilled");
+    for (const k of ["vr_8k", "unet4x_1080p"]) {
+      expect(p[k].description).toContain("勾选「1080p 档：使用 LTX」时不使用");
+    }
+    expect(p.jasna_extra_args.description).toContain("LTX 参数（--ltx-*、--restoration-model-name）一律拒绝");
+  });
+
   it("does not cross-attribute a same-named field across plugins", () => {
     const s: RJSFSchema = { type: "object", properties: { host: { type: "string", title: "Host" } } };
     // comfyui.host has a description; tcp_check.host is just 主机 (no ComfyUI wording).
