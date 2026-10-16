@@ -128,10 +128,30 @@ describe("localizeSchema (#121)", () => {
     expect(p.ltx_auto_split.description).toContain("12");
     expect(p.ltx_best.title).toBe("LTX 最佳模型");
     expect(p.ltx_best.description).toContain("ltx-undistilled");
-    for (const k of ["vr_8k", "unet4x_1080p"]) {
-      expect(p[k].description).toContain("勾选「1080p 档：使用 LTX」时不使用");
-    }
+    // #265: 8K VR is off under either LTX tickbox; the 1080p unet-4x under the 1080p one.
+    expect(p.vr_8k.description).toContain("勾选任一「使用 LTX」时不使用");
+    expect(p.unet4x_1080p.description).toContain("勾选「1080p 档：使用 LTX」时不使用");
     expect(p.jasna_extra_args.description).toContain("LTX 参数（--ltx-*、--restoration-model-name）一律拒绝");
+  });
+
+  it("translates the jasna 4K LTX and large-canvas fields (#265)", () => {
+    const s: RJSFSchema = {
+      type: "object",
+      properties: Object.fromEntries(
+        ["ltx_4k", "ltx_large_canvas", "unet4x_4k", "ltx_fast"]
+          .map((k) => [k, { type: "string", title: k, description: "English" }]),
+      ),
+    };
+    const p = localizeSchema(s, "jasna", "zh-CN").properties as Record<
+      string,
+      { title: string; description?: string }
+    >;
+    expect(p.ltx_4k.title).toBe("4K 档：使用 LTX");
+    expect(p.ltx_4k.description).toContain("8 GB");
+    expect(p.ltx_large_canvas.title).toBe("LTX 大马赛克高清");
+    expect(p.ltx_large_canvas.description).toContain("16 GB");
+    expect(p.unet4x_4k.description).toContain("勾选「4K 档：使用 LTX」时不使用");
+    expect(p.ltx_fast.description).toContain("RTX 4090");
   });
 
   it("does not cross-attribute a same-named field across plugins", () => {

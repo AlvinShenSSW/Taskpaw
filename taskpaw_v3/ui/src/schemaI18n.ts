@@ -178,7 +178,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     unet4x_4k: {
       title: "4K 档：使用 unet-4x 二次修复",
       description:
-        "默认关：8 GB 显存放不下 4K 的 unet-4x。4K 档指像素数 > 1920×1080×1.5（约 3.1 MP，即 2560×1440 及以上）的视频。显存更大时可以打开。勾选「8K VR」时，启动时由 8K VR 覆盖此项。",
+        "默认关：8 GB 显存放不下 4K 的 unet-4x。4K 档指像素数 > 1920×1080×1.5（约 3.1 MP，即 2560×1440 及以上）的视频。显存更大时可以打开。勾选「8K VR」时，启动时由 8K VR 覆盖此项。勾选「4K 档：使用 LTX」时不使用。",
     },
     av_translate: {
       title: "AV 翻译",
@@ -195,27 +195,37 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     ltx_1080p: {
       title: "1080p 档：使用 LTX",
       description:
-        "仅 1080p 档：4K 档的文件和其他所有设置都按原来的配置。勾选后 1080p 档的文件用 Jasna 的赞助者模型 LTX 修复（需 Jasna 0.11.1 及以上；细节更多、慢很多；需 NVIDIA RTX 显卡）。勾选时「8K VR」和「1080p 档：使用 unet-4x 二次修复」不使用（LTX 两者都不支持），它们保存的值不变，取消勾选后恢复。第一次用 LTX 时会在 Jasna 窗口里询问是否下载模型（快速模式约 9 GB，不开快速约 15 GB）。运行中的任务保存后会从头重跑当前影片。",
+        "仅 1080p 档：4K 档的文件和其他所有设置都按原来的配置（4K 档有自己的 LTX 勾选框）。勾选后 1080p 档的文件用 Jasna 的赞助者模型 LTX 修复（需 Jasna 0.11.1 及以上；细节更多、慢很多；需 NVIDIA RTX 显卡）。勾选时「8K VR」和「1080p 档：使用 unet-4x 二次修复」不使用（LTX 两者都不支持），它们保存的值不变，取消勾选后恢复。第一次用 LTX 时会在 Jasna 窗口里询问是否下载模型（快速模式约 9 GB，不开快速约 15 GB）。运行中的任务保存后会从头重跑当前影片。",
     },
     ltx_fast: {
       title: "LTX 快速模式",
       description:
-        "--ltx-fast：快约 1.4 倍，细节略少，下载更小。仅限 RTX 50 系显卡（其他显卡 Jasna 会报错）。默认开：标准 LTX 模型在 8 GB 显卡上放不下。只在勾选「1080p 档：使用 LTX」时使用。",
+        "--ltx-fast：快约 1.4 倍，细节略少，下载更小。仅限 RTX 50 系显卡：TaskPaw 启动时检测显卡，没有 RTX 50 系（例如 RTX 4090）就不用它。默认开：标准 LTX 模型在 8 GB 显卡上放不下。只在勾选「使用 LTX」时使用。",
     },
     ltx_auto_split: {
       title: "LTX 仅用于大马赛克（%）",
       description:
-        "--ltx-auto-split，按视频高度的百分比：不小于这个尺寸的马赛克用 LTX，更小的用 BasicVSR++（不带 unet-4x）。12 是 Jasna 建议的起点；0 = 整片都用 LTX。影片没有合适切点时 Jasna 会跳过拆分、整片用 LTX。只在勾选「1080p 档：使用 LTX」时使用。",
+        "--ltx-auto-split，按视频高度的百分比：不小于这个尺寸的马赛克用 LTX，更小的用 BasicVSR++（不带 unet-4x）。12 是 Jasna 建议的起点；0 = 整片都用 LTX。影片没有合适切点时 Jasna 会跳过拆分、整片用 LTX。4K 片的小马赛克走 BasicVSR++ 时可能略糊，追求画质可设 0。只在勾选「使用 LTX」时使用。",
     },
     ltx_best: {
       title: "LTX 最佳模型",
       description:
-        "--restoration-model-name ltx-undistilled：细节略多，慢约 1.5–1.8 倍，需要单独下载模型。只在勾选「1080p 档：使用 LTX」时使用。",
+        "--restoration-model-name ltx-undistilled：细节略多，慢约 1.5–1.8 倍，需要单独下载模型。只在勾选「使用 LTX」时使用。",
+    },
+    ltx_4k: {
+      title: "4K 档：使用 LTX",
+      description:
+        "4K 档的文件也用 LTX 修复。需要大显存显卡：8 GB 显卡上 4K LTX 会在最后阶段失败（已实测，TaskPaw 会提醒一次），24 GB 的 RTX 4090 足够。勾选时「8K VR」和「4K 档：使用 unet-4x 二次修复」不使用，保存的值不变。LTX 失败的影片不会马上重跑，下次启动时再试。运行中的任务保存后会从头重跑当前影片。",
+    },
+    ltx_large_canvas: {
+      title: "LTX 大马赛克高清",
+      description:
+        "--ltx-large-canvas：大马赛克按 768 px 而不是 512 px 修复，特写和 4K 细节更多，这些片段慢约 3 倍。只有每张显卡都有 16 GB 及以上显存时才会使用（TaskPaw 启动时检测）：8 GB 显卡上实测连 1080p 都会失败，所以不会传给它。只在勾选「使用 LTX」时使用。",
     },
     vr_8k: {
       title: "8K VR",
       description:
-        "勾选后，这个任务的所有文件都按 8K SBS VR 处理：启动时使用 VR180 检测模型 rfdetr-vr-v1、--vr-mode sbs、时序重叠 8、4K 档片段长度 30，4K 档不用 unet-4x。被覆盖的字段保留各自保存的值，取消勾选后重新生效。2D 影片请放到另一个任务。运行中的任务保存这个设置后会从头重跑当前影片。勾选「1080p 档：使用 LTX」时不使用。",
+        "勾选后，这个任务的所有文件都按 8K SBS VR 处理：启动时使用 VR180 检测模型 rfdetr-vr-v1、--vr-mode sbs、时序重叠 8、4K 档片段长度 30，4K 档不用 unet-4x。被覆盖的字段保留各自保存的值，取消勾选后重新生效。2D 影片请放到另一个任务。运行中的任务保存这个设置后会从头重跑当前影片。勾选任一「使用 LTX」时不使用。",
     },
     clip_size_1080p: {
       title: "1080p 档片段长度",
@@ -249,7 +259,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     jasna_extra_args: {
       title: "额外参数",
       description:
-        "原样追加到命令行末尾的额外参数，例如 --device cuda:1。不要在这里重复 TaskPaw 已经控制的参数（--input --output --max-clip-size --temporal-overlap --codec --cq --detection-model）。特例：在这里写 --secondary-restoration（如 tvai / rtx-super-res / none）会对每个文件覆盖上面两个勾选框，并关闭自动的 unet-4x 降级重试。另外 --encoder-settings cq= 与上面的 CQ 冲突，Jasna 自己会报错。勾选「8K VR」时，--vr-mode 和 --detection-model-path 也会被拒绝。LTX 参数（--ltx-*、--restoration-model-name）一律拒绝，请用上面的 LTX 选项；勾选「1080p 档：使用 LTX」时，--secondary-restoration、--denoise、--no-compile-basicvsrpp、--stream、--vr-mode、--restoration-model-path、--working-directory 也会被拒绝（开启「LTX 仅用于大马赛克」时还有 --fmp4 和 --segments）。",
+        "原样追加到命令行末尾的额外参数，例如 --device cuda:1。不要在这里重复 TaskPaw 已经控制的参数（--input --output --max-clip-size --temporal-overlap --codec --cq --detection-model）。特例：在这里写 --secondary-restoration（如 tvai / rtx-super-res / none）会对每个文件覆盖上面两个勾选框，并关闭自动的 unet-4x 降级重试。另外 --encoder-settings cq= 与上面的 CQ 冲突，Jasna 自己会报错。勾选「8K VR」时，--vr-mode 和 --detection-model-path 也会被拒绝。LTX 参数（--ltx-*、--restoration-model-name）一律拒绝，请用上面的 LTX 选项；勾选任一「使用 LTX」时，--secondary-restoration、--denoise、--no-compile-basicvsrpp、--stream、--vr-mode、--restoration-model-path、--working-directory 也会被拒绝（开启「LTX 仅用于大马赛克」时还有 --fmp4 和 --segments）。",
     },
     jasna_gpu_monitor: {
       title: "GPU 监控",

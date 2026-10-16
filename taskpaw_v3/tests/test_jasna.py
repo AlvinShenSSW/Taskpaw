@@ -37,6 +37,27 @@ from taskpaw_v3.monitors.plugins.jasna import (
 from taskpaw_v3.monitors.registry import default_registry
 
 _PROBE_NAME = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+# #265 D4: the real GPU query, kept for its own parsing tests before the autouse
+# fixture below replaces it for every other test.
+_REAL_QUERY_GPUS = J.query_gpus
+
+
+@pytest.fixture(autouse=True)
+def _no_real_nvidia_smi(monkeypatch):
+    """#265 D4: no test may run the real nvidia-smi (a cc 8.9 dev box would drop
+    --ltx-fast and break the argv expectations). The GPU is "unknown" unless a
+    test patches `J.query_gpus` itself; the tripwire fails any test whose code
+    still spawns nvidia-smi through subprocess."""
+    monkeypatch.setattr(J, "query_gpus", lambda: None)
+    real_popen = subprocess.Popen
+
+    def guarded(argv, *a, **kw):
+        head = str(argv[0] if isinstance(argv, (list, tuple)) else argv)
+        if "nvidia-smi" in head:
+            raise AssertionError("a test ran the real nvidia-smi")
+        return real_popen(argv, *a, **kw)
+
+    monkeypatch.setattr(J.subprocess, "Popen", guarded)
 
 
 # ── harness ───────────────────────────────────────────────────────────────
@@ -203,8 +224,8 @@ def test_json_schema_exposes_the_tickbox_defaults():
     own = set(JasnaConfig.model_fields) - set(
         JasnaConfig.__bases__[0].model_fields  # type: ignore[attr-defined]
     )
-    # 15 restore + 4「AV 翻译」(#177) + 8K VR (#208) + 4 LTX (#263)
-    assert len(own) == 24
+    # 15 restore + 4「AV 翻译」(#177) + 8K VR (#208) + 4 LTX (#263) + 2 (#265)
+    assert len(own) == 26
     for name in own:
         assert props[name].get("description"), f"{name} has no description"
 
@@ -332,7 +353,7 @@ def test_vr_8k_field_order_and_help_texts():
     assert order[order.index("whisperjav_extra_args") + 1] == "ltx_1080p"
     i = order.index("vr_8k")
     assert order[i - 1 : i + 2] == [
-        "ltx_best",
+        "ltx_large_canvas",
         "vr_8k",
         "clip_size_1080p",
     ]
@@ -2079,11 +2100,13 @@ def test_ltx_defaults_and_schema():
     assert props["ltx_best"]["default"] is False
     order = JasnaPlugin.ui_schema()["ui:order"]
     i = order.index("ltx_1080p")
-    assert order[i : i + 5] == [
+    assert order[i : i + 7] == [  # #265: + ltx_4k, ltx_large_canvas
         "ltx_1080p",
+        "ltx_4k",
         "ltx_fast",
         "ltx_auto_split",
         "ltx_best",
+        "ltx_large_canvas",
         "vr_8k",
     ]
 
@@ -2097,8 +2120,11 @@ def test_ltx_auto_split_bounds():
 
 
 def test_ui_schema_carries_the_ltx_lock_from_the_constants():
-    lock = JasnaPlugin.ui_schema()["ltx_1080p"]["ui:options"]["taskpawLock"]
-    assert lock == J._LTX_LOCK == {"vr_8k": False, "unet4x_1080p": False}
+    ui = JasnaPlugin.ui_schema()
+    lock = ui["ltx_1080p"]["ui:options"]["taskpawLock"]
+    assert lock == J._LTX_1080P_LOCK == {"vr_8k": False, "unet4x_1080p": False}
+    lock_4k = ui["ltx_4k"]["ui:options"]["taskpawLock"]  # #265
+    assert lock_4k == J._LTX_4K_LOCK == {"vr_8k": False, "unet4x_4k": False}
 
 
 def test_ltx_launch_and_vr_profile_rules():
@@ -2228,14 +2254,14 @@ def test_ltx_trial_rejection_explains_the_unrestored_copy():
     ],
 )
 def test_ltx_conditional_flags(flag):
-    with pytest.raises(ValueError, match="with 1080p LTX ticked"):
+    with pytest.raises(ValueError, match="with LTX ticked"):
         _cfg(ltx_1080p=True, jasna_extra_args=flag)
     assert _cfg(jasna_extra_args=flag).jasna_extra_args == flag  # accepted when off
 
 
 @pytest.mark.parametrize("flag", ["--fmp4", "--segments 0:00-0:05"])
 def test_fmp4_and_segments_only_clash_with_auto_split(flag):
-    with pytest.raises(ValueError, match="with 1080p LTX ticked"):
+    with pytest.raises(ValueError, match="with LTX ticked"):
         _cfg(ltx_1080p=True, jasna_extra_args=flag)
     assert _cfg(ltx_1080p=True, ltx_auto_split=0, jasna_extra_args=flag)
     assert _cfg(jasna_extra_args=flag)
@@ -2279,7 +2305,7 @@ def test_mixed_queue_ltx_on_1080p_basicvsrpp_on_4k(tmp_path, monkeypatch):
     _ltx_model(home)
     _videos(inp, "a.mp4", "b.mp4")
     probe = _probe({"b.mp4": (3840, 2160)})
-    launcher = _Launcher([1, 0, 0])  # the LTX launch of a fails once
+    launcher = _Launcher([1, 0])  # the LTX launch of a fails
     _patch(monkeypatch, launcher, probe)
     inst = JasnaInstance("j1", cfg)
     evs, emit = _events()
@@ -2287,21 +2313,21 @@ def test_mixed_queue_ltx_on_1080p_basicvsrpp_on_4k(tmp_path, monkeypatch):
     for _ in range(3):
         inst.check(emit)
 
-    assert launcher.inputs() == ["a.mp4", "a.mp4", "b.mp4"]
-    for i in (0, 1):  # the LTX launch and its plain retry
-        assert launcher.arg(i, "--restoration-model-name") == "ltx"
-        assert launcher.secondary(i) == "none"
-        assert launcher.arg(i, "--working-directory") == str(out / ".jasna-work")
+    # #265 D2: a failed LTX launch is not relaunched (the next Start retries it)
+    assert launcher.inputs() == ["a.mp4", "b.mp4"]
+    assert launcher.arg(0, "--restoration-model-name") == "ltx"
+    assert launcher.secondary(0) == "none"
+    assert launcher.arg(0, "--working-directory") == str(out / ".jasna-work")
     assert (out / ".jasna-work").is_dir()
-    assert "--restoration-model-name" not in launcher.launches[2]
-    assert "--working-directory" not in launcher.launches[2]
-    assert launcher.secondary(2) == "unet-4x"  # the 4K tier as before
+    assert "--restoration-model-name" not in launcher.launches[1]
+    assert "--working-directory" not in launcher.launches[1]
+    assert launcher.secondary(1) == "unet-4x"  # the 4K tier as before
     modes = [r["data"]["mode"] for r in _tasklog("restore.started")]
-    assert modes == ["ltx fast auto-split 12%", "ltx fast auto-split 12%", "unet-4x"]
+    assert modes == ["ltx fast auto-split 12%", "unet-4x"]
     assert inst._run_unet_disabled == {}
     assert not [e for e in evs if "unet-4x disabled" in e[1]]
     assert not [e for e in evs if e[3] == "j1:ltx:model"]  # the model is there
-    assert inst._done == 2 and inst._failed == 0
+    assert inst._done == 1 and inst._failed == 1
 
 
 def test_ltx_task_never_logs_the_8k_vr_profile_or_alerts_for_its_detector(
@@ -2342,8 +2368,8 @@ def _missing_model_run(tmp_path, monkeypatch, windows: bool, capture: bool = Tru
     cfg, inp, _out, _home = _managed(
         tmp_path, ltx_1080p=True, jasna_capture_progress=capture
     )
-    _videos(inp, "a.mp4", "b.mp4")
-    launcher = _Launcher([1, 1, None])
+    _videos(inp, "a.mp4", "b.mp4", "c.mp4")
+    launcher = _Launcher([1, 1, None])  # #265: no retry → a, b fail; c runs
     _patch(monkeypatch, launcher)
     monkeypatch.setattr(J, "_console_fallback_allowed", lambda: windows)
     inst = JasnaInstance("j1", cfg)
@@ -2358,10 +2384,10 @@ def test_missing_model_opens_one_console_window_per_run_on_windows(
     tmp_path, monkeypatch
 ):
     launcher, evs, inst = _missing_model_run(tmp_path, monkeypatch, windows=True)
-    assert launcher.n == 3  # a, a's retry, b
-    first, retry, nxt = launcher.kwargs
+    assert launcher.inputs() == ["a.mp4", "b.mp4", "c.mp4"]  # no LTX retry
+    first, second, third = launcher.kwargs
     assert "stdout" not in first and "stdin" not in first  # its own window
-    for kw in (retry, nxt):  # later launches captured again
+    for kw in (second, third):  # later launches captured again
         assert kw.get("stdout") is subprocess.PIPE
         assert kw.get("stdin") == subprocess.DEVNULL
     alerts = [e for e in evs if e[3] == "j1:ltx:model"]
@@ -2569,3 +2595,357 @@ def test_detail_names_the_ltx_variant_and_keeps_4k_as_before(tmp_path):
     assert inst._build_status("running").detail == (
         "running: a.mp4 [4K 3840x2160, unet-4x]"
     )
+
+
+# ── #265「4K 档：使用 LTX」 + GPU-aware LTX options ─────────────────────────
+_RTX5060 = [(12.0, 8151)]
+_RTX4090 = [(8.9, 24564)]
+_GB12 = [(8.9, 12282)]
+_GB16 = [(8.9, 16376)]
+
+
+def test_ltx_4k_fields_defaults_and_order():
+    c = _cfg()
+    assert c.ltx_4k is False
+    assert c.ltx_large_canvas is True
+    props = JasnaPlugin.json_schema()["properties"]
+    assert props["ltx_4k"]["title"] == "4K tier: restore with LTX"
+    assert props["ltx_4k"]["default"] is False
+    assert props["ltx_large_canvas"]["title"] == "LTX large canvas"
+    assert props["ltx_large_canvas"]["default"] is True
+    assert "16 GB" in props["ltx_large_canvas"]["description"]
+    assert "RTX 4090" in props["ltx_fast"]["description"]
+    assert "Jasna fails on other GPUs" not in props["ltx_fast"]["description"]
+    for name in ("ltx_fast", "ltx_auto_split", "ltx_best", "ltx_large_canvas"):
+        assert "Only used with LTX" in props[name]["description"]
+    assert "The 4K tier has its own LTX tickbox." in props["ltx_1080p"]["description"]
+    assert "Not used while 4K LTX is ticked" in props["unet4x_4k"]["description"]
+    assert (
+        "while either LTX tickbox is ticked" in props["jasna_extra_args"]["description"]
+    )
+
+
+def test_uses_ltx_ltx_launch_and_vr_profile_per_tier():
+    only_4k = _cfg(ltx_4k=True, vr_8k=True)
+    assert J.uses_ltx(only_4k) is True
+    assert J.ltx_launch(only_4k, "4k") is True
+    assert J.ltx_launch(only_4k, "1080p") is False
+    assert J.vr_profile(only_4k) is False  # VR greyed whenever any LTX tick is on
+    both = _cfg(ltx_1080p=True, ltx_4k=True)
+    assert J.ltx_launch(both, "1080p") and J.ltx_launch(both, "4k")
+    none = _cfg(vr_8k=True)
+    assert J.uses_ltx(none) is False and J.vr_profile(none) is True
+
+
+def test_build_argv_4k_ltx_launch_exact():
+    cfg = _cfg(ltx_4k=True)
+    wd = Path("out") / ".jasna-work"
+    argv = build_argv(
+        cfg,
+        "jasna.exe",
+        Path("a.mp4"),
+        Path("a.tmp.mp4"),
+        "4k",
+        True,  # whatever the caller resolved, an LTX launch has no unet-4x
+        True,  # the large detector exists
+        wd,
+        ltx_fast_ok=False,
+        ltx_canvas_ok=True,
+    )
+    assert argv == [
+        "jasna.exe",
+        "--input",
+        "a.mp4",
+        "--output",
+        "a.tmp.mp4",
+        "--max-clip-size",
+        "60",
+        "--temporal-overlap",
+        "8",
+        "--secondary-restoration",
+        "none",
+        "--codec",
+        "hevc",
+        "--cq",
+        "24",
+        "--detection-model",
+        "rfdetr-v6-large",
+        "--restoration-model-name",
+        "ltx",
+        "--ltx-large-canvas",
+        "--ltx-auto-split",
+        "12",
+        "--working-directory",
+        str(wd),
+    ]
+
+
+def test_build_argv_fast_and_canvas_follow_the_effective_values():
+    cfg = _cfg(ltx_1080p=True)
+    argv = _ltx_argv(cfg)  # defaults: fast ok, canvas not ok
+    assert "--ltx-fast" in argv and "--ltx-large-canvas" not in argv
+    argv = build_argv(
+        cfg,
+        "j",
+        Path("a.mp4"),
+        Path("s.mp4"),
+        "1080p",
+        False,
+        False,
+        ltx_fast_ok=False,
+        ltx_canvas_ok=True,
+    )
+    assert "--ltx-fast" not in argv and "--ltx-large-canvas" in argv
+    off = _cfg(ltx_1080p=True, ltx_large_canvas=False)
+    argv = build_argv(
+        off,
+        "j",
+        Path("a.mp4"),
+        Path("s.mp4"),
+        "1080p",
+        False,
+        False,
+        ltx_canvas_ok=True,
+    )
+    assert "--ltx-large-canvas" not in argv
+
+
+def test_build_argv_1080p_with_only_ltx_4k_is_the_basicvsrpp_argv():
+    stored = _cfg(ltx_4k=True, vr_8k=True)
+    assert _ltx_argv(stored, tier="1080p", work_dir=Path("w")) == _ltx_argv(
+        _cfg(), tier="1080p"
+    )
+
+
+@pytest.mark.parametrize(
+    ("gpus", "fast", "canvas", "small"),
+    [
+        (None, True, False, False),
+        (_RTX5060, True, False, True),
+        (_RTX4090, False, True, False),
+        (_GB12, False, False, False),
+        (_GB16, False, True, False),
+        (_RTX5060 + _RTX4090, True, False, False),  # mixed box
+        (_RTX4090 + _RTX4090, False, True, False),
+    ],
+)
+def test_gpu_rules(gpus, fast, canvas, small):
+    assert J.fast_supported(gpus) is fast
+    assert J.canvas_supported(gpus) is canvas
+    assert J.small_gpus(gpus) is small
+
+
+class _FakeSmi:
+    def __init__(self, out=b"", rc=0, hang=False):
+        self._out, self.returncode, self._hang = out, rc, hang
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        if self._hang:
+            raise subprocess.TimeoutExpired("nvidia-smi", timeout)
+        return self._out, b""
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _smi(monkeypatch, proc=None, exc=None):
+    calls = []
+
+    def fake(argv, **kw):
+        calls.append((list(argv), kw))
+        if exc is not None:
+            raise exc
+        return proc
+
+    monkeypatch.setattr(J.subprocess, "Popen", fake)
+    return calls
+
+
+def test_query_gpus_parses_nvidia_smi(monkeypatch):
+    calls = _smi(monkeypatch, _FakeSmi(b"12.0, 8151\r\n8.9, 24564\n"))
+    assert _REAL_QUERY_GPUS() == [(12.0, 8151), (8.9, 24564)]
+    argv, kw = calls[0]
+    assert argv[0] == "nvidia-smi"
+    assert "--query-gpu=compute_cap,memory.total" in argv
+    assert kw["stdin"] == subprocess.DEVNULL and kw["stdout"] == subprocess.PIPE
+
+
+@pytest.mark.parametrize(
+    "proc,exc",
+    [
+        (_FakeSmi(b"", rc=6), None),  # "No devices were found"
+        (_FakeSmi(b"[N/A], 8151\n"), None),
+        (_FakeSmi(b"\n"), None),
+        (None, FileNotFoundError("nvidia-smi")),
+        (None, OSError("denied")),
+    ],
+)
+def test_query_gpus_failures_are_unknown(monkeypatch, proc, exc):
+    _smi(monkeypatch, proc, exc)
+    assert _REAL_QUERY_GPUS() is None
+
+
+def test_query_gpus_timeout_kills_without_waiting_long(monkeypatch):
+    hung = _FakeSmi(hang=True)
+    _smi(monkeypatch, hung)
+    assert _REAL_QUERY_GPUS() is None
+    assert hung.killed
+
+
+def _gpus(monkeypatch, gpus):
+    calls = []
+
+    def fake():
+        calls.append(1)
+        return gpus
+
+    monkeypatch.setattr(J, "query_gpus", fake)
+    return calls
+
+
+def test_rtx4090_box_both_tiers_ltx_without_fast_with_large_canvas(
+    tmp_path, monkeypatch
+):
+    cfg, inp, _out, home = _managed(
+        tmp_path, ltx_1080p=True, ltx_4k=True, unet4x_1080p=True, unet4x_4k=True
+    )
+    _ltx_model(home, fast=False)  # the non-fast model is what this box needs
+    _videos(inp, "a.mp4", "b.mp4")
+    calls = _gpus(monkeypatch, _RTX4090)
+    launcher = _Launcher([0, None])
+    _patch(monkeypatch, launcher, _probe({"b.mp4": (3840, 2160)}))
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    inst.check(emit)
+    assert calls == [1]  # one query per Start
+    assert launcher.inputs() == ["a.mp4", "b.mp4"]
+    for i in (0, 1):
+        argv = launcher.launches[i]
+        assert launcher.arg(i, "--restoration-model-name") == "ltx"
+        assert "--ltx-fast" not in argv and "--ltx-large-canvas" in argv
+        assert launcher.secondary(i) == "none"
+    assert launcher.arg(1, "--max-clip-size") == "60"  # the 4K tier's clip
+    modes = [r["data"]["mode"] for r in _tasklog("restore.started")]
+    assert modes == ["ltx large-canvas auto-split 12%"] * 2
+    assert not [e for e in evs if e[3] in ("j1:ltx:model", "j1:ltx:4k-vram")]
+    assert "running: b.mp4 [4K 3840x2160, LTX, large canvas, auto-split 12%]" in (
+        inst._build_status("running").detail
+    )
+    inst.stop(timeout=0.5)
+
+
+def test_dropped_fast_and_canvas_are_logged(tmp_path, monkeypatch, caplog):
+    cfg, inp, _out, _home = _managed(tmp_path, ltx_1080p=True)
+    _videos(inp, "a.mp4")
+    _gpus(monkeypatch, _GB12)  # Ada, 12 GB: no fast, no large canvas
+    _patch(monkeypatch, _Launcher([None]))
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    with caplog.at_level("INFO", logger="taskpaw.monitors.jasna"):
+        inst.start(emit)
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "--ltx-fast" in text and "--ltx-large-canvas" in text
+    inst.stop(timeout=0.5)
+
+
+def test_no_gpu_query_without_an_ltx_tickbox(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    calls = _gpus(monkeypatch, _RTX4090)
+    _patch(monkeypatch, _Launcher([None]))
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    assert calls == []
+    inst.stop(timeout=0.5)
+
+
+@pytest.mark.parametrize(
+    ("gpus", "dims", "alerts"),
+    [
+        (_RTX5060, (3840, 2160), 1),
+        (_RTX5060, (1920, 1080), 0),  # no 4K LTX launch
+        (_RTX4090, (3840, 2160), 0),
+        (_RTX5060 + _RTX4090, (3840, 2160), 0),  # mixed: Jasna may use the 4090
+        (None, (3840, 2160), 0),
+    ],
+)
+def test_small_gpu_4k_ltx_alerts_once_at_the_first_4k_launch(
+    tmp_path, monkeypatch, gpus, dims, alerts
+):
+    cfg, inp, _out, home = _managed(tmp_path, ltx_4k=True)
+    _ltx_model(home)
+    _videos(inp, "a.mp4", "b.mp4")
+    _gpus(monkeypatch, gpus)
+    launcher = _Launcher([0, None])
+    _patch(monkeypatch, launcher, _probe(default=dims))
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    inst.check(emit)
+    got = [e for e in evs if e[3] == "j1:ltx:4k-vram"]
+    assert len(got) == alerts
+    if alerts:
+        assert got[0][0] == "alert" and "8151 MB" in got[0][2]
+    assert launcher.n == 2  # the launches still happen
+    inst.stop(timeout=0.5)
+
+
+def test_failed_4k_ltx_launch_is_not_retried_but_basicvsrpp_is(tmp_path, monkeypatch):
+    cfg, inp, _out, home = _managed(tmp_path, ltx_4k=True, unet4x_1080p=False)
+    _ltx_model(home)
+    _videos(inp, "a.mp4", "b.mp4")
+    launcher = _Launcher([1, 1, 0])
+    _patch(monkeypatch, launcher, _probe({"a.mp4": (3840, 2160)}))
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    for _ in range(3):
+        inst.check(emit)
+    # a: 4K LTX fails once → failed, no relaunch; b: BasicVSR++ fails → plain retry
+    assert launcher.inputs() == ["a.mp4", "b.mp4", "b.mp4"]
+    assert inst._failed == 1 and inst._done == 1
+    assert [e for e in evs if e[1] == "JASNA: a.mp4 failed"]
+
+
+@pytest.mark.parametrize("flag", ["--vr-mode off", "--denoise low", "--stream"])
+def test_ltx_conditional_flags_apply_to_the_4k_tickbox_too(flag):
+    with pytest.raises(ValueError, match="with LTX ticked"):
+        _cfg(ltx_4k=True, jasna_extra_args=flag)
+    assert _cfg(jasna_extra_args=flag)
+    with pytest.raises(ValueError, match="unet-4x is set with its tickboxes"):
+        _cfg(ltx_4k=True, jasna_extra_args="--secondary-restoration tvai")
+
+
+def test_large_canvas_options_stay_owned_in_extra_args():
+    for bad in ("--ltx-large-canvas", "--no-ltx-large-canvas"):
+        with pytest.raises(ValueError, match="LTX options"):
+            _cfg(ltx_4k=True, jasna_extra_args=bad)
+
+
+def test_model_alert_names_ltx_files_not_1080p_files(tmp_path, monkeypatch):
+    cfg, inp, _out, _home = _managed(tmp_path, ltx_4k=True)
+    _videos(inp, "a.mp4")
+    _patch(monkeypatch, _Launcher([None]), _probe(default=(3840, 2160)))
+    monkeypatch.setattr(J, "_console_fallback_allowed", lambda: False)
+    inst = JasnaInstance("j1", cfg)
+    evs, emit = _events()
+    inst.start(emit)
+    msg = [e for e in evs if e[3] == "j1:ltx:model"][0][2]
+    assert "the other LTX files fail" in msg and "1080p files" not in msg
+    inst.stop(timeout=0.5)
+
+
+def test_large_canvas_state_is_safe_before_any_query(tmp_path):
+    cfg, _inp, _out, _home = _managed(tmp_path, ltx_1080p=True)
+    inst = JasnaInstance("j1", cfg)
+    assert inst._ltx_canvas_ok is False and inst._ltx_fast_ok is True
+    inst._current = Path("a.mp4")
+    inst._current_tier = "1080p"
+    inst._current_dims = (1920, 1080)
+    assert "large canvas" not in inst._build_status("running").detail

@@ -31,6 +31,8 @@ const VR8K_PROFILE = {
 // #263: what the「1080p 档：使用 LTX」tickbox greys, exactly as the backend's static
 // ui_schema carries it (`ltx_1080p.ui:options.taskpawLock`, jasna.py's _LTX_LOCK).
 const LTX_LOCK = { vr_8k: false, unet4x_1080p: false };
+// #265: the「4K 档：使用 LTX」tickbox's lock (jasna.py's _LTX_4K_LOCK).
+const LTX_4K_LOCK = { vr_8k: false, unet4x_4k: false };
 
 // A jasna-shaped plugin (#173): the two unet-4x tickboxes, with the backend's
 // defaults (1080p on, 4K off) carried in the json_schema; plus the #177「AV 翻译」
@@ -51,11 +53,13 @@ const jasnaPlugin: apiModule.PluginInfo = {
       unet4x_4k: { type: "boolean", title: "Unet4X 4K", default: false },
       av_translate: { type: "boolean", title: "AV 翻译", default: false },
       ltx_1080p: { type: "boolean", title: "1080p tier: restore with LTX", default: false },
+      ltx_4k: { type: "boolean", title: "4K tier: restore with LTX", default: false },
       ltx_fast: { type: "boolean", title: "LTX fast mode", default: true },
       ltx_auto_split: {
         type: "integer", title: "LTX only for big mosaics (%)", default: 12, minimum: 0, maximum: 100,
       },
       ltx_best: { type: "boolean", title: "LTX best model", default: false },
+      ltx_large_canvas: { type: "boolean", title: "LTX large canvas", default: true },
       vr_8k: {
         type: "boolean", title: "8K VR", default: false,
         description: "Treat every file of this task as 8K SBS VR.",
@@ -78,13 +82,14 @@ const jasnaPlugin: apiModule.PluginInfo = {
     "ui:order": [
       "name", "jasna_exe_path", "jasna_input_folder", "jasna_output_folder",
       "unet4x_1080p", "unet4x_4k", "av_translate", "whisperjav_exe_path",
-      "whisperjav_engine", "whisperjav_extra_args", "ltx_1080p", "ltx_fast", "ltx_auto_split",
-      "ltx_best", "vr_8k", "clip_size_1080p",
+      "whisperjav_engine", "whisperjav_extra_args", "ltx_1080p", "ltx_4k", "ltx_fast",
+      "ltx_auto_split", "ltx_best", "ltx_large_canvas", "vr_8k", "clip_size_1080p",
       "clip_size_4k", "temporal_overlap", "codec", "cq", "detection_model",
       "process_name", "jasna_extra_args", "jasna_gpu_monitor", "jasna_capture_progress",
       "poll_interval", "timeout", "*",
     ],
     ltx_1080p: { "ui:options": { taskpawLock: LTX_LOCK } },
+    ltx_4k: { "ui:options": { taskpawLock: LTX_4K_LOCK } },
     vr_8k: { "ui:options": { taskpawProfile: VR8K_PROFILE } },
   },
 };
@@ -607,6 +612,94 @@ describe("MonitorWizard jasna 1080p LTX (#263)", () => {
     expect(screen.queryByText(LTX_HINT)).not.toBeInTheDocument();
     expect(lockedIds()).toEqual([]);
     expect(screen.getByRole("checkbox", { name: UNET1080 })).toBeEnabled();
+  });
+});
+
+// #265: the「4K 档：使用 LTX」tickbox, alone and with the 1080p one.
+const LTX4K = /4K 档：使用 LTX|4K tier: restore with LTX/;
+const LTX_HINT_4K = /已勾选：只有 4K 档的文件用 LTX|4K LTX is on: only the 4K-tier files use LTX/;
+const LTX_HINT_BOTH = /已勾选：1080p 档和 4K 档的文件都用 LTX|LTX is on for both tiers/;
+
+describe("MonitorWizard jasna 4K LTX (#265)", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("4K LTX alone greys 8K VR and the 4K unet-4x, keeps the 1080p unet-4x editable", () => {
+    chooseJasna();
+    fireEvent.change(screen.getByRole("textbox", { name: NAME }), { target: { value: "ltx-4k" } });
+    const realUnet4k = screen.getByRole("checkbox", { name: UNET4K });
+
+    fireEvent.click(screen.getByRole("checkbox", { name: LTX4K }));
+
+    expect(screen.getByRole("textbox", { name: NAME })).toHaveValue("ltx-4k");
+    expect(lockedIds()).toEqual(["locked_unet4x_4k", "locked_vr_8k"]);
+    expect(screen.getByRole("checkbox", { name: UNET4K })).toBeDisabled();
+    expect(fieldOf(realUnet4k)).not.toBeVisible();
+    expect(screen.getByRole("checkbox", { name: UNET1080 })).toBeEnabled();
+    const hint = screen.getByText(LTX_HINT_4K);
+    expect(hint).toBeVisible();
+    expect(
+      screen.getByRole("checkbox", { name: LTX4K }).compareDocumentPosition(hint) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: LTX4K }));
+
+    expect(lockedIds()).toEqual([]);
+    expect(screen.getByRole("checkbox", { name: UNET4K })).toBe(realUnet4k);
+    expect(screen.queryByText(LTX_HINT_4K)).not.toBeInTheDocument();
+  });
+
+  it("both LTX tickboxes lock all three and show the both-tiers hint", () => {
+    chooseJasna();
+    fireEvent.click(screen.getByRole("checkbox", { name: LTX }));
+    fireEvent.click(screen.getByRole("checkbox", { name: LTX4K }));
+    expect(lockedIds()).toEqual(["locked_unet4x_1080p", "locked_unet4x_4k", "locked_vr_8k"]);
+    expect(screen.getByText(LTX_HINT_BOTH)).toBeVisible();
+    expect(screen.queryByText(LTX_HINT)).not.toBeInTheDocument();
+    expect(screen.queryByText(LTX_HINT_4K)).not.toBeInTheDocument();
+  });
+
+  it("the 8K VR lock stays off while only the 4K LTX tickbox is on", () => {
+    chooseJasna();
+    fireEvent.click(screen.getByRole("checkbox", { name: VR8K }));
+    expect(screen.getByText(HINT)).toBeVisible();
+    fireEvent.click(screen.getByRole("checkbox", { name: LTX4K }));
+    expect(screen.queryByText(HINT)).not.toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: CLIP4K })).toBeEnabled();
+    expect(lockedIds()).toEqual(["locked_unet4x_4k", "locked_vr_8k"]);
+  });
+
+  it("edit mode: both saved open with the union lock, Save submits the stored values", async () => {
+    const updateMonitor = vi.spyOn(apiModule.api, "updateMonitor").mockResolvedValue({} as never);
+    const saved = {
+      name: "ltx-both", ltx_1080p: true, ltx_4k: true, vr_8k: true, unet4x_1080p: true, unet4x_4k: true,
+    };
+    wrap(
+      <MonitorWizard mode="edit" name="ltx-both" existingType="jasna" existingConfig={saved}
+        {...baseProps} plugins={[jasnaPlugin]} />,
+    );
+    expect(screen.getByText(LTX_HINT_BOTH)).toBeVisible();
+    expect(lockedIds()).toEqual(["locked_unet4x_1080p", "locked_unet4x_4k", "locked_vr_8k"]);
+    fireEvent.click(screen.getByRole("button", { name: /Save changes|保存更改/ }));
+    await waitFor(() => expect(updateMonitor).toHaveBeenCalledWith("ltx-both", {
+      config: expect.objectContaining({
+        ltx_1080p: true, ltx_4k: true, vr_8k: true, unet4x_1080p: true, unet4x_4k: true,
+      }),
+    }));
+  });
+
+  it.each([
+    ["4K only", [LTX4K], /仅 4K 档（不用 8K VR 和 4K 档 unet-4x）|4K tier only \(without 8K VR and the 4K unet-4x\)/],
+    ["both", [LTX, LTX4K], /1080p 和 4K 档（不用 8K VR 和 unet-4x）|both tiers \(without 8K VR and unet-4x\)/],
+  ])("add-mode review shows the LTX row for %s", async (_case, boxes, value) => {
+    chooseJasna();
+    fireEvent.change(screen.getByRole("textbox", { name: NAME }), { target: { value: "ltx-r" } });
+    for (const box of boxes) fireEvent.click(screen.getByRole("checkbox", { name: box }));
+    fireEvent.click(screen.getByRole("button", { name: /Review|复核/ }));
+    await screen.findByRole("button", { name: /Add monitor|添加监控/ });
+    const typeRow = screen.getByText(/服务类型|Service type/).parentElement as HTMLElement;
+    const ltxRow = typeRow.nextElementSibling as HTMLElement;
+    expect(within(ltxRow).getByText("LTX")).toBeInTheDocument();
+    expect(within(ltxRow).getByText(value)).toBeInTheDocument();
   });
 });
 
