@@ -36,6 +36,12 @@ values are untouched. LTX launches keep Jasna's scratch in the output folder's
 downloaded yet opens its own window once per run so Jasna's download prompt can
 be answered.
 
+「4K 档：使用 LTX」(#265, `ltx_4k`) does the same for the 4K tier (for a big GPU —
+an 8 GB card fails 4K LTX). The LTX options follow the GPU, queried once per
+Start: `--ltx-fast` only on a Blackwell card (RTX 50), `--ltx-large-canvas` only
+when every GPU has 16 GB or more. A failed LTX launch is not relaunched (the next
+Start tries the film again).
+
 Passive mode (no exe path) just watches an externally-running `jasna` process,
 exactly like lada's passive mode.
 
@@ -236,9 +242,20 @@ _VR8K_CLIP_SIZE_4K = 30  # 4K tier only; the 1080p tier keeps clip_size_1080p
 _VR8K_UNET4X_4K = False  # 4K tier only; the 1080p tier keeps unet4x_1080p
 _VR8K_PROFILE = "8k-vr"  # the `restore.started` task-log `profile` value
 
-# 「1080p 档：使用 LTX」(#263). What the wizard greys while it is ticked (one
-# source with the launch rules below, like the 8K VR profile).
-_LTX_LOCK: dict[str, bool] = {"vr_8k": False, "unet4x_1080p": False}
+# 「1080p 档：使用 LTX」(#263) /「4K 档：使用 LTX」(#265). What the wizard greys
+# while each is ticked (one source with the launch rules below, like the 8K VR
+# profile).
+_LTX_1080P_LOCK: dict[str, bool] = {"vr_8k": False, "unet4x_1080p": False}
+_LTX_4K_LOCK: dict[str, bool] = {"vr_8k": False, "unet4x_4k": False}
+# #265 GPU rules (nvidia-smi at Start). Jasna's fast mode is RTX 50 (Blackwell,
+# compute capability 10.x/12.x) only. Large canvas plans memory for 768 px even
+# when it falls back to 512 px, which made a 1080p run fail on an 8 GB card
+# (verified); a 12 GB card is left with less than Jasna's ~12 GB free, so only
+# the 16 GB class gets it. 4K LTX failed on an 8 GB card (verified).
+_LTX_FAST_MIN_CC = 10.0
+_LTX_CANVAS_MIN_MB = 15360
+_LTX_4K_SMALL_MB = 8192
+_GPU_QUERY_TIMEOUT = 5.0
 _LTX_WORK_DIR = ".jasna-work"  # TaskPaw's own folder inside the output folder
 # Jasna 0.11.1's model files in `<exe dir>/model_weights/ltx-restore`, keyed by
 # (best, fast) — printed by the CLI when they are missing (verified 2026-10-16).
@@ -704,6 +721,72 @@ def _console_fallback_allowed() -> bool:
     return sys.platform == "win32"
 
 
+def query_gpus() -> Optional[list[tuple[float, int]]]:
+    """#265: `[(compute capability, total VRAM MiB)]` per NVIDIA GPU, or None
+    when unknown (no nvidia-smi, an error, a timeout or output it cannot
+    parse). Bounded: on a timeout the child is killed and never read again (a
+    `with Popen` block or `subprocess.run` would wait for it without a bound)."""
+    try:
+        proc = subprocess.Popen(
+            [
+                "nvidia-smi",
+                "--query-gpu=compute_cap,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
+        )
+    except OSError as e:
+        log.info("jasna: GPU query unavailable (%s)", e)
+        return None
+    try:
+        out, _err = proc.communicate(timeout=_GPU_QUERY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            # Killed but not reaped yet: never read from it again (no unbounded
+            # wait) — the OS reaps it.
+            log.warning("jasna: nvidia-smi did not exit after kill()")
+        log.warning("jasna: nvidia-smi timed out; GPU treated as unknown")
+        return None
+    if proc.returncode != 0:
+        return None
+    gpus: list[tuple[float, int]] = []
+    for line in (out or b"").decode("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
+        parts = [x.strip() for x in line.split(",")]
+        try:
+            gpus.append((float(parts[0]), int(float(parts[1]))))
+        except (IndexError, ValueError):
+            log.info(
+                "jasna: unreadable nvidia-smi line %r; GPU treated as unknown", line
+            )
+            return None
+    return gpus or None
+
+
+def fast_supported(gpus: Optional[list[tuple[float, int]]]) -> bool:
+    """#265: drop --ltx-fast only when EVERY known GPU is pre-Blackwell (on a
+    mixed box Jasna may run on the Blackwell card); unknown keeps the choice."""
+    return gpus is None or any(cc >= _LTX_FAST_MIN_CC for cc, _mb in gpus)
+
+
+def canvas_supported(gpus: Optional[list[tuple[float, int]]]) -> bool:
+    """#265: pass --ltx-large-canvas only when every GPU is known to be in the
+    16 GB class — never on an unknown, small or mixed box (fail safe)."""
+    return bool(gpus) and all(mb >= _LTX_CANVAS_MIN_MB for _cc, mb in gpus or [])
+
+
+def small_gpus(gpus: Optional[list[tuple[float, int]]]) -> bool:
+    """#265: every known GPU has at most 8 GB (where 4K LTX failed in tests)."""
+    return bool(gpus) and all(mb <= _LTX_4K_SMALL_MB for _cc, mb in gpus or [])
+
+
 def sweep_ltx_work(
     output_folder: str, max_age: float = _ORPHAN_STAGING_AGE
 ) -> list[Path]:
@@ -1024,7 +1107,7 @@ class JasnaConfig(BaseMonitorConfig):
         False,
         description="4K tier: run the supporter-only unet-4x secondary "
         "restoration. Off by default — it does not fit in 8 GB of VRAM at 4K. "
-        "8K VR overrides this at launch.",
+        "8K VR overrides this at launch. Not used while 4K LTX is ticked.",
     )
     av_translate: bool = Field(
         False,
@@ -1076,7 +1159,8 @@ class JasnaConfig(BaseMonitorConfig):
         False,
         title="1080p tier: restore with LTX",
         description="1080p tier only: 4K files and every other setting stay as "
-        "they are. The 1080p-tier files are restored with Jasna's supporter model "
+        "they are. The 4K tier has its own LTX tickbox. The 1080p-tier files are "
+        "restored with Jasna's supporter model "
         "LTX (Jasna 0.11.1 or newer; more detail, much slower; NVIDIA RTX). While "
         "ticked, 8K VR and the 1080p unet-4x are not used (LTX supports neither) "
         "and keep their saved values for when this is unticked. The first LTX "
@@ -1084,13 +1168,23 @@ class JasnaConfig(BaseMonitorConfig):
         "without) in Jasna's window. Saving this on a running task restarts the "
         "current film.",
     )
+    ltx_4k: bool = Field(
+        False,
+        title="4K tier: restore with LTX",
+        description="4K tier: restore the 4K-tier files with LTX too. Needs a big "
+        "GPU: on an 8 GB card a 4K LTX run fails in its last stage (tested; TaskPaw "
+        "alerts once), a 24 GB RTX 4090 has room. While ticked, 8K VR and the 4K "
+        "unet-4x are not used and keep their saved values. Saving this on a "
+        "running task restarts the current film.",
+    )
     ltx_fast: bool = Field(
         True,
         title="LTX fast mode",
         description="--ltx-fast: about 1.4x faster, slightly less detail, a "
-        "smaller download. RTX 50-series GPUs only (Jasna fails on other GPUs). "
-        "On by default: the standard LTX model does not fit an 8 GB card. Only "
-        "used with 1080p LTX.",
+        "smaller download. RTX 50-series GPUs only — TaskPaw checks the GPU at "
+        "Start and launches without it when it finds none (e.g. an RTX 4090). On "
+        "by default: the standard LTX model does not fit an 8 GB card. Only used "
+        "with LTX.",
     )
     ltx_auto_split: int = Field(
         12,
@@ -1101,14 +1195,23 @@ class JasnaConfig(BaseMonitorConfig):
         "at least that big use LTX, smaller ones BasicVSR++ (without unet-4x). 12 "
         "is Jasna's suggested start; 0 = the whole film with LTX. Jasna restores "
         "the whole film with LTX when it finds no safe cut points. Only used with "
-        "1080p LTX.",
+        "LTX.",
     )
     ltx_best: bool = Field(
         False,
         title="LTX best model",
         description="--restoration-model-name ltx-undistilled: slightly more "
         "detail, about 1.5-1.8x slower, its own model download. Only used with "
-        "1080p LTX.",
+        "LTX.",
+    )
+    ltx_large_canvas: bool = Field(
+        True,
+        title="LTX large canvas",
+        description="--ltx-large-canvas: large mosaics at 768 px instead of 512 — "
+        "more detail on close-ups and 4K, about 3x slower on those. Passed only "
+        "when every GPU has at least 16 GB of VRAM (TaskPaw checks at Start): on "
+        "an 8 GB card Jasna's large canvas made even a 1080p run fail, so it is "
+        "never passed there. Only used with LTX.",
     )
     vr_8k: bool = Field(
         False,
@@ -1176,7 +1279,7 @@ class JasnaConfig(BaseMonitorConfig):
         "and disables the automatic unet-4x degrade (the relaunch would carry the "
         "same flag). Passing `--encoder-settings cq=...` alongside --cq is Jasna's "
         "own error. LTX options (--ltx-*, --restoration-model-name) are always "
-        "rejected — use the LTX fields; while 1080p LTX is ticked, so are "
+        "rejected — use the LTX fields; while either LTX tickbox is ticked, so are "
         "--secondary-restoration, --denoise, --no-compile-basicvsrpp, --stream, "
         "--vr-mode, --restoration-model-path and --working-directory (and --fmp4 / "
         "--segments with LTX only for big mosaics).",
@@ -1237,15 +1340,15 @@ class JasnaConfig(BaseMonitorConfig):
                 "the extra args go to every launch and Jasna rejects LTX options "
                 f"on a BasicVSR++ launch — use the LTX fields{trial}"
             )
-        if self.ltx_1080p:
+        if self.ltx_1080p or self.ltx_4k:  # uses_ltx(self)
             conflicts = ltx_conflicts_in(
                 self.jasna_extra_args, auto_split=self.ltx_auto_split > 0
             )
             if conflicts:
                 raise ValueError(
-                    "with 1080p LTX ticked, jasna_extra_args must not set "
+                    "with LTX ticked, jasna_extra_args must not set "
                     f"{', '.join(conflicts)}: the extra args go to every launch and "
-                    "LTX launches reject them (the 4K tier's unet-4x is its tickbox)"
+                    "LTX launches reject them (unet-4x is set with its tickboxes)"
                 )
         validate_fields(
             self.whisperjav_exe_path,
@@ -1306,24 +1409,37 @@ def parse_jasna_progress_line(line: str, prev: dict) -> dict:
     return out
 
 
+def uses_ltx(cfg: JasnaConfig) -> bool:
+    """#265: either LTX tickbox is ticked."""
+    return cfg.ltx_1080p or cfg.ltx_4k
+
+
 def ltx_launch(cfg: JasnaConfig, tier: Tier) -> bool:
-    """#263: whether a launch of this tier is an LTX launch (1080p tier only)."""
-    return cfg.ltx_1080p and tier == "1080p"
+    """#263/#265: whether a launch of this tier is an LTX launch."""
+    return (tier == "1080p" and cfg.ltx_1080p) or (tier == "4k" and cfg.ltx_4k)
 
 
 def vr_profile(cfg: JasnaConfig) -> bool:
-    """#263: the effective 8K VR profile — off on every tier while 1080p LTX is
-    ticked (owner rule: VR is greyed out under LTX)."""
-    return cfg.vr_8k and not cfg.ltx_1080p
+    """#263: the effective 8K VR profile — off on every tier while either LTX
+    tickbox is ticked (owner rule: VR is greyed out under LTX)."""
+    return cfg.vr_8k and not uses_ltx(cfg)
 
 
-def _ltx_label(cfg: JasnaConfig) -> str:
-    return "LTX" + (" best" if cfg.ltx_best else "") + (" fast" if cfg.ltx_fast else "")
+def _ltx_label(cfg: JasnaConfig, fast: bool, canvas: bool) -> list[str]:
+    """The `_tier_suffix` parts of an LTX launch (effective fast / canvas)."""
+    parts = ["LTX" + (" best" if cfg.ltx_best else "") + (" fast" if fast else "")]
+    if canvas:
+        parts.append("large canvas")
+    if cfg.ltx_auto_split > 0:
+        parts.append(f"auto-split {cfg.ltx_auto_split}%")
+    return parts
 
 
-def _ltx_mode(cfg: JasnaConfig) -> str:
-    """The `restore.started` `mode` of an LTX launch."""
-    mode = "ltx" + (" best" if cfg.ltx_best else "") + (" fast" if cfg.ltx_fast else "")
+def _ltx_mode(cfg: JasnaConfig, fast: bool, canvas: bool) -> str:
+    """The `restore.started` `mode` of an LTX launch (effective fast / canvas)."""
+    mode = "ltx" + (" best" if cfg.ltx_best else "") + (" fast" if fast else "")
+    if canvas:
+        mode += " large-canvas"
     if cfg.ltx_auto_split > 0:
         mode += f" auto-split {cfg.ltx_auto_split}%"
     return mode
@@ -1338,6 +1454,8 @@ def build_argv(
     unet_enabled: bool,
     large_detector: bool,
     work_dir: Optional[Path] = None,
+    ltx_fast_ok: bool = True,
+    ltx_canvas_ok: bool = False,
 ) -> list[str]:
     """Pure: the exact argv for one file. Operator extra args come LAST so
     argparse's last-wins makes the documented `--secondary-restoration` override
@@ -1351,7 +1469,8 @@ def build_argv(
     #263: an LTX launch (`ltx_launch`) adds `--restoration-model-name`, the LTX
     options and `--working-directory work_dir` (when given) before the extra
     args, never carries unet-4x, and — like every launch of a ticked task —
-    never the 8K VR profile (`vr_profile`)."""
+    never the 8K VR profile (`vr_profile`). #265: `--ltx-fast` / `--ltx-large-canvas`
+    follow the GPU (`ltx_fast_ok` / `ltx_canvas_ok`, resolved at Start)."""
     ltx = ltx_launch(cfg, tier)
     vr = vr_profile(cfg)
     clip_4k = _VR8K_CLIP_SIZE_4K if vr else cfg.clip_size_4k
@@ -1367,8 +1486,10 @@ def build_argv(
             "--restoration-model-name",
             "ltx-undistilled" if cfg.ltx_best else "ltx",
         ]
-        if cfg.ltx_fast:
+        if cfg.ltx_fast and ltx_fast_ok:
             ltx_args.append("--ltx-fast")
+        if cfg.ltx_large_canvas and ltx_canvas_ok:
+            ltx_args.append("--ltx-large-canvas")
         if cfg.ltx_auto_split > 0:
             ltx_args += ["--ltx-auto-split", str(cfg.ltx_auto_split)]
         if work_dir is not None:
@@ -1451,6 +1572,12 @@ class JasnaInstance(MonitorInstance):
         # #263 AC4: the one console-window fallback and the one model alert
         self._ltx_console_used = False
         self._ltx_model_alerted = False
+        # #265: the GPU queried at Start and what it allows; the current launch
+        self._gpus: Optional[list[tuple[float, int]]] = None
+        self._ltx_fast_ok = True
+        self._ltx_canvas_ok = False  # the safe value until a query says otherwise
+        self._ltx_4k_alerted = False
+        self._current_ltx = False
         self._ffprobe: Optional[str] = None
         self._prev_running: Optional[bool] = None  # passive transition
         # GPU lease (#177 AC9 hooks, backed by `core.gpu_lease` since #179).
@@ -1545,6 +1672,11 @@ class JasnaInstance(MonitorInstance):
         self._idle_note = ""
         self._ltx_console_used = False
         self._ltx_model_alerted = False
+        self._gpus = None
+        self._ltx_fast_ok = True
+        self._ltx_canvas_ok = False
+        self._ltx_4k_alerted = False
+        self._current_ltx = False
         self._ffprobe = None
         self._prev_running = None
         self._started = True
@@ -1682,6 +1814,23 @@ class JasnaInstance(MonitorInstance):
                 "likely to fail until it is installed.",
                 dedupe_key=f"{self.instance_id}:ffprobe",
             )
+        if uses_ltx(cfg):
+            # #265: once per Start, never under `_launch_lock` (bounded at 5 s).
+            self._gpus = query_gpus()
+            self._ltx_fast_ok = fast_supported(self._gpus)
+            self._ltx_canvas_ok = canvas_supported(self._gpus)
+            if cfg.ltx_fast and not self._ltx_fast_ok:
+                log.info(
+                    "jasna: no RTX 50-series GPU found (%s); LTX launches without "
+                    "--ltx-fast",
+                    self._gpus,
+                )
+            if cfg.ltx_large_canvas and not self._ltx_canvas_ok:
+                log.info(
+                    "jasna: not every GPU has 16 GB of VRAM (%s); LTX launches "
+                    "without --ltx-large-canvas",
+                    self._gpus,
+                )
         if vr_profile(cfg) and not vr_detector_available(self._exe_dir()):
             # #208 AC5: Jasna cannot load missing RF-DETR weights, so every launch
             # would fail. The run still starts: the failed-file path and the
@@ -2219,6 +2368,7 @@ class JasnaInstance(MonitorInstance):
 
             exe_dir = self._exe_dir()
             ltx = ltx_launch(cfg, tier)
+            self._current_ltx = ltx  # #265 D2: a failed LTX launch is not retried
             if ltx:
                 # #263: LTX takes no secondary restoration — an LTX launch is
                 # never a unet-4x launch (no degrade path for this tier).
@@ -2250,12 +2400,16 @@ class JasnaInstance(MonitorInstance):
                 unet,
                 large_detector_available(exe_dir),
                 work_dir,
+                self._ltx_fast_ok,
+                self._ltx_canvas_ok,
             )
 
             capture = cfg.jasna_capture_progress
-            missing = (
-                ltx_missing_files(exe_dir, cfg.ltx_best, cfg.ltx_fast) if ltx else []
-            )
+            fast = cfg.ltx_fast and self._ltx_fast_ok
+            canvas = cfg.ltx_large_canvas and self._ltx_canvas_ok
+            missing = ltx_missing_files(exe_dir, cfg.ltx_best, fast) if ltx else []
+            if ltx and tier == "4k" and small_gpus(self._gpus):
+                self._alert_ltx_4k_vram(emit)
             if missing:
                 self._alert_ltx_model(emit, missing)
                 if (
@@ -2324,7 +2478,7 @@ class JasnaInstance(MonitorInstance):
             started: dict[str, object] = {
                 "index": self._done + self._failed + 1,
                 "total": self._total,
-                "mode": _ltx_mode(cfg)
+                "mode": _ltx_mode(cfg, fast, canvas)
                 if ltx
                 else ("unet-4x" if self._current_unet else "plain"),
             }
@@ -2368,6 +2522,21 @@ class JasnaInstance(MonitorInstance):
             return None
         return work
 
+    def _alert_ltx_4k_vram(self, emit: EventEmitter) -> None:
+        """#265: one alert per run, at the first 4K LTX launch on a small card."""
+        if self._ltx_4k_alerted:
+            return
+        self._ltx_4k_alerted = True
+        mb = max(m for _cc, m in self._gpus or [(0.0, 0)])
+        emit(
+            "alert",
+            f"{self._cfg.name}: 4K LTX on a small GPU",
+            f"4K LTX: this GPU has {mb} MB of VRAM. In tests on an 8 GB card a 4K "
+            "LTX run fails in its last stage (DiffVAE decode), so each 4K file will "
+            "likely fail — untick「4K 档：使用 LTX」on this machine.",
+            dedupe_key=f"{self.instance_id}:ltx:4k-vram",
+        )
+
     def _alert_ltx_model(self, emit: EventEmitter, missing: list[str]) -> None:
         """#263 AC4: one alert per run while the LTX model is not downloaded."""
         if self._ltx_model_alerted:
@@ -2381,7 +2550,7 @@ class JasnaInstance(MonitorInstance):
             "without). Jasna asks to download it when an LTX launch has a window: "
             "answer y there (with capture progress on, TaskPaw opens that window for "
             "the first such launch of a run, on Windows only). Until the model is "
-            "downloaded, the other 1080p files fail — you can also download it once "
+            "downloaded, the other LTX files fail — you can also download it once "
             "in Jasna's own app (pick LTX there).",
             dedupe_key=f"{self.instance_id}:ltx:model",
         )
@@ -2770,7 +2939,9 @@ class JasnaInstance(MonitorInstance):
         # A plain launch failed. _unet_retry_pending is left AS IS: it means "this
         # file runs without unet from now on" and is reset only when _current
         # changes or after the rc-0 degrade handling (P-3).
-        if not self._plain_retry_used:
+        # #265 D2: an LTX failure is repeatable and can come hours into a film,
+        # so it is never relaunched at once — the next Start is its retry.
+        if not self._plain_retry_used and not self._current_ltx:
             self._plain_retry_used = True
             self._requeue_current()
             return
@@ -3896,10 +4067,13 @@ class JasnaInstance(MonitorInstance):
             dims = f" {self._current_dims[0]}x{self._current_dims[1]}"
         parts = [f"{label}{dims}"]
         if ltx_launch(self._cfg, tier):
-            # #263: an LTX launch has no unet part and never the 8K VR profile
-            parts.append(_ltx_label(self._cfg))
-            if self._cfg.ltx_auto_split > 0:
-                parts.append(f"auto-split {self._cfg.ltx_auto_split}%")
+            # #263: an LTX launch has no unet part and never the 8K VR profile;
+            # #265: fast / large canvas as launched (the GPU decides)
+            parts += _ltx_label(
+                self._cfg,
+                self._cfg.ltx_fast and self._ltx_fast_ok,
+                self._cfg.ltx_large_canvas and self._ltx_canvas_ok,
+            )
             return f" [{', '.join(parts)}]"
         if vr_profile(self._cfg):
             parts.append("8K VR")
@@ -4001,9 +4175,11 @@ class JasnaPlugin(MonitorPlugin):
                 "whisperjav_engine",
                 "whisperjav_extra_args",
                 "ltx_1080p",
+                "ltx_4k",
                 "ltx_fast",
                 "ltx_auto_split",
                 "ltx_best",
+                "ltx_large_canvas",
                 "vr_8k",
                 "clip_size_1080p",
                 "clip_size_4k",
@@ -4025,7 +4201,8 @@ class JasnaPlugin(MonitorPlugin):
             "whisperjav_exe_path": {"ui:options": {"taskpawPath": "file"}},
             # #263: what the wizard greys while 1080p LTX is ticked (one source
             # with the launch rules).
-            "ltx_1080p": {"ui:options": {"taskpawLock": dict(_LTX_LOCK)}},
+            "ltx_1080p": {"ui:options": {"taskpawLock": dict(_LTX_1080P_LOCK)}},
+            "ltx_4k": {"ui:options": {"taskpawLock": dict(_LTX_4K_LOCK)}},
             # #208 N4: the values the wizard greys the overridden fields with —
             # the same constants the launch uses (one source).
             "vr_8k": {

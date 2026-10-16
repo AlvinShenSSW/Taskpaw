@@ -62,6 +62,19 @@ describe("i18n", () => {
     expect(i18n.t("wizard.ltxOn")).toBe("1080p tier only (without 8K VR and the 1080p unet-4x)");
   });
 
+  it("carries the 4K and both-tiers LTX hint and review strings in zh and en (#265)", () => {
+    expect(i18n.t("wizard.ltxHint4k")).toContain("只有 4K 档的文件用 LTX");
+    expect(i18n.t("wizard.ltxHint4k")).toContain("8 GB");
+    expect(i18n.t("wizard.ltxHintBoth")).toContain("1080p 档和 4K 档的文件都用 LTX");
+    expect(i18n.t("wizard.ltxOn4k")).toBe("仅 4K 档（不用 8K VR 和 4K 档 unet-4x）");
+    expect(i18n.t("wizard.ltxOnBoth")).toBe("1080p 和 4K 档（不用 8K VR 和 unet-4x）");
+    setLang("en");
+    expect(i18n.t("wizard.ltxHint4k")).toContain("4K LTX is on: only the 4K-tier files use LTX");
+    expect(i18n.t("wizard.ltxHintBoth")).toContain("LTX is on for both tiers");
+    expect(i18n.t("wizard.ltxOn4k")).toBe("4K tier only (without 8K VR and the 4K unet-4x)");
+    expect(i18n.t("wizard.ltxOnBoth")).toBe("both tiers (without 8K VR and unet-4x)");
+  });
+
   it("does not throw when reporting the language outside a Tauri shell (#108)", () => {
     // No window.__TASKPAW__ in the test env → the shell sync (set_ui_lang) must
     // be a safe no-op rather than blowing up the browser/dev path.

@@ -194,6 +194,10 @@ const en = {
     ltxHint: "1080p LTX is on: only the 1080p-tier files use LTX; 4K files and every other setting stay as they are (the 4K tier keeps BasicVSR++ and its unet-4x). LTX gives more detail but is much slower, and it supports neither VR side-by-side video nor unet-4x, so 8K VR and the 1080p unet-4x are greyed and not used — their saved values do not change and apply again when you untick. On the first LTX launch Jasna asks in its window whether to download the model (about 9 GB with fast mode, 15 GB without): type y. When a film has no safe cut points Jasna skips \"LTX only for big mosaics\" and restores the whole film with LTX; small mosaics restored by BasicVSR++ get no unet-4x either. Saving a running task restarts the current film from the beginning.",
     ltxRow: "LTX",
     ltxOn: "1080p tier only (without 8K VR and the 1080p unet-4x)",
+    ltxHint4k: "4K LTX is on: only the 4K-tier files use LTX; 1080p files and every other setting stay as they are. This needs a big GPU — on an 8 GB card a 4K LTX run fails in its last stage (TaskPaw alerts once); a 24 GB RTX 4090 has room. LTX supports neither VR side-by-side video nor unet-4x, so 8K VR and the 4K unet-4x are greyed and not used — their saved values do not change and apply again when you untick. Fast mode is used only on RTX 50 cards and large canvas only on cards with 16 GB or more; TaskPaw checks the GPU at Start. A failed LTX film is not relaunched at once; the next Start tries it again. On the first LTX launch Jasna asks in its window whether to download the model: type y. Saving a running task restarts the current film from the beginning.",
+    ltxHintBoth: "LTX is on for both tiers: the 1080p and the 4K files use LTX; every other setting stays as it is. 4K LTX needs a big GPU — on an 8 GB card it fails in its last stage (TaskPaw alerts once); a 24 GB RTX 4090 has room. LTX supports neither VR side-by-side video nor unet-4x, so 8K VR and both unet-4x tickboxes are greyed and not used — their saved values do not change and apply again when you untick. Fast mode is used only on RTX 50 cards and large canvas only on cards with 16 GB or more; TaskPaw checks the GPU at Start. A failed LTX film is not relaunched at once; the next Start tries it again. On the first LTX launch Jasna asks in its window whether to download the model: type y. Saving a running task restarts the current film from the beginning.",
+    ltxOn4k: "4K tier only (without 8K VR and the 4K unet-4x)",
+    ltxOnBoth: "both tiers (without 8K VR and unet-4x)",
   },
   services: {
     lada: "Subtitle/translation pipeline — files, fps, GPU.",
@@ -551,6 +555,10 @@ const zh: typeof en = {
     ltxHint: "已勾选：只有 1080p 档的文件用 LTX，4K 档和其他设置都按原来的配置（4K 档继续用 BasicVSR++ 和它的 unet-4x）。LTX 细节更多但慢很多；它不支持 VR 左右并排视频和 unet-4x，所以「8K VR」和「1080p 档：使用 unet-4x 二次修复」灰显、不使用，保存的原值不变，取消勾选后恢复。第一次用 LTX 时 Jasna 会弹出窗口询问是否下载模型（快速模式约 9 GB，不开快速约 15 GB），输入 y。影片没有合适切点时 Jasna 会跳过「LTX 仅用于大马赛克」，整片都用 LTX；小马赛克走 BasicVSR++ 时也不用 unet-4x。运行中的任务保存后会从头重跑当前影片。",
     ltxRow: "LTX",
     ltxOn: "仅 1080p 档（不用 8K VR 和 1080p 档 unet-4x）",
+    ltxHint4k: "已勾选：只有 4K 档的文件用 LTX，1080p 档和其他设置都按原来的配置。需要大显存显卡：8 GB 显卡上 4K LTX 会在最后阶段失败（TaskPaw 会提醒一次），24 GB 的 RTX 4090 足够。LTX 不支持 VR 左右并排视频和 unet-4x，所以「8K VR」和「4K 档：使用 unet-4x 二次修复」灰显、不使用，保存的原值不变，取消勾选后恢复。快速模式只在 RTX 50 系显卡上使用，大马赛克高清只在 16 GB 及以上显卡上使用，TaskPaw 启动时检测显卡。LTX 失败的影片不会马上重跑，下次启动时再试。第一次用 LTX 时 Jasna 会弹出窗口询问是否下载模型，输入 y。运行中的任务保存后会从头重跑当前影片。",
+    ltxHintBoth: "已勾选：1080p 档和 4K 档的文件都用 LTX，其他设置都按原来的配置。4K LTX 需要大显存显卡：8 GB 显卡上会在最后阶段失败（TaskPaw 会提醒一次），24 GB 的 RTX 4090 足够。LTX 不支持 VR 左右并排视频和 unet-4x，所以「8K VR」和两个 unet-4x 勾选框都灰显、不使用，保存的原值不变，取消勾选后恢复。快速模式只在 RTX 50 系显卡上使用，大马赛克高清只在 16 GB 及以上显卡上使用，TaskPaw 启动时检测显卡。LTX 失败的影片不会马上重跑，下次启动时再试。第一次用 LTX 时 Jasna 会弹出窗口询问是否下载模型，输入 y。运行中的任务保存后会从头重跑当前影片。",
+    ltxOn4k: "仅 4K 档（不用 8K VR 和 4K 档 unet-4x）",
+    ltxOnBoth: "1080p 和 4K 档（不用 8K VR 和 unet-4x）",
   },
   services: {
     lada: "字幕/翻译流水线 —— 文件、帧率、GPU。",
