@@ -166,6 +166,42 @@ def test_download_session_retry_progress_and_stop(tmp_path, monkeypatch):
     assert session.stop(0.01) and session.child is None
 
 
+@pytest.mark.parametrize("valid", [True, False])
+def test_worker_exits_normally_while_parent_keeps_stdin_open(tmp_path, valid):
+    import json
+    import subprocess
+
+    name = D.SHARED_FILES[1]
+    (tmp_path / name).write_bytes(b"existing isolated fixture")
+    proc = subprocess.Popen(
+        D.worker_argv(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        proc.stdin.write(
+            json.dumps(
+                {"destination": str(tmp_path), "files": [name if valid else "unknown"]}
+            ).encode()
+            + b"\n"
+        )
+        proc.stdin.flush()
+        # Do not close stdin until the child has exited: the parent owns the
+        # worker throughout completion, just like DownloadSession in production.
+        rc = proc.wait(timeout=10)
+        out, err = proc.communicate(timeout=5)
+        assert rc == (0 if valid else 1), err.decode(errors="replace")
+        assert not err
+        assert json.loads(out)["state"] == ("complete" if valid else "error")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+        proc.communicate(timeout=5)
+
+
 def test_parent_eof_exits_a_blocked_download(tmp_path):
     import json
     import subprocess

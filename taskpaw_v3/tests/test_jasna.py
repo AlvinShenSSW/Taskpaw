@@ -2668,12 +2668,12 @@ _GB16 = [(8.9, 16376)]
 def test_ltx_4k_fields_defaults_and_order():
     c = _cfg()
     assert c.ltx_4k is False
-    assert c.ltx_large_canvas is True
+    assert c.ltx_large_canvas is False
     props = JasnaPlugin.json_schema()["properties"]
     assert props["ltx_4k"]["title"] == "4K tier: restore with LTX"
     assert props["ltx_4k"]["default"] is False
     assert props["ltx_large_canvas"]["title"] == "LTX large canvas"
-    assert props["ltx_large_canvas"]["default"] is True
+    assert props["ltx_large_canvas"]["default"] is False
     assert "16 GB" in props["ltx_large_canvas"]["description"]
     assert "RTX 4090" in props["ltx_fast"]["description"]
     assert "Jasna fails on other GPUs" not in props["ltx_fast"]["description"]
@@ -2699,7 +2699,7 @@ def test_uses_ltx_ltx_launch_and_vr_profile_per_tier():
 
 
 def test_build_argv_4k_ltx_launch_exact():
-    cfg = _cfg(ltx_4k=True)
+    cfg = _cfg(ltx_4k=True, ltx_large_canvas=True)
     wd = Path("out") / ".jasna-work"
     argv = build_argv(
         cfg,
@@ -2742,7 +2742,7 @@ def test_build_argv_4k_ltx_launch_exact():
 
 
 def test_build_argv_fast_and_canvas_follow_the_effective_values():
-    cfg = _cfg(ltx_1080p=True)
+    cfg = _cfg(ltx_1080p=True, ltx_large_canvas=True)
     argv = _ltx_argv(cfg)  # defaults: fast ok, canvas not ok
     assert "--ltx-fast" in argv and "--ltx-large-canvas" not in argv
     argv = build_argv(
@@ -2872,7 +2872,12 @@ def test_rtx4090_box_both_tiers_ltx_without_fast_with_large_canvas(
     tmp_path, monkeypatch
 ):
     cfg, inp, _out, home = _managed(
-        tmp_path, ltx_1080p=True, ltx_4k=True, unet4x_1080p=True, unet4x_4k=True
+        tmp_path,
+        ltx_1080p=True,
+        ltx_4k=True,
+        ltx_large_canvas=True,
+        unet4x_1080p=True,
+        unet4x_4k=True,
     )
     _ltx_model(home, fast=False)  # the non-fast model is what this box needs
     _videos(inp, "a.mp4", "b.mp4")
@@ -2901,7 +2906,7 @@ def test_rtx4090_box_both_tiers_ltx_without_fast_with_large_canvas(
 
 
 def test_dropped_fast_and_canvas_are_logged(tmp_path, monkeypatch, caplog):
-    cfg, inp, _out, _home = _managed(tmp_path, ltx_1080p=True)
+    cfg, inp, _out, _home = _managed(tmp_path, ltx_1080p=True, ltx_large_canvas=True)
     _videos(inp, "a.mp4")
     _gpus(monkeypatch, _GB12)  # Ada, 12 GB: no fast, no large canvas
     _patch(monkeypatch, _Launcher([None]))

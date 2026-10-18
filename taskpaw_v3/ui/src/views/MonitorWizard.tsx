@@ -184,7 +184,8 @@ export function MonitorWizard({
     fields: Object.fromEntries([
       ...(liveLtx.hd ? Object.entries(ltxLocks.ltx_1080p ?? {}) : []),
       ...(liveLtx.uhd ? Object.entries(ltxLocks.ltx_4k ?? {}) : []),
-    ].map(([k, value]) => [k, { value }])),
+    ].filter(([k]) => k !== "vr_8k" || !(jasnaPresets && jasnaModel && jasnaGpu))
+      .map(([k, value]) => [k, { value }])),
   } : undefined;
   const reviewLtx = ltxTiers(formData);
   const ltxReview = reviewLtx.hd || reviewLtx.uhd;

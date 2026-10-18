@@ -59,7 +59,7 @@ const jasnaPlugin: apiModule.PluginInfo = {
         type: "integer", title: "LTX only for big mosaics (%)", default: 12, minimum: 0, maximum: 100,
       },
       ltx_best: { type: "boolean", title: "LTX best model", default: false },
-      ltx_large_canvas: { type: "boolean", title: "LTX large canvas", default: true },
+      ltx_large_canvas: { type: "boolean", title: "LTX large canvas", default: false },
       vr_8k: {
         type: "boolean", title: "8K VR", default: false,
         description: "Treat every file of this task as 8K SBS VR.",

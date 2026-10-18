@@ -133,8 +133,8 @@
         "type": "boolean"
       },
       "ltx_large_canvas": {
-        "default": true,
-        "description": "--ltx-large-canvas: large mosaics at 768 px instead of 512 — more detail on close-ups and 4K, about 3x slower on those. Passed only when every GPU has at least 16 GB of VRAM (TaskPaw checks at Start): on an 8 GB card Jasna's large canvas made even a 1080p run fail, so it is never passed there. Only used with LTX.",
+        "default": false,
+        "description": "--ltx-large-canvas: large mosaics at 768 px instead of 512 — more detail on close-ups and 4K, about 3x slower on those. Passed only when every GPU has at least 16 GB of VRAM (TaskPaw checks at Start): on an 8 GB card Jasna's large canvas made even a 1080p run fail, so it is never passed there. Off by default; enable manually for detail-sensitive shots. Only used with LTX.",
         "title": "LTX large canvas",
         "type": "boolean"
       },

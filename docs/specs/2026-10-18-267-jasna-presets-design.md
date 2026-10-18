@@ -180,3 +180,10 @@ passed. Keep the speed-first preset explicit and editable, and avoid promised
 quality equivalence. A declined prompt exposes Download later with a fresh ID
 in the same panel; this makes recovery possible while supervisor lifecycle is
 still running, addressing the design critic's checkpoint. Start also reoffers.
+
+Subsequent operator steering: community samples reportedly improve static shots
+with large canvas, but show little difference during motion. This is attributed
+feedback, not an independently verified universal quality result. The operator
+requests OFF by default: apply to both new JasnaConfig/schema defaults and all
+reference presets. Preserve explicitly saved true values and manual overrides.
+Tests must cover the new default and explicit true behavior.

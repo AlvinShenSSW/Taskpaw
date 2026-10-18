@@ -70,6 +70,27 @@ it("VR switch applies once and leaves manual VR tuning editable", () => {
   expect(field("clip_size_4k")).toHaveValue(180);
 }, 15000);
 
+it("LTX preset permits the independent VR switch and restores both LTX tiers when cleared", () => {
+  wizard(); select("修复模型", "LTX"); select("设备型号", "RTX 4090 · 24 GB");
+  const vr = screen.getByRole("checkbox", { name: "8K VR" });
+  expect(vr).toHaveAttribute("id", "root_vr_8k");
+  expect(vr).not.toBeDisabled();
+  expect(screen.queryByText(/输入 y/)).not.toBeInTheDocument();
+  fireEvent.click(vr);
+  expect(field("ltx_1080p")).not.toBeChecked();
+  expect(field("ltx_4k")).not.toBeChecked();
+  expect(field("clip_size_4k")).toHaveValue(30);
+  expect(field("clip_size_4k")).not.toBeDisabled();
+  fireEvent.change(field("clip_size_4k"), { target: { value: "48" } });
+  fireEvent.change(field("cq"), { target: { value: "26" } });
+  expect(field("clip_size_4k")).toHaveValue(48);
+  fireEvent.click(field("vr_8k"));
+  expect(field("ltx_1080p")).toBeChecked();
+  expect(field("ltx_4k")).toBeChecked();
+  expect(field("clip_size_4k")).toHaveValue(180);
+  expect(field("cq")).toHaveValue(26);
+}, 15000);
+
 it("stage 100% never becomes whole-film 100%; stage card resets for BasicVSR++", () => {
   const { rerender } = render(<MonitorMetrics metrics={{ current_file: "a.mp4", ltx_stage: "3/4 denoise", percent: 100, eta: "04:57" }} />);
   expect(screen.getByText("第 3 / 4 阶段进度")).toBeInTheDocument();
@@ -96,6 +117,7 @@ it("add review/back preserves both presets and subsequent manual tuning", async 
   wizard("add");
   fireEvent.click(screen.getByText("Jasna"));
   fireEvent.click(screen.getByText("继续"));
+  expect(field("ltx_large_canvas")).not.toBeChecked();
   fireEvent.change(field("name"), { target: { value: "mixed" } });
   select("修复模型", "普通（BasicVSR++）"); select("设备型号", "RTX 5070 Ti · 16 GB");
   fireEvent.change(field("clip_size_4k"), { target: { value: "75" } });

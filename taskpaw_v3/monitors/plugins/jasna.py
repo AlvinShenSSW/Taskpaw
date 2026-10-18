@@ -1198,13 +1198,14 @@ class JasnaConfig(BaseMonitorConfig):
         "LTX.",
     )
     ltx_large_canvas: bool = Field(
-        True,
+        False,
         title="LTX large canvas",
         description="--ltx-large-canvas: large mosaics at 768 px instead of 512 — "
         "more detail on close-ups and 4K, about 3x slower on those. Passed only "
         "when every GPU has at least 16 GB of VRAM (TaskPaw checks at Start): on "
         "an 8 GB card Jasna's large canvas made even a 1080p run fail, so it is "
-        "never passed there. Only used with LTX.",
+        "never passed there. Off by default; enable manually for detail-sensitive "
+        "shots. Only used with LTX.",
     )
     ltx_overlap: Literal["auto", "on", "off"] = Field(
         "auto",

@@ -220,7 +220,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     ltx_large_canvas: {
       title: "LTX 大马赛克高清",
       description:
-        "--ltx-large-canvas：大马赛克按 768 px 而不是 512 px 修复，特写和 4K 细节更多，这些片段慢约 3 倍。只有每张显卡都有 16 GB 及以上显存时才会使用（TaskPaw 启动时检测）：8 GB 显卡上实测连 1080p 都会失败，所以不会传给它。只在勾选「使用 LTX」时使用。",
+        "--ltx-large-canvas：默认关闭，可按画质需要手动开启。大马赛克按 768 px 而不是 512 px 修复，特写和 4K 细节更多，这些片段慢约 3 倍。只有每张显卡都有 16 GB 及以上显存时才会使用（TaskPaw 启动时检测）：8 GB 显卡上实测连 1080p 都会失败，所以不会传给它。只在勾选「使用 LTX」时使用。",
     },
     ltx_overlap: { title: "LTX 减少重叠（0.11.2+）", description: "auto = 跟随 Jasna 默认（0.11.2 Windows 默认开启）；on / off = 显式开 / 关，仅用于 LTX。作者称长视频约快 13%。不要与 BasicVSR++ 的时序重叠帧数混淆。" },
     vr_8k_custom: { title: "8K VR：使用可编辑参数", description: "启用后，片段长度、重叠和 unet-4x 采用下方的手动值；关闭保留旧版固定 VR 预设。检测器和 SBS 模式仍固定。应用机型预设时自动开启。" },

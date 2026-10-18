@@ -136,8 +136,13 @@ def main() -> int:
 
     def parent_watch() -> None:
         # Parent retains stdin after the one request. EOF means ownership ended.
-        sys.stdin.buffer.read()
-        os._exit(0)
+        # A buffered read here holds stdin's lock during normal interpreter
+        # shutdown, aborting an otherwise successful worker. Read the raw pipe.
+        try:
+            while os.read(sys.stdin.fileno(), 1):
+                continue
+        finally:
+            os._exit(0)
 
     threading.Thread(target=parent_watch, daemon=True, name="jasna-parent").start()
 
