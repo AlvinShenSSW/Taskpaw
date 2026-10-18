@@ -731,6 +731,116 @@ def test_parent_result_capture_is_independently_bounded(monkeypatch):
     assert transport.clean()
 
 
+@pytest.mark.skipif(__import__("os").name != "nt", reason="native Windows launch")
+@pytest.mark.parametrize("oversize", [False, True], ids=["reply", "oversize"])
+def test_windows_venv_exit_before_first_census_is_owned(monkeypatch, oversize):
+    """A short venv runtime must not disappear before its handle is owned."""
+    import sys
+
+    import pydantic
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    capture = uw._WindowsProcess.capture_members
+    observed = []
+
+    def after_exit(proc):
+        if not observed:
+            # Both pipe owners have started. Model the parent not being
+            # scheduled again until the short runtime has already exited.
+            proc.wait(5)
+            observed.append(proc)
+        capture(proc)
+
+    code = "import json,sys,pydantic; sys.stdin.buffer.readline(); " + (
+        f"sys.stdout.buffer.write(b'x'*{uw.REPLY_BYTES + 65536}); "
+        "sys.stdout.buffer.flush()"
+        if oversize
+        else "print(json.dumps({'ok':True,'prefix':sys.prefix,"
+        "'executable':sys.executable,'dependency':pydantic.__version__}))"
+    )
+    monkeypatch.setattr(uw, "worker_argv", lambda: [sys.executable, "-c", code])
+    monkeypatch.setattr(uw._WindowsProcess, "capture_members", after_exit)
+    transport = uw.Transport()
+    try:
+        result = transport.request({}, 5)
+        assert result == (
+            {"ok": False, "reason": "helper_output_oversize"}
+            if oversize
+            else {
+                "ok": True,
+                "prefix": sys.prefix,
+                "executable": sys.executable,
+                "dependency": pydantic.__version__,
+            }
+        )
+        assert transport.clean()
+        assert observed[0].final_accounting == (1, 0)
+        assert len(observed[0].members) == 1
+        assert all(m.valid and m.signaled and m.closed for m in observed[0].members)
+    finally:
+        transport.cancel()
+        if not transport.retry_cleanup():
+            # Dispose this diagnostic's own exited child even on the RED
+            # revision, without treating incomplete production proof as clean.
+            rec = transport._owned
+            assert rec is not None
+            rec.proc.terminate_owned()
+            rec.proc.wait(2)
+            assert rec.proc.api.accounting(rec.proc.job)[1] == 0
+            for thread in rec.threads:
+                thread.join(2)
+                assert not thread.is_alive()
+            rec.proc.close()
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="native Windows launch")
+@pytest.mark.parametrize("kind", ["venv", "frozen", "custom", "base"])
+def test_windows_venv_launch_preserves_command_and_environment(monkeypatch, kind):
+    import os
+    import sys
+
+    from taskpaw_v3.hub.server import upstream_worker as uw
+
+    class Captured(Exception):
+        pass
+
+    venv = r"C:\owned venv\Scripts\python.exe"
+    base = r"C:\owned runtime\python.exe"
+    custom = r"C:\owned tool\helper.exe"
+    monkeypatch.setattr(sys, "executable", venv)
+    monkeypatch.setattr(sys, "_base_executable", venv if kind == "base" else base)
+    monkeypatch.setattr(sys, "frozen", kind == "frozen", raising=False)
+    argv = [custom if kind == "custom" else venv, "owned argument"]
+    env = {"OWNED_VALUE": "unchanged"}
+    original_argv, original_env = argv.copy(), env.copy()
+    parent_launcher = os.environ.get("__PYVENV_LAUNCHER__")
+    seen = []
+
+    def create(api, command, child_env, handles):
+        seen.append((command, child_env))
+        raise Captured()
+
+    monkeypatch.setattr(uw._WindowsAPI, "create_process", create)
+    proc = uw._WindowsProcess()
+    try:
+        with pytest.raises(Captured):
+            proc.start(argv, env)
+        assert seen == [
+            (
+                [base, *argv[1:]] if kind == "venv" else argv,
+                {**env, "__PYVENV_LAUNCHER__": venv} if kind == "venv" else env,
+            )
+        ]
+        assert argv == original_argv and env == original_env
+        assert os.environ.get("__PYVENV_LAUNCHER__") == parent_launcher
+    finally:
+        for pipe in (proc.stdin, proc.stdout):
+            if pipe is not None:
+                pipe.close()
+        proc.close()
+
+
 def _capture_upstream_process(monkeypatch, captured, callback=None, phases=None):
     import os
     import time

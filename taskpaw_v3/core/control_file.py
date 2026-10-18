@@ -210,7 +210,8 @@ class _PosixDirectory:
         self.path = _path(path)
         self._fds: list[int] = []
         try:
-            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            # This backend runs only on POSIX; Windows stubs omit these flags.
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY") | getattr(os, "O_NOFOLLOW")
             self._fds.append(os.open(self.path.anchor, flags))
             self._check(self._fds[-1], final=not self.path.parts[1:])
             for index, part in enumerate(self.path.parts[1:]):
@@ -228,7 +229,7 @@ class _PosixDirectory:
     @staticmethod
     def _check(fd: int, *, final: bool) -> None:
         info = os.fstat(fd)
-        uid = os.getuid()
+        uid = getattr(os, "getuid")()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid not in {uid, 0}:
             raise ControlCredentialError("unsafe_control_directory")
         writable = bool(info.st_mode & 0o022)
@@ -238,12 +239,16 @@ class _PosixDirectory:
         _check_darwin_acl(fd, directory=True, final=final)
 
     def _open(self, name: str) -> int:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.fd)
+        fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW") | getattr(os, "O_NONBLOCK"),
+            dir_fd=self.fd,
+        )
         try:
             info = os.fstat(fd)
             if (
                 not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.getuid()
+                or info.st_uid != getattr(os, "getuid")()
                 or info.st_mode & 0o077
                 or info.st_nlink != 1
                 or info.st_size > _LIMIT
@@ -282,14 +287,14 @@ class _PosixDirectory:
         try:
             fd = os.open(
                 tmp,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW"),
                 0o600,
                 dir_fd=self.fd,
             )
             info = os.fstat(fd)
             if (
                 not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.getuid()
+                or info.st_uid != getattr(os, "getuid")()
                 or info.st_mode & 0o077
                 or info.st_nlink != 1
             ):

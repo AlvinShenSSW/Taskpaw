@@ -3,6 +3,7 @@
 import importlib
 import json
 import ntpath
+import os
 import shlex
 import sys
 from pathlib import Path, PureWindowsPath
@@ -25,9 +26,36 @@ def setup(tmp_path, monkeypatch, request):
             assert argv[1] == "-c"
             words = shlex.split(argv[2])
             assert words[0] == "exec"
+            # Emulate POSIX exec, including owning the actual interpreter:
+            # Windows venv python.exe otherwise launches a second process.
+            if (
+                sys.platform == "win32"
+                and sys.implementation.name == "cpython"
+                and Path(words[1]) == Path(sys.executable)
+            ):
+                child_env = dict(kwargs.get("env", os.environ))
+                child_env["__PYVENV_LAUNCHER__"] = words[1]
+                kwargs["env"] = child_env
+                words[1] = sys._base_executable
             return native_run(words[1:], **kwargs)
 
         monkeypatch.setattr(s.subprocess, "run", direct_writer)
+
+        class DirectVerification(s.WindowsVerification):
+            def run(self, argv, raw, timeout):
+                return direct_writer(
+                    argv,
+                    input=raw,
+                    text=True,
+                    stdout=s.subprocess.DEVNULL,
+                    stderr=s.subprocess.DEVNULL,
+                    timeout=timeout,
+                    check=False,
+                ).returncode
+
+        # Windows-policy tests also use this synthetic shell. Native private-Job
+        # launch/cleanup is exercised through real Git Bash in test_activity_verifier.
+        monkeypatch.setattr(s, "WindowsVerification", DirectVerification)
         monkeypatch.setattr(
             s.shutil,
             "which",
@@ -38,6 +66,26 @@ def setup(tmp_path, monkeypatch, request):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("CODEX_HOME", raising=False)
     return s, tmp_path
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows CPython venv redirector")
+def test_synthetic_exec_owns_actual_interpreter_and_preserves_venv(setup):
+    s, _ = setup
+    script = (
+        "import json, os, sys; "
+        "print(json.dumps([os.getppid(), sys.executable, sys.prefix]))"
+    )
+    result = s.subprocess.run(
+        ["synthetic-shell", "-c", "exec " + shlex.join([sys.executable, "-c", script])],
+        stdout=s.subprocess.PIPE,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    parent, executable, prefix = json.loads(result.stdout)
+    assert parent == os.getpid()
+    assert Path(executable) == Path(sys.executable)
+    assert Path(prefix) == Path(sys.prefix)
 
 
 @pytest.fixture
@@ -368,6 +416,14 @@ def test_write_failures_report_and_keep_backup(
     setup, monkeypatch, capsys, failure, run
 ):
     s, home = setup
+
+    def unrelated_writer(*args, **kwargs):
+        raise AssertionError("write-failure test must not depend on writer startup")
+
+    monkeypatch.setattr(s.subprocess, "run", unrelated_writer)
+    # This test injects settings/undo I/O failures after successful preflight.
+    # Real interpreter/writer verification has separate integration coverage.
+    monkeypatch.setattr(s, "verify_writer", lambda *args: None)
     p = put(home, "claude", {"baseline": 1})
     original = s.atomic_write
 
@@ -399,7 +455,14 @@ def test_check_rejects_bad_writer_output_and_cleans_temp(
     setup, monkeypatch, fault, run
 ):
     s, home = setup
-    run(s, home, "install", "claude")
+
+    def unrelated_writer(*args, **kwargs):
+        raise AssertionError("bad-writer fixture must not depend on writer startup")
+
+    with monkeypatch.context() as install:
+        install.setattr(s.subprocess, "run", unrelated_writer)
+        install.setattr(s, "verify_writer", lambda *args: None)
+        run(s, home, "install", "claude")
 
     def fake_run(argv, **kwargs):
         import time

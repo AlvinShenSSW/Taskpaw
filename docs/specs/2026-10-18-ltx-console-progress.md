@@ -168,3 +168,45 @@ checks, internal review, sole Kimi K3 review, full native checks and remote CI.
 Record any environmental baseline failures separately from passes; never call
 a partially failing suite green. No merge while required checks or an admitted
 in-scope finding remain unresolved.
+
+## Operator-approved Windows validation amendment
+
+After candidate `67230d6` passed the sole Kimi K3 code-review gate, the final
+native suite and the required Windows CI job remained red. On 2026-10-18 the
+operator explicitly authorized: “纳入本次 AFK，修复并验证后发版”, in response to
+expanding this run to the remaining Hub child-process communication, exit
+cleanup and Windows test-compatibility failures. This amendment retains issue
+#269, PR #270, version 3.9.17, the same repair allowance and sole Kimi K3 gate.
+
+Additional acceptance criteria:
+
+9. Diagnose and repair the demonstrated Windows validation failures with
+   regression coverage: macOS packaging fixtures executed on Windows, admin
+   cleanup synchronization, activity-writer verification, and Hub helper
+   transport/owned-process cleanup. Passing isolated tests is not proof that
+   a hosted failure is resolved. Establish each causal fix before changing it.
+10. Preserve subprocess deadlines, bounded input/output, process-tree ownership,
+    fail-closed cleanup and durable event acknowledgements. Do not disable
+    failing checks, weaken assertions, silently discard cleanup failures or
+    repeatedly rerun CI as a substitute for repair. Platform-specific test
+    assumptions may be corrected while retaining their behavioral coverage.
+11. Re-review the amended implementation with Kimi K3, execute the full native
+    suite on the final reviewed revision and resolve every required remote
+    check before merging and publishing. Rebuild and verify the final Desktop
+    EXE against the released artifact. Do not install or restart live services.
+
+The added edit surface is the affected V3 Hub helper/transport and admin or
+supervisor cleanup code, activity setup verification, packaging validation
+helpers, their regression tests and directly necessary test/tool configuration.
+Changes must map to a demonstrated failure above; this is not authorization
+for unrelated refactoring, protocol redesign or deployment. Existing LTX UI
+acceptance criteria and historical failed-run evidence remain unchanged.
+
+Windows activity verification keeps the canonical shell command and five-second
+execution deadline. Its private Job must signal the root and all captured,
+validated members, report zero active processes, join pipe owners and close
+handles before temporary-directory removal. A failed sample retains uncertainty
+for that owner, even if a later sample succeeds; termination, wait and close
+failures remain retryable. This local verifier does not require Hub's historical
+member-count equality: a process that fully disappears before any snapshot has
+no independent retained-handle proof. Hub's stronger lifetime census is unchanged.

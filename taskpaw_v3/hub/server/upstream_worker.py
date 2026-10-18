@@ -680,6 +680,20 @@ class _WindowsProcess:
         return pipe
 
     def start(self, argv: list[str], env: dict) -> None:
+        base_executable = getattr(sys, "_base_executable", None)
+        if (
+            not getattr(sys, "frozen", False)
+            and isinstance(base_executable, str)
+            and base_executable
+            and argv
+            and os.path.normcase(argv[0]) == os.path.normcase(sys.executable)
+            and os.path.normcase(base_executable) != os.path.normcase(sys.executable)
+        ):
+            # Match CPython's Windows multiprocessing launch: own the runtime
+            # handle immediately, avoiding a venv redirector whose short-lived
+            # child could exit between Job censuses. Preserve the venv context.
+            argv = [base_executable, *argv[1:]]
+            env = {**env, "__PYVENV_LAUNCHER__": sys.executable}
         if self.api is None:
             self.api = _WindowsAPI()
         self.job = self.api.create_job()
@@ -984,7 +998,7 @@ class Transport:
                         raise
                     failed = True
             if not native and rec.proc.poll() is None:
-                if os.name == "posix":
+                if sys.platform != "win32" and os.name == "posix":
                     try:
                         os.killpg(rec.proc.pid, signal.SIGKILL)
                     except ProcessLookupError:
