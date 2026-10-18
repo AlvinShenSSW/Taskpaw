@@ -340,7 +340,7 @@ describe("MonitorWizard jasna 8K VR (#208)", () => {
       "locked_clip_size_4k", "locked_detection_model", "locked_temporal_overlap", "locked_unet4x_4k",
     ]);
     // The localized help (with its "8K VR overrides this" clause) is the display control's helper text.
-    expect(clip).toHaveAccessibleDescription(/启动时由 8K VR 覆盖此项/);
+    expect(clip).toHaveAccessibleDescription(/未启用可编辑参数时，启动时由固定 VR 预设覆盖此项/);
     // The real fields stay mounted (rjsf keeps and submits them) but hidden.
     for (const real of [realClip, realOverlap, realDetection, realUnet]) {
       expect(real).toBeInTheDocument();

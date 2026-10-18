@@ -14,6 +14,22 @@ export const LANGS: { value: Lang; label: string }[] = [
 const STORE_KEY = "taskpaw.lang";
 
 const en = {
+  jasna: {
+    presets: "Model and GPU reference settings", model: "Restoration model", gpu: "GPU model",
+    plain: "Plain (BasicVSR++)", unet: "unet-4x", ltx: "LTX", reapply: "Reapply preset",
+    presetHelp: "Select both to fill 1080p and 4K together for mixed batches. These are unbenchmarked starting points; tuning stays editable. Changing a selection replaces tuning values. 8K VR has its own switch below.",
+    smallGpu: "8 GB: LTX Fast for 1080p; 4K uses unet-4x. Large canvas and Best are off. This avoids 4K LTX failures observed in 0.11.1; 0.11.2 has not been measured on your machine.",
+    canvasHelp: "Speed preset: Large canvas and Best are off. Large canvas adds detail on big mosaics and close-ups, with about 3× processing cost on those regions. Enable it manually when that detail matters.",
+    vrHelp: "8K SBS VR uses its own detector. The preset disables LTX and 4K unet-4x; clip, overlap and unet fields remain editable. Keep 2D videos in a separate task.",
+    progress: "LTX restoration", scan: "Find mosaics", encode: "Prepare", denoise: "Restore", compose: "Save",
+    stagePercent: "Stage {{stage}} / 4 progress", stageFps: "Stage: {{fps}} fps", runEta: "Run remaining: {{eta}}",
+    downloadTitle: "LTX model files", download: "Download and continue", notNow: "Not now", retryDownload: "Retry download",
+    download_awaiting: "Required files are missing. The film stays queued until you confirm the download.",
+    download_approved: "Starting download…", download_downloading: "Downloading and verifying model files…",
+    download_paused: "Download paused. Download later here, or stop this task.",
+    download_error: "Download failed. Your film remains queued. Check network and disk space, then retry.",
+    downloadHelp: "Official Jasna files from Hugging Face (hf-mirror fallback), verified before use. Stop cancels the download. LTX still requires activation in Jasna.",
+  },
   control: { title: "Connect to {{role}}", help: "Read this running backend’s protected control descriptor in your local editor, then enter its base_url and control token. This role’s endpoint and credentials stay in memory; VITE_TASKPAW_BASE is no longer used.", endpoint: "Control endpoint", token: "Control token", connect: "Connect", failed: "Could not authenticate or reach the local backend. Read its current descriptor and try again.", reopen: "The backend may have restarted or startup credentials are unavailable. Please reopen TaskPaw." },
   ffmpeg: {
     checking: "Checking FFmpeg…",
@@ -377,6 +393,22 @@ const en = {
 };
 
 const zh: typeof en = {
+  jasna: {
+    presets: "模型与显卡参考预设", model: "修复模型", gpu: "设备型号",
+    plain: "普通（BasicVSR++）", unet: "unet-4x", ltx: "LTX", reapply: "重新填入预设",
+    presetHelp: "选好模型和显卡，同时填入 1080p、4K 两档，适合混合批次。这是未经本机实测的起点，参数仍可手动修改；更换选择会重新填入。8K VR 保留下面的独立开关。",
+    smallGpu: "8GB 预设：1080p 使用 LTX Fast，4K 使用 unet-4x；大马赛克和 Best 关闭。用于避开 0.11.1 实测的 4K LTX 失败，尚未在本机实测 0.11.2。",
+    canvasHelp: "速度预设默认关闭「大马赛克」和 Best。大马赛克可改善大面积遮挡与近景细节，但相关区域约慢 3 倍；需要这部分细节时可手动开启。",
+    vrHelp: "8K SBS VR 使用专用检测器；预设关闭 LTX 和 4K unet-4x，片段长度、重叠和 unet 参数仍可编辑。2D 影片请放在另一任务中。",
+    progress: "LTX 修复进度", scan: "查找马赛克", encode: "准备", denoise: "修复", compose: "保存",
+    stagePercent: "第 {{stage}} / 4 阶段进度", stageFps: "当前阶段：{{fps}} fps", runEta: "本轮剩余：{{eta}}",
+    downloadTitle: "LTX 模型文件", download: "下载并继续", notNow: "暂不下载", retryDownload: "重试下载",
+    download_awaiting: "缺少所需模型文件。影片保留在队列中，确认后才下载。",
+    download_approved: "正在启动下载…", download_downloading: "正在下载并校验模型文件…",
+    download_paused: "已暂停下载。可以在这里稍后下载，也可以停止任务。",
+    download_error: "下载失败，影片仍在队列中。请检查网络和磁盘空间后重试。",
+    downloadHelp: "文件来自 Jasna 官方模型仓库（Hugging Face，失败时使用 hf-mirror），校验后才使用。停止任务会取消下载；LTX 授权仍需在 Jasna 中激活。",
+  },
   control: { title: "连接 {{role}}", help: "在本地编辑器读取当前后端的受保护控制凭据文件，再填写 base_url 和控制令牌。端点和凭据仅在当前角色的内存中保存；不再使用 VITE_TASKPAW_BASE。", endpoint: "控制端点", token: "控制令牌", connect: "连接", failed: "无法验证凭据或连接本地后端。请读取当前凭据文件后重试。", reopen: "后端可能已重启，或启动凭据不可用。请重新打开 TaskPaw。" },
   ffmpeg: {
     checking: "正在检查 FFmpeg…",

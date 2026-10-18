@@ -10,6 +10,9 @@ import type { FilmSource } from "./filmSource.helpers";
 import { hubFilmKind } from "../views/hubDashboard.helpers";
 import { hiddenWithPipeline, readPipeline, readFilmFallback } from "./pipelineProgress.helpers";
 import { Tile } from "./Tile";
+import { LtxProgress } from "./LtxProgress";
+import { ltxStage } from "./ltxProgress.helpers";
+import { LtxDownload } from "./LtxDownload";
 
 // Live metrics dashboard for a monitor's status pane (design-system
 // pages/agent-console.md → StatusHeader: "live metric line … file N/M, fps, %").
@@ -62,6 +65,7 @@ const KNOWN = new Set([
   "mem_used_mb", "mem_total_mb",
   // #189 queue counters (an empty AV 翻译 tracker leaves them without `steps`)
   "queue_restored", "queue_pre_done", "steps", "films", "films_more",
+  "ltx_stage", "ltx_download",
 ]);
 
 export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
@@ -100,7 +104,9 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
   // REPLACES the now-processing banner, the queue bar and the fps/ETA tiles, and
   // the keys it shows itself are hidden from the generic tiles (D13). Without it
   // (Lada, AV-off Jasna, other monitors) nothing below changes.
-  const pipe = readPipeline(m);
+  const ltx = ltxStage(m) !== null;
+  const pipelineMetrics = ltx ? { ...m, percent: undefined, fps: undefined } : m;
+  const pipe = readPipeline(pipelineMetrics);
 
   const gauges = [
     gpu !== undefined ? { label: "GPU", pct: gpu } : null,
@@ -109,8 +115,8 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
   ].filter(Boolean) as { label: string; pct: number }[];
 
   const tiles: { label: string; value: string }[] = [];
-  if (!pipe && fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
-  if (!pipe && eta) tiles.push({ label: t("events.eta"), value: eta });
+  if (!pipe && !ltx && fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
+  if (!pipe && !ltx && eta) tiles.push({ label: t("events.eta"), value: eta });
   // Unknown keys → tiles (so nothing is silently hidden, nothing is raw JSON).
   for (const [k, val] of Object.entries(m)) {
     if (KNOWN.has(k)) continue;
@@ -124,10 +130,12 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
 
   return (
     <Stack spacing={2} sx={{ mt: 2 }}>
-      {pipe && <PipelineProgress pipeline={pipe} metrics={m} taskName={taskName} filmSource={filmSource} taskType={taskType} />}
+      {pipe && <PipelineProgress pipeline={pipe} metrics={pipelineMetrics} taskName={taskName} filmSource={filmSource} taskType={taskType} />}
+      {ltx && <LtxProgress metrics={m} />}
+      {filmSource?.kind === "hub" && <LtxDownload value={m.ltx_download} />}
 
       {/* Now-processing banner + current-file progress */}
-      {!pipe && currentFile && (
+      {!pipe && !ltx && currentFile && (
         <Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "rgba(34,197,94,0.06)",
                    border: "1px solid", borderColor: "rgba(34,197,94,0.25)" }}>
           <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase",

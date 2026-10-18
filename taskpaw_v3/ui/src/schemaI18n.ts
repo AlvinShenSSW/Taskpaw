@@ -178,7 +178,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     unet4x_4k: {
       title: "4K 档：使用 unet-4x 二次修复",
       description:
-        "默认关：8 GB 显存放不下 4K 的 unet-4x。4K 档指像素数 > 1920×1080×1.5（约 3.1 MP，即 2560×1440 及以上）的视频。显存更大时可以打开。勾选「8K VR」时，启动时由 8K VR 覆盖此项。勾选「4K 档：使用 LTX」时不使用。",
+        "默认关：8 GB 显存放不下 4K 的 unet-4x。4K 档指像素数 > 1920×1080×1.5（约 3.1 MP，即 2560×1440 及以上）的视频。显存更大时可以打开。8K VR 未启用可编辑参数时，启动时由固定 VR 预设覆盖此项。仅调整 BasicVSR++，不会改变 LTX 自身窗口。勾选「4K 档：使用 LTX」时不使用。",
     },
     av_translate: {
       title: "AV 翻译",
@@ -195,12 +195,12 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     ltx_1080p: {
       title: "1080p 档：使用 LTX",
       description:
-        "仅 1080p 档：4K 档的文件和其他所有设置都按原来的配置（4K 档有自己的 LTX 勾选框）。勾选后 1080p 档的文件用 Jasna 的赞助者模型 LTX 修复（需 Jasna 0.11.1 及以上；细节更多、慢很多；需 NVIDIA RTX 显卡）。勾选时「8K VR」和「1080p 档：使用 unet-4x 二次修复」不使用（LTX 两者都不支持），它们保存的值不变，取消勾选后恢复。第一次用 LTX 时会在 Jasna 窗口里询问是否下载模型（快速模式约 9 GB，不开快速约 15 GB）。运行中的任务保存后会从头重跑当前影片。",
+        "仅 1080p 档：4K 档的文件和其他所有设置都按原来的配置（4K 档有自己的 LTX 勾选框）。勾选后 1080p 档的文件用 Jasna 的赞助者模型 LTX 修复（需 Jasna 0.11.1 及以上；细节更多、慢很多；需 NVIDIA RTX 显卡）。勾选时「8K VR」和「1080p 档：使用 unet-4x 二次修复」不使用（LTX 两者都不支持），它们保存的值不变，取消勾选后恢复。第一次缺少模型时会在 TaskPaw 中确认并显示下载进度（快速模式约 9 GB，不开快速约 15 GB）。运行中的任务保存后会从头重跑当前影片。",
     },
     ltx_fast: {
       title: "LTX 快速模式",
       description:
-        "--ltx-fast：快约 1.4 倍，细节略少，下载更小。仅限 RTX 50 系显卡：TaskPaw 启动时检测显卡，没有 RTX 50 系（例如 RTX 4090）就不用它。默认开：标准 LTX 模型在 8 GB 显卡上放不下。只在勾选「使用 LTX」时使用。",
+        "--ltx-fast：快约 1.4 倍，细节略少，下载更小。仅限 RTX 50 系显卡：TaskPaw 启动时检测显卡，没有 RTX 50 系（例如 RTX 4090）就不用它。默认开：0.11.1 实测标准 LTX 模型在 8 GB 显卡上放不下。只在勾选「使用 LTX」时使用。",
     },
     ltx_auto_split: {
       title: "LTX 仅用于大马赛克（%）",
@@ -215,17 +215,19 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     ltx_4k: {
       title: "4K 档：使用 LTX",
       description:
-        "4K 档的文件也用 LTX 修复。需要大显存显卡：8 GB 显卡上 4K LTX 会在最后阶段失败（已实测，TaskPaw 会提醒一次），24 GB 的 RTX 4090 足够。勾选时「8K VR」和「4K 档：使用 unet-4x 二次修复」不使用，保存的值不变。LTX 失败的影片不会马上重跑，下次启动时再试。运行中的任务保存后会从头重跑当前影片。",
+        "4K 档的文件也用 LTX 修复。需要大显存显卡：8 GB 显卡上 Jasna 0.11.1 的 4K LTX 会在最后阶段失败（旧版实测，0.11.2 未复测，TaskPaw 会提醒一次），24 GB 的 RTX 4090 足够。勾选时「8K VR」和「4K 档：使用 unet-4x 二次修复」不使用，保存的值不变。LTX 失败的影片不会马上重跑，下次启动时再试。运行中的任务保存后会从头重跑当前影片。",
     },
     ltx_large_canvas: {
       title: "LTX 大马赛克高清",
       description:
         "--ltx-large-canvas：大马赛克按 768 px 而不是 512 px 修复，特写和 4K 细节更多，这些片段慢约 3 倍。只有每张显卡都有 16 GB 及以上显存时才会使用（TaskPaw 启动时检测）：8 GB 显卡上实测连 1080p 都会失败，所以不会传给它。只在勾选「使用 LTX」时使用。",
     },
+    ltx_overlap: { title: "LTX 减少重叠（0.11.2+）", description: "auto = 跟随 Jasna 默认（0.11.2 Windows 默认开启）；on / off = 显式开 / 关，仅用于 LTX。作者称长视频约快 13%。不要与 BasicVSR++ 的时序重叠帧数混淆。" },
+    vr_8k_custom: { title: "8K VR：使用可编辑参数", description: "启用后，片段长度、重叠和 unet-4x 采用下方的手动值；关闭保留旧版固定 VR 预设。检测器和 SBS 模式仍固定。应用机型预设时自动开启。" },
     vr_8k: {
       title: "8K VR",
       description:
-        "勾选后，这个任务的所有文件都按 8K SBS VR 处理：启动时使用 VR180 检测模型 rfdetr-vr-v1、--vr-mode sbs、时序重叠 8、4K 档片段长度 30，4K 档不用 unet-4x。被覆盖的字段保留各自保存的值，取消勾选后重新生效。2D 影片请放到另一个任务。运行中的任务保存这个设置后会从头重跑当前影片。勾选任一「使用 LTX」时不使用。",
+        "勾选后，这个任务的所有文件都按 8K SBS VR 处理：启动时使用 VR180 检测模型 rfdetr-vr-v1、--vr-mode sbs、时序重叠 8、4K 档片段长度 30，4K 档不用 unet-4x。开启「8K VR：使用可编辑参数」后，片段长度、重叠和 unet 采用下方可编辑值；旧配置未开启时仍用固定值。2D 影片请放到另一个任务。运行中的任务保存这个设置后会从头重跑当前影片。勾选任一「使用 LTX」时不使用。",
     },
     clip_size_1080p: {
       title: "1080p 档片段长度",
@@ -235,12 +237,12 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     clip_size_4k: {
       title: "4K 档片段长度",
       description:
-        "4K 档每次送进模型的帧数（--max-clip-size）。越大越稳定但更吃显存；8 GB 显存建议 60。勾选「8K VR」时，启动时由 8K VR 覆盖此项。",
+        "4K 档每次送进模型的帧数（--max-clip-size）。越大越稳定但更吃显存；8 GB 显存建议 60。8K VR 未启用可编辑参数时，启动时由固定 VR 预设覆盖此项。仅调整 BasicVSR++，不会改变 LTX 自身窗口。",
     },
     temporal_overlap: {
       title: "时序重叠帧数",
       description:
-        "相邻片段之间重叠的帧数（--temporal-overlap），减少接缝闪烁。建议 8–20；Jasna 要求 2×重叠 必须小于片段长度（两个档位都要满足）。勾选「8K VR」时，启动时由 8K VR 覆盖此项。",
+        "相邻片段之间重叠的帧数（--temporal-overlap），减少接缝闪烁。建议 8–20；Jasna 要求 2×重叠 必须小于片段长度（两个档位都要满足）。8K VR 未启用可编辑参数时，启动时由固定 VR 预设覆盖此项。仅调整 BasicVSR++，不会改变 LTX 自身窗口。",
     },
     codec: {
       title: "编码器",
@@ -268,7 +270,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     jasna_capture_progress: {
       title: "捕获进度",
       description:
-        "高级。关（默认）：每个文件的 jasna.exe 各自开一个控制台窗口显示进度条（一个文件一个窗口）。开：把 Jasna 的输出捕获进 TaskPaw（不另开窗口），在状态面板显示 文件/%/fps/ETA。注意：「正在编译引擎」提示只依据 model_weights/*.engine 是否存在，与本开关无关。",
+        "仅控制普通 / unet-4x；LTX 总是整合进 TaskPaw。关（默认）：每个文件的 jasna.exe 各自开一个控制台窗口显示进度条（一个文件一个窗口）。开：把 Jasna 的输出捕获进 TaskPaw（不另开窗口），在状态面板显示 文件/%/fps/ETA。注意：「正在编译引擎」提示只依据 model_weights/*.engine 是否存在，与本开关无关。",
     },
   },
   // Standalone「AV 翻译 (subtitles)」task (#179).

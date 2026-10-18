@@ -10,6 +10,7 @@ import { api, MonitorOperationError, monitorOperationMessageKey, type MonitorSna
 import { StatusDot } from "../components/StatusDot";
 import { SkeletonRows } from "../components/SkeletonRows";
 import { MonitorMetrics } from "../components/MonitorMetrics";
+import { LtxDownload } from "../components/LtxDownload";
 import { TaskLog, TaskLogRows } from "../components/TaskLog";
 import { MonitorSelector } from "../components/MonitorSelector";
 import { MonitorWizard } from "./MonitorWizard";
@@ -287,6 +288,8 @@ function MonitorDetail({
           </Typography>
         )}
 
+        <LtxDownload key={name} value={snap.metrics?.ltx_download} name={manageable ? name : undefined}
+          disabled={!!pending || stop.isPending} onChanged={onChanged} onError={onError} />
         <MonitorMetrics metrics={snap.metrics} taskName={name} />
       </CardContent>
 

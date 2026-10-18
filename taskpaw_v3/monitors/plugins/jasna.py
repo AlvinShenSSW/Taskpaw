@@ -32,9 +32,8 @@ Jasna 0.11.1's LTX restoration model (`--restoration-model-name ltx` /
 other setting launch exactly as before (LTX cannot finish a 4K file on an 8 GB
 card). While ticked, 8K VR and the 1080p unet-4x are off at launch — their saved
 values are untouched. LTX launches keep Jasna's scratch in the output folder's
-`.jasna-work` (swept at Start), and a capture-mode launch whose model is not
-downloaded yet opens its own window once per run so Jasna's download prompt can
-be answered.
+`.jasna-work` (swept at Start). LTX always runs captured; missing models pause
+the queue for a local confirmation and a verified, terminable download worker.
 
 「4K 档：使用 LTX」(#265, `ltx_4k`) does the same for the 4K tier (for a big GPU —
 an 8 GB card fails 4K LTX). The LTX options follow the GPU, queried once per
@@ -127,6 +126,10 @@ from taskpaw_v3.monitors.base import (
 )
 from taskpaw_v3.monitors.plugins.avsubs import _is_link_dir
 from taskpaw_v3.monitors.plugins.host_metrics import read_gpu
+from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES as _LTX_MODEL_FILES
+from taskpaw_v3.monitors.plugins.jasna_download import SHARED_FILES as _LTX_SHARED_FILES
+from taskpaw_v3.monitors.plugins.jasna_download_session import DownloadSession
+from taskpaw_v3.monitors.plugins.jasna_presets import preset_catalogue
 from taskpaw_v3.monitors.plugins.lada import (
     _CRASH_DETAIL_CHARS,
     _CRASH_DETAIL_LINES,
@@ -259,16 +262,11 @@ _GPU_QUERY_TIMEOUT = 5.0
 _LTX_WORK_DIR = ".jasna-work"  # TaskPaw's own folder inside the output folder
 # Jasna 0.11.1's model files in `<exe dir>/model_weights/ltx-restore`, keyed by
 # (best, fast) — printed by the CLI when they are missing (verified 2026-10-16).
-_LTX_MODEL_FILES: dict[tuple[bool, bool], str] = {
-    (False, False): "ltx-restore-alpha1-distill8-int8.safetensors.enc",
-    (False, True): "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc",
-    (True, False): "ltx-restore-alpha1-int8.safetensors.enc",
-    (True, True): "ltx-restore-alpha1-nvfp4.safetensors.enc",
-}
-_LTX_SHARED_FILES = ("vae.safetensors.enc", "vae-decoder.safetensors.enc")
 # The extra args go to EVERY launch, and Jasna rejects LTX options on a
 # BasicVSR++ launch (and --ltx-trial would publish unrestored copies).
 _LTX_OPTION_FLAGS = (
+    "--experimental-ltx-less-overlap",
+    "--no-experimental-ltx-less-overlap",
     "--ltx-fast",
     "--no-ltx-fast",
     "--ltx-auto-split",
@@ -716,11 +714,6 @@ def ltx_missing_files(exe_dir: Optional[str], best: bool, fast: bool) -> list[st
     return missing
 
 
-def _console_fallback_allowed() -> bool:
-    """#263 AC4: only Windows can give an uncaptured launch its own window."""
-    return sys.platform == "win32"
-
-
 def query_gpus() -> Optional[list[tuple[float, int]]]:
     """#265: `[(compute capability, total VRAM MiB)]` per NVIDIA GPU, or None
     when unknown (no nvidia-smi, an error, a timeout or output it cannot
@@ -1165,7 +1158,7 @@ class JasnaConfig(BaseMonitorConfig):
         "ticked, 8K VR and the 1080p unet-4x are not used (LTX supports neither) "
         "and keep their saved values for when this is unticked. The first LTX "
         "launch asks to download the model (about 9 GB with fast mode, 15 GB "
-        "without) in Jasna's window. Saving this on a running task restarts the "
+        "without) in TaskPaw. Saving this on a running task restarts the "
         "current film.",
     )
     ltx_4k: bool = Field(
@@ -1213,6 +1206,16 @@ class JasnaConfig(BaseMonitorConfig):
         "an 8 GB card Jasna's large canvas made even a 1080p run fail, so it is "
         "never passed there. Only used with LTX.",
     )
+    ltx_overlap: Literal["auto", "on", "off"] = Field(
+        "auto",
+        title="LTX reduced overlap (0.11.2+)",
+        description="auto: use Jasna's default (on in 0.11.2 Windows); on/off: explicitly enable/disable reduced overlap. About 13% faster on long videos. Only applies to LTX, not BasicVSR++ temporal overlap.",
+    )
+    vr_8k_custom: bool = Field(
+        False,
+        title="8K VR: use editable tuning",
+        description="Use the clip, overlap and unet-4x fields for VR. Off keeps the legacy fixed VR profile. The VR180 detector and SBS mode remain fixed.",
+    )
     vr_8k: bool = Field(
         False,
         title="8K VR",
@@ -1222,7 +1225,7 @@ class JasnaConfig(BaseMonitorConfig):
         f"the 4K-tier unet-4x {'on' if _VR8K_UNET4X_4K else 'off'}. The fields it "
         "overrides keep their saved values and apply again when unticked. 2D "
         "films belong in another task. Saving this on a running task restarts "
-        "the current film.",
+        "the current film. With editable VR tuning enabled, clip/overlap/unet fields apply instead of the fixed profile.",
     )
     clip_size_1080p: int = Field(
         90,
@@ -1236,14 +1239,14 @@ class JasnaConfig(BaseMonitorConfig):
         description="Frames per clip (--max-clip-size) for the 4K tier. A file "
         "counts as 4K when its pixel count exceeds 1.5x 1920x1080 (about 3.1 MP, "
         "so 2560x1440 and up); 1920x1200 and 2560x1080 stay 1080p. 8K VR "
-        "overrides this at launch.",
+        "overrides this at launch unless editable VR tuning is enabled.",
     )
     temporal_overlap: int = Field(
         8,
         ge=0,
         description="Frames of overlap between clips (--temporal-overlap). Jasna "
         "requires 2 x overlap to be smaller than the smallest clip size. 8K VR "
-        "overrides this at launch.",
+        "overrides this at launch unless editable VR tuning is enabled.",
     )
     codec: Literal["hevc", "h264", "av1"] = Field(
         "hevc",
@@ -1291,7 +1294,7 @@ class JasnaConfig(BaseMonitorConfig):
     )
     jasna_capture_progress: bool = Field(
         False,
-        description="Advanced. Off (default): EACH file opens its OWN console "
+        description="BasicVSR++ only; LTX always runs inside TaskPaw. Off (default): EACH BasicVSR++ file opens its OWN console "
         "window with Jasna's progress bar. On: capture Jasna's output into TaskPaw "
         "(no separate window) to show %/fps/ETA in the status pane and to include "
         "the error tail in failure alerts. The 'compiling TensorRT engines' hint "
@@ -1366,7 +1369,11 @@ class JasnaConfig(BaseMonitorConfig):
             )
         # #208: the 1080p launch keeps its own clip but takes the profile's overlap
         # (the 4K launch is the profile's own, always valid, pair).
-        if self.vr_8k and 2 * _VR8K_TEMPORAL_OVERLAP >= self.clip_size_1080p:
+        if (
+            self.vr_8k
+            and not self.vr_8k_custom
+            and 2 * _VR8K_TEMPORAL_OVERLAP >= self.clip_size_1080p
+        ):
             raise ValueError(
                 f"8K VR uses a temporal overlap of {_VR8K_TEMPORAL_OVERLAP}, so "
                 f"clip_size_1080p must be larger than {2 * _VR8K_TEMPORAL_OVERLAP}"
@@ -1382,7 +1389,7 @@ _RE_LTX_FPS = re.compile(r"(\d+(?:\.\d+)?)\s*frame/s")
 _RE_LTX_LEFT = re.compile(r"run\s+([\d:]+)\s+left")
 # Stage-scoped numbers an LTX line must not leave behind (C9): they would
 # describe a stage, not the film; fps only when the stage reports frame/s.
-_LTX_STALE_KEYS = ("elapsed", "processed_frames", "remaining_frames", "fps")
+_LTX_STALE_KEYS = ("elapsed", "processed_frames", "remaining_frames", "fps", "eta")
 
 
 def parse_jasna_progress_line(line: str, prev: dict) -> dict:
@@ -1432,6 +1439,8 @@ def _ltx_label(cfg: JasnaConfig, fast: bool, canvas: bool) -> list[str]:
         parts.append("large canvas")
     if cfg.ltx_auto_split > 0:
         parts.append(f"auto-split {cfg.ltx_auto_split}%")
+    if cfg.ltx_overlap != "auto":
+        parts.append(f"less overlap {cfg.ltx_overlap}")
     return parts
 
 
@@ -1442,6 +1451,8 @@ def _ltx_mode(cfg: JasnaConfig, fast: bool, canvas: bool) -> str:
         mode += " large-canvas"
     if cfg.ltx_auto_split > 0:
         mode += f" auto-split {cfg.ltx_auto_split}%"
+    if cfg.ltx_overlap != "auto":
+        mode += f" less-overlap={cfg.ltx_overlap}"
     return mode
 
 
@@ -1473,9 +1484,11 @@ def build_argv(
     follow the GPU (`ltx_fast_ok` / `ltx_canvas_ok`, resolved at Start)."""
     ltx = ltx_launch(cfg, tier)
     vr = vr_profile(cfg)
-    clip_4k = _VR8K_CLIP_SIZE_4K if vr else cfg.clip_size_4k
+    clip_4k = _VR8K_CLIP_SIZE_4K if vr and not cfg.vr_8k_custom else cfg.clip_size_4k
     clip = clip_4k if tier == "4k" else cfg.clip_size_1080p
-    overlap = _VR8K_TEMPORAL_OVERLAP if vr else cfg.temporal_overlap
+    overlap = (
+        _VR8K_TEMPORAL_OVERLAP if vr and not cfg.vr_8k_custom else cfg.temporal_overlap
+    )
     detection = _VR8K_DETECTION_MODEL if vr else cfg.detection_model
     if tier == "4k" and large_detector and detection == _DEFAULT_DETECTION_MODEL:
         detection = _LARGE_DETECTION_MODEL
@@ -1490,6 +1503,12 @@ def build_argv(
             ltx_args.append("--ltx-fast")
         if cfg.ltx_large_canvas and ltx_canvas_ok:
             ltx_args.append("--ltx-large-canvas")
+        if cfg.ltx_overlap != "auto":
+            ltx_args.append(
+                "--experimental-ltx-less-overlap"
+                if cfg.ltx_overlap == "on"
+                else "--no-experimental-ltx-less-overlap"
+            )
         if cfg.ltx_auto_split > 0:
             ltx_args += ["--ltx-auto-split", str(cfg.ltx_auto_split)]
         if work_dir is not None:
@@ -1544,6 +1563,7 @@ class JasnaInstance(MonitorInstance):
         self._stopping = threading.Event()
         self._process: Optional[subprocess.Popen] = None
         self._reader: Optional[threading.Thread] = None
+        self._download = DownloadSession()
         self._progress: dict = {}
         self._recent_output: deque[str] = deque(maxlen=_RECENT_OUTPUT_LINES)
         # queue
@@ -1570,7 +1590,6 @@ class JasnaInstance(MonitorInstance):
         self._idle_note = ""
         self._started = False
         # #263 AC4: the one console-window fallback and the one model alert
-        self._ltx_console_used = False
         self._ltx_model_alerted = False
         # #265: the GPU queried at Start and what it allows; the current launch
         self._gpus: Optional[list[tuple[float, int]]] = None
@@ -1649,8 +1668,12 @@ class JasnaInstance(MonitorInstance):
             self._process is not None
             or self._subs_job is not None
             or self._translator is not None
+            or self._download.child is not None
         ):
             self.stop()
+        if self._download.child is not None:
+            raise RuntimeError("previous model downloader is still stopping")
+        self._download = DownloadSession()
         self._stopping.clear()
         self._process = None
         self._reader = None
@@ -1670,7 +1693,6 @@ class JasnaInstance(MonitorInstance):
         self._batch_aborted = False
         self._compiling = False
         self._idle_note = ""
-        self._ltx_console_used = False
         self._ltx_model_alerted = False
         self._gpus = None
         self._ltx_fast_ok = True
@@ -2160,6 +2182,14 @@ class JasnaInstance(MonitorInstance):
             reader.join(timeout=2)
         if translator is not None:
             translator.join(max(0.1, deadline - time.monotonic()))
+        if not self._download.stop(max(0, deadline - time.monotonic())):
+            raise RuntimeError("model downloader is still stopping")
+
+    def respond_prompt(self, request_id: str, approved: bool) -> bool:
+        with self._launch_lock:
+            if self._stopping.is_set() or not self._started:
+                return False
+            return self._download.respond(request_id, approved)
 
     def _log_asr_stop(self, job: SubsJob, child) -> None:
         get_task_log().record(
@@ -2345,6 +2375,23 @@ class JasnaInstance(MonitorInstance):
         with self._launch_lock:
             if self._stopping.is_set() or not self._pending:
                 return False
+            if self._download.status or self._download.child is not None:
+                return False
+            if ltx_launch(cfg, tier):
+                fast = cfg.ltx_fast and self._ltx_fast_ok
+                missing = ltx_missing_files(self._exe_dir(), cfg.ltx_best, fast)
+                if missing:
+                    self._download.request(
+                        Path(cfg.jasna_exe_path).resolve().parent
+                        / "model_weights"
+                        / "ltx-restore",
+                        missing,
+                        _ltx_mode(
+                            cfg, fast, cfg.ltx_large_canvas and self._ltx_canvas_ok
+                        ),
+                    )
+                    self._alert_ltx_model(emit, missing)
+                    return False
             self._phase = "restore"
             video = self._pending.pop(0)
             if video != self._current:  # a NEW file → fresh retry budget
@@ -2377,7 +2424,11 @@ class JasnaInstance(MonitorInstance):
                 # #208: under 8K VR the 4K tier's tickbox reads as the profile's
                 # (off), so a 4K launch is never a unet-4x launch — no degrade
                 # path, `_run_unet_disabled` never set for it.
-                tickbox = _VR8K_UNET4X_4K if vr_profile(cfg) else cfg.unet4x_4k
+                tickbox = (
+                    _VR8K_UNET4X_4K
+                    if vr_profile(cfg) and not cfg.vr_8k_custom
+                    else cfg.unet4x_4k
+                )
             else:
                 tickbox = cfg.unet4x_1080p
             unet = (
@@ -2404,23 +2455,11 @@ class JasnaInstance(MonitorInstance):
                 self._ltx_canvas_ok,
             )
 
-            capture = cfg.jasna_capture_progress
+            capture = cfg.jasna_capture_progress or ltx
             fast = cfg.ltx_fast and self._ltx_fast_ok
             canvas = cfg.ltx_large_canvas and self._ltx_canvas_ok
-            missing = ltx_missing_files(exe_dir, cfg.ltx_best, fast) if ltx else []
             if ltx and tier == "4k" and small_gpus(self._gpus):
                 self._alert_ltx_4k_vram(emit)
-            if missing:
-                self._alert_ltx_model(emit, missing)
-                if (
-                    capture
-                    and _console_fallback_allowed()
-                    and not self._ltx_console_used
-                ):
-                    # #263 AC4: Jasna's download prompt needs a window to be
-                    # answered — once per run, Windows only.
-                    self._ltx_console_used = True
-                    capture = False
             if sys.platform == "win32":
                 flags = _NO_WINDOW if capture else _NEW_CONSOLE
             else:
@@ -2532,7 +2571,7 @@ class JasnaInstance(MonitorInstance):
             "alert",
             f"{self._cfg.name}: 4K LTX on a small GPU",
             f"4K LTX: this GPU has {mb} MB of VRAM. In tests on an 8 GB card a 4K "
-            "LTX run fails in its last stage (DiffVAE decode), so each 4K file will "
+            "LTX run on Jasna 0.11.1 fails in its last stage (DiffVAE decode), so each 4K file may "
             "likely fail — untick「4K 档：使用 LTX」on this machine.",
             dedupe_key=f"{self.instance_id}:ltx:4k-vram",
         )
@@ -2546,12 +2585,9 @@ class JasnaInstance(MonitorInstance):
             "alert",
             f"{self._cfg.name}: LTX model not downloaded",
             f"LTX model not downloaded: {', '.join(missing)} are not in Jasna's "
-            "model_weights\\ltx-restore folder (about 9 GB with fast mode, 15 GB "
-            "without). Jasna asks to download it when an LTX launch has a window: "
-            "answer y there (with capture progress on, TaskPaw opens that window for "
-            "the first such launch of a run, on Windows only). Until the model is "
-            "downloaded, the other LTX files fail — you can also download it once "
-            "in Jasna's own app (pick LTX there).",
+            "model_weights\\ltx-restore folder. Confirm Download and continue in "
+            "TaskPaw's local task panel. The film stays queued until the download "
+            "finishes; Jasna still requires its own LTX activation.",
             dedupe_key=f"{self.instance_id}:ltx:model",
         )
 
@@ -2608,6 +2644,11 @@ class JasnaInstance(MonitorInstance):
         # degrade it triggers — happens before anything below can return, so a
         # restore launch error never strands finished translations (S1).
         self._settle_results(emit)
+        with self._launch_lock:
+            resumed = not self._stopping.is_set() and self._download.tick()
+        if resumed:
+            self._advance_requested = True
+            self._dispatch(emit)
         # (2) launch error
         if self._launch_error is not None:
             return MonitorStatus(state="error", detail=self._launch_error)
@@ -2631,6 +2672,12 @@ class JasnaInstance(MonitorInstance):
         if self._launch_error is not None:
             return MonitorStatus(state="error", detail=self._launch_error)
         self._phase = self._live_phase()
+        if self._download.status:
+            active = self._download.status.get("state") in ("approved", "downloading")
+            return self._build_status(
+                "running" if active or self._translating() else "idle",
+                detail="LTX model download: " + self._download.status["state"],
+            )
         if self._process is not None or self._asr_live():
             return self._build_status("running")
         if self._gpu_waiting:
@@ -2922,7 +2969,9 @@ class JasnaInstance(MonitorInstance):
             severity="error",
             data={
                 "exit_code": retcode,
-                "tail": _bounded(tail) if cfg.jasna_capture_progress else "",
+                "tail": _bounded(tail)
+                if cfg.jasna_capture_progress or self._current_ltx
+                else "",
             },
         )
         if self._current is not None:
@@ -2946,7 +2995,7 @@ class JasnaInstance(MonitorInstance):
             self._requeue_current()
             return
         detail = f"exit code {retcode}"
-        if cfg.jasna_capture_progress and tail:
+        if (cfg.jasna_capture_progress or self._current_ltx) and tail:
             if len(tail) > _CRASH_DETAIL_CHARS:
                 tail = tail[-_CRASH_DETAIL_CHARS:].lstrip()
             detail = f"{detail}\n{tail}"  # bounded tail, never the argv
@@ -3947,7 +3996,11 @@ class JasnaInstance(MonitorInstance):
         # when it isn't (lada/Codex #59 parity). #177 (D17): they belong to the
         # phase's live child — the restore child's progress in `restore`, the
         # ASR child's media name in `subs`, nothing while only translating.
-        if state == "running" and self._phase == "restore":
+        if (
+            state == "running"
+            and self._phase == "restore"
+            and not self._download.status
+        ):
             with self._lock:
                 metrics.update(self._progress)
             if self._current is not None:
@@ -3973,6 +4026,8 @@ class JasnaInstance(MonitorInstance):
             metrics["queue_total"] = self._total
             metrics["queue_failed"] = self._failed
             metrics["queue_remaining"] = max(0, self._total - completed - self._failed)
+        if self._download.status:
+            metrics["ltx_download"] = dict(self._download.status)
         if cfg.jasna_exe_path.strip():
             metrics["phase"] = self._phase
             if cfg.av_translate:
@@ -4037,7 +4092,9 @@ class JasnaInstance(MonitorInstance):
             restore = (
                 self._current.name,
                 {
-                    "percent": capture.get("percent"),
+                    "percent": None
+                    if capture.get("ltx_stage")
+                    else capture.get("percent"),
                     "eta_s": parse_eta(capture.get("eta")),
                     "elapsed_s": parse_eta(capture.get("elapsed")),
                 },
@@ -4180,7 +4237,9 @@ class JasnaPlugin(MonitorPlugin):
                 "ltx_auto_split",
                 "ltx_best",
                 "ltx_large_canvas",
+                "ltx_overlap",
                 "vr_8k",
+                "vr_8k_custom",
                 "clip_size_1080p",
                 "clip_size_4k",
                 "temporal_overlap",
@@ -4195,6 +4254,7 @@ class JasnaPlugin(MonitorPlugin):
                 "timeout",
                 "*",
             ],
+            "ui:options": {"jasnaPresets": preset_catalogue()},
             "jasna_exe_path": {"ui:options": {"taskpawPath": "file"}},
             "jasna_input_folder": {"ui:options": {"taskpawPath": "directory"}},
             "jasna_output_folder": {"ui:options": {"taskpawPath": "directory"}},

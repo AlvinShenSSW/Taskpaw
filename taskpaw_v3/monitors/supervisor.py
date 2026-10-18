@@ -433,6 +433,14 @@ class Supervisor:
             log.warning("Monitor run films unavailable (%s)", type(exc).__name__)
             return None
 
+    def respond_prompt(self, instance_id: str, request_id: str, approved: bool) -> bool:
+        with self._lock:
+            managed = self._monitors.get(instance_id)
+            if managed is None or managed.stop.is_set() or managed.retiring:
+                return False
+            instance = managed.instance
+        return instance.respond_prompt(request_id, approved)
+
     def unregister(self, instance_id: str, timeout: float = 10.0) -> dict:
         if not self.has(instance_id):
             raise KeyError(instance_id)

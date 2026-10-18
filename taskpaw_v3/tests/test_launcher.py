@@ -336,6 +336,9 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
         def run_films(self, instance_id, filter, page, size):
             return None
 
+        def respond_prompt(self, instance_id, request_id, approved):
+            return False
+
     class _FakeServer:
         started = True
 
@@ -377,6 +380,7 @@ def test_run_agent_supervisor_starts_with_llm_settings(monkeypatch):
         launcher.run_agent(_llm_cfg(), shutdown=shutdown, block=False)
         assert control_kwargs.get("films_provider") == supervisor.film_page
         assert control_kwargs.get("run_films_provider") == supervisor.run_films
+        assert control_kwargs.get("prompt_responder") == supervisor.respond_prompt
         from taskpaw_v3 import __version__
 
         assert network_kwargs.get("films_provider") == supervisor.film_page
@@ -734,6 +738,9 @@ def test_startup_cancellation_does_not_restart_or_leak_resources(
 
         def run_films(self, *args, **kwargs):
             return None
+
+        def respond_prompt(self, *args, **kwargs):
+            return False
 
         def start(self):
             start()

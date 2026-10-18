@@ -20,6 +20,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 if TYPE_CHECKING:
     from taskpaw_v3.agent.server.admin import MonitorAdmin
@@ -39,6 +40,12 @@ from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import effective_monitors, monitor_name
 from taskpaw_v3.monitors.subs import ffmpeg
+
+
+class PromptResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=128)
+    approved: StrictBool
 
 
 def _unauthorized() -> JSONResponse:
@@ -208,6 +215,7 @@ def create_control_app(
     *,
     control_token: str,
     control_active: Callable[[], bool],
+    prompt_responder: Optional[Callable[[str, str, bool], bool]] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API)."""
@@ -224,6 +232,16 @@ def create_control_app(
     )
 
     _register_validation_handler(app, "/control/monitors", control=True)
+
+    @app.post("/control/monitors/respond")
+    def respond_prompt(body: PromptResponse, name: str = Query(pattern=r"\S")) -> dict:
+        if prompt_responder is None or not prompt_responder(
+            name, body.request_id, body.approved
+        ):
+            raise HTTPException(
+                status_code=409, detail="prompt expired or task stopped"
+            )
+        return {"ok": True}
 
     @app.get("/control/ping")
     def ping() -> dict:

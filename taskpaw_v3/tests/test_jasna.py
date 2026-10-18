@@ -225,7 +225,7 @@ def test_json_schema_exposes_the_tickbox_defaults():
         JasnaConfig.__bases__[0].model_fields  # type: ignore[attr-defined]
     )
     # 15 restore + 4「AV 翻译」(#177) + 8K VR (#208) + 4 LTX (#263) + 2 (#265)
-    assert len(own) == 26
+    assert len(own) == 28
     for name in own:
         assert props[name].get("description"), f"{name} has no description"
 
@@ -335,6 +335,7 @@ def test_vr_8k_field_order_and_help_texts():
         "4K-tier unet-4x off. The fields it overrides keep their saved values and "
         "apply again when unticked. 2D films belong in another task. Saving this "
         "on a running task restarts the current film."
+        " With editable VR tuning enabled, clip/overlap/unet fields apply instead of the fixed profile."
     )
     # C12: the overridden / conditionally owned fields say so
     assert (
@@ -352,9 +353,10 @@ def test_vr_8k_field_order_and_help_texts():
     order = JasnaPlugin.ui_schema()["ui:order"]
     assert order[order.index("whisperjav_extra_args") + 1] == "ltx_1080p"
     i = order.index("vr_8k")
-    assert order[i - 1 : i + 2] == [
-        "ltx_large_canvas",
+    assert order[i - 1 : i + 3] == [
+        "ltx_overlap",
         "vr_8k",
+        "vr_8k_custom",
         "clip_size_1080p",
     ]
 
@@ -772,6 +774,29 @@ def test_8k_vr_4k_launch_is_never_a_unet_launch(tmp_path, monkeypatch):
     assert inst._run_unet_disabled == {}
     assert not [e for e in evs if "unet-4x disabled" in e[1]]
     assert inst._done == 2 and inst._failed == 0
+
+
+def test_editable_vr_launch_uses_manual_unet_and_clip(tmp_path, monkeypatch):
+    cfg, inp, _out, home = _managed(
+        tmp_path,
+        vr_8k=True,
+        vr_8k_custom=True,
+        unet4x_4k=True,
+        clip_size_4k=45,
+        temporal_overlap=12,
+    )
+    _vr_weights(home)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher, _probe(default=(8192, 4096)))
+    inst = JasnaInstance("j1", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    assert launcher.secondary(0) == "unet-4x"
+    assert launcher.arg(0, "--max-clip-size") == "45"
+    assert launcher.arg(0, "--temporal-overlap") == "12"
+    assert launcher.arg(0, "--detection-model") == "rfdetr-vr-v1"
+    inst.stop(timeout=0.5)
 
 
 def test_8k_vr_keeps_the_stored_values_and_untick_launches_with_them(
@@ -2100,13 +2125,14 @@ def test_ltx_defaults_and_schema():
     assert props["ltx_best"]["default"] is False
     order = JasnaPlugin.ui_schema()["ui:order"]
     i = order.index("ltx_1080p")
-    assert order[i : i + 7] == [  # #265: + ltx_4k, ltx_large_canvas
+    assert order[i : i + 8] == [  # #265: + ltx_4k, ltx_large_canvas
         "ltx_1080p",
         "ltx_4k",
         "ltx_fast",
         "ltx_auto_split",
         "ltx_best",
         "ltx_large_canvas",
+        "ltx_overlap",
         "vr_8k",
     ]
 
@@ -2364,65 +2390,100 @@ def test_capture_launches_close_stdin_console_launches_do_not(tmp_path, monkeypa
         inst.stop(timeout=0.5)
 
 
-def _missing_model_run(tmp_path, monkeypatch, windows: bool, capture: bool = True):
-    cfg, inp, _out, _home = _managed(
+@pytest.mark.parametrize("capture", [True, False])
+def test_missing_model_waits_without_consuming_films_or_gpu(
+    tmp_path, monkeypatch, capture
+):
+    cfg, inp, out, home = _managed(
         tmp_path, ltx_1080p=True, jasna_capture_progress=capture
     )
-    _videos(inp, "a.mp4", "b.mp4", "c.mp4")
-    launcher = _Launcher([1, 1, None])  # #265: no retry → a, b fail; c runs
+    _videos(inp, "a.mp4", "b.mp4")
+    launcher = _Launcher([None])
     _patch(monkeypatch, launcher)
-    monkeypatch.setattr(J, "_console_fallback_allowed", lambda: windows)
     inst = JasnaInstance("j1", cfg)
     evs, emit = _events()
     inst.start(emit)
-    for _ in range(2):
-        inst.check(emit)
-    return launcher, evs, inst
-
-
-def test_missing_model_opens_one_console_window_per_run_on_windows(
-    tmp_path, monkeypatch
-):
-    launcher, evs, inst = _missing_model_run(tmp_path, monkeypatch, windows=True)
-    assert launcher.inputs() == ["a.mp4", "b.mp4", "c.mp4"]  # no LTX retry
-    first, second, third = launcher.kwargs
-    assert "stdout" not in first and "stdin" not in first  # its own window
-    for kw in (second, third):  # later launches captured again
-        assert kw.get("stdout") is subprocess.PIPE
-        assert kw.get("stdin") == subprocess.DEVNULL
-    alerts = [e for e in evs if e[3] == "j1:ltx:model"]
-    assert len(alerts) == 1 and alerts[0][0] == "alert"
-    msg = alerts[0][2]
-    assert "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc" in msg
-    assert "answer y there" in msg and "on Windows only" in msg
-    inst.stop(timeout=0.5)
-
-
-def test_missing_model_never_opens_a_window_off_windows(tmp_path, monkeypatch):
-    launcher, evs, inst = _missing_model_run(tmp_path, monkeypatch, windows=False)
-    assert all(kw.get("stdin") == subprocess.DEVNULL for kw in launcher.kwargs)
+    for _ in range(3):
+        status = inst.check(emit)
+    assert launcher.n == 0 and inst._done == inst._failed == 0
+    assert [p.name for p in inst._pending] == ["a.mp4", "b.mp4"]
+    assert inst._gpu_holder is None
+    assert not list(out.glob("*.mp4"))
+    prompt = status.metrics["ltx_download"]
+    assert prompt["state"] == "awaiting" and len(prompt["files"]) == 3
+    assert prompt["total_bytes"] > 9_000_000_000
     assert len([e for e in evs if e[3] == "j1:ltx:model"]) == 1
+    assert inst.respond_prompt(prompt["request_id"], False)
+    assert not inst.respond_prompt(prompt["request_id"], True)
+    assert inst.check(emit).metrics["ltx_download"]["state"] == "paused"
     inst.stop(timeout=0.5)
-
-
-def test_missing_model_fallback_resets_on_the_next_start(tmp_path, monkeypatch):
-    launcher, _evs, inst = _missing_model_run(tmp_path, monkeypatch, windows=True)
-    inst.stop(timeout=0.5)
-    _evs2, emit = _events()
+    assert not inst.respond_prompt(prompt["request_id"], True)
     inst.start(emit)
-    assert "stdout" not in launcher.kwargs[-1]  # a new run gets its one window again
-    inst.stop(timeout=0.5)
-
-
-def test_missing_model_in_console_mode_alerts_once_and_changes_nothing(
-    tmp_path, monkeypatch
-):
-    launcher, evs, inst = _missing_model_run(
-        tmp_path, monkeypatch, windows=True, capture=False
+    assert (
+        inst.check(emit).metrics["ltx_download"]["request_id"] != prompt["request_id"]
     )
-    assert all("stdout" not in kw and "stdin" not in kw for kw in launcher.kwargs)
-    assert len([e for e in evs if e[3] == "j1:ltx:model"]) == 1
     inst.stop(timeout=0.5)
+
+
+@pytest.mark.parametrize("tier,dims", [("1080p", (1920, 1080)), ("4k", (3840, 2160))])
+def test_ltx_always_captured_without_console_preference(
+    tmp_path, monkeypatch, tier, dims
+):
+    cfg, inp, out, home = _managed(
+        tmp_path, **{f"ltx_{tier}": True}, jasna_capture_progress=False
+    )
+    _ltx_model(home)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher, _probe(default=dims))
+    inst = JasnaInstance("j1", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    assert launcher.kwargs[0]["stdout"] is subprocess.PIPE
+    assert launcher.kwargs[0]["stdin"] == subprocess.DEVNULL
+    inst.stop(timeout=0.5)
+
+
+def test_download_completion_resumes_same_film(tmp_path, monkeypatch):
+    cfg, inp, out, home = _managed(tmp_path, ltx_1080p=True)
+    _videos(inp, "a.mp4", "b.mp4")
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    prompt = inst._download.status
+    assert inst.respond_prompt(prompt["request_id"], True)
+    assert launcher.n == 0  # API only records approval
+
+    def completed():
+        _ltx_model(home)
+        inst._download.status = {}
+        return True
+
+    monkeypatch.setattr(inst._download, "tick", completed)
+    inst.check(emit)
+    assert launcher.inputs() == ["a.mp4"]
+    assert inst._done == inst._failed == 0
+    assert not list(out.glob("*-破解.mp4"))
+    inst.stop(timeout=0.5)
+
+
+def test_surviving_downloader_prevents_restart(tmp_path, monkeypatch):
+    cfg, inp, _, _ = _managed(tmp_path, ltx_1080p=True)
+    _videos(inp, "a.mp4")
+    launcher = _Launcher([])
+    _patch(monkeypatch, launcher)
+    inst = JasnaInstance("j1", cfg)
+    _, emit = _events()
+    inst.start(emit)
+    marker = object()
+    inst._download.child = marker
+    monkeypatch.setattr(inst._download, "stop", lambda timeout: False)
+    with pytest.raises(RuntimeError, match="downloader"):
+        inst.start(emit)
+    assert inst._download.child is marker
+    assert launcher.n == 0
 
 
 @pytest.mark.parametrize("ltx_on,dims", [(False, (1920, 1080)), (True, (3840, 2160))])
@@ -2879,7 +2940,7 @@ def test_small_gpu_4k_ltx_alerts_once_at_the_first_4k_launch(
     tmp_path, monkeypatch, gpus, dims, alerts
 ):
     cfg, inp, _out, home = _managed(tmp_path, ltx_4k=True)
-    _ltx_model(home)
+    _ltx_model(home, fast=J.fast_supported(gpus))
     _videos(inp, "a.mp4", "b.mp4")
     _gpus(monkeypatch, gpus)
     launcher = _Launcher([0, None])
@@ -2932,12 +2993,11 @@ def test_model_alert_names_ltx_files_not_1080p_files(tmp_path, monkeypatch):
     cfg, inp, _out, _home = _managed(tmp_path, ltx_4k=True)
     _videos(inp, "a.mp4")
     _patch(monkeypatch, _Launcher([None]), _probe(default=(3840, 2160)))
-    monkeypatch.setattr(J, "_console_fallback_allowed", lambda: False)
     inst = JasnaInstance("j1", cfg)
     evs, emit = _events()
     inst.start(emit)
     msg = [e for e in evs if e[3] == "j1:ltx:model"][0][2]
-    assert "the other LTX files fail" in msg and "1080p files" not in msg
+    assert "film stays queued" in msg and "1080p files" not in msg
     inst.stop(timeout=0.5)
 
 

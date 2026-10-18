@@ -107,6 +107,10 @@ class MonitorInstance(abc.ABC):
         """Optional local current-run results; None without a supported list."""
         return None
 
+    def respond_prompt(self, request_id: str, approved: bool) -> bool:
+        """Optional local confirmation. Record a choice; never block on work."""
+        return False
+
     def stop(self, timeout: float = 5.0) -> None:
         """Release any owned resources (subprocess/socket/file watcher/tail).
         Default no-op; override when the instance owns something. Called by the

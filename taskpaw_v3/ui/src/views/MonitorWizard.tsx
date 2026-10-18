@@ -11,6 +11,8 @@ import { SchemaForm } from "../components/SchemaForm";
 import { FfmpegReminder } from "../components/FfmpegReminder";
 import { fieldLabel } from "../schemaI18n";
 import { ServiceIcon } from "../components/ServiceIcon";
+import { JasnaPresets } from "../components/JasnaPresets";
+import { applyJasnaPreset, readJasnaPresets } from "../components/jasnaPresets.helpers";
 
 // A selectable service is either a plugin type or a preset bundle (e.g. moomoo).
 type Service =
@@ -57,6 +59,9 @@ export function MonitorWizard({
   const [savedNames, setSavedNames] = useState<Set<string>>(new Set());
   const [runtimeRetries, setRuntimeRetries] = useState<Set<string>>(new Set());
   const [confirmClose, setConfirmClose] = useState(false);
+  const [jasnaModel, setJasnaModel] = useState("");
+  const [jasnaGpu, setJasnaGpu] = useState("");
+  const [presetRevision, setPresetRevision] = useState(0);
 
   // Edit can open before /control/plugins resolves (services empty → editService
   // undefined → selectedId stays null, leaving step 2 blank). Sync the selection
@@ -66,9 +71,30 @@ export function MonitorWizard({
   }, [mode, selectedId, editService]);
 
   const selected = services.find((s) => s.id === selectedId) ?? null;
+  const jasnaPresets = useMemo(() => selected?.kind === "plugin" && selected.id === "jasna"
+    ? readJasnaPresets(selected.plugin.ui_schema) : undefined, [selected]);
+  const applyPreset = (model: string, gpu: string, data = liveFormData, vr = data.vr_8k === true) => {
+    const next = jasnaPresets && applyJasnaPreset(jasnaPresets, model, gpu, data, vr);
+    if (next) {
+      setFormData(next); setLiveFormData(next);
+      // RJSF compares props deeply: reapplying the same preset otherwise keeps
+      // its internal manual values. Remount only on this explicit apply event.
+      setPresetRevision(v => v + 1);
+    }
+  };
+  const selectJasnaPreset = (model: string, gpu: string) => {
+    setJasnaModel(model); setJasnaGpu(gpu);
+    applyPreset(model, gpu, liveFormData, model === "ltx" ? false : liveFormData.vr_8k === true);
+  };
+  const onFormChange = (data: unknown) => {
+    const next = data as Record<string, unknown>;
+    if (jasnaPresets && jasnaModel && jasnaGpu && (next.vr_8k === true) !== (liveFormData.vr_8k === true)) {
+      applyPreset(jasnaModel, jasnaGpu, next);
+    } else setLiveFormData(next);
+  };
 
   const enterConfig = () => {
-    setLiveFormData(mode === "edit" ? existingConfig ?? {} : formData);
+    setLiveFormData(formData);
     setStep(2);
   };
 
@@ -79,6 +105,7 @@ export function MonitorWizard({
     if (id !== selectedId) {
       setFormData({});
       setLiveFormData({});
+      setJasnaModel(""); setJasnaGpu("");
       setError(null);
     }
     setSelectedId(id);
@@ -169,16 +196,17 @@ export function MonitorWizard({
     after: "vr_8k",
     note: (
       <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-        {t("wizard.vr8kHint", {
+        {t(liveFormData.vr_8k_custom === true ? "jasna.vrHelp" : "wizard.vr8kHint", {
           detection: vr8kProfile.detection_model,
           clip: vr8kProfile.clip_size_4k,
           overlap: vr8kProfile.temporal_overlap,
         })}
       </Typography>
     ),
-    fields: Object.fromEntries(Object.entries(vr8kProfile).map(([k, value]) => [k, { value }])),
+    fields: Object.fromEntries(Object.entries(vr8kProfile).filter(([k]) => liveFormData.vr_8k_custom !== true || k === "detection_model").map(([k, value]) => [k, { value }])),
   } : undefined;
-  const vr8kReview = vr8kProfile && !ltxReview && formData.vr_8k === true ? vr8kProfile : undefined;
+  const vr8kReview = vr8kProfile && !ltxReview && formData.vr_8k === true
+    ? Object.fromEntries(Object.entries(vr8kProfile).filter(([k]) => formData.vr_8k_custom !== true || k === "detection_model")) : undefined;
 
   const formUiSchema = useMemo(() => {
     if (selected?.kind !== "plugin") return {};
@@ -315,12 +343,16 @@ export function MonitorWizard({
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               {t("wizard.adapt", { name: serviceName(selected) })}
             </Typography>
+            {jasnaPresets && <JasnaPresets catalogue={jasnaPresets} model={jasnaModel} gpu={jasnaGpu}
+              disabled={busy || operationPending} onSelect={selectJasnaPreset}
+              onApply={() => applyPreset(jasnaModel, jasnaGpu)} />}
             <SchemaForm
+              key={`${selected.id}:${presetRevision}`}
               schema={selected.plugin.json_schema}
               uiSchema={formUiSchema}
-              formData={mode === "edit" ? existingConfig : formData}
+              formData={formData}
               onSubmit={onFormSubmit}
-              onChange={(data) => setLiveFormData(data as Record<string, unknown>)}
+              onChange={onFormChange}
               reminder={(selected.plugin.type_id === "avsubs" ||
                 (selected.plugin.type_id === "jasna" && liveFormData.av_translate === true))
                 ? <FfmpegReminder whisperjav={typeof liveFormData.whisperjav_exe_path === "string"

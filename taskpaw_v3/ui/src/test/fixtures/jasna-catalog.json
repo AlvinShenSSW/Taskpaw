@@ -1,0 +1,922 @@
+{
+  "type_id": "jasna",
+  "display_name": "Jasna",
+  "category": "task",
+  "config_version": 1,
+  "system": false,
+  "json_schema": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "description": "A unique name for this monitor on this machine.",
+        "minLength": 1,
+        "title": "Name",
+        "type": "string"
+      },
+      "poll_interval": {
+        "default": 10.0,
+        "description": "How often to check, in seconds (min 1).",
+        "minimum": 1.0,
+        "title": "Poll Interval",
+        "type": "number"
+      },
+      "timeout": {
+        "default": 30.0,
+        "description": "Per-check command/HTTP timeout, in seconds.",
+        "exclusiveMinimum": 0,
+        "title": "Timeout",
+        "type": "number"
+      },
+      "max_events_per_minute": {
+        "default": 60,
+        "minimum": 1,
+        "title": "Max Events Per Minute",
+        "type": "integer"
+      },
+      "max_line_bytes": {
+        "default": 1000000,
+        "minimum": 1024,
+        "title": "Max Line Bytes",
+        "type": "integer"
+      },
+      "jasna_exe_path": {
+        "default": "",
+        "description": "Full path to the Jasna EXECUTABLE FILE (e.g. C:\\Jasna\\jasna.exe) — NOT the folder. Set it → MANAGED mode (TaskPaw runs one Jasna process per video, needs the input/output folders below). Leave empty → PASSIVE mode (just watch an already-running Jasna).",
+        "title": "Jasna Exe Path",
+        "type": "string"
+      },
+      "jasna_input_folder": {
+        "default": "",
+        "description": "Folder of videos to restore (scanned once at Start, not recursive). Required in managed mode.",
+        "title": "Jasna Input Folder",
+        "type": "string"
+      },
+      "jasna_output_folder": {
+        "default": "",
+        "description": "Folder where the restored videos are written as <name>-破解.mp4. Required in managed mode, and must be a DIFFERENT folder from the input. A file whose output already exists is skipped, so a batch resumes where it left off; a <name>_restored.mp4 from TaskPaw 3.5 and earlier also counts as restored (it is not renamed). Give each Jasna monitor its OWN output folder: Start sweeps stale *-破解.tmp.mp4 (and old *_restored.tmp.mp4) files it does not own.",
+        "title": "Jasna Output Folder",
+        "type": "string"
+      },
+      "unet4x_1080p": {
+        "default": true,
+        "description": "1080p tier: run the supporter-only unet-4x secondary restoration (more detail, more VRAM). On by default. Not used while 1080p LTX is ticked.",
+        "title": "Unet4X 1080P",
+        "type": "boolean"
+      },
+      "unet4x_4k": {
+        "default": false,
+        "description": "4K tier: run the supporter-only unet-4x secondary restoration. Off by default — it does not fit in 8 GB of VRAM at 4K. 8K VR overrides this at launch. Not used while 4K LTX is ticked.",
+        "title": "Unet4X 4K",
+        "type": "boolean"
+      },
+      "av_translate": {
+        "default": false,
+        "description": "After each restore, transcribe the restored video with WhisperJAV and translate it to Simplified Chinese with the agent's LLM setting: writes <name>-破解.zh.srt (Chinese) next to <name>-破解.mp4 — the subtitle always has the video's own name, so a <name>_restored.mp4 from TaskPaw 3.5 and earlier gets <name>_restored.zh.srt. The Japanese transcript (<name>-破解.ja.srt) is deleted once the Chinese .zh.srt is written; it is kept when translation does not finish, and the next Start then only translates. GPU work stays serial (restore → transcribe → next restore); translation runs in the background. Already restored files without subtitles are handled after the pending restores. Staging lives in the output folder's .avsubs directory. A file already has subtitles, and gets none, when <name>-破解.srt (or .ass / .ssa / .vtt) or a <name>-破解.<tag>.srt such as <name>-破解.chs.srt exists next to its restored video and the tag is not Japanese (ja, jp, jpn, jap, japanese, 日语, 日文, 日本語 — also as ja-JP); other subtitles in the output folder never count for it. If the output folder cannot be read, subtitles are skipped (one alert; tried again at the next Start), and an existing subtitle is never overwritten. An existing .ja.srt / .srt is reused as-is: if you replace a source video under the same name, delete its old .srt files first.",
+        "title": "AV 翻译",
+        "type": "boolean"
+      },
+      "whisperjav_exe_path": {
+        "default": "",
+        "description": "Full path to whisperjav.exe (e.g. C:\\WhisperJAV\\Scripts\\whisperjav.exe) — NOT the folder. Required when AV 翻译 is ticked.",
+        "title": "Whisperjav Exe Path",
+        "type": "string"
+      },
+      "whisperjav_engine": {
+        "default": "anime-whisper",
+        "description": "WhisperJAV preset: anime-whisper (default; best on the prototype), large-v3, large-v2, qwen3, or custom (no preset flags — set --mode/--model/--qwen-generator yourself in the extra args).",
+        "enum": [
+          "anime-whisper",
+          "large-v3",
+          "large-v2",
+          "qwen3",
+          "custom"
+        ],
+        "title": "Whisperjav Engine",
+        "type": "string"
+      },
+      "whisperjav_extra_args": {
+        "default": "",
+        "description": "Extra WhisperJAV flags appended to every transcription, e.g. --sensitivity aggressive. TaskPaw owns --output-dir, --output-format, --language, --temp-dir and --no-signature (and, unless the engine is custom, --mode/--model/--qwen-generator); those, and any argparse abbreviation of them 4 or more characters long (e.g. --out), are rejected. --translate* options are always rejected (they would put an API key on the command line).",
+        "title": "Whisperjav Extra Args",
+        "type": "string"
+      },
+      "ltx_1080p": {
+        "default": false,
+        "description": "1080p tier only: 4K files and every other setting stay as they are. The 4K tier has its own LTX tickbox. The 1080p-tier files are restored with Jasna's supporter model LTX (Jasna 0.11.1 or newer; more detail, much slower; NVIDIA RTX). While ticked, 8K VR and the 1080p unet-4x are not used (LTX supports neither) and keep their saved values for when this is unticked. The first LTX launch asks to download the model (about 9 GB with fast mode, 15 GB without) in TaskPaw. Saving this on a running task restarts the current film.",
+        "title": "1080p tier: restore with LTX",
+        "type": "boolean"
+      },
+      "ltx_4k": {
+        "default": false,
+        "description": "4K tier: restore the 4K-tier files with LTX too. Needs a big GPU: on an 8 GB card a 4K LTX run fails in its last stage (tested; TaskPaw alerts once), a 24 GB RTX 4090 has room. While ticked, 8K VR and the 4K unet-4x are not used and keep their saved values. Saving this on a running task restarts the current film.",
+        "title": "4K tier: restore with LTX",
+        "type": "boolean"
+      },
+      "ltx_fast": {
+        "default": true,
+        "description": "--ltx-fast: about 1.4x faster, slightly less detail, a smaller download. RTX 50-series GPUs only — TaskPaw checks the GPU at Start and launches without it when it finds none (e.g. an RTX 4090). On by default: the standard LTX model does not fit an 8 GB card. Only used with LTX.",
+        "title": "LTX fast mode",
+        "type": "boolean"
+      },
+      "ltx_auto_split": {
+        "default": 12,
+        "description": "--ltx-auto-split, in percent of the video height: mosaics at least that big use LTX, smaller ones BasicVSR++ (without unet-4x). 12 is Jasna's suggested start; 0 = the whole film with LTX. Jasna restores the whole film with LTX when it finds no safe cut points. Only used with LTX.",
+        "maximum": 100,
+        "minimum": 0,
+        "title": "LTX only for big mosaics (%)",
+        "type": "integer"
+      },
+      "ltx_best": {
+        "default": false,
+        "description": "--restoration-model-name ltx-undistilled: slightly more detail, about 1.5-1.8x slower, its own model download. Only used with LTX.",
+        "title": "LTX best model",
+        "type": "boolean"
+      },
+      "ltx_large_canvas": {
+        "default": true,
+        "description": "--ltx-large-canvas: large mosaics at 768 px instead of 512 — more detail on close-ups and 4K, about 3x slower on those. Passed only when every GPU has at least 16 GB of VRAM (TaskPaw checks at Start): on an 8 GB card Jasna's large canvas made even a 1080p run fail, so it is never passed there. Only used with LTX.",
+        "title": "LTX large canvas",
+        "type": "boolean"
+      },
+      "ltx_overlap": {
+        "default": "auto",
+        "description": "auto: use Jasna's default (on in 0.11.2 Windows); on/off: explicitly enable/disable reduced overlap. About 13% faster on long videos. Only applies to LTX, not BasicVSR++ temporal overlap.",
+        "enum": [
+          "auto",
+          "on",
+          "off"
+        ],
+        "title": "LTX reduced overlap (0.11.2+)",
+        "type": "string"
+      },
+      "vr_8k_custom": {
+        "default": false,
+        "description": "Use the clip, overlap and unet-4x fields for VR. Off keeps the legacy fixed VR profile. The VR180 detector and SBS mode remain fixed.",
+        "title": "8K VR: use editable tuning",
+        "type": "boolean"
+      },
+      "vr_8k": {
+        "default": false,
+        "description": "Treat every file of this task as 8K SBS VR: launch with the VR180 detector rfdetr-vr-v1, --vr-mode sbs, 4K-tier clip 30, overlap 8 and the 4K-tier unet-4x off. The fields it overrides keep their saved values and apply again when unticked. 2D films belong in another task. Saving this on a running task restarts the current film. With editable VR tuning enabled, clip/overlap/unet fields apply instead of the fixed profile.",
+        "title": "8K VR",
+        "type": "boolean"
+      },
+      "clip_size_1080p": {
+        "default": 90,
+        "description": "Frames per clip (--max-clip-size) for the 1080p tier. Higher = better temporal consistency and more VRAM.",
+        "minimum": 8,
+        "title": "Clip Size 1080P",
+        "type": "integer"
+      },
+      "clip_size_4k": {
+        "default": 60,
+        "description": "Frames per clip (--max-clip-size) for the 4K tier. A file counts as 4K when its pixel count exceeds 1.5x 1920x1080 (about 3.1 MP, so 2560x1440 and up); 1920x1200 and 2560x1080 stay 1080p. 8K VR overrides this at launch unless editable VR tuning is enabled.",
+        "minimum": 8,
+        "title": "Clip Size 4K",
+        "type": "integer"
+      },
+      "temporal_overlap": {
+        "default": 8,
+        "description": "Frames of overlap between clips (--temporal-overlap). Jasna requires 2 x overlap to be smaller than the smallest clip size. 8K VR overrides this at launch unless editable VR tuning is enabled.",
+        "minimum": 0,
+        "title": "Temporal Overlap",
+        "type": "integer"
+      },
+      "codec": {
+        "default": "hevc",
+        "description": "Output video codec (--codec). hevc matches Jasna's own default.",
+        "enum": [
+          "hevc",
+          "h264",
+          "av1"
+        ],
+        "title": "Codec",
+        "type": "string"
+      },
+      "cq": {
+        "default": 24,
+        "description": "Constant-quality level (--cq), 0-63. Lower = better quality and a bigger file; 24 is Jasna's default.",
+        "maximum": 63,
+        "minimum": 0,
+        "title": "Cq",
+        "type": "integer"
+      },
+      "detection_model": {
+        "default": "rfdetr-v6",
+        "description": "Detection model (--detection-model) — ignored while 8K VR is ticked (rfdetr-vr-v1 is used). Left at the default, 4K files are automatically upgraded to rfdetr-v6-large when those weights are installed next to jasna.exe.",
+        "title": "Detection Model",
+        "type": "string"
+      },
+      "process_name": {
+        "default": "jasna",
+        "description": "Passive mode only: the process to detect. Matches with or without a trailing '.exe' (Windows: jasna.exe).",
+        "title": "Process Name",
+        "type": "string"
+      },
+      "jasna_extra_args": {
+        "default": "",
+        "description": "Extra Jasna flags appended verbatim to every launch, e.g. --device cuda:1. The flags TaskPaw owns (--input, --output, --output-pattern, --max-clip-size, --temporal-overlap, --codec, --cq, --detection-model) are rejected here — use the fields above. While 8K VR is ticked, --vr-mode and --detection-model-path are rejected too. `--secondary-restoration` here overrides the tickboxes for every file and disables the automatic unet-4x degrade (the relaunch would carry the same flag). Passing `--encoder-settings cq=...` alongside --cq is Jasna's own error. LTX options (--ltx-*, --restoration-model-name) are always rejected — use the LTX fields; while either LTX tickbox is ticked, so are --secondary-restoration, --denoise, --no-compile-basicvsrpp, --stream, --vr-mode, --restoration-model-path and --working-directory (and --fmp4 / --segments with LTX only for big mosaics).",
+        "title": "Jasna Extra Args",
+        "type": "string"
+      },
+      "jasna_gpu_monitor": {
+        "default": true,
+        "description": "Report GPU% / VRAM via nvidia-smi (turn off on a machine without an NVIDIA GPU).",
+        "title": "Jasna Gpu Monitor",
+        "type": "boolean"
+      },
+      "jasna_capture_progress": {
+        "default": false,
+        "description": "BasicVSR++ only; LTX always runs inside TaskPaw. Off (default): EACH BasicVSR++ file opens its OWN console window with Jasna's progress bar. On: capture Jasna's output into TaskPaw (no separate window) to show %/fps/ETA in the status pane and to include the error tail in failure alerts. The 'compiling TensorRT engines' hint does not depend on this setting — it is derived from whether model_weights/*.engine exist.",
+        "title": "Jasna Capture Progress",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "title": "JasnaConfig",
+    "type": "object"
+  },
+  "ui_schema": {
+    "ui:order": [
+      "name",
+      "jasna_exe_path",
+      "jasna_input_folder",
+      "jasna_output_folder",
+      "unet4x_1080p",
+      "unet4x_4k",
+      "av_translate",
+      "whisperjav_exe_path",
+      "whisperjav_engine",
+      "whisperjav_extra_args",
+      "ltx_1080p",
+      "ltx_4k",
+      "ltx_fast",
+      "ltx_auto_split",
+      "ltx_best",
+      "ltx_large_canvas",
+      "ltx_overlap",
+      "vr_8k",
+      "vr_8k_custom",
+      "clip_size_1080p",
+      "clip_size_4k",
+      "temporal_overlap",
+      "codec",
+      "cq",
+      "detection_model",
+      "process_name",
+      "jasna_extra_args",
+      "jasna_gpu_monitor",
+      "jasna_capture_progress",
+      "poll_interval",
+      "timeout",
+      "*"
+    ],
+    "ui:options": {
+      "jasnaPresets": {
+        "version": 1,
+        "gpus": [
+          {
+            "id": "5060-8",
+            "label": "RTX 5060 · 8 GB"
+          },
+          {
+            "id": "5060ti-16",
+            "label": "RTX 5060 Ti · 16 GB"
+          },
+          {
+            "id": "5070ti-16",
+            "label": "RTX 5070 Ti · 16 GB"
+          },
+          {
+            "id": "4090-24",
+            "label": "RTX 4090 · 24 GB"
+          },
+          {
+            "id": "5090-32",
+            "label": "RTX 5090 · 32 GB"
+          }
+        ],
+        "profiles": [
+          {
+            "model": "plain",
+            "gpu": "5060-8",
+            "standard": {
+              "clip_size_1080p": 90,
+              "clip_size_4k": 45,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 90,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "plain",
+            "gpu": "5060ti-16",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 90,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "plain",
+            "gpu": "5070ti-16",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 90,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "plain",
+            "gpu": "4090-24",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 180,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": false,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": false,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "plain",
+            "gpu": "5090-32",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 180,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "unet",
+            "gpu": "5060-8",
+            "standard": {
+              "clip_size_1080p": 90,
+              "clip_size_4k": 45,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": true,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 90,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "unet",
+            "gpu": "5060ti-16",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 90,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": true,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "unet",
+            "gpu": "5070ti-16",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 90,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": true,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "unet",
+            "gpu": "4090-24",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 180,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": true,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": false,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": false,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "unet",
+            "gpu": "5090-32",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 180,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": true,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": true,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "ltx",
+            "gpu": "5060-8",
+            "standard": {
+              "clip_size_1080p": 90,
+              "clip_size_4k": 45,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": true,
+              "ltx_1080p": true,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 90,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "ltx",
+            "gpu": "5060ti-16",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 90,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": true,
+              "ltx_4k": true,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "ltx",
+            "gpu": "5070ti-16",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 90,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": true,
+              "ltx_4k": true,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "ltx",
+            "gpu": "4090-24",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 180,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": true,
+              "ltx_4k": true,
+              "ltx_fast": false,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": false,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          },
+          {
+            "model": "ltx",
+            "gpu": "5090-32",
+            "standard": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 180,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": true,
+              "ltx_4k": true,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": false,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-v6"
+            },
+            "vr": {
+              "clip_size_1080p": 180,
+              "clip_size_4k": 30,
+              "temporal_overlap": 8,
+              "unet4x_1080p": false,
+              "unet4x_4k": false,
+              "ltx_1080p": false,
+              "ltx_4k": false,
+              "ltx_fast": true,
+              "ltx_best": false,
+              "ltx_large_canvas": false,
+              "ltx_auto_split": 12,
+              "ltx_overlap": "auto",
+              "vr_8k": true,
+              "vr_8k_custom": true,
+              "detection_model": "rfdetr-vr-v1"
+            }
+          }
+        ]
+      }
+    },
+    "jasna_exe_path": {
+      "ui:options": {
+        "taskpawPath": "file"
+      }
+    },
+    "jasna_input_folder": {
+      "ui:options": {
+        "taskpawPath": "directory"
+      }
+    },
+    "jasna_output_folder": {
+      "ui:options": {
+        "taskpawPath": "directory"
+      }
+    },
+    "whisperjav_exe_path": {
+      "ui:options": {
+        "taskpawPath": "file"
+      }
+    },
+    "ltx_1080p": {
+      "ui:options": {
+        "taskpawLock": {
+          "vr_8k": false,
+          "unet4x_1080p": false
+        }
+      }
+    },
+    "ltx_4k": {
+      "ui:options": {
+        "taskpawLock": {
+          "vr_8k": false,
+          "unet4x_4k": false
+        }
+      }
+    },
+    "vr_8k": {
+      "ui:options": {
+        "taskpawProfile": {
+          "unet4x_4k": false,
+          "detection_model": "rfdetr-vr-v1",
+          "clip_size_4k": 30,
+          "temporal_overlap": 8
+        }
+      }
+    }
+  }
+}
