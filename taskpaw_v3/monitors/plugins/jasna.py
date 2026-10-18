@@ -96,7 +96,6 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import re
 import shlex
 import shutil
 import subprocess
@@ -130,6 +129,7 @@ from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES as _LTX_MODEL
 from taskpaw_v3.monitors.plugins.jasna_download import SHARED_FILES as _LTX_SHARED_FILES
 from taskpaw_v3.monitors.plugins.jasna_download_session import DownloadSession
 from taskpaw_v3.monitors.plugins.jasna_presets import preset_catalogue
+from taskpaw_v3.monitors.plugins.jasna_progress import parse_jasna_progress_line
 from taskpaw_v3.monitors.plugins.lada import (
     _CRASH_DETAIL_CHARS,
     _CRASH_DETAIL_LINES,
@@ -137,7 +137,6 @@ from taskpaw_v3.monitors.plugins.lada import (
     _NO_WINDOW,
     _RECENT_OUTPUT_LINES,
     _cpu_mem,
-    parse_progress_line,
     process_alive,
 )
 
@@ -1380,41 +1379,6 @@ class JasnaConfig(BaseMonitorConfig):
                 f"clip_size_1080p must be larger than {2 * _VR8K_TEMPORAL_OVERLAP}"
             )
         return self
-
-
-# #263 AC5: Jasna 0.11.1's LTX progress, e.g.
-#   LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]
-# Four stages, the percent restarts each stage, `run … left` is the whole film.
-_RE_LTX_STAGE = re.compile(r"^LTX\s+(\d+)/(\d+)\s+([^:：]+?)\s*[:：]\s*(\d+)\s*%")
-_RE_LTX_FPS = re.compile(r"(\d+(?:\.\d+)?)\s*frame/s")
-_RE_LTX_LEFT = re.compile(r"run\s+([\d:]+)\s+left")
-# Stage-scoped numbers an LTX line must not leave behind (C9): they would
-# describe a stage, not the film; fps only when the stage reports frame/s.
-_LTX_STALE_KEYS = ("elapsed", "processed_frames", "remaining_frames", "fps", "eta")
-
-
-def parse_jasna_progress_line(line: str, prev: dict) -> dict:
-    """Pure: lada's `parse_progress_line` plus Jasna 0.11.1's LTX stages
-    (`ltx_stage`, stage percent, frame/s, the film's `run … left` as `eta`). A
-    `Jasna: …` line (the installation check printed on every launch) is not
-    progress. Returns `prev` itself for a line that changes nothing."""
-    text = line.strip()
-    if not text or text.startswith("Jasna: "):
-        return prev
-    m = _RE_LTX_STAGE.match(text)
-    if m:
-        out = {k: v for k, v in prev.items() if k not in _LTX_STALE_KEYS}
-        out["percent"] = int(m.group(4))
-        out["ltx_stage"] = f"{m.group(1)}/{m.group(2)} {m.group(3).strip()}"
-        if fps := _RE_LTX_FPS.search(text):
-            out["fps"] = float(fps.group(1))  # the pattern only admits a number
-        if left := _RE_LTX_LEFT.search(text):
-            out["eta"] = left.group(1)
-        return out
-    out = parse_progress_line(line, prev)
-    if out is not prev and "ltx_stage" in out:
-        out = {k: v for k, v in out.items() if k != "ltx_stage"}
-    return out
 
 
 def uses_ltx(cfg: JasnaConfig) -> bool:
@@ -4090,14 +4054,13 @@ class JasnaInstance(MonitorInstance):
         if self._process is not None and self._current is not None:
             with self._lock:
                 capture = dict(self._progress)
+            ltx = bool(capture.get("ltx_stage") or capture.get("ltx_progress"))
             restore = (
                 self._current.name,
                 {
-                    "percent": None
-                    if capture.get("ltx_stage")
-                    else capture.get("percent"),
-                    "eta_s": parse_eta(capture.get("eta")),
-                    "elapsed_s": parse_eta(capture.get("elapsed")),
+                    "percent": None if ltx else capture.get("percent"),
+                    "eta_s": None if ltx else parse_eta(capture.get("eta")),
+                    "elapsed_s": None if ltx else parse_eta(capture.get("elapsed")),
                 },
             )
         waiting: Optional[tuple[str, str]] = None

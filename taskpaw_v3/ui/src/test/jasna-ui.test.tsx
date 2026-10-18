@@ -93,9 +93,9 @@ it("LTX preset permits the independent VR switch and restores both LTX tiers whe
 
 it("stage 100% never becomes whole-film 100%; stage card resets for BasicVSR++", () => {
   const { rerender } = render(<MonitorMetrics metrics={{ current_file: "a.mp4", ltx_stage: "3/4 denoise", percent: 100, eta: "04:57" }} />);
-  expect(screen.getByText("第 3 / 4 阶段进度")).toBeInTheDocument();
-  expect(screen.getByText("本轮剩余：04:57")).toBeInTheDocument();
-  expect(screen.getByRole("progressbar")).toHaveAccessibleName("第 3 / 4 阶段进度");
+  expect(screen.getByText("阶段 3 / 4")).toBeInTheDocument();
+  expect(screen.getByText("当前 LTX 本轮预计剩余").parentElement).toHaveTextContent("04:57");
+  expect(screen.getByRole("progressbar")).toHaveAccessibleName("denoise · 第 3 / 4 阶段进度");
   rerender(<MonitorMetrics metrics={{ current_file: "b.mp4", percent: 5 }} />);
   expect(screen.queryByTestId("ltx-progress")).not.toBeInTheDocument();
   rerender(<MonitorMetrics metrics={{ ltx_stage: "9/4 scan", percent: NaN }} />);

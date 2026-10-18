@@ -11,7 +11,7 @@ import { hubFilmKind } from "../views/hubDashboard.helpers";
 import { hiddenWithPipeline, readPipeline, readFilmFallback } from "./pipelineProgress.helpers";
 import { Tile } from "./Tile";
 import { LtxProgress } from "./LtxProgress";
-import { ltxStage } from "./ltxProgress.helpers";
+import { readLtxProgress, withoutLtxPipelineNumbers } from "./ltxProgress.helpers";
 import { LtxDownload } from "./LtxDownload";
 
 // Live metrics dashboard for a monitor's status pane (design-system
@@ -65,7 +65,7 @@ const KNOWN = new Set([
   "mem_used_mb", "mem_total_mb",
   // #189 queue counters (an empty AV 翻译 tracker leaves them without `steps`)
   "queue_restored", "queue_pre_done", "steps", "films", "films_more",
-  "ltx_stage", "ltx_download",
+  "ltx_stage", "ltx_progress", "ltx_download",
 ]);
 
 export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
@@ -104,8 +104,8 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
   // REPLACES the now-processing banner, the queue bar and the fps/ETA tiles, and
   // the keys it shows itself are hidden from the generic tiles (D13). Without it
   // (Lada, AV-off Jasna, other monitors) nothing below changes.
-  const ltx = ltxStage(m) !== null;
-  const pipelineMetrics = ltx ? { ...m, percent: undefined, fps: undefined } : m;
+  const ltx = readLtxProgress(m) !== null;
+  const pipelineMetrics = ltx ? withoutLtxPipelineNumbers(m) : m;
   const pipe = readPipeline(pipelineMetrics);
 
   const gauges = [
@@ -120,6 +120,7 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
   // Unknown keys → tiles (so nothing is silently hidden, nothing is raw JSON).
   for (const [k, val] of Object.entries(m)) {
     if (KNOWN.has(k)) continue;
+    if (ltx && ["elapsed", "processed_frames", "remaining_frames"].includes(k)) continue;
     if (pipe && hiddenWithPipeline(k)) continue;
     if (typeof val !== "string" && typeof val !== "boolean"
       && !(typeof val === "number" && Number.isFinite(val))) continue;
