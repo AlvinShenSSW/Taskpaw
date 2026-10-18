@@ -1528,6 +1528,7 @@ class JasnaInstance(MonitorInstance):
         self._stopping = threading.Event()
         self._process: Optional[subprocess.Popen] = None
         self._reader: Optional[threading.Thread] = None
+        self._reader_generation = 0  # guarded by _lock, independent of process exit
         self._download = DownloadSession()
         self._progress: dict = {}
         self._recent_output: deque[str] = deque(maxlen=_RECENT_OUTPUT_LINES)
@@ -1638,6 +1639,10 @@ class JasnaInstance(MonitorInstance):
             self.stop()
         if self._download.child is not None:
             raise RuntimeError("previous model downloader is still stopping")
+        with self._lock:
+            self._reader_generation += 1
+            self._progress = {}
+            self._recent_output.clear()
         self._download = DownloadSession()
         self._stopping.clear()
         self._process = None
@@ -1667,9 +1672,6 @@ class JasnaInstance(MonitorInstance):
         self._ffprobe = None
         self._prev_running = None
         self._started = True
-        with self._lock:
-            self._progress = {}
-            self._recent_output.clear()
         self._reset_subs()
         if cfg.jasna_exe_path.strip():
             self._sweep_subs_leftovers()
@@ -2048,7 +2050,9 @@ class JasnaInstance(MonitorInstance):
 
     def stop(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + max(0.1, timeout)
-        self._stopping.set()
+        with self._lock:
+            self._stopping.set()
+            self._reader_generation += 1
         log_stop = not self._log_stopped
         if log_stop:
             self._log_stopped = True
@@ -2317,9 +2321,8 @@ class JasnaInstance(MonitorInstance):
             else:
                 dims = probe_resolution(nxt, self._ffprobe)
                 tier = tier_for(*dims) if dims else "1080p"
-            # The previous file's reader is at EOF (its process exited before we
-            # got here); join it so it can't append to the deque we are about to
-            # clear.
+            # Let the previous reader drain after its process exits. The join
+            # is bounded; _launch_locked fences any reader that outlives it.
             prev_reader = self._reader
             if prev_reader is not None and prev_reader.is_alive():
                 prev_reader.join(timeout=1)
@@ -2357,6 +2360,13 @@ class JasnaInstance(MonitorInstance):
                     )
                     self._alert_ltx_model(emit, missing)
                     return False
+            # Fence the previous reader before replacing its file or clearing
+            # its output, even when this launch does not capture a new pipe.
+            with self._lock:
+                self._reader_generation += 1
+                reader_generation = self._reader_generation
+                self._progress = {}
+                self._recent_output.clear()
             self._phase = "restore"
             video = self._pending.pop(0)
             if video != self._current:  # a NEW file → fresh retry budget
@@ -2441,9 +2451,6 @@ class JasnaInstance(MonitorInstance):
                 if capture
                 else {}
             )
-            with self._lock:
-                self._progress = {}
-                self._recent_output.clear()
             try:
                 # shell=False (list argv) — constitution §2.
                 proc = subprocess.Popen(argv, creationflags=flags, **kw)
@@ -2502,7 +2509,7 @@ class JasnaInstance(MonitorInstance):
             if capture and proc.stdout is not None:
                 self._reader = threading.Thread(
                     target=self._reader_loop,
-                    args=(proc,),
+                    args=(proc, reader_generation),
                     name=f"jasna-reader-{self.instance_id}",
                     daemon=True,
                 )
@@ -2557,7 +2564,14 @@ class JasnaInstance(MonitorInstance):
         )
 
     # ── reader thread (capture mode) ───────────────────────────────────────
-    def _reader_loop(self, proc: subprocess.Popen) -> None:
+    def _reader_loop(
+        self, proc: subprocess.Popen, generation: Optional[int] = None
+    ) -> None:
+        # Direct synchronous callers may omit the token. Production captures
+        # it before starting the thread, so delayed entry cannot adopt a new run.
+        if generation is None:
+            with self._lock:
+                generation = self._reader_generation
         stdout = proc.stdout
         if stdout is None:
             return
@@ -2568,19 +2582,19 @@ class JasnaInstance(MonitorInstance):
                 if ch == b"":
                     break  # EOF — process exited
                 if ch in (b"\r", b"\n"):
-                    self._consume_output(buf)
+                    self._consume_output(buf, generation)
                     buf = b""
                 else:
                     buf += ch
             # A crash line printed right before exit may arrive without a trailing
             # \r/\n before the pipe closes — flush it so the reason isn't lost.
-            self._consume_output(buf)
+            self._consume_output(buf, generation)
         except (OSError, ValueError):
             # Pipe closed / read on a terminated process as the child exits —
             # expected; the reader simply ends.
             pass
 
-    def _consume_output(self, buf: bytes) -> None:
+    def _consume_output(self, buf: bytes, generation: Optional[int] = None) -> None:
         """Classify one decoded output line: a recognized progress update advances
         `_progress`; any other non-empty line is retained as recent output (so a
         non-zero exit can report the crash reason)."""
@@ -2588,6 +2602,8 @@ class JasnaInstance(MonitorInstance):
             return
         line = buf.decode("utf-8", "replace")
         with self._lock:
+            if generation is not None and generation != self._reader_generation:
+                return
             new_progress = parse_jasna_progress_line(line, self._progress)
             if new_progress is not self._progress:
                 self._progress = new_progress

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_jasna import _events, _Launcher, _ltx_model, _managed, _patch, _videos
+from test_jasna import _events, _Launcher, _ltx_model, _managed, _patch, _probe, _videos
 from test_jasna_subs import _setup
 
 from taskpaw_v3.monitors.plugins import jasna as J
@@ -177,8 +178,8 @@ def test_reader_handles_cr_lf_ansi_split_utf8_and_eof_without_newline(tmp_path):
     observed = []
     consume = inst._consume_output
 
-    def record(buf):
-        consume(buf)
+    def record(buf, generation=None):
+        consume(buf, generation)
         if buf:
             observed.append(dict(inst._progress))
 
@@ -276,3 +277,136 @@ def test_lifecycle_removes_live_snapshot_and_restart_starts_clean(
     inst.start(emit)
     assert "ltx_progress" not in inst.check(emit).metrics
     inst.stop(timeout=0.5)
+
+
+class _HeldEOF(io.BytesIO):
+    """Hold a reader after its last byte, before EOF flushes its buffered line."""
+
+    def __init__(self, data):
+        super().__init__(data)
+        self.waiting = threading.Event()
+        self.release = threading.Event()
+
+    def read(self, size=-1):
+        chunk = super().read(size)
+        if chunk == b"":
+            self.waiting.set()
+            if not self.release.wait(5):
+                raise AssertionError("test did not release its old reader")
+        return chunk
+
+
+def _start_held_reader(
+    tmp_path, monkeypatch, payload, *, late_entry=False, second_file=False
+):
+    cfg, inp, _, home = _managed(tmp_path, ltx_1080p=True, jasna_capture_progress=False)
+    _ltx_model(home)
+    _videos(inp, "a.mp4", *(("b.mp4",) if second_file else ()))
+    launcher = _Launcher([None, None])
+    held = _HeldEOF(payload)
+
+    def launch(*args, **kwargs):
+        proc = launcher(*args, **kwargs)
+        if launcher.n == 1:
+            proc.stdout = io.BytesIO(payload) if late_entry else held
+        return proc
+
+    # A 1080p LTX file followed by uncaptured 4K BasicVSR++ has no new
+    # progress reader to hide an old reader's late writes.
+    _patch(monkeypatch, launch, _probe({"a.mp4": (1920, 1080), "b.mp4": (3840, 2160)}))
+    inst = J.JasnaInstance("j1", cfg)
+    if late_entry:
+        reader_loop = inst._reader_loop
+
+        def enter_later(proc, *args):
+            if proc is launcher.procs[0]:
+                held.waiting.set()
+                if not held.release.wait(5):
+                    raise AssertionError("test did not release its old reader entry")
+            reader_loop(proc, *args)
+
+        monkeypatch.setattr(inst, "_reader_loop", enter_later)
+    _, emit = _events()
+    inst.start(emit)
+    old_reader = inst._reader
+    assert old_reader is not None and held.waiting.wait(2)
+    joins = []
+    # Deterministically model an expired bounded join while the reader is
+    # still blocked, without adding one/two-second wall-clock sleeps.
+    monkeypatch.setattr(old_reader, "join", lambda timeout=None: joins.append(timeout))
+    return inst, emit, launcher, held, old_reader, joins
+
+
+@pytest.mark.parametrize("payload", [ENCODE.encode(), b"old process crash detail"])
+@pytest.mark.parametrize("late_entry", [False, True])
+def test_old_reader_cannot_write_into_next_uncaptured_model(
+    tmp_path, monkeypatch, payload, late_entry
+):
+    inst, emit, launcher, held, old_reader, joins = _start_held_reader(
+        tmp_path, monkeypatch, payload, late_entry=late_entry, second_file=True
+    )
+    try:
+        launcher.procs[0]._rc = 0
+        status = inst.check(emit)
+        assert status.metrics["current_file"] == "b.mp4"
+        assert launcher.procs[1].stdout is None and 1 in joins
+        held.release.set()
+        threading.Thread.join(old_reader, timeout=2)
+        assert not old_reader.is_alive()
+        assert (inst._progress, list(inst._recent_output)) == ({}, [])
+        assert "ltx_progress" not in inst.check(emit).metrics
+    finally:
+        held.release.set()
+        threading.Thread.join(old_reader, timeout=2)
+        inst.stop(timeout=0.5)
+
+
+@pytest.mark.parametrize("payload", [ENCODE.encode(), b"old process crash detail"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_stopped_reader_cannot_write_after_stop_or_restart(
+    tmp_path, monkeypatch, payload, restart
+):
+    inst, emit, launcher, held, old_reader, joins = _start_held_reader(
+        tmp_path, monkeypatch, payload
+    )
+    try:
+        inst.stop(timeout=0.5)
+        assert 2 in joins
+        if restart:
+            launcher._output = DENOISE + "\rnew process note"
+            inst.start(emit)
+            current_reader = inst._reader
+            assert current_reader is not None and current_reader is not old_reader
+            current_reader.join(timeout=2)
+            assert inst._progress["ltx_progress"]["stage_name"] == "denoise"
+            expected = (dict(inst._progress), ["new process note"])
+        else:
+            expected = ({}, [])
+        held.release.set()
+        threading.Thread.join(old_reader, timeout=2)
+        assert not old_reader.is_alive()
+        assert (inst._progress, list(inst._recent_output)) == expected
+    finally:
+        held.release.set()
+        threading.Thread.join(old_reader, timeout=2)
+        inst.stop(timeout=0.5)
+
+
+def test_current_reader_eof_tail_survives_process_exit_before_drain(
+    tmp_path, monkeypatch
+):
+    inst, emit, launcher, held, old_reader, _ = _start_held_reader(
+        tmp_path, monkeypatch, b"current process final crash detail"
+    )
+    try:
+        launcher.procs[0]._rc = 1
+        inst.check(emit)
+        assert inst._process is None
+        held.release.set()
+        threading.Thread.join(old_reader, timeout=2)
+        assert not old_reader.is_alive()
+        assert list(inst._recent_output) == ["current process final crash detail"]
+    finally:
+        held.release.set()
+        threading.Thread.join(old_reader, timeout=2)
+        inst.stop(timeout=0.5)

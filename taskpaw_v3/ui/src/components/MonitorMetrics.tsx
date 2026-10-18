@@ -105,7 +105,10 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
   // the keys it shows itself are hidden from the generic tiles (D13). Without it
   // (Lada, AV-off Jasna, other monitors) nothing below changes.
   const ltx = readLtxProgress(m) !== null;
-  const pipelineMetrics = ltx ? withoutLtxPipelineNumbers(m) : m;
+  // Structured presence owns the legacy numbers even when its snapshot cannot
+  // render. Invalid LTX data must not turn stage values into film telemetry.
+  const ownsLtx = Object.hasOwn(m, "ltx_progress") || ltx;
+  const pipelineMetrics = ownsLtx ? withoutLtxPipelineNumbers(m) : m;
   const pipe = readPipeline(pipelineMetrics);
 
   const gauges = [
@@ -115,12 +118,12 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
   ].filter(Boolean) as { label: string; pct: number }[];
 
   const tiles: { label: string; value: string }[] = [];
-  if (!pipe && !ltx && fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
-  if (!pipe && !ltx && eta) tiles.push({ label: t("events.eta"), value: eta });
+  if (!pipe && !ownsLtx && fps !== undefined) tiles.push({ label: t("events.fps"), value: fps.toFixed(fps < 10 ? 1 : 0) });
+  if (!pipe && !ownsLtx && eta) tiles.push({ label: t("events.eta"), value: eta });
   // Unknown keys → tiles (so nothing is silently hidden, nothing is raw JSON).
   for (const [k, val] of Object.entries(m)) {
     if (KNOWN.has(k)) continue;
-    if (ltx && ["elapsed", "processed_frames", "remaining_frames"].includes(k)) continue;
+    if (ownsLtx && ["elapsed", "processed_frames", "remaining_frames"].includes(k)) continue;
     if (pipe && hiddenWithPipeline(k)) continue;
     if (typeof val !== "string" && typeof val !== "boolean"
       && !(typeof val === "number" && Number.isFinite(val))) continue;
@@ -136,7 +139,7 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
       {filmSource?.kind === "hub" && <LtxDownload value={m.ltx_download} />}
 
       {/* Now-processing banner + current-file progress */}
-      {!pipe && !ltx && currentFile && (
+      {!pipe && !ownsLtx && currentFile && (
         <Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "rgba(34,197,94,0.06)",
                    border: "1px solid", borderColor: "rgba(34,197,94,0.25)" }}>
           <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase",
@@ -180,9 +183,9 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
       )}
 
       {!pipe && taskName !== undefined && (hubKind === "jasna"
-        ? <RunFilmsCard key={filmKey} name={taskName} source={filmSource} fallback={readFilmFallback(m)} />
+        ? <RunFilmsCard key={filmKey} name={taskName} source={filmSource} fallback={readFilmFallback(pipelineMetrics)} />
         : hubKind === "avsubs"
-          ? <PagedFilmList key={filmKey} name={taskName} source={filmSource} fallback={readFilmFallback(m)} showSingle />
+          ? <PagedFilmList key={filmKey} name={taskName} source={filmSource} fallback={readFilmFallback(pipelineMetrics)} showSingle />
           : filmSource?.kind !== "hub" && typeof m.queue_pre_done === "number"
             ? <PagedFilmList key={filmKey} name={taskName} /> : null)}
 

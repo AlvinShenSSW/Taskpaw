@@ -183,3 +183,43 @@ describe("LTX pipeline scope in Agent and Hub", () => {
     expect(input.steps[0]).toMatchObject({ percent: 100, eta_s: 297, elapsed_s: 281 });
   });
 });
+
+describe("LTX269-F1: invalid structured data still owns legacy metrics", () => {
+  const invalidSnapshots = [
+    null,
+    { mode: "other", stage_index: 2, stage_total: 4, stage_name: "encode" },
+    { mode: "restore", stage_index: 9, stage_total: 4, stage_name: "encode" },
+  ];
+  const legacy = { current_file: "video.mp4", ltx_stage: "2/4 encode", percent: 99,
+    fps: 5.62, eta: "12:12", elapsed: "11:11", processed_frames: 999, remaining_frames: 1,
+    queue_completed: 2, queue_total: 8, queue_remaining: 6 };
+
+  it.each(invalidSnapshots)("suppresses generic stage numbers for %j, then retains BasicVSR++ progress", invalid => {
+    const { rerender } = wrap(<MonitorMetrics metrics={{ ...legacy, ltx_progress: invalid }} />);
+    expect(screen.queryByTestId("ltx-progress")).not.toBeInTheDocument();
+    for (const stale of ["99%", "12:12", "11:11", "5.6", "processed frames", "remaining frames"]) {
+      expect(screen.queryByText(stale)).not.toBeInTheDocument();
+    }
+    expect(screen.getByText(/2.*8/)).toBeInTheDocument();
+    // Absence, unlike an invalid owned property, admits ordinary film telemetry.
+    rerender(<ThemeProvider theme={theme}><MonitorMetrics metrics={{ current_file: "plain.mp4", percent: 25, fps: 5.62, eta: "12:12" }} /></ThemeProvider>);
+    expect(screen.getByText("25%")).toBeInTheDocument();
+    expect(screen.getByText("12:12")).toBeInTheDocument();
+    expect(screen.getByText("5.6")).toBeInTheDocument();
+  });
+
+  it.each(invalidSnapshots)("suppresses restore-step/row legacy estimates for %j without hiding subtitle or queue progress", invalid => {
+    wrap(<MonitorMetrics metrics={{ ...legacy, ltx_progress: invalid, film: "video.mp4",
+      steps: [{ key: "restore", state: "active", percent: 99, eta_s: 732, elapsed_s: 671 },
+        { key: "asr", state: "pending" }, { key: "translate", state: "pending" }],
+      films: [{ name: "video.mp4", status: "active", steps: { restore: "active", asr: "pending", translate: "pending" }, percent: 99, eta_s: 732 },
+        { name: "previous.mp4", status: "active", steps: { restore: "done", asr: "active", translate: "pending" }, percent: 43, eta_s: 360 }],
+      films_more: 0,
+    }} />);
+    expect(screen.queryByTestId("ltx-progress")).not.toBeInTheDocument();
+    const pipeline = screen.getByTestId("pipeline-progress");
+    expect(pipeline).not.toHaveTextContent(/99%|12:12|11:11|约剩 13 分|5\.6/);
+    expect(within(pipeline).getByText(/43%/)).toBeInTheDocument();
+    expect(within(pipeline).getByText(/2.*8/)).toBeInTheDocument();
+  });
+});
