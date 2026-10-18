@@ -52,7 +52,11 @@ class FileLease:
             else:
                 import fcntl
 
-                fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # POSIX-only attributes are absent from Windows type stubs.
+                getattr(fcntl, "flock")(
+                    self._file.fileno(),
+                    getattr(fcntl, "LOCK_EX") | getattr(fcntl, "LOCK_NB"),
+                )
         except OSError as exc:
             self.close()
             raise StateError("lease_held_or_unavailable") from exc

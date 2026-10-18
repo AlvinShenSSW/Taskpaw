@@ -1,0 +1,14 @@
+# Jasna 0.11.1 trial console, 2026-10-16; rc=0; 12 observations from four stages.
+# Sanitized at the closing tqdm bracket; no warning/file suffixes retained.
+LTX 1/4 scan:   0%|          | 0/300 [00:00<?, ?frame/s]
+LTX 1/4 scan:  49%|████▉     | 148/300 [00:01<00:01, 142.45frame/s]
+LTX 1/4 scan: 100%|██████████| 300/300 [00:02<00:00, 111.92frame/s]
+LTX 2/4 encode:   0%|          | 0/300 [00:00<?, ?frame/s]
+LTX 2/4 encode:  36%|███▌      | 108/300 [00:19<00:43,  4.36frame/s, run 09:54 left]
+LTX 2/4 encode: 100%|██████████| 300/300 [00:35<00:00,  8.39frame/s, run 09:37 left]
+LTX 3/4 denoise:   0%|          | 0/120 [00:00<?, ?step/s]
+LTX 3/4 denoise:  51%|█████     | 61/120 [02:34<02:09,  2.19s/step, run 07:05 left]
+LTX 3/4 denoise: 100%|██████████| 120/120 [04:41<00:00,  2.34s/step, run 04:57 left]
+LTX 4/4 compose:   0%|          | 0/300 [00:00<?, ?frame/s]
+LTX 4/4 compose:  43%|████▎     | 128/300 [02:38<02:00,  1.43frame/s, run 02:11 left]
+LTX 4/4 compose: 100%|██████████| 300/300 [03:38<00:00,  1.37frame/s, run 00:00 left]

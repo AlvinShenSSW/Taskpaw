@@ -85,4 +85,7 @@ def test_new_ltx_stage_drops_old_rate_and_eta():
 
     before = {"ltx_stage": "2/4 encode", "percent": 100, "fps": 12, "eta": "10:00"}
     after = parse_jasna_progress_line("LTX 3/4 denoise: 1%", before)
-    assert after == {"ltx_stage": "3/4 denoise", "percent": 1}
+    assert {k: v for k, v in after.items() if k != "ltx_progress"} == {
+        "ltx_stage": "3/4 denoise",
+        "percent": 1,
+    }

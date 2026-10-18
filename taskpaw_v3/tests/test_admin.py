@@ -1860,7 +1860,9 @@ def test_r07_start_failure_reaps_plain_owned_child_before_retry(tmp_path):
                 item.child.wait(timeout=2)
 
 
-def test_r07_remove_retains_failed_cleanup_and_actual_row(tmp_path):
+def test_r07_remove_retains_failed_cleanup_and_actual_row(tmp_path, monkeypatch):
+    import threading
+
     from taskpaw_v3.monitors.supervisor import Supervisor
 
     class Broken(_FakeInstance):
@@ -1880,24 +1882,54 @@ def test_r07_remove_retains_failed_cleanup_and_actual_row(tmp_path):
     reg.register(plugin)
     cfg = _agent_config()
     sup = Supervisor(lambda *a: None)
+    failed_cleanup_published = threading.Event()
+    release_failed_cleanup = threading.Event()
+    cleanup = sup._cleanup
+
+    def hold_failed_cleanup(iid, managed, deadline):
+        cleanup(iid, managed, deadline)
+        if managed.instance.calls == 1:
+            failed_cleanup_published.set()
+            assert release_failed_cleanup.wait(5)
+
+    monkeypatch.setattr(sup, "_cleanup", hold_failed_cleanup)
     adm = MonitorAdmin(cfg, sup, reg, tmp_path / "owned.yaml", operation_timeout=0.1)
     adm.add({"type_id": "fake", "config": {"name": "owned"}})
-    result = adm.remove("owned")
-    assert result["runtime"] == "stopping" and result["error_code"] == "cleanup_failed"
-    assert cfg.monitors == [] and sup.has("owned")
-    row = adm.status_view()["owned"]
-    assert (
-        row["configured"] is False
-        and row["type_id"] == "fake"
-        and row["lifecycle"] == "remove_pending"
-    )
-    assert (
-        adm.add({"type_id": "fake", "config": {"name": "owned"}})["outcome"] == "busy"
-    )
-    assert adm.set_enabled("owned", False)["runtime"] == "stopped"
-    assert "owned" not in adm.status_view()
-    assert adm.add({"type_id": "fake", "config": {"name": "owned"}})["ok"]
-    sup.stop(timeout=1)
+    managed = sup._monitors["owned"]
+    try:
+        result = adm.remove("owned")
+        assert (
+            result["runtime"] == "stopping" and result["error_code"] == "cleanup_failed"
+        )
+        assert failed_cleanup_published.wait(2)
+        assert cfg.monitors == [] and sup.has("owned")
+        row = adm.status_view()["owned"]
+        assert (
+            row["configured"] is False
+            and row["type_id"] == "fake"
+            and row["lifecycle"] == "remove_pending"
+        )
+        assert (
+            adm.add({"type_id": "fake", "config": {"name": "owned"}})["outcome"]
+            == "busy"
+        )
+        # cleanup_done reports the callback result before its owning thread
+        # exits. A retry cannot replace that still-live owner.
+        pending = adm.set_enabled("owned", False)
+        assert pending["runtime"] == "stopping" and managed.instance.calls == 1
+        release_failed_cleanup.set()
+        assert managed.cleanup_thread is not None
+        managed.cleanup_thread.join(2)
+        assert not managed.cleanup_thread.is_alive()
+        assert adm.set_enabled("owned", False)["runtime"] == "stopped"
+        assert managed.instance.calls == 2
+        assert "owned" not in adm.status_view()
+        assert adm.add({"type_id": "fake", "config": {"name": "owned"}})["ok"]
+    finally:
+        release_failed_cleanup.set()
+        if managed.cleanup_thread is not None:
+            managed.cleanup_thread.join(2)
+        sup.stop(timeout=1)
 
 
 @pytest.mark.parametrize("manual,enabled", [(False, True), (True, False), (True, True)])
@@ -2957,9 +2989,8 @@ def test_r07_or002_stop_persistence_and_late_retirement_are_preserved(
     original_save = module.save_yaml
 
     def persist(*args):
-        if persistence == "pending":
-            save_entered.set()
-            assert save_release.wait(5)
+        save_entered.set()
+        assert save_release.wait(5)
         if persistence == "failed":
             raise OSError("PLANTED_SAVE_SECRET")
         original_save(*args)
@@ -2975,9 +3006,15 @@ def test_r07_or002_stop_persistence_and_late_retirement_are_preserved(
         assert (
             result["runtime"] == "stopping" and result["error_code"] == "stop_timeout"
         )
-        assert result["persistence"] == persistence
-        if persistence == "pending":
-            assert save_entered.is_set() and not save.done.is_set()
+        # Stop's bounded result reflects the still-held writer. A real saved or
+        # failed outcome may settle after its 0.1s deadline on any platform.
+        assert result["persistence"] == "pending"
+        assert save_entered.wait(2) and not save.done.is_set()
+        if persistence != "pending":
+            save_release.set()
+            assert save.done.wait(2)
+            save.thread.join(2)
+            assert not save.thread.is_alive()
         row = adm.status_view()["owned"]
         assert (
             row["runtime_error_code"]

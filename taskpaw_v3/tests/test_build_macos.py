@@ -8,6 +8,7 @@ import inspect
 import json
 import os
 import plistlib
+import posixpath
 import subprocess
 import sys
 import uuid
@@ -1036,6 +1037,17 @@ def finalizer_fixture(tmp_path, monkeypatch, mode="adhoc"):
     (app / "Contents/MacOS/taskpaw").write_bytes(b"fixture")
     events = []
 
+    if os.name == "nt":
+        # This fixture already stubs codesign, ZIP and DMG tools. On Windows,
+        # verify the macOS shortcut request without requiring symlink privilege.
+        # Actual filesystem semantics remain exercised below on POSIX hosts.
+        def applications_shortcut(path, target, target_is_directory=False):
+            assert path.name == "Applications" and path.parent.name == "dmg-staging"
+            assert target == "/Applications"
+            events.append(("applications-shortcut",))
+
+        monkeypatch.setattr(Path, "symlink_to", applications_shortcut)
+
     def fake_code(app):
         sidecar = app / "Contents/MacOS/taskpaw-backend"
         return [sidecar, app / "Contents/MacOS/taskpaw"], [], sidecar
@@ -1070,6 +1082,14 @@ def finalizer_fixture(tmp_path, monkeypatch, mode="adhoc"):
     def tool(stage, cmd, **kw):
         events.append((stage,))
         if stage == "dmg_create":
+            staging = Path(cmd[cmd.index("-srcfolder") + 1])
+            if os.name == "nt":
+                assert events.count(("applications-shortcut",)) == 1
+                assert not (staging / "Applications").exists()
+            else:
+                shortcut = staging / "Applications"
+                assert shortcut.is_symlink()
+                assert shortcut.readlink() == Path("/Applications")
             Path(cmd[-1]).write_bytes(b"fake-dmg")
         return b"fake-commit", b""
 
@@ -1146,19 +1166,34 @@ def test_group_transient_permission_is_not_treated_as_absence(monkeypatch):
     assert waited == [True]
 
 
-@pytest.mark.parametrize("compressed", [False, True])
-def test_real_pinned_carchive_bytes_are_inspected_not_outer_exe(compressed, tmp_path):
+def write_macos_carchive(archive, entries, monkeypatch):
+    """Use the pinned real writer with macOS member names on every test host."""
     pytest.importorskip("PyInstaller")
-    from PyInstaller.archive.writers import CArchiveWriter
+    from PyInstaller.archive import writers
+
+    # Patch only the writer's OS view during fixture creation. Source-file I/O,
+    # compression, archive format and the production reader all remain real.
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            writers, "os", SimpleNamespace(**(vars(os) | {"path": posixpath}))
+        )
+        patch.setattr(writers, "is_win", False)
+        writers.CArchiveWriter(str(archive), entries, "Python")
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_real_pinned_carchive_bytes_are_inspected_not_outer_exe(
+    compressed, tmp_path, monkeypatch
+):
 
     source = tmp_path / "native-bytes"
     data = b"\xcf\xfa\xed\xfe" + b"native-fixture" * 20
     source.write_bytes(data)
     archive = tmp_path / "fixture.pkg"
-    CArchiveWriter(
-        str(archive),
+    write_macos_carchive(
+        archive,
         [("psutil/_psutil_osx.so", str(source), compressed, "b")],
-        "Python",
+        monkeypatch,
     )
     assert list(mac.archive_entries(archive)) == [("psutil/_psutil_osx.so", data)]
 
@@ -1167,17 +1202,17 @@ def test_real_pinned_carchive_bytes_are_inspected_not_outer_exe(compressed, tmp_
     "name,code,data,error",
     [
         ("../escape.so", "b", b"\xcf\xfa\xed\xfe", "name_invalid"),
+        ("psutil\\escape.so", "b", b"\xcf\xfa\xed\xfe", "name_invalid"),
         ("ordinary-native.so", "b", b"not-MachO", "binary_invalid"),
     ],
 )
-def test_real_carchive_bad_entries_rejected(name, code, data, error, tmp_path):
-    pytest.importorskip("PyInstaller")
-    from PyInstaller.archive.writers import CArchiveWriter
-
+def test_real_carchive_bad_entries_rejected(
+    name, code, data, error, tmp_path, monkeypatch
+):
     source = tmp_path / "input"
     source.write_bytes(data)
     archive = tmp_path / "fixture.pkg"
-    CArchiveWriter(str(archive), [(name, str(source), True, code)], "Python")
+    write_macos_carchive(archive, [(name, str(source), True, code)], monkeypatch)
     with pytest.raises(mac.BuildError, match=error):
         list(mac.archive_entries(archive))
 

@@ -2578,18 +2578,30 @@ def test_a_file_named_jasna_work_never_stops_a_restore(tmp_path, monkeypatch, ca
 
 def test_parse_jasna_progress_ltx_lines():
     p = J.parse_jasna_progress_line(_LTX_SCAN, {})
-    assert p == {"percent": 45, "fps": 133.25, "ltx_stage": "1/4 scan"}
+    assert {k: v for k, v in p.items() if k != "ltx_progress"} == {
+        "percent": 45,
+        "fps": 133.25,
+        "ltx_stage": "1/4 scan",
+    }
     p = J.parse_jasna_progress_line(_LTX_ENCODE, p)
-    assert p == {
+    assert {k: v for k, v in p.items() if k != "ltx_progress"} == {
         "percent": 52,
         "fps": 5.62,
         "eta": "12:12",
         "ltx_stage": "2/4 encode",
     }
     p = J.parse_jasna_progress_line(_LTX_DENOISE, p)  # s/step → no fps
-    assert p == {"percent": 100, "eta": "04:57", "ltx_stage": "3/4 denoise"}
+    assert {k: v for k, v in p.items() if k != "ltx_progress"} == {
+        "percent": 100,
+        "eta": "04:57",
+        "ltx_stage": "3/4 denoise",
+    }
     p = J.parse_jasna_progress_line(_LTX_COMPOSE_SLOW, p)  # s/frame → no fps
-    assert p == {"percent": 10, "eta": "03:20", "ltx_stage": "4/4 compose"}
+    assert {k: v for k, v in p.items() if k != "ltx_progress"} == {
+        "percent": 10,
+        "eta": "03:20",
+        "ltx_stage": "4/4 compose",
+    }
 
 
 def test_parse_jasna_progress_drops_stage_numbers_and_keeps_identity():
@@ -2599,7 +2611,8 @@ def test_parse_jasna_progress_drops_stage_numbers_and_keeps_identity():
         "processed_frames": 9,
         "remaining_frames": 1,
     }
-    assert J.parse_jasna_progress_line(_LTX_SCAN, prev) == {
+    observed = J.parse_jasna_progress_line(_LTX_SCAN, prev)
+    assert {k: v for k, v in observed.items() if k != "ltx_progress"} == {
         "percent": 45,
         "fps": 133.25,
         "ltx_stage": "1/4 scan",

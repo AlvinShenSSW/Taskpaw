@@ -406,3 +406,37 @@ it("#210 SR-2: empty-success restart fallback retains the transient error reason
   expect(screen.getByText("显示上次成功读取的列表。")).toBeInTheDocument();
   expect(screen.getByText("PQRS-fallback-1.mp4")).toBeInTheDocument();
 });
+
+describe.each(["loading", "unavailable"] as const)("LTX269-F1: Hub fallback while %s", state => {
+  it.each([
+    ["structured", { ltx_progress: { mode: "restore", stage_index: 2, stage_total: 4, stage_name: "encode", percent: 99, percent_text: "99" } }],
+    ["invalid structured", { ltx_progress: null, ltx_stage: "2/4 encode" }],
+    ["legacy", { ltx_stage: "2/4 encode" }],
+  ])("keeps %s stage numbers out of restore rows without usable steps", async (_kind, ltxMetrics) => {
+    const pending = deferred();
+    serve = () => state === "loading" ? pending.promise : response({ error: "film_list_unavailable" }, false);
+    const ordinary = {
+      current_file: "video.mp4", percent: 99, eta: "12:12", films_more: 0,
+      films: [
+        { name: "video.mp4", status: "active", steps: { restore: "active", asr: "pending", translate: "pending" }, percent: 99, eta_s: 732 },
+        { name: "subtitle.mp4", status: "active", steps: { restore: "done", asr: "active", translate: "pending" }, percent: 43, eta_s: 360 },
+      ],
+    };
+    const view = render(<MonitorMetrics metrics={{ ...ordinary, ...ltxMetrics }} taskName="jasna/main"
+      taskType="jasna" filmSource={{ kind: "hub", serverId: 1 }} />, { wrapper });
+    await waitFor(() => expect(requests[0]?.pathname).toBe("/servers/1/monitors/run-films"));
+    if (state === "unavailable") await waitFor(() => expect(qc.getQueryCache().findAll()[0]?.state.status).toBe("error"));
+
+    const fallback = screen.getByTestId("pipeline-films");
+    expect(fallback).not.toHaveTextContent("修复 99%");
+    expect(fallback).not.toHaveTextContent("约剩 13 分");
+    expect(fallback).toHaveTextContent("识别 43%");
+    expect(fallback).toHaveTextContent("约剩 6 分");
+
+    view.rerender(<MonitorMetrics metrics={ordinary} taskName="jasna/main"
+      taskType="jasna" filmSource={{ kind: "hub", serverId: 1 }} />);
+    expect(screen.getByTestId("pipeline-films")).toHaveTextContent("修复 99%");
+    expect(screen.getByTestId("pipeline-films")).toHaveTextContent("约剩 13 分");
+    expect(screen.getByTestId("pipeline-films")).toHaveTextContent("识别 43%");
+  });
+});

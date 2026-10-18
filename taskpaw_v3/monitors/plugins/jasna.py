@@ -96,7 +96,6 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import re
 import shlex
 import shutil
 import subprocess
@@ -130,6 +129,7 @@ from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES as _LTX_MODEL
 from taskpaw_v3.monitors.plugins.jasna_download import SHARED_FILES as _LTX_SHARED_FILES
 from taskpaw_v3.monitors.plugins.jasna_download_session import DownloadSession
 from taskpaw_v3.monitors.plugins.jasna_presets import preset_catalogue
+from taskpaw_v3.monitors.plugins.jasna_progress import parse_jasna_progress_line
 from taskpaw_v3.monitors.plugins.lada import (
     _CRASH_DETAIL_CHARS,
     _CRASH_DETAIL_LINES,
@@ -137,7 +137,6 @@ from taskpaw_v3.monitors.plugins.lada import (
     _NO_WINDOW,
     _RECENT_OUTPUT_LINES,
     _cpu_mem,
-    parse_progress_line,
     process_alive,
 )
 
@@ -1382,41 +1381,6 @@ class JasnaConfig(BaseMonitorConfig):
         return self
 
 
-# #263 AC5: Jasna 0.11.1's LTX progress, e.g.
-#   LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]
-# Four stages, the percent restarts each stage, `run … left` is the whole film.
-_RE_LTX_STAGE = re.compile(r"^LTX\s+(\d+)/(\d+)\s+([^:：]+?)\s*[:：]\s*(\d+)\s*%")
-_RE_LTX_FPS = re.compile(r"(\d+(?:\.\d+)?)\s*frame/s")
-_RE_LTX_LEFT = re.compile(r"run\s+([\d:]+)\s+left")
-# Stage-scoped numbers an LTX line must not leave behind (C9): they would
-# describe a stage, not the film; fps only when the stage reports frame/s.
-_LTX_STALE_KEYS = ("elapsed", "processed_frames", "remaining_frames", "fps", "eta")
-
-
-def parse_jasna_progress_line(line: str, prev: dict) -> dict:
-    """Pure: lada's `parse_progress_line` plus Jasna 0.11.1's LTX stages
-    (`ltx_stage`, stage percent, frame/s, the film's `run … left` as `eta`). A
-    `Jasna: …` line (the installation check printed on every launch) is not
-    progress. Returns `prev` itself for a line that changes nothing."""
-    text = line.strip()
-    if not text or text.startswith("Jasna: "):
-        return prev
-    m = _RE_LTX_STAGE.match(text)
-    if m:
-        out = {k: v for k, v in prev.items() if k not in _LTX_STALE_KEYS}
-        out["percent"] = int(m.group(4))
-        out["ltx_stage"] = f"{m.group(1)}/{m.group(2)} {m.group(3).strip()}"
-        if fps := _RE_LTX_FPS.search(text):
-            out["fps"] = float(fps.group(1))  # the pattern only admits a number
-        if left := _RE_LTX_LEFT.search(text):
-            out["eta"] = left.group(1)
-        return out
-    out = parse_progress_line(line, prev)
-    if out is not prev and "ltx_stage" in out:
-        out = {k: v for k, v in out.items() if k != "ltx_stage"}
-    return out
-
-
 def uses_ltx(cfg: JasnaConfig) -> bool:
     """#265: either LTX tickbox is ticked."""
     return cfg.ltx_1080p or cfg.ltx_4k
@@ -1564,6 +1528,7 @@ class JasnaInstance(MonitorInstance):
         self._stopping = threading.Event()
         self._process: Optional[subprocess.Popen] = None
         self._reader: Optional[threading.Thread] = None
+        self._reader_generation = 0  # guarded by _lock, independent of process exit
         self._download = DownloadSession()
         self._progress: dict = {}
         self._recent_output: deque[str] = deque(maxlen=_RECENT_OUTPUT_LINES)
@@ -1674,6 +1639,10 @@ class JasnaInstance(MonitorInstance):
             self.stop()
         if self._download.child is not None:
             raise RuntimeError("previous model downloader is still stopping")
+        with self._lock:
+            self._reader_generation += 1
+            self._progress = {}
+            self._recent_output.clear()
         self._download = DownloadSession()
         self._stopping.clear()
         self._process = None
@@ -1703,9 +1672,6 @@ class JasnaInstance(MonitorInstance):
         self._ffprobe = None
         self._prev_running = None
         self._started = True
-        with self._lock:
-            self._progress = {}
-            self._recent_output.clear()
         self._reset_subs()
         if cfg.jasna_exe_path.strip():
             self._sweep_subs_leftovers()
@@ -2084,7 +2050,9 @@ class JasnaInstance(MonitorInstance):
 
     def stop(self, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + max(0.1, timeout)
-        self._stopping.set()
+        with self._lock:
+            self._stopping.set()
+            self._reader_generation += 1
         log_stop = not self._log_stopped
         if log_stop:
             self._log_stopped = True
@@ -2353,9 +2321,8 @@ class JasnaInstance(MonitorInstance):
             else:
                 dims = probe_resolution(nxt, self._ffprobe)
                 tier = tier_for(*dims) if dims else "1080p"
-            # The previous file's reader is at EOF (its process exited before we
-            # got here); join it so it can't append to the deque we are about to
-            # clear.
+            # Let the previous reader drain after its process exits. The join
+            # is bounded; _launch_locked fences any reader that outlives it.
             prev_reader = self._reader
             if prev_reader is not None and prev_reader.is_alive():
                 prev_reader.join(timeout=1)
@@ -2393,6 +2360,13 @@ class JasnaInstance(MonitorInstance):
                     )
                     self._alert_ltx_model(emit, missing)
                     return False
+            # Fence the previous reader before replacing its file or clearing
+            # its output, even when this launch does not capture a new pipe.
+            with self._lock:
+                self._reader_generation += 1
+                reader_generation = self._reader_generation
+                self._progress = {}
+                self._recent_output.clear()
             self._phase = "restore"
             video = self._pending.pop(0)
             if video != self._current:  # a NEW file → fresh retry budget
@@ -2477,9 +2451,6 @@ class JasnaInstance(MonitorInstance):
                 if capture
                 else {}
             )
-            with self._lock:
-                self._progress = {}
-                self._recent_output.clear()
             try:
                 # shell=False (list argv) — constitution §2.
                 proc = subprocess.Popen(argv, creationflags=flags, **kw)
@@ -2538,7 +2509,7 @@ class JasnaInstance(MonitorInstance):
             if capture and proc.stdout is not None:
                 self._reader = threading.Thread(
                     target=self._reader_loop,
-                    args=(proc,),
+                    args=(proc, reader_generation),
                     name=f"jasna-reader-{self.instance_id}",
                     daemon=True,
                 )
@@ -2593,7 +2564,14 @@ class JasnaInstance(MonitorInstance):
         )
 
     # ── reader thread (capture mode) ───────────────────────────────────────
-    def _reader_loop(self, proc: subprocess.Popen) -> None:
+    def _reader_loop(
+        self, proc: subprocess.Popen, generation: Optional[int] = None
+    ) -> None:
+        # Direct synchronous callers may omit the token. Production captures
+        # it before starting the thread, so delayed entry cannot adopt a new run.
+        if generation is None:
+            with self._lock:
+                generation = self._reader_generation
         stdout = proc.stdout
         if stdout is None:
             return
@@ -2604,19 +2582,19 @@ class JasnaInstance(MonitorInstance):
                 if ch == b"":
                     break  # EOF — process exited
                 if ch in (b"\r", b"\n"):
-                    self._consume_output(buf)
+                    self._consume_output(buf, generation)
                     buf = b""
                 else:
                     buf += ch
             # A crash line printed right before exit may arrive without a trailing
             # \r/\n before the pipe closes — flush it so the reason isn't lost.
-            self._consume_output(buf)
+            self._consume_output(buf, generation)
         except (OSError, ValueError):
             # Pipe closed / read on a terminated process as the child exits —
             # expected; the reader simply ends.
             pass
 
-    def _consume_output(self, buf: bytes) -> None:
+    def _consume_output(self, buf: bytes, generation: Optional[int] = None) -> None:
         """Classify one decoded output line: a recognized progress update advances
         `_progress`; any other non-empty line is retained as recent output (so a
         non-zero exit can report the crash reason)."""
@@ -2624,6 +2602,8 @@ class JasnaInstance(MonitorInstance):
             return
         line = buf.decode("utf-8", "replace")
         with self._lock:
+            if generation is not None and generation != self._reader_generation:
+                return
             new_progress = parse_jasna_progress_line(line, self._progress)
             if new_progress is not self._progress:
                 self._progress = new_progress
@@ -4090,14 +4070,13 @@ class JasnaInstance(MonitorInstance):
         if self._process is not None and self._current is not None:
             with self._lock:
                 capture = dict(self._progress)
+            ltx = bool(capture.get("ltx_stage") or capture.get("ltx_progress"))
             restore = (
                 self._current.name,
                 {
-                    "percent": None
-                    if capture.get("ltx_stage")
-                    else capture.get("percent"),
-                    "eta_s": parse_eta(capture.get("eta")),
-                    "elapsed_s": parse_eta(capture.get("elapsed")),
+                    "percent": None if ltx else capture.get("percent"),
+                    "eta_s": None if ltx else parse_eta(capture.get("eta")),
+                    "elapsed_s": None if ltx else parse_eta(capture.get("elapsed")),
                 },
             )
         waiting: Optional[tuple[str, str]] = None

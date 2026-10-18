@@ -1,0 +1,10 @@
+# CPU-only tqdm 4.67.1 formatting with source-verified Jasna v0.11.2 labels/units.
+# Synthetic timing/counters, not inference. Upstream tqdm version is unpinned.
+# Source: https://github.com/Kruk2/jasna/blob/b623466f6b479ab88790b25e17a2c84456367eda/jasna/ltx/restore.py
+LTX 1/4 scan:   0%|          | 0/300 [00:00<?, ?frame/s]
+LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]
+LTX 3/4 denoise: 100%|██████████| 120/120 [04:41<00:00,  2.34s/step, run 04:57 left]
+LTX 3/4 denoise:  20%|██        | 24/120 [00:08<00:32,  3.00step/s, run 04:57 left]
+LTX 4/4 compose:  10%|█         | 30/300 [00:40<06:09,  1.37s/frame, run 03:20 left]
+LTX speed test 1/4 scan:   0%|          | 0/100 [00:00<?, ?frame/s]
+LTX 3/4 denoise:   1%|          | 1/120 [00:02<1:39:10, 50.00s/step, run 2:10:00 left]

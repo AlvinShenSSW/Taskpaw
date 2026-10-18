@@ -18,6 +18,7 @@ import time
 import uuid
 from pathlib import Path
 
+from taskpaw_v3.integrations.activity_verifier import WindowsVerification
 from taskpaw_v3.integrations.activity_writer import (
     _CLAUDE_EVENT_STATE,
     _CODEX_EVENT_STATE,
@@ -279,9 +280,14 @@ def verify_writer(command: str, tool: str, state_dir: Path) -> None:
     if not os.access(args[0], os.X_OK):
         raise SetupError("interpreter is not executable")
     private_dir(state_dir)
-    with tempfile.TemporaryDirectory(
+    verification = WindowsVerification(state_dir) if WINDOWS else None
+    context = verification or tempfile.TemporaryDirectory(
         prefix=".activity-check-", dir=state_dir
-    ) as directory:
+    )
+    with context as checked:
+        directory = (
+            checked.path if isinstance(checked, WindowsVerification) else checked
+        )
         output = Path(directory) / "state.json"
         args[5] = str(output).replace("\\", "/") if WINDOWS else str(output)
         nonce = uuid.uuid4().hex
@@ -293,25 +299,31 @@ def verify_writer(command: str, tool: str, state_dir: Path) -> None:
             output.unlink(missing_ok=True)
             started = time.time()
             try:
-                # exec replaces the shell, so timeout kills the writer itself.
-                completed = subprocess.run(
-                    [shell, "-c", "exec " + shlex.join(args)],
-                    input=json.dumps(
-                        {
-                            "hook_event_name": event,
-                            "session_id": nonce,
-                            "prompt_id" if tool == "claude" else "turn_id": nonce,
-                        }
-                    ),
-                    text=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
+                # POSIX exec replaces the shell; Windows owns the canonical
+                # shell and writer descendants through a private Job.
+                argv = [shell, "-c", "exec " + shlex.join(args)]
+                payload = json.dumps(
+                    {
+                        "hook_event_name": event,
+                        "session_id": nonce,
+                        "prompt_id" if tool == "claude" else "turn_id": nonce,
+                    }
                 )
+                if verification is not None:
+                    code = verification.run(argv, payload, timeout=5)
+                else:
+                    code = subprocess.run(
+                        argv,
+                        input=payload,
+                        text=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5,
+                        check=False,
+                    ).returncode
             except subprocess.TimeoutExpired:
                 raise SetupError("writer check timed out") from None
-            if completed.returncode != 0:
+            if code != 0:
                 raise SetupError("writer command failed")
             data = decode(read_bytes(output))
             ts = data.get("ts")
