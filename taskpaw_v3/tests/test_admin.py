@@ -2989,9 +2989,8 @@ def test_r07_or002_stop_persistence_and_late_retirement_are_preserved(
     original_save = module.save_yaml
 
     def persist(*args):
-        if persistence == "pending":
-            save_entered.set()
-            assert save_release.wait(5)
+        save_entered.set()
+        assert save_release.wait(5)
         if persistence == "failed":
             raise OSError("PLANTED_SAVE_SECRET")
         original_save(*args)
@@ -3007,9 +3006,15 @@ def test_r07_or002_stop_persistence_and_late_retirement_are_preserved(
         assert (
             result["runtime"] == "stopping" and result["error_code"] == "stop_timeout"
         )
-        assert result["persistence"] == persistence
-        if persistence == "pending":
-            assert save_entered.is_set() and not save.done.is_set()
+        # Stop's bounded result reflects the still-held writer. A real saved or
+        # failed outcome may settle after its 0.1s deadline on any platform.
+        assert result["persistence"] == "pending"
+        assert save_entered.wait(2) and not save.done.is_set()
+        if persistence != "pending":
+            save_release.set()
+            assert save.done.wait(2)
+            save.thread.join(2)
+            assert not save.thread.is_alive()
         row = adm.status_view()["owned"]
         assert (
             row["runtime_error_code"]
