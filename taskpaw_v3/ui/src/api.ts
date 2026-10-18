@@ -360,6 +360,8 @@ async function send<T>(
 const q = (name: string) => `?name=${encodeURIComponent(name)}`;
 
 export const api = {
+  respondPrompt: (name: string, request_id: string, approved: boolean) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/monitors/respond${q(name)}`, { request_id, approved }),
   hubFilms: (serverId: number, name: string, page?: number, size = 10) =>
     hubFilmGet(`/servers/${serverId}/monitors/films${q(name)}${page === undefined ? "" : `&page=${page}`}&size=${size}`),
   hubRunFilms: (serverId: number, name: string, filter: "done" | "open" | "all", page: number, size = 10) =>

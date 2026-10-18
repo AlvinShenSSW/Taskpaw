@@ -45,7 +45,7 @@ describe("i18n", () => {
   it("carries the 1080p LTX hint and review-row strings in zh and en (#263)", () => {
     const zh = i18n.t("wizard.ltxHint");
     for (const part of ["只有 1080p 档的文件用 LTX", "4K 档和其他设置都按原来的配置", "unet-4x",
-      "「8K VR」", "灰显", "取消勾选后恢复", "约 9 GB", "约 15 GB", "输入 y", "整片都用 LTX",
+      "「8K VR」", "灰显", "取消勾选后恢复", "约 9 GB", "约 15 GB", "下载并继续", "整片都用 LTX",
       "从头重跑当前影片"]) {
       expect(zh).toContain(part);
     }
@@ -54,7 +54,7 @@ describe("i18n", () => {
     setLang("en");
     const en = i18n.t("wizard.ltxHint");
     for (const part of ["only the 1080p-tier files use LTX", "4K files and every other setting stay as they are",
-      "8K VR", "greyed", "untick", "about 9 GB", "15 GB", "type y", "whole film with LTX",
+      "8K VR", "greyed", "untick", "about 9 GB", "15 GB", "Download and continue", "whole film with LTX",
       "restarts the current film"]) {
       expect(en).toContain(part);
     }
@@ -73,6 +73,16 @@ describe("i18n", () => {
     expect(i18n.t("wizard.ltxHintBoth")).toContain("LTX is on for both tiers");
     expect(i18n.t("wizard.ltxOn4k")).toBe("4K tier only (without 8K VR and the 4K unet-4x)");
     expect(i18n.t("wizard.ltxOnBoth")).toBe("both tiers (without 8K VR and unet-4x)");
+  });
+
+  it.each(["en", "zh-CN"] as const)("LTX hints direct first downloads to TaskPaw (%s)", lang => {
+    setLang(lang);
+    for (const key of ["ltxHint", "ltxHint4k", "ltxHintBoth"]) {
+      const text = i18n.t(`wizard.${key}`);
+      expect(text).toContain(lang === "en" ? "local TaskPaw task panel" : "TaskPaw 本地任务面板");
+      expect(text).toContain(lang === "en" ? "Download and continue" : "下载并继续");
+      expect(text).not.toMatch(/type y|输入 y|Jasna.*asks in its window|Jasna 会弹出窗口/);
+    }
   });
 
   it("does not throw when reporting the language outside a Tauri shell (#108)", () => {

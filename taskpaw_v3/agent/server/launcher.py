@@ -289,6 +289,7 @@ def run_agent(
                     events_provider=queue.recent,
                     films_provider=supervisor.film_page,
                     run_films_provider=supervisor.run_films,
+                    prompt_responder=supervisor.respond_prompt,
                 ),
                 log_level="warning",
             )
