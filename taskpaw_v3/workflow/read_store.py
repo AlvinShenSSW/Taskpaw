@@ -32,6 +32,13 @@ class ReadCommands(WorkflowCore):
                         (film_id, principal["principal_id"]),
                     ).fetchone()
                 )
+                if not created and principal["role"] == "intake_adapter":
+                    created = self._conn.execute(
+                        "SELECT 1 FROM intake_films i JOIN intake_packages p ON p.package_id=i.package_id "
+                        "JOIN intake_roots r ON r.root_id=p.root_id AND r.current=1 "
+                        "WHERE i.film_id=? AND r.component_id=? LIMIT 1",
+                        (film_id, principal["component_id"]),
+                    ).fetchone()
                 if not owned and not created:
                     raise WorkflowError("forbidden")
                 if principal["role"] == "compute_worker":

@@ -24,6 +24,10 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     role = argv[0].lower() if argv else "agent"
+    if role == "workflow-intake":
+        from taskpaw_v3.workflow.intake_worker import main as intake_main
+
+        return intake_main(argv[1:])
     if role == "jasna-download":
         from taskpaw_v3.monitors.plugins.jasna_download import main as download_main
 

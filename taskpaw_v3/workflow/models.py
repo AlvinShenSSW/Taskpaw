@@ -19,11 +19,15 @@ from pydantic import (
     PlainSerializer,
     SecretBytes,
     SecretStr,
+    SerializerFunctionWrapHandler,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 from typing_extensions import Self
+
+from taskpaw_v3.workflow.raw_media_models import RawMediaFacts
 
 
 class WorkflowError(ValueError):
@@ -315,9 +319,31 @@ class MediaProbe(Model):
     video_streams: Count
     audio_streams: Count
     evidence: EvidenceRef
+    raw_facts: RawMediaFacts | None = None
+
+    @model_serializer(mode="wrap")
+    def _historical_wire(self, handler: SerializerFunctionWrapHandler) -> dict:
+        payload = handler(self)
+        if self.raw_facts is None:
+            payload.pop("raw_facts", None)
+        return payload
 
     @model_validator(mode="after")
     def _success(self) -> Self:
+        if self.raw_facts is not None:
+            raw = self.raw_facts
+            if self.evidence.payload_digest != raw.payload_sha256:
+                raise ValueError("media_probe_payload_mismatch")
+            if (
+                self.width != raw.display_width
+                or self.height != raw.display_height
+                or self.duration_ms != raw.duration_ms
+                or self.video_streams
+                != sum(stream.codec_type == "video" for stream in raw.streams)
+                or self.audio_streams
+                != sum(stream.codec_type == "audio" for stream in raw.streams)
+            ):
+                raise ValueError("media_probe_projection_mismatch")
         if self.evidence.status == "passed" and (
             self.width is None
             or self.height is None
@@ -470,6 +496,22 @@ def _content(value: object, *, root: bool = True) -> object:
             for key, item in value.items()
             if key != "received_at" and not (root and key == "manifest_hash")
         }
+        # Only these additive optional fields have an omitted-None wire form.
+        # Keep historical manifests and their receipt-bound hashes unchanged.
+        if {"film_id", "revision", "items", "readiness"} <= value.keys() and value.get(
+            "source_binding"
+        ) is None:
+            result.pop("source_binding", None)
+        if {
+            "item_id",
+            "width",
+            "height",
+            "duration_ms",
+            "video_streams",
+            "audio_streams",
+            "evidence",
+        } <= value.keys() and value.get("raw_facts") is None:
+            result.pop("raw_facts", None)
         # These are sets of identities, not the order of business operations.
         for key, identity in (
             ("items", "item_id"),
@@ -501,6 +543,19 @@ def manifest_digest(value: object) -> str:
     return digest(_content(value))
 
 
+class InputSourceBinding(Model):
+    """Exact intake snapshot identity; it contains no recursive manifest hash."""
+
+    root_id: Id
+    root_config_revision: Revision
+    package_id: Id
+    source_generation: Revision
+    snapshot_id: Id
+    grouping_revision: Revision
+    package_membership_digest: Digest
+    grouping_digest: Digest
+
+
 class InputManifest(Model):
     film_id: Id
     revision: Revision
@@ -508,6 +563,16 @@ class InputManifest(Model):
     readiness: ReadinessEvidence
     policy_revision: Revision
     manifest_hash: Digest
+    source_binding: InputSourceBinding | None = None
+
+    @model_serializer(mode="wrap")
+    def _legacy_shape(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.source_binding is None:
+            value.pop("source_binding", None)
+        return value
 
     @model_validator(mode="after")
     def _manifest(self) -> Self:

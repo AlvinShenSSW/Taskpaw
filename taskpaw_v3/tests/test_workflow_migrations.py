@@ -97,7 +97,9 @@ def test_reopen_validates_then_configures_wal_full_and_foreign_keys(tmp_path):
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert 0 < conn.execute("PRAGMA busy_timeout").fetchone()[0] <= 5000
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
+        )
         assert (
             conn.execute("PRAGMA application_id").fetchone()[0] == schema.APPLICATION_ID
         )
@@ -119,7 +121,7 @@ def test_empty_or_corrupt_database_is_preserved_and_rejected(tmp_path, contents)
     "mutation",
     [
         "PRAGMA application_id=42",
-        "PRAGMA user_version=2",
+        "PRAGMA user_version=3",
         "PRAGMA user_version=0",
         "DROP TABLE cleanup_items",
         "ALTER TABLE films ADD COLUMN unexpected TEXT",

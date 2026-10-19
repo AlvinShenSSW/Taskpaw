@@ -1,7 +1,7 @@
 """Opt-in workflow store. Construction is always explicit."""
 
-from .approval_store import ApprovalCommands
+from .intake_store import IntakeCommands
 
 
-class WorkflowStore(ApprovalCommands):
+class WorkflowStore(IntakeCommands):
     """Public facade for transaction-owned workflow commands."""

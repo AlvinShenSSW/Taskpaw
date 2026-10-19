@@ -72,6 +72,36 @@ def _passed(evidence: tuple[EvidenceRef, ...]) -> bool:
 
 
 class FilmCommands(WorkerCommands):
+    def _require_source_admissible(self, film: sqlite3.Row) -> None:
+        link = self._conn.execute(
+            "SELECT i.*,p.source_generation AS current_generation,p.dirty,p.active_snapshot_id,p.state,"
+            "p.root_config_revision,r.config_revision AS current_root_revision,r.enabled,"
+            "COALESCE(s.required,0) AS rescan_required "
+            "FROM intake_films i JOIN intake_packages p ON p.package_id=i.package_id "
+            "JOIN intake_roots r ON r.root_id=p.root_id AND r.current=1 "
+            "LEFT JOIN intake_root_scans s ON s.root_id=p.root_id "
+            "WHERE i.film_id=? AND i.input_revision=?",
+            (film["film_id"], film["current_input_revision"]),
+        ).fetchone()
+        if link is None:
+            # Historical unbound manifests remain readable. Once managed intake
+            # is enabled they are not proof of a current verified source.
+            if self._conn.execute(
+                "SELECT 1 FROM intake_roots WHERE current=1 AND enabled=1"
+            ).fetchone():
+                raise WorkflowError("source_not_admissible")
+            return
+        if (
+            link["dirty"]
+            or link["rescan_required"]
+            or not link["enabled"]
+            or link["source_generation"] != link["current_generation"]
+            or link["snapshot_id"] != link["active_snapshot_id"]
+            or link["root_config_revision"] != link["current_root_revision"]
+            or link["state"] != "operational_ready"
+        ):
+            raise WorkflowError("source_not_admissible")
+
     def _film_row(self, film_id: str) -> sqlite3.Row:
         return self._one("SELECT * FROM films WHERE film_id=?", (film_id,))
 
@@ -204,95 +234,111 @@ class FilmCommands(WorkerCommands):
                     body_json=canonical_json(item),
                 )
 
+    def _create_film_sql(self, command: FilmCreate, now: datetime) -> Mutation:
+        value = FilmRecord(
+            **command.model_dump(),
+            current_input_revision=None,
+            current_final_revision=None,
+            current_context_revision=None,
+            context_state="invalidated",
+            version=1,
+            created_at=now,
+        )
+        self._insert(
+            "films",
+            film_id=value.film_id,
+            intake_session_id=value.intake_session_id,
+            display_name=value.display_name,
+            policy_revision=value.policy.policy_revision,
+            created_at=timestamp(now),
+            body_json=canonical_json(value),
+        )
+        return Mutation(value.film_id, 1, "receiving")
+
     def create_film(
         self, auth: AuthProof, meta: CommandMeta, command: FilmCreate
     ) -> CommandResult:
-        def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
-            value = FilmRecord(
-                **command.model_dump(),
-                current_input_revision=None,
-                current_final_revision=None,
-                current_context_revision=None,
-                context_state="invalidated",
+        return self._execute(
+            auth,
+            meta,
+            command,
+            "create_film",
+            lambda principal, now: self._create_film_sql(command, now),
+        )
+
+    def _put_input_sql(self, command: InputManifestPut, now: datetime) -> Mutation:
+        row = self._film_row(command.film_id)
+        if row["version"] != command.expected_version:
+            raise WorkflowError("cas_conflict")
+        film = FilmRecord.model_validate_json(row["body_json"])
+        value = command.manifest
+        readiness = value.readiness
+        proofs = (
+            readiness.writer_check,
+            readiness.full_read,
+            readiness.source_recheck,
+            readiness.workcopy.verification,
+            *(probe.evidence for probe in readiness.media_probes),
+        )
+        if (
+            not _passed(proofs)
+            or readiness.writer_check.summary.active_writers is not False
+            or value.policy_revision != film.policy.policy_revision
+            or value.revision <= (row["current_input_revision"] or 0)
+        ):
+            raise WorkflowError("precondition_failed")
+        self._check_attachments(film, value)
+        self._manifest_insert(value, now)
+        job_ids = {name: str(uuid4()) for name in _STAGES}
+        for index, name in enumerate(_STAGES):
+            previous = (
+                "archive"
+                if name == "cleanup_workcopy"
+                else _STAGES[index - 1]
+                if index
+                else None
+            )
+            stage = StageRecord(
+                job_id=job_ids[name],
+                film_id=value.film_id,
+                stage=name,
+                input_revision=value.revision,
+                input_hash=value.manifest_hash,
+                dependency_job_ids=(job_ids[previous],) if previous else (),
+                status="succeeded" if name == "intake" else "pending",
+                attempt_id=None,
                 version=1,
-                created_at=now,
             )
             self._insert(
-                "films",
-                film_id=value.film_id,
-                intake_session_id=value.intake_session_id,
-                display_name=value.display_name,
-                policy_revision=value.policy.policy_revision,
-                created_at=timestamp(now),
-                body_json=canonical_json(value),
+                "stages",
+                job_id=stage.job_id,
+                film_id=stage.film_id,
+                input_revision=stage.input_revision,
+                input_hash=stage.input_hash,
+                stage=name,
+                status=stage.status,
+                body_json=canonical_json(stage),
             )
-            return Mutation(value.film_id, 1, "receiving")
-
-        return self._execute(auth, meta, command, "create_film", apply)
+        version = self._set_film(
+            row,
+            current_input_revision=value.revision,
+            current_final_revision=None,
+            context_state="invalidated",
+        )
+        return Mutation(value.film_id, version, "ready")
 
     def put_input_manifest(
         self, auth: AuthProof, meta: CommandMeta, command: InputManifestPut
     ) -> CommandResult:
         def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
-            row = self._film_row(command.film_id)
-            if row["version"] != command.expected_version:
-                raise WorkflowError("cas_conflict")
-            film = FilmRecord.model_validate_json(row["body_json"])
-            value = command.manifest
-            readiness = value.readiness
-            proofs = (
-                readiness.writer_check,
-                readiness.full_read,
-                readiness.source_recheck,
-                readiness.workcopy.verification,
-                *(probe.evidence for probe in readiness.media_probes),
-            )
             if (
-                not _passed(proofs)
-                or readiness.writer_check.summary.active_writers is not False
-                or value.policy_revision != film.policy.policy_revision
-                or value.revision <= (row["current_input_revision"] or 0)
+                command.manifest.source_binding is not None
+                or self._conn.execute(
+                    "SELECT 1 FROM intake_films WHERE film_id=?", (command.film_id,)
+                ).fetchone()
             ):
-                raise WorkflowError("precondition_failed")
-            self._check_attachments(film, value)
-            self._manifest_insert(value, now)
-            job_ids = {name: str(uuid4()) for name in _STAGES}
-            for index, name in enumerate(_STAGES):
-                previous = (
-                    "archive"
-                    if name == "cleanup_workcopy"
-                    else _STAGES[index - 1]
-                    if index
-                    else None
-                )
-                stage = StageRecord(
-                    job_id=job_ids[name],
-                    film_id=value.film_id,
-                    stage=name,
-                    input_revision=value.revision,
-                    input_hash=value.manifest_hash,
-                    dependency_job_ids=(job_ids[previous],) if previous else (),
-                    status="succeeded" if name == "intake" else "pending",
-                    attempt_id=None,
-                    version=1,
-                )
-                self._insert(
-                    "stages",
-                    job_id=stage.job_id,
-                    film_id=stage.film_id,
-                    input_revision=stage.input_revision,
-                    input_hash=stage.input_hash,
-                    stage=name,
-                    status=stage.status,
-                    body_json=canonical_json(stage),
-                )
-            version = self._set_film(
-                row,
-                current_input_revision=value.revision,
-                current_final_revision=None,
-                context_state="invalidated",
-            )
-            return Mutation(value.film_id, version, "ready")
+                raise WorkflowError("managed_snapshot_required")
+            return self._put_input_sql(command, now)
 
         return self._execute(auth, meta, command, "put_input_manifest", apply)
 
@@ -372,6 +418,7 @@ class FilmCommands(WorkerCommands):
                 raise WorkflowError("precondition_failed")
             if STAGE_ROLES.get(job["stage"]) != principal["role"]:
                 raise WorkflowError("forbidden")
+            self._require_source_admissible(self._film_row(job["film_id"]))
             self._dependencies(job)
             if (
                 command.profile_revision != command.tool_versions.profile_revision

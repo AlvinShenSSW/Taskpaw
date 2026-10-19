@@ -113,6 +113,8 @@ COMMAND_ROLES: dict[str, frozenset[str]] = {
         "revoke_approval",
         "begin_archive",
         "begin_cleanup",
+        "configure_intake_root",
+        "resolve_intake_grouping",
     )
 }
 COMMAND_ROLES.update(
@@ -122,6 +124,15 @@ COMMAND_ROLES.update(
         "record_boot": frozenset({"compute_worker"}),
         "create_film": frozenset({"intake_adapter"}),
         "put_input_manifest": frozenset({"intake_adapter"}),
+        "observe_intake": frozenset({"intake_adapter"}),
+        "record_intake_source_notice": frozenset({"intake_adapter"}),
+        "begin_intake_root_scan": frozenset({"intake_adapter"}),
+        "finish_intake_root_scan": frozenset({"intake_adapter"}),
+        "mark_intake_scan_seen": frozenset({"intake_adapter"}),
+        "begin_intake_snapshot": frozenset({"intake_adapter"}),
+        "record_intake_owner": frozenset({"intake_adapter"}),
+        "finish_intake_snapshot": frozenset({"intake_adapter"}),
+        "cancel_intake_snapshot": frozenset({"intake_adapter", "operator"}),
         "put_final_manifest": frozenset({"scrape_adapter"}),
         "claim": frozenset({"compute_worker", "receiver_adapter", "scrape_adapter"}),
         "renew": frozenset({"compute_worker", "receiver_adapter", "scrape_adapter"}),

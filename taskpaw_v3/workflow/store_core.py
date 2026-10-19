@@ -72,6 +72,13 @@ _RECOVERY_COMMANDS = frozenset(
         "accept_archive_receipt",
         "record_cleanup_result",
         "record_boot",
+        "record_intake_owner",
+        "record_intake_source_notice",
+        "begin_intake_root_scan",
+        "finish_intake_root_scan",
+        "mark_intake_scan_seen",
+        "finish_intake_snapshot",
+        "cancel_intake_snapshot",
     }
 )
 

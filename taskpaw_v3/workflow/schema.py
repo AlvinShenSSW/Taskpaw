@@ -1,6 +1,7 @@
-"""Version-one workflow SQLite format; the store owns leases and transactions.
+"""Versioned workflow SQLite format; the store owns leases and transactions.
 
-There is no legacy workflow version to migrate. Opening never repairs a database.
+Known v1 databases receive a verified backup before the atomic v2 intake upgrade.
+Unknown or damaged databases are never repaired or automatically restored.
 The caller must hold its FileLease before connecting, and retain it until close.
 """
 
@@ -17,8 +18,10 @@ from taskpaw_v3.hub.server.outbox_migration import (
     backup_database as _snapshot_database,
 )
 
+from . import schema_intake
+
 APPLICATION_ID = 0x54505746  # TPWF, separate from the monitoring database.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BUSY_TIMEOUT_MS = 5000
 
 
@@ -32,7 +35,7 @@ class SchemaError(ValueError):
 
 # Literal, versioned DDL also serves as the exact format allowlist on reopen.
 # NO ACTION/RESTRICT is intentional: historical identities cannot cascade away.
-TABLES = {
+V1_TABLES = {
     "authority": """CREATE TABLE authority (
         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
         authority_id TEXT NOT NULL UNIQUE,
@@ -341,7 +344,7 @@ TABLES = {
     )""",
 }
 
-INDEXES = {
+V1_INDEXES = {
     "one_unresolved_assignment_per_job": """CREATE UNIQUE INDEX one_unresolved_assignment_per_job
         ON assignments(job_id) WHERE resolved_at IS NULL""",
     "one_active_owner_per_resource": """CREATE UNIQUE INDEX one_active_owner_per_resource
@@ -354,6 +357,9 @@ INDEXES = {
     "assignment_owner": """CREATE INDEX assignment_owner
         ON assignments(owner_principal_id,worker_id,boot_id)""",
 }
+
+TABLES = {**V1_TABLES, **schema_intake.TABLES}
+INDEXES = {**V1_INDEXES, **schema_intake.INDEXES}
 
 
 def _path(path: Path) -> Path:
@@ -406,10 +412,17 @@ def connect_existing(path: Path) -> sqlite3.Connection:
     conn: sqlite3.Connection | None = None
     try:
         conn = _connect(path, "ro")
-        validate_schema(conn)
+        version = _supported_version(conn)
+        validate_schema(conn, version=version)
         conn.close()
+        conn = None
+        if version == 1:
+            _backup_version(path, version=1, deadline_seconds=5.0)
         conn = _connect(path, "rw")
-        validate_schema(conn)
+        validate_schema(conn, version=version)
+        if version == 1:
+            configure_connection(conn)
+            _migrate_v1(conn)
         return conn
     except BaseException:
         if conn is not None:
@@ -460,8 +473,20 @@ def _normalized_sql(sql: str) -> str:
     return " ".join(sql.split())
 
 
-def validate_schema(conn: sqlite3.Connection) -> None:
-    """Validate exact v1 columns, CHECK/FK clauses and index predicates, plus data.
+def _supported_version(conn: sqlite3.Connection) -> int:
+    try:
+        if conn.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
+            raise SchemaError("wrong_application_id")
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version not in (1, SCHEMA_VERSION):
+            raise SchemaError("unsupported_schema_version")
+        return int(version)
+    except sqlite3.Error as exc:
+        raise SchemaError("invalid_database") from exc
+
+
+def validate_schema(conn: sqlite3.Connection, *, version: int = SCHEMA_VERSION) -> None:
+    """Validate exact versioned columns, CHECK/FK clauses, index predicates and data.
 
     Comparing the complete versioned DDL rejects a same-named weaker index or a
     recreated table missing its FK/CHECK constraints. No speculative repair or
@@ -470,16 +495,21 @@ def validate_schema(conn: sqlite3.Connection) -> None:
     try:
         if conn.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
             raise SchemaError("wrong_application_id")
-        if conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+        if (
+            version not in (1, SCHEMA_VERSION)
+            or conn.execute("PRAGMA user_version").fetchone()[0] != version
+        ):
             raise SchemaError("unsupported_schema_version")
         rows = conn.execute(
             "SELECT type,name,sql FROM sqlite_master "
             "WHERE name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall()
         actual = {(row[0], row[1]): _normalized_sql(row[2] or "") for row in rows}
+        tables = V1_TABLES if version == 1 else TABLES
+        indexes = V1_INDEXES if version == 1 else INDEXES
         expected = {
-            **{("table", name): _normalized_sql(sql) for name, sql in TABLES.items()},
-            **{("index", name): _normalized_sql(sql) for name, sql in INDEXES.items()},
+            **{("table", name): _normalized_sql(sql) for name, sql in tables.items()},
+            **{("index", name): _normalized_sql(sql) for name, sql in indexes.items()},
         }
         if actual != expected:
             raise SchemaError("invalid_schema")
@@ -516,21 +546,56 @@ def validate_schema(conn: sqlite3.Connection) -> None:
         raise SchemaError("invalid_database") from exc
 
 
+def _migrate_v1(conn: sqlite3.Connection) -> None:
+    if conn.in_transaction:
+        raise SchemaError("unexpected_transaction")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        validate_schema(conn, version=1)
+        for statement in (
+            *schema_intake.TABLES.values(),
+            *schema_intake.INDEXES.values(),
+        ):
+            conn.execute(statement)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        validate_schema(conn)
+        conn.commit()
+    except BaseException as exc:
+        conn.rollback()
+        if isinstance(exc, sqlite3.Error):
+            raise SchemaError("migration_failed") from exc
+        raise
+
+
+def _backup_version(path: Path, *, version: int, deadline_seconds: float) -> Path:
+    try:
+        backup = _snapshot_database(path, deadline_seconds=deadline_seconds)
+        verification = _connect(backup, "ro")
+        try:
+            validate_schema(verification, version=version)
+        finally:
+            verification.close()
+        return backup
+    except (MigrationError, OSError, sqlite3.Error, SchemaError) as exc:
+        raise SchemaError("backup_failed") from exc
+
+
 def backup_database(path: Path, *, deadline_seconds: float = 5.0) -> Path:
     """Snapshot committed WAL using the existing tested backup primitive.
 
     The primitive's legacy ``.outbox-v1-*.bak`` filename is retained; its snapshot
     operation copies the entire database, not just monitoring/outbox tables.
-    This is not a v0-to-v1 migration or an automatic restore/activation API.
+    This operation does not migrate, restore or activate either supported version.
     """
     path = _path(path)
     conn: sqlite3.Connection | None = None
     try:
         conn = _connect(path, "ro")
-        validate_schema(conn)
+        version = _supported_version(conn)
+        validate_schema(conn, version=version)
         conn.close()
         conn = None
-        return _snapshot_database(path, deadline_seconds=deadline_seconds)
+        return _backup_version(path, version=version, deadline_seconds=deadline_seconds)
     except (MigrationError, OSError, sqlite3.Error) as exc:
         raise SchemaError("backup_failed") from exc
     finally:

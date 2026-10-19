@@ -90,6 +90,7 @@ class ApprovalCommands(FilmCommands):
                 != command.expected_context_revision
             ):
                 raise m.WorkflowError("cas_conflict")
+            self._require_source_admissible(film)
             self._binding_manifests(command.binding)
             observations = command.observations
             proofs = (
@@ -160,6 +161,7 @@ class ApprovalCommands(FilmCommands):
             film = self._film_row(command.film_id)
             if film["version"] != command.expected_version:
                 raise m.WorkflowError("cas_conflict")
+            self._require_source_admissible(film)
             context = self._context(film)
             if (
                 context.context_revision != command.context_revision
@@ -229,7 +231,12 @@ class ApprovalCommands(FilmCommands):
         return self._execute(auth, meta, command, "revoke_approval", apply)
 
     def _approved(
-        self, film_id: str, approval_id: str, now: datetime
+        self,
+        film_id: str,
+        approval_id: str,
+        now: datetime,
+        *,
+        allow_source_change: bool = False,
     ) -> m.ApprovalRecord:
         row = self._one(
             "SELECT * FROM approvals WHERE approval_id=?",
@@ -247,7 +254,30 @@ class ApprovalCommands(FilmCommands):
             or record.authority_epoch != authority["epoch"]
         ):
             raise m.WorkflowError("binding_changed")
-        context = self._context(self._film_row(film_id))
+        film = self._film_row(film_id)
+        source_invalidation = None
+        if allow_source_change and film["context_state"] == "invalidated":
+            source_invalidation = self._conn.execute(
+                "SELECT 1 FROM intake_films WHERE film_id=? AND input_revision=? "
+                "AND source_invalidated_context_revision=?",
+                (
+                    film_id,
+                    film["current_input_revision"],
+                    film["current_context_revision"],
+                ),
+            ).fetchone()
+        if source_invalidation:
+            context_row = self._one(
+                "SELECT * FROM approval_contexts WHERE film_id=? AND context_revision=?",
+                (film_id, film["current_context_revision"]),
+                code="binding_changed",
+            )
+            if context_row["state"] != "ready":
+                raise m.WorkflowError("binding_changed")
+            context = m.ApprovalContext.model_validate_json(context_row["body_json"])
+            self._binding_manifests(context.binding)
+        else:
+            context = self._context(film)
         if (
             context.context_revision != record.context_revision
             or context.context_hash != record.context_hash
@@ -353,6 +383,7 @@ class ApprovalCommands(FilmCommands):
             film = self._film_row(command.film_id)
             if film["version"] != command.expected_version:
                 raise m.WorkflowError("cas_conflict")
+            self._require_source_admissible(film)
             approval = self._approved(command.film_id, command.approval_id, now)
             if approval.binding_hash != command.binding_hash:
                 raise m.WorkflowError("binding_changed")
@@ -645,7 +676,14 @@ class ApprovalCommands(FilmCommands):
             film = self._film_row(command.film_id)
             if film["version"] != command.expected_version:
                 raise m.WorkflowError("cas_conflict")
-            approval = self._approved(command.film_id, command.approval_id, now)
+            if command.scope == "input":
+                self._require_source_admissible(film)
+            approval = self._approved(
+                command.film_id,
+                command.approval_id,
+                now,
+                allow_source_change=command.scope == "workcopy",
+            )
             expected = (
                 approval.binding.input_cleanup
                 if command.scope == "input"
