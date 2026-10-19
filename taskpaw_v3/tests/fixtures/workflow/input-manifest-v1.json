@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "film_id": "00000000-0000-0000-0000-000000000001",
+  "revision": 1,
+  "items": [
+    {
+      "schema_version": 1,
+      "item_id": "00000000-0000-0000-0000-000000000015",
+      "role": "main_video",
+      "relative_path": "movie.mkv",
+      "size_bytes": 1024,
+      "sha256": "089168833f12e68467e8566cc5d05dfcccafe9da66e6420064458dd61811ad51",
+      "source_root_id": "00000000-0000-0000-0000-00000000000a",
+      "native_identity": {
+        "schema_version": 1,
+        "scheme": "windows_file_id",
+        "root_id": "00000000-0000-0000-0000-00000000000a",
+        "volume_or_export_id": "fictional-volume",
+        "object_id": "fictional-object-21",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "evidence_id": "00000000-0000-0000-0000-0000000000dd"
+      },
+      "parent_item_id": null,
+      "volume_ordinal": 1,
+      "video_item_id": null,
+      "language": null
+    },
+    {
+      "schema_version": 1,
+      "item_id": "00000000-0000-0000-0000-000000000016",
+      "role": "source_subtitle",
+      "relative_path": "movie.ja.srt",
+      "size_bytes": 1024,
+      "sha256": "9b884caf18683a64c97f839419ae702ff197c5fd128a59b00bf8e3a10049b6ed",
+      "source_root_id": "00000000-0000-0000-0000-00000000000a",
+      "native_identity": {
+        "schema_version": 1,
+        "scheme": "windows_file_id",
+        "root_id": "00000000-0000-0000-0000-00000000000a",
+        "volume_or_export_id": "fictional-volume",
+        "object_id": "fictional-object-22",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "evidence_id": "00000000-0000-0000-0000-0000000000de"
+      },
+      "parent_item_id": null,
+      "volume_ordinal": null,
+      "video_item_id": "00000000-0000-0000-0000-000000000015",
+      "language": "ja"
+    }
+  ],
+  "readiness": {
+    "schema_version": 1,
+    "mode": "ordinary_directory",
+    "policy_revision": 1,
+    "stable_started_at": "2026-10-19T00:59:00Z",
+    "stable_ended_at": "2026-10-19T01:00:00Z",
+    "membership_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "writer_check": {
+      "schema_version": 1,
+      "evidence_id": "00000000-0000-0000-0000-000000000051",
+      "kind": "writer_check",
+      "producer_id": "00000000-0000-0000-0000-00000000005a",
+      "producer_version": "fixture-1",
+      "observed_at": "2026-10-19T01:00:00Z",
+      "received_at": "2026-10-19T01:00:00Z",
+      "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "passed",
+      "summary": {
+        "schema_version": 1,
+        "item_ids": [],
+        "note": null,
+        "item_count": null,
+        "bytes_read": null,
+        "active_writers": false
+      }
+    },
+    "media_probes": [
+      {
+        "schema_version": 1,
+        "item_id": "00000000-0000-0000-0000-000000000015",
+        "width": 1920,
+        "height": 1080,
+        "duration_ms": 120000,
+        "video_streams": 1,
+        "audio_streams": 1,
+        "evidence": {
+          "schema_version": 1,
+          "evidence_id": "00000000-0000-0000-0000-000000000141",
+          "kind": "media_probe",
+          "producer_id": "00000000-0000-0000-0000-00000000005a",
+          "producer_version": "fixture-1",
+          "observed_at": "2026-10-19T01:00:00Z",
+          "received_at": "2026-10-19T01:00:00Z",
+          "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "status": "passed",
+          "summary": {
+            "schema_version": 1,
+            "item_ids": [],
+            "note": null,
+            "item_count": null,
+            "bytes_read": null,
+            "active_writers": null
+          }
+        }
+      }
+    ],
+    "full_read": {
+      "schema_version": 1,
+      "evidence_id": "00000000-0000-0000-0000-000000000052",
+      "kind": "full_read",
+      "producer_id": "00000000-0000-0000-0000-00000000005a",
+      "producer_version": "fixture-1",
+      "observed_at": "2026-10-19T01:00:00Z",
+      "received_at": "2026-10-19T01:00:00Z",
+      "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "passed",
+      "summary": {
+        "schema_version": 1,
+        "item_ids": [],
+        "note": null,
+        "item_count": null,
+        "bytes_read": null,
+        "active_writers": null
+      }
+    },
+    "workcopy": {
+      "schema_version": 1,
+      "manifest_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "items": [
+        {
+          "schema_version": 1,
+          "source_item_id": "00000000-0000-0000-0000-000000000015",
+          "root_id": "00000000-0000-0000-0000-00000000000b",
+          "relative_path": "movie.mkv",
+          "size_bytes": 1024,
+          "sha256": "089168833f12e68467e8566cc5d05dfcccafe9da66e6420064458dd61811ad51",
+          "native_identity": {
+            "schema_version": 1,
+            "scheme": "windows_file_id",
+            "root_id": "00000000-0000-0000-0000-00000000000b",
+            "volume_or_export_id": "fictional-volume",
+            "object_id": "fictional-object-400",
+            "observed_at": "2026-10-19T01:00:00Z",
+            "evidence_id": "00000000-0000-0000-0000-000000000258"
+          }
+        },
+        {
+          "schema_version": 1,
+          "source_item_id": "00000000-0000-0000-0000-000000000016",
+          "root_id": "00000000-0000-0000-0000-00000000000b",
+          "relative_path": "movie.ja.srt",
+          "size_bytes": 1024,
+          "sha256": "9b884caf18683a64c97f839419ae702ff197c5fd128a59b00bf8e3a10049b6ed",
+          "native_identity": {
+            "schema_version": 1,
+            "scheme": "windows_file_id",
+            "root_id": "00000000-0000-0000-0000-00000000000b",
+            "volume_or_export_id": "fictional-volume",
+            "object_id": "fictional-object-401",
+            "observed_at": "2026-10-19T01:00:00Z",
+            "evidence_id": "00000000-0000-0000-0000-000000000259"
+          }
+        }
+      ],
+      "verification": {
+        "schema_version": 1,
+        "evidence_id": "00000000-0000-0000-0000-000000000050",
+        "kind": "workcopy_verification",
+        "producer_id": "00000000-0000-0000-0000-00000000005a",
+        "producer_version": "fixture-1",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "received_at": "2026-10-19T01:00:00Z",
+        "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "passed",
+        "summary": {
+          "schema_version": 1,
+          "item_ids": [],
+          "note": null,
+          "item_count": null,
+          "bytes_read": null,
+          "active_writers": null
+        }
+      }
+    },
+    "source_recheck": {
+      "schema_version": 1,
+      "evidence_id": "00000000-0000-0000-0000-000000000053",
+      "kind": "source_recheck",
+      "producer_id": "00000000-0000-0000-0000-00000000005a",
+      "producer_version": "fixture-1",
+      "observed_at": "2026-10-19T01:00:00Z",
+      "received_at": "2026-10-19T01:00:00Z",
+      "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "passed",
+      "summary": {
+        "schema_version": 1,
+        "item_ids": [],
+        "note": null,
+        "item_count": null,
+        "bytes_read": null,
+        "active_writers": null
+      }
+    }
+  },
+  "policy_revision": 1,
+  "manifest_hash": "90b4547e8854913355ea2d2bb872801b5081bb38c2643405c5c8de72525172d0"
+}

@@ -100,6 +100,33 @@ def write_activity(
     )
 
 
+def _replace_projection(tmp: Path, destination: Path) -> None:
+    """Retry only bounded Windows replacement refusals, using the same payload.
+
+    Access denied can also be permanent. Keep its failure semantics after the
+    short budget; never delete the destination or substitute a non-atomic write.
+    """
+    deadline = time.monotonic() + 0.2
+    delays = (0.01, 0.02, 0.04, 0.05, 0.05)
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(tmp, destination)
+            return
+        except OSError as exc:
+            if (
+                sys.platform != "win32"
+                or getattr(exc, "winerror", None) not in {5, 32, 33}
+                or attempt == len(delays)
+            ):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(delays[attempt], remaining))
+            if time.monotonic() >= deadline:
+                raise
+
+
 def _write_projection(
     path: str, tool: str, state: str, session: Optional[str], ts: float, **extra
 ) -> Path:
@@ -119,7 +146,7 @@ def _write_projection(
             json.dump(payload, stream)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(tmp, p)
+        _replace_projection(tmp, p)
     finally:
         tmp.unlink(missing_ok=True)
     return p

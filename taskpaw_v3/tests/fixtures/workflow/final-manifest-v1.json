@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "film_id": "00000000-0000-0000-0000-000000000001",
+  "revision": 1,
+  "input_revision": 1,
+  "input_hash": "90b4547e8854913355ea2d2bb872801b5081bb38c2643405c5c8de72525172d0",
+  "items": [
+    {
+      "schema_version": 1,
+      "item_id": "00000000-0000-0000-0000-00000000001f",
+      "role": "main_video",
+      "relative_path": "movie.mkv",
+      "size_bytes": 1024,
+      "sha256": "089168833f12e68467e8566cc5d05dfcccafe9da66e6420064458dd61811ad51",
+      "source_root_id": "00000000-0000-0000-0000-00000000000b",
+      "native_identity": {
+        "schema_version": 1,
+        "scheme": "windows_file_id",
+        "root_id": "00000000-0000-0000-0000-00000000000b",
+        "volume_or_export_id": "fictional-volume",
+        "object_id": "fictional-object-31",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "evidence_id": "00000000-0000-0000-0000-0000000000e7"
+      },
+      "parent_item_id": null,
+      "volume_ordinal": 1,
+      "video_item_id": null,
+      "language": null
+    },
+    {
+      "schema_version": 1,
+      "item_id": "00000000-0000-0000-0000-000000000020",
+      "role": "generated_subtitle",
+      "relative_path": "movie.zh.srt",
+      "size_bytes": 1024,
+      "sha256": "e32913753d9288afffae88ac8fb4e397d6ac5f55d46498d3b42aeb93e0dc507d",
+      "source_root_id": "00000000-0000-0000-0000-00000000000b",
+      "native_identity": {
+        "schema_version": 1,
+        "scheme": "windows_file_id",
+        "root_id": "00000000-0000-0000-0000-00000000000b",
+        "volume_or_export_id": "fictional-volume",
+        "object_id": "fictional-object-32",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "evidence_id": "00000000-0000-0000-0000-0000000000e8"
+      },
+      "parent_item_id": null,
+      "volume_ordinal": null,
+      "video_item_id": "00000000-0000-0000-0000-00000000001f",
+      "language": "zh"
+    },
+    {
+      "schema_version": 1,
+      "item_id": "00000000-0000-0000-0000-000000000021",
+      "role": "nfo",
+      "relative_path": "movie.nfo",
+      "size_bytes": 1024,
+      "sha256": "225ab1e945f61dfdd465d952958447046e301dae83aa587bdafcc7170e5b722e",
+      "source_root_id": "00000000-0000-0000-0000-00000000000b",
+      "native_identity": {
+        "schema_version": 1,
+        "scheme": "windows_file_id",
+        "root_id": "00000000-0000-0000-0000-00000000000b",
+        "volume_or_export_id": "fictional-volume",
+        "object_id": "fictional-object-33",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "evidence_id": "00000000-0000-0000-0000-0000000000e9"
+      },
+      "parent_item_id": null,
+      "volume_ordinal": null,
+      "video_item_id": null,
+      "language": null
+    },
+    {
+      "schema_version": 1,
+      "item_id": "00000000-0000-0000-0000-000000000022",
+      "role": "poster",
+      "relative_path": "poster.jpg",
+      "size_bytes": 1024,
+      "sha256": "97a7c2f0ae2d99d97bedd98a4ffe3c8060bd29f05da69995fe09ee0cea2684ea",
+      "source_root_id": "00000000-0000-0000-0000-00000000000b",
+      "native_identity": {
+        "schema_version": 1,
+        "scheme": "windows_file_id",
+        "root_id": "00000000-0000-0000-0000-00000000000b",
+        "volume_or_export_id": "fictional-volume",
+        "object_id": "fictional-object-34",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "evidence_id": "00000000-0000-0000-0000-0000000000ea"
+      },
+      "parent_item_id": null,
+      "volume_ordinal": null,
+      "video_item_id": null,
+      "language": null
+    },
+    {
+      "schema_version": 1,
+      "item_id": "00000000-0000-0000-0000-000000000023",
+      "role": "fanart",
+      "relative_path": "fanart.jpg",
+      "size_bytes": 1024,
+      "sha256": "b6f2c2715a00980efa60dbf44aa6e86ebb2056cab402d5ef5bc058e16d5efbdf",
+      "source_root_id": "00000000-0000-0000-0000-00000000000b",
+      "native_identity": {
+        "schema_version": 1,
+        "scheme": "windows_file_id",
+        "root_id": "00000000-0000-0000-0000-00000000000b",
+        "volume_or_export_id": "fictional-volume",
+        "object_id": "fictional-object-35",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "evidence_id": "00000000-0000-0000-0000-0000000000eb"
+      },
+      "parent_item_id": null,
+      "volume_ordinal": null,
+      "video_item_id": null,
+      "language": null
+    },
+    {
+      "schema_version": 1,
+      "item_id": "00000000-0000-0000-0000-000000000024",
+      "role": "folder_cover",
+      "relative_path": "folder.jpg",
+      "size_bytes": 1024,
+      "sha256": "1a910b690bcb43bdcd272e8cc3fdca66ebcbc87f761970ab1871b121b93cfbef",
+      "source_root_id": "00000000-0000-0000-0000-00000000000b",
+      "native_identity": {
+        "schema_version": 1,
+        "scheme": "windows_file_id",
+        "root_id": "00000000-0000-0000-0000-00000000000b",
+        "volume_or_export_id": "fictional-volume",
+        "object_id": "fictional-object-36",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "evidence_id": "00000000-0000-0000-0000-0000000000ec"
+      },
+      "parent_item_id": null,
+      "volume_ordinal": null,
+      "video_item_id": null,
+      "language": null
+    }
+  ],
+  "output_root_id": "00000000-0000-0000-0000-00000000000b",
+  "output_relative_path": "Film-Sample",
+  "tool_versions": {
+    "schema_version": 1,
+    "tool": "Jasna",
+    "tool_version": "fixture-1",
+    "model": "ltx",
+    "model_version": "fixture-1",
+    "profile": "1080p",
+    "profile_revision": 1,
+    "config_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "restoration": {
+    "schema_version": 1,
+    "status": "applied",
+    "video_item_ids": [
+      "00000000-0000-0000-0000-00000000001f"
+    ],
+    "evidence": {
+      "schema_version": 1,
+      "evidence_id": "00000000-0000-0000-0000-000000000055",
+      "kind": "restoration",
+      "producer_id": "00000000-0000-0000-0000-00000000005a",
+      "producer_version": "fixture-1",
+      "observed_at": "2026-10-19T01:00:00Z",
+      "received_at": "2026-10-19T01:00:00Z",
+      "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "passed",
+      "summary": {
+        "schema_version": 1,
+        "item_ids": [],
+        "note": null,
+        "item_count": null,
+        "bytes_read": null,
+        "active_writers": null
+      }
+    }
+  },
+  "subtitles": {
+    "schema_version": 1,
+    "status": "present",
+    "language": "zh",
+    "item_ids": [
+      "00000000-0000-0000-0000-000000000020"
+    ],
+    "evidence": {
+      "schema_version": 1,
+      "evidence_id": "00000000-0000-0000-0000-000000000056",
+      "kind": "subtitle_verification",
+      "producer_id": "00000000-0000-0000-0000-00000000005a",
+      "producer_version": "fixture-1",
+      "observed_at": "2026-10-19T01:00:00Z",
+      "received_at": "2026-10-19T01:00:00Z",
+      "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "passed",
+      "summary": {
+        "schema_version": 1,
+        "item_ids": [],
+        "note": null,
+        "item_count": null,
+        "bytes_read": null,
+        "active_writers": null
+      }
+    }
+  },
+  "postprocess": {
+    "schema_version": 1,
+    "attempt_id": "00000000-0000-0000-0000-000000000037",
+    "tool_version": "fixture-miko-1",
+    "config_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "status": "passed",
+    "full_process": true,
+    "items": [
+      {
+        "schema_version": 1,
+        "item_id": "00000000-0000-0000-0000-000000000021",
+        "sha256": "225ab1e945f61dfdd465d952958447046e301dae83aa587bdafcc7170e5b722e",
+        "status": "passed"
+      },
+      {
+        "schema_version": 1,
+        "item_id": "00000000-0000-0000-0000-000000000022",
+        "sha256": "97a7c2f0ae2d99d97bedd98a4ffe3c8060bd29f05da69995fe09ee0cea2684ea",
+        "status": "passed"
+      },
+      {
+        "schema_version": 1,
+        "item_id": "00000000-0000-0000-0000-000000000023",
+        "sha256": "b6f2c2715a00980efa60dbf44aa6e86ebb2056cab402d5ef5bc058e16d5efbdf",
+        "status": "passed"
+      },
+      {
+        "schema_version": 1,
+        "item_id": "00000000-0000-0000-0000-000000000024",
+        "sha256": "1a910b690bcb43bdcd272e8cc3fdca66ebcbc87f761970ab1871b121b93cfbef",
+        "status": "passed"
+      }
+    ],
+    "nfo_item_id": "00000000-0000-0000-0000-000000000021",
+    "poster_item_id": "00000000-0000-0000-0000-000000000022",
+    "required_image_item_ids": [
+      "00000000-0000-0000-0000-000000000022",
+      "00000000-0000-0000-0000-000000000023"
+    ],
+    "actual_marks": [
+      "restored",
+      "chinese_subtitles"
+    ],
+    "image_refresh": "refreshed",
+    "folder_required": true,
+    "folder_item_id": "00000000-0000-0000-0000-000000000024",
+    "parent_context": "Performer-Sample/Film-Sample",
+    "volume_item_ids": [
+      "00000000-0000-0000-0000-00000000001f"
+    ],
+    "evidence": {
+      "schema_version": 1,
+      "evidence_id": "00000000-0000-0000-0000-000000000054",
+      "kind": "miko_complete",
+      "producer_id": "00000000-0000-0000-0000-00000000005a",
+      "producer_version": "fixture-1",
+      "observed_at": "2026-10-19T01:00:00Z",
+      "received_at": "2026-10-19T01:00:00Z",
+      "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "passed",
+      "summary": {
+        "schema_version": 1,
+        "item_ids": [],
+        "note": null,
+        "item_count": null,
+        "bytes_read": null,
+        "active_writers": null
+      }
+    }
+  },
+  "media_probes": [
+    {
+      "schema_version": 1,
+      "item_id": "00000000-0000-0000-0000-00000000001f",
+      "width": 1920,
+      "height": 1080,
+      "duration_ms": 120000,
+      "video_streams": 1,
+      "audio_streams": 1,
+      "evidence": {
+        "schema_version": 1,
+        "evidence_id": "00000000-0000-0000-0000-00000000014b",
+        "kind": "media_probe",
+        "producer_id": "00000000-0000-0000-0000-00000000005a",
+        "producer_version": "fixture-1",
+        "observed_at": "2026-10-19T01:00:00Z",
+        "received_at": "2026-10-19T01:00:00Z",
+        "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "passed",
+        "summary": {
+          "schema_version": 1,
+          "item_ids": [],
+          "note": null,
+          "item_count": null,
+          "bytes_read": null,
+          "active_writers": null
+        }
+      }
+    }
+  ],
+  "manifest_hash": "fcc45c53878905907d3e31a42bf9e9d0b86cfdef2b209174f5cfe670894721ce"
+}
