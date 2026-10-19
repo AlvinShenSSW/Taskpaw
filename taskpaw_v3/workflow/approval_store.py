@@ -596,6 +596,48 @@ class ApprovalCommands(FilmCommands):
                 if not releasable:
                     raise m.WorkflowError("precondition_failed")
 
+    def _workcopy_excludes_inputs(self, manifest: m.CleanupManifest) -> None:
+        objects = {
+            (
+                member.native_identity.scheme,
+                member.native_identity.volume_or_export_id,
+                member.native_identity.object_id,
+            )
+            for member in manifest.members
+        }
+        locations = {
+            (member.root_id, member.relative_path.casefold()): member.native_identity
+            for member in manifest.members
+        }
+        # Include this film and references admitted after its approval. Root and
+        # item labels cannot turn the same native object into a disposable copy.
+        for row in self._conn.execute(
+            "SELECT body_json FROM source_refs WHERE retained=1"
+        ):
+            source = m.ManifestItem.model_validate_json(row[0])
+            identity = source.native_identity
+            if (
+                identity is not None
+                and (
+                    identity.scheme,
+                    identity.volume_or_export_id,
+                    identity.object_id,
+                )
+                in objects
+            ):
+                raise m.WorkflowError("precondition_failed")
+            location = locations.get(
+                (source.source_root_id, source.relative_path.casefold())
+            )
+            if location is not None and (
+                identity is None
+                or identity.scheme != location.scheme
+                or identity.volume_or_export_id != location.volume_or_export_id
+            ):
+                # As with input sharing, only comparable native evidence can
+                # prove that the same controlled path refers to another object.
+                raise m.WorkflowError("precondition_failed")
+
     def begin_cleanup(
         self, auth: AuthProof, meta: m.CommandMeta, command: m.CleanupAdmission
     ) -> m.CommandResult:
@@ -654,6 +696,8 @@ class ApprovalCommands(FilmCommands):
                 raise m.WorkflowError("precondition_failed")
             if command.scope == "input":
                 self._shared_sources(command.film_id, expected, now)
+            else:
+                self._workcopy_excludes_inputs(expected)
             candidates = self._conn.execute(
                 "SELECT principal_id FROM principals WHERE role='cleanup_adapter'"
             ).fetchall()
