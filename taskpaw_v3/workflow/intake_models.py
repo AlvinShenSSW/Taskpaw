@@ -60,6 +60,7 @@ Reason = Literal[
     "disabled",
     "limit_exceeded",
     "recovery_required",
+    "publication_blocked",
     "permission_denied",
     "tool_missing",
 ]

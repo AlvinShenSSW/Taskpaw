@@ -105,6 +105,74 @@ def test_actual_probe_ack_occurs_only_after_exact_owner_is_durable(ready, monkey
     assert h.store.get_intake(adapter, observation.package_id).state == "blocked"
 
 
+@pytest.mark.parametrize(
+    "failure", ["transient", "persistent", "rejected", "lost_response"]
+)
+def test_terminal_database_failure_retains_proof_and_retries_without_native_launch(
+    ready, monkeypatch, failure
+):
+    h, adapter, observation, controller = ready
+    original = h.store.finish_intake_snapshot
+    calls, launches = [], []
+    start = owner.start_snapshot_suspended
+
+    def counted_start(request):
+        launches.append(request.operation_id)
+        return start(request)
+
+    def failed(auth, meta, command):
+        calls.append(command)
+        if failure == "persistent" or len(calls) == 1:
+            if failure == "lost_response":
+                original(auth, meta, command)
+            raise WorkflowError(
+                "precondition_failed"
+                if failure == "rejected"
+                else "authority_unavailable"
+            )
+        return original(auth, meta, command)
+
+    monkeypatch.setattr(owner, "start_snapshot_suspended", counted_start)
+    monkeypatch.setattr(h.store, "finish_intake_snapshot", failed)
+    if failure == "persistent":
+        with pytest.raises(WorkflowError, match="authority_unavailable"):
+            controller.run(observation.package_id)
+        assert controller.has_pending_settlement
+        assert controller.active_operation_id == launches[0]
+        assert len(calls) == 2
+        monkeypatch.setattr(h.store, "finish_intake_snapshot", original)
+        # Actual public service retry consumer, even with no ready packages.
+        from taskpaw_v3.workflow.intake import IntakeService
+
+        service = IntakeService(
+            h.store,
+            adapter,
+            root_id=observation.root_id,
+            meta=h.meta,
+            owner_boot_id=controller.owner_boot_id,
+            ffprobe=None,
+            controller=True,
+            enabled=True,
+            clock=h.clock.now,
+        )
+        service._runner = controller
+        result = service.run_ready_once()
+    else:
+        result = controller.run(observation.package_id)
+    assert len(launches) == 1
+    assert result.exit_proof.state == "stopped"
+    if failure == "rejected":
+        assert result.state == "failed" and result.result.snapshot is None
+        assert (
+            h.store.get_intake(adapter, observation.package_id).reason
+            == "publication_blocked"
+        )
+    else:
+        assert result.state == "completed" and result.result.snapshot is not None
+    assert controller.active_operation_id is None
+    assert not controller.has_pending_settlement
+
+
 def test_persistence_failure_before_probe_ack_stops_then_records_actual_closure(
     ready, monkeypatch
 ):

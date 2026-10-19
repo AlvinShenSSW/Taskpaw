@@ -71,7 +71,12 @@ class IntakeService:
             raise m.WorkflowError("intake_disabled")
         self._runner = (
             SnapshotRunner(
-                store, auth, meta=meta, owner_boot_id=owner_boot_id, ffprobe=ffprobe
+                store,
+                auth,
+                meta=meta,
+                owner_boot_id=owner_boot_id,
+                ffprobe=ffprobe,
+                clock=self.clock,
             )
             if ffprobe
             else None
@@ -372,6 +377,8 @@ class IntakeService:
         return tuple(ready)
 
     def run_ready_once(self) -> im.IntakeOperationView | None:
+        if self._runner is not None and self._runner.has_pending_settlement:
+            return self._runner.retry_settlement()
         candidates = self.ready_packages()
         if not candidates:
             return None
@@ -412,9 +419,12 @@ class IntakeService:
                     )
                 if (
                     self._runner
-                    and self.ready_packages()
                     and (self._worker is None or not self._worker.is_alive())
-                    and self._runner.active_operation_id is None
+                    and (
+                        self._runner.has_pending_settlement
+                        or self.ready_packages()
+                        and self._runner.active_operation_id is None
+                    )
                 ):
                     self._worker = threading.Thread(
                         target=self._snapshot,

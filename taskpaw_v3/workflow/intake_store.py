@@ -414,6 +414,10 @@ class IntakeCommands(ApprovalCommands):
                     "recovery_required",
                     None,
                 )
+            if old and not changed and old["reason"] == "publication_blocked":
+                # A complete unchanged scan cannot make a rejected film policy
+                # compatible, nor should it repeatedly copy the same package.
+                state, reason, stable_since = "blocked", "publication_blocked", None
             values = dict(
                 root_id=command.root_id,
                 root_config_revision=command.root_config_revision,
@@ -1059,6 +1063,7 @@ class IntakeCommands(ApprovalCommands):
             )
             snapshot = command.snapshot
             current_snapshot = False
+            publication_blocked = False
             if snapshot is not None:
                 admission = im.IntakeSnapshotAdmission.model_validate_json(
                     row["admission_json"]
@@ -1091,6 +1096,28 @@ class IntakeCommands(ApprovalCommands):
                     and package["active_operation_id"] == command.operation_id
                 )
                 if current_snapshot and snapshot.eligibility.decision == "eligible":
+                    # Publication is all-film atomic, but valid snapshot/exit
+                    # facts must survive a routine policy change. Check every
+                    # existing film before creating or publishing any film.
+                    for manifest in snapshot.manifests:
+                        existing = self._conn.execute(
+                            "SELECT body_json FROM films WHERE film_id=?",
+                            (manifest.film_id,),
+                        ).fetchone()
+                        if existing is None:
+                            continue
+                        record = m.FilmRecord.model_validate_json(existing[0])
+                        if record.policy.policy_revision != manifest.policy_revision:
+                            publication_blocked = True
+                        try:
+                            self._check_attachments(record, manifest)
+                        except m.WorkflowError:
+                            publication_blocked = True
+                if (
+                    current_snapshot
+                    and snapshot.eligibility.decision == "eligible"
+                    and not publication_blocked
+                ):
                     for manifest in snapshot.manifests:
                         film = self._conn.execute(
                             "SELECT * FROM films WHERE film_id=?", (manifest.film_id,)
@@ -1158,7 +1185,11 @@ class IntakeCommands(ApprovalCommands):
             if package["active_operation_id"] == command.operation_id:
                 same = package["source_generation"] == command.source_generation
                 snapshot_values = {}
-                if current_snapshot and snapshot is not None:
+                if (
+                    current_snapshot
+                    and snapshot is not None
+                    and not publication_blocked
+                ):
                     snapshot_values = dict(
                         active_snapshot_id=snapshot.admission.snapshot_id,
                         eligibility_json=m.canonical_json(snapshot.eligibility),
@@ -1172,6 +1203,8 @@ class IntakeCommands(ApprovalCommands):
                     active_operation_id=command.operation_id if unresolved else None,
                     state="unknown_owner"
                     if unresolved
+                    else "blocked"
+                    if publication_blocked
                     else "operational_ready"
                     if current_snapshot
                     and snapshot is not None
@@ -1193,6 +1226,8 @@ class IntakeCommands(ApprovalCommands):
                     else package["state"],
                     reason="owner_unknown"
                     if unresolved
+                    else "publication_blocked"
+                    if publication_blocked
                     else snapshot.eligibility.reason
                     if current_snapshot and snapshot is not None
                     else command.reason
