@@ -1,11 +1,19 @@
 """Fixed suspended probe protocol. Synthetic callbacks do not attest native exit."""
 
+import sys
+
 import pytest
 
 from taskpaw_v3.tests.test_workflow_intake_protocol import work_request
 from taskpaw_v3.workflow import intake_models as im
 from taskpaw_v3.workflow import intake_probe as probe
 from taskpaw_v3.workflow.models import WorkflowError
+
+# The intake owner is the Windows controller's native helper (the product refuses other
+# platforms with intake_platform); Windows CI runs every test here.
+pytestmark = pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows-only intake owner"
+)
 
 
 class NativeProbe:

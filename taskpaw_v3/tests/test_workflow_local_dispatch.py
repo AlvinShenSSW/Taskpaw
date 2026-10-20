@@ -387,6 +387,9 @@ def test_restart_keeps_the_owner_while_the_recorded_child_still_runs(tmp_path):
         second.close()
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows Job-object stop of a running stage"
+)
 def test_stop_during_a_stage_ends_the_child_and_requeues_without_counting(rt):
     rt.executors["restore"] = SyntheticExecutor("restore", SLEEP)
     film = add_film(rt)

@@ -12,6 +12,12 @@ from taskpaw_v3.workflow import intake_owner as owner
 from taskpaw_v3.workflow import intake_protocol as p
 from taskpaw_v3.workflow.models import WorkflowError
 
+# The intake owner is the Windows controller's native helper (the product refuses other
+# platforms with intake_platform); Windows CI runs every test here.
+pytestmark = pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows-only intake owner"
+)
+
 
 class FakeAPI:
     def __init__(self):
