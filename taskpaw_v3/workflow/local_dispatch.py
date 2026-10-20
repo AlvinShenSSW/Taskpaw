@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from taskpaw_v3.core import gpu_lease
+from taskpaw_v3.core.generation import next_generation
 
 from . import models as m
 from .executors import (
@@ -95,7 +96,8 @@ class LocalDispatcher:
     ) -> None:
         self.runtime, self.lease = runtime, lease
         self.poll, self.stop_settle, self.renew_every = poll, stop_settle, renew_every
-        self.run_id: gpu_lease.RunId = ("workflow", 1)
+        # A process-unique generation: never equal to a manual task's RunId (C5).
+        self.run_id: gpu_lease.RunId = ("workflow", next_generation())
         self.cancel = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None

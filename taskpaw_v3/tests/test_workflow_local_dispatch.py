@@ -426,3 +426,16 @@ def test_refused_claim_does_not_spin_and_never_starves_later_films(rt, monkeypat
     assert d.run_once() is False  # only the refused film is left: no busy loop
     assert stage(rt, blocked, "restore").status == "pending"
     assert lease.holder() is None and not any(rt.attempt_dir.glob("*.json"))
+
+
+def test_workflow_lease_id_never_collides_with_a_manual_task_named_workflow(rt):
+    from taskpaw_v3.core.generation import next_generation
+
+    lease = GpuLease()
+    manual = ("workflow", next_generation())  # a monitor instance named "workflow"
+    assert lease.try_acquire(manual, 5, "手动任务")
+    add_film(rt)
+    d = dispatcher(rt, lease)
+    assert d.run_id != manual
+    assert d.run_once() is False
+    assert lease.holder() == manual
