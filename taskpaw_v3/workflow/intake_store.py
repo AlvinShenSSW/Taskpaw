@@ -833,6 +833,33 @@ class IntakeCommands(ApprovalCommands):
             reason="source_changed",
         )
 
+    def retire_archived_package(
+        self,
+        auth: AuthProof,
+        meta: m.CommandMeta,
+        command: m.ArchivedPackageRetirement,
+    ) -> m.CommandResult:
+        """Retire a package after every linked film cleaned its input (N03/V3-3)."""
+
+        def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
+            package = self._one(
+                "SELECT * FROM intake_packages WHERE package_id=?",
+                (command.package_id,),
+            )
+            if package["version"] != command.expected_version:
+                raise m.WorkflowError("cas_conflict")
+            films = self._package_films(command.package_id)
+            if (
+                not package["current"]
+                or not films
+                or any(film.cleanup_input_status != "succeeded" for film in films)
+            ):
+                raise m.WorkflowError("precondition_failed")
+            version = self._retire_intake_package(package)
+            return Mutation(command.package_id, version, "retired")
+
+        return self._execute(auth, meta, command, "retire_archived_package", apply)
+
     def begin_intake_snapshot(
         self, auth: AuthProof, meta: m.CommandMeta, command: im.IntakeSnapshotAdmission
     ) -> m.CommandResult:

@@ -13,7 +13,7 @@ import shutil
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from taskpaw_v3.core import gpu_lease
 from taskpaw_v3.core.generation import next_generation
@@ -31,6 +31,9 @@ from .executors import (
 )
 from .local_runtime import AttemptFile, LocalRuntime, _new_id
 from .owned_process import OwnedJob
+
+if TYPE_CHECKING:
+    from .finalize import Finalizer
 
 log = logging.getLogger("taskpaw.workflow.dispatch")
 
@@ -157,8 +160,10 @@ class LocalDispatcher:
         return_step: ReturnStep | None = None,
         scrape_step: ComponentStep | None = None,
         off_reasons: dict[str, str] | None = None,
+        finalizer: Finalizer | None = None,
     ) -> None:
         self.runtime, self.lease = runtime, lease
+        self.finalizer = finalizer
         self.return_step, self.scrape_step = return_step, scrape_step
         # unconfigured component stages, shown as the waiting reason (M01 §4.4)
         configured = {
@@ -220,7 +225,10 @@ class LocalDispatcher:
                 if self._running is not None
                 else "idle"
             )
-            return DispatchStatus(state, self._reason, current, dict(self._waiting))
+            waiting = dict(self._waiting)
+            if self.finalizer is not None:
+                waiting.update(self.finalizer.waiting)
+            return DispatchStatus(state, self._reason, current, waiting)
 
     def reconcile_retries(self) -> None:
         """R3: make retries a crash lost between resolution and requeue."""
@@ -250,11 +258,21 @@ class LocalDispatcher:
             except Exception:
                 log.exception("workflow dispatch tick failed")
                 worked = False
+            self._finalize()
             if not worked:
                 self._wake.wait(self.poll)
                 self._wake.clear()
         if self._unsettled is None:  # a still-running tree keeps the GPU (C4)
             self._release()
+
+    def _finalize(self) -> None:
+        """Archive and clean approved films (F02-P1); never holds the GPU, never spins."""
+        if self.finalizer is None:
+            return
+        try:
+            self.finalizer.run_once()
+        except Exception:
+            log.exception("workflow finalize tick failed")
 
     # ── one tick ────────────────────────────────────────────────────────
     def run_once(self) -> bool:

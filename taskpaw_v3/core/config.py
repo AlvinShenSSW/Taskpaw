@@ -35,6 +35,8 @@ class WorkflowSettings(BaseModel):
     mdcx_python: Optional[str] = None  # python.exe of MDCX304's environment
     mdcx_root: Optional[str] = None  # the MDCX304 checkout
     mdcx_profile: Optional[str] = None  # the user's Miko config.json
+    # F02-P1: where Filmpaw keeps its library (workflow-endpoint.json); default %APPDATA%\Filmpaw.
+    filmpaw_data_dir: Optional[str] = None
 
 
 class AgentConfig(BaseModel):

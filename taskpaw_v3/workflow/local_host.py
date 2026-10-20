@@ -20,6 +20,8 @@ from taskpaw_v3.core.config import WorkflowSettings
 from . import intake_models as im
 from . import models as m
 from .executors import StageExecutor
+from .filmpaw_client import FilmpawClient
+from .finalize import Finalizer
 from .intake_protocol import ProbeArtifact
 from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
@@ -138,6 +140,7 @@ class LocalWorkflowHost:
         self.runtime: LocalRuntime | None = None
         self.intake: Any = None
         self.dispatcher: LocalDispatcher | None = None
+        self.finalizer: Finalizer | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
 
@@ -181,11 +184,18 @@ class LocalWorkflowHost:
                 if self._stopping.is_set():
                     return
                 self.intake.start()
+            data = self.settings.filmpaw_data_dir
+            self.finalizer = Finalizer(
+                rt,
+                Path(inbox) if inbox else None,
+                FilmpawClient(Path(data) if data else None),
+            )
             self.dispatcher = LocalDispatcher(
                 rt,
                 return_step=self.return_step,
                 scrape_step=self.scrape_step,
                 off_reasons=self.off_reasons,
+                finalizer=self.finalizer,
             )
             if self._stopping.is_set():
                 return
@@ -222,6 +232,15 @@ class LocalWorkflowHost:
         if self.runtime is not None:
             self.runtime.close()
         self.state = "stopped"
+
+    def confirm(self, film_id: str, performer_id: str) -> str:
+        """确认入库 (F02-P1 C1); raises ConfirmError with the reason when refused."""
+        if self.finalizer is None:
+            raise RuntimeError("媒体流水线尚未启动")
+        approval_id = self.finalizer.confirm(film_id, performer_id)
+        if self.dispatcher is not None:
+            self.dispatcher.wake()
+        return approval_id
 
     def status(self) -> dict[str, Any]:
         value: dict[str, Any] = {"state": self.state, "reason": self.reason}

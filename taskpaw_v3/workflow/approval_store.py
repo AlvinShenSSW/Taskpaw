@@ -90,6 +90,13 @@ class ApprovalCommands(FilmCommands):
                 != command.expected_context_revision
             ):
                 raise m.WorkflowError("cas_conflict")
+            if self._conn.execute(
+                "SELECT 1 FROM operations WHERE film_id=? AND kind='archive' AND resolved_at IS NULL",
+                (command.film_id,),
+            ).fetchone():
+                # An open archive must settle (receipt or failure) before the
+                # operator can re-confirm (F02-P1 D02/N05).
+                raise m.WorkflowError("precondition_failed")
             self._require_source_admissible(film)
             self._binding_manifests(command.binding)
             observations = command.observations
@@ -444,11 +451,12 @@ class ApprovalCommands(FilmCommands):
         now: datetime,
         evidence: tuple[m.EvidenceRef, ...],
         status: str,
+        error_code: str | None = None,
     ) -> None:
         attempt = self._one(
             "SELECT * FROM attempts WHERE attempt_id=?", (operation["attempt_id"],)
         )
-        self._set_attempt(attempt, status, now, evidence)
+        self._set_attempt(attempt, status, now, evidence, error_code)
         job = self._one("SELECT * FROM stages WHERE job_id=?", (operation["job_id"],))
         film = self._film_row(operation["film_id"])
         approval = self._one(
@@ -545,6 +553,56 @@ class ApprovalCommands(FilmCommands):
             )
 
         return self._execute(auth, meta, command, "accept_archive_receipt", apply)
+
+    def fail_archive(
+        self, auth: AuthProof, meta: m.CommandMeta, command: m.ArchiveFailure
+    ) -> m.CommandResult:
+        """Record a terminal archive failure; re-archiving needs a new approval (C8)."""
+
+        def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
+            operation = self._one(
+                "SELECT * FROM operations WHERE operation_id=?", (command.operation_id,)
+            )
+            if (
+                operation["kind"] != "archive"
+                or operation["owner_principal_id"] != principal["principal_id"]
+                or command.evidence.producer_id != principal["principal_id"]
+            ):
+                raise m.WorkflowError("forbidden")
+            if operation["version"] != command.expected_version:
+                raise m.WorkflowError("cas_conflict")
+            if operation["status"] not in ("admitted", "running", "unknown"):
+                raise m.WorkflowError("precondition_failed")
+            original = m.ArchiveOperation.model_validate_json(operation["body_json"])
+            value = original.model_copy(
+                update={
+                    "status": "failed",
+                    "error_code": command.error_code,
+                    "version": operation["version"] + 1,
+                    "evidence": (*original.evidence, command.evidence),
+                }
+            )
+            version = self._update(
+                "operations",
+                "operation_id",
+                command.operation_id,
+                operation["version"],
+                status="failed",
+                updated_at=timestamp(now),
+                resolved_at=timestamp(now),
+                body_json=m.canonical_json(value),
+            )
+            self._external_fact(
+                operation, now, (command.evidence,), "failed", command.error_code
+            )
+            return Mutation(
+                command.operation_id,
+                version,
+                "failed",
+                operation_id=command.operation_id,
+            )
+
+        return self._execute(auth, meta, command, "fail_archive", apply)
 
     @staticmethod
     def _cleanup_members_equal(
@@ -676,13 +734,23 @@ class ApprovalCommands(FilmCommands):
             film = self._film_row(command.film_id)
             if film["version"] != command.expected_version:
                 raise m.WorkflowError("cas_conflict")
-            if command.scope == "input":
+            # N04: once this approval's archive is accepted, a changed INBOX
+            # must not strand input cleanup. Exactness moves to each member's
+            # delete handle; binding, sharing and observation checks remain.
+            archived_here = (
+                self._conn.execute(
+                    "SELECT 1 FROM receipts WHERE receipt_id=? AND kind='archive' AND approval_id=?",
+                    (command.archive_receipt_id, command.approval_id),
+                ).fetchone()
+                is not None
+            )
+            if command.scope == "input" and not archived_here:
                 self._require_source_admissible(film)
             approval = self._approved(
                 command.film_id,
                 command.approval_id,
                 now,
-                allow_source_change=command.scope == "workcopy",
+                allow_source_change=command.scope == "workcopy" or archived_here,
             )
             expected = (
                 approval.binding.input_cleanup

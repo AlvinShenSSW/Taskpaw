@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
+from . import file_identity
 from . import models as m
 from .exec_restore import ffprobe_command, probe_video
 from .executors import SUCCEEDED_KIND, ErrorClass, ExecOutcome
@@ -351,6 +352,15 @@ class LocalScrapeStep:
         def rel(path: str) -> str:
             return PurePosixPath(path).relative_to(film_dir).as_posix()
 
+        def identity(path: str) -> m.NativeIdentity:
+            # The same identity the cleanup delete checks on its handle (D08).
+            try:
+                return file_identity.native(
+                    rt.work_dir / output / path, rt.identity.work_root_id
+                )
+            except OSError as exc:
+                raise _Failure("needs_attention", f"无法读取文件身份：{path}") from exc
+
         videos = {f["video"]: f for f in files if f["role"] == "main_video"}
         if set(videos) != set(staged):
             raise _Failure("needs_attention", "Miko 输出的视频数量不符")
@@ -382,7 +392,7 @@ class LocalScrapeStep:
                 size_bytes=entry["size"],
                 sha256=entry["sha256"],
                 source_root_id=rt.identity.work_root_id,
-                native_identity=None,
+                native_identity=identity(path),
                 volume_ordinal=ordinal,
                 video_item_id=video_id if language else None,
                 language=language,

@@ -12,6 +12,7 @@ from taskpaw_v3.core.gpu_lease import GpuLease
 from taskpaw_v3.tests import test_workflow_return_step as ret
 from taskpaw_v3.tests.test_workflow_local_dispatch import Crash
 from taskpaw_v3.tests.workflow_exec_helpers import fake, video
+from taskpaw_v3.workflow import file_identity
 from taskpaw_v3.workflow.executors import failed_kind
 from taskpaw_v3.workflow.local_dispatch import LocalDispatcher
 from taskpaw_v3.workflow.pipeline import default_scrape_step
@@ -78,8 +79,16 @@ def final_of(rt, film):
     return view.film.current_final_revision
 
 
-def test_miko_output_becomes_the_published_final(rt, tmp_path):
+def test_miko_output_becomes_the_published_final(rt, tmp_path, monkeypatch):
     film = ret.add_real_film(rt)
+    published = []
+    real_put = rt.store.put_final_manifest
+
+    def spy(auth, meta, command):
+        published.append(command.manifest)
+        return real_put(auth, meta, command)
+
+    monkeypatch.setattr(rt.store, "put_final_manifest", spy)
     d = dispatcher(rt, scrape_step(tmp_path))
     for _ in range(4):
         assert d.run_once()
@@ -99,6 +108,17 @@ def test_miko_output_becomes_the_published_final(rt, tmp_path):
         "thumb.jpg",
     ]
     assert not any((rt.work_dir / "scrape").rglob("in"))  # staging inputs dropped
+    # D08: every final item carries the identity the C6 delete will check
+    (final,) = published
+    for item in final.items:
+        assert item.native_identity is not None
+        assert item.native_identity.root_id == item.source_root_id
+        observed = file_identity.native(out / item.relative_path, item.source_root_id)
+        assert (observed.scheme, observed.volume_or_export_id, observed.object_id) == (
+            item.native_identity.scheme,
+            item.native_identity.volume_or_export_id,
+            item.native_identity.object_id,
+        )
 
 
 @pytest.mark.parametrize(

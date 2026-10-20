@@ -673,13 +673,24 @@ class WorkerCommands(ReadCommands):
                     "SELECT max(generation) FROM credentials WHERE principal_id=?",
                     (command.principal_id,),
                 )[0]
+                # Archive/cleanup adapters are fixed principals that keep owning
+                # their open operations across controller restarts (F02-P1 D11).
+                reboot = old["role"] in ("archive_adapter", "cleanup_adapter")
                 if (
                     old["role"] != command.role
                     or old["component_id"] != command.component_id
-                    or old["boot_id"] != command.boot_id
+                    or (old["boot_id"] != command.boot_id and not reboot)
                     or command.generation != generation + 1
                 ):
                     raise WorkflowError("precondition_failed")
+                if old["boot_id"] != command.boot_id:
+                    self._update(
+                        "principals",
+                        "principal_id",
+                        command.principal_id,
+                        old["version"],
+                        boot_id=command.boot_id,
+                    )
                 self._conn.execute(
                     "UPDATE credentials SET revoked_at=?,version=version+1 WHERE principal_id=? AND revoked_at IS NULL",
                     (timestamp(now), command.principal_id),

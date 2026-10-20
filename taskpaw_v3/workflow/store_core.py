@@ -70,6 +70,7 @@ _RECOVERY_COMMANDS = frozenset(
         "finish_attempt",
         "accept_artifact_receipt",
         "accept_archive_receipt",
+        "fail_archive",
         "record_cleanup_result",
         "record_boot",
         "record_intake_owner",

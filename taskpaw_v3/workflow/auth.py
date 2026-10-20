@@ -116,6 +116,7 @@ COMMAND_ROLES: dict[str, frozenset[str]] = {
         "configure_intake_root",
         "resolve_intake_grouping",
         "settle_abandoned_intake",
+        "retire_archived_package",
     )
 }
 COMMAND_ROLES.update(
@@ -142,6 +143,7 @@ COMMAND_ROLES.update(
         ),
         "accept_artifact_receipt": frozenset({"receiver_adapter"}),
         "accept_archive_receipt": frozenset({"archive_adapter"}),
+        "fail_archive": frozenset({"archive_adapter"}),
         "record_cleanup_result": frozenset({"cleanup_adapter"}),
     }
 )

@@ -1422,6 +1422,20 @@ class ArchiveAdmission(VersionedCommand):
     adapter_id: Id
 
 
+class ArchiveFailure(VersionedCommand):
+    """A terminal archive outcome; `expected_version` is the operation's version."""
+
+    operation_id: Id
+    error_code: Text
+    evidence: EvidenceRef
+
+
+class ArchivedPackageRetirement(VersionedCommand):
+    """Retire an intake package once every linked film cleaned its input."""
+
+    package_id: Id
+
+
 class CleanupAdmission(VersionedCommand):
     film_id: Id
     operation_id: Id
@@ -1476,7 +1490,16 @@ class PendingComputeJob(Model):
     job_id: Id
     film_id: Id
     display_name: Text
-    stage: Literal["restore", "asr", "translate", "return", "scrape"]
+    stage: Literal[
+        "restore",
+        "asr",
+        "translate",
+        "return",
+        "scrape",
+        "archive",
+        "cleanup_input",
+        "cleanup_workcopy",
+    ]
     input_revision: Revision
     version: Revision
     film_created_at: UtcTime
@@ -1499,6 +1522,84 @@ class FilmView(Model):
 class WorkerView(Model):
     worker: WorkerRecord
     assignments: tuple[AssignmentRecord, ...]
+
+
+class WorkflowApproval(Model):
+    """The newest approval of the film's current approval context."""
+
+    approval_id: Id
+    context_revision: Revision
+    binding: ApprovalBinding
+    binding_hash: Digest
+    expires_at: UtcTime
+    revoked: bool
+
+
+class WorkflowArchiveOperation(Model):
+    operation_id: Id
+    approval_id: Id
+    status: Literal["admitted", "running", "unknown", "verified", "failed"]
+    version: Revision
+    resolved: bool
+    error_code: Text | None
+
+
+class WorkflowCleanupItem(Model):
+    item_id: Id
+    status: Literal[
+        "pending",
+        "deleted",
+        "already_absent",
+        "blocked_changed",
+        "blocked_writing",
+        "blocked_identity",
+        "failed",
+        "unknown",
+    ]
+
+
+class WorkflowCleanupOperation(Model):
+    operation_id: Id
+    approval_id: Id
+    scope: CleanupScope
+    version: Revision
+    status: Literal["admitted", "running", "unknown", "verified"]
+    resolved: bool
+    items: tuple[WorkflowCleanupItem, ...]
+
+
+class FilmWorkflow(Model):
+    """Approval, archive and cleanup state of one film (F02-P1 D09)."""
+
+    film_id: Id
+    version: Revision
+    input_revision: Revision | None
+    context_revision: Revision | None
+    context_state: Literal["ready", "blocked", "invalidated"] | None
+    approval: WorkflowApproval | None
+    archive_operations: tuple[WorkflowArchiveOperation, ...]
+    archive_receipt_id: Id | None
+    archive_receipt_approval_id: Id | None
+    cleanup_operations: tuple[WorkflowCleanupOperation, ...]
+    scrape_status: StageStatus | None
+    archive_status: StageStatus | None
+    cleanup_input_status: StageStatus | None
+    cleanup_workcopy_status: StageStatus | None
+    package_id: Id | None
+    intake_operation_id: Id | None
+    snapshot_id: Id | None
+    snapshot_work_path: RelativePath | None
+    package_version: Revision | None = None
+    package_path: RelativePath | None = None  # under the INBOX root
+    package_current: bool = False
+
+
+class PackageFilm(Model):
+    """A film whose current input revision is linked to an intake package."""
+
+    film_id: Id
+    cleanup_input_status: StageStatus | None
+    cleanup_workcopy_status: StageStatus | None
 
 
 class ExecutionOperation(Model):

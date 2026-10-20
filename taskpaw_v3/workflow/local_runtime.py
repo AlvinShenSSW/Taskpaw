@@ -50,6 +50,16 @@ def _secret() -> str:
     return secrets.token_urlsafe(32)
 
 
+_BACKFILLED = (
+    "receiver_component_id",
+    "scrape_component_id",
+    "archive_component_id",
+    "archive_principal_id",
+    "cleanup_component_id",
+    "cleanup_principal_id",
+)
+
+
 @dataclass
 class LocalIdentity:
     """Ids, secrets and fixed idempotency keys, persisted before any command (D11)."""
@@ -73,16 +83,18 @@ class LocalIdentity:
     # principals; "" in older files.
     receiver_component_id: str = ""
     scrape_component_id: str = ""
+    # F02-P1 C9: fixed archive / cleanup principals, re-granted every boot so their
+    # open operations survive a restart and exactly one cleanup adapter exists.
+    archive_component_id: str = ""
+    archive_principal_id: str = ""
+    cleanup_component_id: str = ""
+    cleanup_principal_id: str = ""
 
     @classmethod
     def load_or_create(cls, path: Path, now: datetime) -> LocalIdentity:
         if path.exists():
             loaded = cls(**json.loads(path.read_text(encoding="utf-8")))
-            missing = [
-                name
-                for name in ("receiver_component_id", "scrape_component_id")
-                if not getattr(loaded, name)
-            ]
+            missing = [name for name in _BACKFILLED if not getattr(loaded, name)]
             for name in missing:  # back-fill once, then stable
                 setattr(loaded, name, _new_id())
             if missing:
@@ -107,8 +119,7 @@ class LocalIdentity:
                 name: _new_id()
                 for name in ("register", "pairing", "complete", "participation")
             },
-            receiver_component_id=_new_id(),
-            scrape_component_id=_new_id(),
+            **{name: _new_id() for name in _BACKFILLED},
         )
         atomic_json(path, asdict(value))
         return value
@@ -160,6 +171,8 @@ class LocalRuntime:
         self._worker_auth: AuthProof | None = None
         self._receiver_auth: AuthProof | None = None
         self._scrape_auth: AuthProof | None = None
+        self._archive_auth: AuthProof | None = None
+        self._cleanup_auth: AuthProof | None = None
         self._boot_id: str | None = None
         self.gpu: LocalGpu | None = None
         self.reason = "starting"
@@ -196,6 +209,14 @@ class LocalRuntime:
     @property
     def scrape_auth(self) -> AuthProof:
         return cast(AuthProof, self._need(self._scrape_auth, "scrape credential"))
+
+    @property
+    def archive_auth(self) -> AuthProof:
+        return cast(AuthProof, self._need(self._archive_auth, "archive credential"))
+
+    @property
+    def cleanup_auth(self) -> AuthProof:
+        return cast(AuthProof, self._need(self._cleanup_auth, "cleanup credential"))
 
     @property
     def boot_id(self) -> str:
@@ -461,6 +482,8 @@ class LocalRuntime:
         self._record_boot()
         _, self._receiver_auth = self._grant("receiver_adapter")
         _, self._scrape_auth = self._grant("scrape_adapter")
+        self._archive_auth = self._grant_fixed("archive_adapter")
+        self._cleanup_auth = self._grant_fixed("cleanup_adapter")
         self.settle_previous()
 
     def _record_boot(self) -> None:
@@ -664,6 +687,29 @@ class LocalRuntime:
         )
         self.store.grant_component(self.operator, self.meta(), grant)
         return grant, authenticate(self.store, grant.credential_id, secret)
+
+    def _grant_fixed(
+        self, role: Literal["archive_adapter", "cleanup_adapter"]
+    ) -> AuthProof:
+        """A new credential (and boot) for the same principal every boot (F02-P1 C9)."""
+        ident = self.identity
+        component, principal = {
+            "archive_adapter": (ident.archive_component_id, ident.archive_principal_id),
+            "cleanup_adapter": (ident.cleanup_component_id, ident.cleanup_principal_id),
+        }[role]
+        secret = SecretStr(_secret())
+        grant = m.ComponentGrant(
+            component_id=component,
+            principal_id=principal,
+            credential_id=_new_id(),
+            boot_id=self.boot_id,
+            generation=self.store.component_generation(self.operator, principal) + 1,
+            role=role,
+            secret_digest=digest_secret(secret),
+            expires_at=self.clock.now() + LONG,
+        )
+        self.store.grant_component(self.operator, self.meta(), grant)
+        return authenticate(self.store, grant.credential_id, secret)
 
     def settle_intake(self) -> int:
         """Cancel intake operations of exited boots and drop their private copies."""
