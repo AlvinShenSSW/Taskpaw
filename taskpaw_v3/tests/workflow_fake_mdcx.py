@@ -78,7 +78,11 @@ def main() -> int:
         if any(v["zh_subtitle"] for v in request["videos"])
         else "无码破解"
     )
-    (film / "ABC-123.nfo").write_text(f"<movie><tag>{tags}</tag></movie>", "utf-8")
+    (film / "ABC-123.nfo").write_text(
+        "<movie><title>假的标题</title><actor><name>Actor</name></actor>"
+        f"<tag>{tags}</tag></movie>",
+        "utf-8",
+    )
     add(film / "ABC-123.nfo", "nfo")
     for name, role in (
         ("poster.jpg", "poster"),

@@ -293,6 +293,8 @@ def run_agent(
                     films_provider=supervisor.film_page,
                     run_films_provider=supervisor.run_films,
                     prompt_responder=supervisor.respond_prompt,
+                    # late-bound: the host starts after announce_ready (T06-P1)
+                    workflow_provider=lambda: workflow_host,
                 ),
                 log_level="warning",
             )

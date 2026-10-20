@@ -106,25 +106,9 @@ def parse_nfo_hint(
     if type(max_bytes) is not int or not 1 <= max_bytes <= 1048576:
         raise ValueError("nfo_limit_invalid")
     invalid = NfoHint(member_id=member_id, identifiers=(), valid=False)
-    if type(payload) is not bytes or not payload or len(payload) > max_bytes:
+    root = _nfo_root(payload, max_bytes)
+    if root is None:
         return invalid
-    try:
-        text = payload.decode("utf-8-sig")
-        if re.search(r"<!\s*(?:DOCTYPE|ENTITY)", text, flags=re.I):
-            return invalid
-        root = ElementTree.fromstring(text)
-    except (UnicodeError, ElementTree.ParseError):
-        return invalid
-    if root.tag != "movie":
-        return invalid
-    pending = [(root, 0)]
-    count = 0
-    while pending:
-        node, depth = pending.pop()
-        count += 1
-        if depth > 8 or count > 4096:
-            return invalid
-        pending.extend((child, depth + 1) for child in node)
     identifiers = tuple(
         sorted(
             {
@@ -141,6 +125,52 @@ def parse_nfo_hint(
     ):
         return invalid
     return NfoHint(member_id=member_id, identifiers=identifiers, valid=True)
+
+
+def _nfo_root(payload: bytes, max_bytes: int) -> ElementTree.Element | None:
+    """A bounded `<movie>` tree; None for anything oversized, unsafe or malformed."""
+    if type(payload) is not bytes or not payload or len(payload) > max_bytes:
+        return None
+    try:
+        text = payload.decode("utf-8-sig")
+        if re.search(r"<!\s*(?:DOCTYPE|ENTITY)", text, flags=re.I):
+            return None
+        root = ElementTree.fromstring(text)
+    except (UnicodeError, ElementTree.ParseError):
+        return None
+    if root.tag != "movie":
+        return None
+    pending = [(root, 0)]
+    count = 0
+    while pending:
+        node, depth = pending.pop()
+        count += 1
+        if depth > 8 or count > 4096:
+            return None
+        pending.extend((child, depth + 1) for child in node)
+    return root
+
+
+def _nfo_text(node: ElementTree.Element | None) -> str | None:
+    value = (node.text or "").strip() if node is not None else ""
+    if not value or len(value) > 256 or any(ord(char) < 32 for char in value):
+        return None
+    return value
+
+
+def parse_nfo_summary(
+    payload: bytes, *, max_bytes: int = 262144
+) -> tuple[str | None, tuple[str, ...]]:
+    """Title and actor names of a final NFO (T06-P1 D10); never raises."""
+    root = _nfo_root(payload, max_bytes)
+    if root is None:
+        return None, ()
+    actors: list[str] = []
+    for actor in root.findall("actor"):
+        name = _nfo_text(actor.find("name"))
+        if name and name not in actors and len(actors) < 64:
+            actors.append(name)
+    return _nfo_text(root.find("title")), tuple(actors)
 
 
 @dataclass(frozen=True)

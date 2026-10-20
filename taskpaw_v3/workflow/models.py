@@ -1594,6 +1594,32 @@ class FilmWorkflow(Model):
     package_current: bool = False
 
 
+class BoardStage(Model):
+    """One current-revision stage and its last attempt's note (T06-P1 D02)."""
+
+    stage: Stage
+    status: StageStatus
+    note: Text | None = None
+
+
+class BoardFilm(Model):
+    """One film on the 媒体入库 board, read in one statement (T06-P1 D03, N01).
+
+    `approval_active`: the current context revision has an unrevoked approval
+    that no archive operation has used yet (confirmed, waiting to archive).
+    `archive_error`: the error code of the film's newest archive operation.
+    """
+
+    film_id: Id
+    display_name: Text
+    created_at: UtcTime
+    final_name: Text | None  # the current final's film directory name
+    stages: tuple[BoardStage, ...]
+    approval_active: bool
+    archive_open: bool
+    archive_error: Text | None
+
+
 class PackageFilm(Model):
     """A film whose current input revision is linked to an intake package."""
 

@@ -198,6 +198,34 @@ export type LlmTestResult = {
   note?: "thinking_unsupported";
 };
 
+// Media workflow (T06-P1 §8, frozen shapes).
+export type FilmGroup = "confirm" | "active" | "attention" | "archiving" | "done";
+export interface FilmRow {
+  film_id: string; name: string; group: FilmGroup; stage: string; status: string;
+  note: string | null; can_confirm: boolean; can_retry: boolean; retry_stage: string | null;
+  created_at: string | null;
+}
+export interface WorkflowCurrent { film_id: string; film: string; stage: string; progress: unknown }
+export interface WorkflowFilms {
+  state: string; reason: string | null; current: WorkflowCurrent | null; films: FilmRow[];
+}
+export interface FilmDetail {
+  film_id: string; name: string; number: string | null; title: string | null; actors: string[];
+  marks: { restored: boolean; chinese_subtitles: boolean; uhd: boolean };
+  files: Array<{ role: string; path: string; size: number | null; volume: number | string | null }>;
+  inputs: Array<{ path: string; size: number | null }>;
+  workcopy_count: number; has_poster: boolean;
+  group: FilmGroup; can_confirm: boolean; can_retry: boolean; retry_stage: string | null; note: string | null;
+  stages: Array<{ stage: string; status: string; note: string | null }>;
+  archive: { status: string | null; error: string | null; target_path: string | null };
+  cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
+}
+export interface Performer {
+  id: number | string; name: string; source_label: string | null; unc_path: string | null;
+  has_thumb: boolean; aliases: string[];
+}
+const seg = (id: string | number) => encodeURIComponent(String(id));
+
 export type ControlRole = "agent" | "hub";
 declare global {
   interface Window {
@@ -279,13 +307,19 @@ function checkUnauthorized(role: ControlRole, res: Response) {
   if (res.status === 401) { clearControlCredentials(role); throw new ControlCredentialError(); }
 }
 
+// A non-2xx control response. Keeps the old message (detail text or "path → status")
+// and adds the status so callers can tell e.g. 503 "Filmpaw down" from other errors.
+export class HttpError extends Error {
+  constructor(message: string, public readonly status: number) { super(message); }
+}
+
 async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
   const { baseUrl, controlToken } = cfg(role);
   const res = await fetch(`${baseUrl}${path}`, {
     headers: { Authorization: `Bearer ${controlToken}` },
   });
   checkUnauthorized(role, res);
-  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  if (!res.ok) throw new HttpError(`${path} → ${res.status}`, res.status);
   return res.json() as Promise<T>;
 }
 
@@ -352,9 +386,26 @@ async function send<T>(
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(detail);
+    throw new HttpError(detail, res.status);
   }
+  if (res.status === 204) return undefined as T;
   return monitor ? payload as T : res.json() as Promise<T>;
+}
+
+// Authenticated image fetch → data: URL (T06 D01): control routes need the bearer
+// token and the packaged CSP only allows `img-src 'self' data:`.
+async function image(path: string): Promise<string> {
+  const { baseUrl, controlToken } = cfg("agent");
+  const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${controlToken}` } });
+  checkUnauthorized("agent", res);
+  if (!res.ok) throw new HttpError(`${path} → ${res.status}`, res.status);
+  const blob = await res.blob();
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("image read failed"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 const q = (name: string) => `?name=${encodeURIComponent(name)}`;
@@ -418,4 +469,18 @@ export const api = {
   hubRemoveServer: (id: number) => send<{ ok: boolean }>("hub", "DELETE", `/servers/${id}`),
   hubSetPollingToken: (polling_token: string) =>
     send<{ ok: boolean }>("hub", "PATCH", "/config", { polling_token }),
+  // Media workflow (T06-P1 §8): local control API only; paths are resolved by film id.
+  workflowFilms: () => get<WorkflowFilms>("agent", "/control/workflow/films"),
+  workflowFilm: (filmId: string) => get<FilmDetail>("agent", `/control/workflow/films/${seg(filmId)}`),
+  performers: (query: string) =>
+    get<{ items: Performer[] }>("agent", `/control/workflow/performers?${new URLSearchParams({ q: query })}`),
+  workflowConfirm: (filmId: string, performer_id: Performer["id"]) =>
+    send<{ approval_id: string }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/confirm`, { performer_id }),
+  workflowRetry: (filmId: string, stage: string) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/retry`, { stage }),
+  workflowOpen: (filmId: string, what: "inbox" | "output") =>
+    send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
+  posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
+  thumbPath: (performerId: Performer["id"]) => `/control/workflow/performers/${seg(performerId)}/thumb`,
+  image,
 };

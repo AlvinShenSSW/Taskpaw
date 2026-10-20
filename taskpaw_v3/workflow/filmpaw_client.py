@@ -85,6 +85,14 @@ class FilmpawClient:
         self.timeout = timeout
 
     def _call(self, method: str, path: str, body: Any = None) -> Any:
+        data, _ = self._request(method, path, body)
+        try:
+            return json.loads(data or b"null")
+        except ValueError as e:
+            raise FilmpawUnavailable(f"Filmpaw 无响应：{e}") from e
+
+    def _request(self, method: str, path: str, body: Any = None) -> tuple[bytes, str]:
+        """The raw response body and its media type."""
         endpoint = read_endpoint(self.data_dir)
         data = None if body is None else json.dumps(body).encode("utf-8")
         request = urllib.request.Request(
@@ -98,15 +106,41 @@ class FilmpawClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read() or b"null")
+                return response.read(), response.headers.get_content_type()
         except urllib.error.HTTPError as e:
             try:
                 detail = json.loads(e.read() or b"{}").get("detail", "")
             except ValueError:
                 detail = ""
             raise FilmpawRefused(e.code, str(detail) or e.reason) from None
-        except (OSError, ValueError) as e:  # URLError, timeouts, resets, bad JSON
+        except (OSError, ValueError) as e:  # URLError, timeouts, resets
             raise FilmpawUnavailable(f"Filmpaw 无响应：{e}") from e
+
+    def performers(self, q: str) -> list[dict[str, Any]]:
+        """Present performers matching a name or alias, for the operator to pick (T06-P1 D08)."""
+        query = urllib.parse.urlencode(
+            {"q": q, "include_missing": "false", "page_size": 50}
+        )
+        data = self._call("GET", f"/api/performers?{query}")
+        try:
+            return [
+                {
+                    "id": str(item["id"]),
+                    "name": str(item["name"]),
+                    "source_label": item.get("source_label"),
+                    "unc_path": str(item["unc_path"]),
+                    "has_thumb": bool(item.get("has_thumb")),
+                    "aliases": [str(a["alias"]) for a in item.get("aliases") or ()],
+                }
+                for item in data["items"]
+            ]
+        except (KeyError, TypeError, AttributeError) as e:
+            raise FilmpawUnavailable(f"Filmpaw 返回的演员列表无效：{e}") from e
+
+    def thumb(self, performer_id: str) -> tuple[bytes, str]:
+        """A performer's avatar bytes and media type; FilmpawRefused 404 when it has none."""
+        quoted = urllib.parse.quote(performer_id, safe="")
+        return self._request("GET", f"/api/performers/{quoted}/thumb")
 
     def target(self, performer_id: str, film_dir: str) -> dict[str, Any]:
         query = urllib.parse.urlencode(

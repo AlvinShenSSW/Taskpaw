@@ -13,12 +13,13 @@ import shutil
 import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from taskpaw_v3.core.config import WorkflowSettings
 
 from . import intake_models as im
 from . import models as m
+from .auth import STAGE_ROLES
 from .executors import StageExecutor
 from .filmpaw_client import FilmpawClient
 from .finalize import Finalizer
@@ -117,6 +118,42 @@ def configure_intake(
     )
     if current is None or not _same_root(current, wanted):
         rt.store.configure_intake_root(rt.operator, rt.meta(), wanted)
+
+
+def retry_failed_stage(rt: LocalRuntime, film_id: str, stage: str) -> None:
+    """重试 (T06-P1 D05): only a failed or blocked local stage of the current revision."""
+    job = next(
+        (s for s in rt.store.get_film(rt.operator, film_id).stages if s.stage == stage),
+        None,
+    )
+    if (
+        job is None
+        or stage not in STAGE_ROLES
+        or job.status not in ("failed", "blocked")
+    ):
+        raise m.WorkflowError("precondition_failed")
+    rt.store.retry_stage(
+        rt.operator,
+        rt.meta(),
+        m.StageRetry(
+            job_id=job.job_id, expected_version=job.version, reason="operator"
+        ),
+    )
+
+
+class WorkflowHostLike(Protocol):
+    """What the 媒体入库 control routes need from a host (T06-P1 D14)."""
+
+    state: str
+    reason: str
+    runtime: LocalRuntime | None
+    finalizer: Finalizer | None
+
+    def status(self) -> dict[str, Any]: ...
+
+    def confirm(self, film_id: str, performer_id: str) -> str: ...
+
+    def retry(self, film_id: str, stage: str) -> None: ...
 
 
 class LocalWorkflowHost:
@@ -241,6 +278,13 @@ class LocalWorkflowHost:
         if self.dispatcher is not None:
             self.dispatcher.wake()
         return approval_id
+
+    def retry(self, film_id: str, stage: str) -> None:
+        """Requeue a failed local stage (T06-P1 D05); WorkflowError when it is not one."""
+        if self.runtime is None or self.dispatcher is None:
+            raise RuntimeError("媒体流水线尚未启动")
+        retry_failed_stage(self.runtime, film_id, stage)
+        self.dispatcher.wake()
 
     def status(self) -> dict[str, Any]:
         value: dict[str, Any] = {"state": self.state, "reason": self.reason}
