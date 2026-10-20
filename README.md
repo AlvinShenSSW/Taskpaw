@@ -28,7 +28,7 @@ file/folder pickers for path fields.
 |---------|---------|
 | `lada` | LADA video restore — managed (TaskPaw launches `lada-cli`, parses progress) or passive (detect an external run); file queue, GPU/VRAM, CPU/RAM |
 | `avsubs` | Standalone「AV 翻译」— walk a library folder (recursive by default) and give every MP4 that has no subtitles yet a `<name>.srt` (zh, global LLM API) next to it, via a `<name>.ja.srt` transcript (WhisperJAV) that is deleted once the `.srt` is written (kept as the resume point when translation does not finish); translation is resumable line by line (a Stop or an outage loses at most the request in flight), lines the primary model refuses go to up to two fallback models, a line every model refuses keeps its Japanese text, and a video with no translation service for 2 h is paused and continued at the next Start; a video already has subtitles when its folder holds `<name>.srt` (or `.ass`/`.ssa`/`.vtt`), a `<name>.<tag>.srt` with a non-Japanese tag (e.g. `.chs.srt`), or it is the folder's only video and there is any non-Japanese subtitle — an unreadable folder skips the video for the run and an existing subtitle is never overwritten; takes turns on the GPU with Jasna per file (in-process GPU lease) |
-| `jasna` | Jasna video restore — managed (TaskPaw runs one `jasna.exe` per video: skip/resume, per-resolution `unet-4x`, retry + degrade for BasicVSR++ launches) or passive; file queue with failures, GPU/VRAM, CPU/RAM. Output `<name>-破解.mp4`; a legacy `<name>_restored.mp4` still counts as restored. Optional「AV 翻译」: after each restore, WhisperJAV (ja ASR) + the global LLM API write `<name>-破解.srt` (zh) next to the restored video — always named like that video (`<name>_restored.srt` for a legacy file); the `.ja.srt` transcript is deleted once the `.srt` is written; translation is resumable and uses the fallback models, as in `avsubs`. An「8K VR」tick launches every file of the task with the 8K SBS VR profile and leaves the task's own settings untouched (see Jasna「8K VR」below). 「1080p 档：使用 LTX」/「4K 档：使用 LTX」ticks restore that tier's files with Jasna 0.11.1's LTX model, with fast mode and large canvas chosen from the GPU; the other tier and every other setting stay as they are (see Jasna LTX below) |
+| `jasna` | Jasna video restore — managed (TaskPaw runs one `jasna.exe` per video: skip/resume, per-resolution `unet-4x`, retry + degrade for BasicVSR++ launches) or passive; file queue with failures, GPU/VRAM, CPU/RAM. Output `<name>-破解.mp4`; a legacy `<name>_restored.mp4` still counts as restored. Optional「AV 翻译」: after each restore, WhisperJAV (ja ASR) + the global LLM API write `<name>-破解.srt` (zh) next to the restored video — always named like that video (`<name>_restored.srt` for a legacy file); the `.ja.srt` transcript is deleted once the `.srt` is written; translation is resumable and uses the fallback models, as in `avsubs`. An「8K VR」tick launches every file of the task with the 8K SBS VR profile and leaves the task's own settings untouched (see Jasna「8K VR」below). 「1080p 档：使用 LTX」/「4K 档：使用 LTX」ticks restore that tier's files with Jasna's LTX model (quality tier per task, Jasna 0.11.3+), with fast mode and large canvas chosen from the GPU; the other tier and every other setting stay as they are (see Jasna LTX below) |
 | `comfyui` | ComfyUI queue (idle = complete) + error diagnostics from its log |
 | `folder` | A downloads dir — a file is "done" once its size is stable |
 | `process` | Any process by name/pattern (running ↔ exited) |
@@ -175,7 +175,7 @@ Jasna 0.11.1 起有赞助者模型 **LTX**：细节比 BasicVSR++ 多，但慢�
 
 | 选项 | 默认 | 作用 |
 |---|---|---|
-| LTX 快速模式 `--ltx-fast` | 开 | 快约 1.4 倍、细节略少、下载更小；**仅 RTX 50 系**。TaskPaw 每次「启动」用 nvidia-smi 检测显卡，没有 RTX 50 系（如 RTX 4090）就自动不用。0.11.1 实测 8 GB 显卡加载标准模型显存不足，预设因此使用 Fast；0.11.2 未复测。 |
+| LTX 快速模式 `--ltx-fast` | 开 | 快约 1.4 倍、细节略少、下载更小；**仅 RTX 50 系**。TaskPaw 每次「启动」用 nvidia-smi 检测显卡，没有 RTX 50 系（如 RTX 4090）就自动不用。0.11.1 实测 8 GB 显卡加载 int8 模型显存不足，预设因此使用 Fast；0.11.2 未复测。 |
 | LTX 仅用于大马赛克（%） `--ltx-auto-split` | 12 | 不小于视频高度这个比例的马赛克用 LTX，更小的用 BasicVSR++（不带 unet-4x，4K 片上可能略糊）；0 = 整片用 LTX（画质优先）。影片没有合适切点时 Jasna 会跳过拆分、整片用 LTX。 |
 | LTX 画质 `--restoration-model-name` | 标准 | 四档（需 Jasna 0.11.3 及以上）：标准（`ltx`，最快）、良好（`ltx-4step`，慢约 1.5 倍）、高（`ltx-8step`，慢约 2.5 倍，0.11.3 前的默认）、顶级（`ltx-undistilled`，慢约 5 倍，原「最佳」）。每档需要单独下载模型；旧配置勾选过「最佳模型」的自动成为顶级。 |
 | LTX 大马赛克高清 `--ltx-large-canvas` | 关 | 可手动开启：大马赛克按 768 px 修复，特写和 4K 细节更多，这些片段慢约 3 倍。**只有每张 NVIDIA 显卡都有 16 GB 及以上显存时才传给 Jasna**：在 8 GB 卡上实测它连 1080p 都会让 Jasna 失败；机器上多插一张小显卡也会让它停用。已有配置明确保存的选择保留。 |
@@ -204,7 +204,7 @@ Jasna 0.11.1 起有赞助者模型 **LTX**：细节比 BasicVSR++ 多，但慢�
 | RTX 4090 24 GB | 180 / 180 | 关 | LTX / LTX |
 | RTX 5090 32 GB | 180 / 180 | 开 | LTX / LTX |
 
-各速度预设使用重叠 8、LTX 自动拆分 12%、Best 关、大马赛克关、LTX 减少重叠 auto。普通模式两档关闭 unet 和 LTX；unet 模式两档开启 unet、关闭 LTX。
+各速度预设使用重叠 8、LTX 自动拆分 12%、LTX 画质标准、大马赛克关、LTX 减少重叠 auto。普通模式两档关闭 unet 和 LTX；unet 模式两档开启 unet、关闭 LTX。
 8K VR 仍是独立开关：参考值为 4K 片段 30、重叠 8、4K unet 关、LTX 关。新预设开启「8K VR：使用可编辑参数」，允许随后手动调整；旧任务默认保留固定 VR 行为。检测器和 SBS 模式保持固定，2D 影片应单独建任务。
 
 **Jasna 0.11.2 与大马赛克的取舍（2026-10-18 调研）**
@@ -221,9 +221,9 @@ Jasna 0.11.1 起有赞助者模型 **LTX**：细节比 BasicVSR++ 多，但慢�
 
 | 配置 | 结果 |
 |---|---|
-| LTX 标准模型 | 加载时显存不足（两次都是） |
+| LTX int8 模型（0.11.1） | 加载时显存不足（两次都是） |
 | LTX 快速模式，1080p | 541–721 秒（约 54–72 倍实时，取决于桌面程序占用的显存） |
-| LTX 最佳 + 快速，1080p | 968 秒 |
+| LTX 最佳 + 快速（0.11.1 命名，即顶级），1080p | 968 秒 |
 | LTX 快速 + 大马赛克高清，1080p | 失败（`Cannot fit a DiffVAE decode tile`），所以 TaskPaw 不会在 8 GB 卡上传这个选项 |
 | LTX 快速模式，4K | 最后阶段失败：`Cannot fit a DiffVAE decode tile under the memory budget` |
 | BasicVSR++ + unet-4x，4K | 约 7 秒，显存峰值 6.4 GB |

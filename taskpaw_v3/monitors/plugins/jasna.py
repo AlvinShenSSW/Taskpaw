@@ -1239,7 +1239,7 @@ class JasnaConfig(BaseMonitorConfig):
         "default and the fastest; Good (ltx-4step), High (ltx-8step) and Top "
         "(ltx-undistilled) add detail and take longer. Each tier has its own model "
         "download. The tiers need Jasna 0.11.3 or newer: on 0.11.2 Standard runs "
-        "the old High model and Good fails with Jasna's own error. Only used with "
+        "the old High model, and Good and High fail with Jasna's own error. Only used with "
         "LTX.",
         json_schema_extra=_ltx_model_select,
     )

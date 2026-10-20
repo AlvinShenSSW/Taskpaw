@@ -211,7 +211,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     ltx_model: {
       title: "LTX 画质",
       description:
-        "--restoration-model-name：标准画质（ltx）是 Jasna 0.11.3 的默认，也最快；良好（ltx-4step）、高（ltx-8step）和顶级（ltx-undistilled）细节更多、更慢。每档需要单独下载模型。这四档需要 Jasna 0.11.3 及以上：在 0.11.2 上「标准」跑的是旧的高画质模型，「良好」会报 Jasna 自己的参数错误。只在勾选「使用 LTX」时使用。",
+        "--restoration-model-name：标准画质（ltx）是 Jasna 0.11.3 的默认，也最快；良好（ltx-4step）、高（ltx-8step）和顶级（ltx-undistilled）细节更多、更慢。每档需要单独下载模型。这四档需要 Jasna 0.11.3 及以上：在 0.11.2 上「标准」跑的是旧的高画质模型，「良好」「高」会报 Jasna 自己的参数错误。只在勾选「使用 LTX」时使用。",
       options: {
         standard: "标准画质（默认，最快）",
         good: "良好画质（慢约 1.5 倍）",
