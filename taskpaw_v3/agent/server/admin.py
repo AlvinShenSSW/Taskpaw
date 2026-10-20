@@ -933,10 +933,11 @@ class MonitorAdmin:
         running config, but the editable scalars come from the DESIRED (pending)
         state so the form reflects unsaved-since-restart edits and doesn't send
         stale running values back (which would revert a pending change). The token
-        is masked by the route, not here."""
+        is masked by the route, not here. #283: each monitor's config is the
+        plugin's `migrate_config` of the stored one (mapped outside the lock)."""
         with self._lock:
             self._prune_validation()
-            return {
+            view = {
                 **copy.deepcopy(self._config.model_dump()),
                 **self._desired,
                 "monitor_operations": {
@@ -948,6 +949,12 @@ class MonitorAdmin:
                     for iid, op in self._owners.items()
                 },
             }
+        for spec in view.get("monitors") or []:
+            type_id, raw = spec.get("type_id"), spec.get("config")
+            if isinstance(type_id, str) and isinstance(raw, dict):
+                if self._reg.has(type_id):
+                    spec["config"] = self._reg.get(type_id).migrate_config(raw)
+        return view
 
     def update_config(self, patch: dict) -> dict[str, Any]:
         """Edit top-level agent config (machine/ports/token) from the Settings UI

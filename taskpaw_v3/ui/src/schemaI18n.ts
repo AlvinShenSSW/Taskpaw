@@ -8,7 +8,8 @@ import type { RJSFSchema } from "@rjsf/utils";
 // same-named fields that mean different things per plugin (e.g. `host`/`port` in
 // tcp_check vs comfyui, `path` in folder vs state_file) translate correctly.
 
-type FieldT = { title: string; description?: string };
+// `options`: zh titles for a select's `oneOf` options, keyed by `const` (#283).
+type FieldT = { title: string; description?: string; options?: Record<string, string> };
 
 // Shared base config fields (BaseMonitorConfig) — present on every plugin form.
 const BASE: Record<string, FieldT> = {
@@ -195,22 +196,28 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     ltx_1080p: {
       title: "1080p 档：使用 LTX",
       description:
-        "仅 1080p 档：4K 档的文件和其他所有设置都按原来的配置（4K 档有自己的 LTX 勾选框）。勾选后 1080p 档的文件用 Jasna 的赞助者模型 LTX 修复（需 Jasna 0.11.1 及以上；细节更多、慢很多；需 NVIDIA RTX 显卡）。勾选时「8K VR」和「1080p 档：使用 unet-4x 二次修复」不使用（LTX 两者都不支持），它们保存的值不变，取消勾选后恢复。第一次缺少模型时会在 TaskPaw 中确认并显示下载进度（快速模式约 9 GB，不开快速约 15 GB）。运行中的任务保存后会从头重跑当前影片。",
+        "仅 1080p 档：4K 档的文件和其他所有设置都按原来的配置（4K 档有自己的 LTX 勾选框）。勾选后 1080p 档的文件用 Jasna 的赞助者模型 LTX 修复（需 Jasna 0.11.3 及以上；细节更多、慢很多；需 NVIDIA RTX 显卡）。勾选时「8K VR」和「1080p 档：使用 unet-4x 二次修复」不使用（LTX 两者都不支持），它们保存的值不变，取消勾选后恢复。第一次缺少模型时会在 TaskPaw 中确认并显示下载进度（快速模式约 9 GB，不开快速约 15 GB）。运行中的任务保存后会从头重跑当前影片。",
     },
     ltx_fast: {
       title: "LTX 快速模式",
       description:
-        "--ltx-fast：快约 1.4 倍，细节略少，下载更小。仅限 RTX 50 系显卡：TaskPaw 启动时检测显卡，没有 RTX 50 系（例如 RTX 4090）就不用它。默认开：0.11.1 实测标准 LTX 模型在 8 GB 显卡上放不下。只在勾选「使用 LTX」时使用。",
+        "--ltx-fast：快约 1.4 倍，细节略少，下载更小。仅限 RTX 50 系显卡：TaskPaw 启动时检测显卡，没有 RTX 50 系（例如 RTX 4090）就不用它。默认开：不开快速模式的 int8 模型在 8 GB 显卡上放不下。只在勾选「使用 LTX」时使用。",
     },
     ltx_auto_split: {
       title: "LTX 仅用于大马赛克（%）",
       description:
         "--ltx-auto-split，按视频高度的百分比：不小于这个尺寸的马赛克用 LTX，更小的用 BasicVSR++（不带 unet-4x）。12 是 Jasna 建议的起点；0 = 整片都用 LTX。影片没有合适切点时 Jasna 会跳过拆分、整片用 LTX。4K 片的小马赛克走 BasicVSR++ 时可能略糊，追求画质可设 0。只在勾选「使用 LTX」时使用。",
     },
-    ltx_best: {
-      title: "LTX 最佳模型",
+    ltx_model: {
+      title: "LTX 画质",
       description:
-        "--restoration-model-name ltx-undistilled：细节略多，慢约 1.5–1.8 倍，需要单独下载模型。只在勾选「使用 LTX」时使用。",
+        "--restoration-model-name：标准画质（ltx）是 Jasna 0.11.3 的默认，也最快；良好（ltx-4step）、高（ltx-8step）和顶级（ltx-undistilled）细节更多、更慢。每档需要单独下载模型。这四档需要 Jasna 0.11.3 及以上：在 0.11.2 上「标准」跑的是旧的高画质模型，「良好」会报 Jasna 自己的参数错误。只在勾选「使用 LTX」时使用。",
+      options: {
+        standard: "标准画质（默认，最快）",
+        good: "良好画质（慢约 1.5 倍）",
+        high: "高画质（慢约 2.5 倍，0.11.3 前的默认）",
+        top: "顶级画质（慢约 5 倍，原「最佳」）",
+      },
     },
     ltx_4k: {
       title: "4K 档：使用 LTX",
@@ -222,7 +229,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
       description:
         "--ltx-large-canvas：默认关闭，可按画质需要手动开启。大马赛克按 768 px 而不是 512 px 修复，特写和 4K 细节更多，这些片段慢约 3 倍。只有每张显卡都有 16 GB 及以上显存时才会使用（TaskPaw 启动时检测）：8 GB 显卡上实测连 1080p 都会失败，所以不会传给它。只在勾选「使用 LTX」时使用。",
     },
-    ltx_overlap: { title: "LTX 减少重叠（0.11.2+）", description: "auto = 跟随 Jasna 默认（0.11.2 Windows 默认开启）；on / off = 显式开 / 关，仅用于 LTX。作者称长视频约快 13%。不要与 BasicVSR++ 的时序重叠帧数混淆。" },
+    ltx_overlap: { title: "LTX 减少重叠（0.11.2+）", description: "auto = 跟随 Jasna 默认（0.11.2 Windows 默认开启）；on / off = 显式开 / 关，仅用于 LTX。作者称马赛克在画面上停留超过 4 秒时约快 13%。不要与 BasicVSR++ 的时序重叠帧数混淆。" },
     vr_8k_custom: { title: "8K VR：使用可编辑参数", description: "启用后，片段长度、重叠和 unet-4x 采用下方的手动值；关闭保留旧版固定 VR 预设。检测器和 SBS 模式仍固定。应用机型预设时自动开启。" },
     vr_8k: {
       title: "8K VR",
@@ -334,10 +341,21 @@ export function localizeSchema(schema: RJSFSchema, typeId?: string, lang?: strin
   for (const [field, spec] of Object.entries(props)) {
     const zh = zhField(typeId, field);
     if (zh && spec && typeof spec === "object") {
+      const oneOf = (spec as { oneOf?: unknown }).oneOf;
+      const options = zh.options;
       nextProps[field] = {
         ...(spec as object),
         title: zh.title,
         ...(zh.description !== undefined ? { description: zh.description } : {}),
+        // #283: a titled select's option labels (rjsf reads each `oneOf` title).
+        ...(options && Array.isArray(oneOf)
+          ? {
+              oneOf: oneOf.map((o) => {
+                const label = o && typeof o === "object" ? options[String((o as { const?: unknown }).const)] : undefined;
+                return label ? { ...(o as object), title: label } : o;
+              }),
+            }
+          : {}),
       };
     } else {
       nextProps[field] = spec;

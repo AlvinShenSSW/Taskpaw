@@ -27,8 +27,8 @@ every file of the task AT LAUNCH ONLY — the operator's own fields are never
 rewritten, so unticking launches with them again.
 
 「1080p 档：使用 LTX」(#263, `ltx_1080p`): the 1080p-tier files launch with
-Jasna 0.11.1's LTX restoration model (`--restoration-model-name ltx` /
-`ltx-undistilled`, `--ltx-fast`, `--ltx-auto-split`); 4K-tier files and every
+Jasna's LTX restoration model (`--restoration-model-name`, `--ltx-fast`,
+`--ltx-auto-split`); 4K-tier files and every
 other setting launch exactly as before (LTX cannot finish a 4K file on an 8 GB
 card). While ticked, 8K VR and the 1080p unet-4x are off at launch — their saved
 values are untouched. LTX launches keep Jasna's scratch in the output folder's
@@ -40,6 +40,12 @@ an 8 GB card fails 4K LTX). The LTX options follow the GPU, queried once per
 Start: `--ltx-fast` only on a Blackwell card (RTX 50), `--ltx-large-canvas` only
 when every GPU has 16 GB or more. A failed LTX launch is not relaunched (the next
 Start tries the film again).
+
+LTX quality (#283, `ltx_model`): Jasna 0.11.3's four tiers — standard (`ltx`,
+the new default and the fastest), good (`ltx-4step`), high (`ltx-8step`, the
+`ltx` of 0.11.2 and earlier) and top (`ltx-undistilled`) — each with its own model
+download. A legacy `ltx_best` key still loads: true becomes top, otherwise
+standard (an explicit `ltx_model` wins); the editor is shown the mapped config.
 
 Passive mode (no exe path) just watches an externally-running `jasna` process,
 exactly like lada's passive mode.
@@ -106,7 +112,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Literal, Optional
+from typing import Any, Callable, Iterable, Literal, Optional
 
 from pydantic import Field, model_validator
 
@@ -191,6 +197,42 @@ from taskpaw_v3.monitors.subs.whisperjav import (
 log = logging.getLogger("taskpaw.monitors.jasna")
 
 Tier = Literal["1080p", "4k"]
+#: #283: Jasna 0.11.3's LTX quality tiers (`ltx_model`).
+LtxModel = Literal["standard", "good", "high", "top"]
+#: #283 C1: the `--restoration-model-name` each tier launches with.
+LTX_MODEL_NAMES: dict[str, str] = {
+    "standard": "ltx",
+    "good": "ltx-4step",
+    "high": "ltx-8step",
+    "top": "ltx-undistilled",
+}
+#: #283 C5: the select's English option titles (the zh overlay translates them).
+_LTX_MODEL_TITLES = (
+    ("standard", "Standard (default, fastest)"),
+    ("good", "Good (~1.5x slower)"),
+    ("high", "High (~2.5x slower; the pre-0.11.3 default)"),
+    ("top", 'Top (~5x slower; formerly "best")'),
+)
+
+
+def _ltx_model_select(schema: dict) -> None:
+    """#283 C5: render `ltx_model` as a select with titled options (rjsf reads
+    `oneOf` titles only when there is no `enum`)."""
+    schema.pop("enum", None)
+    schema["oneOf"] = [{"const": v, "title": t} for v, t in _LTX_MODEL_TITLES]
+
+
+def migrate_legacy_ltx(raw: Any) -> Any:
+    """#283 C2: map the legacy `ltx_best` tickbox onto `ltx_model` (a copy; the
+    input is never mutated). `ltx_best: true` becomes top, anything else
+    standard; an `ltx_model` already present wins. Other input is returned as is."""
+    if not isinstance(raw, dict) or "ltx_best" not in raw:
+        return raw
+    out = dict(raw)
+    best = out.pop("ltx_best")
+    out.setdefault("ltx_model", "top" if best is True else "standard")
+    return out
+
 
 #: Containers Jasna's own CLI accepts (its folder mode scans the same set) —
 #: the shared common-video set the subtitle attribution uses too (#191).
@@ -695,10 +737,11 @@ def vr_detector_available(exe_dir: Optional[str]) -> bool:
     return _weights_available(exe_dir, _VR8K_DETECTION_MODEL)
 
 
-def ltx_missing_files(exe_dir: Optional[str], best: bool, fast: bool) -> list[str]:
-    """#263 AC4: which files of the selected LTX variant are not in
-    `<exe dir>/model_weights/ltx-restore` (all of them without an exe dir)."""
-    names = [_LTX_MODEL_FILES[(best, fast)], *_LTX_SHARED_FILES]
+def ltx_missing_files(exe_dir: Optional[str], model: str, fast: bool) -> list[str]:
+    """#263 AC4: which files of the selected LTX variant (#283: the `ltx_model`
+    tier, int8 or nvfp4 when fast) are not in `<exe dir>/model_weights/ltx-restore`
+    (all of them without an exe dir)."""
+    names = [_LTX_MODEL_FILES[(model, fast)], *_LTX_SHARED_FILES]
     if not exe_dir:
         return names
     folder = Path(exe_dir) / "model_weights" / "ltx-restore"
@@ -1153,7 +1196,7 @@ class JasnaConfig(BaseMonitorConfig):
         description="1080p tier only: 4K files and every other setting stay as "
         "they are. The 4K tier has its own LTX tickbox. The 1080p-tier files are "
         "restored with Jasna's supporter model "
-        "LTX (Jasna 0.11.1 or newer; more detail, much slower; NVIDIA RTX). While "
+        "LTX (Jasna 0.11.3 or newer; more detail, much slower; NVIDIA RTX). While "
         "ticked, 8K VR and the 1080p unet-4x are not used (LTX supports neither) "
         "and keep their saved values for when this is unticked. The first LTX "
         "launch asks to download the model (about 9 GB with fast mode, 15 GB "
@@ -1175,8 +1218,8 @@ class JasnaConfig(BaseMonitorConfig):
         description="--ltx-fast: about 1.4x faster, slightly less detail, a "
         "smaller download. RTX 50-series GPUs only — TaskPaw checks the GPU at "
         "Start and launches without it when it finds none (e.g. an RTX 4090). On "
-        "by default: the standard LTX model does not fit an 8 GB card. Only used "
-        "with LTX.",
+        "by default: the int8 model (without fast mode) does not fit an 8 GB card. "
+        "Only used with LTX.",
     )
     ltx_auto_split: int = Field(
         12,
@@ -1189,12 +1232,16 @@ class JasnaConfig(BaseMonitorConfig):
         "the whole film with LTX when it finds no safe cut points. Only used with "
         "LTX.",
     )
-    ltx_best: bool = Field(
-        False,
-        title="LTX best model",
-        description="--restoration-model-name ltx-undistilled: slightly more "
-        "detail, about 1.5-1.8x slower, its own model download. Only used with "
+    ltx_model: LtxModel = Field(
+        "standard",
+        title="LTX quality",
+        description="--restoration-model-name: Standard (ltx) is Jasna 0.11.3's "
+        "default and the fastest; Good (ltx-4step), High (ltx-8step) and Top "
+        "(ltx-undistilled) add detail and take longer. Each tier has its own model "
+        "download. The tiers need Jasna 0.11.3 or newer: on 0.11.2 Standard runs "
+        "the old High model and Good fails with Jasna's own error. Only used with "
         "LTX.",
+        json_schema_extra=_ltx_model_select,
     )
     ltx_large_canvas: bool = Field(
         False,
@@ -1209,7 +1256,7 @@ class JasnaConfig(BaseMonitorConfig):
     ltx_overlap: Literal["auto", "on", "off"] = Field(
         "auto",
         title="LTX reduced overlap (0.11.2+)",
-        description="auto: use Jasna's default (on in 0.11.2 Windows); on/off: explicitly enable/disable reduced overlap. About 13% faster on long videos. Only applies to LTX, not BasicVSR++ temporal overlap.",
+        description="auto: use Jasna's default (on in 0.11.2 Windows); on/off: explicitly enable/disable reduced overlap. About 13% faster when a mosaic stays on screen for more than 4 seconds. Only applies to LTX, not BasicVSR++ temporal overlap.",
     )
     vr_8k_custom: bool = Field(
         False,
@@ -1301,6 +1348,13 @@ class JasnaConfig(BaseMonitorConfig):
         "does not depend on this setting — it is derived from whether "
         "model_weights/*.engine exist.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_ltx_best(cls, data: Any) -> Any:
+        # #283 C2: extra="forbid" would reject the legacy key and stop the agent
+        # at boot — agent.yaml, Hub-pushed specs and admin patches all pass here.
+        return migrate_legacy_ltx(data)
 
     @model_validator(mode="after")
     def _validate_jasna(self) -> "JasnaConfig":
@@ -1399,7 +1453,7 @@ def vr_profile(cfg: JasnaConfig) -> bool:
 
 def _ltx_label(cfg: JasnaConfig, fast: bool, canvas: bool) -> list[str]:
     """The `_tier_suffix` parts of an LTX launch (effective fast / canvas)."""
-    parts = ["LTX" + (" best" if cfg.ltx_best else "") + (" fast" if fast else "")]
+    parts = [f"LTX {cfg.ltx_model}" + (" fast" if fast else "")]  # #283: the tier
     if canvas:
         parts.append("large canvas")
     if cfg.ltx_auto_split > 0:
@@ -1411,7 +1465,7 @@ def _ltx_label(cfg: JasnaConfig, fast: bool, canvas: bool) -> list[str]:
 
 def _ltx_mode(cfg: JasnaConfig, fast: bool, canvas: bool) -> str:
     """The `restore.started` `mode` of an LTX launch (effective fast / canvas)."""
-    mode = "ltx" + (" best" if cfg.ltx_best else "") + (" fast" if fast else "")
+    mode = f"ltx {cfg.ltx_model}" + (" fast" if fast else "")  # #283: the tier
     if canvas:
         mode += " large-canvas"
     if cfg.ltx_auto_split > 0:
@@ -1462,7 +1516,7 @@ def build_argv(
     if ltx:
         ltx_args = [
             "--restoration-model-name",
-            "ltx-undistilled" if cfg.ltx_best else "ltx",
+            LTX_MODEL_NAMES[cfg.ltx_model],  # #283
         ]
         if cfg.ltx_fast and ltx_fast_ok:
             ltx_args.append("--ltx-fast")
@@ -2347,7 +2401,7 @@ class JasnaInstance(MonitorInstance):
                 return False
             if ltx_launch(cfg, tier):
                 fast = cfg.ltx_fast and self._ltx_fast_ok
-                missing = ltx_missing_files(self._exe_dir(), cfg.ltx_best, fast)
+                missing = ltx_missing_files(self._exe_dir(), cfg.ltx_model, fast)
                 if missing:
                     self._download.request(
                         Path(cfg.jasna_exe_path).resolve().parent
@@ -4195,6 +4249,11 @@ class JasnaPlugin(MonitorPlugin):
         return JasnaConfig
 
     @classmethod
+    def migrate_config(cls, raw: dict) -> dict:
+        """#283 C2: the editor sees `ltx_best` already mapped to `ltx_model`."""
+        return migrate_legacy_ltx(raw)
+
+    @classmethod
     def ui_schema(cls) -> dict:
         # Lead with the fields that matter; path fields are flagged for the
         # file/folder picker widget (#71). Help text comes from the field
@@ -4215,7 +4274,7 @@ class JasnaPlugin(MonitorPlugin):
                 "ltx_4k",
                 "ltx_fast",
                 "ltx_auto_split",
-                "ltx_best",
+                "ltx_model",
                 "ltx_large_canvas",
                 "ltx_overlap",
                 "vr_8k",

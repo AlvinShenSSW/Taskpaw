@@ -112,7 +112,7 @@ describe("localizeSchema (#121)", () => {
     const s: RJSFSchema = {
       type: "object",
       properties: Object.fromEntries(
-        ["ltx_1080p", "ltx_fast", "ltx_auto_split", "ltx_best", "vr_8k", "unet4x_1080p", "jasna_extra_args"]
+        ["ltx_1080p", "ltx_fast", "ltx_auto_split", "ltx_model", "vr_8k", "unet4x_1080p", "jasna_extra_args"]
           .map((k) => [k, { type: "string", title: k, description: "English" }]),
       ),
     };
@@ -126,12 +126,35 @@ describe("localizeSchema (#121)", () => {
     expect(p.ltx_fast.description).toContain("RTX 50");
     expect(p.ltx_auto_split.title).toBe("LTX 仅用于大马赛克（%）");
     expect(p.ltx_auto_split.description).toContain("12");
-    expect(p.ltx_best.title).toBe("LTX 最佳模型");
-    expect(p.ltx_best.description).toContain("ltx-undistilled");
+    expect(p.ltx_model.title).toBe("LTX 画质");
+    expect(p.ltx_model.description).toContain("ltx-undistilled");
+    expect(p.ltx_model.description).toContain("Jasna 0.11.3 及以上");
     // #265: 8K VR is off under either LTX tickbox; the 1080p unet-4x under the 1080p one.
     expect(p.vr_8k.description).toContain("勾选任一「使用 LTX」时不使用");
     expect(p.unet4x_1080p.description).toContain("勾选「1080p 档：使用 LTX」时不使用");
     expect(p.jasna_extra_args.description).toContain("LTX 参数（--ltx-*、--restoration-model-name）一律拒绝");
+  });
+
+  it("translates the jasna LTX quality options and keeps unknown ones (#283)", () => {
+    const oneOf = [
+      { const: "standard", title: "Standard (default, fastest)" },
+      { const: "good", title: "Good (~1.5x slower)" },
+      { const: "high", title: "High (~2.5x slower; the pre-0.11.3 default)" },
+      { const: "top", title: "Top" },
+      { const: "future", title: "Future tier" },
+    ];
+    const s: RJSFSchema = { type: "object", properties: { ltx_model: { type: "string", title: "LTX quality", oneOf } } };
+    const zh = localizeSchema(s, "jasna", "zh-CN").properties as Record<string, { oneOf: { const: string; title: string }[] }>;
+    expect(zh.ltx_model.oneOf.map((o) => o.title)).toEqual([
+      "标准画质（默认，最快）",
+      "良好画质（慢约 1.5 倍）",
+      "高画质（慢约 2.5 倍，0.11.3 前的默认）",
+      "顶级画质（慢约 5 倍，原「最佳」）",
+      "Future tier",
+    ]);
+    expect(zh.ltx_model.oneOf.map((o) => o.const)).toEqual(oneOf.map((o) => o.const));
+    expect(oneOf[0].title).toBe("Standard (default, fastest)"); // input untouched
+    expect(localizeSchema(s, "jasna", "en")).toBe(s);
   });
 
   it("translates the jasna 4K LTX and large-canvas fields (#265)", () => {

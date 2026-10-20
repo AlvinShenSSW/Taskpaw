@@ -152,6 +152,13 @@ class MonitorPlugin(abc.ABC):
         """Build a runnable instance from validated config."""
 
     @classmethod
+    def migrate_config(cls, raw: dict) -> dict:
+        """A stored raw config as the editor must show it: legacy keys mapped the
+        way the model's own validation maps them, so a form default never
+        replaces a stored legacy value (#283). Never mutates `raw`. Default: as is."""
+        return raw
+
+    @classmethod
     def validate_config(cls, raw: dict) -> BaseMonitorConfig:
         """Validate a raw config dict against this plugin's model."""
         return cls.config_model()(**raw)

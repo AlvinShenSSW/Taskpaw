@@ -2083,19 +2083,24 @@ _LTX_COMPOSE_SLOW = (
     "run 03:20 left]"
 )
 _JASNA_CHECK = "Jasna: checked 14563/19444 files (74.9%)"
-_LTX_FILES = {
-    (False, False): "ltx-restore-alpha1-distill8-int8.safetensors.enc",
-    (False, True): "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc",
-    (True, False): "ltx-restore-alpha1-int8.safetensors.enc",
-    (True, True): "ltx-restore-alpha1-nvfp4.safetensors.enc",
+_LTX_STEPS = {
+    "standard": "distill2-",
+    "good": "distill4-",
+    "high": "distill8-",
+    "top": "",
+}
+_LTX_FILES = {  # #283: (ltx_model, fast) → the tier's model file
+    (m, f): f"ltx-restore-alpha1-{s}{'nvfp4' if f else 'int8'}.safetensors.enc"
+    for m, s in _LTX_STEPS.items()
+    for f in (False, True)
 }
 
 
-def _ltx_model(home: Path, best: bool = False, fast: bool = True) -> None:
+def _ltx_model(home: Path, model: str = "standard", fast: bool = True) -> None:
     folder = home / "model_weights" / "ltx-restore"
     folder.mkdir(parents=True, exist_ok=True)
     for name in (
-        _LTX_FILES[(best, fast)],
+        _LTX_FILES[(model, fast)],
         "vae.safetensors.enc",
         "vae-decoder.safetensors.enc",
     ):
@@ -2113,7 +2118,7 @@ def test_ltx_defaults_and_schema():
     assert c.ltx_1080p is False
     assert c.ltx_fast is True  # standard LTX does not load on 8 GB (device matrix)
     assert c.ltx_auto_split == 12
-    assert c.ltx_best is False
+    assert c.ltx_model == "standard"  # #283: Jasna 0.11.3's default tier
     props = JasnaPlugin.json_schema()["properties"]
     assert props["ltx_1080p"]["default"] is False
     assert props["ltx_1080p"]["title"] == "1080p tier: restore with LTX"
@@ -2122,7 +2127,7 @@ def test_ltx_defaults_and_schema():
     )
     assert props["ltx_fast"]["default"] is True
     assert props["ltx_auto_split"]["default"] == 12
-    assert props["ltx_best"]["default"] is False
+    assert props["ltx_model"]["default"] == "standard"
     order = JasnaPlugin.ui_schema()["ui:order"]
     i = order.index("ltx_1080p")
     assert order[i : i + 8] == [  # #265: + ltx_4k, ltx_large_canvas
@@ -2130,7 +2135,7 @@ def test_ltx_defaults_and_schema():
         "ltx_4k",
         "ltx_fast",
         "ltx_auto_split",
-        "ltx_best",
+        "ltx_model",
         "ltx_large_canvas",
         "ltx_overlap",
         "vr_8k",
@@ -2198,7 +2203,7 @@ def test_build_argv_ltx_1080p_launch_exact():
 
 def test_build_argv_ltx_variants():
     best = _ltx_argv(
-        _cfg(ltx_1080p=True, ltx_best=True, ltx_fast=False, ltx_auto_split=0)
+        _cfg(ltx_1080p=True, ltx_model="top", ltx_fast=False, ltx_auto_split=0)
     )
     assert best[best.index("--restoration-model-name") + 1] == "ltx-undistilled"
     assert "--ltx-fast" not in best and "--ltx-auto-split" not in best
@@ -2227,7 +2232,7 @@ def test_build_argv_ltx_ignores_the_stored_8k_vr_profile():
 
 
 def test_build_argv_basicvsrpp_unchanged_with_ltx_options_stored():
-    stored = _cfg(ltx_fast=False, ltx_auto_split=30, ltx_best=True)
+    stored = _cfg(ltx_fast=False, ltx_auto_split=30, ltx_model="top")
     for tier in ("1080p", "4k"):
         assert _ltx_argv(stored, tier=tier, work_dir=Path("w")) == _ltx_argv(
             _cfg(), tier=tier
@@ -2312,16 +2317,16 @@ def test_vr_8k_stays_valid_with_ltx_ticked():
     assert c.vr_8k is True and c.ltx_1080p is True
 
 
-@pytest.mark.parametrize(("best", "fast"), list(_LTX_FILES))
-def test_ltx_missing_files_per_variant(tmp_path, best, fast):
-    assert J.ltx_missing_files(str(tmp_path), best, fast) == [
-        _LTX_FILES[(best, fast)],
+@pytest.mark.parametrize(("model", "fast"), list(_LTX_FILES))
+def test_ltx_missing_files_per_variant(tmp_path, model, fast):
+    assert J.ltx_missing_files(str(tmp_path), model, fast) == [
+        _LTX_FILES[(model, fast)],
         "vae.safetensors.enc",
         "vae-decoder.safetensors.enc",
     ]
-    _ltx_model(tmp_path, best, fast)
-    assert J.ltx_missing_files(str(tmp_path), best, fast) == []
-    assert J.ltx_missing_files(None, best, fast) != []
+    _ltx_model(tmp_path, model, fast)
+    assert J.ltx_missing_files(str(tmp_path), model, fast) == []
+    assert J.ltx_missing_files(None, model, fast) != []
 
 
 def test_mixed_queue_ltx_on_1080p_basicvsrpp_on_4k(tmp_path, monkeypatch):
@@ -2349,7 +2354,7 @@ def test_mixed_queue_ltx_on_1080p_basicvsrpp_on_4k(tmp_path, monkeypatch):
     assert "--working-directory" not in launcher.launches[1]
     assert launcher.secondary(1) == "unet-4x"  # the 4K tier as before
     modes = [r["data"]["mode"] for r in _tasklog("restore.started")]
-    assert modes == ["ltx fast auto-split 12%", "unet-4x"]
+    assert modes == ["ltx standard fast auto-split 12%", "unet-4x"]
     assert inst._run_unet_disabled == {}
     assert not [e for e in evs if "unet-4x disabled" in e[1]]
     assert not [e for e in evs if e[3] == "j1:ltx:model"]  # the model is there
@@ -2641,7 +2646,8 @@ def test_ltx_stage_rides_the_metrics_and_the_detail(tmp_path):
     st = inst._build_status("running")
     assert st.metrics["ltx_stage"] == "2/4 encode"
     assert st.detail == (
-        "running: a.mp4 [1080p 1920x1080, LTX fast, auto-split 12%] · LTX 2/4 encode"
+        "running: a.mp4 [1080p 1920x1080, LTX standard fast, auto-split 12%] · "
+        "LTX 2/4 encode"
         " · 52% · ETA 12:12 · 5.6 fps"
     )
 
@@ -2650,7 +2656,7 @@ def test_detail_names_the_ltx_variant_and_keeps_4k_as_before(tmp_path):
     cfg, _inp, _out, _home = _managed(
         tmp_path,
         ltx_1080p=True,
-        ltx_best=True,
+        ltx_model="top",
         ltx_fast=False,
         ltx_auto_split=0,
         vr_8k=True,
@@ -2660,7 +2666,7 @@ def test_detail_names_the_ltx_variant_and_keeps_4k_as_before(tmp_path):
     inst._current_tier = "1080p"
     inst._current_dims = (1920, 1080)
     assert inst._build_status("running").detail == (
-        "running: a.mp4 [1080p 1920x1080, LTX best]"
+        "running: a.mp4 [1080p 1920x1080, LTX top]"
     )
     inst._current_tier = "4k"
     inst._current_dims = (3840, 2160)
@@ -2690,7 +2696,7 @@ def test_ltx_4k_fields_defaults_and_order():
     assert "16 GB" in props["ltx_large_canvas"]["description"]
     assert "RTX 4090" in props["ltx_fast"]["description"]
     assert "Jasna fails on other GPUs" not in props["ltx_fast"]["description"]
-    for name in ("ltx_fast", "ltx_auto_split", "ltx_best", "ltx_large_canvas"):
+    for name in ("ltx_fast", "ltx_auto_split", "ltx_model", "ltx_large_canvas"):
         assert "Only used with LTX" in props[name]["description"]
     assert "The 4K tier has its own LTX tickbox." in props["ltx_1080p"]["description"]
     assert "Not used while 4K LTX is ticked" in props["unet4x_4k"]["description"]
@@ -2910,10 +2916,11 @@ def test_rtx4090_box_both_tiers_ltx_without_fast_with_large_canvas(
         assert launcher.secondary(i) == "none"
     assert launcher.arg(1, "--max-clip-size") == "60"  # the 4K tier's clip
     modes = [r["data"]["mode"] for r in _tasklog("restore.started")]
-    assert modes == ["ltx large-canvas auto-split 12%"] * 2
+    assert modes == ["ltx standard large-canvas auto-split 12%"] * 2
     assert not [e for e in evs if e[3] in ("j1:ltx:model", "j1:ltx:4k-vram")]
-    assert "running: b.mp4 [4K 3840x2160, LTX, large canvas, auto-split 12%]" in (
-        inst._build_status("running").detail
+    assert (
+        "running: b.mp4 [4K 3840x2160, LTX standard, large canvas, auto-split 12%]"
+        in (inst._build_status("running").detail)
     )
     inst.stop(timeout=0.5)
 
