@@ -211,6 +211,27 @@ def retry_missing_models(rt: LocalRuntime) -> list[str]:
     return retried
 
 
+def recall_missing_models(rt: LocalRuntime) -> None:
+    """H3: after a restart, tell the restore executor which models its persisted
+    failure lacked, so the 修复 step offers the download again."""
+    restore = rt.executors.get("restore")
+    recall = getattr(restore, "recall_missing", None)
+    if not callable(recall):
+        return
+    for film in rt.store.film_board(rt.operator):
+        stage = next((s for s in film.stages if s.stage == "restore"), None)
+        note = (stage.note or "") if stage is not None else ""
+        if (
+            stage is None
+            or stage.status != "failed"
+            or not note.startswith(MISSING_LTX)
+        ):
+            continue
+        names = [n.strip() for n in note[len(MISSING_LTX) :].split("、")]
+        recall([n for n in names if n])
+        return
+
+
 class LocalWorkflowHost:
     def __init__(
         self,
@@ -256,6 +277,10 @@ class LocalWorkflowHost:
             rt.start_boot()
             _, intake_auth = rt.grant_intake_adapter()
             rt.settle_intake()
+            try:
+                recall_missing_models(rt)
+            except Exception:
+                log.exception("media workflow model offer recall failed")
             inbox = self.settings.inbox_root
             if inbox:
                 if not Path(inbox).is_dir():

@@ -505,6 +505,89 @@ def test_missing_models_are_offered_downloaded_and_the_restore_retried(offered):
     assert len(workers) == 1
 
 
+def test_the_offer_survives_an_agent_restart(tmp_path, monkeypatch):
+    """H3 Codex r3: the failed restore is persisted, the executor's cache is not."""
+    from taskpaw_v3.monitors.plugins import jasna
+    from taskpaw_v3.tests.test_workflow_local_dispatch import GPU_8GB
+    from taskpaw_v3.tests.workflow_exec_helpers import (
+        File,
+        Tools,
+        add_film,
+        dispatcher,
+        runtime,
+        stage,
+        video,
+    )
+
+    tools = Tools(tmp_path / "tools")
+    weights = tools.jasna_dir / "model_weights" / "ltx-restore"
+    shutil.rmtree(weights.parent)
+    data = tmp_path / "data"
+    rt = runtime(data, tools)
+    film = add_film(rt, [File("ABF-394.mp4", video())])
+    assert dispatcher(rt).run_once() is True
+    assert stage(rt, film, "restore").status == "failed"
+    rt.close()
+
+    def no_gpu_query():
+        raise AssertionError("the offer must not query the GPU")
+
+    monkeypatch.setattr(
+        local_host,
+        "LocalRuntime",
+        lambda path, execs: LocalRuntime(
+            path, execs, gpu=lambda: GPU_8GB, machine=lambda: "synthetic"
+        ),
+    )
+    host = LocalWorkflowHost(
+        WorkflowSettings(enabled=True),
+        data,
+        executor_factory=lambda r: [tools.restore(r, gpus=no_gpu_query)],
+    )
+    host.start()
+    try:
+        _wait(lambda: host.state != "starting")
+        assert host.state == "running", host.reason
+        client = _control(host)
+        offer = _restore_step(client, film)["download"]
+        missing = jasna.ltx_missing_files(None, False, True)
+        assert offer["state"] == "awaiting" and offer["files"] == missing
+        assert offer["variant"] == "ltx fast auto-split 12%"
+        weights.mkdir(parents=True)  # copied in by hand meanwhile: withdrawn
+        for name in missing:
+            (weights / name).write_bytes(b"weights")
+        assert "download" not in _restore_step(client, film)
+    finally:
+        host.stop(timeout=10)
+    assert host.state == "stopped"
+
+
+def test_recall_missing_infers_the_variant_from_the_file_names(tmp_path):
+    from taskpaw_v3.tests.workflow_exec_helpers import Tools, runtime
+
+    tools = Tools(tmp_path / "tools")
+    shutil.rmtree(tools.jasna_dir / "model_weights")
+    rt = runtime(tmp_path / "wf", tools)
+    try:
+        vae = ["vae.safetensors.enc", "vae-decoder.safetensors.enc"]
+        for names, cfg_fast, fast in (
+            (["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"], False, True),
+            (["a-nvfp4.enc", "vae.safetensors.enc"], False, True),
+            (["ltx-restore-alpha1-distill8-int8.safetensors.enc"], True, False),
+            (vae, True, True),
+            (vae, False, False),
+        ):
+            restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
+            restore.cfg = restore.cfg.model_copy(update={"ltx_fast": cfg_fast})
+            restore.recall_missing(names)
+            assert restore._models == (restore._weights(), fast), names
+        restore._models = (tmp_path, True)  # an existing preflight result wins
+        restore.recall_missing(["x-int8.enc"])
+        assert restore._models == (tmp_path, True)
+    finally:
+        rt.close()
+
+
 def test_a_download_can_be_stopped_and_is_offered_again(offered):
     from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, stage, video
 

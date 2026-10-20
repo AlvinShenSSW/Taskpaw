@@ -276,6 +276,22 @@ class RestoreExecutor:
             return None
         return weights, missing, jasna._ltx_mode(self.cfg, fast, False)
 
+    def recall_missing(self, names: list[str]) -> None:
+        """Seed the offer from a persisted preflight failure after a restart.
+
+        Only while nothing is cached; never queries the GPU. The variant comes
+        from the file names: the fast and the standard weights differ by suffix,
+        and only shared VAE files being missing leaves the configured choice."""
+        if any("-nvfp4" in name for name in names):
+            fast = True
+        elif any("-int8" in name for name in names):
+            fast = False
+        else:
+            fast = self.cfg.ltx_fast
+        with self._models_lock:
+            if self._models is None:
+                self._models = (self._weights(), fast)
+
     # ── stage body ──────────────────────────────────────────────────────
     def _run(self, context: JobContext) -> ExecOutcome:
         rt, manifest = self.runtime, context.manifest
