@@ -417,6 +417,32 @@ def test_stale_parts_of_the_request_are_cleared_when_the_folder_is_claimed(
     assert session.stop(0.01)
 
 
+def test_a_locked_partial_does_not_stop_the_cleanup_of_the_others(
+    tmp_path, monkeypatch, caplog
+):
+    """H3 Codex r2: Windows can refuse one delete; the rest still go, and it is logged."""
+    from taskpaw_v3.monitors.plugins import jasna_download_session as S
+
+    name = D.SHARED_FILES[1]
+    dest = tmp_path / "jasna"
+    dest.mkdir()
+    locked, other = dest / f".{name}.a1.part", dest / f".{name}.b2.part"
+    for path in (locked, other):
+        path.write_bytes(b"x")
+    real_unlink = type(locked).unlink
+
+    def unlink(self, missing_ok=False):
+        if self.name == locked.name:
+            raise PermissionError("in use")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(type(locked), "unlink", unlink)
+    with caplog.at_level("WARNING"):
+        S.DownloadSession._clear_parts(str(dest), [name])
+    assert locked.exists() and not other.exists()
+    assert "cannot delete" in caplog.text
+
+
 def test_an_exited_stopped_worker_is_reaped_by_the_next_claim(tmp_path, workers):
     """H3 Codex r1 F3: nobody ticks a stopped monitor, so the claimant reaps it."""
     name = D.SHARED_FILES[1]

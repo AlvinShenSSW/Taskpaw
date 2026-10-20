@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import glob
 import json
+import logging
 import os
 import queue
 import threading
@@ -17,6 +18,8 @@ from pathlib import Path
 
 from taskpaw_v3.monitors.plugins.jasna_download import FILES, worker_argv
 from taskpaw_v3.monitors.subs.child import ChildProcess, Eof, asr_env
+
+log = logging.getLogger(__name__)
 
 # Destinations a live worker downloads into, across every session (H3 D08),
 # each with its owning session so a later claimant can reap an exited worker.
@@ -97,10 +100,15 @@ class DownloadSession:
     def _clear_parts(destination: str, names: list[str]) -> None:
         for name in names:
             try:
-                for part in Path(destination).glob(f".{glob.escape(name)}.*.part"):
+                parts = list(Path(destination).glob(f".{glob.escape(name)}.*.part"))
+            except OSError as e:
+                log.warning("jasna download: cannot list partials of %s: %s", name, e)
+                continue
+            for part in parts:  # one locked partial must not keep the others
+                try:
                     part.unlink(missing_ok=True)
-            except OSError:
-                pass
+                except OSError as e:
+                    log.warning("jasna download: cannot delete %s: %s", part, e)
 
     def request(self, destination: Path, missing: list[str], variant: str) -> None:
         self.status = dict(
