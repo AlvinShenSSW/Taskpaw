@@ -19,6 +19,7 @@ import hashlib
 import os
 import stat
 import sys
+import threading
 from collections.abc import Callable
 from ctypes import wintypes as wt
 from datetime import datetime, timezone
@@ -53,6 +54,7 @@ DeleteStatus = Literal[
     "blocked_writing",
     "failed",
 ]
+Interrupted = Literal["interrupted"]
 
 _DELETE = 0x00010000
 _GENERIC_READ = 0x80000000
@@ -174,9 +176,20 @@ def _open_status(
     return "failed"
 
 
-def _hash_matches(read: Callable[[], bytes], size: int, sha256: str) -> bool:
+class _Interrupted(Exception):
+    """Shutdown was requested while a member was being hashed."""
+
+
+def _hash_matches(
+    read: Callable[[], bytes],
+    size: int,
+    sha256: str,
+    cancel: threading.Event | None = None,
+) -> bool:
     digest, total = hashlib.sha256(), 0
     while chunk := read():
+        if cancel is not None and cancel.is_set():
+            raise _Interrupted
         total += len(chunk)
         if total > size:
             return False
@@ -208,7 +221,9 @@ def check(path: Path, member: m.CleanupMember) -> CheckStatus:
         key, size = api.facts(handle)
         if key != expected:
             return "blocked_identity"
-        return "ok" if size == member.size_bytes else "blocked_changed"
+        if size != member.size_bytes or not _single_stream(api, path):
+            return "blocked_changed"
+        return "ok"
     except OSError:
         return "failed"
     finally:
@@ -218,10 +233,26 @@ def check(path: Path, member: m.CleanupMember) -> CheckStatus:
             pass
 
 
-def delete_exact(path: Path, member: m.CleanupMember) -> DeleteStatus:
-    """C6: verify identity, size and SHA-256 on one handle, then delete it."""
+def _single_stream(api: WindowsFiles, path: Path) -> bool:
+    """False when an alternate data stream exists: its bytes were never archived."""
+    try:
+        api.streams(path)
+    except IntakeFileError as exc:
+        if exc.code == "alternate_stream":
+            return False
+        raise OSError(exc.code) from exc
+    return True
+
+
+def delete_exact(
+    path: Path, member: m.CleanupMember, cancel: threading.Event | None = None
+) -> DeleteStatus | Interrupted:
+    """C6: verify identity, size, single stream and SHA-256 on one handle, then delete it.
+
+    "interrupted" (shutdown during hashing) deletes nothing and is not a result: retry later.
+    """
     if sys.platform != "win32":
-        return _posix_delete(path, member)
+        return _posix_delete(path, member, cancel)
     api = _api()
     try:
         handle = api.open_exact(path, _DELETE | _GENERIC_READ)
@@ -234,12 +265,21 @@ def delete_exact(path: Path, member: m.CleanupMember) -> DeleteStatus:
         key, size = api.facts(handle)
         if key != _key(member.native_identity):
             return "blocked_identity"
-        if size != member.size_bytes or not _hash_matches(
-            lambda: api.read(handle, _CHUNK), member.size_bytes, member.sha256
+        if (
+            size != member.size_bytes
+            or not _single_stream(api, path)
+            or not _hash_matches(
+                lambda: api.read(handle, _CHUNK),
+                member.size_bytes,
+                member.sha256,
+                cancel,
+            )
         ):
             return "blocked_changed"
         api.dispose(handle)
         disposed = True
+    except _Interrupted:
+        return "interrupted"
     except OSError:
         return "failed"
     finally:
@@ -255,7 +295,9 @@ def _posix_key(info: os.stat_result) -> tuple[str, str, str]:
     return "posix_inode", str(info.st_dev), str(info.st_ino)
 
 
-def _posix_delete(path: Path, member: m.CleanupMember) -> DeleteStatus:
+def _posix_delete(
+    path: Path, member: m.CleanupMember, cancel: threading.Event | None = None
+) -> DeleteStatus | Interrupted:
     """Development/test fallback; POSIX has no read-only share lock."""
     expected = _key(member.native_identity)
     try:
@@ -278,12 +320,14 @@ def _posix_delete(path: Path, member: m.CleanupMember) -> DeleteStatus:
         if _posix_key(os.fstat(fd)) != expected:
             return "blocked_identity"
         if not _hash_matches(
-            lambda: os.read(fd, _CHUNK), member.size_bytes, member.sha256
+            lambda: os.read(fd, _CHUNK), member.size_bytes, member.sha256, cancel
         ):
             return "blocked_changed"
         if _posix_key(os.lstat(path)) != expected:
             return "blocked_identity"
         os.unlink(path)
+    except _Interrupted:
+        return "interrupted"
     except FileNotFoundError:
         return "already_absent"
     except OSError:

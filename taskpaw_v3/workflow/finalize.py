@@ -530,8 +530,10 @@ class Finalizer:
             if statuses.get(member.item_id, "pending") not in _RETRYABLE:
                 continue  # done, or changed/replaced: kept for the operator (C7)
             status = file_identity.delete_exact(
-                self._member_path(member, final, wf.package_path), member
+                self._member_path(member, final, wf.package_path), member, self.cancel
             )
+            if status == "interrupted":
+                break  # shutdown mid-hash: nothing deleted, retried after restart
             results.append(
                 m.CleanupItemResult(
                     item_id=member.item_id,

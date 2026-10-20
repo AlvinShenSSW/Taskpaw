@@ -183,3 +183,27 @@ def test_empty_file_round_trip(tmp_path):
     assert fid.check(path, value) == "ok"
     assert fid.delete_exact(path, value) == "deleted"
     assert not path.exists()
+
+
+@WINDOWS
+def test_alternate_stream_added_after_intake_is_never_deleted(member):
+    """Codex F02 r2: ADS bytes were never archived; the file is kept."""
+    path, value = member
+    with open(f"{path}:new_metadata", "wb") as stream:
+        stream.write(b"not archived")
+    assert fid.check(path, value) == "blocked_changed"
+    assert fid.delete_exact(path, value) == "blocked_changed"
+    assert path.exists()
+    with open(f"{path}:new_metadata", "rb") as stream:
+        assert stream.read() == b"not archived"
+
+
+def test_shutdown_while_hashing_deletes_nothing(member):
+    import threading
+
+    path, value = member
+    cancel = threading.Event()
+    cancel.set()
+    assert fid.delete_exact(path, value, cancel) == "interrupted"
+    assert path.exists()
+    assert fid.delete_exact(path, value) == "deleted"
