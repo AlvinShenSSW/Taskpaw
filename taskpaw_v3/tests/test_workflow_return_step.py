@@ -103,14 +103,19 @@ class FakeRestore(_Fake):
 
 class FakeAsr(_Fake):
     stage = "asr"
+    decision = "source_ja"
 
     def run(self, context):
         (video,) = main_videos(context.manifest)
         (sub,) = [i for i in context.manifest.items if i.role == "source_subtitle"]
-        ja = file_ref(
+        ref = file_ref(
             self.rt.work_dir, workcopy_path(self.rt, context.manifest, sub.item_id)
         )
-        facts = SubtitleFacts(decision="source_ja", ja=ja)
+        facts = {
+            "source_ja": SubtitleFacts(decision="source_ja", ja=ref),
+            "reused_zh": SubtitleFacts(decision="reused_zh", zh=ref),
+            "no_speech": SubtitleFacts(decision="no_speech"),
+        }[self.decision]
         return self._done(
             context,
             [
@@ -127,6 +132,8 @@ class FakeTranslate(_Fake):
     def run(self, context):
         asr = load_stage_result(self.rt, context.job.film_id, "asr")
         (entry,) = asr.videos
+        if entry.subtitle.decision not in ("source_ja", "generated_ja"):
+            return self._done(context, [entry])  # reused zh / no speech: no-op
         out = context.workdir / "movie-破解.zh.srt"
         out.write_bytes(ZH)
         facts = SubtitleFacts(
@@ -160,11 +167,11 @@ def rt(tmp_path):
         value.close()
 
 
-def add_real_film(rt):
+def add_real_film(rt, *, root=WORKCOPY, sub=JA, sub_language="ja"):
     """A film whose work copy really exists, with matching hashes."""
-    files = {"movie.mkv": VIDEO, "movie.ja.srt": JA}
+    files = {"movie.mkv": VIDEO, "movie.ja.srt": sub}
     for name, raw in files.items():
-        path = rt.work_dir / WORKCOPY / name
+        path = rt.work_dir / root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
 
@@ -176,7 +183,10 @@ def add_real_film(rt):
                 hashlib.sha256(raw).hexdigest(),
             )
         for item in data["readiness"]["workcopy"]["items"]:
-            item["relative_path"] = f"{WORKCOPY}/{item['relative_path']}"
+            item["relative_path"] = f"{root}/{item['relative_path']}"
+        for item in data["items"]:
+            if item["role"] == "source_subtitle":
+                item["language"] = sub_language
 
     _, auth = rt.grant_intake_adapter()
     film = identity()
@@ -363,3 +373,40 @@ def test_refs_are_relative_to_the_work_root(rt):
     assert file_ref(rt.work_dir, target) == FileRef(
         path="x/f.bin", sha256=hashlib.sha256(b"abc").hexdigest(), size=3
     )
+
+
+def test_an_input_labelled_zh_is_never_reported_as_the_chinese_subtitle(rt):
+    """IR01: only the translate ledger's zh subtitle counts, never a filename label."""
+    rt.executors["asr"].decision = "no_speech"
+    film = add_real_film(rt, sub=JA, sub_language="zh")  # labelled zh, judged Japanese
+    run_all(dispatcher(rt))
+    assert status(rt, film, "return") == "succeeded"
+    handoff = json.loads(
+        (package_dir(rt, film, 1) / MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert handoff["subtitles"] == {
+        "status": "no_speech",
+        "language": None,
+        "item_ids": [],
+        "kept_ja": 0,
+    }
+
+
+def test_a_reused_chinese_subtitle_is_recognised_by_its_work_copy_path(rt):
+    """IR05: reuse follows the manifest's work copy paths, not a directory name."""
+    rt.executors["asr"].decision = "reused_zh"
+    film = add_real_film(rt, root="copies/elsewhere", sub=ZH, sub_language="zh")
+    run_all(dispatcher(rt))
+    assert status(rt, film, "return") == "succeeded"
+    package = package_dir(rt, film, 1)
+    handoff = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
+    roles = {i["relative_path"]: i["role"] for i in handoff["items"]}
+    assert roles == {
+        "movie-破解.mkv": "main_video",
+        "movie-破解.zh.srt": "source_subtitle",
+    }
+    (zh_item,) = handoff["subtitles"]["item_ids"]
+    assert next(i for i in handoff["items"] if i["item_id"] == zh_item)[
+        "relative_path"
+    ] == ("movie-破解.zh.srt")
+    assert (package / "movie-破解.zh.srt").read_bytes() == ZH

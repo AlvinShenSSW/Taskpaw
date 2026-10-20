@@ -50,6 +50,9 @@ class _Member:
     language: str | None = None
     volume_ordinal: int | None = None
     source_item_id: str | None = None
+    # The film's verified Chinese subtitle from the translate ledger (IR01);
+    # an input file merely labelled "zh" never sets this.
+    final_zh: bool = False
 
 
 def package_dir(rt: LocalRuntime, film_id: str, revision: int) -> Path:
@@ -110,6 +113,7 @@ class LocalReturnStep:
         subtitles = {v.video_item_id: v.subtitle for v in translate.videos}
         members: list[_Member] = []
         reused_sources: set[str] = set()
+        workcopies = {c.relative_path for c in manifest.readiness.workcopy.items}
         for video in main_videos(manifest):
             facts = restored.get(video.item_id)
             if facts is None:
@@ -139,7 +143,7 @@ class LocalReturnStep:
                 if ref is None:
                     continue
                 file = check_file(rt.work_dir, ref)
-                reused = ref.path.startswith("intake/")
+                reused = ref.path in workcopies  # an input subtitle kept as is (IR05)
                 if reused:
                     reused_sources.add(ref.path)
                 members.append(
@@ -153,6 +157,7 @@ class LocalReturnStep:
                         link=False,
                         video_item_id=video.item_id,
                         language=language,
+                        final_zh=language == "zh",
                     )
                 )
         for item in manifest.items:
@@ -202,7 +207,7 @@ class LocalReturnStep:
         restore = results["restore"]
         videos = [v.restore for v in restore.videos if v.restore is not None]
         subtitles = [v.subtitle for v in results["translate"].videos if v.subtitle]
-        zh_items = [x.item_id for x in members if x.language == "zh"]
+        zh_items = [x.item_id for x in members if x.final_zh]
         return {
             "schema": 1,
             "film_id": context.job.film_id,
