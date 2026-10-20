@@ -415,3 +415,35 @@ def test_stale_parts_of_the_request_are_cleared_when_the_folder_is_claimed(
     assert not stale.exists()
     assert all(path.exists() for path in kept)
     assert session.stop(0.01)
+
+
+def test_an_exited_stopped_worker_is_reaped_by_the_next_claim(tmp_path, workers):
+    """H3 Codex r1 F3: nobody ticks a stopped monitor, so the claimant reaps it."""
+    name = D.SHARED_FILES[1]
+    dest = tmp_path / "jasna"
+    first = _approved(dest, name)
+    first.tick()
+    dest.mkdir()
+    partial = dest / f".{name}.k3j2.part"
+    partial.write_bytes(b"half")
+    workers[0].survives = True
+    assert not first.stop(0.01)  # the claim stays: the worker may still write
+    second = _approved(dest, name)
+    assert not second.tick()  # a live child is never reaped
+    assert (
+        second.status["state"] == "error"
+        and "already downloading" in (second.status["error"])
+    )
+    assert partial.exists() and len(workers) == 1
+    workers[0].rc = 1  # exits without any further tick of the first session
+    assert second.respond(second.status["request_id"], True)
+    second.tick()
+    assert second.status["state"] == "downloading" and len(workers) == 2
+    assert not partial.exists()
+    assert second.stop(0.01)
+    # the reaped session's late tick must not free the new owner's claim
+    assert not first.tick() and first.child is None
+    third = _approved(dest, name)
+    third.tick()
+    assert third.status["state"] == "downloading"
+    assert third.stop(0.01)

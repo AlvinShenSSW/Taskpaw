@@ -11,6 +11,7 @@ import hashlib
 import logging
 import shutil
 import threading
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -307,6 +308,7 @@ class LocalWorkflowHost:
         which would hang the agent's shutdown. Process exit still releases the
         store lock and closes the kill-on-close Jobs.
         """
+        deadline = time.monotonic() + timeout
         self._stopping.set()
         confirmed = True
         if self._thread is not None:
@@ -314,9 +316,19 @@ class LocalWorkflowHost:
             confirmed &= not self._thread.is_alive()
         ticker = self._ticker
         if ticker is not None:
-            ticker.join(timeout=timeout)
-        with self._download_lock:
-            confirmed &= self._download.stop(min(timeout, DOWNLOAD_STOP_SECONDS))
+            ticker.join(timeout=max(0.0, deadline - time.monotonic()))
+            # a ticker still inside the retry callback (outside the lock) or a
+            # stalled tick owns the runtime: closing under it is unsafe
+            confirmed &= not ticker.is_alive()
+        # a ticker stalled inside the lock must not hang the whole shutdown; the
+        # session and its child stay ours for a later stop() to retry
+        if self._download_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            try:
+                confirmed &= self._download.stop(min(timeout, DOWNLOAD_STOP_SECONDS))
+            finally:
+                self._download_lock.release()
+        else:
+            confirmed = False
         if self.dispatcher is not None:
             confirmed &= self.dispatcher.stop(timeout=timeout)
         if self.intake is not None:

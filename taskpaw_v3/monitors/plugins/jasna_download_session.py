@@ -12,13 +12,15 @@ import os
 import queue
 import threading
 import uuid
+import weakref
 from pathlib import Path
 
 from taskpaw_v3.monitors.plugins.jasna_download import FILES, worker_argv
 from taskpaw_v3.monitors.subs.child import ChildProcess, Eof, asr_env
 
-# Destinations a live worker downloads into, across every session (H3 D08).
-_ACTIVE: set[str] = set()
+# Destinations a live worker downloads into, across every session (H3 D08),
+# each with its owning session so a later claimant can reap an exited worker.
+_ACTIVE: dict[str, weakref.ref[DownloadSession]] = {}
 _ACTIVE_LOCK = threading.Lock()
 BUSY = "LTX models are already downloading into this folder; retry when it finishes."
 
@@ -55,24 +57,41 @@ class DownloadSession:
         self._leftovers: tuple[str, list[str]] | None = None  # to clean on stop
 
     def _claim(self, destination: str) -> bool:
+        key = _key(destination)
         with _ACTIVE_LOCK:
-            if _key(destination) in _ACTIVE:
-                return False
-            _ACTIVE.add(_key(destination))
+            holder = _ACTIVE.get(key)
+            if holder is not None:
+                owner = holder()
+                if owner is None:
+                    del _ACTIVE[key]  # the session is gone: nothing can reap it
+                elif owner is self or not owner._worker_exited():
+                    return False
+                else:  # a stopped worker ended after nobody ticked it any more
+                    owner._release_locked()
+            _ACTIVE[key] = weakref.ref(self)
         self._claimed = destination
         return True
+
+    def _worker_exited(self) -> bool:
+        child = self.child
+        return child is not None and child.poll() is not None
 
     def _release(self) -> None:
         """Free the destination once no worker of ours can write to it, then
         delete the partial files a stopped worker left (H3 D09)."""
+        with _ACTIVE_LOCK:
+            self._release_locked()
+
+    def _release_locked(self) -> None:
         claimed, self._claimed = self._claimed, None
         leftovers, self._leftovers = self._leftovers, None
-        with _ACTIVE_LOCK:
-            if claimed is not None:
-                _ACTIVE.discard(_key(claimed))
-            if leftovers is None or _key(leftovers[0]) in _ACTIVE:
-                return  # another session downloads there now: its files
-            self._clear_parts(*leftovers)
+        if claimed is not None:
+            holder = _ACTIVE.get(_key(claimed))
+            if holder is not None and holder() is self:  # never a new owner's
+                del _ACTIVE[_key(claimed)]
+        if leftovers is None or _key(leftovers[0]) in _ACTIVE:
+            return  # another session downloads there now: its files
+        self._clear_parts(*leftovers)
 
     @staticmethod
     def _clear_parts(destination: str, names: list[str]) -> None:

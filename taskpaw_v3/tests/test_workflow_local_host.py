@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -597,3 +598,63 @@ def test_the_download_ticker_survives_a_failing_tick(offered, monkeypatch):
     workers[0].finish()
     _wait(lambda: host._ticker is None, seconds=10)
     assert host._download.status == {}
+
+
+def _start_download(offered, worker=True):
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, video
+
+    add_film(offered.rt, [File("ABF-394.mp4", video())])
+    assert offered.host.dispatcher.run_once() is True
+    offer = offered.host.status()["ltx_download"]
+    assert offered.host.respond_ltx_download(offer["request_id"], True)
+    if worker:
+        _wait(lambda: offered.workers, seconds=10)
+
+
+def test_stop_is_bounded_while_the_ticker_holds_the_download_lock(offered, monkeypatch):
+    """H3 Codex r1 F1: a stalled tick must not hang the shutdown."""
+    host = offered.host
+    entered, release = threading.Event(), threading.Event()
+    real = host._download.tick
+
+    def stalled():
+        entered.set()
+        release.wait(30)
+        return real()
+
+    monkeypatch.setattr(host._download, "tick", stalled)
+    _start_download(offered, worker=False)
+    assert entered.wait(10)
+    started = time.monotonic()
+    host.stop(timeout=0.05)
+    assert time.monotonic() - started < 5
+    assert host.state == "stop_unconfirmed"
+    assert host.runtime is not None and host.runtime.store is not None
+    release.set()
+    host.stop(timeout=10)
+    assert host.state == "stopped"
+
+
+def test_stop_is_unconfirmed_while_the_ticker_runs_the_retry_callback(
+    offered, monkeypatch
+):
+    """H3 Codex r1 F2: the callback runs outside the lock but is still ours."""
+    host = offered.host
+    entered, release = threading.Event(), threading.Event()
+    closed = []
+    real_close = offered.rt.close
+    monkeypatch.setattr(offered.rt, "close", lambda: closed.append(1) or real_close())
+
+    def slow():
+        entered.set()
+        release.wait(30)
+
+    monkeypatch.setattr(host, "_downloaded", slow)
+    _start_download(offered)
+    offered.workers[0].finish()
+    assert entered.wait(10)
+    host.stop(timeout=0.05)
+    assert host.state == "stop_unconfirmed" and closed == []
+    release.set()
+    host.stop(timeout=10)
+    assert host.state == "stopped" and closed == [1]
