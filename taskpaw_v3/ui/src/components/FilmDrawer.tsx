@@ -58,10 +58,11 @@ function FilmBody({ film }: { film: FilmDetail }) {
   const { t } = useTranslation();
   const label = useMediaLabels();
   const qc = useQueryClient();
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY });
-    qc.invalidateQueries({ queryKey: mediaFilmKey(film.film_id) });
-  };
+  const invalidate = () =>
+    Promise.all([
+      qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY }),
+      qc.invalidateQueries({ queryKey: mediaFilmKey(film.film_id) }),
+    ]);
   const retry = useMutation({
     mutationFn: (stage: string) => api.workflowRetry(film.film_id, stage), onSuccess: invalidate,
   });
@@ -108,7 +109,9 @@ function FilmBody({ film }: { film: FilmDetail }) {
 
       {/* the success note lasts only while the film is not confirmable: a failed archive shows the picker again */}
       {confirmed && !film.can_confirm ? <Alert severity="success">{t("media.confirmed")}</Alert>
-        : film.can_confirm && <TargetPicker film={film} onConfirmed={() => { setConfirmed(true); invalidate(); }} />}
+        : film.can_confirm && (
+          <TargetPicker film={film} onConfirmed={() => { setConfirmed(true); return invalidate(); }} />
+        )}
 
       <Divider />
       <Box>
@@ -190,7 +193,7 @@ function PerformerAvatar({ performer }: { performer: Performer }) {
 
 // U3/U4: search Filmpaw performers (prefilled with the first actor), pick one by
 // hand — nothing is auto-selected — then a single click confirms the intake.
-function TargetPicker({ film, onConfirmed }: { film: FilmDetail; onConfirmed: () => void }) {
+function TargetPicker({ film, onConfirmed }: { film: FilmDetail; onConfirmed: () => Promise<unknown> }) {
   const { t } = useTranslation();
   const initial = film.actors[0] ?? film.number ?? "";
   const [text, setText] = useState(initial);
@@ -205,18 +208,17 @@ function TargetPicker({ film, onConfirmed }: { film: FilmDetail; onConfirmed: ()
     enabled: query.trim() !== "", retry: false,
   });
   const filmpawDown = performers.error instanceof HttpError && performers.error.status === 503;
-  // The film as confirmed: success disables the button only until a newer detail arrives — an
-  // archive that already failed must be confirmable again without reopening (Codex T06 r1).
-  const [confirmedFilm, setConfirmedFilm] = useState<FilmDetail | null>(null);
+  // The mutation stays pending until the refreshed detail has arrived, then resets: whatever the
+  // backend now says (archiving, or already failed and confirmable) decides — never a stale
+  // success, however quickly or identically an archive fails (Codex T06 r1/r2).
   const confirm = useMutation({
     mutationFn: (performer: Performer) => api.workflowConfirm(film.film_id, performer.id),
-    onSuccess: () => {
-      setConfirmedFilm(film);
-      onConfirmed();
+    onSuccess: async () => {
+      await onConfirmed();
+      confirm.reset();
     },
   });
-  const settled = confirm.isSuccess && confirmedFilm === film;
-  const canClick = film.can_confirm && selected !== null && !filmpawDown && !confirm.isPending && !settled;
+  const canClick = film.can_confirm && selected !== null && !filmpawDown && !confirm.isPending;
   const items = performers.data?.items ?? [];
 
   return (
@@ -236,7 +238,7 @@ function TargetPicker({ film, onConfirmed }: { film: FilmDetail; onConfirmed: ()
         <List dense sx={{ maxHeight: 280, overflow: "auto" }}>
           {items.map((p) => (
             <ListItemButton key={p.id} selected={selected?.id === p.id} onClick={() => setSelected(p)}
-              disabled={confirm.isPending || confirm.isSuccess}>
+              disabled={confirm.isPending}>
               <ListItemAvatar><PerformerAvatar performer={p} /></ListItemAvatar>
               <ListItemText
                 primary={p.source_label ? `${p.name} · ${p.source_label}` : p.name}

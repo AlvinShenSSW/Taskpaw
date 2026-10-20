@@ -174,6 +174,12 @@ describe("FilmDrawer", () => {
     await waitFor(() => expect(confirmButton()).toBeEnabled());
     fireEvent.click(confirmButton());
     await waitFor(() => expect(confirmApi).toHaveBeenCalledTimes(2));
+    // Codex T06 r2: identical failures (same detail object) and a different target stay possible
+    await waitFor(() => expect(confirmButton()).toBeEnabled());
+    fireEvent.click(await screen.findByText("三上 · NAS-B"));
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(confirmApi).toHaveBeenCalledTimes(3));
+    expect(confirmApi).toHaveBeenLastCalledWith("f1", 8);
   });
 
   it("labels kept cleanup members by why they were kept", async () => {
