@@ -277,6 +277,32 @@ def test_a_held_file_is_transient_and_retried(rt):
     assert all(a.evidence[0].kind == failed_kind("transient") for a in attempts)
 
 
+def test_transient_retries_wait_a_poll_between_attempts(rt):
+    """H1 internal review IR01: back-to-back retries cannot outlast an AV hold."""
+    import time
+
+    times: list[float] = []
+
+    def held():
+        times.append(time.monotonic())
+        return PermissionError(errno.EACCES, "Permission denied")
+
+    rt.executors["restore"] = RaisingExecutor("restore", held)
+    film = add_film(rt)
+    d = dispatcher(rt)
+    d.poll = 0.3
+    d.start()
+    try:
+        deadline = time.monotonic() + 10
+        while stage(rt, film, "restore").status != "failed" or len(times) < 3:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+    finally:
+        assert d.stop(timeout=10)
+    assert len(times) == 3
+    assert min(b - a for a, b in zip(times, times[1:])) >= 0.25
+
+
 def test_other_executor_errors_still_need_attention(rt):
     rt.executors["restore"] = RaisingExecutor(
         "restore", lambda: FileNotFoundError(errno.ENOENT, "No such file")

@@ -190,6 +190,7 @@ class LocalDispatcher:
         self._unsettled: _Unsettled | None = None
         self._waiting: dict[str, str] = {}
         self._reason = "idle"
+        self._backoff = False  # wait a poll before retrying a transient failure
         self._holding = False
 
     # ── lifecycle ───────────────────────────────────────────────────────
@@ -263,7 +264,10 @@ class LocalDispatcher:
                 worked = False
             if not self.cancel.is_set():
                 self._finalize()
-            if not worked:
+            if not worked or self._backoff:
+                # a transient failure waits a poll before its retry: an antivirus or
+                # indexer hold outlasts three back-to-back attempts (H1 IR01)
+                self._backoff = False
                 self._wake.wait(self.poll)
                 self._wake.clear()
         if self._unsettled is None:  # a still-running tree keeps the GPU (C4)
@@ -455,7 +459,9 @@ class LocalDispatcher:
                     job, manifest, workdir, self.cancel, running.processes, progress
                 )
             )
-        except Exception as exc:  # setup error or executor bug: visible needs-attention
+        except (
+            Exception
+        ) as exc:  # setup error / executor bug: needs-attention; a held file: transient
             log.exception("workflow stage %s failed", job.stage)
             outcome = ExecOutcome.failed(classify_exception(exc), f"执行器异常：{exc}")
         finally:
@@ -558,6 +564,7 @@ class LocalDispatcher:
             else:
                 self._retry_if_due(running.job.job_id)  # C6
                 self._reason = outcome.message
+                self._backoff = outcome.error_class == "transient"
         finally:
             with self._lock:
                 self._running = None
@@ -645,7 +652,7 @@ class LocalDispatcher:
                     running.processes,
                 )
             )
-        except Exception as exc:  # a step bug is a visible needs-attention
+        except Exception as exc:  # a step bug: needs-attention; a held file: transient
             log.exception("workflow %s failed", job.stage)
             outcome = ExecOutcome.failed(
                 classify_exception(exc), f"{job.stage} 异常：{exc}"
