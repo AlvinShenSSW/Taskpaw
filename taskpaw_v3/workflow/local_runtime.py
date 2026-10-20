@@ -69,15 +69,23 @@ class LocalIdentity:
     work_root_id: str
     created_at: str
     keys: dict[str, str] = field(default_factory=dict)
-    # Fixed component of every boot's receiver principal (T04 D17); "" in old files.
+    # Fixed components of every boot's receiver (T04 D17) and scrape (M01 §4.1)
+    # principals; "" in older files.
     receiver_component_id: str = ""
+    scrape_component_id: str = ""
 
     @classmethod
     def load_or_create(cls, path: Path, now: datetime) -> LocalIdentity:
         if path.exists():
             loaded = cls(**json.loads(path.read_text(encoding="utf-8")))
-            if not loaded.receiver_component_id:  # back-fill once, then stable
-                loaded.receiver_component_id = _new_id()
+            missing = [
+                name
+                for name in ("receiver_component_id", "scrape_component_id")
+                if not getattr(loaded, name)
+            ]
+            for name in missing:  # back-fill once, then stable
+                setattr(loaded, name, _new_id())
+            if missing:
                 atomic_json(path, asdict(loaded))
             return loaded
         value = cls(
@@ -100,6 +108,7 @@ class LocalIdentity:
                 for name in ("register", "pairing", "complete", "participation")
             },
             receiver_component_id=_new_id(),
+            scrape_component_id=_new_id(),
         )
         atomic_json(path, asdict(value))
         return value
@@ -150,6 +159,7 @@ class LocalRuntime:
         self._operator: AuthProof | None = None
         self._worker_auth: AuthProof | None = None
         self._receiver_auth: AuthProof | None = None
+        self._scrape_auth: AuthProof | None = None
         self._boot_id: str | None = None
         self.gpu: LocalGpu | None = None
         self.reason = "starting"
@@ -182,6 +192,10 @@ class LocalRuntime:
     @property
     def receiver_auth(self) -> AuthProof:
         return cast(AuthProof, self._need(self._receiver_auth, "receiver credential"))
+
+    @property
+    def scrape_auth(self) -> AuthProof:
+        return cast(AuthProof, self._need(self._scrape_auth, "scrape credential"))
 
     @property
     def boot_id(self) -> str:
@@ -446,6 +460,7 @@ class LocalRuntime:
         self._boot_id = _new_id()
         self._record_boot()
         _, self._receiver_auth = self._grant("receiver_adapter")
+        _, self._scrape_auth = self._grant("scrape_adapter")
         self.settle_previous()
 
     def _record_boot(self) -> None:
@@ -530,11 +545,14 @@ class LocalRuntime:
             return True
 
     def _ours(self, open_: m.OpenAssignment) -> bool:
-        """Only this runtime's work: its GPU worker or its receiver (T04 D12)."""
-        assignment = open_.assignment
-        return assignment.worker_id == self.identity.worker_id or (
-            open_.stage == "return"
-            and open_.owner_component_id == self.identity.receiver_component_id
+        """Only this runtime's work: GPU worker, receiver or scrape (T04 D12, M01)."""
+        assignment, ident = open_.assignment, self.identity
+        return assignment.worker_id == ident.worker_id or (
+            (open_.stage, open_.owner_component_id)
+            in (
+                ("return", ident.receiver_component_id),
+                ("scrape", ident.scrape_component_id),
+            )
         )
 
     def open_assignment(self, assignment_id: str) -> m.AssignmentRecord:
@@ -625,14 +643,14 @@ class LocalRuntime:
         return self._grant("intake_adapter")
 
     def _grant(
-        self, role: Literal["intake_adapter", "receiver_adapter"]
+        self, role: Literal["intake_adapter", "receiver_adapter", "scrape_adapter"]
     ) -> tuple[m.ComponentGrant, AuthProof]:
         """A fresh principal of a fixed component for this boot."""
-        component = (
-            self.identity.intake_component_id
-            if role == "intake_adapter"
-            else self.identity.receiver_component_id
-        )
+        component = {
+            "intake_adapter": self.identity.intake_component_id,
+            "receiver_adapter": self.identity.receiver_component_id,
+            "scrape_adapter": self.identity.scrape_component_id,
+        }[role]
         secret = SecretStr(_secret())
         grant = m.ComponentGrant(
             component_id=component,

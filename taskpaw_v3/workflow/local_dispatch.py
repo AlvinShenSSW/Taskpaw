@@ -13,15 +13,17 @@ import shutil
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from taskpaw_v3.core import gpu_lease
 from taskpaw_v3.core.generation import next_generation
 
 from . import models as m
+from .auth import AuthProof
 from .executors import (
     INTERRUPTED_KIND,
     SUCCEEDED_KIND,
+    ComputeStage,
     ExecOutcome,
     JobContext,
     StageExecutor,
@@ -33,6 +35,7 @@ from .owned_process import OwnedJob
 log = logging.getLogger("taskpaw.workflow.dispatch")
 
 _COMPUTE: tuple[str, ...] = ("restore", "asr", "translate")
+_LOCAL: tuple[str, ...] = (*_COMPUTE, "return", "scrape")
 MAX_AUTO_RETRIES = 2
 POLL_SECONDS = 5.0
 STOP_SETTLE_SECONDS = 30.0
@@ -59,12 +62,15 @@ class _Running:
     progress: str = ""
 
 
-class ReturnStep(Protocol):
-    """Builds and receipts the local return package (T04 E5); not a GPU executor."""
+class ComponentStep(Protocol):
+    """A non-GPU stage claimed by a component principal: return (T04), scrape (M01)."""
 
     def tools(self) -> m.ToolVersions: ...
 
     def run(self, context: ReturnContext) -> ExecOutcome: ...
+
+
+ReturnStep = ComponentStep
 
 
 @dataclass
@@ -75,6 +81,8 @@ class ReturnContext:
     operation_id: str
     runtime: LocalRuntime
     cancel: threading.Event
+    # the attempt's kill-on-close Job, for steps that run a child (M01 scrape)
+    processes: OwnedJob | None = None
 
 
 def _needs_gpu(executor: StageExecutor, manifest: m.InputManifest) -> bool:
@@ -147,9 +155,10 @@ class LocalDispatcher:
         stop_settle: float = STOP_SETTLE_SECONDS,
         renew_every: float = RENEW_SECONDS,
         return_step: ReturnStep | None = None,
+        scrape_step: ComponentStep | None = None,
     ) -> None:
         self.runtime, self.lease = runtime, lease
-        self.return_step = return_step
+        self.return_step, self.scrape_step = return_step, scrape_step
         self.poll, self.stop_settle, self.renew_every = poll, stop_settle, renew_every
         # A process-unique generation: never equal to a manual task's RunId (C5).
         self.run_id: gpu_lease.RunId = ("workflow", next_generation())
@@ -205,9 +214,7 @@ class LocalDispatcher:
         """R3: make retries a crash lost between resolution and requeue."""
         rt = self.runtime
         try:
-            for job in rt.store.list_jobs(
-                rt.operator, "failed", _COMPUTE + ("return",)
-            ):
+            for job in rt.store.list_jobs(rt.operator, "failed", _LOCAL):
                 try:
                     self._retry_if_due(job.job_id)
                 except m.WorkflowError as exc:
@@ -246,8 +253,8 @@ class LocalDispatcher:
         if not rt.reconciled and not rt.settle_previous(wait=0):
             self._reason = rt.reason
             return False
-        stages = _COMPUTE + (("return",) if self.return_step is not None else ())
-        jobs = rt.store.list_jobs(rt.operator, "pending", stages)
+        steps = self._steps()
+        jobs = rt.store.list_jobs(rt.operator, "pending", _COMPUTE + tuple(steps))
         waiting: dict[str, str] = {}
         vram = rt.gpu.vram_mib if rt.gpu else 0
         gpu_waited = False
@@ -255,11 +262,12 @@ class LocalDispatcher:
             manifest = rt.store.get_input_manifest(
                 rt.operator, job.film_id, job.input_revision
             )
-            if job.stage == "return":
+            if job.stage in steps:
                 self._leave_queue()  # about to run a stage without the GPU (E7)
-                ran = self._execute_return(job, manifest)
-            else:
-                executor = rt.executors.get(job.stage)
+                step, auth = steps[job.stage]
+                ran = self._execute_step(job, manifest, step, auth)
+            else:  # only compute stages are listed besides the component steps
+                executor = rt.executors.get(cast(ComputeStage, job.stage))
                 if executor is None or rt.gpu is None:
                     waiting[job.film_id] = (
                         rt.reason if rt.gpu is None else "没有可用的执行器"
@@ -522,20 +530,36 @@ class LocalDispatcher:
             if attempt.attempt_id != running.attempt.attempt_id:
                 shutil.rmtree(rt.work_dir / attempt.attempt_id, ignore_errors=True)
 
-    def _execute_return(
-        self, job: m.PendingComputeJob, manifest: m.InputManifest
+    def _steps(self) -> dict[str, tuple[ComponentStep, AuthProof]]:
+        """Configured component stages and the principal that claims each."""
+        rt, steps = self.runtime, {}
+        if self.return_step is not None:
+            steps["return"] = (self.return_step, rt.receiver_auth)
+        if self.scrape_step is not None:
+            steps["scrape"] = (self.scrape_step, rt.scrape_auth)
+        return steps
+
+    def _execute_step(
+        self,
+        job: m.PendingComputeJob,
+        manifest: m.InputManifest,
+        step: ComponentStep,
+        auth: AuthProof,
     ) -> bool:
-        """Claim the return stage as this boot's receiver and build the package (E5)."""
-        rt, step = self.runtime, self.return_step
-        assert step is not None
-        tools = step.tools()
+        """Claim a component stage (return E5, scrape M01) and run it in its own Job."""
+        rt = self.runtime
+        try:
+            tools = step.tools()
+        except Exception as exc:  # e.g. the Miko profile cannot be read
+            self._reason = f"无法准备 {job.stage}：{exc}"
+            return False
         attempt = AttemptFile(
             attempt_id=_new_id(), operation_id=_new_id(), job_id=job.job_id
         )
         rt.write_attempt(attempt)
         try:
             claimed = rt.store.claim(
-                rt.receiver_auth,
+                auth,
                 rt.meta(),
                 m.ClaimRequest(
                     job_id=job.job_id,
@@ -558,11 +582,18 @@ class LocalDispatcher:
             raise m.WorkflowError("precondition_failed")
         attempt = replace(attempt, assignment_id=claimed.assignment_id)
         rt.write_attempt(attempt)
-        # No renewal thread: the 24 h lease outlives the package build (D11).
+        children: list[str] = []
+
+        def launched(identity: str) -> None:
+            children.append(identity)
+            rt.write_attempt(replace(attempt, children=tuple(children)))
+
+        # No renewal thread: the 24 h lease outlives these stages (D11).
         running = _Running(job, attempt, claimed.assignment_id, None, None, False)
         with self._lock:
             self._running = running
         try:
+            running.processes = OwnedJob(on_launch=launched)
             outcome = step.run(
                 ReturnContext(
                     job,
@@ -571,13 +602,21 @@ class LocalDispatcher:
                     attempt.operation_id,
                     rt,
                     self.cancel,
+                    running.processes,
                 )
             )
-        except Exception as exc:  # a packaging bug is a visible needs-attention
-            log.exception("workflow return failed")
-            outcome = ExecOutcome.failed("needs_attention", f"回传异常：{exc}")
+        except Exception as exc:  # a step bug is a visible needs-attention
+            log.exception("workflow %s failed", job.stage)
+            outcome = ExecOutcome.failed("needs_attention", f"{job.stage} 异常：{exc}")
         if self.cancel.is_set() and not outcome.ok:
             outcome = ExecOutcome.failed("cancelled", "已停止")
+        processes = running.processes
+        if processes is not None:
+            processes.terminate()
+            if not processes.settle(self.stop_settle):
+                self._unsettled = _Unsettled(running, outcome)
+                self._reason = "停止未确认：任务进程仍在运行"
+                return True
         self._resolve(running, outcome)
         return True
 

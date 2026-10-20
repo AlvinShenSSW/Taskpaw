@@ -37,6 +37,7 @@ from .exec_common import (
 from .executors import ComputeStage, ExecOutcome, JobContext
 from .local_gpu import FULL_HD, max_resolution
 from .local_runtime import LocalRuntime
+from .owned_process import OwnedJob
 from .stage_results import (
     FileRef,
     RestoreFacts,
@@ -152,7 +153,39 @@ def progress_text(volume: str, state: dict) -> str:
     return " · ".join(parts)
 
 
-def _command(value: str | Sequence[str] | None) -> list[str] | None:
+def probe_video(
+    processes: OwnedJob,
+    ffprobe: Sequence[str] | None,
+    path: Path,
+    cwd: Path,
+    cancel: threading.Event,
+) -> ProbeFacts:
+    """ffprobe one video inside the attempt's Job (restore and M01 scrape)."""
+    if ffprobe is None:
+        raise attention("找不到 ffprobe，无法核对视频")
+    lines: list[str] = []
+    lock = threading.Lock()
+
+    def on_line(stream: str, text: str) -> None:
+        if stream == "stdout":
+            with lock:
+                lines.append(text)
+
+    child = processes.launch(
+        [*ffprobe, *FFPROBE_ARGS, "-i", str(path)], cwd=str(cwd), on_line=on_line
+    )
+    code = child.wait(cancel)
+    if code is None:
+        raise cancelled()
+    with lock:
+        facts = parse_probe("\n".join(lines)) if code == 0 else None
+    if facts is None:
+        raise attention(f"ffprobe 无法读取：{path.name}")
+    return facts
+
+
+def ffprobe_command(value: str | Sequence[str] | None) -> list[str] | None:
+    """The ffprobe command: a path, an argv prefix, or `ffprobe` on PATH."""
     if value is None:
         found = shutil.which("ffprobe")
         return [found] if found else None
@@ -181,7 +214,7 @@ class RestoreExecutor:
         `launch_prefix` goes before the Jasna argv (tests run a fake tool)."""
         self.runtime, self.jasna_exe, self.gpu_id = runtime, jasna_exe, gpu_id
         self.cfg = workflow_jasna_config(gpu_id)
-        self.ffprobe = _command(ffprobe)
+        self.ffprobe = ffprobe_command(ffprobe)
         self.launch_prefix = tuple(launch_prefix)
         self._gpus = gpus
 
@@ -369,29 +402,9 @@ class RestoreExecutor:
         return self._facts("applied", file_ref(self.runtime.work_dir, final), facts)
 
     def _probe(self, context: JobContext, path: Path) -> ProbeFacts:
-        if self.ffprobe is None:
-            raise attention("找不到 ffprobe，无法核对视频")
-        lines: list[str] = []
-        lock = threading.Lock()
-
-        def on_line(stream: str, text: str) -> None:
-            if stream == "stdout":
-                with lock:
-                    lines.append(text)
-
-        child = context.processes.launch(
-            [*self.ffprobe, *FFPROBE_ARGS, "-i", str(path)],
-            cwd=str(context.workdir),
-            on_line=on_line,
+        return probe_video(
+            context.processes, self.ffprobe, path, context.workdir, context.cancel
         )
-        code = child.wait(context.cancel)
-        if code is None:
-            raise cancelled()
-        with lock:
-            facts = parse_probe("\n".join(lines)) if code == 0 else None
-        if facts is None:
-            raise attention(f"ffprobe 无法读取：{path.name}")
-        return facts
 
     @staticmethod
     def _facts(

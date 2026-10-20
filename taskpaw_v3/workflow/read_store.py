@@ -18,8 +18,9 @@ from .models import (
 )
 from .store_core import WorkflowCore, parse_time
 
-# Stages the controller's own runtime claims (compute on its GPU, return locally).
-_LOCAL_STAGES = frozenset({"restore", "asr", "translate", "return"})
+# Stages the controller's own runtime claims (compute on its GPU; return and
+# Miko scrape locally).
+_LOCAL_STAGES = frozenset({"restore", "asr", "translate", "return", "scrape"})
 
 
 class ReadCommands(WorkflowCore):

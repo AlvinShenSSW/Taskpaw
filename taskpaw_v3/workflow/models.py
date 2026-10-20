@@ -1476,7 +1476,7 @@ class PendingComputeJob(Model):
     job_id: Id
     film_id: Id
     display_name: Text
-    stage: Literal["restore", "asr", "translate", "return"]
+    stage: Literal["restore", "asr", "translate", "return", "scrape"]
     input_revision: Revision
     version: Revision
     film_created_at: UtcTime
