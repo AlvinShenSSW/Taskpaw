@@ -11,7 +11,15 @@ from ctypes import wintypes as wt
 from dataclasses import dataclass
 from pathlib import Path
 
-from .intake_files import IntakeFileError, WindowsFiles, _Holds, _key, _local, _parts
+from .intake_files import (
+    IntakeFileError,
+    WindowsFiles,
+    _Holds,
+    _key,
+    _last_error,
+    _local,
+    _parts,
+)
 from .models import NativeIdentity
 
 
@@ -185,7 +193,7 @@ class DirectoryWatcher:
         assert self._api is not None
         if (
             not self._api.kernel.CancelIoEx(self._watch, ctypes.byref(overlap))
-            and ctypes.get_last_error() != 1168
+            and _last_error() != 1168
         ):
             self.failure = self.failure or "watcher_cancel_failed"
 
@@ -222,7 +230,7 @@ class DirectoryWatcher:
                 self._watch, ctypes.byref(overlap), ctypes.byref(count), False
             ):
                 return bytes(buffer)[: count.value]
-            error = ctypes.get_last_error()
+            error = _last_error()
             if error == 996:  # ERROR_IO_INCOMPLETE, still owns this buffer.
                 continue
             if error == 995 and cancelled:

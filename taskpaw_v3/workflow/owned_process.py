@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 LineSink = Callable[[str, str], None]  # (stream name, decoded line)
 
@@ -68,7 +68,8 @@ def _pump(stream: Any, name: str, sink: LineSink | None) -> None:
             pass
 
 
-if sys.platform == "win32":
+# Defined only on Windows at runtime; the type checker sees it on every platform.
+if sys.platform == "win32" or TYPE_CHECKING:
     from taskpaw_v3.hub.server.upstream_worker import _WindowsAPI
 
     class _OwnedAPI(_WindowsAPI):
@@ -144,6 +145,10 @@ class Child:
 
 class OwnedJob:
     """All processes of one attempt. Owned by one dispatcher thread."""
+
+    # Set only on Windows (see __init__).
+    _api: _OwnedAPI
+    _job: int
 
     def __init__(self, on_launch: Callable[[str], None] | None = None) -> None:
         self._on_launch = on_launch

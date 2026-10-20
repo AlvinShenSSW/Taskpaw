@@ -209,7 +209,7 @@ class _WalkOwner:
                     _Child(
                         item.name,
                         stat.S_ISDIR(info.st_mode),
-                        bool(info.st_file_attributes & 0x400),
+                        bool(getattr(info, "st_file_attributes") & 0x400),
                     )
                 )
             self._admit()

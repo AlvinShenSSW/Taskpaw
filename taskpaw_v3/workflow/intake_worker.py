@@ -14,7 +14,7 @@ from . import intake_models as im
 from . import intake_protocol as wire
 from .intake_build import build_snapshot, check_observation
 from .intake_copy import PrivateCopy
-from .intake_files import HeldPackage, PinnedFile
+from .intake_files import HeldPackage, PinnedFile, _last_error
 from .intake_probe import probe_video
 from .models import WorkflowError
 from .raw_media_models import RawMediaFacts
@@ -27,9 +27,9 @@ class NativeInput:
         import msvcrt
 
         self.fd = fd
-        self.handle = msvcrt.get_osfhandle(fd)
+        self.handle = getattr(msvcrt, "get_osfhandle")(fd)
         self.deadline = time.monotonic() + 30
-        self._kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
         self._peek = self._kernel.PeekNamedPipe
         self._peek.argtypes = [
             w.HANDLE,
@@ -44,7 +44,7 @@ class NativeInput:
     def available(self) -> int:
         count = w.DWORD()
         if not self._peek(self.handle, None, 0, None, ctypes.byref(count), None):
-            if ctypes.get_last_error() in {109, 232}:
+            if _last_error() in {109, 232}:
                 return -1
             raise WorkflowError("intake_protocol")
         return count.value

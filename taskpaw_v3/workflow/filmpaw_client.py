@@ -41,7 +41,7 @@ def _pid_alive(pid: int) -> bool:
     if os.name == "nt":
         import ctypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
         handle = kernel32.OpenProcess(
             0x1000, False, pid
         )  # PROCESS_QUERY_LIMITED_INFORMATION

@@ -15,6 +15,7 @@ from ctypes import wintypes as wt
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
+from typing import Any
 from uuid import uuid4
 
 from .intake_models import IntakePolicy
@@ -83,6 +84,11 @@ def _key(value: NativeIdentity) -> tuple[str, str, str]:
     return value.scheme, value.volume_or_export_id, value.object_id
 
 
+def _last_error() -> int:
+    """``ctypes.get_last_error`` without a Windows-only name for other platforms."""
+    return int(getattr(ctypes, "get_last_error")())
+
+
 @dataclass(frozen=True)
 class HeldEntry:
     relative_path: str
@@ -112,10 +118,12 @@ class HeldEntry:
 class WindowsFiles:
     """Narrow checked Win32 calls; handles never appear in persisted evidence."""
 
+    kernel: Any
+
     def __init__(self) -> None:
         if sys.platform != "win32":
             raise IntakeFileError("platform_unsupported")
-        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
         definitions = {
             "CreateFileW": (
                 wt.HANDLE,
@@ -181,7 +189,7 @@ class WindowsFiles:
     @staticmethod
     def check(success: object) -> None:
         if not success:
-            error = ctypes.get_last_error()
+            error = _last_error()
             raise IntakeFileError(
                 "writer_busy"
                 if error in (32, 33)
@@ -277,7 +285,7 @@ class WindowsFiles:
         handle = self.kernel.FindFirstStreamW(str(path), 0, ctypes.byref(value), 0)
         if handle == ctypes.c_void_p(-1).value:
             # A zero-length regular file can have no data stream enumeration.
-            if ctypes.get_last_error() == 38:
+            if _last_error() == 38:
                 return
             self.check(False)
         try:
@@ -285,7 +293,7 @@ class WindowsFiles:
                 if value.name != "::$DATA":
                     raise IntakeFileError("alternate_stream")
                 if not self.kernel.FindNextStreamW(handle, ctypes.byref(value)):
-                    if ctypes.get_last_error() != 38:
+                    if _last_error() != 38:
                         self.check(False)
                     break
         finally:
