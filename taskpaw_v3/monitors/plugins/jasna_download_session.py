@@ -72,13 +72,16 @@ class DownloadSession:
                 _ACTIVE.discard(_key(claimed))
             if leftovers is None or _key(leftovers[0]) in _ACTIVE:
                 return  # another session downloads there now: its files
-            destination, names = leftovers
-            for name in names:
-                try:
-                    for part in Path(destination).glob(f".{glob.escape(name)}.*.part"):
-                        part.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            self._clear_parts(*leftovers)
+
+    @staticmethod
+    def _clear_parts(destination: str, names: list[str]) -> None:
+        for name in names:
+            try:
+                for part in Path(destination).glob(f".{glob.escape(name)}.*.part"):
+                    part.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def request(self, destination: Path, missing: list[str], variant: str) -> None:
         self.status = dict(
@@ -114,6 +117,8 @@ class DownloadSession:
             if not self._claim(request["destination"]):
                 self._fail(BUSY)  # the other owner's worker writes there (D08)
                 return False
+            # the folder is ours: partials of an earlier crashed worker are stale
+            self._clear_parts(request["destination"], request["files"])
             payload = json.dumps({k: request[k] for k in ("destination", "files")})
             self._lines = _ProgressQueue()
             self._complete = False
@@ -143,6 +148,13 @@ class DownloadSession:
                 if self.status is request:
                     self._fail(f"Cannot start downloader ({type(exc).__name__}).")
         if not self.status:
+            # A stop whose kill timed out kept the child; reap it once it ends,
+            # or its destination claim would be held for the whole process.
+            if self.child is not None and self.child.poll() is not None:
+                self.child.join_readers(timeout=0.2)
+                self.child.close_stdin()
+                self.child = None
+                self._release()
             return False
         child = self.child
         if child is None:

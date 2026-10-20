@@ -373,3 +373,45 @@ def test_stop_leaves_the_folder_alone_while_another_session_downloads(
     assert waiting.stop(0.01)
     assert partial.exists()
     assert busy.stop(0.01) and not partial.exists()
+
+
+def test_a_stopped_worker_that_exits_later_is_reaped_by_tick(tmp_path, workers):
+    """H3 IR01: a stop that timed out must not leak the claim once the worker ends."""
+    name = D.SHARED_FILES[1]
+    dest = tmp_path / "jasna"
+    session = _approved(dest, name)
+    session.tick()
+    dest.mkdir()
+    partial = dest / f".{name}.k3j2.part"
+    partial.write_bytes(b"half")
+    workers[0].survives = True
+    assert not session.stop(0.01)
+    assert not session.tick() and session.child is not None  # still running
+    assert not _approved(dest, name).tick()  # the claim is still held
+    workers[0].rc = 1  # the worker finally exits
+    assert not session.tick()
+    assert session.child is None and session.status == {}
+    assert not partial.exists()
+    second = _approved(dest, name)
+    second.tick()
+    assert second.status["state"] == "downloading"
+    assert second.stop(0.01)
+
+
+def test_stale_parts_of_the_request_are_cleared_when_the_folder_is_claimed(
+    tmp_path, workers
+):
+    """H3 IR03: a crashed earlier worker's partials are not left to accumulate."""
+    name, other = D.SHARED_FILES[1], D.SHARED_FILES[0]
+    dest = tmp_path / "jasna"
+    dest.mkdir()
+    stale = dest / f".{name}.old1.part"
+    kept = [dest / f".{other}.x1.part", dest / name, dest / "notes.part"]
+    for path in (stale, *kept):
+        path.write_bytes(b"x")
+    session = _approved(dest, name)
+    session.tick()
+    assert session.status["state"] == "downloading"
+    assert not stale.exists()
+    assert all(path.exists() for path in kept)
+    assert session.stop(0.01)

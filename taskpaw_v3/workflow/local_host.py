@@ -399,7 +399,12 @@ class LocalWorkflowHost:
         """Advance the download until it ends; then retry the waiting restores."""
         while not self._stopping.is_set():
             with self._download_lock:
-                done = self._download.tick()
+                try:
+                    done = self._download.tick()
+                except Exception:
+                    # a dying thread would keep the destination claim held
+                    log.exception("media workflow model download tick failed")
+                    done = False
                 busy = (
                     self._download.child is not None
                     or self._download.status.get("state") in _DOWNLOAD_BUSY

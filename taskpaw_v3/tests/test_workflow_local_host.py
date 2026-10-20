@@ -548,3 +548,52 @@ def test_stopping_the_host_stops_the_download(offered):
     assert host.state == "stopped"
     assert not host.respond_ltx_download(offer["request_id"], True)
     assert film
+
+
+def test_a_stopped_download_that_ends_later_is_offered_again(offered):
+    """H3 IR01: the tick thread reaps a worker whose stop had timed out."""
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, video
+
+    rt, d, workers = offered.rt, offered.host.dispatcher, offered.workers
+    add_film(rt, [File("ABF-394.mp4", video())])
+    assert d.run_once() is True
+    host = offered.host
+    offer = host.status()["ltx_download"]
+    assert host.respond_ltx_download(offer["request_id"], True)
+    _wait(lambda: workers, seconds=10)
+    workers[0].survives = True
+    with pytest.raises(RuntimeError):
+        host.stop_ltx_download()
+    assert host.status()["ltx_download"] is None  # the worker still holds the folder
+    workers[0].rc = 1  # it ends on its own
+    _wait(lambda: host.status()["ltx_download"] is not None, seconds=10)
+    again = host.status()["ltx_download"]
+    assert again["state"] == "awaiting" and again["request_id"] != offer["request_id"]
+    assert host.respond_ltx_download(again["request_id"], True)
+    _wait(lambda: len(workers) == 2, seconds=10)  # the claim was freed
+
+
+def test_the_download_ticker_survives_a_failing_tick(offered, monkeypatch):
+    """H3 IR02: an unexpected tick error is logged, not fatal to the thread."""
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, video
+
+    rt, d, workers = offered.rt, offered.host.dispatcher, offered.workers
+    add_film(rt, [File("ABF-394.mp4", video())])
+    assert d.run_once() is True
+    host = offered.host
+    real, calls = host._download.tick, []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return real()
+
+    monkeypatch.setattr(host._download, "tick", flaky)
+    offer = host.status()["ltx_download"]
+    assert host.respond_ltx_download(offer["request_id"], True)
+    _wait(lambda: workers and len(calls) >= 2, seconds=10)
+    assert host._ticker is not None and host._ticker.is_alive()
+    workers[0].finish()
+    _wait(lambda: host._ticker is None, seconds=10)
+    assert host._download.status == {}
