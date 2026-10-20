@@ -291,12 +291,26 @@ def test_stop_retains_direct_public_scan_until_actual_source_close(
     package[1].rename(package[1].with_name("closed-after-scan"))
 
 
-def test_stop_and_public_scan_admission_are_one_atomic_boundary(service, monkeypatch):
+@pytest.mark.parametrize("slow_machine", [False, True])
+def test_stop_and_public_scan_admission_are_one_atomic_boundary(
+    service, monkeypatch, slow_machine
+):
     from taskpaw_v3.workflow import intake_walk
 
     _, _, _, obj, _ = service
     entered, release, stop_done = (threading.Event() for _ in range(3))
     original_lock, original_walk = obj._scan_lock, intake_walk.walk_root
+    if slow_machine:
+        # The CI runner: the scan read the scan state, then the stop fence's own
+        # begin commits first, so the scan's begin loses its CAS and ends unwalked.
+        real_begin = obj.store.begin_intake_root_scan
+
+        def slow_begin(*args, **kwargs):
+            if threading.current_thread().name == "scanner":
+                time.sleep(0.03)  # within stop's 0.1 s budget
+            return real_begin(*args, **kwargs)
+
+        monkeypatch.setattr(obj.store, "begin_intake_root_scan", slow_begin)
     seen = []
     outcomes = []
 
@@ -324,7 +338,7 @@ def test_stop_and_public_scan_admission_are_one_atomic_boundary(service, monkeyp
 
     monkeypatch.setattr(obj, "_scan_lock", AdmissionBarrier())
     monkeypatch.setattr(intake_walk, "walk_root", walk)
-    scanner = threading.Thread(target=obj.scan_once, daemon=False)
+    scanner = threading.Thread(target=obj.scan_once, daemon=False, name="scanner")
     stopper = threading.Thread(target=stop, daemon=False)
     scanner.start()
     try:
@@ -335,8 +349,15 @@ def test_stop_and_public_scan_admission_are_one_atomic_boundary(service, monkeyp
         scanner.join(10)
         stopper.join(10)
         assert not scanner.is_alive() and not stopper.is_alive()
-    assert outcomes == [False]
-    assert seen == [True]
+    # Either the admitted scan was refused at begin (the stop fence won: stop is
+    # confirmed and nothing is walked) or it is still owned (stop is not
+    # confirmed and the walk observes the stop). A walk after a confirmed stop
+    # would be the bug. Which one happens depends on the machine's speed.
+    assert outcomes in ([True], [False])
+    if slow_machine:
+        assert outcomes == [True]  # the CI case: refused at begin, stop confirmed
+    assert seen == ([] if outcomes == [True] else [True])
+    walked = list(seen)
     assert obj.stop(timeout=2)
     assert not obj.scan_once()
-    assert seen == [True]
+    assert seen == walked
