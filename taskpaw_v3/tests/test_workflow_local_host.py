@@ -20,6 +20,11 @@ def test_disabled_by_default_and_creates_nothing(tmp_path):
     assert not (tmp_path / "workflow").exists()
 
 
+def test_enabled_without_an_inbox_does_not_start(tmp_path):
+    assert start_local_workflow(WorkflowSettings(enabled=True), tmp_path) is None
+    assert not (tmp_path / "workflow").exists()
+
+
 def test_old_agent_yaml_without_workflow_still_loads():
     config = AgentConfig.model_validate({"server_id": "a", "machine": "m"})
     assert config.workflow == WorkflowSettings()

@@ -193,9 +193,10 @@ class LocalDispatcher:
                 )
                 self._set_waiting(waiting)
                 return False
-            self._set_waiting(waiting)
-            self._execute(job, executor, manifest)
-            return True
+            if self._execute(job, executor, manifest):
+                self._set_waiting(waiting)
+                return True
+            waiting[job.film_id] = self._reason  # claim refused: try the next film
         self._set_waiting(waiting)
         self._release()
         return False
@@ -225,13 +226,14 @@ class LocalDispatcher:
         job: m.PendingComputeJob,
         executor: StageExecutor,
         manifest: m.InputManifest,
-    ) -> None:
+    ) -> bool:
+        """Claim and run one stage; False (nothing ran) when the claim is refused."""
         rt = self.runtime
         worker = rt.worker()
         if worker.physical_binding is None:
             self._release()
             self._reason = "本机 GPU 尚未登记"
-            return
+            return False
         tools = executor.tools()
         attempt = AttemptFile(
             attempt_id=_new_id(), operation_id=_new_id(), job_id=job.job_id
@@ -258,7 +260,7 @@ class LocalDispatcher:
             rt.drop_attempt(attempt.attempt_id)
             self._release()
             self._reason = f"领取失败：{exc}"
-            return
+            return False
         assignment_id = claimed.assignment_id
         if assignment_id is None:  # T01 always reports it for a claim
             raise m.WorkflowError("precondition_failed")
@@ -311,8 +313,9 @@ class LocalDispatcher:
         if not processes.settle(self.stop_settle):
             self._unsettled = _Unsettled(running, outcome)
             self._reason = "停止未确认：任务进程仍在运行"
-            return
+            return True
         self._resolve(running, outcome)
+        return True
 
     def _finish_unsettled(self) -> bool:
         pending = self._unsettled

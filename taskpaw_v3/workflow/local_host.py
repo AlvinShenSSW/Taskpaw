@@ -213,8 +213,8 @@ def start_local_workflow(
     config_dir: Path | None,
     executors: Sequence[StageExecutor] = (),
 ) -> LocalWorkflowHost | None:
-    """None unless the operator enabled the workflow (C7)."""
-    if not settings.enabled:
+    """None unless the operator enabled the workflow and named its INBOX (C7)."""
+    if not settings.enabled or not settings.inbox_root:
         return None
     if settings.data_dir:
         data_dir = Path(settings.data_dir)

@@ -402,3 +402,27 @@ def test_unconfirmed_stop_keeps_owner_and_gpu_until_the_tree_ends(rt, monkeypatc
     assert d.run_once() is True  # settles, resolves, then runs the next stage
     assert stage(rt, film, "restore").status == "succeeded"
     assert stage(rt, film, "asr").status == "succeeded"
+
+
+def test_refused_claim_does_not_spin_and_never_starves_later_films(rt, monkeypatch):
+    blocked, later = add_film(rt), add_film(rt)
+    refused = stage(rt, blocked, "restore").job_id
+    real = rt.store.claim
+
+    def claim(auth, meta, command):
+        if command.job_id == refused:
+            raise m.WorkflowError("source_not_admissible")
+        return real(auth, meta, command)
+
+    monkeypatch.setattr(rt.store, "claim", claim)
+    lease = GpuLease()
+    d = dispatcher(rt, lease)
+    assert d.run_once() is True  # the later film runs despite the refused one
+    assert stage(rt, later, "restore").status == "succeeded"
+    assert d.status().waiting[blocked] == "领取失败：source_not_admissible"
+    while d.run_once():
+        pass
+    assert stage(rt, later, "translate").status == "succeeded"
+    assert d.run_once() is False  # only the refused film is left: no busy loop
+    assert stage(rt, blocked, "restore").status == "pending"
+    assert lease.holder() is None and not any(rt.attempt_dir.glob("*.json"))
