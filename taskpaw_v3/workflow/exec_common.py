@@ -27,6 +27,9 @@ PROFILE_REVISION = 1
 # The tools do not report a version the executor could pin; the capability
 # changes through `config_digest` instead.
 UNPINNED = "unpinned"
+# The restore preflight's note when LTX model files are missing; the Media Center
+# offers the download on it and retries these failures afterwards (H3 M1, D01).
+MISSING_LTX = "缺少 LTX 模型文件："
 
 
 class StageFailure(Exception):

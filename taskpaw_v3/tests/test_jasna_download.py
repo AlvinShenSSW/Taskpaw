@@ -253,3 +253,123 @@ def test_stop_during_slow_spawn_cleans_late_child(tmp_path, monkeypatch):
     session.respond(session.status["request_id"], True)
     assert not session.tick()
     assert killed == [True] and session.child is None and session.status == {}
+
+
+class _Child:
+    """A fake download worker: the test feeds its output lines and exit code."""
+
+    pid = 123
+
+    def __init__(self, argv, **kw):
+        self.sink = kw["line_sink"]
+        self.payload = None
+        self.rc = None
+        self.survives = False
+
+    def write_line(self, line):
+        self.payload = line
+
+    def poll(self):
+        return self.rc
+
+    def join_readers(self, timeout):
+        pass
+
+    def close_stdin(self):
+        pass
+
+    def terminate_tree(self, timeout):
+        return not self.survives
+
+    def finish(self):
+        from taskpaw_v3.monitors.subs.child import Eof
+
+        self.sink.put('{"state":"complete"}')
+        self.sink.put(Eof(self.pid))
+        self.rc = 0
+
+
+@pytest.fixture
+def workers(monkeypatch):
+    from taskpaw_v3.monitors.plugins import jasna_download_session as S
+
+    made = []
+
+    def spawn(*a, **kw):
+        made.append(_Child(*a, **kw))
+        return made[-1]
+
+    monkeypatch.setattr(S, "ChildProcess", spawn)
+    return made
+
+
+def _approved(destination, name=D.SHARED_FILES[1]):
+    from taskpaw_v3.monitors.plugins import jasna_download_session as S
+
+    session = S.DownloadSession()
+    session.request(destination, [name], "ltx")
+    assert session.respond(session.status["request_id"], True)
+    return session
+
+
+def test_one_download_per_destination_across_sessions(tmp_path, workers):
+    """H3 D08: the monitor and the workflow never download into one folder at once."""
+    first = _approved(tmp_path / "jasna")
+    first.tick()
+    assert first.status["state"] == "downloading" and len(workers) == 1
+    second = _approved(tmp_path / "jasna" / ".." / "jasna")
+    assert not second.tick()
+    assert second.status["state"] == "error" and len(workers) == 1
+    assert "already downloading" in second.status["error"]
+    elsewhere = _approved(tmp_path / "other")
+    elsewhere.tick()
+    assert elsewhere.status["state"] == "downloading" and len(workers) == 2
+    workers[0].finish()
+    assert first.tick() is True
+    # the folder is free again: the refused session's retry now starts
+    assert second.respond(second.status["request_id"], True)
+    second.tick()
+    assert second.status["state"] == "downloading" and len(workers) == 3
+    assert second.stop(0.01) and elsewhere.stop(0.01)
+    again = _approved(tmp_path / "jasna")
+    again.tick()
+    assert again.status["state"] == "downloading"
+    assert again.stop(0.01)
+
+
+def test_stop_deletes_the_partial_files_of_its_request(tmp_path, workers):
+    """H3 D09: a killed worker never ran its own cleanup."""
+    name, other = D.SHARED_FILES[1], D.SHARED_FILES[0]
+    dest = tmp_path / "jasna"
+    session = _approved(dest, name)
+    session.tick()
+    partial = dest / f".{name}.k3j2.part"
+    dest.mkdir()
+    partial.write_bytes(b"half")
+    kept = [dest / f".{other}.x1.part", dest / name, dest / "notes.part"]
+    for path in kept:
+        path.write_bytes(b"keep")
+    workers[0].survives = True
+    assert not session.stop(0.01)
+    assert partial.exists()  # the worker may still be writing it
+    workers[0].survives = False
+    assert session.stop(0.01)
+    assert not partial.exists()
+    assert all(path.exists() for path in kept)
+
+
+def test_stop_leaves_the_folder_alone_while_another_session_downloads(
+    tmp_path, workers
+):
+    name = D.SHARED_FILES[1]
+    dest = tmp_path / "jasna"
+    busy = _approved(dest, name)
+    busy.tick()
+    waiting = _approved(dest, name)
+    waiting.tick()  # refused: the folder is busy
+    dest.mkdir()
+    partial = dest / f".{name}.live.part"
+    partial.write_bytes(b"being written")
+    assert waiting.stop(0.01)
+    assert partial.exists()
+    assert busy.stop(0.01) and not partial.exists()

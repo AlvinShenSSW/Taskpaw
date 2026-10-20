@@ -20,6 +20,7 @@ from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.workflow import board
 from taskpaw_v3.workflow import intake_models as im
 from taskpaw_v3.workflow import models as m
+from taskpaw_v3.workflow.exec_common import MISSING_LTX
 from taskpaw_v3.workflow.local_host import retry_failed_stage
 from taskpaw_v3.workflow.manifest import parse_nfo_summary
 
@@ -197,9 +198,26 @@ def test_waiting_reason_is_the_note_unless_the_stage_failed():
     assert board.film_row(failed, {failed.film_id: "排队"})["note"] == "排队"
 
 
-def test_name_is_the_final_directory_else_the_display_name():
-    assert board.film_row(film(), {})["name"] == "原始包名"
+def test_name_is_the_final_directory_else_the_input_never_the_grouping_key():
+    """H3 D06: final folder → single-film package folder → NFO number → video stem."""
+    one = film().model_copy(
+        update={"package_path": "Downloads/(HD)ABF-393 河合あすな", "package_films": 1}
+    )
+    assert board.film_name(one, "ABF-393", "4K688.com@ABF-393") == (
+        "(HD)ABF-393 河合あすな"
+    )
+    two = one.model_copy(update={"package_films": 2})
+    assert board.film_name(two, "ABF-393", "4K688.com@ABF-393") == "ABF-393"
+    assert board.film_name(two, None, "4K688.com@ABF-393") == "4K688.com@ABF-393"
+    final = two.model_copy(update={"final_name": "ABF-393"})
+    assert board.film_name(final, "ABF-394", "x") == "ABF-393"
     assert board.film_row(film(final_name="ABC-123"), {})["name"] == "ABC-123"
+    assert board.film_row(two, {}, label=("ABF-393", "x"))["name"] == "ABF-393"
+    assert board.film_row(one, {})["name"] == "(HD)ABF-393 河合あすな"
+    rows = board.film_rows((two,), {}, labels={two.film_id: (None, "abf-393")})
+    assert rows[0]["name"] == "abf-393"
+    # only a film without an input manifest has nothing better than its key
+    assert board.film_row(film(), {})["name"] == "原始包名"
 
 
 def test_rows_carry_the_frozen_shape():
@@ -251,6 +269,69 @@ def test_the_running_stage_shows_the_host_progress_for_that_film_only():
         "running",
         None,
         None,
+    )
+
+
+def _step_of(row: dict, key: str) -> dict:
+    return next(s for s in row["steps"] if s["key"] == key)
+
+
+def test_the_running_restore_step_carries_the_ltx_detail_and_its_volume():
+    """H3 M3: the step keeps the text and gains the LtxProgress metrics."""
+    value = film({**done_through("intake"), "restore": "running"})
+    ltx = {
+        "ltx_progress": {
+            "mode": "restore",
+            "stage_index": 2,
+            "stage_total": 4,
+            "stage_name": "encode",
+        },
+        "ltx_stage": "2/4 encode",
+        "current_file": "第 1/2 卷",
+    }
+    current = {
+        "film_id": value.film_id,
+        "film": "x",
+        "stage": "restore",
+        "progress": "修复 第 1/2 卷 · 阶段 2/4 encode",
+        "ltx": ltx,
+    }
+    restore = _step_of(board.film_row(value, {}, current=current), "restore")
+    assert restore["progress"] == "修复 第 1/2 卷 · 阶段 2/4 encode"
+    assert restore["ltx"] == ltx and restore["current_file"] == "第 1/2 卷"
+    other = {**current, "film_id": identity()}
+    assert "ltx" not in _step_of(board.film_row(value, {}, current=other), "restore")
+    plain = {k: v for k, v in current.items() if k != "ltx"}
+    assert "ltx" not in _step_of(board.film_row(value, {}, current=plain), "restore")
+
+
+def test_a_missing_model_failure_offers_the_download_on_the_restore_step():
+    """H3 M1: the step stays failed with its reason and carries the session."""
+    note = MISSING_LTX + "vae.safetensors.enc、vae-decoder.safetensors.enc"
+    value = film(
+        {**done_through("intake"), "restore": "failed"}, notes={"restore": note}
+    )
+    download = {
+        "state": "downloading",
+        "request_id": "r1",
+        "files": ["vae.safetensors.enc", "vae-decoder.safetensors.enc"],
+        "total_bytes": 10,
+        "downloaded_bytes": 4,
+        "destination": "D:/Jasna/model_weights/ltx-restore",
+        "variant": "ltx fast",
+        "error": None,
+    }
+    row = board.film_row(value, {}, download=download)
+    restore = _step_of(row, "restore")
+    assert (restore["state"], restore["note"]) == ("failed", note)
+    assert restore["download"] == download
+    assert (row["can_retry"], row["retry_stage"]) == (True, "restore")
+    assert "download" not in _step_of(board.film_row(value, {}), "restore")
+    crashed = film(
+        {**done_through("intake"), "restore": "failed"}, notes={"restore": "工具崩溃"}
+    )
+    assert "download" not in _step_of(
+        board.film_row(crashed, {}, download=download), "restore"
     )
 
 
@@ -438,13 +519,14 @@ def test_the_package_being_copied_shows_the_intake_progress():
 
 
 # ── NFO summary (D10) ────────────────────────────────────────────────────
-def test_nfo_summary_reads_title_and_actor_names():
+def test_nfo_summary_reads_title_actor_names_and_number():
     payload = (
         "﻿<movie><title> 标题 </title><actor><name>甲</name></actor>"
         "<actor><name>乙</name><role>x</role></actor><actor><name>甲</name></actor>"
-        "<actor/></movie>"
+        "<actor/><num> ABF-393 </num></movie>"
     ).encode()
-    assert parse_nfo_summary(payload) == ("标题", ("甲", "乙"))
+    assert parse_nfo_summary(payload) == ("标题", ("甲", "乙"), "ABF-393")
+    assert parse_nfo_summary(b"<movie><title>t</title></movie>") == ("t", (), None)
 
 
 @pytest.mark.parametrize(
@@ -461,7 +543,7 @@ def test_nfo_summary_reads_title_and_actor_names():
     ids=["entity", "unclosed", "not-utf8", "empty", "not-movie", "oversized", "str"],
 )
 def test_bad_nfo_gives_an_empty_summary_never_an_error(payload):
-    assert parse_nfo_summary(payload) == (None, ())  # type: ignore[arg-type]
+    assert parse_nfo_summary(payload) == (None, (), None)  # type: ignore[arg-type]
 
 
 # ── the T01 read against a real store (D03) ──────────────────────────────
@@ -624,6 +706,24 @@ class Seed:
                     )
         return fid
 
+    def package(self, path: str, *names: str, revision: int = 1) -> None:
+        """An INBOX package whose input revision `revision` made the named films."""
+        package = identity()
+        self.conn.execute(
+            "INSERT INTO intake_packages(package_id,root_id,root_config_revision,"
+            "relative_path,path_key,source_generation,version,state,reason,dirty,"
+            "observation_digest,observed_at,observation_json) "
+            "VALUES(?,'r',1,?,?,1,1,'operational_ready','ready',0,?,?,'{}')",
+            (package, path, path.casefold(), "0" * 64, self._now()),
+        )
+        for name in names:
+            self.conn.execute(
+                "INSERT INTO intake_films(film_id,input_revision,package_id,"
+                "snapshot_id,source_generation,grouping_revision,created_at) "
+                "VALUES(?,?,?,?,1,1,?)",
+                (self.ids[name], revision, package, identity(), self._now()),
+            )
+
     def approval(self, name: str, *, context: int = 1, revoked: bool = False) -> str:
         approval = identity()
         self.conn.execute(
@@ -785,3 +885,100 @@ def test_film_board_work_grows_linearly_with_the_films(tmp_path):
         small.close()
         large.close()
     assert ratio < 2.6, ratio
+
+
+def test_film_board_names_the_package_and_counts_its_films(seeded):
+    """H3 D06: the package folder names a film only when it holds that one film."""
+    rt, seed = seeded
+    with seed:
+        for name in ("alone", "pair_a", "pair_b", "loose"):
+            seed.film(name, {"intake": "succeeded"}, final=False)
+        seed.film("moved", {"intake": "succeeded"}, revision=2, final=False)
+        seed.package("Downloads/(HD)ABF-393 河合あすな", "alone")
+        seed.package("Downloads/two", "pair_a", "pair_b")
+        seed.package("Downloads/old", "moved", revision=1)  # not its current input
+    got = {f.display_name: f for f in rt.store.film_board(rt.operator)}
+
+    def link(name: str) -> tuple:
+        return got[name].package_path, got[name].package_films
+
+    assert link("alone") == ("Downloads/(HD)ABF-393 河合あすな", 1)
+    assert link("pair_a") == link("pair_b") == ("Downloads/two", 2)
+    assert link("loose") == link("moved") == (None, 0)
+    assert got["moved"].input_revision == 2
+    (one,) = rt.store.film_board(rt.operator, film_id=seed.ids["pair_b"])
+    assert (one.package_path, one.package_films) == ("Downloads/two", 2)
+    assert board.film_row(got["alone"], {})["name"] == "(HD)ABF-393 河合あすな"
+
+
+# ── metadata before Miko (H3 M2, D11) ─────────────────────────────────────
+NFO = (
+    "<movie><title>预刮削标题</title><actor><name>河合あすな</name></actor>"
+    "<num>ABF-393</num></movie>"
+).encode()
+VIDEO = "4K688.com@ABF-393.mp4"
+
+
+@pytest.fixture
+def staged(tmp_path):
+    from taskpaw_v3.tests.workflow_exec_helpers import Tools, runtime
+
+    rt = runtime(tmp_path / "wf", Tools(tmp_path / "tools"))
+    try:
+        yield rt
+    finally:
+        rt.close()
+
+
+def _input_film(rt, *files: tuple[str, str]) -> str:
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, video
+
+    extra = [
+        File(path, NFO if role == "nfo" else path.encode(), role=role)
+        for path, role in files
+    ]
+    return add_film(rt, [File(VIDEO, video()), *extra], attachments=(".jpg", ".txt"))
+
+
+@pytest.mark.parametrize(
+    ("images", "served"),
+    [
+        (
+            [("p.jpg", "poster"), ("t.jpg", "thumb"), ("ABF-393.jpg", "attachment")],
+            "p.jpg",
+        ),
+        ([("t.jpg", "thumb"), ("ABF-393.jpg", "attachment")], "t.jpg"),
+        ([("广告.txt", "attachment"), ("ABF-393.jpg", "attachment")], "ABF-393.jpg"),
+    ],
+    ids=["poster", "thumb", "attachment"],
+)
+def test_before_miko_the_detail_reads_the_input_nfo_and_cover(staged, images, served):
+    rt = staged
+    value = _input_film(rt, ("ABF-393.nfo", "nfo"), *images)
+    detail = board.film_detail(rt, value, {})
+    assert detail is not None
+    assert (detail["title"], detail["actors"], detail["number"]) == (
+        "预刮削标题",
+        ["河合あすな"],
+        "ABF-393",
+    )
+    assert detail["name"] == "ABF-393"  # no single-film package: the NFO number
+    assert detail["has_poster"] is True and detail["poster_source"].startswith("input")
+    poster = board.poster_path(rt, value)
+    assert poster is not None and poster.read_bytes() == served.encode()
+    assert poster.is_relative_to(rt.work_dir)  # the intake work copy, never the INBOX
+
+
+def test_an_unscraped_input_is_named_by_its_video_and_has_no_cover(staged):
+    rt = staged
+    value = _input_film(rt, ("广告.txt", "attachment"))
+    detail = board.film_detail(rt, value, {})
+    assert detail is not None
+    assert detail["name"] == "4K688.com@ABF-393"  # original case, never the key
+    assert (detail["title"], detail["actors"], detail["number"]) == (None, [], None)
+    assert detail["has_poster"] is False and detail["poster_source"] is None
+    assert board.poster_path(rt, value) is None
+    films = rt.store.film_board(rt.operator)
+    (row,) = board.film_rows(films, {}, labels=board.input_labels(rt, films))
+    assert row["name"] == "4K688.com@ABF-393"
+    assert board.name_of(rt, value) == "4K688.com@ABF-393"

@@ -1,14 +1,30 @@
-"""Small download state machine. Owner serializes calls with its launch lock."""
+"""Small download state machine. Owner serializes calls with its launch lock.
+
+The Jasna monitor and the Media Center workflow each own a session in the same
+agent process; a destination folder is downloaded into by one of them at a time.
+"""
 
 from __future__ import annotations
 
+import glob
 import json
+import os
 import queue
+import threading
 import uuid
 from pathlib import Path
 
 from taskpaw_v3.monitors.plugins.jasna_download import FILES, worker_argv
 from taskpaw_v3.monitors.subs.child import ChildProcess, Eof, asr_env
+
+# Destinations a live worker downloads into, across every session (H3 D08).
+_ACTIVE: set[str] = set()
+_ACTIVE_LOCK = threading.Lock()
+BUSY = "LTX models are already downloading into this folder; retry when it finishes."
+
+
+def _key(destination: str) -> str:
+    return os.path.normcase(os.path.normpath(destination))
 
 
 class _ProgressQueue(queue.Queue):
@@ -35,6 +51,34 @@ class DownloadSession:
         self._complete = False
         self._error = ""
         self._eof = False
+        self._claimed: str | None = None  # the destination this worker holds
+        self._leftovers: tuple[str, list[str]] | None = None  # to clean on stop
+
+    def _claim(self, destination: str) -> bool:
+        with _ACTIVE_LOCK:
+            if _key(destination) in _ACTIVE:
+                return False
+            _ACTIVE.add(_key(destination))
+        self._claimed = destination
+        return True
+
+    def _release(self) -> None:
+        """Free the destination once no worker of ours can write to it, then
+        delete the partial files a stopped worker left (H3 D09)."""
+        claimed, self._claimed = self._claimed, None
+        leftovers, self._leftovers = self._leftovers, None
+        with _ACTIVE_LOCK:
+            if claimed is not None:
+                _ACTIVE.discard(_key(claimed))
+            if leftovers is None or _key(leftovers[0]) in _ACTIVE:
+                return  # another session downloads there now: its files
+            destination, names = leftovers
+            for name in names:
+                try:
+                    for part in Path(destination).glob(f".{glob.escape(name)}.*.part"):
+                        part.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def request(self, destination: Path, missing: list[str], variant: str) -> None:
         self.status = dict(
@@ -67,6 +111,9 @@ class DownloadSession:
         """True only on verified worker completion; owner rechecks missing files."""
         if self.status.get("state") == "approved":
             request = self.status
+            if not self._claim(request["destination"]):
+                self._fail(BUSY)  # the other owner's worker writes there (D08)
+                return False
             payload = json.dumps({k: request[k] for k in ("destination", "files")})
             self._lines = _ProgressQueue()
             self._complete = False
@@ -91,6 +138,8 @@ class DownloadSession:
                 # A failed write can leave a child: retain ownership for Stop.
                 if self.child is not None:
                     self.child.close_stdin()
+                else:
+                    self._release()
                 if self.status is request:
                     self._fail(f"Cannot start downloader ({type(exc).__name__}).")
         if not self.status:
@@ -131,6 +180,7 @@ class DownloadSession:
             return False
         child.close_stdin()
         self.child = None
+        self._release()
         if rc == 0 and self._complete:
             self.status = {}
             return True
@@ -141,8 +191,12 @@ class DownloadSession:
         return False
 
     def stop(self, timeout: float) -> bool:
+        request = self.status
+        if request.get("destination") and request.get("files"):
+            self._leftovers = (request["destination"], list(request["files"]))
         self.status = {}  # invalidate approval before touching the child
         if self.child is None:
+            self._release()
             return True
         child = self.child
         child.close_stdin()
@@ -150,4 +204,5 @@ class DownloadSession:
         child.join_readers(timeout=0.2)
         if stopped:
             self.child = None
+            self._release()
         return stopped

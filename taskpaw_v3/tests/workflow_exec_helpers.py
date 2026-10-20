@@ -176,8 +176,12 @@ class File:
     duration_ms: int = 120_000
 
 
-def add_film(rt: LocalRuntime, files: list[File]) -> str:
-    """A film whose work copies really exist under `rt.work_dir`."""
+def add_film(
+    rt: LocalRuntime, files: list[File], *, attachments: tuple[str, ...] = ()
+) -> str:
+    """A film whose work copies really exist under `rt.work_dir`.
+
+    `attachments`: the attachment suffixes its policy allows (H2 R1)."""
     film_id = identity()
     template = fixture("input-manifest-v1.json")
     item0 = template["items"][0]
@@ -243,6 +247,7 @@ def add_film(rt: LocalRuntime, files: list[File]) -> str:
                 subtitle_requirement="chinese",
                 required_image_roles=("poster",),
                 folder_cover_required=False,
+                allowed_attachment_extensions=attachments,
             ),
         ),
     )
@@ -289,6 +294,7 @@ class Direct:
     workdir: Path
     progress: list[str]
     processes: OwnedJob
+    ltx: list[dict]  # the structured LTX state beside each text update (H3 M3)
 
 
 def run_direct(
@@ -309,18 +315,25 @@ def run_direct(
     workdir = rt.work_dir / identity()
     workdir.mkdir(parents=True)
     progress: list[str] = []
+    states: list[dict] = []
     processes = OwnedJob()
+
+    def report(text: str, ltx: dict | None = None) -> None:
+        progress.append(text)
+        if ltx is not None:
+            states.append(ltx)
+
     context = JobContext(
         job,
         manifest(rt, film_id),
         workdir,
         cancel or threading.Event(),
         processes,
-        progress.append,
+        report,
     )
     try:
         outcome = executor.run(context)
     finally:
         processes.terminate()
         processes.settle(10)
-    return Direct(outcome, workdir, progress, processes)
+    return Direct(outcome, workdir, progress, processes, states)

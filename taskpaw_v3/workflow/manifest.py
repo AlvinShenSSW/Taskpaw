@@ -160,17 +160,17 @@ def _nfo_text(node: ElementTree.Element | None) -> str | None:
 
 def parse_nfo_summary(
     payload: bytes, *, max_bytes: int = 262144
-) -> tuple[str | None, tuple[str, ...]]:
-    """Title and actor names of a final NFO (T06-P1 D10); never raises."""
+) -> tuple[str | None, tuple[str, ...], str | None]:
+    """Title, actor names and number of an NFO (T06-P1 D10, H3 D05); never raises."""
     root = _nfo_root(payload, max_bytes)
     if root is None:
-        return None, ()
+        return None, (), None
     actors: list[str] = []
     for actor in root.findall("actor"):
         name = _nfo_text(actor.find("name"))
         if name and name not in actors and len(actors) < 64:
             actors.append(name)
-    return _nfo_text(root.find("title")), tuple(actors)
+    return _nfo_text(root.find("title")), tuple(actors), _nfo_text(root.find("num"))
 
 
 @dataclass(frozen=True)

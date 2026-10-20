@@ -11,7 +11,12 @@ from taskpaw_v3.core.gpu_lease import GpuLease
 from taskpaw_v3.tests.test_workflow_films import STAGES, input_manifest
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.workflow import models as m
-from taskpaw_v3.workflow.executors import SyntheticExecutor, failed_kind
+from taskpaw_v3.workflow.executors import (
+    ExecOutcome,
+    JobContext,
+    SyntheticExecutor,
+    failed_kind,
+)
 from taskpaw_v3.workflow.local_dispatch import NO_4K_DEVICE, LocalDispatcher
 from taskpaw_v3.workflow.local_gpu import LocalGpu
 from taskpaw_v3.workflow.local_runtime import LocalRuntime
@@ -494,6 +499,47 @@ def test_refused_claim_does_not_spin_and_never_starves_later_films(rt, monkeypat
     assert d.run_once() is False  # only the refused film is left: no busy loop
     assert stage(rt, blocked, "restore").status == "pending"
     assert lease.holder() is None and not any(rt.attempt_dir.glob("*.json"))
+
+
+class _Reporting(SyntheticExecutor):
+    """Reports LTX progress, then plain text, reading the status after each."""
+
+    def __init__(self) -> None:
+        super().__init__("restore")
+        self.dispatcher: LocalDispatcher | None = None
+        self.seen: list[dict] = []
+        self.blocking: list[str] = []
+
+    def run(self, context: JobContext) -> ExecOutcome:
+        assert self.dispatcher is not None
+        ltx = {"ltx_stage": "2/4 encode", "current_file": "第 1/2 卷"}
+        context.progress("修复 第 1/2 卷 · 阶段 2/4 encode", ltx=ltx)
+        self.seen.append(dict(self.dispatcher.status().current or {}))
+        self.blocking.append(self.dispatcher.lease.blocking_label())
+        context.progress("修复 第 2/2 卷")
+        self.seen.append(dict(self.dispatcher.status().current or {}))
+        return ExecOutcome.succeeded()
+
+
+def test_the_running_stage_reports_text_ltx_detail_and_the_film_name(rt):
+    """H3 M3/D04: `progress` stays the text, `ltx` rides beside it; D06: the
+    status and the GPU lease name the film, never its grouping key."""
+    reporting = _Reporting()
+    rt.executors["restore"] = reporting
+    film = add_film(rt)
+    d = reporting.dispatcher = dispatcher(rt)
+    assert d.run_once() is True
+    assert stage(rt, film, "restore").status == "succeeded"
+    first, second = reporting.seen
+    assert first == {
+        "film_id": film,
+        "film": "movie",  # the main video's stem: no package, no NFO
+        "stage": "restore",
+        "progress": "修复 第 1/2 卷 · 阶段 2/4 encode",
+        "ltx": {"ltx_stage": "2/4 encode", "current_file": "第 1/2 卷"},
+    }
+    assert second["progress"] == "修复 第 2/2 卷" and "ltx" not in second
+    assert reporting.blocking == ["影片工作流：movie"]
 
 
 def test_workflow_lease_id_never_collides_with_a_manual_task_named_workflow(rt):

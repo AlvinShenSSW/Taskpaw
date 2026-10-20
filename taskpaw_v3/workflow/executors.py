@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import sys
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from .local_gpu import max_resolution
 from .models import InputManifest, PendingComputeJob, ToolVersions
@@ -61,6 +61,16 @@ class ExecOutcome:
         return cls(error_class, message)
 
 
+class Progress(Protocol):
+    """A stage's short status text; restore adds its parsed LTX state (H3 M3)."""
+
+    def __call__(self, text: str, ltx: dict[str, Any] | None = None) -> None: ...
+
+
+def _no_progress(text: str, ltx: dict[str, Any] | None = None) -> None:
+    pass
+
+
 @dataclass
 class JobContext:
     job: PendingComputeJob
@@ -68,7 +78,7 @@ class JobContext:
     workdir: Path
     cancel: threading.Event
     processes: OwnedJob
-    progress: Callable[[str], None] = field(default=lambda text: None)
+    progress: Progress = field(default=_no_progress)
 
 
 class StageExecutor(Protocol):

@@ -26,6 +26,7 @@ from taskpaw_v3.monitors.plugins.jasna_progress import parse_jasna_progress_line
 
 from . import models as m
 from .exec_common import (
+    MISSING_LTX,
     attempt_id,
     attention,
     cancelled,
@@ -217,6 +218,9 @@ class RestoreExecutor:
         self.ffprobe = ffprobe_command(ffprobe)
         self.launch_prefix = tuple(launch_prefix)
         self._gpus = gpus
+        # the last preflight's model folder and fast flag while files were missing
+        self._models_lock = threading.Lock()
+        self._models: tuple[Path, bool] | None = None
 
     # ── contract ────────────────────────────────────────────────────────
     def tools(self) -> m.ToolVersions:
@@ -247,6 +251,30 @@ class RestoreExecutor:
 
     def run(self, context: JobContext) -> ExecOutcome:
         return guarded(lambda: self._run(context))
+
+    # ── model download offer (H3 M1, D07, D10) ──────────────────────────
+    def _weights(self) -> Path:
+        """Where this Jasna loads its LTX models; the download goes there too."""
+        return Path(self.jasna_exe).parent / "model_weights" / "ltx-restore"
+
+    def missing_models(self) -> tuple[Path, list[str], str] | None:
+        """`(destination, missing files, variant)` the last preflight stopped on,
+        rechecked on disk; None once they are all there. Never queries the GPU:
+        the variant is the one that preflight chose."""
+        with self._models_lock:
+            cached = self._models
+        if cached is None:
+            return None
+        weights, fast = cached
+        missing = jasna.ltx_missing_files(
+            str(weights.parent.parent), self.cfg.ltx_best, fast
+        )
+        if not missing:
+            with self._models_lock:
+                if self._models is cached:
+                    self._models = None
+            return None
+        return weights, missing, jasna._ltx_mode(self.cfg, fast, False)
 
     # ── stage body ──────────────────────────────────────────────────────
     def _run(self, context: JobContext) -> ExecOutcome:
@@ -307,8 +335,10 @@ class RestoreExecutor:
             raise attention("找不到 ffprobe，无法核对修复结果")
         fast = self.cfg.ltx_fast and jasna.fast_supported(self._gpus())
         missing = jasna.ltx_missing_files(str(exe.parent), self.cfg.ltx_best, fast)
+        with self._models_lock:
+            self._models = (self._weights(), fast) if missing else None
         if missing:
-            raise attention("缺少 LTX 模型文件：" + "、".join(missing))
+            raise attention(MISSING_LTX + "、".join(missing))
         names = [
             jasna.output_path_for(str(context.workdir), Path(input_name(v))).name
             for v in pending
@@ -363,6 +393,7 @@ class RestoreExecutor:
         lock = threading.Lock()
         state: dict = {}
         tail: deque[str] = deque(maxlen=_TAIL_LINES)
+        volume = label.strip() or source.name
         context.progress(progress_text(label, state))
 
         def on_line(_stream: str, text: str) -> None:
@@ -374,7 +405,10 @@ class RestoreExecutor:
                         tail.append(text.strip()[:300])
                     return
                 state = updated
-            context.progress(progress_text(label, updated))
+            # the monitor's LtxProgress metrics: its parse state and the volume (M3)
+            context.progress(
+                progress_text(label, updated), ltx={**updated, "current_file": volume}
+            )
 
         child = context.processes.launch(argv, cwd=str(workdir), on_line=on_line)
         code = child.wait(context.cancel)

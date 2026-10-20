@@ -362,8 +362,14 @@ class ReadCommands(WorkflowCore):
         where: tuple[str, tuple[Any, ...]] = ("", ())
         ops: tuple[str, tuple[Any, ...]] = ("", ())
         approved: tuple[str, tuple[Any, ...]] = ("", ())
+        linked: tuple[str, tuple[Any, ...]] = ("", ())
         if film_id is not None:
             where = ("WHERE f.film_id=?", (film_id,))
+            linked = (
+                "WHERE i.package_id IN "
+                "(SELECT package_id FROM intake_films WHERE film_id=?)",
+                (film_id,),
+            )
             # an approval counts as used by any archive operation naming it
             ops = (
                 "AND (film_id=? OR approval_id IN "
@@ -388,17 +394,30 @@ class ReadCommands(WorkflowCore):
                 raise WorkflowError("forbidden")
             rows = self._conn.execute(
                 "SELECT f.film_id,f.display_name,f.created_at,"
+                "f.current_input_revision AS input_revision,"
                 "json_extract(fm.body_json,'$.output_relative_path') AS output_path,"
+                "i.package_id,p.relative_path AS package_path,"
                 "s.stage,s.status,json_extract(s.body_json,'$.reason') AS reason,"
                 "a.body_json AS attempt_json "
                 "FROM films f "
                 "LEFT JOIN manifests fm ON fm.film_id=f.film_id AND fm.kind='final' "
                 "AND fm.revision=f.current_final_revision "
+                "LEFT JOIN intake_films i ON i.film_id=f.film_id "
+                "AND i.input_revision=f.current_input_revision "
+                "LEFT JOIN intake_packages p ON p.package_id=i.package_id "
                 "LEFT JOIN stages s ON s.film_id=f.film_id "
                 "AND s.input_revision=f.current_input_revision "
                 "LEFT JOIN attempts a ON a.attempt_id=s.current_attempt_id "
                 f"{where[0]} ORDER BY f.created_at,f.film_id,s.rowid",
                 where[1],
+            ).fetchall()
+            # H3 D06: how many films' current inputs each package holds
+            counts = self._conn.execute(
+                "SELECT i.package_id,count(*) AS films FROM intake_films i "
+                "JOIN films f ON f.film_id=i.film_id "
+                f"AND f.current_input_revision=i.input_revision {linked[0]} "
+                "GROUP BY i.package_id",
+                linked[1],
             ).fetchall()
             archives = self._conn.execute(
                 "SELECT film_id,approval_id,resolved_at IS NULL AS open,"
@@ -418,6 +437,7 @@ class ReadCommands(WorkflowCore):
         open_films = {row["film_id"] for row in archives if row["open"]}
         errors = {row["film_id"]: row["error"] for row in archives}  # newest wins
         active = {row["film_id"] for row in approvals if row["approval_id"] not in used}
+        package_films = {row["package_id"]: row["films"] for row in counts}
         films: dict[str, dict[str, Any]] = {}
         for row in rows:
             film = films.setdefault(
@@ -433,6 +453,9 @@ class ReadCommands(WorkflowCore):
                     "approval_active": row["film_id"] in active,
                     "archive_open": row["film_id"] in open_films,
                     "archive_error": errors.get(row["film_id"]) or None,
+                    "input_revision": row["input_revision"],
+                    "package_path": row["package_path"],
+                    "package_films": package_films.get(row["package_id"], 0),
                 },
             )
             if row["stage"] is not None:

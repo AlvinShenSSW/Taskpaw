@@ -1,5 +1,6 @@
 """The workflow is off by default and, once enabled, runs the loop end to end (T03-P1 C7)."""
 
+import json
 import shutil
 import subprocess
 import sys
@@ -381,3 +382,169 @@ def test_stuck_downloads_become_films_once_the_extras_are_allowed(tmp_path):
         assert inputs["ABF-394-poster.jpg"] == "poster"
     finally:
         new.stop()
+
+
+# ── LTX model download from the Media Center (H3 M1) ─────────────────────
+@pytest.fixture
+def offered(tmp_path, monkeypatch):
+    """A running host whose restore lacks its LTX models; fake download workers."""
+    from taskpaw_v3.monitors.plugins import jasna_download_session as S
+    from taskpaw_v3.tests.test_jasna_download import _Child
+    from taskpaw_v3.tests.workflow_exec_helpers import Tools, dispatcher, runtime
+
+    workers: list = []
+
+    def spawn(*a, **kw):
+        workers.append(_Child(*a, **kw))
+        return workers[-1]
+
+    monkeypatch.setattr(S, "ChildProcess", spawn)
+    monkeypatch.setattr(local_host, "DOWNLOAD_TICK_SECONDS", 0.01)
+    tools = Tools(tmp_path / "tools")
+    weights = tools.jasna_dir / "model_weights" / "ltx-restore"
+    shutil.rmtree(weights.parent)
+    rt = runtime(tmp_path / "wf", tools)
+    host = LocalWorkflowHost(WorkflowSettings(enabled=True), tmp_path / "data")
+    host.runtime, host.dispatcher, host.state = rt, dispatcher(rt), "running"
+    try:
+        yield SimpleNamespace(
+            host=host, rt=rt, tools=tools, weights=weights, workers=workers
+        )
+    finally:
+        host.stop(timeout=10)
+        assert host.state == "stopped"
+
+
+def _control(host):
+    from fastapi.testclient import TestClient
+
+    from taskpaw_v3.agent.server.app import create_control_app
+
+    return TestClient(
+        create_control_app(
+            AgentConfig(server_id="s1", machine="dev"),
+            control_token="t",
+            control_active=lambda: True,
+            workflow_provider=lambda: host,
+        ),
+        headers={"Authorization": "Bearer t"},
+    )
+
+
+def _restore_step(client, film):
+    films = client.get("/control/workflow/films").json()["films"]
+    row = next(f for f in films if f["film_id"] == film)
+    return next(s for s in row["steps"] if s["key"] == "restore")
+
+
+def test_missing_models_are_offered_downloaded_and_the_restore_retried(offered):
+    from taskpaw_v3.monitors.plugins import jasna
+    from taskpaw_v3.monitors.plugins.jasna_download import FILES
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, stage, video
+    from taskpaw_v3.workflow.exec_common import MISSING_LTX
+    from taskpaw_v3.workflow.exec_restore import RestoreExecutor
+
+    rt, d, workers = offered.rt, offered.host.dispatcher, offered.workers
+    restore = rt.executors["restore"]
+    # another film failed restore for another reason: never retried by the download
+    rt.executors["restore"] = RestoreExecutor(
+        rt, str(offered.tools.jasna_exe), ffprobe=[], gpus=lambda: None
+    )
+    other = add_film(rt, [File("other.mkv", video())])
+    assert d.run_once() is True
+    rt.executors["restore"] = restore
+    film = add_film(rt, [File("ABF-394.mp4", video())])
+    assert d.run_once() is True
+    assert d.run_once() is False  # D01: needs attention, never retried on its own
+    assert stage(rt, film, "restore").status == "failed"
+    client = _control(offered.host)
+    step = _restore_step(client, film)
+    assert step["state"] == "failed" and step["note"].startswith(MISSING_LTX)
+    offer = step["download"]
+    missing = jasna.ltx_missing_files(None, False, True)
+    assert offer == {
+        "state": "awaiting",
+        "request_id": offer["request_id"],
+        "files": missing,
+        "total_bytes": sum(FILES[name][0] for name in missing),
+        "downloaded_bytes": 0,
+        "destination": str(offered.weights.resolve()),
+        "variant": "ltx fast auto-split 12%",
+        "error": None,
+    }
+    assert "download" not in _restore_step(client, other)
+    assert workers == []  # nothing downloads without the operator's click
+    url = "/control/workflow/ltx-download"
+    stale = client.post(url, json={"request_id": "stale", "approved": True})
+    assert stale.status_code == 409
+    assert (
+        client.post(url, json={"request_id": "x", "approved": "yes"}).status_code == 422
+    )
+    click = {"request_id": offer["request_id"], "approved": True}
+    assert client.post(url, json=click).json() == {"ok": True}
+    assert client.post(url, json=click).status_code == 409  # a second click
+    _wait(lambda: workers, seconds=10)
+    (worker,) = workers
+    assert json.loads(worker.payload) == {
+        "destination": str(offered.weights.resolve()),
+        "files": missing,
+    }
+    worker.sink.put('{"state":"downloading","downloaded_bytes":123}')
+    _wait(lambda: _restore_step(client, film)["download"]["downloaded_bytes"] == 123)
+    assert _restore_step(client, film)["download"]["state"] == "downloading"
+    offered.weights.mkdir(parents=True)
+    for name in missing:  # what the verified worker publishes
+        (offered.weights / name).write_bytes(b"weights")
+    worker.finish()
+    _wait(lambda: stage(rt, film, "restore").status == "pending", seconds=10)
+    assert stage(rt, other, "restore").status == "failed"
+    assert "download" not in _restore_step(client, film)
+    assert d.run_once() is True
+    assert stage(rt, film, "restore").status == "succeeded"
+    assert len(workers) == 1
+
+
+def test_a_download_can_be_stopped_and_is_offered_again(offered):
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, stage, video
+
+    rt, d, workers = offered.rt, offered.host.dispatcher, offered.workers
+    film = add_film(rt, [File("ABF-394.mp4", video())])
+    assert d.run_once() is True
+    client = _control(offered.host)
+    offer = _restore_step(client, film)["download"]
+    click = {"request_id": offer["request_id"], "approved": True}
+    assert client.post("/control/workflow/ltx-download", json=click).status_code == 200
+    _wait(lambda: workers, seconds=10)
+    stop = client.post("/control/workflow/ltx-download/stop")
+    assert stop.json() == {"ok": True}
+    again = _restore_step(client, film)["download"]
+    assert again["state"] == "awaiting" and again["request_id"] != offer["request_id"]
+    click = {"request_id": again["request_id"], "approved": True}
+    assert client.post("/control/workflow/ltx-download", json=click).status_code == 200
+    _wait(lambda: len(workers) == 2, seconds=10)
+    workers[1].survives = True
+    stuck = client.post("/control/workflow/ltx-download/stop")
+    assert stuck.status_code == 503
+    workers[1].survives = False
+    assert stage(rt, film, "restore").status == "failed"
+
+
+def test_stopping_the_host_stops_the_download(offered):
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, video
+
+    rt, d, workers = offered.rt, offered.host.dispatcher, offered.workers
+    film = add_film(rt, [File("ABF-394.mp4", video())])
+    assert d.run_once() is True
+    host = offered.host
+    offer = host.status()["ltx_download"]
+    assert offer["state"] == "awaiting" and offer["files"]
+    assert host.respond_ltx_download(offer["request_id"], True)
+    _wait(lambda: workers, seconds=10)
+    workers[0].survives = True
+    host.stop(timeout=1)
+    assert host.state == "stop_unconfirmed"  # the worker did not end
+    workers[0].survives = False
+    host.stop(timeout=1)
+    assert host.state == "stopped"
+    assert not host.respond_ltx_download(offer["request_id"], True)
+    assert film

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from taskpaw_v3.core import gpu_lease
 from taskpaw_v3.core.generation import next_generation
 
+from . import board
 from . import models as m
 from .auth import AuthProof
 from .executors import (
@@ -63,7 +64,9 @@ class _Running:
     owner: m.LocalOwnerEvidence | None  # None: a return claim holds no resource
     processes: OwnedJob | None
     uses_gpu: bool
+    name: str = ""  # the film's shown name (H3 D06)
     progress: str = ""
+    ltx: dict[str, Any] | None = None  # restore's parsed LTX state (H3 M3)
 
 
 class ComponentStep(Protocol):
@@ -106,7 +109,7 @@ class _Unsettled:
 class DispatchStatus:
     state: str
     reason: str
-    current: dict[str, str] | None
+    current: dict[str, Any] | None
     waiting: dict[str, str] = field(default_factory=dict)
 
 
@@ -214,14 +217,17 @@ class LocalDispatcher:
 
     def status(self) -> DispatchStatus:
         with self._lock:
-            current = None
-            if self._running is not None:
+            current: dict[str, Any] | None = None
+            running = self._running
+            if running is not None:
                 current = {
-                    "film_id": self._running.job.film_id,
-                    "film": self._running.job.display_name,
-                    "stage": self._running.job.stage,
-                    "progress": self._running.progress,
+                    "film_id": running.job.film_id,
+                    "film": running.name or running.job.display_name,
+                    "stage": running.job.stage,
+                    "progress": running.progress,
                 }
+                if running.ltx is not None:
+                    current["ltx"] = running.ltx
             state = (
                 "stopping_unconfirmed"
                 if self._unsettled is not None
@@ -321,7 +327,8 @@ class LocalDispatcher:
                     waiting[job.film_id] = NO_4K_DEVICE
                     continue
                 gpu = _needs_gpu(executor, manifest)
-                if gpu and not self._acquire(job):
+                name = self._name(job, manifest)
+                if gpu and not self._acquire(job, name):
                     gpu_waited = True  # keep the queue place, look further (E7)
                     waiting[job.film_id] = "等待 GPU：" + (
                         self.lease.blocking_label()
@@ -331,7 +338,7 @@ class LocalDispatcher:
                     continue
                 if not gpu:
                     self._leave_queue()
-                ran = self._execute(job, executor, manifest, gpu)
+                ran = self._execute(job, executor, manifest, gpu, name)
             if ran:
                 self._set_waiting(waiting)
                 return True
@@ -347,10 +354,18 @@ class LocalDispatcher:
         with self._lock:
             self._waiting = waiting
 
-    def _acquire(self, job: m.PendingComputeJob) -> bool:
-        if self.lease.try_acquire(
-            self.run_id, self.poll, f"影片工作流：{job.display_name}"
-        ):
+    def _name(self, job: m.PendingComputeJob, manifest: m.InputManifest) -> str:
+        """The film's shown name (H3 D06); a failed read never stops dispatch."""
+        try:
+            return board.name_of(self.runtime, job.film_id, manifest) or (
+                job.display_name
+            )
+        except Exception:
+            log.exception("workflow film name unavailable for %s", job.film_id)
+            return job.display_name
+
+    def _acquire(self, job: m.PendingComputeJob, name: str) -> bool:
+        if self.lease.try_acquire(self.run_id, self.poll, f"影片工作流：{name}"):
             self._holding = True
             return True
         return False
@@ -380,6 +395,7 @@ class LocalDispatcher:
         executor: StageExecutor,
         manifest: m.InputManifest,
         uses_gpu: bool,
+        name: str = "",
     ) -> bool:
         """Claim and run one stage; False (nothing ran) when the claim is refused."""
         rt = self.runtime
@@ -435,12 +451,13 @@ class LocalDispatcher:
             children.append(identity)
             rt.write_attempt(replace(attempt, children=tuple(children)))
 
-        running = _Running(job, attempt, assignment_id, owner, None, uses_gpu)
+        running = _Running(job, attempt, assignment_id, owner, None, uses_gpu, name)
         with self._lock:
             self._running = running
 
-        def progress(text: str) -> None:
+        def progress(text: str, ltx: dict[str, Any] | None = None) -> None:
             running.progress = text[-200:]
+            running.ltx = ltx  # a plain update ends the previous LTX observation
 
         stop_renew = threading.Event()
         renewer = threading.Thread(
@@ -636,7 +653,15 @@ class LocalDispatcher:
             rt.write_attempt(replace(attempt, children=tuple(children)))
 
         # No renewal thread: the 24 h lease outlives these stages (D11).
-        running = _Running(job, attempt, claimed.assignment_id, None, None, False)
+        running = _Running(
+            job,
+            attempt,
+            claimed.assignment_id,
+            None,
+            None,
+            False,
+            self._name(job, manifest),
+        )
         with self._lock:
             self._running = running
         try:

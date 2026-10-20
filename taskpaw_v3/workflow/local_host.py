@@ -16,10 +16,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from taskpaw_v3.core.config import WorkflowSettings
+from taskpaw_v3.monitors.plugins.jasna_download_session import DownloadSession
 
 from . import intake_models as im
 from . import models as m
 from .auth import STAGE_ROLES
+from .exec_common import MISSING_LTX
 from .executors import StageExecutor
 from .filmpaw_client import FilmpawClient
 from .finalize import Finalizer
@@ -32,6 +34,9 @@ ExecutorFactory = Callable[[LocalRuntime], Sequence[StageExecutor]]
 log = logging.getLogger("taskpaw.workflow.host")
 
 COMPUTE_STAGES: tuple[m.Stage, ...] = ("restore", "asr", "translate")
+DOWNLOAD_TICK_SECONDS = 1.0  # how often a running model download is advanced
+DOWNLOAD_STOP_SECONDS = 10.0
+_DOWNLOAD_BUSY = ("approved", "downloading")
 MANDATORY_STAGES: tuple[m.Stage, ...] = (
     "intake",
     "return",
@@ -180,6 +185,30 @@ class WorkflowHostLike(Protocol):
 
     def retry(self, film_id: str, stage: str) -> None: ...
 
+    def respond_ltx_download(self, request_id: str, approved: bool) -> bool: ...
+
+    def stop_ltx_download(self) -> None: ...
+
+
+def retry_missing_models(rt: LocalRuntime) -> list[str]:
+    """H3 D01: requeue every restore that failed only for missing LTX models."""
+    retried = []
+    for film in rt.store.film_board(rt.operator):
+        restore = next((s for s in film.stages if s.stage == "restore"), None)
+        if (
+            restore is None
+            or restore.status != "failed"
+            or not (restore.note or "").startswith(MISSING_LTX)
+        ):
+            continue
+        try:
+            retry_failed_stage(rt, film.film_id, "restore")
+        except m.WorkflowError as exc:  # changed meanwhile: the operator retries
+            log.warning("model retry skipped %s: %s", film.film_id, exc)
+            continue
+        retried.append(film.film_id)
+    return retried
+
 
 class LocalWorkflowHost:
     def __init__(
@@ -205,6 +234,10 @@ class LocalWorkflowHost:
         self.finalizer: Finalizer | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
+        # H3 M1/D02: one LTX model download; the session needs serialized calls
+        self._download = DownloadSession()
+        self._download_lock = threading.Lock()
+        self._ticker: threading.Thread | None = None
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -279,6 +312,11 @@ class LocalWorkflowHost:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             confirmed &= not self._thread.is_alive()
+        ticker = self._ticker
+        if ticker is not None:
+            ticker.join(timeout=timeout)
+        with self._download_lock:
+            confirmed &= self._download.stop(min(timeout, DOWNLOAD_STOP_SECONDS))
         if self.dispatcher is not None:
             confirmed &= self.dispatcher.stop(timeout=timeout)
         if self.intake is not None:
@@ -311,12 +349,87 @@ class LocalWorkflowHost:
         retry_failed_stage(self.runtime, film_id, stage)
         self.dispatcher.wake()
 
+    # ── LTX model download (H3 M1, D02, D10) ────────────────────────────
+    def _missing_models(self) -> tuple[Path, list[str], str] | None:
+        """The restore executor's cached preflight result, rechecked on disk."""
+        rt = self.runtime
+        restore = rt.executors.get("restore") if rt is not None else None
+        check = getattr(restore, "missing_models", None)
+        return check() if callable(check) else None
+
+    def ltx_download(self) -> dict[str, Any] | None:
+        """The download session for the 修复 step. A restore that stopped on
+        missing models is offered (`awaiting`); nothing downloads before the
+        operator approves it through `respond_ltx_download`."""
+        with self._download_lock:
+            session = self._download
+            if session.child is None and session.status.get("state") not in (
+                _DOWNLOAD_BUSY
+            ):
+                missing = self._missing_models()
+                if missing is None:
+                    session.stop(0)  # all there now: withdraw a stale offer
+                elif not session.status or session.status["files"] != missing[1]:
+                    session.request(*missing)
+            return dict(session.status) or None
+
+    def respond_ltx_download(self, request_id: str, approved: bool) -> bool:
+        """The operator's 下载模型 click; False for a stale or a second click."""
+        with self._download_lock:
+            if self._stopping.is_set():
+                return False
+            if not self._download.respond(request_id, approved):
+                return False
+            if approved and (self._ticker is None or not self._ticker.is_alive()):
+                self._ticker = threading.Thread(
+                    target=self._tick_download,
+                    name="workflow-ltx-download",
+                    daemon=True,
+                )
+                self._ticker.start()
+            return True
+
+    def stop_ltx_download(self) -> None:
+        """Stop the download; RuntimeError while its worker is still running."""
+        with self._download_lock:
+            if not self._download.stop(DOWNLOAD_STOP_SECONDS):
+                raise RuntimeError("模型下载进程仍在停止")
+
+    def _tick_download(self) -> None:
+        """Advance the download until it ends; then retry the waiting restores."""
+        while not self._stopping.is_set():
+            with self._download_lock:
+                done = self._download.tick()
+                busy = (
+                    self._download.child is not None
+                    or self._download.status.get("state") in _DOWNLOAD_BUSY
+                )
+                if not done and not busy:
+                    self._ticker = None
+                    return
+            if done:
+                self._downloaded()
+            self._stopping.wait(DOWNLOAD_TICK_SECONDS)
+
+    def _downloaded(self) -> None:
+        """D01: a verified download retries the restores that lacked the models."""
+        rt, dispatcher = self.runtime, self.dispatcher
+        if rt is None or self._missing_models() is not None:
+            return  # still missing: the next read offers what is left
+        try:
+            retry_missing_models(rt)
+        except Exception:
+            log.exception("media workflow model retry failed")
+        if dispatcher is not None:
+            dispatcher.wake()
+
     def status(self) -> dict[str, Any]:
         value: dict[str, Any] = {
             "state": self.state,
             "reason": self.reason,
             # the snapshot copy in progress, for the 入库扫描 step (H2 G1)
             "intake": self.intake.progress if self.intake is not None else None,
+            "ltx_download": self.ltx_download(),
         }
         if self.dispatcher is not None:
             dispatch = self.dispatcher.status()

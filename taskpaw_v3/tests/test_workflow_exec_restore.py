@@ -1,5 +1,6 @@
 """RestoreExecutor: Jasna LTX per main video with a fake Jasna child (T04-P1 E1, E8)."""
 
+import json
 import shutil
 import subprocess
 import threading
@@ -7,6 +8,7 @@ import time
 
 import pytest
 
+from taskpaw_v3.monitors.plugins import jasna
 from taskpaw_v3.tests.workflow_exec_helpers import (
     File,
     Tools,
@@ -19,6 +21,7 @@ from taskpaw_v3.tests.workflow_exec_helpers import (
     stage,
     video,
 )
+from taskpaw_v3.workflow.exec_common import MISSING_LTX
 from taskpaw_v3.workflow.exec_restore import (
     RestoreExecutor,
     is_restored_name,
@@ -88,6 +91,49 @@ def test_cr_separated_ltx_progress_reaches_the_status(rt):
     assert "修复 · 阶段 1/4 scan · 100% · 剩余 12:30" in run.progress
 
 
+def test_restore_reports_the_parsed_ltx_state_beside_the_text(rt):
+    """H3 M3/D13: the state the Jasna monitor's LtxProgress reads, plus the volume."""
+    film = add_film(
+        rt,
+        [
+            File("cd1.mkv", video(), volume=1),
+            File("cd2.mkv", video(), volume=2),
+        ],
+    )
+    run = run_direct(rt, film, "restore")
+    assert run.outcome.ok
+    # the short text is unchanged (the list row and the other stages keep it)
+    assert "修复 第 1/2 卷 · 阶段 2/4 encode · 52% · 剩余 12:12" in run.progress
+    encode = [s for s in run.ltx if s["ltx_progress"]["stage_name"] == "encode"]
+    first, second = encode
+    assert (first["current_file"], second["current_file"]) == ("第 1/2 卷", "第 2/2 卷")
+    assert first["ltx_stage"] == "2/4 encode"
+    assert (first["percent"], first["fps"], first["eta"]) == (52, 5.62, "12:12")
+    assert first["ltx_progress"] == {
+        "mode": "restore",
+        "stage_index": 2,
+        "stage_total": 4,
+        "stage_name": "encode",
+        "raw_line": "LTX 2/4 encode:  52.00%|█████▏    | 156/300 "
+        "[00:27<00:25,  5.620frame/s, run 12:12 left]",
+        "percent": 52.0,
+        "percent_text": "52.00",
+        "current": "156",
+        "total": "300",
+        "elapsed": "00:27",
+        "eta": "00:25",
+        "rate_value": "5.620",
+        "rate_unit": "frame/s",
+        "run_eta": "12:12",
+    }
+    json.dumps(run.ltx)  # it travels through the status as JSON
+
+
+def test_a_single_volume_names_its_video_in_the_ltx_state(rt):
+    run = run_direct(rt, single(rt, "ABF-394.mp4"), "restore")
+    assert run.ltx and {s["current_file"] for s in run.ltx} == {"ABF-394.mp4"}
+
+
 def test_progress_text_shows_volume_stage_percent_and_eta():
     state = {"ltx_stage": "3/4 denoise", "percent": 7, "eta": "04:57"}
     assert progress_text(" 第 2/3 卷", state) == (
@@ -131,6 +177,48 @@ def test_missing_tool_or_models_launch_nothing(rt, tools, missing):
     }
     assert expected[missing] in run.outcome.message
     assert run.processes.children == []
+
+
+def test_missing_models_are_cached_for_the_download_offer(rt, tools):
+    """H3 D10: the host offers the download from the last preflight, rechecked on
+    disk only — reading the offer never queries the GPU (nvidia-smi)."""
+    queries = []
+
+    def gpus():
+        queries.append(1)
+        return None
+
+    executor = tools.restore(rt, gpus=gpus)
+    assert executor.missing_models() is None
+    weights = tools.jasna_dir / "model_weights" / "ltx-restore"
+    shutil.rmtree(weights.parent)
+    run = run_direct(rt, single(rt), "restore", executor)
+    assert run.outcome.message.startswith(MISSING_LTX)
+    asked = len(queries)
+    missing = jasna.ltx_missing_files(None, False, True)
+    assert executor.missing_models() == (weights, missing, "ltx fast auto-split 12%")
+    weights.mkdir(parents=True)
+    (weights / missing[0]).write_bytes(b"weights")
+    assert executor.missing_models() == (
+        weights,
+        missing[1:],
+        "ltx fast auto-split 12%",
+    )
+    for name in missing[1:]:
+        (weights / name).write_bytes(b"weights")
+    assert executor.missing_models() is None
+    assert len(queries) == asked
+    (weights / missing[0]).unlink()
+    assert executor.missing_models() is None  # only a preflight makes a new offer
+    run_direct(rt, single(rt, "b.mkv"), "restore", executor)
+    assert executor.missing_models() == (
+        weights,
+        missing[:1],
+        "ltx fast auto-split 12%",
+    )
+    (weights / missing[0]).write_bytes(b"weights")
+    assert run_direct(rt, single(rt, "c.mkv"), "restore", executor).outcome.ok
+    assert executor.missing_models() is None
 
 
 def test_models_checked_for_the_variant_the_gpu_allows(rt, tools):

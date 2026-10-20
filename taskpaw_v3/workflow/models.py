@@ -1610,6 +1610,8 @@ class BoardFilm(Model):
     `approval_active`: the current context revision has an unrevoked approval
     that no archive operation has used yet (confirmed, waiting to archive).
     `archive_error`: the error code of the film's newest archive operation.
+    `package_path` / `package_films`: the INBOX package of the current input
+    revision and how many films' current inputs it holds (H3 D06).
     """
 
     film_id: Id
@@ -1620,6 +1622,9 @@ class BoardFilm(Model):
     approval_active: bool
     archive_open: bool
     archive_error: Text | None
+    input_revision: Revision | None = None
+    package_path: Text | None = None  # under the INBOX root
+    package_films: Count = 0
 
 
 class PackageFilm(Model):

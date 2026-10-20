@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from taskpaw_v3.core.config import WorkflowSettings
 
@@ -46,6 +46,14 @@ class RetryBody(BaseModel):
 class OpenBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     what: Literal["inbox", "output"]
+
+
+class LtxDownloadBody(BaseModel):
+    """The 下载模型 answer to the offered request (H3 M1), as the monitor's."""
+
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=128)
+    approved: StrictBool
 
 
 def open_folder(path: Path) -> None:
@@ -110,9 +118,6 @@ def register_workflow_routes(
         assert host.runtime is not None  # checked by _host
         return host.runtime
 
-    def _dispatch(host: WorkflowHostLike) -> dict[str, Any]:
-        return dict(host.status().get("dispatch") or {})
-
     def _not_found() -> HTTPException:
         return HTTPException(status_code=404, detail="未知影片")
 
@@ -153,13 +158,18 @@ def register_workflow_routes(
         with _mapped():
             films = rt.store.film_board(rt.operator)
             packages = rt.store.list_intake_board(rt.operator)
+            labels = board.input_labels(rt, films)
         return {
             "state": host.state,
             "reason": host.reason,
             "current": current,
             "intake": intake,
             "films": board.film_rows(
-                films, dict(dispatch.get("waiting") or {}), current
+                films,
+                dict(dispatch.get("waiting") or {}),
+                current,
+                status.get("ltx_download"),
+                labels,
             ),
             "packages": board.package_rows(packages, intake),
         }
@@ -169,13 +179,15 @@ def register_workflow_routes(
         from taskpaw_v3.workflow import board
 
         host = _host()
-        dispatch = _dispatch(host)
+        status = host.status()
+        dispatch = dict(status.get("dispatch") or {})
         with _mapped():
             detail = board.film_detail(
                 _runtime(host),
                 film_id,
                 dict(dispatch.get("waiting") or {}),
                 dispatch.get("current"),
+                status.get("ltx_download"),
             )
         if detail is None:
             raise _not_found()
@@ -220,6 +232,22 @@ def register_workflow_routes(
         host = _host()
         with _mapped():
             host.retry(film_id, body.stage)
+        return {"ok": True}
+
+    @app.post("/control/workflow/ltx-download")
+    def workflow_ltx_download(body: LtxDownloadBody) -> dict[str, bool]:
+        """下载模型 (H3 M1): the session's own handshake refuses a stale or a
+        second click; nothing downloads without it."""
+        host = _host()
+        if not host.respond_ltx_download(body.request_id, body.approved):
+            raise HTTPException(status_code=409, detail="下载请求已过期，请刷新后重试")
+        return {"ok": True}
+
+    @app.post("/control/workflow/ltx-download/stop")
+    def workflow_ltx_download_stop() -> dict[str, bool]:
+        host = _host()
+        with _mapped():
+            host.stop_ltx_download()
         return {"ok": True}
 
     @app.post("/control/workflow/films/{film_id}/open", status_code=204)

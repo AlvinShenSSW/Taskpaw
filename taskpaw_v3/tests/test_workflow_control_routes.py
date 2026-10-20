@@ -107,7 +107,12 @@ def test_list_shows_the_film_its_group_and_the_running_stage(world, host, client
     data = client.get(f"{BASE}/films").json()
     assert (data["state"], data["current"]["stage"]) == ("running", "restore")
     (row,) = data["films"]
-    assert (row["film_id"], row["name"], row["group"]) == (world.film, "Film", "active")
+    # H3 D06: before Miko the video names the film, never the grouping key
+    assert (row["film_id"], row["name"], row["group"]) == (
+        world.film,
+        "movie",
+        "active",
+    )
     world.scrape()
     row = _row(client, world.film)
     assert (row["name"], row["group"], row["can_confirm"]) == (
@@ -206,6 +211,7 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "inputs",
         "workcopy_count",
         "has_poster",
+        "poster_source",
         "group",
         "can_confirm",
         "can_retry",
@@ -232,7 +238,7 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
     assert video["size"] > 0
     assert sorted(i["path"] for i in data["inputs"]) == ["movie.ja.srt", "movie.mkv"]
     assert data["workcopy_count"] == len(data["files"])
-    assert data["has_poster"] is True
+    assert data["has_poster"] is True and data["poster_source"].startswith("final")
     assert (data["group"], data["can_confirm"]) == ("confirm", True)
     stages = {s["stage"]: s["status"] for s in data["stages"]}
     assert stages["scrape"] == "succeeded" and stages["archive"] == "pending"
@@ -254,6 +260,29 @@ def test_poster_is_served_by_film_id(world, client):
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
     assert response.content == b"image poster.jpg"
+
+
+def test_the_input_cover_shows_until_the_final_one_exists(tmp_path):
+    """H3 M2: an image the download brought is the cover until Miko ran."""
+    world = World(tmp_path, {"ABF-393.jpg": b"input cover"})
+    try:
+        client = _client(lambda: Host(world))
+        before = client.get(f"{BASE}/films/{world.film}").json()
+        assert before["has_poster"] is True
+        assert before["poster_source"].startswith("input")
+        assert client.get(f"{BASE}/films/{world.film}/poster").content == (
+            b"input cover"
+        )
+        world.scrape()
+        after = client.get(f"{BASE}/films/{world.film}").json()
+        assert after["poster_source"].startswith("final")
+        assert after["poster_source"] != before["poster_source"]
+        assert (after["name"], after["title"]) == (FILM_DIR, "假的标题")
+        assert client.get(f"{BASE}/films/{world.film}/poster").content == (
+            b"image poster.jpg"
+        )
+    finally:
+        world.rt.close()
 
 
 def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, client):
