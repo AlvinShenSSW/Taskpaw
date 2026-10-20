@@ -9,7 +9,7 @@ Home-LAN single-user (P0): secrets live in a plain user-profile file.
 from __future__ import annotations
 
 import json
-import os
+import logging
 import secrets
 import shutil
 import threading
@@ -22,6 +22,8 @@ from typing import Any, Callable, cast
 
 from pydantic import SecretStr
 
+from taskpaw_v3.core.state import atomic_json
+
 from . import intake_models as im
 from . import models as m
 from .auth import AuthProof, authenticate, authenticate_pairing, digest_secret
@@ -30,6 +32,8 @@ from .local_clock import MonotonicWallClock, read_high_water
 from .local_gpu import FULL_HD, UHD, LocalGpu, machine_identity, query_gpu
 from .owned_process import own_identity, process_alive
 from .store import WorkflowStore
+
+log = logging.getLogger("taskpaw.workflow.runtime")
 
 PRODUCER = "taskpaw-local-runtime"
 LONG = timedelta(days=3650)
@@ -44,13 +48,6 @@ def _new_id() -> str:
 
 def _secret() -> str:
     return secrets.token_urlsafe(32)
-
-
-def write_json_atomic(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 @dataclass
@@ -97,7 +94,7 @@ class LocalIdentity:
                 for name in ("register", "pairing", "complete", "participation")
             },
         )
-        write_json_atomic(path, asdict(value))
+        atomic_json(path, asdict(value))
         return value
 
     @property
@@ -446,22 +443,31 @@ class LocalRuntime:
         return self.attempt_dir / f"{attempt_id}.json"
 
     def write_attempt(self, value: AttemptFile) -> None:
-        write_json_atomic(
+        atomic_json(
             self.attempt_path(value.attempt_id),
             {**asdict(value), "children": list(value.children)},
         )
 
     def read_attempt(self, attempt_id: str) -> AttemptFile | None:
+        """None when absent or unreadable (R4).
+
+        A torn file only follows an OS crash or power loss, which also ended
+        every child, so "no recorded children" is the true state then.
+        """
         path = self.attempt_path(attempt_id)
         if not path.exists():
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return AttemptFile(
-            attempt_id=data["attempt_id"],
-            operation_id=data["operation_id"],
-            job_id=data["job_id"],
-            children=tuple(data.get("children", ())),
-        )
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return AttemptFile(
+                attempt_id=data["attempt_id"],
+                operation_id=data["operation_id"],
+                job_id=data["job_id"],
+                children=tuple(data.get("children", ())),
+            )
+        except (ValueError, KeyError, TypeError):
+            log.warning("unreadable workflow attempt record %s ignored", path.name)
+            return None
 
     def drop_attempt(self, attempt_id: str) -> None:
         try:

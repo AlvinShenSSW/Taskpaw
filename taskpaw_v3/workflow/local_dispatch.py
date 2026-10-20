@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -18,6 +19,7 @@ from taskpaw_v3.core.generation import next_generation
 
 from . import models as m
 from .executors import (
+    INTERRUPTED_KIND,
     SUCCEEDED_KIND,
     ExecOutcome,
     JobContext,
@@ -50,7 +52,7 @@ class _Running:
     attempt: AttemptFile
     assignment_id: str
     owner: m.LocalOwnerEvidence
-    processes: OwnedJob
+    processes: OwnedJob | None
     uses_gpu: bool
     progress: str = ""
 
@@ -82,6 +84,32 @@ def _limits(manifest: m.InputManifest) -> tuple[int, int]:
 def fits(manifest: m.InputManifest, limit: tuple[int, int]) -> bool:
     width, height = _limits(manifest)
     return 0 < width <= limit[0] and 0 < height <= limit[1]
+
+
+_FREE_RETRY = frozenset({INTERRUPTED_KIND, failed_kind("cancelled")})
+_TRANSIENT = failed_kind("transient")
+
+
+def _kinds(attempt: Any) -> set[str]:
+    return {evidence.kind for evidence in attempt.evidence}
+
+
+def should_retry(attempts: Sequence[Any]) -> bool:
+    """C6 / T08-P1a R3: decided only by persisted evidence kinds, oldest first.
+
+    Interruptions and stops are retried without counting; a transient failure
+    is retried while at most MAX_AUTO_RETRIES transient attempts have failed;
+    permission and needs-attention failures are never retried.
+    """
+    if not attempts:
+        return False
+    latest = _kinds(attempts[-1])
+    if latest & _FREE_RETRY:
+        return True
+    if _TRANSIENT in latest:
+        failures = sum(1 for attempt in attempts if _TRANSIENT in _kinds(attempt))
+        return failures <= MAX_AUTO_RETRIES
+    return False
 
 
 class LocalDispatcher:
@@ -118,11 +146,14 @@ class LocalDispatcher:
     def wake(self) -> None:
         self._wake.set()
 
-    def stop(self, timeout: float = 60.0) -> None:
+    def stop(self, timeout: float = 60.0) -> bool:
+        """True when the dispatch thread has exited (or never started)."""
         self.cancel.set()
         self._wake.set()
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
+        if self._thread is None:
+            return True
+        self._thread.join(timeout=timeout)
+        return not self._thread.is_alive()
 
     def status(self) -> DispatchStatus:
         with self._lock:
@@ -143,7 +174,22 @@ class LocalDispatcher:
             )
             return DispatchStatus(state, self._reason, current, dict(self._waiting))
 
+    def reconcile_retries(self) -> None:
+        """R3: make retries a crash lost between resolution and requeue."""
+        rt = self.runtime
+        try:
+            for job in rt.store.list_compute_jobs(rt.operator, "failed"):
+                try:
+                    self._retry_if_due(job.job_id)
+                except m.WorkflowError as exc:
+                    log.warning(
+                        "workflow retry reconcile skipped %s: %s", job.job_id, exc
+                    )
+        except Exception:
+            log.exception("workflow retry reconcile failed")
+
     def _loop(self) -> None:
+        self.reconcile_retries()
         while not self.cancel.is_set():
             try:
                 worked = self.run_once()
@@ -281,14 +327,9 @@ class LocalDispatcher:
             children.append(identity)
             rt.write_attempt(replace(attempt, children=tuple(children)))
 
-        processes = OwnedJob(on_launch=launched)
-        running = _Running(
-            job, attempt, assignment_id, owner, processes, executor.uses_gpu
-        )
+        running = _Running(job, attempt, assignment_id, owner, None, executor.uses_gpu)
         with self._lock:
             self._running = running
-        workdir = rt.work_dir / attempt.attempt_id
-        workdir.mkdir(parents=True, exist_ok=True)
 
         def progress(text: str) -> None:
             running.progress = text[-200:]
@@ -301,28 +342,38 @@ class LocalDispatcher:
         )
         renewer.start()
         try:
+            # Setup after the claim fails like a stage, never leaving it claimed (R2).
+            running.processes = OwnedJob(on_launch=launched)
+            workdir = rt.work_dir / attempt.attempt_id
+            workdir.mkdir(parents=True, exist_ok=True)
             outcome = executor.run(
-                JobContext(job, manifest, workdir, self.cancel, processes, progress)
+                JobContext(
+                    job, manifest, workdir, self.cancel, running.processes, progress
+                )
             )
-        except Exception as exc:  # an executor bug is a visible needs-attention
-            log.exception("executor %s failed", job.stage)
+        except Exception as exc:  # setup error or executor bug: visible needs-attention
+            log.exception("workflow stage %s failed", job.stage)
             outcome = ExecOutcome.failed("needs_attention", f"执行器异常：{exc}")
         finally:
             stop_renew.set()
+            renewer.join()  # no renewal may land after resolution reads the version (R1)
         if self.cancel.is_set() and not outcome.ok:
             outcome = ExecOutcome.failed("cancelled", "已停止")
-        processes.terminate()  # descendants left behind by a finished primary
-        if not processes.settle(self.stop_settle):
-            self._unsettled = _Unsettled(running, outcome)
-            self._reason = "停止未确认：任务进程仍在运行"
-            return True
+        processes = running.processes
+        if processes is not None:  # None: nothing was launched, nothing to settle
+            processes.terminate()  # descendants left behind by a finished primary
+            if not processes.settle(self.stop_settle):
+                self._unsettled = _Unsettled(running, outcome)
+                self._reason = "停止未确认：任务进程仍在运行"
+                return True
         self._resolve(running, outcome)
         return True
 
     def _finish_unsettled(self) -> bool:
         pending = self._unsettled
         assert pending is not None
-        if not pending.running.processes.settle(0):
+        processes = pending.running.processes
+        if processes is not None and not processes.settle(0):
             return False
         self._unsettled = None
         self._resolve(pending.running, pending.outcome)
@@ -398,7 +449,7 @@ class LocalDispatcher:
             )
             rt.drop_attempt(running.attempt.attempt_id)
             if not outcome.ok:
-                self._after_failure(running.job, outcome)
+                self._retry_if_due(running.job.job_id)  # C6
                 self._reason = outcome.message
         finally:
             with self._lock:
@@ -406,30 +457,17 @@ class LocalDispatcher:
             if running.uses_gpu:
                 self._release()
 
-    def _after_failure(self, job: m.PendingComputeJob, outcome: ExecOutcome) -> None:
-        """C6: bounded automatic retry; interruptions never count (D05)."""
+    def _retry_if_due(self, job_id: str) -> None:
+        """C6: bounded automatic retry by `should_retry`; interruptions never count."""
         rt = self.runtime
-        if outcome.error_class not in ("transient", "cancelled"):
+        if not should_retry(rt.store.list_attempts(rt.operator, job_id)):
             return
-        if outcome.error_class == "transient":
-            attempts = rt.store.list_attempts(rt.operator, job.job_id)
-            failures = sum(
-                1
-                for a in attempts
-                if any(e.kind == failed_kind("transient") for e in a.evidence)
-            )
-            if failures > MAX_AUTO_RETRIES:
-                return
-        stage = rt.store.get_stage(rt.operator, job.job_id)
+        stage = rt.store.get_stage(rt.operator, job_id)
         if stage.status == "failed":
             rt.store.retry_stage(
                 rt.operator,
                 rt.meta(),
                 m.StageRetry(
-                    job_id=job.job_id,
-                    expected_version=stage.version,
-                    reason="自动重试"
-                    if outcome.error_class == "transient"
-                    else "停止后继续",
+                    job_id=job_id, expected_version=stage.version, reason="自动重试"
                 ),
             )

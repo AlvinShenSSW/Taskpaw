@@ -108,6 +108,12 @@ class ReadCommands(WorkflowCore):
 
         Only the dependency status is checked here; `claim` enforces the rest.
         """
+        return self.list_compute_jobs(auth, "pending")
+
+    def list_compute_jobs(
+        self, auth: AuthProof, status: str
+    ) -> tuple[PendingComputeJob, ...]:
+        """Current-revision compute jobs in `status` whose dependencies are done."""
         with self._lock:
             principal = self._check_auth(auth, self._observe_time())
             if principal["role"] != "operator":
@@ -115,10 +121,11 @@ class ReadCommands(WorkflowCore):
             rows = self._conn.execute(
                 "SELECT s.*,f.display_name,f.created_at AS film_created_at FROM stages s "
                 "JOIN films f ON f.film_id=s.film_id AND f.current_input_revision=s.input_revision "
-                "WHERE s.status='pending' AND s.stage IN ('restore','asr','translate') "
-                "ORDER BY f.created_at,f.film_id,s.rowid"
+                "WHERE s.status=? AND s.stage IN ('restore','asr','translate') "
+                "ORDER BY f.created_at,f.film_id,s.rowid",
+                (status,),
             ).fetchall()
-            status = {
+            statuses = {
                 row[0]: row[1]
                 for row in self._conn.execute("SELECT job_id,status FROM stages")
             }
@@ -126,7 +133,7 @@ class ReadCommands(WorkflowCore):
             for row in rows:
                 record = StageRecord.model_validate_json(row["body_json"])
                 if all(
-                    status.get(dep) in ("succeeded", "skipped")
+                    statuses.get(dep) in ("succeeded", "skipped")
                     for dep in record.dependency_job_ids
                 ):
                     jobs.append(

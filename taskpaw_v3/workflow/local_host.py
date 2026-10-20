@@ -181,16 +181,29 @@ class LocalWorkflowHost:
             self.state, self.reason = "failed", str(exc) or type(exc).__name__
 
     def stop(self, timeout: float = 60.0) -> None:
+        """Stop everything; keep the store open unless every user stopped (R5).
+
+        Closing waits on the store lock that a stuck intake stopper may hold,
+        which would hang the agent's shutdown. Process exit still releases the
+        store lock and closes the kill-on-close Jobs.
+        """
         self._stopping.set()
+        confirmed = True
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+            confirmed &= not self._thread.is_alive()
         if self.dispatcher is not None:
-            self.dispatcher.stop(timeout=timeout)
+            confirmed &= self.dispatcher.stop(timeout=timeout)
         if self.intake is not None:
             try:
-                self.intake.stop(timeout=min(timeout, 30.0))
+                confirmed &= bool(self.intake.stop(timeout=min(timeout, 30.0)))
             except Exception:
                 log.exception("media workflow intake stop failed")
+                confirmed = False
+        if not confirmed:
+            log.error("media workflow stop unconfirmed; store left open")
+            self.state = "stop_unconfirmed"
+            return
         if self.runtime is not None:
             self.runtime.close()
         self.state = "stopped"
