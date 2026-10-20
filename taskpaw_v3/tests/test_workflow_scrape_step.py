@@ -274,3 +274,41 @@ def test_a_changed_return_package_file_stops_the_scrape(rt, tmp_path):
     (attempt,) = rt.store.list_attempts(rt.operator, job.job_id)
     assert attempt.evidence[0].kind == failed_kind("needs_attention")
     assert final_of(rt, film) is None
+
+
+def test_japanese_subtitles_keep_their_format_and_never_share_a_name(tmp_path):
+    """H1-3: an input .ass beside the generated .ja.srt, and a second .srt."""
+    package, out = tmp_path / "pkg", tmp_path / "out"
+    (package / "F").mkdir(parents=True)
+    (out / "Film").mkdir(parents=True)
+
+    def item(rel, data, role):
+        (package / rel).write_bytes(data)
+        return {
+            "relative_path": rel,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "role": role,
+            "language": "ja",
+            "staged_video": "ABC-001.mp4",
+        }
+
+    japanese = [
+        item("F/ABC-001.ja.srt", b"generated", "generated_subtitle"),
+        item("F/ABC-001.ja.ass", b"[Script Info]", "source_subtitle"),
+        item("F/extra.JA.SRT", b"second srt", "source_subtitle"),
+    ]
+    files = [{"role": "main_video", "video": "ABC-001.mp4", "path": "Film/ABC-001.mp4"}]
+    placed = LocalScrapeStep._place_japanese(
+        japanese, package, out / "Film", out, files
+    )
+    assert [p["path"] for p in placed] == [
+        "Film/ABC-001.ja.srt",
+        "Film/ABC-001.ja.ass",
+        "Film/ABC-001.ja.1.SRT",
+    ]
+    assert [(out / p["path"]).read_bytes() for p in placed] == [
+        b"generated",
+        b"[Script Info]",
+        b"second srt",
+    ]

@@ -27,6 +27,7 @@ from .executors import (
     ExecOutcome,
     JobContext,
     StageExecutor,
+    classify_exception,
     failed_kind,
 )
 from .local_runtime import AttemptFile, LocalRuntime, _new_id
@@ -456,7 +457,7 @@ class LocalDispatcher:
             )
         except Exception as exc:  # setup error or executor bug: visible needs-attention
             log.exception("workflow stage %s failed", job.stage)
-            outcome = ExecOutcome.failed("needs_attention", f"执行器异常：{exc}")
+            outcome = ExecOutcome.failed(classify_exception(exc), f"执行器异常：{exc}")
         finally:
             stop_renew.set()
             renewer.join()  # no renewal may land after resolution reads the version (R1)
@@ -646,7 +647,9 @@ class LocalDispatcher:
             )
         except Exception as exc:  # a step bug is a visible needs-attention
             log.exception("workflow %s failed", job.stage)
-            outcome = ExecOutcome.failed("needs_attention", f"{job.stage} 异常：{exc}")
+            outcome = ExecOutcome.failed(
+                classify_exception(exc), f"{job.stage} 异常：{exc}"
+            )
         if self.cancel.is_set() and not outcome.ok:
             outcome = ExecOutcome.failed("cancelled", "已停止")
         processes = running.processes

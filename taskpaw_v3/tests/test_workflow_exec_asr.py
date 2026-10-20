@@ -1,7 +1,9 @@
 """AsrExecutor: subtitle decision matrix and a fake WhisperJAV child (T04-P1 E2)."""
 
+import errno
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +22,7 @@ from taskpaw_v3.tests.workflow_exec_helpers import (
     stage,
     video,
 )
+from taskpaw_v3.workflow import exec_common
 from taskpaw_v3.workflow.exec_asr import AsrExecutor
 from taskpaw_v3.workflow.executors import failed_kind
 from taskpaw_v3.workflow.stage_results import check_file, load_stage_result
@@ -192,6 +195,33 @@ def test_whisperjav_failure_is_transient(rt, tools):
     first = attempts(rt, film, "asr")[0]
     assert first.evidence[0].kind == failed_kind("transient")
     assert "WhisperJAV" in first.evidence[0].summary.note
+
+
+def _held(*args, **kwargs):
+    # A sharing violation on open: errno 13, no winerror (H1-2).
+    raise PermissionError(errno.EACCES, "Permission denied")
+
+
+def test_a_held_work_copy_is_transient(rt, tools, monkeypatch):
+    film = film_with(rt, ("movie.zh.srt", ZH_SRT, "zh"))
+    monkeypatch.setattr(exec_common, "file_ref", _held)
+    run_asr(rt, film)
+    first = attempts(rt, film, "asr")[0]
+    assert first.evidence[0].kind == failed_kind("transient")
+
+
+def test_a_held_subtitle_is_transient(rt, tools, monkeypatch):
+    film = film_with(rt, ("movie.zh.srt", ZH_SRT, "zh"))
+    read_bytes = Path.read_bytes
+
+    def read(path):
+        return _held() if path.suffix == ".srt" else read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    run_asr(rt, film)
+    first = attempts(rt, film, "asr")[0]
+    assert first.evidence[0].kind == failed_kind("transient")
+    assert "movie.zh.srt" in first.evidence[0].summary.note
 
 
 def test_missing_whisperjav_launches_nothing(rt, tools):

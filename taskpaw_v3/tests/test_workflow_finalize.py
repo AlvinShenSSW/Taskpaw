@@ -16,6 +16,7 @@ import pytest
 
 from taskpaw_v3.tests import test_workflow_return_step as ret
 from taskpaw_v3.tests import test_workflow_scrape_step as scr
+from taskpaw_v3.tests.test_workflow_local_dispatch import Crash
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.workflow_exec_helpers import video
 from taskpaw_v3.tests.workflow_fake_filmpaw import FakeFilmpaw
@@ -418,6 +419,32 @@ def test_reclaim_survives_a_restart(world):
     world.rt = world.runtime()
     world.finalizer().run_once()
     assert not list((world.rt.work_dir / "return").glob(f"{world.film}-r*"))
+
+
+def test_a_crash_right_after_the_recorded_cleanup_still_reclaims(world):
+    """H1-4: the reclaim intent is durable before the cleanup result is."""
+    world.scrape()
+    real = world.rt.store.record_cleanup_result
+
+    def record_then_crash(*args, **kwargs):
+        real(*args, **kwargs)
+        raise Crash()
+
+    world.rt.store.record_cleanup_result = record_then_crash  # type: ignore[method-assign]
+    with world.fake:
+        world.finalizer().confirm(world.film, "actor")
+        for _ in range(8):
+            try:
+                world.finalizer().run_once()  # each crash is a fresh process
+            except Crash:
+                pass
+    assert world.status("cleanup_input") == "succeeded"
+    assert world.status("cleanup_workcopy") == "succeeded"
+    world.rt.close()
+    world.rt = world.runtime()
+    world.finalizer().run_once()
+    assert not list((world.rt.work_dir / "return").glob(f"{world.film}-r*"))
+    assert not list((world.rt.work_dir / "scrape").glob(f"{world.film}-r*"))
 
 
 def test_shutdown_stops_finalization(world):

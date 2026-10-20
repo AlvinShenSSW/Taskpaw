@@ -29,6 +29,16 @@ def failed_kind(error_class: ErrorClass) -> str:
     return f"exec_failed:{error_class}"
 
 
+def classify_exception(exc: BaseException) -> ErrorClass:
+    """The class of an unexpected stage error (H1-2).
+
+    Windows reports a file briefly held by antivirus or the indexer (a sharing
+    violation) as `PermissionError`; the automatic retry outlasts it. Anything
+    else is for the operator.
+    """
+    return "transient" if isinstance(exc, PermissionError) else "needs_attention"
+
+
 @dataclass(frozen=True)
 class ExecOutcome:
     error_class: ErrorClass | None = None

@@ -295,9 +295,9 @@ def test_stop_and_public_scan_admission_are_one_atomic_boundary(service, monkeyp
     from taskpaw_v3.workflow import intake_walk
 
     _, _, _, obj, _ = service
-    entered, release, stop_started, stop_done = (threading.Event() for _ in range(4))
+    entered, release, stop_done = (threading.Event() for _ in range(3))
     original_lock, original_walk = obj._scan_lock, intake_walk.walk_root
-    calls_after_stop = []
+    seen = []
     outcomes = []
 
     class AdmissionBarrier:
@@ -312,11 +312,13 @@ def test_stop_and_public_scan_admission_are_one_atomic_boundary(service, monkeyp
             return original_lock.release()
 
     def walk(*args, **kwargs):
-        calls_after_stop.append(stop_done.is_set())
+        # An admitted scan is still owned: stop cannot certify it, and its walk
+        # must observe the stop instead of racing past it.
+        assert stop_done.wait(5)
+        seen.append(kwargs["cancelled"]())
         return original_walk(*args, **kwargs)
 
     def stop():
-        stop_started.set()
         outcomes.append(obj.stop(timeout=0.1))
         stop_done.set()
 
@@ -328,15 +330,13 @@ def test_stop_and_public_scan_admission_are_one_atomic_boundary(service, monkeyp
     try:
         assert entered.wait(3)
         stopper.start()
-        assert stop_started.wait(3)
-        stop_done.wait(0.2)
     finally:
         release.set()
-        scanner.join(5)
-        stopper.join(5)
+        scanner.join(10)
+        stopper.join(10)
         assert not scanner.is_alive() and not stopper.is_alive()
-    assert outcomes and not any(calls_after_stop)
+    assert outcomes == [False]
+    assert seen == [True]
     assert obj.stop(timeout=2)
-    before = len(calls_after_stop)
     assert not obj.scan_once()
-    assert len(calls_after_stop) == before
+    assert seen == [True]

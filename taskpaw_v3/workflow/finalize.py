@@ -557,6 +557,12 @@ class Finalizer:
             if intent is None:
                 raise m.WorkflowError("not_found")
             version = intent.version
+        # Reclaim is housekeeping after the recorded cleanup. The marker is written
+        # first so a crash right after the record cannot lose it (H1-4); `_reclaim`
+        # does nothing until the scope has succeeded, and the marker keeps it
+        # retried (locked file, crash, waiting siblings) until it is complete.
+        self.reclaim_dir.mkdir(parents=True, exist_ok=True)
+        (self.reclaim_dir / wf.film_id).touch()
         rt.store.record_cleanup_result(
             rt.cleanup_auth,
             rt.meta(),
@@ -572,12 +578,7 @@ class Finalizer:
             if scope == "input"
             else after.cleanup_workcopy_status
         )
-        if done == "succeeded":
-            # reclaim is housekeeping after the recorded cleanup; the marker keeps it
-            # retried (locked file, crash, waiting siblings) until it is complete
-            self.reclaim_dir.mkdir(parents=True, exist_ok=True)
-            (self.reclaim_dir / wf.film_id).touch()
-        else:
+        if done != "succeeded":
             blocked = [
                 r for r in results if r.status not in ("deleted", "already_absent")
             ]

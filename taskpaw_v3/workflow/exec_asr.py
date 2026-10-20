@@ -145,6 +145,10 @@ class AsrExecutor:
             path, ref = workcopy_ref(self.runtime, manifest, item.item_id)
             try:
                 raw = path.read_bytes()
+            except PermissionError:  # held by antivirus / the indexer (H1-2)
+                raise StageFailure(
+                    "transient", f"字幕暂时被占用：{item.relative_path}"
+                ) from None
             except OSError:
                 raise attention(f"无法读取字幕：{item.relative_path}") from None
             verdict = judge(raw, item.language or "")

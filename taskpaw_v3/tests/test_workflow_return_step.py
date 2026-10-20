@@ -1,8 +1,11 @@
 """Local return package, hand-off manifest and receipt (T04-P1 E4–E6, D12, D17)."""
 
+import errno
 import hashlib
 import json
+import os
 import shutil
+import threading
 
 import pytest
 
@@ -11,8 +14,9 @@ from taskpaw_v3.tests.test_workflow_films import STAGES, input_manifest
 from taskpaw_v3.tests.test_workflow_local_dispatch import GPU_8GB, Crash
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.workflow import models as m
-from taskpaw_v3.workflow.executors import ExecOutcome
-from taskpaw_v3.workflow.local_dispatch import LocalDispatcher
+from taskpaw_v3.workflow import stage_results
+from taskpaw_v3.workflow.executors import ExecOutcome, failed_kind
+from taskpaw_v3.workflow.local_dispatch import LocalDispatcher, ReturnContext
 from taskpaw_v3.workflow.local_gpu import max_resolution
 from taskpaw_v3.workflow.local_runtime import LocalIdentity, LocalRuntime
 from taskpaw_v3.workflow.return_step import MANIFEST_NAME, LocalReturnStep, package_dir
@@ -308,6 +312,100 @@ def test_leftover_partial_directory_is_rebuilt(rt):
     run_all(dispatcher(rt))
     assert status(rt, film, "return") == "succeeded"
     assert not partial.exists()
+
+
+def test_a_held_file_during_return_is_retried(rt, monkeypatch):
+    # An indexer briefly holding a source: errno 13, no winerror (H1-2).
+    film = add_real_film(rt)
+    real, held = shutil.copyfile, []
+
+    def copyfile(src, dst, *args, **kwargs):
+        if ".partial" in str(dst) and not held:
+            held.append(dst)
+            raise PermissionError(errno.EACCES, "Permission denied", str(src))
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copyfile", copyfile)
+    run_all(dispatcher(rt))
+    assert held and status(rt, film, "return") == "succeeded"
+    job = next(
+        s for s in rt.store.get_film(rt.operator, film).stages if s.stage == "return"
+    )
+    first = rt.store.list_attempts(rt.operator, job.job_id)[0]
+    assert first.evidence[0].kind == failed_kind("transient")
+
+
+def test_stop_while_building_leaves_no_package_and_is_retried(rt, monkeypatch):
+    # H1-5: a stop mid-copy is a free retry, never a half package taken as done.
+    film = add_real_film(rt)
+    d = dispatcher(rt)
+    for _ in range(3):
+        assert d.run_once()
+    real = shutil.copyfile
+
+    def copyfile(src, dst, *args, **kwargs):
+        d.cancel.set()  # the operator stops the agent while the copy runs
+        return real(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copyfile", copyfile)
+    assert d.run_once() is True
+    monkeypatch.setattr(shutil, "copyfile", real)
+    assert status(rt, film, "return") == "pending"
+    assert not package_dir(rt, film, 1).exists()
+    job = next(
+        s for s in rt.store.get_film(rt.operator, film).stages if s.stage == "return"
+    )
+    (attempt,) = rt.store.list_attempts(rt.operator, job.job_id)
+    assert attempt.evidence[0].kind == failed_kind("cancelled")
+    run_all(dispatcher(rt))
+    assert status(rt, film, "return") == "succeeded"
+
+
+def _return_job(rt, film):
+    return next(
+        j
+        for j in rt.store.list_jobs(rt.operator, "pending", ("return",))
+        if j.film_id == film
+    )
+
+
+def test_stop_while_the_package_rename_waits_ends_the_wait(rt, monkeypatch):
+    film = add_real_film(rt)
+    d = dispatcher(rt)
+    for _ in range(3):
+        assert d.run_once()
+    cancel, tries = threading.Event(), []
+    real = os.replace
+
+    def replace(src, dst):
+        if str(src).endswith(".partial"):
+            tries.append(src)
+            cancel.set()  # stop requested while an indexer holds the directory
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real(src, dst)
+
+    monkeypatch.setattr(os, "replace", replace)
+    manifest = rt.store.get_input_manifest(rt.operator, film, 1)
+    context = ReturnContext(_return_job(rt, film), manifest, "a", "o", rt, cancel)
+    outcome = LocalReturnStep().run(context)
+    assert outcome.error_class == "cancelled"
+    assert len(tries) == 1  # no further rename attempts after the stop
+    assert not package_dir(rt, film, 1).exists()
+
+
+def test_hashing_notices_a_stop_between_chunks(tmp_path):
+    path = tmp_path / "big.bin"
+    path.write_bytes(b"x" * (3 << 20))
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(stage_results.Cancelled):
+        stage_results.sha256_file(path, cancel)
+    ref = FileRef(path="big.bin", sha256="0" * 64, size=3 << 20)
+    with pytest.raises(stage_results.Cancelled):
+        stage_results.check_file(tmp_path, ref, cancel)
+    assert stage_results.sha256_file(path, threading.Event()) == (
+        hashlib.sha256(path.read_bytes()).hexdigest()
+    )
 
 
 def test_tampered_stage_result_stops_the_return(rt):

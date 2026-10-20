@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -25,6 +26,10 @@ RESULT_NAME = "stage-result.json"
 
 class StageResultError(Exception):
     """The ledger cannot vouch for a stage's outputs (→ needs_attention)."""
+
+
+class Cancelled(Exception):
+    """A stop was requested while a file was being hashed (→ cancelled)."""
 
 
 class _Frozen(BaseModel):
@@ -70,10 +75,13 @@ class StageResult(_Frozen):
     videos: tuple[VideoResult, ...]
 
 
-def sha256_file(path: Path) -> str:
+def sha256_file(path: Path, cancel: threading.Event | None = None) -> str:
+    """sha256 of `path`; a set `cancel` is noticed within one 1 MiB chunk."""
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1 << 20), b""):
+            if cancel is not None and cancel.is_set():
+                raise Cancelled
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -90,13 +98,15 @@ def file_ref(work_root: Path, path: Path) -> FileRef:
     )
 
 
-def check_file(work_root: Path, ref: FileRef) -> Path:
+def check_file(
+    work_root: Path, ref: FileRef, cancel: threading.Event | None = None
+) -> Path:
     """The file behind `ref`, after confirming size and content are unchanged."""
     path = work_root / ref.path
     if (
         not path.is_file()
         or path.stat().st_size != ref.size
-        or sha256_file(path) != ref.sha256
+        or sha256_file(path, cancel) != ref.sha256
     ):
         raise StageResultError(f"产物已变化或缺失：{ref.path}")
     return path

@@ -298,6 +298,8 @@ class LocalScrapeStep:
         files: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         placed = []
+        # Each keeps its own format; a second one of a format is `.ja.<n>` (H1-3).
+        used = {f["path"].casefold() for f in files}
         for sub in japanese:
             video = next(
                 (
@@ -309,7 +311,13 @@ class LocalScrapeStep:
             )
             if video is None:
                 raise _Failure("needs_attention", "日语字幕找不到对应的视频")
-            target = (out / video["path"]).with_suffix(".ja.srt")
+            main = out / video["path"]
+            ext = PurePosixPath(sub["relative_path"]).suffix
+            target, n = main.with_name(f"{main.stem}.ja{ext}"), 0
+            while target.relative_to(out).as_posix().casefold() in used:
+                n += 1
+                target = main.with_name(f"{main.stem}.ja.{n}{ext}")
+            used.add(target.relative_to(out).as_posix().casefold())
             shutil.copyfile(_checked(package, sub), target)
             placed.append(
                 {

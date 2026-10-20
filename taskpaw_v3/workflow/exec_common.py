@@ -91,6 +91,10 @@ def workcopy_ref(
     path = rt.work_dir / copy.relative_path
     try:
         ref = file_ref(rt.work_dir, path)
+    except PermissionError:  # held by antivirus / the indexer (H1-2)
+        raise StageFailure(
+            "transient", f"收件工作副本暂时被占用：{copy.relative_path}"
+        ) from None
     except OSError:
         raise attention(f"收件工作副本缺失：{copy.relative_path}") from None
     if (ref.sha256, ref.size) != (copy.sha256, copy.size_bytes):

@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import shutil
-import time
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -23,6 +23,7 @@ from .local_dispatch import ReturnContext
 from .local_runtime import LocalRuntime
 from .stage_results import (
     RESULT_NAME,
+    Cancelled,
     StageResult,
     StageResultError,
     check_file,
@@ -75,12 +76,18 @@ class LocalReturnStep:
         )
 
     def run(self, context: ReturnContext) -> ExecOutcome:
-        rt, job = context.runtime, context.job
+        try:
+            return self._run(context)
+        except Cancelled:  # stopped before the receipt: a free retry (H1-5)
+            return ExecOutcome.failed("cancelled", "已停止")
+
+    def _run(self, context: ReturnContext) -> ExecOutcome:
+        rt, job, cancel = context.runtime, context.job, context.cancel
         try:
             restore = load_stage_result(rt, job.film_id, "restore")
             translate = load_stage_result(rt, job.film_id, "translate")
             asr = load_stage_result(rt, job.film_id, "asr")
-            members = self._members(rt, context.manifest, restore, translate)
+            members = self._members(rt, context.manifest, restore, translate, cancel)
         except StageResultError as exc:
             return ExecOutcome.failed("needs_attention", str(exc))
         package = package_dir(rt, job.film_id, job.input_revision)
@@ -88,9 +95,9 @@ class LocalReturnStep:
             context, members, {"restore": restore, "asr": asr, "translate": translate}
         )
         raw = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        if not self._complete(package, members, raw):
+        if not self._complete(package, members, raw, cancel):
             try:
-                self._build(package, members, raw)
+                self._build(package, members, raw, cancel)
             except _Busy as exc:
                 return ExecOutcome.failed("transient", str(exc))
             except StageResultError as exc:
@@ -107,6 +114,7 @@ class LocalReturnStep:
         manifest: m.InputManifest,
         restore: StageResult,
         translate: StageResult,
+        cancel: threading.Event,
     ) -> list[_Member]:
         film = manifest.film_id
         restored = {v.video_item_id: v.restore for v in restore.videos}
@@ -118,7 +126,7 @@ class LocalReturnStep:
             facts = restored.get(video.item_id)
             if facts is None:
                 raise StageResultError("修复结果缺少一个主视频")
-            source = check_file(rt.work_dir, facts.file)
+            source = check_file(rt.work_dir, facts.file, cancel)
             folder = PurePosixPath(video.relative_path).parent
             name = PurePosixPath(facts.file.path).name
             path = (folder / name).as_posix()
@@ -142,7 +150,7 @@ class LocalReturnStep:
             for language, ref in (("zh", subtitle.zh), ("ja", subtitle.ja)):
                 if ref is None:
                     continue
-                file = check_file(rt.work_dir, ref)
+                file = check_file(rt.work_dir, ref, cancel)
                 reused = ref.path in workcopies  # an input subtitle kept as is (IR05)
                 if reused:
                     reused_sources.add(ref.path)
@@ -259,25 +267,37 @@ class LocalReturnStep:
 
     # ── building ───────────────────────────────────────────────────────
     @staticmethod
-    def _complete(package: Path, members: list[_Member], raw: bytes) -> bool:
+    def _complete(
+        package: Path, members: list[_Member], raw: bytes, cancel: threading.Event
+    ) -> bool:
         """A finished package with exactly these bytes is reused (E5)."""
         listing = package / MANIFEST_NAME
         if not listing.is_file() or listing.read_bytes() != raw:
             return False
         for member in members:
+            if cancel.is_set():
+                raise Cancelled
             path = package / member.relative_path
             if (
                 not path.is_file()
                 or path.stat().st_size != member.size
-                or sha256_file(path) != member.sha256
+                or sha256_file(path, cancel) != member.sha256
             ):
                 return False
         return True
 
-    def _build(self, package: Path, members: list[_Member], raw: bytes) -> None:
+    def _build(
+        self,
+        package: Path,
+        members: list[_Member],
+        raw: bytes,
+        cancel: threading.Event,
+    ) -> None:
         partial = package.with_name(package.name + ".partial")
         shutil.rmtree(partial, ignore_errors=True)
         for member in members:
+            if cancel.is_set():  # the partial is never taken as a package (H1-5)
+                raise Cancelled
             target = partial / member.relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             if member.link:
@@ -287,7 +307,7 @@ class LocalReturnStep:
                     shutil.copyfile(member.source, target)
             else:
                 shutil.copyfile(member.source, target)
-            if sha256_file(target) != member.sha256:
+            if sha256_file(target, cancel) != member.sha256:
                 raise StageResultError(f"回传文件核对失败：{member.relative_path}")
         (partial / MANIFEST_NAME).write_bytes(raw)
         if package.exists():
@@ -297,7 +317,8 @@ class LocalReturnStep:
                 os.replace(partial, package)
                 return
             except PermissionError:  # an indexer or antivirus holding a handle
-                time.sleep(0.5 * (attempt + 1))
+                if cancel.wait(0.5 * (attempt + 1)):
+                    raise Cancelled from None
         raise _Busy("回传目录暂时被占用，稍后重试")
 
     # ── receipt ────────────────────────────────────────────────────────

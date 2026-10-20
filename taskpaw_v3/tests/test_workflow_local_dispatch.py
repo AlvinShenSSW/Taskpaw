@@ -1,5 +1,6 @@
 """Controller-local self-enrolment, dispatch and restart settlement (T03-P1)."""
 
+import errno
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -248,6 +249,44 @@ def test_permission_failure_is_not_retried(rt):
     job = stage(rt, film, "restore")
     assert job.status == "failed"
     assert len(rt.store.list_attempts(rt.operator, job.job_id)) == 1
+
+
+class RaisingExecutor(SyntheticExecutor):
+    def __init__(self, stage, error):
+        super().__init__(stage)
+        self.error = error
+
+    def run(self, context):
+        raise self.error()
+
+
+def test_a_held_file_is_transient_and_retried(rt):
+    # A file held by antivirus or the indexer: Windows reports the sharing
+    # violation on open/copy as errno 13 without a winerror (H1-2).
+    rt.executors["restore"] = RaisingExecutor(
+        "restore", lambda: PermissionError(errno.EACCES, "Permission denied")
+    )
+    film = add_film(rt)
+    d = dispatcher(rt)
+    while d.run_once():
+        pass
+    job = stage(rt, film, "restore")
+    assert job.status == "failed"
+    attempts = rt.store.list_attempts(rt.operator, job.job_id)
+    assert len(attempts) == 3
+    assert all(a.evidence[0].kind == failed_kind("transient") for a in attempts)
+
+
+def test_other_executor_errors_still_need_attention(rt):
+    rt.executors["restore"] = RaisingExecutor(
+        "restore", lambda: FileNotFoundError(errno.ENOENT, "No such file")
+    )
+    film = add_film(rt)
+    d = dispatcher(rt)
+    assert d.run_once() is True and d.run_once() is False
+    job = stage(rt, film, "restore")
+    (attempt,) = rt.store.list_attempts(rt.operator, job.job_id)
+    assert attempt.evidence[0].kind == failed_kind("needs_attention")
 
 
 # ── stop and restart ────────────────────────────────────────────────────
