@@ -581,6 +581,19 @@ def test_recall_missing_infers_the_variant_from_the_file_names(tmp_path):
             restore.cfg = restore.cfg.model_copy(update={"ltx_fast": cfg_fast})
             restore.recall_missing(names)
             assert restore._models == (restore._weights(), fast), names
+        # only VAE missing: the installed model is the one preflight chose
+        from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES
+
+        weights = restore._weights()
+        weights.mkdir(parents=True)
+        for installed, cfg_fast in ((False, True), (True, False)):
+            for stale in weights.iterdir():
+                stale.unlink()
+            (weights / MODEL_FILES[(False, installed)]).write_bytes(b"w")
+            restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
+            restore.cfg = restore.cfg.model_copy(update={"ltx_fast": cfg_fast})
+            restore.recall_missing(vae)
+            assert restore._models == (weights, installed), installed
         restore._models = (tmp_path, True)  # an existing preflight result wins
         restore.recall_missing(["x-int8.enc"])
         assert restore._models == (tmp_path, True)

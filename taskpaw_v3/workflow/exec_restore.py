@@ -280,14 +280,24 @@ class RestoreExecutor:
         """Seed the offer from a persisted preflight failure after a restart.
 
         Only while nothing is cached; never queries the GPU. The variant comes
-        from the file names: the fast and the standard weights differ by suffix,
-        and only shared VAE files being missing leaves the configured choice."""
+        from the file names: the fast and the standard weights differ by suffix.
+        When only shared VAE files were missing, the model preflight chose was
+        present, so the one installed tells (the configured choice if both or
+        neither are: an RTX 40 card runs int8 although `ltx_fast` is on)."""
         if any("-nvfp4" in name for name in names):
             fast = True
         elif any("-int8" in name for name in names):
             fast = False
         else:
-            fast = self.cfg.ltx_fast
+            folder = self._weights()
+            installed = [
+                variant
+                for variant in (True, False)
+                if (
+                    folder / jasna._LTX_MODEL_FILES[(self.cfg.ltx_best, variant)]
+                ).is_file()
+            ]
+            fast = installed[0] if len(installed) == 1 else self.cfg.ltx_fast
         with self._models_lock:
             if self._models is None:
                 self._models = (self._weights(), fast)
