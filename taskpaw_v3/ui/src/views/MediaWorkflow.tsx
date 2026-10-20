@@ -21,7 +21,7 @@ export function MediaWorkflow() {
   if (films.error || !films.data) return <Alert severity="error">{t("media.failed")}</Alert>;
   const { state, reason, current } = films.data;
   if (state !== "running") {
-    return <Alert severity="info">{t("media.unavailable", { reason: reason ?? state })}</Alert>;
+    return <Alert severity="info">{t("media.unavailable", { reason: reason || state })}</Alert>;
   }
   const rows = films.data.films ?? [];
   const queued = (c: WorkflowCurrent) => t("media.queued", { film: c.film, stage: label.stage(c.stage) });

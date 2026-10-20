@@ -353,7 +353,35 @@ class ReadCommands(WorkflowCore):
 
         Oldest film first. `done_limit` keeps only the newest fully finished
         films (both cleanups succeeded); `film_id` reads one film.
+
+        Three linear reads merged here (IR01): films with their current stages,
+        every archive operation once, and the current contexts' unrevoked
+        approvals. Per-row subqueries over operations made the board quadratic
+        while it held the store lock.
         """
+        where: tuple[str, tuple[Any, ...]] = ("", ())
+        ops: tuple[str, tuple[Any, ...]] = ("", ())
+        approved: tuple[str, tuple[Any, ...]] = ("", ())
+        if film_id is not None:
+            where = ("WHERE f.film_id=?", (film_id,))
+            # an approval counts as used by any archive operation naming it
+            ops = (
+                "AND (film_id=? OR approval_id IN "
+                "(SELECT approval_id FROM approvals WHERE film_id=?))",
+                (film_id, film_id),
+            )
+            approved = ("AND f.film_id=?", (film_id,))
+        elif done_limit is not None:
+            # D13 before reading stage bodies: drop all but the newest finished films
+            where = (
+                "WHERE f.film_id NOT IN (SELECT film_id FROM (SELECT d.film_id,"
+                "row_number() OVER (ORDER BY d.created_at DESC,d.film_id DESC) AS newest "
+                "FROM films d JOIN stages c ON c.film_id=d.film_id "
+                "AND c.input_revision=d.current_input_revision "
+                "WHERE c.stage IN ('cleanup_input','cleanup_workcopy') AND c.status='succeeded' "
+                "GROUP BY d.film_id HAVING count(*)=2) WHERE newest>?)",
+                (done_limit,),
+            )
         with self._lock:
             principal = self._check_auth(auth, self._observe_time())
             if principal["role"] != "operator":
@@ -361,26 +389,33 @@ class ReadCommands(WorkflowCore):
             rows = self._conn.execute(
                 "SELECT f.film_id,f.display_name,f.created_at,"
                 "json_extract(fm.body_json,'$.output_relative_path') AS output_path,"
-                "s.stage,s.status,a.body_json AS attempt_json,"
-                "EXISTS(SELECT 1 FROM approvals p WHERE p.film_id=f.film_id "
-                "AND p.context_revision=f.current_context_revision AND p.revoked_at IS NULL "
-                "AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.kind='archive' "
-                "AND o.approval_id=p.approval_id)) AS approval_active,"
-                "EXISTS(SELECT 1 FROM operations o WHERE o.film_id=f.film_id "
-                "AND o.kind='archive' AND o.resolved_at IS NULL) AS archive_open,"
-                "(SELECT json_extract(o.body_json,'$.error_code') FROM operations o "
-                "WHERE o.film_id=f.film_id AND o.kind='archive' "
-                "ORDER BY o.created_at DESC,o.rowid DESC LIMIT 1) AS archive_error "
+                "s.stage,s.status,a.body_json AS attempt_json "
                 "FROM films f "
                 "LEFT JOIN manifests fm ON fm.film_id=f.film_id AND fm.kind='final' "
                 "AND fm.revision=f.current_final_revision "
                 "LEFT JOIN stages s ON s.film_id=f.film_id "
                 "AND s.input_revision=f.current_input_revision "
                 "LEFT JOIN attempts a ON a.attempt_id=s.current_attempt_id "
-                "WHERE ? IS NULL OR f.film_id=? "
-                "ORDER BY f.created_at,f.film_id,s.rowid",
-                (film_id, film_id),
+                f"{where[0]} ORDER BY f.created_at,f.film_id,s.rowid",
+                where[1],
             ).fetchall()
+            archives = self._conn.execute(
+                "SELECT film_id,approval_id,resolved_at IS NULL AS open,"
+                "json_extract(body_json,'$.error_code') AS error "
+                f"FROM operations WHERE kind='archive' {ops[0]} "
+                "ORDER BY created_at,rowid",
+                ops[1],
+            ).fetchall()
+            approvals = self._conn.execute(
+                "SELECT p.film_id,p.approval_id FROM approvals p JOIN films f "
+                "ON f.film_id=p.film_id AND p.context_revision=f.current_context_revision "
+                f"WHERE p.revoked_at IS NULL {approved[0]}",
+                approved[1],
+            ).fetchall()
+        used = {row["approval_id"] for row in archives if row["approval_id"]}
+        open_films = {row["film_id"] for row in archives if row["open"]}
+        errors = {row["film_id"]: row["error"] for row in archives}  # newest wins
+        active = {row["film_id"] for row in approvals if row["approval_id"] not in used}
         films: dict[str, dict[str, Any]] = {}
         for row in rows:
             film = films.setdefault(
@@ -393,9 +428,9 @@ class ReadCommands(WorkflowCore):
                     if row["output_path"]
                     else None,
                     "stages": [],
-                    "approval_active": bool(row["approval_active"]),
-                    "archive_open": bool(row["archive_open"]),
-                    "archive_error": row["archive_error"] or None,
+                    "approval_active": row["film_id"] in active,
+                    "archive_open": row["film_id"] in open_films,
+                    "archive_error": errors.get(row["film_id"]) or None,
                 },
             )
             if row["stage"] is not None:
@@ -406,12 +441,7 @@ class ReadCommands(WorkflowCore):
                         note=_attempt_note(row["attempt_json"]),
                     )
                 )
-        values = [BoardFilm.model_validate(film) for film in films.values()]
-        if done_limit is None or film_id is not None:
-            return tuple(values)
-        done = [value.film_id for value in values if _finished(value)]
-        dropped = set(done[: max(0, len(done) - done_limit)])
-        return tuple(value for value in values if value.film_id not in dropped)
+        return tuple(BoardFilm.model_validate(film) for film in films.values())
 
     def package_films(
         self, auth: AuthProof, package_id: str
@@ -484,11 +514,3 @@ def _attempt_note(body: str | None) -> str | None:
     if not evidence:
         return None
     return (evidence[-1].get("summary") or {}).get("note") or None
-
-
-def _finished(film: BoardFilm) -> bool:
-    statuses = {stage.stage: stage.status for stage in film.stages}
-    return (
-        statuses.get("cleanup_input") == "succeeded"
-        and statuses.get("cleanup_workcopy") == "succeeded"
-    )

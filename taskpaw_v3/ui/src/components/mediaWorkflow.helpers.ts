@@ -13,6 +13,8 @@ export function useMediaLabels() {
   return {
     stage: (stage: string) => t(`media.stage.${stage}`, { defaultValue: stage }),
     status: (status: string) => t(`media.status.${status}`, { defaultValue: status }),
+    // why a cleanup kept a member (WorkflowCleanupItem.status)
+    kept: (status: string) => t(`media.keptStatus.${status}`, { defaultValue: status }),
   };
 }
 

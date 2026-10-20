@@ -410,6 +410,17 @@ def test_open_is_501_off_windows(world, client, monkeypatch):
     assert response.status_code == 501
 
 
+def test_open_failure_is_a_json_error_not_a_crash(world, client, monkeypatch):
+    def broken(path: Path) -> None:
+        raise PermissionError(13, "拒绝访问", str(path))
+
+    monkeypatch.setattr(workflow_routes, "open_folder", broken)
+    response = client.post(f"{BASE}/films/{world.film}/open", json={"what": "inbox"})
+    assert response.status_code == 500
+    assert response.json()["detail"].startswith("无法打开文件夹：")
+    assert "拒绝访问" in response.json()["detail"]
+
+
 def test_open_folder_refuses_other_platforms(monkeypatch, tmp_path):
     monkeypatch.setattr(workflow_routes.sys, "platform", "linux")
     with pytest.raises(NotImplementedError):

@@ -106,7 +106,8 @@ function FilmBody({ film }: { film: FilmDetail }) {
       {retry.error && <Alert severity="error">{errorText(retry.error)}</Alert>}
       {openError && <Alert severity="error">{openError}</Alert>}
 
-      {confirmed ? <Alert severity="success">{t("media.confirmed")}</Alert>
+      {/* the success note lasts only while the film is not confirmable: a failed archive shows the picker again */}
+      {confirmed && !film.can_confirm ? <Alert severity="success">{t("media.confirmed")}</Alert>
         : film.can_confirm && <TargetPicker film={film} onConfirmed={() => { setConfirmed(true); invalidate(); }} />}
 
       <Divider />
@@ -168,7 +169,7 @@ function FilmBody({ film }: { film: FilmDetail }) {
             <List dense disablePadding>
               {film.cleanup.kept.map((k) => (
                 <ListItem key={k.path} disableGutters>
-                  <ListItemText primary={k.path} secondary={label.status(k.status)} sx={{ wordBreak: "break-all" }} />
+                  <ListItemText primary={k.path} secondary={label.kept(k.status)} sx={{ wordBreak: "break-all" }} />
                 </ListItem>
               ))}
             </List>

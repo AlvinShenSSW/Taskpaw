@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -145,6 +146,37 @@ def test_an_unknown_stage_needs_attention_but_is_not_retryable():
     assert row["note"] == board.UNKNOWN_NOTE == "等待确认停止"
 
 
+@pytest.mark.parametrize("stage", ["cleanup_input", "cleanup_workcopy"])
+def test_a_cleanup_that_kept_members_says_why_never_the_stop_message(stage):
+    statuses = {**done_through("archive"), stage: "unknown"}
+    value = film(statuses)
+    reason = "待清理：2 个文件未能删除（blocked_changed）"
+    row = board.film_row(value, {value.film_id: reason})
+    assert (row["group"], row["stage"], row["status"]) == (
+        "attention",
+        stage,
+        "unknown",
+    )
+    assert row["note"] == reason
+    # after a restart the host has no reason yet: the kept members explain it
+    kept = {stage: [{"path": "a.mp4", "status": "blocked_identity"}]}
+    assert board.film_row(value, {}, kept)["note"] == (
+        "待清理：1 个文件未能删除（blocked_identity）"
+    )
+    assert board.film_row(value, {})["note"] == board.KEPT_NOTE
+    assert board.KEPT_NOTE != board.UNKNOWN_NOTE
+
+
+def test_only_local_stages_wait_for_a_stop_confirmation():
+    value = film({**done_through("scrape"), "archive": "unknown"})
+    row = board.film_row(value, {value.film_id: "Filmpaw 查询失败：超时"})
+    assert (row["stage"], row["note"]) == ("archive", "Filmpaw 查询失败：超时")
+    intake = film({"intake": "unknown"})
+    assert (
+        board.film_row(intake, {intake.film_id: "入库扫描中"})["note"] == "入库扫描中"
+    )
+
+
 def test_a_failed_intake_is_not_retryable_here():
     row = board.film_row(film({"intake": "failed"}), {})
     assert row["group"] == "attention" and row["can_retry"] is False
@@ -283,3 +315,224 @@ def test_film_board_is_operator_only(world):
     _, intake = world.rt.grant_intake_adapter()
     with pytest.raises(m.WorkflowError, match="forbidden"):
         world.rt.store.film_board(intake)
+
+
+# ── many films in one read (IR01) ─────────────────────────────────────────
+class Seed:
+    """Raw rows for board reads only: a film per state, no T01 commands."""
+
+    def __init__(self, rt):
+        self.conn = rt.store._conn
+        self.clock = datetime(2026, 10, 20, tzinfo=timezone.utc)
+        self.ids: dict[str, str] = {}
+
+    def __enter__(self) -> Seed:
+        self.conn.execute("PRAGMA foreign_keys=OFF")
+        self.conn.execute("BEGIN")
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.conn.execute("COMMIT")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+
+    def _now(self) -> str:
+        self.clock += timedelta(seconds=1)
+        return self.clock.isoformat().replace("+00:00", "Z")
+
+    def film(
+        self,
+        name: str,
+        statuses: dict[str, str] | None = None,
+        *,
+        notes: dict[str, str] | None = None,
+        context: int = 1,
+        revision: int = 1,
+        final: bool = True,
+    ) -> str:
+        fid = self.ids[name] = identity()
+        self.conn.execute(
+            "INSERT INTO films(film_id,intake_session_id,display_name,policy_revision,"
+            "current_input_revision,current_final_revision,current_context_revision,"
+            "created_at,body_json) VALUES(?,?,?,1,?,?,?,?,'{}')",
+            (fid, "s", name, revision, 1 if final else None, context, self._now()),
+        )
+        if final:
+            body = json.dumps({"output_relative_path": f"out/{name.upper()}-1"})
+            self.conn.execute(
+                "INSERT INTO manifests VALUES(?,'final',1,?,1,'h',NULL,'t',?)",
+                (fid, "0" * 64, body),
+            )
+        for rev in range(1, revision + 1):
+            for stage in ORDER if statuses is not None else ():
+                old = rev < revision
+                status = "failed" if old else statuses.get(stage, "pending")  # type: ignore[union-attr]
+                note = "旧版本" if old else (notes or {}).get(stage)
+                attempt = identity() if note else None
+                job = identity()
+                self.conn.execute(
+                    "INSERT INTO stages VALUES(?,?,?,'h',?,?,?,1,'{}')",
+                    (job, fid, rev, stage, status, attempt),
+                )
+                if attempt:
+                    evidence = {"evidence": [{"summary": {"note": note}}]}
+                    self.conn.execute(
+                        "INSERT INTO attempts VALUES(?,?,1,'p',NULL,'b',1,1,'h',"
+                        "'failed',NULL,'t',NULL,1,?)",
+                        (attempt, job, json.dumps(evidence)),
+                    )
+        return fid
+
+    def approval(self, name: str, *, context: int = 1, revoked: bool = False) -> str:
+        approval = identity()
+        self.conn.execute(
+            "INSERT INTO approvals VALUES(?,?,?,'h','b','p',1,'t','t',?,1,'{}')",
+            (approval, self.ids[name], context, "t" if revoked else None),
+        )
+        return approval
+
+    def archive(
+        self, name: str, approval: str, *, open: bool = False, error: str | None = None
+    ) -> None:
+        now = self._now()
+        self.conn.execute(
+            "INSERT INTO operations(operation_id,film_id,kind,approval_id,"
+            "owner_principal_id,status,created_at,updated_at,resolved_at,body_json) "
+            "VALUES(?,?,'archive',?,'p',?,?,?,?,?)",
+            (
+                identity(),
+                self.ids[name],
+                approval,
+                "running" if open else "failed" if error else "resolved",
+                now,
+                now,
+                None if open else now,
+                json.dumps({"error_code": error}),
+            ),
+        )
+
+
+@pytest.fixture
+def seeded(tmp_path):
+    rt = ret.make_runtime(tmp_path / "seed")
+    try:
+        yield rt, Seed(rt)
+    finally:
+        rt.close()
+
+
+def _summary(value: m.BoardFilm) -> tuple:
+    return (
+        value.display_name,
+        value.final_name,
+        value.approval_active,
+        value.archive_open,
+        value.archive_error,
+    )
+
+
+def test_film_board_reads_every_film_state_at_once(seeded):
+    rt, seed = seeded
+    scraped = done_through("scrape")
+    done = done_through("cleanup_workcopy")
+    with seed:
+        seed.film(
+            "fresh",
+            {"intake": "succeeded", "restore": "running"},
+            notes={"restore": "50%"},
+        )
+        seed.film("waiting", scraped)
+        seed.approval("waiting")  # confirmed, not used by any archive yet
+        seed.film("failed", {**scraped, "archive": "failed"})
+        seed.archive("failed", seed.approval("failed"), error="NAS 可用空间不足")
+        seed.film("again", {**scraped, "archive": "failed"})
+        seed.archive("again", seed.approval("again"), error="Filmpaw 拒绝")
+        seed.approval("again")  # confirmed again after the failure
+        seed.film("open", {**scraped, "archive": "pending"})
+        seed.archive("open", seed.approval("open"), error="旧原因")
+        seed.archive("open", seed.approval("open"), open=True)
+        seed.film("revoked", scraped)
+        seed.approval("revoked", revoked=True)
+        seed.film("stale", scraped, context=2)
+        seed.approval("stale", context=1)  # an older approval context
+        seed.film("bare", None, final=False)
+        seed.film("rev2", {"intake": "succeeded"}, revision=2)
+        for name in ("done1", "done2", "done3"):
+            seed.film(name, done)
+            seed.archive(name, seed.approval(name))
+    every = rt.store.film_board(rt.operator, None)
+    assert [f.display_name for f in every] == list(seed.ids)  # oldest first
+    got = {f.display_name: f for f in every}
+    assert {name: _summary(value)[1:] for name, value in got.items()} == {
+        "fresh": ("FRESH-1", False, False, None),
+        "waiting": ("WAITING-1", True, False, None),
+        "failed": ("FAILED-1", False, False, "NAS 可用空间不足"),
+        "again": ("AGAIN-1", True, False, "Filmpaw 拒绝"),
+        "open": ("OPEN-1", False, True, None),
+        "revoked": ("REVOKED-1", False, False, None),
+        "stale": ("STALE-1", False, False, None),
+        "bare": (None, False, False, None),
+        "rev2": ("REV2-1", False, False, None),
+        "done1": ("DONE1-1", False, False, None),
+        "done2": ("DONE2-1", False, False, None),
+        "done3": ("DONE3-1", False, False, None),
+    }
+    assert [(s.stage, s.status, s.note) for s in got["fresh"].stages][:3] == [
+        ("intake", "succeeded", None),
+        ("restore", "running", "50%"),
+        ("asr", "pending", None),
+    ]
+    assert got["bare"].stages == ()
+    assert [s.stage for s in got["rev2"].stages] == list(ORDER)
+    assert {s.status for s in got["rev2"].stages} == {"succeeded", "pending"}
+    groups = {name: board.film_row(value, {})["group"] for name, value in got.items()}
+    assert (groups["failed"], groups["again"], groups["waiting"]) == (
+        "confirm",
+        "archiving",
+        "archiving",
+    )
+    assert board.film_row(got["failed"], {})["note"] == "NAS 可用空间不足"
+    assert (groups["open"], groups["revoked"], groups["stale"]) == (
+        "archiving",
+        "confirm",
+        "confirm",
+    )
+    # D13: only the newest finished films are kept; unfinished ones always are
+    names = [f.display_name for f in rt.store.film_board(rt.operator, done_limit=1)]
+    assert names == list(seed.ids)[:-3] + ["done3"]
+    assert len(rt.store.film_board(rt.operator)) == len(seed.ids)
+    one = rt.store.film_board(rt.operator, done_limit=0, film_id=seed.ids["done1"])
+    assert [_summary(f) for f in one] == [_summary(got["done1"])]
+    assert rt.store.film_board(rt.operator, film_id=identity()) == ()
+
+
+def _board_steps(rt, films: int) -> int:
+    seed = Seed(rt)
+    with seed:
+        for n in range(films):
+            name = f"film{n}"
+            seed.film(name, done_through("cleanup_workcopy"), notes={"scrape": "x"})
+            seed.archive(name, seed.approval(name))
+    steps = 0
+
+    def count() -> int:
+        nonlocal steps
+        steps += 1
+        return 0
+
+    rt.store._conn.set_progress_handler(count, 100)
+    try:
+        assert len(rt.store.film_board(rt.operator, None)) >= films
+    finally:
+        rt.store._conn.set_progress_handler(None, 100)
+    return steps
+
+
+def test_film_board_work_grows_linearly_with_the_films(tmp_path):
+    """IR01: no per-row subqueries over operations/approvals while holding the lock."""
+    small, large = (ret.make_runtime(tmp_path / name) for name in ("small", "large"))
+    try:
+        ratio = _board_steps(large, 240) / _board_steps(small, 120)
+    finally:
+        small.close()
+        large.close()
+    assert ratio < 2.6, ratio

@@ -7,7 +7,7 @@ import { MediaWorkflow } from "../views/MediaWorkflow";
 import { FilmDrawer } from "../components/FilmDrawer";
 import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
-import { setLang } from "../i18n";
+import i18n, { setLang } from "../i18n";
 
 const row = (over: Partial<FilmRow>): FilmRow => ({
   film_id: "f1", name: "ABC-001", group: "confirm", stage: "scrape", status: "succeeded",
@@ -23,7 +23,7 @@ const LIST: WorkflowFilms = {
     row({ film_id: "f3", name: "QQQ-003", group: "active", stage: "asr", status: "pending", can_confirm: false }),
     row({ film_id: "f4", name: "BAD-004", group: "attention", stage: "translate", status: "failed", note: "LLM 超时",
       can_confirm: false, can_retry: true, retry_stage: "translate" }),
-    row({ film_id: "f5", name: "OLD-005", group: "done", stage: "cleanup", status: "succeeded", can_confirm: false }),
+    row({ film_id: "f5", name: "OLD-005", group: "done", stage: "cleanup_workcopy", status: "succeeded", can_confirm: false }),
   ],
 };
 
@@ -72,6 +72,12 @@ describe("MediaWorkflow list", () => {
     expect(screen.getAllByText(/排队中/)).toHaveLength(1);
   });
 
+  it("falls back to the state while the host starts with an empty reason", async () => {
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ state: "starting", reason: "", current: null, films: [] });
+    wrap(<MediaWorkflow />);
+    expect(await screen.findByText("媒体流水线未运行：starting")).toBeInTheDocument();
+  });
+
   it("shows the reason without an error when the workflow is not running", async () => {
     vi.spyOn(api, "workflowFilms").mockResolvedValue({ state: "disabled", reason: "未启用", current: null, films: [] });
     wrap(<MediaWorkflow />);
@@ -96,7 +102,8 @@ describe("FilmDrawer", () => {
   const confirmButton = () => screen.getByRole("button", { name: "确认入库" });
 
   it("keeps confirm disabled until a performer is picked; one click → one call; success message", async () => {
-    vi.spyOn(api, "workflowFilm").mockResolvedValue(DETAIL);
+    let current: FilmDetail = DETAIL;
+    vi.spyOn(api, "workflowFilm").mockImplementation(() => Promise.resolve(current));
     const search = vi.spyOn(api, "performers").mockResolvedValue(PERFORMERS);
     let resolve!: (v: { approval_id: string }) => void;
     const confirm = vi.spyOn(api, "workflowConfirm").mockImplementation(() => new Promise((r) => { resolve = r; }));
@@ -114,9 +121,51 @@ describe("FilmDrawer", () => {
     expect(confirmButton()).toBeDisabled(); // in flight (D15)
     fireEvent.click(confirmButton());
     expect(confirm).toHaveBeenCalledWith("f1", 7);
+    current = { ...DETAIL, group: "archiving", can_confirm: false }; // what the refetch reads
     resolve({ approval_id: "a1" });
     expect(await screen.findByText("已确认，等待归档")).toBeInTheDocument();
     expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the picker again when a failed archive makes the film confirmable", async () => {
+    let current: FilmDetail = DETAIL;
+    vi.spyOn(api, "workflowFilm").mockImplementation(() => Promise.resolve(current));
+    vi.spyOn(api, "performers").mockResolvedValue(PERFORMERS);
+    vi.spyOn(api, "workflowConfirm").mockImplementation(() => {
+      current = { ...DETAIL, group: "archiving", can_confirm: false };
+      return Promise.resolve({ approval_id: "a1" });
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<ThemeProvider theme={theme}><QueryClientProvider client={qc}>
+      <FilmDrawer filmId="f1" onClose={() => {}} />
+    </QueryClientProvider></ThemeProvider>);
+    fireEvent.click(await screen.findByText("三上悠亚 · NAS-A"));
+    fireEvent.click(confirmButton());
+    expect(await screen.findByText("已确认，等待归档")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "确认入库" })).not.toBeInTheDocument());
+    current = {
+      ...DETAIL, can_confirm: true, note: "NAS 可用空间不足",
+      archive: { status: "failed", error: "NAS 可用空间不足", target_path: null },
+    };
+    await qc.invalidateQueries({ queryKey: ["mediaFilm", "f1"] });
+    expect(await screen.findByRole("button", { name: "确认入库" })).toBeDisabled(); // pick again
+    expect(screen.queryByText("已确认，等待归档")).not.toBeInTheDocument();
+  });
+
+  it("labels kept cleanup members by why they were kept", async () => {
+    vi.spyOn(api, "workflowFilm").mockResolvedValue({
+      ...DETAIL, group: "attention", can_confirm: false,
+      cleanup: { input: "unknown", workcopy: "succeeded", kept: [
+        { path: "pkg/a.mp4", status: "blocked_changed" }, { path: "pkg/b.mp4", status: "blocked_identity" },
+        { path: "pkg/c.mp4", status: "blocked_writing" }, { path: "pkg/d.mp4", status: "unknown" },
+      ] },
+    });
+    wrap(<FilmDrawer filmId="f1" onClose={() => {}} />);
+    expect(await screen.findByText("已变化")).toBeInTheDocument();
+    expect(screen.getByText("已被替换")).toBeInTheDocument();
+    expect(screen.getByText("正在写入")).toBeInTheDocument();
+    expect(screen.getByText("未知")).toBeInTheDocument();
+    expect(screen.getByText("INBOX 清理：状态未知")).toBeInTheDocument();
   });
 
   it("shows the backend reason on 409", async () => {
@@ -158,6 +207,33 @@ describe("FilmDrawer", () => {
     fireEvent.click(await screen.findByRole("button", { name: "打开成品文件夹" }));
     expect(await screen.findByText("文件夹不存在。")).toBeInTheDocument();
     expect(open).toHaveBeenCalledWith("f1", "output");
+  });
+});
+
+describe("media labels", () => {
+  // Every value the backend can send (workflow/models.py Stage, StageStatus, WorkflowCleanupItem).
+  const STAGES = ["intake", "restore", "asr", "translate", "return", "scrape", "archive", "cleanup_input", "cleanup_workcopy"];
+  const STATUSES = ["pending", "running", "succeeded", "skipped", "failed", "unknown", "blocked"];
+  const KEPT = ["blocked_changed", "blocked_identity", "blocked_writing", "failed", "unknown"];
+
+  it.each(["zh-CN", "en"])("has a label for every stage and status in %s", (lng) => {
+    const missing = [
+      ...STAGES.map((s) => `media.stage.${s}`),
+      ...STATUSES.map((s) => `media.status.${s}`),
+      ...KEPT.map((s) => `media.keptStatus.${s}`),
+    ].filter((key) => !i18n.exists(key, { lng }));
+    expect(missing).toEqual([]);
+  });
+
+  it("names the intake and cleanup stages", () => {
+    const zh = i18n.getFixedT("zh-CN");
+    expect(["intake", "cleanup_input", "cleanup_workcopy"].map((s) => zh(`media.stage.${s}`)))
+      .toEqual(["入库扫描", "INBOX 清理", "工作副本清理"]);
+    expect(zh("media.status.skipped")).toBe("已跳过");
+    const en = i18n.getFixedT("en");
+    expect(["intake", "cleanup_input", "cleanup_workcopy"].map((s) => en(`media.stage.${s}`)))
+      .toEqual(["Intake", "INBOX cleanup", "Work-copy cleanup"]);
+    expect(en("media.status.skipped")).toBe("Skipped");
   });
 });
 

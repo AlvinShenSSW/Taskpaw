@@ -204,5 +204,10 @@ def register_workflow_routes(
             path = board.folder(_runtime(host), inbox, film_id, body.what)
             if path is None:
                 raise HTTPException(status_code=404, detail="文件夹不存在")
-            open_folder(path)
+            try:
+                open_folder(path)
+            except OSError as exc:  # Explorer refused (access, vanished share)
+                raise HTTPException(
+                    status_code=500, detail=f"无法打开文件夹：{exc}"
+                ) from None
         return Response(status_code=204)

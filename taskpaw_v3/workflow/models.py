@@ -1603,7 +1603,7 @@ class BoardStage(Model):
 
 
 class BoardFilm(Model):
-    """One film on the 媒体入库 board, read in one statement (T06-P1 D03, N01).
+    """One film on the 媒体入库 board, read in one locked snapshot (T06-P1 D03, N01).
 
     `approval_active`: the current context revision has an unrevoked approval
     that no archive operation has used yet (confirmed, waiting to archive).

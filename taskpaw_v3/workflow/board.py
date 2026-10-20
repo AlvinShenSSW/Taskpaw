@@ -28,6 +28,7 @@ STAGE_ORDER: tuple[m.Stage, ...] = (
     "cleanup_workcopy",
 )
 UNKNOWN_NOTE = "等待确认停止"
+KEPT_NOTE = "待清理：部分文件未能删除，请在详情中查看"
 NFO_LIMIT = 262144
 _FINISHED = ("succeeded", "skipped")
 _TROUBLE = ("failed", "blocked", "unknown")
@@ -84,12 +85,29 @@ def _place(film: m.BoardFilm) -> dict[str, Any]:
     return place
 
 
+def _kept_note(kept: list[dict[str, str]]) -> str:
+    """Why a cleanup stays unknown when the host has no reason yet (after a restart)."""
+    if not kept:
+        return KEPT_NOTE
+    return f"待清理：{len(kept)} 个文件未能删除（{kept[0]['status']}）"
+
+
 def _note(
-    film: m.BoardFilm, stage: m.BoardStage | None, waiting: dict[str, str]
+    film: m.BoardFilm,
+    stage: m.BoardStage | None,
+    waiting: dict[str, str],
+    kept: dict[str, list[dict[str, str]]],
 ) -> str | None:
-    """D02: a failure's own reason first, otherwise why the film waits."""
+    """D02: a failure's own reason first, otherwise why the film waits.
+
+    Only a local stage's `unknown` waits for its runner to confirm the stop; a
+    cleanup is `unknown` because members were kept, so it says which.
+    """
     if stage is not None and stage.status == "unknown":
-        return UNKNOWN_NOTE
+        if stage.stage in STAGE_ROLES:
+            return UNKNOWN_NOTE
+        if stage.stage in _CLEANUPS:
+            return waiting.get(film.film_id) or _kept_note(kept.get(stage.stage, []))
     if stage is not None and stage.status in _RETRYABLE:
         reason = (
             film.archive_error or stage.note if stage.stage == "archive" else stage.note
@@ -99,15 +117,23 @@ def _note(
     return waiting.get(film.film_id)
 
 
-def film_row(film: m.BoardFilm, waiting: dict[str, str]) -> dict[str, Any]:
-    """One FilmRow of `GET /control/workflow/films` (§8)."""
+def film_row(
+    film: m.BoardFilm,
+    waiting: dict[str, str],
+    kept: dict[str, list[dict[str, str]]] | None = None,
+) -> dict[str, Any]:
+    """One FilmRow of `GET /control/workflow/films` (§8).
+
+    `kept`: per cleanup stage, the members its newest cleanup did not remove
+    (the detail view has them; the list falls back to `KEPT_NOTE`).
+    """
     place = _place(film)
     stage = next((s for s in film.stages if s.stage == place["stage"]), None)
     # confirmed again after a failed archive: the old failure is no longer the reason
     note = (
         waiting.get(film.film_id)
         if place["group"] == "archiving"
-        else _note(film, stage, waiting)
+        else _note(film, stage, waiting, kept or {})
     )
     return {
         "film_id": film.film_id,
@@ -196,18 +222,20 @@ def _read_nfo(path: Path | None) -> tuple[str | None, tuple[str, ...]]:
     return parse_nfo_summary(payload, max_bytes=NFO_LIMIT)
 
 
-def _kept(wf: m.FilmWorkflow, paths: dict[str, str]) -> list[dict[str, str]]:
-    """Members the newest cleanup of each scope did not remove (U2 逐成员结果)."""
+def _kept(wf: m.FilmWorkflow, paths: dict[str, str]) -> dict[str, list[dict[str, str]]]:
+    """Per cleanup stage, members its newest cleanup did not remove (U2 逐成员结果)."""
     latest: dict[str, m.WorkflowCleanupOperation] = {}
     for operation in wf.cleanup_operations:
         latest[operation.scope] = operation
-    return [
-        {"path": paths.get(item.item_id, item.item_id), "status": item.status}
+    return {
+        f"cleanup_{scope}": [
+            {"path": paths.get(item.item_id, item.item_id), "status": item.status}
+            for item in latest[scope].items
+            if item.status not in _KEPT_OK
+        ]
         for scope in ("input", "workcopy")
         if scope in latest
-        for item in latest[scope].items
-        if item.status not in _KEPT_OK
-    ]
+    }
 
 
 def film_detail(
@@ -217,7 +245,6 @@ def film_detail(
     film = board_film(rt, film_id)
     if film is None:
         return None
-    row = film_row(film, waiting)
     op = rt.operator
     view = rt.store.get_film(op, film_id).film
     wf = rt.store.film_workflow(op, film_id)
@@ -236,6 +263,8 @@ def film_detail(
         if manifest is not None
         for item in manifest.items
     }
+    kept = _kept(wf, paths)
+    row = film_row(film, waiting, kept)
     return {
         "film_id": film_id,
         "name": row["name"],
@@ -286,6 +315,6 @@ def film_detail(
         "cleanup": {
             "input": wf.cleanup_input_status,
             "workcopy": wf.cleanup_workcopy_status,
-            "kept": _kept(wf, paths),
+            "kept": [item for items in kept.values() for item in items],
         },
     }
