@@ -11,7 +11,7 @@ import hashlib
 import logging
 import shutil
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +21,10 @@ from . import intake_models as im
 from . import models as m
 from .executors import StageExecutor
 from .intake_protocol import ProbeArtifact
-from .local_dispatch import LocalDispatcher
+from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
+
+ExecutorFactory = Callable[[LocalRuntime], Sequence[StageExecutor]]
 
 log = logging.getLogger("taskpaw.workflow.host")
 
@@ -123,9 +125,12 @@ class LocalWorkflowHost:
         executors: Sequence[StageExecutor] = (),
         *,
         intake_policy: im.IntakePolicy | None = None,
+        executor_factory: ExecutorFactory | None = None,
+        return_step: ReturnStep | None = None,
     ) -> None:
         self.settings, self.data_dir, self.executors = settings, data_dir, executors
         self.intake_policy = intake_policy
+        self.executor_factory, self.return_step = executor_factory, return_step
         self.state, self.reason = "starting", ""
         self.runtime: LocalRuntime | None = None
         self.intake: Any = None
@@ -142,6 +147,8 @@ class LocalWorkflowHost:
     def _boot(self) -> None:
         try:
             rt = self.runtime = LocalRuntime(self.data_dir, self.executors)
+            if self.executor_factory is not None:  # executors that read the ledger
+                rt.executors = {e.stage: e for e in self.executor_factory(rt)}
             rt.open()
             rt.ensure_worker()
             rt.start_boot()
@@ -171,7 +178,7 @@ class LocalWorkflowHost:
                 if self._stopping.is_set():
                     return
                 self.intake.start()
-            self.dispatcher = LocalDispatcher(rt)
+            self.dispatcher = LocalDispatcher(rt, return_step=self.return_step)
             if self._stopping.is_set():
                 return
             self.dispatcher.start()
@@ -235,6 +242,17 @@ def start_local_workflow(
         data_dir = config_dir / "workflow"
     else:
         return None
-    host = LocalWorkflowHost(settings, data_dir, executors)
+    if executors:
+        host = LocalWorkflowHost(settings, data_dir, executors)
+    else:  # the shipped pipeline (T04 E9): tools from agent.yaml, local return
+        from .pipeline import default_executors
+        from .return_step import LocalReturnStep
+
+        host = LocalWorkflowHost(
+            settings,
+            data_dir,
+            executor_factory=default_executors(settings),
+            return_step=LocalReturnStep(),
+        )
     host.start()
     return host
