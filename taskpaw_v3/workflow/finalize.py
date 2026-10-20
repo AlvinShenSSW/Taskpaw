@@ -148,37 +148,40 @@ class Finalizer:
             input_cleanup=rt.evidence("input_members_checked", producer=signer),
             workcopy_cleanup=rt.evidence("workcopy_members_checked", producer=signer),
         )
-        put = store.put_approval_context(
-            op,
-            rt.meta(),
-            m.ApprovalContextPut(
-                film_id=film_id,
-                expected_version=film.version,
-                expected_context_revision=film.current_context_revision or 0,
-                binding=binding,
-                observations=observations,
-            ),
-        )
-        if (
-            put.status != "ready"
-            or put.context_revision is None
-            or put.context_hash is None
-        ):
-            raise ConfirmError(f"审批上下文未就绪：{put.status}")
-        approval_id = _new_id()
-        store.approve(
-            op,
-            rt.meta(),
-            m.ApprovalCreate(
-                film_id=film_id,
-                expected_version=put.version,
-                approval_id=approval_id,
-                context_revision=put.context_revision,
-                context_hash=put.context_hash,
-                binding=binding,
-                expires_at=rt.clock.now() + APPROVAL_LIFETIME,
-            ),
-        )
+        try:
+            put = store.put_approval_context(
+                op,
+                rt.meta(),
+                m.ApprovalContextPut(
+                    film_id=film_id,
+                    expected_version=film.version,
+                    expected_context_revision=film.current_context_revision or 0,
+                    binding=binding,
+                    observations=observations,
+                ),
+            )
+            if (
+                put.status != "ready"
+                or put.context_revision is None
+                or put.context_hash is None
+            ):
+                raise ConfirmError(f"审批上下文未就绪：{put.status}")
+            approval_id = _new_id()
+            store.approve(
+                op,
+                rt.meta(),
+                m.ApprovalCreate(
+                    film_id=film_id,
+                    expected_version=put.version,
+                    approval_id=approval_id,
+                    context_revision=put.context_revision,
+                    context_hash=put.context_hash,
+                    binding=binding,
+                    expires_at=rt.clock.now() + APPROVAL_LIFETIME,
+                ),
+            )
+        except m.WorkflowError as exc:  # e.g. an archive was admitted meanwhile (IR07)
+            raise ConfirmError(f"影片状态已变化，请刷新后重试：{exc}") from exc
         return approval_id
 
     def _target(
@@ -242,6 +245,9 @@ class Finalizer:
                     raise
                 log.warning("finalize %s: %s", film_id, exc)
                 waiting[film_id] = f"归档/清理暂停：{exc}"
+            except Exception as exc:  # one broken film must not stop the others (IR04)
+                log.exception("finalize %s failed", film_id)
+                waiting[film_id] = f"归档/清理出错：{exc}"
         self.waiting = waiting
         return worked
 
@@ -465,6 +471,10 @@ class Finalizer:
         for scope, status in scopes:
             if status == "succeeded":
                 continue
+            if scope == "input" and not self._package_archived(wf):
+                # deleting this film's originals dirties the package and would block its siblings
+                waiting[wf.film_id] = "包内仍有未入库影片"
+                continue
             worked |= self._cleanup(wf, approval, final, scope, waiting)
         return worked
 
@@ -544,7 +554,12 @@ class Finalizer:
             else after.cleanup_workcopy_status
         )
         if done == "succeeded":
-            self._reclaim(after, scope, final)
+            try:
+                self._reclaim(after, scope, final)
+            except Exception:  # the cleanup itself is recorded; reclaim is housekeeping
+                log.exception(
+                    "reclaim after %s cleanup of %s failed", scope, wf.film_id
+                )
         else:
             blocked = [
                 r for r in results if r.status not in ("deleted", "already_absent")
@@ -634,14 +649,23 @@ class Finalizer:
             package = self.inbox / wf.package_path
             if package.resolve() != self.inbox.resolve():  # never the INBOX root itself
                 _rmdir_empty(package)
-        if wf.package_current and wf.package_version is not None:
+        latest = rt.store.film_workflow(
+            rt.operator, wf.film_id
+        )  # rmdir may have bumped it
+        if latest.package_current and latest.package_version is not None:
             rt.store.retire_archived_package(
                 rt.operator,
                 rt.meta(),
                 m.ArchivedPackageRetirement(
-                    package_id=wf.package_id, expected_version=wf.package_version
+                    package_id=wf.package_id, expected_version=latest.package_version
                 ),
             )
+
+    def _package_archived(self, wf: m.FilmWorkflow) -> bool:
+        if wf.package_id is None:
+            return True
+        films = self.runtime.store.package_films(self.runtime.operator, wf.package_id)
+        return all(f.archive_status == "succeeded" for f in films)
 
     def _package_done(self, package_id: str, scope: Scope) -> bool:
         films = self.runtime.store.package_films(self.runtime.operator, package_id)

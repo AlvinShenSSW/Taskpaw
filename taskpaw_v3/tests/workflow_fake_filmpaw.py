@@ -138,7 +138,7 @@ class FakeFilmpaw:
             "target_path": str(target),
             "directory_identity": _identity(target),
         }:
-            return 409, {"detail": "NAS 演员目录已变化，请重新确认入库"}
+            return 412, {"detail": "NAS 演员目录已变化，请重新确认入库"}
         package = Path(body["package_dir"])
         task: dict[str, Any] = {
             "id": str(uuid.uuid4()),

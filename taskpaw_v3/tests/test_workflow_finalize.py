@@ -237,9 +237,11 @@ def test_a_replaced_original_is_kept_and_the_rest_is_cleaned(world):
         fin.confirm(world.film, "actor")
         fin.run_once()  # archive submitted
         fin.run_once()  # receipt accepted
-        raw = original.read_bytes()
-        original.unlink()
-        original.write_bytes(raw)  # same bytes, new file: not the approved object
+        fresh = original.with_name(original.name + ".new")
+        fresh.write_bytes(original.read_bytes())
+        os.replace(
+            fresh, original
+        )  # same bytes, new file (no inode reuse): not the approved object
         world.ticks(fin)
     assert original.exists()
     assert world.status("cleanup_input") != "succeeded"
@@ -278,3 +280,97 @@ def test_confirm_twice_while_archiving_is_refused(world):
             fin.confirm(world.film, "actor")
     assert os.listdir(world.nas) == []
     assert identity()  # keep helper import used
+
+
+def test_target_replaced_after_confirm_fails_and_a_new_confirm_archives(world):
+    """IR01: a stale target proof is a failure to re-confirm, never an endless 'busy'."""
+    world.scrape()
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        world.nas.rename(world.nas.with_name("Actor-old"))
+        world.nas.mkdir()
+        world.ticks(fin, 2)
+        assert world.status("archive") == "failed"
+        fin.confirm(world.film, "actor")
+        world.ticks(fin)
+    assert world.status("cleanup_input") == "succeeded"
+    assert (world.nas / FILM_DIR).is_dir()
+
+
+def _in_package(world, monkeypatch, siblings):
+    """Pretend the film came from an INBOX package shared with `siblings` (IR02)."""
+    package = identity()
+    real = world.rt.store.film_workflow
+
+    def film_workflow(auth, film_id):
+        return real(auth, film_id).model_copy(update={"package_id": package})
+
+    def package_films(auth, package_id):
+        own = real(auth, world.film)
+        return (
+            m.PackageFilm(
+                film_id=world.film,
+                archive_status=own.archive_status,
+                cleanup_input_status=own.cleanup_input_status,
+                cleanup_workcopy_status=own.cleanup_workcopy_status,
+            ),
+            *siblings,
+        )
+
+    monkeypatch.setattr(world.rt.store, "film_workflow", film_workflow)
+    monkeypatch.setattr(world.rt.store, "package_films", package_films)
+
+
+def test_input_cleanup_waits_until_every_film_of_the_package_is_archived(
+    world, monkeypatch
+):
+    world.scrape()
+    sibling = m.PackageFilm(
+        film_id=identity(),
+        archive_status="pending",
+        cleanup_input_status="pending",
+        cleanup_workcopy_status="pending",
+    )
+    siblings = [sibling]
+    _in_package(world, monkeypatch, siblings)
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        world.ticks(fin)
+        assert world.status("cleanup_workcopy") == "succeeded"
+        assert world.status("cleanup_input") == "pending"
+        assert fin.waiting[world.film] == "包内仍有未入库影片"
+        assert any(p.is_file() for p in world.inbox.rglob("*"))
+        siblings[0] = sibling.model_copy(update={"archive_status": "succeeded"})
+        world.ticks(fin)
+    assert world.status("cleanup_input") == "succeeded"
+
+
+def test_one_broken_film_does_not_stop_the_others(world, monkeypatch):
+    fin = world.finalizer()
+    bad, good = identity(), identity()
+    jobs = [type("Job", (), {"film_id": bad})(), type("Job", (), {"film_id": good})()]
+    monkeypatch.setattr(world.rt.store, "list_jobs", lambda auth, status, stages: jobs)
+    seen = []
+
+    def advance(film_id, waiting):
+        seen.append(film_id)
+        if film_id == bad:
+            raise RuntimeError("boom")
+        return False
+
+    monkeypatch.setattr(fin, "_advance", advance)
+    fin.run_once()
+    assert good in seen and "boom" in fin.waiting[bad]
+
+
+def test_store_refusal_during_confirm_is_a_confirm_error(world, monkeypatch):
+    world.scrape()
+
+    def refuse(*args, **kwargs):
+        raise m.WorkflowError("precondition_failed")
+
+    monkeypatch.setattr(world.rt.store, "put_approval_context", refuse)
+    with world.fake, pytest.raises(ConfirmError):
+        world.finalizer().confirm(world.film, "actor")

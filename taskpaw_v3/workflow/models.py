@@ -1598,6 +1598,7 @@ class PackageFilm(Model):
     """A film whose current input revision is linked to an intake package."""
 
     film_id: Id
+    archive_status: StageStatus | None = None
     cleanup_input_status: StageStatus | None
     cleanup_workcopy_status: StageStatus | None
 

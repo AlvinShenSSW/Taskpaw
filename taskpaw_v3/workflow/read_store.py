@@ -356,6 +356,8 @@ class ReadCommands(WorkflowCore):
             "(SELECT status FROM stages s WHERE s.film_id=f.film_id "
             "AND s.input_revision=f.current_input_revision AND s.stage='cleanup_input'),"
             "(SELECT status FROM stages s WHERE s.film_id=f.film_id "
+            "AND s.input_revision=f.current_input_revision AND s.stage='archive'),"
+            "(SELECT status FROM stages s WHERE s.film_id=f.film_id "
             "AND s.input_revision=f.current_input_revision AND s.stage='cleanup_workcopy') "
             "FROM films f JOIN intake_films i ON i.film_id=f.film_id "
             "AND i.input_revision=f.current_input_revision WHERE i.package_id=? "
@@ -366,7 +368,8 @@ class ReadCommands(WorkflowCore):
             PackageFilm(
                 film_id=row[0],
                 cleanup_input_status=row[1],
-                cleanup_workcopy_status=row[2],
+                archive_status=row[2],
+                cleanup_workcopy_status=row[3],
             )
             for row in rows
         )
