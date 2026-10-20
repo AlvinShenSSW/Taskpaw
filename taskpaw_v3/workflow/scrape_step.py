@@ -208,7 +208,7 @@ class LocalScrapeStep:
         videos, japanese = [], []
         for entry in self._stage_index(handoff):
             item, staged, volume = entry["item"], entry["file"], entry["volume"]
-            source = package / item["relative_path"]
+            source = _checked(package, item)
             try:
                 os.link(source, staging / staged)
             except OSError:
@@ -219,7 +219,7 @@ class LocalScrapeStep:
             zh = [s for s in subs if s["item_id"] in zh_ids]
             for sub in zh[:1]:
                 shutil.copyfile(
-                    package / sub["relative_path"],
+                    _checked(package, sub),
                     staging / f"{PurePosixPath(staged).stem}.srt",
                 )
             japanese += [
@@ -309,7 +309,7 @@ class LocalScrapeStep:
             if video is None:
                 raise _Failure("needs_attention", "日语字幕找不到对应的视频")
             target = (out / video["path"]).with_suffix(".ja.srt")
-            shutil.copyfile(package / sub["relative_path"], target)
+            shutil.copyfile(_checked(package, sub), target)
             placed.append(
                 {
                     "path": target.relative_to(out).as_posix(),
@@ -524,6 +524,22 @@ class LocalScrapeStep:
             staged = f"{name.stem}-cd{volume}{name.suffix}" if multi else name.name
             out.append({"file": staged, "volume": volume, "item": item})
         return out
+
+
+def _checked(package: Path, item: dict[str, Any]) -> Path:
+    """A return-package file whose bytes still match the hand-off (Codex CX-T1).
+
+    The facts carried into the final (restoration, Chinese subtitle) are only
+    true of the receipted bytes, so a changed file stops the scrape.
+    """
+    path = package / item["relative_path"]
+    if (
+        not path.is_file()
+        or path.stat().st_size != item["size"]
+        or sha256_file(path) != item["sha256"]
+    ):
+        raise _Failure("needs_attention", f"回传包文件已变化：{item['relative_path']}")
+    return path
 
 
 def _relative(rt: LocalRuntime, path: Path) -> str:

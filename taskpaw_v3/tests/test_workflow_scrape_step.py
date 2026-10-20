@@ -235,3 +235,22 @@ def test_shipped_host_shows_why_scrape_is_off(tmp_path, monkeypatch):
         WorkflowSettings(enabled=True, inbox_root="x"), tmp_path
     )
     assert host.scrape_step is None and host.off_reasons == {"scrape": MIKO_OFF}
+
+
+def test_a_changed_return_package_file_stops_the_scrape(rt, tmp_path):
+    """Codex CX-T1: facts carried forward are only true of the receipted bytes."""
+    film = ret.add_real_film(rt)
+    d = dispatcher(rt, scrape_step(tmp_path))
+    for _ in range(4):
+        assert d.run_once()
+    package = package_dir(rt, film, 1)
+    (zh,) = package.glob("*.zh.srt")
+    zh.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello\n\n", encoding="utf-8")
+    assert d.run_once() is True
+    assert ret.status(rt, film, "scrape") == "failed"
+    job = next(
+        s for s in rt.store.get_film(rt.operator, film).stages if s.stage == "scrape"
+    )
+    (attempt,) = rt.store.list_attempts(rt.operator, job.job_id)
+    assert attempt.evidence[0].kind == failed_kind("needs_attention")
+    assert final_of(rt, film) is None
