@@ -8,9 +8,10 @@ Every path is resolved here from the film id, never taken from a client (U6).
 from __future__ import annotations
 
 from datetime import timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from . import intake_models as im
 from . import models as m
 from .auth import STAGE_ROLES
 from .local_runtime import LocalRuntime
@@ -29,6 +30,30 @@ STAGE_ORDER: tuple[m.Stage, ...] = (
 )
 UNKNOWN_NOTE = "等待确认停止"
 KEPT_NOTE = "待清理：部分文件未能删除，请在详情中查看"
+CONFIRM_NOTE = "等你确认入库"
+# H2 R5: the one fixed lifecycle line of every film and package row.
+STEP_KEYS = (
+    "intake",
+    "restore",
+    "asr",
+    "translate",
+    "return",
+    "scrape",
+    "confirm",
+    "archive",
+    "cleanup",
+    "done",
+)
+_LOCAL: tuple[m.Stage, ...] = ("restore", "asr", "translate", "return", "scrape")
+# R2a: package states that are still on their way in; the rest need the operator.
+_ARRIVING = {
+    "receiving",
+    "waiting_stability",
+    "snapshotting",
+    "snapshot_ready",
+    "waiting_capacity",
+}
+_COPYING = {"snapshotting", "snapshot_ready"}
 NFO_LIMIT = 262144
 _FINISHED = ("succeeded", "skipped")
 _TROUBLE = ("failed", "blocked", "unknown")
@@ -117,15 +142,110 @@ def _note(
     return waiting.get(film.film_id)
 
 
+def _step(
+    key: str, state: str, note: str | None = None, progress: Any = None
+) -> dict[str, Any]:
+    return {"key": key, "state": state, "note": note, "progress": progress}
+
+
+def _steps(
+    film: m.BoardFilm,
+    place: dict[str, Any],
+    waiting: dict[str, str],
+    kept: dict[str, list[dict[str, str]]],
+    current: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """R5: the film's lifecycle line, from the stages and the host (G3–G5).
+
+    A finished stage is done with its note (a skip or "no work" outcome, G3);
+    the host's waiting reason belongs to the first step not yet finished.
+    """
+    stages = {stage.stage: stage for stage in film.stages}
+
+    def status(name: str) -> str:
+        return stages[name].status if name in stages else "pending"
+
+    wait = waiting.get(film.film_id)
+    first = next((n for n in STAGE_ORDER if status(n) not in _FINISHED), None)
+    steps = [_step("intake", "done")]
+    for name in _LOCAL:
+        stage = stages.get(name)
+        why = (stage.note or stage.reason) if stage else None
+        value = status(name)
+        if value in _FINISHED:
+            steps.append(_step(name, "done", why))
+        elif value == "running":
+            running = current or {}
+            mine = (
+                running.get("film_id") == film.film_id and running.get("stage") == name
+            )
+            steps.append(
+                _step(
+                    name,
+                    "running",
+                    why,
+                    (running.get("progress") or None) if mine else None,
+                )
+            )
+        elif value in _RETRYABLE:
+            steps.append(_step(name, "failed", why))
+        elif value == "unknown":
+            steps.append(_step(name, "waiting", UNKNOWN_NOTE))
+        elif name == first and wait:
+            steps.append(_step(name, "waiting", wait))
+        else:
+            steps.append(_step(name, "pending"))
+    archive = status("archive")
+    archive_stage = stages.get("archive")
+    error = film.archive_error or (archive_stage.note if archive_stage else None)
+    if place["can_confirm"]:
+        steps.append(
+            _step("confirm", "waiting", error if archive == "failed" else CONFIRM_NOTE)
+        )
+    elif (
+        film.approval_active
+        or film.archive_open
+        or archive not in ("pending", "failed")
+    ):
+        steps.append(_step("confirm", "done"))
+    else:
+        steps.append(_step("confirm", "pending"))
+    if archive == "succeeded":
+        steps.append(_step("archive", "done"))
+    elif film.archive_open or archive == "running":
+        steps.append(_step("archive", "running", wait))
+    elif archive == "unknown" or film.approval_active:
+        steps.append(_step("archive", "waiting", wait))
+    elif archive in _RETRYABLE:
+        steps.append(_step("archive", "failed", error))
+    else:
+        steps.append(_step("archive", "pending"))
+    finished = all(status(name) == "succeeded" for name in _CLEANUPS)
+    trouble = next((stages[n] for n in _CLEANUPS if status(n) in _TROUBLE), None)
+    if finished:
+        steps.append(_step("cleanup", "done"))
+    elif trouble is not None:
+        state = "waiting" if trouble.status == "unknown" else "failed"
+        steps.append(_step("cleanup", state, _note(film, trouble, waiting, kept)))
+    elif archive == "succeeded":
+        steps.append(_step("cleanup", "running", wait))
+    else:
+        steps.append(_step("cleanup", "pending"))
+    steps.append(_step("done", "done" if finished else "pending"))
+    return steps
+
+
 def film_row(
     film: m.BoardFilm,
     waiting: dict[str, str],
     kept: dict[str, list[dict[str, str]]] | None = None,
+    current: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One FilmRow of `GET /control/workflow/films` (§8).
+    """One FilmRow of `GET /control/workflow/films` (§8) with its steps (H2 R5).
 
     `kept`: per cleanup stage, the members its newest cleanup did not remove
     (the detail view has them; the list falls back to `KEPT_NOTE`).
+    `current`: the host's running stage, whose progress the step shows.
     """
     place = _place(film)
     stage = next((s for s in film.stages if s.stage == place["stage"]), None)
@@ -146,13 +266,82 @@ def film_row(
         "can_retry": place["retry_stage"] is not None,
         "retry_stage": place["retry_stage"],
         "created_at": _time(film.created_at),
+        "steps": _steps(film, place, waiting, kept or {}, current),
     }
 
 
 def film_rows(
-    films: tuple[m.BoardFilm, ...], waiting: dict[str, str]
+    films: tuple[m.BoardFilm, ...],
+    waiting: dict[str, str],
+    current: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    return [film_row(film, waiting) for film in films]
+    return [film_row(film, waiting, current=current) for film in films]
+
+
+# ── INBOX packages that are not films yet (H2 R2/R2a) ───────────────────
+def package_group(state: str, reason: str) -> str:
+    """`active` while the folder is still arriving (a reconfigured root rescans
+    too), `attention` when the operator has to act."""
+    if state in _ARRIVING or (state == "blocked" and reason == "changed"):
+        return "active"
+    return "attention"
+
+
+def package_row(
+    package: im.IntakeBoardPackage, intake: dict[str, Any] | None
+) -> dict[str, Any]:
+    """One package row: codes only, the UI owns the labels (frozen H2 API).
+
+    `intake`: the host's running snapshot copy, shown on this package's step.
+    """
+    group = package_group(package.state, package.reason)
+    copying = (
+        intake if intake and intake.get("package_id") == package.package_id else None
+    )
+    state = (
+        "failed"
+        if group == "attention"
+        else "running"
+        if package.state in _COPYING or copying
+        else "waiting"
+    )
+    return {
+        "package_id": package.package_id,
+        "name": package.relative_path,
+        "state": package.state,
+        "reason": package.reason,
+        "grouping_reasons": list(package.grouping_reasons),
+        "files": list(package.unassigned_paths),
+        "group": group,
+        "steps": [
+            _step("intake", state, package.reason, copying),
+            *(_step(key, "pending") for key in STEP_KEYS[1:]),
+        ],
+    }
+
+
+def package_rows(
+    packages: tuple[im.IntakeBoardPackage, ...], intake: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    return [package_row(package, intake) for package in packages]
+
+
+def package_folder(
+    rt: LocalRuntime, inbox: Path | None, package_id: str
+) -> Path | None:
+    """The folder of a package row, when it exists; resolved from its id (U6)."""
+    package = next(
+        (
+            p
+            for p in rt.store.list_intake_board(rt.operator)
+            if p.package_id == package_id
+        ),
+        None,
+    )
+    if inbox is None or package is None:
+        return None
+    path = inbox.joinpath(*PurePosixPath(package.relative_path).parts)
+    return path if path.is_dir() else None
 
 
 # ── detail (U2) ──────────────────────────────────────────────────────────
@@ -239,7 +428,10 @@ def _kept(wf: m.FilmWorkflow, paths: dict[str, str]) -> dict[str, list[dict[str,
 
 
 def film_detail(
-    rt: LocalRuntime, film_id: str, waiting: dict[str, str]
+    rt: LocalRuntime,
+    film_id: str,
+    waiting: dict[str, str],
+    current: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """`GET /control/workflow/films/{film_id}` (§8); None for an unknown film."""
     film = board_film(rt, film_id)
@@ -264,7 +456,7 @@ def film_detail(
         for item in manifest.items
     }
     kept = _kept(wf, paths)
-    row = film_row(film, waiting, kept)
+    row = film_row(film, waiting, kept, current)
     return {
         "film_id": film_id,
         "name": row["name"],
@@ -305,6 +497,7 @@ def film_detail(
             }
             for stage in film.stages
         ],
+        "steps": row["steps"],
         "archive": {
             "status": wf.archive_status,
             "error": film.archive_error,

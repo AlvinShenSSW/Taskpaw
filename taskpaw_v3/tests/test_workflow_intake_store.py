@@ -1,13 +1,14 @@
 """Public intake commands persist observations before allowing a private snapshot."""
 
 from datetime import timedelta
+from pathlib import PurePosixPath
 
 import pytest
 
 from taskpaw_v3.tests.test_workflow_store import Harness, identity
 from taskpaw_v3.workflow import intake_models as im
 from taskpaw_v3.workflow import models as m
-from taskpaw_v3.workflow.manifest import observation_digest
+from taskpaw_v3.workflow.manifest import group_keys, group_package, observation_digest
 from taskpaw_v3.workflow.store import WorkflowStore
 
 
@@ -399,3 +400,109 @@ def test_grouping_correction_cannot_omit_an_observed_member(intake):
                 grouping=grouping,
             ),
         )
+
+
+# ── 媒体处理中心 package rows (H2 R2/R2a) ─────────────────────────────────
+def drop(store, adapter, meta, root, relative, paths, *, now):
+    """Observe one INBOX package of `paths`, grouped as discovery groups it."""
+
+    def ident(object_id):
+        return m.NativeIdentity(
+            scheme="windows_file_id",
+            root_id=root.root_id,
+            volume_or_export_id="synthetic-volume",
+            object_id=object_id,
+            observed_at=now,
+            evidence_id=identity(),
+        )
+
+    members = tuple(
+        im.ObservedMember(
+            member_id=identity(),
+            relative_path=path,
+            entry_kind="file",
+            native_identity=ident(f"{relative}/{path}"),
+            size_bytes=100,
+            mtime_ns=1,
+        )
+        for path in paths
+    )
+    parent = str(PurePosixPath(relative).parent)
+    parent = None if parent == "." else parent
+    grouping = group_package(
+        members,
+        film_ids=tuple(
+            im.FilmIdentity(group_key=key, film_id=identity())
+            for key in group_keys(members)
+        ),
+        parent_context=parent,
+        grouping_revision=1,
+        allowed_attachment_extensions=root.policy.allowed_attachment_extensions,
+    )
+    observed = im.IntakeObservation(
+        root_id=root.root_id,
+        root_config_revision=root.expected_version + 1,
+        package_id=identity(),
+        expected_package_version=0,
+        package_native_identity=ident(relative),
+        relative_path=relative,
+        parent_context=parent,
+        observed_at=now,
+        coverage="complete",
+        trigger="startup",
+        members=members,
+        grouping=grouping,
+        writer_state="clear",
+        observation_digest=observation_digest(
+            members, parent_context=parent, grouping=grouping
+        ),
+    )
+    store.observe_intake(adapter, meta(), observed)
+    return observed.package_id
+
+
+def test_intake_board_lists_current_packages_that_are_not_films_yet(intake):
+    h, _, adapter, root = intake
+    h.store.configure_intake_root(h.operator, h.meta(), root)
+
+    def put(relative, *paths):
+        return drop(h.store, adapter, h.meta, root, relative, paths, now=h.clock.now())
+
+    put("Downloads/ABF-393", "ABF-393.mp4", "setup.exe")
+    put("Performer/MOV-002", "MOV-002.mp4")
+    gone, ready, filmed = (
+        put(f"Performer/MOV-00{n}", f"MOV-00{n}.mp4") for n in (3, 4, 5)
+    )
+    conn = h.store._conn
+    conn.execute(
+        "UPDATE intake_packages SET state='missing' WHERE package_id=?", (gone,)
+    )
+    conn.execute(
+        "UPDATE intake_packages SET state='operational_ready',reason='eligible' "
+        "WHERE package_id=?",
+        (ready,),
+    )
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(
+        "INSERT INTO intake_films(film_id,input_revision,package_id,snapshot_id,"
+        "source_generation,grouping_revision,created_at) VALUES(?,1,?,?,1,1,'t')",
+        (identity(), filmed, identity()),
+    )
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=ON")
+    board = h.store.list_intake_board(h.operator)
+    assert [
+        (p.relative_path, p.state, p.reason, p.grouping_reasons, p.unassigned_paths)
+        for p in board
+    ] == [
+        (
+            "Downloads/ABF-393",
+            "needs_attention",
+            "ambiguous_grouping",
+            ("unknown_attachment",),
+            ("setup.exe",),
+        ),
+        ("Performer/MOV-002", "waiting_stability", "observed", (), ()),
+    ]
+    with pytest.raises(m.WorkflowError, match="forbidden"):
+        h.store.list_intake_board(adapter)

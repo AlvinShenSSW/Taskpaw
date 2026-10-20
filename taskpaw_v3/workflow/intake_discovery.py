@@ -64,11 +64,15 @@ def _group(
     members: tuple[im.ObservedMember, ...],
     parent: str | None,
     previous: im.IntakeObservation | None,
+    root_config_revision: int,
 ) -> im.PackageGrouping:
     old = previous.grouping if previous else None
     if (
         old
         and previous
+        # A new root configuration (e.g. more allowed attachments) re-groups;
+        # film ids still come from the previous keys below (H2 R3, D01).
+        and previous.root_config_revision == root_config_revision
         and old.parent_context == parent
         and observation_digest(members, parent_context=parent, grouping=old)
         == previous.observation_digest
@@ -170,7 +174,9 @@ def observe_package(
             ):
                 compatible = None
             members = _members(source, compatible)
-            grouping = _group(source, members, parent, compatible)
+            grouping = _group(
+                source, members, parent, compatible, config.expected_version + 1
+            )
             source.recheck()
     except IntakeFileError as exc:
         if exc.code in {"close_failed", "native_io_failed"}:

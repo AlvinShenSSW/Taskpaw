@@ -34,7 +34,7 @@ def probeable_video(monkeypatch):
 
 
 class World:
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, extras: dict[str, bytes] | None = None):
         self.tmp = tmp_path
         self.inbox = tmp_path / "inbox"
         self.nas = tmp_path / "nas" / "Actor"
@@ -42,7 +42,7 @@ class World:
         self.inbox.mkdir()
         self.nas.mkdir(parents=True)
         self.rt = self.runtime()
-        self.film = self._film()
+        self.film = self._film(extras)
         self.fake = FakeFilmpaw(self.filmpaw_dir, {"actor": self.nas})
 
     def runtime(self):
@@ -56,7 +56,7 @@ class World:
         rt.store.film_workflow = film_workflow  # type: ignore[method-assign]
         return rt
 
-    def _film(self) -> str:
+    def _film(self, extras: dict[str, bytes] | None = None) -> str:
         """add_real_film, plus real INBOX originals recorded with their identities."""
         rt, inbox = self.rt, self.inbox
         real_put = rt.store.put_input_manifest
@@ -91,7 +91,7 @@ class World:
 
         rt.store.put_input_manifest = put  # type: ignore[method-assign]
         try:
-            return ret.add_real_film(rt)
+            return ret.add_real_film(rt, extras=extras)
         finally:
             del rt.store.put_input_manifest
 
@@ -155,6 +155,32 @@ def test_one_click_archives_once_and_cleans_both_scopes(world):
     # C10: Taskpaw's private per-film dirs are reclaimed
     assert not list((world.rt.work_dir / "return").glob(f"{world.film}-r*"))
     assert not list((world.rt.work_dir / "scrape").glob(f"{world.film}-r*"))
+
+
+def test_download_extras_are_cleaned_with_the_original_never_archived(
+    tmp_path, monkeypatch
+):
+    """H2 R1: the cover and advert are input members; the package folder goes too."""
+    extras = {"ABF-393.jpg": b"cover from the download site", "新建文本文档.txt": b"ad"}
+    world = World(tmp_path, extras)
+    try:
+        _in_package(world, monkeypatch, [])
+        assert {p.name for p in (world.inbox / "pkg").iterdir()} >= set(extras)
+        world.scrape()
+        out = _scrape_out(world)
+        assert not set(extras) & {p.name for p in out.rglob("*")}  # never reach Miko
+        with world.fake:
+            fin = world.finalizer()
+            fin.confirm(world.film, "actor")
+            world.ticks(fin)
+        assert world.status("cleanup_input") == "succeeded"
+        assert world.status("cleanup_workcopy") == "succeeded"
+        archived = {p.name for p in (world.nas / FILM_DIR).rglob("*")}
+        assert not set(extras) & archived  # nor the NAS
+        assert not (world.inbox / "pkg").exists()  # emptied and removed
+        assert world.inbox.is_dir()
+    finally:
+        world.rt.close()
 
 
 def test_confirm_refusals_write_nothing(world, tmp_path):

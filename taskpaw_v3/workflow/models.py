@@ -1595,11 +1595,13 @@ class FilmWorkflow(Model):
 
 
 class BoardStage(Model):
-    """One current-revision stage and its last attempt's note (T06-P1 D02)."""
+    """One current-revision stage, its last attempt's note (T06-P1 D02) and its
+    own reason, e.g. why it was skipped or blocked (H2 G4)."""
 
     stage: Stage
     status: StageStatus
     note: Text | None = None
+    reason: Text | None = None
 
 
 class BoardFilm(Model):

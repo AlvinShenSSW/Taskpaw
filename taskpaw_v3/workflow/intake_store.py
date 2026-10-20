@@ -1543,6 +1543,47 @@ class IntakeCommands(ApprovalCommands):
                 ),
             )
 
+    def list_intake_board(self, auth: AuthProof) -> tuple[im.IntakeBoardPackage, ...]:
+        """Current packages that have not become films, for the operator's page (H2 R2).
+
+        `missing` is hidden (D07) and `operational_ready` has become films.
+        """
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise m.WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT p.package_id,p.relative_path,p.state,p.reason,p.observation_json "
+                "FROM intake_packages p WHERE p.current=1 "
+                "AND p.state NOT IN ('missing','operational_ready') "
+                "AND NOT EXISTS (SELECT 1 FROM intake_films i WHERE i.package_id=p.package_id) "
+                "ORDER BY p.path_key,p.package_id"
+            ).fetchall()
+        packages = []
+        for row in rows:
+            observation = im.IntakeObservation.model_validate_json(
+                row["observation_json"]
+            )
+            paths = {v.member_id: v.relative_path for v in observation.members}
+            grouping = observation.grouping
+            packages.append(
+                im.IntakeBoardPackage(
+                    package_id=row["package_id"],
+                    relative_path=row["relative_path"],
+                    state=row["state"],
+                    reason=row["reason"],
+                    grouping_reasons=grouping.reasons if grouping else (),
+                    unassigned_paths=tuple(
+                        paths[member]
+                        for member in (
+                            grouping.unassigned_member_ids if grouping else ()
+                        )
+                        if member in paths
+                    ),
+                )
+            )
+        return tuple(packages)
+
     def list_intakes(
         self, auth: AuthProof, query: im.IntakeListQuery, *, current_only: bool = False
     ) -> im.IntakePage:

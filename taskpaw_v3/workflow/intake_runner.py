@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 from uuid import uuid4
 
 from . import intake_models as im
@@ -42,12 +43,22 @@ class SnapshotRunner:
         self._operation: str | None = None
         self._pending_result: im.IntakeSnapshotResult | None = None
         self._cancelled = threading.Event()
+        self._progress: dict[str, Any] | None = None
 
     @property
     def active_operation_id(self) -> str | None:
         # A status hint must not wait on an in-flight native launch. Actual
         # admission/stop and release still use the locks and durable store.
         return self._operation
+
+    @property
+    def progress(self) -> dict[str, Any] | None:
+        """The running copy, `{package_id, phase, bytes_completed, total}` (H2 G1).
+
+        A status hint like `active_operation_id`: one immutable dict replaced as
+        frames arrive, read without a lock.
+        """
+        return self._progress
 
     @property
     def has_pending_settlement(self) -> bool:
@@ -218,6 +229,13 @@ class SnapshotRunner:
                 self._native = native.start_snapshot_suspended(request)
                 owned = self._native
             snapshot, reason = None, "copy_failed"
+            total = sum(v.size_bytes or 0 for v in request.observation.members)
+            self._progress = {
+                "package_id": package_id,
+                "phase": "copy",
+                "bytes_completed": 0,
+                "total": total,
+            }
             try:
                 version = self._record(owned)
                 if not self._cancelled.is_set():
@@ -251,6 +269,15 @@ class SnapshotRunner:
                                     **event.notice.model_dump(), owner_version=version
                                 )
                             )
+                    elif isinstance(event, wire.ProgressEvent):
+                        # Cumulative bytes per phase; the copy is verified in
+                        # three passes (after copying, before and after publish).
+                        self._progress = {
+                            "package_id": package_id,
+                            "phase": event.phase,
+                            "bytes_completed": event.bytes_completed,
+                            "total": total * (3 if event.phase == "verify" else 1),
+                        }
                     elif isinstance(event, wire.ResultEvent):
                         snapshot, reason = event.snapshot, "snapshot_complete"
                         break
@@ -262,6 +289,7 @@ class SnapshotRunner:
                 # public persistence below decide whether any slot can release.
                 reason = "cancelled" if self._cancelled.is_set() else "copy_failed"
             finally:
+                self._progress = None
                 end = time.monotonic() + 30
                 proof = owned.settle(deadline=end)
                 self._record(owned)

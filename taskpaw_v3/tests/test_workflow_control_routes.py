@@ -22,15 +22,17 @@ from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
     probeable_video,
     world,
 )
+from taskpaw_v3.tests.test_workflow_intake_store import drop
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.workflow_fake_filmpaw import FakeFilmpaw
+from taskpaw_v3.workflow import intake_models as im
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.filmpaw_client import (
     FilmpawClient,
     FilmpawRefused,
     FilmpawUnavailable,
 )
-from taskpaw_v3.workflow.local_host import retry_failed_stage
+from taskpaw_v3.workflow.local_host import film_policy, retry_failed_stage
 
 AUTH = {"Authorization": "Bearer t"}
 BASE = "/control/workflow"
@@ -44,12 +46,14 @@ class Host:
         self.runtime = world.rt
         self.finalizer = world.finalizer()
         self.current: dict[str, str] | None = None
+        self.intake: dict[str, Any] | None = None
         self.confirm_error: Exception | None = None
 
     def status(self) -> dict[str, Any]:
         return {
             "state": self.state,
             "reason": self.reason,
+            "intake": self.intake,
             "dispatch": {
                 "state": "idle",
                 "reason": "idle",
@@ -132,10 +136,13 @@ def test_no_host_explains_why_and_refuses_everything_else(settings, state, reaso
             "state": state,
             "reason": reason,
             "current": None,
+            "intake": None,
             "films": [],
+            "packages": [],
         }
         film = identity()
         for response in (
+            client.post(f"{BASE}/packages/{identity()}/open"),
             client.get(f"{BASE}/films/{film}"),
             client.get(f"{BASE}/films/{film}/poster"),
             client.get(f"{BASE}/performers", params={"q": "a"}),
@@ -154,7 +161,9 @@ def test_a_host_that_is_not_running_lists_nothing(world, host, client):
         "state": "failed",
         "reason": "收件目录不存在：X:/in",
         "current": None,
+        "intake": None,
         "films": [],
+        "packages": [],
     }
     response = client.post(
         f"{BASE}/films/{world.film}/confirm", json={"performer_id": "actor"}
@@ -170,6 +179,7 @@ def test_routes_live_on_the_control_api_only(host):
     )
     assert network.get(f"{BASE}/films").status_code == 404
     assert network.post(f"{BASE}/films/x/confirm", json={}).status_code == 404
+    assert network.post(f"{BASE}/packages/x/open").status_code == 404
     bare = TestClient(
         create_control_app(
             AgentConfig(server_id="s1", machine="dev"),
@@ -202,9 +212,16 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "retry_stage",
         "note",
         "stages",
+        "steps",
         "archive",
         "cleanup",
     }
+    steps = {s["key"]: s["state"] for s in data["steps"]}
+    assert (steps["scrape"], steps["confirm"], steps["archive"]) == (
+        "done",
+        "waiting",
+        "pending",
+    )
     assert (data["name"], data["number"]) == (FILM_DIR, FILM_DIR)
     assert (data["title"], data["actors"]) == ("假的标题", ["Actor"])
     assert data["marks"] == {"restored": True, "chinese_subtitles": True, "uhd": False}
@@ -419,6 +436,114 @@ def test_open_failure_is_a_json_error_not_a_crash(world, client, monkeypatch):
     assert response.status_code == 500
     assert response.json()["detail"].startswith("无法打开文件夹：")
     assert "拒绝访问" in response.json()["detail"]
+
+
+# ── INBOX packages that are not films yet (H2 R2/R2a, G1) ────────────────
+def _root(world: World) -> im.IntakeRootPut:
+    """The World store's intake root, configured as the host would (synthetic paths)."""
+    rt = world.rt
+    grant, adapter = rt.grant_intake_adapter()
+    now = rt.clock.now()
+
+    def native(root_id: str, object_id: str) -> m.NativeIdentity:
+        return m.NativeIdentity(
+            scheme="windows_file_id",
+            root_id=root_id,
+            volume_or_export_id="synthetic-volume",
+            object_id=object_id,
+            observed_at=now,
+            evidence_id=identity(),
+        )
+
+    root = im.IntakeRootPut(
+        expected_version=0,
+        root_id=rt.identity.root_id,
+        native_identity=native(rt.identity.root_id, "input-root"),
+        private_path="C:/synthetic/input",
+        work_root_id=rt.identity.work_root_id,
+        work_native_identity=native(rt.identity.work_root_id, "work-root"),
+        private_work_path="C:/synthetic/work",
+        component_id=grant.component_id,
+        policy=im.IntakePolicy(policy_revision=1),
+        film_policy=film_policy(()),
+        profiles=(),
+        enabled=True,
+    )
+    rt.store.configure_intake_root(rt.operator, rt.meta(), root)
+    world.adapter = adapter
+    return root
+
+
+def _drop(world: World, root: im.IntakeRootPut, relative: str, *paths: str) -> str:
+    return drop(
+        world.rt.store,
+        world.adapter,
+        world.rt.meta,
+        root,
+        relative,
+        paths,
+        now=world.rt.clock.now(),
+    )
+
+
+def test_list_shows_packages_that_are_not_films_yet(world, host, client):
+    root = _root(world)
+    stuck = _drop(world, root, "Downloads/ABF-393", "ABF-393.mp4", "setup.exe")
+    arriving = _drop(world, root, "Performer/MOV-002", "MOV-002.mp4")
+    copying = {
+        "package_id": arriving,
+        "phase": "copy",
+        "bytes_completed": 1,
+        "total": 2,
+    }
+    host.intake = copying
+    data = client.get(f"{BASE}/films").json()
+    assert data["intake"] == copying
+    rows = {p["package_id"]: p for p in data["packages"]}
+    assert set(rows) == {stuck, arriving}
+    assert rows[stuck]["group"] == "attention"  # 需处理
+    assert (rows[stuck]["name"], rows[stuck]["files"]) == (
+        "Downloads/ABF-393",
+        ["setup.exe"],
+    )
+    assert rows[stuck]["grouping_reasons"] == ["unknown_attachment"]
+    assert (rows[stuck]["state"], rows[stuck]["reason"]) == (
+        "needs_attention",
+        "ambiguous_grouping",
+    )
+    assert rows[arriving]["group"] == "active"
+    intake = next(s for s in rows[arriving]["steps"] if s["key"] == "intake")
+    assert intake["progress"] == copying
+    (film,) = data["films"]
+    assert [s["key"] for s in film["steps"]][0] == "intake"
+
+
+def test_a_package_folder_opens_by_package_id(world, client, monkeypatch):
+    opened: list[Path] = []
+    monkeypatch.setattr(workflow_routes, "open_folder", opened.append)
+    root = _root(world)
+    stuck = _drop(world, root, "Downloads/ABF-393", "ABF-393.mp4", "setup.exe")
+    url = f"{BASE}/packages/{stuck}/open"
+    assert client.post(url).status_code == 404  # the folder is not there
+    (world.inbox / "Downloads" / "ABF-393").mkdir(parents=True)
+    assert client.post(url).status_code == 204
+    assert opened == [world.inbox / "Downloads" / "ABF-393"]
+    assert client.post(f"{BASE}/packages/{identity()}/open").status_code == 404
+    world.rt.store._conn.execute(
+        "UPDATE intake_packages SET current=0 WHERE package_id=?", (stuck,)
+    )
+    world.rt.store._conn.commit()
+    assert client.post(url).status_code == 404  # not a current package
+
+
+def test_package_open_is_501_off_windows(world, client, monkeypatch):
+    def refuse(path: Path) -> None:
+        raise NotImplementedError("只支持 Windows")
+
+    monkeypatch.setattr(workflow_routes, "open_folder", refuse)
+    stuck = _drop(world, _root(world), "Downloads/ABF-393", "ABF-393.mp4", "x.exe")
+    (world.inbox / "Downloads" / "ABF-393").mkdir(parents=True)
+    assert client.post(f"{BASE}/packages/{stuck}/open").status_code == 501
 
 
 def test_open_folder_refuses_other_platforms(monkeypatch, tmp_path):

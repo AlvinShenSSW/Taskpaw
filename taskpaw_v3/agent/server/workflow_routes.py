@@ -110,36 +110,58 @@ def register_workflow_routes(
         assert host.runtime is not None  # checked by _host
         return host.runtime
 
-    def _waiting(host: WorkflowHostLike) -> dict[str, str]:
-        return dict((host.status().get("dispatch") or {}).get("waiting") or {})
+    def _dispatch(host: WorkflowHostLike) -> dict[str, Any]:
+        return dict(host.status().get("dispatch") or {})
 
     def _not_found() -> HTTPException:
         return HTTPException(status_code=404, detail="未知影片")
+
+    def _open(path: Path | None) -> Response:
+        if path is None:
+            raise HTTPException(status_code=404, detail="文件夹不存在")
+        try:
+            open_folder(path)
+        except OSError as exc:  # Explorer refused (access, vanished share)
+            raise HTTPException(
+                status_code=500, detail=f"无法打开文件夹：{exc}"
+            ) from None
+        return Response(status_code=204)
+
+    def _empty(state: str, reason: str) -> dict[str, Any]:
+        return {
+            "state": state,
+            "reason": reason,
+            "current": None,
+            "intake": None,
+            "films": [],
+            "packages": [],
+        }
 
     @app.get("/control/workflow/films")
     def workflow_films() -> dict[str, Any]:
         host = provider() if provider is not None else None
         if host is None:
-            state, reason = off_state(settings)
-            return {"state": state, "reason": reason, "current": None, "films": []}
+            return _empty(*off_state(settings))
         if host.state != "running" or host.runtime is None:
-            return {
-                "state": host.state,
-                "reason": host.reason,
-                "current": None,
-                "films": [],
-            }
+            return _empty(host.state, host.reason)
         from taskpaw_v3.workflow import board
 
-        dispatch = host.status().get("dispatch") or {}
+        status = host.status()
+        dispatch = status.get("dispatch") or {}
+        current, intake = dispatch.get("current"), status.get("intake")
         rt = host.runtime
         with _mapped():
             films = rt.store.film_board(rt.operator)
+            packages = rt.store.list_intake_board(rt.operator)
         return {
             "state": host.state,
             "reason": host.reason,
-            "current": dispatch.get("current"),
-            "films": board.film_rows(films, dict(dispatch.get("waiting") or {})),
+            "current": current,
+            "intake": intake,
+            "films": board.film_rows(
+                films, dict(dispatch.get("waiting") or {}), current
+            ),
+            "packages": board.package_rows(packages, intake),
         }
 
     @app.get("/control/workflow/films/{film_id}")
@@ -147,8 +169,14 @@ def register_workflow_routes(
         from taskpaw_v3.workflow import board
 
         host = _host()
+        dispatch = _dispatch(host)
         with _mapped():
-            detail = board.film_detail(_runtime(host), film_id, _waiting(host))
+            detail = board.film_detail(
+                _runtime(host),
+                film_id,
+                dict(dispatch.get("waiting") or {}),
+                dispatch.get("current"),
+            )
         if detail is None:
             raise _not_found()
         return detail
@@ -201,13 +229,14 @@ def register_workflow_routes(
         host = _host()
         inbox = host.finalizer.inbox if host.finalizer is not None else None
         with _mapped():
-            path = board.folder(_runtime(host), inbox, film_id, body.what)
-            if path is None:
-                raise HTTPException(status_code=404, detail="文件夹不存在")
-            try:
-                open_folder(path)
-            except OSError as exc:  # Explorer refused (access, vanished share)
-                raise HTTPException(
-                    status_code=500, detail=f"无法打开文件夹：{exc}"
-                ) from None
-        return Response(status_code=204)
+            return _open(board.folder(_runtime(host), inbox, film_id, body.what))
+
+    @app.post("/control/workflow/packages/{package_id}/open", status_code=204)
+    def workflow_open_package(package_id: str) -> Response:
+        """打开文件夹 of a package row (H2 R2): a current package, under the INBOX."""
+        from taskpaw_v3.workflow import board
+
+        host = _host()
+        inbox = host.finalizer.inbox if host.finalizer is not None else None
+        with _mapped():
+            return _open(board.package_folder(_runtime(host), inbox, package_id))

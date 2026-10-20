@@ -7,13 +7,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, HttpError, type FilmDetail, type Performer } from "../api";
+import { LifecycleStepper } from "./LifecycleSteps";
 import { SkeletonRows } from "./SkeletonRows";
-import { fmtBytes, MEDIA_FILMS_KEY, mediaFilmKey, useMediaLabels } from "./mediaWorkflow.helpers";
+import {
+  fmtBytes, lifecycle, MEDIA_FILMS_KEY, mediaFilmKey, openErrorText, useMediaLabels,
+} from "./mediaWorkflow.helpers";
 
 const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // Film detail drawer (T06-P1 U2–U5): Miko's result, the NAS target picker, the
-// single-click 「确认入库」, retry of a failed local stage and 「打开文件夹」.
+// single-click 「确认入库」, retry of a failed local stage and 「打开文件夹」; H2 R5 adds the
+// lifecycle stepper with each step's state, note and progress.
 export function FilmDrawer({ filmId, onClose }: { filmId: string | null; onClose: () => void }) {
   return (
     <Drawer anchor="right" open={filmId !== null} onClose={onClose}
@@ -67,9 +71,7 @@ function FilmBody({ film }: { film: FilmDetail }) {
     mutationFn: (stage: string) => api.workflowRetry(film.film_id, stage), onSuccess: invalidate,
   });
   const open = useMutation({ mutationFn: (what: "inbox" | "output") => api.workflowOpen(film.film_id, what) });
-  const openError = open.error instanceof HttpError && open.error.status === 404 ? t("media.folderMissing")
-    : open.error instanceof HttpError && open.error.status === 501 ? t("media.openUnsupported")
-      : open.error ? errorText(open.error) : null;
+  const openError = openErrorText(open.error, t);
   const [confirmed, setConfirmed] = useState(false);
   const marks = (["restored", "chinese_subtitles", "uhd"] as const).filter((m) => film.marks?.[m]);
 
@@ -114,16 +116,23 @@ function FilmBody({ film }: { film: FilmDetail }) {
         )}
 
       <Divider />
-      <Box>
-        <Typography variant="overline" color="text.secondary">{t("media.stages")}</Typography>
-        <List dense disablePadding>
-          {film.stages.map((s) => (
-            <ListItem key={s.stage} disableGutters>
-              <ListItemText primary={`${label.stage(s.stage)} · ${label.status(s.status)}`} secondary={s.note || undefined} />
-            </ListItem>
-          ))}
-        </List>
-      </Box>
+      {(film.steps ?? []).length > 0 ? (
+        <Box>
+          <Typography variant="overline" color="text.secondary">{t("media.lifecycle")}</Typography>
+          <LifecycleStepper steps={lifecycle(film.steps)} />
+        </Box>
+      ) : (
+        <Box>
+          <Typography variant="overline" color="text.secondary">{t("media.stages")}</Typography>
+          <List dense disablePadding>
+            {film.stages.map((s) => (
+              <ListItem key={s.stage} disableGutters>
+                <ListItemText primary={`${label.stage(s.stage)} · ${label.status(s.status)}`} secondary={s.note || undefined} />
+              </ListItem>
+            ))}
+          </List>
+        </Box>
+      )}
 
       <Box>
         <Typography variant="overline" color="text.secondary">{t("media.files")}</Typography>

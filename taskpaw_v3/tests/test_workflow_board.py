@@ -18,6 +18,7 @@ from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
 )
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.workflow import board
+from taskpaw_v3.workflow import intake_models as im
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.local_host import retry_failed_stage
 from taskpaw_v3.workflow.manifest import parse_nfo_summary
@@ -29,6 +30,7 @@ def film(
     statuses: dict[str, str] | None = None,
     *,
     notes: dict[str, str] | None = None,
+    reasons: dict[str, str] | None = None,
     final_name: str | None = None,
     approval_active: bool = False,
     archive_open: bool = False,
@@ -38,6 +40,7 @@ def film(
     """A synthetic board row: every stage pending unless named."""
     statuses = statuses or {}
     notes = notes or {}
+    reasons = reasons or {}
     return m.BoardFilm(
         film_id=film_id or identity(),
         display_name="原始包名",
@@ -48,6 +51,7 @@ def film(
                 stage=stage,
                 status=statuses.get(stage, "pending"),
                 note=notes.get(stage),
+                reason=reasons.get(stage),
             )
             for stage in ORDER
         ),
@@ -211,8 +215,226 @@ def test_rows_carry_the_frozen_shape():
         "can_retry",
         "retry_stage",
         "created_at",
+        "steps",
     }
     assert row["created_at"] == "2026-10-20T00:00:00Z"
+    assert [s["key"] for s in row["steps"]] == list(board.STEP_KEYS)
+    assert all(set(s) == {"key", "state", "note", "progress"} for s in row["steps"])
+
+
+# ── lifecycle step line (H2 R5, G3–G5) ────────────────────────────────────
+def _steps(row: dict) -> dict[str, tuple]:
+    return {s["key"]: (s["state"], s["note"], s["progress"]) for s in row["steps"]}
+
+
+STEP_STATES = {"done", "running", "waiting", "failed", "pending"}
+
+
+def test_a_fresh_film_is_past_intake_and_nothing_else_has_started():
+    steps = _steps(board.film_row(film({"intake": "succeeded"}), {}))
+    assert steps["intake"] == ("done", None, None)
+    assert {k: v[0] for k, v in steps.items() if k != "intake"} == dict.fromkeys(
+        board.STEP_KEYS[1:], "pending"
+    )
+
+
+def test_the_running_stage_shows_the_host_progress_for_that_film_only():
+    value = film({**done_through("intake"), "restore": "running"})
+    current = {"film_id": value.film_id, "film": "x", "stage": "restore"}
+    steps = _steps(
+        board.film_row(value, {}, current={**current, "progress": "42% 1/3"})
+    )
+    assert steps["restore"] == ("running", None, "42% 1/3")
+    assert steps["asr"][0] == "pending"
+    other = {**current, "film_id": identity(), "progress": "9%"}
+    assert _steps(board.film_row(value, {}, current=other))["restore"] == (
+        "running",
+        None,
+        None,
+    )
+
+
+def test_a_waiting_reason_belongs_to_the_first_unstarted_step():
+    value = film(done_through("intake"))
+    steps = _steps(board.film_row(value, {value.film_id: "等待 GPU：手动任务"}))
+    assert steps["restore"] == ("waiting", "等待 GPU：手动任务", None)
+    assert (steps["asr"][0], steps["translate"][0]) == ("pending", "pending")
+
+
+def test_no_work_and_skipped_stages_are_done_with_their_reason():
+    """G3/G5: there is no 'skipped' step state; the reason says why."""
+    value = film(
+        {**done_through("restore"), "asr": "skipped", "translate": "succeeded"},
+        notes={"translate": "无需翻译：已有中文字幕"},
+        reasons={"asr": "Existing validated output"},
+    )
+    steps = _steps(board.film_row(value, {}))
+    assert steps["asr"] == ("done", "Existing validated output", None)
+    assert steps["translate"] == ("done", "无需翻译：已有中文字幕", None)
+
+
+def test_failed_blocked_and_unknown_stages():
+    value = film(
+        {**done_through("asr"), "translate": "failed", "return": "blocked"},
+        notes={"translate": "工具崩溃"},
+        reasons={"return": "policy_blocked"},
+    )
+    steps = _steps(board.film_row(value, {}))
+    assert steps["translate"] == ("failed", "工具崩溃", None)
+    assert steps["return"] == ("failed", "policy_blocked", None)  # G4
+    unknown = film({**done_through("intake"), "restore": "unknown"})
+    assert _steps(board.film_row(unknown, {}))["restore"] == (
+        "waiting",
+        board.UNKNOWN_NOTE,
+        None,
+    )
+
+
+def test_a_scraped_film_waits_for_the_operator():
+    steps = _steps(board.film_row(film(done_through("scrape")), {}))
+    assert steps["scrape"][0] == "done"
+    assert steps["confirm"] == ("waiting", board.CONFIRM_NOTE, None)
+    assert board.CONFIRM_NOTE == "等你确认入库"
+    assert (steps["archive"][0], steps["cleanup"][0], steps["done"][0]) == (
+        "pending",
+        "pending",
+        "pending",
+    )
+
+
+def test_a_failed_archive_waits_for_a_new_confirm_with_its_error():
+    value = film(
+        {**done_through("scrape"), "archive": "failed"}, archive_error="NAS 空间不足"
+    )
+    steps = _steps(board.film_row(value, {}))
+    assert steps["confirm"] == ("waiting", "NAS 空间不足", None)
+    assert steps["archive"] == ("failed", "NAS 空间不足", None)
+
+
+def test_a_confirmed_film_is_archiving():
+    queued = film(done_through("scrape"), approval_active=True)
+    steps = _steps(board.film_row(queued, {queued.film_id: "归档中"}))
+    assert steps["confirm"][0] == "done"
+    assert steps["archive"] == ("waiting", "归档中", None)
+    started = film({**done_through("scrape"), "archive": "running"}, archive_open=True)
+    steps = _steps(board.film_row(started, {started.film_id: "等待 Filmpaw 运行"}))
+    assert steps["confirm"][0] == "done"
+    assert steps["archive"] == ("running", "等待 Filmpaw 运行", None)
+
+
+def test_cleanup_combines_both_scopes_and_says_what_was_kept():
+    archived = film(done_through("archive"))
+    steps = _steps(board.film_row(archived, {}))
+    assert (steps["archive"][0], steps["cleanup"][0], steps["done"][0]) == (
+        "done",
+        "running",
+        "pending",
+    )
+    kept = film({**done_through("archive"), "cleanup_input": "unknown"})
+    files = {"cleanup_input": [{"path": "a.mp4", "status": "blocked_identity"}]}
+    assert _steps(board.film_row(kept, {}, files))["cleanup"] == (
+        "waiting",
+        "待清理：1 个文件未能删除（blocked_identity）",
+        None,
+    )
+    blocked = film(
+        {**done_through("archive"), "cleanup_workcopy": "blocked"},
+        notes={"cleanup_workcopy": "工作区被占用"},
+    )
+    assert _steps(board.film_row(blocked, {}))["cleanup"][:2] == (
+        "failed",
+        "工作区被占用",
+    )
+    done = _steps(board.film_row(film(done_through("cleanup_workcopy")), {}))
+    assert (done["cleanup"][0], done["done"][0]) == ("done", "done")
+    assert {v[0] for v in done.values()} == {"done"}
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        {},
+        done_through("intake"),
+        {**done_through("restore"), "asr": "running"},
+        {**done_through("scrape"), "archive": "unknown"},
+        {**done_through("archive"), "cleanup_input": "failed"},
+        done_through("cleanup_workcopy"),
+    ],
+)
+def test_every_step_state_is_one_of_the_frozen_five(statuses):
+    row = board.film_row(film(statuses), {})
+    assert {s["state"] for s in row["steps"]} <= STEP_STATES
+
+
+# ── package rows (H2 R2/R2a) ──────────────────────────────────────────────
+def package(state: str, reason: str, **kw) -> im.IntakeBoardPackage:
+    return im.IntakeBoardPackage(
+        package_id=kw.pop("package_id", identity()),
+        relative_path=kw.pop("relative_path", "Downloads/ABF-393"),
+        state=state,
+        reason=reason,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "reason", "group", "step"),
+    [
+        ("receiving", "temporary_member", "active", "waiting"),
+        ("receiving", "writer_busy", "active", "waiting"),
+        ("waiting_stability", "observed", "active", "waiting"),
+        ("snapshotting", "stable", "active", "running"),
+        ("waiting_capacity", "waiting_capacity", "active", "waiting"),
+        ("blocked", "changed", "active", "waiting"),
+        ("needs_attention", "ambiguous_grouping", "attention", "failed"),
+        ("blocked", "publication_blocked", "attention", "failed"),
+        ("blocked", "profile_required", "attention", "failed"),
+        ("unknown_owner", "recovery_required", "attention", "failed"),
+    ],
+)
+def test_a_package_row_is_grouped_by_its_intake_state(state, reason, group, step):
+    row = board.package_row(package(state, reason), None)
+    assert (row["group"], row["state"], row["reason"]) == (group, state, reason)
+    steps = _steps(row)
+    assert steps["intake"] == (step, reason, None)
+    assert {v[0] for k, v in steps.items() if k != "intake"} == {"pending"}
+
+
+def test_a_stuck_package_names_its_reasons_and_files():
+    value = package(
+        "needs_attention",
+        "ambiguous_grouping",
+        grouping_reasons=("unknown_attachment",),
+        unassigned_paths=("setup.exe",),
+    )
+    row = board.package_row(value, None)
+    assert row == {
+        "package_id": value.package_id,
+        "name": "Downloads/ABF-393",
+        "state": "needs_attention",
+        "reason": "ambiguous_grouping",
+        "grouping_reasons": ["unknown_attachment"],
+        "files": ["setup.exe"],
+        "group": "attention",
+        "steps": row["steps"],
+    }
+
+
+def test_the_package_being_copied_shows_the_intake_progress():
+    value = package("snapshotting", "stable")
+    copying = {
+        "package_id": value.package_id,
+        "phase": "copy",
+        "bytes_completed": 5,
+        "total": 10,
+    }
+    assert _steps(board.package_row(value, copying))["intake"] == (
+        "running",
+        "stable",
+        copying,
+    )
+    other = {**copying, "package_id": identity()}
+    assert _steps(board.package_row(value, other))["intake"][2] is None
 
 
 # ── NFO summary (D10) ────────────────────────────────────────────────────
@@ -345,6 +567,7 @@ class Seed:
         statuses: dict[str, str] | None = None,
         *,
         notes: dict[str, str] | None = None,
+        reasons: dict[str, str] | None = None,
         context: int = 1,
         context_state: str = "ready",
         revision: int = 1,
@@ -379,9 +602,18 @@ class Seed:
                 note = "旧版本" if old else (notes or {}).get(stage)
                 attempt = identity() if note else None
                 job = identity()
+                reason = None if old else (reasons or {}).get(stage)
                 self.conn.execute(
-                    "INSERT INTO stages VALUES(?,?,?,'h',?,?,?,1,'{}')",
-                    (job, fid, rev, stage, status, attempt),
+                    "INSERT INTO stages VALUES(?,?,?,'h',?,?,?,1,?)",
+                    (
+                        job,
+                        fid,
+                        rev,
+                        stage,
+                        status,
+                        attempt,
+                        json.dumps({"reason": reason} if reason else {}),
+                    ),
                 )
                 if attempt:
                     evidence = {"evidence": [{"summary": {"note": note}}]}
@@ -447,8 +679,9 @@ def test_film_board_reads_every_film_state_at_once(seeded):
     with seed:
         seed.film(
             "fresh",
-            {"intake": "succeeded", "restore": "running"},
+            {"intake": "succeeded", "restore": "running", "asr": "skipped"},
             notes={"restore": "50%"},
+            reasons={"asr": "Existing validated output"},
         )
         seed.film("waiting", scraped)
         seed.approval("waiting")  # confirmed, not used by any archive yet
@@ -490,10 +723,11 @@ def test_film_board_reads_every_film_state_at_once(seeded):
         "done2": ("DONE2-1", False, False, None),
         "done3": ("DONE3-1", False, False, None),
     }
-    assert [(s.stage, s.status, s.note) for s in got["fresh"].stages][:3] == [
-        ("intake", "succeeded", None),
-        ("restore", "running", "50%"),
-        ("asr", "pending", None),
+    assert [(s.stage, s.status, s.note, s.reason) for s in got["fresh"].stages][:4] == [
+        ("intake", "succeeded", None, None),
+        ("restore", "running", "50%", None),
+        ("asr", "skipped", None, "Existing validated output"),  # H2 G4
+        ("translate", "pending", None, None),
     ]
     assert got["bare"].stages == ()
     assert [s.stage for s in got["rev2"].stages] == list(ORDER)

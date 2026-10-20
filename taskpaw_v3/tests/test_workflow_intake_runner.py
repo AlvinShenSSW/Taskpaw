@@ -105,6 +105,33 @@ def test_actual_probe_ack_occurs_only_after_exact_owner_is_durable(ready, monkey
     assert h.store.get_intake(adapter, observation.package_id).state == "blocked"
 
 
+def test_copy_progress_is_visible_only_while_the_snapshot_runs(ready, monkeypatch):
+    """H2 G1: the 入库扫描 step shows the helper's copy/verify bytes."""
+    h, adapter, observation, controller = ready
+    total = sum(v.size_bytes or 0 for v in observation.members)
+    seen = []
+    original = owner.OwnedIntakeSnapshot.next_event
+
+    def watched(native, *, deadline):
+        seen.append(controller.progress)  # what the previous event left visible
+        return original(native, deadline=deadline)
+
+    monkeypatch.setattr(owner.OwnedIntakeSnapshot, "next_event", watched)
+    assert controller.progress is None
+    assert controller.run(observation.package_id).state == "completed"
+    assert controller.progress is None
+    assert seen[0] == {
+        "package_id": observation.package_id,
+        "phase": "copy",
+        "bytes_completed": 0,
+        "total": total,
+    }
+    copied = [p for p in seen[1:] if p and p["bytes_completed"]]
+    assert copied and all(p["package_id"] == observation.package_id for p in copied)
+    assert all(0 < p["bytes_completed"] <= p["total"] for p in copied)
+    assert {p["phase"] for p in copied} <= {"copy", "verify"}
+
+
 @pytest.mark.parametrize(
     "failure", ["transient", "persistent", "rejected", "lost_response"]
 )

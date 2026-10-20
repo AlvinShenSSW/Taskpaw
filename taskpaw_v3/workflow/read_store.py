@@ -389,7 +389,8 @@ class ReadCommands(WorkflowCore):
             rows = self._conn.execute(
                 "SELECT f.film_id,f.display_name,f.created_at,"
                 "json_extract(fm.body_json,'$.output_relative_path') AS output_path,"
-                "s.stage,s.status,a.body_json AS attempt_json "
+                "s.stage,s.status,json_extract(s.body_json,'$.reason') AS reason,"
+                "a.body_json AS attempt_json "
                 "FROM films f "
                 "LEFT JOIN manifests fm ON fm.film_id=f.film_id AND fm.kind='final' "
                 "AND fm.revision=f.current_final_revision "
@@ -440,6 +441,7 @@ class ReadCommands(WorkflowCore):
                         stage=row["stage"],
                         status=row["status"],
                         note=_attempt_note(row["attempt_json"]),
+                        reason=row["reason"],
                     )
                 )
         return tuple(BoardFilm.model_validate(film) for film in films.values())

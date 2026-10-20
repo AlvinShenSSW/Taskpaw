@@ -903,6 +903,20 @@ class IntakeView(Model):
     operation_id: Id | None
 
 
+class IntakeBoardPackage(Model):
+    """A current INBOX package that is not a film yet (媒体处理中心, H2 R2/R2a).
+
+    `unassigned_paths`: the members grouping could not place, e.g. an unknown file.
+    """
+
+    package_id: Id
+    relative_path: RelativePath
+    state: IntakeState
+    reason: Reason
+    grouping_reasons: Annotated[tuple[Reason, ...], Field(max_length=32)] = ()
+    unassigned_paths: Annotated[tuple[RelativePath, ...], Field(max_length=4096)] = ()
+
+
 class IntakeListQuery(Model):
     root_id: Id | None = None
     states: Annotated[tuple[IntakeState, ...], Field(max_length=10)] = ()

@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from . import intake_discovery_models as dm
@@ -97,6 +98,11 @@ class IntakeService:
         self._scanning = False
         self._last_scan = -math.inf
         self._started = False
+
+    @property
+    def progress(self) -> dict[str, Any] | None:
+        """The snapshot copy in progress, if any (H2 G1); a lock-free hint."""
+        return self._runner.progress if self._runner else None
 
     def status(self) -> IntakeServiceStatus:
         with self._state_lock:

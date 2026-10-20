@@ -203,11 +203,24 @@ export type FilmGroup = "confirm" | "active" | "attention" | "archiving" | "done
 export interface FilmRow {
   film_id: string; name: string; group: FilmGroup; stage: string; status: string;
   note: string | null; can_confirm: boolean; can_retry: boolean; retry_stage: string | null;
-  created_at: string | null;
+  created_at: string | null; steps: WorkflowStep[];
 }
+// H2 R5 lifecycle step line (frozen): one fixed line per film/package, computed by the backend.
+export type StepKey =
+  "intake" | "restore" | "asr" | "translate" | "return" | "scrape" | "confirm" | "archive" | "cleanup" | "done";
+export type StepState = "done" | "running" | "waiting" | "failed" | "pending";
+// progress: whatever the executor reports (a 0–1 fraction, a percentage, console text, …) or null.
+export interface WorkflowStep { key: StepKey; state: StepState; note: string | null; progress: unknown }
+// H2 R2/R2a: an INBOX package that is not a film yet. The backend sends codes; the UI owns the labels.
+export interface PackageRow {
+  package_id: string; name: string; state: string; reason: string | null; grouping_reasons: string[];
+  files: string[]; group: "active" | "attention"; steps: WorkflowStep[];
+}
+export interface WorkflowIntake { package_id: string; phase: string; bytes_completed: number; total: number }
 export interface WorkflowCurrent { film_id: string; film: string; stage: string; progress: unknown }
 export interface WorkflowFilms {
-  state: string; reason: string | null; current: WorkflowCurrent | null; films: FilmRow[];
+  state: string; reason: string | null; current: WorkflowCurrent | null; intake: WorkflowIntake | null;
+  films: FilmRow[]; packages: PackageRow[];
 }
 export interface FilmDetail {
   film_id: string; name: string; number: string | null; title: string | null; actors: string[];
@@ -216,7 +229,7 @@ export interface FilmDetail {
   inputs: Array<{ path: string; size: number | null }>;
   workcopy_count: number; has_poster: boolean;
   group: FilmGroup; can_confirm: boolean; can_retry: boolean; retry_stage: string | null; note: string | null;
-  stages: Array<{ stage: string; status: string; note: string | null }>;
+  stages: Array<{ stage: string; status: string; note: string | null }>; steps: WorkflowStep[];
   archive: { status: string | null; error: string | null; target_path: string | null };
   cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
 }
@@ -480,6 +493,9 @@ export const api = {
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/retry`, { stage }),
   workflowOpen: (filmId: string, what: "inbox" | "output") =>
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
+  // H2 R2: open a current INBOX package folder (204 | 404 missing | 501 unsupported platform).
+  workflowOpenPackage: (packageId: string) =>
+    send<void>("agent", "POST", `/control/workflow/packages/${seg(packageId)}/open`),
   posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
   thumbPath: (performerId: Performer["id"]) => `/control/workflow/performers/${seg(performerId)}/thumb`,
   image,

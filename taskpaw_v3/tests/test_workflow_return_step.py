@@ -18,6 +18,7 @@ from taskpaw_v3.workflow import stage_results
 from taskpaw_v3.workflow.executors import ExecOutcome, failed_kind
 from taskpaw_v3.workflow.local_dispatch import LocalDispatcher, ReturnContext
 from taskpaw_v3.workflow.local_gpu import max_resolution
+from taskpaw_v3.workflow.local_host import DOWNLOAD_EXTRAS
 from taskpaw_v3.workflow.local_runtime import LocalIdentity, LocalRuntime
 from taskpaw_v3.workflow.return_step import MANIFEST_NAME, LocalReturnStep, package_dir
 from taskpaw_v3.workflow.stage_results import (
@@ -171,15 +172,43 @@ def rt(tmp_path):
         value.close()
 
 
-def add_real_film(rt, *, root=WORKCOPY, sub=JA, sub_language="ja"):
-    """A film whose work copy really exists, with matching hashes."""
-    files = {"movie.mkv": VIDEO, "movie.ja.srt": sub}
+def add_real_film(rt, *, root=WORKCOPY, sub=JA, sub_language="ja", extras=None):
+    """A film whose work copy really exists, with matching hashes.
+
+    `extras`: download attachments (name → bytes) beside the video (H2 R1).
+    """
+    extras = extras or {}
+    files = {"movie.mkv": VIDEO, "movie.ja.srt": sub, **extras}
     for name, raw in files.items():
         path = rt.work_dir / root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
 
     def real(data):
+        subtitle, copied = data["items"][1], data["readiness"]["workcopy"]["items"][1]
+        for name in extras:
+            item_id = identity()
+            native = {**subtitle["native_identity"], "object_id": f"extra-{name}"}
+            data["items"].append(
+                {
+                    **subtitle,
+                    "item_id": item_id,
+                    "role": "attachment",
+                    "relative_path": name,
+                    "native_identity": native,
+                    "video_item_id": None,
+                    "language": None,
+                }
+            )
+            work = {**copied["native_identity"], "object_id": f"work-extra-{name}"}
+            data["readiness"]["workcopy"]["items"].append(
+                {
+                    **copied,
+                    "source_item_id": item_id,
+                    "relative_path": name,
+                    "native_identity": work,
+                }
+            )
         for item in (*data["items"], *data["readiness"]["workcopy"]["items"]):
             raw = files[item["relative_path"]]
             item["size_bytes"], item["sha256"] = (
@@ -207,6 +236,7 @@ def add_real_film(rt, *, root=WORKCOPY, sub=JA, sub_language="ja"):
                 subtitle_requirement="chinese",
                 required_image_roles=("poster",),
                 folder_cover_required=False,
+                allowed_attachment_extensions=DOWNLOAD_EXTRAS if extras else (),
             ),
         ),
     )

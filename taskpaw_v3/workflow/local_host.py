@@ -42,13 +42,35 @@ MANDATORY_STAGES: tuple[m.Stage, ...] = (
 )
 
 
-def film_policy() -> m.FilmPolicy:
+# H2 R1: what a download leaves beside the video (cover, advert, shortcut). They
+# are attachments: never staged for Miko nor archived, deleted with the input.
+# The single list for the intake and the film policy (the store validates both
+# are equal); every plain image grouping may emit as an attachment is in it.
+DOWNLOAD_EXTRAS: tuple[str, ...] = (
+    ".txt",
+    ".url",
+    ".html",
+    ".htm",
+    ".mht",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".lnk",
+    ".torrent",
+)
+
+
+def film_policy(extensions: tuple[str, ...]) -> m.FilmPolicy:
     return m.FilmPolicy(
         policy_revision=1,
         required_stages=(MANDATORY_STAGES[0], *COMPUTE_STAGES, *MANDATORY_STAGES[1:]),
         subtitle_requirement="chinese",
         required_image_roles=("poster",),
         folder_cover_required=False,
+        allowed_attachment_extensions=extensions,
     )
 
 
@@ -102,6 +124,9 @@ def configure_intake(
         if str(exc) != "not_found":
             raise
         current = None
+    policy = policy or im.IntakePolicy(
+        policy_revision=1, allowed_attachment_extensions=DOWNLOAD_EXTRAS
+    )
     wanted = im.IntakeRootPut(
         expected_version=0 if current is None else current.expected_version + 1,
         root_id=ident.root_id,
@@ -111,8 +136,8 @@ def configure_intake(
         work_native_identity=inspect_root(rt.work_dir, ident.work_root_id),
         private_work_path=str(rt.work_dir),
         component_id=ident.intake_component_id,
-        policy=policy or im.IntakePolicy(policy_revision=1),
-        film_policy=film_policy(),
+        policy=policy,
+        film_policy=film_policy(policy.allowed_attachment_extensions),
         profiles=intake_profiles(rt.evidence("intake_profile_approval")),
         enabled=True,
     )
@@ -287,7 +312,12 @@ class LocalWorkflowHost:
         self.dispatcher.wake()
 
     def status(self) -> dict[str, Any]:
-        value: dict[str, Any] = {"state": self.state, "reason": self.reason}
+        value: dict[str, Any] = {
+            "state": self.state,
+            "reason": self.reason,
+            # the snapshot copy in progress, for the 入库扫描 step (H2 G1)
+            "intake": self.intake.progress if self.intake is not None else None,
+        }
         if self.dispatcher is not None:
             dispatch = self.dispatcher.status()
             value["dispatch"] = {

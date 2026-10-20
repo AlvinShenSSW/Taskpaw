@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { api, HttpError, type FilmDetail, type FilmRow, type WorkflowFilms } from "../api";
+import {
+  api, HttpError, type FilmDetail, type FilmRow, type PackageRow, type WorkflowFilms, type WorkflowStep,
+} from "../api";
 import { MediaWorkflow } from "../views/MediaWorkflow";
 import { FilmDrawer } from "../components/FilmDrawer";
 import { AgentConsole } from "../views/AgentConsole";
@@ -11,11 +13,11 @@ import i18n, { setLang } from "../i18n";
 
 const row = (over: Partial<FilmRow>): FilmRow => ({
   film_id: "f1", name: "ABC-001", group: "confirm", stage: "scrape", status: "succeeded",
-  note: null, can_confirm: true, can_retry: false, retry_stage: null, created_at: "2026-10-20T00:00:00Z", ...over,
+  note: null, can_confirm: true, can_retry: false, retry_stage: null, created_at: "2026-10-20T00:00:00Z", steps: [], ...over,
 });
 
 const LIST: WorkflowFilms = {
-  state: "running", reason: null,
+  state: "running", reason: null, intake: null, packages: [],
   current: { film_id: "f2", film: "XYZ-002", stage: "restore", progress: 0.4 },
   films: [
     row({}),
@@ -33,7 +35,7 @@ const DETAIL: FilmDetail = {
   files: [{ role: "video", path: "ABC-001.mp4", size: 1073741824, volume: 1 }],
   inputs: [{ path: "ABC-001/ABC-001.mp4", size: 2048 }], workcopy_count: 1, has_poster: false,
   group: "confirm", can_confirm: true, can_retry: false, retry_stage: null, note: null,
-  stages: [{ stage: "scrape", status: "succeeded", note: null }],
+  stages: [{ stage: "scrape", status: "succeeded", note: null }], steps: [],
   archive: { status: null, error: null, target_path: null },
   cleanup: { input: null, workcopy: null, kept: [] },
 };
@@ -73,13 +75,13 @@ describe("MediaWorkflow list", () => {
   });
 
   it("falls back to the state while the host starts with an empty reason", async () => {
-    vi.spyOn(api, "workflowFilms").mockResolvedValue({ state: "starting", reason: "", current: null, films: [] });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ state: "starting", reason: "", current: null, intake: null, films: [], packages: [] });
     wrap(<MediaWorkflow />);
     expect(await screen.findByText("媒体流水线未运行：starting")).toBeInTheDocument();
   });
 
   it("shows the reason without an error when the workflow is not running", async () => {
-    vi.spyOn(api, "workflowFilms").mockResolvedValue({ state: "disabled", reason: "未启用", current: null, films: [] });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ state: "disabled", reason: "未启用", current: null, intake: null, films: [], packages: [] });
     wrap(<MediaWorkflow />);
     expect(await screen.findByText("媒体流水线未运行：未启用")).toBeInTheDocument();
     expect(screen.queryByText(/无法读取/)).not.toBeInTheDocument();
@@ -87,19 +89,185 @@ describe("MediaWorkflow list", () => {
 });
 
 describe("AgentConsole media tab", () => {
-  it("renders MediaWorkflow under 「媒体入库」", async () => {
+  it("renders MediaWorkflow under 「媒体处理中心」", async () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ machine: "box1", monitors: {} }) })));
     const films = vi.spyOn(api, "workflowFilms").mockResolvedValue(LIST);
     wrap(<AgentConsole />);
-    fireEvent.click(screen.getByRole("tab", { name: "媒体入库" }));
+    fireEvent.click(screen.getByRole("tab", { name: "媒体处理中心" }));
     expect(await screen.findByRole("region", { name: "待确认入库" })).toBeInTheDocument();
     expect(films).toHaveBeenCalled();
+    expect(screen.queryByRole("tab", { name: "媒体入库" })).not.toBeInTheDocument();
     vi.unstubAllGlobals();
+  });
+
+  it("names the tab 「Media Center」 in English", () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve({ machine: "box1", monitors: {} }) })));
+    setLang("en");
+    wrap(<AgentConsole />);
+    expect(screen.getByRole("tab", { name: "Media Center" })).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+});
+
+const step = (key: WorkflowStep["key"], state: WorkflowStep["state"], note: string | null = null,
+  progress: unknown = null): WorkflowStep => ({ key, state, note, progress });
+
+const pkg = (over: Partial<PackageRow>): PackageRow => ({
+  package_id: "p1", name: "(HD1080P)(Prestige)(ABF-393)", state: "needs_attention", reason: "ambiguous_grouping",
+  grouping_reasons: ["unknown_attachment"], files: ["新建文本文档.txt"], group: "attention",
+  steps: [step("intake", "failed", "needs_attention")], ...over,
+});
+
+describe("MediaWorkflow lifecycle step line (R5)", () => {
+  it("renders done / running with progress / waiting / failed / pending and highlights the current step", async () => {
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({
+      ...LIST, current: null,
+      films: [row({
+        film_id: "f9", name: "STP-009", group: "active", stage: "asr", status: "running", can_confirm: false,
+        steps: [step("intake", "done"), step("restore", "done", "无需修复"), step("asr", "running", null, 0.4),
+          step("translate", "waiting", "等待 GPU 空闲"), step("return", "failed", "NAS 不可达")],
+      })],
+    });
+    wrap(<MediaWorkflow />);
+    const active = await screen.findByRole("region", { name: "处理中" });
+    const line = within(active).getByRole("list", { name: "生命周期" });
+    const items = within(line).getAllByRole("listitem");
+    expect(items).toHaveLength(10);
+    expect(items[0]).toHaveAccessibleName("入库扫描：已完成");
+    expect(items[1]).toHaveAccessibleName("修复：已完成（无需修复）");
+    expect(items[2]).toHaveAccessibleName("识别：进行中 40%");
+    expect(items[3]).toHaveAccessibleName("翻译：等待（等待 GPU 空闲）");
+    expect(items[4]).toHaveAccessibleName("回传：失败（NAS 不可达）");
+    // the steps the backend did not send are 未开始, in the fixed order
+    expect(items.slice(5).map((i) => i.getAttribute("aria-label")))
+      .toEqual(["整理：未开始", "待确认：未开始", "归档：未开始", "清理：未开始", "完成：未开始"]);
+    expect(items[2]).toHaveAttribute("aria-current", "step");
+    expect(items.filter((i) => i.getAttribute("aria-current"))).toHaveLength(1);
+    expect(within(line).getByText("识别 40%")).toBeInTheDocument();
+  });
+
+  it("omits the step line for a film whose row carries no steps", async () => {
+    vi.spyOn(api, "workflowFilms").mockResolvedValue(LIST);
+    wrap(<MediaWorkflow />);
+    await screen.findByRole("region", { name: "待确认入库" });
+    expect(screen.queryByRole("list", { name: "生命周期" })).not.toBeInTheDocument();
+  });
+});
+
+describe("MediaWorkflow packages (R2/R2a)", () => {
+  const PACKAGES: WorkflowFilms = {
+    ...LIST, films: [],
+    intake: { package_id: "p2", phase: "copy", bytes_completed: 1073741824, total: 4294967296 },
+    packages: [
+      pkg({}),
+      pkg({ package_id: "p2", name: "ABF-394", state: "waiting_stability", reason: "changed", grouping_reasons: [],
+        files: [], group: "active", steps: [step("intake", "running", "waiting_stability")] }),
+      pkg({ package_id: "p3", name: "ODD-001", state: "blocked", reason: "mystery_reason",
+        grouping_reasons: ["unknown_attachment", "brand_new_code"], files: ["setup.exe", "desktop.ini"] }),
+    ],
+  };
+
+  it("shows stuck packages in 需处理 with readable reasons and file names, and intake progress in 处理中", async () => {
+    const detail = vi.spyOn(api, "workflowFilm");
+    vi.spyOn(api, "workflowFilms").mockResolvedValue(PACKAGES);
+    wrap(<MediaWorkflow />);
+    const attention = await screen.findByRole("region", { name: "需处理" });
+    expect(within(attention).getByText("(HD1080P)(Prestige)(ABF-393)")).toBeInTheDocument();
+    expect(within(attention).getByText("需要处理 · 无法确定影片由哪些文件组成")).toBeInTheDocument();
+    expect(within(attention).getByText("有无法识别的文件：新建文本文档.txt")).toBeInTheDocument();
+    // unknown codes fall back to the code itself
+    expect(within(attention).getByText("受阻 · mystery_reason")).toBeInTheDocument();
+    expect(within(attention).getByText("有无法识别的文件；brand_new_code")).toBeInTheDocument();
+    expect(within(attention).getByText("文件：setup.exe、desktop.ini")).toBeInTheDocument();
+    expect(within(attention).getAllByRole("listitem", { name: "入库扫描：失败（需要处理）" })).toHaveLength(2);
+
+    const active = screen.getByRole("region", { name: "处理中" });
+    expect(within(active).getByText("ABF-394")).toBeInTheDocument();
+    expect(within(active).getByText("等待文件稳定 · 文件仍在变化")).toBeInTheDocument();
+    const line = within(active).getByRole("list", { name: "生命周期" });
+    const items = within(line).getAllByRole("listitem");
+    expect(items[0]).toHaveAccessibleName("入库扫描：进行中 25%（等待文件稳定 · 复制 1.0 GB / 4.0 GB）");
+    expect(items[0]).toHaveAttribute("aria-current", "step");
+    expect(items.slice(1).every((i) => i.getAttribute("data-state") === "pending")).toBe(true);
+    expect(within(line).getByText("入库扫描 25%")).toBeInTheDocument();
+    expect(within(active).getByText("1")).toBeInTheDocument(); // the group count includes packages
+    expect(within(attention).getByText("2")).toBeInTheDocument();
+
+    // a package row opens no drawer
+    fireEvent.click(within(active).getByText("ABF-394"));
+    expect(detail).not.toHaveBeenCalled();
+    expect(screen.queryByText("还没有影片。")).not.toBeInTheDocument();
+  });
+
+  it("opens the package folder and reports a missing folder inline", async () => {
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...PACKAGES, packages: [pkg({})] });
+    const open = vi.spyOn(api, "workflowOpenPackage").mockRejectedValueOnce(new HttpError("x", 404));
+    wrap(<MediaWorkflow />);
+    const attention = await screen.findByRole("region", { name: "需处理" });
+    fireEvent.click(within(attention).getByRole("button", { name: "打开文件夹" }));
+    await waitFor(() => expect(open).toHaveBeenCalledWith("p1"));
+    expect(await within(attention).findByText("文件夹不存在。")).toBeInTheDocument();
+  });
+
+  it("reports an unsupported platform on 501 and clears it after a successful open", async () => {
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...PACKAGES, packages: [pkg({})] });
+    const open = vi.spyOn(api, "workflowOpenPackage")
+      .mockRejectedValueOnce(new HttpError("x", 501)).mockResolvedValueOnce(undefined);
+    wrap(<MediaWorkflow />);
+    const button = await screen.findByRole("button", { name: "打开文件夹" });
+    fireEvent.click(button);
+    expect(await screen.findByText("此平台不支持打开文件夹。")).toBeInTheDocument();
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(open).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText("此平台不支持打开文件夹。")).not.toBeInTheDocument());
+  });
+
+  it("shows the empty state only when there are neither films nor packages", async () => {
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...LIST, films: [], packages: [] });
+    const first = wrap(<MediaWorkflow />);
+    expect(await screen.findByText("还没有影片。")).toBeInTheDocument();
+    first.unmount();
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...LIST, films: [], packages: [pkg({ group: "active" })] });
+    wrap(<MediaWorkflow />);
+    expect(await screen.findByRole("region", { name: "处理中" })).toBeInTheDocument();
+    expect(screen.queryByText("还没有影片。")).not.toBeInTheDocument();
   });
 });
 
 describe("FilmDrawer", () => {
   const confirmButton = () => screen.getByRole("button", { name: "确认入库" });
+
+  it("shows the lifecycle stepper with each step's state and note", async () => {
+    vi.spyOn(api, "workflowFilm").mockResolvedValue({
+      ...DETAIL, group: "attention", can_confirm: false,
+      steps: [step("intake", "done"), step("restore", "done", "无需修复"), step("asr", "done"),
+        step("translate", "done", "没有需要翻译的字幕"), step("return", "done"), step("scrape", "done"),
+        step("confirm", "done"), step("archive", "done"),
+        step("cleanup", "waiting", "保留 1 个文件：pkg/a.mp4"), step("done", "pending")],
+    });
+    wrap(<FilmDrawer filmId="f1" onClose={() => {}} />);
+    expect(await screen.findByText("保留 1 个文件：pkg/a.mp4")).toBeInTheDocument();
+    expect(screen.getByText("没有需要翻译的字幕")).toBeInTheDocument(); // a "no work" outcome is done with its note (G3)
+    expect(screen.getByText("整理")).toBeInTheDocument();
+    expect(screen.getAllByText("已完成")).toHaveLength(8);
+    expect(screen.getByText("等待")).toBeInTheDocument();
+    expect(screen.getByText("未开始")).toBeInTheDocument();
+    expect(document.querySelector('[aria-current="step"]')).toHaveTextContent("清理");
+    expect(screen.queryByText("阶段")).not.toBeInTheDocument(); // the stepper replaces the stage list
+  });
+
+  it("shows a running step's progress in the stepper", async () => {
+    vi.spyOn(api, "workflowFilm").mockResolvedValue({
+      ...DETAIL, group: "active", can_confirm: false,
+      steps: [step("intake", "done"), step("restore", "running", null, "frame 120/300 40%")],
+    });
+    wrap(<FilmDrawer filmId="f1" onClose={() => {}} />);
+    expect(await screen.findByText("进行中 40%")).toBeInTheDocument();
+    expect(screen.getByText("frame 120/300 40%")).toBeInTheDocument();
+    expect(screen.getAllByRole("progressbar").some((p) => p.getAttribute("aria-valuenow") === "40")).toBe(true);
+    expect(document.querySelector('[aria-current="step"]')).toHaveTextContent("修复");
+  });
 
   it("keeps confirm disabled until a performer is picked; one click → one call; success message", async () => {
     let current: FilmDetail = DETAIL;
@@ -245,12 +413,27 @@ describe("media labels", () => {
   const STAGES = ["intake", "restore", "asr", "translate", "return", "scrape", "archive", "cleanup_input", "cleanup_workcopy"];
   const STATUSES = ["pending", "running", "succeeded", "skipped", "failed", "unknown", "blocked"];
   const KEPT = ["blocked_changed", "blocked_identity", "blocked_writing", "failed", "unknown"];
+  const STEPS = ["intake", "restore", "asr", "translate", "return", "scrape", "confirm", "archive", "cleanup", "done"];
+  const STEP_STATES = ["done", "running", "waiting", "failed", "pending"];
+  // workflow/intake_models.py IntakeState and Reason
+  const INTAKE_STATES = ["receiving", "waiting_stability", "snapshotting", "snapshot_ready", "operational_ready",
+    "needs_attention", "blocked", "waiting_capacity", "unknown_owner", "missing"];
+  const INTAKE_REASONS = ["observed", "stable", "changed", "partial_observation", "unknown_identity", "writer_busy",
+    "writer_unknown", "temporary_member", "empty_package", "missing_video", "ambiguous_grouping", "volume_gap",
+    "duplicate_volume", "subtitle_ambiguous", "subtitle_language_unknown", "unknown_attachment", "invalid_nfo",
+    "film_id_required", "profile_required", "media_unknown", "eligible", "waiting_capacity", "snapshot_complete",
+    "source_changed", "cancelled", "probe_failed", "copy_failed", "owner_unknown", "disabled", "limit_exceeded",
+    "recovery_required", "publication_blocked", "permission_denied", "tool_missing"];
 
   it.each(["zh-CN", "en"])("has a label for every stage and status in %s", (lng) => {
     const missing = [
       ...STAGES.map((s) => `media.stage.${s}`),
       ...STATUSES.map((s) => `media.status.${s}`),
       ...KEPT.map((s) => `media.keptStatus.${s}`),
+      ...STEPS.map((s) => `media.step.${s}`),
+      ...STEP_STATES.map((s) => `media.stepState.${s}`),
+      ...INTAKE_STATES.map((s) => `media.intakeState.${s}`),
+      ...INTAKE_REASONS.map((s) => `media.intakeReason.${s}`),
     ].filter((key) => !i18n.exists(key, { lng }));
     expect(missing).toEqual([]);
   });
@@ -264,6 +447,14 @@ describe("media labels", () => {
     expect(["intake", "cleanup_input", "cleanup_workcopy"].map((s) => en(`media.stage.${s}`)))
       .toEqual(["Intake", "INBOX cleanup", "Work-copy cleanup"]);
     expect(en("media.status.skipped")).toBe("Skipped");
+  });
+
+  it("names the page and the lifecycle steps", () => {
+    const zh = i18n.getFixedT("zh-CN");
+    expect(zh("media.tab")).toBe("媒体处理中心");
+    expect(STEPS.map((s) => zh(`media.step.${s}`)))
+      .toEqual(["入库扫描", "修复", "识别", "翻译", "回传", "整理", "待确认", "归档", "清理", "完成"]);
+    expect(i18n.getFixedT("en")("media.tab")).toBe("Media Center");
   });
 });
 
