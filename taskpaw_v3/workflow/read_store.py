@@ -4,15 +4,17 @@ from .auth import AuthProof
 from .models import (
     ApprovalContext,
     ArchiveOperation,
+    AttemptRecord,
     CleanupIntent,
     ExecutionOperation,
     FilmRecord,
     FilmView,
     OperationView,
+    PendingComputeJob,
     StageRecord,
     WorkflowError,
 )
-from .store_core import WorkflowCore
+from .store_core import WorkflowCore, parse_time
 
 
 class ReadCommands(WorkflowCore):
@@ -98,3 +100,64 @@ class ReadCommands(WorkflowCore):
                     version=row["version"],
                 )
             )
+
+    def list_pending_compute_jobs(
+        self, auth: AuthProof
+    ) -> tuple[PendingComputeJob, ...]:
+        """Pending restore/asr/translate jobs ready to claim, oldest film first.
+
+        Only the dependency status is checked here; `claim` enforces the rest.
+        """
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT s.*,f.display_name,f.created_at AS film_created_at FROM stages s "
+                "JOIN films f ON f.film_id=s.film_id AND f.current_input_revision=s.input_revision "
+                "WHERE s.status='pending' AND s.stage IN ('restore','asr','translate') "
+                "ORDER BY f.created_at,f.film_id,s.rowid"
+            ).fetchall()
+            status = {
+                row[0]: row[1]
+                for row in self._conn.execute("SELECT job_id,status FROM stages")
+            }
+            jobs = []
+            for row in rows:
+                record = StageRecord.model_validate_json(row["body_json"])
+                if all(
+                    status.get(dep) in ("succeeded", "skipped")
+                    for dep in record.dependency_job_ids
+                ):
+                    jobs.append(
+                        PendingComputeJob(
+                            job_id=row["job_id"],
+                            film_id=row["film_id"],
+                            display_name=row["display_name"],
+                            stage=row["stage"],
+                            input_revision=row["input_revision"],
+                            version=row["version"],
+                            film_created_at=parse_time(row["film_created_at"]),
+                        )
+                    )
+            return tuple(jobs)
+
+    def list_attempts(self, auth: AuthProof, job_id: str) -> tuple[AttemptRecord, ...]:
+        """Every attempt of one job, oldest first (retry accounting, T03-P1 C6)."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT body_json FROM attempts WHERE job_id=? ORDER BY attempt_number",
+                (job_id,),
+            ).fetchall()
+            return tuple(AttemptRecord.model_validate_json(row[0]) for row in rows)
+
+    def get_stage(self, auth: AuthProof, job_id: str) -> StageRecord:
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            row = self._one("SELECT body_json FROM stages WHERE job_id=?", (job_id,))
+            return StageRecord.model_validate_json(row[0])

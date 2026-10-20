@@ -20,6 +20,15 @@ def _valid_port(p: int) -> int:
     return p
 
 
+class WorkflowSettings(BaseModel):
+    """Media workflow on this controller (T03-P1 C7): off unless explicitly enabled."""
+
+    enabled: bool = False
+    inbox_root: Optional[str] = None
+    data_dir: Optional[str] = None
+    ffprobe_path: Optional[str] = None
+
+
 class AgentConfig(BaseModel):
     """A V3 agent's local config (`agent.yaml`)."""
 
@@ -44,6 +53,7 @@ class AgentConfig(BaseModel):
     api_token: str = ""
     # Monitor instances. Opaque dicts here; #17 defines the plugin schema.
     monitors: list[dict[str, Any]] = Field(default_factory=list)
+    workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
     # Auto-run a host_metrics self-monitor on this agent (§5b: every agent).
     host_metrics: bool = True
     # Global LLM API (#178): one OpenAI-compatible endpoint for the whole agent

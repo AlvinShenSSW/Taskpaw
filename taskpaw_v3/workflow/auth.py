@@ -115,6 +115,7 @@ COMMAND_ROLES: dict[str, frozenset[str]] = {
         "begin_cleanup",
         "configure_intake_root",
         "resolve_intake_grouping",
+        "settle_abandoned_intake",
     )
 }
 COMMAND_ROLES.update(

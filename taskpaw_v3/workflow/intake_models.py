@@ -913,3 +913,17 @@ class IntakeListQuery(Model):
 class IntakePage(Model):
     items: Annotated[tuple[IntakeView, ...], Field(max_length=200)]
     next_package_id: Id | None
+
+
+class UnresolvedIntakeOperation(Model):
+    operation_id: Id
+    package_id: Id
+    owner_boot_id: Id
+    version: Revision
+
+
+class IntakeAbandonedSettlement(VersionedCommand):
+    """Settle an operation whose owner belonged to an exited controller boot."""
+
+    operation_id: Id
+    current_owner_boot_id: Id

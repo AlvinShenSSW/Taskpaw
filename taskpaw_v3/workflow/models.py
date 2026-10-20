@@ -1470,6 +1470,18 @@ class AuditPage(Model):
     next_after: Count
 
 
+class PendingComputeJob(Model):
+    """A current-revision compute stage whose dependencies are complete."""
+
+    job_id: Id
+    film_id: Id
+    display_name: Text
+    stage: Literal["restore", "asr", "translate"]
+    input_revision: Revision
+    version: Revision
+    film_created_at: UtcTime
+
+
 class FilmView(Model):
     film: FilmRecord
     stages: tuple[StageRecord, ...]

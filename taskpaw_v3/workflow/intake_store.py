@@ -930,6 +930,90 @@ class IntakeCommands(ApprovalCommands):
             raise m.WorkflowError("forbidden")
         return row
 
+    def list_unresolved_intake_operations(
+        self, auth: AuthProof
+    ) -> tuple[im.UnresolvedIntakeOperation, ...]:
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise m.WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT operation_id,package_id,owner_boot_id,version FROM intake_operations "
+                "WHERE unresolved=1 ORDER BY created_at,operation_id"
+            ).fetchall()
+            return tuple(
+                im.UnresolvedIntakeOperation(
+                    operation_id=row["operation_id"],
+                    package_id=row["package_id"],
+                    owner_boot_id=row["owner_boot_id"],
+                    version=row["version"],
+                )
+                for row in rows
+            )
+
+    def settle_abandoned_intake(
+        self,
+        auth: AuthProof,
+        meta: m.CommandMeta,
+        command: im.IntakeAbandonedSettlement,
+    ) -> m.CommandResult:
+        """Cancel an operation left by an exited controller boot (T03-P1 D01).
+
+        Its helper ran in a KILL_ON_JOB_CLOSE Job held by that controller, so the
+        controller's exit ended it. Same-boot unknowns keep the T02 blocking rule.
+        """
+
+        def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
+            row = self._intake_operation(principal, command.operation_id, operator=True)
+            if row["version"] != command.expected_version:
+                raise m.WorkflowError("cas_conflict")
+            if not row["unresolved"]:
+                return Mutation(
+                    command.operation_id,
+                    row["version"],
+                    row["state"],
+                    operation_id=command.operation_id,
+                )
+            if row["owner_boot_id"] == command.current_owner_boot_id or not (
+                self._conn.execute(
+                    "SELECT 1 FROM principals WHERE role='intake_adapter' AND boot_id=?",
+                    (command.current_owner_boot_id,),
+                ).fetchone()
+            ):
+                raise m.WorkflowError("precondition_failed")
+            version = self._update(
+                "intake_operations",
+                "operation_id",
+                command.operation_id,
+                row["version"],
+                state="cancelled",
+                unresolved=0,
+                publication_allowed=0,
+                updated_at=timestamp(now),
+            )
+            package = self._one(
+                "SELECT * FROM intake_packages WHERE package_id=?", (row["package_id"],)
+            )
+            if package["active_operation_id"] == command.operation_id:
+                self._update(
+                    "intake_packages",
+                    "package_id",
+                    package["package_id"],
+                    package["version"],
+                    state="waiting_stability",
+                    reason="cancelled",
+                    active_operation_id=None,
+                    stable_since=None,
+                )
+            return Mutation(
+                command.operation_id,
+                version,
+                "cancelled",
+                operation_id=command.operation_id,
+            )
+
+        return self._execute(auth, meta, command, "settle_abandoned_intake", apply)
+
     def record_intake_owner(
         self, auth: AuthProof, meta: m.CommandMeta, command: im.IntakeOwnerObservation
     ) -> m.CommandResult:
