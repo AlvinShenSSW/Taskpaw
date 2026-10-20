@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 from pydantic import SecretStr
 
@@ -69,11 +69,17 @@ class LocalIdentity:
     work_root_id: str
     created_at: str
     keys: dict[str, str] = field(default_factory=dict)
+    # Fixed component of every boot's receiver principal (T04 D17); "" in old files.
+    receiver_component_id: str = ""
 
     @classmethod
     def load_or_create(cls, path: Path, now: datetime) -> LocalIdentity:
         if path.exists():
-            return cls(**json.loads(path.read_text(encoding="utf-8")))
+            loaded = cls(**json.loads(path.read_text(encoding="utf-8")))
+            if not loaded.receiver_component_id:  # back-fill once, then stable
+                loaded.receiver_component_id = _new_id()
+                atomic_json(path, asdict(loaded))
+            return loaded
         value = cls(
             authority_id=_new_id(),
             operator_principal_id=_new_id(),
@@ -93,6 +99,7 @@ class LocalIdentity:
                 name: _new_id()
                 for name in ("register", "pairing", "complete", "participation")
             },
+            receiver_component_id=_new_id(),
         )
         atomic_json(path, asdict(value))
         return value
@@ -110,6 +117,7 @@ class AttemptFile:
     operation_id: str
     job_id: str
     children: tuple[str, ...] = ()
+    assignment_id: str = ""
 
 
 class LocalRuntime:
@@ -141,6 +149,7 @@ class LocalRuntime:
         self._identity: LocalIdentity | None = None
         self._operator: AuthProof | None = None
         self._worker_auth: AuthProof | None = None
+        self._receiver_auth: AuthProof | None = None
         self._boot_id: str | None = None
         self.gpu: LocalGpu | None = None
         self.reason = "starting"
@@ -169,6 +178,10 @@ class LocalRuntime:
     @property
     def worker_auth(self) -> AuthProof:
         return cast(AuthProof, self._need(self._worker_auth, "worker credential"))
+
+    @property
+    def receiver_auth(self) -> AuthProof:
+        return cast(AuthProof, self._need(self._receiver_auth, "receiver credential"))
 
     @property
     def boot_id(self) -> str:
@@ -227,18 +240,28 @@ class LocalRuntime:
             authority_epoch=1,
         )
 
-    def evidence(self, kind: str, note: str | None = None) -> m.EvidenceRef:
+    def evidence(
+        self,
+        kind: str,
+        note: str | None = None,
+        *,
+        producer: AuthProof | None = None,
+        payload_digest: str | None = None,
+        item_ids: tuple[str, ...] = (),
+    ) -> m.EvidenceRef:
+        """Passed evidence, signed by the operator unless another producer is named."""
         now = self.clock.now()
         return m.EvidenceRef(
             evidence_id=_new_id(),
             kind=kind,
-            producer_id=self.operator.principal_id,
+            producer_id=(producer or self.operator).principal_id,
             producer_version=PRODUCER,
             observed_at=now,
             received_at=now,
-            payload_digest=m.digest({"kind": kind, "note": note or ""}),
+            payload_digest=payload_digest
+            or m.digest({"kind": kind, "note": note or ""}),
             status="passed",
-            summary=m.EvidenceSummary(note=note) if note else m.EvidenceSummary(),
+            summary=m.EvidenceSummary(note=note, item_ids=item_ids),
         )
 
     def worker_view(self) -> m.WorkerView:
@@ -422,6 +445,7 @@ class LocalRuntime:
         """New boot, settle what the exited previous boot left, then reconcile."""
         self._boot_id = _new_id()
         self._record_boot()
+        _, self._receiver_auth = self._grant("receiver_adapter")
         self.settle_previous()
 
     def _record_boot(self) -> None:
@@ -464,6 +488,7 @@ class LocalRuntime:
                 operation_id=data["operation_id"],
                 job_id=data["job_id"],
                 children=tuple(data.get("children", ())),
+                assignment_id=data.get("assignment_id", ""),
             )
         except (ValueError, KeyError, TypeError):
             log.warning("unreadable workflow attempt record %s ignored", path.name)
@@ -484,9 +509,9 @@ class LocalRuntime:
         """
         with self.lock:
             pending = [
-                a
-                for a in self.worker_view().assignments
-                if a.status != "resolved" and a.boot_id != self.boot_id
+                open_.assignment
+                for open_ in self.store.list_open_assignments(self.operator)
+                if open_.assignment.boot_id != self.boot_id and self._ours(open_)
             ]
             blocked = False
             for assignment in pending:
@@ -503,6 +528,20 @@ class LocalRuntime:
             self._record_boot()
             self.reconciled = True
             return True
+
+    def _ours(self, open_: m.OpenAssignment) -> bool:
+        """Only this runtime's work: its GPU worker or its receiver (T04 D12)."""
+        assignment = open_.assignment
+        return assignment.worker_id == self.identity.worker_id or (
+            open_.stage == "return"
+            and open_.owner_component_id == self.identity.receiver_component_id
+        )
+
+    def open_assignment(self, assignment_id: str) -> m.AssignmentRecord:
+        for open_ in self.store.list_open_assignments(self.operator):
+            if open_.assignment.assignment_id == assignment_id:
+                return open_.assignment
+        raise m.WorkflowError("not_found")
 
     @staticmethod
     def _wait_gone(children: Sequence[str], wait: float) -> bool:
@@ -583,14 +622,25 @@ class LocalRuntime:
     # ── intake ──────────────────────────────────────────────────────────
     def grant_intake_adapter(self) -> tuple[m.ComponentGrant, AuthProof]:
         """A fresh intake principal for this boot (same component, D01)."""
+        return self._grant("intake_adapter")
+
+    def _grant(
+        self, role: Literal["intake_adapter", "receiver_adapter"]
+    ) -> tuple[m.ComponentGrant, AuthProof]:
+        """A fresh principal of a fixed component for this boot."""
+        component = (
+            self.identity.intake_component_id
+            if role == "intake_adapter"
+            else self.identity.receiver_component_id
+        )
         secret = SecretStr(_secret())
         grant = m.ComponentGrant(
-            component_id=self.identity.intake_component_id,
+            component_id=component,
             principal_id=_new_id(),
             credential_id=_new_id(),
             boot_id=self.boot_id,
             generation=1,
-            role="intake_adapter",
+            role=role,
             secret_digest=digest_secret(secret),
             expires_at=self.clock.now() + LONG,
         )

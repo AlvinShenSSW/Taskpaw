@@ -33,14 +33,18 @@ def failed_kind(error_class: ErrorClass) -> str:
 class ExecOutcome:
     error_class: ErrorClass | None = None
     message: str = ""
+    # sha256 of the stage's stage-result.json, kept in the success evidence (T04 E4)
+    result_digest: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.error_class is None
 
     @classmethod
-    def succeeded(cls, message: str = "") -> ExecOutcome:
-        return cls(None, message)
+    def succeeded(
+        cls, message: str = "", result_digest: str | None = None
+    ) -> ExecOutcome:
+        return cls(None, message, result_digest)
 
     @classmethod
     def failed(cls, error_class: ErrorClass, message: str) -> ExecOutcome:
@@ -59,7 +63,7 @@ class JobContext:
 
 class StageExecutor(Protocol):
     stage: ComputeStage
-    uses_gpu: bool
+    uses_gpu: bool  # default answer of needs_gpu(); executors may decide per film
 
     def tools(self) -> ToolVersions: ...
 

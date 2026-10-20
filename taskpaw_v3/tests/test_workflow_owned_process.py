@@ -94,3 +94,22 @@ def test_unknown_or_reused_identity_is_not_alive():
     assert not process_alive("not-an-identity")
     assert not process_alive("999999999:1")
     assert process_alive(own_identity())
+
+
+def test_carriage_return_progress_is_split_and_long_lines_are_bounded(tmp_path):
+    seen, sink = _sink()
+    job = OwnedJob()
+    script = (
+        "import sys\n"
+        "w = sys.stdout.buffer.write\n"
+        "for i in range(3): w(f'LTX {i}0%\\r'.encode()); sys.stdout.flush()\n"
+        "w(('长' * 5000 + '\\n').encode('utf-8'))\n"
+        "w(b'done\\n')\n"
+    )
+    child = job.launch([sys.executable, "-c", script], cwd=str(tmp_path), on_line=sink)
+    assert child.wait() == 0
+    assert job.settle(timeout=30)
+    texts = [text for _, text in seen]
+    assert texts[:3] == ["LTX 00%", "LTX 10%", "LTX 20%"]
+    assert texts[3] == "长" * 4096  # decoded first, then cut: no broken character
+    assert texts[-1] == "done"

@@ -9,6 +9,7 @@ Jasna / subtitle tasks (C5).
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -31,6 +32,7 @@ from .owned_process import OwnedJob
 
 log = logging.getLogger("taskpaw.workflow.dispatch")
 
+_COMPUTE: tuple[str, ...] = ("restore", "asr", "translate")
 MAX_AUTO_RETRIES = 2
 POLL_SECONDS = 5.0
 STOP_SETTLE_SECONDS = 30.0
@@ -51,10 +53,33 @@ class _Running:
     job: m.PendingComputeJob
     attempt: AttemptFile
     assignment_id: str
-    owner: m.LocalOwnerEvidence
+    owner: m.LocalOwnerEvidence | None  # None: a return claim holds no resource
     processes: OwnedJob | None
     uses_gpu: bool
     progress: str = ""
+
+
+class ReturnStep(Protocol):
+    """Builds and receipts the local return package (T04 E5); not a GPU executor."""
+
+    def tools(self) -> m.ToolVersions: ...
+
+    def run(self, context: ReturnContext) -> ExecOutcome: ...
+
+
+@dataclass
+class ReturnContext:
+    job: m.PendingComputeJob
+    manifest: m.InputManifest
+    attempt_id: str
+    operation_id: str
+    runtime: LocalRuntime
+    cancel: threading.Event
+
+
+def _needs_gpu(executor: StageExecutor, manifest: m.InputManifest) -> bool:
+    decide = getattr(executor, "needs_gpu", None)
+    return bool(decide(manifest)) if callable(decide) else executor.uses_gpu
 
 
 @dataclass
@@ -121,8 +146,10 @@ class LocalDispatcher:
         poll: float = POLL_SECONDS,
         stop_settle: float = STOP_SETTLE_SECONDS,
         renew_every: float = RENEW_SECONDS,
+        return_step: ReturnStep | None = None,
     ) -> None:
         self.runtime, self.lease = runtime, lease
+        self.return_step = return_step
         self.poll, self.stop_settle, self.renew_every = poll, stop_settle, renew_every
         # A process-unique generation: never equal to a manual task's RunId (C5).
         self.run_id: gpu_lease.RunId = ("workflow", next_generation())
@@ -178,7 +205,9 @@ class LocalDispatcher:
         """R3: make retries a crash lost between resolution and requeue."""
         rt = self.runtime
         try:
-            for job in rt.store.list_compute_jobs(rt.operator, "failed"):
+            for job in rt.store.list_jobs(
+                rt.operator, "failed", _COMPUTE + ("return",)
+            ):
                 try:
                     self._retry_if_due(job.job_id)
                 except m.WorkflowError as exc:
@@ -217,36 +246,49 @@ class LocalDispatcher:
         if not rt.reconciled and not rt.settle_previous(wait=0):
             self._reason = rt.reason
             return False
-        jobs = rt.store.list_pending_compute_jobs(rt.operator)
+        stages = _COMPUTE + (("return",) if self.return_step is not None else ())
+        jobs = rt.store.list_jobs(rt.operator, "pending", stages)
         waiting: dict[str, str] = {}
         vram = rt.gpu.vram_mib if rt.gpu else 0
+        gpu_waited = False
         for job in jobs:
-            executor = rt.executors.get(job.stage)
-            if executor is None or rt.gpu is None:
-                waiting[job.film_id] = (
-                    rt.reason if rt.gpu is None else "没有可用的执行器"
-                )
-                continue
             manifest = rt.store.get_input_manifest(
                 rt.operator, job.film_id, job.input_revision
             )
-            if not fits(manifest, executor.max_resolution(vram)):
-                waiting[job.film_id] = NO_4K_DEVICE
-                continue
-            if executor.uses_gpu and not self._acquire(job):
-                waiting[job.film_id] = "等待 GPU：" + (
-                    self.lease.blocking_label()
-                    if hasattr(self.lease, "blocking_label")
-                    else ""
-                )
-                self._set_waiting(waiting)
-                return False
-            if self._execute(job, executor, manifest):
+            if job.stage == "return":
+                self._leave_queue()  # about to run a stage without the GPU (E7)
+                ran = self._execute_return(job, manifest)
+            else:
+                executor = rt.executors.get(job.stage)
+                if executor is None or rt.gpu is None:
+                    waiting[job.film_id] = (
+                        rt.reason if rt.gpu is None else "没有可用的执行器"
+                    )
+                    continue
+                if not fits(manifest, executor.max_resolution(vram)):
+                    waiting[job.film_id] = NO_4K_DEVICE
+                    continue
+                gpu = _needs_gpu(executor, manifest)
+                if gpu and not self._acquire(job):
+                    gpu_waited = True  # keep the queue place, look further (E7)
+                    waiting[job.film_id] = "等待 GPU：" + (
+                        self.lease.blocking_label()
+                        if hasattr(self.lease, "blocking_label")
+                        else ""
+                    )
+                    continue
+                if not gpu:
+                    self._leave_queue()
+                ran = self._execute(job, executor, manifest, gpu)
+            if ran:
                 self._set_waiting(waiting)
                 return True
             waiting[job.film_id] = self._reason  # claim refused: try the next film
         self._set_waiting(waiting)
-        self._release()
+        if self._holding:
+            self._release()
+        elif not gpu_waited:
+            self._leave_queue()
         return False
 
     def _set_waiting(self, waiting: dict[str, str]) -> None:
@@ -262,10 +304,21 @@ class LocalDispatcher:
         return False
 
     def _release(self) -> None:
+        """Give the GPU back if held, else leave the queue (stop and resolution)."""
         if self._holding:
             self.lease.release(self.run_id)
             self._holding = False
         else:
+            self._leave_queue()
+
+    def _release_if_holding(self) -> None:
+        if self._holding:
+            self.lease.release(self.run_id)
+            self._holding = False
+
+    def _leave_queue(self) -> None:
+        """The only place the workflow gives up its gpu_lease queue place (E7)."""
+        if not self._holding:
             self.lease.withdraw(self.run_id)
 
     # ── execution ───────────────────────────────────────────────────────
@@ -274,12 +327,13 @@ class LocalDispatcher:
         job: m.PendingComputeJob,
         executor: StageExecutor,
         manifest: m.InputManifest,
+        uses_gpu: bool,
     ) -> bool:
         """Claim and run one stage; False (nothing ran) when the claim is refused."""
         rt = self.runtime
         worker = rt.worker()
         if worker.physical_binding is None:
-            self._release()
+            self._release_if_holding()
             self._reason = "本机 GPU 尚未登记"
             return False
         tools = executor.tools()
@@ -306,12 +360,14 @@ class LocalDispatcher:
             )
         except m.WorkflowError as exc:
             rt.drop_attempt(attempt.attempt_id)
-            self._release()
+            self._release_if_holding()
             self._reason = f"领取失败：{exc}"
             return False
         assignment_id = claimed.assignment_id
         if assignment_id is None:  # T01 always reports it for a claim
             raise m.WorkflowError("precondition_failed")
+        attempt = replace(attempt, assignment_id=assignment_id)
+        rt.write_attempt(attempt)
         owner = m.LocalOwnerEvidence(
             owner_id=_new_id(),
             generation=1,
@@ -327,7 +383,7 @@ class LocalDispatcher:
             children.append(identity)
             rt.write_attempt(replace(attempt, children=tuple(children)))
 
-        running = _Running(job, attempt, assignment_id, owner, None, executor.uses_gpu)
+        running = _Running(job, attempt, assignment_id, owner, None, uses_gpu)
         with self._lock:
             self._running = running
 
@@ -384,11 +440,7 @@ class LocalDispatcher:
     ) -> None:
         rt = self.runtime
         try:
-            current = next(
-                a
-                for a in rt.worker_view().assignments
-                if a.assignment_id == assignment_id
-            )
+            current = rt.open_assignment(assignment_id)
             rt.store.renew(
                 rt.worker_auth,
                 rt.meta(),
@@ -403,7 +455,7 @@ class LocalDispatcher:
                     local_owner=owner,
                 ),
             )
-        except (m.WorkflowError, StopIteration) as exc:
+        except m.WorkflowError as exc:
             # Renewal only extends the lease; a failure never stops the Job (D19).
             log.warning("workflow lease renewal failed: %s", exc)
 
@@ -420,14 +472,11 @@ class LocalDispatcher:
     def _resolve(self, running: _Running, outcome: ExecOutcome) -> None:
         rt = self.runtime
         try:
-            current = next(
-                a
-                for a in rt.worker_view().assignments
-                if a.assignment_id == running.assignment_id
-            )
+            current = rt.open_assignment(running.assignment_id)
             kind = (
                 SUCCEEDED_KIND if outcome.ok else failed_kind(outcome.error_class)  # type: ignore[arg-type]
             )
+            owner = running.owner
             rt.store.resolve_assignment(
                 rt.operator,
                 rt.meta(),
@@ -437,18 +486,28 @@ class LocalDispatcher:
                     expected_version=current.version,
                     reason=outcome.message or ("完成" if outcome.ok else "失败"),
                     operation_id=running.attempt.operation_id,
-                    local_owner=running.owner.model_copy(
+                    local_owner=None
+                    if owner is None
+                    else owner.model_copy(
                         update={
                             "state": "stopped",
                             "evidence": rt.evidence("native_owner_stopped"),
                         }
                     ),
-                    evidence=(rt.evidence(kind, outcome.message or None),),
+                    evidence=(
+                        rt.evidence(
+                            kind,
+                            outcome.message or None,
+                            payload_digest=outcome.result_digest,
+                        ),
+                    ),
                     outcome="succeeded" if outcome.ok else "failed",
                 ),
             )
             rt.drop_attempt(running.attempt.attempt_id)
-            if not outcome.ok:
+            if outcome.ok:
+                self._drop_other_workdirs(running)  # E4: superseded outputs
+            else:
                 self._retry_if_due(running.job.job_id)  # C6
                 self._reason = outcome.message
         finally:
@@ -456,6 +515,71 @@ class LocalDispatcher:
                 self._running = None
             if running.uses_gpu:
                 self._release()
+
+    def _drop_other_workdirs(self, running: _Running) -> None:
+        rt = self.runtime
+        for attempt in rt.store.list_attempts(rt.operator, running.job.job_id):
+            if attempt.attempt_id != running.attempt.attempt_id:
+                shutil.rmtree(rt.work_dir / attempt.attempt_id, ignore_errors=True)
+
+    def _execute_return(
+        self, job: m.PendingComputeJob, manifest: m.InputManifest
+    ) -> bool:
+        """Claim the return stage as this boot's receiver and build the package (E5)."""
+        rt, step = self.runtime, self.return_step
+        assert step is not None
+        tools = step.tools()
+        attempt = AttemptFile(
+            attempt_id=_new_id(), operation_id=_new_id(), job_id=job.job_id
+        )
+        rt.write_attempt(attempt)
+        try:
+            claimed = rt.store.claim(
+                rt.receiver_auth,
+                rt.meta(),
+                m.ClaimRequest(
+                    job_id=job.job_id,
+                    expected_version=job.version,
+                    attempt_id=attempt.attempt_id,
+                    operation_id=attempt.operation_id,
+                    worker_id=None,
+                    boot_id=rt.boot_id,
+                    profile_revision=tools.profile_revision,
+                    config_digest=tools.config_digest,
+                    resource_id=None,
+                    tool_versions=tools,
+                ),
+            )
+        except m.WorkflowError as exc:
+            rt.drop_attempt(attempt.attempt_id)
+            self._reason = f"领取失败：{exc}"
+            return False
+        if claimed.assignment_id is None:  # T01 always reports it for a claim
+            raise m.WorkflowError("precondition_failed")
+        attempt = replace(attempt, assignment_id=claimed.assignment_id)
+        rt.write_attempt(attempt)
+        # No renewal thread: the 24 h lease outlives the package build (D11).
+        running = _Running(job, attempt, claimed.assignment_id, None, None, False)
+        with self._lock:
+            self._running = running
+        try:
+            outcome = step.run(
+                ReturnContext(
+                    job,
+                    manifest,
+                    attempt.attempt_id,
+                    attempt.operation_id,
+                    rt,
+                    self.cancel,
+                )
+            )
+        except Exception as exc:  # a packaging bug is a visible needs-attention
+            log.exception("workflow return failed")
+            outcome = ExecOutcome.failed("needs_attention", f"回传异常：{exc}")
+        if self.cancel.is_set() and not outcome.ok:
+            outcome = ExecOutcome.failed("cancelled", "已停止")
+        self._resolve(running, outcome)
+        return True
 
     def _retry_if_due(self, job_id: str) -> None:
         """C6: bounded automatic retry by `should_retry`; interruptions never count."""

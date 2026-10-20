@@ -4,17 +4,22 @@ from .auth import AuthProof
 from .models import (
     ApprovalContext,
     ArchiveOperation,
+    AssignmentRecord,
     AttemptRecord,
     CleanupIntent,
     ExecutionOperation,
     FilmRecord,
     FilmView,
+    OpenAssignment,
     OperationView,
     PendingComputeJob,
     StageRecord,
     WorkflowError,
 )
 from .store_core import WorkflowCore, parse_time
+
+# Stages the controller's own runtime claims (compute on its GPU, return locally).
+_LOCAL_STAGES = frozenset({"restore", "asr", "translate", "return"})
 
 
 class ReadCommands(WorkflowCore):
@@ -114,16 +119,25 @@ class ReadCommands(WorkflowCore):
         self, auth: AuthProof, status: str
     ) -> tuple[PendingComputeJob, ...]:
         """Current-revision compute jobs in `status` whose dependencies are done."""
+        return self.list_jobs(auth, status, ("restore", "asr", "translate"))
+
+    def list_jobs(
+        self, auth: AuthProof, status: str, stages: tuple[str, ...]
+    ) -> tuple[PendingComputeJob, ...]:
+        """Current-revision jobs of `stages` in `status` whose dependencies are done."""
+        if not stages or not set(stages) <= _LOCAL_STAGES:
+            raise WorkflowError("invalid_request")
         with self._lock:
             principal = self._check_auth(auth, self._observe_time())
             if principal["role"] != "operator":
                 raise WorkflowError("forbidden")
+            marks = ",".join("?" for _ in stages)
             rows = self._conn.execute(
                 "SELECT s.*,f.display_name,f.created_at AS film_created_at FROM stages s "
                 "JOIN films f ON f.film_id=s.film_id AND f.current_input_revision=s.input_revision "
-                "WHERE s.status=? AND s.stage IN ('restore','asr','translate') "
+                f"WHERE s.status=? AND s.stage IN ({marks}) "
                 "ORDER BY f.created_at,f.film_id,s.rowid",
-                (status,),
+                (status, *stages),
             ).fetchall()
             statuses = {
                 row[0]: row[1]
@@ -160,6 +174,27 @@ class ReadCommands(WorkflowCore):
                 (job_id,),
             ).fetchall()
             return tuple(AttemptRecord.model_validate_json(row[0]) for row in rows)
+
+    def list_open_assignments(self, auth: AuthProof) -> tuple[OpenAssignment, ...]:
+        """Every unresolved assignment with its stage and owner component (T04 D02/D17)."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT a.body_json,s.stage,p.component_id FROM assignments a "
+                "JOIN stages s ON s.job_id=a.job_id "
+                "JOIN principals p ON p.principal_id=a.owner_principal_id "
+                "WHERE a.resolved_at IS NULL ORDER BY a.claimed_at,a.assignment_id"
+            ).fetchall()
+            return tuple(
+                OpenAssignment(
+                    assignment=AssignmentRecord.model_validate_json(row[0]),
+                    stage=row[1],
+                    owner_component_id=row[2],
+                )
+                for row in rows
+            )
 
     def get_stage(self, auth: AuthProof, job_id: str) -> StageRecord:
         with self._lock:

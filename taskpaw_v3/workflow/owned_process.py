@@ -30,21 +30,40 @@ def _decode(raw: bytes) -> str:
         return raw.decode("mbcs" if sys.platform == "win32" else "latin-1", "replace")
 
 
+MAX_LINE = 4096  # characters kept per output line (T04 E8)
+_MAX_PENDING = 1 << 16  # bytes buffered without a line break before flushing
+
+
+def _emit(raw: bytes, name: str, sink: LineSink | None) -> None:
+    text = _decode(raw)[:MAX_LINE]
+    if sink is not None and text:
+        try:
+            sink(name, text)
+        except Exception:  # a progress callback never stops draining
+            pass
+
+
 def _pump(stream: Any, name: str, sink: LineSink | None) -> None:
-    buffered = io.BufferedReader(stream)
+    """Drain one pipe; lines end at LF or CR (tqdm redraws with CR)."""
+    pending = b""
     try:
-        for raw in iter(buffered.readline, b""):
-            text = _decode(raw).rstrip("\r\n")
-            if sink is not None and text:
-                try:
-                    sink(name, text)
-                except Exception:  # a progress callback never stops draining
-                    pass
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            pending += chunk.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            *lines, pending = pending.split(b"\n")
+            for raw in lines:
+                _emit(raw, name, sink)
+            if len(pending) > _MAX_PENDING:
+                _emit(pending, name, sink)
+                pending = b""
+        _emit(pending, name, sink)
     except (OSError, ValueError):
         pass
     finally:
         try:
-            buffered.close()
+            stream.close()
         except OSError:
             pass
 
