@@ -40,9 +40,20 @@ class World:
         self.filmpaw_dir = tmp_path / "Filmpaw"
         self.inbox.mkdir()
         self.nas.mkdir(parents=True)
-        self.rt = ret.make_runtime(tmp_path / "wf")
+        self.rt = self.runtime()
         self.film = self._film()
         self.fake = FakeFilmpaw(self.filmpaw_dir, {"actor": self.nas})
+
+    def runtime(self):
+        """A (re)started runtime whose film came from the INBOX package `pkg`, as intake records it."""
+        rt = ret.make_runtime(self.tmp / "wf")
+        real = rt.store.film_workflow
+
+        def film_workflow(auth, film_id):
+            return real(auth, film_id).model_copy(update={"package_path": "pkg"})
+
+        rt.store.film_workflow = film_workflow  # type: ignore[method-assign]
+        return rt
 
     def _film(self) -> str:
         """add_real_film, plus real INBOX originals recorded with their identities."""
@@ -59,7 +70,6 @@ class World:
                 items.append(
                     item.model_copy(
                         update={
-                            "relative_path": f"pkg/{item.relative_path}",
                             "source_root_id": rt.identity.root_id,
                             "native_identity": file_identity.native(
                                 path, rt.identity.root_id
@@ -182,9 +192,7 @@ def test_filmpaw_down_waits_and_a_restart_continues_the_same_operation(world, tm
     assert fin.waiting[world.film] == "等待 Filmpaw 运行"
     assert world.status("archive") == "running"
     world.rt.close()
-    world.rt = ret.make_runtime(
-        tmp_path / "wf"
-    )  # restart: same fixed archive principal (C9)
+    world.rt = world.runtime()  # restart: same fixed archive principal (C9)
     with world.fake:
         world.ticks(world.finalizer())
     assert world.status("cleanup_workcopy") == "succeeded"
@@ -374,3 +382,49 @@ def test_store_refusal_during_confirm_is_a_confirm_error(world, monkeypatch):
     monkeypatch.setattr(world.rt.store, "put_approval_context", refuse)
     with world.fake, pytest.raises(ConfirmError):
         world.finalizer().confirm(world.film, "actor")
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="an open file blocks deletion on Windows"
+)
+def test_reclaim_is_retried_until_a_locked_work_file_is_released(world):
+    """Codex: a locked private file must not leak the film's work dirs forever."""
+    world.scrape()
+    returned = next((world.rt.work_dir / "return").rglob("*.mkv"))
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        with open(returned, "rb"):
+            world.ticks(fin)
+            assert world.status("cleanup_workcopy") == "succeeded"
+            assert returned.exists()
+        world.ticks(fin, 1)
+    assert not list((world.rt.work_dir / "return").glob(f"{world.film}-r*"))
+    assert not any(fin.reclaim_dir.iterdir())
+
+
+def test_reclaim_survives_a_restart(world):
+    world.scrape()
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        real = fin._reclaim_pending
+        fin._reclaim_pending = lambda: None  # crash before reclaiming
+        world.ticks(fin)
+        fin._reclaim_pending = real
+    assert world.status("cleanup_input") == "succeeded"
+    assert list((world.rt.work_dir / "return").glob(f"{world.film}-r*"))
+    world.rt.close()
+    world.rt = world.runtime()
+    world.finalizer().run_once()
+    assert not list((world.rt.work_dir / "return").glob(f"{world.film}-r*"))
+
+
+def test_shutdown_stops_finalization(world):
+    world.scrape()
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        fin.cancel.set()
+        world.ticks(fin)
+    assert world.status("archive") == "pending" and world.fake.posts == 0

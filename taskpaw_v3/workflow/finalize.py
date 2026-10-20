@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import threading
 import uuid
 from collections.abc import Iterable
 from datetime import timedelta
@@ -62,16 +63,23 @@ class Finalizer:
     ) -> None:
         self.runtime, self.inbox, self.filmpaw = runtime, inbox, filmpaw
         self.waiting: dict[str, str] = {}
+        # set by the dispatcher: stop between films and between members on shutdown
+        self.cancel = threading.Event()
+        self.reclaim_dir = runtime.data_dir / "reclaim"
 
     # ── paths ───────────────────────────────────────────────────────────
-    def _member_path(self, member: m.CleanupMember, final: m.FinalManifest) -> Path:
+    def _member_path(
+        self, member: m.CleanupMember, final: m.FinalManifest, package: str | None
+    ) -> Path:
+        """Final items are film-dir relative; intake items are relative to their INBOX package."""
         rt = self.runtime
         if (
             member.root_id == rt.identity.work_root_id
         ):  # final items are film-dir relative
             return rt.work_dir / final.output_relative_path / member.relative_path
         if member.root_id == rt.identity.root_id and self.inbox is not None:
-            return self.inbox / member.relative_path
+            base = self.inbox / package if package else self.inbox
+            return base / member.relative_path
         raise ConfirmError(f"无法定位清理成员的根目录：{member.root_id}")
 
     def _package_dir(self, final: m.FinalManifest) -> Path:
@@ -114,7 +122,11 @@ class Finalizer:
             f"{member.relative_path}：{status}"
             for manifest in (input_cleanup, workcopy_cleanup)
             for member in manifest.members
-            if (status := file_identity.check(self._member_path(member, final), member))
+            if (
+                status := file_identity.check(
+                    self._member_path(member, final, wf.package_path), member
+                )
+            )
             != "ok"
         ]
         if problems:
@@ -238,6 +250,8 @@ class Finalizer:
         waiting: dict[str, str] = {}
         worked = False
         for film_id in films:
+            if self.cancel.is_set():
+                break
             try:
                 worked |= self._advance(film_id, waiting)
             except m.WorkflowError as exc:
@@ -249,6 +263,7 @@ class Finalizer:
                 log.exception("finalize %s failed", film_id)
                 waiting[film_id] = f"归档/清理出错：{exc}"
         self.waiting = waiting
+        self._reclaim_pending()
         return worked
 
     def _advance(self, film_id: str, waiting: dict[str, str]) -> bool:
@@ -510,10 +525,12 @@ class Finalizer:
             statuses = {i.item_id: i.status for i in current.items}
         results = []
         for member in manifest.members:
+            if self.cancel.is_set():
+                break  # record what was done; the rest is retried after restart
             if statuses.get(member.item_id, "pending") not in _RETRYABLE:
                 continue  # done, or changed/replaced: kept for the operator (C7)
             status = file_identity.delete_exact(
-                self._member_path(member, final), member
+                self._member_path(member, final, wf.package_path), member
             )
             results.append(
                 m.CleanupItemResult(
@@ -554,12 +571,10 @@ class Finalizer:
             else after.cleanup_workcopy_status
         )
         if done == "succeeded":
-            try:
-                self._reclaim(after, scope, final)
-            except Exception:  # the cleanup itself is recorded; reclaim is housekeeping
-                log.exception(
-                    "reclaim after %s cleanup of %s failed", scope, wf.film_id
-                )
+            # reclaim is housekeeping after the recorded cleanup; the marker keeps it
+            # retried (locked file, crash, waiting siblings) until it is complete
+            self.reclaim_dir.mkdir(parents=True, exist_ok=True)
+            (self.reclaim_dir / wf.film_id).touch()
         else:
             blocked = [
                 r for r in results if r.status not in ("deleted", "already_absent")
@@ -582,7 +597,9 @@ class Finalizer:
         writing = [
             member.relative_path
             for member in manifest.members
-            if file_identity.check(self._member_path(member, final), member)
+            if file_identity.check(
+                self._member_path(member, final, wf.package_path), member
+            )
             == "blocked_writing"
         ]
         if writing:
@@ -630,21 +647,45 @@ class Finalizer:
         return operation_id
 
     # ── reclaim (C10) ───────────────────────────────────────────────────
-    def _reclaim(
-        self, wf: m.FilmWorkflow, scope: Scope, final: m.FinalManifest
-    ) -> None:
+    def _reclaim_pending(self) -> None:
+        if not self.reclaim_dir.is_dir():
+            return
+        for marker in sorted(self.reclaim_dir.iterdir()):
+            if self.cancel.is_set():
+                return
+            try:
+                if self._reclaim(marker.name):
+                    marker.unlink()
+            except Exception:
+                log.exception("reclaim of %s failed; retried next tick", marker.name)
+
+    def _reclaim(self, film_id: str) -> bool:
+        """Remove what Taskpaw kept for a cleaned film; True once nothing is left to do."""
         rt = self.runtime
-        if scope == "workcopy":
-            self._reclaim_film(wf.film_id, final)
-            if (
-                wf.package_id
-                and wf.snapshot_work_path
-                and self._package_done(wf.package_id, "workcopy")
-            ):
-                shutil.rmtree(rt.work_dir / wf.snapshot_work_path, ignore_errors=True)
-            return
-        if not (wf.package_id and self._package_done(wf.package_id, "input")):
-            return
+        wf = rt.store.film_workflow(rt.operator, film_id)
+        done = True
+        if wf.cleanup_workcopy_status == "succeeded":
+            done &= self._reclaim_film(film_id)
+            if wf.package_id and wf.snapshot_work_path:
+                if self._package_done(wf.package_id, "workcopy"):
+                    snapshot = rt.work_dir / wf.snapshot_work_path
+                    shutil.rmtree(snapshot, ignore_errors=True)
+                    done &= not snapshot.exists()
+                else:
+                    done = False  # siblings still use the shared snapshot
+        else:
+            done = False
+        if wf.cleanup_input_status != "succeeded":
+            return False
+        if wf.package_id is None:
+            return done
+        if not self._package_done(wf.package_id, "input"):
+            return False
+        self._retire(wf)
+        return done and not rt.store.film_workflow(rt.operator, film_id).package_current
+
+    def _retire(self, wf: m.FilmWorkflow) -> None:
+        rt = self.runtime
         if self.inbox is not None and wf.package_path:
             package = self.inbox / wf.package_path
             if package.resolve() != self.inbox.resolve():  # never the INBOX root itself
@@ -652,7 +693,11 @@ class Finalizer:
         latest = rt.store.film_workflow(
             rt.operator, wf.film_id
         )  # rmdir may have bumped it
-        if latest.package_current and latest.package_version is not None:
+        if (
+            wf.package_id is not None
+            and latest.package_current
+            and latest.package_version is not None
+        ):
             rt.store.retire_archived_package(
                 rt.operator,
                 rt.meta(),
@@ -674,17 +719,21 @@ class Finalizer:
         )
         return bool(films) and all(getattr(f, field) == "succeeded" for f in films)
 
-    def _reclaim_film(self, film_id: str, final: m.FinalManifest) -> None:
+    def _reclaim_film(self, film_id: str) -> bool:
         """Taskpaw's own per-film dirs: compute attempts, return package, scrape attempts."""
         rt = self.runtime
         view = rt.store.get_film(rt.operator, film_id)
-        for stage in view.stages:
-            if stage.stage in ("restore", "asr", "translate"):
-                for attempt in rt.store.list_attempts(rt.operator, stage.job_id):
-                    shutil.rmtree(rt.work_dir / attempt.attempt_id, ignore_errors=True)
+        dirs = [
+            rt.work_dir / attempt.attempt_id
+            for stage in view.stages
+            if stage.stage in ("restore", "asr", "translate")
+            for attempt in rt.store.list_attempts(rt.operator, stage.job_id)
+        ]
         for parent in ("return", "scrape"):
-            for path in (rt.work_dir / parent).glob(f"{film_id}-r*"):
-                shutil.rmtree(path, ignore_errors=True)
+            dirs.extend((rt.work_dir / parent).glob(f"{film_id}-r*"))
+        for path in dirs:
+            shutil.rmtree(path, ignore_errors=True)  # a locked file: retried next tick
+        return not any(path.exists() for path in dirs)
 
 
 def _rmdir_empty(root: Path) -> None:

@@ -180,6 +180,8 @@ class LocalDispatcher:
         # A process-unique generation: never equal to a manual task's RunId (C5).
         self.run_id: gpu_lease.RunId = ("workflow", next_generation())
         self.cancel = threading.Event()
+        if finalizer is not None:  # shutdown stops finalization too (constitution §4)
+            finalizer.cancel = self.cancel
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -258,7 +260,8 @@ class LocalDispatcher:
             except Exception:
                 log.exception("workflow dispatch tick failed")
                 worked = False
-            self._finalize()
+            if not self.cancel.is_set():
+                self._finalize()
             if not worked:
                 self._wake.wait(self.poll)
                 self._wake.clear()
