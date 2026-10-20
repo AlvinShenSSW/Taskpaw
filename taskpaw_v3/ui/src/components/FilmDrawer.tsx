@@ -205,11 +205,18 @@ function TargetPicker({ film, onConfirmed }: { film: FilmDetail; onConfirmed: ()
     enabled: query.trim() !== "", retry: false,
   });
   const filmpawDown = performers.error instanceof HttpError && performers.error.status === 503;
+  // The film as confirmed: success disables the button only until a newer detail arrives — an
+  // archive that already failed must be confirmable again without reopening (Codex T06 r1).
+  const [confirmedFilm, setConfirmedFilm] = useState<FilmDetail | null>(null);
   const confirm = useMutation({
     mutationFn: (performer: Performer) => api.workflowConfirm(film.film_id, performer.id),
-    onSuccess: onConfirmed,
+    onSuccess: () => {
+      setConfirmedFilm(film);
+      onConfirmed();
+    },
   });
-  const canClick = film.can_confirm && selected !== null && !filmpawDown && !confirm.isPending && !confirm.isSuccess;
+  const settled = confirm.isSuccess && confirmedFilm === film;
+  const canClick = film.can_confirm && selected !== null && !filmpawDown && !confirm.isPending && !settled;
   const items = performers.data?.items ?? [];
 
   return (

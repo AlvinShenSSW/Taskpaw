@@ -346,6 +346,7 @@ class Seed:
         *,
         notes: dict[str, str] | None = None,
         context: int = 1,
+        context_state: str = "ready",
         revision: int = 1,
         final: bool = True,
     ) -> str:
@@ -353,8 +354,17 @@ class Seed:
         self.conn.execute(
             "INSERT INTO films(film_id,intake_session_id,display_name,policy_revision,"
             "current_input_revision,current_final_revision,current_context_revision,"
-            "created_at,body_json) VALUES(?,?,?,1,?,?,?,?,'{}')",
-            (fid, "s", name, revision, 1 if final else None, context, self._now()),
+            "context_state,created_at,body_json) VALUES(?,?,?,1,?,?,?,?,?,'{}')",
+            (
+                fid,
+                "s",
+                name,
+                revision,
+                1 if final else None,
+                context,
+                context_state,
+                self._now(),
+            ),
         )
         if final:
             body = json.dumps({"output_relative_path": f"out/{name.upper()}-1"})
@@ -455,6 +465,9 @@ def test_film_board_reads_every_film_state_at_once(seeded):
         seed.film("stale", scraped, context=2)
         seed.approval("stale", context=1)  # an older approval context
         seed.film("bare", None, final=False)
+        # Codex T06 r1: an intake recheck invalidated the context before archiving
+        seed.film("invalid", scraped, context_state="invalidated")
+        seed.approval("invalid")
         seed.film("rev2", {"intake": "succeeded"}, revision=2)
         for name in ("done1", "done2", "done3"):
             seed.film(name, done)
@@ -471,6 +484,7 @@ def test_film_board_reads_every_film_state_at_once(seeded):
         "revoked": ("REVOKED-1", False, False, None),
         "stale": ("STALE-1", False, False, None),
         "bare": (None, False, False, None),
+        "invalid": ("INVALID-1", False, False, None),
         "rev2": ("REV2-1", False, False, None),
         "done1": ("DONE1-1", False, False, None),
         "done2": ("DONE2-1", False, False, None),
@@ -496,6 +510,7 @@ def test_film_board_reads_every_film_state_at_once(seeded):
         "confirm",
         "confirm",
     )
+    assert groups["invalid"] == "confirm"  # confirm again, never a dead 'archiving'
     # D13: only the newest finished films are kept; unfinished ones always are
     names = [f.display_name for f in rt.store.film_board(rt.operator, done_limit=1)]
     assert names == list(seed.ids)[:-3] + ["done3"]

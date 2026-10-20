@@ -409,7 +409,8 @@ class ReadCommands(WorkflowCore):
             approvals = self._conn.execute(
                 "SELECT p.film_id,p.approval_id FROM approvals p JOIN films f "
                 "ON f.film_id=p.film_id AND p.context_revision=f.current_context_revision "
-                f"WHERE p.revoked_at IS NULL {approved[0]}",
+                # an invalidated context can never be archived: confirm again (Codex T06 r1)
+                f"WHERE p.revoked_at IS NULL AND f.context_state='ready' {approved[0]}",
                 approved[1],
             ).fetchall()
         used = {row["approval_id"] for row in archives if row["approval_id"]}

@@ -152,6 +152,30 @@ describe("FilmDrawer", () => {
     expect(screen.queryByText("已确认，等待归档")).not.toBeInTheDocument();
   });
 
+  it("lets the operator confirm again when the archive fails before the refetch", async () => {
+    // Codex T06 r1: the refetch can already be confirmable (failed) — never a dead button
+    let current: FilmDetail = DETAIL;
+    vi.spyOn(api, "workflowFilm").mockImplementation(() => Promise.resolve(current));
+    vi.spyOn(api, "performers").mockResolvedValue(PERFORMERS);
+    const confirmApi = vi.spyOn(api, "workflowConfirm").mockImplementation(() => {
+      current = {
+        ...DETAIL, can_confirm: true, note: "NAS 可用空间不足",
+        archive: { status: "failed", error: "NAS 可用空间不足", target_path: null },
+      };
+      return Promise.resolve({ approval_id: "a1" });
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<ThemeProvider theme={theme}><QueryClientProvider client={qc}>
+      <FilmDrawer filmId="f1" onClose={() => {}} />
+    </QueryClientProvider></ThemeProvider>);
+    fireEvent.click(await screen.findByText("三上悠亚 · NAS-A"));
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(confirmApi).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(confirmButton()).toBeEnabled());
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(confirmApi).toHaveBeenCalledTimes(2));
+  });
+
   it("labels kept cleanup members by why they were kept", async () => {
     vi.spyOn(api, "workflowFilm").mockResolvedValue({
       ...DETAIL, group: "attention", can_confirm: false,
