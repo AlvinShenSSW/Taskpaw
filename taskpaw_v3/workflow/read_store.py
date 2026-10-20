@@ -204,3 +204,15 @@ class ReadCommands(WorkflowCore):
                 raise WorkflowError("forbidden")
             row = self._one("SELECT body_json FROM stages WHERE job_id=?", (job_id,))
             return StageRecord.model_validate_json(row[0])
+
+    def latest_final_revision(self, auth: AuthProof, film_id: str) -> int:
+        """Highest final-manifest revision of a film, published or not (M01 M4)."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            row = self._one(
+                "SELECT coalesce(max(revision),0) FROM manifests WHERE film_id=? AND kind='final'",
+                (film_id,),
+            )
+            return int(row[0])

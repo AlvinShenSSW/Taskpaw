@@ -127,10 +127,12 @@ class LocalWorkflowHost:
         intake_policy: im.IntakePolicy | None = None,
         executor_factory: ExecutorFactory | None = None,
         return_step: ReturnStep | None = None,
+        scrape_step: ReturnStep | None = None,
     ) -> None:
         self.settings, self.data_dir, self.executors = settings, data_dir, executors
         self.intake_policy = intake_policy
         self.executor_factory, self.return_step = executor_factory, return_step
+        self.scrape_step = scrape_step
         self.state, self.reason = "starting", ""
         self.runtime: LocalRuntime | None = None
         self.intake: Any = None
@@ -178,7 +180,9 @@ class LocalWorkflowHost:
                 if self._stopping.is_set():
                     return
                 self.intake.start()
-            self.dispatcher = LocalDispatcher(rt, return_step=self.return_step)
+            self.dispatcher = LocalDispatcher(
+                rt, return_step=self.return_step, scrape_step=self.scrape_step
+            )
             if self._stopping.is_set():
                 return
             self.dispatcher.start()
@@ -245,7 +249,7 @@ def start_local_workflow(
     if executors:
         host = LocalWorkflowHost(settings, data_dir, executors)
     else:  # the shipped pipeline (T04 E9): tools from agent.yaml, local return
-        from .pipeline import default_executors
+        from .pipeline import default_executors, default_scrape_step
         from .return_step import LocalReturnStep
 
         host = LocalWorkflowHost(
@@ -253,6 +257,7 @@ def start_local_workflow(
             data_dir,
             executor_factory=default_executors(settings),
             return_step=LocalReturnStep(),
+            scrape_step=default_scrape_step(settings),
         )
     host.start()
     return host

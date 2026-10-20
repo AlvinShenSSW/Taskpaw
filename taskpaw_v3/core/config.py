@@ -31,6 +31,10 @@ class WorkflowSettings(BaseModel):
     jasna_exe_path: Optional[str] = None
     whisperjav_exe_path: Optional[str] = None
     ltx_gpu: str = "5060-8"  # jasna_presets GPU id for the LTX preset
+    # M01-P1: Miko (MDCX304) for full post-processing; all three or scrape is off.
+    mdcx_python: Optional[str] = None  # python.exe of MDCX304's environment
+    mdcx_root: Optional[str] = None  # the MDCX304 checkout
+    mdcx_profile: Optional[str] = None  # the user's Miko config.json
 
 
 class AgentConfig(BaseModel):

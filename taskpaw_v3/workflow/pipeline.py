@@ -16,6 +16,7 @@ from .exec_restore import RestoreExecutor
 from .exec_translate import TranslateExecutor
 from .executors import StageExecutor
 from .local_runtime import LocalRuntime
+from .scrape_step import LocalScrapeStep
 
 log = logging.getLogger("taskpaw.workflow.pipeline")
 
@@ -46,3 +47,15 @@ def default_executors(
         return executors
 
     return build
+
+
+def default_scrape_step(settings: WorkflowSettings) -> LocalScrapeStep | None:
+    """Miko post-processing (M01) only when its environment is fully configured."""
+    if not (settings.mdcx_python and settings.mdcx_root and settings.mdcx_profile):
+        return None
+    return LocalScrapeStep(
+        python=settings.mdcx_python,
+        root=settings.mdcx_root,
+        profile=settings.mdcx_profile,
+        ffprobe=settings.ffprobe_path,
+    )
