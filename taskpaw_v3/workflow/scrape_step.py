@@ -441,7 +441,8 @@ class LocalScrapeStep:
             str(x.get("definition") or "") for x in result.get("expected_marks", ())
         ]
         if all(p.width and p.width >= 3840 for p in probes) and any(
-            d.upper() in ("4K", "UHD", "8K") for d in definitions
+            d.upper() in ("4K", "8K", "UHD", "UHD8")
+            for d in definitions  # hd_name styles
         ):
             marks.append("4k")  # M7: only when Miko and our probe agree
         outputs = [
