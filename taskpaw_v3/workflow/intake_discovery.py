@@ -73,6 +73,8 @@ def _group(
         # A new root configuration (e.g. more allowed attachments) re-groups;
         # film ids still come from the previous keys below (H2 R3, D01).
         and previous.root_config_revision == root_config_revision
+        # a failed scan stores the old grouping under the new revision (IR01)
+        and previous.coverage == "complete"
         and old.parent_context == parent
         and observation_digest(members, parent_context=parent, grouping=old)
         == previous.observation_digest

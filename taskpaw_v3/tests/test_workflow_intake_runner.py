@@ -124,12 +124,15 @@ def test_copy_progress_is_visible_only_while_the_snapshot_runs(ready, monkeypatc
         "package_id": observation.package_id,
         "phase": "copy",
         "bytes_completed": 0,
-        "total": total,
+        "total": total * 4,  # one copy pass and three verify passes
     }
     copied = [p for p in seen[1:] if p and p["bytes_completed"]]
     assert copied and all(p["package_id"] == observation.package_id for p in copied)
     assert all(0 < p["bytes_completed"] <= p["total"] for p in copied)
     assert {p["phase"] for p in copied} <= {"copy", "verify"}
+    # IR03: one figure that never goes backwards across the alternating phases
+    figures = [p["bytes_completed"] for p in copied]
+    assert figures == sorted(figures)
 
 
 @pytest.mark.parametrize(

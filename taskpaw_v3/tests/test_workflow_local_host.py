@@ -228,6 +228,7 @@ def test_a_changed_root_configuration_regroups_a_stuck_package():
         grouping=old,
         parent_context=None,
         root_config_revision=1,
+        coverage="complete",
         observation_digest=observation_digest(
             members, parent_context=None, grouping=old
         ),
@@ -244,6 +245,12 @@ def test_a_changed_root_configuration_regroups_a_stuck_package():
     assert [g.film_id for g in again.film_groups] == [
         g.film_id for g in old.film_groups
     ]
+    # H2 IR01: a failed (partial) scan after the reconfigure stored the old
+    # grouping under the new revision; the next complete scan must re-group it
+    partial = SimpleNamespace(**{**vars(previous), "root_config_revision": 2})
+    partial.coverage = "partial"
+    regrouped = discovery._group(source, members, None, partial, 2)
+    assert (regrouped.status, regrouped.reasons) == ("ready", ())
     assert again.grouping_revision == old.grouping_revision + 1
 
 

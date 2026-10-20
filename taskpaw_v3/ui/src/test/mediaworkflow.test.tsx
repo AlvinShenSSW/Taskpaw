@@ -183,7 +183,7 @@ describe("MediaWorkflow packages (R2/R2a)", () => {
 
     const active = screen.getByRole("region", { name: "处理中" });
     expect(within(active).getByText("ABF-394")).toBeInTheDocument();
-    expect(within(active).getByText("等待文件稳定 · 文件仍在变化")).toBeInTheDocument();
+    expect(within(active).getByText("等待文件稳定 · 入库设置已更新，正在重新扫描")).toBeInTheDocument();
     const line = within(active).getByRole("list", { name: "生命周期" });
     const items = within(line).getAllByRole("listitem");
     expect(items[0]).toHaveAccessibleName("入库扫描：进行中 25%（等待文件稳定 · 复制 1.0 GB / 4.0 GB）");

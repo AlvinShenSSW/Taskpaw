@@ -230,11 +230,14 @@ class SnapshotRunner:
                 owned = self._native
             snapshot, reason = None, "copy_failed"
             total = sum(v.size_bytes or 0 for v in request.observation.members)
+            # One rising figure over the copy and the three verify passes (IR03):
+            # the helper reports cumulative bytes per phase, alternating file by file.
+            done = {"copy": 0, "verify": 0}
             self._progress = {
                 "package_id": package_id,
                 "phase": "copy",
                 "bytes_completed": 0,
-                "total": total,
+                "total": total * 4,
             }
             try:
                 version = self._record(owned)
@@ -272,11 +275,12 @@ class SnapshotRunner:
                     elif isinstance(event, wire.ProgressEvent):
                         # Cumulative bytes per phase; the copy is verified in
                         # three passes (after copying, before and after publish).
+                        done[event.phase] = event.bytes_completed
                         self._progress = {
                             "package_id": package_id,
                             "phase": event.phase,
-                            "bytes_completed": event.bytes_completed,
-                            "total": total * (3 if event.phase == "verify" else 1),
+                            "bytes_completed": done["copy"] + done["verify"],
+                            "total": total * 4,
                         }
                     elif isinstance(event, wire.ResultEvent):
                         snapshot, reason = event.snapshot, "snapshot_complete"

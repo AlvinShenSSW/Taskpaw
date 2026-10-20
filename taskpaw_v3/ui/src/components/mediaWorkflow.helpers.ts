@@ -36,7 +36,7 @@ export function useMediaLabels() {
       if (!CODE.test(note)) return note;
       return t(`media.intakeReason.${note}`, { defaultValue: t(`media.intakeState.${note}`, { defaultValue: note }) });
     },
-    // 「等待文件稳定 · 文件仍在变化」: the package state plus its reason, when it adds something.
+    // 「等待文件稳定 · 入库设置已更新，正在重新扫描」: the package state plus its reason, when it adds something.
     packageStatus: (pkg: PackageRow) =>
       [intakeState(pkg.state), pkg.reason && pkg.reason !== pkg.state ? intakeReason(pkg.reason) : null]
         .filter(Boolean).join(" · "),
