@@ -206,3 +206,32 @@ def test_4k_is_claimed_only_when_miko_and_our_probe_agree(rt, tmp_path):
         marks = json.loads(path.read_text("utf-8"))["expected_marks"]
     assert marks and marks[0]["definition"] == "4K"  # Miko said 4K ...
     assert revision == 1  # ... yet the final was accepted without a 4k mark
+
+
+def test_an_unconfigured_miko_is_a_visible_waiting_reason(rt):
+    """M01-IR02 / design §4.4: scrape off is shown, not silently pending."""
+    from taskpaw_v3.workflow.pipeline import MIKO_OFF
+
+    film = ret.add_real_film(rt)
+    d = LocalDispatcher(
+        rt,
+        lease=GpuLease(),
+        poll=0.05,
+        return_step=LocalReturnStep(),
+        off_reasons={"scrape": MIKO_OFF},
+    )
+    ret.run_all(d)
+    assert ret.status(rt, film, "return") == "succeeded"
+    assert ret.status(rt, film, "scrape") == "pending"
+    assert d.status().waiting == {film: MIKO_OFF}
+
+
+def test_shipped_host_shows_why_scrape_is_off(tmp_path, monkeypatch):
+    from taskpaw_v3.workflow.local_host import LocalWorkflowHost, start_local_workflow
+    from taskpaw_v3.workflow.pipeline import MIKO_OFF
+
+    monkeypatch.setattr(LocalWorkflowHost, "start", lambda self: None)
+    host = start_local_workflow(
+        WorkflowSettings(enabled=True, inbox_root="x"), tmp_path
+    )
+    assert host.scrape_step is None and host.off_reasons == {"scrape": MIKO_OFF}

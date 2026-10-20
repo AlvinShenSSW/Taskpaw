@@ -49,6 +49,9 @@ def default_executors(
     return build
 
 
+MIKO_OFF = "未配置 Miko（mdcx_python / mdcx_root / mdcx_profile）"
+
+
 def default_scrape_step(settings: WorkflowSettings) -> LocalScrapeStep | None:
     """Miko post-processing (M01) only when its environment is fully configured."""
     if not (settings.mdcx_python and settings.mdcx_root and settings.mdcx_profile):

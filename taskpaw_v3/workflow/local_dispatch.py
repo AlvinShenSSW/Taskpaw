@@ -156,9 +156,21 @@ class LocalDispatcher:
         renew_every: float = RENEW_SECONDS,
         return_step: ReturnStep | None = None,
         scrape_step: ComponentStep | None = None,
+        off_reasons: dict[str, str] | None = None,
     ) -> None:
         self.runtime, self.lease = runtime, lease
         self.return_step, self.scrape_step = return_step, scrape_step
+        # unconfigured component stages, shown as the waiting reason (M01 §4.4)
+        configured = {
+            stage
+            for stage, step in (("return", return_step), ("scrape", scrape_step))
+            if step is not None
+        }
+        self.off_reasons = {
+            stage: reason
+            for stage, reason in (off_reasons or {}).items()
+            if stage not in configured
+        }
         self.poll, self.stop_settle, self.renew_every = poll, stop_settle, renew_every
         # A process-unique generation: never equal to a manual task's RunId (C5).
         self.run_id: gpu_lease.RunId = ("workflow", next_generation())
@@ -254,7 +266,8 @@ class LocalDispatcher:
             self._reason = rt.reason
             return False
         steps = self._steps()
-        jobs = rt.store.list_jobs(rt.operator, "pending", _COMPUTE + tuple(steps))
+        stages = _COMPUTE + tuple(steps) + tuple(self.off_reasons)
+        jobs = rt.store.list_jobs(rt.operator, "pending", stages)
         waiting: dict[str, str] = {}
         vram = rt.gpu.vram_mib if rt.gpu else 0
         gpu_waited = False
@@ -262,6 +275,11 @@ class LocalDispatcher:
             manifest = rt.store.get_input_manifest(
                 rt.operator, job.film_id, job.input_revision
             )
+            if (
+                job.stage in self.off_reasons
+            ):  # visible, never silently stuck (M01 §4.4)
+                waiting[job.film_id] = self.off_reasons[job.stage]
+                continue
             if job.stage in steps:
                 self._leave_queue()  # about to run a stage without the GPU (E7)
                 step, auth = steps[job.stage]

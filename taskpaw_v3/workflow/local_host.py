@@ -128,11 +128,12 @@ class LocalWorkflowHost:
         executor_factory: ExecutorFactory | None = None,
         return_step: ReturnStep | None = None,
         scrape_step: ReturnStep | None = None,
+        off_reasons: dict[str, str] | None = None,
     ) -> None:
         self.settings, self.data_dir, self.executors = settings, data_dir, executors
         self.intake_policy = intake_policy
         self.executor_factory, self.return_step = executor_factory, return_step
-        self.scrape_step = scrape_step
+        self.scrape_step, self.off_reasons = scrape_step, off_reasons
         self.state, self.reason = "starting", ""
         self.runtime: LocalRuntime | None = None
         self.intake: Any = None
@@ -181,7 +182,10 @@ class LocalWorkflowHost:
                     return
                 self.intake.start()
             self.dispatcher = LocalDispatcher(
-                rt, return_step=self.return_step, scrape_step=self.scrape_step
+                rt,
+                return_step=self.return_step,
+                scrape_step=self.scrape_step,
+                off_reasons=self.off_reasons,
             )
             if self._stopping.is_set():
                 return
@@ -249,7 +253,7 @@ def start_local_workflow(
     if executors:
         host = LocalWorkflowHost(settings, data_dir, executors)
     else:  # the shipped pipeline (T04 E9): tools from agent.yaml, local return
-        from .pipeline import default_executors, default_scrape_step
+        from .pipeline import MIKO_OFF, default_executors, default_scrape_step
         from .return_step import LocalReturnStep
 
         host = LocalWorkflowHost(
@@ -258,6 +262,7 @@ def start_local_workflow(
             executor_factory=default_executors(settings),
             return_step=LocalReturnStep(),
             scrape_step=default_scrape_step(settings),
+            off_reasons={"scrape": MIKO_OFF},
         )
     host.start()
     return host
