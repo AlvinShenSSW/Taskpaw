@@ -11,7 +11,7 @@ import pytest
 
 from taskpaw_v3.core.gpu_lease import GpuLease
 from taskpaw_v3.tests.test_workflow_films import STAGES, input_manifest
-from taskpaw_v3.tests.test_workflow_local_dispatch import GPU_8GB, Crash
+from taskpaw_v3.tests.test_workflow_local_dispatch import GPU_8GB, Crash, plan_film
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow import stage_results
@@ -58,7 +58,7 @@ class _Fake:
     def __init__(self, rt):
         self.rt = rt
 
-    def tools(self):
+    def tools(self, job=None):
         return _tools(self.stage)
 
     def max_resolution(self, vram):
@@ -172,10 +172,13 @@ def rt(tmp_path):
         value.close()
 
 
-def add_real_film(rt, *, root=WORKCOPY, sub=JA, sub_language="ja", extras=None):
+def add_real_film(
+    rt, *, root=WORKCOPY, sub=JA, sub_language="ja", extras=None, plan=True
+):
     """A film whose work copy really exists, with matching hashes.
 
     `extras`: download attachments (name → bytes) beside the video (H2 R1).
+    `plan`: confirm its standard plan so restore may run (U1 P1').
     """
     extras = extras or {}
     files = {"movie.mkv": VIDEO, "movie.ja.srt": sub, **extras}
@@ -247,6 +250,8 @@ def add_real_film(rt, *, root=WORKCOPY, sub=JA, sub_language="ja", extras=None):
             film_id=film, expected_version=1, manifest=input_manifest(film, change=real)
         ),
     )
+    if plan:
+        plan_film(rt, film)
     return film
 
 

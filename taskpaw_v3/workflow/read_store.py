@@ -15,6 +15,7 @@ from .models import (
     BoardStage,
     CleanupIntent,
     ExecutionOperation,
+    FilmPlan,
     FilmRecord,
     FilmView,
     FilmWorkflow,
@@ -24,6 +25,7 @@ from .models import (
     PackageFilm,
     PendingComputeJob,
     StageRecord,
+    UnplannedFilm,
     WorkflowApproval,
     WorkflowArchiveOperation,
     WorkflowCleanupItem,
@@ -149,10 +151,15 @@ class ReadCommands(WorkflowCore):
             if principal["role"] != "operator":
                 raise WorkflowError("forbidden")
             marks = ",".join("?" for _ in stages)
+            # U1 P1': a restore is offered only under a confirmed plan, whose
+            # tier rides along to the executor (P4')
             rows = self._conn.execute(
-                "SELECT s.*,f.display_name,f.created_at AS film_created_at FROM stages s "
+                "SELECT s.*,f.display_name,f.created_at AS film_created_at,"
+                "p.ltx_model AS plan_ltx_model FROM stages s "
                 "JOIN films f ON f.film_id=s.film_id AND f.current_input_revision=s.input_revision "
+                "LEFT JOIN film_plans p ON p.film_id=s.film_id AND p.input_revision=s.input_revision "
                 f"WHERE s.status=? AND s.stage IN ({marks}) "
+                "AND (s.stage!='restore' OR p.film_id IS NOT NULL) "
                 "ORDER BY f.created_at,f.film_id,s.rowid",
                 (status, *stages),
             ).fetchall()
@@ -176,9 +183,58 @@ class ReadCommands(WorkflowCore):
                             input_revision=row["input_revision"],
                             version=row["version"],
                             film_created_at=parse_time(row["film_created_at"]),
+                            ltx_model=row["plan_ltx_model"]
+                            if row["stage"] == "restore"
+                            else None,
                         )
                     )
             return tuple(jobs)
+
+    def list_unplanned(self, auth: AuthProof) -> tuple[UnplannedFilm, ...]:
+        """Films whose current-revision restore waits for a plan (待处理), oldest first."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT f.film_id,f.current_input_revision,f.display_name,f.created_at "
+                "FROM films f JOIN stages s ON s.film_id=f.film_id "
+                "AND s.input_revision=f.current_input_revision AND s.stage='restore' "
+                "LEFT JOIN film_plans p ON p.film_id=f.film_id "
+                "AND p.input_revision=f.current_input_revision "
+                "WHERE s.status='pending' AND p.film_id IS NULL "
+                "ORDER BY f.created_at,f.film_id"
+            ).fetchall()
+            return tuple(
+                UnplannedFilm(
+                    film_id=row[0],
+                    input_revision=row[1],
+                    display_name=row[2],
+                    created_at=parse_time(row[3]),
+                )
+                for row in rows
+            )
+
+    def list_plans(self, auth: AuthProof) -> tuple[FilmPlan, ...]:
+        """Every confirmed plan, oldest first (the recommendation's history)."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT film_id,input_revision,ltx_model,machine,confirmed_at "
+                "FROM film_plans ORDER BY confirmed_at,film_id,input_revision"
+            ).fetchall()
+            return tuple(
+                FilmPlan(
+                    film_id=row[0],
+                    input_revision=row[1],
+                    ltx_model=row[2],
+                    machine=row[3],
+                    confirmed_at=parse_time(row[4]),
+                )
+                for row in rows
+            )
 
     def list_attempts(self, auth: AuthProof, job_id: str) -> tuple[AttemptRecord, ...]:
         """Every attempt of one job, oldest first (retry accounting, T03-P1 C6)."""

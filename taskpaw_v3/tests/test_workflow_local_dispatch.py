@@ -53,7 +53,22 @@ def rt(tmp_path):
         value.close()
 
 
-def add_film(rt, *, width=1920, height=1080):
+def plan_film(rt, film_id, *, revision=1, tier="standard"):
+    """Confirm the film's plan so its restore may be claimed (U1 P1')."""
+    rt.store.confirm_plan(
+        rt.operator,
+        rt.meta(),
+        m.FilmPlanConfirm(
+            film_id=film_id,
+            input_revision=revision,
+            ltx_model=tier,
+            machine=rt.identity.worker_id,
+        ),
+    )
+
+
+def add_film(rt, *, width=1920, height=1080, plan=True):
+    """A film with one input revision; planned (standard) unless `plan` is off."""
     _, auth = rt.grant_intake_adapter()
     film_id = identity()
     rt.store.create_film(
@@ -86,6 +101,8 @@ def add_film(rt, *, width=1920, height=1080):
             manifest=input_manifest(film_id, change=size),
         ),
     )
+    if plan:
+        plan_film(rt, film_id)
     return film_id
 
 

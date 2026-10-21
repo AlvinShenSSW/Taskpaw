@@ -17,7 +17,7 @@ from taskpaw_v3.monitors.plugins import jasna
 from taskpaw_v3.monitors.subs.srt import Cue
 from taskpaw_v3.monitors.subs.translate import TranslateRequest, TranslateResult
 from taskpaw_v3.tests.test_workflow_films import STAGES, fixture, input_manifest
-from taskpaw_v3.tests.test_workflow_local_dispatch import GPU_8GB
+from taskpaw_v3.tests.test_workflow_local_dispatch import GPU_8GB, plan_film
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.exec_asr import AsrExecutor
@@ -177,11 +177,17 @@ class File:
 
 
 def add_film(
-    rt: LocalRuntime, files: list[File], *, attachments: tuple[str, ...] = ()
+    rt: LocalRuntime,
+    files: list[File],
+    *,
+    attachments: tuple[str, ...] = (),
+    plan: bool = True,
+    tier: str | None = "standard",
 ) -> str:
     """A film whose work copies really exist under `rt.work_dir`.
 
-    `attachments`: the attachment suffixes its policy allows (H2 R1)."""
+    `attachments`: the attachment suffixes its policy allows (H2 R1).
+    `plan` / `tier`: its confirmed plan (U1 P1'), none when `plan` is off."""
     film_id = identity()
     template = fixture("input-manifest-v1.json")
     item0 = template["items"][0]
@@ -260,6 +266,8 @@ def add_film(
             manifest=input_manifest(film_id, change=change),
         ),
     )
+    if plan:
+        plan_film(rt, film_id, tier=tier)
     return film_id
 
 

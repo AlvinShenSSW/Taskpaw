@@ -1,7 +1,8 @@
 """Versioned workflow SQLite format; the store owns leases and transactions.
 
-Known v1 databases receive a verified backup before the atomic v2 intake upgrade.
-Unknown or damaged databases are never repaired or automatically restored.
+Known v1 and v2 databases receive a verified backup before the atomic upgrade to
+v3 (v2: intake tables; v3: the U1 film plans). Unknown or damaged databases are
+never repaired or automatically restored.
 The caller must hold its FileLease before connecting, and retain it until close.
 """
 
@@ -21,7 +22,11 @@ from taskpaw_v3.hub.server.outbox_migration import (
 from . import schema_intake
 
 APPLICATION_ID = 0x54505746  # TPWF, separate from the monitoring database.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+SUPPORTED_VERSIONS = (1, 2, SCHEMA_VERSION)
+# U04: the tier a v3 upgrade records for restores that already ran. Every
+# workflow LTX preset's `standard` profile restores with this tier.
+BACKFILL_LTX_MODEL = "standard"
 BUSY_TIMEOUT_MS = 5000
 
 
@@ -358,8 +363,35 @@ V1_INDEXES = {
         ON assignments(owner_principal_id,worker_id,boot_id)""",
 }
 
-TABLES = {**V1_TABLES, **schema_intake.TABLES}
-INDEXES = {**V1_INDEXES, **schema_intake.INDEXES}
+# Frozen v2 format: v1 plus the intake tables. Never edited; v3 only adds.
+V2_TABLES = {**V1_TABLES, **schema_intake.TABLES}
+V2_INDEXES = {**V1_INDEXES, **schema_intake.INDEXES}
+
+# U1 P1': one confirmed plan per (film, input revision). A new input revision
+# has no row, so the film is unplanned again; a row is never updated. A NULL
+# tier is a film whose inputs are all restored already (needs no GPU).
+V3_TABLES = {
+    "film_plans": """CREATE TABLE film_plans (
+        film_id TEXT NOT NULL REFERENCES films(film_id) ON DELETE RESTRICT,
+        manifest_kind TEXT NOT NULL DEFAULT 'input' CHECK(manifest_kind='input'),
+        input_revision INTEGER NOT NULL CHECK(input_revision>0),
+        ltx_model TEXT CHECK(ltx_model IN ('standard','good','high')),
+        machine TEXT NOT NULL REFERENCES workers(worker_id) ON DELETE RESTRICT,
+        confirmed_at TEXT NOT NULL,
+        PRIMARY KEY(film_id,input_revision),
+        FOREIGN KEY(film_id,manifest_kind,input_revision)
+            REFERENCES manifests(film_id,kind,revision) ON DELETE RESTRICT
+    )""",
+}
+V3_INDEXES: dict[str, str] = {}
+
+TABLES = {**V2_TABLES, **V3_TABLES}
+INDEXES = {**V2_INDEXES, **V3_INDEXES}
+_FORMATS = {
+    1: (V1_TABLES, V1_INDEXES),
+    2: (V2_TABLES, V2_INDEXES),
+    SCHEMA_VERSION: (TABLES, INDEXES),
+}
 
 
 def _path(path: Path) -> Path:
@@ -416,13 +448,13 @@ def connect_existing(path: Path) -> sqlite3.Connection:
         validate_schema(conn, version=version)
         conn.close()
         conn = None
-        if version == 1:
-            _backup_version(path, version=1, deadline_seconds=5.0)
+        if version != SCHEMA_VERSION:
+            _backup_version(path, version=version, deadline_seconds=5.0)
         conn = _connect(path, "rw")
         validate_schema(conn, version=version)
-        if version == 1:
+        if version != SCHEMA_VERSION:
             configure_connection(conn)
-            _migrate_v1(conn)
+            _migrate(conn, version)
         return conn
     except BaseException:
         if conn is not None:
@@ -478,7 +510,7 @@ def _supported_version(conn: sqlite3.Connection) -> int:
         if conn.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
             raise SchemaError("wrong_application_id")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (1, SCHEMA_VERSION):
+        if version not in SUPPORTED_VERSIONS:
             raise SchemaError("unsupported_schema_version")
         return int(version)
     except sqlite3.Error as exc:
@@ -496,7 +528,7 @@ def validate_schema(conn: sqlite3.Connection, *, version: int = SCHEMA_VERSION) 
         if conn.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
             raise SchemaError("wrong_application_id")
         if (
-            version not in (1, SCHEMA_VERSION)
+            version not in SUPPORTED_VERSIONS
             or conn.execute("PRAGMA user_version").fetchone()[0] != version
         ):
             raise SchemaError("unsupported_schema_version")
@@ -505,8 +537,7 @@ def validate_schema(conn: sqlite3.Connection, *, version: int = SCHEMA_VERSION) 
             "WHERE name NOT LIKE 'sqlite_%' ORDER BY name"
         ).fetchall()
         actual = {(row[0], row[1]): _normalized_sql(row[2] or "") for row in rows}
-        tables = V1_TABLES if version == 1 else TABLES
-        indexes = V1_INDEXES if version == 1 else INDEXES
+        tables, indexes = _FORMATS[version]
         expected = {
             **{("table", name): _normalized_sql(sql) for name, sql in tables.items()},
             **{("index", name): _normalized_sql(sql) for name, sql in indexes.items()},
@@ -546,17 +577,38 @@ def validate_schema(conn: sqlite3.Connection, *, version: int = SCHEMA_VERSION) 
         raise SchemaError("invalid_database") from exc
 
 
-def _migrate_v1(conn: sqlite3.Connection) -> None:
+def _backfill_plans(conn: sqlite3.Connection) -> None:
+    """U04: restores that already ran keep running under a default-tier plan.
+
+    Only current-revision restore jobs with an attempt get one (its worker is
+    the machine); a never-claimed restore lands in 待处理 like any new film.
+    """
+    conn.execute(
+        "INSERT INTO film_plans (film_id,input_revision,ltx_model,machine,confirmed_at) "
+        "SELECT s.film_id,s.input_revision,?,a.worker_id,a.started_at FROM stages s "
+        "JOIN films f ON f.film_id=s.film_id AND f.current_input_revision=s.input_revision "
+        "JOIN attempts a ON a.attempt_id=(SELECT l.attempt_id FROM attempts l "
+        "WHERE l.job_id=s.job_id AND l.worker_id IS NOT NULL "
+        "ORDER BY l.attempt_number DESC LIMIT 1) "
+        "WHERE s.stage='restore'",
+        (BACKFILL_LTX_MODEL,),
+    )
+
+
+def _migrate(conn: sqlite3.Connection, version: int) -> None:
+    """One transaction from a supported older version to SCHEMA_VERSION."""
     if conn.in_transaction:
         raise SchemaError("unexpected_transaction")
     try:
         conn.execute("BEGIN IMMEDIATE")
-        validate_schema(conn, version=1)
-        for statement in (
-            *schema_intake.TABLES.values(),
-            *schema_intake.INDEXES.values(),
-        ):
+        validate_schema(conn, version=version)
+        added = []
+        if version < 2:
+            added += [*schema_intake.TABLES.values(), *schema_intake.INDEXES.values()]
+        added += [*V3_TABLES.values(), *V3_INDEXES.values()]
+        for statement in added:
             conn.execute(statement)
+        _backfill_plans(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         validate_schema(conn)
         conn.commit()

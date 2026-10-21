@@ -657,8 +657,28 @@ def compute_worker(h, *, binding=None, max_width=1920, max_height=1080):
     return h.store.get_worker(h.operator, current.worker_id).worker, auth
 
 
+def plan(h, film_id, worker_id, *, revision=1):
+    """Confirm the film's plan once (U1 P1': restore needs it)."""
+    try:
+        h.store.confirm_plan(
+            h.operator,
+            h.meta(),
+            m.FilmPlanConfirm(
+                film_id=film_id,
+                input_revision=revision,
+                ltx_model="standard",
+                machine=worker_id,
+            ),
+        )
+    except m.WorkflowError as exc:
+        if exc.code not in ("plan_exists", "precondition_failed"):
+            raise
+
+
 def claim_compute(h, film_id, worker, auth, *, name="restore"):
     job = stage(h, film_id, name)
+    if name == "restore":
+        plan(h, film_id, worker.worker_id, revision=job.input_revision)
     command = m.ClaimRequest(
         job_id=job.job_id,
         expected_version=job.version,

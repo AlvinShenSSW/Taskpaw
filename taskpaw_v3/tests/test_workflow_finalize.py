@@ -34,7 +34,13 @@ def probeable_video(monkeypatch):
 
 
 class World:
-    def __init__(self, tmp_path: Path, extras: dict[str, bytes] | None = None):
+    def __init__(
+        self,
+        tmp_path: Path,
+        extras: dict[str, bytes] | None = None,
+        *,
+        plan: bool = True,
+    ):
         self.tmp = tmp_path
         self.inbox = tmp_path / "inbox"
         self.nas = tmp_path / "nas" / "Actor"
@@ -42,7 +48,7 @@ class World:
         self.inbox.mkdir()
         self.nas.mkdir(parents=True)
         self.rt = self.runtime()
-        self.film = self._film(extras)
+        self.film = self._film(extras, plan=plan)
         self.fake = FakeFilmpaw(self.filmpaw_dir, {"actor": self.nas})
 
     def runtime(self):
@@ -56,7 +62,9 @@ class World:
         rt.store.film_workflow = film_workflow  # type: ignore[method-assign]
         return rt
 
-    def _film(self, extras: dict[str, bytes] | None = None) -> str:
+    def _film(
+        self, extras: dict[str, bytes] | None = None, *, plan: bool = True
+    ) -> str:
         """add_real_film, plus real INBOX originals recorded with their identities."""
         rt, inbox = self.rt, self.inbox
         real_put = rt.store.put_input_manifest
@@ -91,7 +99,7 @@ class World:
 
         rt.store.put_input_manifest = put  # type: ignore[method-assign]
         try:
-            return ret.add_real_film(rt, extras=extras)
+            return ret.add_real_film(rt, extras=extras, plan=plan)
         finally:
             del rt.store.put_input_manifest
 

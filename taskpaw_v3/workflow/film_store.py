@@ -21,6 +21,7 @@ from .models import (
     CommandResult,
     EvidenceRef,
     FilmCreate,
+    FilmPlanConfirm,
     FilmRecord,
     FinalManifest,
     FinalManifestPut,
@@ -101,6 +102,59 @@ class FilmCommands(WorkerCommands):
             or link["state"] != "operational_ready"
         ):
             raise WorkflowError("source_not_admissible")
+
+    def _require_plan(self, job: sqlite3.Row) -> None:
+        """U1 P1': a restore is claimed only under its revision's confirmed plan."""
+        if (
+            job["stage"] == "restore"
+            and not self._conn.execute(
+                "SELECT 1 FROM film_plans WHERE film_id=? AND input_revision=?",
+                (job["film_id"], job["input_revision"]),
+            ).fetchone()
+        ):
+            raise WorkflowError("plan_required")
+
+    def confirm_plan(
+        self, auth: AuthProof, meta: CommandMeta, command: FilmPlanConfirm
+    ) -> CommandResult:
+        """U1 P1': the operator's plan of one film, CAS on its input revision.
+
+        Only a current revision whose restore is still pending can be planned,
+        once: a confirmed plan is never changed (a new revision needs its own).
+        """
+
+        def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
+            film = self._film_row(command.film_id)
+            if film["current_input_revision"] != command.input_revision:
+                raise WorkflowError("cas_conflict")
+            if self._conn.execute(
+                "SELECT 1 FROM film_plans WHERE film_id=? AND input_revision=?",
+                (command.film_id, command.input_revision),
+            ).fetchone():
+                raise WorkflowError("plan_exists")
+            restore = self._conn.execute(
+                "SELECT status FROM stages WHERE film_id=? AND input_revision=? "
+                "AND stage='restore'",
+                (command.film_id, command.input_revision),
+            ).fetchone()
+            if restore is None or restore["status"] != "pending":
+                raise WorkflowError("precondition_failed")
+            if not self._conn.execute(
+                "SELECT 1 FROM workers WHERE worker_id=? AND enrollment_state='verified'",
+                (command.machine,),
+            ).fetchone():
+                raise WorkflowError("precondition_failed")
+            self._insert(
+                "film_plans",
+                film_id=command.film_id,
+                input_revision=command.input_revision,
+                ltx_model=command.ltx_model,
+                machine=command.machine,
+                confirmed_at=timestamp(now),
+            )
+            return Mutation(command.film_id, film["version"], "planned")
+
+        return self._execute(auth, meta, command, "confirm_plan", apply)
 
     def _film_row(self, film_id: str) -> sqlite3.Row:
         return self._one("SELECT * FROM films WHERE film_id=?", (film_id,))
@@ -419,6 +473,7 @@ class FilmCommands(WorkerCommands):
             if STAGE_ROLES.get(job["stage"]) != principal["role"]:
                 raise WorkflowError("forbidden")
             self._require_source_admissible(self._film_row(job["film_id"]))
+            self._require_plan(job)
             self._dependencies(job)
             if (
                 command.profile_revision != command.tool_versions.profile_revision

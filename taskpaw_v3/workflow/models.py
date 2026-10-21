@@ -1484,8 +1484,46 @@ class AuditPage(Model):
     next_after: Count
 
 
+LtxTier = Literal["standard", "good", "high"]
+
+
+class FilmPlanConfirm(Model):
+    """U1 P1': confirm one film's plan for its current input revision.
+
+    `ltx_model` is None only for a film whose inputs are all restored already.
+    """
+
+    film_id: Id
+    input_revision: Revision
+    ltx_model: LtxTier | None
+    machine: Id
+
+
+class FilmPlan(Model):
+    """A confirmed plan; immutable, bound to one input revision."""
+
+    film_id: Id
+    input_revision: Revision
+    ltx_model: LtxTier | None
+    machine: Id
+    confirmed_at: UtcTime
+
+
+class UnplannedFilm(Model):
+    """A film whose current-revision restore waits for a plan (待处理)."""
+
+    film_id: Id
+    input_revision: Revision
+    display_name: Text
+    created_at: UtcTime
+
+
 class PendingComputeJob(Model):
-    """A current-revision local stage whose dependencies are complete."""
+    """A current-revision local stage whose dependencies are complete.
+
+    `ltx_model`: the planned LTX tier of a restore job (U1 P4'), read once by
+    the list that offered the job; None for other stages or no tier.
+    """
 
     job_id: Id
     film_id: Id
@@ -1503,6 +1541,7 @@ class PendingComputeJob(Model):
     input_revision: Revision
     version: Revision
     film_created_at: UtcTime
+    ltx_model: LtxTier | None = None
 
 
 class OpenAssignment(Model):
@@ -1625,6 +1664,17 @@ class BoardFilm(Model):
     input_revision: Revision | None = None
     package_path: Text | None = None  # under the INBOX root
     package_films: Count = 0
+    # U1 V': the current revision's confirmed plan
+    planned: bool = False
+    plan_ltx_model: LtxTier | None = None
+    plan_machine: Id | None = None
+    # V3 §7: the newest archive receipt, both manifests and the largest probe
+    receipt_id: Text | None = None
+    input_hash: Digest | None = None
+    final_revision: Revision | None = None
+    final_hash: Digest | None = None
+    max_width: Count = 0
+    max_height: Count = 0
 
 
 class PackageFilm(Model):
