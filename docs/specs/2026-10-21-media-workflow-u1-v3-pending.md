@@ -158,3 +158,10 @@
   - the `confirm-recommended` server route;
   - the sentence 「改画质即新修复」.
 - **V2 heading (operator decision 7, overrides V2):** no eyebrow, h1 slogan or paragraph. A compact title row 「待处理」 with 「全部按推荐确认」 on the right; the toolbar sits below it.
+
+### v2.1 — lookup profile isolation (M02 IR01)
+
+- `lookup_one` runs with `MDCX_CONFIG_DIR` set to a fresh per-run directory under the workflow work dir. It is built exactly as the M01 scrape attempt builds its config dir: the operator's MDCX profile JSON (`mdcx_profile`) is copied in as `config.json`, with no `MDCx.config` mark.
+- MDCX may create a mark and `userdata/` inside that directory. That is harmless, because the directory is discarded after the run.
+- `lookup_one` refuses a mark that points outside its config dir (M02 fix), so the live profile `%LOCALAPPDATA%/com.mdcx.desktop` is never read through a mark and never written.
+- The run passes `file_name` = the main video's file name. Names without a number are refused by M02, and the card shows 「文件名中没有番号」 with 「重新查询」 disabled.
