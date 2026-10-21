@@ -970,6 +970,51 @@ describe("AgentConsole media tab", () => {
   });
 });
 
+describe("U1b covers", () => {
+  it("every cover opens the lightbox: 待处理, queue, review, overview, drawer and 图文确认", async () => {
+    mockApi();
+    const films = FILMS.map((f) => ({ ...f, has_poster: true, poster_source: `input-${f.film_id}` }));
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, counts: counts(films, PACKAGES) });
+    vi.spyOn(api, "workflowPlans").mockResolvedValue({ ...PLANS, plans: PLANS.plans.map((p) => ({ ...p, has_poster: true, poster_source: "lookup-1" })) });
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => detail(id, {
+      has_poster: true, poster_source: "final-1", has_cover: true, cover_source: "final-2" }));
+    wrap(<MediaWorkspace />);
+    const lightbox = async (scope: HTMLElement, name: string) => {
+      fireEvent.click(await within(scope).findByRole("button", { name: "查看大图" }));
+      const box = await screen.findByRole("dialog", { name: `${name} 大图` });
+      fireEvent.click(within(box).getByRole("button", { name: "关闭大图" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: `${name} 大图` })).toBeNull());
+    };
+    // 概览: the active rows and the review peeks
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    await waitFor(() => expect(document.querySelector(".film-row .cover-btn")).toBeTruthy());
+    await waitFor(() => expect(document.querySelector(".review-peek .cover-btn")).toBeTruthy());
+    const peek = document.querySelector(".review-peek") as HTMLElement;
+    await lightbox(peek, within(peek).getByRole("heading", { level: 3 }).textContent as string);
+    await go("待处理");
+    await waitFor(() => expect(document.querySelector('[data-pending="abf-422"] .cover-btn')).toBeTruthy());
+    await lightbox(document.querySelector('[data-pending="abf-422"]') as HTMLElement, "晨雾车站");
+    await go("影片队列");
+    await waitFor(() => expect(document.querySelector('[data-film="abf-401"] .cover-btn')).toBeTruthy());
+    await lightbox(document.querySelector('[data-film="abf-401"]') as HTMLElement, "浮光之间");
+    await go("待确认");
+    await waitFor(() => expect(document.querySelector('[data-review="abf-406"] .cover-btn')).toBeTruthy());
+    const review = document.querySelector('[data-review="abf-406"]') as HTMLElement;
+    const title = within(review).getByRole("heading", { level: 3 }).textContent as string;
+    await lightbox(review, title);
+    // the drawer hero and the 图文确认 dialog ask for the full jacket
+    fireEvent.click(within(review).getByRole("button", { name: /图文核对入库|查看并处理/ }));
+    const dialog = await screen.findByRole("dialog", { name: "确认影片与入库目标" });
+    fireEvent.click(await within(dialog).findByRole("button", { name: "查看大图" }));
+    await screen.findByRole("dialog", { name: `${title} 大图` });
+    await waitFor(() => expect(api.image).toHaveBeenCalledWith(api.coverPath("abf-406")));
+    fireEvent.keyDown(screen.getByRole("dialog", { name: `${title} 大图` }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: `${title} 大图` })).toBeNull());
+    // Esc closed only the lightbox
+    expect(screen.getByRole("dialog", { name: "确认影片与入库目标" })).toBeInTheDocument();
+  });
+});
+
 describe("deferred Codex r6 P2s", () => {
   const confirmRow = (i: number) => row({
     film_id: `c-${String(i).padStart(2, "0")}`, title: `确认片 ${i}`, group: "confirm",

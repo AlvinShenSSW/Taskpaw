@@ -121,7 +121,8 @@ function DrawerBody({ film, item, status, plan }: {
   return (
     <>
       <div className="detail-hero">
-        <Cover filmId={film.film_id} hasPoster={film.has_poster} source={film.poster_source} size="large" label={title} />
+        <Cover filmId={film.film_id} hasPoster={film.has_poster} source={film.poster_source}
+          hasCover={film.has_cover} coverSource={film.cover_source} size="large" label={title} />
         <div>
           <h2>{title}</h2>
           <div className="chips">

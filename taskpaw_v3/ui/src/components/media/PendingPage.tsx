@@ -231,7 +231,8 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onCh
   };
   return (
     <article className="panel review-card pending-card" data-pending={id} aria-labelledby={tid}>
-      <Cover filmId={id} hasPoster={e.has_poster} source={e.poster_source} size="review" label={title} />
+      <Cover filmId={id} hasPoster={e.has_poster} source={e.poster_source} hasCover={e.has_cover}
+        coverSource={e.cover_source} size="review" label={title} />
       <div className="film-body">
         <div className="film-title"><h3 id={tid}>{title}</h3>{e.resolution && <Chip>{e.resolution}</Chip>}</div>
         {idLine && <p>{idLine}</p>}

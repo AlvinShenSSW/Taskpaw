@@ -148,6 +148,14 @@ export const MEDIA_CSS = `
 .mw .cover.review{width:88px;height:117px;border-radius:8px}
 .mw .cover.large{width:116px;height:154px;border-radius:9px}
 .mw .cover.confirm{width:108px;height:144px;border-radius:9px}
+/* U1b: a landscape jacket's front cover is its right part; the cover opens the lightbox */
+.mw .cover img.landscape{object-position:right center}
+.mw .cover-btn{padding:0;font:inherit;cursor:zoom-in;appearance:none;transition:border-color .15s}
+.mw .cover-btn:hover{border-color:var(--blue)}
+.mw .cover-btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.mw-lightbox .lightbox-close{position:fixed;top:12px;right:12px;width:44px;height:44px;display:grid;place-items:center;border-radius:50%;border:1px solid #ffffff40;background:#0b1120cc;color:#f8fafc;cursor:pointer}
+.mw-lightbox .lightbox-close:hover{background:#1c2b43}
+.mw-lightbox .lightbox-close:focus-visible{outline:2px solid ${T.blue};outline-offset:2px}
 
 /* film body, stage block */
 .mw .film-body{flex:1;min-width:0}

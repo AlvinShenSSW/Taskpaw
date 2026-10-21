@@ -1,8 +1,10 @@
 // Small V3 building blocks of the 媒体处理中心 (build spec §2–§3). Styled by mediaStyles.ts.
 import type { SvgIconComponent } from "@mui/icons-material";
 import CheckIcon from "@mui/icons-material/Check";
+import CloseIcon from "@mui/icons-material/Close";
+import { Dialog } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { api, type WorkflowStep } from "../../api";
 import {
   currentStep, lifecycle, ltxOf, STATUS_META, STEP_LABEL, stageLine, type ChipTone, type StatusKey, type WorkItem,
@@ -55,20 +57,68 @@ export function EmptyState({ title, description, children }: { title: string; de
 
 export type CoverSize = "row" | "card" | "peek" | "review" | "large" | "confirm";
 
-// The real poster (an authenticated image as a data: URL), or 「无封面」.
-export function Cover({ filmId, hasPoster, source, size = "row", label }: {
-  filmId: string | null; hasPoster: boolean; source?: string | null; size?: CoverSize; label: string;
+// The one cover of every page: the real poster (an authenticated image as a data: URL), or
+// 「无封面」. A landscape image is a whole jacket whose front cover is its right part, so the box
+// shows that part (U1b). Clicking the cover opens the lightbox (「查看大图」).
+export function Cover({ filmId, hasPoster, source, hasCover = false, coverSource, size = "row", label }: {
+  filmId: string | null; hasPoster: boolean; source?: string | null;
+  hasCover?: boolean; coverSource?: string | null; size?: CoverSize; label: string;
 }) {
   const poster = useQuery({
     queryKey: ["mediaPoster", filmId, source ?? null],
     queryFn: () => api.image(api.posterPath(filmId as string)),
     enabled: hasPoster && filmId !== null, staleTime: Infinity, retry: false,
   });
+  const [landscape, setLandscape] = useState(false);
+  const [open, setOpen] = useState(false);
+  const button = useRef<HTMLButtonElement>(null);
   const cls = `cover${size === "row" ? "" : ` ${size}`}`;
-  return hasPoster && poster.data ? (
-    <div className={cls}><img src={poster.data} alt={`${label} 封面`} /></div>
-  ) : (
-    <div className={cls} role="img" aria-label={`${label}：无封面`}><span aria-hidden>无封面</span></div>
+  if (!hasPoster || !poster.data || filmId === null) {
+    return <div className={cls} role="img" aria-label={`${label}：无封面`}><span aria-hidden>无封面</span></div>;
+  }
+  const onLoad = (e: SyntheticEvent<HTMLImageElement>) =>
+    setLandscape(e.currentTarget.naturalWidth > e.currentTarget.naturalHeight);
+  return (
+    <>
+      <button type="button" ref={button} className={`${cls} cover-btn`} aria-label="查看大图" onClick={() => setOpen(true)}>
+        <img src={poster.data} alt={`${label} 封面`} className={landscape ? "landscape" : undefined} onLoad={onLoad} />
+      </button>
+      <CoverLightbox open={open} onClose={() => setOpen(false)} onExited={() => button.current?.focus()}
+        filmId={filmId} hasCover={hasCover} coverSource={coverSource ?? null} poster={poster.data} label={label} />
+    </>
+  );
+}
+
+const LIGHTBOX_BACKDROP = { sx: { backgroundColor: "#020611EB" } };
+const LIGHTBOX_IMAGE = { display: "block", maxWidth: "92vw", maxHeight: "88vh", objectFit: "contain" } as const;
+
+// The full, uncropped image: the landscape jacket when the film has one (`/cover`), else the
+// poster. Esc, a backdrop click or 「关闭大图」 closes it; the cover gets the focus back.
+function CoverLightbox({ open, onClose, onExited, filmId, hasCover, coverSource, poster, label }: {
+  open: boolean; onClose: () => void; onExited: () => void; filmId: string; hasCover: boolean;
+  coverSource: string | null; poster: string; label: string;
+}) {
+  const full = useQuery({
+    queryKey: ["mediaCover", filmId, coverSource],
+    queryFn: () => api.image(api.coverPath(filmId)),
+    enabled: open && hasCover, staleTime: Infinity, retry: false,
+  });
+  const src = (hasCover && full.data) || poster;
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth={false} disableRestoreFocus className="mw-lightbox"
+      slotProps={{
+        backdrop: LIGHTBOX_BACKDROP,
+        transition: { onExited },
+        paper: {
+          "aria-label": `${label} 大图`,
+          sx: { m: 0, maxWidth: "92vw", maxHeight: "88vh", overflow: "visible", background: "none", boxShadow: "none" },
+        } as object,
+      }}>
+      <img src={src} alt={`${label} 大图`} style={LIGHTBOX_IMAGE} />
+      <button type="button" className="lightbox-close" aria-label="关闭大图" onClick={onClose}>
+        <CloseIcon aria-hidden />
+      </button>
+    </Dialog>
   );
 }
 
@@ -76,7 +126,7 @@ export function ItemCover({ item, size }: { item: WorkItem; size?: CoverSize }) 
   const title = item.kind === "film" ? item.row.title || item.row.name : item.pkg.name;
   return item.kind === "film"
     ? <Cover filmId={item.row.film_id} hasPoster={item.row.has_poster} source={item.row.poster_source}
-      size={size} label={title} />
+      hasCover={item.row.has_cover} coverSource={item.row.cover_source} size={size} label={title} />
     : <Cover filmId={null} hasPoster={false} size={size} label={title} />;
 }
 

@@ -181,6 +181,63 @@ describe("contract: drawer", () => {
   });
 });
 
+describe("contract: the cover lightbox (U1b)", () => {
+  it("the review film's cover opens Miko's full fanart; a film without one shows its poster", async () => {
+    const m = mockApi();
+    expect(C.films.films.find((f) => f.film_id === REVIEW)?.has_cover).toBe(true);
+    wrap(<MediaWorkspace />);
+    await go("待确认");
+    const card = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>(`[data-review="${REVIEW}"]`);
+      if (!el) throw new Error("no card");
+      return el;
+    });
+    fireEvent.click(await within(card).findByRole("button", { name: "查看大图" }));
+    await screen.findByRole("dialog", { name: "假的标题 大图" });
+    await waitFor(() => expect(m.image).toHaveBeenCalledWith(api.coverPath(REVIEW)));
+    fireEvent.click(screen.getByRole("button", { name: "关闭大图" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "假的标题 大图" })).toBeNull());
+    // the lookup's portrait poster is no jacket: the lightbox shows the poster itself
+    expect(C.plans.plans.find((p) => p.film_id === "film-planning")?.has_cover).toBe(false);
+    await go("待处理");
+    const pending = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-pending="film-planning"]');
+      if (!el) throw new Error("no card");
+      return el;
+    });
+    fireEvent.click(await within(pending).findByRole("button", { name: "查看大图" }));
+    await screen.findByRole("dialog", { name: "MOVIE 的标题 大图" });
+    expect(m.image).not.toHaveBeenCalledWith(api.coverPath("film-planning"));
+  });
+
+  it("the drawer hero opens the lightbox and Esc closes only the lightbox", async () => {
+    mockApi();
+    wrap(<MediaWorkspace />);
+    await go("待确认");
+    const card = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>(`[data-review="${REVIEW}"]`);
+      if (!el) throw new Error("no card");
+      return el;
+    });
+    await waitFor(() => expect(within(card).getByRole("button", { name: "查看大图" })).toBeInTheDocument());
+    fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
+    await screen.findByRole("heading", { level: 1, name: "影片队列" });
+    const queued = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>(`[data-film="${REVIEW}"]`);
+      if (!el) throw new Error("no card");
+      return el;
+    });
+    fireEvent.click(within(queued).getByRole("button", { name: /详情/ }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    fireEvent.click(await within(drawer).findByRole("button", { name: "查看大图" }));
+    const box = await screen.findByRole("dialog", { name: "假的标题 大图" });
+    fireEvent.keyDown(box, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "假的标题 大图" })).toBeNull());
+    expect(screen.getByRole("dialog", { name: "影片详情" })).toBeInTheDocument();
+    await waitFor(() => expect(within(drawer).getByRole("button", { name: "查看大图" })).toHaveFocus());
+  });
+});
+
 describe("contract: 待确认 and 图文确认", () => {
   const openReview = async () => {
     await go("待确认");

@@ -217,6 +217,8 @@ export interface FilmRow {
   // final NFO > lookup > input NFO; the cover by the same precedence
   number: string | null; title: string | null; actors: string[];
   has_poster: boolean; poster_source: string | null;
+  // U1b: the full landscape jacket the 大图 shows (`coverPath`); `cover_source` is its cache key
+  has_cover: boolean; cover_source: string | null;
   resolution: Resolution | null; plan: FilmPlan | null; receipt_id: string | null; revisions: FilmRevisions;
 }
 // H2 R5 lifecycle step line; U1 V3 adds 「待处理」 (`plan`) after 入库扫描.
@@ -261,6 +263,7 @@ export interface FilmDetail {
   files: Array<{ role: string; path: string; size: number | null; volume: number | string | null }>;
   inputs: Array<{ path: string; size: number | null }>;
   workcopy_count: number; has_poster: boolean; poster_source: string | null;
+  has_cover: boolean; cover_source: string | null;
   group: FilmGroup; can_confirm: boolean; can_retry: boolean; retry_stage: string | null; note: string | null;
   stages: Array<{ stage: string; status: string; note: string | null }>; steps: WorkflowStep[];
   archive: { status: string | null; error: string | null; target_path: string | null };
@@ -294,7 +297,8 @@ export interface PlanRecommendation { ltx_model: LtxTier | null; ltx_reason: str
 export interface PlanEntry {
   film_id: string; input_revision: number; revision_changed: boolean; name: string;
   title: string | null; number: string | null; actors: string[];
-  has_poster: boolean; poster_source: string | null; resolution: Resolution | null;
+  has_poster: boolean; poster_source: string | null; has_cover: boolean; cover_source: string | null;
+  resolution: Resolution | null;
   width: number | null; height: number | null; duration_ms: number | null; size_bytes: number | null;
   video_count: number; item_count: number; needs_gpu: boolean; created_at: string;
   lookup: PlanLookup | null; recommendation: PlanRecommendation;
@@ -588,6 +592,8 @@ export const api = {
   workflowOpenPackage: (packageId: string) =>
     send<void>("agent", "POST", `/control/workflow/packages/${seg(packageId)}/open`),
   posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
+  // U1b: the full landscape jacket (final fanart > thumb > input fanart > thumb > image attachment)
+  coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,
   thumbPath: (performerId: Performer["id"]) => `/control/workflow/performers/${seg(performerId)}/thumb`,
   image,
 };

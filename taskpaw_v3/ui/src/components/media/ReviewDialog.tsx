@@ -181,7 +181,8 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
       <ModalHead id="mw-review-title" title="确认影片与入库目标" subtitle="入库完成后自动清理本次收件来源" onClose={onClose} />
       <div className="modal-body">
         <div className="confirmation-layout">
-          <Cover filmId={film.film_id} hasPoster={film.has_poster} source={film.poster_source} size="confirm" label={title} />
+          <Cover filmId={film.film_id} hasPoster={film.has_poster} source={film.poster_source}
+            hasCover={film.has_cover} coverSource={film.cover_source} size="confirm" label={title} />
           <div>
             <div className="eyebrow-id">{film.number || film.name} · MIKO 最终封面</div>
             <h3>{title}</h3>

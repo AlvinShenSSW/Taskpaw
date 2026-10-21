@@ -34,6 +34,7 @@ export const row = (over: Partial<FilmRow> & { film_id: string }): FilmRow => ({
   can_confirm: false, can_retry: false, retry_stage: null, created_at: "2026-10-21T00:00:00Z", steps: [],
   resolution: "1080p", number: over.film_id.toUpperCase(), title: null, actors: [], receipt_id: null,
   revisions: revisions(1), plan: { ltx_model: "standard", machine: "w-local" }, has_poster: false, poster_source: null,
+  has_cover: false, cover_source: null,
   ...over,
 });
 
@@ -121,7 +122,7 @@ export const lookupFailed = (message: string, can_requery: boolean): PlanLookup 
 export const plan = (over: Partial<PlanEntry> & { film_id: string }): PlanEntry => ({
   name: over.film_id.toUpperCase(), input_revision: 1, revision_changed: false, number: over.film_id.toUpperCase(),
   title: null, actors: [], resolution: "1080p", width: 1920, height: 1080, duration_ms: 7094000, size_bytes: 7301444403,
-  video_count: 1, item_count: 2, has_poster: false, poster_source: null, needs_gpu: true, created_at: "2026-10-21T00:00:00Z",
+  video_count: 1, item_count: 2, has_poster: false, poster_source: null, has_cover: false, cover_source: null, needs_gpu: true, created_at: "2026-10-21T00:00:00Z",
   lookup: LOOKUP_DONE,
   recommendation: { ltx_model: "standard", ltx_reason: "默认", machine: "w-local", machine_reason: "RTX 5070 Ti 16 GB" },
   ...over,
@@ -158,7 +159,7 @@ export function detail(id: string, over: Partial<FilmDetail> = {}): FilmDetail {
     workcopy_count: 0, has_poster: r.group === "confirm", group: r.group, can_confirm: r.can_confirm, can_retry: r.can_retry,
     retry_stage: r.retry_stage, note: r.note, stages: [], steps: r.steps,
     archive: { status: null, error: null, target_path: null }, cleanup: { input: null, workcopy: null, kept: [] },
-    resolution: r.resolution, receipt_id: r.receipt_id, revisions: r.revisions, plan: r.plan, poster_source: null, lookup: null,
+    resolution: r.resolution, receipt_id: r.receipt_id, revisions: r.revisions, plan: r.plan, poster_source: null, has_cover: false, cover_source: null, lookup: null,
     ...over,
   };
 }
