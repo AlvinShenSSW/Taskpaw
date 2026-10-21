@@ -61,6 +61,18 @@ def _gpu_lease_isolation():
     gpu_lease._reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_bitrate_probe(monkeypatch):
+    """#285: `match_source_bitrate` is on by default, so every managed Jasna
+    launch would run ffprobe for the source bitrate — against the fake
+    `tools/ffprobe` the tests write. The probe reports "unknown" (no
+    --encoder-settings, as before) unless a test patches `probe_bitrate`; its
+    own tests keep a reference to the real function."""
+    from taskpaw_v3.monitors.plugins import jasna
+
+    monkeypatch.setattr(jasna, "probe_bitrate", lambda video, ffprobe: None)
+
+
 def tasklog_rows(kind=None):
     from taskpaw_v3.core.tasklog import get_task_log
 

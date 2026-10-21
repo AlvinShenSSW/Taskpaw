@@ -21,7 +21,7 @@ def preset_catalogue() -> dict:
                 ltx_1080p=model == "ltx",
                 ltx_4k=model == "ltx" and gpu != "5060-8",
                 ltx_fast=gpu != "4090-24",
-                ltx_best=False,
+                ltx_model="standard",  # #283: Jasna 0.11.3's default tier
                 ltx_large_canvas=False,
                 ltx_auto_split=12,
                 ltx_overlap="auto",

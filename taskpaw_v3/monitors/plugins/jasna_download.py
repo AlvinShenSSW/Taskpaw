@@ -1,7 +1,9 @@
-"""Fixed Jasna 0.11.2 encrypted model downloader; no license/decryption handling.
+"""Fixed Jasna 0.11.3 encrypted model downloader; no license/decryption handling.
 
 Run out of process: network/DNS and large file writes must never hold up Stop.
 The manifest is pinned to Kruk2/ltx-restore; stdin cannot select arbitrary URLs.
+#283/#285: the three 0.11.3 quality tiers TaskPaw offers (standard/good/high),
+each in an int8 and an nvfp4 (fast) file, plus the two shared VAE files.
 """
 
 from __future__ import annotations
@@ -18,30 +20,41 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-REVISION = "3ac0e9734ac40e3b75714bcf942357ef119e2ea1"
+REVISION = "a6e596656f9374dd85536a9313c9a5511cbdd407"
+# #283: (ltx_model tier, fast) → its model file; fast = nvfp4 (--ltx-fast), else int8.
 MODEL_FILES = {
-    (False, False): "ltx-restore-alpha1-distill8-int8.safetensors.enc",
-    (False, True): "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc",
-    (True, False): "ltx-restore-alpha1-int8.safetensors.enc",
-    (True, True): "ltx-restore-alpha1-nvfp4.safetensors.enc",
+    ("standard", False): "ltx-restore-alpha1-distill2-int8.safetensors.enc",
+    ("standard", True): "ltx-restore-alpha1-distill2-nvfp4.safetensors.enc",
+    ("good", False): "ltx-restore-alpha1-distill4-int8.safetensors.enc",
+    ("good", True): "ltx-restore-alpha1-distill4-nvfp4.safetensors.enc",
+    ("high", False): "ltx-restore-alpha1-distill8-int8.safetensors.enc",
+    ("high", True): "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc",
 }
 SHARED_FILES = ("vae.safetensors.enc", "vae-decoder.safetensors.enc")
 FILES = {
-    MODEL_FILES[False, False]: (
+    MODEL_FILES["standard", False]: (
+        13368048749,
+        "c23559f9d120df49266fc2dbe60ec384058d51834cf1a2da049e54b28aea51ad",
+    ),
+    MODEL_FILES["standard", True]: (
+        7733294997,
+        "4aa08c146c8cc335e7f90d19aa293cc0dfe4f14520fd85efc257fe809510693b",
+    ),
+    MODEL_FILES["good", False]: (
+        13368048733,
+        "1c0f1642232813f690d949b05fe90bdc02d3203e0092950de25e9cc961f30965",
+    ),
+    MODEL_FILES["good", True]: (
+        7733294981,
+        "57098e622d02598467f903049f4d1a613852f832847a01c43da148f506876973",
+    ),
+    MODEL_FILES["high", False]: (
         13368048773,
         "b006342a109c640a46ae91a5cd10e67186d968c63ef2f715c78bedf36936e057",
     ),
-    MODEL_FILES[False, True]: (
+    MODEL_FILES["high", True]: (
         7733295021,
         "54f2f4f6f7d3f5d60e18aca7bf6137da206a2b66f282e1a9078743c3173e62e2",
-    ),
-    MODEL_FILES[True, False]: (
-        13368048821,
-        "c72161b1afefe4d8cc0592fa57afef6c20466dcf912912f3628a451468780f83",
-    ),
-    MODEL_FILES[True, True]: (
-        7733295061,
-        "8301d5ba17660b577ebe906d343963208f7e5453e589ef2f7470087a3ba2ccb5",
     ),
     SHARED_FILES[0]: (
         1472223815,

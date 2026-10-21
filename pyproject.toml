@@ -16,7 +16,9 @@ dependencies = [
 # System-tray support for the interactive agent (Windows/macOS desktop only).
 tray = [
     "pystray>=0.19.0,<1.0.0",
-    "Pillow>=12.3.0,<13.0.0",
+    # Pillow 13 (security fixes) needs Python 3.11+; 3.10 has no fixed release.
+    "Pillow>=13.0.0,<14.0.0; python_version >= '3.11'",
+    "Pillow>=12.3.0,<13.0.0; python_version < '3.11'",
 ]
 # .exe / app packaging.
 build = [
