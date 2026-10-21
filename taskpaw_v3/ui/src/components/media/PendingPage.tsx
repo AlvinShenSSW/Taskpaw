@@ -15,6 +15,7 @@ type Choice = { tier: LtxTier | null; machine: string };
 const recommendedChoice = (e: PlanEntry): Choice => ({ tier: e.needs_gpu ? e.recommendation.ltx_model : null, machine: e.recommendation.machine });
 const complete = (e: PlanEntry) => Boolean(e.recommendation.machine) && (!e.needs_gpu || e.recommendation.ltx_model !== null);
 const entryTitle = (e: PlanEntry) => e.title || e.name;
+const planKey = (e: Pick<PlanEntry, "film_id" | "input_revision">) => `${e.film_id}:${e.input_revision}`;
 
 // 待处理 (U1 V2): unplanned films wait here; the operator keeps or changes the recommended tier
 // and device, then confirms each film (or every unchanged one) into the film queue.
@@ -30,10 +31,11 @@ export function PendingPage() {
   const [rejected, setRejected] = useState<Set<string>>(new Set());
   // A revision the backend marks as changed stays flagged until its detail has been opened.
   const [acked, setAcked] = useState<Record<string, number>>({});
+  // Confirmed (film, input revision) pairs (Codex r6 P2): a newer unplanned revision shows again.
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const focusNext = useRef<string | null>(null);
 
-  const all = useMemo(() => (plans.data?.plans ?? []).filter((e) => !hidden.has(e.film_id)), [plans.data, hidden]);
+  const all = useMemo(() => (plans.data?.plans ?? []).filter((e) => !hidden.has(planKey(e))), [plans.data, hidden]);
   useEffect(() => {
     setSeen((prev) => {
       const missing = all.filter((e) => prev[e.film_id] === undefined);
@@ -43,11 +45,11 @@ export function PendingPage() {
       return next;
     });
   }, [all]);
-  // A confirmed film stays hidden until the refreshed list no longer has it.
+  // A confirmed revision stays hidden until the refreshed list no longer has it.
   useEffect(() => {
-    const ids = new Set((plans.data?.plans ?? []).map((e) => e.film_id));
+    const keys = new Set((plans.data?.plans ?? []).map(planKey));
     setHidden((prev) => {
-      const next = new Set([...prev].filter((id) => ids.has(id)));
+      const next = new Set([...prev].filter((key) => keys.has(key)));
       return next.size === prev.size ? prev : next;
     });
   }, [plans.data]);
@@ -97,7 +99,7 @@ export function PendingPage() {
     const firstIdx = order.indexOf(sent[0]?.film_id ?? "");
     const remaining = order.filter((id) => !ok.has(id));
     focusNext.current = remaining[Math.min(Math.max(firstIdx, 0), remaining.length - 1)] ?? "";
-    setHidden((prev) => new Set([...prev, ...ok]));
+    setHidden((prev) => new Set([...prev, ...sent.filter((e) => ok.has(e.film_id)).map(planKey)]));
     if (stale.size) setRejected((prev) => new Set([...prev, ...stale]));
     void qc.invalidateQueries({ queryKey: MEDIA_PLANS_KEY });
     void qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY });

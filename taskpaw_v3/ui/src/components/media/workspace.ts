@@ -39,7 +39,7 @@ export interface MediaData {
 // Polls like the rest of the console (5 s). Films waiting for 确认入库 also get the target
 // preflight, which says whether they are ready, ambiguous, unmatched or blocked (U1 §7.3; with
 // exactly one candidate the backend checks its target in the same call, F4) — only
-// while a view that shows it is mounted (`preflight`: 概览, 待确认, 图文确认) and only for the top
+// while a view that shows it is mounted (`preflight`: 概览, 待确认, 异常, 图文确认) and only for the top
 // PREFLIGHT_MAX of them; the others keep their last answer, or read 「检查中」 (IR05).
 export function useMediaData(preflight = true): MediaData {
   const films = useQuery({ queryKey: MEDIA_FILMS_KEY, queryFn: api.workflowFilms, refetchInterval: POLL_MS });

@@ -44,6 +44,7 @@ const PAGES: Array<{ key: PageKey; label: string; icon: SvgIconComponent; later?
   { key: "bridge", label: "Mac 信息桥", icon: LanIcon, later: true },
   { key: "settings", label: "设置 / 迁移", icon: TuneIcon, later: true },
 ];
+const PREFLIGHT_PAGES = new Set<PageKey>(["overview", "review", "exceptions"]);
 const LIVE_PAGES = new Set<PageKey>(["overview", "pending", "queue", "review", "exceptions", "local"]);
 const NAV_BACKDROP = { sx: { backgroundColor: "#030812CC" } };
 
@@ -80,8 +81,9 @@ export function MediaWorkspace() {
   const [queueStage, setQueueStage] = useState<StageFilter>("all");
   const [drawer, setDrawer] = useState<string | null>(null);
   const [review, setReview] = useState<string | null>(null);
-  // The target preflight polls only while a view that shows it is mounted (IR05).
-  const data = useMediaData(page === "overview" || page === "review" || review !== null);
+  // The target preflight polls only while a view that shows it is mounted (IR05); 异常 lists the
+  // films whose target is offline, unwritable or taken, so it refreshes them too (Codex r6 P2).
+  const data = useMediaData(PREFLIGHT_PAGES.has(page) || review !== null);
   const [explain, setExplain] = useState<Explain>(null);
   const [toast, setToast] = useState<{ text: string; key: number } | null>(null);
   const [navOpen, setNavOpen] = useState(false);

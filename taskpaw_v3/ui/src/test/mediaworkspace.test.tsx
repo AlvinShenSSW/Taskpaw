@@ -969,3 +969,56 @@ describe("AgentConsole media tab", () => {
     expect(screen.getByRole("tab", { name: "Media Center" })).toBeInTheDocument();
   });
 });
+
+describe("deferred Codex r6 P2s", () => {
+  const confirmRow = (i: number) => row({
+    film_id: `c-${String(i).padStart(2, "0")}`, title: `确认片 ${i}`, group: "confirm",
+    stage: "archive", status: "pending", can_confirm: true, steps: steps("confirm", "waiting"),
+  });
+
+  it("the 异常 page refreshes the target checks too, for the top ten films", async () => {
+    mockApi();
+    const films = [...FILMS.filter((f) => f.group !== "confirm"), ...Array.from({ length: 12 }, (_, i) => confirmRow(i))];
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, counts: counts(films, PACKAGES) });
+    const target = vi.spyOn(api, "workflowTarget").mockImplementation(async (id) =>
+      preflight(id.toUpperCase(), null, { error_code: "offline", message: "Filmpaw 未运行" }));
+    wrap(<MediaWorkspace />);
+    fireEvent.click(within(rail()).getByRole("button", { name: /^异常/ }));
+    await screen.findByRole("heading", { level: 1, name: "异常" });
+    await waitFor(() => expect(target).toHaveBeenCalledTimes(10));
+    expect(new Set(target.mock.calls.map(([id]) => id))).toEqual(
+      new Set(Array.from({ length: 10 }, (_, i) => `c-${String(i).padStart(2, "0")}`)));
+  });
+
+  it("a confirmed film hidden on 待处理 shows again when a newer unplanned revision arrives", async () => {
+    const m = mockApi();
+    const plans = vi.spyOn(api, "workflowPlans").mockResolvedValue(PLANS);
+    m.confirmPlans.mockImplementation(async (sent: PlanChoice[]) => {
+      // the refreshed list still has abf-422, now at a newer input revision nobody planned
+      plans.mockResolvedValue({ ...PLANS, plans: PLANS.plans.map((p) => (p.film_id === "abf-422"
+        ? { ...p, input_revision: 2, revision_changed: true } : p)) });
+      return { results: sent.map((p) => ({ film_id: p.film_id, ok: true, error: null, message: null })) };
+    });
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    const card = (id: string) => document.querySelector<HTMLElement>(`[data-pending="${id}"]`);
+    await waitFor(() => expect(card("abf-422")).toBeTruthy());
+    fireEvent.click(within(card("abf-422") as HTMLElement).getByRole("button", { name: "确认入队" }));
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalled());
+    await waitFor(() => expect(card("abf-422")).toBeTruthy());
+    expect(within(card("abf-422") as HTMLElement).getByText("收件内容已更新，请重新查看后确认")).toBeInTheDocument();
+  });
+
+  it("the same revision stays hidden while the list still has it", async () => {
+    const m = mockApi();
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    const card = (id: string) => document.querySelector<HTMLElement>(`[data-pending="${id}"]`);
+    await waitFor(() => expect(card("abf-422")).toBeTruthy());
+    fireEvent.click(within(card("abf-422") as HTMLElement).getByRole("button", { name: "确认入队" }));
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalled());
+    await waitFor(() => expect(card("abf-422")).toBeNull());
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
+    expect(card("abf-422")).toBeNull();
+  });
+});
