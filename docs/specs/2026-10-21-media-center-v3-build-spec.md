@@ -204,7 +204,7 @@ Each status has a label and a chip variant:
 | cleanup | 已入库 · 待清理 | amber |
 | completed | 已完成 | green |
 | skipped | 已跳过 · 保留来源 | neutral |
-| stopped | 本机任务已停止 | amber |
+| stopping | 正在确认停止 | blue (not in V3; a local stage whose stop is unconfirmed, never retryable) |
 | intake_attention | 收件需要处理 | amber (operator addition, for INBOX packages needing attention) |
 
 Extra chips:

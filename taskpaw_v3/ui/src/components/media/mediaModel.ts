@@ -9,7 +9,7 @@ export type ChipTone = "neutral" | "green" | "blue" | "amber" | "red";
 export type StatusKey =
   | "pending" | "receiving" | "postprocess_error" | "inbox" | "encode" | "denoise" | "asr" | "translate"
   | "return" | "scrape" | "match" | "checking" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
-  | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopped" | "failed" | "intake_attention";
+  | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopping" | "failed" | "intake_attention";
 
 export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   pending: ["待处理", "amber"],
@@ -38,7 +38,9 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   cleanup: ["已入库 · 待清理", "amber"],
   completed: ["已完成", "green"],
   skipped: ["已跳过 · 保留来源", "neutral"],
-  stopped: ["本机任务已停止", "amber"],
+  // Not in the V3 vocabulary: a local stage whose stop the runner has not confirmed yet (`unknown`).
+  // Never 「本机任务已停止」 and never retryable until the backend says so (`can_retry`).
+  stopping: ["正在确认停止", "blue"],
   // Not in the V3 vocabulary: a local stage that failed and can be retried (§4.4 last row).
   failed: ["处理失败", "red"],
   intake_attention: ["收件需要处理", "amber"],
@@ -46,7 +48,7 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
 
 export const REVIEW_STATES: StatusKey[] = ["checking", "ready", "multi", "nomatch", "offline", "permission", "duplicate"];
 export const EXCEPTION_STATES: StatusKey[] = [
-  "postprocess_error", "offline", "permission", "duplicate", "unknown", "cleanup", "stopped", "failed", "intake_attention",
+  "postprocess_error", "offline", "permission", "duplicate", "unknown", "cleanup", "stopping", "failed", "intake_attention",
 ];
 export const ACTIVE_STATES: StatusKey[] = ["encode", "denoise", "asr", "translate", "return", "scrape", "match"];
 
@@ -116,7 +118,7 @@ export function filmStatus(row: FilmRow, preflight?: TargetPreflight | null): St
       if (stage.startsWith("cleanup")) return "cleanup";
       if (stage === "intake") return "intake_attention";
       if (stage === "archive") return row.status === "unknown" ? "unknown" : "failed";
-      if (LOCAL_STAGES.has(stage) && row.status === "unknown") return "stopped";
+      if (LOCAL_STAGES.has(stage) && row.status === "unknown") return "stopping";
       return "failed";
     default: // active
       if (stage === "restore") {
@@ -234,23 +236,28 @@ export function reviewLine(status: StatusKey, packageFiles: number | null, candi
   }
 }
 
-export type ExceptionAction = "retry-scrape" | "retry" | "review" | "reconcile" | "cleanup" | "open-package";
+// "none": nothing to press (the stop is still being confirmed, or the backend offers no retry).
+export type ExceptionAction = "retry-scrape" | "retry" | "review" | "reconcile" | "cleanup" | "open-package" | "none";
 // Title, description and the one action of an exception card (§4.4).
 export function exceptionInfo(item: WorkItem, intakeReasons: (pkg: PackageRow) => string): [string, string, string, ExceptionAction] {
   const note = item.kind === "film" ? item.row.note : null;
+  // 重试 only where the backend names a stage to retry (`can_retry`, board `retry_stage`)
+  const canRetry = item.kind === "film" && item.row.can_retry;
   switch (item.status) {
-    case "postprocess_error": return ["最终封面尚未准备好", "已有 NFO 或封面不能跳过本次后处理。", "重试后处理", "retry-scrape"];
+    case "postprocess_error":
+      return ["最终封面尚未准备好", "已有 NFO 或封面不能跳过本次后处理。", canRetry ? "重试后处理" : "", canRetry ? "retry-scrape" : "none"];
     case "offline": return ["目标 NAS 暂时离线", "来源保留，稍后重试。", "重试", "review"];
     case "permission": return ["目标暂不可写", "检查权限后重试，来源保留。", "重试", "review"];
     case "duplicate": return ["目标已有同名影片包", "不会覆盖已有片源，请核对目标。", "查看冲突", "review"];
     case "unknown": return ["入库结果待核对", "后台先检查目标和记录，暂不重新上传或清理来源。", "核对结果", "reconcile"];
     case "cleanup": return ["已入库 · 来源待清理", note || "仅重试来源清理，不重复上传。", "重试清理", "cleanup"];
-    case "stopped": return ["本机任务已停止", "原始来源和已完成结果保留。", "重试", "retry"];
+    case "stopping": return ["正在确认停止", "等待本机任务确认停止；原始来源和已完成结果保留，确认前不能重试。", "", "none"];
     case "intake_attention":
       return ["收件需要处理", item.kind === "package" ? intakeReasons(item.pkg) : note || "", "打开文件夹", "open-package"];
     default: {
       const stage = item.kind === "film" ? stageName(item.row.retry_stage || item.row.stage) : "";
-      return [stage ? `${stage}失败` : "处理失败", note || "原始来源保留，可重试本阶段。", "重试", "retry"];
+      return [stage ? `${stage}失败` : "处理失败", note || (canRetry ? "原始来源保留，可重试本阶段。" : "原始来源保留。"),
+        canRetry ? "重试" : "", canRetry ? "retry" : "none"];
     }
   }
 }

@@ -95,7 +95,7 @@ export const FILMS_RESPONSE: WorkflowFilms = {
   gpu: { name: "RTX 5070 Ti", vram_mib: 16303 },
 };
 
-const performer = (id: number, name: string, label: string): Performer =>
+export const performer = (id: number, name: string, label: string): Performer =>
   ({ id, name, source_label: label, unc_path: `\\\\${label.toLowerCase()}\\actors\\${name}`, has_thumb: false, aliases: [] });
 
 // The preflight without a performer: only the candidates (U1 §7.3).

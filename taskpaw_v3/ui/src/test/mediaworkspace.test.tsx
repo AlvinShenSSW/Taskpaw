@@ -6,12 +6,13 @@ import type { ReactNode } from "react";
 import { api, HttpError, PLAN_BATCH_MAX, type PlanChoice, type TargetPreflight } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
 import { filmStatus, lifecycle, reviewStatus, STATUS_META } from "../components/media/mediaModel";
+import { PREFLIGHT_MS } from "../components/media/workspace";
 import { LtxDownload } from "../components/LtxDownload";
 import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
 import { setLang } from "../i18n";
 import {
-  counts, detail, FILMS, FILMS_RESPONSE, lookupFailed, PACKAGES, plan, PLANS, preflight, PREFLIGHTS, revisions, row, steps,
+  counts, detail, FILMS, FILMS_RESPONSE, lookupFailed, PACKAGES, performer, plan, PLANS, preflight, PREFLIGHTS, revisions, row, steps,
 } from "./fixtures/mediaWorkspace";
 
 const wrapWith = (ui: ReactNode) => {
@@ -324,6 +325,33 @@ describe("影片队列 / 待确认 / 异常", () => {
   });
 });
 
+describe("unresolved stops and unretryable failures (Codex r3 F3)", () => {
+  it("a local stage still unknown waits for the stop; 重试 only where the backend allows it", async () => {
+    mockApi();
+    const rows = [
+      row({ film_id: "stp-1", title: "停止未确认", group: "attention", stage: "restore", status: "unknown",
+        note: "等待确认停止", steps: steps("restore", "waiting", { note: "等待确认停止" }) }),
+      row({ film_id: "bad-1", title: "不可重试的失败", group: "attention", stage: "bogus", status: "failed",
+        can_retry: false, retry_stage: null, note: "未知阶段", steps: steps("restore", "failed") }),
+      row({ film_id: "bad-2", title: "可重试的失败", group: "attention", stage: "translate", status: "failed",
+        can_retry: true, retry_stage: "translate", note: "LLM 超时", steps: steps("translate", "failed") }),
+    ];
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: rows, packages: [], counts: counts(rows, []) });
+    wrap(<MediaWorkspace />);
+    await go("异常");
+    const card = async (id: string) => {
+      await waitFor(() => expect(document.querySelector(`[data-exception="${id}"]`)).not.toBeNull());
+      return document.querySelector(`[data-exception="${id}"]`) as HTMLElement;
+    };
+    const stopped = await card("stp-1");
+    expect(within(stopped).getAllByText("正在确认停止").length).toBeGreaterThan(0);
+    expect(stopped.textContent).not.toContain("本机任务已停止");
+    expect(within(stopped).queryByRole("button", { name: "重试" })).toBeNull();
+    expect(within(await card("bad-1")).queryByRole("button", { name: "重试" })).toBeNull();
+    expect(within(await card("bad-2")).getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+});
+
 describe("drawer and 图文确认", () => {
   it("the drawer shows the step line, the full LtxProgress and the plan facts", async () => {
     mockApi();
@@ -536,6 +564,131 @@ describe("图文确认 review fixes", () => {
     });
   });
 
+  it("an automatic sole-candidate selection follows the final revision (Codex r3 F1)", async () => {
+    mockApi();
+    let final = 2;
+    const sole = (id: number, name: string) => preflight("ABF-406", [performer(id, name, "NAS-A")]);
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) =>
+      detail(id, id === "abf-406" ? { revisions: revisions(1, final) } : {}));
+    vi.spyOn(api, "workflowTarget").mockImplementation(async (id, chosen) => {
+      if (id !== "abf-406") return PREFLIGHTS[id] ?? preflight(id.toUpperCase(), []);
+      const pf = final === 2 ? sole(1, "演员星河") : sole(7, "演员海岛");
+      const items = pf.candidates?.items ?? [];
+      const picked = chosen ?? items[0].id;
+      return { ...pf, performer_id: String(picked), absent: true, target_path: `${items[0].unc_path}\\ABF-406` };
+    });
+    const { qc } = wrapWith(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    await waitFor(() => expect(within(dialog).getByText("演员星河", { selector: "strong" })).toBeInTheDocument());
+    const ok = within(dialog).getByRole("button", { name: "确认入库" });
+    await waitFor(() => expect(ok).toBeEnabled());
+    final = 3;
+    await act(() => qc.invalidateQueries({ queryKey: ["mediaFilm", "abf-406"] }));
+    expect(await within(dialog).findByText("成品或来源已更新，请重新查看后确认。")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新查看" }));
+    await waitFor(() => expect(within(dialog).getByText("演员海岛", { selector: "strong" })).toBeInTheDocument());
+    await waitFor(() => expect(ok).toBeEnabled());
+    fireEvent.click(ok);
+    const confirm = vi.mocked(api.workflowConfirm);
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+    expect(String(confirm.mock.calls[0][1])).toBe("7");
+  });
+
+  it("a manual selection survives a new revision only while it is still a candidate (F1)", async () => {
+    mockApi();
+    let final = 2;
+    const pairs: Record<number, [number, number]> = { 2: [2, 3], 3: [3, 4], 4: [4, 5] };
+    const two = () => preflight("ABF-407", pairs[final].map((n) => performer(n, `演员${n}`, "NAS-A")));
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) =>
+      detail(id, id === "abf-407" ? { revisions: revisions(1, final) } : {}));
+    vi.spyOn(api, "workflowTarget").mockImplementation(async (id, chosen) => {
+      if (id !== "abf-407") return PREFLIGHTS[id] ?? preflight(id.toUpperCase(), []);
+      const pf = two();
+      const hit = pf.candidates?.items.find((p) => p.id === chosen);
+      return chosen === undefined ? pf
+        : { ...pf, performer_id: String(chosen), absent: true, target_path: hit ? `${hit.unc_path}\\ABF-407` : null,
+          error_code: hit ? null : "missing" };
+    });
+    const { qc } = wrapWith(<MediaWorkspace />);
+    const dialog = await openReview("夜航日志");
+    fireEvent.click(await within(dialog).findByRole("button", { name: /演员3/ }));
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeEnabled());
+    const bump = async (to: number) => {
+      final = to;
+      await act(() => qc.invalidateQueries({ queryKey: ["mediaFilm", "abf-407"] }));
+      fireEvent.click(await within(dialog).findByRole("button", { name: "重新查看" }));
+    };
+    await bump(3);  // 演员3 is still a candidate of revision 3: kept
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: /演员3/ })).toHaveAttribute("aria-pressed", "true"));
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeEnabled());
+    await bump(4);  // revision 4 no longer lists 演员3: cleared, the picker asks again
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: /演员4/ })).toBeInTheDocument());
+    expect(within(dialog).getByRole("button", { name: /演员4/ })).toHaveAttribute("aria-pressed", "false");
+    expect(within(dialog).getByText("请选择演员与目标路径。")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeDisabled();
+  });
+
+  const blockedTarget = (state: { up: boolean }, code: "offline" | "permission") =>
+    vi.spyOn(api, "workflowTarget").mockImplementation(async (id, chosen) => {
+      if (id !== "abf-407") return PREFLIGHTS[id] ?? preflight(id.toUpperCase(), []);
+      const pf = PREFLIGHTS["abf-407"];
+      if (chosen === undefined) return pf;
+      const hit = pf.candidates?.items.find((p) => p.id === chosen);
+      return state.up ? { ...pf, performer_id: String(chosen), absent: true, target_path: `${hit?.unc_path}\\ABF-407` }
+        : { ...pf, performer_id: String(chosen), error_code: code, message: "x" };
+    });
+
+  it("a blocked check of the chosen performer recovers through 重新检查 (F2)", async () => {
+    mockApi();
+    const state = { up: false };
+    blockedTarget(state, "offline");
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview("夜航日志");
+    fireEvent.click(await within(dialog).findByRole("button", { name: /演员夜航乙/ }));
+    expect(await within(dialog).findByText("目标 NAS 暂时离线，请稍后重试。")).toBeInTheDocument();
+    const ok = within(dialog).getByRole("button", { name: "确认入库" });
+    expect(ok).toBeDisabled();
+    state.up = true;  // the NAS comes back
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新检查" }));
+    await waitFor(() => expect(ok).toBeEnabled());
+    expect(within(dialog).queryByRole("button", { name: "重新检查" })).toBeNull();
+  });
+
+  it("clicking the same candidate again refetches a blocked check (F2)", async () => {
+    mockApi();
+    const state = { up: false };
+    const target = blockedTarget(state, "permission");
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview("夜航日志");
+    const pick = await within(dialog).findByRole("button", { name: /演员夜航乙/ });
+    fireEvent.click(pick);
+    expect(await within(dialog).findByText("目标暂不可写，请检查权限后重试。")).toBeInTheDocument();
+    const own = () => target.mock.calls.filter(([id, p]) => id === "abf-407" && p !== undefined).length;
+    const before = own();
+    state.up = true;
+    fireEvent.click(pick);
+    await waitFor(() => expect(own()).toBeGreaterThan(before));
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeEnabled());
+  });
+
+  it("a blocked check is polled at the shared preflight interval while the dialog is open (F2)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockApi();
+      const state = { up: false };
+      blockedTarget(state, "offline");
+      wrap(<MediaWorkspace />);
+      const dialog = await openReview("夜航日志");
+      fireEvent.click(await within(dialog).findByRole("button", { name: /演员夜航乙/ }));
+      expect(await within(dialog).findByText("目标 NAS 暂时离线，请稍后重试。")).toBeInTheDocument();
+      state.up = true;
+      await act(async () => { await vi.advanceTimersByTimeAsync(PREFLIGHT_MS + 1000); });
+      await waitFor(() => expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeEnabled());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("one candidate: the list and the dialog read the same target check (F4)", async () => {
     mockApi();
     const duplicate = withPerformer(PREFLIGHTS["abf-406"], { absent: false, error_code: "duplicate", message: "同名" });
@@ -643,7 +796,9 @@ describe("mediaModel", () => {
     expect(filmStatus(row({ film_id: "a", stage: "restore", status: "running",
       steps: steps("restore", "running", { ltx: { ltx_progress: { mode: "restore", stage_index: 3, stage_total: 4, stage_name: "denoise" } } }) }))).toBe("denoise");
     expect(filmStatus(row({ film_id: "a", group: "attention", stage: "scrape", status: "failed" }))).toBe("postprocess_error");
-    expect(filmStatus(row({ film_id: "a", group: "attention", stage: "restore", status: "unknown" }))).toBe("stopped");
+    // a local stage still `unknown` has not confirmed its stop (Codex r3 F3)
+    expect(filmStatus(row({ film_id: "a", group: "attention", stage: "restore", status: "unknown" }))).toBe("stopping");
+    expect(STATUS_META.stopping[0]).toBe("正在确认停止");
     expect(filmStatus(row({ film_id: "a", group: "attention", stage: "cleanup_input", status: "unknown" }))).toBe("cleanup");
     expect(filmStatus(row({ film_id: "a", group: "archiving", stage: "archive", status: "unknown" }))).toBe("unknown");
     expect(filmStatus(row({ film_id: "a", group: "done" }))).toBe("completed");

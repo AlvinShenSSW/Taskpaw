@@ -53,7 +53,7 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     if (REVIEW_STATES.includes(status)) {
       return <button type="button" className="btn primary" onClick={() => ws.openReview(filmId)}>查看并确认入库</button>;
     }
-    if (EXCEPTION_STATES.includes(status) && item) {
+    if (EXCEPTION_STATES.includes(status) && item && exceptionInfo(item, reasons)[3] !== "none") {
       const [, , label, action] = exceptionInfo(item, reasons);
       const onClick = () => {
         if (action === "review") ws.openReview(filmId);

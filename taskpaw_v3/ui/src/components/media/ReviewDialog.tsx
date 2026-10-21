@@ -12,7 +12,9 @@ import {
 import { packageNote, type StatusKey } from "./mediaModel";
 import { EvidenceFold } from "./FilmDrawer";
 import { Chip, Cover, Icon, Notice } from "./parts";
-import { errorText, finalRevision, MEDIA_FILMS_KEY, mediaFilmKey, mediaTargetKey, useWorkspace } from "./workspace";
+import {
+  errorText, finalRevision, MEDIA_FILMS_KEY, mediaFilmKey, mediaTargetKey, PREFLIGHT_MS, useWorkspace,
+} from "./workspace";
 
 const BACKDROP = { sx: { backgroundColor: "#030812BA", backdropFilter: "blur(4px)" } };
 const TARGET_BLOCK: Record<TargetErrorCode, string> = {
@@ -67,9 +69,16 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   // F3: every target answer belongs to the final revision it checked; the detail's is the newest
   const final = finalRevision(film?.revisions ?? (item?.kind === "film" ? item.row.revisions : null));
   // the list's query for this film (F4): with one candidate it already checked that target
-  const target = useQuery({ queryKey: mediaTargetKey(filmId, final), queryFn: () => api.workflowTarget(filmId), retry: false });
+  // A target answer that is not a pass (error, offline, permission, duplicate, missing) is polled until
+  // it recovers, as the list polls its own; a plain candidate list without a chosen performer is not.
+  const target = useQuery({
+    queryKey: mediaTargetKey(filmId, final), queryFn: () => api.workflowTarget(filmId), retry: false,
+    refetchInterval: (q) => (q.state.status === "error" || q.state.data?.error_code
+      || (q.state.data?.performer_id != null && !passes(q.state.data)) ? PREFLIGHT_MS : false),
+  });
   const [seenRev, setSeenRev] = useState<FilmRevisions | undefined>(undefined);
-  const [selected, setSelected] = useState<Performer | null | undefined>(undefined);
+  // The operator's own choice, bound to the final revision it was made against.
+  const [manual, setManual] = useState<{ performer: Performer; rev: string | null } | null>(null);
   const [phase, setPhase] = useState<"review" | "submitted">("review");
   // The detail's update time when 「确认入库」 succeeded: only a later read may end the submitted phase.
   const [submittedAt, setSubmittedAt] = useState(0);
@@ -85,13 +94,18 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     return target.isError ? (actor ? search.data?.items ?? null : []) : null;
   }, [target.data, target.isError, actor, search.data]);
   useEffect(() => { if (film && seenRev === undefined) setSeenRev(film.revisions); }, [film, seenRev]);
-  // Exactly one candidate is selected, also when it arrives after an empty or failed first load;
-  // several are never pre-selected, and an operator's choice is never replaced.
+  // A new final revision re-derives the choice from its own candidates: a manual choice stays only
+  // while that performer is still a candidate (else it is dropped and the picker asks again).
   useEffect(() => {
-    if (candidates === null) return;
-    if (selected === undefined) setSelected(candidates.length === 1 ? candidates[0] : null);
-    else if (selected === null && candidates.length === 1) setSelected(candidates[0]);
-  }, [candidates, selected]);
+    if (!manual || manual.rev === final || candidates === null) return;
+    const same = candidates.find((p) => String(p.id) === String(manual.performer.id));
+    setManual(same ? { performer: same, rev: final } : null);
+  }, [manual, final, candidates]);
+  // Exactly one candidate is selected automatically (also when it arrives after an empty or failed
+  // first load); several are never pre-selected, and an operator's choice is never replaced.
+  // The automatic choice is derived from the current candidates, so it always belongs to this revision.
+  const selected: Performer | null | undefined = manual && manual.rev === final ? manual.performer
+    : candidates === null ? undefined : candidates.length === 1 ? candidates[0] : null;
   // The chosen performer's check: the shared answer when the backend checked that very candidate,
   // else its own query (once the shared one has answered), keyed by the revision as well.
   const shared = Boolean(selected) && target.data?.performer_id != null
@@ -100,8 +114,14 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     queryKey: [...mediaTargetKey(filmId, final), selected?.id ?? null],
     queryFn: () => api.workflowTarget(filmId, (selected as Performer).id),
     enabled: Boolean(selected) && !shared && (target.data !== undefined || target.isError), retry: false,
+    refetchInterval: (q) => (passes(q.state.data) ? false : PREFLIGHT_MS),
   });
   const preflight = shared ? target : own;
+  const choose = (p: Performer) => {
+    // the same candidate again asks the NAS again
+    if (selected && String(selected.id) === String(p.id)) void preflight.refetch();
+    setManual({ performer: p, rev: final });
+  };
   const confirm = useMutation({
     mutationFn: (p: Performer) => api.workflowConfirm(filmId, p.id),
     onSuccess: () => {
@@ -137,14 +157,19 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   // the chosen performer's own answer only: never an older or another target's
   const errorCode = (selected ? preflight.data?.error_code : target.data?.error_code) ?? null;
   const changed = seenRev !== undefined && !sameRevisions(seenRev, film.revisions);
-  const blocked =
+  const earlier =
     status === "unknown" ? "入库结果待核对，暂不能重新上传。"
       : !film.can_confirm ? "影片尚未完成准备，稍后自动继续。"
         : !film.has_poster || film.files.length === 0 ? "最终封面或文件包尚未准备好，请先处理。"
-          : changed ? "成品或来源已更新，请重新查看后确认。"
-            : errorCode ? TARGET_BLOCK[errorCode]
-              : !selected ? "请选择演员与目标路径。"
-                : targetCheck(preflight.data, preflight.isError ? preflight.error : null);
+          : changed ? "成品或来源已更新，请重新查看后确认。" : "";
+  const targetBlock = errorCode ? TARGET_BLOCK[errorCode]
+    : !selected ? (candidates === null ? "正在检查目标…" : "请选择演员与目标路径。")
+      : targetCheck(preflight.data, preflight.isError ? preflight.error : null);
+  const blocked = earlier || targetBlock;
+  // 重新检查: a target check that did not pass is asked again on demand (it is also polled)
+  const rechecking = (selected ? preflight : target).isFetching;
+  const recheck = !earlier && targetBlock && (selected || errorCode)
+    ? () => void (selected ? preflight : target).refetch() : null;
   const title = film.title || film.name;
   // the backend's target already ends in the film folder (`film_dir`)
   const targetPath = selected ? preflight.data?.target_path ?? null : null;
@@ -167,11 +192,16 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
             <p>{film.marks.chinese_subtitles ? "修复成品 · 中文字幕已核对" : "修复成品 · 无语音，不加中文字幕标识"}</p>
           </div>
         </div>
-        <Candidates candidates={candidates} selected={selected ?? null} actor={actor} onSelect={setSelected} />
+        <Candidates candidates={candidates} selected={selected ?? null} actor={actor} onSelect={choose} />
         {archiveStatus === "failed" && film.can_confirm && (
           <Notice tone="red">上次入库未完成：{film.archive.error || "原因未知"}。可重新确认入库。</Notice>
         )}
         {blocked && <div className="spacer-top"><Notice tone="amber" icon={WarningAmberIcon}>{blocked}</Notice></div>}
+        {recheck && (
+          <div className="spacer-top">
+            <button type="button" className="btn ghost small" disabled={rechecking} onClick={recheck}>重新检查</button>
+          </div>
+        )}
         {confirm.error && <Notice tone="red">{conflict ? "成品或来源已更新，请重新查看后确认。" : errorText(confirm.error)}</Notice>}
         <div className="target-box">
           <h3><Icon of={FolderOpenIcon} />入库到</h3>
@@ -203,6 +233,9 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     </>
   );
 }
+
+// A passed target check: no error, with the target folder and that folder known to be absent.
+const passes = (d: TargetPreflight | undefined) => Boolean(d && !d.error_code && d.target_path && d.absent === true);
 
 // 「确认入库」 needs a passed preflight of the chosen performer: its answer, with the target
 // folder and that folder known to be absent. Loading or an HTTP error is no pass.

@@ -67,7 +67,7 @@ function ExceptionCard({ item }: { item: WorkItem }) {
         </div>
       </div>
       <div className="actions">
-        <button type="button" className="btn small" disabled={run.isPending} onClick={onAction}>{label}</button>
+        {action !== "none" && <button type="button" className="btn small" disabled={run.isPending} onClick={onAction}>{label}</button>}
         {item.kind === "film" && (
           <button type="button" className="btn ghost small" onClick={() => ws.openDetail(item.id)}>查看详情</button>
         )}
