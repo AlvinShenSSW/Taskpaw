@@ -1500,13 +1500,16 @@ class FilmPlanConfirm(Model):
 
 
 class FilmPlan(Model):
-    """A confirmed plan; immutable, bound to one input revision."""
+    """A confirmed plan; immutable, bound to one input revision.
+
+    `backfilled`: written by the v3 upgrade, not chosen by the operator (U04)."""
 
     film_id: Id
     input_revision: Revision
     ltx_model: LtxTier | None
     machine: Id
     confirmed_at: UtcTime
+    backfilled: bool = False
 
 
 class UnplannedFilm(Model):

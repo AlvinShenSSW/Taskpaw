@@ -370,6 +370,8 @@ V2_INDEXES = {**V1_INDEXES, **schema_intake.INDEXES}
 # U1 P1': one confirmed plan per (film, input revision). A new input revision
 # has no row, so the film is unplanned again; a row is never updated. A NULL
 # tier is a film whose inputs are all restored already (needs no GPU).
+# `backfilled` marks the v3 upgrade's own default-tier rows (U04): they are no
+# operator choice, so the recommendation never learns from them.
 V3_TABLES = {
     "film_plans": """CREATE TABLE film_plans (
         film_id TEXT NOT NULL REFERENCES films(film_id) ON DELETE RESTRICT,
@@ -378,6 +380,7 @@ V3_TABLES = {
         ltx_model TEXT CHECK(ltx_model IN ('standard','good','high')),
         machine TEXT NOT NULL REFERENCES workers(worker_id) ON DELETE RESTRICT,
         confirmed_at TEXT NOT NULL,
+        backfilled INTEGER NOT NULL DEFAULT 0 CHECK(backfilled IN (0,1)),
         PRIMARY KEY(film_id,input_revision),
         FOREIGN KEY(film_id,manifest_kind,input_revision)
             REFERENCES manifests(film_id,kind,revision) ON DELETE RESTRICT
@@ -578,19 +581,23 @@ def validate_schema(conn: sqlite3.Connection, *, version: int = SCHEMA_VERSION) 
 
 
 def _backfill_plans(conn: sqlite3.Connection) -> None:
-    """U04: restores that already ran keep running under a default-tier plan.
+    """U04 (operator decision IR02): a finished restore keeps its film past 待处理.
 
-    Only current-revision restore jobs with an attempt get one (its worker is
-    the machine); a never-claimed restore lands in 待处理 like any new film.
+    Only a current-revision restore that already succeeded gets a default-tier
+    plan (its last attempt's worker is the machine), marked `backfilled`. Every
+    other restore — never claimed, interrupted, failed or retrying, even with
+    attempts — stays unplanned: once pending it is in 待处理, where the operator
+    picks its tier, and nothing claims it before.
     """
     conn.execute(
-        "INSERT INTO film_plans (film_id,input_revision,ltx_model,machine,confirmed_at) "
-        "SELECT s.film_id,s.input_revision,?,a.worker_id,a.started_at FROM stages s "
+        "INSERT INTO film_plans "
+        "(film_id,input_revision,ltx_model,machine,confirmed_at,backfilled) "
+        "SELECT s.film_id,s.input_revision,?,a.worker_id,a.started_at,1 FROM stages s "
         "JOIN films f ON f.film_id=s.film_id AND f.current_input_revision=s.input_revision "
         "JOIN attempts a ON a.attempt_id=(SELECT l.attempt_id FROM attempts l "
         "WHERE l.job_id=s.job_id AND l.worker_id IS NOT NULL "
         "ORDER BY l.attempt_number DESC LIMIT 1) "
-        "WHERE s.stage='restore'",
+        "WHERE s.stage='restore' AND s.status='succeeded'",
         (BACKFILL_LTX_MODEL,),
     )
 

@@ -519,6 +519,30 @@ def film_facts(
     return replace(facts, poster_source=poster[1] if poster else None)
 
 
+def film_actors(rt: LocalRuntime, film: m.BoardFilm, revision: int) -> tuple[str, ...]:
+    """A film's actors as of one input revision, by `film_facts`' precedence:
+    final NFO > that revision's lookup > that revision's input NFO (IR04)."""
+    final = (
+        rt.store.get_final_manifest(rt.operator, film.film_id, film.final_revision)
+        if film.final_revision is not None
+        else None
+    )
+    try:
+        source = rt.store.get_input_manifest(rt.operator, film.film_id, revision)
+    except m.WorkflowError as exc:
+        if exc.code != "not_found":
+            raise
+        source = None
+    lookup = getattr(rt, "lookup", None)
+    found = _input_file(rt, source, "nfo") if source else None
+    return Facts.merge(
+        final=_read_nfo(_item_path(rt, final, "nfo")) if final else (None, (), None),
+        lookup=lookup.result(film.film_id, revision) if lookup else None,
+        input_nfo=_read_nfo(found[1] if found else None),
+        video=None,
+    ).actors
+
+
 def row_facts(rt: LocalRuntime, films: tuple[m.BoardFilm, ...]) -> dict[str, Facts]:
     """`film_facts` of every listed film (NFO reads are cached by mtime)."""
     return {film.film_id: film_facts(rt, film) for film in films}

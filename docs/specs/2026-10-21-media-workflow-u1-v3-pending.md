@@ -146,9 +146,10 @@
   - The tier lives only in settings, so it changes `config_digest`. `model` stays "ltx", so the single approved capability profile still matches the claim.
   - The model-download offer stores `(weights, ltx_model, fast)`. `recall_missing` infers the tier from file names.
   - A `needs_gpu=false` film uses the default cfg.
-- **U04. Existing films:**
-  - The migration backfills a default-tier plan only for current-revision restore jobs that already have an attempt.
-  - Never-claimed restores land in 待处理. On the operator's machine that is ABF-393 and ABF-394; this is intended.
+- **U04. Existing films (operator decision IR02, overrides the first draft's "already have an attempt"):**
+  - The migration backfills a default-tier plan only for films whose current-revision restore has status `succeeded`, i.e. films already past restore.
+  - Every other restore stays unplanned: never claimed, interrupted, failed or retrying, even with attempts. Once pending it is in 待处理, where the operator picks the tier, and nothing claims it before. On the operator's machine that is ABF-393 (interrupted) and ABF-394 (never claimed); this is intended.
+  - Backfilled rows carry `film_plans.backfilled = 1`. They are no operator choice, so the recommendation history leaves them out (IR03).
 - **V' (U07).**
   - `film_board` joins the plan. `_place` puts a film with a pending restore and no plan into a 「待处理」 group.
   - Rows carry `plan {ltx_model, machine}`, and the step line contains 待处理.
@@ -239,7 +240,7 @@ It has the row additions above (`resolution`, `plan`, `receipt_id`, `revisions`)
 
 | `error` | `message` |
 |---|---|
-| `cas_conflict` | 收件内容已更新，请重新查看后确认 (stale revision) |
+| `cas_conflict` | 收件内容已更新，请重新查看后确认 (a revision older or newer than the film's current one) |
 | `plan_exists` | 已确认，无需重复确认 |
 | `precondition_failed` | 当前状态不允许安排 |
 | `not_found` | 未知影片 |
@@ -252,7 +253,20 @@ It has the row additions above (`resolution`, `plan`, `receipt_id`, `revisions`)
 - Errors:
   - 503: Miko is not configured.
   - 404: unknown film.
-  - 409: a lookup is running, or the name has no number (`can_requery: false`).
+  - 409: a lookup is running, the name has no number (`can_requery: false`), or the film already has a final (its NFO names it).
+- A lookup cut short by an app stop caches nothing; the film reads `queued` again after the restart.
+- The cache `<work>/lookup/<film>-r<N>/` is reclaimed with the film's other work dirs after `cleanup_workcopy`.
+
+### Recommendation history
+
+- The history is every plan the operator confirmed. Backfilled plans (`film_plans.backfilled = 1`, below) are left out.
+- A past film's actors use the card's precedence for the plan's input revision: final NFO > lookup > input NFO.
+
+### Schema v3 migration (U04)
+
+- `film_plans` has `backfilled INTEGER NOT NULL DEFAULT 0 CHECK(backfilled IN (0,1))`. An operator's confirm writes 0.
+- The v2 → v3 upgrade inserts one `standard` plan with `backfilled = 1` for each film whose current-revision restore is `succeeded`. Its machine is that restore's last attempt worker.
+- No other film gets a plan. Pending, interrupted, failed or retrying restores, even with attempts, wait in 待处理 for the operator's tier.
 
 ### `POST /pause`
 

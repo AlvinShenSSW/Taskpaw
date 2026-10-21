@@ -248,6 +248,87 @@ def test_v2_upgrade_backfills_only_restores_that_already_ran(tmp_path):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
+def test_v2_upgrade_plans_only_finished_restores_not_interrupted_ones(tmp_path):
+    """IR02 (operator decision, overrides U04's "has an attempt"): only a restore
+    that already succeeded is past the tier choice. An interrupted restore,
+    even with an attempt, goes to 待处理 so the operator picks its tier."""
+    from taskpaw_v3.tests.test_workflow_local_dispatch import crash_mid_stage
+
+    first = runtime(tmp_path / "wf")
+    done = add_film(first)
+    d = dispatcher(first)
+    for _ in range(10):
+        if not d.run_once():
+            break
+    assert stage(first, done, "restore").status == "succeeded"
+    cut, crashing = crash_mid_stage(first)  # the app dies mid-restore
+    crashing.processes.terminate()
+    assert crashing.processes.settle(15)
+    as_v2(tmp_path / "wf" / "workflow.db")
+    again = runtime(tmp_path / "wf")
+    try:
+        plans = again.store.list_plans(again.operator)
+        assert [(p.film_id, p.ltx_model, p.backfilled) for p in plans] == [
+            (done, schema.BACKFILL_LTX_MODEL, True)
+        ]
+        assert [f.film_id for f in again.store.list_unplanned(again.operator)] == [cut]
+        job = stage(again, cut, "restore")
+        assert job.status == "pending"
+        assert len(again.store.list_attempts(again.operator, job.job_id)) == 1
+        d = dispatcher(again)
+        for _ in range(5):
+            d.run_once()
+        assert stage(again, cut, "restore").status == "pending"  # never claimed
+        assert len(again.store.list_attempts(again.operator, job.job_id)) == 1
+        confirm(again, cut, tier="high")  # the operator's tier
+        (plan,) = [p for p in again.store.list_plans(again.operator) if p.film_id == cut]
+        assert (plan.ltx_model, plan.backfilled) == ("high", False)
+        assert d.run_once() is True
+        assert stage(again, cut, "restore").status == "succeeded"
+    finally:
+        again.close()
+
+
+def test_a_backfilled_plan_is_not_an_operator_choice(tmp_path):
+    """IR03: the upgrade's default tier says nothing about the operator's taste,
+    so neither the film's next revision nor its actors' films recall it."""
+    from taskpaw_v3.tests.test_workflow_lookup import Profile, make
+    from taskpaw_v3.workflow.planning import plan_list
+
+    profile = Profile(tmp_path)
+    first = runtime(tmp_path / "wf")
+    old = add_film(first)
+    first.lookup = make(first, profile)
+    assert first.lookup.run_once() is True  # 演员甲, 演员乙
+    d = dispatcher(first)
+    for _ in range(10):
+        if not d.run_once():
+            break
+    assert stage(first, old, "restore").status == "succeeded"
+    first.close()
+    as_v2(tmp_path / "wf" / "workflow.db")
+    again = runtime(tmp_path / "wf")
+    try:
+        again.lookup = make(again, profile)
+        (plan,) = again.store.list_plans(again.operator)
+        assert plan.backfilled is True
+        same_actors = add_film(again, plan=False)
+        new_revision(again, old)
+        while again.lookup.run_once():
+            pass
+        reasons = {
+            entry["film_id"]: entry["recommendation"]["ltx_reason"]
+            for entry in plan_list(again)["plans"]
+        }
+        assert reasons == {old: "默认", same_actors: "默认"}
+        # an operator's own choice is history again
+        confirm(again, same_actors, tier="high")
+        (entry,) = plan_list(again)["plans"]
+        assert entry["recommendation"]["ltx_reason"] == "演员甲 上次选择 高"
+    finally:
+        again.close()
+
+
 def test_v2_upgrade_failure_keeps_the_v2_file(tmp_path, monkeypatch):
     rt = runtime(tmp_path / "wf")
     rt.close()

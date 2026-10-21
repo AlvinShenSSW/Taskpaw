@@ -222,8 +222,8 @@ class ReadCommands(WorkflowCore):
             if principal["role"] != "operator":
                 raise WorkflowError("forbidden")
             rows = self._conn.execute(
-                "SELECT film_id,input_revision,ltx_model,machine,confirmed_at "
-                "FROM film_plans ORDER BY confirmed_at,film_id,input_revision"
+                "SELECT film_id,input_revision,ltx_model,machine,confirmed_at,"
+                "backfilled FROM film_plans ORDER BY confirmed_at,film_id,input_revision"
             ).fetchall()
             return tuple(
                 FilmPlan(
@@ -232,6 +232,7 @@ class ReadCommands(WorkflowCore):
                     ltx_model=row[2],
                     machine=row[3],
                     confirmed_at=parse_time(row[4]),
+                    backfilled=bool(row[5]),
                 )
                 for row in rows
             )
