@@ -287,3 +287,17 @@ def test_new_databases_are_created_at_v3(rt):
     assert schema.SCHEMA_VERSION == 3
     assert "film_plans" in schema.TABLES
     assert STAGES  # imported policy stages still create every stage
+
+
+# ── pause (V3 §7.5) ──────────────────────────────────────────────────────
+def test_a_paused_dispatcher_claims_nothing_until_resumed(rt):
+    film = add_film(rt)
+    d = dispatcher(rt)
+    d.set_paused(True)
+    assert d.run_once() is False
+    status = d.status()
+    assert (status.state, status.paused) == ("paused", True)
+    assert stage(rt, film, "restore").status == "pending"
+    d.set_paused(False)
+    assert d.run_once() is True
+    assert d.status().paused is False

@@ -111,6 +111,7 @@ class DispatchStatus:
     reason: str
     current: dict[str, Any] | None
     waiting: dict[str, str] = field(default_factory=dict)
+    paused: bool = False
 
 
 def _limits(manifest: m.InputManifest) -> tuple[int, int]:
@@ -195,6 +196,9 @@ class LocalDispatcher:
         self._reason = "idle"
         self._backoff = False  # wait a poll before retrying a transient failure
         self._holding = False
+        # V3 §7.5: no new claims while paused; in-flight work and the finalizer
+        # carry on. In memory: a restart resumes dispatch.
+        self.paused = False
 
     # ── lifecycle ───────────────────────────────────────────────────────
     def start(self) -> None:
@@ -204,6 +208,10 @@ class LocalDispatcher:
         self._thread.start()
 
     def wake(self) -> None:
+        self._wake.set()
+
+    def set_paused(self, paused: bool) -> None:
+        self.paused = bool(paused)
         self._wake.set()
 
     def stop(self, timeout: float = 60.0) -> bool:
@@ -233,12 +241,14 @@ class LocalDispatcher:
                 if self._unsettled is not None
                 else "running"
                 if self._running is not None
+                else "paused"
+                if self.paused
                 else "idle"
             )
             waiting = dict(self._waiting)
             if self.finalizer is not None:
                 waiting.update(self.finalizer.waiting)
-            return DispatchStatus(state, self._reason, current, waiting)
+            return DispatchStatus(state, self._reason, current, waiting, self.paused)
 
     def reconcile_retries(self) -> None:
         """R3: make retries a crash lost between resolution and requeue."""
@@ -296,6 +306,11 @@ class LocalDispatcher:
             return False
         if not rt.reconciled and not rt.settle_previous(wait=0):
             self._reason = rt.reason
+            return False
+        if self.paused:
+            self._reason = "paused"
+            self._set_waiting({})
+            self._release()  # give up the GPU (or its queue place) while paused
             return False
         steps = self._steps()
         stages = _COMPUTE + tuple(steps) + tuple(self.off_reasons)
@@ -404,7 +419,7 @@ class LocalDispatcher:
             self._release_if_holding()
             self._reason = "本机 GPU 尚未登记"
             return False
-        tools = executor.tools()
+        tools = executor.tools(job)  # U1 P4': the planned tier, read once
         attempt = AttemptFile(
             attempt_id=_new_id(), operation_id=_new_id(), job_id=job.job_id
         )

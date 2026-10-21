@@ -106,7 +106,7 @@ class TranslateExecutor:
         self.poll, self.join_timeout = poll, join_timeout
 
     # ── contract ────────────────────────────────────────────────────────
-    def tools(self) -> m.ToolVersions:
+    def tools(self, job: m.PendingComputeJob | None = None) -> m.ToolVersions:
         return tool_versions(
             tool="taskpaw-translate",
             model="llm-chain",

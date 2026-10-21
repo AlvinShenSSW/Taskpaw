@@ -85,7 +85,9 @@ class StageExecutor(Protocol):
     stage: ComputeStage
     uses_gpu: bool  # default answer of needs_gpu(); executors may decide per film
 
-    def tools(self) -> ToolVersions: ...
+    def tools(self, job: PendingComputeJob | None = None) -> ToolVersions:
+        """The claim's record; `job` is the job to claim (None: the profile)."""
+        ...
 
     def max_resolution(self, vram_mib: int) -> tuple[int, int]: ...
 
@@ -111,7 +113,7 @@ class SyntheticExecutor:
         self.revision = revision
         self.runs: list[str] = []
 
-    def tools(self) -> ToolVersions:
+    def tools(self, job: PendingComputeJob | None = None) -> ToolVersions:
         return ToolVersions(
             tool="synthetic",
             tool_version="1",

@@ -16,6 +16,7 @@ from .exec_restore import RestoreExecutor
 from .exec_translate import TranslateExecutor
 from .executors import StageExecutor
 from .local_runtime import LocalRuntime
+from .lookup import MetadataLookup
 from .scrape_step import LocalScrapeStep
 
 log = logging.getLogger("taskpaw.workflow.pipeline")
@@ -50,6 +51,24 @@ def default_executors(
 
 
 MIKO_OFF = "未配置 Miko（mdcx_python / mdcx_root / mdcx_profile）"
+
+
+def default_lookup(
+    settings: WorkflowSettings,
+) -> Callable[[LocalRuntime], MetadataLookup] | None:
+    """The U1 metadata preview runs on the same Miko environment as scrape."""
+    if not (settings.mdcx_python and settings.mdcx_root and settings.mdcx_profile):
+        return None
+    python, root, profile = (
+        settings.mdcx_python,
+        settings.mdcx_root,
+        settings.mdcx_profile,
+    )
+
+    def build(runtime: LocalRuntime) -> MetadataLookup:
+        return MetadataLookup(runtime, python=python, root=root, profile=profile)
+
+    return build
 
 
 def default_scrape_step(settings: WorkflowSettings) -> LocalScrapeStep | None:

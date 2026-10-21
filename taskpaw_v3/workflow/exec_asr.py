@@ -97,7 +97,7 @@ class AsrExecutor:
         self.launch_prefix = tuple(launch_prefix)
 
     # ── contract ────────────────────────────────────────────────────────
-    def tools(self) -> m.ToolVersions:
+    def tools(self, job: m.PendingComputeJob | None = None) -> m.ToolVersions:
         return tool_versions(
             tool="whisperjav",
             model=self.engine,

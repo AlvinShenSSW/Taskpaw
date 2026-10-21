@@ -351,7 +351,7 @@ def test_parse_probe_ignores_cover_art_and_reads_the_format_duration():
 def test_tools_profile_is_stable_and_follows_the_settings(rt, tools):
     first = rt.executors["restore"].tools()
     assert (first.profile, first.profile_revision) == ("workflow-restore-ltx", 1)
-    # J2 (#283, D09): the tier's CLI name and the weights' precision
+    # J2 (D09): the weights' precision; U1 U05: the model is "ltx" for every tier
     assert (first.model, first.model_version) == ("ltx", "fast")
     same = tools.restore(rt).tools()
     assert same.config_digest == first.config_digest
@@ -410,26 +410,26 @@ def with_cfg(executor, **update):
 
 
 @pytest.mark.parametrize(
-    "tier, fast, model, version",
+    "tier, fast, version",
     [
-        ("standard", True, "ltx", "fast"),
-        ("good", False, "ltx-4step", "int8"),
-        ("high", True, "ltx-8step", "fast"),
+        ("standard", True, "fast"),
+        ("good", False, "int8"),
+        ("high", True, "fast"),
     ],
 )
-def test_tools_name_the_tier_cli_model_and_its_precision(
-    rt, tools, tier, fast, model, version
-):
+def test_tools_keep_one_model_and_name_the_precision(rt, tools, tier, fast, version):
+    """U1 U05: the tier is a setting (the digest), the model stays "ltx"."""
     executor = with_cfg(tools.restore(rt), ltx_model=tier, ltx_fast=fast)
     record = executor.tools()
-    assert (record.model, record.model_version) == (model, version)
+    assert (record.model, record.model_version) == ("ltx", version)
 
 
 def test_the_tier_picks_the_model_name_and_the_models_it_checks(rt, tools):
     """Only the standard tier is installed: high launches nothing and offers its
     own model file under the tier's variant text."""
     executor = with_cfg(tools.restore(rt), ltx_model="high")
-    run = run_direct(rt, single(rt), "restore", executor)
+    film = add_film(rt, [File("movie.mkv", video())], tier=None)  # the preset's
+    run = run_direct(rt, film, "restore", executor)
     assert run.outcome.message.startswith(MISSING_LTX)
     assert run.processes.children == []
     weights = tools.jasna_dir / "model_weights" / "ltx-restore"
@@ -442,7 +442,8 @@ def test_the_tier_picks_the_model_name_and_the_models_it_checks(rt, tools):
     )
     (weights / missing[0]).write_bytes(b"weights")
     assert executor.missing_models() is None
-    assert run_direct(rt, single(rt, "b.mkv"), "restore", executor).outcome.ok
+    other = add_film(rt, [File("b.mkv", video())], tier=None)
+    assert run_direct(rt, other, "restore", executor).outcome.ok
     (argv,) = tools.runs(tools.jasna_exe)
     assert argv[argv.index("--restoration-model-name") + 1] == "ltx-8step"
 

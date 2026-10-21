@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Literal, cast
+from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 
 from pydantic import SecretStr
 
@@ -32,6 +32,9 @@ from .local_clock import MonotonicWallClock, read_high_water
 from .local_gpu import FULL_HD, UHD, LocalGpu, machine_identity, query_gpu
 from .owned_process import own_identity, process_alive
 from .store import WorkflowStore
+
+if TYPE_CHECKING:
+    from .lookup import MetadataLookup
 
 log = logging.getLogger("taskpaw.workflow.runtime")
 
@@ -178,6 +181,8 @@ class LocalRuntime:
         self.reason = "starting"
         self.reconciled = False
         self.agent_identity = ""
+        # U1 L: the metadata preview the host attaches (None: Miko not configured)
+        self.lookup: MetadataLookup | None = None
 
     # ── opened state ────────────────────────────────────────────────────
     @staticmethod

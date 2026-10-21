@@ -47,8 +47,8 @@ class WaitsForRenewal:
     def __init__(self, base, in_flight):
         self.base, self.in_flight = base, in_flight
 
-    def tools(self):
-        return self.base.tools()
+    def tools(self, job=None):
+        return self.base.tools(job)
 
     def max_resolution(self, vram):
         return self.base.max_resolution(vram)

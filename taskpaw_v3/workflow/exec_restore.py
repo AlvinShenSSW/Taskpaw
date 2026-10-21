@@ -9,6 +9,11 @@ again. A failed LTX run is `needs_attention` and never relaunched (#265 D2).
 J2: the preset's Jasna 0.11.3 tier (`ltx_model`, #283) picks the model and its
 download, and — like the monitor (#285) — each video's launch is capped at its
 source bitrate (`jasna.probe_bitrate`, once per video; a retry reuses it).
+
+U1 P4': the film's confirmed plan carries its tier on the job (`ltx_model`),
+read once by the list that offered it; the claim's settings and the launch use
+it. The tier is a setting (a new config digest), never the tool identity: the
+record's `model` stays "ltx" so the single approved profile matches (U05).
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from pathlib import Path
 from typing import Literal
 
 from taskpaw_v3.monitors.plugins import jasna
+from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES
 from taskpaw_v3.monitors.plugins.jasna_presets import preset_catalogue
 from taskpaw_v3.monitors.plugins.jasna_progress import parse_jasna_progress_line
 
@@ -56,6 +62,7 @@ from .stage_results import (
 )
 
 PROFILE_ID = "workflow-restore-ltx"
+MODEL = "ltx"  # the record's model for every tier (U1 U05)
 TIER: jasna.Tier = "1080p"  # T04-P1 runs on the controller's 8 GB card only
 DURATION_SLACK_MS = 2000
 DURATION_SLACK_SHARE = 0.02
@@ -87,6 +94,13 @@ log = logging.getLogger("taskpaw.workflow.restore")
 def is_restored_name(name: str) -> bool:
     """Whether a file name is already a Jasna restore result (plugin rule)."""
     return name.casefold().endswith(_RESTORED_SUFFIXES)
+
+
+def needs_restore(manifest: m.InputManifest) -> bool:
+    """False only when every main video already is a restore result (D19)."""
+    return not all(
+        is_restored_name(input_name(video)) for video in main_videos(manifest)
+    )
 
 
 def workflow_jasna_config(gpu_id: str) -> jasna.JasnaConfig:
@@ -246,11 +260,12 @@ class RestoreExecutor:
         self._bitrate_failed: set[_BitrateKey] = set()
 
     # ── contract ────────────────────────────────────────────────────────
-    def tools(self) -> m.ToolVersions:
-        cfg = self.cfg
+    def tools(self, job: m.PendingComputeJob | None = None) -> m.ToolVersions:
+        """The claim's record; `job` brings the planned tier (None: the preset)."""
+        cfg = self._tier_cfg(job)
         return tool_versions(
             tool="jasna",
-            model=jasna.LTX_MODEL_NAMES[cfg.ltx_model],  # #283: the tier's CLI name
+            model=MODEL,  # U05: the tier is in `settings` (the digest) only
             # D09: not a tier. A setting, not a fact: a pre-Blackwell card runs
             # int8 although `ltx_fast` is on, so the record says "fast", not "nvfp4".
             model_version="fast" if cfg.ltx_fast else "int8",
@@ -270,9 +285,7 @@ class RestoreExecutor:
 
     def needs_gpu(self, manifest: m.InputManifest) -> bool:
         """False only when every main video already is a restore result (D19)."""
-        return not all(
-            is_restored_name(input_name(video)) for video in main_videos(manifest)
-        )
+        return needs_restore(manifest)
 
     def run(self, context: JobContext) -> ExecOutcome:
         return guarded(lambda: self._run(context))
@@ -301,19 +314,20 @@ class RestoreExecutor:
             return None
         return weights, missing, jasna._ltx_mode(cfg, fast, False)
 
-    def recall_missing(self, names: list[str]) -> None:
+    def recall_missing(self, names: list[str], tier: str | None = None) -> None:
         """Seed the offer from a persisted preflight failure after a restart.
 
-        Only while nothing is cached; never queries the GPU. The tier is the
-        launch config's, never the file names': a note written before an upgrade
-        can name a file that now belongs to another tier (3.9.18 moved
-        `distill8` to `high`), and the retry restores with the configured tier.
-        The fast and the int8 weights differ by suffix, so the names tell which.
-        When only shared VAE files were missing, the model preflight chose was
-        present, so the one installed tells (the configured choice if both or
-        neither are: an RTX 40 card runs int8 although `ltx_fast` is on)."""
-        cfg = self.cfg  # no film context at recall time: what preflight would use
-        tier = cfg.ltx_model
+        Only while nothing is cached; never queries the GPU. U1 P4': the tier
+        is the film's planned one (`tier`, what its retry restores with), else
+        the one whose model file the note names, else the preset's (only
+        shared files were missing). The fast and the int8 weights differ by
+        suffix, so the names tell which. When only shared VAE files were
+        missing, the model preflight chose was present, so the one installed
+        tells (the configured choice if both or neither are: an RTX 40 card runs
+        int8 although `ltx_fast` is on)."""
+        named = [key for key, name in MODEL_FILES.items() if name in names]
+        tier = tier or (named[0][0] if named else None) or self.cfg.ltx_model
+        cfg = self.cfg.model_copy(update={"ltx_model": tier})
         if any("-nvfp4" in name for name in names):
             fast = True
         elif any("-int8" in name for name in names):
@@ -330,12 +344,19 @@ class RestoreExecutor:
             if self._models is None:
                 self._models = (self._weights(), cfg, fast)
 
-    # ── per-film settings (U1 hook) ─────────────────────────────────────
+    # ── per-film settings (U1 P4') ──────────────────────────────────────
+    def _tier_cfg(self, job: m.PendingComputeJob | None) -> jasna.JasnaConfig:
+        """The preset with the job's planned tier; the preset itself without one
+        (a film that needs no restore, or no job at all)."""
+        tier = getattr(job, "ltx_model", None)
+        if not tier or tier == self.cfg.ltx_model:
+            return self.cfg
+        return self.cfg.model_copy(update={"ltx_model": tier})
+
     def _cfg_for(self, context: JobContext) -> jasna.JasnaConfig:
-        """The Jasna settings this film restores with. The single place a
-        per-film LTX tier (U1) plugs in; no film record carries one yet, so
-        every film uses the stage's preset (`self.cfg`)."""
-        return self.cfg
+        """The Jasna settings this film restores with: its planned tier, as
+        read with the job that the claim's `tools(job)` recorded."""
+        return self._tier_cfg(context.job)
 
     def _source_bitrate(
         self,

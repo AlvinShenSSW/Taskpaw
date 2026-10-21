@@ -29,8 +29,10 @@ from .finalize import Finalizer
 from .intake_protocol import ProbeArtifact
 from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
+from .lookup import MetadataLookup
 
 ExecutorFactory = Callable[[LocalRuntime], Sequence[StageExecutor]]
+LookupFactory = Callable[[LocalRuntime], MetadataLookup]
 
 log = logging.getLogger("taskpaw.workflow.host")
 
@@ -173,12 +175,17 @@ def retry_failed_stage(rt: LocalRuntime, film_id: str, stage: str) -> None:
 
 
 class WorkflowHostLike(Protocol):
-    """What the 媒体入库 control routes need from a host (T06-P1 D14)."""
+    """What the 媒体入库 control routes need from a host (T06-P1 D14).
+
+    U1: the 待处理 routes go through `runtime` (plans, the lookup cache on
+    `runtime.lookup`) and wake or pause `dispatcher`.
+    """
 
     state: str
     reason: str
     runtime: LocalRuntime | None
     finalizer: Finalizer | None
+    dispatcher: Any
 
     def status(self) -> dict[str, Any]: ...
 
@@ -228,7 +235,7 @@ def recall_missing_models(rt: LocalRuntime) -> None:
         ):
             continue
         names = [n.strip() for n in note[len(MISSING_LTX) :].split("、")]
-        recall([n for n in names if n])
+        recall([n for n in names if n], film.plan_ltx_model)  # U1: the film's tier
         return
 
 
@@ -244,8 +251,11 @@ class LocalWorkflowHost:
         return_step: ReturnStep | None = None,
         scrape_step: ReturnStep | None = None,
         off_reasons: dict[str, str] | None = None,
+        lookup_factory: LookupFactory | None = None,
     ) -> None:
         self.settings, self.data_dir, self.executors = settings, data_dir, executors
+        self.lookup_factory = lookup_factory
+        self.lookup: MetadataLookup | None = None
         self.intake_policy = intake_policy
         self.executor_factory, self.return_step = executor_factory, return_step
         self.scrape_step, self.off_reasons = scrape_step, off_reasons
@@ -321,6 +331,9 @@ class LocalWorkflowHost:
             if self._stopping.is_set():
                 return
             self.dispatcher.start()
+            if self.lookup_factory is not None:  # U1 L: off the dispatch thread
+                self.lookup = rt.lookup = self.lookup_factory(rt)
+                self.lookup.start()
             self.state, self.reason = "running", rt.reason
         except Exception as exc:  # never fatal to the agent (C4)
             log.exception("media workflow failed to start")
@@ -356,6 +369,8 @@ class LocalWorkflowHost:
             confirmed = False
         if self.dispatcher is not None:
             confirmed &= self.dispatcher.stop(timeout=timeout)
+        if self.lookup is not None:
+            confirmed &= self.lookup.stop(timeout=min(timeout, 30.0))
         if self.intake is not None:
             try:
                 confirmed &= bool(self.intake.stop(timeout=min(timeout, 30.0)))
@@ -378,6 +393,25 @@ class LocalWorkflowHost:
         if self.dispatcher is not None:
             self.dispatcher.wake()
         return approval_id
+
+    def plans(self) -> dict[str, Any]:
+        """待处理 (U1 P3'): the unplanned films and their recommendations."""
+        if self.runtime is None:
+            raise RuntimeError("媒体流水线尚未启动")
+        from .planning import plan_list
+
+        return plan_list(self.runtime)
+
+    def confirm_plans(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """确认入队: one result per item; a confirmed plan wakes the dispatcher."""
+        if self.runtime is None:
+            raise RuntimeError("媒体流水线尚未启动")
+        from .planning import confirm_plans
+
+        results = confirm_plans(self.runtime, items)
+        if self.dispatcher is not None and any(r["ok"] for r in results):
+            self.dispatcher.wake()
+        return results
 
     def retry(self, film_id: str, stage: str) -> None:
         """Requeue a failed local stage (T06-P1 D05); WorkflowError when it is not one."""
@@ -480,6 +514,7 @@ class LocalWorkflowHost:
                 "reason": dispatch.reason,
                 "current": dispatch.current,
                 "waiting": dispatch.waiting,
+                "paused": dispatch.paused,
             }
         return value
 
@@ -501,7 +536,12 @@ def start_local_workflow(
     if executors:
         host = LocalWorkflowHost(settings, data_dir, executors)
     else:  # the shipped pipeline (T04 E9): tools from agent.yaml, local return
-        from .pipeline import MIKO_OFF, default_executors, default_scrape_step
+        from .pipeline import (
+            MIKO_OFF,
+            default_executors,
+            default_lookup,
+            default_scrape_step,
+        )
         from .return_step import LocalReturnStep
 
         host = LocalWorkflowHost(
@@ -511,6 +551,7 @@ def start_local_workflow(
             return_step=LocalReturnStep(),
             scrape_step=default_scrape_step(settings),
             off_reasons={"scrape": MIKO_OFF},
+            lookup_factory=default_lookup(settings),
         )
     host.start()
     return host
