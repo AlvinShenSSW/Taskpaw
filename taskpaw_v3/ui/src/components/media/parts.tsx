@@ -7,7 +7,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { api, type WorkflowStep } from "../../api";
 import {
-  currentStep, heartbeatText, isRestoring, lifecycle, ltxOf, restoreLive, restoreStep, SPLIT_LABEL, STATUS_META, STEP_LABEL,
+  currentStep, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL, STATUS_META,
+  STEP_LABEL,
   stageLine, type ChipTone, type RestoreLive, type StatusKey, type WorkItem,
 } from "./mediaModel";
 import { useNow } from "./useNow";
@@ -156,7 +157,7 @@ const ELLIPSIS = { minWidth: 0, maxWidth: "100%", overflow: "hidden", textOverfl
 
 // U1c: the running 修复 step before LTX — Jasna loading, the auto split's mosaic scan, BasicVSR++.
 function RestorePhaseBlock({ title, live, beat }: { title: string; live: RestoreLive; beat: string }) {
-  const heartbeat = <div className="stage-detail" data-testid="restore-heartbeat"><span className="mono">{beat}</span></div>;
+  const heartbeat = <><Heartbeat beat={beat} /><ParamsLine live={live} /></>;
   if (live.phase === "scan" && live.scan) {
     const scan = live.scan;
     return (
@@ -203,8 +204,19 @@ function RestorePhaseBlock({ title, live, beat }: { title: string; live: Restore
     <>
       <div className="film-stage"><strong className="t-green" data-testid="restore-heartbeat">{beat}</strong></div>
       <div className="stage-detail"><span className={live.split ? undefined : "mono"} style={ELLIPSIS} title={detail}>{detail}</span></div>
+      <ParamsLine live={live} />
     </>
   );
+}
+
+const Heartbeat = ({ beat }: { beat: string }) =>
+  <div className="stage-detail" data-testid="restore-heartbeat"><span className="mono">{beat}</span></div>;
+
+// 「标准 · nvfp4 · 上限 12.2 Mbps」: this film's launch in one line (U1c).
+function ParamsLine({ live }: { live: RestoreLive | null }) {
+  if (!live?.params) return null;
+  const line = paramSummary(live.params);
+  return <div className="stage-detail" data-testid="restore-params"><span style={ELLIPSIS} title={line}>{line}</span></div>;
 }
 
 // The stage block (§3): LTX shows only this stage's percent, counts and rate; others one line.
@@ -238,7 +250,8 @@ export function StageBlock({ item }: { item: WorkItem }) {
           <span className="mono">{ltx?.current ?? "—"} / {ltx?.total ?? "—"} {unit}</span>
           <span className="mono">{ltx?.rate_value ? `${ltx.rate_value} ${ltx.rate_unit ?? ""}` : "—"}</span>
         </div>
-        {beat && <div className="stage-detail" data-testid="restore-heartbeat"><span className="mono">{beat}</span></div>}
+        {beat && <Heartbeat beat={beat} />}
+        <ParamsLine live={live} />
       </>
     );
   }

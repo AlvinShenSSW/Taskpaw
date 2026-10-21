@@ -233,7 +233,16 @@ export type StepState = "done" | "running" | "waiting" | "failed" | "pending";
 export interface WorkflowStep {
   key: StepKey; state: StepState; note: string | null; progress: unknown;
   ltx?: Record<string, unknown> | null; current_file?: string | null; download?: Record<string, unknown> | null;
-  started_at?: string | null; console?: string | null;
+  started_at?: string | null; console?: string | null; params?: RestoreParams | null;
+}
+// U1c: the effective Jasna launch of the running video, read from its argv (paths cut to names).
+export interface RestoreParams {
+  ltx_model: LtxTier | null; model_name: string | null; fast: boolean; precision: "nvfp4" | "int8";
+  auto_split: number; large_canvas: boolean; overlap: "auto" | "on" | "off"; codec: string | null; cq: number | null;
+  match_source_bitrate: boolean; maxrate_bps: number | null; source_bitrate_bps: number | null;
+  detection_model: string | null; clip_size: number | null; temporal_overlap: number | null; tier: string;
+  source_width: number | null; source_height: number | null; gpu: string | null; gpu_vram_mib: number | null;
+  preset: string; argv: string;
 }
 // H2 R2/R2a: an INBOX package that is not a film yet. The backend sends codes; the UI owns the labels.
 export interface PackageRow {

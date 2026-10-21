@@ -1,7 +1,7 @@
 // 媒体处理中心 V3: the status vocabulary (build spec §3) and how a backend row maps onto it.
 // Pure functions only; the components and tests share them.
 import type {
-  FilmRow, LtxTier, PackageRow, StepKey, TargetPreflight, WorkflowFilms, WorkflowStep,
+  FilmRow, LtxTier, PackageRow, RestoreParams, StepKey, TargetPreflight, WorkflowFilms, WorkflowStep,
 } from "../../api";
 import { plainText, readLtxProgress, record, type LtxSnapshot } from "../ltxProgress.helpers";
 import {
@@ -117,6 +117,7 @@ export interface RestoreLive {
   basic: BasicSnapshot | null;
   ltx: LtxSnapshot | null;
   metrics: Record<string, unknown>; // the step's parse state, for the shared progress cards
+  params: RestoreParams | null;
 }
 
 export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null {
@@ -129,7 +130,66 @@ export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null 
   const console = plainText(step.console ?? metrics.console, 300)?.trim() || null;
   const started = typeof step.started_at === "string" ? Date.parse(step.started_at) : NaN;
   const phase: RestorePhase = ltx ? "ltx" : scan ? "scan" : basic ? "basic" : split ? "split" : console ? "working" : "starting";
-  return { phase, startedAt: Number.isFinite(started) ? started : null, console, split, scan, basic, ltx, metrics };
+  const params = readParams(step.params ?? metrics.params);
+  return { phase, startedAt: Number.isFinite(started) ? started : null, console, split, scan, basic, ltx, metrics, params };
+}
+
+// ── 本片参数 (U1c): the effective launch, read defensively ──────────────
+const int = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
+const text = (v: unknown, limit = 128) => plainText(v, limit)?.trim() || null;
+
+export function readParams(value: unknown): RestoreParams | null {
+  if (!record(value)) return null;
+  const argv = text(value.argv, 4096);
+  if (!argv) return null;
+  const tier = TIER_ORDER.find((t) => t === value.ltx_model) ?? null;
+  const overlap = value.overlap === "on" || value.overlap === "off" ? value.overlap : "auto";
+  return {
+    ltx_model: tier, model_name: text(value.model_name), fast: value.fast === true,
+    precision: value.fast === true ? "nvfp4" : "int8", auto_split: int(value.auto_split) ?? 0,
+    large_canvas: value.large_canvas === true, overlap, codec: text(value.codec), cq: int(value.cq),
+    match_source_bitrate: value.match_source_bitrate === true, maxrate_bps: int(value.maxrate_bps),
+    source_bitrate_bps: int(value.source_bitrate_bps), detection_model: text(value.detection_model),
+    clip_size: int(value.clip_size), temporal_overlap: int(value.temporal_overlap), tier: text(value.tier) ?? "1080p",
+    source_width: int(value.source_width), source_height: int(value.source_height), gpu: text(value.gpu),
+    gpu_vram_mib: int(value.gpu_vram_mib), preset: text(value.preset) ?? "", argv,
+  };
+}
+
+const mbps = (bps: number) => `${(bps / 1e6).toFixed(1)} Mbps`;
+const ON_OFF = (on: boolean) => (on ? "开" : "关");
+const OVERLAP: Record<RestoreParams["overlap"], string> = { auto: "自动", on: "开", off: "关" };
+
+export function capText(p: RestoreParams): string {
+  if (p.maxrate_bps !== null) {
+    return `${mbps(p.maxrate_bps)}${p.source_bitrate_bps !== null ? `（原片 ${mbps(p.source_bitrate_bps)}）` : ""}`;
+  }
+  return p.match_source_bitrate ? "未读到原片码率，按 Jasna 默认上限" : "按 Jasna 默认上限";
+}
+
+// The labelled rows of the drawer's 「本片参数」 block.
+export function paramRows(p: RestoreParams): Array<[string, string]> {
+  const quality = p.ltx_model ? TIER_SHORT[p.ltx_model] : "—";
+  const size = p.source_width !== null && p.source_height !== null ? `${p.source_width}×${p.source_height} · ` : "";
+  return [
+    ["画质", `${quality}（${p.model_name ?? "—"}）`],
+    ["快速模式", p.precision],
+    ["自动拆分", p.auto_split > 0 ? `${p.auto_split}%` : "关"],
+    ["大画布", ON_OFF(p.large_canvas)],
+    ["减少重叠", OVERLAP[p.overlap]],
+    ["编码", `${(p.codec ?? "—").toUpperCase()} · CQ ${p.cq ?? "—"}`],
+    ["码率上限", capText(p)],
+    ["检测", p.detection_model ?? "—"],
+    ["片段 / 重叠", `${p.clip_size ?? "—"} / ${p.temporal_overlap ?? "—"}`],
+    ["输入", `${size}${p.tier} 档`],
+    ["GPU", [p.gpu, fmtVram(p.gpu_vram_mib)].filter(Boolean).join(" ") || "—"],
+  ];
+}
+
+// The queue card's one line: 「标准 · nvfp4 · 上限 12.2 Mbps」.
+export function paramSummary(p: RestoreParams): string {
+  const cap = p.maxrate_bps !== null ? `上限 ${mbps(p.maxrate_bps)}` : "默认码率上限";
+  return [p.ltx_model ? TIER_SHORT[p.ltx_model] : null, p.precision, cap].filter(Boolean).join(" · ");
 }
 
 // 「已用」: mm:ss under an hour, else h:mm:ss; a clock ahead of the start reads 00:00.

@@ -2,11 +2,11 @@
 // latest console line) above the phase's card: the mosaic scan, BasicVSR++, then the Jasna
 // monitor's own LtxProgress, unchanged.
 import { Box, Typography } from "@mui/material";
-import type { WorkflowStep } from "../../api";
+import type { RestoreParams, WorkflowStep } from "../../api";
 import { LtxProgress } from "../LtxProgress";
 import { ConsoleFold, DATA, ProgressFrame } from "../progressParts";
 import { BasicVsrProgress, MosaicScanProgress } from "../RestorePhaseProgress";
-import { heartbeatText, restoreLive, SPLIT_LABEL, SPLIT_NOTE, type RestoreLive } from "./mediaModel";
+import { heartbeatText, paramRows, restoreLive, SPLIT_LABEL, SPLIT_NOTE, type RestoreLive } from "./mediaModel";
 import { useNow } from "./useNow";
 
 function phaseLabel(live: RestoreLive): string {
@@ -26,6 +26,25 @@ const PULSE = {
   animation: "restore-beat 1.6s ease-in-out infinite",
   "@media (prefers-reduced-motion: reduce)": { animation: "none" },
 } as const;
+
+// 「本片参数」: what Jasna was launched with for this video, and the full command to copy.
+function ParamsBlock({ params }: { params: RestoreParams }) {
+  return (
+    <ProgressFrame testId="restore-params" label="本片参数" title="本片参数" position={params.preset ? `预设 ${params.preset}` : undefined}>
+      <Box component="dl" sx={{ m: 0, px: { xs: 2, sm: 3 }, py: 2, display: "flex", flexWrap: "wrap", gap: 1 }}>
+        {paramRows(params).map(([label, value]) => (
+          <Box key={label} data-param={label} sx={{ display: "inline-flex", alignItems: "baseline", gap: 0.75, minWidth: 0,
+            maxWidth: "100%", px: 1.25, py: 0.5, border: "1px solid", borderColor: "divider", borderRadius: 1.5,
+            bgcolor: "background.default" }}>
+            <Typography component="dt" variant="caption" color="text.secondary">{label}</Typography>
+            <Typography component="dd" sx={{ ...DATA, m: 0, fontSize: 12 }}>{value}</Typography>
+          </Box>
+        ))}
+      </Box>
+      <ConsoleFold raw={params.argv} title="完整命令" help="启动 Jasna 的完整命令（路径只保留文件名）" testIdPrefix="restore-argv" />
+    </ProgressFrame>
+  );
+}
 
 export function RestoreLivePanel({ step }: { step: WorkflowStep }) {
   const live = restoreLive(step);
@@ -57,6 +76,7 @@ export function RestoreLivePanel({ step }: { step: WorkflowStep }) {
             testIdPrefix="restore-console" />
         )}
       </ProgressFrame>
+      {live.params && <ParamsBlock params={live.params} />}
       {live.phase === "ltx" && <LtxProgress metrics={live.metrics} />}
       {live.phase === "scan" && <MosaicScanProgress metrics={live.metrics} />}
       {live.phase === "basic" && <BasicVsrProgress metrics={live.metrics} />}

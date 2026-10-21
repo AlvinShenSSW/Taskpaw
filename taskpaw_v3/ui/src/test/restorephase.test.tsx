@@ -11,7 +11,7 @@ import { RestoreLivePanel } from "../components/media/RestoreLivePanel";
 import { setLang } from "../i18n";
 import { theme } from "../theme";
 import {
-  BASIC_LINE, LTX_LINE, RESTORE_PHASES, restoreSteps, row, SCAN_LINE, type RestorePhaseKey,
+  BASIC_LINE, LTX_LINE, PARAMS, RESTORE_PHASES, restoreSteps, row, SCAN_LINE, type RestorePhaseKey,
 } from "./fixtures/mediaWorkspace";
 
 const wrap = (ui: ReactNode) => render(<ThemeProvider theme={theme}><div className="mw">{ui}</div></ThemeProvider>);
@@ -158,6 +158,48 @@ describe("drawer 修复 section", () => {
     expect(screen.getByTestId("restore-heartbeat")).toHaveTextContent("LTX 2/4 encode");
     act(() => { vi.advanceTimersByTime(60_000); });
     expect(screen.getByTestId("restore-heartbeat")).toHaveTextContent("已用 02:05");
+  });
+});
+
+describe("本片参数", () => {
+  const param = (label: string) => document.querySelector(`[data-param="${label}"]`)?.textContent;
+
+  it("the drawer lists this film's effective launch and the full command", () => {
+    wrap(<RestoreLivePanel step={step("ltx")} />);
+    const block = screen.getByTestId("restore-params");
+    expect(within(block).getByText("本片参数")).toBeInTheDocument();
+    expect(within(block).getByText("预设 5060-8")).toBeInTheDocument();
+    expect(param("画质")).toBe("画质标准（ltx）");
+    expect(param("快速模式")).toBe("快速模式nvfp4");
+    expect(param("自动拆分")).toBe("自动拆分12%");
+    expect(param("大画布")).toBe("大画布关");
+    expect(param("减少重叠")).toBe("减少重叠自动");
+    expect(param("编码")).toBe("编码HEVC · CQ 20");
+    expect(param("码率上限")).toBe("码率上限12.2 Mbps（原片 12.2 Mbps）");
+    expect(param("检测")).toBe("检测rfdetr-v6");
+    expect(param("片段 / 重叠")).toBe("片段 / 重叠90 / 8");
+    expect(param("输入")).toBe("输入1920×1080 · 1080p 档");
+    expect(param("GPU")).toBe("GPUNVIDIA GeForce RTX 5070 Ti 16 GB");
+    expect(within(block).getByTestId("restore-argv-toggle")).toHaveTextContent("完整命令");
+    expect(within(block).getByTestId("restore-argv-raw").textContent).toBe(PARAMS.argv);
+  });
+
+  it("says so when the source bitrate could not be read", () => {
+    const params = { ...PARAMS, ltx_model: "high" as const, model_name: "ltx-8step", fast: false, maxrate_bps: null, source_bitrate_bps: null };
+    wrap(<RestoreLivePanel step={{ ...step("starting"), params }} />);
+    expect(param("码率上限")).toBe("码率上限未读到原片码率，按 Jasna 默认上限");
+    expect(param("画质")).toBe("画质高（ltx-8step）");
+    expect(param("快速模式")).toBe("快速模式int8");
+  });
+
+  it("drops a payload without a command and strips terminal controls", () => {
+    expect(restoreLive({ ...step("scan"), params: { ...PARAMS, argv: "" } })?.params).toBeNull();
+    expect(restoreLive({ ...step("scan"), params: { ...PARAMS, gpu: "[31mRTX[0m" } })?.params?.gpu).toBe("RTX");
+  });
+
+  it.each(["starting", "scan", "basic", "ltx"] as const)("the %s queue card shows the one-line summary", (phase) => {
+    wrap(<StageBlock item={item(phase)} />);
+    expect(screen.getByTestId("restore-params")).toHaveTextContent("标准 · nvfp4 · 上限 12.2 Mbps");
   });
 });
 
