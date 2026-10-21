@@ -656,6 +656,53 @@ def test_recall_missing_infers_the_tier_and_the_variant(tmp_path):
         rt.close()
 
 
+def test_a_pre_tier_note_is_recalled_with_the_films_planned_tier(tmp_path, monkeypatch):
+    """A note persisted before the tiers (3.9.18) names distill8's files; after
+    a restart the offer is for the tier the film's retry restores with (its
+    plan), never the one the old names imply. A film without a plan never got
+    this far: its restore is not claimable (U1 P1')."""
+    from taskpaw_v3.monitors.plugins import jasna
+    from taskpaw_v3.tests.workflow_exec_helpers import (
+        File,
+        Tools,
+        add_film,
+        dispatcher,
+        runtime,
+        stage,
+        video,
+    )
+    from taskpaw_v3.workflow.exec_common import MISSING_LTX
+
+    tools = Tools(tmp_path / "tools")
+    shutil.rmtree(tools.jasna_dir / "model_weights")
+    rt = runtime(tmp_path / "wf", tools)
+    try:
+        film = add_film(rt, [File("ABF-394.mp4", video())], tier="standard")
+        old = [
+            "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc",
+            "vae.safetensors.enc",
+        ]
+        with monkeypatch.context() as patch:  # the pre-3.9.18 executor's preflight
+            patch.setattr(jasna, "ltx_missing_files", lambda *a, **k: list(old))
+            assert dispatcher(rt).run_once() is True
+        assert stage(rt, film, "restore").status == "failed"
+        (row,) = rt.store.film_board(rt.operator, film_id=film)
+        note = next(s.note for s in row.stages if s.stage == "restore")
+        assert note == MISSING_LTX + "、".join(old)
+        # the restarted host: a fresh executor, nothing cached
+        rt.executors["restore"] = tools.restore(
+            rt, gpus=lambda: pytest.fail("GPU queried")
+        )
+        local_host.recall_missing_models(rt)
+        _, cfg, fast = rt.executors["restore"]._models
+        assert (cfg.ltx_model, fast) == ("standard", True)
+        _, missing, _ = rt.executors["restore"].missing_models()
+        assert "ltx-restore-alpha1-distill2-nvfp4.safetensors.enc" in missing
+        assert not any("distill8" in name for name in missing)
+    finally:
+        rt.close()
+
+
 def test_a_download_can_be_stopped_and_is_offered_again(offered):
     from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, stage, video
 
