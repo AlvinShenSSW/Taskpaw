@@ -67,7 +67,24 @@ def jasna(argv: list[str]) -> int:
     return 0
 
 
+def bitrate_probe(argv: list[str]) -> int:
+    """`jasna.bitrate_probe_args` (the video is the last argument): the fake
+    video's `bit_rate`, none without one; `bitrate_hang` never answers (J2)."""
+    try:
+        facts = json.loads(Path(argv[-1]).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        sys.stderr.write(f"{argv[-1]}: Invalid data found when processing input\n")
+        return 1
+    if facts.get("bitrate_hang"):
+        time.sleep(120)
+    stream = {"bit_rate": str(facts["bit_rate"])} if "bit_rate" in facts else {}
+    print(json.dumps({"streams": [stream], "format": {}}, indent=4))
+    return 0
+
+
 def ffprobe(argv: list[str]) -> int:
+    if "-select_streams" in argv:
+        return bitrate_probe(argv)
     path = Path(_option(argv, "-i"))
     try:
         facts = json.loads(path.read_text(encoding="utf-8"))

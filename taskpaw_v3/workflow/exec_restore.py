@@ -8,7 +8,10 @@ again. A failed LTX run is `needs_attention` and never relaunched (#265 D2).
 
 J2: the preset's Jasna 0.11.3 tier (`ltx_model`, #283) picks the model and its
 download, and — like the monitor (#285) — each video's launch is capped at its
-source bitrate (`jasna.probe_bitrate`, once per video; a retry reuses it).
+source bitrate (`probe_source_bitrate`, once per video; a retry reuses it). The
+probe is Jasna's own (`jasna.bitrate_probe_args` / `parse_bitrate`) but runs
+inside the attempt's Job like `probe_video`: a stop ends it, and it gets
+`BITRATE_PROBE_SECONDS` before it reads as unknown.
 
 U1 P4': the film's confirmed plan carries its tier on the job (`ltx_model`),
 read once by the list that offered it; the claim's settings and the launch use
@@ -24,6 +27,7 @@ import math
 import os
 import shutil
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -78,6 +82,9 @@ FFPROBE_ARGS = (
     "json",
 )
 _TAIL_LINES = 8
+# The monitor's own bound for one bitrate probe (`jasna._PROBE_TIMEOUT`).
+BITRATE_PROBE_SECONDS = 5.0
+_BITRATE_POLL = 0.05
 
 # The plugin's restored names (#187): `<stem>-破解.mp4`, legacy `<stem>_restored.mp4`.
 _RESTORED_SUFFIXES = tuple(
@@ -218,10 +225,51 @@ def ffprobe_command(value: str | Sequence[str] | None) -> list[str] | None:
     return list(value) or None
 
 
-def bitrate_ffprobe(command: Sequence[str] | None) -> str | None:
-    """The executable `jasna.probe_bitrate` runs: only a plain ffprobe path (an
-    argv prefix such as a test fake reads as unknown — no cap)."""
-    return command[0] if command and len(command) == 1 else None
+def probe_source_bitrate(
+    processes: OwnedJob,
+    ffprobe: Sequence[str] | None,
+    path: Path,
+    cwd: Path,
+    cancel: threading.Event,
+    timeout: float = BITRATE_PROBE_SECONDS,
+) -> int | None:
+    """#285 C8: the source bitrate in bits/s by Jasna's order, probed inside
+    the attempt's Job like `probe_video`. None on any failure (no cap): no
+    ffprobe, a launch error, a non-zero exit, no rate, or no exit within
+    `timeout` seconds (that child is killed). A stop kills it and raises
+    `cancelled()`."""
+    if ffprobe is None:
+        return None
+    lines: list[str] = []
+    lock = threading.Lock()
+
+    def on_line(stream: str, text: str) -> None:
+        if stream == "stdout":
+            with lock:
+                lines.append(text)
+
+    try:
+        child = processes.launch(
+            [*ffprobe, *jasna.bitrate_probe_args(path)], cwd=str(cwd), on_line=on_line
+        )
+    except OSError as exc:
+        log.debug("workflow restore: bitrate ffprobe did not start: %s", exc)
+        return None
+    deadline = time.monotonic() + timeout
+    while (code := child.poll()) is None:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            child.kill()
+            log.debug("workflow restore: bitrate ffprobe timed out for %s", path)
+            return None
+        if cancel.wait(min(_BITRATE_POLL, left)):
+            child.kill()
+            raise cancelled()
+    child.wait()  # the output readers finish
+    if code != 0:
+        return None
+    with lock:
+        return jasna.parse_bitrate("\n".join(lines))
 
 
 class RestoreExecutor:
@@ -375,7 +423,9 @@ class RestoreExecutor:
         with self._bitrates_lock:
             if key in self._bitrates:
                 return self._bitrates[key]
-        bitrate = jasna.probe_bitrate(source, bitrate_ffprobe(self.ffprobe))
+        bitrate = probe_source_bitrate(
+            context.processes, self.ffprobe, source, context.workdir, context.cancel
+        )
         with self._bitrates_lock:
             self._drop_stale_revisions(key)
             if bitrate is not None:

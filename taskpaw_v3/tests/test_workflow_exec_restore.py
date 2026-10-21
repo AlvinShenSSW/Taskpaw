@@ -17,21 +17,29 @@ from taskpaw_v3.tests.workflow_exec_helpers import (
     add_film,
     attempts,
     dispatcher,
+    fake,
     manifest,
     run_direct,
     runtime,
     stage,
     video,
 )
-from taskpaw_v3.workflow.exec_common import MISSING_LTX
+from taskpaw_v3.workflow import exec_restore
+from taskpaw_v3.workflow.exec_common import MISSING_LTX, StageFailure
 from taskpaw_v3.workflow.exec_restore import (
     RestoreExecutor,
     is_restored_name,
     parse_probe,
+    probe_source_bitrate,
     progress_text,
 )
 from taskpaw_v3.workflow.executors import failed_kind
+from taskpaw_v3.workflow.owned_process import OwnedJob
 from taskpaw_v3.workflow.stage_results import StageResult, check_file, load_stage_result
+
+# conftest replaces the module's probe for every test; this is the real one.
+REAL_BITRATE_PROBE = probe_source_bitrate
+FAKE_FFPROBE = fake("ffprobe")
 
 
 @pytest.fixture
@@ -476,16 +484,16 @@ def test_a_per_film_config_hook_decides_the_tier_of_that_film(rt, tools):
 
 @pytest.fixture
 def bitrates(monkeypatch):
-    """A fake `jasna.probe_bitrate`: records each probe; answers the next of
-    `answers` (the last one repeats)."""
+    """A fake `probe_source_bitrate`: records each probe's video and the Job it
+    ran in; answers the next of `answers` (the last one repeats)."""
     box = {"answers": [45_200_000], "calls": []}
 
-    def probe(video, ffprobe):
-        box["calls"].append((video, ffprobe))
+    def probe(processes, ffprobe, video, cwd, cancel):
+        box["calls"].append((video, processes))
         answers = box["answers"]
         return answers.pop(0) if len(answers) > 1 else answers[0]
 
-    monkeypatch.setattr(jasna, "probe_bitrate", probe)
+    monkeypatch.setattr(exec_restore, "probe_source_bitrate", probe)
     return box
 
 
@@ -501,7 +509,8 @@ def test_the_launch_is_capped_at_the_source_bitrate(rt, tools, bitrates):
     (argv,) = tools.runs(tools.jasna_exe)
     assert encoder_settings(argv) == ["maxrate=45200000,qmax=51"]
     assert argv.index("--encoder-settings") > argv.index("--restoration-model-name")
-    assert [video for video, _ in bitrates["calls"]] == [source]
+    # probed inside the attempt's Job, like probe_video (J2 Codex r2 P2)
+    assert bitrates["calls"] == [(source, run.processes)]
     (only,) = ledger(run).videos
     assert only.restore.maxrate == 45_200_000
 
@@ -560,7 +569,7 @@ def test_a_new_input_revision_drops_the_films_older_probes(rt, tools, bitrates):
 
     def probe(film_id, revision):
         job = SimpleNamespace(film_id=film_id, input_revision=revision)
-        context = SimpleNamespace(job=job)
+        context = SimpleNamespace(job=job, processes=None, workdir=None, cancel=None)
         item = SimpleNamespace(item_id="v1")
         return executor._source_bitrate(context, executor.cfg, item, source)
 
@@ -607,11 +616,111 @@ def test_a_reused_video_is_never_probed(rt, tools, bitrates):
     assert only.restore.maxrate is None
 
 
-def test_the_bitrate_probe_gets_a_plain_ffprobe_path_only():
-    """`jasna.probe_bitrate` runs one executable: an argv prefix (the tests'
-    interpreter + script fake) reads as unknown."""
-    from taskpaw_v3.workflow.exec_restore import bitrate_ffprobe
+# ── J2 Codex r2 P2: the probe is an owned, cancel-aware, bounded child ──────
+def bitrate_video(tmp_path, name="a.mkv", **facts):
+    path = tmp_path / name
+    path.write_text(json.dumps({**json.loads(video()), **facts}), encoding="utf-8")
+    return path
 
-    assert bitrate_ffprobe(["C:/ff/ffprobe.exe"]) == "C:/ff/ffprobe.exe"
-    assert bitrate_ffprobe(["python", "fake.py", "ffprobe"]) is None
-    assert bitrate_ffprobe(None) is None
+
+@pytest.fixture
+def job():
+    launched: list[str] = []
+    value = OwnedJob(on_launch=launched.append)
+    value.launched = launched  # type: ignore[attr-defined]
+    try:
+        yield value
+    finally:
+        value.terminate()
+        value.settle(10)
+
+
+def exited(child, seconds=5.0):
+    deadline = time.monotonic() + seconds
+    while child.poll() is None:
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def test_the_bitrate_probe_runs_in_the_attempts_job(tmp_path, tools, job):
+    path = bitrate_video(tmp_path, bit_rate=45_200_000)
+    rate = REAL_BITRATE_PROBE(job, FAKE_FFPROBE, path, tmp_path, threading.Event())
+    assert rate == 45_200_000
+    assert len(job.children) == 1 and len(job.launched) == 1
+    assert exec_restore.BITRATE_PROBE_SECONDS == 5.0  # the monitor's own bound
+
+
+def test_a_stop_ends_a_hanging_bitrate_probe_promptly(tmp_path, tools, job):
+    path = bitrate_video(tmp_path, bit_rate=1, bitrate_hang=True)
+    cancel = threading.Event()
+    timer = threading.Timer(0.5, cancel.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(StageFailure) as caught:
+            REAL_BITRATE_PROBE(job, FAKE_FFPROBE, path, tmp_path, cancel, timeout=60)
+    finally:
+        timer.cancel()
+    assert caught.value.outcome.error_class == "cancelled"
+    assert time.monotonic() - started < 3
+    (child,) = job.children
+    assert exited(child)  # killed by the probe, not by the Job's teardown
+
+
+def test_a_hanging_bitrate_probe_gives_up_at_its_bound(tmp_path, tools, job):
+    path = bitrate_video(tmp_path, bit_rate=1, bitrate_hang=True)
+    started = time.monotonic()
+    rate = REAL_BITRATE_PROBE(
+        job, FAKE_FFPROBE, path, tmp_path, threading.Event(), timeout=0.5
+    )
+    assert rate is None and time.monotonic() - started < 3
+    (child,) = job.children
+    assert exited(child)
+
+
+def test_a_failed_bitrate_probe_reads_as_unknown(tmp_path, tools, job):
+    cancel = threading.Event()
+    no_rate = bitrate_video(tmp_path)
+    assert REAL_BITRATE_PROBE(job, FAKE_FFPROBE, no_rate, tmp_path, cancel) is None
+    broken = tmp_path / "broken.mkv"
+    broken.write_bytes(b"not a video")  # ffprobe exits 1
+    assert REAL_BITRATE_PROBE(job, FAKE_FFPROBE, broken, tmp_path, cancel) is None
+    missing = [str(tmp_path / "no-such-ffprobe.exe")]
+    assert REAL_BITRATE_PROBE(job, missing, no_rate, tmp_path, cancel) is None
+    assert REAL_BITRATE_PROBE(job, None, no_rate, tmp_path, cancel) is None
+    assert len(job.children) == 2
+
+
+def test_a_stop_during_the_bitrate_probe_stops_the_restore(rt, tools, monkeypatch):
+    monkeypatch.setattr(exec_restore, "probe_source_bitrate", REAL_BITRATE_PROBE)
+    hanging = json.dumps({**json.loads(video()), "bitrate_hang": True}).encode()
+    film = single(rt, data=hanging)
+    cancel = threading.Event()
+    timer = threading.Timer(0.5, cancel.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        run = run_direct(rt, film, "restore", cancel=cancel)
+    finally:
+        timer.cancel()
+    assert run.outcome.error_class == "cancelled"
+    assert time.monotonic() - started < 5
+    assert tools.runs(tools.jasna_exe) == []  # Jasna never started
+
+
+def test_a_real_probe_without_a_bitrate_adds_no_cap_and_warns_once(
+    rt, tools, monkeypatch, caplog
+):
+    monkeypatch.setattr(exec_restore, "probe_source_bitrate", REAL_BITRATE_PROBE)
+    tools.set_jasna(mode="fail")
+    film = single(rt)
+    with caplog.at_level("WARNING", logger="taskpaw.workflow.restore"):
+        assert not run_direct(rt, film, "restore").outcome.ok
+        tools.set_jasna()
+        run = run_direct(rt, film, "restore")
+    assert run.outcome.ok, run.outcome.message
+    assert all(encoder_settings(argv) == [] for argv in tools.runs(tools.jasna_exe))
+    warnings = [r for r in caplog.records if "bitrate" in r.getMessage()]
+    assert len(warnings) == 1

@@ -126,6 +126,24 @@ class Child:
             self._exit = code
         return code
 
+    def kill(self) -> None:
+        """End this process only (a probe past its bound); the rest of the
+        attempt's Job runs on. A process that already exited is left alone."""
+        if self._job.closed or self.poll() is not None:
+            return
+        if sys.platform == "win32":
+            try:
+                self._job._api.kill(self._handle)
+            except OSError:  # exited meanwhile
+                pass
+            return
+        import signal
+
+        try:
+            os.killpg(self._handle.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
     def wait(
         self, cancel: threading.Event | None = None, poll: float = 0.2
     ) -> int | None:

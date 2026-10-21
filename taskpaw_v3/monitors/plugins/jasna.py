@@ -518,43 +518,29 @@ def _positive_int(value: Any) -> Optional[int]:
     return n if n > 0 else None
 
 
-def probe_bitrate(video: Path, ffprobe: Optional[str]) -> Optional[int]:
-    """#285 C8: the source video bitrate in bits/s, or None on ANY failure.
+def bitrate_probe_args(video: Path) -> list[str]:
+    """The ffprobe arguments (after the executable) of `probe_bitrate`; the
+    workflow's restore runs the same probe inside its attempt's Job (J2)."""
+    return [
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=bit_rate:stream_tags=BPS,BPS-eng:format=bit_rate",
+        "-of",
+        "json",
+        str(video),
+    ]
+
+
+def parse_bitrate(stdout: str) -> Optional[int]:
+    """The bitrate in bits/s from `bitrate_probe_args`' JSON, or None.
     Jasna 0.11.3's own order (`media/probe.py`): the first video stream's
     `bit_rate`, then its `BPS` / `BPS-eng` tags (Matroska), then the container's
-    `bit_rate`. A second ffprobe call, so `probe_resolution` stays as it is."""
-    if not ffprobe:
-        return None
+    `bit_rate`."""
     try:
-        # shell=False (list argv) — constitution §2.
-        out = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=bit_rate:stream_tags=BPS,BPS-eng:format=bit_rate",
-                "-of",
-                "json",
-                str(video),
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=_PROBE_TIMEOUT,
-            creationflags=_NO_WINDOW,
-        )
-    except (OSError, subprocess.SubprocessError) as e:
-        # debug: the caller (`_probe_bitrate`) logs the one warning per file
-        log.debug("jasna: ffprobe (bitrate) failed for %s: %s", video, e)
-        return None
-    if out.returncode != 0:
-        return None
-    try:
-        doc = json.loads(out.stdout or "")
+        doc = json.loads(stdout or "")
     except ValueError:
         return None
     if not isinstance(doc, dict):
@@ -578,6 +564,31 @@ def probe_bitrate(video: Path, ffprobe: Optional[str]) -> Optional[int]:
         if rate is not None:
             return rate
     return None
+
+
+def probe_bitrate(video: Path, ffprobe: Optional[str]) -> Optional[int]:
+    """#285 C8: the source video bitrate in bits/s (`parse_bitrate`), or None
+    on ANY failure. A second ffprobe call, so `probe_resolution` stays as it is."""
+    if not ffprobe:
+        return None
+    try:
+        # shell=False (list argv) — constitution §2.
+        out = subprocess.run(
+            [ffprobe, *bitrate_probe_args(video)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_PROBE_TIMEOUT,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        # debug: the caller (`_probe_bitrate`) logs the one warning per file
+        log.debug("jasna: ffprobe (bitrate) failed for %s: %s", video, e)
+        return None
+    if out.returncode != 0:
+        return None
+    return parse_bitrate(out.stdout)
 
 
 def plan_queue(

@@ -67,10 +67,15 @@ def _no_real_bitrate_probe(monkeypatch):
     launch would run ffprobe for the source bitrate — against the fake
     `tools/ffprobe` the tests write. The probe reports "unknown" (no
     --encoder-settings, as before) unless a test patches `probe_bitrate`; its
-    own tests keep a reference to the real function."""
+    own tests keep a reference to the real function. The workflow restore's
+    owned-process probe (J2) is replaced the same way."""
     from taskpaw_v3.monitors.plugins import jasna
+    from taskpaw_v3.workflow import exec_restore
 
     monkeypatch.setattr(jasna, "probe_bitrate", lambda video, ffprobe: None)
+    monkeypatch.setattr(
+        exec_restore, "probe_source_bitrate", lambda *args, **kwargs: None
+    )
 
 
 def tasklog_rows(kind=None):
