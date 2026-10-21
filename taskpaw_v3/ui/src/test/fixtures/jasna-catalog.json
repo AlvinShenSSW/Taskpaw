@@ -209,7 +209,7 @@
       },
       "cq": {
         "default": 20,
-        "description": "Constant-quality level (--cq), 0-63. Lower = better quality and a bigger file. With 'Output bitrate follows the source' on, a lower cq lets the source-tied ceiling, not cq, decide the size: the output approaches the source size and never exceeds it. Applies to every output codec; a low cq on av1 is bound by the ceiling too. 20 is the default (24 before TaskPaw 3.9.18); Jasna's own default is 28.",
+        "description": "Constant-quality level (--cq), 0-63. Lower = better quality and a bigger file. With 'Output bitrate follows the source' on, a lower cq lets the source-tied ceiling, not cq, decide the size: the output is about the source size, capped at its bitrate. Applies to every output codec; a low cq on av1 is bound by the ceiling too. 20 is the default (24 before TaskPaw 3.9.18); Jasna's own default is 28.",
         "maximum": 63,
         "minimum": 0,
         "title": "Cq",
@@ -217,7 +217,7 @@
       },
       "match_source_bitrate": {
         "default": true,
-        "description": "Every launch (LTX or not) caps the output at 1.0x the source video's bitrate, whatever the codec: TaskPaw reads it with ffprobe and passes --encoder-settings maxrate=<source>,qmax=51, so the restored file keeps about the source's size and never exceeds its bitrate. Jasna's own cap allows up to 2x for H.264 output, which LTX auto-split writes for an H.264 source. NVIDIA GPUs only: AMD HEVC/AV1 encode at a constant QP and ignore the cap. When the bitrate cannot be read, nothing is added and Jasna's own cap applies. While on, --encoder-settings is rejected in the extra args.",
+        "description": "Every launch (LTX or not) caps the output at 1.0x the source video's bitrate, whatever the codec: TaskPaw reads it with ffprobe and passes --encoder-settings maxrate=<source>,qmax=51, so the restored file is about the source's size, capped at its bitrate (the container fallback includes audio; maxrate is a peak limit). Jasna's own cap allows up to 2x for H.264 output, which LTX auto-split writes for an H.264 source. NVIDIA GPUs only: on an AMD GPU turn this off (Jasna rejects these settings there). When the bitrate cannot be read, nothing is added and Jasna's own cap applies. While on, --encoder-settings is rejected in the extra args.",
         "title": "Output bitrate follows the source",
         "type": "boolean"
       },

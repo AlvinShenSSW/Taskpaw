@@ -257,12 +257,12 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     cq: {
       title: "画质 CQ",
       description:
-        "恒定质量参数（--cq，0–63），对所有输出编码都生效。数值越小画质越好、文件越大。开启「输出码率跟随原片」时，cq 调低后决定文件大小的是跟随原片的码率上限而不是 cq：输出接近原片大小、不会超过原片；av1 用低 cq 时同样受这个上限约束。默认 20（TaskPaw 3.9.18 之前是 24）；Jasna 自己的默认是 28。",
+        "恒定质量参数（--cq，0–63），对所有输出编码都生效。数值越小画质越好、文件越大。开启「输出码率跟随原片」时，cq 调低后决定文件大小的是跟随原片的码率上限而不是 cq：输出约等于原片大小、以原片码率为上限；av1 用低 cq 时同样受这个上限约束。默认 20（TaskPaw 3.9.18 之前是 24）；Jasna 自己的默认是 28。",
     },
     match_source_bitrate: {
       title: "输出码率跟随原片",
       description:
-        "每次启动（不论是否 LTX）都把输出码率上限设为原片视频码率的 1.0 倍，所有编码都一样：TaskPaw 用 ffprobe 读出原片码率，传 --encoder-settings maxrate=<原片码率>,qmax=51，修复后的文件大小接近原片、码率不超过原片。Jasna 自己的上限对 H.264 输出可到 2 倍，而「LTX 仅用于大马赛克」会把 H.264 原片重新编码为 H.264。只对 NVIDIA 显卡有效：AMD 的 HEVC/AV1 用固定 QP 编码，会忽略这个上限。读不到原片码率时不加参数，沿用 Jasna 自己的上限。开启时额外参数里的 --encoder-settings 会被拒绝。",
+        "每次启动（不论是否 LTX）都把输出码率上限设为原片视频码率的 1.0 倍，所有编码都一样：TaskPaw 用 ffprobe 读出原片码率，传 --encoder-settings maxrate=<原片码率>,qmax=51，修复后的文件大小约等于原片，以原片码率为上限（容器码率回退时含音频，maxrate 是峰值限制）。Jasna 自己的上限对 H.264 输出可到 2 倍，而「LTX 仅用于大马赛克」会把 H.264 原片重新编码为 H.264。只对 NVIDIA 显卡有效：qmax=51 不是 AMD（AMF）的编码器设置，Jasna 会拒绝，AMD 显卡上请关闭本选项。读不到原片码率时不加参数，沿用 Jasna 自己的上限。开启时额外参数里的 --encoder-settings 会被拒绝。",
     },
     detection_model: {
       title: "检测模型",

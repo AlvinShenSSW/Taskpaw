@@ -164,8 +164,10 @@ def test_ltx_launches_carry_the_cap_after_the_ltx_options():
     ],
 )
 def test_encoder_settings_in_extra_args_is_rejected_while_on(extra):
+    # explicitly on (the key present) is rejected; a config without the key is a
+    # 3.9.17 one and gets the option off instead (review F1, tests below)
     with pytest.raises(ValueError, match="match_source_bitrate"):
-        _cfg(jasna_extra_args=extra)
+        _cfg(jasna_extra_args=extra, match_source_bitrate=True)
     assert _cfg(jasna_extra_args=extra, match_source_bitrate=False)
 
 
@@ -208,6 +210,73 @@ def test_migration_maps_the_tier_and_cq_together_without_mutating():
     stored = {"name": "j", "ltx_best": True, "cq": 24}
     assert J.migrate_legacy_ltx(stored) == {"name": "j", "ltx_model": "high", "cq": 20}
     assert stored == {"name": "j", "ltx_best": True, "cq": 24}
+
+
+# ── #285 review F1: a 3.9.17 config with its own --encoder-settings keeps it ─
+_ENC = "--encoder-settings preset=p7"
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"jasna_extra_args": _ENC},
+        {"jasna_extra_args": "--encoder-settings=preset=p7", "ltx_best": True},
+        {"jasna_extra_args": "--device cuda:1 --encoder preset=p7", "cq": 24},
+        {"jasna_extra_args": _ENC, "ltx_model": "top"},
+    ],
+)
+def test_a_legacy_config_with_encoder_settings_validates_with_the_option_off(stored):
+    cfg = _cfg(**stored)
+    assert cfg.match_source_bitrate is False
+    assert cfg.jasna_extra_args == stored["jasna_extra_args"]
+    migrated = J.migrate_legacy_ltx({"name": "j", **stored})
+    assert migrated["match_source_bitrate"] is False
+
+
+def test_the_legacy_default_applies_only_without_the_key_and_with_the_flag():
+    assert "match_source_bitrate" not in J.migrate_legacy_ltx({"name": "j"})
+    plain = {"name": "j", "jasna_extra_args": "--device cuda:1"}
+    assert J.migrate_legacy_ltx(plain) == plain
+    assert _cfg(jasna_extra_args="--device cuda:1").match_source_bitrate is True
+    stored = {"name": "j", "jasna_extra_args": _ENC}
+    J.migrate_legacy_ltx(stored)
+    assert stored == {"name": "j", "jasna_extra_args": _ENC}  # never mutated
+
+
+def test_an_explicit_match_with_encoder_settings_is_still_rejected():
+    with pytest.raises(ValueError, match="--encoder-settings"):
+        _cfg(jasna_extra_args=_ENC, match_source_bitrate=True)
+    with pytest.raises(ValueError, match="--encoder-settings"):
+        _cfg(jasna_extra_args=_ENC, match_source_bitrate=True, ltx_best=True)
+    # an explicit off stays off
+    assert _cfg(jasna_extra_args=_ENC, match_source_bitrate=False).jasna_extra_args
+
+
+def test_the_supervisor_builds_a_3917_yaml_with_encoder_settings(tmp_path):
+    from taskpaw_v3.core.config import AgentConfig, load_yaml
+    from taskpaw_v3.core.protocol import EventQueue
+    from taskpaw_v3.monitors.registry import default_registry
+    from taskpaw_v3.monitors.runtime import build_supervisor
+
+    path = tmp_path / "agent.yaml"
+    path.write_text(
+        "server_id: s\nmachine: m\nhost_metrics: false\nmonitors:\n"
+        "  - type_id: jasna\n    name: E\n"
+        "    config: {name: E, ltx_best: false, cq: 24,"
+        " jasna_extra_args: '--encoder-settings preset=p7'}\n"
+        "  - type_id: jasna\n    name: P\n    config: {name: P}\n",
+        encoding="utf-8",
+    )
+    config = load_yaml(AgentConfig, path)
+    sup = build_supervisor(default_registry(), config.monitors, EventQueue("m"), "m")
+    try:
+        assert set(sup._monitors) == {"E", "P"}  # nothing aborted the agent
+        enc = sup._monitors["E"].instance.config
+        assert enc.match_source_bitrate is False and enc.cq == 20
+        assert enc.jasna_extra_args == "--encoder-settings preset=p7"
+        assert sup._monitors["P"].instance.config.match_source_bitrate is True
+    finally:
+        sup.stop(timeout=1)
 
 
 # ── C8: the mode / label text ────────────────────────────────────────────────
@@ -320,6 +389,38 @@ def test_with_the_option_off_nothing_is_probed(tmp_path, monkeypatch, caplog):
         assert not [r for r in caplog.records if "source bitrate" in r.getMessage()]
     finally:
         inst.stop(timeout=0.5)
+
+
+def test_an_unreadable_resolution_skips_the_bitrate_probe(tmp_path, monkeypatch):
+    # #285 review F4: the file is unreachable — a second 5 s probe would only
+    # delay the 1080p-tier fallback launch
+    cfg, inp, _out, _home = _managed(tmp_path)
+    _videos(inp, "a.mp4")
+    calls: list[str] = []
+    launcher = _Launcher([None])
+    _patch(monkeypatch, launcher, probe=lambda video, ffprobe: None)
+    monkeypatch.setattr(
+        J, "probe_bitrate", lambda video, ffprobe: calls.append("x") or _B
+    )
+    inst = JasnaInstance("j1", cfg)
+    _evs, emit = _events()
+    inst.start(emit)
+    try:
+        assert launcher.inputs() == ["a.mp4"]  # still launched, on the 1080p tier
+        assert calls == []
+        assert "--encoder-settings" not in launcher.launches[0]
+    finally:
+        inst.stop(timeout=0.5)
+
+
+def test_a_failed_ffprobe_warns_once_from_the_caller_only(monkeypatch, caplog):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("ffprobe", 5)
+
+    monkeypatch.setattr(J.subprocess, "run", boom)
+    with caplog.at_level("WARNING", logger="taskpaw.monitors.jasna"):
+        assert _REAL_PROBE_BITRATE(Path("a.mp4"), "ffprobe") is None
+    assert not caplog.records  # the per-file warning is the caller's (`_probe_bitrate`)
 
 
 def test_the_tickbox_sits_next_to_codec_and_cq():

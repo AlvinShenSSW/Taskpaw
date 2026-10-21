@@ -196,6 +196,62 @@ def test_editor_explicit_standard_saves_standard(tmp_path):
     assert stored["ltx_model"] == "standard" and "ltx_best" not in stored
 
 
+def _legacy_editor(tmp_path, **stored) -> tuple[MonitorAdmin, Path]:
+    path = tmp_path / "agent.yaml"
+    config = AgentConfig(
+        server_id="s",
+        machine="m",
+        host_metrics=False,
+        monitors=[
+            {
+                "type_id": "jasna",
+                "name": "J",
+                "config": {"name": "J", "ltx_best": False, "cq": 24, **stored},
+            }
+        ],
+    )
+    return MonitorAdmin(config, None, default_registry(), path), path
+
+
+def _saved(path: Path) -> dict:
+    return load_yaml(AgentConfig, path).monitors[0]["config"]
+
+
+def test_patch_merges_onto_the_migrated_config_so_an_explicit_cq_24_stays(tmp_path):
+    # #285 review F2: the raw legacy ltx_best must not survive the merge and turn
+    # the operator's explicit cq 24 into 20
+    admin, path = _legacy_editor(tmp_path)
+    admin.update("J", {"cq": 24})
+    stored = _saved(path)
+    assert stored["cq"] == 24 and "ltx_best" not in stored
+    assert stored["ltx_model"] == "standard"
+
+
+def test_a_full_form_save_with_cq_24_keeps_24(tmp_path):
+    admin, path = _legacy_editor(tmp_path)
+    admin.update("J", {**_form(_shown(admin)), "cq": 24})
+    assert _saved(path)["cq"] == 24
+
+
+def test_an_untouched_full_form_save_keeps_the_shown_cq_20(tmp_path):
+    admin, path = _legacy_editor(tmp_path)
+    shown = _shown(admin)
+    assert shown["cq"] == 20
+    admin.update("J", _form(shown))
+    stored = _saved(path)
+    assert stored["cq"] == 20 and "ltx_best" not in stored
+
+
+def test_patch_keeps_a_legacy_best_tier_and_a_3917_encoder_setting(tmp_path):
+    admin, path = _legacy_editor(
+        tmp_path, ltx_best=True, jasna_extra_args="--encoder-settings preset=p7"
+    )
+    admin.update("J", {"cq": 22})
+    stored = _saved(path)
+    assert stored["ltx_model"] == "high" and stored["cq"] == 22
+    assert stored["match_source_bitrate"] is False
+
+
 # ── C3: every caller follows the setting ─────────────────────────────────────
 @pytest.mark.parametrize("tier", _TIERS)
 @pytest.mark.parametrize("fast", [False, True])

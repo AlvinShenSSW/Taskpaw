@@ -671,8 +671,15 @@ class MonitorAdmin:
         accepted = False
         try:
             spec = copy.deepcopy(original)
+            # #285 review F2: merge onto what the editor SHOWED (the plugin's
+            # `migrate_config`), not the raw legacy dict — a surviving `ltx_best`
+            # would make the validator turn an explicit cq 24 into 20.
+            stored = spec.get("config") or {}
+            type_id = spec.get("type_id")
+            if isinstance(type_id, str) and self._reg.has(type_id):
+                stored = self._reg.get(type_id).migrate_config(stored)
             spec["config"] = {
-                **(spec.get("config") or {}),
+                **stored,
                 **body.get("config", {}),
                 "name": iid,
             }

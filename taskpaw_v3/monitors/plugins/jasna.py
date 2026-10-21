@@ -52,9 +52,12 @@ video bitrate B is probed with ffprobe next to its resolution (Jasna's own order
 the stream, its BPS / BPS-eng tags, the container) and every launch, LTX or not,
 passes `--encoder-settings maxrate=B,qmax=51`: a 1.0x ceiling for every codec
 (Jasna's own cap reaches 2x for H.264 output, which LTX auto-split writes for an
-H.264 source). NVIDIA only — AMD HEVC/AV1 encode at constant QP and ignore it. A
-failed probe adds nothing — Jasna's own cap applies — and logs one warning per
-file.
+H.264 source). NVIDIA only — qmax=51 is not an AMD (AMF) encoder setting, so Jasna
+rejects the flag there: turn the option off on an AMD GPU. The cap bounds the
+bitrate (the container fallback includes audio; maxrate is a peak limit), so the
+file ends up about the source's size. A failed probe adds nothing — Jasna's own cap
+applies — and logs one warning per file. A 3.9.17 config (no such key) whose
+extra args already set `--encoder-settings` keeps it and loads with the option off.
 
 Passive mode (no exe path) just watches an externally-running `jasna` process,
 exactly like lada's passive mode.
@@ -239,11 +242,21 @@ def migrate_legacy_ltx(raw: Any) -> Any:
     else standard; an `ltx_model` already present wins. #285 C9: the key marks a
     pre-3.9.18 config, whose cq 24 (the old default) moves to 20 as well. #285
     V03: the top tier of an unreleased four-tier build becomes high. Other input
-    is returned as is."""
+    is returned as is. #285 review F1: a 3.9.17 config never had
+    `match_source_bitrate`, and its own `--encoder-settings` extra arg was allowed
+    then — it keeps the flag and gets the option off instead of failing to boot
+    (an explicit `match_source_bitrate` is never touched)."""
     if not isinstance(raw, dict):
         return raw
     if raw.get("ltx_model") == "top":
         raw = {**raw, "ltx_model": "high"}
+    extra = raw.get("jasna_extra_args")
+    if (
+        "match_source_bitrate" not in raw
+        and isinstance(extra, str)
+        and encoder_settings_in(extra)
+    ):
+        raw = {**raw, "match_source_bitrate": False}
     if "ltx_best" not in raw:
         return raw
     out = dict(raw)
@@ -294,7 +307,7 @@ _VR8K_OWNED_FLAGS = ("--vr-mode", "--detection-model-path")
 _BITRATE_OWNED_FLAG = "--encoder-settings"
 _CAP_QMAX = 51  # #285: NVENC's own ceiling, above Jasna's default qmax 34
 
-_PROBE_TIMEOUT = 5.0  # fits the supervisor's 5s stop / 10s reconfigure budgets
+_PROBE_TIMEOUT = 5.0  # one probe fits the supervisor's 10s reconfigure budget
 _ORPHAN_STAGING_AGE = 60.0  # don't sweep a staging file another run may be writing
 _ABORT_AFTER_FAILURES = 3
 _DEFAULT_DETECTION_MODEL = "rfdetr-v6"
@@ -535,7 +548,8 @@ def probe_bitrate(video: Path, ffprobe: Optional[str]) -> Optional[int]:
             creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError) as e:
-        log.warning("jasna: ffprobe (bitrate) failed for %s: %s", video, e)
+        # debug: the caller (`_probe_bitrate`) logs the one warning per file
+        log.debug("jasna: ffprobe (bitrate) failed for %s: %s", video, e)
         return None
     if out.returncode != 0:
         return None
@@ -1406,7 +1420,7 @@ class JasnaConfig(BaseMonitorConfig):
         description="Constant-quality level (--cq), 0-63. Lower = better quality "
         "and a bigger file. With 'Output bitrate follows the source' on, a lower "
         "cq lets the source-tied ceiling, not cq, decide the size: the output "
-        "approaches the source size and never exceeds it. Applies to every output "
+        "is about the source size, capped at its bitrate. Applies to every output "
         "codec; a low cq on av1 is bound by the ceiling too. 20 is the default (24 "
         "before TaskPaw 3.9.18); Jasna's own default is 28.",
     )
@@ -1416,10 +1430,11 @@ class JasnaConfig(BaseMonitorConfig):
         description="Every launch (LTX or not) caps the output at 1.0x the source "
         "video's bitrate, whatever the codec: TaskPaw reads it with ffprobe and "
         "passes --encoder-settings maxrate=<source>,qmax=51, so the restored file "
-        "keeps about the source's size and never exceeds its bitrate. Jasna's own "
+        "is about the source's size, capped at its bitrate (the container fallback "
+        "includes audio; maxrate is a peak limit). Jasna's own "
         "cap allows up to 2x for H.264 output, which LTX auto-split writes for an "
-        "H.264 source. NVIDIA GPUs only: AMD HEVC/AV1 encode at a constant QP and "
-        "ignore the cap. When the bitrate cannot be read, nothing is added and "
+        "H.264 source. NVIDIA GPUs only: on an AMD GPU turn this off (Jasna rejects "
+        "these settings there). When the bitrate cannot be read, nothing is added and "
         "Jasna's own cap applies. While on, --encoder-settings is rejected in the "
         "extra args.",
     )
@@ -2540,7 +2555,13 @@ class JasnaInstance(MonitorInstance):
             else:
                 dims = probe_resolution(nxt, self._ffprobe)
                 tier = tier_for(*dims) if dims else "1080p"
-                bitrate = self._probe_bitrate(nxt)
+                # F4: an unreachable file (no resolution) or a stop in flight
+                # gets no second probe — it would only add another 5 s.
+                bitrate = (
+                    self._probe_bitrate(nxt)
+                    if dims is not None and not self._stopping.is_set()
+                    else None
+                )
             # Let the previous reader drain after its process exits. The join
             # is bounded; _launch_locked fences any reader that outlives it.
             prev_reader = self._reader
