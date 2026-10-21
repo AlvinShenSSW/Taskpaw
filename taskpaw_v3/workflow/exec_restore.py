@@ -238,9 +238,12 @@ class RestoreExecutor:
         self._models_lock = threading.Lock()
         self._models: tuple[Path, jasna.JasnaConfig, bool] | None = None
         # J2 (#285): each pending video's probed source bitrate, kept until the
-        # film's restore succeeds so a retry of the stage launches with the same cap
+        # film's restore succeeds so a retry of the stage launches with the same cap.
+        # Only successful probes are kept; a failed one is probed again on the
+        # next attempt and its key only silences the repeated warning.
         self._bitrates_lock = threading.Lock()
-        self._bitrates: dict[_BitrateKey, int | None] = {}
+        self._bitrates: dict[_BitrateKey, int] = {}
+        self._bitrate_failed: set[_BitrateKey] = set()
 
     # ── contract ────────────────────────────────────────────────────────
     def tools(self) -> m.ToolVersions:
@@ -248,7 +251,9 @@ class RestoreExecutor:
         return tool_versions(
             tool="jasna",
             model=jasna.LTX_MODEL_NAMES[cfg.ltx_model],  # #283: the tier's CLI name
-            model_version="nvfp4" if cfg.ltx_fast else "int8",  # D09: not a tier
+            # D09: not a tier. A setting, not a fact: a pre-Blackwell card runs
+            # int8 although `ltx_fast` is on, so the record says "fast", not "nvfp4".
+            model_version="fast" if cfg.ltx_fast else "int8",
             profile=PROFILE_ID,
             settings={
                 "gpu": self.gpu_id,
@@ -299,15 +304,16 @@ class RestoreExecutor:
     def recall_missing(self, names: list[str]) -> None:
         """Seed the offer from a persisted preflight failure after a restart.
 
-        Only while nothing is cached; never queries the GPU. The variant comes
-        from the file names: a tier's model file names it (#283; the configured
-        tier otherwise), and the fast and the int8 weights differ by suffix.
+        Only while nothing is cached; never queries the GPU. The tier is the
+        launch config's, never the file names': a note written before an upgrade
+        can name a file that now belongs to another tier (3.9.18 moved
+        `distill8` to `high`), and the retry restores with the configured tier.
+        The fast and the int8 weights differ by suffix, so the names tell which.
         When only shared VAE files were missing, the model preflight chose was
         present, so the one installed tells (the configured choice if both or
         neither are: an RTX 40 card runs int8 although `ltx_fast` is on)."""
-        tiers = {name: tier for (tier, _), name in jasna._LTX_MODEL_FILES.items()}
-        tier = next((tiers[n] for n in names if n in tiers), self.cfg.ltx_model)
-        cfg = self.cfg.model_copy(update={"ltx_model": tier})
+        cfg = self.cfg  # no film context at recall time: what preflight would use
+        tier = cfg.ltx_model
         if any("-nvfp4" in name for name in names):
             fast = True
         elif any("-int8" in name for name in names):
@@ -340,7 +346,8 @@ class RestoreExecutor:
     ) -> int | None:
         """#285 C8: the source bitrate this video's launch is capped at, probed
         once while `match_source_bitrate` is on. A retry of the same video (same
-        input revision) reuses it — a failed probe too, so it warns once."""
+        input revision) reuses a successful probe; a failed one (a transient
+        ffprobe timeout) is probed again, and warns only the first time."""
         if not cfg.match_source_bitrate:
             return None
         key = (context.job.film_id, context.job.input_revision, video.item_id)
@@ -348,15 +355,34 @@ class RestoreExecutor:
             if key in self._bitrates:
                 return self._bitrates[key]
         bitrate = jasna.probe_bitrate(source, bitrate_ffprobe(self.ffprobe))
-        if bitrate is None:
+        with self._bitrates_lock:
+            self._drop_stale_revisions(key)
+            if bitrate is not None:
+                self._bitrate_failed.discard(key)
+                self._bitrates[key] = bitrate
+                return bitrate
+            warn = key not in self._bitrate_failed
+            self._bitrate_failed.add(key)
+        if warn:
             log.warning(
                 "workflow restore: no source bitrate for %s; Jasna's own maxrate "
                 "cap applies",
                 source.name,
             )
-        with self._bitrates_lock:
-            self._bitrates[key] = bitrate
-        return bitrate
+        return None
+
+    def _drop_stale_revisions(self, key: _BitrateKey) -> None:
+        """Forget this film's entries of another input revision (the caller holds
+        the lock): a film that failed and was never retried, or whose input
+        changed, would otherwise leave them behind for good."""
+        film_id, revision, _ = key
+        for stale in [
+            k for k in self._bitrates if k[0] == film_id and k[1] != revision
+        ]:
+            del self._bitrates[stale]
+        self._bitrate_failed = {
+            k for k in self._bitrate_failed if k[0] != film_id or k[1] == revision
+        }
 
     def _forget_bitrates(
         self, context: JobContext, videos: list[m.ManifestItem]
@@ -365,9 +391,9 @@ class RestoreExecutor:
         job = context.job
         with self._bitrates_lock:
             for video in videos:
-                self._bitrates.pop(
-                    (job.film_id, job.input_revision, video.item_id), None
-                )
+                key = (job.film_id, job.input_revision, video.item_id)
+                self._bitrates.pop(key, None)
+                self._bitrate_failed.discard(key)
 
     # ── stage body ──────────────────────────────────────────────────────
     def _run(self, context: JobContext) -> ExecOutcome:

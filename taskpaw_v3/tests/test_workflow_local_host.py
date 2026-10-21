@@ -562,7 +562,7 @@ def test_the_offer_survives_an_agent_restart(tmp_path, monkeypatch):
     assert host.state == "stopped"
 
 
-def test_recall_missing_infers_the_variant_from_the_file_names(tmp_path):
+def test_recall_missing_keeps_the_launch_tier_and_infers_the_variant(tmp_path):
     from taskpaw_v3.tests.workflow_exec_helpers import Tools, runtime
 
     tools = Tools(tmp_path / "tools")
@@ -570,35 +570,51 @@ def test_recall_missing_infers_the_variant_from_the_file_names(tmp_path):
     rt = runtime(tmp_path / "wf", tools)
     try:
         vae = ["vae.safetensors.enc", "vae-decoder.safetensors.enc"]
-        # J2 (#283): the tier comes from the model file name too
-        for names, cfg_fast, tier, fast in (
+        # J2 (#283): the tier is the launch config's, never the file names'. A note
+        # written before 3.9.18 names distill8, now the high tier's file, while the
+        # next restore runs standard: the offer is standard's (distill2) nvfp4.
+        for names, cfg_fast, cfg_tier, fast in (
+            (
+                ["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"],
+                False,
+                "standard",
+                True,
+            ),
             (
                 ["ltx-restore-alpha1-distill2-nvfp4.safetensors.enc"],
                 False,
                 "standard",
                 True,
             ),
-            (
-                ["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"],
-                False,
-                "high",
-                True,
-            ),
             (["a-nvfp4.enc", "vae.safetensors.enc"], False, "standard", True),
             (["ltx-restore-alpha1-distill4-int8.safetensors.enc"], True, "good", False),
+            (
+                ["ltx-restore-alpha1-distill8-int8.safetensors.enc"],
+                True,
+                "standard",
+                False,
+            ),
             (vae, True, "standard", True),
             (vae, False, "standard", False),
         ):
             restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
-            restore.cfg = restore.cfg.model_copy(update={"ltx_fast": cfg_fast})
+            restore.cfg = restore.cfg.model_copy(
+                update={"ltx_fast": cfg_fast, "ltx_model": cfg_tier}
+            )
             restore.recall_missing(names)
             weights, cfg, recalled = restore._models
             assert (weights, cfg.ltx_model, recalled) == (
                 restore._weights(),
-                tier,
+                cfg_tier,
                 fast,
             ), names
-            assert cfg.ltx_fast == cfg_fast  # only the tier is taken from the names
+            assert cfg.ltx_fast == cfg_fast
+        # the offer rebuilds the missing list from disk for the launch tier
+        restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
+        restore.recall_missing(["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"])
+        _, missing, _ = restore.missing_models()
+        assert "ltx-restore-alpha1-distill2-nvfp4.safetensors.enc" in missing
+        assert not any("distill8" in name for name in missing)
         # only VAE missing: the installed model of the tier is the one preflight chose
         from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES
 

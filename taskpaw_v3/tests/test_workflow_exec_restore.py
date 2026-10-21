@@ -5,6 +5,8 @@ import shutil
 import subprocess
 import threading
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -350,7 +352,7 @@ def test_tools_profile_is_stable_and_follows_the_settings(rt, tools):
     first = rt.executors["restore"].tools()
     assert (first.profile, first.profile_revision) == ("workflow-restore-ltx", 1)
     # J2 (#283, D09): the tier's CLI name and the weights' precision
-    assert (first.model, first.model_version) == ("ltx", "nvfp4")
+    assert (first.model, first.model_version) == ("ltx", "fast")
     same = tools.restore(rt).tools()
     assert same.config_digest == first.config_digest
     other_gpu = RestoreExecutor(rt, str(tools.jasna_exe), "5060ti-16").tools()
@@ -410,9 +412,9 @@ def with_cfg(executor, **update):
 @pytest.mark.parametrize(
     "tier, fast, model, version",
     [
-        ("standard", True, "ltx", "nvfp4"),
+        ("standard", True, "ltx", "fast"),
         ("good", False, "ltx-4step", "int8"),
-        ("high", True, "ltx-8step", "nvfp4"),
+        ("high", True, "ltx-8step", "fast"),
     ],
 )
 def test_tools_name_the_tier_cli_model_and_its_precision(
@@ -525,15 +527,51 @@ def test_a_failed_probe_adds_no_cap_and_warns_once(rt, tools, bitrates, caplog):
     with caplog.at_level("WARNING", logger="taskpaw.workflow.restore"):
         assert not run_direct(rt, film, "restore").outcome.ok
         tools.set_jasna()
-        run = run_direct(rt, film, "restore")  # the retry reuses the failed probe
+        run = run_direct(rt, film, "restore")  # the retry probes again, quietly
     assert run.outcome.ok, run.outcome.message
     runs = tools.runs(tools.jasna_exe)
     assert len(runs) == 2 and all(encoder_settings(argv) == [] for argv in runs)
-    assert len(bitrates["calls"]) == 1
+    assert len(bitrates["calls"]) == 2
     warnings = [r for r in caplog.records if "bitrate" in r.getMessage()]
     assert len(warnings) == 1
     (only,) = ledger(run).videos
     assert only.restore.maxrate is None
+
+
+def test_a_transient_probe_failure_does_not_uncap_the_retry(rt, tools, bitrates):
+    bitrates["answers"] = [None, 45_200_000]  # the first ffprobe times out
+    tools.set_jasna(mode="fail")
+    film = single(rt)
+    assert not run_direct(rt, film, "restore").outcome.ok
+    tools.set_jasna()
+    assert run_direct(rt, film, "restore").outcome.ok
+    first, second = tools.runs(tools.jasna_exe)
+    assert encoder_settings(first) == []
+    assert encoder_settings(second) == ["maxrate=45200000,qmax=51"]
+    assert len(bitrates["calls"]) == 2
+
+
+def test_a_new_input_revision_drops_the_films_older_probes(rt, tools, bitrates):
+    executor = tools.restore(rt)
+    film = single(rt)
+    other = single(rt, "b.mkv")
+    source = Path("x.mkv")
+
+    def probe(film_id, revision):
+        job = SimpleNamespace(film_id=film_id, input_revision=revision)
+        context = SimpleNamespace(job=job)
+        item = SimpleNamespace(item_id="v1")
+        return executor._source_bitrate(context, executor.cfg, item, source)
+
+    assert probe(film, 1) == 45_200_000 and probe(other, 1) == 45_200_000
+    bitrates["answers"] = [None]
+    probe(film, 2)  # a failed probe of the new revision drops the old ones too
+    assert set(executor._bitrates) == {(other, 1, "v1")}
+    assert executor._bitrate_failed == {(film, 2, "v1")}
+    bitrates["answers"] = [30_000_000]
+    assert probe(film, 3) == 30_000_000
+    assert set(executor._bitrates) == {(other, 1, "v1"), (film, 3, "v1")}
+    assert executor._bitrate_failed == set()
 
 
 def test_a_relaunch_of_the_same_video_reuses_its_probe(rt, tools, bitrates):
