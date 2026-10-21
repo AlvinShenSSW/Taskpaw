@@ -148,3 +148,22 @@
   - the three-tier manifest and labels;
   - the mode/label text.
 - **Not in scope:** per-film tier and machine choice, which belongs to the EPIC #271 pending-review list.
+
+### v2.1 (debate V01–V09; overrides v2)
+
+- **V01. The cap factors as they really are.**
+  - Jasna caps at 1.0× (other source codecs), 1.25× (HEVC source) and 2.0× (NVIDIA H.264 *output*).
+  - LTX auto-split (on, 12%) smart-renders with the output codec equal to the source codec. An H.264 source is therefore re-encoded as H.264 under the 2.0× cap. That is the likely cause of the operator's 11 → 20 GB run; to be confirmed with ffprobe on that pair.
+  - C8's explicit 1.0× fixes it.
+- **V02 / V04.** The flag is `--encoder-settings maxrate=B,qmax=51`. `bufsize` is dropped because ffmpeg `nvenc.c` discards it in CQ mode. `qmax=51` lifts Jasna's qmax 34, so NVENC can honour the cap in hard scenes.
+- **V03.** `ltx_model: "top"` (from unreleased v1 builds) maps to `high`.
+- **V08.** Rejection uses the existing owned-flag prefix logic, so `--encoder-settings=` and abbreviations are rejected too. This applies only while C8 is on.
+- **V09.**
+  - Probe values are parsed like Jasna's: `int(float())`, skipping N/A.
+  - The same B is reused on the unet-4x degrade relaunch and on retries.
+  - A probe failure gives one warning, no flag and no label.
+- **Help text (V01/V06/V07).**
+  - The cap is 1.0× for every codec.
+  - NVIDIA only: AMD HEVC/AV1 use constant QP and ignore it.
+  - cq applies to every output codec; low values are cap-bound.
+- **Accepted (V05).** The cq 24 → 20 migration recognises old configs only by `ltx_best`.
