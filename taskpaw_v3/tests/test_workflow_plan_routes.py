@@ -274,9 +274,7 @@ def test_an_actors_last_tier_is_recommended(world, client, tmp_path):
     assert entry["recommendation"]["ltx_reason"] == "上次选择 高"
 
 
-def test_a_past_films_final_nfo_actor_counts_when_its_lookup_failed(
-    scraped, tmp_path
-):
+def test_a_past_films_final_nfo_actor_counts_when_its_lookup_failed(scraped, tmp_path):
     """IR04: the history reads a past film's actors as its card does (final NFO >
     lookup > input NFO), so a failed lookup does not hide the archived actor."""
     from taskpaw_v3.tests.test_workflow_local_dispatch import add_film

@@ -281,7 +281,9 @@ def test_v2_upgrade_plans_only_finished_restores_not_interrupted_ones(tmp_path):
         assert stage(again, cut, "restore").status == "pending"  # never claimed
         assert len(again.store.list_attempts(again.operator, job.job_id)) == 1
         confirm(again, cut, tier="high")  # the operator's tier
-        (plan,) = [p for p in again.store.list_plans(again.operator) if p.film_id == cut]
+        (plan,) = [
+            p for p in again.store.list_plans(again.operator) if p.film_id == cut
+        ]
         assert (plan.ltx_model, plan.backfilled) == ("high", False)
         assert d.run_once() is True
         assert stage(again, cut, "restore").status == "succeeded"
