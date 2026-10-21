@@ -170,6 +170,8 @@ def test_the_launch_params_are_the_argv_jasna_got_for_this_film(
         "gpu": GPU_8GB.name,
         "gpu_vram_mib": GPU_8GB.vram_mib,
         "preset": "5060-8",
+        "preset_label": "RTX 5060 · 8 GB",
+        "preset_auto": False,
         "argv": params["argv"],
     }
     assert params["model_name"] == "ltx-8step"

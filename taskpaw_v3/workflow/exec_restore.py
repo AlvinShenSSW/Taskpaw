@@ -116,6 +116,47 @@ def needs_restore(manifest: m.InputManifest) -> bool:
     )
 
 
+# (name fragment, preset id, VRAM MiB the preset assumes), most specific first. The
+# VRAM floor keeps a name from claiming more card than there is (an 8 GB 5060 Ti).
+_PRESET_BY_NAME = (
+    ("5090", "5090-32", 30 * 1024),
+    ("4090", "4090-24", 22 * 1024),
+    ("5070 ti", "5070ti-16", 15 * 1024),
+    ("5060 ti", "5060ti-16", 15 * 1024),
+    ("5060", "5060-8", 0),
+)
+_PRESET_BY_VRAM = (
+    (30 * 1024, "5090-32"),
+    (22 * 1024, "4090-24"),
+    (15 * 1024, "5070ti-16"),
+)
+SAFE_PRESET = "5060-8"
+
+
+def resolve_gpu_preset(gpu: LocalGpu | None) -> str:
+    """U1d: the Jasna preset id for the local card (`ltx_gpu` unset in agent.yaml):
+    by model name, else by VRAM class; an unreadable or unknown card gets the
+    8 GB preset, which is safe on any card."""
+    if gpu is None:
+        return SAFE_PRESET
+    name = " ".join(gpu.name.casefold().split())
+    for fragment, preset, floor in _PRESET_BY_NAME:
+        if fragment in name and gpu.vram_mib >= floor:
+            return preset
+    for floor, preset in _PRESET_BY_VRAM:
+        if gpu.vram_mib >= floor:
+            return preset
+    return SAFE_PRESET
+
+
+def preset_label(gpu_id: str) -> str:
+    """The catalogue's name of a preset id (the id itself when unknown)."""
+    for entry in preset_catalogue()["gpus"]:
+        if entry["id"] == gpu_id:
+            return str(entry["label"])
+    return gpu_id
+
+
 def workflow_jasna_config(gpu_id: str) -> jasna.JasnaConfig:
     """The `standard` LTX preset of `gpu_id`; no exe path (skips folder checks)."""
     for profile in preset_catalogue()["profiles"]:
@@ -217,6 +258,7 @@ def launch_params(
     probe: m.MediaProbe | None,
     gpu: LocalGpu | None,
     preset: str,
+    preset_auto: bool = False,
 ) -> dict[str, Any]:
     """U1c: what Jasna was launched with for this video, read from its argv
     (the effective values after the GPU check, never the configured ones), and
@@ -264,6 +306,8 @@ def launch_params(
         "gpu": gpu.name if gpu is not None else None,
         "gpu_vram_mib": gpu.vram_mib if gpu is not None else None,
         "preset": preset,
+        "preset_label": preset_label(preset),
+        "preset_auto": preset_auto,
         "argv": subprocess.list2cmdline(short),
     }
 
@@ -368,13 +412,16 @@ class RestoreExecutor:
         jasna_exe: str,
         gpu_id: str = "5060-8",
         *,
+        preset_auto: bool = False,
         ffprobe: str | Sequence[str] | None = None,
         launch_prefix: Sequence[str] = (),
         gpus: GpuQuery = jasna.query_gpus,
     ) -> None:
         """`ffprobe`: path or command (default: `ffprobe` on PATH).
-        `launch_prefix` goes before the Jasna argv (tests run a fake tool)."""
+        `launch_prefix` goes before the Jasna argv (tests run a fake tool).
+        `preset_auto`: `gpu_id` was picked from the local GPU, not configured."""
         self.runtime, self.jasna_exe, self.gpu_id = runtime, jasna_exe, gpu_id
+        self.preset_auto = preset_auto
         self.cfg = workflow_jasna_config(gpu_id)
         self.ffprobe = ffprobe_command(ffprobe)
         self.launch_prefix = tuple(launch_prefix)
@@ -712,6 +759,7 @@ class RestoreExecutor:
             probe=probe,
             gpu=self.runtime.gpu,
             preset=self.gpu_id,
+            preset_auto=self.preset_auto,
         )
         lock = threading.Lock()
         state: dict = {}

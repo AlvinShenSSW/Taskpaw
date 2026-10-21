@@ -242,7 +242,7 @@ export interface RestoreParams {
   match_source_bitrate: boolean; maxrate_bps: number | null; source_bitrate_bps: number | null;
   detection_model: string | null; clip_size: number | null; temporal_overlap: number | null; tier: string;
   source_width: number | null; source_height: number | null; gpu: string | null; gpu_vram_mib: number | null;
-  preset: string; argv: string;
+  preset: string; preset_label: string; preset_auto: boolean; argv: string;
 }
 // H2 R2/R2a: an INBOX package that is not a film yet. The backend sends codes; the UI owns the labels.
 export interface PackageRow {

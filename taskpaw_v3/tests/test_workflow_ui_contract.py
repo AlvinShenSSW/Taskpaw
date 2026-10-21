@@ -52,8 +52,9 @@ LTX_ENCODE = (
     "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, "
     "run 12:12 left]"
 )
-# U1c: the 5060-8 preset's launch of a probed 12.2 Mbps 1080p film on a 16 GB card
-_CFG = workflow_jasna_config("5060-8")
+# U1c/U1d: the 5070ti-16 preset (picked automatically) launching a probed 12.2 Mbps
+# 1080p film on that 16 GB card
+_CFG = workflow_jasna_config("5070ti-16")
 PARAMS = launch_params(
     jasna.build_argv(
         _CFG,
@@ -71,7 +72,8 @@ PARAMS = launch_params(
     source_bitrate=12_200_000,
     probe=None,
     gpu=LocalGpu("NVIDIA GeForce RTX 5070 Ti", "GPU-contract", 16303),
-    preset="5060-8",
+    preset="5070ti-16",
+    preset_auto=True,
 )
 TRANSLATE_ERROR = "LLM 超时：翻译服务 120 秒没有响应"
 # Where the temp folders stand in for, as an operator's Windows machine shows it.

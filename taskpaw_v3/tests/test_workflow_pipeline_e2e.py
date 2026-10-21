@@ -41,7 +41,8 @@ def test_shipped_pipeline_registers_executors_only_for_configured_tools(tmp_path
             WorkflowSettings(
                 jasna_exe_path=str(tools.jasna_exe),
                 whisperjav_exe_path=str(tools.whisper_exe),
-            )
+            ),
+            gpu=lambda: None,  # never the real nvidia-smi
         )
         assert [e.stage for e in both(rt)] == ["restore", "asr", "translate"]
     finally:
@@ -156,3 +157,38 @@ def test_dropped_film_becomes_a_verified_return_package(tmp_path):
         assert source.read_bytes() == original  # the user's INBOX file is untouched
     finally:
         host.stop()
+
+
+def test_unset_ltx_gpu_picks_the_preset_once_from_the_local_gpu(tmp_path):
+    from taskpaw_v3.tests.workflow_exec_helpers import runtime as make
+    from taskpaw_v3.workflow.local_gpu import LocalGpu
+
+    tools = Tools(tmp_path / "tools")
+    rt = make(tmp_path / "wf", tools)
+    asked = []
+
+    def card():
+        asked.append(1)
+        return LocalGpu("NVIDIA GeForce RTX 5070 Ti", "GPU-fake", 16303)
+
+    try:
+        settings = WorkflowSettings(jasna_exe_path=str(tools.jasna_exe))
+        assert settings.ltx_gpu is None
+        (restore,) = default_executors(settings, gpu=card)(rt)
+        assert (restore.gpu_id, restore.preset_auto) == ("5070ti-16", True)
+        assert restore.cfg.clip_size_1080p == 180
+        same = default_executors(settings, gpu=card)(rt)[0].tools().config_digest
+        assert restore.tools().config_digest == same  # stable across rebuilds
+        assert len(asked) == 2  # decided at build, never again per job
+
+        (none,) = default_executors(settings, gpu=lambda: None)(rt)
+        assert (none.gpu_id, none.preset_auto) == ("5060-8", True)
+
+        explicit = WorkflowSettings(
+            jasna_exe_path=str(tools.jasna_exe), ltx_gpu="4090-24"
+        )
+        (named,) = default_executors(explicit, gpu=card)(rt)
+        assert (named.gpu_id, named.preset_auto) == ("4090-24", False)
+        assert len(asked) == 2  # an explicit setting never queries the card
+    finally:
+        rt.close()

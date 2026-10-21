@@ -32,8 +32,10 @@ from taskpaw_v3.workflow.exec_restore import (
     parse_probe,
     probe_source_bitrate,
     progress_text,
+    resolve_gpu_preset,
 )
 from taskpaw_v3.workflow.executors import failed_kind
+from taskpaw_v3.workflow.local_gpu import LocalGpu
 from taskpaw_v3.workflow.owned_process import OwnedJob
 from taskpaw_v3.workflow.stage_results import StageResult, check_file, load_stage_result
 
@@ -825,3 +827,71 @@ def test_a_real_probe_without_a_bitrate_adds_no_cap_and_warns_once(
     assert all(encoder_settings(argv) == [] for argv in tools.runs(tools.jasna_exe))
     warnings = [r for r in caplog.records if "bitrate" in r.getMessage()]
     assert len(warnings) == 1
+
+
+# ── U1d: the Jasna preset follows the local GPU when agent.yaml names none ─────
+def _card(name: str, vram_mib: int) -> LocalGpu:
+    return LocalGpu(name, "GPU-test", vram_mib)
+
+
+@pytest.mark.parametrize(
+    ("name", "vram_mib", "preset"),
+    [
+        ("NVIDIA GeForce RTX 5090", 32607, "5090-32"),
+        ("NVIDIA GeForce RTX 4090", 24564, "4090-24"),
+        ("NVIDIA GeForce RTX 5070 Ti", 16303, "5070ti-16"),
+        ("NVIDIA GeForce RTX 5060 Ti", 16311, "5060ti-16"),
+        ("NVIDIA GeForce RTX 5060", 8151, "5060-8"),
+        ("nvidia geforce rtx  5070  ti", 16303, "5070ti-16"),  # case and spacing
+    ],
+)
+def test_preset_is_picked_by_the_card_name(name, vram_mib, preset):
+    assert resolve_gpu_preset(_card(name, vram_mib)) == preset
+
+
+@pytest.mark.parametrize(
+    ("name", "vram_mib", "preset"),
+    [
+        ("NVIDIA GeForce RTX 5080", 16303, "5070ti-16"),  # 16 GB, no name rule
+        ("NVIDIA RTX 6000 Ada", 49140, "5090-32"),
+        ("NVIDIA GeForce RTX 3090", 24576, "4090-24"),
+        ("NVIDIA GeForce RTX 5070", 12227, "5060-8"),
+        ("NVIDIA GeForce RTX 3060", 8192, "5060-8"),
+        # a name rule never claims more VRAM than the card has (5060 Ti 8 GB)
+        ("NVIDIA GeForce RTX 5060 Ti", 8151, "5060-8"),
+    ],
+)
+def test_preset_falls_back_to_the_vram_class(name, vram_mib, preset):
+    assert resolve_gpu_preset(_card(name, vram_mib)) == preset
+
+
+def test_no_readable_gpu_gets_the_safe_8gb_preset():
+    assert resolve_gpu_preset(None) == "5060-8"
+
+
+def test_every_picked_preset_exists_in_the_catalogue():
+    from taskpaw_v3.monitors.plugins.jasna_presets import preset_catalogue
+
+    ids = {g["id"] for g in preset_catalogue()["gpus"]}
+    cards = [("5090", 32607), ("4090", 24564), ("5070 Ti", 16303), ("5060 Ti", 16311)]
+    picked = {resolve_gpu_preset(_card(f"RTX {n}", v)) for n, v in cards}
+    assert picked | {resolve_gpu_preset(None)} <= ids
+
+
+def test_the_run_reports_the_preset_label_and_whether_it_was_automatic(rt, tools):
+    auto = tools.restore(rt, gpu_id="5070ti-16", preset_auto=True)
+    rt.executors["restore"] = auto
+    run = run_direct(rt, single(rt), "restore")
+    assert run.outcome.ok
+    params = run.ltx[0]["params"]
+    assert params["preset"] == "5070ti-16"
+    assert params["preset_label"] == "RTX 5070 Ti · 16 GB"
+    assert params["preset_auto"] is True
+    assert params["clip_size"] == 180  # the 16 GB preset, not the 8 GB one
+
+
+def test_an_explicit_preset_is_not_marked_automatic(rt, tools):
+    run = run_direct(rt, single(rt), "restore")
+    params = run.ltx[0]["params"]
+    assert (params["preset"], params["preset_auto"]) == ("5060-8", False)
+    assert params["preset_label"] == "RTX 5060 · 8 GB"

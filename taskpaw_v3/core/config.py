@@ -30,7 +30,8 @@ class WorkflowSettings(BaseModel):
     # T04-P1: the tools the local executors run; a missing path disables its stage.
     jasna_exe_path: Optional[str] = None
     whisperjav_exe_path: Optional[str] = None
-    ltx_gpu: str = "5060-8"  # jasna_presets GPU id for the LTX preset
+    # jasna_presets GPU id for the LTX preset; None picks it from the local GPU (U1d)
+    ltx_gpu: Optional[str] = None
     # M01-P1: Miko (MDCX304) for full post-processing; all three or scrape is off.
     mdcx_python: Optional[str] = None  # python.exe of MDCX304's environment
     mdcx_root: Optional[str] = None  # the MDCX304 checkout

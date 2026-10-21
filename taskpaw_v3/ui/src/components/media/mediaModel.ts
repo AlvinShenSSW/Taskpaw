@@ -152,9 +152,14 @@ export function readParams(value: unknown): RestoreParams | null {
     source_bitrate_bps: int(value.source_bitrate_bps), detection_model: text(value.detection_model),
     clip_size: int(value.clip_size), temporal_overlap: int(value.temporal_overlap), tier: text(value.tier) ?? "1080p",
     source_width: int(value.source_width), source_height: int(value.source_height), gpu: text(value.gpu),
-    gpu_vram_mib: int(value.gpu_vram_mib), preset: text(value.preset) ?? "", argv,
+    gpu_vram_mib: int(value.gpu_vram_mib), preset: text(value.preset) ?? "",
+    preset_label: text(value.preset_label) ?? text(value.preset) ?? "", preset_auto: value.preset_auto === true, argv,
   };
 }
+
+// 「预设 RTX 5070 Ti · 16 GB（自动）」: the header of the 本片参数 block; empty without a preset.
+export const presetText = (p: RestoreParams) =>
+  p.preset ? `预设 ${p.preset_label || p.preset}${p.preset_auto ? "（自动）" : ""}` : "";
 
 const mbps = (bps: number) => `${(bps / 1e6).toFixed(1)} Mbps`;
 const ON_OFF = (on: boolean) => (on ? "开" : "关");

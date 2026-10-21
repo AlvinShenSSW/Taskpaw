@@ -5,7 +5,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import type { ReactNode } from "react";
 import { MonitorMetrics } from "../components/MonitorMetrics";
-import { elapsedClock, filmStatus, heartbeatText, restoreLive, restoreStep, type WorkItem } from "../components/media/mediaModel";
+import { elapsedClock, filmStatus, heartbeatText, readParams, restoreLive, restoreStep, type WorkItem } from "../components/media/mediaModel";
 import { StageBlock } from "../components/media/parts";
 import { RestoreLivePanel } from "../components/media/RestoreLivePanel";
 import { setLang } from "../i18n";
@@ -168,7 +168,7 @@ describe("本片参数", () => {
     wrap(<RestoreLivePanel step={step("ltx")} />);
     const block = screen.getByTestId("restore-params");
     expect(within(block).getByText("本片参数")).toBeInTheDocument();
-    expect(within(block).getByText("预设 5060-8")).toBeInTheDocument();
+    expect(within(block).getByText("预设 RTX 5070 Ti · 16 GB（自动）")).toBeInTheDocument();
     expect(param("画质")).toBe("画质标准（ltx）");
     expect(param("快速模式")).toBe("快速模式nvfp4");
     expect(param("自动拆分")).toBe("自动拆分12%");
@@ -177,11 +177,19 @@ describe("本片参数", () => {
     expect(param("编码")).toBe("编码HEVC · CQ 20");
     expect(param("码率上限")).toBe("码率上限12.2 Mbps（原片 12.2 Mbps）");
     expect(param("检测")).toBe("检测rfdetr-v6");
-    expect(param("片段 / 重叠")).toBe("片段 / 重叠90 / 8");
+    expect(param("片段 / 重叠")).toBe("片段 / 重叠180 / 8");
     expect(param("输入")).toBe("输入1920×1080 · 1080p 档");
     expect(param("GPU")).toBe("GPUNVIDIA GeForce RTX 5070 Ti 16 GB");
     expect(within(block).getByTestId("restore-argv-toggle")).toHaveTextContent("完整命令");
     expect(within(block).getByTestId("restore-argv-raw").textContent).toBe(PARAMS.argv);
+  });
+
+  it("names a configured preset without the 自动 mark, and falls back to the id", () => {
+    const named = { ...PARAMS, preset: "5060-8", preset_label: "RTX 5060 · 8 GB", preset_auto: false };
+    wrap(<RestoreLivePanel step={{ ...step("ltx"), params: named }} />);
+    expect(within(screen.getByTestId("restore-params")).getByText("预设 RTX 5060 · 8 GB")).toBeInTheDocument();
+    expect(readParams({ ...PARAMS, preset_label: undefined, preset_auto: undefined })).toMatchObject(
+      { preset: "5070ti-16", preset_label: "5070ti-16", preset_auto: false });
   });
 
   it("says so when the source bitrate could not be read", () => {

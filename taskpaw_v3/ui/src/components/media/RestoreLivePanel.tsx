@@ -6,7 +6,7 @@ import type { RestoreParams, WorkflowStep } from "../../api";
 import { LtxProgress } from "../LtxProgress";
 import { ConsoleFold, DATA, ProgressFrame } from "../progressParts";
 import { BasicVsrProgress, MosaicScanProgress } from "../RestorePhaseProgress";
-import { heartbeatText, paramRows, restoreLive, SPLIT_LABEL, SPLIT_NOTE, type RestoreLive } from "./mediaModel";
+import { heartbeatText, paramRows, presetText, restoreLive, SPLIT_LABEL, SPLIT_NOTE, type RestoreLive } from "./mediaModel";
 import { useNow } from "./useNow";
 
 function phaseLabel(live: RestoreLive): string {
@@ -30,7 +30,7 @@ const PULSE = {
 // 「本片参数」: what Jasna was launched with for this video, and the full command to copy.
 function ParamsBlock({ params }: { params: RestoreParams }) {
   return (
-    <ProgressFrame testId="restore-params" label="本片参数" title="本片参数" position={params.preset ? `预设 ${params.preset}` : undefined}>
+    <ProgressFrame testId="restore-params" label="本片参数" title="本片参数" position={presetText(params) || undefined}>
       <Box component="dl" sx={{ m: 0, px: { xs: 2, sm: 3 }, py: 2, display: "flex", flexWrap: "wrap", gap: 1 }}>
         {paramRows(params).map(([label, value]) => (
           <Box key={label} data-param={label} sx={{ display: "inline-flex", alignItems: "baseline", gap: 0.75, minWidth: 0,

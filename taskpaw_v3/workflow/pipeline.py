@@ -12,9 +12,10 @@ from collections.abc import Callable
 from taskpaw_v3.core.config import WorkflowSettings
 
 from .exec_asr import AsrExecutor
-from .exec_restore import RestoreExecutor
+from .exec_restore import RestoreExecutor, resolve_gpu_preset
 from .exec_translate import TranslateExecutor
 from .executors import StageExecutor
+from .local_gpu import LocalGpu, query_gpu
 from .local_runtime import LocalRuntime
 from .lookup import MetadataLookup
 from .scrape_step import LocalScrapeStep
@@ -24,16 +25,22 @@ log = logging.getLogger("taskpaw.workflow.pipeline")
 
 def default_executors(
     settings: WorkflowSettings,
+    gpu: Callable[[], LocalGpu | None] = query_gpu,
 ) -> Callable[[LocalRuntime], list[StageExecutor]]:
     def build(runtime: LocalRuntime) -> list[StageExecutor]:
         executors: list[StageExecutor] = []
         if settings.jasna_exe_path:
+            # U1d: an unset `ltx_gpu` is decided once, here, so the approved
+            # capability profile keeps matching for the runtime's life
+            auto = not settings.ltx_gpu
+            preset = settings.ltx_gpu or resolve_gpu_preset(gpu())
             try:
                 executors.append(
                     RestoreExecutor(
                         runtime,
                         settings.jasna_exe_path,
-                        settings.ltx_gpu,
+                        preset,
+                        preset_auto=auto,
                         ffprobe=settings.ffprobe_path,
                     )
                 )
