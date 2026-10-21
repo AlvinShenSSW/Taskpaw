@@ -242,7 +242,11 @@ def test_rows_carry_the_frozen_shape():
         "plan",
         "receipt_id",
         "revisions",
+        # the cover of the queue and review cards (UI contract)
+        "has_poster",
+        "poster_source",
     }
+    assert (row["has_poster"], row["poster_source"]) == (False, None)
     assert row["created_at"] == "2026-10-20T00:00:00Z"
     assert [s["key"] for s in row["steps"]] == list(board.STEP_KEYS)
     assert all(set(s) == {"key", "state", "note", "progress"} for s in row["steps"])

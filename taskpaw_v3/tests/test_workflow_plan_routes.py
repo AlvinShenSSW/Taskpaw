@@ -236,6 +236,9 @@ def test_the_lookup_fills_the_card_and_names_the_film(world, client, tmp_path):
         "MOVIE",
         ["演员甲", "演员乙"],
     )
+    # the list row carries the same cover as the card (V3 §4.2 queue cards)
+    assert value["has_poster"] is True
+    assert value["poster_source"] == entry["poster_source"]
     detail = client.get(f"{BASE}/films/{world.film}").json()
     assert (detail["title"], detail["lookup"]["status"]) == (
         "MOVIE 的标题",

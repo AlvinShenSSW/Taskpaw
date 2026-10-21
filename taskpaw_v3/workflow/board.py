@@ -13,7 +13,7 @@ Miko lookup (`rt.lookup`), else the input (precedence final > lookup > input).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -121,6 +121,8 @@ class Facts:
     input_number: str | None = None
     video: str | None = None
     lookup_number: str | None = None
+    # the cover's source token by the same precedence; None without a cover
+    poster_source: str | None = None
 
     @property
     def label(self) -> Label:
@@ -431,6 +433,9 @@ def film_row(
         "number": facts.number,
         "title": facts.title,
         "actors": list(facts.actors),
+        # the list's cover: the one `film_detail` and `poster_path` serve
+        "has_poster": facts.poster_source is not None,
+        "poster_source": facts.poster_source,
         "resolution": resolution(film.max_width, film.max_height),
         "plan": {"ltx_model": film.plan_ltx_model, "machine": film.plan_machine}
         if film.planned
@@ -503,12 +508,15 @@ def film_facts(
     source = manifest or _current_input(rt, film)
     found = _input_file(rt, source, "nfo") if source else None
     videos = main_videos(source) if source else []
-    return Facts.merge(
+    looked = _lookup(rt, film)
+    poster = _poster(rt, final, source, looked)
+    facts = Facts.merge(
         final=final_nfo,
-        lookup=_lookup(rt, film),
+        lookup=looked,
         input_nfo=_read_nfo(found[1] if found else None),
         video=PurePosixPath(videos[0].relative_path).stem if videos else None,
     )
+    return replace(facts, poster_source=poster[1] if poster else None)
 
 
 def row_facts(rt: LocalRuntime, films: tuple[m.BoardFilm, ...]) -> dict[str, Facts]:
