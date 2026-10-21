@@ -304,20 +304,26 @@ def test_the_running_restore_step_always_carries_its_start_and_console():
         "stage": "restore",
         "progress": "修复",
         "started_at": "2026-10-22T08:00:00+00:00",
-        "ltx": {"current_file": "a.mp4", "console": "loading models"},
+        "ltx": {
+            "current_file": "a.mp4",
+            "console": "loading models",
+            "params": {"ltx_model": "high", "argv": "jasna.exe --input a.mp4"},
+        },
     }
     restore = _step_of(board.film_row(value, {}, current=current), "restore")
     assert restore["started_at"] == "2026-10-22T08:00:00+00:00"
     assert restore["console"] == "loading models"
+    assert restore["params"] == current["ltx"]["params"]
     bare = {k: v for k, v in current.items() if k != "ltx"}
     restore = _step_of(board.film_row(value, {}, current=bare), "restore")
-    assert (restore["started_at"], restore["console"]) == (
+    assert (restore["started_at"], restore["console"], restore["params"]) == (
         "2026-10-22T08:00:00+00:00",
+        None,
         None,
     )
     other = {**current, "film_id": identity()}
     restore = _step_of(board.film_row(value, {}, current=other), "restore")
-    assert "started_at" not in restore and "console" not in restore
+    assert not ({"started_at", "console", "params"} & restore.keys())
 
 
 def test_the_running_restore_step_carries_the_ltx_detail_and_its_volume():

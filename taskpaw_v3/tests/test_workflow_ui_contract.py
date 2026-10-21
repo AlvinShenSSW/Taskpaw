@@ -19,6 +19,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from taskpaw_v3.monitors.plugins import jasna
 from taskpaw_v3.monitors.plugins.jasna_progress import (
     console_text,
     parse_jasna_progress_line,
@@ -36,8 +37,13 @@ from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
     probeable_video,
 )
 from taskpaw_v3.tests.test_workflow_plan_routes import with_lookup
-from taskpaw_v3.workflow.exec_restore import progress_text
+from taskpaw_v3.workflow.exec_restore import (
+    launch_params,
+    progress_text,
+    workflow_jasna_config,
+)
 from taskpaw_v3.workflow.executors import ExecOutcome
+from taskpaw_v3.workflow.local_gpu import LocalGpu
 
 FIXTURE = Path(__file__).parents[1] / "ui/src/test/fixtures/workflow-contract.json"
 REGENERATE = "TASKPAW_WRITE_UI_CONTRACT"
@@ -45,6 +51,27 @@ REGENERATE = "TASKPAW_WRITE_UI_CONTRACT"
 LTX_ENCODE = (
     "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, "
     "run 12:12 left]"
+)
+# U1c: the 5060-8 preset's launch of a probed 12.2 Mbps 1080p film on a 16 GB card
+_CFG = workflow_jasna_config("5060-8")
+PARAMS = launch_params(
+    jasna.build_argv(
+        _CFG,
+        "C:/Jasna/jasna.exe",
+        Path("D:/Work/a1/movie.mkv"),
+        Path("D:/Work/a1/movie-破解.tmp.mp4"),
+        "1080p",
+        False,
+        False,
+        Path("D:/Work/a1/.jasna-work"),
+        True,
+        source_bitrate=12_200_000,
+    ),
+    match_source_bitrate=_CFG.match_source_bitrate,
+    source_bitrate=12_200_000,
+    probe=None,
+    gpu=LocalGpu("NVIDIA GeForce RTX 5070 Ti", "GPU-contract", 16303),
+    preset="5060-8",
 )
 TRANSLATE_ERROR = "LLM 超时：翻译服务 120 秒没有响应"
 # Where the temp folders stand in for, as an operator's Windows machine shows it.
@@ -72,6 +99,7 @@ class HeldRestore(ret.FakeRestore):
         state = parse_jasna_progress_line(LTX_ENCODE, {})
         detail = {**state, "current_file": "movie.mkv"}
         detail["console"] = console_text(LTX_ENCODE)  # U1c heartbeat
+        detail["params"] = PARAMS  # U1c: the launch, as exec_restore reports it
         context.progress(progress_text("", state), ltx=detail)
         self.started.set()
         self.release.wait(30)
@@ -242,6 +270,8 @@ def test_the_fixture_covers_every_page_the_ui_tests():
     )
     assert restore["ltx"]["ltx_progress"]["stage_name"] == "encode"
     assert restore["started_at"] and restore["console"] == LTX_ENCODE  # U1c
+    assert restore["params"]["model_name"] == "ltx"
+    assert restore["params"]["maxrate_bps"] == 12_200_000
     statuses = {e["lookup"]["status"] for e in data["plans"]["plans"]}
     assert statuses == {"succeeded", "failed"}
     assert data["target"]["missing"]["error_code"] == "missing"

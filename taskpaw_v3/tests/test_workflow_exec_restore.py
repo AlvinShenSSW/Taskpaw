@@ -114,7 +114,9 @@ def test_restore_reports_the_parsed_ltx_state_beside_the_text(rt):
     assert run.outcome.ok
     # the short text is unchanged (the list row and the other stages keep it)
     assert "修复 第 1/2 卷 · 阶段 2/4 encode · 52% · 剩余 12:12" in run.progress
-    encode = [s for s in run.ltx if s["ltx_progress"]["stage_name"] == "encode"]
+    encode = [
+        s for s in run.ltx if s.get("ltx_progress", {}).get("stage_name") == "encode"
+    ]
     first, second = encode
     assert (first["current_file"], second["current_file"]) == ("第 1/2 卷", "第 2/2 卷")
     assert first["ltx_stage"] == "2/4 encode"
@@ -170,7 +172,9 @@ def test_the_auto_split_scan_and_any_console_line_keep_the_step_alive(
     run = run_direct(rt, single(rt, "ABF-394.mp4"), "restore")
     assert run.outcome.ok
     assert "修复 · 扫描马赛克 12%" in run.progress
-    consoles = [s.get("console") for s in run.ltx]
+    # U1c: the launch itself is reported first, with its parameters
+    assert set(run.ltx[0]) == {"current_file", "params"}
+    consoles = [s.get("console") for s in run.ltx[1:]]
     assert consoles[0] == "loading models…"
     scan = next(s for s in run.ltx if "scan_progress" in s)
     assert scan["scan_progress"]["current"] == "600" and "percent" not in scan
@@ -192,7 +196,7 @@ def test_unrecognised_console_lines_are_throttled_but_progress_is_not(
     assert run.outcome.ok
     # the first note emits, the next ones wait out the interval; a progress
     # line is never throttled and carries its own console line
-    assert [s.get("console") for s in run.ltx] == ["first note", SCAN_LINE]
+    assert [s.get("console") for s in run.ltx[1:]] == ["first note", SCAN_LINE]
 
 
 def test_progress_text_shows_volume_stage_percent_and_eta():

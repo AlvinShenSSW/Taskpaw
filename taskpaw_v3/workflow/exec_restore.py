@@ -26,13 +26,14 @@ import logging
 import math
 import os
 import shutil
+import subprocess
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from taskpaw_v3.monitors.plugins import jasna
 from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES
@@ -54,7 +55,7 @@ from .exec_common import (
     workcopy_ref,
 )
 from .executors import ComputeStage, ExecOutcome, JobContext
-from .local_gpu import FULL_HD, max_resolution
+from .local_gpu import FULL_HD, LocalGpu, max_resolution
 from .local_runtime import LocalRuntime
 from .owned_process import OwnedJob
 from .stage_results import (
@@ -191,6 +192,80 @@ def progress_text(volume: str, state: dict) -> str:
     if eta := state.get("eta"):
         parts.append(f"剩余 {eta}")
     return " · ".join(parts)
+
+
+_PATH_FLAGS = ("--input", "--output", "--working-directory")
+_MODEL_TIERS = {name: tier for tier, name in jasna.LTX_MODEL_NAMES.items()}
+
+
+def _flag(argv: Sequence[str], flag: str) -> str | None:
+    return argv[argv.index(flag) + 1] if flag in argv[:-1] else None
+
+
+def _int(value: str | None) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def launch_params(
+    argv: Sequence[str],
+    *,
+    match_source_bitrate: bool,
+    source_bitrate: int | None,
+    probe: m.MediaProbe | None,
+    gpu: LocalGpu | None,
+    preset: str,
+) -> dict[str, Any]:
+    """U1c: what Jasna was launched with for this video, read from its argv
+    (the effective values after the GPU check, never the configured ones), and
+    the argv itself with every path cut to its file name, ready to copy."""
+    model_name = _flag(argv, "--restoration-model-name")
+    fast = "--ltx-fast" in argv
+    overlap = (
+        "on"
+        if "--experimental-ltx-less-overlap" in argv
+        else "off"
+        if "--no-experimental-ltx-less-overlap" in argv
+        else "auto"
+    )
+    rate = _flag(argv, "--encoder-settings") or ""
+    maxrate = next(
+        (_int(part[8:]) for part in rate.split(",") if part.startswith("maxrate=")),
+        None,
+    )
+    short = list(argv)
+    if short:
+        short[0] = Path(short[0]).name
+    for flag in _PATH_FLAGS:
+        if flag in short[:-1]:
+            index = short.index(flag) + 1
+            short[index] = Path(short[index]).name
+    return {
+        "ltx_model": _MODEL_TIERS.get(model_name or ""),
+        "model_name": model_name,
+        "fast": fast,
+        "precision": "nvfp4" if fast else "int8",
+        "auto_split": _int(_flag(argv, "--ltx-auto-split")) or 0,
+        "large_canvas": "--ltx-large-canvas" in argv,
+        "overlap": overlap,
+        "codec": _flag(argv, "--codec"),
+        "cq": _int(_flag(argv, "--cq")),
+        "match_source_bitrate": match_source_bitrate,
+        "maxrate_bps": maxrate,
+        "source_bitrate_bps": source_bitrate,
+        "detection_model": _flag(argv, "--detection-model"),
+        "clip_size": _int(_flag(argv, "--max-clip-size")),
+        "temporal_overlap": _int(_flag(argv, "--temporal-overlap")),
+        "tier": TIER,
+        "source_width": probe.width if probe is not None else None,
+        "source_height": probe.height if probe is not None else None,
+        "gpu": gpu.name if gpu is not None else None,
+        "gpu_vram_mib": gpu.vram_mib if gpu is not None else None,
+        "preset": preset,
+        "argv": subprocess.list2cmdline(short),
+    }
 
 
 def probe_video(
@@ -616,26 +691,35 @@ class RestoreExecutor:
         ltx_work = workdir / LTX_WORK_DIRNAME
         ltx_work.mkdir(parents=True, exist_ok=True)
         staging.unlink(missing_ok=True)
-        argv = [
-            *self.launch_prefix,
-            *jasna.build_argv(
-                cfg,
-                str(exe),
-                source,
-                staging,
-                TIER,
-                False,
-                False,
-                ltx_work,
-                fast,
-                source_bitrate=bitrate,
-            ),
-        ]
+        jasna_argv = jasna.build_argv(
+            cfg,
+            str(exe),
+            source,
+            staging,
+            TIER,
+            False,
+            False,
+            ltx_work,
+            fast,
+            source_bitrate=bitrate,
+        )
+        argv = [*self.launch_prefix, *jasna_argv]
+        # U1c: this video's effective launch, shown on the step while it runs
+        params = launch_params(
+            jasna_argv,
+            match_source_bitrate=cfg.match_source_bitrate,
+            source_bitrate=bitrate,
+            probe=probe,
+            gpu=self.runtime.gpu,
+            preset=self.gpu_id,
+        )
         lock = threading.Lock()
         state: dict = {}
         tail: deque[str] = deque(maxlen=_TAIL_LINES)
         volume = label.strip() or source.name
-        context.progress(progress_text(label, state))
+        context.progress(
+            progress_text(label, state), ltx={"current_file": volume, "params": params}
+        )
         console = ""
         last_emit = -math.inf
 
@@ -657,6 +741,7 @@ class RestoreExecutor:
                 # the monitor's LtxProgress metrics: its parse state and the
                 # volume (M3), plus the latest plain console line (U1c)
                 detail = {**updated, "current_file": volume, "console": console}
+                detail["params"] = params
                 context.progress(progress_text(label, updated), ltx=detail)
 
         child = context.processes.launch(argv, cwd=str(workdir), on_line=on_line)

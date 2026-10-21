@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES
 from taskpaw_v3.tests.workflow_exec_helpers import (
+    GPU_8GB,
     File,
     Tools,
     add_film,
@@ -18,6 +21,7 @@ from taskpaw_v3.tests.workflow_exec_helpers import (
     stage,
     video,
 )
+from taskpaw_v3.workflow import exec_restore
 from taskpaw_v3.workflow.exec_common import MISSING_LTX
 
 
@@ -121,3 +125,62 @@ def test_recall_infers_the_tier_from_the_names_or_takes_the_plan(
     assert cfg.ltx_model == expected
     if fast is not None:
         assert recalled is fast
+
+
+def _after(argv: list[str], flag: str) -> str:
+    return argv[argv.index(flag) + 1]
+
+
+@pytest.mark.parametrize("bitrate", [12_200_000, None])
+def test_the_launch_params_are_the_argv_jasna_got_for_this_film(
+    rt, tools, monkeypatch, bitrate
+):
+    """U1c: the restore step shows the effective launch of THIS film — read from
+    the argv itself — with the probed source bitrate, or none when it failed."""
+    monkeypatch.setattr(
+        exec_restore, "probe_source_bitrate", lambda *args, **kwargs: bitrate
+    )
+    install(tools, "high")
+    film = add_film(rt, [File("ABF-394.mp4", video())], tier="high")
+    run = run_direct(rt, film, "restore")
+    assert run.outcome.ok
+    (argv,) = tools.runs(tools.jasna_exe)
+    params = run.ltx[0]["params"]
+    assert all(state["params"] == params for state in run.ltx)
+    fast = "--ltx-fast" in argv
+    assert params == {
+        "ltx_model": "high",
+        "model_name": _after(argv, "--restoration-model-name"),
+        "fast": fast,
+        "precision": "nvfp4" if fast else "int8",
+        "auto_split": int(_after(argv, "--ltx-auto-split")),
+        "large_canvas": "--ltx-large-canvas" in argv,
+        "overlap": "auto",
+        "codec": _after(argv, "--codec"),
+        "cq": int(_after(argv, "--cq")),
+        "match_source_bitrate": True,
+        "maxrate_bps": bitrate,
+        "source_bitrate_bps": bitrate,
+        "detection_model": _after(argv, "--detection-model"),
+        "clip_size": int(_after(argv, "--max-clip-size")),
+        "temporal_overlap": int(_after(argv, "--temporal-overlap")),
+        "tier": "1080p",
+        "source_width": 1920,
+        "source_height": 1080,
+        "gpu": GPU_8GB.name,
+        "gpu_vram_mib": GPU_8GB.vram_mib,
+        "preset": "5060-8",
+        "argv": params["argv"],
+    }
+    assert params["model_name"] == "ltx-8step"
+    assert ("--encoder-settings" in argv) == (bitrate is not None)
+    if bitrate is not None:
+        assert _after(argv, "--encoder-settings").startswith(f"maxrate={bitrate},")
+    # the copyable command: the same tokens, every path cut to its file name
+    short = [Path(a).name if a == argv[0] else a for a in argv]
+    for flag in ("--input", "--output", "--working-directory"):
+        i = short.index(flag) + 1
+        short[i] = Path(argv[i]).name
+    assert params["argv"] == subprocess.list2cmdline(short)
+    assert str(tools.jasna_dir) not in params["argv"]
+    assert "--input ABF-394.mp4" in params["argv"]
