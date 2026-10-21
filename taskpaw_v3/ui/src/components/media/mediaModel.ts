@@ -148,7 +148,7 @@ export function readParams(value: unknown): RestoreParams | null {
     ltx_model: tier, model_name: text(value.model_name), fast: value.fast === true,
     precision: value.fast === true ? "nvfp4" : "int8", auto_split: int(value.auto_split) ?? 0,
     large_canvas: value.large_canvas === true, overlap, codec: text(value.codec),
-    codec_follows_source: value.codec_follows_source === true, cq: int(value.cq),
+    source_codec: text(value.source_codec), cq: int(value.cq),
     match_source_bitrate: value.match_source_bitrate === true, maxrate_bps: int(value.maxrate_bps),
     source_bitrate_bps: int(value.source_bitrate_bps), detection_model: text(value.detection_model),
     clip_size: int(value.clip_size), temporal_overlap: int(value.temporal_overlap), tier: text(value.tier) ?? "1080p",
@@ -173,8 +173,19 @@ export function capText(p: RestoreParams): string {
   return p.match_source_bitrate ? "未读到原片码率，按 Jasna 默认上限" : "按 Jasna 默认上限";
 }
 
+// 编码: with the auto split on, Jasna smart-renders the split's spans in the source codec, but only
+// once it planned a split; skipped / no mosaics restores the whole video in the configured codec.
+export function codecText(p: RestoreParams, split: SplitNote | null): string {
+  const cq = `CQ ${p.cq ?? "—"}`;
+  const configured = (p.codec ?? "—").toUpperCase();
+  if (!p.source_codec) return `${configured} · ${cq}`;
+  const source = p.source_codec.toUpperCase();
+  if (!split) return `${configured} · ${cq}（若自动拆分则沿用原片 ${source}）`;
+  return split.kind === "planned" ? `${source} · ${cq}（自动拆分沿用原片编码）` : `${configured} · ${cq}`;
+}
+
 // The labelled rows of the drawer's 「本片参数」 block.
-export function paramRows(p: RestoreParams): Array<[string, string]> {
+export function paramRows(p: RestoreParams, split: SplitNote | null = null): Array<[string, string]> {
   const quality = p.ltx_model ? TIER_SHORT[p.ltx_model] : "—";
   const size = p.source_width !== null && p.source_height !== null ? `${p.source_width}×${p.source_height} · ` : "";
   return [
@@ -183,7 +194,7 @@ export function paramRows(p: RestoreParams): Array<[string, string]> {
     ["自动拆分", p.auto_split > 0 ? `${p.auto_split}%` : "关"],
     ["大画布", ON_OFF(p.large_canvas)],
     ["减少重叠", OVERLAP[p.overlap]],
-    ["编码", `${(p.codec ?? "—").toUpperCase()} · CQ ${p.cq ?? "—"}${p.codec_follows_source ? "（自动拆分沿用原片编码）" : ""}`],
+    ["编码", codecText(p, split)],
     ["码率上限", capText(p)],
     ["检测", p.detection_model ?? "—"],
     ["片段 / 重叠", `${p.clip_size ?? "—"} / ${p.temporal_overlap ?? "—"}`],

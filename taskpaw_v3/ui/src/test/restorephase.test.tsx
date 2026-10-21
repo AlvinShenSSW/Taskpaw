@@ -11,7 +11,7 @@ import { RestoreLivePanel } from "../components/media/RestoreLivePanel";
 import { setLang } from "../i18n";
 import { theme } from "../theme";
 import {
-  BASIC_LINE, LTX_LINE, PARAMS, RESTORE_PHASES, restoreSteps, row, SCAN_LINE, type RestorePhaseKey,
+  BASIC_LINE, LTX_LINE, PARAMS, RESTORE_PHASES, restoreSteps, row, SCAN_LINE, SPLIT_LINE, type RestorePhaseKey,
 } from "./fixtures/mediaWorkspace";
 
 const wrap = (ui: ReactNode) => render(<ThemeProvider theme={theme}><div className="mw">{ui}</div></ThemeProvider>);
@@ -229,12 +229,33 @@ describe("本片参数", () => {
       { preset: "5070ti-16", preset_label: "5070ti-16", preset_auto: false });
   });
 
-  it("shows the source codec with a note when the auto split keeps it (IR05)", () => {
-    const params = { ...PARAMS, codec: "h264", codec_follows_source: true };
-    wrap(<RestoreLivePanel step={{ ...step("ltx"), params }} />);
-    expect(param("编码")).toBe("编码H264 · CQ 20（自动拆分沿用原片编码）");
-    expect(readParams(params)?.codec_follows_source).toBe(true);
-    expect(readParams({ ...PARAMS, codec_follows_source: undefined })?.codec_follows_source).toBe(false);
+  describe("编码 with a source codec (the auto split may keep it)", () => {
+    const params = { ...PARAMS, source_codec: "h264" };
+    const stepWith = (note?: { kind: string; text: string }) => {
+      const base = step("starting");
+      return { ...base, ltx: note ? { split_note: note } : null, params };
+    };
+
+    it("split planned: the source codec, with the note", () => {
+      wrap(<RestoreLivePanel step={stepWith({ kind: "planned", text: SPLIT_LINE })} />);
+      expect(param("编码")).toBe("编码H264 · CQ 20（自动拆分沿用原片编码）");
+    });
+
+    it.each(["skipped", "no_mosaics"])("split %s: the configured codec", (kind) => {
+      wrap(<RestoreLivePanel step={stepWith({ kind, text: "no split" })} />);
+      expect(param("编码")).toBe("编码HEVC · CQ 20");
+    });
+
+    it("no split note yet: the configured codec, and what a split would do", () => {
+      wrap(<RestoreLivePanel step={stepWith()} />);
+      expect(param("编码")).toBe("编码HEVC · CQ 20（若自动拆分则沿用原片 H264）");
+    });
+
+    it("reads the field defensively", () => {
+      expect(readParams(params)?.source_codec).toBe("h264");
+      expect(readParams(PARAMS)?.source_codec).toBeNull();
+      expect(readParams({ ...PARAMS, source_codec: undefined })?.source_codec).toBeNull();
+    });
   });
 
   it("says so when the source bitrate could not be read", () => {

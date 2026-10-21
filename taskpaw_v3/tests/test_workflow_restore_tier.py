@@ -157,7 +157,7 @@ def test_the_launch_params_are_the_argv_jasna_got_for_this_film(
         "large_canvas": "--ltx-large-canvas" in argv,
         "overlap": "auto",
         "codec": _after(argv, "--codec"),
-        "codec_follows_source": False,
+        "source_codec": None,
         "cq": int(_after(argv, "--cq")),
         "match_source_bitrate": True,
         "maxrate_bps": bitrate,
@@ -229,25 +229,34 @@ def test_a_repeated_flag_takes_the_last_value_like_argparse():
 
 
 @pytest.mark.parametrize(
-    ("split", "configured", "source", "codec", "follows"),
+    ("split", "configured", "source", "source_codec"),
     [
-        ("12", "hevc", "h264", "h264", True),  # smart render keeps the source codec
-        ("12", "hevc", "av1", "av1", True),
-        ("12", "av1", "hevc", "hevc", True),
-        ("12", "hevc", "hevc", "hevc", False),  # already the same
-        ("0", "hevc", "h264", "hevc", False),  # no auto split: it re-encodes
-        ("12", "hevc", "mpeg4", "hevc", False),  # not a codec Jasna keeps
-        ("12", "hevc", None, "hevc", False),  # unreadable source codec
+        (
+            "12",
+            "hevc",
+            "h264",
+            "h264",
+        ),  # a split would smart-render in the source codec
+        ("12", "hevc", "av1", "av1"),
+        ("12", "av1", "hevc", "hevc"),
+        ("12", "hevc", "hevc", None),  # already the same
+        ("0", "hevc", "h264", None),  # no auto split: it re-encodes
+        ("12", "hevc", "mpeg4", None),  # not a codec Jasna keeps
+        ("12", "hevc", None, None),  # unreadable source codec
     ],
 )
-def test_auto_split_shows_the_source_codec_as_the_effective_output(
-    split, configured, source, codec, follows
+def test_params_keep_the_configured_codec_and_name_the_source_codec_a_split_would_use(
+    split, configured, source, source_codec
 ):
+    """Jasna may still skip the split, so `codec` is always the configured one;
+    the UI decides from the split note which of the two applies."""
     argv = ["--codec", configured, "--ltx-auto-split", split]
     params = _launch(argv, _probe(source))
-    assert (params["codec"], params["codec_follows_source"]) == (codec, follows)
+    assert params["codec"] == configured
+    assert params["source_codec"] == source_codec
+    assert "codec_follows_source" not in params
 
 
-def test_the_codec_stays_configured_without_a_probe():
+def test_there_is_no_source_codec_without_a_probe():
     params = _launch(["--codec", "hevc", "--ltx-auto-split", "12"], None)
-    assert (params["codec"], params["codec_follows_source"]) == ("hevc", False)
+    assert (params["codec"], params["source_codec"]) == ("hevc", None)

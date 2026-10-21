@@ -53,7 +53,7 @@ export type RestorePhaseKey = keyof typeof RESTORE_PHASES;
 // The auto-picked 5070ti-16 preset's launch of a probed 12.2 Mbps 1080p film (the backend's `launch_params`).
 export const PARAMS: RestoreParams = {
   ltx_model: "standard", model_name: "ltx", fast: true, precision: "nvfp4", auto_split: 12, large_canvas: false,
-  overlap: "auto", codec: "hevc", codec_follows_source: false, cq: 20, match_source_bitrate: true, maxrate_bps: 12_200_000, source_bitrate_bps: 12_200_000,
+  overlap: "auto", codec: "hevc", source_codec: null, cq: 20, match_source_bitrate: true, maxrate_bps: 12_200_000, source_bitrate_bps: 12_200_000,
   detection_model: "rfdetr-v6", clip_size: 180, temporal_overlap: 8, tier: "1080p", source_width: 1920, source_height: 1080,
   gpu: "NVIDIA GeForce RTX 5070 Ti", gpu_vram_mib: 16303, preset: "5070ti-16", preset_label: "RTX 5070 Ti · 16 GB", preset_auto: true,
   argv: "jasna.exe --input ABF-401.mp4 --output ABF-401-破解.tmp.mp4 --max-clip-size 90 --temporal-overlap 8 "

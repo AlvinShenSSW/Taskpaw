@@ -306,12 +306,12 @@ def launch_params(
     )
     codec = _flag(argv, "--codec")
     auto_split = _int(_flag(argv, "--ltx-auto-split")) or 0
-    # Jasna smart-renders the auto split's spans in the source's codec, so a
-    # different configured codec does not apply to them
+    # Jasna smart-renders the auto split's spans in the source's codec, but it may
+    # skip the split; `codec` stays the configured one and the UI picks by the
+    # split note
     source_codec = _source_codec(probe)
-    follows = bool(auto_split and source_codec and source_codec != codec)
-    if follows:
-        codec = source_codec
+    if not auto_split or source_codec == codec:
+        source_codec = None
     short = list(argv)
     if short:
         short[0] = Path(short[0]).name
@@ -327,7 +327,7 @@ def launch_params(
         "large_canvas": _switch(argv, "--ltx-large-canvas") is True,
         "overlap": overlap,
         "codec": codec,
-        "codec_follows_source": follows,
+        "source_codec": source_codec,
         "cq": _int(_flag(argv, "--cq")),
         "match_source_bitrate": match_source_bitrate,
         "maxrate_bps": maxrate,

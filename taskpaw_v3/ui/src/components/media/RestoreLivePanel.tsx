@@ -4,6 +4,7 @@
 import { Box, Typography } from "@mui/material";
 import type { RestoreParams, WorkflowStep } from "../../api";
 import { LtxProgress } from "../LtxProgress";
+import type { SplitNote } from "../restorePhase.helpers";
 import { ConsoleFold, DATA, ProgressFrame } from "../progressParts";
 import { BasicVsrProgress, MosaicScanProgress } from "../RestorePhaseProgress";
 import { heartbeatText, paramRows, presetText, restoreLive, SPLIT_LABEL, SPLIT_NOTE, type RestoreLive } from "./mediaModel";
@@ -28,11 +29,11 @@ const PULSE = {
 } as const;
 
 // 「本片参数」: what Jasna was launched with for this video, and the full command to copy.
-function ParamsBlock({ params }: { params: RestoreParams }) {
+function ParamsBlock({ params, split }: { params: RestoreParams; split: SplitNote | null }) {
   return (
     <ProgressFrame testId="restore-params" label="本片参数" title="本片参数" position={presetText(params) || undefined}>
       <Box component="dl" sx={{ m: 0, px: { xs: 2, sm: 3 }, py: 2, display: "flex", flexWrap: "wrap", gap: 1 }}>
-        {paramRows(params).map(([label, value]) => (
+        {paramRows(params, split).map(([label, value]) => (
           <Box key={label} data-param={label} sx={{ display: "inline-flex", alignItems: "baseline", gap: 0.75, minWidth: 0,
             maxWidth: "100%", px: 1.25, py: 0.5, border: "1px solid", borderColor: "divider", borderRadius: 1.5,
             bgcolor: "background.default" }}>
@@ -73,7 +74,7 @@ export function RestoreLivePanel({ step }: { step: WorkflowStep }) {
         <ConsoleFold raw={live.console ?? undefined} title="最新输出" help="Jasna 控制台最近一行（纯文本）"
           unavailable="Jasna 还没有输出" testIdPrefix="restore-console" />
       </ProgressFrame>
-      {live.params && <ParamsBlock params={live.params} />}
+      {live.params && <ParamsBlock params={live.params} split={live.split} />}
       {live.phase === "ltx" && <LtxProgress metrics={live.metrics} />}
       {live.phase === "scan" && <MosaicScanProgress metrics={live.metrics} />}
       {live.phase === "basic" && <BasicVsrProgress metrics={live.metrics} />}
