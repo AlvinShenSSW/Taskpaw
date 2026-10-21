@@ -4262,7 +4262,9 @@ class JasnaInstance(MonitorInstance):
                 # authority for current_file.
                 metrics["current_file"] = self._current.name
             if self._compiling and (
-                "percent" in metrics or engines_present(self._exe_dir())
+                "percent" in metrics
+                or "scan_progress" in metrics  # U1c: work began, as a % did
+                or engines_present(self._exe_dir())
             ):
                 self._compiling = False
         elif state == "running" and self._phase == "subs":
@@ -4408,11 +4410,14 @@ class JasnaInstance(MonitorInstance):
             return self._subs_detail(m)
         if state == "running" and self._current is not None:
             head = f"{state}: {self._current.name}{self._tier_suffix()}"
-            if self._compiling and "percent" not in m:
+            if self._compiling and "percent" not in m and "scan_progress" not in m:
                 head = _COMPILING_HINT + head
             parts.append(head)
         else:
             parts.append(state)
+        scan = m.get("scan_progress")
+        if isinstance(scan, dict) and "percent_text" in scan:
+            parts.append(f"Mosaic scan {scan['percent_text']}%")  # U1c: pre-LTX
         if m.get("ltx_stage"):
             parts.append(f"LTX {m['ltx_stage']}")  # #263: the stage the % is of
         if "percent" in m:
