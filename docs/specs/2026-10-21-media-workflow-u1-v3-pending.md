@@ -167,6 +167,16 @@
 - `lookup_one` refuses a mark that points outside its config dir (M02 fix), so the live profile `%LOCALAPPDATA%/com.mdcx.desktop` is never read through a mark and never written.
 - The run passes `file_name` = the main video's file name. Names without a number are refused by M02, and the card shows 「文件名中没有番号」 with 「重新查询」 disabled.
 
+## U1b (operator feedback 2026-10-21)
+
+After installing the U1 build the operator wrote: 「封面被裁切了，可以用poster吗 另外点击能lightbox放大吗」 (the cover is cropped; can it use the poster, and can a click enlarge it in a lightbox?).
+
+- **Cause.** Downloaded packages carry `<num>-poster.jpg`, `-thumb.jpg`, `-fanart.jpg` and `<num>.jpg`, and every one of them is the whole landscape jacket (2184×1477 or 840×568). The front cover, which is the poster, is the jacket's right part. When the Miko lookup succeeds it returns a portrait `poster.jpg` (421×600). ABF-393's lookup ran past the 90 s metadata budget, so its card fell back to the input image. The portrait box (`object-fit: cover`, centred) then showed the middle of the jacket.
+- **Poster display.** One shared `Cover` serves every place: 待处理 cards, queue cards, review cards, overview rows and peeks, the drawer hero and the 图文确认 dialog. A portrait image renders as before. A landscape image (`naturalWidth > naturalHeight`) renders with `object-fit: cover; object-position: right center`, so the front cover shows. The box sizes are unchanged: 61×82, 88×117, 116×154 and 108 px.
+- **Lightbox.** A cover with an image is a button (「查看大图」). It works with Enter and Space and shows a focus ring. It opens a dialog with the full, uncropped image, up to 92vw × 88vh (`object-fit: contain`) over a dark backdrop. The dialog shows the film's full jacket (`/films/{id}/cover`) when `has_cover` is true; otherwise it shows the poster, and it also falls back to the poster when the jacket fails to load. Esc, a backdrop click or 「关闭大图」 close it, and focus returns to the cover. Inside the drawer or the 图文确认 dialog, Esc closes only the lightbox.
+- **Lookup budget.** MDCX304 8a3f519 gives `lookup_one` its own 270 s budget: 240 s for metadata and 30 s for the poster. Taskpaw's wall-clock kill moves from 150 s to **300 s**, so a slow site ends with lookup_one's own 「资料查询超时」 result instead of a killed process.
+- **Codex r6 P2s.** The 异常 page polls the target preflights, still only for the top ten films, because it lists films whose target is offline, unwritable or taken. 待处理 hides a confirmed film by `(film_id, input_revision)`, so a newer revision that has not been planned shows again, flagged as changed.
+
 ## API appendix (backend as built, U1)
 
 All routes are on the loopback control API under `/control/workflow`, with the existing bearer token. JSON field names are final; the frontend aligns to this section. Labels, toasts and colours stay in the UI.
@@ -294,3 +304,10 @@ It has the row additions above (`resolution`, `plan`, `receipt_id`, `revisions`)
   - `duplicate`: the folder already exists; `absent` is false.
   - `null`: none of the above.
 - 409: the film has no final package yet. 404: unknown film.
+
+### U1b: the full jacket and the lookup timeout
+
+- `has_cover`, `cover_source` are on every `GET /films` row, on `GET /films/{id}` and on every `GET /plans` entry. `cover_source` is the jacket's cache key (`final-…` / `input-…` + 16 hex of its sha256), like `poster_source`. Both are `false` / `null` when the film has no landscape image.
+- `GET /films/{id}/cover` serves the full jacket: the largest landscape image (wider than tall, by pixel area) of the first tier that has one. The tiers are the final's `fanart`, then the final's `thumb`, then the input's `fanart`, `thumb` and image `attachment`. The size comes from the file header (JPEG, PNG, GIF, BMP, WebP). Input files are read only from their intake work copy (`workcopy_path`), never from the INBOX; final files are read from the final package. The guard is the poster route's: bearer token, control API only, 503 without a running host. It returns 404 「没有完整封面」 when there is no jacket, and 404 for an unknown film.
+- The lookup's portrait `poster.jpg` is not a jacket. For a film that has only that, the lightbox shows the poster.
+- The `lookup_one` hard timeout (`lookup.TIMEOUT_SECONDS`) is 300 s. It sits above MDCX's own 270 s budget (`MDCX_BUDGET_SECONDS`).
