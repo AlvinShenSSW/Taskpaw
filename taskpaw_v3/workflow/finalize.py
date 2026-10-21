@@ -93,6 +93,10 @@ class Finalizer:
 
         `error_code`: offline (Filmpaw or its share unreachable), permission,
         missing (the performer record is gone), duplicate (the folder exists).
+
+        Without `performer_id`, exactly one candidate is checked in the same
+        call (U1 Codex r2 F4; `performer_id` then names it): the list reads one
+        answer per film and still shows a blocked target.
         """
         from . import board
 
@@ -124,6 +128,8 @@ class Finalizer:
                 "query": list(dict.fromkeys(actors)),
                 "items": list(items.values()),
             }
+            if not performer_id and len(items) == 1:
+                performer_id = value["performer_id"] = next(iter(items))
             if performer_id:
                 proof = self.filmpaw.target(performer_id, film_dir)
                 value["absent"] = bool(proof["absent"])

@@ -11,7 +11,7 @@ import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
 import { setLang } from "../i18n";
 import {
-  counts, detail, FILMS, FILMS_RESPONSE, lookupFailed, PACKAGES, plan, PLANS, preflight, PREFLIGHTS, row, steps,
+  counts, detail, FILMS, FILMS_RESPONSE, lookupFailed, PACKAGES, plan, PLANS, preflight, PREFLIGHTS, revisions, row, steps,
 } from "./fixtures/mediaWorkspace";
 
 const wrapWith = (ui: ReactNode) => {
@@ -30,10 +30,14 @@ function mockApi() {
   vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => detail(id));
   vi.spyOn(api, "workflowTarget").mockImplementation(async (id, performer) => {
     const pf = PREFLIGHTS[id] ?? preflight(id.toUpperCase(), []);
-    if (performer === undefined || pf.error_code) return pf;
-    // as the backend: the target ends in the film folder; an unknown performer is `missing`
-    const chosen = pf.candidates?.items.find((p) => p.id === performer);
-    return { ...pf, performer_id: String(performer), absent: chosen ? true : null,
+    if (pf.error_code) return pf;
+    // as the backend: exactly one candidate is checked without a performer too (F4)
+    const items = pf.candidates?.items ?? [];
+    const checked = performer ?? (items.length === 1 ? items[0].id : undefined);
+    if (checked === undefined) return pf;
+    // the target ends in the film folder; an unknown performer is `missing`
+    const chosen = items.find((p) => p.id === checked);
+    return { ...pf, performer_id: String(checked), absent: chosen ? true : null,
       target_path: chosen ? `${chosen.unc_path}\\${pf.film_dir}` : null, error_code: chosen ? null : "missing" };
   });
   vi.spyOn(api, "image").mockResolvedValue("data:image/png;base64,");
@@ -479,7 +483,9 @@ describe("图文确认 review fixes", () => {
     const ok = within(dialog).getByRole("button", { name: "确认入库" });
     expect(await within(dialog).findByText("正在检查目标…")).toBeInTheDocument();
     expect(ok).toBeDisabled();
-    const recheck = () => act(() => qc.resetQueries({ queryKey: ["mediaTarget", "abf-406", 1] }));
+    const recheck = () => act(() => qc.resetQueries({
+      predicate: (q) => q.queryKey[0] === "mediaTarget" && q.queryKey[1] === "abf-406" && q.queryKey[3] === 1,
+    }));
     // an HTTP error is no pass
     answer = async () => { throw new HttpError("服务暂不可用", 503); };
     await recheck();
@@ -495,6 +501,56 @@ describe("图文确认 review fixes", () => {
     answer = async (pf) => withPerformer(pf, {});
     await recheck();
     await waitFor(() => expect(ok).toBeEnabled());
+  });
+
+  it("a new final revision needs its own passed target check; 重新查看 keeps no stale one", async () => {
+    mockApi();
+    let final = 2;
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) =>
+      detail(id, id === "abf-406" ? { revisions: revisions(1, final) } : {}));
+    let release: () => void = () => {};
+    const calls: Array<[string, unknown]> = [];
+    const inner = vi.mocked(api.workflowTarget).getMockImplementation() as typeof api.workflowTarget;
+    vi.spyOn(api, "workflowTarget").mockImplementation(async (id, performer) => {
+      calls.push([id, performer]);
+      if (id === "abf-406" && final === 3) await new Promise<void>((resolve) => { release = resolve; });
+      return inner(id, performer);
+    });
+    const { qc } = wrapWith(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    const ok = within(dialog).getByRole("button", { name: "确认入库" });
+    await waitFor(() => expect(ok).toBeEnabled());
+    final = 3;
+    await act(() => qc.invalidateQueries({ queryKey: ["mediaFilm", "abf-406"] }));
+    expect(await within(dialog).findByText("成品或来源已更新，请重新查看后确认。")).toBeInTheDocument();
+    expect(ok).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新查看" }));
+    // acknowledged, but revision 2's passed check does not stand in for revision 3's
+    expect(await within(dialog).findByText("正在检查目标…")).toBeInTheDocument();
+    expect(ok).toBeDisabled();
+    await waitFor(() => expect(calls.filter(([id]) => id === "abf-406").length).toBeGreaterThan(1));
+    await act(async () => { release(); });
+    await waitFor(() => expect(ok).toBeEnabled());
+    expect(qc.getQueryData(["mediaTarget", "abf-406", `3:${revisions(1, 3).final?.hash}`])).toMatchObject({
+      performer_id: "1", absent: true,
+    });
+  });
+
+  it("one candidate: the list and the dialog read the same target check (F4)", async () => {
+    mockApi();
+    const duplicate = withPerformer(PREFLIGHTS["abf-406"], { absent: false, error_code: "duplicate", message: "同名" });
+    const target = vi.spyOn(api, "workflowTarget").mockImplementation(async (id) =>
+      (id === "abf-406" ? duplicate : PREFLIGHTS[id] ?? preflight(id.toUpperCase(), [])));
+    wrap(<MediaWorkspace />);
+    await go("待确认");  // the list asks (IR05: only where it is shown) …
+    await waitFor(() => expect(target).toHaveBeenCalledWith("abf-406"));
+    await go("异常");  // … and its answer files the film under 异常
+    await waitFor(() => expect(document.querySelector("main")?.textContent).toContain("星河慢行"));
+    const dialog = await openReview("星河慢行");
+    expect(await within(dialog).findByText("目标已有同名影片包，不能覆盖；请打开文件夹核对。")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeDisabled();
+    // the dialog asked no second, diverging question for that performer
+    expect(target.mock.calls.filter(([id, p]) => id === "abf-406" && p !== undefined)).toEqual([]);
   });
 
   it.each(["zero", "failed"] as const)("a lone candidate arriving after a %s first load is selected", async (first) => {
@@ -517,7 +573,7 @@ describe("图文确认 review fixes", () => {
     const dialog = await openReview("未命名的岛");
     await within(dialog).findByRole("searchbox", { name: "搜索已有演员" });
     one = true;
-    await act(() => qc.invalidateQueries({ queryKey: ["mediaTarget", "abf-408"], exact: true }));
+    await act(() => qc.invalidateQueries({ queryKey: ["mediaTarget", "abf-408", null], exact: true }));
     await waitFor(() => expect(within(dialog).getByText("演员孤岛", { selector: "strong" })).toBeInTheDocument());
     await waitFor(() => expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeEnabled());
   });

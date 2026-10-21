@@ -219,9 +219,10 @@ describe("contract: 待确认 and 图文确认", () => {
   });
 
   it("a performer record that is gone blocks the confirm and asks for a new choice", async () => {
-    mockApi((p) => (p === undefined ? C.target.candidates : C.target.missing));
+    // the lone candidate's record is gone: the backend's one call says so (F4)
+    mockApi(() => ({ ...C.target.missing, performer_id: C.target.candidates.performer_id }));
     wrap(<MediaWorkspace />);
-    fireEvent.click(within(await openReview()).getByRole("button", { name: "图文核对入库" }));
+    fireEvent.click(within(await openReview()).getByRole("button", { name: /图文核对入库|查看并处理/ }));
     const dialog = await screen.findByRole("dialog", { name: "确认影片与入库目标" });
     expect(await within(dialog).findByText("演员记录已不存在，请重新选择。")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeDisabled();

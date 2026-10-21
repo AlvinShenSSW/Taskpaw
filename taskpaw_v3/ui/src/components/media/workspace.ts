@@ -2,13 +2,19 @@
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { createContext, useContext, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type PackageRow, type TargetPreflight, type WorkflowFilms, type WorkflowPlans } from "../../api";
+import {
+  api, type FilmRevisions, type PackageRow, type TargetPreflight, type WorkflowFilms, type WorkflowPlans,
+} from "../../api";
 import { ACTIVE_STATES, EXCEPTION_STATES, REVIEW_STATES, workItems, type StageFilter, type WorkItem } from "./mediaModel";
 
 export const MEDIA_FILMS_KEY = ["mediaFilms"] as const;
 export const MEDIA_PLANS_KEY = ["mediaPlans"] as const;
 export const mediaFilmKey = (filmId: string) => ["mediaFilm", filmId] as const;
-export const mediaTargetKey = (filmId: string) => ["mediaTarget", filmId] as const;
+// The target preflight of a film's current final revision (U1 Codex r2 F3): a new revision is a new
+// query, so its answer is never an older revision's. The list and the 图文确认 dialog share it.
+export const finalRevision = (revisions: FilmRevisions | null | undefined) =>
+  (revisions?.final ? `${revisions.final.revision}:${revisions.final.hash}` : null);
+export const mediaTargetKey = (filmId: string, final: string | null) => ["mediaTarget", filmId, final] as const;
 const POLL_MS = 5000;
 const PREFLIGHT_MS = 30000;
 // Each preflight asks Filmpaw and stats the NAS, so at most this many films per poll cycle (IR05).
@@ -31,7 +37,8 @@ export interface MediaData {
 }
 
 // Polls like the rest of the console (5 s). Films waiting for 确认入库 also get the target
-// preflight, which says whether they are ready, ambiguous, unmatched or blocked (U1 §7.3) — only
+// preflight, which says whether they are ready, ambiguous, unmatched or blocked (U1 §7.3; with
+// exactly one candidate the backend checks its target in the same call, F4) — only
 // while a view that shows it is mounted (`preflight`: 概览, 待确认, 图文确认) and only for the top
 // PREFLIGHT_MAX of them; the others keep their last answer, or read 「检查中」 (IR05).
 export function useMediaData(preflight = true): MediaData {
@@ -40,13 +47,11 @@ export function useMediaData(preflight = true): MediaData {
   const plans = useQuery({
     queryKey: MEDIA_PLANS_KEY, queryFn: api.workflowPlans, refetchInterval: POLL_MS, enabled: running, retry: false,
   });
-  const confirmIds = useMemo(
-    () => (films.data?.films ?? []).filter((f) => f.group === "confirm").map((f) => f.film_id),
-    [films.data],
-  );
+  const confirmRows = useMemo(() => (films.data?.films ?? []).filter((f) => f.group === "confirm"), [films.data]);
+  const confirmIds = useMemo(() => confirmRows.map((f) => f.film_id), [confirmRows]);
   const targetList = useQueries({
-    queries: confirmIds.map((id, i) => ({
-      queryKey: mediaTargetKey(id), queryFn: () => api.workflowTarget(id),
+    queries: confirmRows.map((f, i) => ({
+      queryKey: mediaTargetKey(f.film_id, finalRevision(f.revisions)), queryFn: () => api.workflowTarget(f.film_id),
       refetchInterval: PREFLIGHT_MS, retry: false, enabled: running && preflight && i < PREFLIGHT_MAX,
     })),
     combine: (results) => results.map((r) => r.data ?? null),

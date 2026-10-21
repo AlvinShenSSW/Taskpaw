@@ -12,7 +12,7 @@ import {
 import { packageNote, type StatusKey } from "./mediaModel";
 import { EvidenceFold } from "./FilmDrawer";
 import { Chip, Cover, Icon, Notice } from "./parts";
-import { errorText, MEDIA_FILMS_KEY, mediaFilmKey, mediaTargetKey, useWorkspace } from "./workspace";
+import { errorText, finalRevision, MEDIA_FILMS_KEY, mediaFilmKey, mediaTargetKey, useWorkspace } from "./workspace";
 
 const BACKDROP = { sx: { backgroundColor: "#030812BA", backdropFilter: "blur(4px)" } };
 const TARGET_BLOCK: Record<TargetErrorCode, string> = {
@@ -62,14 +62,17 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const ws = useWorkspace();
   const qc = useQueryClient();
   const detail = useQuery({ queryKey: mediaFilmKey(filmId), queryFn: () => api.workflowFilm(filmId), refetchInterval: 5000 });
-  const target = useQuery({ queryKey: mediaTargetKey(filmId), queryFn: () => api.workflowTarget(filmId), retry: false });
   const film = detail.data;
+  const item = ws.data.items.find((i) => i.id === filmId);
+  // F3: every target answer belongs to the final revision it checked; the detail's is the newest
+  const final = finalRevision(film?.revisions ?? (item?.kind === "film" ? item.row.revisions : null));
+  // the list's query for this film (F4): with one candidate it already checked that target
+  const target = useQuery({ queryKey: mediaTargetKey(filmId, final), queryFn: () => api.workflowTarget(filmId), retry: false });
   const [seenRev, setSeenRev] = useState<FilmRevisions | undefined>(undefined);
   const [selected, setSelected] = useState<Performer | null | undefined>(undefined);
   const [phase, setPhase] = useState<"review" | "submitted">("review");
   // The detail's update time when 「确认入库」 succeeded: only a later read may end the submitted phase.
   const [submittedAt, setSubmittedAt] = useState(0);
-  const item = ws.data.items.find((i) => i.id === filmId);
   const actor = film?.actors[0] ?? "";
   // Candidates: the preflight's (Filmpaw searched for every NFO actor); while Filmpaw is offline
   // (null) or the preflight failed, a manual search is offered instead.
@@ -89,11 +92,16 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     if (selected === undefined) setSelected(candidates.length === 1 ? candidates[0] : null);
     else if (selected === null && candidates.length === 1) setSelected(candidates[0]);
   }, [candidates, selected]);
-  const preflight = useQuery({
-    queryKey: [...mediaTargetKey(filmId), selected?.id ?? null],
+  // The chosen performer's check: the shared answer when the backend checked that very candidate,
+  // else its own query (once the shared one has answered), keyed by the revision as well.
+  const shared = Boolean(selected) && target.data?.performer_id != null
+    && String(target.data.performer_id) === String(selected?.id);
+  const own = useQuery({
+    queryKey: [...mediaTargetKey(filmId, final), selected?.id ?? null],
     queryFn: () => api.workflowTarget(filmId, (selected as Performer).id),
-    enabled: Boolean(selected), retry: false,
+    enabled: Boolean(selected) && !shared && (target.data !== undefined || target.isError), retry: false,
   });
+  const preflight = shared ? target : own;
   const confirm = useMutation({
     mutationFn: (p: Performer) => api.workflowConfirm(filmId, p.id),
     onSuccess: () => {
@@ -126,7 +134,8 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   if (phase === "submitted" && !reopened) return <Receipt film={film} onClose={onClose} />;
 
   const status: StatusKey | undefined = archiveStatus === "unknown" ? "unknown" : item?.status;
-  const errorCode = preflight.data?.error_code ?? target.data?.error_code ?? null;
+  // the chosen performer's own answer only: never an older or another target's
+  const errorCode = (selected ? preflight.data?.error_code : target.data?.error_code) ?? null;
   const changed = seenRev !== undefined && !sameRevisions(seenRev, film.revisions);
   const blocked =
     status === "unknown" ? "入库结果待核对，暂不能重新上传。"

@@ -434,9 +434,24 @@ def test_target_preflight_reports_the_folder_and_the_candidates(scraped):
         (scraped.nas / FILM_DIR).mkdir()
         duplicate = client.get(url, params={"performer_id": "actor"}).json()
         assert (duplicate["absent"], duplicate["error_code"]) == (False, "duplicate")
+        # U1 Codex r2 F4: exactly one candidate is checked in the same call,
+        # so the list shows a duplicate (offline, permission, missing) too
         only = client.get(url).json()
-        assert only["performer_id"] is None and only["target_path"] is None
+        assert {k: only[k] for k in ("performer_id", "absent", "error_code")} == {
+            "performer_id": "actor",
+            "absent": False,
+            "error_code": "duplicate",
+        }
+        assert only["target_path"] == str(Path(scraped.nas) / FILM_DIR)
         assert len(only["candidates"]["items"]) == 1
+        (scraped.nas / FILM_DIR).rmdir()
+        free = client.get(url).json()
+        assert (free["performer_id"], free["absent"], free["error_code"]) == (
+            "actor",
+            True,
+            None,
+        )
+        (scraped.nas / FILM_DIR).mkdir()
         gone = client.get(url, params={"performer_id": "nobody"}).json()
         assert gone["error_code"] == "missing"
     offline = client.get(url, params={"performer_id": "actor"}).json()

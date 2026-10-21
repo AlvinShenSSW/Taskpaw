@@ -1841,9 +1841,9 @@
   "target": {
     "candidates": {
       "film_dir": "ABC-123",
-      "performer_id": null,
-      "target_path": null,
-      "absent": null,
+      "performer_id": "actor",
+      "target_path": "\\\\nas-a\\actors\\Actor\\ABC-123",
+      "absent": true,
       "error_code": null,
       "message": null,
       "candidates": {
