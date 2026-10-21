@@ -293,9 +293,10 @@ export const vramGb = (mib: number | null | undefined) => (mib ? Math.round(mib 
 export const fmtVram = (mib: number | null | undefined) => (vramGb(mib) === null ? "" : `${vramGb(mib)} GB`);
 export const gpuLabel = (gpu: WorkflowFilms["gpu"] | undefined) =>
   [gpu?.name, fmtVram(gpu?.vram_mib)].filter(Boolean).join(" ");
-// The card may restore 4K: the backend's boundary (local_gpu.FOUR_K_VRAM_MIB, 16 GB-class cards).
-export const FOUR_K_VRAM_MIB = 15360;
-export const takes4k = (gpu: WorkflowFilms["gpu"] | undefined) => (gpu?.vram_mib ?? 0) >= FOUR_K_VRAM_MIB;
+// What the workflow restores on this card, as the backend states it (`gpu.max_output`): phase 1 caps
+// every card at 1080p, so a 16 GB card is no 4K device. Unknown reads as the safe 1080p.
+export const outputLimit = (gpu: WorkflowFilms["gpu"] | undefined): string =>
+  `修复输出上限 ${gpu?.max_output === "4K" ? "4K" : "1080p"}`;
 
 // The package file note of the 图文确认 list (§6).
 export function packageNote(role: string, path: string): string {

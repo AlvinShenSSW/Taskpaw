@@ -737,7 +737,8 @@
     },
     "gpu": {
       "name": "NVIDIA GeForce RTX 5060",
-      "vram_mib": 8151
+      "vram_mib": 8151,
+      "max_output": "1080p"
     }
   },
   "film": {

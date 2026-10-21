@@ -7,6 +7,8 @@ import { fmtBytes, fmtDurationMs, machineLabel, TIER_ORDER, TIER_SHORT, tierLong
 import { Chip, Cover, EmptyState, Icon, Notice, PageTitle } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, MEDIA_PLANS_KEY, useWorkspace } from "./workspace";
 
+const STALE_TEXT = "收件内容已更新，请重新查看后确认";
+
 type Filter = "all" | "gpu" | "nogpu";
 type Choice = { tier: LtxTier | null; machine: string };
 
@@ -77,13 +79,18 @@ export function PendingPage() {
   const after = (sent: PlanEntry[], results: PlanResult[] | null, failure?: unknown, quiet = false) => {
     const ok = new Set<string>();
     const stale = new Set<string>();
+    const other: string[] = [];  // the server's own reasons for every refusal that is not a changed revision
     if (results) {
       for (const r of results) {
         if (r.ok) ok.add(r.film_id);
         else if (r.error === "cas_conflict") stale.add(r.film_id);
-        else if (!quiet) ws.toast(r.message || r.error || "确认失败");
+        else {
+          const why = r.message || r.error || "确认失败";
+          other.push(why);
+          if (!quiet) ws.toast(why);
+        }
       }
-    } else if (failure instanceof HttpError && failure.status === 409 && sent.length === 1) {
+    } else if (failure instanceof HttpError && failure.code === "cas_conflict" && sent.length === 1) {
       stale.add(sent[0].film_id);
     }
     const order = items.map((e) => e.film_id);
@@ -94,7 +101,7 @@ export function PendingPage() {
     if (stale.size) setRejected((prev) => new Set([...prev, ...stale]));
     void qc.invalidateQueries({ queryKey: MEDIA_PLANS_KEY });
     void qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY });
-    return ok;
+    return { ok, stale, other };
   };
 
   const confirm = useMutation({
@@ -116,26 +123,29 @@ export function PendingPage() {
       } catch (e) {
         if (i > 0) break;
         after(entries, null, e);
-        ws.toast(e instanceof HttpError && e.status === 409 ? "收件内容已更新，请重新查看后确认" : errorText(e));
+        ws.toast(e instanceof HttpError && e.code === "cas_conflict" ? STALE_TEXT : errorText(e));
         return null;
       }
     }
     return after(entries, results, undefined, quiet);
   };
   const confirmOne = async (e: PlanEntry) => {
-    const ok = await send([e], choiceOf);
-    if (!ok) return;
+    const res = await send([e], choiceOf);
+    if (!res) return;
     const c = choiceOf(e);
-    if (ok.has(e.film_id)) ws.toast(`${entryTitle(e)} 已确认入队 · ${tierLong(e.needs_gpu ? c.tier : null)} · ${machineName(machines, c.machine)}`);
-    else ws.toast("收件内容已更新，请重新查看后确认");
+    if (res.ok.has(e.film_id)) ws.toast(`${entryTitle(e)} 已确认入队 · ${tierLong(e.needs_gpu ? c.tier : null)} · ${machineName(machines, c.machine)}`);
+    // a refusal other than a changed revision already showed the server's own message
+    else if (res.stale.has(e.film_id)) ws.toast(STALE_TEXT);
+    else if (!res.other.length) ws.toast("确认失败");
   };
   const confirmAll = async () => {
     const skipped = items.length - eligible.length;
-    const ok = await send(eligible, recommendedChoice, true);
-    if (!ok) return;
-    const failed = eligible.length - ok.size;
+    const res = await send(eligible, recommendedChoice, true);
+    if (!res) return;
+    const failed = eligible.length - res.ok.size;
     const rest = skipped + failed;
-    ws.toast(`已确认 ${ok.size} 部，进入影片队列${rest ? `。${rest} 部已调整或需重新查看，请单独确认。` : ""}`);
+    const why = [...new Set(res.other)].slice(0, 2).join("；");
+    ws.toast(`已确认 ${res.ok.size} 部，进入影片队列${rest ? `。${rest} 部已调整或需重新查看，请单独确认。` : ""}${why ? `（${why}）` : ""}`);
   };
   const lookup = useMutation({
     mutationFn: (filmId: string) => api.workflowLookup(filmId),

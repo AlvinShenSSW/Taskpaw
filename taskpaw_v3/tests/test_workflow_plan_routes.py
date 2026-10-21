@@ -109,7 +109,11 @@ def test_counts_dispatch_and_gpu_are_on_the_film_list(world, host, client):
     data = client.get(f"{BASE}/films").json()
     assert data["counts"]["planning"] == 1 and data["counts"]["waiting_for_you"] == 1
     assert data["dispatch"] == {"state": "idle", "reason": "idle", "paused": False}
-    assert data["gpu"] == {"name": "NVIDIA GeForce RTX 5060", "vram_mib": 8151}
+    assert data["gpu"] == {
+        "name": "NVIDIA GeForce RTX 5060",
+        "vram_mib": 8151,
+        "max_output": "1080p",
+    }
 
 
 # ── POST /plans ──────────────────────────────────────────────────────────

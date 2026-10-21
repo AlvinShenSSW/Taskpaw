@@ -187,7 +187,8 @@ The UI tests load what these routes return for a realistic runtime: `taskpaw_v3/
 - Top-level additions:
   - `counts`: `{planning, active, attention, confirm, archiving, done, packages_attention, waiting_for_you}`. `waiting_for_you` is `planning + confirm`, for the overview stat 「等待您的确认」.
   - `dispatch`: `{state, reason, paused}` or `null` without a host. `state` is one of `idle`, `running`, `paused`, `stopping_unconfirmed`.
-  - `gpu`: `{name, vram_mib}` or `null`.
+  - `gpu`: `{name, vram_mib, max_output}` or `null`. `max_output` (`"1080p"` / `"4K"`) is the restore executor's own limit (phase 1: `1080p` on every card), never the card's VRAM class; the UI shows 「修复输出上限 …」 from it.
+  - A 409 from `POST /films/{id}/confirm` is `{detail}`, plus `code` (`cas_conflict` = the film's revision changed, `precondition_failed`) when the store named one. Offline, permission and duplicate refusals carry no `code`; the UI shows their `detail`.
 
 ### `GET /films/{id}` (extended)
 

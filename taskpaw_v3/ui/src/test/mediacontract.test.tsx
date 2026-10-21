@@ -64,7 +64,7 @@ describe("contract: 概览", () => {
     expect(screen.getByText("2 部待安排 · 1 部待入库")).toBeInTheDocument();
     expect(screen.getByText("1 部 LTX · 其余步骤分别计数")).toBeInTheDocument();
     expect(screen.getByText("NVIDIA GeForce RTX 5060 8 GB")).toBeInTheDocument();
-    expect(screen.getByText("仅 1080p")).toBeInTheDocument();
+    expect(screen.getByText("修复输出上限 1080p")).toBeInTheDocument();
     const bar = await screen.findByRole("progressbar", { name: "movie Encode / 编码 本阶段进度" });
     expect(bar).toHaveAttribute("aria-valuenow", "52");
     expect(screen.getByText("156 / 300 帧")).toBeInTheDocument();

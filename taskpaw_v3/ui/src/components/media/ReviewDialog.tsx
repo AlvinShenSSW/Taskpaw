@@ -173,7 +173,8 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const title = film.title || film.name;
   // the backend's target already ends in the film folder (`film_dir`)
   const targetPath = selected ? preflight.data?.target_path ?? null : null;
-  const conflict = confirm.error instanceof HttpError && confirm.error.status === 409;
+  // only a real revision conflict (`cas_conflict`) says the film changed; other refusals keep their own message
+  const conflict = confirm.error instanceof HttpError && confirm.error.status === 409 && confirm.error.code === "cas_conflict";
 
   return (
     <>

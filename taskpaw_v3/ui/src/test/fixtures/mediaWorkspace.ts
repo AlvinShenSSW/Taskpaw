@@ -92,7 +92,7 @@ export const FILMS_RESPONSE: WorkflowFilms = {
   intake: { package_id: "p1", phase: "copy", bytes_completed: 1073741824, total: 4294967296 },
   films: FILMS, packages: PACKAGES, counts: counts(FILMS, PACKAGES),
   dispatch: { state: "running", reason: "", paused: false },
-  gpu: { name: "RTX 5070 Ti", vram_mib: 16303 },
+  gpu: { name: "RTX 5070 Ti", vram_mib: 16303, max_output: "1080p" },
 };
 
 export const performer = (id: number, name: string, label: string): Performer =>

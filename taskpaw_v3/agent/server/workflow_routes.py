@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from taskpaw_v3.core.config import WorkflowSettings
@@ -31,6 +31,14 @@ _CONFLICTS = {
     "cas_conflict": "影片状态已变化，请刷新后重试",
     "precondition_failed": "当前状态不允许此操作",
 }
+
+
+class CodedConflict(HTTPException):
+    """A 409 whose body also names the store's error code (U1 Codex r4 F2)."""
+
+    def __init__(self, detail: str, code: str):
+        super().__init__(status_code=409, detail=detail)
+        self.code = code
 
 
 class ConfirmBody(BaseModel):
@@ -105,10 +113,12 @@ def _mapped() -> Iterator[None]:
     try:
         yield
     except ConfirmError as exc:
+        if exc.code in _CONFLICTS:
+            raise CodedConflict(str(exc), exc.code) from None
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except WorkflowError as exc:
         if exc.code in _CONFLICTS:
-            raise HTTPException(status_code=409, detail=_CONFLICTS[exc.code]) from None
+            raise CodedConflict(_CONFLICTS[exc.code], exc.code) from None
         if exc.code == "not_found":
             raise HTTPException(status_code=404, detail="未知影片") from None
         raise HTTPException(
@@ -128,6 +138,12 @@ def _mapped() -> Iterator[None]:
 def register_workflow_routes(
     app: FastAPI, settings: WorkflowSettings, provider: WorkflowProvider | None
 ) -> None:
+    @app.exception_handler(CodedConflict)
+    async def _coded_conflict(_request: Any, exc: CodedConflict) -> JSONResponse:
+        return JSONResponse(
+            status_code=409, content={"detail": exc.detail, "code": exc.code}
+        )
+
     def _host() -> WorkflowHostLike:
         host = provider() if provider is not None else None
         if host is None:
@@ -183,6 +199,7 @@ def register_workflow_routes(
         if host.state != "running" or host.runtime is None:
             return _empty(host.state, host.reason)
         from taskpaw_v3.workflow import board
+        from taskpaw_v3.workflow.planning import max_output
 
         status = host.status()
         dispatch = status.get("dispatch") or {}
@@ -217,7 +234,12 @@ def register_workflow_routes(
             }
             if dispatch
             else None,
-            "gpu": {"name": gpu.name, "vram_mib": gpu.vram_mib}
+            # `max_output`: what the workflow restores, not what the card could (phase 1)
+            "gpu": {
+                "name": gpu.name,
+                "vram_mib": gpu.vram_mib,
+                "max_output": max_output(rt),
+            }
             if gpu is not None
             else None,
         }

@@ -41,7 +41,15 @@ Scope = Literal["input", "workcopy"]
 
 
 class ConfirmError(Exception):
-    """Why 确认入库 was refused; nothing was written anywhere."""
+    """Why 确认入库 was refused; nothing was written anywhere.
+
+    `code` is the store's error code when the refusal wraps one (a revision
+    conflict is `cas_conflict`); a plain refusal has none.
+    """
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 def performer_uuid(performer_id: str) -> str:
@@ -258,7 +266,9 @@ class Finalizer:
                 ),
             )
         except m.WorkflowError as exc:  # e.g. an archive was admitted meanwhile (IR07)
-            raise ConfirmError(f"影片状态已变化，请刷新后重试：{exc}") from exc
+            raise ConfirmError(
+                f"影片状态已变化，请刷新后重试：{exc}", code=exc.code
+            ) from exc
         return approval_id
 
     def _target(

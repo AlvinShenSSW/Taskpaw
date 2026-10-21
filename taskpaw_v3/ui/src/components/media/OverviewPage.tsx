@@ -11,7 +11,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api";
 import {
-  fmtVram, gpuLabel, itemActors, itemNumber, itemResolution, itemTitle, REVIEW_STATES, takes4k, type StageFilter,
+  fmtVram, gpuLabel, itemActors, itemNumber, itemResolution, itemTitle, outputLimit, REVIEW_STATES, type StageFilter,
   type WorkItem,
 } from "./mediaModel";
 import { Chip, Icon, ItemCover, Notice, PageTitle, StageBlock, StatusChip } from "./parts";
@@ -39,7 +39,6 @@ export function OverviewPage() {
   const review = data.review.length;
   const waiting = data.films.data?.counts.waiting_for_you ?? pending + review;
   const gpu = data.films.data?.gpu;
-  const uhd = takes4k(gpu);
   const flow: Array<[string, number, StageFilter | "pending", boolean]> = [
     ["收件", count((i) => i.status === "inbox" || i.status === "receiving"), "inbox", false],
     ["待处理", pending, "pending", true],
@@ -161,7 +160,7 @@ export function OverviewPage() {
                   <div className="desc">本机 + 主控{paused ? " · 新领取已暂停" : ""}</div>
                 </div>
               </div>
-              <Chip tone={uhd ? "blue" : "neutral"}>{uhd ? "4K 优先" : "仅 1080p"}</Chip>
+              <Chip>{outputLimit(gpu)}</Chip>
             </div>
           </section>
         </div>

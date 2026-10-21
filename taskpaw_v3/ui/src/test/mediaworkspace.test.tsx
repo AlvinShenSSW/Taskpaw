@@ -352,6 +352,84 @@ describe("unresolved stops and unretryable failures (Codex r3 F3)", () => {
   });
 });
 
+describe("待处理 rejection messages (Codex r4 F3)", () => {
+  const toast = () => document.querySelector('[role="status"]')?.textContent;
+  const card = (id: string) => document.querySelector<HTMLElement>(`[data-pending="${id}"]`) as HTMLElement;
+  const confirmOnly = async (error: string, message: string) => {
+    const m = mockApi();
+    m.confirmPlans.mockImplementation(async (plans) => ({
+      results: plans.map((p) => ({ film_id: p.film_id, ok: false, error, message })),
+    }));
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    await waitFor(() => expect(card("abf-422")).toBeTruthy());
+    fireEvent.click(within(card("abf-422")).getByRole("button", { name: "确认入队" }));
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalled());
+    return m;
+  };
+  it.each([
+    ["plan_exists", "该影片已有处理计划"],
+    ["invalid_machine", "设备不可用"],
+    ["precondition_failed", "当前状态不允许此操作"],
+  ])("a single confirm refused with %s keeps the server's message", async (error, message) => {
+    await confirmOnly(error, message);
+    await waitFor(() => expect(toast()).toBe(message));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(toast()).toBe(message);
+  });
+  it("only cas_conflict reads 「收件内容已更新」", async () => {
+    await confirmOnly("cas_conflict", "服务端文字");
+    await waitFor(() => expect(toast()).toBe("收件内容已更新，请重新查看后确认"));
+  });
+  it("a whole-request 409 follows its code, not its status", async () => {
+    const m = mockApi();
+    m.confirmPlans.mockRejectedValueOnce(new HttpError("当前状态不允许此操作", 409, "precondition_failed"));
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    await waitFor(() => expect(card("abf-422")).toBeTruthy());
+    fireEvent.click(within(card("abf-422")).getByRole("button", { name: "确认入队" }));
+    await waitFor(() => expect(toast()).toBe("当前状态不允许此操作"));
+    expect(within(card("abf-422")).queryByText("收件内容已更新，请重新查看后确认")).toBeNull();
+    m.confirmPlans.mockRejectedValueOnce(new HttpError("影片状态已变化，请刷新后重试", 409, "cas_conflict"));
+    fireEvent.click(within(card("abf-422")).getByRole("button", { name: "确认入队" }));
+    await waitFor(() => expect(toast()).toBe("收件内容已更新，请重新查看后确认"));
+  });
+  it("the batch toast names the other refusals' reason", async () => {
+    const m = mockApi();
+    m.confirmPlans.mockImplementation(async (plans) => ({
+      results: plans.map((p) => (p.film_id === "abf-422"
+        ? { film_id: p.film_id, ok: false, error: "invalid_machine", message: "设备不可用" }
+        : { film_id: p.film_id, ok: true, error: null, message: null })),
+    }));
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    await waitFor(() => expect(card("abf-421")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "全部按推荐确认" }));
+    await waitFor(() => expect(toast()).toContain("设备不可用"));
+    expect(toast()).not.toContain("收件内容已更新");
+  });
+});
+
+describe("local card honesty (Codex r4 F1)", () => {
+  it("概览 and 本机 state the workflow's output limit and never advertise 4K", async () => {
+    mockApi();  // a 16 GB card whose workflow limit is still 1080p
+    wrap(<MediaWorkspace />);
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    expect(await screen.findByText("修复输出上限 1080p")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("4K 优先");
+    await go("本机");
+    expect(screen.getByText("修复输出上限 1080p")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("4K 优先");
+  });
+  it("shows 4K only when the backend says the workflow restores it", async () => {
+    mockApi();
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({
+      ...FILMS_RESPONSE, gpu: { name: "RTX 5070 Ti", vram_mib: 16303, max_output: "4K" } });
+    wrap(<MediaWorkspace />);
+    expect(await screen.findByText("修复输出上限 4K")).toBeInTheDocument();
+  });
+});
+
 describe("drawer and 图文确认", () => {
   it("the drawer shows the step line, the full LtxProgress and the plan facts", async () => {
     mockApi();
@@ -689,6 +767,25 @@ describe("图文确认 review fixes", () => {
     }
   });
 
+  it.each([
+    ["a target refusal keeps the backend's message", new HttpError("目标 NAS 暂时离线，请稍后重试", 409), "目标 NAS 暂时离线，请稍后重试"],
+    ["a duplicate keeps the backend's message", new HttpError("演员目录下已有同名目录：ABF-406", 409), "演员目录下已有同名目录：ABF-406"],
+    ["a real revision conflict says the revision changed", new HttpError("影片状态已变化，请刷新后重试", 409, "cas_conflict"),
+      "成品或来源已更新，请重新查看后确认。"],
+  ])("confirm 409: %s (Codex r4 F2)", async (_name, error, text) => {
+    const m = mockApi();
+    m.confirm.mockRejectedValue(error);
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    const ok = within(dialog).getByRole("button", { name: "确认入库" });
+    await waitFor(() => expect(ok).toBeEnabled());
+    fireEvent.click(ok);
+    expect(await within(dialog).findByText(text)).toBeInTheDocument();
+    if (text !== "成品或来源已更新，请重新查看后确认。") {
+      expect(within(dialog).queryByText("成品或来源已更新，请重新查看后确认。")).toBeNull();
+    }
+  });
+
   it("one candidate: the list and the dialog read the same target check (F4)", async () => {
     mockApi();
     const duplicate = withPerformer(PREFLIGHTS["abf-406"], { absent: false, error_code: "duplicate", message: "同名" });
@@ -753,7 +850,7 @@ describe("待处理 batch limit", () => {
     expect(m.confirmPlans.mock.calls.map(([body]) => body.length)).toEqual([500, 1]);
     // one summary toast, not one per film
     const toast = () => document.querySelector('[role="status"]')?.textContent;
-    await waitFor(() => expect(toast()).toBe("已确认 500 部，进入影片队列。1 部已调整或需重新查看，请单独确认。"),
+    await waitFor(() => expect(toast()).toBe("已确认 500 部，进入影片队列。1 部已调整或需重新查看，请单独确认。（设备不可用）"),
       { timeout: 20000 });
   }, 60000);
 });

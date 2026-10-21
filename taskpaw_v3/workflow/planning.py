@@ -14,7 +14,7 @@ from typing import Any
 from . import board
 from . import models as m
 from .exec_restore import needs_restore
-from .local_gpu import FULL_HD
+from .local_gpu import FULL_HD, max_resolution
 from .local_runtime import LocalRuntime
 from .plan import (
     LOCAL_NAME,
@@ -49,6 +49,19 @@ def default_tier(rt: LocalRuntime) -> str:
 def _gpu(rt: LocalRuntime) -> tuple[str | None, int]:
     gpu = rt.gpu
     return (gpu.name, gpu.vram_mib) if gpu is not None else (None, 0)
+
+
+def max_output(rt: LocalRuntime) -> str:
+    """The frame size this workflow restores on the local card: "4K" or "1080p".
+
+    The restore executor's own limit (phase 1: 1080p on every card), the same
+    one `LocalDispatcher.run_once()` checks; never the card's VRAM class.
+    """
+    gpu = rt.gpu
+    vram = gpu.vram_mib if gpu is not None else 0
+    restore = rt.executors.get("restore")
+    _width, height = (restore.max_resolution if restore else max_resolution)(vram)
+    return "4K" if height > FULL_HD[1] else "1080p"
 
 
 def machines(rt: LocalRuntime) -> list[dict[str, Any]]:

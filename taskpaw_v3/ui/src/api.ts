@@ -242,7 +242,8 @@ export interface WorkflowCurrent {
 export interface WorkflowDispatch {
   state: "idle" | "running" | "paused" | "stopping_unconfirmed"; reason: string; paused: boolean;
 }
-export interface WorkflowGpu { name: string; vram_mib: number }
+// `max_output`: the frame size the workflow restores on this card (phase 1: 1080p on every card), not the card's class.
+export interface WorkflowGpu { name: string; vram_mib: number; max_output: "4K" | "1080p" }
 // The rail badges and the overview stats; `waiting_for_you` = planning + confirm (「等待您的确认」).
 export interface WorkflowCounts {
   planning: number; active: number; attention: number; confirm: number; archiving: number; done: number;
@@ -395,7 +396,8 @@ function checkUnauthorized(role: ControlRole, res: Response) {
 export const PLAN_BATCH_MAX = 500;
 
 export class HttpError extends Error {
-  constructor(message: string, public readonly status: number) { super(message); }
+  // `code`: the backend's error code when the body names one (a 409's `cas_conflict` = a changed revision)
+  constructor(message: string, public readonly status: number, public readonly code?: string) { super(message); }
 }
 
 async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
@@ -465,13 +467,15 @@ async function send<T>(
   }
   if (!res.ok) {
     let detail = `${path} → ${res.status}`;
+    let code: string | undefined;
     try {
-      const j = monitor ? payload as { detail?: unknown } : await res.json();
+      const j = monitor ? payload as { detail?: unknown; code?: unknown } : await res.json();
       if (j?.detail) detail = String(j.detail);
+      if (typeof j?.code === "string") code = j.code;
     } catch {
       /* non-JSON error body */
     }
-    throw new HttpError(detail, res.status);
+    throw new HttpError(detail, res.status, code);
   }
   if (res.status === 204) return undefined as T;
   return monitor ? payload as T : res.json() as Promise<T>;

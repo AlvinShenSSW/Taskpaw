@@ -421,6 +421,48 @@ def test_confirm_failures_map_to_status_codes(world, host, client, error, status
     assert response.status_code == status and response.json()["detail"]
 
 
+def test_a_revision_conflict_carries_a_code_other_refusals_do_not(world, host, client):
+    """U1 Codex r4 F2: the UI says 「已更新」 only for a real revision conflict."""
+    from taskpaw_v3.workflow.finalize import ConfirmError
+
+    url = f"{BASE}/films/{world.film}/confirm"
+    body = {"performer_id": "actor"}
+    for error, code in (
+        (m.WorkflowError("cas_conflict"), "cas_conflict"),
+        (ConfirmError("影片状态已变化", code="cas_conflict"), "cas_conflict"),
+        (m.WorkflowError("precondition_failed"), "precondition_failed"),
+    ):
+        host.confirm_error = error
+        refused = client.post(url, json=body)
+        assert refused.status_code == 409 and refused.json()["code"] == code
+        assert refused.json()["detail"]
+    for plain in (
+        ConfirmError("目标 NAS 离线"),
+        ConfirmError("演员目录下已有同名目录：X"),
+    ):
+        host.confirm_error = plain
+        refused = client.post(url, json=body)
+        assert refused.status_code == 409
+        assert refused.json() == {"detail": str(plain)}
+
+
+def test_the_list_states_the_workflow_output_limit_not_the_card(world, host, client):
+    """U1 Codex r4 F1: phase 1 restores 1080p only, whatever the card's VRAM."""
+    from types import SimpleNamespace
+
+    from taskpaw_v3.workflow.local_gpu import FULL_HD, UHD, LocalGpu
+
+    world.rt.gpu = LocalGpu("NVIDIA GeForce RTX 5060 Ti", "GPU-16", 16311)
+    world.rt.executors["restore"] = SimpleNamespace(max_resolution=lambda vram: FULL_HD)
+    assert client.get(f"{BASE}/films").json()["gpu"] == {
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "vram_mib": 16311,
+        "max_output": "1080p",
+    }
+    world.rt.executors["restore"] = SimpleNamespace(max_resolution=lambda vram: UHD)
+    assert client.get(f"{BASE}/films").json()["gpu"]["max_output"] == "4K"
+
+
 # ── retry (U5, D05) ──────────────────────────────────────────────────────
 def test_retry_only_failed_local_stages(world, client):
     ret.run_all(scr.dispatcher(world.rt, scr.scrape_step(world.tmp, "extra_file")))
