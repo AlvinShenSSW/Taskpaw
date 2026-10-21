@@ -234,6 +234,14 @@ def test_rows_carry_the_frozen_shape():
         "retry_stage",
         "created_at",
         "steps",
+        # U1 V' / V3 §7
+        "number",
+        "title",
+        "actors",
+        "resolution",
+        "plan",
+        "receipt_id",
+        "revisions",
     }
     assert row["created_at"] == "2026-10-20T00:00:00Z"
     assert [s["key"] for s in row["steps"]] == list(board.STEP_KEYS)
@@ -251,9 +259,10 @@ STEP_STATES = {"done", "running", "waiting", "failed", "pending"}
 def test_a_fresh_film_is_past_intake_and_nothing_else_has_started():
     steps = _steps(board.film_row(film({"intake": "succeeded"}), {}))
     assert steps["intake"] == ("done", None, None)
-    assert {k: v[0] for k, v in steps.items() if k != "intake"} == dict.fromkeys(
-        board.STEP_KEYS[1:], "pending"
-    )
+    assert steps["plan"] == ("waiting", "待安排", None)  # U1: 待处理 first
+    assert {
+        k: v[0] for k, v in steps.items() if k not in ("intake", "plan")
+    } == dict.fromkeys(board.STEP_KEYS[2:], "pending")
 
 
 def test_the_running_stage_shows_the_host_progress_for_that_film_only():

@@ -419,8 +419,10 @@ class ReadCommands(WorkflowCore):
         ops: tuple[str, tuple[Any, ...]] = ("", ())
         approved: tuple[str, tuple[Any, ...]] = ("", ())
         linked: tuple[str, tuple[Any, ...]] = ("", ())
+        receipted: tuple[str, tuple[Any, ...]] = ("", ())
         if film_id is not None:
             where = ("WHERE f.film_id=?", (film_id,))
+            receipted = ("AND o.film_id=?", (film_id,))
             linked = (
                 "WHERE i.package_id IN "
                 "(SELECT package_id FROM intake_films WHERE film_id=?)",
@@ -454,10 +456,18 @@ class ReadCommands(WorkflowCore):
                 "json_extract(fm.body_json,'$.output_relative_path') AS output_path,"
                 "i.package_id,p.relative_path AS package_path,"
                 "s.stage,s.status,json_extract(s.body_json,'$.reason') AS reason,"
-                "a.body_json AS attempt_json "
+                "a.body_json AS attempt_json,"
+                # U1 V' / V3 §7: the plan and both manifests' revisions and hashes
+                "fp.film_id IS NOT NULL AS planned,fp.ltx_model AS plan_ltx_model,"
+                "fp.machine AS plan_machine,im.manifest_hash AS input_hash,"
+                "fm.revision AS final_revision,fm.manifest_hash AS final_hash "
                 "FROM films f "
                 "LEFT JOIN manifests fm ON fm.film_id=f.film_id AND fm.kind='final' "
                 "AND fm.revision=f.current_final_revision "
+                "LEFT JOIN manifests im ON im.film_id=f.film_id AND im.kind='input' "
+                "AND im.revision=f.current_input_revision "
+                "LEFT JOIN film_plans fp ON fp.film_id=f.film_id "
+                "AND fp.input_revision=f.current_input_revision "
                 "LEFT JOIN intake_films i ON i.film_id=f.film_id "
                 "AND i.input_revision=f.current_input_revision "
                 "LEFT JOIN intake_packages p ON p.package_id=i.package_id "
@@ -489,11 +499,29 @@ class ReadCommands(WorkflowCore):
                 f"WHERE p.revoked_at IS NULL AND f.context_state='ready' {approved[0]}",
                 approved[1],
             ).fetchall()
+            receipts = self._conn.execute(
+                "SELECT o.film_id,r.receipt_id FROM receipts r "
+                "JOIN operations o ON o.operation_id=r.operation_id "
+                f"WHERE r.kind='archive' {receipted[0]} ORDER BY r.rowid",
+                receipted[1],
+            ).fetchall()
+            # the largest probe of each current input (V3 §7 resolution)
+            probes = self._conn.execute(
+                "SELECT f.film_id,max(json_extract(p.value,'$.width')),"
+                "max(json_extract(p.value,'$.height')) FROM films f "
+                "JOIN manifests im ON im.film_id=f.film_id AND im.kind='input' "
+                "AND im.revision=f.current_input_revision,"
+                "json_each(im.body_json,'$.readiness.media_probes') p "
+                f"{where[0]} GROUP BY f.film_id",
+                where[1],
+            ).fetchall()
         used = {row["approval_id"] for row in archives if row["approval_id"]}
         open_films = {row["film_id"] for row in archives if row["open"]}
         errors = {row["film_id"]: row["error"] for row in archives}  # newest wins
         active = {row["film_id"] for row in approvals if row["approval_id"] not in used}
         package_films = {row["package_id"]: row["films"] for row in counts}
+        receipt_ids = {row[0]: row[1] for row in receipts}  # newest wins
+        sizes = {row[0]: (row[1] or 0, row[2] or 0) for row in probes}
         films: dict[str, dict[str, Any]] = {}
         for row in rows:
             film = films.setdefault(
@@ -512,6 +540,15 @@ class ReadCommands(WorkflowCore):
                     "input_revision": row["input_revision"],
                     "package_path": row["package_path"],
                     "package_films": package_films.get(row["package_id"], 0),
+                    "planned": bool(row["planned"]),
+                    "plan_ltx_model": row["plan_ltx_model"],
+                    "plan_machine": row["plan_machine"],
+                    "receipt_id": receipt_ids.get(row["film_id"]),
+                    "input_hash": row["input_hash"],
+                    "final_revision": row["final_revision"],
+                    "final_hash": row["final_hash"],
+                    "max_width": sizes.get(row["film_id"], (0, 0))[0],
+                    "max_height": sizes.get(row["film_id"], (0, 0))[1],
                 },
             )
             if row["stage"] is not None:

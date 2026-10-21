@@ -3,20 +3,29 @@
 `film_row` is pure over one `film_board` row and the host's waiting reasons;
 `film_detail` adds the final package, its NFO summary and the cleanup results.
 Every path is resolved here from the film id, never taken from a client (U6).
+
+U1 V': a film whose restore waits for its plan is in the `planning` group
+(待处理); every row carries its plan and the line gains the `plan` step. What a
+film is (title, number, actors, cover) comes from the final package, else the
+Miko lookup (`rt.lookup`), else the input (precedence final > lookup > input).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 from . import intake_models as im
 from . import models as m
 from .auth import STAGE_ROLES
 from .exec_common import MISSING_LTX
+from .local_gpu import FULL_HD
 from .local_runtime import LocalRuntime
 from .manifest import parse_nfo_summary
+from .plan import NO_RESTORE, TIER_LABELS
 from .stage_results import StageResultError, main_videos, workcopy_path
 
 STAGE_ORDER: tuple[m.Stage, ...] = (
@@ -33,9 +42,12 @@ STAGE_ORDER: tuple[m.Stage, ...] = (
 UNKNOWN_NOTE = "等待确认停止"
 KEPT_NOTE = "待清理：部分文件未能删除，请在详情中查看"
 CONFIRM_NOTE = "等你确认入库"
-# H2 R5: the one fixed lifecycle line of every film and package row.
+PLAN_NOTE = "待安排"
+# H2 R5: the one fixed lifecycle line of every film and package row; U1 adds
+# `plan` (待处理) after 入库扫描.
 STEP_KEYS = (
     "intake",
+    "plan",
     "restore",
     "asr",
     "translate",
@@ -83,10 +95,89 @@ DOWNLOAD_KEYS = (
 )
 # H3 D06: what the input says about a film: its NFO number and main video stem.
 Label = tuple[str | None, str | None]
+# What an NFO summary says: title, actors, number.
+Summary = tuple[str | None, tuple[str, ...], str | None]
+GROUPS = ("planning", "active", "attention", "confirm", "archiving", "done")
+
+
+class Looked(Protocol):
+    """What a lookup result offers the board (`lookup.LookupResult`)."""
+
+    @property
+    def ok(self) -> bool: ...
+
+    number: str | None
+    title: str | None
+    actors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Facts:
+    """What a film is, by precedence final > lookup > input (U1 L)."""
+
+    title: str | None = None
+    actors: tuple[str, ...] = ()
+    number: str | None = None
+    input_number: str | None = None
+    video: str | None = None
+    lookup_number: str | None = None
+
+    @property
+    def label(self) -> Label:
+        """The input's own name parts (H3 D06)."""
+        return self.input_number, self.video
+
+    @classmethod
+    def merge(
+        cls,
+        *,
+        final: Summary,
+        lookup: Looked | None,
+        input_nfo: Summary,
+        video: str | None,
+    ) -> Facts:
+        found = lookup if lookup is not None and lookup.ok else None
+        looked: Summary = (
+            (found.title, tuple(found.actors), found.number)
+            if found
+            else (None, (), None)
+        )
+        layers = (final, looked, input_nfo)
+        return cls(
+            title=next((s[0] for s in layers if s[0]), None),
+            actors=next((s[1] for s in layers if s[1]), ()),
+            number=next((s[2] for s in layers if s[2]), None),
+            input_number=input_nfo[2],
+            video=video,
+            lookup_number=looked[2],
+        )
 
 
 def _time(value: Any) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+iso = _time
+
+
+def resolution(width: int | None, height: int | None) -> str | None:
+    """V3 §7: "4K" beyond Full HD, "1080p" up to it, None without a probe."""
+    if not width or not height:
+        return None
+    return "4K" if width > FULL_HD[0] or height > FULL_HD[1] else "1080p"
+
+
+def counts(
+    rows: Sequence[dict[str, Any]], packages: Sequence[dict[str, Any]]
+) -> dict[str, int]:
+    """The rail badges and the overview stats: films per group, packages that
+    need the operator, and 等待您的确认 (待处理 + 待确认)."""
+    value = {group: 0 for group in GROUPS}
+    for row in rows:
+        value[row["group"]] = value.get(row["group"], 0) + 1
+    value["packages_attention"] = sum(1 for p in packages if p["group"] == "attention")
+    value["waiting_for_you"] = value["planning"] + value["confirm"]
+    return value
 
 
 def _place(film: m.BoardFilm) -> dict[str, Any]:
@@ -113,6 +204,9 @@ def _place(film: m.BoardFilm) -> dict[str, Any]:
         place.update(group="attention", stage=trouble)
         if trouble in STAGE_ROLES and statuses[trouble] in _RETRYABLE:
             place["retry_stage"] = trouble
+        return place
+    if statuses.get("restore") == "pending" and not film.planned:
+        place.update(group="planning", stage="restore")  # 待处理 (U1 V')
         return place
     if (
         film.archive_open
@@ -185,7 +279,7 @@ def _steps(
 
     wait = waiting.get(film.film_id)
     first = next((n for n in STAGE_ORDER if status(n) not in _FINISHED), None)
-    steps = [_step("intake", "done")]
+    steps = [_step("intake", "done"), _plan_step(film, status("restore"))]
     for name in _LOCAL:
         stage = stages.get(name)
         why = (stage.note or stage.reason) if stage else None
@@ -259,15 +353,33 @@ def _steps(
     return steps
 
 
+def _plan_step(film: m.BoardFilm, restore: str) -> dict[str, Any]:
+    """待处理: done with the chosen tier, waiting while the restore needs a plan."""
+    if film.planned:
+        tier = film.plan_ltx_model
+        return _step(
+            "plan", "done", TIER_LABELS.get(tier, tier) if tier else NO_RESTORE
+        )
+    if restore == "pending":
+        return _step("plan", "waiting", PLAN_NOTE)
+    return _step("plan", "done")
+
+
 def film_name(
-    film: m.BoardFilm, number: str | None = None, video: str | None = None
+    film: m.BoardFilm,
+    number: str | None = None,
+    video: str | None = None,
+    *,
+    looked_up: str | None = None,
 ) -> str:
     """The one shown name of a film (H3 D06), never its grouping key: the final
-    folder, else the package folder when it holds only this film, else the input
-    NFO number, else the main video's stem. Only a film without an input
-    manifest falls back to the display name."""
+    folder, else the Miko lookup's number (U1 L), else the package folder when it
+    holds only this film, else the input NFO number, else the main video's stem.
+    Only a film without an input manifest falls back to the display name."""
     if film.final_name:
         return film.final_name
+    if looked_up:
+        return looked_up
     if film.package_path and film.package_films == 1:
         folder = PurePosixPath(film.package_path).name
         if folder:
@@ -287,6 +399,7 @@ def film_row(
     current: dict[str, Any] | None = None,
     download: dict[str, Any] | None = None,
     label: Label | None = None,
+    facts: Facts | None = None,
 ) -> dict[str, Any]:
     """One FilmRow of `GET /control/workflow/films` (§8) with its steps (H2 R5).
 
@@ -295,6 +408,8 @@ def film_row(
     `current`: the host's running stage, whose progress the step shows.
     `download`: the host's LTX model download session (H3 M1).
     `label`: the input's NFO number and video stem (`input_labels`, H3 D06).
+    `facts`: title / number / actors by precedence (`row_facts`, U1); it names
+    the film in place of `label`.
     """
     place = _place(film)
     stage = next((s for s in film.stages if s.stage == place["stage"]), None)
@@ -304,9 +419,24 @@ def film_row(
         if place["group"] == "archiving"
         else _note(film, stage, waiting, kept or {})
     )
+    if facts is None:
+        facts = Facts(
+            number=(label or (None, None))[0],
+            input_number=(label or (None, None))[0],
+            video=(label or (None, None))[1],
+        )
     return {
         "film_id": film.film_id,
-        "name": film_name(film, *(label or (None, None))),
+        "name": film_name(film, *facts.label, looked_up=facts.lookup_number),
+        "number": facts.number,
+        "title": facts.title,
+        "actors": list(facts.actors),
+        "resolution": resolution(film.max_width, film.max_height),
+        "plan": {"ltx_model": film.plan_ltx_model, "machine": film.plan_machine}
+        if film.planned
+        else None,
+        "receipt_id": film.receipt_id,
+        "revisions": revisions(film),
         "group": place["group"],
         "stage": stage.stage if stage else None,
         "status": stage.status if stage else None,
@@ -319,12 +449,25 @@ def film_row(
     }
 
 
+def revisions(film: m.BoardFilm) -> dict[str, Any]:
+    """V3 §7: the current input and final manifests, revision and hash."""
+    return {
+        "input": {"revision": film.input_revision, "hash": film.input_hash}
+        if film.input_revision is not None
+        else None,
+        "final": {"revision": film.final_revision, "hash": film.final_hash}
+        if film.final_revision is not None
+        else None,
+    }
+
+
 def film_rows(
     films: tuple[m.BoardFilm, ...],
     waiting: dict[str, str],
     current: dict[str, Any] | None = None,
     download: dict[str, Any] | None = None,
     labels: dict[str, Label] | None = None,
+    facts: dict[str, Facts] | None = None,
 ) -> list[dict[str, Any]]:
     return [
         film_row(
@@ -333,9 +476,44 @@ def film_rows(
             current=current,
             download=download,
             label=(labels or {}).get(film.film_id),
+            facts=(facts or {}).get(film.film_id),
         )
         for film in films
     ]
+
+
+def _lookup(rt: LocalRuntime, film: m.BoardFilm) -> Any:
+    lookup = getattr(rt, "lookup", None)
+    return lookup.result(film.film_id, film.input_revision) if lookup else None
+
+
+def film_facts(
+    rt: LocalRuntime,
+    film: m.BoardFilm,
+    *,
+    manifest: m.InputManifest | None = None,
+    final: m.FinalManifest | None = None,
+) -> Facts:
+    """Title, number and actors of one film: final NFO > lookup > input NFO."""
+    if final is None and film.final_revision is not None:
+        final = rt.store.get_final_manifest(
+            rt.operator, film.film_id, film.final_revision
+        )
+    final_nfo = _read_nfo(_item_path(rt, final, "nfo")) if final else (None, (), None)
+    source = manifest or _current_input(rt, film)
+    found = _input_file(rt, source, "nfo") if source else None
+    videos = main_videos(source) if source else []
+    return Facts.merge(
+        final=final_nfo,
+        lookup=_lookup(rt, film),
+        input_nfo=_read_nfo(found[1] if found else None),
+        video=PurePosixPath(videos[0].relative_path).stem if videos else None,
+    )
+
+
+def row_facts(rt: LocalRuntime, films: tuple[m.BoardFilm, ...]) -> dict[str, Facts]:
+    """`film_facts` of every listed film (NFO reads are cached by mtime)."""
+    return {film.film_id: film_facts(rt, film) for film in films}
 
 
 def _input_label(rt: LocalRuntime, manifest: m.InputManifest) -> Label:
@@ -377,6 +555,11 @@ def name_of(
     film = board_film(rt, film_id)
     if film is None:
         return None
+    if film.final_name:
+        return film_name(film)
+    found = _lookup(rt, film)
+    if found is not None and found.ok and found.number:
+        return film_name(film, looked_up=found.number)
     if _named_by_board(film):
         return film_name(film)
     manifest = manifest or _current_input(rt, film)
@@ -499,15 +682,22 @@ def _input_file(
 
 
 def _poster(
-    rt: LocalRuntime, final: m.FinalManifest | None, source: m.InputManifest | None
+    rt: LocalRuntime,
+    final: m.FinalManifest | None,
+    source: m.InputManifest | None,
+    looked: Any = None,
 ) -> tuple[Path, str] | None:
     """The cover and its source token (the UI's cache key): the final's poster
-    once a final exists (D11), before that the input's poster, thumb or first
-    image attachment, from the intake work copy (H3 M2)."""
+    once a final exists (D11), before that the Miko lookup's cover (U1 L), else
+    the input's poster, thumb or first image attachment, from the intake work
+    copy (H3 M2)."""
     if final is not None:
         item = next((i for i in final.items if i.role == "poster"), None)
         path = _item_path(rt, final, "poster")
         return (path, f"final-{item.sha256[:16]}") if item and path else None
+    poster = getattr(looked, "poster", None)
+    if poster is not None and poster.is_file():
+        return poster, f"lookup-{looked.poster_sha or 'cover'}"
     if source is None:
         return None
     found = (
@@ -527,12 +717,25 @@ def _source(rt: LocalRuntime, film_id: str) -> m.InputManifest | None:
     )
 
 
+def cover(
+    rt: LocalRuntime,
+    final: m.FinalManifest | None,
+    source: m.InputManifest | None,
+    film_id: str,
+) -> tuple[Path, str] | None:
+    """`_poster` with the film's current lookup (final > lookup > input)."""
+    lookup = getattr(rt, "lookup", None)
+    revision = source.revision if source is not None else None
+    looked = lookup.result(film_id, revision) if lookup and final is None else None
+    return _poster(rt, final, source, looked)
+
+
 def poster_path(rt: LocalRuntime, film_id: str) -> Path | None:
-    """The cover while its work copy exists (D11, H3 M2)."""
+    """The cover while its work copy exists (D11, H3 M2, U1 L)."""
     if board_film(rt, film_id) is None:
         return None
     final = final_manifest(rt, film_id)
-    poster = _poster(rt, final, None if final else _source(rt, film_id))
+    poster = cover(rt, final, _source(rt, film_id), film_id)
     return poster[0] if poster else None
 
 
@@ -555,15 +758,29 @@ def folder(
     return path if path is not None and path.is_dir() else None
 
 
-def _read_nfo(path: Path | None) -> tuple[str | None, tuple[str, ...], str | None]:
+_NFO_CACHE: dict[Path, tuple[tuple[int, int], Summary]] = {}
+_NFO_CACHE_LIMIT = 1024
+
+
+def _read_nfo(path: Path | None) -> Summary:
+    """An NFO's summary; cached by size and mtime (every list poll reads them)."""
     if path is None:
         return None, (), None
     try:
+        st = path.stat()
+        key = (st.st_mtime_ns, st.st_size)
+        cached = _NFO_CACHE.get(path)
+        if cached is not None and cached[0] == key:
+            return cached[1]
         with path.open("rb") as stream:
             payload = stream.read(NFO_LIMIT + 1)
     except OSError:
         return None, (), None
-    return parse_nfo_summary(payload, max_bytes=NFO_LIMIT)
+    value = parse_nfo_summary(payload, max_bytes=NFO_LIMIT)
+    if len(_NFO_CACHE) >= _NFO_CACHE_LIMIT:
+        _NFO_CACHE.clear()
+    _NFO_CACHE[path] = (key, value)
+    return value
 
 
 def _kept(wf: m.FilmWorkflow, paths: dict[str, str]) -> dict[str, list[dict[str, str]]]:
@@ -599,15 +816,12 @@ def film_detail(
     wf = rt.store.film_workflow(op, film_id)
     final = final_manifest(rt, film_id)
     source = _source(rt, film_id)
+    facts = film_facts(rt, film, manifest=source, final=final)
+    title, actors, number = facts.title, facts.actors, facts.number
     if final is not None:
-        title, actors, number = _read_nfo(_item_path(rt, final, "nfo"))
         number = number or film.final_name
-    else:
-        found = _input_file(rt, source, "nfo") if source else None
-        title, actors, number = _read_nfo(found[1] if found else None)
-    poster = _poster(rt, final, source)
-    videos = main_videos(source) if source else []
-    video = PurePosixPath(videos[0].relative_path).stem if videos else None
+    poster = cover(rt, final, source, film_id)
+    lookup = getattr(rt, "lookup", None)
     marks = set(final.postprocess.actual_marks) if final else set()
     target = wf.approval.binding.target if wf.approval else None
     paths = {
@@ -617,13 +831,20 @@ def film_detail(
         for item in manifest.items
     }
     kept = _kept(wf, paths)
-    row = film_row(film, waiting, kept, current, download, (number, video))
+    row = film_row(film, waiting, kept, current, download, facts=facts)
     return {
         "film_id": film_id,
         "name": row["name"],
         "number": number,
         "title": title,
         "actors": list(actors),
+        "resolution": row["resolution"],
+        "plan": row["plan"],
+        "receipt_id": row["receipt_id"] or wf.archive_receipt_id,
+        "revisions": row["revisions"],
+        "lookup": lookup.state(film_id, film.input_revision)
+        if lookup is not None and film.input_revision is not None
+        else None,
         "marks": {
             "restored": "restored" in marks,
             "chinese_subtitles": "chinese_subtitles" in marks,

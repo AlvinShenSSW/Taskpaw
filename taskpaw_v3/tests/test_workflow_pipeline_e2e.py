@@ -58,6 +58,25 @@ def test_enabled_agent_config_starts_the_shipped_pipeline(tmp_path, monkeypatch)
     assert host.executor_factory is not None
 
 
+def confirm_first_plan(host) -> str:
+    """U1: the taken-in film waits in 待处理 until its plan is confirmed."""
+    rt = host.runtime
+    _wait(lambda: rt.store.list_unplanned(rt.operator), seconds=120)
+    (film,) = rt.store.list_unplanned(rt.operator)
+    (result,) = host.confirm_plans(
+        [
+            {
+                "film_id": film.film_id,
+                "input_revision": film.input_revision,
+                "ltx_model": "standard",
+                "machine": rt.identity.worker_id,
+            }
+        ]
+    )
+    assert result["ok"], result
+    return film.film_id
+
+
 def test_dropped_film_becomes_a_verified_return_package(tmp_path):
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe or not shutil.which("nvidia-smi"):
@@ -120,6 +139,7 @@ def test_dropped_film_becomes_a_verified_return_package(tmp_path):
             )
             return {(j.film_id, j.stage) for j in jobs}
 
+        confirm_first_plan(host)
         _wait(lambda: len(stages()) == 4, seconds=180)
         (film,) = {film_id for film_id, _ in stages()}
         package = package_dir(rt, film, 1)

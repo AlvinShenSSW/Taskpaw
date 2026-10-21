@@ -25,6 +25,7 @@ from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
 from taskpaw_v3.tests.test_workflow_intake_store import drop
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.workflow_fake_filmpaw import FakeFilmpaw
+from taskpaw_v3.workflow import board
 from taskpaw_v3.workflow import intake_models as im
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.filmpaw_client import (
@@ -48,6 +49,7 @@ class Host:
         self.current: dict[str, str] | None = None
         self.intake: dict[str, Any] | None = None
         self.confirm_error: Exception | None = None
+        self.dispatcher: Any = None  # U1: woken after a plan, paused by §7.5
 
     def status(self) -> dict[str, Any]:
         return {
@@ -144,6 +146,9 @@ def test_no_host_explains_why_and_refuses_everything_else(settings, state, reaso
             "intake": None,
             "films": [],
             "packages": [],
+            "counts": board.counts([], []),
+            "dispatch": None,
+            "gpu": None,
         }
         film = identity()
         for response in (
@@ -169,6 +174,9 @@ def test_a_host_that_is_not_running_lists_nothing(world, host, client):
         "intake": None,
         "films": [],
         "packages": [],
+        "counts": board.counts([], []),
+        "dispatch": None,
+        "gpu": None,
     }
     response = client.post(
         f"{BASE}/films/{world.film}/confirm", json={"performer_id": "actor"}
@@ -221,6 +229,12 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "steps",
         "archive",
         "cleanup",
+        # U1 / V3 §7
+        "resolution",
+        "plan",
+        "receipt_id",
+        "revisions",
+        "lookup",
     }
     steps = {s["key"]: s["state"] for s in data["steps"]}
     assert (steps["scrape"], steps["confirm"], steps["archive"]) == (

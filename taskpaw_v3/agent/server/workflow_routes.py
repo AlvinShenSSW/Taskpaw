@@ -48,6 +48,28 @@ class OpenBody(BaseModel):
     what: Literal["inbox", "output"]
 
 
+class PlanItem(BaseModel):
+    """One film as the 待处理 card showed it (U1 P3')."""
+
+    model_config = ConfigDict(extra="forbid")
+    film_id: str = Field(min_length=1, max_length=256)
+    input_revision: int = Field(gt=0, strict=True)
+    ltx_model: Optional[Literal["standard", "good", "high"]]
+    machine: str = Field(min_length=1, max_length=256)
+
+
+class PlansBody(BaseModel):
+    """确认入队 of one card or 全部按推荐确认 of the list: each its own CAS."""
+
+    model_config = ConfigDict(extra="forbid")
+    plans: list[PlanItem] = Field(min_length=1, max_length=500)
+
+
+class PauseBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    paused: StrictBool
+
+
 class LtxDownloadBody(BaseModel):
     """The 下载模型 answer to the offered request (H3 M1), as the monitor's."""
 
@@ -133,6 +155,8 @@ def register_workflow_routes(
         return Response(status_code=204)
 
     def _empty(state: str, reason: str) -> dict[str, Any]:
+        from taskpaw_v3.workflow import board
+
         return {
             "state": state,
             "reason": reason,
@@ -140,7 +164,16 @@ def register_workflow_routes(
             "intake": None,
             "films": [],
             "packages": [],
+            "counts": board.counts([], []),
+            "dispatch": None,
+            "gpu": None,
         }
+
+    def _dispatcher(host: WorkflowHostLike) -> Any:
+        dispatcher = getattr(host, "dispatcher", None)
+        if dispatcher is None:
+            raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
+        return dispatcher
 
     @app.get("/control/workflow/films")
     def workflow_films() -> dict[str, Any]:
@@ -158,20 +191,35 @@ def register_workflow_routes(
         with _mapped():
             films = rt.store.film_board(rt.operator)
             packages = rt.store.list_intake_board(rt.operator)
-            labels = board.input_labels(rt, films)
+            facts = board.row_facts(rt, films)
+        rows = board.film_rows(
+            films,
+            dict(dispatch.get("waiting") or {}),
+            current,
+            status.get("ltx_download"),
+            facts=facts,
+        )
+        package_rows = board.package_rows(packages, intake)
+        gpu = rt.gpu
         return {
             "state": host.state,
             "reason": host.reason,
             "current": current,
             "intake": intake,
-            "films": board.film_rows(
-                films,
-                dict(dispatch.get("waiting") or {}),
-                current,
-                status.get("ltx_download"),
-                labels,
-            ),
-            "packages": board.package_rows(packages, intake),
+            "films": rows,
+            "packages": package_rows,
+            # U1 V' / V3 §7.4: the rail badges, the dispatch state and the card
+            "counts": board.counts(rows, package_rows),
+            "dispatch": {
+                "state": dispatch.get("state", "idle"),
+                "reason": dispatch.get("reason", ""),
+                "paused": bool(dispatch.get("paused", False)),
+            }
+            if dispatch
+            else None,
+            "gpu": {"name": gpu.name, "vram_mib": gpu.vram_mib}
+            if gpu is not None
+            else None,
         }
 
     @app.get("/control/workflow/films/{film_id}")
@@ -203,6 +251,69 @@ def register_workflow_routes(
         if path is None:
             raise HTTPException(status_code=404, detail="没有封面")
         return FileResponse(path, media_type=board.image_type(path))
+
+    # ── U1 P3': 待处理 ──────────────────────────────────────────────────
+    @app.get("/control/workflow/plans")
+    def workflow_plans() -> dict[str, Any]:
+        from taskpaw_v3.workflow.planning import plan_list
+
+        host = _host()
+        with _mapped():
+            return plan_list(_runtime(host))
+
+    @app.post("/control/workflow/plans")
+    def workflow_confirm_plans(body: PlansBody) -> dict[str, Any]:
+        """确认入队 / 全部按推荐确认: a result per item; a success wakes dispatch."""
+        from taskpaw_v3.workflow.planning import confirm_plans
+
+        host = _host()
+        with _mapped():
+            results = confirm_plans(
+                _runtime(host), [item.model_dump() for item in body.plans]
+            )
+        dispatcher = getattr(host, "dispatcher", None)
+        if dispatcher is not None and any(r["ok"] for r in results):
+            dispatcher.wake()
+        return {"results": results}
+
+    @app.post("/control/workflow/films/{film_id}/lookup")
+    def workflow_requery(film_id: str) -> dict[str, bool]:
+        """重新查询 (U1 L): the film's current revision is looked up again."""
+        from taskpaw_v3.workflow.models import WorkflowError
+
+        host = _host()
+        rt = _runtime(host)
+        if rt.lookup is None:
+            raise HTTPException(status_code=503, detail="未配置 Miko，无法查询资料")
+        with _mapped():
+            film = rt.store.get_film(rt.operator, film_id).film
+            if film.current_input_revision is None:
+                raise HTTPException(status_code=409, detail="影片还没有收件内容")
+            try:
+                rt.lookup.requery(film_id, film.current_input_revision)
+            except WorkflowError as exc:
+                if exc.code != "precondition_failed":
+                    raise
+                raise HTTPException(
+                    status_code=409, detail="正在查询，或文件名中没有番号"
+                ) from None
+        return {"ok": True}
+
+    @app.post("/control/workflow/pause")
+    def workflow_pause(body: PauseBody) -> dict[str, bool]:
+        """V3 §7.5: stop new claims; in-flight work and the finalizer continue."""
+        host = _host()
+        _dispatcher(host).set_paused(body.paused)
+        return {"paused": body.paused}
+
+    @app.get("/control/workflow/films/{film_id}/target")
+    def workflow_target(film_id: str, performer_id: str = "") -> dict[str, Any]:
+        """V3 §7.3: the archive target preflight and the NFO actor's candidates."""
+        host = _host()
+        if host.finalizer is None:
+            raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
+        with _mapped():
+            return host.finalizer.preflight(film_id, performer_id or None)
 
     @app.get("/control/workflow/performers")
     def workflow_performers(q: str = "") -> dict[str, Any]:

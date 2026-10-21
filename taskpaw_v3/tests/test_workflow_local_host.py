@@ -82,6 +82,25 @@ def test_start_failure_is_reported_not_raised(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Native intake")
+def confirm_first_plan(host) -> str:
+    """U1: the taken-in film waits in 待处理 until its plan is confirmed."""
+    rt = host.runtime
+    _wait(lambda: rt.store.list_unplanned(rt.operator), seconds=120)
+    (film,) = rt.store.list_unplanned(rt.operator)
+    (result,) = host.confirm_plans(
+        [
+            {
+                "film_id": film.film_id,
+                "input_revision": film.input_revision,
+                "ltx_model": "standard",
+                "machine": rt.identity.worker_id,
+            }
+        ]
+    )
+    assert result["ok"], result
+    return film.film_id
+
+
 def test_dropped_film_is_taken_in_and_processed_by_the_local_gpu(tmp_path):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg or not shutil.which("ffprobe") or not shutil.which("nvidia-smi"):
@@ -126,6 +145,7 @@ def test_dropped_film_is_taken_in_and_processed_by_the_local_gpu(tmp_path):
         _wait(lambda: host.state != "starting")
         assert host.state == "running", host.reason
         rt = host.runtime
+        confirm_first_plan(host)
         _wait(lambda: execs[0].runs, seconds=120)
         job_film = rt.store.get_stage(rt.operator, execs[0].runs[0]).film_id
         _wait(
@@ -562,7 +582,7 @@ def test_the_offer_survives_an_agent_restart(tmp_path, monkeypatch):
     assert host.state == "stopped"
 
 
-def test_recall_missing_keeps_the_launch_tier_and_infers_the_variant(tmp_path):
+def test_recall_missing_infers_the_tier_and_the_variant(tmp_path):
     from taskpaw_v3.tests.workflow_exec_helpers import Tools, runtime
 
     tools = Tools(tmp_path / "tools")
@@ -570,14 +590,13 @@ def test_recall_missing_keeps_the_launch_tier_and_infers_the_variant(tmp_path):
     rt = runtime(tmp_path / "wf", tools)
     try:
         vae = ["vae.safetensors.enc", "vae-decoder.safetensors.enc"]
-        # J2 (#283): the tier is the launch config's, never the file names'. A note
-        # written before 3.9.18 names distill8, now the high tier's file, while the
-        # next restore runs standard: the offer is standard's (distill2) nvfp4.
+        # U1 P4': without the film's plan the tier is the one whose model file
+        # the note names (distill8 is high's), else the preset's.
         for names, cfg_fast, cfg_tier, fast in (
             (
                 ["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"],
                 False,
-                "standard",
+                "high",
                 True,
             ),
             (
@@ -591,16 +610,14 @@ def test_recall_missing_keeps_the_launch_tier_and_infers_the_variant(tmp_path):
             (
                 ["ltx-restore-alpha1-distill8-int8.safetensors.enc"],
                 True,
-                "standard",
+                "high",
                 False,
             ),
             (vae, True, "standard", True),
             (vae, False, "standard", False),
         ):
             restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
-            restore.cfg = restore.cfg.model_copy(
-                update={"ltx_fast": cfg_fast, "ltx_model": cfg_tier}
-            )
+            restore.cfg = restore.cfg.model_copy(update={"ltx_fast": cfg_fast})
             restore.recall_missing(names)
             weights, cfg, recalled = restore._models
             assert (weights, cfg.ltx_model, recalled) == (
@@ -609,9 +626,11 @@ def test_recall_missing_keeps_the_launch_tier_and_infers_the_variant(tmp_path):
                 fast,
             ), names
             assert cfg.ltx_fast == cfg_fast
-        # the offer rebuilds the missing list from disk for the launch tier
+        # the film's planned tier wins; the offer rebuilds its missing list from disk
         restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
-        restore.recall_missing(["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"])
+        restore.recall_missing(
+            ["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"], "standard"
+        )
         _, missing, _ = restore.missing_models()
         assert "ltx-restore-alpha1-distill2-nvfp4.safetensors.enc" in missing
         assert not any("distill8" in name for name in missing)

@@ -165,3 +165,112 @@
 - MDCX may create a mark and `userdata/` inside that directory. That is harmless, because the directory is discarded after the run.
 - `lookup_one` refuses a mark that points outside its config dir (M02 fix), so the live profile `%LOCALAPPDATA%/com.mdcx.desktop` is never read through a mark and never written.
 - The run passes `file_name` = the main video's file name. Names without a number are refused by M02, and the card shows 「文件名中没有番号」 with 「重新查询」 disabled.
+
+## API appendix (backend as built, U1)
+
+All routes are on the loopback control API under `/control/workflow`, with the existing bearer token. JSON field names are final; the frontend aligns to this section. Labels, toasts and colours stay in the UI.
+
+### `GET /films` (extended)
+
+- Every film row also has:
+  - `number`, `title`, `actors[]`: precedence final NFO > lookup > input NFO. `name` uses the same order: final folder > lookup number > single-film package folder > input NFO number > video stem.
+  - `resolution`: `"4K" | "1080p" | null`, from the largest input probe.
+  - `plan`: `{ltx_model: "standard"|"good"|"high"|null, machine: <worker id>}` or `null` while unplanned.
+  - `receipt_id`: the newest archive receipt id, or `null`.
+  - `revisions`: `{input: {revision, hash} | null, final: {revision, hash} | null}`.
+  - `group` gains `"planning"` (待处理): restore pending and no plan for the current input revision.
+  - `steps`: the line is `intake, plan, restore, asr, translate, return, scrape, confirm, archive, cleanup, done`. The `plan` step is `waiting` with note `待安排` while unplanned, and `done` with the tier label (`标准` / `良好` / `高`) or `无需修复` once planned. Package rows carry the same keys.
+- Top-level additions:
+  - `counts`: `{planning, active, attention, confirm, archiving, done, packages_attention, waiting_for_you}`. `waiting_for_you` is `planning + confirm`, for the overview stat 「等待您的确认」.
+  - `dispatch`: `{state, reason, paused}` or `null` without a host. `state` is one of `idle`, `running`, `paused`, `stopping_unconfirmed`.
+  - `gpu`: `{name, vram_mib}` or `null`.
+
+### `GET /films/{id}` (extended)
+
+It has the row additions above (`resolution`, `plan`, `receipt_id`, `revisions`) and `lookup` (the block below, or `null` when Miko is not configured). The cover (`has_poster`, `poster_source`, `/films/{id}/poster`) follows final > lookup > input. A lookup cover's `poster_source` starts with `lookup-`.
+
+### `GET /plans`
+
+```json
+{
+  "plans": [{
+    "film_id": "…", "input_revision": 1, "revision_changed": false,
+    "name": "ABF-394", "title": "…", "number": "ABF-394", "actors": ["…"],
+    "has_poster": true, "poster_source": "lookup-…",
+    "resolution": "1080p", "width": 1920, "height": 1080,
+    "duration_ms": 7200000, "size_bytes": 4294967296,
+    "video_count": 1, "item_count": 3,
+    "needs_gpu": true, "created_at": "2026-10-21T00:00:00Z",
+    "lookup": {"status": "queued|running|succeeded|failed", "number": "…", "title": "…",
+               "actors": [], "studio": "…", "release": "…", "runtime_min": 120,
+               "has_poster": true, "error_class": "transient|needs_attention|null",
+               "message": "未查到资料 | 文件名中没有番号 | …", "can_requery": true},
+    "recommendation": {"ltx_model": "high", "ltx_reason": "三上悠亜 上次选择 高",
+                       "machine": "<worker id>", "machine_reason": "NVIDIA GeForce RTX 5060 8 GB"}
+  }],
+  "default_tier": "standard",
+  "choices": {
+    "tiers": [{"value": "standard", "label": "标准"}, {"value": "good", "label": "良好"}, {"value": "high", "label": "高"}],
+    "machines": [{"id": "<worker id>", "name": "本机", "gpu": "…", "vram_mib": 8151, "reason": "…"}]
+  }
+}
+```
+
+- Entries come oldest film first. `lookup` is `null` when Miko is not configured.
+- `revision_changed` is true for an input revision above 1. Show the amber notice 「收件内容已更新，请重新查看后确认」.
+- `duration_ms` and `size_bytes` are summed over the main videos. `item_count` counts every input file.
+- Recommendation reasons:
+  - `ltx_reason` is one of `上次选择 {tier}`, `{actor} 上次选择 {tier}`, `默认` or `无需修复`. A `needs_gpu: false` film has `ltx_model: null`.
+  - `machine_reason` is the card's name and VRAM, `本机修复输出上限 1080p` for a 4K film, or `本机 GPU 未就绪`.
+- `choices` is listed once at the top level, not per entry.
+
+### `POST /plans`
+
+- Body: `{"plans": [{film_id, input_revision, ltx_model, machine}]}`, with 1–500 items. `ltx_model` is `"standard"|"good"|"high"|null`.
+  - A bad body is a 422.
+  - The same route serves 确认入队 (one item) and 全部按推荐确认 (every shown item).
+- Response: `{"results": [{film_id, ok, error, message}]}`, one result per item in order.
+  - Each item is its own CAS. Any success wakes the dispatcher.
+  - For a film with `needs_gpu: false`, the tier is stored as `null` whatever was sent.
+- `error` codes, with the `message` shown for each:
+
+| `error` | `message` |
+|---|---|
+| `cas_conflict` | 收件内容已更新，请重新查看后确认 (stale revision) |
+| `plan_exists` | 已确认，无需重复确认 |
+| `precondition_failed` | 当前状态不允许安排 |
+| `not_found` | 未知影片 |
+| `invalid_machine` | 设备不可用 |
+| `tier_required` | 请选择画质 (null tier for a film that needs restoring) |
+
+### `POST /films/{id}/lookup` (重新查询)
+
+- Response: `{"ok": true}`. The card's `lookup.status` then reads `queued` until the worker reruns it.
+- Errors:
+  - 503: Miko is not configured.
+  - 404: unknown film.
+  - 409: a lookup is running, or the name has no number (`can_requery: false`).
+
+### `POST /pause`
+
+- Body: `{"paused": bool}`. Response: `{"paused": bool}`.
+- While paused, nothing new is claimed; in-flight work and the finalizer continue. The flag is held in memory, so a restart resumes dispatch.
+- 503 without a dispatcher.
+
+### `GET /films/{id}/target?performer_id=`
+
+```json
+{"film_dir": "ABC-123", "performer_id": "…|null", "target_path": "\\nas\…\ABC-123|null",
+ "absent": true, "error_code": null, "message": null,
+ "candidates": {"query": ["NFO actor"], "items": [{"id", "name", "source_label", "unc_path", "has_thumb", "aliases"}]}}
+```
+
+- This is read-only. `candidates` comes from searching Filmpaw for each NFO actor (final > lookup > input), merged by id. The dialog pre-selects only when exactly one candidate comes back.
+- Without `performer_id`, only `candidates` is filled.
+- `error_code` is one of:
+  - `offline`: Filmpaw or its share is unreachable; `candidates` is then `null`.
+  - `permission`: Filmpaw answered 403.
+  - `missing`: the performer record is gone (404).
+  - `duplicate`: the folder already exists; `absent` is false.
+  - `null`: none of the above.
+- 409: the film has no final package yet. 404: unknown film.

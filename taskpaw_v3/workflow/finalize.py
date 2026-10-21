@@ -85,6 +85,65 @@ class Finalizer:
     def _package_dir(self, final: m.FinalManifest) -> Path:
         return self.runtime.work_dir / final.output_relative_path
 
+    # ── 图文确认 preflight (V3 §7.3) ─────────────────────────────────────
+    def preflight(self, film_id: str, performer_id: str | None) -> dict[str, Any]:
+        """Where 确认入库 would archive, read-only: the target folder under the
+        chosen performer and whether it is free, plus Filmpaw's candidates for
+        the film's NFO actors (0 / 1 / many; the dialog pre-selects only one).
+
+        `error_code`: offline (Filmpaw or its share unreachable), permission,
+        missing (the performer record is gone), duplicate (the folder exists).
+        """
+        from . import board
+
+        rt = self.runtime
+        film = rt.store.get_film(rt.operator, film_id).film
+        if film.current_final_revision is None:
+            raise ConfirmError("影片尚未完成整理（刮削）")
+        final = rt.store.get_final_manifest(
+            rt.operator, film_id, film.current_final_revision
+        )
+        film_dir = PurePosixPath(final.output_relative_path).name
+        value: dict[str, Any] = {
+            "film_dir": film_dir,
+            "performer_id": performer_id,
+            "target_path": None,
+            "absent": None,
+            "error_code": None,
+            "message": None,
+            "candidates": None,
+        }
+        row = board.board_film(rt, film_id)
+        actors = board.film_facts(rt, row, final=final).actors if row else ()
+        try:
+            items: dict[str, dict[str, Any]] = {}
+            for actor in dict.fromkeys(actors):
+                for item in self.filmpaw.performers(actor):
+                    items.setdefault(item["id"], item)
+            value["candidates"] = {
+                "query": list(dict.fromkeys(actors)),
+                "items": list(items.values()),
+            }
+            if performer_id:
+                proof = self.filmpaw.target(performer_id, film_dir)
+                value["absent"] = bool(proof["absent"])
+                value["target_path"] = str(
+                    Path(proof["expected_target"]["target_path"]) / film_dir
+                )
+                if not value["absent"]:
+                    value.update(
+                        error_code="duplicate",
+                        message=f"演员目录下已有同名目录：{film_dir}",
+                    )
+        except FilmpawUnavailable as e:
+            value.update(error_code="offline", message=f"Filmpaw 未运行：{e}")
+        except FilmpawRefused as e:
+            code = {403: "permission", 404: "missing"}.get(e.status, "offline")
+            value.update(error_code=code, message=e.message)
+        except (KeyError, TypeError) as e:
+            value.update(error_code="offline", message=f"Filmpaw 返回的目标无效：{e}")
+        return value
+
     # ── 确认入库 ────────────────────────────────────────────────────────
     def confirm(self, film_id: str, performer_id: str) -> str:
         """Approve archiving this film's final package under the performer's folder; the approval id."""
