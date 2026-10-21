@@ -4,7 +4,8 @@ import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../../api";
 import {
-  fmtBytes, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, STAGE_OPTIONS, type StageFilter, type WorkItem,
+  fmtBytes, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, STAGE_OPTIONS, type StageFilter,
+  type WorkItem,
 } from "./mediaModel";
 import { Chip, EmptyState, Icon, ItemCover, PageTitle, StageBlock, StatusChip, StepLine } from "./parts";
 import { errorText, useWorkspace } from "./workspace";
@@ -86,7 +87,7 @@ function FilmCard({ item }: { item: WorkItem }) {
       </div>
       <StepLine steps={item.kind === "film" ? item.row.steps : item.pkg.steps} title={title} />
       <div className="card-foot">
-        <span>{item.kind === "package" ? "INBOX" : item.status === "encode" || item.status === "denoise" ? "本机" : "INBOX"}</span>
+        <span>{item.kind === "package" ? "INBOX" : isRestoring(item.status) ? "本机" : "INBOX"}</span>
         {item.kind === "film" ? (
           <button type="button" className="btn ghost small" aria-label={`查看 ${title} 详情`} onClick={() => ws.openDetail(item.id)}>查看详情</button>
         ) : (

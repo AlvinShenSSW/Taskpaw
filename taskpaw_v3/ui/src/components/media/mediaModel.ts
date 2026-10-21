@@ -3,11 +3,14 @@
 import type {
   FilmRow, LtxTier, PackageRow, StepKey, TargetPreflight, WorkflowFilms, WorkflowStep,
 } from "../../api";
-import { readLtxProgress, type LtxSnapshot } from "../ltxProgress.helpers";
+import { plainText, readLtxProgress, record, type LtxSnapshot } from "../ltxProgress.helpers";
+import {
+  readBasicProgress, readScanProgress, readSplitNote, type BasicSnapshot, type ScanSnapshot, type SplitNote,
+} from "../restorePhase.helpers";
 
 export type ChipTone = "neutral" | "green" | "blue" | "amber" | "red";
 export type StatusKey =
-  | "pending" | "receiving" | "postprocess_error" | "inbox" | "encode" | "denoise" | "asr" | "translate"
+  | "pending" | "receiving" | "postprocess_error" | "inbox" | "restore" | "encode" | "denoise" | "asr" | "translate"
   | "return" | "scrape" | "match" | "waiting" | "checking" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
   | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopping" | "failed" | "intake_attention";
 
@@ -16,6 +19,8 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   receiving: ["等待收件检查", "blue"],
   postprocess_error: ["成品封面待处理", "amber"],
   inbox: ["待领取", "blue"],
+  // Not in the V3 vocabulary (U1c): Jasna runs but no LTX stage yet (loading, mosaic scan, BasicVSR++).
+  restore: ["修复中", "green"],
   encode: ["LTX · Encode", "green"],
   denoise: ["LTX · Denoise", "green"],
   asr: ["语音识别", "blue"],
@@ -53,7 +58,7 @@ export const REVIEW_STATES: StatusKey[] = ["checking", "ready", "multi", "nomatc
 export const EXCEPTION_STATES: StatusKey[] = [
   "postprocess_error", "offline", "permission", "duplicate", "unknown", "cleanup", "stopping", "failed", "intake_attention",
 ];
-export const ACTIVE_STATES: StatusKey[] = ["encode", "denoise", "asr", "translate", "return", "scrape", "match"];
+export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match"];
 
 // ── tiers (U1 V2) ───────────────────────────────────────────────────────
 export const TIER_ORDER: LtxTier[] = ["standard", "good", "high"];
@@ -96,6 +101,64 @@ export function ltxOf(row: { steps?: WorkflowStep[] | null }): LtxSnapshot | nul
   return ltx && typeof ltx === "object" ? readLtxProgress(ltx) : null;
 }
 
+// The local GPU restore is running (any phase).
+export const isRestoring = (status: StatusKey) => status === "restore" || status === "encode" || status === "denoise";
+
+// ── the running 修复 step (U1c) ─────────────────────────────────────────
+// starting: no console line yet (Jasna loads its models); working: console lines, no known bar;
+// split: the auto split logged its plan; scan → basic (BasicVSR++ spans) → ltx: Jasna's bars.
+export type RestorePhase = "starting" | "working" | "split" | "scan" | "basic" | "ltx";
+export interface RestoreLive {
+  phase: RestorePhase;
+  startedAt: number | null; // epoch ms
+  console: string | null;
+  split: SplitNote | null;
+  scan: ScanSnapshot | null;
+  basic: BasicSnapshot | null;
+  ltx: LtxSnapshot | null;
+  metrics: Record<string, unknown>; // the step's parse state, for the shared progress cards
+}
+
+export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null {
+  if (!step || step.key !== "restore" || step.state !== "running") return null;
+  const metrics = record(step.ltx) ? step.ltx : {};
+  const ltx = readLtxProgress(metrics);
+  const scan = ltx ? null : readScanProgress(metrics);
+  const basic = ltx || scan ? null : readBasicProgress(metrics);
+  const split = readSplitNote(metrics);
+  const console = plainText(step.console ?? metrics.console, 300)?.trim() || null;
+  const started = typeof step.started_at === "string" ? Date.parse(step.started_at) : NaN;
+  const phase: RestorePhase = ltx ? "ltx" : scan ? "scan" : basic ? "basic" : split ? "split" : console ? "working" : "starting";
+  return { phase, startedAt: Number.isFinite(started) ? started : null, console, split, scan, basic, ltx, metrics };
+}
+
+// 「已用」: mm:ss under an hour, else h:mm:ss; a clock ahead of the start reads 00:00.
+export function elapsedClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+export const SPLIT_LABEL: Record<SplitNote["kind"], string> = {
+  planned: "已完成自动分段，正在切分片段",
+  skipped: "未自动分段 · 整片使用 LTX",
+  no_mosaics: "未发现马赛克 · 整片使用 LTX",
+};
+// The same fact once a later phase runs.
+export const SPLIT_NOTE: Record<SplitNote["kind"], string> = {
+  ...SPLIT_LABEL,
+  planned: "已自动分段：大马赛克片段用 LTX，其余用 BasicVSR++",
+};
+
+// 「修复中 · 已用 mm:ss」, or before Jasna printed anything 「正在启动 Jasna（加载模型）」.
+export function heartbeatText(live: RestoreLive, now: number): string {
+  const head = live.phase === "starting" ? "正在启动 Jasna（加载模型）" : "修复中";
+  return live.startedAt === null ? head : `${head} · 已用 ${elapsedClock(now - live.startedAt)}`;
+}
+
 // What the preflight says about a film waiting for 确认入库: a target error, else the candidate count.
 // `missing` (the chosen performer record is gone) asks for a new choice, as no match does.
 // No preflight yet reads 「检查中」, not ready.
@@ -126,7 +189,9 @@ export function filmStatus(row: FilmRow, preflight?: TargetPreflight | null): St
     default: // active
       if (stage === "restore") {
         if (row.status !== "running") return "inbox";
-        return ltxOf(row)?.stage_name === "denoise" ? "denoise" : "encode";
+        const ltx = ltxOf(row);
+        if (!ltx) return "restore"; // U1c: loading, the mosaic scan or BasicVSR++
+        return ltx.stage_name === "denoise" ? "denoise" : "encode";
       }
       if (stage === "asr" || stage === "translate" || stage === "return" || stage === "scrape") {
         return row.status === "running" ? stage : "waiting";
@@ -182,7 +247,7 @@ export function matchesStage(item: WorkItem, filter: StageFilter): boolean {
     case "all": return true;
     case "inbox": return status === "inbox" || status === "receiving";
     case "pending": return status === "pending";
-    case "processing": return ["encode", "denoise", "asr", "translate"].includes(status);
+    case "processing": return ["restore", "encode", "denoise", "asr", "translate"].includes(status);
     case "preparing": return ["return", "scrape", "match"].includes(status);
     case "review": return REVIEW_STATES.includes(status);
     case "archive": return ["archiving", "unknown", "cleanup"].includes(status);

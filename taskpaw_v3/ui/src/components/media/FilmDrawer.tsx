@@ -6,12 +6,12 @@ import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type FilmDetail, type PlanEntry } from "../../api";
 import { LtxDownload } from "../LtxDownload";
-import { LtxProgress } from "../LtxProgress";
 import {
   CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, packageNote, REVIEW_STATES, restoreStep,
   machineLabel, STATUS_META, stageName, tierLong, type WorkItem,
 } from "./mediaModel";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
+import { RestoreLivePanel } from "./RestoreLivePanel";
 import { errorText, MEDIA_FILMS_KEY, mediaFilmKey, useIntakeReasons, useWorkspace } from "./workspace";
 
 const BACKDROP = { sx: { backgroundColor: "#030812BA", backdropFilter: "blur(4px)" } };
@@ -98,7 +98,7 @@ function DrawerBody({ film, item, status, plan }: {
   const title = film.title || plan?.title || film.name;
   const actors = film.actors.length ? film.actors : plan?.actors ?? [];
   const restore = restoreStep(film);
-  const ltx = restore?.state === "running" && restore.ltx && typeof restore.ltx === "object" ? restore.ltx : null;
+  const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
   const download = restore?.download ?? null;
   const changed = film.cleanup.kept.some((k) => k.status === "blocked_changed" || k.status === "blocked_identity");
   const final = film.files.length > 0;
@@ -135,9 +135,9 @@ function DrawerBody({ film, item, status, plan }: {
         </div>
       </div>
       <div className="detail-steps"><StepLine steps={film.steps} title={title} /></div>
-      {ltx ? (
+      {running ? (
         <div>
-          <LtxProgress metrics={ltx} />
+          <RestoreLivePanel step={running} />
           <p className="small muted" style={{ marginTop: 10 }}>由阶段日志提供；不包含翻译、回传、刮削与入库。</p>
         </div>
       ) : download ? (

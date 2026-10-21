@@ -227,10 +227,13 @@ export type StepKey =
 export type StepState = "done" | "running" | "waiting" | "failed" | "pending";
 // progress: whatever the executor reports (a 0–1 fraction, a percentage, console text, …) or null.
 // H3 M1/M3: the restore step carries the LTX monitor metrics (`ltx`) while running and the
-// model download session (`download`) when it failed on missing models.
+// model download session (`download`) when it failed on missing models. U1c: the running restore
+// step also carries its heartbeat, the stage start (`started_at`, UTC ISO) and the latest plain
+// console line (`console`), whether or not a progress bar was recognised yet.
 export interface WorkflowStep {
   key: StepKey; state: StepState; note: string | null; progress: unknown;
   ltx?: Record<string, unknown> | null; current_file?: string | null; download?: Record<string, unknown> | null;
+  started_at?: string | null; console?: string | null;
 }
 // H2 R2/R2a: an INBOX package that is not a film yet. The backend sends codes; the UI owns the labels.
 export interface PackageRow {

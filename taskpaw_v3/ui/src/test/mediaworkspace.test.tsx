@@ -891,7 +891,9 @@ describe("mediaModel", () => {
   it("maps backend rows onto the V3 vocabulary", () => {
     expect(filmStatus(row({ film_id: "a", group: "planning" }))).toBe("pending");
     expect(filmStatus(row({ film_id: "a", stage: "restore", status: "pending" }))).toBe("inbox");
-    expect(filmStatus(row({ film_id: "a", stage: "restore", status: "running" }))).toBe("encode");
+    // U1c: a running restore without an LTX stage yet (loading, mosaic scan, BasicVSR++)
+    expect(filmStatus(row({ film_id: "a", stage: "restore", status: "running" }))).toBe("restore");
+    expect(STATUS_META.restore[0]).toBe("修复中");
     expect(filmStatus(row({ film_id: "a", stage: "restore", status: "running",
       steps: steps("restore", "running", { ltx: { ltx_progress: { mode: "restore", stage_index: 3, stage_total: 4, stage_name: "denoise" } } }) }))).toBe("denoise");
     expect(filmStatus(row({ film_id: "a", group: "attention", stage: "scrape", status: "failed" }))).toBe("postprocess_error");

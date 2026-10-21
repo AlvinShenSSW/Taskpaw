@@ -24,6 +24,40 @@ export const LTX_ENCODE = {
   current_file: "ABF-401.mp4",
 };
 
+// U1c: the restore step's parse state per Jasna phase, as exec_restore reports it (test_jasna_progress).
+export const RESTORE_STARTED_AT = "2026-10-22T08:00:00Z";
+export const SCAN_LINE = "Mosaic scan:  12%|█▏        | 600/5000 [00:40<04:53, 15.00sample/s]";
+export const BASIC_LINE = "Processing video:  15%|███ |Processed: 06:09 (36703f) | Remaining: 30:47 (207454f) | Speed: 112.3fps";
+export const LTX_LINE = "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]";
+export const SPLIT_LINE = "ABF-401.mp4: LTX auto split: 300 s with mosaics, 120 s (40%) of it with LTX";
+export const RESTORE_PHASES = {
+  starting: {},
+  working: { current_file: "ABF-401.mp4", console: "Loading LTX weights (fast) …" },
+  scan: {
+    current_file: "ABF-401.mp4", console: SCAN_LINE,
+    scan_progress: { percent: 12, percent_text: "12", current: "600", total: "5000", elapsed: "00:40", eta: "04:53",
+      rate_value: "15.00", rate_unit: "sample/s", raw_line: SCAN_LINE },
+  },
+  split: { current_file: "ABF-401.mp4", console: SPLIT_LINE, split_note: { kind: "planned", text: SPLIT_LINE } },
+  basic: {
+    current_file: "ABF-401.mp4", console: BASIC_LINE, split_note: { kind: "planned", text: SPLIT_LINE },
+    percent: 15, elapsed: "06:09", processed_frames: 36703, eta: "30:47", remaining_frames: 207454, fps: 112.3,
+  },
+  ltx: {
+    current_file: "ABF-401.mp4", console: "WARNING: VRAM 92% used", split_note: { kind: "planned", text: SPLIT_LINE },
+    ltx_progress: { ...LTX_ENCODE.ltx_progress, raw_line: LTX_LINE }, ltx_stage: "2/4 encode", percent: 52, fps: 5.62, eta: "12:12",
+  },
+} as const satisfies Record<string, Record<string, unknown>>;
+export type RestorePhaseKey = keyof typeof RESTORE_PHASES;
+// The running restore step in one phase, with the heartbeat the board copies onto it.
+export function restoreSteps(phase: RestorePhaseKey): WorkflowStep[] {
+  const ltx = RESTORE_PHASES[phase] as Record<string, unknown>;
+  return steps("restore", "running", {
+    ltx: phase === "starting" ? null : ltx, current_file: (ltx.current_file as string | undefined) ?? null,
+    started_at: RESTORE_STARTED_AT, console: (ltx.console as string | undefined) ?? null,
+  });
+}
+
 const hash = (seed: string) => seed.repeat(64).slice(0, 64);
 export const revisions = (input: number, final: number | null = null): FilmRevisions => ({
   input: { revision: input, hash: hash(`a${input}`) }, final: final === null ? null : { revision: final, hash: hash(`b${final}`) },

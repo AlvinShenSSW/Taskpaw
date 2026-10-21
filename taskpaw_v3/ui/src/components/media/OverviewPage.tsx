@@ -11,7 +11,8 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api";
 import {
-  fmtVram, gpuLabel, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, outputLimit, REVIEW_STATES, type StageFilter,
+  fmtVram, gpuLabel, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, outputLimit, REVIEW_STATES,
+  type StageFilter,
   type WorkItem,
 } from "./mediaModel";
 import { Chip, Icon, ItemCover, Notice, PageTitle, StageBlock, StatusChip } from "./parts";
@@ -34,7 +35,7 @@ export function OverviewPage() {
   });
   const items = data.items;
   const count = (pred: (i: WorkItem) => boolean) => items.filter(pred).length;
-  const ltx = count((i) => i.status === "encode" || i.status === "denoise");
+  const ltx = count((i) => isRestoring(i.status));
   const pending = data.pendingCount;
   const review = data.review.length;
   const waiting = data.films.data?.counts.waiting_for_you ?? pending + review;

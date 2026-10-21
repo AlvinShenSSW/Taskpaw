@@ -7,8 +7,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { api, type WorkflowStep } from "../../api";
 import {
-  currentStep, lifecycle, ltxOf, STATUS_META, STEP_LABEL, stageLine, type ChipTone, type StatusKey, type WorkItem,
+  currentStep, heartbeatText, isRestoring, lifecycle, ltxOf, restoreLive, restoreStep, SPLIT_LABEL, STATUS_META, STEP_LABEL,
+  stageLine, type ChipTone, type RestoreLive, type StatusKey, type WorkItem,
 } from "./mediaModel";
+import { useNow } from "./useNow";
 
 export function Icon({ of: C }: { of: SvgIconComponent }) {
   return <C className="icon" aria-hidden />;
@@ -150,8 +152,71 @@ export function ItemCover({ item, size }: { item: WorkItem; size?: CoverSize }) 
     : <Cover filmId={null} hasPoster={false} size={size} label={title} />;
 }
 
+const ELLIPSIS = { minWidth: 0, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } as const;
+
+// U1c: the running 修复 step before LTX — Jasna loading, the auto split's mosaic scan, BasicVSR++.
+function RestorePhaseBlock({ title, live, beat }: { title: string; live: RestoreLive; beat: string }) {
+  const heartbeat = <div className="stage-detail" data-testid="restore-heartbeat"><span className="mono">{beat}</span></div>;
+  if (live.phase === "scan" && live.scan) {
+    const scan = live.scan;
+    return (
+      <>
+        <div className="film-stage">
+          <strong className="t-green">扫描马赛克</strong>
+          <span className="mono">{scan.percent_text === undefined ? "—" : `${scan.percent_text}%`} <span className="muted small">本阶段</span></span>
+        </div>
+        <div className="progress" role="progressbar" aria-label={`${title} 扫描马赛克 本阶段进度`}
+          aria-valuemin={0} aria-valuemax={100} aria-valuenow={scan.percent ?? undefined}>
+          <span style={{ width: `${scan.percent ?? 0}%` }} />
+        </div>
+        <div className="stage-detail">
+          <span className="mono">{scan.current ?? "—"} / {scan.total ?? "—"} 采样</span>
+          <span className="mono">剩余 {scan.eta ?? "—"}</span>
+        </div>
+        {heartbeat}
+      </>
+    );
+  }
+  if (live.phase === "basic" && live.basic) {
+    const basic = live.basic;
+    const total = basic.processed !== undefined && basic.remaining !== undefined ? basic.processed + basic.remaining : undefined;
+    return (
+      <>
+        <div className="film-stage">
+          <strong className="t-green">BasicVSR++ 修复</strong>
+          <span className="mono">{Math.round(basic.percent)}% <span className="muted small">本片段</span></span>
+        </div>
+        <div className="progress" role="progressbar" aria-label={`${title} BasicVSR++ 修复 本片段进度`}
+          aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(basic.percent)}>
+          <span style={{ width: `${basic.percent}%` }} />
+        </div>
+        <div className="stage-detail">
+          <span className="mono">{basic.processed ?? "—"} / {total ?? "—"} 帧</span>
+          <span className="mono">{basic.fps === undefined ? "—" : `${basic.fps.toFixed(1)} fps`}</span>
+        </div>
+        {heartbeat}
+      </>
+    );
+  }
+  const detail = live.split ? SPLIT_LABEL[live.split.kind] : live.console ?? "等待 Jasna 的第一行输出";
+  return (
+    <>
+      <div className="film-stage"><strong className="t-green" data-testid="restore-heartbeat">{beat}</strong></div>
+      <div className="stage-detail"><span className={live.split ? undefined : "mono"} style={ELLIPSIS} title={detail}>{detail}</span></div>
+    </>
+  );
+}
+
 // The stage block (§3): LTX shows only this stage's percent, counts and rate; others one line.
+// U1c: a running 修复 always shows it is alive (已用) and its phase before LTX.
 export function StageBlock({ item }: { item: WorkItem }) {
+  const restoring = item.kind === "film" && isRestoring(item.status);
+  const live = restoring && item.kind === "film" ? restoreLive(restoreStep(item.row)) : null;
+  const now = useNow(live !== null && live.startedAt !== null);
+  const beat = live ? heartbeatText(live, now) : null;
+  if (item.kind === "film" && restoring && live && beat && item.status === "restore") {
+    return <RestorePhaseBlock title={item.row.title || item.row.name} live={live} beat={beat} />;
+  }
   const ltx = item.kind === "film" && (item.status === "encode" || item.status === "denoise") ? ltxOf(item.row) : null;
   if (item.kind === "film" && (item.status === "encode" || item.status === "denoise")) {
     const title = item.row.title || item.row.name;
@@ -173,6 +238,7 @@ export function StageBlock({ item }: { item: WorkItem }) {
           <span className="mono">{ltx?.current ?? "—"} / {ltx?.total ?? "—"} {unit}</span>
           <span className="mono">{ltx?.rate_value ? `${ltx.rate_value} ${ltx.rate_unit ?? ""}` : "—"}</span>
         </div>
+        {beat && <div className="stage-detail" data-testid="restore-heartbeat"><span className="mono">{beat}</span></div>}
       </>
     );
   }
