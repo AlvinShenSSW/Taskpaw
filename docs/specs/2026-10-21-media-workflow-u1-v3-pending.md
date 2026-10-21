@@ -170,11 +170,14 @@
 
 All routes are on the loopback control API under `/control/workflow`, with the existing bearer token. JSON field names are final; the frontend aligns to this section. Labels, toasts and colours stay in the UI.
 
+The UI tests load what these routes return for a realistic runtime: `taskpaw_v3/tests/test_workflow_ui_contract.py` writes `ui/src/test/fixtures/workflow-contract.json` and fails when the committed copy differs. After an intended change, rerun it with `TASKPAW_WRITE_UI_CONTRACT=1` and fix the UI.
+
 ### `GET /films` (extended)
 
 - Every film row also has:
   - `number`, `title`, `actors[]`: precedence final NFO > lookup > input NFO. `name` uses the same order: final folder > lookup number > single-film package folder > input NFO number > video stem.
   - `resolution`: `"4K" | "1080p" | null`, from the largest input probe.
+  - `has_poster`, `poster_source`: the cover, by the same precedence as the detail's (final > lookup > input), so the queue and review cards show it.
   - `plan`: `{ltx_model: "standard"|"good"|"high"|null, machine: <worker id>}` or `null` while unplanned.
   - `receipt_id`: the newest archive receipt id, or `null`.
   - `revisions`: `{input: {revision, hash} | null, final: {revision, hash} | null}`.
