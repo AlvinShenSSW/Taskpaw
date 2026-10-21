@@ -274,6 +274,18 @@ def register_workflow_routes(
             raise HTTPException(status_code=404, detail="没有封面")
         return FileResponse(path, media_type=board.image_type(path))
 
+    @app.get("/control/workflow/films/{film_id}/cover")
+    def workflow_cover(film_id: str) -> FileResponse:
+        """U1b: the full landscape jacket the 大图 shows (`board.jacket`)."""
+        from taskpaw_v3.workflow import board
+
+        host = _host()
+        with _mapped():
+            path = board.cover_path(_runtime(host), film_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="没有完整封面")
+        return FileResponse(path, media_type=board.image_type(path))
+
     # ── U1 P3': 待处理 ──────────────────────────────────────────────────
     @app.get("/control/workflow/plans")
     def workflow_plans() -> dict[str, Any]:

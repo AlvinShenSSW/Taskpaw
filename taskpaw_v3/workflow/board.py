@@ -22,6 +22,7 @@ from . import intake_models as im
 from . import models as m
 from .auth import STAGE_ROLES
 from .exec_common import MISSING_LTX
+from .image_size import is_landscape
 from .local_gpu import FULL_HD
 from .local_runtime import LocalRuntime
 from .manifest import parse_nfo_summary
@@ -123,6 +124,8 @@ class Facts:
     lookup_number: str | None = None
     # the cover's source token by the same precedence; None without a cover
     poster_source: str | None = None
+    # U1b: the full landscape jacket's source token (`jacket`); None without one
+    cover_source: str | None = None
 
     @property
     def label(self) -> Label:
@@ -436,6 +439,9 @@ def film_row(
         # the list's cover: the one `film_detail` and `poster_path` serve
         "has_poster": facts.poster_source is not None,
         "poster_source": facts.poster_source,
+        # U1b: the full jacket the 大图 shows (`jacket`, `cover_path`)
+        "has_cover": facts.cover_source is not None,
+        "cover_source": facts.cover_source,
         "resolution": resolution(film.max_width, film.max_height),
         "plan": {"ltx_model": film.plan_ltx_model, "machine": film.plan_machine}
         if film.planned
@@ -516,7 +522,12 @@ def film_facts(
         input_nfo=_read_nfo(found[1] if found else None),
         video=PurePosixPath(videos[0].relative_path).stem if videos else None,
     )
-    return replace(facts, poster_source=poster[1] if poster else None)
+    full = jacket(rt, final, source)
+    return replace(
+        facts,
+        poster_source=poster[1] if poster else None,
+        cover_source=full[1] if full else None,
+    )
 
 
 def film_actors(rt: LocalRuntime, film: m.BoardFilm, revision: int) -> tuple[str, ...]:
@@ -700,6 +711,20 @@ def _input_file(
     suffixes: dict[str, str] | None = None,
 ) -> tuple[m.ManifestItem, Path] | None:
     """The first input item of `role` whose intake work copy exists (H3 D11)."""
+    found = _input_files(rt, manifest, role, suffixes, first=True)
+    return found[0] if found else None
+
+
+def _input_files(
+    rt: LocalRuntime,
+    manifest: m.InputManifest,
+    role: m.ItemRole,
+    suffixes: dict[str, str] | None = None,
+    *,
+    first: bool = False,
+) -> list[tuple[m.ManifestItem, Path]]:
+    """Input items of `role` whose intake work copy exists, in manifest order."""
+    found = []
     for item in manifest.items:
         suffix = PurePosixPath(item.relative_path).suffix.lower()
         if item.role != role or (suffixes is not None and suffix not in suffixes):
@@ -709,8 +734,10 @@ def _input_file(
         except StageResultError:
             continue
         if path.is_file():
-            return item, path
-    return None
+            found.append((item, path))
+            if first:
+                break
+    return found
 
 
 def _poster(
@@ -738,6 +765,48 @@ def _poster(
         or _input_file(rt, source, "attachment", _IMAGE_TYPES)
     )
     return (found[1], f"input-{found[0].sha256[:16]}") if found else None
+
+
+def jacket(
+    rt: LocalRuntime,
+    final: m.FinalManifest | None,
+    source: m.InputManifest | None,
+) -> tuple[Path, str] | None:
+    """The full jacket and its source token (U1b): the largest landscape image
+    of the first tier that has one — the final's fanart, its thumb, then the
+    input's fanart, thumb and image attachments, from the intake work copy. A
+    downloaded jacket's front cover is its right part; the 大图 shows it whole."""
+    tiers: list[tuple[str, list[tuple[m.ManifestItem, Path]]]] = []
+    roles: tuple[m.ItemRole, ...] = ("fanart", "thumb")
+    if final is not None:
+        for role in roles:
+            files = [
+                (item, output_dir(rt, final) / item.relative_path)
+                for item in final.items
+                if item.role == role
+            ]
+            tiers.append(("final", files))
+    if source is not None:
+        for role in (*roles, "attachment"):
+            tiers.append(("input", _input_files(rt, source, role, _IMAGE_TYPES)))
+    for kind, files in tiers:
+        sized = [
+            (size[0] * size[1], item, path)
+            for item, path in files
+            if path.is_file() and (size := is_landscape(path)) is not None
+        ]
+        if sized:
+            _, item, path = max(sized, key=lambda found: found[0])
+            return path, f"{kind}-{item.sha256[:16]}"
+    return None
+
+
+def cover_path(rt: LocalRuntime, film_id: str) -> Path | None:
+    """The full jacket while its file exists (U1b); None without one."""
+    if board_film(rt, film_id) is None:
+        return None
+    found = jacket(rt, final_manifest(rt, film_id), _source(rt, film_id))
+    return found[0] if found else None
 
 
 def _source(rt: LocalRuntime, film_id: str) -> m.InputManifest | None:
@@ -900,6 +969,8 @@ def film_detail(
         "workcopy_count": len(final.items) if final else 0,
         "has_poster": poster is not None,
         "poster_source": poster[1] if poster else None,
+        "has_cover": facts.cover_source is not None,
+        "cover_source": facts.cover_source,
         "group": row["group"],
         "can_confirm": row["can_confirm"],
         "can_retry": row["can_retry"],

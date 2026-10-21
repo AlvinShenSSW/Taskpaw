@@ -16,6 +16,7 @@ from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
     probeable_video,
     world,
 )
+from taskpaw_v3.tests.test_workflow_image_size import jpeg
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.workflow import board
 from taskpaw_v3.workflow import intake_models as im
@@ -245,8 +246,12 @@ def test_rows_carry_the_frozen_shape():
         # the cover of the queue and review cards (UI contract)
         "has_poster",
         "poster_source",
+        # U1b: the full jacket the 大图 shows
+        "has_cover",
+        "cover_source",
     }
     assert (row["has_poster"], row["poster_source"]) == (False, None)
+    assert (row["has_cover"], row["cover_source"]) == (False, None)
     assert row["created_at"] == "2026-10-20T00:00:00Z"
     assert [s["key"] for s in row["steps"]] == list(board.STEP_KEYS)
     assert all(set(s) == {"key", "state", "note", "progress"} for s in row["steps"])
@@ -995,3 +1000,79 @@ def test_an_unscraped_input_is_named_by_its_video_and_has_no_cover(staged):
     (row,) = board.film_rows(films, {}, labels=board.input_labels(rt, films))
     assert row["name"] == "4K688.com@ABF-393"
     assert board.name_of(rt, value) == "4K688.com@ABF-393"
+
+
+# ── the full jacket for the 大图 (U1b) ────────────────────────────────────
+def _image_film(rt, *files: tuple[str, str, bytes]) -> str:
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, video
+
+    extra = [File(path, data, role=role) for path, role, data in files]
+    return add_film(rt, [File(VIDEO, video()), *extra], attachments=(".jpg", ".txt"))
+
+
+JACKET = jpeg(2184, 1477)  # the downloaded fanart: the whole jacket
+SMALL = jpeg(840, 568)  # its thumb
+PORTRAIT = jpeg(421, 600)  # a front cover alone
+
+
+@pytest.mark.parametrize(
+    ("images", "served"),
+    [
+        (
+            [
+                ("ABF-393-poster.jpg", "poster", jpeg(2184, 1478)),
+                ("ABF-393-thumb.jpg", "thumb", SMALL),
+                ("ABF-393-fanart.jpg", "fanart", JACKET),
+                ("ABF-393.jpg", "attachment", jpeg(3000, 2000)),
+            ],
+            "ABF-393-fanart.jpg",
+        ),
+        (  # the role decides before the size
+            [("t.jpg", "thumb", SMALL), ("ABF-393.jpg", "attachment", JACKET)],
+            "t.jpg",
+        ),
+        (  # among attachments the largest landscape one
+            [
+                ("a.jpg", "attachment", SMALL),
+                ("b.jpg", "attachment", JACKET),
+                ("c.jpg", "attachment", jpeg(1400, 2000)),
+            ],
+            "b.jpg",
+        ),
+        (  # a portrait fanart is no jacket
+            [("f.jpg", "fanart", PORTRAIT), ("a.jpg", "attachment", SMALL)],
+            "a.jpg",
+        ),
+    ],
+    ids=["fanart", "thumb-before-attachment", "largest-attachment", "portrait-fanart"],
+)
+def test_the_cover_is_the_landscape_jacket_by_precedence(staged, images, served):
+    rt = staged
+    value = _image_film(rt, *images)
+    data = {path: blob for path, _, blob in images}
+    detail = board.film_detail(rt, value, {})
+    assert detail is not None
+    assert detail["has_cover"] is True
+    assert detail["cover_source"].startswith("input-")
+    path = board.cover_path(rt, value)
+    assert path is not None and path.read_bytes() == data[served]
+    assert path.is_relative_to(rt.work_dir)  # the intake work copy, never the INBOX
+    films = rt.store.film_board(rt.operator)
+    (row,) = board.film_rows(films, {}, facts=board.row_facts(rt, films))
+    assert (row["has_cover"], row["cover_source"]) == (True, detail["cover_source"])
+    assert detail["has_poster"] is True  # the cards keep showing the poster
+
+
+def test_without_a_landscape_image_there_is_no_cover(staged):
+    rt = staged
+    value = _image_film(
+        rt,
+        ("p.jpg", "poster", PORTRAIT),
+        ("t.jpg", "thumb", b"image t.jpg"),  # unreadable: no size
+        ("广告.txt", "attachment", b"text"),
+    )
+    detail = board.film_detail(rt, value, {})
+    assert detail is not None and detail["has_poster"] is True
+    assert (detail["has_cover"], detail["cover_source"]) == (False, None)
+    assert board.cover_path(rt, value) is None
+    assert board.cover_path(rt, identity()) is None

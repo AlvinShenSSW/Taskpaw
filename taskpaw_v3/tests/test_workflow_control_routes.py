@@ -22,6 +22,7 @@ from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
     probeable_video,
     world,
 )
+from taskpaw_v3.tests.test_workflow_image_size import jpeg
 from taskpaw_v3.tests.test_workflow_intake_store import drop
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.workflow_fake_filmpaw import FakeFilmpaw
@@ -36,6 +37,8 @@ from taskpaw_v3.workflow.filmpaw_client import (
 from taskpaw_v3.workflow.local_host import film_policy, retry_failed_stage
 
 AUTH = {"Authorization": "Bearer t"}
+JACKET = jpeg(2184, 1477)
+SMALL = jpeg(840, 568)
 BASE = "/control/workflow"
 
 
@@ -155,6 +158,7 @@ def test_no_host_explains_why_and_refuses_everything_else(settings, state, reaso
             client.post(f"{BASE}/packages/{identity()}/open"),
             client.get(f"{BASE}/films/{film}"),
             client.get(f"{BASE}/films/{film}/poster"),
+            client.get(f"{BASE}/films/{film}/cover"),
             client.get(f"{BASE}/performers", params={"q": "a"}),
             client.get(f"{BASE}/performers/p/thumb"),
             client.post(f"{BASE}/films/{film}/confirm", json={"performer_id": "a"}),
@@ -220,6 +224,8 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "workcopy_count",
         "has_poster",
         "poster_source",
+        "has_cover",
+        "cover_source",
         "group",
         "can_confirm",
         "can_retry",
@@ -264,6 +270,7 @@ def test_unknown_film_is_404(client):
     film = identity()
     assert client.get(f"{BASE}/films/{film}").status_code == 404
     assert client.get(f"{BASE}/films/{film}/poster").status_code == 404
+    assert client.get(f"{BASE}/films/{film}/cover").status_code == 404
     assert client.get(f"{BASE}/films/not-an-id").status_code == 404
 
 
@@ -299,6 +306,38 @@ def test_the_input_cover_shows_until_the_final_one_exists(tmp_path):
         world.rt.close()
 
 
+def test_the_full_jacket_is_served_by_film_id(tmp_path):
+    """U1b: the 大图 shows the largest landscape image, input until a final exists."""
+    world = World(tmp_path, {"ABF-393.jpg": JACKET, "ABF-393-small.jpg": SMALL})
+    try:
+        client = _client(lambda: Host(world))
+        before = client.get(f"{BASE}/films/{world.film}").json()
+        assert before["has_cover"] is True
+        assert before["cover_source"].startswith("input-")
+        response = client.get(f"{BASE}/films/{world.film}/cover")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "image/jpeg"
+        assert response.content == JACKET
+        assert _row(client, world.film)["cover_source"] == before["cover_source"]
+        world.scrape()  # Miko's fanart is the jacket now
+        after = client.get(f"{BASE}/films/{world.film}").json()
+        assert after["cover_source"].startswith("final-")
+        fanart = client.get(f"{BASE}/films/{world.film}/cover").content
+        assert fanart.startswith(b"\xff\xd8") and fanart.endswith(b"image fanart.jpg")
+        # the cards keep the poster
+        assert client.get(f"{BASE}/films/{world.film}/poster").content == (
+            b"image poster.jpg"
+        )
+    finally:
+        world.rt.close()
+
+
+def test_a_film_without_a_landscape_image_has_no_full_jacket(world, client):
+    data = client.get(f"{BASE}/films/{world.film}").json()
+    assert (data["has_cover"], data["cover_source"]) == (False, None)
+    assert client.get(f"{BASE}/films/{world.film}/cover").status_code == 404
+
+
 def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, client):
     world.scrape()
     with world.fake:
@@ -311,6 +350,7 @@ def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, clien
         world.ticks(host.finalizer)
     data = client.get(f"{BASE}/films/{world.film}").json()
     assert data["group"] == "done" and data["has_poster"] is False
+    assert data["has_cover"] is False
     assert data["archive"] == {
         "status": "succeeded",
         "error": None,
@@ -323,6 +363,7 @@ def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, clien
     }
     assert data["title"] is None and data["actors"] == []
     assert client.get(f"{BASE}/films/{world.film}/poster").status_code == 404
+    assert client.get(f"{BASE}/films/{world.film}/cover").status_code == 404
     assert (
         client.post(
             f"{BASE}/films/{world.film}/open", json={"what": "output"}

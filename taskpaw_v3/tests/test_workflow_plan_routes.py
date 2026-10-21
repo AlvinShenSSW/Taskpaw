@@ -251,6 +251,8 @@ def test_the_lookup_fills_the_card_and_names_the_film(world, client, tmp_path):
     assert entry["has_poster"] is True and entry["poster_source"].startswith("lookup-")
     poster = client.get(f"{BASE}/films/{world.film}/poster")
     assert poster.status_code == 200 and poster.content.startswith(b"\xff\xd8fake-jpeg")
+    # U1b: the lookup has a front cover only, no full jacket for the 大图
+    assert (entry["has_cover"], entry["cover_source"]) == (False, None)
     value = row(client, world.film)
     assert (value["name"], value["number"], value["actors"]) == (
         "MOVIE",

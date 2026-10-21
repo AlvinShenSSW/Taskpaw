@@ -16,6 +16,9 @@ import shutil
 import sys
 from pathlib import Path
 
+# SOI + SOF0 of an 800×538 image: enough for the cover's size check (U1b)
+_JACKET_HEAD = b"\xff\xd8\xff\xc0\x00\x11\x08\x02\x1a\x03\x20\x03" + bytes(9)
+
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -89,7 +92,9 @@ def main() -> int:
         ("thumb.jpg", "thumb"),
         ("fanart.jpg", "fanart"),
     ):
-        (film / name).write_bytes(f"image {name}".encode())
+        # the fanart is the whole landscape jacket (a JPEG frame header, U1b)
+        head = _JACKET_HEAD if role == "fanart" else b""
+        (film / name).write_bytes(head + f"image {name}".encode())
         add(film / name, role)
     if multi:
         shutil.copyfile(film / "poster.jpg", film / "folder.jpg")

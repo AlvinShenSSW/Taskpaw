@@ -160,6 +160,7 @@ def plan_list(rt: LocalRuntime) -> dict[str, Any]:
             uhd=totals["uhd"],
         )
         poster = board.cover(rt, None, manifest, item.film_id)
+        full = board.jacket(rt, None, manifest)
         entries.append(
             {
                 "film_id": item.film_id,
@@ -173,6 +174,8 @@ def plan_list(rt: LocalRuntime) -> dict[str, Any]:
                 "actors": list(facts.actors),
                 "has_poster": poster is not None,
                 "poster_source": poster[1] if poster else None,
+                "has_cover": full is not None,
+                "cover_source": full[1] if full else None,
                 "resolution": totals["resolution"],
                 "width": totals["width"],
                 "height": totals["height"],
