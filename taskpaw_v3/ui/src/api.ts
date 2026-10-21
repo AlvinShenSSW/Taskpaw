@@ -264,23 +264,29 @@ export interface TargetPreflight {
   target_path: string | null; absent: boolean | null; error_code: TargetErrorCode | null;
   candidates?: Performer[] | null;
 }
-// U1 P3': one unplanned film on the 待处理 list, with the recommendation and its reasons.
-export type LookupState = "found" | "pending" | "failed" | "no_number";
-export interface PlanRecommendation {
-  ltx_model: LtxTier | null; ltx_reason: string; machine: string; machine_reason: string;
-  warning?: string | null;
+// U1 P3': one unplanned film on the 待处理 list, with the recommendation and its reasons
+// (backend `workflow/planning.py`). `lookup` is the MDCX metadata preview (v2 L).
+export type LookupStatus = "succeeded" | "failed" | "running" | "queued";
+export interface PlanLookup {
+  status: LookupStatus; number: string | null; title: string | null; actors: string[];
+  message: string | null; can_requery: boolean; has_poster?: boolean;
 }
+export interface PlanRecommendation { ltx_model: LtxTier | null; ltx_reason: string; machine: string; machine_reason: string }
 export interface PlanEntry {
-  film_id: string; name: string; input_revision: number;
-  number: string | null; title: string | null; actors: string[];
-  resolution: "4K" | "1080p" | null; duration_s: number | null; size_bytes: number | null; file_count: number;
-  has_poster: boolean; poster_source?: string | null; needs_gpu: boolean;
-  lookup?: LookupState | null; recommended: PlanRecommendation;
+  film_id: string; input_revision: number; revision_changed?: boolean; name: string;
+  title: string | null; number: string | null; actors: string[];
+  has_poster: boolean; poster_source?: string | null; resolution: "4K" | "1080p" | null;
+  duration_ms: number | null; size_bytes: number | null; video_count?: number; item_count: number;
+  needs_gpu: boolean; lookup: PlanLookup | null; recommendation: PlanRecommendation;
 }
-export interface PlanMachine { id: string; label: string; reason?: string | null }
-export interface WorkflowPlans { items: PlanEntry[]; tiers?: LtxTier[]; machines: PlanMachine[] }
+export interface PlanMachine { id: string; name: string; gpu?: string | null; vram_mib?: number | null; reason?: string | null }
+export interface WorkflowPlans {
+  plans: PlanEntry[]; default_tier?: LtxTier;
+  choices: { tiers: Array<{ value: LtxTier; label: string }>; machines: PlanMachine[] };
+}
 export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string }
-export interface PlanResult { film_id: string; ok: boolean; status?: number | null; error?: string | null }
+// `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
+export interface PlanResult { film_id: string; ok: boolean; error: string | null; message: string | null }
 const seg = (id: string | number) => encodeURIComponent(String(id));
 
 export type ControlRole = "agent" | "hub";

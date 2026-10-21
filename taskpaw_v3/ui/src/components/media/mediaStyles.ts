@@ -37,6 +37,7 @@ export const MEDIA_CSS = `
 .mw .muted{color:var(--muted)}
 .mw .small{font-size:12px}
 .mw .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.mw .tabular{font-variant-numeric:tabular-nums}
 .mw .t-green{color:var(--green-light)}.mw .t-amber{color:var(--amber)}.mw .t-blue{color:var(--blue)}.mw .t-red{color:var(--red)}
 .mw .wrap{overflow-wrap:anywhere}
 .mw .icon{width:19px;height:19px;flex:none;vertical-align:middle}
@@ -63,7 +64,7 @@ export const MEDIA_CSS = `
 .mw .nav-count{margin-left:auto;min-width:22px;text-align:center;background:#263650;border-radius:5px;font:11px/20px var(--mono);color:#cedbea;padding:0 4px}
 .mw .nav-item[aria-current=page] .nav-count{background:#22c55e19;color:#a8edbe}
 .mw .nav-later{margin-left:auto;font-size:9px;line-height:1.6;padding:1px 6px;border:1px solid #344861;border-radius:4px;color:#97a9bf}
-.mw .content{padding:27px;max-width:1650px;margin:0 auto;min-width:0}
+.mw .content{padding:27px;max-width:1650px;width:100%;margin:0 auto;min-width:0}
 .mw .content:focus{outline:none}
 .mw .mobile-menu{display:none}
 
@@ -279,6 +280,7 @@ export const MEDIA_CSS = `
 .mw .files-table{width:100%;border-collapse:collapse;font-size:11px;margin-top:10px}
 .mw .files-table th,.mw .files-table td{text-align:left;padding:7px 6px;border-bottom:1px solid #2636509c;vertical-align:top;overflow-wrap:anywhere}
 .mw .files-table th{color:var(--muted);font-weight:500}
+.mw .mobile-nav-head h2:focus{outline:none}
 .mw .mobile-nav-head{display:flex;justify-content:space-between;align-items:center;padding:4px 8px 12px}
 .mw.mw-nav{width:min(380px,calc(100% - 24px));padding:14px;border:1px solid #415875;border-radius:12px;background:#101a2c;color:var(--text);margin:12px;max-width:none}
 .mw.mw-nav .nav-item{min-height:49px}

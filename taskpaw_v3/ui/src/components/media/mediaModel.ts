@@ -275,6 +275,14 @@ export function fmtDuration(seconds: number | null | undefined): string {
   const m = Math.floor((s % 3600) / 60);
   return `${h}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
+export const fmtDurationMs = (ms: number | null | undefined) => fmtDuration(ms == null ? null : ms / 1000);
+
+// 「本机 · RTX 5070 Ti 16 GB」 from a plan machine (backend `planning.machines`).
+export function machineLabel(m: { name: string; gpu?: string | null; vram_mib?: number | null } | undefined, fallback = "本机"): string {
+  if (!m) return fallback;
+  const gpu = [m.gpu, m.vram_mib ? `${Math.round(m.vram_mib / 1024)} GB` : null].filter(Boolean).join(" ");
+  return gpu ? `${m.name} · ${gpu}` : m.name;
+}
 
 export const fmtVram = (gb: number | null | undefined) => (gb == null ? "" : `${gb} GB`);
 export const gpuLabel = (gpu: WorkflowFilms["gpu"]) =>

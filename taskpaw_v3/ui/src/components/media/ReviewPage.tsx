@@ -1,9 +1,11 @@
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
+import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { itemActors, itemNumber, itemResolution, itemTitle, reviewLine } from "./mediaModel";
+import { api } from "../../api";
+import { itemActors, itemNumber, itemResolution, itemTitle, reviewLine, type StatusKey } from "./mediaModel";
 import { Chip, EmptyState, Icon, ItemCover, Notice, PageTitle, StatusChip } from "./parts";
-import { useWorkspace } from "./workspace";
+import { mediaFilmKey, useWorkspace } from "./workspace";
 
 type Filter = "all" | "ready" | "blocked";
 
@@ -40,7 +42,7 @@ export function ReviewPage() {
                   <p>{[itemNumber(item), actor].filter(Boolean).join(" · ")}</p>
                   <div className="chips"><StatusChip status={item.status} /></div>
                   <div className="keyline"><Icon of={FolderOpenIcon} /><span className="wrap">{target ?? "尚未选定目标"}</span></div>
-                  <p>{reviewLine(item.status, null, candidates?.length ?? null)}</p>
+                  <ReviewLine filmId={item.id} status={item.status} candidates={candidates?.length ?? null} />
                   <div className="actions">
                     <button type="button" className={`btn small${item.status === "ready" ? " primary" : ""}`}
                       onClick={() => ws.openReview(item.id)}>{item.status === "ready" ? "图文核对入库" : "查看并处理"}</button>
@@ -55,4 +57,12 @@ export function ReviewPage() {
       )}
     </>
   );
+}
+
+// 「最终成品包 {n} 个文件 · Miko 已完成」 needs the final package, which only the detail has.
+function ReviewLine({ filmId, status, candidates }: { filmId: string; status: StatusKey; candidates: number | null }) {
+  const detail = useQuery({
+    queryKey: mediaFilmKey(filmId), queryFn: () => api.workflowFilm(filmId), enabled: status === "ready", staleTime: 30000,
+  });
+  return <p>{reviewLine(status, detail.data?.files.length ?? null, candidates)}</p>;
 }

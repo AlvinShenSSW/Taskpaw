@@ -34,7 +34,7 @@ function mockApi() {
   vi.spyOn(api, "config").mockResolvedValue({ monitors: [], workflow: { inbox_root: "D:\\TODO" } });
   return {
     confirmPlans: vi.spyOn(api, "workflowConfirmPlans").mockImplementation(async (plans: PlanChoice[]) =>
-      ({ results: plans.map((p) => ({ film_id: p.film_id, ok: true })) })),
+      ({ results: plans.map((p) => ({ film_id: p.film_id, ok: true, error: null, message: null })) })),
     confirm: vi.spyOn(api, "workflowConfirm").mockResolvedValue({ approval_id: "a1" }),
     pause: vi.spyOn(api, "workflowPause").mockResolvedValue({ paused: true }),
   };
@@ -46,7 +46,7 @@ const go = async (label: string) => {
   return screen.findByRole("heading", { level: 1, name: label });
 };
 
-beforeEach(() => setLang("zh-CN"));
+beforeEach(() => { setLang("zh-CN"); vi.spyOn(window, "scrollTo").mockImplementation(() => {}); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("MediaWorkspace shell", () => {
@@ -101,9 +101,15 @@ describe("MediaWorkspace shell", () => {
     fireEvent.click(trigger);
     const dialog = await screen.findByRole("dialog", { name: "工作台导航" });
     expect(within(dialog).getByRole("button", { name: "关闭主导航" })).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole("button", { name: /^待确认/ }));
+    await waitFor(() => expect(within(dialog).getByRole("heading", { name: "工作台导航" })).toHaveFocus());
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(trigger).toHaveFocus());
+    fireEvent.click(trigger);
+    const again = await screen.findByRole("dialog", { name: "工作台导航" });
+    fireEvent.click(within(again).getByRole("button", { name: /^待确认/ }));
     expect(await screen.findByRole("heading", { level: 1, name: "待确认" })).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "工作台导航" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
   });
 });
 
@@ -183,7 +189,7 @@ describe("待处理", () => {
     fireEvent.click(within(card("abf-422")).getByRole("radio", { name: "良好" }));
     fireEvent.click(within(card("abf-422")).getByRole("button", { name: "确认入队" }));
     await waitFor(() => expect(m.confirmPlans).toHaveBeenCalledWith(
-      [{ film_id: "abf-422", input_revision: 1, ltx_model: "good", machine: "local" }]));
+      [{ film_id: "abf-422", input_revision: 1, ltx_model: "good", machine: "w-local" }]));
     await waitFor(() => expect(card("abf-422")).toBeNull());
     expect(await screen.findByText("晨雾车站 已确认入队 · 良好画质 · 本机")).toBeInTheDocument();
   });
@@ -191,7 +197,9 @@ describe("待处理", () => {
   it("batch-confirms the unchanged films only and skips changed and stale ones", async () => {
     const m = mockApi();
     m.confirmPlans.mockImplementationOnce(async (plans) => ({
-      results: plans.map((p) => (p.film_id === "abf-423" ? { film_id: p.film_id, ok: false, status: 409 } : { film_id: p.film_id, ok: true })),
+      results: plans.map((p) => (p.film_id === "abf-423"
+        ? { film_id: p.film_id, ok: false, error: "cas_conflict", message: "收件内容已更新，请重新查看后确认" }
+        : { film_id: p.film_id, ok: true, error: null, message: null })),
     }));
     wrap(<MediaWorkspace />);
     await go("待处理");
@@ -205,7 +213,7 @@ describe("待处理", () => {
     m.confirmPlans.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "全部按推荐确认" }));
     await waitFor(() => expect(m.confirmPlans).toHaveBeenCalledWith(
-      [{ film_id: "abf-422", input_revision: 1, ltx_model: "standard", machine: "local" }]));
+      [{ film_id: "abf-422", input_revision: 1, ltx_model: "standard", machine: "w-local" }]));
     expect(await screen.findByText("已确认 1 部，进入影片队列。2 部已调整或需重新查看，请单独确认。")).toBeInTheDocument();
     // opening the detail acknowledges the new revision
     fireEvent.click(within(card("abf-423")).getByRole("button", { name: "查看详情" }));
@@ -213,9 +221,34 @@ describe("待处理", () => {
     expect(within(card("abf-423")).queryByText("收件内容已更新，请重新查看后确认")).toBeNull();
   });
 
+  it("a changed input revision stays flagged until the detail is opened; a failed lookup can be re-queried", async () => {
+    mockApi();
+    const lookup = vi.spyOn(api, "workflowLookup").mockResolvedValue({ ok: true });
+    vi.spyOn(api, "workflowPlans").mockResolvedValue({ ...PLANS, plans: PLANS.plans.map((p) => (p.film_id === "abf-422"
+      ? { ...p, input_revision: 2, revision_changed: true,
+        lookup: { status: "failed", number: null, title: null, actors: [], message: "未查到资料", can_requery: true } }
+      : p.film_id === "abf-423" ? { ...p,
+        lookup: { status: "failed", number: null, title: null, actors: [], message: "文件名中没有番号", can_requery: false } } : p)) });
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    await waitFor(() => expect(card("abf-422")).toBeTruthy());
+    const c = within(card("abf-422"));
+    expect(c.getByText("收件内容已更新，请重新查看后确认")).toBeInTheDocument();
+    expect(c.getByRole("button", { name: "确认入队" })).toBeDisabled();
+    fireEvent.click(c.getByRole("button", { name: "重新查询" }));
+    await waitFor(() => expect(lookup).toHaveBeenCalledWith("abf-422"));
+    expect(within(card("abf-423")).getByText("文件名中没有番号")).toBeInTheDocument();
+    expect(within(card("abf-423")).getByRole("button", { name: "重新查询" })).toBeDisabled();
+    fireEvent.click(c.getByRole("button", { name: "查看详情" }));
+    fireEvent.keyDown(await screen.findByRole("dialog", { name: "影片详情" }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "影片详情" })).not.toBeInTheDocument());
+    expect(c.queryByText("收件内容已更新，请重新查看后确认")).toBeNull();
+    expect(c.getByRole("button", { name: "确认入队" })).toBeEnabled();
+  });
+
   it("shows the empty state", async () => {
     mockApi();
-    vi.spyOn(api, "workflowPlans").mockResolvedValue({ items: [], machines: [] });
+    vi.spyOn(api, "workflowPlans").mockResolvedValue({ plans: [], choices: { tiers: [], machines: [] } });
     vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: FILMS_RESPONSE.films.filter((f) => f.group !== "pending") });
     wrap(<MediaWorkspace />);
     await go("待处理");
@@ -250,6 +283,7 @@ describe("影片队列 / 待确认 / 异常", () => {
     const reviewCard = (id: string) => document.querySelector<HTMLElement>(`[data-review="${id}"]`) as HTMLElement;
     await waitFor(() => expect(within(reviewCard("abf-407")).getByText("多个目标候选")).toBeInTheDocument());
     expect(within(reviewCard("abf-406")).getByRole("button", { name: "图文核对入库" })).toBeInTheDocument();
+    expect(await within(reviewCard("abf-406")).findByText("最终成品包 4 个文件 · Miko 已完成")).toBeInTheDocument();
     expect(within(reviewCard("abf-407")).getByText("2 个演员 / 目录候选，必须明确选择")).toBeInTheDocument();
     expect(within(reviewCard("abf-408")).getByText("暂无演员匹配")).toBeInTheDocument();
     expect(within(reviewCard("abf-409")).getByText("目标 NAS 离线，禁止提交")).toBeInTheDocument();

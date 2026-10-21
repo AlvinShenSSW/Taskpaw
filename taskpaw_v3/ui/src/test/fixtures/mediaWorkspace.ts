@@ -28,7 +28,7 @@ export const row = (over: Partial<FilmRow> & { film_id: string }): FilmRow => ({
   name: over.film_id.toUpperCase(), group: "active", stage: "restore", status: "pending", note: null,
   can_confirm: false, can_retry: false, retry_stage: null, created_at: "2026-10-21T00:00:00Z", steps: [],
   resolution: "1080p", number: over.film_id.toUpperCase(), title: null, actors: [], receipt_id: null,
-  revisions: { final: null, input: 1 }, plan: { ltx_model: "standard", machine: "local" }, has_poster: false, ...over,
+  revisions: { final: null, input: 1 }, plan: { ltx_model: "standard", machine: "w-local" }, has_poster: false, ...over,
 });
 
 export const FILMS: FilmRow[] = [
@@ -92,22 +92,26 @@ export const PREFLIGHTS: Record<string, TargetPreflight> = {
 
 export const plan = (over: Partial<PlanEntry> & { film_id: string }): PlanEntry => ({
   name: over.film_id.toUpperCase(), input_revision: 1, number: over.film_id.toUpperCase(), title: null, actors: [],
-  resolution: "1080p", duration_s: 7094, size_bytes: 7301444403, file_count: 2, has_poster: false, needs_gpu: true,
-  lookup: "found", recommended: { ltx_model: "standard", ltx_reason: "默认", machine: "local", machine_reason: "RTX 5070 Ti 16 GB" },
+  resolution: "1080p", duration_ms: 7094000, size_bytes: 7301444403, item_count: 2, has_poster: false, needs_gpu: true,
+  lookup: { status: "succeeded", number: null, title: null, actors: [], message: null, can_requery: true },
+  recommendation: { ltx_model: "standard", ltx_reason: "默认", machine: "w-local", machine_reason: "RTX 5070 Ti 16 GB" },
   ...over,
 });
 
 export const PLANS: WorkflowPlans = {
-  items: [
-    plan({ film_id: "abf-421", title: "星河之外", actors: ["演员星河"], resolution: "4K", duration_s: 7694, size_bytes: 44667659878,
-      file_count: 3, recommended: { ltx_model: "high", ltx_reason: "演员星河 上次选择 高画质", machine: "local",
-        machine_reason: "RTX 5070 Ti 16 GB", warning: "本机修复输出上限 1080p" } }),
+  plans: [
+    plan({ film_id: "abf-421", title: "星河之外", actors: ["演员星河"], resolution: "4K", duration_ms: 7694000, size_bytes: 44667659878,
+      item_count: 3, recommendation: { ltx_model: "high", ltx_reason: "演员星河 上次选择 高画质", machine: "w-local",
+        machine_reason: "本机修复输出上限 1080p" } }),
     plan({ film_id: "abf-422", title: "晨雾车站", actors: ["演员晨雾"] }),
     plan({ film_id: "abf-423", title: "纸上潮汐", actors: ["演员潮汐"], needs_gpu: false,
-      recommended: { ltx_model: null, ltx_reason: "无需修复", machine: "local", machine_reason: "RTX 5070 Ti 16 GB" } }),
+      recommendation: { ltx_model: null, ltx_reason: "无需修复", machine: "w-local", machine_reason: "RTX 5070 Ti 16 GB" } }),
   ],
-  tiers: ["standard", "good", "high"],
-  machines: [{ id: "local", label: "本机 · RTX 5070 Ti 16 GB", reason: "RTX 5070 Ti 16 GB" }],
+  default_tier: "standard",
+  choices: {
+    tiers: [{ value: "standard", label: "标准" }, { value: "good", label: "良好" }, { value: "high", label: "高" }],
+    machines: [{ id: "w-local", name: "本机", gpu: "RTX 5070 Ti", vram_mib: 16303, reason: "RTX 5070 Ti 16 GB" }],
+  },
 };
 
 export function detail(id: string, over: Partial<FilmDetail> = {}): FilmDetail {

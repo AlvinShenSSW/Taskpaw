@@ -9,7 +9,7 @@ import { LtxDownload } from "../LtxDownload";
 import { LtxProgress } from "../LtxProgress";
 import {
   CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, packageNote, REVIEW_STATES, restoreStep,
-  STATUS_META, stageName, tierLong, type WorkItem,
+  machineLabel, STATUS_META, stageName, tierLong, type WorkItem,
 } from "./mediaModel";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, mediaFilmKey, useIntakeReasons, useWorkspace } from "./workspace";
@@ -36,7 +36,7 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const detail = useQuery({ queryKey: mediaFilmKey(filmId), queryFn: () => api.workflowFilm(filmId), refetchInterval: 5000 });
   const film = detail.data;
   const item = ws.data.items.find((i) => i.id === filmId);
-  const plan = ws.data.plans.data?.items.find((e) => e.film_id === filmId);
+  const plan = ws.data.plans.data?.plans.find((e) => e.film_id === filmId);
   const open = useMutation({ mutationFn: () => api.workflowOpen(filmId, "inbox"), onError: (e) => ws.toast(errorText(e)) });
   const retry = useMutation({
     mutationFn: (stage: string) => api.workflowRetry(filmId, stage),
@@ -94,7 +94,9 @@ function DrawerBody({ film, item, status, plan }: {
   film: FilmDetail; item: WorkItem | undefined; status: keyof typeof STATUS_META; plan: PlanEntry | undefined;
 }) {
   const ws = useWorkspace();
-  const title = film.title || film.name;
+  // Before Miko, an unplanned film's names come from the lookup preview (precedence: final > lookup > input).
+  const title = film.title || plan?.title || film.name;
+  const actors = film.actors.length ? film.actors : plan?.actors ?? [];
   const restore = restoreStep(film);
   const ltx = restore?.state === "running" && restore.ltx && typeof restore.ltx === "object" ? restore.ltx : null;
   const download = restore?.download ?? null;
@@ -106,13 +108,13 @@ function DrawerBody({ film, item, status, plan }: {
   const receipt = film.receipt_id ?? (film.archive.status === "succeeded" ? "已入库" : null);
   const plannedFacts = status === "pending" ? (
     <>
-      <dt>画质</dt><dd>待安排{plan && <span className="muted"> · 推荐 {plan.needs_gpu ? tierLong(plan.recommended.ltx_model) : "无需修复"}</span>}</dd>
-      <dt>设备</dt><dd>待安排{plan && <span className="muted"> · 推荐 {ws.data.plans.data?.machines.find((m) => m.id === plan.recommended.machine)?.label ?? "本机"}</span>}</dd>
+      <dt>画质</dt><dd>待安排{plan && <span className="muted"> · 推荐 {plan.needs_gpu ? tierLong(plan.recommendation.ltx_model) : "无需修复"}</span>}</dd>
+      <dt>设备</dt><dd>待安排{plan && <span className="muted"> · 推荐 {machineLabel(ws.data.plans.data?.choices.machines.find((m) => m.id === plan.recommendation.machine))}</span>}</dd>
     </>
   ) : film.plan ? (
     <>
       <dt>画质</dt><dd>{tierLong(film.plan.ltx_model)}</dd>
-      <dt>设备</dt><dd>{ws.data.plans.data?.machines.find((m) => m.id === film.plan?.machine)?.label ?? (film.plan.machine === "local" ? "本机" : film.plan.machine)}</dd>
+      <dt>设备</dt><dd>{machineLabel(ws.data.plans.data?.choices.machines.find((m) => m.id === film.plan?.machine), "本机")}</dd>
     </>
   ) : (
     <><dt>画质</dt><dd>待安排</dd><dt>设备</dt><dd>待安排</dd></>
@@ -128,7 +130,7 @@ function DrawerBody({ film, item, status, plan }: {
             {changed && <Chip tone="red">输入变化 · 禁止清理</Chip>}
             {film.resolution && <Chip>{film.resolution}</Chip>}
           </div>
-          {film.actors.length > 0 && <p>{film.actors.join("、")}</p>}
+          {actors.length > 0 && <p>{actors.join("、")}</p>}
           <p>来源：主控收件目录 INBOX · 本机</p>
         </div>
       </div>

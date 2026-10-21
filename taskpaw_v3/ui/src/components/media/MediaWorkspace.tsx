@@ -87,7 +87,10 @@ export function MediaWorkspace() {
   const mainRef = useRef<HTMLElement>(null);
   const [moves, setMoves] = useState(0);
   const navPicked = useRef(false);
+  const navTrigger = useRef<HTMLButtonElement>(null);
 
+  // Back to the top of the page; the app bar above the workspace is sticky, so not scrollIntoView.
+  const toTop = () => window.scrollTo({ top: 0 });
   const navigate = useCallback((next: PageKey, opts?: { stage?: StageFilter }) => {
     if (opts?.stage) setQueueStage(opts.stage);
     setPage(next);
@@ -97,7 +100,7 @@ export function MediaWorkspace() {
   useEffect(() => {
     if (moves === 0 || navPicked.current) return;
     mainRef.current?.focus({ preventScroll: true });
-    mainRef.current?.scrollIntoView?.({ block: "start" });
+    toTop();
   }, [moves]);
 
   const api: WorkspaceApi = useMemo(() => ({
@@ -132,7 +135,7 @@ export function MediaWorkspace() {
         <div className="scope-banner">
           <div className="scope-left">
             {narrow && (
-              <button type="button" className="btn ghost mobile-menu" aria-haspopup="dialog" onClick={() => setNavOpen(true)}>
+              <button type="button" className="btn ghost mobile-menu" aria-haspopup="dialog" ref={navTrigger} onClick={() => setNavOpen(true)}>
                 <Icon of={MenuIcon} />工作区导航
               </button>
             )}
@@ -161,13 +164,14 @@ export function MediaWorkspace() {
           }}>{toast?.text}</div>
         </Snackbar>
       </div>
-      <Dialog open={navOpen} onClose={() => setNavOpen(false)} slotProps={{ backdrop: NAV_BACKDROP }}
+      <Dialog open={navOpen} onClose={() => setNavOpen(false)} disableAutoFocus slotProps={{ backdrop: NAV_BACKDROP }}
         TransitionProps={{ onExited: () => {
-          if (navPicked.current) { navPicked.current = false; mainRef.current?.focus({ preventScroll: true }); mainRef.current?.scrollIntoView?.({ block: "start" }); }
+          if (navPicked.current) { navPicked.current = false; mainRef.current?.focus({ preventScroll: true }); toTop(); }
+          else navTrigger.current?.focus();
         } }}
         PaperProps={{ className: "mw mw-nav", sx: { backgroundImage: "none" }, "aria-labelledby": "mw-nav-title" } as object}>
         <div className="mobile-nav-head">
-          <h2 id="mw-nav-title">工作台导航</h2>
+          <h2 id="mw-nav-title" tabIndex={-1} ref={(el) => el?.focus({ preventScroll: true })}>工作台导航</h2>
           <button type="button" className="btn ghost icon-btn" aria-label="关闭主导航" onClick={() => setNavOpen(false)}><Icon of={CloseIcon} /></button>
         </div>
         <NavList page={page} data={data} label="媒体处理中心导航"

@@ -3,15 +3,15 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api, HttpError, type LtxTier, type PlanChoice, type PlanEntry, type PlanMachine, type PlanResult } from "../../api";
-import { fmtBytes, fmtDuration, TIER_ORDER, TIER_SHORT, tierLong } from "./mediaModel";
+import { fmtBytes, fmtDurationMs, machineLabel, TIER_ORDER, TIER_SHORT, tierLong } from "./mediaModel";
 import { Chip, Cover, EmptyState, Icon, Notice, PageTitle } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, MEDIA_PLANS_KEY, useWorkspace } from "./workspace";
 
 type Filter = "all" | "gpu" | "nogpu";
 type Choice = { tier: LtxTier | null; machine: string };
 
-const recommendedChoice = (e: PlanEntry): Choice => ({ tier: e.needs_gpu ? e.recommended.ltx_model : null, machine: e.recommended.machine });
-const complete = (e: PlanEntry) => Boolean(e.recommended.machine) && (!e.needs_gpu || e.recommended.ltx_model !== null);
+const recommendedChoice = (e: PlanEntry): Choice => ({ tier: e.needs_gpu ? e.recommendation.ltx_model : null, machine: e.recommendation.machine });
+const complete = (e: PlanEntry) => Boolean(e.recommendation.machine) && (!e.needs_gpu || e.recommendation.ltx_model !== null);
 const entryTitle = (e: PlanEntry) => e.title || e.name;
 
 // 待处理 (U1 V2): unplanned films wait here; the operator keeps or changes the recommended tier
@@ -26,10 +26,12 @@ export function PendingPage() {
   // detail is opened again (「收件内容已更新，请重新查看后确认」).
   const [seen, setSeen] = useState<Record<string, number>>({});
   const [rejected, setRejected] = useState<Set<string>>(new Set());
+  // A revision the backend marks as changed stays flagged until its detail has been opened.
+  const [acked, setAcked] = useState<Record<string, number>>({});
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const focusNext = useRef<string | null>(null);
 
-  const all = useMemo(() => (plans.data?.items ?? []).filter((e) => !hidden.has(e.film_id)), [plans.data, hidden]);
+  const all = useMemo(() => (plans.data?.plans ?? []).filter((e) => !hidden.has(e.film_id)), [plans.data, hidden]);
   useEffect(() => {
     setSeen((prev) => {
       const missing = all.filter((e) => prev[e.film_id] === undefined);
@@ -41,7 +43,7 @@ export function PendingPage() {
   }, [all]);
   // A confirmed film stays hidden until the refreshed list no longer has it.
   useEffect(() => {
-    const ids = new Set((plans.data?.items ?? []).map((e) => e.film_id));
+    const ids = new Set((plans.data?.plans ?? []).map((e) => e.film_id));
     setHidden((prev) => {
       const next = new Set([...prev].filter((id) => ids.has(id)));
       return next.size === prev.size ? prev : next;
@@ -60,14 +62,16 @@ export function PendingPage() {
 
   const items = all.filter((e) => (filter === "gpu" ? e.needs_gpu : filter === "nogpu" ? !e.needs_gpu : true));
   const choiceOf = (e: PlanEntry) => choices[e.film_id] ?? recommendedChoice(e);
-  const isStale = (e: PlanEntry) => rejected.has(e.film_id) || (seen[e.film_id] !== undefined && seen[e.film_id] !== e.input_revision);
+  const isStale = (e: PlanEntry) => rejected.has(e.film_id)
+    || (seen[e.film_id] !== undefined && seen[e.film_id] !== e.input_revision)
+    || (Boolean(e.revision_changed) && acked[e.film_id] !== e.input_revision);
   const unchanged = (e: PlanEntry) => {
     const c = choiceOf(e), r = recommendedChoice(e);
     return c.tier === r.tier && c.machine === r.machine;
   };
   const batchEligible = (e: PlanEntry) => complete(e) && !isStale(e) && unchanged(e);
   const eligible = items.filter(batchEligible);
-  const machines = plans.data?.machines ?? [];
+  const machines = plans.data?.choices.machines ?? [];
 
   const after = (sent: PlanEntry[], results: PlanResult[] | null, failure?: unknown) => {
     const ok = new Set<string>();
@@ -75,7 +79,8 @@ export function PendingPage() {
     if (results) {
       for (const r of results) {
         if (r.ok) ok.add(r.film_id);
-        else if (r.status === 409) stale.add(r.film_id);
+        else if (r.error === "cas_conflict") stale.add(r.film_id);
+        else ws.toast(r.message || r.error || "确认失败");
       }
     } else if (failure instanceof HttpError && failure.status === 409 && sent.length === 1) {
       stale.add(sent[0].film_id);
@@ -131,6 +136,7 @@ export function PendingPage() {
 
   const openDetail = (e: PlanEntry) => {
     setSeen((prev) => ({ ...prev, [e.film_id]: e.input_revision }));
+    setAcked((prev) => ({ ...prev, [e.film_id]: e.input_revision }));
     setRejected((prev) => { const n = new Set(prev); n.delete(e.film_id); return n; });
     ws.openDetail(e.film_id);
   };
@@ -174,8 +180,7 @@ export function PendingPage() {
 }
 
 function machineName(machines: PlanMachine[], id: string): string {
-  const m = machines.find((x) => x.id === id);
-  return m ? m.label.split(" · ")[0] : id === "local" ? "本机" : id;
+  return machines.find((x) => x.id === id)?.name ?? "本机";
 }
 
 function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onChoice, onConfirm, onDetail, onLookup }: {
@@ -185,9 +190,10 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onCh
   const id = e.film_id;
   const tid = `pt-${id}`;
   const title = entryTitle(e);
-  const rec = e.recommended;
-  const options = machines.length ? machines : [{ id: rec.machine, label: rec.machine === "local" ? "本机" : rec.machine }];
-  const machineReason = machines.find((m) => m.id === choice.machine)?.reason ?? (choice.machine === rec.machine ? rec.machine_reason : "");
+  const rec = e.recommendation;
+  const options = machines.length ? machines.map((m) => ({ id: m.id, label: machineLabel(m) })) : [{ id: rec.machine, label: "本机" }];
+  // The recommended machine shows the recommendation's reason (a 4K film: 「本机修复输出上限 1080p」).
+  const machineReason = choice.machine === rec.machine ? rec.machine_reason : machines.find((m) => m.id === choice.machine)?.reason ?? "";
   const ready = Boolean(choice.machine) && (!e.needs_gpu || choice.tier !== null);
   const idLine = [e.number || (e.title ? e.name : null), e.actors.join("、")].filter(Boolean).join(" · ");
   const onKey = (ev: KeyboardEvent<HTMLButtonElement>, tier: LtxTier) => {
@@ -208,14 +214,14 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onCh
       <div className="film-body">
         <div className="film-title"><h3 id={tid}>{title}</h3>{e.resolution && <Chip>{e.resolution}</Chip>}</div>
         {idLine && <p>{idLine}</p>}
-        <p className="mono">{fmtDuration(e.duration_s)} · {fmtBytes(e.size_bytes)} · {e.file_count} 个文件</p>
-        {(e.lookup === "failed" || e.lookup === "no_number") && (
+        <p className="tabular">{fmtDurationMs(e.duration_ms)} · {fmtBytes(e.size_bytes)} · {e.item_count} 个文件</p>
+        {e.lookup?.status === "failed" && (
           <div className="keyline">
-            <span>{e.lookup === "no_number" ? "文件名中没有番号" : "未查到资料"}</span>
-            <button type="button" className="link-btn" disabled={e.lookup === "no_number" || lookupBusy} onClick={onLookup}>重新查询</button>
+            <span>{e.lookup.message || "未查到资料"}</span>
+            <button type="button" className="link-btn" disabled={!e.lookup.can_requery || lookupBusy} onClick={onLookup}>重新查询</button>
           </div>
         )}
-        {e.lookup === "pending" && <p>正在查询资料…</p>}
+        {(e.lookup?.status === "queued" || e.lookup?.status === "running") && <p>正在查询资料…</p>}
         {stale && <Notice tone="amber" icon={WarningAmberIcon} id={`stale-${id}`}>收件内容已更新，请重新查看后确认</Notice>}
       </div>
       <div className="plan">
@@ -246,7 +252,6 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onCh
             {options.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
           <p className="plan-reason" id={`machine-reason-${id}`}>{machineReason}</p>
-          {rec.warning && <p className="plan-reason t-amber">{rec.warning}</p>}
         </div>
       </div>
       <div className="pending-foot">

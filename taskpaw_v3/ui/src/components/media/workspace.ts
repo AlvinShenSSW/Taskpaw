@@ -62,7 +62,7 @@ export function useMediaData(): MediaData {
       active: items.filter((i) => ACTIVE_STATES.includes(i.status)),
       review: items.filter((i) => REVIEW_STATES.includes(i.status)),
       exceptions: items.filter((i) => EXCEPTION_STATES.includes(i.status)),
-      pendingCount: Math.max(pendingFromFilms, plans.data?.items.length ?? 0),
+      pendingCount: Math.max(pendingFromFilms, plans.data?.plans.length ?? 0),
     };
   }, [films, plans, running, preflights]);
 }
