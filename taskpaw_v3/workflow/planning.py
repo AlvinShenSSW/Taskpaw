@@ -71,18 +71,24 @@ def choices(rt: LocalRuntime) -> dict[str, Any]:
     }
 
 
-def _history(rt: LocalRuntime) -> list[PastPlan]:
-    lookup = rt.lookup
+def _history(rt: LocalRuntime, films: dict[str, m.BoardFilm]) -> list[PastPlan]:
+    """The operator's own past choices with their films' actors.
+
+    A backfilled plan (the v3 upgrade's default tier, U04) is no choice and is
+    left out (IR03). Actors follow the card's precedence, final NFO > lookup >
+    input NFO, for the plan's revision (IR04)."""
     history = []
     for plan in rt.store.list_plans(rt.operator):
-        found = lookup.result(plan.film_id, plan.input_revision) if lookup else None
+        if plan.backfilled:
+            continue
+        film = films.get(plan.film_id)
         history.append(
             PastPlan(
                 plan.film_id,
                 plan.input_revision,
                 plan.ltx_model,
                 plan.confirmed_at,
-                found.actors if found is not None and found.ok else (),
+                board.film_actors(rt, film, plan.input_revision) if film else (),
             )
         )
     return history
@@ -112,7 +118,7 @@ def plan_list(rt: LocalRuntime) -> dict[str, Any]:
     op, lookup = rt.operator, rt.lookup
     unplanned = rt.store.list_unplanned(op)
     films = {film.film_id: film for film in rt.store.film_board(op)}
-    history = _history(rt)
+    history = _history(rt, films)
     default = default_tier(rt)
     gpu_name, vram = _gpu(rt)
     entries = []
@@ -172,6 +178,18 @@ def plan_list(rt: LocalRuntime) -> dict[str, Any]:
     return {"plans": entries, "default_tier": default, "choices": choices(rt)}
 
 
+def _manifest(rt: LocalRuntime, film_id: str, revision: int) -> m.InputManifest:
+    """The input manifest a card was shown; a revision the store does not have
+    for a known film is a stale card (`cas_conflict`), not an unknown film."""
+    try:
+        return rt.store.get_input_manifest(rt.operator, film_id, revision)
+    except m.WorkflowError as exc:
+        if exc.code != "not_found":
+            raise
+        rt.store.get_film(rt.operator, film_id)  # not_found: the film is unknown
+        raise m.WorkflowError("cas_conflict") from None
+
+
 def confirm_plans(
     rt: LocalRuntime, items: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -184,7 +202,7 @@ def confirm_plans(
         try:
             if item["machine"] not in allowed:
                 raise m.WorkflowError("invalid_machine")
-            manifest = rt.store.get_input_manifest(op, film_id, item["input_revision"])
+            manifest = _manifest(rt, film_id, item["input_revision"])
             needs = needs_restore(manifest)
             tier = item["ltx_model"] if needs else None
             if needs and tier is None:

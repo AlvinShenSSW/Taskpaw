@@ -160,6 +160,23 @@ def test_each_item_has_its_own_result(world, host, client):
     assert host.dispatcher.wakes == 1  # only a confirm that succeeded wakes it
 
 
+def test_a_revision_newer_than_the_current_one_is_a_cas_conflict(world, client):
+    """IR06: the card is behind or ahead of the store, never an unknown film."""
+    results = client.post(
+        f"{BASE}/plans",
+        json={
+            "plans": [
+                item(world, input_revision=2),
+                item(world, film_id="00000000-0000-0000-0000-000000000098"),
+            ]
+        },
+    ).json()["results"]
+    assert [(r["ok"], r["error"]) for r in results] == [
+        (False, "cas_conflict"),
+        (False, "not_found"),
+    ]
+
+
 def test_a_tier_is_required_while_the_film_needs_restoring(world, client):
     results = client.post(
         f"{BASE}/plans", json={"plans": [item(world, ltx_model=None)]}
@@ -257,6 +274,26 @@ def test_an_actors_last_tier_is_recommended(world, client, tmp_path):
     assert entry["recommendation"]["ltx_reason"] == "上次选择 高"
 
 
+def test_a_past_films_final_nfo_actor_counts_when_its_lookup_failed(
+    scraped, tmp_path
+):
+    """IR04: the history reads a past film's actors as its card does (final NFO >
+    lookup > input NFO), so a failed lookup does not hide the archived actor."""
+    from taskpaw_v3.tests.test_workflow_local_dispatch import add_film
+    from taskpaw_v3.workflow.planning import plan_list
+
+    profile = with_lookup(scraped, tmp_path, fake_lookup="fail")
+    rt = scraped.rt
+    rt.lookup.run(scraped.film, 1, "pkg.mkv")
+    assert not rt.lookup.result(scraped.film, 1).ok
+    profile.set(fake_actors=["Actor"])
+    newer = add_film(rt, plan=False)
+    assert rt.lookup.run_once() is True
+    (entry,) = plan_list(rt)["plans"]
+    assert entry["film_id"] == newer and entry["actors"] == ["Actor"]
+    assert entry["recommendation"]["ltx_reason"] == "Actor 上次选择 标准"
+
+
 def test_requery_runs_the_lookup_again(world, client, tmp_path):
     profile = with_lookup(world, tmp_path, fake_lookup="fail")
     world.rt.lookup.run_once()
@@ -272,6 +309,15 @@ def test_requery_runs_the_lookup_again(world, client, tmp_path):
     assert plans(client)[0]["lookup"]["status"] == "queued"
     world.rt.lookup.run_once()
     assert plans(client)[0]["lookup"]["status"] == "succeeded"
+
+
+def test_requery_is_refused_once_the_film_has_a_final(scraped, tmp_path):
+    """IR07: the final NFO names the film from then on; a lookup adds nothing."""
+    host = Host(scraped)
+    client = _client(lambda: host)
+    with_lookup(scraped, tmp_path)
+    response = client.post(f"{BASE}/films/{scraped.film}/lookup")
+    assert response.status_code == 409
 
 
 def test_requery_is_refused_without_a_number_or_without_miko(world, client, tmp_path):
