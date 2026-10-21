@@ -104,3 +104,47 @@
 - **Presets:** build valid configs.
 - **UI:** the select shows the four zh labels; the catalog fixture is regenerated.
 - **Version:** test passes at 3.9.18.
+
+## v2: three tiers and output bitrate that follows the source (#285, operator 2026-10-21)
+
+- **Operator data:** RTX 5070 Ti 16 GB, 2 h 4K60.
+  - High on 0.11.2 took about 17 h; Standard on 0.11.3 took about 4.5 h. Perceived quality is about the same.
+  - Standard shrank 12 GB to 9.6 GB. High, on a similar source, grew 11 GB to 20 GB.
+  - Wanted: the output keeps the source bitrate and size, and the three tiers can be chosen.
+- **Upstream** (v0.11.3 `jasna/media/video_encoder.py`, `encoder_settings.py`, `probe.py`):
+  - NVENC runs VBR at `cq`; the HEVC default is 28, with qmin 17 and qmax 34.
+  - Unless the user passes `maxrate`, Jasna caps `maxrate` at the source video bitrate × 1.0 (H.264/other sources) or × 1.25 (HEVC sources), with `bufsize = 2 × maxrate`.
+  - The source bitrate is the stream `bit_rate`, then tags `BPS` / `BPS-eng`, then the container `bit_rate`.
+  - `--encoder-settings` accepts `maxrate` and `bufsize` but not `b`, so there is no target-average mode.
+  - Smart-render fragments add only `forced-idr`.
+- **C1' (supersedes the four tiers in C1, C4 and C5).**
+  - `ltx_model: Literal["standard","good","high"]`, default `standard`. Top / `ltx-undistilled` is removed, together with its two files in `MODEL_FILES`/`FILES`.
+  - Legacy migration: `ltx_best: true` → `high`; false or missing → `standard`.
+  - Labels:
+
+    | Value | Chinese | English |
+    |---|---|---|
+    | `standard` | 标准画质（默认，最快） | Standard (default, fastest) |
+    | `good` | 良好画质（慢约 1.5 倍） | Good (~1.5x slower) |
+    | `high` | 高画质（慢约 2.5 倍） | High (~2.5x slower) |
+
+  - The description keeps the 0.11.3 requirement.
+- **C8. Output bitrate follows the source.**
+  - New field `match_source_bitrate: bool = True` ("输出码率跟随原片" / "Output bitrate follows the source"). It applies to every Jasna launch, LTX or not.
+  - When it is on, TaskPaw probes the source video bitrate with ffprobe, next to the existing resolution probe, using Jasna's fallback order.
+  - If the probe returns B > 0, TaskPaw adds `--encoder-settings maxrate=B,bufsize=2B` (integers, bits/s) before the extra args. The ceiling is then 1.0× the source for every codec.
+  - When the probe fails, no flag is added; Jasna's own cap applies, and one warning is logged per file.
+  - While it is on, `--encoder-settings` in `jasna_extra_args` is rejected, with a validation message naming the option.
+  - The `restore.started` mode and the label carry `maxrate <B/1e6 to 1 decimal> Mbps` when it is applied.
+- **C9. cq default 24 → 20.**
+  - Help text: with C8 on, a lower cq lets the source-tied ceiling, not cq, decide the size. The output approaches the source size and never exceeds it. 20 is the default; 24 was the old one.
+  - Jasna's own default is 28; the stale "24 is Jasna's default" wording is fixed.
+  - **Migration:** a pre-3.9.18 config, recognised by the presence of `ltx_best`, whose `cq` is 24 moves to 20 in the same before-validator.
+  - Presets use 20.
+- **Tests:**
+  - argv with and without a probed bitrate, plus a probe failure (no flag, warning);
+  - extra-args rejection while on and acceptance while off;
+  - migration of `ltx_best` true → high, and cq 24 → 20 only with `ltx_best` present;
+  - the three-tier manifest and labels;
+  - the mode/label text.
+- **Not in scope:** per-film tier and machine choice, which belongs to the EPIC #271 pending-review list.
