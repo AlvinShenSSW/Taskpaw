@@ -295,10 +295,11 @@ class RestoreExecutor:
         self.ffprobe = ffprobe_command(ffprobe)
         self.launch_prefix = tuple(launch_prefix)
         self._gpus = gpus
-        # the last preflight's model folder, its settings (the tier) and fast
-        # flag while files were missing
+        # per tier (U1 Codex r2 F1): the model folder, settings and fast flag of
+        # that tier's last preflight while files were missing; insertion order is
+        # failure order, so the most recent failure is the last entry
         self._models_lock = threading.Lock()
-        self._models: tuple[Path, jasna.JasnaConfig, bool] | None = None
+        self._models: dict[str, tuple[Path, jasna.JasnaConfig, bool]] = {}
         # J2 (#285): each pending video's probed source bitrate, kept until the
         # film's restore succeeds so a retry of the stage launches with the same cap.
         # Only successful probes are kept; a failed one is probed again on the
@@ -343,29 +344,50 @@ class RestoreExecutor:
         """Where this Jasna loads its LTX models; the download goes there too."""
         return Path(self.jasna_exe).parent / "model_weights" / "ltx-restore"
 
-    def missing_models(self) -> tuple[Path, list[str], str] | None:
-        """`(destination, missing files, variant)` the last preflight stopped on,
-        rechecked on disk; None once they are all there. Never queries the GPU:
-        the variant is the one that preflight chose."""
+    def _unresolved(self) -> list[tuple[Path, list[str], str, str]]:
+        """Every cached tier still missing files on disk, the most recent failure
+        first, as `(destination, missing files, variant, tier)`; tiers whose files
+        are all there now are forgotten. Never queries the GPU: the variant is
+        the one that tier's preflight chose."""
         with self._models_lock:
-            cached = self._models
-        if cached is None:
-            return None
-        weights, cfg, fast = cached
-        missing = jasna.ltx_missing_files(
-            str(weights.parent.parent), cfg.ltx_model, fast
-        )
-        if not missing:
+            cached = list(self._models.items())
+        unresolved, resolved = [], []
+        for tier, entry in reversed(cached):
+            weights, cfg, fast = entry
+            missing = jasna.ltx_missing_files(
+                str(weights.parent.parent), cfg.ltx_model, fast
+            )
+            if missing:
+                variant = jasna._ltx_mode(cfg, fast, False)
+                unresolved.append((weights, missing, variant, tier))
+            else:
+                resolved.append((tier, entry))
+        if resolved:
             with self._models_lock:
-                if self._models is cached:
-                    self._models = None
+                for tier, entry in resolved:
+                    if self._models.get(tier) is entry:
+                        del self._models[tier]
+        return unresolved
+
+    def missing_models(self) -> tuple[Path, list[str], str] | None:
+        """`(destination, missing files, variant)` of the most recent preflight
+        failure whose tier still lacks files on disk; None once every tier's are
+        there. The session downloads one variant at a time: once it is in, the
+        next unresolved tier is offered."""
+        unresolved = self._unresolved()
+        if not unresolved:
             return None
-        return weights, missing, jasna._ltx_mode(cfg, fast, False)
+        weights, missing, variant, _ = unresolved[0]
+        return weights, missing, variant
+
+    def unresolved_tiers(self) -> set[str]:
+        """The tiers whose last preflight stopped on files still missing."""
+        return {tier for *_, tier in self._unresolved()}
 
     def recall_missing(self, names: list[str], tier: str | None = None) -> None:
         """Seed the offer from a persisted preflight failure after a restart.
 
-        Only while nothing is cached; never queries the GPU. U1 P4': the tier
+        Only while that tier has nothing cached; never queries the GPU. U1 P4': the tier
         is the film's planned one (`tier`, what its retry restores with), else
         the one whose model file the note names, else the preset's (only
         shared files were missing). The fast and the int8 weights differ by
@@ -389,8 +411,7 @@ class RestoreExecutor:
             ]
             fast = installed[0] if len(installed) == 1 else cfg.ltx_fast
         with self._models_lock:
-            if self._models is None:
-                self._models = (self._weights(), cfg, fast)
+            self._models.setdefault(tier, (self._weights(), cfg, fast))
 
     # ── per-film settings (U1 P4') ──────────────────────────────────────
     def _tier_cfg(self, job: m.PendingComputeJob | None) -> jasna.JasnaConfig:
@@ -533,8 +554,10 @@ class RestoreExecutor:
             raise attention("找不到 ffprobe，无法核对修复结果")
         fast = cfg.ltx_fast and jasna.fast_supported(self._gpus())
         missing = jasna.ltx_missing_files(str(exe.parent), cfg.ltx_model, fast)
-        with self._models_lock:
-            self._models = (self._weights(), cfg, fast) if missing else None
+        with self._models_lock:  # F1: this tier only; a failure moves it last
+            self._models.pop(cfg.ltx_model, None)
+            if missing:
+                self._models[cfg.ltx_model] = (self._weights(), cfg, fast)
         if missing:
             raise attention(MISSING_LTX + "、".join(missing))
         names = [

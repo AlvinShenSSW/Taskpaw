@@ -525,6 +525,41 @@ def test_missing_models_are_offered_downloaded_and_the_restore_retried(offered):
     assert len(workers) == 1
 
 
+def test_a_download_retries_its_tier_and_then_offers_the_next(offered):
+    """U1 Codex r2 F1: two tiers lack models; the latest failure is offered,
+    its download retries only that tier's film, the other tier comes next."""
+    from taskpaw_v3.monitors.plugins import jasna
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, stage, video
+
+    rt, d, workers = offered.rt, offered.host.dispatcher, offered.workers
+    high = add_film(rt, [File("a.mkv", video())], tier="high")
+    assert d.run_once() is True
+    standard = add_film(rt, [File("b.mkv", video())], tier="standard")
+    assert d.run_once() is True
+    client = _control(offered.host)
+    offer = _restore_step(client, standard)["download"]
+    first = jasna.ltx_missing_files(None, "standard", True)
+    assert offer["files"] == first
+    assert _restore_step(client, high)["download"] == offer  # one session
+    click = {"request_id": offer["request_id"], "approved": True}
+    assert client.post("/control/workflow/ltx-download", json=click).json() == {
+        "ok": True
+    }
+    _wait(lambda: workers, seconds=10)
+    offered.weights.mkdir(parents=True)
+    for name in first:
+        (offered.weights / name).write_bytes(b"weights")
+    workers[0].finish()
+    _wait(lambda: stage(rt, standard, "restore").status == "pending", seconds=10)
+    assert stage(rt, high, "restore").status == "failed"
+    nxt = _restore_step(client, high)["download"]
+    assert nxt["state"] == "awaiting" and nxt["request_id"] != offer["request_id"]
+    assert nxt["files"] == jasna.ltx_missing_files(
+        str(offered.tools.jasna_dir), "high", True
+    )
+    assert nxt["variant"] == "ltx high fast auto-split 12%"
+
+
 def test_the_offer_survives_an_agent_restart(tmp_path, monkeypatch):
     """H3 Codex r3: the failed restore is persisted, the executor's cache is not."""
     from taskpaw_v3.monitors.plugins import jasna
@@ -619,7 +654,8 @@ def test_recall_missing_infers_the_tier_and_the_variant(tmp_path):
             restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
             restore.cfg = restore.cfg.model_copy(update={"ltx_fast": cfg_fast})
             restore.recall_missing(names)
-            weights, cfg, recalled = restore._models
+            ((tier, (weights, cfg, recalled)),) = restore._models.items()
+            assert tier == cfg.ltx_model
             assert (weights, cfg.ltx_model, recalled) == (
                 restore._weights(),
                 cfg_tier,
@@ -647,11 +683,13 @@ def test_recall_missing_infers_the_tier_and_the_variant(tmp_path):
             restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
             restore.cfg = restore.cfg.model_copy(update={"ltx_fast": cfg_fast})
             restore.recall_missing(vae)
-            assert restore._models[0::2] == (weights, installed), installed
+            assert restore._models["standard"][0::2] == (weights, installed), installed
         kept = (tmp_path, restore.cfg, True)
-        restore._models = kept  # an existing preflight result wins
+        restore._models = {"standard": kept}  # that tier's preflight result wins
         restore.recall_missing(["x-int8.enc"])
-        assert restore._models is kept
+        assert restore._models["standard"] is kept
+        restore.recall_missing(["x-int8.enc"], "high")  # another tier: its own
+        assert list(restore._models) == ["standard", "high"]
     finally:
         rt.close()
 
@@ -694,7 +732,7 @@ def test_a_pre_tier_note_is_recalled_with_the_films_planned_tier(tmp_path, monke
             rt, gpus=lambda: pytest.fail("GPU queried")
         )
         local_host.recall_missing_models(rt)
-        _, cfg, fast = rt.executors["restore"]._models
+        ((_, cfg, fast),) = rt.executors["restore"]._models.values()
         assert (cfg.ltx_model, fast) == ("standard", True)
         _, missing, _ = rt.executors["restore"].missing_models()
         assert "ltx-restore-alpha1-distill2-nvfp4.safetensors.enc" in missing

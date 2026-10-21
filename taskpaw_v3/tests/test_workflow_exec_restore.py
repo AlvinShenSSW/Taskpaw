@@ -456,6 +456,49 @@ def test_the_tier_picks_the_model_name_and_the_models_it_checks(rt, tools):
     assert argv[argv.index("--restoration-model-name") + 1] == "ltx-8step"
 
 
+def test_each_tier_keeps_its_own_unresolved_offer(rt, tools):
+    """U1 Codex r2 F1: a later tier's successful preflight clears only that
+    tier; the earlier tier's offer stays until its own files are there. The
+    most recent failure is offered first."""
+    executor = tools.restore(rt)
+    weights = tools.jasna_dir / "model_weights" / "ltx-restore"
+    high = add_film(rt, [File("a.mkv", video())], tier="high")
+    assert run_direct(rt, high, "restore", executor).outcome.message.startswith(
+        MISSING_LTX
+    )
+    standard = add_film(rt, [File("b.mkv", video())], tier="standard")
+    assert run_direct(rt, standard, "restore", executor).outcome.ok
+    high_missing = jasna.ltx_missing_files(str(tools.jasna_dir), "high", True)
+    assert executor.missing_models() == (
+        weights,
+        high_missing,
+        "ltx high fast auto-split 12%",
+    )
+    good = add_film(rt, [File("c.mkv", video())], tier="good")
+    assert run_direct(rt, good, "restore", executor).outcome.message.startswith(
+        MISSING_LTX
+    )
+    good_missing = jasna.ltx_missing_files(str(tools.jasna_dir), "good", True)
+    assert executor.missing_models() == (
+        weights,
+        good_missing,
+        "ltx good fast auto-split 12%",
+    )
+    assert executor.unresolved_tiers() == {"high", "good"}
+    for name in good_missing:  # the latest offer downloaded: the next one is up
+        (weights / name).write_bytes(b"weights")
+    assert executor.missing_models() == (
+        weights,
+        high_missing,
+        "ltx high fast auto-split 12%",
+    )
+    assert executor.unresolved_tiers() == {"high"}
+    for name in high_missing:
+        (weights / name).write_bytes(b"weights")
+    assert executor.missing_models() is None
+    assert executor.unresolved_tiers() == set()
+
+
 def test_a_per_film_config_hook_decides_the_tier_of_that_film(rt, tools):
     """U1 plugs a per-film tier into `_cfg_for`; the launch and the download
     offer follow it, the stage's own record stays the preset's."""

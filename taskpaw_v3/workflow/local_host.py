@@ -199,7 +199,13 @@ class WorkflowHostLike(Protocol):
 
 
 def retry_missing_models(rt: LocalRuntime) -> list[str]:
-    """H3 D01: requeue every restore that failed only for missing LTX models."""
+    """H3 D01: requeue every restore that failed only for missing LTX models,
+    except a film whose tier still lacks files (U1 Codex r2 F1): its retry
+    would only stop on them again."""
+    executor = rt.executors.get("restore")
+    unresolved = getattr(executor, "unresolved_tiers", None)
+    waiting = unresolved() if callable(unresolved) else set()
+    preset = getattr(getattr(executor, "cfg", None), "ltx_model", None)
     retried = []
     for film in rt.store.film_board(rt.operator):
         restore = next((s for s in film.stages if s.stage == "restore"), None)
@@ -207,6 +213,7 @@ def retry_missing_models(rt: LocalRuntime) -> list[str]:
             restore is None
             or restore.status != "failed"
             or not (restore.note or "").startswith(MISSING_LTX)
+            or (film.plan_ltx_model or preset) in waiting
         ):
             continue
         try:
@@ -220,7 +227,8 @@ def retry_missing_models(rt: LocalRuntime) -> list[str]:
 
 def recall_missing_models(rt: LocalRuntime) -> None:
     """H3: after a restart, tell the restore executor which models its persisted
-    failure lacked, so the 修复 step offers the download again."""
+    failures lacked, so the 修复 step offers the download again; every film's
+    tier is recalled (F1), the session then offers them one at a time."""
     restore = rt.executors.get("restore")
     recall = getattr(restore, "recall_missing", None)
     if not callable(recall):
@@ -236,7 +244,6 @@ def recall_missing_models(rt: LocalRuntime) -> None:
             continue
         names = [n.strip() for n in note[len(MISSING_LTX) :].split("、")]
         recall([n for n in names if n], film.plan_ltx_model)  # U1: the film's tier
-        return
 
 
 class LocalWorkflowHost:
@@ -488,10 +495,11 @@ class LocalWorkflowHost:
             self._stopping.wait(DOWNLOAD_TICK_SECONDS)
 
     def _downloaded(self) -> None:
-        """D01: a verified download retries the restores that lacked the models."""
+        """D01: a verified download retries the restores that lacked the models;
+        a film whose tier still lacks files waits (F1): the next read offers it."""
         rt, dispatcher = self.runtime, self.dispatcher
-        if rt is None or self._missing_models() is not None:
-            return  # still missing: the next read offers what is left
+        if rt is None:
+            return
         try:
             retry_missing_models(rt)
         except Exception:
