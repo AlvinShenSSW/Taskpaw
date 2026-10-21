@@ -234,6 +234,7 @@ def test_v2_upgrade_backfills_only_restores_that_already_ran(tmp_path):
         assert plans == {
             (ran, 1): (schema.BACKFILL_LTX_MODEL, worker),
         }  # `stale` ran only on revision 1; its current revision 2 never ran
+        assert [p.actors for p in again.store.list_plans(again.operator)] == [()]
         assert {f.film_id for f in again.store.list_unplanned(again.operator)} == {
             never,
             stale,

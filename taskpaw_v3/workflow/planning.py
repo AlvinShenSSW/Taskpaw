@@ -21,6 +21,7 @@ from .plan import (
     TIER_LABELS,
     TIERS,
     PastPlan,
+    actor_key,
     machine_reason,
     recommend,
 )
@@ -75,20 +76,24 @@ def _history(rt: LocalRuntime, films: dict[str, m.BoardFilm]) -> list[PastPlan]:
     """The operator's own past choices with their films' actors.
 
     A backfilled plan (the v3 upgrade's default tier, U04) is no choice and is
-    left out (IR03). Actors follow the card's precedence, final NFO > lookup >
-    input NFO, for the plan's revision (IR04)."""
+    left out (IR03). Actors are the snapshot taken when the plan was confirmed,
+    which outlives the film's cleanup. Only a plan with no snapshot reads them
+    as the card does, final NFO > lookup > input NFO, for its revision (IR04)."""
     history = []
     for plan in rt.store.list_plans(rt.operator):
         if plan.backfilled:
             continue
         film = films.get(plan.film_id)
+        actors = plan.actors or (
+            board.film_actors(rt, film, plan.input_revision) if film else ()
+        )
         history.append(
             PastPlan(
                 plan.film_id,
                 plan.input_revision,
                 plan.ltx_model,
                 plan.confirmed_at,
-                board.film_actors(rt, film, plan.input_revision) if film else (),
+                actors,
             )
         )
     return history
@@ -190,12 +195,19 @@ def _manifest(rt: LocalRuntime, film_id: str, revision: int) -> m.InputManifest:
         raise m.WorkflowError("cas_conflict") from None
 
 
+def _snapshot(actors: tuple[str, ...]) -> tuple[str, ...]:
+    """The names a plan keeps: matching keys (NFKC, trimmed), no blanks or repeats."""
+    keys = dict.fromkeys(actor_key(name) for name in actors)
+    return tuple(key[:2048] for key in keys if key)
+
+
 def confirm_plans(
     rt: LocalRuntime, items: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Confirm each `{film_id, input_revision, ltx_model, machine}`; one result each."""
     op = rt.operator
     allowed = {machine["id"] for machine in machines(rt)}
+    films = {film.film_id: film for film in rt.store.film_board(op)}
     results = []
     for item in items:
         film_id = item["film_id"]
@@ -207,6 +219,7 @@ def confirm_plans(
             tier = item["ltx_model"] if needs else None
             if needs and tier is None:
                 raise m.WorkflowError("tier_required")
+            film = films.get(film_id)
             rt.store.confirm_plan(
                 op,
                 rt.meta(),
@@ -215,6 +228,11 @@ def confirm_plans(
                     input_revision=item["input_revision"],
                     ltx_model=tier,
                     machine=item["machine"],
+                    actors=_snapshot(
+                        board.film_actors(rt, film, item["input_revision"])
+                        if film
+                        else ()
+                    ),
                 ),
             )
         except m.WorkflowError as exc:

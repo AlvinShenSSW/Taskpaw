@@ -223,7 +223,7 @@ class ReadCommands(WorkflowCore):
                 raise WorkflowError("forbidden")
             rows = self._conn.execute(
                 "SELECT film_id,input_revision,ltx_model,machine,confirmed_at,"
-                "backfilled FROM film_plans ORDER BY confirmed_at,film_id,input_revision"
+                "backfilled,actors FROM film_plans ORDER BY confirmed_at,film_id,input_revision"
             ).fetchall()
             return tuple(
                 FilmPlan(
@@ -233,6 +233,7 @@ class ReadCommands(WorkflowCore):
                     machine=row[3],
                     confirmed_at=parse_time(row[4]),
                     backfilled=bool(row[5]),
+                    actors=tuple(json.loads(row[6])),
                 )
                 for row in rows
             )

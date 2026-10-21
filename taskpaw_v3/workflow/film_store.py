@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
@@ -151,6 +152,7 @@ class FilmCommands(WorkerCommands):
                 ltx_model=command.ltx_model,
                 machine=command.machine,
                 confirmed_at=timestamp(now),
+                actors=json.dumps(list(command.actors), ensure_ascii=False),
             )
             return Mutation(command.film_id, film["version"], "planned")
 

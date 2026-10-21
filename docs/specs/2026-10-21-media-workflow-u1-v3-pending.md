@@ -260,11 +260,13 @@ It has the row additions above (`resolution`, `plan`, `receipt_id`, `revisions`)
 ### Recommendation history
 
 - The history is every plan the operator confirmed. Backfilled plans (`film_plans.backfilled = 1`, below) are left out.
-- A past film's actors use the card's precedence for the plan's input revision: final NFO > lookup > input NFO.
+- A past film's actors are the snapshot stored with its plan (`film_plans.actors`, below), so archiving and cleaning the film (which removes its lookup cache) does not remove it from the history.
+- Only a plan with an empty snapshot falls back to the card's precedence for the plan's input revision: final NFO > lookup > input NFO.
 
 ### Schema v3 migration (U04)
 
 - `film_plans` has `backfilled INTEGER NOT NULL DEFAULT 0 CHECK(backfilled IN (0,1))`. An operator's confirm writes 0.
+- `film_plans` has `actors TEXT NOT NULL DEFAULT '[]'`: a JSON list of the film's actors (NFKC-normalised, trimmed, no blanks or repeats) as `film_actors` read them when the operator confirmed the plan; `[]` when none were known. The upgrade's backfilled rows hold `[]`. Schema v3 is unreleased, so the column is part of the v3 DDL itself; the frozen v2 copy is untouched.
 - The v2 → v3 upgrade inserts one `standard` plan with `backfilled = 1` for each film whose current-revision restore is `succeeded`. Its machine is that restore's last attempt worker.
 - No other film gets a plan. Pending, interrupted, failed or retrying restores, even with attempts, wait in 待处理 for the operator's tier.
 

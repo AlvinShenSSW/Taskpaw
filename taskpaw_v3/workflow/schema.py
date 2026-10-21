@@ -371,7 +371,9 @@ V2_INDEXES = {**V1_INDEXES, **schema_intake.INDEXES}
 # has no row, so the film is unplanned again; a row is never updated. A NULL
 # tier is a film whose inputs are all restored already (needs no GPU).
 # `backfilled` marks the v3 upgrade's own default-tier rows (U04): they are no
-# operator choice, so the recommendation never learns from them.
+# operator choice, so the recommendation never learns from them. `actors` is
+# the film's actor list (JSON, NFKC-normalised and trimmed) at confirm time: the
+# recommendation must outlive the film's lookup cache, which cleanup removes.
 V3_TABLES = {
     "film_plans": """CREATE TABLE film_plans (
         film_id TEXT NOT NULL REFERENCES films(film_id) ON DELETE RESTRICT,
@@ -381,6 +383,7 @@ V3_TABLES = {
         machine TEXT NOT NULL REFERENCES workers(worker_id) ON DELETE RESTRICT,
         confirmed_at TEXT NOT NULL,
         backfilled INTEGER NOT NULL DEFAULT 0 CHECK(backfilled IN (0,1)),
+        actors TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY(film_id,input_revision),
         FOREIGN KEY(film_id,manifest_kind,input_revision)
             REFERENCES manifests(film_id,kind,revision) ON DELETE RESTRICT

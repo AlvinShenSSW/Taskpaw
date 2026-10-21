@@ -274,6 +274,58 @@ def test_an_actors_last_tier_is_recommended(world, client, tmp_path):
     assert entry["recommendation"]["ltx_reason"] == "上次选择 高"
 
 
+def test_confirm_snapshots_the_films_actors(world, client, tmp_path):
+    """The plan keeps the actors the operator saw, NFKC-normalised and trimmed."""
+    with_lookup(world, tmp_path, fake_actors=[" Ａctor ", "演员乙", "Actor"])
+    world.rt.lookup.run_once()
+    response = client.post(f"{BASE}/plans", json={"plans": [item(world)]})
+    assert response.json()["results"][0]["ok"] is True
+    (plan,) = world.rt.store.list_plans(world.rt.operator)
+    assert plan.actors == ("Actor", "演员乙")  # deduplicated after normalising
+
+
+def test_an_archived_films_actor_still_counts_after_its_cache_is_reclaimed(
+    world, client, tmp_path
+):
+    """Cleaning a film removes its lookup cache; the plan's own snapshot remains."""
+    import shutil
+
+    from taskpaw_v3.tests.test_workflow_local_dispatch import add_film
+    from taskpaw_v3.workflow.planning import plan_list
+
+    with_lookup(world, tmp_path, fake_actors=["Actor"])
+    world.rt.lookup.run_once()
+    client.post(f"{BASE}/plans", json={"plans": [item(world, ltx_model="high")]})
+    shutil.rmtree(world.rt.work_dir / "lookup")  # what _reclaim_film does
+    world.rt.lookup._records.clear()  # and the cache is not in memory either
+    newer = add_film(world.rt, plan=False)
+    assert world.rt.lookup.run_once() is True
+    (entry,) = plan_list(world.rt)["plans"]
+    assert entry["film_id"] == newer and entry["actors"] == ["Actor"]
+    assert entry["recommendation"]["ltx_model"] == "high"
+    assert entry["recommendation"]["ltx_reason"] == "Actor 上次选择 高"
+
+
+def test_an_empty_snapshot_falls_back_to_the_films_current_actors(
+    world, client, tmp_path
+):
+    """A plan confirmed before any lookup has no snapshot; a lookup that finished
+    later (the film is not yet cleaned) still feeds the history."""
+    from taskpaw_v3.tests.test_workflow_local_dispatch import add_film
+    from taskpaw_v3.workflow.planning import plan_list
+
+    with_lookup(world, tmp_path, fake_actors=["Actor"])
+    client.post(f"{BASE}/plans", json={"plans": [item(world, ltx_model="good")]})
+    (plan,) = world.rt.store.list_plans(world.rt.operator)
+    assert plan.actors == ()
+    world.rt.lookup.run(world.film, 1, "pkg.mkv")
+    newer = add_film(world.rt, plan=False)
+    assert world.rt.lookup.run_once() is True
+    (entry,) = plan_list(world.rt)["plans"]
+    assert entry["film_id"] == newer
+    assert entry["recommendation"]["ltx_reason"] == "Actor 上次选择 良好"
+
+
 def test_a_past_films_final_nfo_actor_counts_when_its_lookup_failed(scraped, tmp_path):
     """IR04: the history reads a past film's actors as its card does (final NFO >
     lookup > input NFO), so a failed lookup does not hide the archived actor."""

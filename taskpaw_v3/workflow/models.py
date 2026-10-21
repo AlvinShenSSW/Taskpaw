@@ -1497,6 +1497,7 @@ class FilmPlanConfirm(Model):
     input_revision: Revision
     ltx_model: LtxTier | None
     machine: Id
+    actors: tuple[Text, ...] = ()  # the film's actors as the operator saw them
 
 
 class FilmPlan(Model):
@@ -1510,6 +1511,7 @@ class FilmPlan(Model):
     machine: Id
     confirmed_at: UtcTime
     backfilled: bool = False
+    actors: tuple[Text, ...] = ()  # snapshot at confirm time; () when unknown
 
 
 class UnplannedFilm(Model):
