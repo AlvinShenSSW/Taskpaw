@@ -290,3 +290,12 @@ def test_the_shipped_lookup_needs_the_whole_miko_environment(rt, profile):
         profile.path,
         lk.TIMEOUT_SECONDS,
     )
+
+
+def test_the_hard_timeout_outlasts_lookup_ones_own_budget():
+    """U1b: MDCX304 8a3f519 gives lookup_one 240 s for metadata and 30 s for
+    the poster; Taskpaw's wall-clock kill comes only after that budget, so a
+    slow site ends in lookup_one's own 资料查询超时, not in a killed process."""
+    assert lk.MDCX_BUDGET_SECONDS == 270.0
+    assert lk.TIMEOUT_SECONDS == 300.0
+    assert lk.TIMEOUT_SECONDS - lk.MDCX_BUDGET_SECONDS >= 30.0

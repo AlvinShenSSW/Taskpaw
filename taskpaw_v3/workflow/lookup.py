@@ -42,7 +42,10 @@ log = logging.getLogger("taskpaw.workflow.lookup")
 
 CLI_VERSION = "lookup_one/1"
 SCHEMA = 1
-TIMEOUT_SECONDS = 150.0
+# lookup_one's own budget (MDCX304 8a3f519): 240 s metadata + 30 s poster. The
+# wall-clock kill below comes after it, so a slow site reports 资料查询超时.
+MDCX_BUDGET_SECONDS = 270.0
+TIMEOUT_SECONDS = 300.0
 POLL_SECONDS = 5.0
 RECORD_NAME = "lookup.json"
 POSTER_NAME = "poster.jpg"
