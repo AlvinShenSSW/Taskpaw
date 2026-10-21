@@ -11,6 +11,7 @@ JSON copied in (here as `config.json`, the name lookup_one loads without a
 mark) plus its userdata, and no `MDCx.config` mark. Whatever Miko adds there is
 discarded with the run. The result and the poster are cached under
 `<work>/lookup/<film>-r<revision>/`; failures are cached too (manual 重新查询).
+A run cut short by an app stop caches nothing: the next start runs it again.
 """
 
 from __future__ import annotations
@@ -52,6 +53,10 @@ NOT_FOUND = "未查到资料"
 TIMED_OUT = "资料查询超时"
 NO_VIDEO = "没有主视频"
 _FIELDS = ("number", "title", "studio", "release", "runtime_min")
+
+
+class _Stopped(Exception):
+    """The worker was stopped mid-lookup: no result, the film stays queued."""
 
 
 @dataclass(frozen=True)
@@ -311,6 +316,8 @@ class MetadataLookup:
             self._running = (film_id, revision)
         try:
             record = self._lookup(film_id, revision, file_name)
+        except _Stopped:
+            return  # an app shutdown is not a failed lookup: rerun on next start
         except Exception as exc:  # never a stuck card: the failure is the result
             log.exception("workflow lookup of %s failed", film_id)
             record = _failure("needs_attention", f"资料查询异常：{exc}")
@@ -379,7 +386,7 @@ class MetadataLookup:
     def _launch(
         self, run: Path, config: Path, request: Path, result: Path
     ) -> int | None:
-        """The exit code; None when the run timed out or was stopped."""
+        """The exit code; None when the run timed out. `_Stopped` on cancel."""
         command = self.launch_prefix or [self.python, "-m", "mdcx.cmd.lookup_one"]
         env = {**os.environ, "MDCX_CONFIG_DIR": str(config)}
         processes = OwnedJob()
@@ -392,7 +399,9 @@ class MetadataLookup:
             )
             deadline = time.monotonic() + self.timeout
             while (code := child.poll()) is None:
-                if self.cancel.is_set() or time.monotonic() >= deadline:
+                if self.cancel.is_set():
+                    raise _Stopped
+                if time.monotonic() >= deadline:
                     return None
                 self.cancel.wait(0.1)
             for worker in child.threads:

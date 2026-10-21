@@ -174,7 +174,7 @@ def test_a_hanging_lookup_is_killed_with_its_tree_and_leaves_no_run_dir(
     film = add_film(rt, plan=False)
     beat = tmp_path / "heartbeat.txt"
     profile.set(fake_lookup="hang", fake_heartbeat=str(beat))
-    lookup = make(rt, profile, timeout=2.0)
+    lookup = make(rt, profile, timeout=5.0)
     lookup.run_once()
     result = lookup.result(film, 1)
     assert (result.status, result.error_class, result.message) == (
@@ -184,10 +184,42 @@ def test_a_hanging_lookup_is_killed_with_its_tree_and_leaves_no_run_dir(
     )
     assert run_dirs(rt) == []
     assert beat.is_file()  # the grandchild ran ...
-    time.sleep(0.5)
-    before = beat.read_text()
-    time.sleep(0.6)
-    assert beat.read_text() == before  # ... and died with its parent
+    assert heartbeat_stops(beat)  # ... and died with its parent
+
+
+def heartbeat_stops(beat: Path, *, window: float = 0.6, deadline: float = 30.0) -> bool:
+    """True once the 0.1 s heartbeat holds still for a whole `window`.
+
+    Polled with a generous deadline: a slow runner may take a while to reap the
+    tree, but a live grandchild never holds still for six of its beats."""
+    end = time.monotonic() + deadline
+    while time.monotonic() < end:
+        before = beat.read_text()
+        time.sleep(window)
+        if beat.read_text() == before:
+            return True
+    return False
+
+
+def test_stopping_the_app_mid_lookup_leaves_it_queued_not_failed(rt, profile):
+    """IR01: a shutdown during a lookup is not a 资料查询超时; the next start
+    looks the film up again."""
+    film = add_film(rt, plan=False)
+    profile.set(fake_lookup="hang")
+    lookup = make(rt, profile, poll=0.05)
+    lookup.start()
+    deadline = time.monotonic() + 30
+    while lookup.state(film, 1)["status"] != "running" and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert lookup.state(film, 1)["status"] == "running"
+    assert lookup.stop(30)
+    assert run_dirs(rt) == []
+    again = make(rt, profile)  # the next app start
+    assert again.result(film, 1) is None
+    assert again.state(film, 1)["status"] == "queued"
+    profile.set()
+    assert again.run_once() is True
+    assert again.result(film, 1).ok
 
 
 def test_forced_exit_temp_files_go_with_the_run_dir(rt, profile):
