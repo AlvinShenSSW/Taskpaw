@@ -116,7 +116,8 @@ def test_recall_infers_the_tier_from_the_names_or_takes_the_plan(
     executor = rt.executors["restore"]
     executor._gpus = lambda: pytest.fail("GPU queried")
     executor.recall_missing(names, tier)
-    _, cfg, recalled = executor._models
+    ((key, (_, cfg, recalled)),) = executor._models.items()
+    assert key == expected
     assert cfg.ltx_model == expected
     if fast is not None:
         assert recalled is fast
