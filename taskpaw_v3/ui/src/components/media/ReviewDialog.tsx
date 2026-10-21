@@ -6,7 +6,9 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { Dialog } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, HttpError, type FilmDetail, type FilmRevisions, type Performer, type TargetErrorCode } from "../../api";
+import {
+  api, HttpError, type FilmDetail, type FilmRevisions, type Performer, type TargetErrorCode, type TargetPreflight,
+} from "../../api";
 import { packageNote, type StatusKey } from "./mediaModel";
 import { EvidenceFold } from "./FilmDrawer";
 import { Chip, Cover, Icon, Notice } from "./parts";
@@ -65,6 +67,8 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const [seenRev, setSeenRev] = useState<FilmRevisions | undefined>(undefined);
   const [selected, setSelected] = useState<Performer | null | undefined>(undefined);
   const [phase, setPhase] = useState<"review" | "submitted">("review");
+  // The detail's update time when 「确认入库」 succeeded: only a later read may end the submitted phase.
+  const [submittedAt, setSubmittedAt] = useState(0);
   const item = ws.data.items.find((i) => i.id === filmId);
   const actor = film?.actors[0] ?? "";
   // Candidates: the preflight's (Filmpaw searched for every NFO actor); while Filmpaw is offline
@@ -78,8 +82,12 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     return target.isError ? (actor ? search.data?.items ?? null : []) : null;
   }, [target.data, target.isError, actor, search.data]);
   useEffect(() => { if (film && seenRev === undefined) setSeenRev(film.revisions); }, [film, seenRev]);
+  // Exactly one candidate is selected, also when it arrives after an empty or failed first load;
+  // several are never pre-selected, and an operator's choice is never replaced.
   useEffect(() => {
-    if (selected === undefined && candidates !== null) setSelected(candidates.length === 1 ? candidates[0] : null);
+    if (candidates === null) return;
+    if (selected === undefined) setSelected(candidates.length === 1 ? candidates[0] : null);
+    else if (selected === null && candidates.length === 1) setSelected(candidates[0]);
   }, [candidates, selected]);
   const preflight = useQuery({
     queryKey: [...mediaTargetKey(filmId), selected?.id ?? null],
@@ -90,11 +98,22 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     mutationFn: (p: Performer) => api.workflowConfirm(filmId, p.id),
     onSuccess: () => {
       setPhase("submitted");
+      setSubmittedAt(detail.dataUpdatedAt);
       void qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY });
       void qc.invalidateQueries({ queryKey: mediaFilmKey(filmId) });
     },
   });
   const open = useMutation({ mutationFn: () => api.workflowOpen(filmId, "output"), onError: (e) => ws.toast(errorText(e)) });
+  // The phase follows the refreshed detail: an archive that then fails (and the film is
+  // confirmable again) or ends unknown brings the review back with its reason.
+  const archiveStatus = film?.archive.status ?? null;
+  const reopened = phase === "submitted" && film !== undefined && detail.dataUpdatedAt > submittedAt
+    && (archiveStatus === "unknown" || (archiveStatus === "failed" && film.can_confirm));
+  useEffect(() => {
+    if (!reopened) return;
+    setPhase("review");
+    confirm.reset();
+  }, [reopened, confirm]);
 
   if (detail.isLoading || !film) {
     return (
@@ -104,9 +123,9 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
       </>
     );
   }
-  if (phase === "submitted") return <Receipt film={film} onClose={onClose} />;
+  if (phase === "submitted" && !reopened) return <Receipt film={film} onClose={onClose} />;
 
-  const status: StatusKey | undefined = item?.status;
+  const status: StatusKey | undefined = archiveStatus === "unknown" ? "unknown" : item?.status;
   const errorCode = preflight.data?.error_code ?? target.data?.error_code ?? null;
   const changed = seenRev !== undefined && !sameRevisions(seenRev, film.revisions);
   const blocked =
@@ -115,7 +134,8 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
         : !film.has_poster || film.files.length === 0 ? "最终封面或文件包尚未准备好，请先处理。"
           : changed ? "成品或来源已更新，请重新查看后确认。"
             : errorCode ? TARGET_BLOCK[errorCode]
-              : !selected ? "请选择演员与目标路径。" : "";
+              : !selected ? "请选择演员与目标路径。"
+                : targetCheck(preflight.data, preflight.isError ? preflight.error : null);
   const title = film.title || film.name;
   // the backend's target already ends in the film folder (`film_dir`)
   const targetPath = selected ? preflight.data?.target_path ?? null : null;
@@ -139,6 +159,9 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
           </div>
         </div>
         <Candidates candidates={candidates} selected={selected ?? null} actor={actor} onSelect={setSelected} />
+        {archiveStatus === "failed" && film.can_confirm && (
+          <Notice tone="red">上次入库未完成：{film.archive.error || "原因未知"}。可重新确认入库。</Notice>
+        )}
         {blocked && <div className="spacer-top"><Notice tone="amber" icon={WarningAmberIcon}>{blocked}</Notice></div>}
         {confirm.error && <Notice tone="red">{conflict ? "成品或来源已更新，请重新查看后确认。" : errorText(confirm.error)}</Notice>}
         <div className="target-box">
@@ -170,6 +193,15 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
       </div>
     </>
   );
+}
+
+// 「确认入库」 needs a passed preflight of the chosen performer: its answer, with the target
+// folder and that folder known to be absent. Loading or an HTTP error is no pass.
+function targetCheck(data: TargetPreflight | undefined, error: unknown): string {
+  if (error) return `目标检查失败：${errorText(error)}`;
+  if (!data) return "正在检查目标…";
+  if (!data.target_path || data.absent !== true) return "目标检查未通过，请重新选择或稍后重试。";
+  return "";
 }
 
 function Candidates({ candidates, selected, actor, onSelect }: {

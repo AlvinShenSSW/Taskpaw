@@ -75,12 +75,13 @@ function NavList({ page, data, onPick, label }: { page: PageKey; data: MediaData
 // 「媒体处理中心」 (build spec V3 + U1). Phase 1 mounts it as the AgentConsole tab; it does not
 // depend on the console, so the Hub can mount the same component later.
 export function MediaWorkspace() {
-  const data = useMediaData();
   const narrow = useMediaQuery("(max-width:900px)");
   const [page, setPage] = useState<PageKey>("overview");
   const [queueStage, setQueueStage] = useState<StageFilter>("all");
   const [drawer, setDrawer] = useState<string | null>(null);
   const [review, setReview] = useState<string | null>(null);
+  // The target preflight polls only while a view that shows it is mounted (IR05).
+  const data = useMediaData(page === "overview" || page === "review" || review !== null);
   const [explain, setExplain] = useState<Explain>(null);
   const [toast, setToast] = useState<{ text: string; key: number } | null>(null);
   const [navOpen, setNavOpen] = useState(false);

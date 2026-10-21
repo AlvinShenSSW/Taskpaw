@@ -2,7 +2,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { api, HttpError, type LtxTier, type PlanChoice, type PlanEntry, type PlanMachine, type PlanResult } from "../../api";
+import { api, HttpError, PLAN_BATCH_MAX, type LtxTier, type PlanChoice, type PlanEntry, type PlanMachine, type PlanResult } from "../../api";
 import { fmtBytes, fmtDurationMs, machineLabel, TIER_ORDER, TIER_SHORT, tierLong } from "./mediaModel";
 import { Chip, Cover, EmptyState, Icon, Notice, PageTitle } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, MEDIA_PLANS_KEY, useWorkspace } from "./workspace";
@@ -73,14 +73,15 @@ export function PendingPage() {
   const eligible = items.filter(batchEligible);
   const machines = plans.data?.choices.machines ?? [];
 
-  const after = (sent: PlanEntry[], results: PlanResult[] | null, failure?: unknown) => {
+  // `quiet`: the batch reports once for every film (confirmAll), not a toast per failure.
+  const after = (sent: PlanEntry[], results: PlanResult[] | null, failure?: unknown, quiet = false) => {
     const ok = new Set<string>();
     const stale = new Set<string>();
     if (results) {
       for (const r of results) {
         if (r.ok) ok.add(r.film_id);
         else if (r.error === "cas_conflict") stale.add(r.film_id);
-        else ws.toast(r.message || r.error || "确认失败");
+        else if (!quiet) ws.toast(r.message || r.error || "确认失败");
       }
     } else if (failure instanceof HttpError && failure.status === 409 && sent.length === 1) {
       stale.add(sent[0].film_id);
@@ -99,19 +100,27 @@ export function PendingPage() {
   const confirm = useMutation({
     mutationFn: (plans: PlanChoice[]) => api.workflowConfirmPlans(plans),
   });
-  const send = async (entries: PlanEntry[], chosen: (e: PlanEntry) => Choice) => {
+  // The route takes at most PLAN_BATCH_MAX items: a longer list goes in several requests, and
+  // their per-film results are read as one. A failed request stops the rest; with nothing
+  // confirmed it is reported as the error, else the films it carried count as not confirmed.
+  const send = async (entries: PlanEntry[], chosen: (e: PlanEntry) => Choice, quiet = false) => {
     const body = entries.map((e): PlanChoice => {
       const c = chosen(e);
       return { film_id: e.film_id, input_revision: e.input_revision, ltx_model: e.needs_gpu ? c.tier : null, machine: c.machine };
     });
-    try {
-      const res = await confirm.mutateAsync(body);
-      return after(entries, res.results ?? []);
-    } catch (e) {
-      after(entries, null, e);
-      ws.toast(e instanceof HttpError && e.status === 409 ? "收件内容已更新，请重新查看后确认" : errorText(e));
-      return null;
+    const results: PlanResult[] = [];
+    for (let i = 0; i < body.length; i += PLAN_BATCH_MAX) {
+      try {
+        const res = await confirm.mutateAsync(body.slice(i, i + PLAN_BATCH_MAX));
+        results.push(...(res.results ?? []));
+      } catch (e) {
+        if (i > 0) break;
+        after(entries, null, e);
+        ws.toast(e instanceof HttpError && e.status === 409 ? "收件内容已更新，请重新查看后确认" : errorText(e));
+        return null;
+      }
     }
+    return after(entries, results, undefined, quiet);
   };
   const confirmOne = async (e: PlanEntry) => {
     const ok = await send([e], choiceOf);
@@ -122,7 +131,7 @@ export function PendingPage() {
   };
   const confirmAll = async () => {
     const skipped = items.length - eligible.length;
-    const ok = await send(eligible, recommendedChoice);
+    const ok = await send(eligible, recommendedChoice, true);
     if (!ok) return;
     const failed = eligible.length - ok.size;
     const rest = skipped + failed;

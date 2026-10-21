@@ -391,6 +391,9 @@ function checkUnauthorized(role: ControlRole, res: Response) {
 
 // A non-2xx control response. Keeps the old message (detail text or "path → status")
 // and adds the status so callers can tell e.g. 503 "Filmpaw down" from other errors.
+// POST /control/workflow/plans takes 1–500 items (backend `PlansBody.plans` max_length).
+export const PLAN_BATCH_MAX = 500;
+
 export class HttpError extends Error {
   constructor(message: string, public readonly status: number) { super(message); }
 }
@@ -564,6 +567,7 @@ export const api = {
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
   // U1: the plan gate (待处理), the archive target preflight, metadata lookup and the global pause.
   workflowPlans: () => get<WorkflowPlans>("agent", "/control/workflow/plans"),
+  // At most PLAN_BATCH_MAX items per request (the route's `PlansBody` max_length).
   workflowConfirmPlans: (plans: PlanChoice[]) =>
     send<{ results: PlanResult[] }>("agent", "POST", "/control/workflow/plans", { plans }),
   workflowLookup: (filmId: string) =>

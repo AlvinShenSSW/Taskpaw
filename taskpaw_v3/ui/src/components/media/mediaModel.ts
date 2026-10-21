@@ -8,7 +8,7 @@ import { readLtxProgress, type LtxSnapshot } from "../ltxProgress.helpers";
 export type ChipTone = "neutral" | "green" | "blue" | "amber" | "red";
 export type StatusKey =
   | "pending" | "receiving" | "postprocess_error" | "inbox" | "encode" | "denoise" | "asr" | "translate"
-  | "return" | "scrape" | "match" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
+  | "return" | "scrape" | "match" | "checking" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
   | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopped" | "failed" | "intake_attention";
 
 export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
@@ -23,6 +23,9 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   return: ["回传成品", "blue"],
   scrape: ["Miko 完整后处理", "blue"],
   match: ["演员匹配", "blue"],
+  // Not in the V3 vocabulary: a film waiting for 确认入库 whose target preflight has not answered
+  // yet (not polled now, or still loading); never 「待确认」 before the check (IR05).
+  checking: ["检查中", "blue"],
   ready: ["待确认", "amber"],
   multi: ["多个目标候选", "amber"],
   nomatch: ["暂无演员匹配", "amber"],
@@ -41,7 +44,7 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   intake_attention: ["收件需要处理", "amber"],
 };
 
-export const REVIEW_STATES: StatusKey[] = ["ready", "multi", "nomatch", "offline", "permission", "duplicate"];
+export const REVIEW_STATES: StatusKey[] = ["checking", "ready", "multi", "nomatch", "offline", "permission", "duplicate"];
 export const EXCEPTION_STATES: StatusKey[] = [
   "postprocess_error", "offline", "permission", "duplicate", "unknown", "cleanup", "stopped", "failed", "intake_attention",
 ];
@@ -90,8 +93,9 @@ export function ltxOf(row: { steps?: WorkflowStep[] | null }): LtxSnapshot | nul
 
 // What the preflight says about a film waiting for 确认入库: a target error, else the candidate count.
 // `missing` (the chosen performer record is gone) asks for a new choice, as no match does.
+// No preflight yet reads 「检查中」, not ready.
 export function reviewStatus(preflight: TargetPreflight | null | undefined): StatusKey {
-  if (!preflight) return "ready";
+  if (!preflight) return "checking";
   const code = preflight.error_code;
   if (code) return code === "missing" ? "nomatch" : code;
   const n = preflight.candidates?.items.length;

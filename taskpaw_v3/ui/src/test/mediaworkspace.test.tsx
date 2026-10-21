@@ -3,21 +3,22 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { api, type PlanChoice } from "../api";
+import { api, HttpError, PLAN_BATCH_MAX, type PlanChoice, type TargetPreflight } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
-import { filmStatus, lifecycle, reviewStatus } from "../components/media/mediaModel";
+import { filmStatus, lifecycle, reviewStatus, STATUS_META } from "../components/media/mediaModel";
 import { LtxDownload } from "../components/LtxDownload";
 import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
 import { setLang } from "../i18n";
 import {
-  counts, detail, FILMS_RESPONSE, lookupFailed, PACKAGES, PLANS, preflight, PREFLIGHTS, row, steps,
+  counts, detail, FILMS, FILMS_RESPONSE, lookupFailed, PACKAGES, plan, PLANS, preflight, PREFLIGHTS, row, steps,
 } from "./fixtures/mediaWorkspace";
 
-const wrap = (ui: ReactNode) => {
+const wrapWith = (ui: ReactNode) => {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<ThemeProvider theme={theme}><QueryClientProvider client={qc}>{ui}</QueryClientProvider></ThemeProvider>);
+  return { qc, ...render(<ThemeProvider theme={theme}><QueryClientProvider client={qc}>{ui}</QueryClientProvider></ThemeProvider>) };
 };
+const wrap = (ui: ReactNode) => wrapWith(ui);
 
 const SLOGANS = ["让每一部影片，顺利归位。", "每部影片，一条完整记录。", "最后一步，由您确认。", "停在可恢复的位置。", "先安排，再开工。",
   "WORKFLOW /", "FILM QUEUE", "HUMAN REVIEW", "EXCEPTIONS /", "PLANNING /", "LOCAL AGENT"];
@@ -425,6 +426,159 @@ describe("drawer and 图文确认", () => {
   });
 });
 
+describe("图文确认 review fixes", () => {
+  const openReview = async (title: string) => {
+    await go("待确认");
+    const cardEl = await waitFor(() => {
+      const el = [...document.querySelectorAll<HTMLElement>("[data-review]")].find((c) => c.textContent?.includes(title));
+      if (!el) throw new Error("no card");
+      return el;
+    });
+    fireEvent.click(within(cardEl).getByRole("button", { name: /图文核对入库|查看并处理/ }));
+    return screen.findByRole("dialog", { name: "确认影片与入库目标" });
+  };
+  const STAR_TARGET = "\\\\nas-a\\actors\\演员星河\\ABF-406";
+  const withPerformer = (pf: TargetPreflight, over: Partial<TargetPreflight>): TargetPreflight => ({
+    ...pf, performer_id: "1", target_path: STAR_TARGET, absent: true, ...over,
+  });
+
+  it.each([
+    ["failed", "上次入库未完成：NAS 写入中断。可重新确认入库。", true],
+    ["unknown", "入库结果待核对，暂不能重新上传。", false],
+  ] as const)("a submitted film whose archive ends %s shows the review controls again", async (status, text, enabled) => {
+    const m = mockApi();
+    let after = false;
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => (after && id === "abf-406"
+      ? detail(id, {
+        archive: { status, error: status === "failed" ? "NAS 写入中断" : null, target_path: null },
+        can_confirm: status === "failed",
+      })
+      : detail(id)));
+    m.confirm.mockImplementation(async () => { after = true; return { approval_id: "a1" }; });
+    wrap(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    const ok = within(dialog).getByRole("button", { name: "确认入库" });
+    await waitFor(() => expect(ok).toBeEnabled());
+    fireEvent.click(ok);
+    await waitFor(() => expect(m.confirm).toHaveBeenCalledTimes(1));
+    const back = await screen.findByRole("dialog", { name: "确认影片与入库目标" });
+    expect(await within(back).findByText(text)).toBeInTheDocument();
+    const again = within(back).getByRole("button", { name: "确认入库" });
+    if (enabled) await waitFor(() => expect(again).toBeEnabled());
+    else expect(again).toBeDisabled();
+  });
+
+  it("确认入库 waits for a passed target check of the chosen performer", async () => {
+    mockApi();
+    let answer: (pf: TargetPreflight) => Promise<TargetPreflight> = () => new Promise(() => {});
+    vi.spyOn(api, "workflowTarget").mockImplementation(async (id, performer) =>
+      (performer === undefined || id !== "abf-406" ? PREFLIGHTS[id] : answer(PREFLIGHTS["abf-406"])));
+    const { qc } = wrapWith(<MediaWorkspace />);
+    const dialog = await openReview("星河慢行");
+    await waitFor(() => expect(within(dialog).getByText("演员星河", { selector: "strong" })).toBeInTheDocument());
+    const ok = within(dialog).getByRole("button", { name: "确认入库" });
+    expect(await within(dialog).findByText("正在检查目标…")).toBeInTheDocument();
+    expect(ok).toBeDisabled();
+    const recheck = () => act(() => qc.resetQueries({ queryKey: ["mediaTarget", "abf-406", 1] }));
+    // an HTTP error is no pass
+    answer = async () => { throw new HttpError("服务暂不可用", 503); };
+    await recheck();
+    expect(await within(dialog).findByText("目标检查失败：服务暂不可用")).toBeInTheDocument();
+    expect(ok).toBeDisabled();
+    // an answer without a target path, or a folder not known to be absent, is no pass either
+    for (const over of [{ target_path: null }, { absent: null }] as Array<Partial<TargetPreflight>>) {
+      answer = async (pf) => withPerformer(pf, over);
+      await recheck();
+      expect(await within(dialog).findByText("目标检查未通过，请重新选择或稍后重试。")).toBeInTheDocument();
+      expect(ok).toBeDisabled();
+    }
+    answer = async (pf) => withPerformer(pf, {});
+    await recheck();
+    await waitFor(() => expect(ok).toBeEnabled());
+  });
+
+  it.each(["zero", "failed"] as const)("a lone candidate arriving after a %s first load is selected", async (first) => {
+    mockApi();
+    let one = false;
+    const lone = preflight("ABF-408", [
+      { id: "9", name: "演员孤岛", source_label: "NAS-A", unc_path: "\\\\nas-a\\actors\\演员孤岛", has_thumb: false, aliases: [] },
+    ]);
+    vi.spyOn(api, "workflowTarget").mockImplementation(async (id, performer) => {
+      if (id !== "abf-408") return PREFLIGHTS[id];
+      if (performer !== undefined) {
+        return { ...lone, performer_id: String(performer), target_path: "\\\\nas-a\\actors\\演员孤岛\\ABF-408", absent: true };
+      }
+      if (one) return lone;
+      if (first === "failed") throw new HttpError("暂时无法读取", 503);
+      return PREFLIGHTS["abf-408"];
+    });
+    vi.spyOn(api, "performers").mockResolvedValue({ items: [] });
+    const { qc } = wrapWith(<MediaWorkspace />);
+    const dialog = await openReview("未命名的岛");
+    await within(dialog).findByRole("searchbox", { name: "搜索已有演员" });
+    one = true;
+    await act(() => qc.invalidateQueries({ queryKey: ["mediaTarget", "abf-408"], exact: true }));
+    await waitFor(() => expect(within(dialog).getByText("演员孤岛", { selector: "strong" })).toBeInTheDocument());
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeEnabled());
+  });
+});
+
+describe("待处理 batch limit", () => {
+  it("全部按推荐确认 sends at most PLAN_BATCH_MAX films per request and reports once", async () => {
+    const m = mockApi();
+    const many = Array.from({ length: 501 }, (_, i) => plan({ film_id: `f-${String(i).padStart(3, "0")}`, title: `影片 ${i}` }));
+    vi.spyOn(api, "workflowPlans").mockResolvedValue({ ...PLANS, plans: many });
+    m.confirmPlans.mockImplementation(async (plans: PlanChoice[]) => ({
+      results: plans.map((p) => (p.film_id === "f-500"
+        ? { film_id: p.film_id, ok: false, error: "invalid_machine", message: "设备不可用" }
+        : { film_id: p.film_id, ok: true, error: null, message: null })),
+    }));
+    wrap(<MediaWorkspace />);
+    // 501 cards: role and text queries over the whole DOM are far too slow, so plain selectors
+    fireEvent.click(within(rail()).getByRole("button", { name: /^待处理/ }));
+    await waitFor(() => expect(document.querySelectorAll("[data-pending]")).toHaveLength(501), { timeout: 20000 });
+    const all = [...document.querySelectorAll<HTMLButtonElement>("main button")].find((b) => b.textContent === "全部按推荐确认");
+    fireEvent.click(all as HTMLButtonElement);
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalledTimes(2), { timeout: 20000 });
+    expect(PLAN_BATCH_MAX).toBe(500);
+    expect(m.confirmPlans.mock.calls.map(([body]) => body.length)).toEqual([500, 1]);
+    // one summary toast, not one per film
+    const toast = () => document.querySelector('[role="status"]')?.textContent;
+    await waitFor(() => expect(toast()).toBe("已确认 500 部，进入影片队列。1 部已调整或需重新查看，请单独确认。"),
+      { timeout: 20000 });
+  }, 60000);
+});
+
+describe("target preflight polling (IR05)", () => {
+  const confirmRow = (i: number) => row({
+    film_id: `c-${String(i).padStart(2, "0")}`, title: `确认片 ${i}`, group: "confirm",
+    stage: "archive", status: "pending", can_confirm: true, steps: steps("confirm", "waiting"),
+  });
+
+  it("polls only on 概览 / 待确认 / 图文确认, for the top ten films; the rest read 检查中", async () => {
+    mockApi();
+    const films = [...FILMS.filter((f) => f.group !== "confirm"), ...Array.from({ length: 12 }, (_, i) => confirmRow(i))];
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, counts: counts(films, PACKAGES) });
+    const target = vi.spyOn(api, "workflowTarget").mockImplementation(async (id) => preflight(id.toUpperCase(), [
+      { id: `p-${id}`, name: `演员${id}`, source_label: "NAS-A", unc_path: `\\\\nas-a\\${id}`, has_thumb: false, aliases: [] },
+    ]));
+    wrap(<MediaWorkspace />);
+    // on 影片队列 nothing asks for the targets
+    fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
+    await screen.findByRole("heading", { level: 1, name: "影片队列" });
+    await waitFor(() => expect(document.body.textContent).toContain("确认片 11"));
+    expect(target).not.toHaveBeenCalled();
+    await go("待确认");
+    await waitFor(() => expect(target).toHaveBeenCalledTimes(10));
+    expect(new Set(target.mock.calls.map(([id]) => id))).toEqual(
+      new Set(Array.from({ length: 10 }, (_, i) => `c-${String(i).padStart(2, "0")}`)));
+    const card = (id: string) => document.querySelector<HTMLElement>(`[data-review="${id}"]`) as HTMLElement;
+    await waitFor(() => expect(within(card("c-00")).getByRole("button", { name: "图文核对入库" })).toBeInTheDocument());
+    expect(within(card("c-11")).getAllByText("检查中").length).toBeGreaterThan(0);
+    expect(within(card("c-11")).getByRole("button", { name: "查看并处理" })).toBeInTheDocument();
+  });
+});
+
 describe("mediaModel", () => {
   it("maps backend rows onto the V3 vocabulary", () => {
     expect(filmStatus(row({ film_id: "a", group: "planning" }))).toBe("pending");
@@ -441,7 +595,11 @@ describe("mediaModel", () => {
     // the chosen performer record is gone: choose again, as with no match
     expect(reviewStatus(preflight("A", [], { error_code: "missing" }))).toBe("nomatch");
     expect(reviewStatus(preflight("A", null, { error_code: "offline" }))).toBe("offline");
-    expect(reviewStatus(null)).toBe("ready");
+    // no preflight yet (not polled, or still loading): 检查中, never ready (IR05)
+    expect(reviewStatus(null)).toBe("checking");
+    expect(reviewStatus(undefined)).toBe("checking");
+    expect(STATUS_META.checking[0]).toBe("检查中");
+    expect(filmStatus(row({ film_id: "a", group: "confirm" }))).toBe("checking");
   });
 
   it("keeps the eleven steps in order and reads a step not sent as not started", () => {
