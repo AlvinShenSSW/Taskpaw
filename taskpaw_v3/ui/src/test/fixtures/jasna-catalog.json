@@ -128,7 +128,7 @@
       },
       "ltx_model": {
         "default": "standard",
-        "description": "--restoration-model-name: Standard (ltx) is Jasna 0.11.3's default and the fastest; Good (ltx-4step), High (ltx-8step) and Top (ltx-undistilled) add detail and take longer. Each tier has its own model download. The tiers need Jasna 0.11.3 or newer: on 0.11.2 Standard runs the old High model, and Good and High fail with Jasna's own error. Only used with LTX.",
+        "description": "--restoration-model-name: Standard (ltx) is Jasna 0.11.3's default and the fastest; Good (ltx-4step) and High (ltx-8step) add detail and take longer. Each tier has its own model download. The tiers need Jasna 0.11.3 or newer: on 0.11.2 Standard runs the old High model, and Good and High fail with Jasna's own error. Only used with LTX.",
         "oneOf": [
           {
             "const": "standard",
@@ -140,11 +140,7 @@
           },
           {
             "const": "high",
-            "title": "High (~2.5x slower; the pre-0.11.3 default)"
-          },
-          {
-            "const": "top",
-            "title": "Top (~5x slower; formerly \"best\")"
+            "title": "High (~2.5x slower)"
           }
         ],
         "title": "LTX quality",
@@ -212,12 +208,18 @@
         "type": "string"
       },
       "cq": {
-        "default": 24,
-        "description": "Constant-quality level (--cq), 0-63. Lower = better quality and a bigger file; 24 is Jasna's default.",
+        "default": 20,
+        "description": "Constant-quality level (--cq), 0-63. Lower = better quality and a bigger file. With 'Output bitrate follows the source' on, a lower cq lets the source-tied ceiling, not cq, decide the size: the output approaches the source size and never exceeds it. Applies to every output codec; a low cq on av1 is bound by the ceiling too. 20 is the default (24 before TaskPaw 3.9.18); Jasna's own default is 28.",
         "maximum": 63,
         "minimum": 0,
         "title": "Cq",
         "type": "integer"
+      },
+      "match_source_bitrate": {
+        "default": true,
+        "description": "Every launch (LTX or not) caps the output at 1.0x the source video's bitrate, whatever the codec: TaskPaw reads it with ffprobe and passes --encoder-settings maxrate=<source>,qmax=51, so the restored file keeps about the source's size and never exceeds its bitrate. Jasna's own cap allows up to 2x for H.264 output, which LTX auto-split writes for an H.264 source. NVIDIA GPUs only: AMD HEVC/AV1 encode at a constant QP and ignore the cap. When the bitrate cannot be read, nothing is added and Jasna's own cap applies. While on, --encoder-settings is rejected in the extra args.",
+        "title": "Output bitrate follows the source",
+        "type": "boolean"
       },
       "detection_model": {
         "default": "rfdetr-v6",
@@ -233,7 +235,7 @@
       },
       "jasna_extra_args": {
         "default": "",
-        "description": "Extra Jasna flags appended verbatim to every launch, e.g. --device cuda:1. The flags TaskPaw owns (--input, --output, --output-pattern, --max-clip-size, --temporal-overlap, --codec, --cq, --detection-model) are rejected here — use the fields above. While 8K VR is ticked, --vr-mode and --detection-model-path are rejected too. `--secondary-restoration` here overrides the tickboxes for every file and disables the automatic unet-4x degrade (the relaunch would carry the same flag). Passing `--encoder-settings cq=...` alongside --cq is Jasna's own error. LTX options (--ltx-*, --restoration-model-name) are always rejected — use the LTX fields; while either LTX tickbox is ticked, so are --secondary-restoration, --denoise, --no-compile-basicvsrpp, --stream, --vr-mode, --restoration-model-path and --working-directory (and --fmp4 / --segments with LTX only for big mosaics).",
+        "description": "Extra Jasna flags appended verbatim to every launch, e.g. --device cuda:1. The flags TaskPaw owns (--input, --output, --output-pattern, --max-clip-size, --temporal-overlap, --codec, --cq, --detection-model) are rejected here — use the fields above. While 8K VR is ticked, --vr-mode and --detection-model-path are rejected too. `--secondary-restoration` here overrides the tickboxes for every file and disables the automatic unet-4x degrade (the relaunch would carry the same flag). While 'Output bitrate follows the source' is on, --encoder-settings is rejected (TaskPaw passes the maxrate there); with it off, `--encoder-settings cq=...` alongside --cq is Jasna's own error. LTX options (--ltx-*, --restoration-model-name) are always rejected — use the LTX fields; while either LTX tickbox is ticked, so are --secondary-restoration, --denoise, --no-compile-basicvsrpp, --stream, --vr-mode, --restoration-model-path and --working-directory (and --fmp4 / --segments with LTX only for big mosaics).",
         "title": "Jasna Extra Args",
         "type": "string"
       },
@@ -282,6 +284,7 @@
       "temporal_overlap",
       "codec",
       "cq",
+      "match_source_bitrate",
       "detection_model",
       "process_name",
       "jasna_extra_args",

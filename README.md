@@ -139,6 +139,19 @@ TaskPaw 会自动使用 WhisperJAV 安装目录中自带的 FFmpeg（Library\bin
 }
 ```
 
+### Jasna 输出码率跟随原片（3.9.18）
+
+Jasna 任务的「输出码率跟随原片」默认开，对每次启动都生效（BasicVSR++ 和 LTX 都一样）：
+
+- TaskPaw 在探测分辨率时一并用 ffprobe 读出原片视频码率 B（顺序同 Jasna：视频流码率 → `BPS` / `BPS-eng` 标签 → 容器码率），
+  启动时传 `--encoder-settings maxrate=B,qmax=51`。输出码率上限是原片的 **1.0 倍**，不分编码；Jasna 自己的上限对 H.264 输出可到 2 倍，
+  而「LTX 仅用于大马赛克」会把 H.264 原片重新编码为 H.264。不传 `bufsize`：ffmpeg 的 NVENC 在 CQ 模式下会丢弃它；`qmax=51` 放开 Jasna
+  默认的 qmax 34，复杂画面也压得住上限。
+- 只对 NVIDIA 显卡有效：AMD 的 HEVC/AV1 用固定 QP 编码，会忽略这个上限。
+- 读不到码率时不加参数（沿用 Jasna 自己的上限），每个文件记一条警告。开启时「额外参数」里不能写 `--encoder-settings`。
+- 画质 CQ 默认 20（3.9.18 之前是 24；Jasna 自己的默认是 28），对所有输出编码都生效。开启本选项时 cq 调低后由上限决定文件大小，
+  输出接近原片、不会超过原片；av1 用低 cq 时同样受上限约束。任务状态和日志显示所用上限，例如 `maxrate 45.2 Mbps`。
+
 ### Jasna「8K VR」
 
 在 Jasna 任务的表单里勾选「8K VR」后，这个任务的**每个文件**都按 8K SBS VR（VR180 左右并排）处理，
@@ -177,7 +190,7 @@ Jasna 0.11.1 起有赞助者模型 **LTX**：细节比 BasicVSR++ 多，但慢�
 |---|---|---|
 | LTX 快速模式 `--ltx-fast` | 开 | 快约 1.4 倍、细节略少、下载更小；**仅 RTX 50 系**。TaskPaw 每次「启动」用 nvidia-smi 检测显卡，没有 RTX 50 系（如 RTX 4090）就自动不用。0.11.1 实测 8 GB 显卡加载 int8 模型显存不足，预设因此使用 Fast；0.11.2 未复测。 |
 | LTX 仅用于大马赛克（%） `--ltx-auto-split` | 12 | 不小于视频高度这个比例的马赛克用 LTX，更小的用 BasicVSR++（不带 unet-4x，4K 片上可能略糊）；0 = 整片用 LTX（画质优先）。影片没有合适切点时 Jasna 会跳过拆分、整片用 LTX。 |
-| LTX 画质 `--restoration-model-name` | 标准 | 四档（需 Jasna 0.11.3 及以上）：标准（`ltx`，最快）、良好（`ltx-4step`，慢约 1.5 倍）、高（`ltx-8step`，慢约 2.5 倍，0.11.3 前的默认）、顶级（`ltx-undistilled`，慢约 5 倍，原「最佳」）。每档需要单独下载模型；旧配置勾选过「最佳模型」的自动成为顶级。 |
+| LTX 画质 `--restoration-model-name` | 标准 | 三档（需 Jasna 0.11.3 及以上）：标准（`ltx`，最快）、良好（`ltx-4step`，慢约 1.5 倍）、高（`ltx-8step`，慢约 2.5 倍，0.11.3 前的默认）。每档需要单独下载模型；旧配置勾选过「最佳模型」的自动成为高画质。 |
 | LTX 大马赛克高清 `--ltx-large-canvas` | 关 | 可手动开启：大马赛克按 768 px 修复，特写和 4K 细节更多，这些片段慢约 3 倍。**只有每张 NVIDIA 显卡都有 16 GB 及以上显存时才传给 Jasna**：在 8 GB 卡上实测它连 1080p 都会让 Jasna 失败；机器上多插一张小显卡也会让它停用。已有配置明确保存的选择保留。 |
 
 - **LTX 失败的影片不会马上重跑**（BasicVSR++ 的失败仍会重跑一次）：LTX 的失败通常可重复，而且 4K 可能在跑了几小时后才失败。
@@ -223,7 +236,7 @@ Jasna 0.11.1 起有赞助者模型 **LTX**：细节比 BasicVSR++ 多，但慢�
 |---|---|
 | LTX int8 模型（0.11.1） | 加载时显存不足（两次都是） |
 | LTX 快速模式，1080p | 541–721 秒（约 54–72 倍实时，取决于桌面程序占用的显存） |
-| LTX 最佳 + 快速（0.11.1 命名，即顶级），1080p | 968 秒 |
+| LTX 最佳 + 快速（0.11.1 的 best 模型，3.9.18 起不再提供），1080p | 968 秒 |
 | LTX 快速 + 大马赛克高清，1080p | 失败（`Cannot fit a DiffVAE decode tile`），所以 TaskPaw 不会在 8 GB 卡上传这个选项 |
 | LTX 快速模式，4K | 最后阶段失败：`Cannot fit a DiffVAE decode tile under the memory budget` |
 | BasicVSR++ + unet-4x，4K | 约 7 秒，显存峰值 6.4 GB |

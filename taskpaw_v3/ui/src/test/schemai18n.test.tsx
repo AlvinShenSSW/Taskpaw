@@ -127,7 +127,7 @@ describe("localizeSchema (#121)", () => {
     expect(p.ltx_auto_split.title).toBe("LTX 仅用于大马赛克（%）");
     expect(p.ltx_auto_split.description).toContain("12");
     expect(p.ltx_model.title).toBe("LTX 画质");
-    expect(p.ltx_model.description).toContain("ltx-undistilled");
+    expect(p.ltx_model.description).toContain("ltx-8step");
     expect(p.ltx_model.description).toContain("Jasna 0.11.3 及以上");
     // #265: 8K VR is off under either LTX tickbox; the 1080p unet-4x under the 1080p one.
     expect(p.vr_8k.description).toContain("勾选任一「使用 LTX」时不使用");
@@ -135,12 +135,11 @@ describe("localizeSchema (#121)", () => {
     expect(p.jasna_extra_args.description).toContain("LTX 参数（--ltx-*、--restoration-model-name）一律拒绝");
   });
 
-  it("translates the jasna LTX quality options and keeps unknown ones (#283)", () => {
+  it("translates the jasna LTX quality options and keeps unknown ones (#283, #285)", () => {
     const oneOf = [
       { const: "standard", title: "Standard (default, fastest)" },
       { const: "good", title: "Good (~1.5x slower)" },
-      { const: "high", title: "High (~2.5x slower; the pre-0.11.3 default)" },
-      { const: "top", title: "Top" },
+      { const: "high", title: "High (~2.5x slower)" },
       { const: "future", title: "Future tier" },
     ];
     const s: RJSFSchema = { type: "object", properties: { ltx_model: { type: "string", title: "LTX quality", oneOf } } };
@@ -148,13 +147,31 @@ describe("localizeSchema (#121)", () => {
     expect(zh.ltx_model.oneOf.map((o) => o.title)).toEqual([
       "标准画质（默认，最快）",
       "良好画质（慢约 1.5 倍）",
-      "高画质（慢约 2.5 倍，0.11.3 前的默认）",
-      "顶级画质（慢约 5 倍，原「最佳」）",
+      "高画质（慢约 2.5 倍）",
       "Future tier",
     ]);
     expect(zh.ltx_model.oneOf.map((o) => o.const)).toEqual(oneOf.map((o) => o.const));
     expect(oneOf[0].title).toBe("Standard (default, fastest)"); // input untouched
     expect(localizeSchema(s, "jasna", "en")).toBe(s);
+  });
+
+  it("translates the jasna output-bitrate tickbox and the cq help (#285)", () => {
+    const s: RJSFSchema = {
+      type: "object",
+      properties: Object.fromEntries(
+        ["match_source_bitrate", "cq", "jasna_extra_args"].map((k) => [k, { type: "string", title: k, description: "English" }]),
+      ),
+    };
+    const p = localizeSchema(s, "jasna", "zh-CN").properties as Record<string, { title: string; description?: string }>;
+    expect(p.match_source_bitrate.title).toBe("输出码率跟随原片");
+    for (const part of ["1.0 倍", "maxrate", "qmax=51", "H.264", "NVIDIA", "AMD", "--encoder-settings"]) {
+      expect(p.match_source_bitrate.description).toContain(part);
+    }
+    for (const part of ["默认 20", "24", "Jasna 自己的默认是 28", "av1"]) {
+      expect(p.cq.description).toContain(part);
+    }
+    expect(p.cq.description).not.toContain("hevc 建议 24");
+    expect(p.jasna_extra_args.description).toContain("开启「输出码率跟随原片」时，--encoder-settings 也会被拒绝");
   });
 
   it("translates the jasna 4K LTX and large-canvas fields (#265)", () => {

@@ -43,26 +43,33 @@ it("opening edit preserves settings; both selectors fill both tiers and save man
   expect(update.mock.calls[0][1].config).toMatchObject({ clip_size_1080p: 180, clip_size_4k: 72, ltx_1080p: true, ltx_4k: true, ltx_large_canvas: true, cq: 25 });
 }, 15000);
 
-it("LTX quality is a select of the four zh tiers; a migrated top config keeps top (#283)", async () => {
+it("LTX quality is a select of the three zh tiers; a migrated high config keeps high (#283, #285)", async () => {
   const update = vi.spyOn(api, "updateMonitor").mockResolvedValue({ ok: true } as never);
   render(<ThemeProvider theme={theme}><MonitorWizard mode="edit" existingType="jasna" name="J"
-    existingConfig={{ name: "J", ltx_model: "top" }}
+    existingConfig={{ name: "J", ltx_model: "high" }}
     plugins={[catalog as PluginInfo]} presets={[]} onClose={vi.fn()} onDone={vi.fn()} onError={vi.fn()} /></ThemeProvider>);
   const box = screen.getByRole("combobox", { name: "LTX 画质" });
-  expect(box).toHaveTextContent("顶级画质（慢约 5 倍，原「最佳」）");
+  expect(box).toHaveTextContent("高画质（慢约 2.5 倍）");
   fireEvent.mouseDown(box);
   expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual([
     "标准画质（默认，最快）",
     "良好画质（慢约 1.5 倍）",
-    "高画质（慢约 2.5 倍，0.11.3 前的默认）",
-    "顶级画质（慢约 5 倍，原「最佳」）",
+    "高画质（慢约 2.5 倍）",
   ]);
   fireEvent.keyDown(screen.getByRole("listbox"), { key: "Escape" });
   fireEvent.submit(field("cq").closest("form")!);
   await waitFor(() => expect(update).toHaveBeenCalled());
-  expect(update.mock.calls[0][1].config).toMatchObject({ ltx_model: "top" });
+  expect(update.mock.calls[0][1].config).toMatchObject({ ltx_model: "high", match_source_bitrate: true, cq: 20 });
   expect(update.mock.calls[0][1].config).not.toHaveProperty("ltx_best");
 }, 15000);
+
+it("output bitrate follows the source: a zh tickbox next to CQ, on by default (#285)", () => {
+  wizard();
+  const box = field("match_source_bitrate");
+  expect(box).toBeChecked();
+  expect(screen.getByLabelText("输出码率跟随原片")).toBe(box);
+  expect(field("cq")).toHaveValue(27); // a saved cq is kept
+});
 
 it("8GB preset keeps 4K on unet; changing GPU merges current fields and reapply is explicit", () => {
   wizard(); select("修复模型", "LTX"); select("设备型号", "RTX 5060 · 8 GB");

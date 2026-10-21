@@ -211,12 +211,11 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     ltx_model: {
       title: "LTX 画质",
       description:
-        "--restoration-model-name：标准画质（ltx）是 Jasna 0.11.3 的默认，也最快；良好（ltx-4step）、高（ltx-8step）和顶级（ltx-undistilled）细节更多、更慢。每档需要单独下载模型。这四档需要 Jasna 0.11.3 及以上：在 0.11.2 上「标准」跑的是旧的高画质模型，「良好」「高」会报 Jasna 自己的参数错误。只在勾选「使用 LTX」时使用。",
+        "--restoration-model-name：标准画质（ltx）是 Jasna 0.11.3 的默认，也最快；良好（ltx-4step）和高（ltx-8step）细节更多、更慢。每档需要单独下载模型。这三档需要 Jasna 0.11.3 及以上：在 0.11.2 上「标准」跑的是旧的高画质模型，「良好」「高」会报 Jasna 自己的参数错误。只在勾选「使用 LTX」时使用。",
       options: {
         standard: "标准画质（默认，最快）",
         good: "良好画质（慢约 1.5 倍）",
-        high: "高画质（慢约 2.5 倍，0.11.3 前的默认）",
-        top: "顶级画质（慢约 5 倍，原「最佳」）",
+        high: "高画质（慢约 2.5 倍）",
       },
     },
     ltx_4k: {
@@ -258,7 +257,12 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     cq: {
       title: "画质 CQ",
       description:
-        "恒定质量参数（--cq，0–63）。数值越小画质越好、文件越大；hevc 建议 24。",
+        "恒定质量参数（--cq，0–63），对所有输出编码都生效。数值越小画质越好、文件越大。开启「输出码率跟随原片」时，cq 调低后决定文件大小的是跟随原片的码率上限而不是 cq：输出接近原片大小、不会超过原片；av1 用低 cq 时同样受这个上限约束。默认 20（TaskPaw 3.9.18 之前是 24）；Jasna 自己的默认是 28。",
+    },
+    match_source_bitrate: {
+      title: "输出码率跟随原片",
+      description:
+        "每次启动（不论是否 LTX）都把输出码率上限设为原片视频码率的 1.0 倍，所有编码都一样：TaskPaw 用 ffprobe 读出原片码率，传 --encoder-settings maxrate=<原片码率>,qmax=51，修复后的文件大小接近原片、码率不超过原片。Jasna 自己的上限对 H.264 输出可到 2 倍，而「LTX 仅用于大马赛克」会把 H.264 原片重新编码为 H.264。只对 NVIDIA 显卡有效：AMD 的 HEVC/AV1 用固定 QP 编码，会忽略这个上限。读不到原片码率时不加参数，沿用 Jasna 自己的上限。开启时额外参数里的 --encoder-settings 会被拒绝。",
     },
     detection_model: {
       title: "检测模型",
@@ -268,7 +272,7 @@ const BY_TYPE: Record<string, Record<string, FieldT>> = {
     jasna_extra_args: {
       title: "额外参数",
       description:
-        "原样追加到命令行末尾的额外参数，例如 --device cuda:1。不要在这里重复 TaskPaw 已经控制的参数（--input --output --max-clip-size --temporal-overlap --codec --cq --detection-model）。特例：在这里写 --secondary-restoration（如 tvai / rtx-super-res / none）会对每个文件覆盖上面两个勾选框，并关闭自动的 unet-4x 降级重试。另外 --encoder-settings cq= 与上面的 CQ 冲突，Jasna 自己会报错。勾选「8K VR」时，--vr-mode 和 --detection-model-path 也会被拒绝。LTX 参数（--ltx-*、--restoration-model-name）一律拒绝，请用上面的 LTX 选项；勾选任一「使用 LTX」时，--secondary-restoration、--denoise、--no-compile-basicvsrpp、--stream、--vr-mode、--restoration-model-path、--working-directory 也会被拒绝（开启「LTX 仅用于大马赛克」时还有 --fmp4 和 --segments）。",
+        "原样追加到命令行末尾的额外参数，例如 --device cuda:1。不要在这里重复 TaskPaw 已经控制的参数（--input --output --max-clip-size --temporal-overlap --codec --cq --detection-model）。特例：在这里写 --secondary-restoration（如 tvai / rtx-super-res / none）会对每个文件覆盖上面两个勾选框，并关闭自动的 unet-4x 降级重试。开启「输出码率跟随原片」时，--encoder-settings 也会被拒绝（TaskPaw 在这里传码率上限）；关闭时 --encoder-settings cq= 与上面的 CQ 冲突，Jasna 自己会报错。勾选「8K VR」时，--vr-mode 和 --detection-model-path 也会被拒绝。LTX 参数（--ltx-*、--restoration-model-name）一律拒绝，请用上面的 LTX 选项；勾选任一「使用 LTX」时，--secondary-restoration、--denoise、--no-compile-basicvsrpp、--stream、--vr-mode、--restoration-model-path、--working-directory 也会被拒绝（开启「LTX 仅用于大马赛克」时还有 --fmp4 和 --segments）。",
     },
     jasna_gpu_monitor: {
       title: "GPU 监控",

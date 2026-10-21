@@ -206,7 +206,7 @@ def test_defaults_match_the_owner_rules():
     assert c.unet4x_1080p is True and c.unet4x_4k is False
     assert c.clip_size_1080p == 90 and c.clip_size_4k == 60
     assert c.temporal_overlap == 8
-    assert c.codec == "hevc" and c.cq == 24
+    assert c.codec == "hevc" and c.cq == 20  # #285
     assert c.detection_model == "rfdetr-v6"
     assert c.jasna_capture_progress is False
     assert c.jasna_gpu_monitor is True
@@ -219,13 +219,14 @@ def test_json_schema_exposes_the_tickbox_defaults():
     assert props["unet4x_4k"]["default"] is False
     assert props["clip_size_1080p"]["default"] == 90
     assert props["clip_size_4k"]["default"] == 60
-    assert props["cq"]["default"] == 24
+    assert props["cq"]["default"] == 20
     # every jasna-owned field carries a description (rjsf renders it as help text)
     own = set(JasnaConfig.model_fields) - set(
         JasnaConfig.__bases__[0].model_fields  # type: ignore[attr-defined]
     )
     # 15 restore + 4「AV 翻译」(#177) + 8K VR (#208) + 4 LTX (#263) + 2 (#265)
-    assert len(own) == 28
+    # + match_source_bitrate (#285)
+    assert len(own) == 29
     for name in own:
         assert props[name].get("description"), f"{name} has no description"
 
@@ -433,7 +434,7 @@ def test_build_argv_1080p_with_unet(tmp_path):
         "--codec",
         "hevc",
         "--cq",
-        "24",
+        "20",
         "--detection-model",
         "rfdetr-v6",  # large detector is 4K-only
     ]
@@ -2087,7 +2088,6 @@ _LTX_STEPS = {
     "standard": "distill2-",
     "good": "distill4-",
     "high": "distill8-",
-    "top": "",
 }
 _LTX_FILES = {  # #283: (ltx_model, fast) → the tier's model file
     (m, f): f"ltx-restore-alpha1-{s}{'nvfp4' if f else 'int8'}.safetensors.enc"
@@ -2186,7 +2186,7 @@ def test_build_argv_ltx_1080p_launch_exact():
         "--codec",
         "hevc",
         "--cq",
-        "24",
+        "20",
         "--detection-model",
         "rfdetr-v6",
         "--restoration-model-name",
@@ -2203,9 +2203,9 @@ def test_build_argv_ltx_1080p_launch_exact():
 
 def test_build_argv_ltx_variants():
     best = _ltx_argv(
-        _cfg(ltx_1080p=True, ltx_model="top", ltx_fast=False, ltx_auto_split=0)
+        _cfg(ltx_1080p=True, ltx_model="high", ltx_fast=False, ltx_auto_split=0)
     )
-    assert best[best.index("--restoration-model-name") + 1] == "ltx-undistilled"
+    assert best[best.index("--restoration-model-name") + 1] == "ltx-8step"
     assert "--ltx-fast" not in best and "--ltx-auto-split" not in best
     assert "--working-directory" not in best  # work_dir None → not emitted
     # an LTX launch never carries unet-4x, whatever the caller resolved
@@ -2232,7 +2232,7 @@ def test_build_argv_ltx_ignores_the_stored_8k_vr_profile():
 
 
 def test_build_argv_basicvsrpp_unchanged_with_ltx_options_stored():
-    stored = _cfg(ltx_fast=False, ltx_auto_split=30, ltx_model="top")
+    stored = _cfg(ltx_fast=False, ltx_auto_split=30, ltx_model="high")
     for tier in ("1080p", "4k"):
         assert _ltx_argv(stored, tier=tier, work_dir=Path("w")) == _ltx_argv(
             _cfg(), tier=tier
@@ -2656,7 +2656,7 @@ def test_detail_names_the_ltx_variant_and_keeps_4k_as_before(tmp_path):
     cfg, _inp, _out, _home = _managed(
         tmp_path,
         ltx_1080p=True,
-        ltx_model="top",
+        ltx_model="high",
         ltx_fast=False,
         ltx_auto_split=0,
         vr_8k=True,
@@ -2666,7 +2666,7 @@ def test_detail_names_the_ltx_variant_and_keeps_4k_as_before(tmp_path):
     inst._current_tier = "1080p"
     inst._current_dims = (1920, 1080)
     assert inst._build_status("running").detail == (
-        "running: a.mp4 [1080p 1920x1080, LTX top]"
+        "running: a.mp4 [1080p 1920x1080, LTX high]"
     )
     inst._current_tier = "4k"
     inst._current_dims = (3840, 2160)
@@ -2747,7 +2747,7 @@ def test_build_argv_4k_ltx_launch_exact():
         "--codec",
         "hevc",
         "--cq",
-        "24",
+        "20",
         "--detection-model",
         "rfdetr-v6-large",
         "--restoration-model-name",

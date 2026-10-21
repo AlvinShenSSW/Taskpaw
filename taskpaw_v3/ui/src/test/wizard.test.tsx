@@ -60,7 +60,7 @@ const jasnaPlugin: apiModule.PluginInfo = {
       },
       ltx_model: {
         type: "string", title: "LTX quality", default: "standard",
-        oneOf: [{ const: "standard", title: "Standard" }, { const: "top", title: "Top" }],
+        oneOf: [{ const: "standard", title: "Standard" }, { const: "high", title: "High" }],
       },
       ltx_large_canvas: { type: "boolean", title: "LTX large canvas", default: false },
       vr_8k: {

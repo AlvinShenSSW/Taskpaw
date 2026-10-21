@@ -1,9 +1,11 @@
-"""#283: Jasna 0.11.3's four LTX quality tiers (`ltx_model`) and the migration
-of the legacy `ltx_best` tickbox. Fakes only: no real Jasna, GPU or download."""
+"""#283/#285: Jasna 0.11.3's three LTX quality tiers (`ltx_model`) and the
+migration of the legacy `ltx_best` tickbox. Fakes only: no real Jasna, GPU or
+download."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from test_jasna import _events, _Launcher, _managed, _patch, _videos
@@ -23,14 +25,13 @@ from taskpaw_v3.monitors.plugins.jasna_presets import preset_catalogue
 from taskpaw_v3.monitors.registry import default_registry
 from taskpaw_v3.monitors.runtime import build_supervisor
 
-_TIERS = ("standard", "good", "high", "top")
+_TIERS = ("standard", "good", "high")
 _CLI = {
     "standard": "ltx",
     "good": "ltx-4step",
     "high": "ltx-8step",
-    "top": "ltx-undistilled",
 }
-# The design's table, verbatim (#283 C4).
+# The design's table, verbatim (#283 C4; #285 C1' keeps three tiers).
 _MODEL = {
     ("standard", False): (
         "ltx-restore-alpha1-distill2-int8.safetensors.enc",
@@ -61,16 +62,6 @@ _MODEL = {
         "ltx-restore-alpha1-distill8-nvfp4.safetensors.enc",
         7733295021,
         "54f2f4f6f7d3f5d60e18aca7bf6137da206a2b66f282e1a9078743c3173e62e2",
-    ),
-    ("top", False): (
-        "ltx-restore-alpha1-int8.safetensors.enc",
-        13368048821,
-        "c72161b1afefe4d8cc0592fa57afef6c20466dcf912912f3628a451468780f83",
-    ),
-    ("top", True): (
-        "ltx-restore-alpha1-nvfp4.safetensors.enc",
-        7733295061,
-        "8301d5ba17660b577ebe906d343963208f7e5453e589ef2f7470087a3ba2ccb5",
     ),
 }
 _SHARED = {
@@ -108,13 +99,14 @@ def test_ltx_model_defaults_to_standard_and_rejects_unknown_tiers():
         assert _cfg(ltx_model=tier).ltx_model == tier
     with pytest.raises(ValueError):
         _cfg(ltx_model="best")
+    assert get_args(J.LtxModel) == _TIERS  # #285 C1': three tiers, no more
     assert "ltx_best" not in JasnaConfig.model_fields
 
 
 @pytest.mark.parametrize(
     ("legacy", "expected"),
     [
-        ({"ltx_best": True}, "top"),
+        ({"ltx_best": True}, "high"),  # #285 C1'
         ({"ltx_best": False}, "standard"),
         ({}, "standard"),
         ({"ltx_best": True, "ltx_model": "standard"}, "standard"),
@@ -129,7 +121,7 @@ def test_legacy_ltx_best_maps_and_an_explicit_ltx_model_wins(legacy, expected):
 
 def test_migrate_config_never_mutates_the_stored_dict():
     stored = {"name": "j", "ltx_best": True}
-    assert JasnaPlugin.migrate_config(stored) == {"name": "j", "ltx_model": "top"}
+    assert JasnaPlugin.migrate_config(stored) == {"name": "j", "ltx_model": "high"}
     assert stored == {"name": "j", "ltx_best": True}
     assert JasnaPlugin.migrate_config({"name": "j"}) == {"name": "j"}
 
@@ -147,7 +139,7 @@ def test_agent_boot_builds_a_legacy_yaml_spec(tmp_path):
     sup = build_supervisor(default_registry(), config.monitors, EventQueue("m"), "m")
     try:
         cfg = sup._monitors["J"].instance.config
-        assert isinstance(cfg, JasnaConfig) and cfg.ltx_model == "top"
+        assert isinstance(cfg, JasnaConfig) and cfg.ltx_model == "high"
     finally:
         sup.stop(timeout=1)
 
@@ -181,20 +173,20 @@ def _shown(admin: MonitorAdmin) -> dict:
     return spec["config"]
 
 
-def test_editor_shows_a_never_resaved_ltx_best_config_as_top(tmp_path):
+def test_editor_shows_a_never_resaved_ltx_best_config_as_high(tmp_path):
     admin, _path = _editor(tmp_path)
     shown = _shown(admin)
-    assert shown["ltx_model"] == "top" and "ltx_best" not in shown
+    assert shown["ltx_model"] == "high" and "ltx_best" not in shown
     # the view is derived: the stored spec keeps its legacy key until a save
     assert admin._config.monitors[0]["config"]["ltx_best"] is True
 
 
-def test_editor_untouched_save_keeps_top(tmp_path):
+def test_editor_untouched_save_keeps_high(tmp_path):
     admin, path = _editor(tmp_path)
     admin.update("J", _form(_shown(admin)))
     stored = load_yaml(AgentConfig, path).monitors[0]["config"]
-    assert stored["ltx_model"] == "top" and "ltx_best" not in stored
-    assert _shown(admin)["ltx_model"] == "top"
+    assert stored["ltx_model"] == "high" and "ltx_best" not in stored
+    assert _shown(admin)["ltx_model"] == "high"
 
 
 def test_editor_explicit_standard_saves_standard(tmp_path):
@@ -284,8 +276,7 @@ def test_ui_order_and_titled_select():
     assert prop["oneOf"] == [
         {"const": "standard", "title": "Standard (default, fastest)"},
         {"const": "good", "title": "Good (~1.5x slower)"},
-        {"const": "high", "title": "High (~2.5x slower; the pre-0.11.3 default)"},
-        {"const": "top", "title": 'Top (~5x slower; formerly "best")'},
+        {"const": "high", "title": "High (~2.5x slower)"},
     ]
     assert "Jasna 0.11.3 or newer" in prop["description"]
     assert (
