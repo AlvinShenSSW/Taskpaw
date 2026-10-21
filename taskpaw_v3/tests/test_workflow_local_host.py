@@ -81,7 +81,6 @@ def test_start_failure_is_reported_not_raised(tmp_path):
         host.stop()
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Native intake")
 def confirm_first_plan(host) -> str:
     """U1: the taken-in film waits in 待处理 until its plan is confirmed."""
     rt = host.runtime
@@ -101,6 +100,7 @@ def confirm_first_plan(host) -> str:
     return film.film_id
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Native intake")
 def test_dropped_film_is_taken_in_and_processed_by_the_local_gpu(tmp_path):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg or not shutil.which("ffprobe") or not shutil.which("nvidia-smi"):

@@ -8,7 +8,7 @@ import { readLtxProgress, type LtxSnapshot } from "../ltxProgress.helpers";
 export type ChipTone = "neutral" | "green" | "blue" | "amber" | "red";
 export type StatusKey =
   | "pending" | "receiving" | "postprocess_error" | "inbox" | "encode" | "denoise" | "asr" | "translate"
-  | "return" | "scrape" | "match" | "checking" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
+  | "return" | "scrape" | "match" | "waiting" | "checking" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
   | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopping" | "failed" | "intake_attention";
 
 export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
@@ -23,6 +23,9 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   return: ["回传成品", "blue"],
   scrape: ["Miko 完整后处理", "blue"],
   match: ["演员匹配", "blue"],
+  // Not in the V3 vocabulary: a queued asr / translate / return / scrape stage that is not running
+  // (paused, or its component is off); the backend's note says why. Never 「正在处理」.
+  waiting: ["等待处理", "blue"],
   // Not in the V3 vocabulary: a film waiting for 确认入库 whose target preflight has not answered
   // yet (not polled now, or still loading); never 「待确认」 before the check (IR05).
   checking: ["检查中", "blue"],
@@ -125,7 +128,9 @@ export function filmStatus(row: FilmRow, preflight?: TargetPreflight | null): St
         if (row.status !== "running") return "inbox";
         return ltxOf(row)?.stage_name === "denoise" ? "denoise" : "encode";
       }
-      if (stage === "asr" || stage === "translate" || stage === "return" || stage === "scrape") return stage;
+      if (stage === "asr" || stage === "translate" || stage === "return" || stage === "scrape") {
+        return row.status === "running" ? stage : "waiting";
+      }
       if (stage === "archive") return "archiving";
       return "receiving";
   }
@@ -166,7 +171,13 @@ export const STAGE_OPTIONS: Array<[StageFilter, string]> = [
   ["all", "全部阶段"], ["inbox", "收件待领取"], ["processing", "修复 / 字幕"], ["preparing", "回传 / 刮削 / 匹配"],
   ["review", "待确认"], ["archive", "入库 / 来源清理"], ["completed", "已完成"], ["skipped", "已跳过"],
 ];
-export function matchesStage(status: StatusKey, filter: StageFilter): boolean {
+export function matchesStage(item: WorkItem, filter: StageFilter): boolean {
+  const status = item.status;
+  // a waiting stage sits in the bucket of the stage it waits for
+  if (status === "waiting" && item.kind === "film") {
+    if (filter === "processing") return item.row.stage === "asr" || item.row.stage === "translate";
+    if (filter === "preparing") return item.row.stage === "return" || item.row.stage === "scrape";
+  }
   switch (filter) {
     case "all": return true;
     case "inbox": return status === "inbox" || status === "receiving";

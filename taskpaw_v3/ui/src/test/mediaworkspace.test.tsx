@@ -5,7 +5,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { api, HttpError, PLAN_BATCH_MAX, type PlanChoice, type TargetPreflight } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
-import { filmStatus, lifecycle, reviewStatus, STATUS_META } from "../components/media/mediaModel";
+import {
+  ACTIVE_STATES, filmStatus, lifecycle, matchesStage, reviewStatus, stageLine, STATUS_META, workItems,
+} from "../components/media/mediaModel";
 import { PREFLIGHT_MS } from "../components/media/workspace";
 import { LtxDownload } from "../components/LtxDownload";
 import { AgentConsole } from "../views/AgentConsole";
@@ -908,6 +910,27 @@ describe("mediaModel", () => {
     expect(reviewStatus(undefined)).toBe("checking");
     expect(STATUS_META.checking[0]).toBe("检查中");
     expect(filmStatus(row({ film_id: "a", group: "confirm" }))).toBe("checking");
+  });
+
+  it("shows a queued asr / translate / return / scrape stage as waiting, not processing (Codex r5 F2)", () => {
+    const miko = "Miko 未配置，刮削已暂停";
+    for (const stage of ["asr", "translate", "return", "scrape"]) {
+      expect(filmStatus(row({ film_id: "a", stage, status: "running" }))).toBe(stage);
+      expect(filmStatus(row({ film_id: "a", stage, status: "pending" }))).toBe("waiting");
+    }
+    const films = [
+      row({ film_id: "run", stage: "asr", status: "running" }),
+      row({ film_id: "idle", stage: "translate", status: "pending", note: "暂停新领取" }),
+      row({ film_id: "off", stage: "scrape", status: "pending", note: miko }),
+    ];
+    const items = workItems({ ...FILMS_RESPONSE, films, packages: [] }, {});
+    expect(items.filter((i) => ACTIVE_STATES.includes(i.status)).map((i) => i.id)).toEqual(["run"]);
+    const off = items.find((i) => i.id === "off")!;
+    expect(off.status).toBe("waiting");
+    expect(stageLine(off)).toBe(miko);
+    expect(stageLine(items[1])).toBe("暂停新领取");
+    expect(items.filter((i) => matchesStage(i, "processing")).map((i) => i.id)).toEqual(["run", "idle"]);
+    expect(items.filter((i) => matchesStage(i, "preparing")).map((i) => i.id)).toEqual(["off"]);
   });
 
   it("keeps the eleven steps in order and reads a step not sent as not started", () => {

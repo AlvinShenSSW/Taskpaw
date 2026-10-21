@@ -19,7 +19,7 @@ export function QueuePage() {
   const [search, setSearch] = useState("");
   const q = search.trim().toLowerCase();
   const films = ws.data.filmItems.filter((i) => i.status !== "intake_attention"
-    && matchesStage(i.status, ws.queueStage)
+    && matchesStage(i, ws.queueStage)
     && (resolution === "all" || itemResolution(i) === resolution)
     && (!q || `${itemTitle(i)} ${itemNumber(i) ?? ""} ${i.kind === "film" ? i.row.name : ""} ${itemActors(i)}`.toLowerCase().includes(q)));
   return (

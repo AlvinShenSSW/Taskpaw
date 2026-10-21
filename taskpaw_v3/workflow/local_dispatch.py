@@ -199,6 +199,11 @@ class LocalDispatcher:
         # V3 §7.5: no new claims while paused; in-flight work and the finalizer
         # carry on. In memory: a restart resumes dispatch.
         self.paused = False
+        # Admission window: held by the dispatch thread from the paused check through
+        # the claim (never while a stage runs), so an acknowledged pause cannot be
+        # followed by a new claim.
+        self._admission = threading.Lock()
+        self._admitting = False
 
     # ── lifecycle ───────────────────────────────────────────────────────
     def start(self) -> None:
@@ -213,6 +218,11 @@ class LocalDispatcher:
     def set_paused(self, paused: bool) -> None:
         self.paused = bool(paused)
         self._wake.set()
+        if self.paused:
+            # Return only once any admission in progress has finished: it either saw
+            # the flag and claimed nothing, or its claim is already in flight.
+            with self._admission:
+                pass
 
     def stop(self, timeout: float = 60.0) -> bool:
         """True when the dispatch thread has exited (or never started)."""
@@ -307,11 +317,29 @@ class LocalDispatcher:
         if not rt.reconciled and not rt.settle_previous(wait=0):
             self._reason = rt.reason
             return False
+        self._admission.acquire()
+        self._admitting = True
+        try:
+            return self._admit_and_run()
+        finally:
+            self._end_admission()
+
+    def _end_admission(self) -> None:
+        """Close the admission window (dispatch thread only); idempotent."""
+        if self._admitting:
+            self._admitting = False
+            self._admission.release()
+
+    def _paused_exit(self) -> bool:
+        self._reason = "paused"
+        self._set_waiting({})
+        self._release()  # give up the GPU (or its queue place) while paused
+        return False
+
+    def _admit_and_run(self) -> bool:
+        rt = self.runtime
         if self.paused:
-            self._reason = "paused"
-            self._set_waiting({})
-            self._release()  # give up the GPU (or its queue place) while paused
-            return False
+            return self._paused_exit()
         steps = self._steps()
         stages = _COMPUTE + tuple(steps) + tuple(self.off_reasons)
         jobs = rt.store.list_jobs(rt.operator, "pending", stages)
@@ -319,6 +347,8 @@ class LocalDispatcher:
         vram = rt.gpu.vram_mib if rt.gpu else 0
         gpu_waited = False
         for job in jobs:
+            if self.paused:  # a pause arrived while admission was blocked
+                return self._paused_exit()
             manifest = rt.store.get_input_manifest(
                 rt.operator, job.film_id, job.input_revision
             )
@@ -358,6 +388,8 @@ class LocalDispatcher:
                 self._set_waiting(waiting)
                 return True
             waiting[job.film_id] = self._reason  # claim refused: try the next film
+            if self.paused:
+                return self._paused_exit()
         self._set_waiting(waiting)
         if self._holding:
             self._release()
@@ -419,6 +451,10 @@ class LocalDispatcher:
             self._release_if_holding()
             self._reason = "本机 GPU 尚未登记"
             return False
+        if self.paused:  # re-checked at the claim, after any blocking lease wait
+            self._release_if_holding()
+            self._reason = "paused"
+            return False
         tools = executor.tools(job)  # U1 P4': the planned tier, read once
         attempt = AttemptFile(
             attempt_id=_new_id(), operation_id=_new_id(), job_id=job.job_id
@@ -469,6 +505,7 @@ class LocalDispatcher:
         running = _Running(job, attempt, assignment_id, owner, None, uses_gpu, name)
         with self._lock:
             self._running = running
+        self._end_admission()  # the claim is visible as running: admission is over
 
         def progress(text: str, ltx: dict[str, Any] | None = None) -> None:
             running.progress = text[-200:]
@@ -627,6 +664,9 @@ class LocalDispatcher:
     ) -> bool:
         """Claim a component stage (return E5, scrape M01) and run it in its own Job."""
         rt = self.runtime
+        if self.paused:
+            self._reason = "paused"
+            return False
         try:
             tools = step.tools()
         except Exception as exc:  # e.g. the Miko profile cannot be read
@@ -679,6 +719,7 @@ class LocalDispatcher:
         )
         with self._lock:
             self._running = running
+        self._end_admission()  # the claim is visible as running: admission is over
         try:
             running.processes = OwnedJob(on_launch=launched)
             outcome = step.run(

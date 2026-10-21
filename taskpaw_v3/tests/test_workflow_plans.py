@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 
 import pytest
 
+from taskpaw_v3.core.gpu_lease import GpuLease
 from taskpaw_v3.tests.test_workflow_films import STAGES, input_manifest
 from taskpaw_v3.tests.test_workflow_local_dispatch import (
     add_film,
@@ -385,3 +387,33 @@ def test_a_paused_dispatcher_claims_nothing_until_resumed(rt):
     d.set_paused(False)
     assert d.run_once() is True
     assert d.status().paused is False
+
+
+def test_a_pause_acknowledged_during_lease_wait_claims_nothing(rt):
+    """The paused check and the claim are one admission: no claim after the ack."""
+    film = add_film(rt)
+    entered, proceed = threading.Event(), threading.Event()
+
+    class SlowLease(GpuLease):
+        def try_acquire(self, *args, **kwargs):
+            entered.set()
+            assert proceed.wait(30)
+            return super().try_acquire(*args, **kwargs)
+
+    d = dispatcher(rt, lease=SlowLease())
+    result: list[bool] = []
+    runner = threading.Thread(target=lambda: result.append(d.run_once()))
+    runner.start()
+    assert entered.wait(30)  # run_once passed its paused check, now inside the lease
+    pauser = threading.Thread(target=lambda: d.set_paused(True))
+    pauser.start()
+    while not d.paused:  # the flag is up; the ack still waits for the admission
+        pass
+    proceed.set()
+    pauser.join(30)
+    runner.join(30)
+    assert not pauser.is_alive() and not runner.is_alive()
+    assert result == [False]
+    assert stage(rt, film, "restore").status == "pending"
+    assert d.status().state == "paused"
+    assert d._holding is False

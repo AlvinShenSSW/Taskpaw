@@ -11,7 +11,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api";
 import {
-  fmtVram, gpuLabel, itemActors, itemNumber, itemResolution, itemTitle, outputLimit, REVIEW_STATES, type StageFilter,
+  fmtVram, gpuLabel, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, outputLimit, REVIEW_STATES, type StageFilter,
   type WorkItem,
 } from "./mediaModel";
 import { Chip, Icon, ItemCover, Notice, PageTitle, StageBlock, StatusChip } from "./parts";
@@ -42,8 +42,8 @@ export function OverviewPage() {
   const flow: Array<[string, number, StageFilter | "pending", boolean]> = [
     ["收件", count((i) => i.status === "inbox" || i.status === "receiving"), "inbox", false],
     ["待处理", pending, "pending", true],
-    ["修复 / 字幕", count((i) => ["encode", "denoise", "asr", "translate"].includes(i.status)), "processing", false],
-    ["回传 / 刮削", count((i) => ["return", "scrape", "match"].includes(i.status)), "preparing", false],
+    ["修复 / 字幕", count((i) => matchesStage(i, "processing")), "processing", false],
+    ["回传 / 刮削", count((i) => matchesStage(i, "preparing")), "preparing", false],
     ["待确认", review, "review", true],
     ["入库 / 清理", count((i) => ["archiving", "unknown", "cleanup"].includes(i.status)), "archive", false],
     ["完成", count((i) => i.status === "completed"), "completed", false],
