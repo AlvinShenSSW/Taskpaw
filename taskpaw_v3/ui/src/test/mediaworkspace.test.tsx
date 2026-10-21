@@ -10,7 +10,9 @@ import { LtxDownload } from "../components/LtxDownload";
 import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
 import { setLang } from "../i18n";
-import { detail, FILMS_RESPONSE, PLANS, PREFLIGHTS, row, steps } from "./fixtures/mediaWorkspace";
+import {
+  counts, detail, FILMS_RESPONSE, lookupFailed, PACKAGES, PLANS, preflight, PREFLIGHTS, row, steps,
+} from "./fixtures/mediaWorkspace";
 
 const wrap = (ui: ReactNode) => {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -26,8 +28,12 @@ function mockApi() {
   vi.spyOn(api, "workflowPlans").mockResolvedValue(PLANS);
   vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => detail(id));
   vi.spyOn(api, "workflowTarget").mockImplementation(async (id, performer) => {
-    const pf = PREFLIGHTS[id] ?? { target_path: null, absent: null, error_code: null, candidates: [] };
-    return performer === undefined ? pf : { ...pf, target_path: pf.target_path ?? `\\\\nas\\actors\\${performer}` };
+    const pf = PREFLIGHTS[id] ?? preflight(id.toUpperCase(), []);
+    if (performer === undefined || pf.error_code) return pf;
+    // as the backend: the target ends in the film folder; an unknown performer is `missing`
+    const chosen = pf.candidates?.items.find((p) => p.id === performer);
+    return { ...pf, performer_id: String(performer), absent: chosen ? true : null,
+      target_path: chosen ? `${chosen.unc_path}\\${pf.film_dir}` : null, error_code: chosen ? null : "missing" };
   });
   vi.spyOn(api, "image").mockResolvedValue("data:image/png;base64,");
   vi.spyOn(api, "agentStatus").mockResolvedValue({ machine: "HOME-PC", monitors: {} });
@@ -83,7 +89,10 @@ describe("MediaWorkspace shell", () => {
 
   it("shows the reason without the pages when the workflow is not running", async () => {
     mockApi();
-    vi.spyOn(api, "workflowFilms").mockResolvedValue({ state: "off", reason: "未启用", current: null, intake: null, films: [], packages: [] });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({
+      state: "off", reason: "未启用", current: null, intake: null, films: [], packages: [], counts: counts([], []),
+      dispatch: null, gpu: null,
+    });
     wrap(<MediaWorkspace />);
     expect(await screen.findByText("媒体流水线未运行：未启用")).toBeInTheDocument();
   });
@@ -226,9 +235,8 @@ describe("待处理", () => {
     const lookup = vi.spyOn(api, "workflowLookup").mockResolvedValue({ ok: true });
     vi.spyOn(api, "workflowPlans").mockResolvedValue({ ...PLANS, plans: PLANS.plans.map((p) => (p.film_id === "abf-422"
       ? { ...p, input_revision: 2, revision_changed: true,
-        lookup: { status: "failed", number: null, title: null, actors: [], message: "未查到资料", can_requery: true } }
-      : p.film_id === "abf-423" ? { ...p,
-        lookup: { status: "failed", number: null, title: null, actors: [], message: "文件名中没有番号", can_requery: false } } : p)) });
+        lookup: lookupFailed("未查到资料", true) }
+      : p.film_id === "abf-423" ? { ...p, lookup: lookupFailed("文件名中没有番号", false) } : p)) });
     wrap(<MediaWorkspace />);
     await go("待处理");
     await waitFor(() => expect(card("abf-422")).toBeTruthy());
@@ -248,8 +256,9 @@ describe("待处理", () => {
 
   it("shows the empty state", async () => {
     mockApi();
-    vi.spyOn(api, "workflowPlans").mockResolvedValue({ plans: [], choices: { tiers: [], machines: [] } });
-    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: FILMS_RESPONSE.films.filter((f) => f.group !== "pending") });
+    vi.spyOn(api, "workflowPlans").mockResolvedValue({ plans: [], default_tier: "standard", choices: { tiers: [], machines: [] } });
+    const films = FILMS_RESPONSE.films.filter((f) => f.group !== "planning");
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, counts: counts(films, PACKAGES) });
     wrap(<MediaWorkspace />);
     await go("待处理");
     expect(await screen.findByText("没有待处理影片")).toBeInTheDocument();
@@ -418,7 +427,7 @@ describe("drawer and 图文确认", () => {
 
 describe("mediaModel", () => {
   it("maps backend rows onto the V3 vocabulary", () => {
-    expect(filmStatus(row({ film_id: "a", group: "pending" }))).toBe("pending");
+    expect(filmStatus(row({ film_id: "a", group: "planning" }))).toBe("pending");
     expect(filmStatus(row({ film_id: "a", stage: "restore", status: "pending" }))).toBe("inbox");
     expect(filmStatus(row({ film_id: "a", stage: "restore", status: "running" }))).toBe("encode");
     expect(filmStatus(row({ film_id: "a", stage: "restore", status: "running",
@@ -428,15 +437,18 @@ describe("mediaModel", () => {
     expect(filmStatus(row({ film_id: "a", group: "attention", stage: "cleanup_input", status: "unknown" }))).toBe("cleanup");
     expect(filmStatus(row({ film_id: "a", group: "archiving", stage: "archive", status: "unknown" }))).toBe("unknown");
     expect(filmStatus(row({ film_id: "a", group: "done" }))).toBe("completed");
-    expect(reviewStatus({ target_path: null, absent: null, error_code: "duplicate" })).toBe("duplicate");
+    expect(reviewStatus(preflight("A", [], { error_code: "duplicate", absent: false }))).toBe("duplicate");
+    // the chosen performer record is gone: choose again, as with no match
+    expect(reviewStatus(preflight("A", [], { error_code: "missing" }))).toBe("nomatch");
+    expect(reviewStatus(preflight("A", null, { error_code: "offline" }))).toBe("offline");
     expect(reviewStatus(null)).toBe("ready");
   });
 
-  it("adds 待处理 to an older step line", () => {
-    const old = steps("restore").filter((s) => s.key !== "plan");
-    expect(lifecycle(old, "active").map((s) => s.key)[1]).toBe("plan");
-    expect(lifecycle(old, "active")[1].state).toBe("done");
-    expect(lifecycle([{ key: "intake", state: "done", note: null, progress: null }], "pending")[1].state).toBe("waiting");
+  it("keeps the eleven steps in order and reads a step not sent as not started", () => {
+    const line = lifecycle(steps("restore").filter((s) => s.key !== "asr"));
+    expect(line.map((s) => s.key)).toEqual(
+      ["intake", "plan", "restore", "asr", "translate", "return", "scrape", "confirm", "archive", "cleanup", "done"]);
+    expect(line[3].state).toBe("pending");
   });
 });
 

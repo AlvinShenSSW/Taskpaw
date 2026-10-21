@@ -55,14 +55,13 @@ export function useMediaData(): MediaData {
   return useMemo(() => {
     const items = workItems(films.data, preflights);
     const filmItems = items.filter((i) => i.status !== "pending");
-    // The rail badge counts from /films (U1 V'); the plans list is the fallback for an older backend.
-    const pendingFromFilms = items.filter((i) => i.status === "pending").length;
+    // The rail badge counts from /films (U1 V'): 待处理 = the `planning` group.
     return {
       films, plans, running, items, filmItems, preflights,
       active: items.filter((i) => ACTIVE_STATES.includes(i.status)),
       review: items.filter((i) => REVIEW_STATES.includes(i.status)),
       exceptions: items.filter((i) => EXCEPTION_STATES.includes(i.status)),
-      pendingCount: Math.max(pendingFromFilms, plans.data?.plans.length ?? 0),
+      pendingCount: films.data?.counts.planning ?? 0,
     };
   }, [films, plans, running, preflights]);
 }
@@ -89,8 +88,7 @@ export const errorText = (e: unknown) => (e instanceof Error ? e.message : Strin
 
 // Whether the dispatcher stops new claims (U1 §7.5); in-flight work continues.
 export function isPaused(data: MediaData): boolean {
-  const d = data.films.data;
-  return Boolean(d?.dispatch?.paused ?? d?.paused);
+  return Boolean(data.films.data?.dispatch?.paused);
 }
 
 // The intake reason labels and file names of a package that needs the operator (decision 5).

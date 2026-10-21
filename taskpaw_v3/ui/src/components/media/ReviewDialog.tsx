@@ -6,16 +6,17 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { Dialog } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, HttpError, type FilmDetail, type FilmRevisions, type Performer } from "../../api";
+import { api, HttpError, type FilmDetail, type FilmRevisions, type Performer, type TargetErrorCode } from "../../api";
 import { packageNote, type StatusKey } from "./mediaModel";
 import { EvidenceFold } from "./FilmDrawer";
 import { Chip, Cover, Icon, Notice } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, mediaFilmKey, mediaTargetKey, useWorkspace } from "./workspace";
 
 const BACKDROP = { sx: { backgroundColor: "#030812BA", backdropFilter: "blur(4px)" } };
-const TARGET_BLOCK: Record<string, string> = {
+const TARGET_BLOCK: Record<TargetErrorCode, string> = {
   offline: "目标 NAS 暂时离线，请稍后重试。",
   permission: "目标暂不可写，请检查权限后重试。",
+  missing: "演员记录已不存在，请重新选择。",
   duplicate: "目标已有同名影片包，不能覆盖；请打开文件夹核对。",
 };
 
@@ -51,9 +52,9 @@ export function ReviewDialog({ filmId, onClose }: { filmId: string | null; onClo
   );
 }
 
-const sameRevisions = (a: FilmRevisions | null | undefined, b: FilmRevisions | null | undefined) =>
-  (a?.final ?? null) === (b?.final ?? null) && (a?.input ?? null) === (b?.input ?? null)
-  && (a?.final_hash ?? null) === (b?.final_hash ?? null) && (a?.input_hash ?? null) === (b?.input_hash ?? null);
+const sameRevisions = (a: FilmRevisions, b: FilmRevisions) =>
+  a.final?.revision === b.final?.revision && a.final?.hash === b.final?.hash
+  && a.input?.revision === b.input?.revision && a.input?.hash === b.input?.hash;
 
 function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }) {
   const ws = useWorkspace();
@@ -61,21 +62,22 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const detail = useQuery({ queryKey: mediaFilmKey(filmId), queryFn: () => api.workflowFilm(filmId), refetchInterval: 5000 });
   const target = useQuery({ queryKey: mediaTargetKey(filmId), queryFn: () => api.workflowTarget(filmId), retry: false });
   const film = detail.data;
-  const [seenRev, setSeenRev] = useState<FilmRevisions | null | undefined>(undefined);
+  const [seenRev, setSeenRev] = useState<FilmRevisions | undefined>(undefined);
   const [selected, setSelected] = useState<Performer | null | undefined>(undefined);
   const [phase, setPhase] = useState<"review" | "submitted">("review");
   const item = ws.data.items.find((i) => i.id === filmId);
   const actor = film?.actors[0] ?? "";
-  // Candidates: the preflight's, else a performer search for the NFO actor (older backend).
+  // Candidates: the preflight's (Filmpaw searched for every NFO actor); while Filmpaw is offline
+  // (null) or the preflight failed, a manual search is offered instead.
   const search = useQuery({
     queryKey: ["mediaPerformers", actor], queryFn: () => api.performers(actor),
     enabled: target.isError && actor !== "", retry: false,
   });
-  const candidates: Performer[] | null = useMemo(
-    () => target.data?.candidates ?? (target.isError ? (actor ? search.data?.items ?? null : []) : null),
-    [target.data, target.isError, actor, search.data],
-  );
-  useEffect(() => { if (film && seenRev === undefined) setSeenRev(film.revisions ?? null); }, [film, seenRev]);
+  const candidates: Performer[] | null = useMemo(() => {
+    if (target.data) return target.data.candidates?.items ?? [];
+    return target.isError ? (actor ? search.data?.items ?? null : []) : null;
+  }, [target.data, target.isError, actor, search.data]);
+  useEffect(() => { if (film && seenRev === undefined) setSeenRev(film.revisions); }, [film, seenRev]);
   useEffect(() => {
     if (selected === undefined && candidates !== null) setSelected(candidates.length === 1 ? candidates[0] : null);
   }, [candidates, selected]);
@@ -115,8 +117,8 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
             : errorCode ? TARGET_BLOCK[errorCode]
               : !selected ? "请选择演员与目标路径。" : "";
   const title = film.title || film.name;
-  const filmDir = film.name;
-  const targetPath = selected && preflight.data?.target_path ? `${preflight.data.target_path}\\${filmDir}` : null;
+  // the backend's target already ends in the film folder (`film_dir`)
+  const targetPath = selected ? preflight.data?.target_path ?? null : null;
   const conflict = confirm.error instanceof HttpError && confirm.error.status === 409;
 
   return (
@@ -151,7 +153,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
           </ul>
         </details>
         <details className="source-box">
-          <summary className="link-btn">入库后清理：主控 INBOX / {film.package || film.name} · {film.inputs.length} 个来源文件</summary>
+          <summary className="link-btn">入库后清理：主控 INBOX / {film.name} · {film.inputs.length} 个来源文件</summary>
           <ul className="package-list">{film.inputs.map((f) => <li key={f.path} className="wrap">{f.path}</li>)}</ul>
           <p>只处理本次收件来源；若文件发生变化或仍被占用，将保留并显示待清理。</p>
         </details>
@@ -161,7 +163,7 @@ function ReviewPane({ filmId, onClose }: { filmId: string; onClose: () => void }
         <p>{blocked ? "处理后重新确认即可。" : "一次确认即可，剩余步骤由后台完成。"}</p>
         <div className="actions">
           <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>
-          {changed && <button type="button" className="btn ghost" onClick={() => { setSeenRev(film.revisions ?? null); confirm.reset(); }}>重新查看</button>}
+          {changed && <button type="button" className="btn ghost" onClick={() => { setSeenRev(film.revisions); confirm.reset(); }}>重新查看</button>}
           <button type="button" className="btn primary" disabled={Boolean(blocked) || confirm.isPending}
             onClick={() => { if (selected && !blocked) confirm.mutate(selected); }}>确认入库</button>
         </div>

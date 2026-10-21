@@ -199,22 +199,25 @@ export type LlmTestResult = {
 };
 
 // Media workflow (T06-P1 §8; U1 adds the plan gate, preflight, pause and the V3 row facts).
-// U1 fields are optional: an older backend omits them and the UI falls back.
-export type FilmGroup = "pending" | "confirm" | "active" | "attention" | "archiving" | "done";
+// The shapes are the backend's as built (U1 spec, "API appendix"); the UI tests load the
+// responses the real routes produce (fixtures/workflow-contract.json, checked by pytest).
+// `planning` is 待处理: the restore waits for the film's plan (U1 V').
+export type FilmGroup = "planning" | "confirm" | "active" | "attention" | "archiving" | "done";
 export type LtxTier = "standard" | "good" | "high";
+export type Resolution = "4K" | "1080p";
 // U1 V': the confirmed plan of a film's current input revision (null tier = 无需修复).
 export interface FilmPlan { ltx_model: LtxTier | null; machine: string }
-// U1 §7.2: the bound final/input revisions, so the 图文确认 dialog can see a change.
-export interface FilmRevisions {
-  final: number | null; final_hash?: string | null; input: number | null; input_hash?: string | null;
-}
+// U1 §7.2: the current input and final manifests, so the 图文确认 dialog can see a change.
+export interface ManifestRevision { revision: number; hash: string }
+export interface FilmRevisions { input: ManifestRevision | null; final: ManifestRevision | null }
 export interface FilmRow {
   film_id: string; name: string; group: FilmGroup; stage: string | null; status: string | null;
   note: string | null; can_confirm: boolean; can_retry: boolean; retry_stage: string | null;
   created_at: string | null; steps: WorkflowStep[];
-  resolution?: "4K" | "1080p" | null; number?: string | null; title?: string | null; actors?: string[];
-  receipt_id?: string | null; revisions?: FilmRevisions | null; plan?: FilmPlan | null;
-  has_poster?: boolean; poster_source?: string | null;
+  // final NFO > lookup > input NFO; the cover by the same precedence
+  number: string | null; title: string | null; actors: string[];
+  has_poster: boolean; poster_source: string | null;
+  resolution: Resolution | null; plan: FilmPlan | null; receipt_id: string | null; revisions: FilmRevisions;
 }
 // H2 R5 lifecycle step line; U1 V3 adds 「待处理」 (`plan`) after 入库扫描.
 export type StepKey =
@@ -233,55 +236,71 @@ export interface PackageRow {
   files: string[]; group: "active" | "attention"; steps: WorkflowStep[];
 }
 export interface WorkflowIntake { package_id: string; phase: string; bytes_completed: number; total: number }
-export interface WorkflowCurrent { film_id: string; film: string; stage: string; progress: unknown }
-export interface WorkflowDispatch { state: string; reason: string | null; paused: boolean }
-export interface WorkflowGpu { name: string | null; vram_gb: number | null }
+export interface WorkflowCurrent {
+  film_id: string; film: string; stage: string; progress: unknown; ltx?: Record<string, unknown>;
+}
+export interface WorkflowDispatch {
+  state: "idle" | "running" | "paused" | "stopping_unconfirmed"; reason: string; paused: boolean;
+}
+export interface WorkflowGpu { name: string; vram_mib: number }
+// The rail badges and the overview stats; `waiting_for_you` = planning + confirm (「等待您的确认」).
+export interface WorkflowCounts {
+  planning: number; active: number; attention: number; confirm: number; archiving: number; done: number;
+  packages_attention: number; waiting_for_you: number;
+}
 export interface WorkflowFilms {
   state: string; reason: string | null; current: WorkflowCurrent | null; intake: WorkflowIntake | null;
-  films: FilmRow[]; packages: PackageRow[];
-  dispatch?: WorkflowDispatch | null; paused?: boolean; gpu?: WorkflowGpu | null;
+  films: FilmRow[]; packages: PackageRow[]; counts: WorkflowCounts;
+  // null without a host (dispatch) or without a probed GPU
+  dispatch: WorkflowDispatch | null; gpu: WorkflowGpu | null;
 }
 export interface FilmDetail {
   film_id: string; name: string; number: string | null; title: string | null; actors: string[];
   marks: { restored: boolean; chinese_subtitles: boolean; uhd: boolean };
   files: Array<{ role: string; path: string; size: number | null; volume: number | string | null }>;
   inputs: Array<{ path: string; size: number | null }>;
-  workcopy_count: number; has_poster: boolean; poster_source?: string | null;
+  workcopy_count: number; has_poster: boolean; poster_source: string | null;
   group: FilmGroup; can_confirm: boolean; can_retry: boolean; retry_stage: string | null; note: string | null;
   stages: Array<{ stage: string; status: string; note: string | null }>; steps: WorkflowStep[];
   archive: { status: string | null; error: string | null; target_path: string | null };
   cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
-  resolution?: "4K" | "1080p" | null; receipt_id?: string | null; revisions?: FilmRevisions | null;
-  plan?: FilmPlan | null; package?: string | null;
+  resolution: Resolution | null; receipt_id: string | null; revisions: FilmRevisions; plan: FilmPlan | null;
+  // null when Miko is not configured
+  lookup: PlanLookup | null;
 }
 export interface Performer {
   id: number | string; name: string; source_label: string | null; unc_path: string | null;
   has_thumb: boolean; aliases: string[];
 }
-// U1 §7.3: the archive target preflight, and the performer candidates of the film's NFO actor.
-export type TargetErrorCode = "offline" | "permission" | "duplicate";
+// U1 §7.3: the archive target preflight (read-only) and Filmpaw's candidates for the film's NFO
+// actors. Without a performer only `candidates` is filled; `target_path` already ends in `film_dir`.
+// `missing`: the chosen performer record is gone; `candidates` is null while Filmpaw is offline.
+export type TargetErrorCode = "offline" | "permission" | "missing" | "duplicate";
 export interface TargetPreflight {
-  target_path: string | null; absent: boolean | null; error_code: TargetErrorCode | null;
-  candidates?: Performer[] | null;
+  film_dir: string; performer_id: string | null; target_path: string | null; absent: boolean | null;
+  error_code: TargetErrorCode | null; message: string | null;
+  candidates: { query: string[]; items: Performer[] } | null;
 }
 // U1 P3': one unplanned film on the 待处理 list, with the recommendation and its reasons
-// (backend `workflow/planning.py`). `lookup` is the MDCX metadata preview (v2 L).
+// (backend `workflow/planning.py`). `lookup` is the Miko metadata preview (v2 L).
 export type LookupStatus = "succeeded" | "failed" | "running" | "queued";
 export interface PlanLookup {
   status: LookupStatus; number: string | null; title: string | null; actors: string[];
-  message: string | null; can_requery: boolean; has_poster?: boolean;
+  studio: string | null; release: string | null; runtime_min: number | null; has_poster: boolean;
+  error_class: string | null; message: string | null; can_requery: boolean;
 }
 export interface PlanRecommendation { ltx_model: LtxTier | null; ltx_reason: string; machine: string; machine_reason: string }
 export interface PlanEntry {
-  film_id: string; input_revision: number; revision_changed?: boolean; name: string;
+  film_id: string; input_revision: number; revision_changed: boolean; name: string;
   title: string | null; number: string | null; actors: string[];
-  has_poster: boolean; poster_source?: string | null; resolution: "4K" | "1080p" | null;
-  duration_ms: number | null; size_bytes: number | null; video_count?: number; item_count: number;
-  needs_gpu: boolean; lookup: PlanLookup | null; recommendation: PlanRecommendation;
+  has_poster: boolean; poster_source: string | null; resolution: Resolution | null;
+  width: number | null; height: number | null; duration_ms: number | null; size_bytes: number | null;
+  video_count: number; item_count: number; needs_gpu: boolean; created_at: string;
+  lookup: PlanLookup | null; recommendation: PlanRecommendation;
 }
-export interface PlanMachine { id: string; name: string; gpu?: string | null; vram_mib?: number | null; reason?: string | null }
+export interface PlanMachine { id: string; name: string; gpu: string | null; vram_mib: number | null; reason: string }
 export interface WorkflowPlans {
-  plans: PlanEntry[]; default_tier?: LtxTier;
+  plans: PlanEntry[]; default_tier: LtxTier;
   choices: { tiers: Array<{ value: LtxTier; label: string }>; machines: PlanMachine[] };
 }
 export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string }

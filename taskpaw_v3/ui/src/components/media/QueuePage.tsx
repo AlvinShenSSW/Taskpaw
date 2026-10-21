@@ -84,8 +84,7 @@ function FilmCard({ item }: { item: WorkItem }) {
           </>
         )}
       </div>
-      <StepLine steps={item.kind === "film" ? item.row.steps : item.pkg.steps}
-        group={item.kind === "film" ? item.row.group : undefined} title={title} />
+      <StepLine steps={item.kind === "film" ? item.row.steps : item.pkg.steps} title={title} />
       <div className="card-foot">
         <span>{item.kind === "package" ? "INBOX" : item.status === "encode" || item.status === "denoise" ? "本机" : "INBOX"}</span>
         {item.kind === "film" ? (

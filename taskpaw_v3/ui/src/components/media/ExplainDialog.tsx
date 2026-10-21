@@ -53,7 +53,7 @@ function ExplainPane({ explain, onClose }: { explain: NonNullable<Explain>; onCl
           <p>{film?.receipt_id ? `回执 ${film.receipt_id} · ` : ""}{target}</p>
         </div>
         <dl className="facts">
-          <dt>允许清理</dt><dd>主控 INBOX / {film?.package || film?.name || explain.filmId} 内 {film?.inputs.length ?? 0} 个原始文件</dd>
+          <dt>允许清理</dt><dd>主控 INBOX / {film?.name || explain.filmId} 内 {film?.inputs.length ?? 0} 个原始文件</dd>
           <dt>未能清理</dt><dd>{kept.length ? kept.map((k) => k.path).join("、") : "—"}</dd>
           <dt>重试检查</dt><dd>当前回执、收件根授权、输入身份与内容、唯一清理持有者</dd>
           <dt>若文件变了</dt><dd>立即保留来源并转人工核对</dd>

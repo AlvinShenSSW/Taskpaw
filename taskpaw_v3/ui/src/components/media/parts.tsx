@@ -75,7 +75,7 @@ export function Cover({ filmId, hasPoster, source, size = "row", label }: {
 export function ItemCover({ item, size }: { item: WorkItem; size?: CoverSize }) {
   const title = item.kind === "film" ? item.row.title || item.row.name : item.pkg.name;
   return item.kind === "film"
-    ? <Cover filmId={item.row.film_id} hasPoster={Boolean(item.row.has_poster)} source={item.row.poster_source}
+    ? <Cover filmId={item.row.film_id} hasPoster={item.row.has_poster} source={item.row.poster_source}
       size={size} label={title} />
     : <Cover filmId={null} hasPoster={false} size={size} label={title} />;
 }
@@ -115,8 +115,8 @@ export function StageBlock({ item }: { item: WorkItem }) {
 }
 
 // The lifecycle step line (operator decision 4; U1 V3 adds 待处理).
-export function StepLine({ steps, group, title }: { steps?: WorkflowStep[] | null; group?: string; title: string }) {
-  const line = lifecycle(steps, group);
+export function StepLine({ steps, title }: { steps?: WorkflowStep[] | null; title: string }) {
+  const line = lifecycle(steps);
   const cur = currentStep(line);
   return (
     <ol className="step-line" aria-label={`${title} 生命周期`}>

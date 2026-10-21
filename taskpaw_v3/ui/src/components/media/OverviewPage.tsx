@@ -11,7 +11,8 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api";
 import {
-  gpuLabel, itemActors, itemNumber, itemResolution, itemTitle, REVIEW_STATES, type StageFilter, type WorkItem,
+  fmtVram, gpuLabel, itemActors, itemNumber, itemResolution, itemTitle, REVIEW_STATES, takes4k, type StageFilter,
+  type WorkItem,
 } from "./mediaModel";
 import { Chip, Icon, ItemCover, Notice, PageTitle, StageBlock, StatusChip } from "./parts";
 import { errorText, isPaused, MEDIA_FILMS_KEY, useWorkspace } from "./workspace";
@@ -36,7 +37,9 @@ export function OverviewPage() {
   const ltx = count((i) => i.status === "encode" || i.status === "denoise");
   const pending = data.pendingCount;
   const review = data.review.length;
+  const waiting = data.films.data?.counts.waiting_for_you ?? pending + review;
   const gpu = data.films.data?.gpu;
+  const uhd = takes4k(gpu);
   const flow: Array<[string, number, StageFilter | "pending", boolean]> = [
     ["收件", count((i) => i.status === "inbox" || i.status === "receiving"), "inbox", false],
     ["待处理", pending, "pending", true],
@@ -70,7 +73,7 @@ export function OverviewPage() {
         </div>
         <div className="panel stat">
           <div className="label">等待您的确认<Icon of={FactCheckIcon} /></div>
-          <strong className="t-amber">{pending + review}<em>部影片</em></strong>
+          <strong className="t-amber">{waiting}<em>部影片</em></strong>
           <div className="note">{pending} 部待安排 · {review} 部待入库</div>
         </div>
         <div className="panel stat">
@@ -154,11 +157,11 @@ export function OverviewPage() {
               <div className="device-meta">
                 <span className="device-icon"><Icon of={ComputerIcon} /></span>
                 <div>
-                  <div className="name">{gpu?.name ?? "本机 GPU"} {gpu?.vram_gb != null && <span className="muted">{gpu.vram_gb} GB</span>}</div>
+                  <div className="name">{gpu?.name ?? "本机 GPU"} {gpu && <span className="muted">{fmtVram(gpu.vram_mib)}</span>}</div>
                   <div className="desc">本机 + 主控{paused ? " · 新领取已暂停" : ""}</div>
                 </div>
               </div>
-              <Chip tone={(gpu?.vram_gb ?? 0) >= 16 ? "blue" : "neutral"}>{(gpu?.vram_gb ?? 0) >= 16 ? "4K 优先" : "仅 1080p"}</Chip>
+              <Chip tone={uhd ? "blue" : "neutral"}>{uhd ? "4K 优先" : "仅 1080p"}</Chip>
             </div>
           </section>
         </div>

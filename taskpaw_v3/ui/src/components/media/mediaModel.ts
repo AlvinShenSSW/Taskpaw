@@ -61,20 +61,11 @@ export const STEP_LABEL: Record<StepKey, string> = {
   scrape: "整理", confirm: "待确认", archive: "归档", cleanup: "清理", done: "完成",
 };
 
-// The fixed eleven steps in order. A backend without the 待处理 step gets one: waiting while the
-// film is unplanned, done once intake is done and the film has moved on.
-export function lifecycle(steps: WorkflowStep[] | null | undefined, group?: string): WorkflowStep[] {
+// The fixed eleven steps in order; the backend sends every one (film and package rows alike), so
+// a missing key only reads as not started.
+export function lifecycle(steps: WorkflowStep[] | null | undefined): WorkflowStep[] {
   const byKey = new Map((steps ?? []).map((s) => [s.key, s]));
-  return STEP_KEYS.map((key): WorkflowStep => {
-    const sent = byKey.get(key);
-    if (sent) return sent;
-    if (key === "plan") {
-      const intakeDone = byKey.get("intake")?.state === "done";
-      const state = group === "pending" ? "waiting" : intakeDone ? "done" : "pending";
-      return { key, state, note: null, progress: null };
-    }
-    return { key, state: "pending", note: null, progress: null };
-  });
+  return STEP_KEYS.map((key): WorkflowStep => byKey.get(key) ?? { key, state: "pending", note: null, progress: null });
 }
 
 // The highlighted step: the first one running, waiting or failed; else the next not started; else the last.
@@ -98,10 +89,12 @@ export function ltxOf(row: { steps?: WorkflowStep[] | null }): LtxSnapshot | nul
 }
 
 // What the preflight says about a film waiting for 确认入库: a target error, else the candidate count.
+// `missing` (the chosen performer record is gone) asks for a new choice, as no match does.
 export function reviewStatus(preflight: TargetPreflight | null | undefined): StatusKey {
   if (!preflight) return "ready";
-  if (preflight.error_code) return preflight.error_code;
-  const n = preflight.candidates?.length;
+  const code = preflight.error_code;
+  if (code) return code === "missing" ? "nomatch" : code;
+  const n = preflight.candidates?.items.length;
   if (n === 0) return "nomatch";
   if (n !== undefined && n > 1) return "multi";
   return "ready";
@@ -110,7 +103,7 @@ export function reviewStatus(preflight: TargetPreflight | null | undefined): Sta
 export function filmStatus(row: FilmRow, preflight?: TargetPreflight | null): StatusKey {
   const stage = row.stage ?? "";
   switch (row.group) {
-    case "pending": return "pending";
+    case "planning": return "pending";
     case "done": return "completed";
     case "confirm": return reviewStatus(preflight);
     case "archiving": return stage === "archive" && row.status === "unknown" ? "unknown" : "archiving";
@@ -280,13 +273,18 @@ export const fmtDurationMs = (ms: number | null | undefined) => fmtDuration(ms =
 // 「本机 · RTX 5070 Ti 16 GB」 from a plan machine (backend `planning.machines`).
 export function machineLabel(m: { name: string; gpu?: string | null; vram_mib?: number | null } | undefined, fallback = "本机"): string {
   if (!m) return fallback;
-  const gpu = [m.gpu, m.vram_mib ? `${Math.round(m.vram_mib / 1024)} GB` : null].filter(Boolean).join(" ");
+  const gpu = [m.gpu, fmtVram(m.vram_mib)].filter(Boolean).join(" ");
   return gpu ? `${m.name} · ${gpu}` : m.name;
 }
 
-export const fmtVram = (gb: number | null | undefined) => (gb == null ? "" : `${gb} GB`);
-export const gpuLabel = (gpu: WorkflowFilms["gpu"]) =>
-  [gpu?.name, fmtVram(gpu?.vram_gb)].filter(Boolean).join(" ");
+// VRAM in whole GB, as the backend's reasons spell it (8151 MiB → 8 GB).
+export const vramGb = (mib: number | null | undefined) => (mib ? Math.round(mib / 1024) : null);
+export const fmtVram = (mib: number | null | undefined) => (vramGb(mib) === null ? "" : `${vramGb(mib)} GB`);
+export const gpuLabel = (gpu: WorkflowFilms["gpu"] | undefined) =>
+  [gpu?.name, fmtVram(gpu?.vram_mib)].filter(Boolean).join(" ");
+// The card may restore 4K: the backend's boundary (local_gpu.FOUR_K_VRAM_MIB, 16 GB-class cards).
+export const FOUR_K_VRAM_MIB = 15360;
+export const takes4k = (gpu: WorkflowFilms["gpu"] | undefined) => (gpu?.vram_mib ?? 0) >= FOUR_K_VRAM_MIB;
 
 // The package file note of the 图文确认 list (§6).
 export function packageNote(role: string, path: string): string {

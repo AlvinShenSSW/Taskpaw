@@ -31,7 +31,7 @@ export function ReviewPage() {
           {items.map((item) => {
             const pf = ws.data.preflights[item.id];
             const actor = itemActors(item);
-            const candidates = pf?.candidates ?? null;
+            const candidates = pf?.candidates?.items ?? null;
             const target = item.status === "ready" && candidates?.length === 1
               ? [candidates[0].source_label, candidates[0].name].filter(Boolean).join(" / ") : null;
             return (

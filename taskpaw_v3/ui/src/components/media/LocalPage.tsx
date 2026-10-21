@@ -2,7 +2,7 @@ import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import ComputerIcon from "@mui/icons-material/Computer";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api";
-import { gpuLabel } from "./mediaModel";
+import { fmtVram, gpuLabel, takes4k } from "./mediaModel";
 import { FilmRowView } from "./OverviewPage";
 import { Chip, Icon, Notice, PageTitle } from "./parts";
 import { isPaused, useWorkspace } from "./workspace";
@@ -13,8 +13,8 @@ export function LocalPage() {
   const ws = useWorkspace();
   const status = useQuery({ queryKey: ["agentStatus"], queryFn: api.agentStatus, refetchInterval: 5000 });
   const gpu = ws.data.films.data?.gpu;
-  const vram = gpu?.vram_gb ?? null;
-  const uhd = vram !== null && vram >= 16;
+  const vram = gpu ? fmtVram(gpu.vram_mib) : null;
+  const uhd = takes4k(gpu);
   const current = ws.data.films.data?.current;
   const running = current ? ws.data.items.find((i) => i.id === current.film_id) : undefined;
   const machine = status.data?.machine ?? "本机";
@@ -33,8 +33,8 @@ export function LocalPage() {
               <Chip tone={isPaused(ws.data) ? "amber" : "green"}>{isPaused(ws.data) ? "新领取已暂停" : "在线"}</Chip>
             </div>
             <div className="metric-grid">
-              <div><label>显存容量</label><strong>{vram === null ? "—" : `${vram} GB`}</strong></div>
-              <div><label>任务资格</label><strong className={`text-value${uhd ? " t-blue" : ""}`}>{vram === null ? "—" : uhd ? "4K 优先" : "仅 1080p"}</strong></div>
+              <div><label>显存容量</label><strong>{vram || "—"}</strong></div>
+              <div><label>任务资格</label><strong className={`text-value${uhd ? " t-blue" : ""}`}>{!gpu ? "—" : uhd ? "4K 优先" : "仅 1080p"}</strong></div>
             </div>
           </article>
           <section className="panel" aria-labelledby="local-task">
@@ -42,7 +42,7 @@ export function LocalPage() {
             {running ? <FilmRowView item={running} /> : (
               <div className="empty">
                 <h2>本机当前空闲</h2>
-                {vram !== null && !uhd && <p>全局队列中的 4K 影片不会派给这台 {vram} GB 设备。</p>}
+                {vram && !uhd && <p>全局队列中的 4K 影片不会派给这台 {vram} 设备。</p>}
               </div>
             )}
           </section>

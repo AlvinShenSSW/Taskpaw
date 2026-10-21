@@ -48,7 +48,7 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     onError: (e) => ws.toast(errorText(e)),
   });
   const reasons = useIntakeReasons();
-  const status = item?.status ?? (film?.group === "pending" ? "pending" : "receiving");
+  const status = item?.status ?? (film?.group === "planning" ? "pending" : "receiving");
   const primary = () => {
     if (REVIEW_STATES.includes(status)) {
       return <button type="button" className="btn primary" onClick={() => ws.openReview(filmId)}>查看并确认入库</button>;
@@ -104,7 +104,6 @@ function DrawerBody({ film, item, status, plan }: {
   const final = film.files.length > 0;
   const subtitle = film.marks.chinese_subtitles ? "字幕：已验证的非空中文字幕。"
     : final ? "本片无语音，不宣称已完成中文字幕。" : "字幕成果待后处理核对。";
-  const pkg = film.package || film.name;
   const receipt = film.receipt_id ?? (film.archive.status === "succeeded" ? "已入库" : null);
   const plannedFacts = status === "pending" ? (
     <>
@@ -134,7 +133,7 @@ function DrawerBody({ film, item, status, plan }: {
           <p>来源：主控收件目录 INBOX · 本机</p>
         </div>
       </div>
-      <div className="detail-steps"><StepLine steps={film.steps} group={film.group} title={title} /></div>
+      <div className="detail-steps"><StepLine steps={film.steps} title={title} /></div>
       {ltx ? (
         <div>
           <LtxProgress metrics={ltx} />
@@ -161,7 +160,7 @@ function DrawerBody({ film, item, status, plan }: {
       <dl className="facts spacer-top">
         {plannedFacts}
         <dt>目标</dt><dd>{film.archive.target_path || "尚未确定目标"}</dd>
-        <dt>原始来源</dt><dd>主控 INBOX / {pkg} · 本次收件 {film.inputs.length} 项</dd>
+        <dt>原始来源</dt><dd>主控 INBOX / {film.name} · 本次收件 {film.inputs.length} 项</dd>
         <dt>入库结果</dt><dd>{receipt || "尚未入库"}</dd>
         <dt>来源清理</dt><dd>{film.cleanup.input ? CLEANUP_STATE[film.cleanup.input] ?? film.cleanup.input : "入库完成后自动检查并清理本次来源"}</dd>
       </dl>
@@ -180,8 +179,8 @@ export function EvidenceFold({ film }: { film: FilmDetail }) {
       <summary className="link-btn">查看后台检查记录</summary>
       <dl className="facts spacer-top">
         <dt>收件检查</dt><dd>{intakeDone ? "已通过：稳定检查、写占用检查、媒体探测及一致副本校验" : "等待检查；尚未进入计算"}</dd>
-        <dt>成品版本</dt><dd className="mono">{rev?.final != null ? `R${rev.final}${rev.final_hash ? ` · ${rev.final_hash.slice(0, 16)}` : ""}` : "尚无成品"}</dd>
-        <dt>来源版本</dt><dd className="mono">{rev?.input != null ? `R${rev.input}${rev.input_hash ? ` · ${rev.input_hash.slice(0, 16)}` : ""}` : "—"}</dd>
+        <dt>成品版本</dt><dd className="mono">{rev.final ? `R${rev.final.revision} · ${rev.final.hash.slice(0, 16)}` : "尚无成品"}</dd>
+        <dt>来源版本</dt><dd className="mono">{rev.input ? `R${rev.input.revision} · ${rev.input.hash.slice(0, 16)}` : "—"}</dd>
         <dt>清理边界</dt><dd>只处理本次输入清单；新增文件、其他影片、父目录和 NAS 正式片库均不删除。</dd>
       </dl>
       {film.files.length > 0 && (
