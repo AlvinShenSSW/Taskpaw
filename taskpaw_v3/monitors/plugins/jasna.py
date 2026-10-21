@@ -27,8 +27,8 @@ every file of the task AT LAUNCH ONLY — the operator's own fields are never
 rewritten, so unticking launches with them again.
 
 「1080p 档：使用 LTX」(#263, `ltx_1080p`): the 1080p-tier files launch with
-Jasna 0.11.1's LTX restoration model (`--restoration-model-name ltx` /
-`ltx-undistilled`, `--ltx-fast`, `--ltx-auto-split`); 4K-tier files and every
+Jasna's LTX restoration model (`--restoration-model-name`, `--ltx-fast`,
+`--ltx-auto-split`); 4K-tier files and every
 other setting launch exactly as before (LTX cannot finish a 4K file on an 8 GB
 card). While ticked, 8K VR and the 1080p unet-4x are off at launch — their saved
 values are untouched. LTX launches keep Jasna's scratch in the output folder's
@@ -40,6 +40,24 @@ an 8 GB card fails 4K LTX). The LTX options follow the GPU, queried once per
 Start: `--ltx-fast` only on a Blackwell card (RTX 50), `--ltx-large-canvas` only
 when every GPU has 16 GB or more. A failed LTX launch is not relaunched (the next
 Start tries the film again).
+
+LTX quality (#283, `ltx_model`; three tiers since #285): Jasna 0.11.3's
+standard (`ltx`, the new default and the fastest), good (`ltx-4step`) and high
+(`ltx-8step`, the `ltx` of 0.11.2 and earlier) — each with its own model
+download. A legacy `ltx_best` key still loads: true becomes high, otherwise
+standard (an explicit `ltx_model` wins); the editor is shown the mapped config.
+
+Output bitrate (#285, `match_source_bitrate`, on by default): each file's source
+video bitrate B is probed with ffprobe next to its resolution (Jasna's own order:
+the stream, its BPS / BPS-eng tags, the container) and every launch, LTX or not,
+passes `--encoder-settings maxrate=B,qmax=51`: a 1.0x ceiling for every codec
+(Jasna's own cap reaches 2x for H.264 output, which LTX auto-split writes for an
+H.264 source). NVIDIA only — qmax=51 is not an AMD (AMF) encoder setting, so Jasna
+rejects the flag there: turn the option off on an AMD GPU. The cap bounds the
+bitrate (the container fallback includes audio; maxrate is a peak limit), so the
+file ends up about the source's size. A failed probe adds nothing — Jasna's own cap
+applies — and logs one warning per file. A 3.9.17 config (no such key) whose
+extra args already set `--encoder-settings` keeps it and loads with the option off.
 
 Passive mode (no exe path) just watches an externally-running `jasna` process,
 exactly like lada's passive mode.
@@ -93,6 +111,7 @@ counted in the `done` text.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -106,7 +125,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable, Literal, Optional
+from typing import Any, Callable, Iterable, Literal, Optional
 
 from pydantic import Field, model_validator
 
@@ -191,6 +210,62 @@ from taskpaw_v3.monitors.subs.whisperjav import (
 log = logging.getLogger("taskpaw.monitors.jasna")
 
 Tier = Literal["1080p", "4k"]
+#: #283: Jasna 0.11.3's LTX quality tiers (`ltx_model`); #285 C1' dropped top.
+LtxModel = Literal["standard", "good", "high"]
+#: #283 C1: the `--restoration-model-name` each tier launches with.
+LTX_MODEL_NAMES: dict[str, str] = {
+    "standard": "ltx",
+    "good": "ltx-4step",
+    "high": "ltx-8step",
+}
+#: #283 C5: the select's English option titles (the zh overlay translates them).
+_LTX_MODEL_TITLES = (
+    ("standard", "Standard (default, fastest)"),
+    ("good", "Good (~1.5x slower)"),
+    ("high", "High (~2.5x slower)"),
+)
+#: #285 C9: the cq default, and the pre-3.9.18 one a legacy config moves off.
+_DEFAULT_CQ = 20
+_LEGACY_DEFAULT_CQ = 24
+
+
+def _ltx_model_select(schema: dict) -> None:
+    """#283 C5: render `ltx_model` as a select with titled options (rjsf reads
+    `oneOf` titles only when there is no `enum`)."""
+    schema.pop("enum", None)
+    schema["oneOf"] = [{"const": v, "title": t} for v, t in _LTX_MODEL_TITLES]
+
+
+def migrate_legacy_ltx(raw: Any) -> Any:
+    """#283 C2: map the legacy `ltx_best` tickbox onto `ltx_model` (a copy; the
+    input is never mutated). `ltx_best: true` becomes high (#285 C1'), anything
+    else standard; an `ltx_model` already present wins. #285 C9: the key marks a
+    pre-3.9.18 config, whose cq 24 (the old default) moves to 20 as well. #285
+    V03: the top tier of an unreleased four-tier build becomes high. Other input
+    is returned as is. #285 review F1: a 3.9.17 config never had
+    `match_source_bitrate`, and its own `--encoder-settings` extra arg was allowed
+    then — it keeps the flag and gets the option off instead of failing to boot
+    (an explicit `match_source_bitrate` is never touched)."""
+    if not isinstance(raw, dict):
+        return raw
+    if raw.get("ltx_model") == "top":
+        raw = {**raw, "ltx_model": "high"}
+    extra = raw.get("jasna_extra_args")
+    if (
+        "match_source_bitrate" not in raw
+        and isinstance(extra, str)
+        and encoder_settings_in(extra)
+    ):
+        raw = {**raw, "match_source_bitrate": False}
+    if "ltx_best" not in raw:
+        return raw
+    out = dict(raw)
+    best = out.pop("ltx_best")
+    out.setdefault("ltx_model", "high" if best is True else "standard")
+    if out.get("cq") == _LEGACY_DEFAULT_CQ:
+        out["cq"] = _DEFAULT_CQ
+    return out
+
 
 #: Containers Jasna's own CLI accepts (its folder mode scans the same set) —
 #: the shared common-video set the subtitle attribution uses too (#191).
@@ -227,8 +302,12 @@ _OWNED_FLAGS = (
 # --detection-model-path would silently swap the pinned VR detector's weights.
 # With the tick off both pass through (e.g. a hand-set sbs-fisheye).
 _VR8K_OWNED_FLAGS = ("--vr-mode", "--detection-model-path")
+# Owned only while `match_source_bitrate` is on (#285 C8): the launch passes its
+# source-tied maxrate there, and a second --encoder-settings would replace it.
+_BITRATE_OWNED_FLAG = "--encoder-settings"
+_CAP_QMAX = 51  # #285: NVENC's own ceiling, above Jasna's default qmax 34
 
-_PROBE_TIMEOUT = 5.0  # fits the supervisor's 5s stop / 10s reconfigure budgets
+_PROBE_TIMEOUT = 5.0  # one probe fits the supervisor's 10s reconfigure budget
 _ORPHAN_STAGING_AGE = 60.0  # don't sweep a staging file another run may be writing
 _ABORT_AFTER_FAILURES = 3
 _DEFAULT_DETECTION_MODEL = "rfdetr-v6"
@@ -427,6 +506,78 @@ def probe_resolution(video: Path, ffprobe: Optional[str]) -> Optional[tuple[int,
     if width <= 0 or height <= 0:
         return None
     return width, height
+
+
+def _positive_int(value: Any) -> Optional[int]:
+    """Jasna's parse of a probed bitrate: `int(float(x))`; N/A, invalid or not
+    above 0 → None (the next candidate is tried)."""
+    try:
+        n = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return n if n > 0 else None
+
+
+def probe_bitrate(video: Path, ffprobe: Optional[str]) -> Optional[int]:
+    """#285 C8: the source video bitrate in bits/s, or None on ANY failure.
+    Jasna 0.11.3's own order (`media/probe.py`): the first video stream's
+    `bit_rate`, then its `BPS` / `BPS-eng` tags (Matroska), then the container's
+    `bit_rate`. A second ffprobe call, so `probe_resolution` stays as it is."""
+    if not ffprobe:
+        return None
+    try:
+        # shell=False (list argv) — constitution §2.
+        out = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=bit_rate:stream_tags=BPS,BPS-eng:format=bit_rate",
+                "-of",
+                "json",
+                str(video),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_PROBE_TIMEOUT,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        # debug: the caller (`_probe_bitrate`) logs the one warning per file
+        log.debug("jasna: ffprobe (bitrate) failed for %s: %s", video, e)
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        doc = json.loads(out.stdout or "")
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    streams = doc.get("streams")
+    stream = streams[0] if isinstance(streams, list) and streams else {}
+    stream = stream if isinstance(stream, dict) else {}
+    tags = stream.get("tags")
+    tags = (
+        {str(k).upper(): v for k, v in tags.items()} if isinstance(tags, dict) else {}
+    )
+    fmt = doc.get("format")
+    fmt = fmt if isinstance(fmt, dict) else {}
+    for value in (
+        stream.get("bit_rate"),
+        tags.get("BPS"),
+        tags.get("BPS-ENG"),
+        fmt.get("bit_rate"),
+    ):
+        rate = _positive_int(value)
+        if rate is not None:
+            return rate
+    return None
 
 
 def plan_queue(
@@ -695,10 +846,11 @@ def vr_detector_available(exe_dir: Optional[str]) -> bool:
     return _weights_available(exe_dir, _VR8K_DETECTION_MODEL)
 
 
-def ltx_missing_files(exe_dir: Optional[str], best: bool, fast: bool) -> list[str]:
-    """#263 AC4: which files of the selected LTX variant are not in
-    `<exe dir>/model_weights/ltx-restore` (all of them without an exe dir)."""
-    names = [_LTX_MODEL_FILES[(best, fast)], *_LTX_SHARED_FILES]
+def ltx_missing_files(exe_dir: Optional[str], model: str, fast: bool) -> list[str]:
+    """#263 AC4: which files of the selected LTX variant (#283: the `ltx_model`
+    tier, int8 or nvfp4 when fast) are not in `<exe dir>/model_weights/ltx-restore`
+    (all of them without an exe dir)."""
+    names = [_LTX_MODEL_FILES[(model, fast)], *_LTX_SHARED_FILES]
     if not exe_dir:
         return names
     folder = Path(exe_dir) / "model_weights" / "ltx-restore"
@@ -1013,6 +1165,12 @@ def owned_flags_in(extra: str, vr_8k: bool = False) -> list[str]:
     return found
 
 
+def encoder_settings_in(extra: str) -> bool:
+    """#285 C8: whether `extra` sets --encoder-settings (exact, `=value`, or an
+    argparse abbreviation such as `--encoder`)."""
+    return any(_selects(n, _BITRATE_OWNED_FLAG) for n in _flag_names(extra))
+
+
 def ltx_options_in(extra: str) -> list[str]:
     """#263 AC3: the LTX options `extra` sets (exact, `=value`, abbreviation)."""
     names = _flag_names(extra)
@@ -1153,7 +1311,7 @@ class JasnaConfig(BaseMonitorConfig):
         description="1080p tier only: 4K files and every other setting stay as "
         "they are. The 4K tier has its own LTX tickbox. The 1080p-tier files are "
         "restored with Jasna's supporter model "
-        "LTX (Jasna 0.11.1 or newer; more detail, much slower; NVIDIA RTX). While "
+        "LTX (Jasna 0.11.3 or newer; more detail, much slower; NVIDIA RTX). While "
         "ticked, 8K VR and the 1080p unet-4x are not used (LTX supports neither) "
         "and keep their saved values for when this is unticked. The first LTX "
         "launch asks to download the model (about 9 GB with fast mode, 15 GB "
@@ -1175,8 +1333,8 @@ class JasnaConfig(BaseMonitorConfig):
         description="--ltx-fast: about 1.4x faster, slightly less detail, a "
         "smaller download. RTX 50-series GPUs only — TaskPaw checks the GPU at "
         "Start and launches without it when it finds none (e.g. an RTX 4090). On "
-        "by default: the standard LTX model does not fit an 8 GB card. Only used "
-        "with LTX.",
+        "by default: the int8 model (without fast mode) does not fit an 8 GB card. "
+        "Only used with LTX.",
     )
     ltx_auto_split: int = Field(
         12,
@@ -1189,12 +1347,15 @@ class JasnaConfig(BaseMonitorConfig):
         "the whole film with LTX when it finds no safe cut points. Only used with "
         "LTX.",
     )
-    ltx_best: bool = Field(
-        False,
-        title="LTX best model",
-        description="--restoration-model-name ltx-undistilled: slightly more "
-        "detail, about 1.5-1.8x slower, its own model download. Only used with "
-        "LTX.",
+    ltx_model: LtxModel = Field(
+        "standard",
+        title="LTX quality",
+        description="--restoration-model-name: Standard (ltx) is Jasna 0.11.3's "
+        "default and the fastest; Good (ltx-4step) and High (ltx-8step) add detail "
+        "and take longer. Each tier has its own model download. The tiers need "
+        "Jasna 0.11.3 or newer: on 0.11.2 Standard runs the old High model, and "
+        "Good and High fail with Jasna's own error. Only used with LTX.",
+        json_schema_extra=_ltx_model_select,
     )
     ltx_large_canvas: bool = Field(
         False,
@@ -1209,7 +1370,7 @@ class JasnaConfig(BaseMonitorConfig):
     ltx_overlap: Literal["auto", "on", "off"] = Field(
         "auto",
         title="LTX reduced overlap (0.11.2+)",
-        description="auto: use Jasna's default (on in 0.11.2 Windows); on/off: explicitly enable/disable reduced overlap. About 13% faster on long videos. Only applies to LTX, not BasicVSR++ temporal overlap.",
+        description="auto: use Jasna's default (on in 0.11.2 Windows); on/off: explicitly enable/disable reduced overlap. About 13% faster when a mosaic stays on screen for more than 4 seconds. Only applies to LTX, not BasicVSR++ temporal overlap.",
     )
     vr_8k_custom: bool = Field(
         False,
@@ -1253,11 +1414,29 @@ class JasnaConfig(BaseMonitorConfig):
         description="Output video codec (--codec). hevc matches Jasna's own default.",
     )
     cq: int = Field(
-        24,
+        _DEFAULT_CQ,
         ge=0,
         le=63,
         description="Constant-quality level (--cq), 0-63. Lower = better quality "
-        "and a bigger file; 24 is Jasna's default.",
+        "and a bigger file. With 'Output bitrate follows the source' on, a lower "
+        "cq lets the source-tied ceiling, not cq, decide the size: the output "
+        "is about the source size, capped at its bitrate. Applies to every output "
+        "codec; a low cq on av1 is bound by the ceiling too. 20 is the default (24 "
+        "before TaskPaw 3.9.18); Jasna's own default is 28.",
+    )
+    match_source_bitrate: bool = Field(
+        True,
+        title="Output bitrate follows the source",
+        description="Every launch (LTX or not) caps the output at 1.0x the source "
+        "video's bitrate, whatever the codec: TaskPaw reads it with ffprobe and "
+        "passes --encoder-settings maxrate=<source>,qmax=51, so the restored file "
+        "is about the source's size, capped at its bitrate (the container fallback "
+        "includes audio; maxrate is a peak limit). Jasna's own "
+        "cap allows up to 2x for H.264 output, which LTX auto-split writes for an "
+        "H.264 source. NVIDIA GPUs only: on an AMD GPU turn this off (Jasna rejects "
+        "these settings there). When the bitrate cannot be read, nothing is added and "
+        "Jasna's own cap applies. While on, --encoder-settings is rejected in the "
+        "extra args.",
     )
     detection_model: str = Field(
         _DEFAULT_DETECTION_MODEL,
@@ -1280,8 +1459,10 @@ class JasnaConfig(BaseMonitorConfig):
         "VR is ticked, --vr-mode and --detection-model-path are rejected too. "
         "`--secondary-restoration` here overrides the tickboxes for every file "
         "and disables the automatic unet-4x degrade (the relaunch would carry the "
-        "same flag). Passing `--encoder-settings cq=...` alongside --cq is Jasna's "
-        "own error. LTX options (--ltx-*, --restoration-model-name) are always "
+        "same flag). While 'Output bitrate follows the source' is on, "
+        "--encoder-settings is rejected (TaskPaw passes the maxrate there); with it "
+        "off, `--encoder-settings cq=...` alongside --cq is Jasna's own error. LTX "
+        "options (--ltx-*, --restoration-model-name) are always "
         "rejected — use the LTX fields; while either LTX tickbox is ticked, so are "
         "--secondary-restoration, --denoise, --no-compile-basicvsrpp, --stream, "
         "--vr-mode, --restoration-model-path and --working-directory (and --fmp4 / "
@@ -1301,6 +1482,13 @@ class JasnaConfig(BaseMonitorConfig):
         "does not depend on this setting — it is derived from whether "
         "model_weights/*.engine exist.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_ltx_best(cls, data: Any) -> Any:
+        # #283 C2: extra="forbid" would reject the legacy key and stop the agent
+        # at boot — agent.yaml, Hub-pushed specs and admin patches all pass here.
+        return migrate_legacy_ltx(data)
 
     @model_validator(mode="after")
     def _validate_jasna(self) -> "JasnaConfig":
@@ -1330,6 +1518,13 @@ class JasnaConfig(BaseMonitorConfig):
             raise ValueError(
                 "jasna_extra_args must not set the flags TaskPaw owns "
                 f"({', '.join(owned)}); use the dedicated fields instead"
+            )
+        if self.match_source_bitrate and encoder_settings_in(self.jasna_extra_args):
+            raise ValueError(
+                f"jasna_extra_args must not set {_BITRATE_OWNED_FLAG} while "
+                "match_source_bitrate (Output bitrate follows the source) is on: "
+                "TaskPaw passes the source-tied maxrate there — turn the "
+                "option off to set the encoder yourself"
             )
         ltx_opts = ltx_options_in(self.jasna_extra_args)
         if ltx_opts:
@@ -1397,27 +1592,51 @@ def vr_profile(cfg: JasnaConfig) -> bool:
     return cfg.vr_8k and not uses_ltx(cfg)
 
 
-def _ltx_label(cfg: JasnaConfig, fast: bool, canvas: bool) -> list[str]:
-    """The `_tier_suffix` parts of an LTX launch (effective fast / canvas)."""
-    parts = ["LTX" + (" best" if cfg.ltx_best else "") + (" fast" if fast else "")]
+def applied_maxrate(cfg: JasnaConfig, bitrate: Optional[int]) -> Optional[int]:
+    """#285 C8: the maxrate a launch passes — the probed source bitrate while
+    `match_source_bitrate` is on — or None (no --encoder-settings)."""
+    if cfg.match_source_bitrate and bitrate is not None and bitrate > 0:
+        return bitrate
+    return None
+
+
+def _maxrate_text(cfg: JasnaConfig, bitrate: Optional[int]) -> str:
+    """#285 C8: `maxrate 45.2 Mbps` for the mode / label, "" when not applied."""
+    maxrate = applied_maxrate(cfg, bitrate)
+    return f"maxrate {maxrate / 1e6:.1f} Mbps" if maxrate else ""
+
+
+def _ltx_label(
+    cfg: JasnaConfig, fast: bool, canvas: bool, bitrate: Optional[int] = None
+) -> list[str]:
+    """The `_tier_suffix` parts of an LTX launch (effective fast / canvas, and
+    the source bitrate it was capped at — #285)."""
+    parts = [f"LTX {cfg.ltx_model}" + (" fast" if fast else "")]  # #283: the tier
     if canvas:
         parts.append("large canvas")
     if cfg.ltx_auto_split > 0:
         parts.append(f"auto-split {cfg.ltx_auto_split}%")
     if cfg.ltx_overlap != "auto":
         parts.append(f"less overlap {cfg.ltx_overlap}")
+    if rate := _maxrate_text(cfg, bitrate):
+        parts.append(rate)
     return parts
 
 
-def _ltx_mode(cfg: JasnaConfig, fast: bool, canvas: bool) -> str:
-    """The `restore.started` `mode` of an LTX launch (effective fast / canvas)."""
-    mode = "ltx" + (" best" if cfg.ltx_best else "") + (" fast" if fast else "")
+def _ltx_mode(
+    cfg: JasnaConfig, fast: bool, canvas: bool, bitrate: Optional[int] = None
+) -> str:
+    """The `restore.started` `mode` of an LTX launch (effective fast / canvas;
+    #285 the maxrate). Without `bitrate` it is also the download `variant`."""
+    mode = f"ltx {cfg.ltx_model}" + (" fast" if fast else "")  # #283: the tier
     if canvas:
         mode += " large-canvas"
     if cfg.ltx_auto_split > 0:
         mode += f" auto-split {cfg.ltx_auto_split}%"
     if cfg.ltx_overlap != "auto":
         mode += f" less-overlap={cfg.ltx_overlap}"
+    if rate := _maxrate_text(cfg, bitrate):
+        mode += f" {rate}"
     return mode
 
 
@@ -1432,6 +1651,7 @@ def build_argv(
     work_dir: Optional[Path] = None,
     ltx_fast_ok: bool = True,
     ltx_canvas_ok: bool = False,
+    source_bitrate: Optional[int] = None,
 ) -> list[str]:
     """Pure: the exact argv for one file. Operator extra args come LAST so
     argparse's last-wins makes the documented `--secondary-restoration` override
@@ -1446,7 +1666,10 @@ def build_argv(
     options and `--working-directory work_dir` (when given) before the extra
     args, never carries unet-4x, and — like every launch of a ticked task —
     never the 8K VR profile (`vr_profile`). #265: `--ltx-fast` / `--ltx-large-canvas`
-    follow the GPU (`ltx_fast_ok` / `ltx_canvas_ok`, resolved at Start)."""
+    follow the GPU (`ltx_fast_ok` / `ltx_canvas_ok`, resolved at Start).
+
+    #285 C8: with `match_source_bitrate` on and a probed `source_bitrate` B, every
+    launch adds `--encoder-settings maxrate=B,qmax=51` before the extra args."""
     ltx = ltx_launch(cfg, tier)
     vr = vr_profile(cfg)
     clip_4k = _VR8K_CLIP_SIZE_4K if vr and not cfg.vr_8k_custom else cfg.clip_size_4k
@@ -1462,7 +1685,7 @@ def build_argv(
     if ltx:
         ltx_args = [
             "--restoration-model-name",
-            "ltx-undistilled" if cfg.ltx_best else "ltx",
+            LTX_MODEL_NAMES[cfg.ltx_model],  # #283
         ]
         if cfg.ltx_fast and ltx_fast_ok:
             ltx_args.append("--ltx-fast")
@@ -1478,6 +1701,13 @@ def build_argv(
             ltx_args += ["--ltx-auto-split", str(cfg.ltx_auto_split)]
         if work_dir is not None:
             ltx_args += ["--working-directory", str(work_dir)]
+    maxrate = applied_maxrate(cfg, source_bitrate)
+    # #285 C8: no bufsize — ffmpeg's nvenc.c drops it in CQ mode (L1151). qmax=51
+    # lifts Jasna's default qmax 34 so NVENC may quantise harder and the cap
+    # still holds in hard scenes.
+    rate_args = (
+        ["--encoder-settings", f"maxrate={maxrate},qmax={_CAP_QMAX}"] if maxrate else []
+    )
     return [
         exe,
         "--input",
@@ -1498,6 +1728,7 @@ def build_argv(
         detection,
         *vr_mode,
         *ltx_args,
+        *rate_args,
         *_split_args(cfg.jasna_extra_args),
     ]
 
@@ -1541,6 +1772,7 @@ class JasnaInstance(MonitorInstance):
         self._current: Optional[Path] = None
         self._current_tier: Optional[Tier] = None
         self._current_dims: Optional[tuple[int, int]] = None
+        self._current_bitrate: Optional[int] = None  # #285: the probed source
         self._current_unet = False
         # retry / degrade
         self._unet_retry_pending = False
@@ -1652,6 +1884,7 @@ class JasnaInstance(MonitorInstance):
         self._current = None
         self._current_tier = None
         self._current_dims = None
+        self._current_bitrate = None
         self._current_unet = False
         self._unet_retry_pending = False
         self._plain_retry_used = False
@@ -2318,18 +2551,40 @@ class JasnaInstance(MonitorInstance):
             if nxt == self._current and self._current_tier is not None:
                 tier: Tier = self._current_tier
                 dims = self._current_dims
+                bitrate = self._current_bitrate
             else:
                 dims = probe_resolution(nxt, self._ffprobe)
                 tier = tier_for(*dims) if dims else "1080p"
+                # F4: an unreachable file (no resolution) or a stop in flight
+                # gets no second probe — it would only add another 5 s.
+                bitrate = (
+                    self._probe_bitrate(nxt)
+                    if dims is not None and not self._stopping.is_set()
+                    else None
+                )
             # Let the previous reader drain after its process exits. The join
             # is bounded; _launch_locked fences any reader that outlives it.
             prev_reader = self._reader
             if prev_reader is not None and prev_reader.is_alive():
                 prev_reader.join(timeout=1)
-            launched = self._launch_locked(emit, tier, dims, hold)
+            launched = self._launch_locked(emit, tier, dims, hold, bitrate)
         finally:
             if not launched:
                 self._gpu_give(hold)
+
+    def _probe_bitrate(self, video: Path) -> Optional[int]:
+        """#285 C8: the source bitrate the launch is capped at, probed only while
+        `match_source_bitrate` is on. A failure is logged once per file (a
+        relaunch of the same file reuses the probe)."""
+        if not self._cfg.match_source_bitrate:
+            return None
+        bitrate = probe_bitrate(video, self._ffprobe)
+        if bitrate is None:
+            log.warning(
+                "jasna: no source bitrate for %s; Jasna's own maxrate cap applies",
+                video,
+            )
+        return bitrate
 
     def _launch_locked(
         self,
@@ -2337,6 +2592,7 @@ class JasnaInstance(MonitorInstance):
         tier: Tier,
         dims: Optional[tuple[int, int]],
         hold: object,
+        bitrate: Optional[int] = None,
     ) -> bool:
         """The locked half of `_launch_next`; True when a child is now live."""
         cfg = self._cfg
@@ -2347,7 +2603,7 @@ class JasnaInstance(MonitorInstance):
                 return False
             if ltx_launch(cfg, tier):
                 fast = cfg.ltx_fast and self._ltx_fast_ok
-                missing = ltx_missing_files(self._exe_dir(), cfg.ltx_best, fast)
+                missing = ltx_missing_files(self._exe_dir(), cfg.ltx_model, fast)
                 if missing:
                     self._download.request(
                         Path(cfg.jasna_exe_path).resolve().parent
@@ -2375,6 +2631,7 @@ class JasnaInstance(MonitorInstance):
             self._current = video
             self._current_tier = tier
             self._current_dims = dims
+            self._current_bitrate = bitrate
 
             staging = staging_path_for(cfg.jasna_output_folder, video)
             # A stale partial from an earlier run — and a 3.5.1-or-earlier one
@@ -2428,6 +2685,7 @@ class JasnaInstance(MonitorInstance):
                 work_dir,
                 self._ltx_fast_ok,
                 self._ltx_canvas_ok,
+                bitrate,
             )
 
             capture = cfg.jasna_capture_progress or ltx
@@ -2486,12 +2744,16 @@ class JasnaInstance(MonitorInstance):
                     self.instance_id, "task.gpu_acquired", task_type="jasna"
                 )
                 self._log_gpu_wait = False
+            if ltx:
+                mode = _ltx_mode(cfg, fast, canvas, bitrate)
+            else:
+                mode = "unet-4x" if self._current_unet else "plain"
+                if rate := _maxrate_text(cfg, bitrate):
+                    mode += f" {rate}"  # #285 C8
             started: dict[str, object] = {
                 "index": self._done + self._failed + 1,
                 "total": self._total,
-                "mode": _ltx_mode(cfg, fast, canvas)
-                if ltx
-                else ("unet-4x" if self._current_unet else "plain"),
+                "mode": mode,
             }
             if vr_profile(cfg):
                 started["profile"] = _VR8K_PROFILE  # #208: only when ticked
@@ -4110,6 +4372,7 @@ class JasnaInstance(MonitorInstance):
                 self._cfg,
                 self._cfg.ltx_fast and self._ltx_fast_ok,
                 self._cfg.ltx_large_canvas and self._ltx_canvas_ok,
+                self._current_bitrate,
             )
             return f" [{', '.join(parts)}]"
         if vr_profile(self._cfg):
@@ -4120,6 +4383,8 @@ class JasnaInstance(MonitorInstance):
             parts.append("secondary via extra args")
         else:
             parts.append("unet-4x" if self._current_unet else "unet-4x off")
+        if rate := _maxrate_text(self._cfg, self._current_bitrate):
+            parts.append(rate)  # #285 C8
         return f" [{', '.join(parts)}]"
 
     def _detail(self, state: str, m: dict) -> str:
@@ -4195,6 +4460,11 @@ class JasnaPlugin(MonitorPlugin):
         return JasnaConfig
 
     @classmethod
+    def migrate_config(cls, raw: dict) -> dict:
+        """#283 C2: the editor sees `ltx_best` already mapped to `ltx_model`."""
+        return migrate_legacy_ltx(raw)
+
+    @classmethod
     def ui_schema(cls) -> dict:
         # Lead with the fields that matter; path fields are flagged for the
         # file/folder picker widget (#71). Help text comes from the field
@@ -4215,7 +4485,7 @@ class JasnaPlugin(MonitorPlugin):
                 "ltx_4k",
                 "ltx_fast",
                 "ltx_auto_split",
-                "ltx_best",
+                "ltx_model",
                 "ltx_large_canvas",
                 "ltx_overlap",
                 "vr_8k",
@@ -4225,6 +4495,7 @@ class JasnaPlugin(MonitorPlugin):
                 "temporal_overlap",
                 "codec",
                 "cq",
+                "match_source_bitrate",  # #285: next to what it shapes
                 "detection_model",
                 "process_name",
                 "jasna_extra_args",

@@ -58,7 +58,10 @@ const jasnaPlugin: apiModule.PluginInfo = {
       ltx_auto_split: {
         type: "integer", title: "LTX only for big mosaics (%)", default: 12, minimum: 0, maximum: 100,
       },
-      ltx_best: { type: "boolean", title: "LTX best model", default: false },
+      ltx_model: {
+        type: "string", title: "LTX quality", default: "standard",
+        oneOf: [{ const: "standard", title: "Standard" }, { const: "high", title: "High" }],
+      },
       ltx_large_canvas: { type: "boolean", title: "LTX large canvas", default: false },
       vr_8k: {
         type: "boolean", title: "8K VR", default: false,
@@ -83,7 +86,7 @@ const jasnaPlugin: apiModule.PluginInfo = {
       "name", "jasna_exe_path", "jasna_input_folder", "jasna_output_folder",
       "unet4x_1080p", "unet4x_4k", "av_translate", "whisperjav_exe_path",
       "whisperjav_engine", "whisperjav_extra_args", "ltx_1080p", "ltx_4k", "ltx_fast",
-      "ltx_auto_split", "ltx_best", "ltx_large_canvas", "vr_8k", "clip_size_1080p",
+      "ltx_auto_split", "ltx_model", "ltx_large_canvas", "vr_8k", "clip_size_1080p",
       "clip_size_4k", "temporal_overlap", "codec", "cq", "detection_model",
       "process_name", "jasna_extra_args", "jasna_gpu_monitor", "jasna_capture_progress",
       "poll_interval", "timeout", "*",
