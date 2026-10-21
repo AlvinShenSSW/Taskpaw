@@ -274,7 +274,8 @@ def _steps(
 
     A finished stage is done with its note (a skip or "no work" outcome, G3);
     the host's waiting reason belongs to the first step not yet finished.
-    The running restore step adds the LTX detail (`ltx`, `current_file`); a
+    The running restore step adds the LTX detail (`ltx`, `current_file`) and
+    always its heartbeat (`started_at`, the latest `console` line, U1c); a
     restore that failed on missing models carries the download session (H3).
     """
     stages = {stage.stage: stage for stage in film.stages}
@@ -305,6 +306,9 @@ def _steps(
             ltx = running.get("ltx") if mine and name == "restore" else None
             if isinstance(ltx, dict):
                 step.update(ltx=ltx, current_file=ltx.get("current_file"))
+            if mine and name == "restore":
+                console = ltx.get("console") if isinstance(ltx, dict) else None
+                step.update(started_at=running.get("started_at"), console=console)
             steps.append(step)
         elif value in _RETRYABLE:
             step = _step(name, "failed", why)

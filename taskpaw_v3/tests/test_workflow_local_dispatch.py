@@ -548,6 +548,11 @@ def test_the_running_stage_reports_text_ltx_detail_and_the_film_name(rt):
     assert d.run_once() is True
     assert stage(rt, film, "restore").status == "succeeded"
     first, second = reporting.seen
+    # U1c: when the stage started (the UI ticks 已用 from it), UTC ISO
+    started = datetime.fromisoformat(first.pop("started_at"))
+    assert started.tzinfo is not None
+    assert abs((datetime.now(timezone.utc) - started).total_seconds()) < 60
+    assert second.pop("started_at") == started.isoformat()
     assert first == {
         "film_id": film,
         "film": "movie",  # the main video's stem: no package, no NFO

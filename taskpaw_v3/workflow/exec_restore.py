@@ -37,7 +37,10 @@ from typing import Literal
 from taskpaw_v3.monitors.plugins import jasna
 from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES
 from taskpaw_v3.monitors.plugins.jasna_presets import preset_catalogue
-from taskpaw_v3.monitors.plugins.jasna_progress import parse_jasna_progress_line
+from taskpaw_v3.monitors.plugins.jasna_progress import (
+    console_text,
+    parse_jasna_progress_line,
+)
 
 from . import models as m
 from .exec_common import (
@@ -82,6 +85,8 @@ FFPROBE_ARGS = (
     "json",
 )
 _TAIL_LINES = 8
+# U1c: an unrecognised console line refreshes the step at most this often
+CONSOLE_INTERVAL_S = 1.0
 # The monitor's own bound for one bitrate probe (`jasna._PROBE_TIMEOUT`).
 BITRATE_PROBE_SECONDS = 5.0
 _BITRATE_POLL = 0.05
@@ -174,6 +179,10 @@ def parse_probe(text: str) -> ProbeFacts | None:
 def progress_text(volume: str, state: dict) -> str:
     """Short status: volume · LTX stage · percent · ETA (E8)."""
     parts = [f"修复{volume}"]
+    scan = state.get("scan_progress")
+    if isinstance(scan, dict):  # U1c: the auto split's pre-LTX scan
+        percent_text = scan.get("percent_text")
+        parts.append(f"扫描马赛克 {percent_text}%" if percent_text else "扫描马赛克")
     if stage := state.get("ltx_stage"):
         parts.append(f"阶段 {stage}")
     percent = state.get("percent")
@@ -627,20 +636,28 @@ class RestoreExecutor:
         tail: deque[str] = deque(maxlen=_TAIL_LINES)
         volume = label.strip() or source.name
         context.progress(progress_text(label, state))
+        console = ""
+        last_emit = -math.inf
 
         def on_line(_stream: str, text: str) -> None:
-            nonlocal state
+            nonlocal state, console, last_emit
             with lock:
                 updated = parse_jasna_progress_line(text, state)
+                line = console_text(text)
+                console = line or console
+                now = time.monotonic()
                 if updated is state:
                     if text.strip():
                         tail.append(text.strip()[:300])
-                    return
-                state = updated
-            # the monitor's LtxProgress metrics: its parse state and the volume (M3)
-            context.progress(
-                progress_text(label, updated), ltx={**updated, "current_file": volume}
-            )
+                    # U1c heartbeat: any console line shows the child is alive,
+                    # throttled so a chatty child cannot flood the status
+                    if not line or now - last_emit < CONSOLE_INTERVAL_S:
+                        return
+                state, last_emit = updated, now
+                # the monitor's LtxProgress metrics: its parse state and the
+                # volume (M3), plus the latest plain console line (U1c)
+                detail = {**updated, "current_file": volume, "console": console}
+                context.progress(progress_text(label, updated), ltx=detail)
 
         child = context.processes.launch(argv, cwd=str(workdir), on_line=on_line)
         code = child.wait(context.cancel)

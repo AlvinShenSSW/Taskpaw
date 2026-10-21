@@ -13,6 +13,7 @@ import shutil
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from taskpaw_v3.core import gpu_lease
@@ -67,6 +68,10 @@ class _Running:
     name: str = ""  # the film's shown name (H3 D06)
     progress: str = ""
     ltx: dict[str, Any] | None = None  # restore's parsed LTX state (H3 M3)
+    # U1c: when this stage started (UTC ISO); the UI ticks 已用 from it
+    started_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
 
 class ComponentStep(Protocol):
@@ -243,6 +248,7 @@ class LocalDispatcher:
                     "film": running.name or running.job.display_name,
                     "stage": running.job.stage,
                     "progress": running.progress,
+                    "started_at": running.started_at,
                 }
                 if running.ltx is not None:
                     current["ltx"] = running.ltx

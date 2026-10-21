@@ -144,12 +144,66 @@ def test_a_single_volume_names_its_video_in_the_ltx_state(rt):
     assert run.ltx and {s["current_file"] for s in run.ltx} == {"ABF-394.mp4"}
 
 
+SCAN_LINE = "Mosaic scan:  12%|█▏        | 600/5000 [00:40<04:53, 15.00sample/s]"
+BASIC_LINE = (
+    "Processing video:  15%|███ |Processed: 06:09 (36703f) | "
+    "Remaining: 30:47 (207454f) | Speed: 112.3fps"
+)
+
+
+def test_the_auto_split_scan_and_any_console_line_keep_the_step_alive(
+    rt, tools, monkeypatch
+):
+    """U1c: the scan phase reports progress, and an unrecognised line still
+    refreshes the latest console line (plain text, bounded)."""
+    monkeypatch.setattr(exec_restore, "CONSOLE_INTERVAL_S", 0.0)
+    tools.set_jasna(
+        progress=[
+            "[33mloading models…[0m",
+            SCAN_LINE,
+            "x" * 400,
+            BASIC_LINE,
+            "LTX 2/4 encode:  52.00%|█████▏    | 156/300 "
+            "[00:27<00:25,  5.620frame/s, run 12:12 left]",
+        ]
+    )
+    run = run_direct(rt, single(rt, "ABF-394.mp4"), "restore")
+    assert run.outcome.ok
+    assert "修复 · 扫描马赛克 12%" in run.progress
+    consoles = [s.get("console") for s in run.ltx]
+    assert consoles[0] == "loading models…"
+    scan = next(s for s in run.ltx if "scan_progress" in s)
+    assert scan["scan_progress"]["current"] == "600" and "percent" not in scan
+    assert scan["console"] == SCAN_LINE and scan["current_file"] == "ABF-394.mp4"
+    assert "x" * 300 in consoles and "x" * 301 not in "".join(map(str, consoles))
+    basic = next(s for s in run.ltx if s.get("percent") == 15)
+    assert "scan_progress" not in basic
+    assert run.ltx[-1]["ltx_stage"] == "2/4 encode"
+
+
+def test_unrecognised_console_lines_are_throttled_but_progress_is_not(
+    rt, tools, monkeypatch
+):
+    monkeypatch.setattr(exec_restore, "CONSOLE_INTERVAL_S", 3600.0)
+    tools.set_jasna(
+        progress=["first note", "second note", SCAN_LINE, "third note", "fourth"]
+    )
+    run = run_direct(rt, single(rt), "restore")
+    assert run.outcome.ok
+    # the first note emits, the next ones wait out the interval; a progress
+    # line is never throttled and carries its own console line
+    assert [s.get("console") for s in run.ltx] == ["first note", SCAN_LINE]
+
+
 def test_progress_text_shows_volume_stage_percent_and_eta():
     state = {"ltx_stage": "3/4 denoise", "percent": 7, "eta": "04:57"}
     assert progress_text(" 第 2/3 卷", state) == (
         "修复 第 2/3 卷 · 阶段 3/4 denoise · 7% · 剩余 04:57"
     )
     assert progress_text("", {}) == "修复"
+    scan = {"scan_progress": {"percent": 12.0, "percent_text": "12"}}
+    assert progress_text(" 第 1/2 卷", scan) == "修复 第 1/2 卷 · 扫描马赛克 12%"
+    assert progress_text("", {"scan_progress": {}}) == "修复 · 扫描马赛克"
 
 
 def test_failed_ltx_needs_attention_and_is_never_relaunched(rt, tools):

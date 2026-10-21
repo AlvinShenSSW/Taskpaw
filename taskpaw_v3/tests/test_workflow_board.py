@@ -294,6 +294,32 @@ def _step_of(row: dict, key: str) -> dict:
     return next(s for s in row["steps"] if s["key"] == key)
 
 
+def test_the_running_restore_step_always_carries_its_start_and_console():
+    """U1c: the heartbeat — the stage start and the latest console line —
+    is on the restore step even before any progress line was recognised."""
+    value = film({**done_through("intake"), "restore": "running"})
+    current = {
+        "film_id": value.film_id,
+        "film": "x",
+        "stage": "restore",
+        "progress": "修复",
+        "started_at": "2026-10-22T08:00:00+00:00",
+        "ltx": {"current_file": "a.mp4", "console": "loading models"},
+    }
+    restore = _step_of(board.film_row(value, {}, current=current), "restore")
+    assert restore["started_at"] == "2026-10-22T08:00:00+00:00"
+    assert restore["console"] == "loading models"
+    bare = {k: v for k, v in current.items() if k != "ltx"}
+    restore = _step_of(board.film_row(value, {}, current=bare), "restore")
+    assert (restore["started_at"], restore["console"]) == (
+        "2026-10-22T08:00:00+00:00",
+        None,
+    )
+    other = {**current, "film_id": identity()}
+    restore = _step_of(board.film_row(value, {}, current=other), "restore")
+    assert "started_at" not in restore and "console" not in restore
+
+
 def test_the_running_restore_step_carries_the_ltx_detail_and_its_volume():
     """H3 M3: the step keeps the text and gains the LtxProgress metrics."""
     value = film({**done_through("intake"), "restore": "running"})

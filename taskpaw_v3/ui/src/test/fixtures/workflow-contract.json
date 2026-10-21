@@ -7,6 +7,7 @@
       "film": "movie",
       "stage": "restore",
       "progress": "修复 · 阶段 2/4 encode · 52% · 剩余 12:12",
+      "started_at": "2026-10-21T08:00:00Z",
       "ltx": {
         "ltx_progress": {
           "mode": "restore",
@@ -28,7 +29,8 @@
         "percent": 52,
         "fps": 5.62,
         "eta": "12:12",
-        "current_file": "movie.mkv"
+        "current_file": "movie.mkv",
+        "console": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]"
       }
     },
     "intake": {
@@ -313,9 +315,12 @@
               "percent": 52,
               "fps": 5.62,
               "eta": "12:12",
-              "current_file": "movie.mkv"
+              "current_file": "movie.mkv",
+              "console": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]"
             },
-            "current_file": "movie.mkv"
+            "current_file": "movie.mkv",
+            "started_at": "2026-10-21T08:00:00Z",
+            "console": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]"
           },
           {
             "key": "asr",
@@ -1312,9 +1317,12 @@
             "percent": 52,
             "fps": 5.62,
             "eta": "12:12",
-            "current_file": "movie.mkv"
+            "current_file": "movie.mkv",
+            "console": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]"
           },
-          "current_file": "movie.mkv"
+          "current_file": "movie.mkv",
+          "started_at": "2026-10-21T08:00:00Z",
+          "console": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]"
         },
         {
           "key": "asr",

@@ -19,7 +19,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from taskpaw_v3.monitors.plugins.jasna_progress import parse_jasna_progress_line
+from taskpaw_v3.monitors.plugins.jasna_progress import (
+    console_text,
+    parse_jasna_progress_line,
+)
 from taskpaw_v3.tests import test_workflow_return_step as ret
 from taskpaw_v3.tests.test_workflow_control_routes import (
     BASE,
@@ -67,9 +70,9 @@ class HeldRestore(ret.FakeRestore):
 
     def run(self, context):
         state = parse_jasna_progress_line(LTX_ENCODE, {})
-        context.progress(
-            progress_text("", state), ltx={**state, "current_file": "movie.mkv"}
-        )
+        detail = {**state, "current_file": "movie.mkv"}
+        detail["console"] = console_text(LTX_ENCODE)  # U1c heartbeat
+        context.progress(progress_text("", state), ltx=detail)
         self.started.set()
         self.release.wait(30)
         return super().run(context)
@@ -238,6 +241,7 @@ def test_the_fixture_covers_every_page_the_ui_tests():
         if step["key"] == "restore" and step["state"] == "running"
     )
     assert restore["ltx"]["ltx_progress"]["stage_name"] == "encode"
+    assert restore["started_at"] and restore["console"] == LTX_ENCODE  # U1c
     statuses = {e["lookup"]["status"] for e in data["plans"]["plans"]}
     assert statuses == {"succeeded", "failed"}
     assert data["target"]["missing"]["error_code"] == "missing"
