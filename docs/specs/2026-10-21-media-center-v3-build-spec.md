@@ -1,10 +1,10 @@
 # Media Center (媒体处理中心) — V3 build spec
 
 Sources:
-- the approved design `D:/WORKSPACE/Taskpaw/design-system/taskpaw-v3/pages/media-workflow.md`;
+- the approved design `design-system/taskpaw-v3/pages/media-workflow.md`;
 - the prototype `preview/media-workflow-v3.html`: the V1 base layer is lines 9–122 and the V3 overlay lines 124–188. The overlay replaces the shell, overview, devices, local and settings pages.
 
-Screenshots are in `C:/Users/304/AppData/Local/Temp/claude/d--WORKSPACE-Filmpaw/4ae57e4b-811b-4fbf-aac5-cf70da7fb0d7/scratchpad/v3-shots/`:
+Screenshots of the prototype were taken during the design review (not committed):
 - desktop: `d-*.png`, including `d-drawer-F02/F03` and `d-confirm-F08/F09/F10`;
 - 390px: `m-*.png`, clipped at about 500px. The 390px rules come from the CSS media queries.
 
