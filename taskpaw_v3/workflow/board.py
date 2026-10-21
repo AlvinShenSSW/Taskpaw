@@ -872,7 +872,8 @@ def film_detail(
         "actors": list(actors),
         "resolution": row["resolution"],
         "plan": row["plan"],
-        "receipt_id": row["receipt_id"] or wf.archive_receipt_id,
+        # F2: the row's, the current final revision's; never an older one's
+        "receipt_id": row["receipt_id"],
         "revisions": row["revisions"],
         "lookup": lookup.state(film_id, film.input_revision)
         if lookup is not None and film.input_revision is not None

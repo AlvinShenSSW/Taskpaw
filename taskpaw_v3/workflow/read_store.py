@@ -501,9 +501,16 @@ class ReadCommands(WorkflowCore):
                 f"WHERE p.revoked_at IS NULL AND f.context_state='ready' {approved[0]}",
                 approved[1],
             ).fetchall()
+            # U1 Codex r2 F2: only the receipt of the current final revision; a
+            # receipt holds the manifest its approval bound, so an older
+            # revision's archive never stands in for a newer one's
             receipts = self._conn.execute(
                 "SELECT o.film_id,r.receipt_id FROM receipts r "
                 "JOIN operations o ON o.operation_id=r.operation_id "
+                "JOIN films f ON f.film_id=o.film_id "
+                "JOIN manifests fm ON fm.film_id=f.film_id AND fm.kind='final' "
+                "AND fm.revision=f.current_final_revision "
+                "AND fm.manifest_hash=r.manifest_hash "
                 f"WHERE r.kind='archive' {receipted[0]} ORDER BY r.rowid",
                 receipted[1],
             ).fetchall()

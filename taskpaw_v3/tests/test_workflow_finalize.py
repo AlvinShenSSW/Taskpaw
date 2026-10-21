@@ -165,6 +165,63 @@ def test_one_click_archives_once_and_cleans_both_scopes(world):
     assert not list((world.rt.work_dir / "scrape").glob(f"{world.film}-r*"))
 
 
+def test_a_new_final_revision_shows_no_receipt_until_it_is_archived(world):
+    """U1 Codex r2 F2: the receipt shown is the current final revision's only;
+    revision 1's receipt never stands in for revision 2."""
+    from taskpaw_v3.workflow import board
+
+    world.scrape()
+    with world.fake:
+        fin = world.finalizer()
+        fin.confirm(world.film, "actor")
+        world.ticks(fin)
+    rt = world.rt
+    receipt = rt.store.film_workflow(rt.operator, world.film).archive_receipt_id
+    assert receipt is not None
+    (row,) = rt.store.film_board(rt.operator, film_id=world.film)
+    assert row.receipt_id == receipt
+    assert board.film_detail(rt, world.film, {})["receipt_id"] == receipt
+    conn = rt.store._conn  # a later scrape published revision 2 (synthetic)
+    old = conn.execute(
+        "SELECT * FROM manifests WHERE film_id=? AND kind='final' AND revision=1",
+        (world.film,),
+    ).fetchone()
+    data = m.FinalManifest.model_validate_json(old["body_json"]).model_dump(mode="json")
+    data["revision"] = 2
+    data["manifest_hash"] = m.manifest_digest(data)
+    second = m.FinalManifest.model_validate(data)
+    with conn:
+        conn.execute(
+            "INSERT INTO manifests(film_id,kind,revision,manifest_hash,input_revision,"
+            "input_hash,attempt_id,created_at,body_json) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                world.film,
+                "final",
+                2,
+                second.manifest_hash,
+                old["input_revision"],
+                old["input_hash"],
+                old["attempt_id"],
+                old["created_at"],
+                m.canonical_json(second),
+            ),
+        )
+        conn.execute(
+            "UPDATE films SET current_final_revision=2,"
+            "body_json=json_set(body_json,'$.current_final_revision',2) WHERE film_id=?",
+            (world.film,),
+        )
+    (row,) = rt.store.film_board(rt.operator, film_id=world.film)
+    assert row.final_revision == 2 and row.receipt_id is None
+    assert (
+        next(
+            f for f in rt.store.film_board(rt.operator) if f.film_id == world.film
+        ).receipt_id
+        is None
+    )
+    assert board.film_detail(rt, world.film, {})["receipt_id"] is None
+
+
 def test_the_lookup_cache_is_reclaimed_with_the_film(world):
     """IR07: the Miko preview of a cleaned film is Taskpaw's to remove too."""
     cache = world.rt.work_dir / "lookup" / f"{world.film}-r1"
