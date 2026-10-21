@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import time
 import zlib
 
 import pytest
@@ -93,3 +94,34 @@ def test_landscape_is_wider_than_tall_and_a_rewrite_is_read_again(tmp_path):
     assert isz.is_landscape(path) is None
     path.write_bytes(jpeg(500, 500))
     assert isz.is_landscape(path) is None
+
+
+def test_a_forged_header_with_a_huge_side_has_no_size(tmp_path):
+    """A PNG IHDR of 4294967295 x 1 must not win the jacket pick."""
+    path = tmp_path / "forged.png"
+    path.write_bytes(png(4294967295, 1))
+    assert isz.image_size(path) is None
+    assert isz.is_landscape(path) is None
+    path.write_bytes(png(65535, 1))  # the largest side a header may claim
+    assert isz.image_size(path) == (65535, 1)
+    path.write_bytes(png(65536, 1))
+    assert isz.image_size(path) is None
+
+
+@pytest.mark.parametrize(
+    "padding",
+    [b"\xff" * (20 * 1024 * 1024), b"\x00" * (4 * 1024 * 1024)],
+    ids=["ff-fill-20mb", "zero-padding-4mb"],
+)
+def test_a_padded_jpeg_gives_up_fast(tmp_path, padding):
+    path = tmp_path / "padded.jpg"
+    path.write_bytes(b"\xff\xd8" + padding)
+    started = time.perf_counter()
+    assert isz.image_size(path) is None
+    assert time.perf_counter() - started < 0.5
+
+
+def test_a_frame_after_fill_bytes_is_still_found(tmp_path):
+    path = tmp_path / "filled.jpg"
+    path.write_bytes(b"\xff\xd8" + b"\xff" * 5000 + jpeg(800, 600)[2:])
+    assert isz.image_size(path) == (800, 600)

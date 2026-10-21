@@ -7,6 +7,7 @@ WebP. Sizes are cached by path, mtime and size, since every list poll asks.
 
 from __future__ import annotations
 
+import re
 import struct
 from pathlib import Path
 from typing import BinaryIO
@@ -18,6 +19,9 @@ _SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 
 # Markers without a length: TEM, RST0–7 (SOI/EOI end the walk before)
 _BARE = {0x01, *range(0xD0, 0xD8)}
 _JPEG_SCAN_LIMIT = 4 * 1024 * 1024
+_FILL = re.compile(rb"\xff+")
+# A header may claim any 32-bit side; no real cover has one past 16 bits (JPEG, WebP VP8)
+_MAX_SIDE = 65535
 _CACHE: dict[Path, tuple[tuple[int, int], Size | None]] = {}
 _CACHE_LIMIT = 2048
 
@@ -63,37 +67,41 @@ def _read(stream: BinaryIO) -> Size | None:
 
 
 def _valid(size: tuple[int, int] | None) -> Size | None:
-    if size is None or size[0] <= 0 or size[1] <= 0:
+    if size is None or not (0 < size[0] <= _MAX_SIDE and 0 < size[1] <= _MAX_SIDE):
         return None
     return int(size[0]), int(size[1])
 
 
 def _jpeg(stream: BinaryIO) -> tuple[int, int] | None:
-    while stream.tell() < _JPEG_SCAN_LIMIT:
-        byte = stream.read(1)
-        if not byte:
+    """Walk the segments of the first `_JPEG_SCAN_LIMIT` bytes, held in memory."""
+    data = stream.read(_JPEG_SCAN_LIMIT)  # the stream sits after SOI
+    end = len(data)
+    pos = 0
+    while True:
+        pos = data.find(b"\xff", pos)  # entropy-coded data or padding in between
+        if pos < 0:
             return None
-        if byte != b"\xff":
-            continue  # entropy-coded data or padding between segments
-        marker = stream.read(1)
-        while marker == b"\xff":  # fill bytes
-            marker = stream.read(1)
-        if not marker:
+        fill = _FILL.match(data, pos)  # a run of 0xFF fill bytes, skipped at C speed
+        pos = fill.end() if fill else pos + 1
+        if pos >= end:
             return None
-        code = marker[0]
+        code = data[pos]
+        pos += 1
         if code in (0x00, *_BARE):
             continue
         if code == 0xD9:  # EOI before a frame
             return None
-        length = struct.unpack(">H", stream.read(2))[0]
+        if pos + 2 > end:
+            return None
+        length = struct.unpack_from(">H", data, pos)[0]
         if length < 2:
             return None
         if code in _SOF:
-            data = stream.read(5)
-            height, width = struct.unpack(">HH", data[1:5])
+            if pos + 7 > end:
+                return None
+            height, width = struct.unpack_from(">HH", data, pos + 3)
             return width, height
-        stream.seek(length - 2, 1)
-    return None
+        pos += length
 
 
 def _bmp(head: bytes) -> tuple[int, int] | None:

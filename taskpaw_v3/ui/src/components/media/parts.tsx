@@ -2,7 +2,7 @@
 import type { SvgIconComponent } from "@mui/icons-material";
 import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
-import { Dialog } from "@mui/material";
+import { CircularProgress, Dialog } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { api, type WorkflowStep } from "../../api";
@@ -71,6 +71,7 @@ export function Cover({ filmId, hasPoster, source, hasCover = false, coverSource
   });
   const [landscape, setLandscape] = useState(false);
   const [open, setOpen] = useState(false);
+  const [mounted, setMounted] = useState(false);  // the lightbox lives only from open to its exit
   const button = useRef<HTMLButtonElement>(null);
   const cls = `cover${size === "row" ? "" : ` ${size}`}`;
   if (!hasPoster || !poster.data || filmId === null) {
@@ -80,16 +81,25 @@ export function Cover({ filmId, hasPoster, source, hasCover = false, coverSource
     setLandscape(e.currentTarget.naturalWidth > e.currentTarget.naturalHeight);
   return (
     <>
-      <button type="button" ref={button} className={`${cls} cover-btn`} aria-label="查看大图" onClick={() => setOpen(true)}>
+      <button type="button" ref={button} className={`${cls} cover-btn`} aria-label={`查看大图：${label}`}
+        onClick={() => { setMounted(true); setOpen(true); }}>
         <img src={poster.data} alt={`${label} 封面`} className={landscape ? "landscape" : undefined} onLoad={onLoad} />
       </button>
-      <CoverLightbox open={open} onClose={() => setOpen(false)} onExited={() => button.current?.focus()}
-        filmId={filmId} hasCover={hasCover} coverSource={coverSource ?? null} poster={poster.data} label={label} />
+      {mounted && (
+        <CoverLightbox open={open} onClose={() => setOpen(false)}
+          onExited={() => { setMounted(false); button.current?.focus(); }}
+          filmId={filmId} hasCover={hasCover} coverSource={coverSource ?? null} poster={poster.data} label={label} />
+      )}
     </>
   );
 }
 
 const LIGHTBOX_BACKDROP = { sx: { backgroundColor: "#020611EB" } };
+const COVER_GC_MS = 60_000;
+const LIGHTBOX_PLACEHOLDER = {
+  width: "min(92vw, 960px)", maxHeight: "88vh", aspectRatio: "3 / 2", background: "#0b1120", color: "#cbd5e1",
+  display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, borderRadius: 8,
+} as const;
 const LIGHTBOX_IMAGE = { display: "block", maxWidth: "92vw", maxHeight: "88vh", objectFit: "contain" } as const;
 
 // The full, uncropped image: the landscape jacket when the film has one (`/cover`), else the
@@ -102,8 +112,11 @@ function CoverLightbox({ open, onClose, onExited, filmId, hasCover, coverSource,
     queryKey: ["mediaCover", filmId, coverSource],
     queryFn: () => api.image(api.coverPath(filmId)),
     enabled: open && hasCover, staleTime: Infinity, retry: false,
+    gcTime: COVER_GC_MS,  // an opened jacket is megabytes: do not keep it for the card's lifetime
   });
-  const src = (hasCover && full.data) || poster;
+  const [broken, setBroken] = useState(false);  // the jacket arrived but the <img> cannot decode it
+  const loading = hasCover && full.isPending;
+  const src = hasCover && full.data && !broken ? full.data : poster;
   return (
     <Dialog open={open} onClose={onClose} maxWidth={false} disableRestoreFocus className="mw-lightbox"
       slotProps={{
@@ -114,7 +127,14 @@ function CoverLightbox({ open, onClose, onExited, filmId, hasCover, coverSource,
           sx: { m: 0, maxWidth: "92vw", maxHeight: "88vh", overflow: "visible", background: "none", boxShadow: "none" },
         } as object,
       }}>
-      <img src={src} alt={`${label} 大图`} style={LIGHTBOX_IMAGE} />
+      {loading
+        ? (
+          <div role="status" style={LIGHTBOX_PLACEHOLDER}>
+            <CircularProgress size={28} aria-hidden />
+            <span>正在加载大图…</span>
+          </div>
+        )
+        : <img src={src} alt={`${label} 大图`} style={LIGHTBOX_IMAGE} onError={() => setBroken(true)} />}
       <button type="button" className="lightbox-close" aria-label="关闭大图" onClick={onClose}>
         <CloseIcon aria-hidden />
       </button>

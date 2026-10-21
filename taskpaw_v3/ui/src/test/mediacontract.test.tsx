@@ -192,7 +192,7 @@ describe("contract: the cover lightbox (U1b)", () => {
       if (!el) throw new Error("no card");
       return el;
     });
-    fireEvent.click(await within(card).findByRole("button", { name: "查看大图" }));
+    fireEvent.click(await within(card).findByRole("button", { name: /^查看大图/ }));
     await screen.findByRole("dialog", { name: "假的标题 大图" });
     await waitFor(() => expect(m.image).toHaveBeenCalledWith(api.coverPath(REVIEW)));
     fireEvent.click(screen.getByRole("button", { name: "关闭大图" }));
@@ -205,7 +205,7 @@ describe("contract: the cover lightbox (U1b)", () => {
       if (!el) throw new Error("no card");
       return el;
     });
-    fireEvent.click(await within(pending).findByRole("button", { name: "查看大图" }));
+    fireEvent.click(await within(pending).findByRole("button", { name: /^查看大图/ }));
     await screen.findByRole("dialog", { name: "MOVIE 的标题 大图" });
     expect(m.image).not.toHaveBeenCalledWith(api.coverPath("film-planning"));
   });
@@ -219,7 +219,7 @@ describe("contract: the cover lightbox (U1b)", () => {
       if (!el) throw new Error("no card");
       return el;
     });
-    await waitFor(() => expect(within(card).getByRole("button", { name: "查看大图" })).toBeInTheDocument());
+    await waitFor(() => expect(within(card).getByRole("button", { name: /^查看大图/ })).toBeInTheDocument());
     fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
     await screen.findByRole("heading", { level: 1, name: "影片队列" });
     const queued = await waitFor(() => {
@@ -229,12 +229,12 @@ describe("contract: the cover lightbox (U1b)", () => {
     });
     fireEvent.click(within(queued).getByRole("button", { name: /详情/ }));
     const drawer = await screen.findByRole("dialog", { name: "影片详情" });
-    fireEvent.click(await within(drawer).findByRole("button", { name: "查看大图" }));
+    fireEvent.click(await within(drawer).findByRole("button", { name: /^查看大图/ }));
     const box = await screen.findByRole("dialog", { name: "假的标题 大图" });
     fireEvent.keyDown(box, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "假的标题 大图" })).toBeNull());
     expect(screen.getByRole("dialog", { name: "影片详情" })).toBeInTheDocument();
-    await waitFor(() => expect(within(drawer).getByRole("button", { name: "查看大图" })).toHaveFocus());
+    await waitFor(() => expect(within(drawer).getByRole("button", { name: /^查看大图/ })).toHaveFocus());
   });
 });
 

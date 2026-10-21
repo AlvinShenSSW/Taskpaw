@@ -980,7 +980,7 @@ describe("U1b covers", () => {
       has_poster: true, poster_source: "final-1", has_cover: true, cover_source: "final-2" }));
     wrap(<MediaWorkspace />);
     const lightbox = async (scope: HTMLElement, name: string) => {
-      fireEvent.click(await within(scope).findByRole("button", { name: "查看大图" }));
+      fireEvent.click(await within(scope).findByRole("button", { name: /^查看大图/ }));
       const box = await screen.findByRole("dialog", { name: `${name} 大图` });
       fireEvent.click(within(box).getByRole("button", { name: "关闭大图" }));
       await waitFor(() => expect(screen.queryByRole("dialog", { name: `${name} 大图` })).toBeNull());
@@ -1005,7 +1005,7 @@ describe("U1b covers", () => {
     // the drawer hero and the 图文确认 dialog ask for the full jacket
     fireEvent.click(within(review).getByRole("button", { name: /图文核对入库|查看并处理/ }));
     const dialog = await screen.findByRole("dialog", { name: "确认影片与入库目标" });
-    fireEvent.click(await within(dialog).findByRole("button", { name: "查看大图" }));
+    fireEvent.click(await within(dialog).findByRole("button", { name: /^查看大图/ }));
     await screen.findByRole("dialog", { name: `${title} 大图` });
     await waitFor(() => expect(api.image).toHaveBeenCalledWith(api.coverPath("abf-406")));
     fireEvent.keyDown(screen.getByRole("dialog", { name: `${title} 大图` }), { key: "Escape" });
