@@ -318,7 +318,7 @@ def test_a_missing_model_failure_offers_the_download_on_the_restore_step():
         "total_bytes": 10,
         "downloaded_bytes": 4,
         "destination": "D:/Jasna/model_weights/ltx-restore",
-        "variant": "ltx fast",
+        "variant": "ltx standard fast",
         "error": None,
     }
     row = board.film_row(value, {}, download=download)

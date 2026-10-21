@@ -60,7 +60,7 @@ class Tools:
         weights = self.jasna_dir / "model_weights" / "ltx-restore"
         weights.mkdir(parents=True, exist_ok=True)
         for fast in (True, False):
-            for name in jasna.ltx_missing_files(None, False, fast):
+            for name in jasna.ltx_missing_files(None, "standard", fast):
                 (weights / name).write_bytes(b"weights")
         self.whisper_exe.parent.mkdir(parents=True, exist_ok=True)
         self.set_jasna()

@@ -5,11 +5,16 @@ model ltx, `standard`), `build_argv`, the LTX model check, the staging /
 published names, the hev1→hvc1 retag and the LTX progress parser. A video whose
 name already carries the plugin's restored suffix is `reused`, never restored
 again. A failed LTX run is `needs_attention` and never relaunched (#265 D2).
+
+J2: the preset's Jasna 0.11.3 tier (`ltx_model`, #283) picks the model and its
+download, and — like the monitor (#285) — each video's launch is capped at its
+source bitrate (`jasna.probe_bitrate`, once per video; a retry reuses it).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import shutil
@@ -73,6 +78,10 @@ _RESTORED_SUFFIXES = tuple(
 )
 
 GpuQuery = Callable[[], "list[tuple[float, int]] | None"]
+# (film, input revision, video item) → the probed source bitrate (None: unknown)
+_BitrateKey = tuple[str, int, str]
+
+log = logging.getLogger("taskpaw.workflow.restore")
 
 
 def is_restored_name(name: str) -> bool:
@@ -195,6 +204,12 @@ def ffprobe_command(value: str | Sequence[str] | None) -> list[str] | None:
     return list(value) or None
 
 
+def bitrate_ffprobe(command: Sequence[str] | None) -> str | None:
+    """The executable `jasna.probe_bitrate` runs: only a plain ffprobe path (an
+    argv prefix such as a test fake reads as unknown — no cap)."""
+    return command[0] if command and len(command) == 1 else None
+
+
 class RestoreExecutor:
     """Jasna LTX restore of every main video (uses the GPU unless all reused)."""
 
@@ -218,17 +233,22 @@ class RestoreExecutor:
         self.ffprobe = ffprobe_command(ffprobe)
         self.launch_prefix = tuple(launch_prefix)
         self._gpus = gpus
-        # the last preflight's model folder and fast flag while files were missing
+        # the last preflight's model folder, its settings (the tier) and fast
+        # flag while files were missing
         self._models_lock = threading.Lock()
-        self._models: tuple[Path, bool] | None = None
+        self._models: tuple[Path, jasna.JasnaConfig, bool] | None = None
+        # J2 (#285): each pending video's probed source bitrate, kept until the
+        # film's restore succeeds so a retry of the stage launches with the same cap
+        self._bitrates_lock = threading.Lock()
+        self._bitrates: dict[_BitrateKey, int | None] = {}
 
     # ── contract ────────────────────────────────────────────────────────
     def tools(self) -> m.ToolVersions:
         cfg = self.cfg
         return tool_versions(
             tool="jasna",
-            model="ltx-undistilled" if cfg.ltx_best else "ltx",
-            model_version="fast" if cfg.ltx_fast else "standard",
+            model=jasna.LTX_MODEL_NAMES[cfg.ltx_model],  # #283: the tier's CLI name
+            model_version="nvfp4" if cfg.ltx_fast else "int8",  # D09: not a tier
             profile=PROFILE_ID,
             settings={
                 "gpu": self.gpu_id,
@@ -265,25 +285,29 @@ class RestoreExecutor:
             cached = self._models
         if cached is None:
             return None
-        weights, fast = cached
+        weights, cfg, fast = cached
         missing = jasna.ltx_missing_files(
-            str(weights.parent.parent), self.cfg.ltx_best, fast
+            str(weights.parent.parent), cfg.ltx_model, fast
         )
         if not missing:
             with self._models_lock:
                 if self._models is cached:
                     self._models = None
             return None
-        return weights, missing, jasna._ltx_mode(self.cfg, fast, False)
+        return weights, missing, jasna._ltx_mode(cfg, fast, False)
 
     def recall_missing(self, names: list[str]) -> None:
         """Seed the offer from a persisted preflight failure after a restart.
 
         Only while nothing is cached; never queries the GPU. The variant comes
-        from the file names: the fast and the standard weights differ by suffix.
+        from the file names: a tier's model file names it (#283; the configured
+        tier otherwise), and the fast and the int8 weights differ by suffix.
         When only shared VAE files were missing, the model preflight chose was
         present, so the one installed tells (the configured choice if both or
         neither are: an RTX 40 card runs int8 although `ltx_fast` is on)."""
+        tiers = {name: tier for (tier, _), name in jasna._LTX_MODEL_FILES.items()}
+        tier = next((tiers[n] for n in names if n in tiers), self.cfg.ltx_model)
+        cfg = self.cfg.model_copy(update={"ltx_model": tier})
         if any("-nvfp4" in name for name in names):
             fast = True
         elif any("-int8" in name for name in names):
@@ -293,14 +317,57 @@ class RestoreExecutor:
             installed = [
                 variant
                 for variant in (True, False)
-                if (
-                    folder / jasna._LTX_MODEL_FILES[(self.cfg.ltx_best, variant)]
-                ).is_file()
+                if (folder / jasna._LTX_MODEL_FILES[(tier, variant)]).is_file()
             ]
-            fast = installed[0] if len(installed) == 1 else self.cfg.ltx_fast
+            fast = installed[0] if len(installed) == 1 else cfg.ltx_fast
         with self._models_lock:
             if self._models is None:
-                self._models = (self._weights(), fast)
+                self._models = (self._weights(), cfg, fast)
+
+    # ── per-film settings (U1 hook) ─────────────────────────────────────
+    def _cfg_for(self, context: JobContext) -> jasna.JasnaConfig:
+        """The Jasna settings this film restores with. The single place a
+        per-film LTX tier (U1) plugs in; no film record carries one yet, so
+        every film uses the stage's preset (`self.cfg`)."""
+        return self.cfg
+
+    def _source_bitrate(
+        self,
+        context: JobContext,
+        cfg: jasna.JasnaConfig,
+        video: m.ManifestItem,
+        source: Path,
+    ) -> int | None:
+        """#285 C8: the source bitrate this video's launch is capped at, probed
+        once while `match_source_bitrate` is on. A retry of the same video (same
+        input revision) reuses it — a failed probe too, so it warns once."""
+        if not cfg.match_source_bitrate:
+            return None
+        key = (context.job.film_id, context.job.input_revision, video.item_id)
+        with self._bitrates_lock:
+            if key in self._bitrates:
+                return self._bitrates[key]
+        bitrate = jasna.probe_bitrate(source, bitrate_ffprobe(self.ffprobe))
+        if bitrate is None:
+            log.warning(
+                "workflow restore: no source bitrate for %s; Jasna's own maxrate "
+                "cap applies",
+                source.name,
+            )
+        with self._bitrates_lock:
+            self._bitrates[key] = bitrate
+        return bitrate
+
+    def _forget_bitrates(
+        self, context: JobContext, videos: list[m.ManifestItem]
+    ) -> None:
+        """Drop the film's probes once every video is restored."""
+        job = context.job
+        with self._bitrates_lock:
+            for video in videos:
+                self._bitrates.pop(
+                    (job.film_id, job.input_revision, video.item_id), None
+                )
 
     # ── stage body ──────────────────────────────────────────────────────
     def _run(self, context: JobContext) -> ExecOutcome:
@@ -309,7 +376,8 @@ class RestoreExecutor:
         probes = {probe.item_id: probe for probe in manifest.readiness.media_probes}
         pending = [v for v in videos if not is_restored_name(input_name(v))]
         pending_ids = {video.item_id for video in pending}
-        exe, fast = self._preflight(context, pending)
+        cfg = self._cfg_for(context)
+        exe, fast = self._preflight(context, cfg, pending)
         results: list[VideoResult] = []
         for index, video in enumerate(videos, start=1):
             if context.cancel.is_set():
@@ -321,7 +389,10 @@ class RestoreExecutor:
                 source = workcopy_path(rt, manifest, video.item_id)
                 if not source.is_file():
                     raise attention(f"收件工作副本缺失：{video.relative_path}")
-                facts = self._restore(context, exe, fast, source, label, probe)
+                bitrate = self._source_bitrate(context, cfg, video, source)
+                facts = self._restore(
+                    context, cfg, exe, fast, source, label, probe, bitrate
+                )
             else:
                 facts = self._reused(context, video, probe)
             results.append(
@@ -331,6 +402,7 @@ class RestoreExecutor:
                     restore=facts,
                 )
             )
+        self._forget_bitrates(context, pending)
         digest = write_stage_result(
             context.workdir,
             StageResult(
@@ -349,7 +421,10 @@ class RestoreExecutor:
         )
 
     def _preflight(
-        self, context: JobContext, pending: list[m.ManifestItem]
+        self,
+        context: JobContext,
+        cfg: jasna.JasnaConfig,
+        pending: list[m.ManifestItem],
     ) -> tuple[Path | None, bool]:
         """Everything a launch needs, checked before any child starts."""
         if not pending:
@@ -359,10 +434,10 @@ class RestoreExecutor:
             raise attention(f"找不到 Jasna 程序：{self.jasna_exe or '未配置'}")
         if self.ffprobe is None:
             raise attention("找不到 ffprobe，无法核对修复结果")
-        fast = self.cfg.ltx_fast and jasna.fast_supported(self._gpus())
-        missing = jasna.ltx_missing_files(str(exe.parent), self.cfg.ltx_best, fast)
+        fast = cfg.ltx_fast and jasna.fast_supported(self._gpus())
+        missing = jasna.ltx_missing_files(str(exe.parent), cfg.ltx_model, fast)
         with self._models_lock:
-            self._models = (self._weights(), fast) if missing else None
+            self._models = (self._weights(), cfg, fast) if missing else None
         if missing:
             raise attention(MISSING_LTX + "、".join(missing))
         names = [
@@ -398,11 +473,13 @@ class RestoreExecutor:
     def _restore(
         self,
         context: JobContext,
+        cfg: jasna.JasnaConfig,
         exe: Path,
         fast: bool,
         source: Path,
         label: str,
         probe: m.MediaProbe | None,
+        bitrate: int | None,
     ) -> RestoreFacts:
         workdir = context.workdir
         staging = jasna.staging_path_for(str(workdir), source)
@@ -413,7 +490,16 @@ class RestoreExecutor:
         argv = [
             *self.launch_prefix,
             *jasna.build_argv(
-                self.cfg, str(exe), source, staging, TIER, False, False, ltx_work, fast
+                cfg,
+                str(exe),
+                source,
+                staging,
+                TIER,
+                False,
+                False,
+                ltx_work,
+                fast,
+                source_bitrate=bitrate,
             ),
         ]
         lock = threading.Lock()
@@ -459,7 +545,12 @@ class RestoreExecutor:
                     f"修复结果时长不符{label}：{actual / 1000:.1f} 秒，"
                     f"输入 {expected / 1000:.1f} 秒"
                 )
-        return self._facts("applied", file_ref(self.runtime.work_dir, final), facts)
+        return self._facts(
+            "applied",
+            file_ref(self.runtime.work_dir, final),
+            facts,
+            jasna.applied_maxrate(cfg, bitrate),
+        )
 
     def _probe(self, context: JobContext, path: Path) -> ProbeFacts:
         return probe_video(
@@ -468,7 +559,10 @@ class RestoreExecutor:
 
     @staticmethod
     def _facts(
-        decision: Literal["applied", "reused"], ref: FileRef, facts: ProbeFacts
+        decision: Literal["applied", "reused"],
+        ref: FileRef,
+        facts: ProbeFacts,
+        maxrate: int | None = None,
     ) -> RestoreFacts:
         if (
             facts.video_streams < 1
@@ -485,4 +579,5 @@ class RestoreExecutor:
             duration_ms=facts.duration_ms,
             video_streams=facts.video_streams,
             audio_streams=facts.audio_streams,
+            maxrate=maxrate,
         )

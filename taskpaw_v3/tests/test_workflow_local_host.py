@@ -462,7 +462,7 @@ def test_missing_models_are_offered_downloaded_and_the_restore_retried(offered):
     step = _restore_step(client, film)
     assert step["state"] == "failed" and step["note"].startswith(MISSING_LTX)
     offer = step["download"]
-    missing = jasna.ltx_missing_files(None, False, True)
+    missing = jasna.ltx_missing_files(None, "standard", True)
     assert offer == {
         "state": "awaiting",
         "request_id": offer["request_id"],
@@ -470,7 +470,7 @@ def test_missing_models_are_offered_downloaded_and_the_restore_retried(offered):
         "total_bytes": sum(FILES[name][0] for name in missing),
         "downloaded_bytes": 0,
         "destination": str(offered.weights.resolve()),
-        "variant": "ltx fast auto-split 12%",
+        "variant": "ltx standard fast auto-split 12%",
         "error": None,
     }
     assert "download" not in _restore_step(client, other)
@@ -550,9 +550,9 @@ def test_the_offer_survives_an_agent_restart(tmp_path, monkeypatch):
         assert host.state == "running", host.reason
         client = _control(host)
         offer = _restore_step(client, film)["download"]
-        missing = jasna.ltx_missing_files(None, False, True)
+        missing = jasna.ltx_missing_files(None, "standard", True)
         assert offer["state"] == "awaiting" and offer["files"] == missing
-        assert offer["variant"] == "ltx fast auto-split 12%"
+        assert offer["variant"] == "ltx standard fast auto-split 12%"
         weights.mkdir(parents=True)  # copied in by hand meanwhile: withdrawn
         for name in missing:
             (weights / name).write_bytes(b"weights")
@@ -570,18 +570,36 @@ def test_recall_missing_infers_the_variant_from_the_file_names(tmp_path):
     rt = runtime(tmp_path / "wf", tools)
     try:
         vae = ["vae.safetensors.enc", "vae-decoder.safetensors.enc"]
-        for names, cfg_fast, fast in (
-            (["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"], False, True),
-            (["a-nvfp4.enc", "vae.safetensors.enc"], False, True),
-            (["ltx-restore-alpha1-distill8-int8.safetensors.enc"], True, False),
-            (vae, True, True),
-            (vae, False, False),
+        # J2 (#283): the tier comes from the model file name too
+        for names, cfg_fast, tier, fast in (
+            (
+                ["ltx-restore-alpha1-distill2-nvfp4.safetensors.enc"],
+                False,
+                "standard",
+                True,
+            ),
+            (
+                ["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"],
+                False,
+                "high",
+                True,
+            ),
+            (["a-nvfp4.enc", "vae.safetensors.enc"], False, "standard", True),
+            (["ltx-restore-alpha1-distill4-int8.safetensors.enc"], True, "good", False),
+            (vae, True, "standard", True),
+            (vae, False, "standard", False),
         ):
             restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
             restore.cfg = restore.cfg.model_copy(update={"ltx_fast": cfg_fast})
             restore.recall_missing(names)
-            assert restore._models == (restore._weights(), fast), names
-        # only VAE missing: the installed model is the one preflight chose
+            weights, cfg, recalled = restore._models
+            assert (weights, cfg.ltx_model, recalled) == (
+                restore._weights(),
+                tier,
+                fast,
+            ), names
+            assert cfg.ltx_fast == cfg_fast  # only the tier is taken from the names
+        # only VAE missing: the installed model of the tier is the one preflight chose
         from taskpaw_v3.monitors.plugins.jasna_download import MODEL_FILES
 
         weights = restore._weights()
@@ -589,14 +607,16 @@ def test_recall_missing_infers_the_variant_from_the_file_names(tmp_path):
         for installed, cfg_fast in ((False, True), (True, False)):
             for stale in weights.iterdir():
                 stale.unlink()
-            (weights / MODEL_FILES[(False, installed)]).write_bytes(b"w")
+            (weights / MODEL_FILES[("standard", installed)]).write_bytes(b"w")
+            (weights / MODEL_FILES[("high", not installed)]).write_bytes(b"w")
             restore = tools.restore(rt, gpus=lambda: pytest.fail("GPU queried"))
             restore.cfg = restore.cfg.model_copy(update={"ltx_fast": cfg_fast})
             restore.recall_missing(vae)
-            assert restore._models == (weights, installed), installed
-        restore._models = (tmp_path, True)  # an existing preflight result wins
+            assert restore._models[0::2] == (weights, installed), installed
+        kept = (tmp_path, restore.cfg, True)
+        restore._models = kept  # an existing preflight result wins
         restore.recall_missing(["x-int8.enc"])
-        assert restore._models == (tmp_path, True)
+        assert restore._models is kept
     finally:
         rt.close()
 

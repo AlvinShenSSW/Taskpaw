@@ -195,14 +195,18 @@ def test_missing_models_are_cached_for_the_download_offer(rt, tools):
     run = run_direct(rt, single(rt), "restore", executor)
     assert run.outcome.message.startswith(MISSING_LTX)
     asked = len(queries)
-    missing = jasna.ltx_missing_files(None, False, True)
-    assert executor.missing_models() == (weights, missing, "ltx fast auto-split 12%")
+    missing = jasna.ltx_missing_files(None, "standard", True)
+    assert executor.missing_models() == (
+        weights,
+        missing,
+        "ltx standard fast auto-split 12%",
+    )
     weights.mkdir(parents=True)
     (weights / missing[0]).write_bytes(b"weights")
     assert executor.missing_models() == (
         weights,
         missing[1:],
-        "ltx fast auto-split 12%",
+        "ltx standard fast auto-split 12%",
     )
     for name in missing[1:]:
         (weights / name).write_bytes(b"weights")
@@ -214,7 +218,7 @@ def test_missing_models_are_cached_for_the_download_offer(rt, tools):
     assert executor.missing_models() == (
         weights,
         missing[:1],
-        "ltx fast auto-split 12%",
+        "ltx standard fast auto-split 12%",
     )
     (weights / missing[0]).write_bytes(b"weights")
     assert run_direct(rt, single(rt, "c.mkv"), "restore", executor).outcome.ok
@@ -226,8 +230,8 @@ def test_models_checked_for_the_variant_the_gpu_allows(rt, tools):
     weights = tools.jasna_dir / "model_weights" / "ltx-restore"
     from taskpaw_v3.monitors.plugins import jasna
 
-    standard_only = set(jasna.ltx_missing_files(None, False, False)) - set(
-        jasna.ltx_missing_files(None, False, True)
+    standard_only = set(jasna.ltx_missing_files(None, "standard", False)) - set(
+        jasna.ltx_missing_files(None, "standard", True)
     )
     for name in standard_only:
         (weights / name).unlink()
@@ -345,7 +349,8 @@ def test_parse_probe_ignores_cover_art_and_reads_the_format_duration():
 def test_tools_profile_is_stable_and_follows_the_settings(rt, tools):
     first = rt.executors["restore"].tools()
     assert (first.profile, first.profile_revision) == ("workflow-restore-ltx", 1)
-    assert first.model == "ltx"
+    # J2 (#283, D09): the tier's CLI name and the weights' precision
+    assert (first.model, first.model_version) == ("ltx", "nvfp4")
     same = tools.restore(rt).tools()
     assert same.config_digest == first.config_digest
     other_gpu = RestoreExecutor(rt, str(tools.jasna_exe), "5060ti-16").tools()
@@ -392,3 +397,182 @@ def test_real_ffprobe_reads_a_real_restored_mp4(rt, tools, tmp_path):
     facts = only.restore
     assert (facts.width, facts.height, facts.video_streams) == (320, 240, 1)
     assert facts.audio_streams == 1 and abs(facts.duration_ms - 2000) <= 200
+
+
+# ── J2: Jasna 0.11.3 tiers (#283) and the source-bitrate cap (#285) ─────────
+
+
+def with_cfg(executor, **update):
+    executor.cfg = executor.cfg.model_copy(update=update)
+    return executor
+
+
+@pytest.mark.parametrize(
+    "tier, fast, model, version",
+    [
+        ("standard", True, "ltx", "nvfp4"),
+        ("good", False, "ltx-4step", "int8"),
+        ("high", True, "ltx-8step", "nvfp4"),
+    ],
+)
+def test_tools_name_the_tier_cli_model_and_its_precision(
+    rt, tools, tier, fast, model, version
+):
+    executor = with_cfg(tools.restore(rt), ltx_model=tier, ltx_fast=fast)
+    record = executor.tools()
+    assert (record.model, record.model_version) == (model, version)
+
+
+def test_the_tier_picks_the_model_name_and_the_models_it_checks(rt, tools):
+    """Only the standard tier is installed: high launches nothing and offers its
+    own model file under the tier's variant text."""
+    executor = with_cfg(tools.restore(rt), ltx_model="high")
+    run = run_direct(rt, single(rt), "restore", executor)
+    assert run.outcome.message.startswith(MISSING_LTX)
+    assert run.processes.children == []
+    weights = tools.jasna_dir / "model_weights" / "ltx-restore"
+    missing = jasna.ltx_missing_files(str(tools.jasna_dir), "high", True)
+    assert missing == ["ltx-restore-alpha1-distill8-nvfp4.safetensors.enc"]
+    assert executor.missing_models() == (
+        weights,
+        missing,
+        "ltx high fast auto-split 12%",
+    )
+    (weights / missing[0]).write_bytes(b"weights")
+    assert executor.missing_models() is None
+    assert run_direct(rt, single(rt, "b.mkv"), "restore", executor).outcome.ok
+    (argv,) = tools.runs(tools.jasna_exe)
+    assert argv[argv.index("--restoration-model-name") + 1] == "ltx-8step"
+
+
+def test_a_per_film_config_hook_decides_the_tier_of_that_film(rt, tools):
+    """U1 plugs a per-film tier into `_cfg_for`; the launch and the download
+    offer follow it, the stage's own record stays the preset's."""
+    executor = tools.restore(rt)
+    good = executor.cfg.model_copy(update={"ltx_model": "good"})
+    seen = []
+
+    def cfg_for(context):
+        seen.append(context.job.film_id)
+        return good
+
+    executor._cfg_for = cfg_for
+    film = single(rt)
+    run = run_direct(rt, film, "restore", executor)
+    assert seen == [film]
+    assert run.outcome.message.startswith(MISSING_LTX)
+    weights, missing, variant = executor.missing_models()
+    assert missing == ["ltx-restore-alpha1-distill4-nvfp4.safetensors.enc"]
+    assert variant == "ltx good fast auto-split 12%"
+    (weights / missing[0]).write_bytes(b"weights")
+    assert run_direct(rt, film, "restore", executor).outcome.ok
+    (argv,) = tools.runs(tools.jasna_exe)
+    assert argv[argv.index("--restoration-model-name") + 1] == "ltx-4step"
+    assert executor.tools().model == "ltx"
+
+
+@pytest.fixture
+def bitrates(monkeypatch):
+    """A fake `jasna.probe_bitrate`: records each probe; answers the next of
+    `answers` (the last one repeats)."""
+    box = {"answers": [45_200_000], "calls": []}
+
+    def probe(video, ffprobe):
+        box["calls"].append((video, ffprobe))
+        answers = box["answers"]
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    monkeypatch.setattr(jasna, "probe_bitrate", probe)
+    return box
+
+
+def encoder_settings(argv):
+    return [argv[i + 1] for i, a in enumerate(argv) if a == "--encoder-settings"]
+
+
+def test_the_launch_is_capped_at_the_source_bitrate(rt, tools, bitrates):
+    film = single(rt)
+    source = rt.work_dir / manifest(rt, film).readiness.workcopy.items[0].relative_path
+    run = run_direct(rt, film, "restore")
+    assert run.outcome.ok, run.outcome.message
+    (argv,) = tools.runs(tools.jasna_exe)
+    assert encoder_settings(argv) == ["maxrate=45200000,qmax=51"]
+    assert argv.index("--encoder-settings") > argv.index("--restoration-model-name")
+    assert [video for video, _ in bitrates["calls"]] == [source]
+    (only,) = ledger(run).videos
+    assert only.restore.maxrate == 45_200_000
+
+
+def test_each_volume_is_probed_and_capped_on_its_own(rt, tools, bitrates):
+    bitrates["answers"] = [30_000_000, 12_500_000]
+    film = add_film(
+        rt,
+        [File("cd1.mkv", video(), volume=1), File("cd2.mkv", video(), volume=2)],
+    )
+    run = run_direct(rt, film, "restore")
+    assert run.outcome.ok, run.outcome.message
+    first, second = tools.runs(tools.jasna_exe)
+    assert encoder_settings(first) == ["maxrate=30000000,qmax=51"]
+    assert encoder_settings(second) == ["maxrate=12500000,qmax=51"]
+    assert [v.restore.maxrate for v in ledger(run).videos] == [30_000_000, 12_500_000]
+    assert len(bitrates["calls"]) == 2
+
+
+def test_a_failed_probe_adds_no_cap_and_warns_once(rt, tools, bitrates, caplog):
+    bitrates["answers"] = [None]
+    tools.set_jasna(mode="fail")
+    film = single(rt)
+    with caplog.at_level("WARNING", logger="taskpaw.workflow.restore"):
+        assert not run_direct(rt, film, "restore").outcome.ok
+        tools.set_jasna()
+        run = run_direct(rt, film, "restore")  # the retry reuses the failed probe
+    assert run.outcome.ok, run.outcome.message
+    runs = tools.runs(tools.jasna_exe)
+    assert len(runs) == 2 and all(encoder_settings(argv) == [] for argv in runs)
+    assert len(bitrates["calls"]) == 1
+    warnings = [r for r in caplog.records if "bitrate" in r.getMessage()]
+    assert len(warnings) == 1
+    (only,) = ledger(run).videos
+    assert only.restore.maxrate is None
+
+
+def test_a_relaunch_of_the_same_video_reuses_its_probe(rt, tools, bitrates):
+    bitrates["answers"] = [45_200_000, 99]  # a second probe would show as 99
+    tools.set_jasna(mode="fail")
+    film = single(rt)
+    assert not run_direct(rt, film, "restore").outcome.ok
+    tools.set_jasna()
+    assert run_direct(rt, film, "restore").outcome.ok
+    first, second = tools.runs(tools.jasna_exe)
+    assert encoder_settings(first) == encoder_settings(second)
+    assert encoder_settings(second) == ["maxrate=45200000,qmax=51"]
+    assert len(bitrates["calls"]) == 1
+
+
+def test_the_cap_is_off_without_match_source_bitrate(rt, tools, bitrates):
+    executor = with_cfg(tools.restore(rt), match_source_bitrate=False)
+    run = run_direct(rt, single(rt), "restore", executor)
+    assert run.outcome.ok, run.outcome.message
+    (argv,) = tools.runs(tools.jasna_exe)
+    assert encoder_settings(argv) == []
+    assert bitrates["calls"] == []
+    (only,) = ledger(run).videos
+    assert only.restore.maxrate is None
+
+
+def test_a_reused_video_is_never_probed(rt, tools, bitrates):
+    run = run_direct(rt, single(rt, "movie-破解.mp4"), "restore")
+    assert run.outcome.ok
+    assert bitrates["calls"] == []
+    (only,) = ledger(run).videos
+    assert only.restore.maxrate is None
+
+
+def test_the_bitrate_probe_gets_a_plain_ffprobe_path_only():
+    """`jasna.probe_bitrate` runs one executable: an argv prefix (the tests'
+    interpreter + script fake) reads as unknown."""
+    from taskpaw_v3.workflow.exec_restore import bitrate_ffprobe
+
+    assert bitrate_ffprobe(["C:/ff/ffprobe.exe"]) == "C:/ff/ffprobe.exe"
+    assert bitrate_ffprobe(["python", "fake.py", "ffprobe"]) is None
+    assert bitrate_ffprobe(None) is None

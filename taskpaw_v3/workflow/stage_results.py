@@ -50,6 +50,8 @@ class RestoreFacts(_Frozen):
     duration_ms: int
     video_streams: int
     audio_streams: int
+    # J2 (#285): the source-bitrate cap the launch applied (bits/s), else None
+    maxrate: int | None = None
 
 
 class SubtitleFacts(_Frozen):
