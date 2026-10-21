@@ -15,7 +15,7 @@ import { TaskLog, TaskLogRows } from "../components/TaskLog";
 import { MonitorSelector } from "../components/MonitorSelector";
 import { MonitorWizard } from "./MonitorWizard";
 import { Settings } from "./Settings";
-import { MediaWorkflow } from "./MediaWorkflow";
+import { MediaWorkspace } from "../components/media/MediaWorkspace";
 
 // HH:MM:SS in 24h, from a react-query dataUpdatedAt epoch (ms). Empty until the
 // first successful fetch. en-GB is a stable 24h format (the digits are mono via
@@ -80,7 +80,7 @@ export function AgentConsole() {
       {tab === "settings" ? (
         <Settings role="agent" />
       ) : tab === "media" ? (
-        <MediaWorkflow />
+        <MediaWorkspace />
       ) : tab === "logs" ? (
         <TaskLog tasks={names} />
       ) : status.isLoading ? (

@@ -198,19 +198,35 @@ export type LlmTestResult = {
   note?: "thinking_unsupported";
 };
 
-// Media workflow (T06-P1 §8, frozen shapes).
-export type FilmGroup = "confirm" | "active" | "attention" | "archiving" | "done";
+// Media workflow (T06-P1 §8; U1 adds the plan gate, preflight, pause and the V3 row facts).
+// U1 fields are optional: an older backend omits them and the UI falls back.
+export type FilmGroup = "pending" | "confirm" | "active" | "attention" | "archiving" | "done";
+export type LtxTier = "standard" | "good" | "high";
+// U1 V': the confirmed plan of a film's current input revision (null tier = 无需修复).
+export interface FilmPlan { ltx_model: LtxTier | null; machine: string }
+// U1 §7.2: the bound final/input revisions, so the 图文确认 dialog can see a change.
+export interface FilmRevisions {
+  final: number | null; final_hash?: string | null; input: number | null; input_hash?: string | null;
+}
 export interface FilmRow {
-  film_id: string; name: string; group: FilmGroup; stage: string; status: string;
+  film_id: string; name: string; group: FilmGroup; stage: string | null; status: string | null;
   note: string | null; can_confirm: boolean; can_retry: boolean; retry_stage: string | null;
   created_at: string | null; steps: WorkflowStep[];
+  resolution?: "4K" | "1080p" | null; number?: string | null; title?: string | null; actors?: string[];
+  receipt_id?: string | null; revisions?: FilmRevisions | null; plan?: FilmPlan | null;
+  has_poster?: boolean; poster_source?: string | null;
 }
-// H2 R5 lifecycle step line (frozen): one fixed line per film/package, computed by the backend.
+// H2 R5 lifecycle step line; U1 V3 adds 「待处理」 (`plan`) after 入库扫描.
 export type StepKey =
-  "intake" | "restore" | "asr" | "translate" | "return" | "scrape" | "confirm" | "archive" | "cleanup" | "done";
+  "intake" | "plan" | "restore" | "asr" | "translate" | "return" | "scrape" | "confirm" | "archive" | "cleanup" | "done";
 export type StepState = "done" | "running" | "waiting" | "failed" | "pending";
 // progress: whatever the executor reports (a 0–1 fraction, a percentage, console text, …) or null.
-export interface WorkflowStep { key: StepKey; state: StepState; note: string | null; progress: unknown }
+// H3 M1/M3: the restore step carries the LTX monitor metrics (`ltx`) while running and the
+// model download session (`download`) when it failed on missing models.
+export interface WorkflowStep {
+  key: StepKey; state: StepState; note: string | null; progress: unknown;
+  ltx?: Record<string, unknown> | null; current_file?: string | null; download?: Record<string, unknown> | null;
+}
 // H2 R2/R2a: an INBOX package that is not a film yet. The backend sends codes; the UI owns the labels.
 export interface PackageRow {
   package_id: string; name: string; state: string; reason: string | null; grouping_reasons: string[];
@@ -218,25 +234,59 @@ export interface PackageRow {
 }
 export interface WorkflowIntake { package_id: string; phase: string; bytes_completed: number; total: number }
 export interface WorkflowCurrent { film_id: string; film: string; stage: string; progress: unknown }
+export interface WorkflowDispatch { state: string; reason: string | null; paused: boolean }
+export interface WorkflowGpu { name: string | null; vram_gb: number | null }
 export interface WorkflowFilms {
   state: string; reason: string | null; current: WorkflowCurrent | null; intake: WorkflowIntake | null;
   films: FilmRow[]; packages: PackageRow[];
+  dispatch?: WorkflowDispatch | null; paused?: boolean; gpu?: WorkflowGpu | null;
 }
 export interface FilmDetail {
   film_id: string; name: string; number: string | null; title: string | null; actors: string[];
   marks: { restored: boolean; chinese_subtitles: boolean; uhd: boolean };
   files: Array<{ role: string; path: string; size: number | null; volume: number | string | null }>;
   inputs: Array<{ path: string; size: number | null }>;
-  workcopy_count: number; has_poster: boolean;
+  workcopy_count: number; has_poster: boolean; poster_source?: string | null;
   group: FilmGroup; can_confirm: boolean; can_retry: boolean; retry_stage: string | null; note: string | null;
   stages: Array<{ stage: string; status: string; note: string | null }>; steps: WorkflowStep[];
   archive: { status: string | null; error: string | null; target_path: string | null };
   cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
+  resolution?: "4K" | "1080p" | null; receipt_id?: string | null; revisions?: FilmRevisions | null;
+  plan?: FilmPlan | null; package?: string | null;
 }
 export interface Performer {
   id: number | string; name: string; source_label: string | null; unc_path: string | null;
   has_thumb: boolean; aliases: string[];
 }
+// U1 §7.3: the archive target preflight, and the performer candidates of the film's NFO actor.
+export type TargetErrorCode = "offline" | "permission" | "duplicate";
+export interface TargetPreflight {
+  target_path: string | null; absent: boolean | null; error_code: TargetErrorCode | null;
+  candidates?: Performer[] | null;
+}
+// U1 P3': one unplanned film on the 待处理 list, with the recommendation and its reasons
+// (backend `workflow/planning.py`). `lookup` is the MDCX metadata preview (v2 L).
+export type LookupStatus = "succeeded" | "failed" | "running" | "queued";
+export interface PlanLookup {
+  status: LookupStatus; number: string | null; title: string | null; actors: string[];
+  message: string | null; can_requery: boolean; has_poster?: boolean;
+}
+export interface PlanRecommendation { ltx_model: LtxTier | null; ltx_reason: string; machine: string; machine_reason: string }
+export interface PlanEntry {
+  film_id: string; input_revision: number; revision_changed?: boolean; name: string;
+  title: string | null; number: string | null; actors: string[];
+  has_poster: boolean; poster_source?: string | null; resolution: "4K" | "1080p" | null;
+  duration_ms: number | null; size_bytes: number | null; video_count?: number; item_count: number;
+  needs_gpu: boolean; lookup: PlanLookup | null; recommendation: PlanRecommendation;
+}
+export interface PlanMachine { id: string; name: string; gpu?: string | null; vram_mib?: number | null; reason?: string | null }
+export interface WorkflowPlans {
+  plans: PlanEntry[]; default_tier?: LtxTier;
+  choices: { tiers: Array<{ value: LtxTier; label: string }>; machines: PlanMachine[] };
+}
+export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string }
+// `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
+export interface PlanResult { film_id: string; ok: boolean; error: string | null; message: string | null }
 const seg = (id: string | number) => encodeURIComponent(String(id));
 
 export type ControlRole = "agent" | "hub";
@@ -493,6 +543,20 @@ export const api = {
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/retry`, { stage }),
   workflowOpen: (filmId: string, what: "inbox" | "output") =>
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
+  // U1: the plan gate (待处理), the archive target preflight, metadata lookup and the global pause.
+  workflowPlans: () => get<WorkflowPlans>("agent", "/control/workflow/plans"),
+  workflowConfirmPlans: (plans: PlanChoice[]) =>
+    send<{ results: PlanResult[] }>("agent", "POST", "/control/workflow/plans", { plans }),
+  workflowLookup: (filmId: string) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/lookup`),
+  workflowTarget: (filmId: string, performerId?: Performer["id"]) =>
+    get<TargetPreflight>("agent", `/control/workflow/films/${seg(filmId)}/target${
+      performerId === undefined ? "" : `?${new URLSearchParams({ performer_id: String(performerId) })}`}`),
+  workflowPause: (paused: boolean) =>
+    send<{ paused: boolean }>("agent", "POST", "/control/workflow/pause", { paused }),
+  // H3 M1: answer the model download offer of the workflow's own session.
+  workflowLtxDownload: (request_id: string, approved: boolean) =>
+    send<{ ok: boolean }>("agent", "POST", "/control/workflow/ltx-download", { request_id, approved }),
   // H2 R2: open a current INBOX package folder (204 | 404 missing | 501 unsupported platform).
   workflowOpenPackage: (packageId: string) =>
     send<void>("agent", "POST", `/control/workflow/packages/${seg(packageId)}/open`),

@@ -3,8 +3,11 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../api";
 
-export function LtxDownload({ value, name, disabled, onChanged, onError }: {
+// `name` answers through the monitor's prompt route; `onRespond` replaces it for an owner with
+// its own route (the media workflow's session, H3 M1). Either one shows the buttons.
+export function LtxDownload({ value, name, disabled, onChanged, onError, onRespond }: {
   value: unknown; name?: string; disabled?: boolean; onChanged?: () => void; onError?: (e: unknown) => void;
+  onRespond?: (requestId: string, approved: boolean) => Promise<unknown>;
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
@@ -14,10 +17,11 @@ export function LtxDownload({ value, name, disabled, onChanged, onError }: {
   if (typeof d.state !== "string" || typeof d.request_id !== "string" || !["awaiting", "approved", "downloading", "paused", "error"].includes(d.state)) return null;
   const requestId = d.request_id;
   const respond = async (approved: boolean) => {
-    if (!name || busy || submitted === requestId) return;
+    if ((!name && !onRespond) || busy || submitted === requestId) return;
     setBusy(true);
     try {
-      await api.respondPrompt(name, requestId, approved);
+      if (onRespond) await onRespond(requestId, approved);
+      else if (name) await api.respondPrompt(name, requestId, approved);
       setSubmitted(requestId);
       onChanged?.();
     } catch (e) { onError?.(e); } finally { setBusy(false); }
@@ -33,7 +37,7 @@ export function LtxDownload({ value, name, disabled, onChanged, onError }: {
     <Typography variant="caption" sx={{ display: "block", overflowWrap: "anywhere" }}>{Array.isArray(d.files) ? d.files.filter(f => typeof f === "string").join(" · ") : ""}</Typography>
     {typeof d.error === "string" && <Alert severity="error" sx={{ mt: 1 }}>{d.error}</Alert>}
     {downloading && <LinearProgress aria-label={t("jasna.downloadTitle")} variant={total ? "determinate" : "indeterminate"} value={total ? done / total * 100 : undefined} sx={{ mt: 1 }} />}
-    {name && !downloading && <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
+    {(name || onRespond) && !downloading && <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
       <Button variant="contained" disabled={disabled || busy || submitted === requestId} onClick={() => void respond(true)}>{t(d.state === "error" ? "jasna.retryDownload" : "jasna.download")}</Button>
       {d.state !== "paused" && <Button disabled={disabled || busy || submitted === requestId} onClick={() => void respond(false)}>{t("jasna.notNow")}</Button>}
     </Stack>}
