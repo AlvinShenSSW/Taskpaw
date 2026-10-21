@@ -157,6 +157,7 @@ def test_the_launch_params_are_the_argv_jasna_got_for_this_film(
         "large_canvas": "--ltx-large-canvas" in argv,
         "overlap": "auto",
         "codec": _after(argv, "--codec"),
+        "codec_follows_source": False,
         "cq": int(_after(argv, "--cq")),
         "match_source_bitrate": True,
         "maxrate_bps": bitrate,
@@ -186,3 +187,67 @@ def test_the_launch_params_are_the_argv_jasna_got_for_this_film(
     assert params["argv"] == subprocess.list2cmdline(short)
     assert str(tools.jasna_dir) not in params["argv"]
     assert "--input ABF-394.mp4" in params["argv"]
+
+
+# ── IR05: the params read the argv the way argparse does ───────────────────
+def _launch(argv: list[str], probe=None, **kw):
+    return exec_restore.launch_params(
+        ["jasna.exe", "--input", "a.mkv", *argv],
+        match_source_bitrate=False,
+        source_bitrate=None,
+        probe=probe,
+        gpu=None,
+        preset="5060-8",
+        **kw,
+    )
+
+
+def _probe(codec: str | None):
+    streams = (SimpleNamespace(index=0, codec_type="video", codec_name=codec),)
+    return SimpleNamespace(
+        width=1920,
+        height=1080,
+        raw_facts=SimpleNamespace(primary_video_index=0, streams=streams),
+    )
+
+
+def test_a_repeated_flag_takes_the_last_value_like_argparse():
+    params = _launch(
+        ["--cq", "20", "--codec", "hevc", "--cq", "30", "--codec", "av1"]
+        + ["--experimental-ltx-less-overlap", "--no-experimental-ltx-less-overlap"]
+        + ["--max-clip-size", "90", "--max-clip-size", "180"]
+        + ["--ltx-fast", "--no-ltx-fast"]
+    )
+    assert (params["cq"], params["codec"]) == (30, "av1")
+    assert params["clip_size"] == 180
+    assert params["overlap"] == "off"
+    assert params["fast"] is False and params["precision"] == "int8"
+    again = _launch(
+        ["--no-experimental-ltx-less-overlap", "--experimental-ltx-less-overlap"]
+    )
+    assert again["overlap"] == "on"
+
+
+@pytest.mark.parametrize(
+    ("split", "configured", "source", "codec", "follows"),
+    [
+        ("12", "hevc", "h264", "h264", True),  # smart render keeps the source codec
+        ("12", "hevc", "av1", "av1", True),
+        ("12", "av1", "hevc", "hevc", True),
+        ("12", "hevc", "hevc", "hevc", False),  # already the same
+        ("0", "hevc", "h264", "hevc", False),  # no auto split: it re-encodes
+        ("12", "hevc", "mpeg4", "hevc", False),  # not a codec Jasna keeps
+        ("12", "hevc", None, "hevc", False),  # unreadable source codec
+    ],
+)
+def test_auto_split_shows_the_source_codec_as_the_effective_output(
+    split, configured, source, codec, follows
+):
+    argv = ["--codec", configured, "--ltx-auto-split", split]
+    params = _launch(argv, _probe(source))
+    assert (params["codec"], params["codec_follows_source"]) == (codec, follows)
+
+
+def test_the_codec_stays_configured_without_a_probe():
+    params = _launch(["--codec", "hevc", "--ltx-auto-split", "12"], None)
+    assert (params["codec"], params["codec_follows_source"]) == ("hevc", False)

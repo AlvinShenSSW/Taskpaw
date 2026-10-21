@@ -276,6 +276,40 @@ def test_agent_config_roundtrip_and_secret_masking(tmp_path):
     assert loaded.server_id == "s1" and loaded.bind_port == 5680
 
 
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("5060-8", "auto"),  # the old default, written out by save_yaml
+        ("auto", "auto"),
+        (None, "auto"),
+        ("", "auto"),
+        ("5090-32", "5090-32"),  # any other explicit preset stays explicit
+        ("4090-24", "4090-24"),
+    ],
+)
+def test_workflow_ltx_gpu_migrates_the_stored_default_to_auto(
+    tmp_path, stored, expected
+):
+    path = tmp_path / "agent.yaml"
+    value = "null" if stored is None else repr(stored)
+    lines = ["server_id: s1", "machine: dev", "workflow:", f"  ltx_gpu: {value}"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert load_yaml(AgentConfig, path).workflow.ltx_gpu == expected  # type: ignore[attr-defined]
+
+
+def test_workflow_ltx_gpu_defaults_to_auto_and_saves_it(tmp_path):
+    cfg = AgentConfig(server_id="s1", machine="dev")
+    assert cfg.workflow.ltx_gpu == "auto"
+    path = tmp_path / "agent.yaml"
+    save_yaml(cfg, path)
+    assert "ltx_gpu: auto" in path.read_text(encoding="utf-8")
+    explicit = AgentConfig(
+        server_id="s1", machine="dev", workflow={"ltx_gpu": "5090-32"}
+    )
+    save_yaml(explicit, path)
+    assert load_yaml(AgentConfig, path).workflow.ltx_gpu == "5090-32"  # type: ignore[attr-defined]
+
+
 def test_agent_config_rejects_bad_port_and_nonloopback_control():
     with pytest.raises(Exception):
         AgentConfig(server_id="s", machine="m", bind_port=70000)

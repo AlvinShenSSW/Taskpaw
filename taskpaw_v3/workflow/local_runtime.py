@@ -178,6 +178,7 @@ class LocalRuntime:
         self._cleanup_auth: AuthProof | None = None
         self._boot_id: str | None = None
         self.gpu: LocalGpu | None = None
+        self._gpu_read: tuple[LocalGpu | None] | None = None
         self.reason = "starting"
         self.reconciled = False
         self.agent_identity = ""
@@ -409,8 +410,16 @@ class LocalRuntime:
             )
         return tuple(values)
 
+    def boot_gpu(self) -> LocalGpu | None:
+        """The local GPU, read once for the boot: the executor factory (restore
+        preset) and the capability probe share this one nvidia-smi call."""
+        with self.lock:
+            if self._gpu_read is None:
+                self._gpu_read = (self._gpu(),)
+            return self._gpu_read[0]
+
     def _ensure_capability(self, current: m.WorkerRecord) -> None:
-        self.gpu = gpu = self._gpu()
+        self.gpu = gpu = self.boot_gpu()
         if gpu is None:
             self.reason = "无法读取本机 GPU（nvidia-smi）"
             return

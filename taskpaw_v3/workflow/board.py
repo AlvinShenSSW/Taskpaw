@@ -71,6 +71,7 @@ _ARRIVING = {
 _COPYING = {"snapshotting", "snapshot_ready"}
 NFO_LIMIT = 262144
 _FINISHED = ("succeeded", "skipped")
+_STEP_KEYS = ("console", "params")  # reported with the LTX state, shown on the step
 _TROUBLE = ("failed", "blocked", "unknown")
 _CLEANUPS: tuple[m.Stage, ...] = ("cleanup_input", "cleanup_workcopy")
 _RETRYABLE = ("failed", "blocked")
@@ -306,7 +307,9 @@ def _steps(
             )
             ltx = running.get("ltx") if mine and name == "restore" else None
             if isinstance(ltx, dict):
-                step.update(ltx=ltx, current_file=ltx.get("current_file"))
+                # IR07: console and params live on the step, not inside `ltx`
+                metrics = {k: v for k, v in ltx.items() if k not in _STEP_KEYS}
+                step.update(ltx=metrics, current_file=ltx.get("current_file"))
             if mine and name == "restore":
                 detail = ltx if isinstance(ltx, dict) else {}
                 step.update(

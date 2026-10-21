@@ -201,6 +201,34 @@ def test_unrecognised_console_lines_are_throttled_but_progress_is_not(
     assert [s.get("console") for s in run.ltx[1:]] == ["first note", SCAN_LINE]
 
 
+def test_a_held_console_line_is_flushed_once_the_window_has_passed(
+    rt, tools, monkeypatch
+):
+    """IR03: A shows at once, B arrives inside the window and is held; with the
+    child then silent (but alive) B still reaches the step when the window ends."""
+    monkeypatch.setattr(exec_restore, "CONSOLE_INTERVAL_S", 0.4)
+    tools.set_jasna(progress=["note A", "note B"], linger=2.0)
+    run = run_direct(rt, single(rt), "restore")
+    assert run.outcome.ok
+    consoles = [s.get("console") for s in run.ltx[1:]]
+    assert consoles == ["note A", "note B"]  # B once, not repeated
+
+
+def test_the_console_flush_stops_with_the_child(rt, tools, monkeypatch):
+    monkeypatch.setattr(exec_restore, "CONSOLE_INTERVAL_S", 0.1)
+    tools.set_jasna(progress=["note A", "note B"])
+    before = {t.ident for t in threading.enumerate()}
+    run = run_direct(rt, single(rt), "restore")
+    assert run.outcome.ok
+    deadline = time.monotonic() + 3
+    while any(
+        t.name == "restore-console-flush" and t.ident not in before
+        for t in threading.enumerate()
+    ):
+        assert time.monotonic() < deadline, "console flush thread kept running"
+        time.sleep(0.02)
+
+
 def test_progress_text_shows_volume_stage_percent_and_eta():
     state = {"ltx_stage": "3/4 denoise", "percent": 7, "eta": "04:57"}
     assert progress_text(" 第 2/3 卷", state) == (

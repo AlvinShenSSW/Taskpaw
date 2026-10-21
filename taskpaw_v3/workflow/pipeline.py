@@ -12,28 +12,48 @@ from collections.abc import Callable
 from taskpaw_v3.core.config import WorkflowSettings
 
 from .exec_asr import AsrExecutor
-from .exec_restore import RestoreExecutor, resolve_gpu_preset
+from .exec_restore import RestoreExecutor, preset_label, resolve_gpu_preset
 from .exec_translate import TranslateExecutor
 from .executors import StageExecutor
-from .local_gpu import LocalGpu, query_gpu
+from .local_gpu import LocalGpu
 from .local_runtime import LocalRuntime
 from .lookup import MetadataLookup
 from .scrape_step import LocalScrapeStep
 
 log = logging.getLogger("taskpaw.workflow.pipeline")
 
+AUTO_PRESET = "auto"
+
+
+def _preset_source(gpu: LocalGpu | None, auto: bool) -> str:
+    if not auto:
+        return "configured"
+    if gpu is None:
+        return "no GPU found, safe default"
+    return f"auto from {gpu.name}, {round(gpu.vram_mib / 1024)} GB"
+
 
 def default_executors(
     settings: WorkflowSettings,
-    gpu: Callable[[], LocalGpu | None] = query_gpu,
+    gpu: Callable[[], LocalGpu | None] | None = None,
 ) -> Callable[[LocalRuntime], list[StageExecutor]]:
+    """`gpu`: the card lookup; by default the runtime's one boot-time read, which
+    the capability probe reuses."""
+
     def build(runtime: LocalRuntime) -> list[StageExecutor]:
         executors: list[StageExecutor] = []
         if settings.jasna_exe_path:
-            # U1d: an unset `ltx_gpu` is decided once, here, so the approved
-            # capability profile keeps matching for the runtime's life
-            auto = not settings.ltx_gpu
-            preset = settings.ltx_gpu or resolve_gpu_preset(gpu())
+            # U1d: "auto" is decided once, here, so the approved capability
+            # profile keeps matching for the runtime's life
+            auto = settings.ltx_gpu == AUTO_PRESET
+            card = (gpu or runtime.boot_gpu)() if auto else None
+            preset = resolve_gpu_preset(card) if auto else settings.ltx_gpu
+            log.info(
+                "workflow restore preset: %s (%s) — %s",
+                preset,
+                preset_label(preset),
+                _preset_source(card, auto),
+            )
             try:
                 executors.append(
                     RestoreExecutor(

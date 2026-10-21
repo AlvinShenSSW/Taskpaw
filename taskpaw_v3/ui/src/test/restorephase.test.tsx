@@ -115,7 +115,9 @@ describe("drawer 修复 section", () => {
     const beat = screen.getByTestId("restore-heartbeat");
     expect(beat).toHaveTextContent("正在启动 Jasna（加载模型） · 已用 01:05");
     expect(beat).toHaveTextContent("Jasna 正在加载模型");
-    expect(screen.queryByTestId("restore-console-toggle")).not.toBeInTheDocument();
+    // IR04: the fold is there from the start, empty until the first line
+    expect(screen.getByTestId("restore-console-toggle")).toHaveTextContent("最新输出");
+    expect(screen.getByTestId("restore-console-raw").textContent).toBe("—");
   });
 
   it("working: the latest console line in a selectable 最新输出 fold", () => {
@@ -124,7 +126,7 @@ describe("drawer 修复 section", () => {
     expect(screen.getByTestId("restore-console-raw")).toHaveTextContent("Loading LTX weights (fast) …");
   });
 
-  it("scan: the shared scan card, its console fold, no duplicate 最新输出", () => {
+  it("scan: the shared scan card and its console fold; 最新输出 still renders", () => {
     wrap(<RestoreLivePanel step={step("scan")} />);
     const card = screen.getByTestId("scan-progress");
     expect(within(card).getByText("Mosaic scan")).toBeInTheDocument();
@@ -133,7 +135,7 @@ describe("drawer 修复 section", () => {
     expect(within(card).getByText("04:53")).toBeInTheDocument();
     expect(within(card).getByText("每秒采样数")).toBeInTheDocument();
     expect(within(card).getByTestId("scan-console-raw").textContent).toBe(SCAN_LINE);
-    expect(screen.queryByTestId("restore-console-toggle")).not.toBeInTheDocument();
+    expect(screen.getByTestId("restore-console-raw").textContent).toBe(SCAN_LINE); // IR04: equal to the card's line
     expect(screen.getByTestId("restore-heartbeat")).toHaveTextContent("扫描马赛克");
   });
 
@@ -158,6 +160,41 @@ describe("drawer 修复 section", () => {
     expect(screen.getByTestId("restore-heartbeat")).toHaveTextContent("LTX 2/4 encode");
     act(() => { vi.advanceTimersByTime(60_000); });
     expect(screen.getByTestId("restore-heartbeat")).toHaveTextContent("已用 02:05");
+  });
+});
+
+describe("最新输出 fold (IR04)", () => {
+  const panel = (phase: RestorePhaseKey, line?: string) => (
+    <ThemeProvider theme={theme}><div className="mw"><RestoreLivePanel step={{ ...step(phase), ...(line ? { console: line } : {}) }} /></div></ThemeProvider>
+  );
+
+  it("keeps its open state while the line updates, even when it equals the card's line", () => {
+    const { rerender } = render(panel("scan"));
+    const fold = () => screen.getByTestId("restore-console-toggle").closest("details")!;
+    fold().open = true;
+    rerender(panel("scan", "Mosaic scan:  13%|█▏        | 650/5000 [00:43<04:50, 15.00sample/s]"));
+    expect(fold().open).toBe(true);
+    expect(screen.getByTestId("restore-console-raw")).toHaveTextContent("650/5000");
+    rerender(panel("scan", SCAN_LINE)); // back to the card's own line: not unmounted
+    expect(fold().open).toBe(true);
+    expect(screen.getByTestId("restore-console-raw").textContent).toBe(SCAN_LINE);
+  });
+
+  it("stays open across the first line and the phase change", () => {
+    const { rerender } = render(panel("starting"));
+    screen.getByTestId("restore-console-toggle").closest("details")!.open = true;
+    rerender(panel("working"));
+    expect(screen.getByTestId("restore-console-toggle").closest("details")!.open).toBe(true);
+    rerender(panel("ltx"));
+    expect(screen.getByTestId("restore-console-toggle").closest("details")!.open).toBe(true);
+  });
+
+  it("reads console and params from the step only, never from the ltx state (IR07)", () => {
+    const ltx = { ...RESTORE_PHASES.working, params: PARAMS };
+    const live = restoreLive({ ...step("working"), ltx, console: null, params: null })!;
+    expect(live.console).toBeNull();
+    expect(live.params).toBeNull();
+    expect(restoreStep(film("ltx"))!.ltx).not.toHaveProperty("console");
   });
 });
 
@@ -190,6 +227,14 @@ describe("本片参数", () => {
     expect(within(screen.getByTestId("restore-params")).getByText("预设 RTX 5060 · 8 GB")).toBeInTheDocument();
     expect(readParams({ ...PARAMS, preset_label: undefined, preset_auto: undefined })).toMatchObject(
       { preset: "5070ti-16", preset_label: "5070ti-16", preset_auto: false });
+  });
+
+  it("shows the source codec with a note when the auto split keeps it (IR05)", () => {
+    const params = { ...PARAMS, codec: "h264", codec_follows_source: true };
+    wrap(<RestoreLivePanel step={{ ...step("ltx"), params }} />);
+    expect(param("编码")).toBe("编码H264 · CQ 20（自动拆分沿用原片编码）");
+    expect(readParams(params)?.codec_follows_source).toBe(true);
+    expect(readParams({ ...PARAMS, codec_follows_source: undefined })?.codec_follows_source).toBe(false);
   });
 
   it("says so when the source bitrate could not be read", () => {

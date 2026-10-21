@@ -173,7 +173,7 @@ def test_unset_ltx_gpu_picks_the_preset_once_from_the_local_gpu(tmp_path):
 
     try:
         settings = WorkflowSettings(jasna_exe_path=str(tools.jasna_exe))
-        assert settings.ltx_gpu is None
+        assert settings.ltx_gpu == "auto"
         (restore,) = default_executors(settings, gpu=card)(rt)
         assert (restore.gpu_id, restore.preset_auto) == ("5070ti-16", True)
         assert restore.cfg.clip_size_1080p == 180
@@ -192,3 +192,72 @@ def test_unset_ltx_gpu_picks_the_preset_once_from_the_local_gpu(tmp_path):
         assert len(asked) == 2  # an explicit setting never queries the card
     finally:
         rt.close()
+
+
+def _boot(tmp_path, settings, card):
+    """The host's boot order: executors built from the runtime, then enrolment."""
+    from taskpaw_v3.workflow.local_runtime import LocalRuntime
+
+    queries = []
+
+    def gpu():
+        queries.append(1)
+        return card
+
+    rt = LocalRuntime(tmp_path / "wf", [], gpu=gpu, machine=lambda: "synthetic")
+    rt.executors = {e.stage: e for e in default_executors(settings)(rt)}
+    rt.open()
+    rt.ensure_worker()
+    return rt, queries
+
+
+def test_the_boot_queries_the_gpu_once_for_the_preset_and_the_capability(tmp_path):
+    from taskpaw_v3.workflow.local_gpu import LocalGpu
+
+    tools = Tools(tmp_path / "tools")
+    card = LocalGpu("NVIDIA GeForce RTX 5070 Ti", "GPU-fake", 16303)
+    settings = WorkflowSettings(jasna_exe_path=str(tools.jasna_exe))
+    rt, queries = _boot(tmp_path, settings, card)
+    try:
+        assert len(queries) == 1
+        assert rt.gpu == card
+        assert rt.executors["restore"].gpu_id == "5070ti-16"
+    finally:
+        rt.close()
+
+
+@pytest.mark.parametrize(
+    ("ltx_gpu", "card", "tail"),
+    [
+        (
+            "auto",
+            ("NVIDIA GeForce RTX 5070 Ti", 16303),
+            "5070ti-16 (RTX 5070 Ti · 16 GB) — auto from NVIDIA GeForce RTX 5070 Ti, 16 GB",
+        ),
+        (
+            "4090-24",
+            ("NVIDIA GeForce RTX 5060", 8151),
+            "4090-24 (RTX 4090 · 24 GB) — configured",
+        ),
+        ("auto", None, "5060-8 (RTX 5060 · 8 GB) — no GPU found, safe default"),
+    ],
+)
+def test_the_boot_logs_which_restore_preset_it_chose_and_why(
+    tmp_path, caplog, ltx_gpu, card, tail
+):
+    import logging
+
+    from taskpaw_v3.workflow.local_gpu import LocalGpu
+
+    tools = Tools(tmp_path / "tools")
+    gpu = LocalGpu(card[0], "GPU-fake", card[1]) if card else None
+    settings = WorkflowSettings(jasna_exe_path=str(tools.jasna_exe), ltx_gpu=ltx_gpu)
+    with caplog.at_level(logging.INFO, logger="taskpaw.workflow.pipeline"):
+        rt, _ = _boot(tmp_path, settings, gpu)
+    rt.close()
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "workflow restore preset" in r.getMessage()
+    ]
+    assert lines == [f"workflow restore preset: {tail}"]

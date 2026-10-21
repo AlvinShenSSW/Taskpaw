@@ -273,6 +273,7 @@ def test_the_fixture_covers_every_page_the_ui_tests():
     assert restore["ltx"]["ltx_progress"]["stage_name"] == "encode"
     assert restore["started_at"] and restore["console"] == LTX_ENCODE  # U1c
     assert restore["params"]["model_name"] == "ltx"
+    assert not ({"console", "params"} & restore["ltx"].keys())  # on the step only
     assert restore["params"]["maxrate_bps"] == 12_200_000
     statuses = {e["lookup"]["status"] for e in data["plans"]["plans"]}
     assert statuses == {"succeeded", "failed"}

@@ -49,6 +49,8 @@ def jasna(argv: list[str]) -> int:
         sys.stdout.write(line + "\r")  # tqdm redraws with CR only
         sys.stdout.flush()
     sys.stdout.write("\n")
+    sys.stdout.flush()
+    time.sleep(cfg.get("linger", 0))  # quiet but alive: the console flush
     mode = cfg.get("mode", "copy")
     if mode == "sleep":
         print("started", flush=True)

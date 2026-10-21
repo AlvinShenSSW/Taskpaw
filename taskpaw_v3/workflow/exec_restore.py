@@ -240,7 +240,39 @@ _MODEL_TIERS = {name: tier for tier, name in jasna.LTX_MODEL_NAMES.items()}
 
 
 def _flag(argv: Sequence[str], flag: str) -> str | None:
-    return argv[argv.index(flag) + 1] if flag in argv[:-1] else None
+    """The value of `flag`; the LAST occurrence wins, as in argparse (the
+    operator's extra args come after the ones the preset built)."""
+    for index in range(len(argv) - 2, -1, -1):
+        if argv[index] == flag:
+            return argv[index + 1]
+    return None
+
+
+def _switch(argv: Sequence[str], flag: str) -> bool | None:
+    """Whether `--x` or `--no-x` came last (None: neither was given)."""
+    off = f"--no-{flag[2:]}"
+    for token in reversed(argv):
+        if token == flag:
+            return True
+        if token == off:
+            return False
+    return None
+
+
+_SMART_CODECS = {"h264", "hevc", "av1"}  # the codecs Jasna's smart render keeps
+
+
+def _source_codec(probe: m.MediaProbe | None) -> str | None:
+    """The primary video's codec as Jasna names it (None: unknown or not one
+    Jasna keeps)."""
+    facts = getattr(probe, "raw_facts", None)
+    if facts is None:
+        return None
+    for stream in facts.streams:
+        if stream.index == facts.primary_video_index:
+            name = (stream.codec_name or "").casefold()
+            return name if name in _SMART_CODECS else None
+    return None
 
 
 def _int(value: str | None) -> int | None:
@@ -264,35 +296,38 @@ def launch_params(
     (the effective values after the GPU check, never the configured ones), and
     the argv itself with every path cut to its file name, ready to copy."""
     model_name = _flag(argv, "--restoration-model-name")
-    fast = "--ltx-fast" in argv
-    overlap = (
-        "on"
-        if "--experimental-ltx-less-overlap" in argv
-        else "off"
-        if "--no-experimental-ltx-less-overlap" in argv
-        else "auto"
-    )
+    fast = _switch(argv, "--ltx-fast") is True
+    switch = _switch(argv, "--experimental-ltx-less-overlap")
+    overlap = "auto" if switch is None else "on" if switch else "off"
     rate = _flag(argv, "--encoder-settings") or ""
     maxrate = next(
         (_int(part[8:]) for part in rate.split(",") if part.startswith("maxrate=")),
         None,
     )
+    codec = _flag(argv, "--codec")
+    auto_split = _int(_flag(argv, "--ltx-auto-split")) or 0
+    # Jasna smart-renders the auto split's spans in the source's codec, so a
+    # different configured codec does not apply to them
+    source_codec = _source_codec(probe)
+    follows = bool(auto_split and source_codec and source_codec != codec)
+    if follows:
+        codec = source_codec
     short = list(argv)
     if short:
         short[0] = Path(short[0]).name
-    for flag in _PATH_FLAGS:
-        if flag in short[:-1]:
-            index = short.index(flag) + 1
-            short[index] = Path(short[index]).name
+    for index in range(len(short) - 1):
+        if short[index] in _PATH_FLAGS:  # every repeat, not only the last
+            short[index + 1] = Path(short[index + 1]).name
     return {
         "ltx_model": _MODEL_TIERS.get(model_name or ""),
         "model_name": model_name,
         "fast": fast,
         "precision": "nvfp4" if fast else "int8",
-        "auto_split": _int(_flag(argv, "--ltx-auto-split")) or 0,
-        "large_canvas": "--ltx-large-canvas" in argv,
+        "auto_split": auto_split,
+        "large_canvas": _switch(argv, "--ltx-large-canvas") is True,
         "overlap": overlap,
-        "codec": _flag(argv, "--codec"),
+        "codec": codec,
+        "codec_follows_source": follows,
         "cq": _int(_flag(argv, "--cq")),
         "match_source_bitrate": match_source_bitrate,
         "maxrate_bps": maxrate,
@@ -770,9 +805,20 @@ class RestoreExecutor:
         )
         console = ""
         last_emit = -math.inf
+        held = False  # a console line the throttle dropped, not yet on the step
+
+        def publish(now: float) -> None:
+            """The monitor's LtxProgress metrics (its parse state and the
+            volume, M3) plus the latest plain console line (U1c). Caller holds
+            `lock`."""
+            nonlocal last_emit, held
+            last_emit, held = now, False
+            detail = {**state, "current_file": volume, "console": console}
+            detail["params"] = params
+            context.progress(progress_text(label, state), ltx=detail)
 
         def on_line(_stream: str, text: str) -> None:
-            nonlocal state, console, last_emit
+            nonlocal state, console, held
             with lock:
                 updated = parse_jasna_progress_line(text, state)
                 line = console_text(text)
@@ -783,17 +829,43 @@ class RestoreExecutor:
                         tail.append(text.strip()[:300])
                     # U1c heartbeat: any console line shows the child is alive,
                     # throttled so a chatty child cannot flood the status
-                    if not line or now - last_emit < CONSOLE_INTERVAL_S:
+                    if not line:
                         return
-                state, last_emit = updated, now
-                # the monitor's LtxProgress metrics: its parse state and the
-                # volume (M3), plus the latest plain console line (U1c)
-                detail = {**updated, "current_file": volume, "console": console}
-                detail["params"] = params
-                context.progress(progress_text(label, updated), ltx=detail)
+                    if now - last_emit < CONSOLE_INTERVAL_S:
+                        held = True  # the flusher publishes it when the window ends
+                        return
+                state = updated
+                publish(now)
+
+        stop_flush = threading.Event()
+
+        def flush_held() -> None:
+            """IR03: a dropped line must still reach the step when the child then
+            goes quiet; lives only while the child runs."""
+            while True:
+                with lock:
+                    wait = (
+                        CONSOLE_INTERVAL_S - (time.monotonic() - last_emit)
+                        if held
+                        else CONSOLE_INTERVAL_S
+                    )
+                if stop_flush.wait(max(wait, 0.05)):
+                    return
+                with lock:
+                    now = time.monotonic()
+                    if held and now - last_emit >= CONSOLE_INTERVAL_S:
+                        publish(now)
 
         child = context.processes.launch(argv, cwd=str(workdir), on_line=on_line)
-        code = child.wait(context.cancel)
+        flusher = threading.Thread(
+            target=flush_held, name="restore-console-flush", daemon=True
+        )
+        flusher.start()
+        try:
+            code = child.wait(context.cancel)
+        finally:
+            stop_flush.set()
+            flusher.join(2)
         if code is None:
             raise cancelled()
         if code != 0:

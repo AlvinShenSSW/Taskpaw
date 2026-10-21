@@ -51,8 +51,6 @@ export function RestoreLivePanel({ step }: { step: WorkflowStep }) {
   const now = useNow(live !== null && live.startedAt !== null);
   if (!live) return null;
   const beat = heartbeatText(live, now);
-  const raw = live.ltx?.raw_line ?? live.scan?.raw_line;
-  const showConsole = live.console !== null && live.console !== raw;
   return (
     <Box sx={{ display: "grid", gap: 2, minWidth: 0 }} data-testid="restore-live">
       <ProgressFrame testId="restore-heartbeat" label="修复进度"
@@ -71,10 +69,9 @@ export function RestoreLivePanel({ step }: { step: WorkflowStep }) {
             {SPLIT_NOTE[live.split.kind]}
           </Typography>
         )}
-        {showConsole && (
-          <ConsoleFold raw={live.console ?? undefined} title="最新输出" help="Jasna 控制台最近一行（纯文本）"
-            testIdPrefix="restore-console" />
-        )}
+        {/* always mounted while the stage runs, so the operator's open/closed choice survives updates */}
+        <ConsoleFold raw={live.console ?? undefined} title="最新输出" help="Jasna 控制台最近一行（纯文本）"
+          unavailable="Jasna 还没有输出" testIdPrefix="restore-console" />
       </ProgressFrame>
       {live.params && <ParamsBlock params={live.params} />}
       {live.phase === "ltx" && <LtxProgress metrics={live.metrics} />}

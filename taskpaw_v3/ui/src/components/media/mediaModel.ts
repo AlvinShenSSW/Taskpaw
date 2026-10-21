@@ -127,10 +127,10 @@ export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null 
   const scan = ltx ? null : readScanProgress(metrics);
   const basic = ltx || scan ? null : readBasicProgress(metrics);
   const split = readSplitNote(metrics);
-  const console = plainText(step.console ?? metrics.console, 300)?.trim() || null;
+  const console = plainText(step.console, 300)?.trim() || null;
   const started = typeof step.started_at === "string" ? Date.parse(step.started_at) : NaN;
   const phase: RestorePhase = ltx ? "ltx" : scan ? "scan" : basic ? "basic" : split ? "split" : console ? "working" : "starting";
-  const params = readParams(step.params ?? metrics.params);
+  const params = readParams(step.params);
   return { phase, startedAt: Number.isFinite(started) ? started : null, console, split, scan, basic, ltx, metrics, params };
 }
 
@@ -147,7 +147,8 @@ export function readParams(value: unknown): RestoreParams | null {
   return {
     ltx_model: tier, model_name: text(value.model_name), fast: value.fast === true,
     precision: value.fast === true ? "nvfp4" : "int8", auto_split: int(value.auto_split) ?? 0,
-    large_canvas: value.large_canvas === true, overlap, codec: text(value.codec), cq: int(value.cq),
+    large_canvas: value.large_canvas === true, overlap, codec: text(value.codec),
+    codec_follows_source: value.codec_follows_source === true, cq: int(value.cq),
     match_source_bitrate: value.match_source_bitrate === true, maxrate_bps: int(value.maxrate_bps),
     source_bitrate_bps: int(value.source_bitrate_bps), detection_model: text(value.detection_model),
     clip_size: int(value.clip_size), temporal_overlap: int(value.temporal_overlap), tier: text(value.tier) ?? "1080p",
@@ -182,7 +183,7 @@ export function paramRows(p: RestoreParams): Array<[string, string]> {
     ["自动拆分", p.auto_split > 0 ? `${p.auto_split}%` : "关"],
     ["大画布", ON_OFF(p.large_canvas)],
     ["减少重叠", OVERLAP[p.overlap]],
-    ["编码", `${(p.codec ?? "—").toUpperCase()} · CQ ${p.cq ?? "—"}`],
+    ["编码", `${(p.codec ?? "—").toUpperCase()} · CQ ${p.cq ?? "—"}${p.codec_follows_source ? "（自动拆分沿用原片编码）" : ""}`],
     ["码率上限", capText(p)],
     ["检测", p.detection_model ?? "—"],
     ["片段 / 重叠", `${p.clip_size ?? "—"} / ${p.temporal_overlap ?? "—"}`],

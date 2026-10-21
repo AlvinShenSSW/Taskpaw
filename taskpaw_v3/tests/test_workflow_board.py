@@ -314,6 +314,9 @@ def test_the_running_restore_step_always_carries_its_start_and_console():
     assert restore["started_at"] == "2026-10-22T08:00:00+00:00"
     assert restore["console"] == "loading models"
     assert restore["params"] == current["ltx"]["params"]
+    # IR07: kept on the step only, not repeated inside `ltx`
+    assert restore["ltx"] == {"current_file": "a.mp4"}
+    assert "console" in current["ltx"] and "params" in current["ltx"]  # input intact
     bare = {k: v for k, v in current.items() if k != "ltx"}
     restore = _step_of(board.film_row(value, {}, current=bare), "restore")
     assert (restore["started_at"], restore["console"], restore["params"]) == (
