@@ -165,6 +165,25 @@ def test_one_click_archives_once_and_cleans_both_scopes(world):
     assert not list((world.rt.work_dir / "scrape").glob(f"{world.film}-r*"))
 
 
+def test_the_lookup_cache_is_reclaimed_with_the_film(world):
+    """IR07: the Miko preview of a cleaned film is Taskpaw's to remove too."""
+    cache = world.rt.work_dir / "lookup" / f"{world.film}-r1"
+    cache.mkdir(parents=True)
+    (cache / "lookup.json").write_text("{}", "utf-8")
+    (cache / "poster.jpg").write_bytes(b"jpeg")
+    other = world.rt.work_dir / "lookup" / "someone-else-r1"
+    other.mkdir()
+    world.scrape()
+    with world.fake:
+        fin = world.finalizer()
+        fin.run_once()
+        fin.confirm(world.film, "actor")
+        world.ticks(fin)
+    assert world.status("cleanup_workcopy") == "succeeded"
+    assert not cache.exists()
+    assert other.is_dir()  # only this film's
+
+
 def test_download_extras_are_cleaned_with_the_original_never_archived(
     tmp_path, monkeypatch
 ):

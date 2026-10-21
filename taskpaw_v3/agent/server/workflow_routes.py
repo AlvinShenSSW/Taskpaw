@@ -289,6 +289,8 @@ def register_workflow_routes(
             film = rt.store.get_film(rt.operator, film_id).film
             if film.current_input_revision is None:
                 raise HTTPException(status_code=409, detail="影片还没有收件内容")
+            if film.current_final_revision is not None:  # the final NFO names it
+                raise HTTPException(status_code=409, detail="影片已刮削，无需重新查询")
             try:
                 rt.lookup.requery(film_id, film.current_input_revision)
             except WorkflowError as exc:

@@ -782,7 +782,8 @@ class Finalizer:
         return bool(films) and all(getattr(f, field) == "succeeded" for f in films)
 
     def _reclaim_film(self, film_id: str) -> bool:
-        """Taskpaw's own per-film dirs: compute attempts, return package, scrape attempts."""
+        """Taskpaw's own per-film dirs: compute attempts, return package, scrape
+        attempts and the Miko lookup cache (IR07)."""
         rt = self.runtime
         view = rt.store.get_film(rt.operator, film_id)
         dirs = [
@@ -791,7 +792,7 @@ class Finalizer:
             if stage.stage in ("restore", "asr", "translate")
             for attempt in rt.store.list_attempts(rt.operator, stage.job_id)
         ]
-        for parent in ("return", "scrape"):
+        for parent in ("return", "scrape", "lookup"):
             dirs.extend((rt.work_dir / parent).glob(f"{film_id}-r*"))
         for path in dirs:
             shutil.rmtree(path, ignore_errors=True)  # a locked file: retried next tick
