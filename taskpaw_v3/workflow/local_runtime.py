@@ -35,6 +35,7 @@ from .store import WorkflowStore
 
 if TYPE_CHECKING:
     from .lookup import MetadataLookup
+    from .stage_results import StageResult
 
 log = logging.getLogger("taskpaw.workflow.runtime")
 
@@ -309,6 +310,12 @@ class LocalRuntime:
                 note=note, item_ids=item_ids, timing=timing, energy=energy
             ),
         )
+
+    def stage_result(self, film_id: str, stage: str) -> StageResult | None:
+        """`ExecRuntime`: the store's verified ledger of the film's `stage`."""
+        from .stage_results import store_stage_result
+
+        return store_stage_result(self, film_id, stage)
 
     def worker_view(self) -> m.WorkerView:
         return self.store.get_worker(self.operator, self.identity.worker_id)

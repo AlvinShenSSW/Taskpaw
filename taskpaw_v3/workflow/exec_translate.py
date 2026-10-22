@@ -35,9 +35,8 @@ from .exec_common import (
     tool_versions,
     write_text_atomic,
 )
-from .executors import ComputeStage, ExecOutcome, JobContext
-from .local_gpu import max_resolution
-from .local_runtime import LocalRuntime
+from .executors import ComputeStage, ExecOutcome, ExecRuntime, JobContext
+from .local_gpu import UHD
 from .stage_results import (
     StageResult,
     StageResultError,
@@ -93,7 +92,7 @@ class TranslateExecutor:
 
     def __init__(
         self,
-        runtime: LocalRuntime,
+        runtime: ExecRuntime,
         *,
         translator_factory: TranslatorFactory | None = None,
         chain_fn: Callable[[], Sequence[object]] = get_llm_chain,
@@ -120,7 +119,9 @@ class TranslateExecutor:
         )
 
     def max_resolution(self, vram_mib: int) -> tuple[int, int]:
-        return max_resolution(vram_mib)
+        # P2-3 R4: LLM-only, so no card limits it (a 4K film restored on a
+        # 16 GB worker translates on the 8 GB controller)
+        return UHD
 
     def run(self, context: JobContext) -> ExecOutcome:
         return guarded(lambda: self._run(context))

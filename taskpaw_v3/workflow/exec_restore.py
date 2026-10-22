@@ -54,9 +54,14 @@ from .exec_common import (
     tool_versions,
     workcopy_ref,
 )
-from .executors import RESTORE_DONE, ComputeStage, ExecOutcome, JobContext
+from .executors import (
+    RESTORE_DONE,
+    ComputeStage,
+    ExecOutcome,
+    ExecRuntime,
+    JobContext,
+)
 from .local_gpu import FULL_HD, LocalGpu, max_resolution
-from .local_runtime import LocalRuntime
 from .owned_process import OwnedJob
 from .stage_results import (
     FileRef,
@@ -446,7 +451,7 @@ class RestoreExecutor:
 
     def __init__(
         self,
-        runtime: LocalRuntime,
+        runtime: ExecRuntime,
         jasna_exe: str,
         gpu_id: str = "5060-8",
         *,

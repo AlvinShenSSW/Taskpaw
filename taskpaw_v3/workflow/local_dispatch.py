@@ -19,6 +19,7 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from taskpaw_v3.core import gpu_lease
@@ -34,6 +35,7 @@ from .executors import (
     ComputeStage,
     ExecOutcome,
     JobContext,
+    Progress,
     StageExecutor,
     classify_exception,
     failed_kind,
@@ -148,6 +150,56 @@ _TRANSIENT = failed_kind("transient")
 
 def _kinds(attempt: Any) -> set[str]:
     return {evidence.kind for evidence in attempt.evidence}
+
+
+@dataclass
+class StageRun:
+    """One executor run: its outcome, the attempt's Job (None: none could be
+    made, nothing was launched) and whether that Job settled in time."""
+
+    outcome: ExecOutcome
+    processes: OwnedJob | None
+    settled: bool
+
+
+def run_stage(
+    executor: StageExecutor,
+    job: m.PendingComputeJob,
+    manifest: m.InputManifest,
+    workdir: Path,
+    cancel: threading.Event,
+    *,
+    on_launch: Callable[[str], None],
+    progress: Progress,
+    stop_settle: float,
+    on_processes: Callable[[OwnedJob], None] | None = None,
+) -> StageRun:
+    """P2-3 §4: the run section shared by the controller's and a worker's
+    dispatcher — a kill-on-close Job, the attempt's work folder, the
+    executor, an exception classified, a stop as `cancelled`, then terminate
+    and settle. No renewal: the caller keeps its own around this call."""
+    processes: OwnedJob | None = None
+    try:
+        # Setup after the claim fails like a stage, never leaving it claimed (R2).
+        processes = OwnedJob(on_launch=on_launch)
+        if on_processes is not None:
+            on_processes(processes)
+        workdir.mkdir(parents=True, exist_ok=True)
+        outcome = executor.run(
+            JobContext(job, manifest, workdir, cancel, processes, progress)
+        )
+    except (
+        Exception
+    ) as exc:  # setup error / executor bug: needs-attention; a held file: transient
+        log.exception("workflow stage %s failed", job.stage)
+        outcome = ExecOutcome.failed(classify_exception(exc), f"执行器异常：{exc}")
+    if cancel.is_set() and not outcome.ok:
+        outcome = ExecOutcome.failed("cancelled", "已停止")
+    settled = True
+    if processes is not None:  # None: nothing was launched, nothing to settle
+        processes.terminate()  # descendants left behind by a finished primary
+        settled = processes.settle(stop_settle)
+    return StageRun(outcome, processes, settled)
 
 
 def should_retry(attempts: Sequence[Any]) -> bool:
@@ -685,34 +737,30 @@ class LocalDispatcher:
             daemon=True,
         )
         renewer.start()
+
+        def held(processes: OwnedJob) -> None:
+            running.processes = processes
+
         try:
-            # Setup after the claim fails like a stage, never leaving it claimed (R2).
-            running.processes = OwnedJob(on_launch=launched)
-            workdir = rt.work_dir / attempt.attempt_id
-            workdir.mkdir(parents=True, exist_ok=True)
-            outcome = executor.run(
-                JobContext(
-                    job, manifest, workdir, self.cancel, running.processes, progress
-                )
+            result = run_stage(
+                executor,
+                job,
+                manifest,
+                rt.work_dir / attempt.attempt_id,
+                self.cancel,
+                on_launch=launched,
+                progress=progress,
+                stop_settle=self.stop_settle,
+                on_processes=held,
             )
-        except (
-            Exception
-        ) as exc:  # setup error / executor bug: needs-attention; a held file: transient
-            log.exception("workflow stage %s failed", job.stage)
-            outcome = ExecOutcome.failed(classify_exception(exc), f"执行器异常：{exc}")
         finally:
             stop_renew.set()
             renewer.join()  # no renewal may land after resolution reads the version (R1)
-        if self.cancel.is_set() and not outcome.ok:
-            outcome = ExecOutcome.failed("cancelled", "已停止")
-        processes = running.processes
-        if processes is not None:  # None: nothing was launched, nothing to settle
-            processes.terminate()  # descendants left behind by a finished primary
-            if not processes.settle(self.stop_settle):
-                self._unsettled = _Unsettled(running, outcome)
-                self._reason = "停止未确认：任务进程仍在运行"
-                return True
-        self._resolve(running, outcome)
+        if not result.settled:
+            self._unsettled = _Unsettled(running, result.outcome)
+            self._reason = "停止未确认：任务进程仍在运行"
+            return True
+        self._resolve(running, result.outcome)
         return True
 
     def _finish_unsettled(self) -> bool:

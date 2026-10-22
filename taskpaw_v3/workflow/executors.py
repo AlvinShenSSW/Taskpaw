@@ -11,11 +11,14 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from .local_gpu import max_resolution
+from .local_gpu import LocalGpu, max_resolution
 from .models import InputManifest, PendingComputeJob, RestoreTiming, ToolVersions
 from .owned_process import OwnedJob
+
+if TYPE_CHECKING:
+    from .stage_results import StageResult
 
 ErrorClass = Literal["transient", "permission", "needs_attention", "cancelled"]
 ComputeStage = Literal["restore", "asr", "translate"]
@@ -89,6 +92,25 @@ class JobContext:
     cancel: threading.Event
     processes: OwnedJob
     progress: Progress = field(default=_no_progress)
+
+
+class ExecRuntime(Protocol):
+    """What an executor and `exec_common` may use of the machine it runs on
+    (P2-3 §4): the controller's `LocalRuntime` or a worker's `WorkerRuntime`."""
+
+    @property
+    def work_dir(self) -> Path:
+        """The root of the work copies and of every attempt's work folder."""
+        ...
+
+    @property
+    def gpu(self) -> LocalGpu | None: ...
+
+    def stage_result(self, film_id: str, stage: str) -> StageResult | None:
+        """The verified ledger of the film's current `stage`; None when the
+        film has no such stage. `StageResultError` when it cannot be vouched
+        for (not succeeded, missing, altered)."""
+        ...
 
 
 class StageExecutor(Protocol):

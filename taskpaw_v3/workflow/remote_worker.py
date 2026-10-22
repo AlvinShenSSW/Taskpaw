@@ -183,15 +183,14 @@ def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
 
     from .exec_asr import AsrExecutor
     from .exec_restore import RestoreExecutor, resolve_gpu_preset
-    from .executors import StageExecutor
+    from .executors import ExecRuntime, StageExecutor
     from .local_gpu import machine_identity, query_gpu
-    from .local_runtime import LocalRuntime
     from .models import ProfileCapability
 
     gpu = query_gpu()
     if gpu is None:
         return None
-    unbound = cast(LocalRuntime, None)  # never used by tools()/max_resolution()
+    unbound = cast(ExecRuntime, None)  # never used by tools()/max_resolution()
     executors: list[StageExecutor] = []
     tiers: tuple[str, ...] = ()
     restore = None

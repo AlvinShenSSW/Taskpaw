@@ -32,9 +32,8 @@ from .exec_common import (
     workcopy_ref,
     write_text_atomic,
 )
-from .executors import ASR_DONE, ComputeStage, ExecOutcome, JobContext
+from .executors import ASR_DONE, ComputeStage, ExecOutcome, ExecRuntime, JobContext
 from .local_gpu import max_resolution
-from .local_runtime import LocalRuntime
 from .stage_results import (
     FileRef,
     StageResult,
@@ -81,7 +80,7 @@ class AsrExecutor:
 
     def __init__(
         self,
-        runtime: LocalRuntime,
+        runtime: ExecRuntime,
         whisperjav_exe: str,
         *,
         engine: whisperjav.Engine = whisperjav.DEFAULT_ENGINE,
