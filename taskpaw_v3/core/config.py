@@ -60,6 +60,32 @@ class WorkflowSettings(BaseModel):
         return value
 
 
+class PowerPeer(BaseModel):
+    """PWR-3 (#289, PW06): another TaskPaw agent the 功耗 tab reads. Only a
+    name and `host[:port]` (port 5680 by default); requests carry this agent's
+    own api_token. A public (WAN) IP literal is refused."""
+
+    name: str = Field(min_length=1, max_length=64)
+    address: str = Field(min_length=1, max_length=255)
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("power.peers name must not be blank")
+        return value
+
+    @field_validator("address")
+    @classmethod
+    def _address(cls, value: str) -> str:
+        from taskpaw_v3.core.power_fleet import parse_address
+
+        value = value.strip()
+        parse_address(value)  # raises ValueError
+        return value
+
+
 class PowerSettings(BaseModel):
     """Per-machine power estimate (PWR-1, #287; `power:` in agent.yaml).
 
@@ -78,12 +104,17 @@ class PowerSettings(BaseModel):
     other_w: Optional[float] = Field(None, ge=0, le=2000)
     psu_efficiency: Optional[float] = Field(None, gt=0, le=1)
     cpu_source: Literal["estimate", "none"] = "estimate"
+    # PWR-3 (PW06): the 功耗 tab's other machines, edited in its dialog
+    peers: list[PowerPeer] = Field(default_factory=list, max_length=16)
 
     @model_validator(mode="after")
     def _idle_within_tdp(self) -> "PowerSettings":
         if self.tdp_w is not None and self.idle_w is not None:
             if self.idle_w > self.tdp_w:
                 raise ValueError("power.idle_w must not exceed power.tdp_w")
+        names = [peer.name for peer in self.peers]
+        if len(set(names)) != len(names):
+            raise ValueError("power.peers names must be unique")
         return self
 
 

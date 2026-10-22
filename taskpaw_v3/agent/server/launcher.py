@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from taskpaw_v3 import __version__
-from taskpaw_v3.core import power
+from taskpaw_v3.core import power, power_fleet
 from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.control import bootstrap_control, revoke_control, strip_control_env
@@ -152,6 +152,7 @@ def run_agent(
     supervisor = None
     workflow_host = None
     power_sampler: Optional[power.PowerSampler] = None
+    fleet: Optional[power_fleet.PowerFleet] = None
     servers: list[uvicorn.Server] = []
     threads: list[threading.Thread] = []
     task_log = None
@@ -172,6 +173,11 @@ def run_agent(
             if supervisor is not None:
                 supervisor.stop()
         finally:
+            if fleet is not None:  # PWR-3: the peers' refresher
+                if not fleet.stop():
+                    log.error("The power peers refresher did not stop in time")
+                if power_fleet.get_fleet() is fleet:
+                    power_fleet.set_fleet(None)
             if power_sampler is not None:
                 try:
                     power_sampler.stop()  # flushes the open 15-minute bucket
@@ -272,6 +278,22 @@ def run_agent(
             ),
             data_dir=config_path.parent if config_path is not None else None,
         )
+        # PWR-3 (#289, PW06): the 功耗 tab's peers, refreshed in the background
+        # with this agent's own (live) api_token; routes read only the cache.
+        peers = fleet = power_fleet.PowerFleet(
+            lambda: power.get_power_settings().peers,
+            lambda: config.api_token,
+        )
+
+        def _power_view(range_: str) -> dict:
+            import platform
+
+            view = power.power_view(sampler, range_)  # ValueError first
+            return {
+                **view,
+                "machine": {"name": config.machine, "os": platform.system()},
+                "peers": peers.snapshot(range_),
+            }
 
         def _status_provider() -> dict:
             import platform
@@ -326,7 +348,7 @@ def run_agent(
                     prompt_responder=supervisor.respond_prompt,
                     # late-bound: the host starts after announce_ready (T06-P1)
                     workflow_provider=lambda: workflow_host,
-                    power_view=lambda range_: power.power_view(sampler, range_),
+                    power_view=_power_view,
                 ),
                 log_level="warning",
             )
@@ -362,6 +384,8 @@ def run_agent(
         runtime_started = True
         power.set_sampler(sampler)
         sampler.start()
+        power_fleet.set_fleet(peers)
+        peers.start()
         startup.checkpoint()
         for thread in threads:
             startup.checkpoint()

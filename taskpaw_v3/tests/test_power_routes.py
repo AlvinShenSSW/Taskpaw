@@ -400,10 +400,10 @@ def test_launcher_starts_the_sampler_after_the_supervisor(monkeypatch, tmp_path)
         status = kwargs["control"]["status_provider"]()
         assert status["power"] == {"w": 42.0, "estimated": True}
         assert kwargs["network"]["power_history"]("7d") == {"range": "7d"}
-        assert kwargs["control"]["power_view"]("30d") == {
-            "power": {"w": 42.0, "estimated": True},
-            "history": {"range": "30d"},
-        }
+        view = kwargs["control"]["power_view"]("30d")
+        assert view["power"] == {"w": 42.0, "estimated": True}
+        assert view["history"] == {"range": "30d"}
+        assert view["peers"] == []  # PWR-3: none configured
     finally:
         shutdown.shutdown()
     assert "sampler.stop" in order

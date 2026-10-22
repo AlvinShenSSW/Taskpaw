@@ -67,15 +67,17 @@ def _power_isolation(monkeypatch):
     sampler, and the process-wide holders (settings, sampler) and the shared
     nvidia-smi cache start fresh. Tests that exercise a reader call it directly
     or pass their own fakes."""
-    from taskpaw_v3.core import gpu_sample, power
+    from taskpaw_v3.core import gpu_sample, power, power_fleet
 
     monkeypatch.setattr(power, "_gpu_reader", lambda: None)
     monkeypatch.setattr(power, "_cpu_reader", lambda: 0.0)
     gpu_sample._reset_for_tests()
     power._reset_for_tests()
+    power_fleet._reset_for_tests()
     yield
     gpu_sample._reset_for_tests()
     power._reset_for_tests()
+    power_fleet._reset_for_tests()
 
 
 @pytest.fixture(autouse=True)

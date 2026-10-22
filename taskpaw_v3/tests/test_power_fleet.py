@@ -1,0 +1,475 @@
+"""PWR-3 (#289): the 功耗 tab's peers (PW06) and the cluster's live power.
+
+Peers are `{name, address}` under agent.yaml `power.peers`; the agent fetches
+only `/status` and `/power/history` with its own api_token, bounded (2 s,
+256 KB), never through a proxy or a redirect, never from a public address.
+A background refresh keeps the cache; routes never wait on a peer. Network
+access in these tests goes only to a fake server on 127.0.0.1.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+
+import pytest
+
+from taskpaw_v3.agent.server.admin import MonitorAdmin
+from taskpaw_v3.core import power, power_fleet
+from taskpaw_v3.core.config import AgentConfig, PowerPeer, PowerSettings, load_yaml
+from taskpaw_v3.core.power_fleet import PeerError, PowerFleet, fetch_json
+from taskpaw_v3.tests.test_admin import _agent_config, _registry
+
+TOKEN = "shared-polling-token"
+LIVE = {
+    "w": 172.0,
+    "gpu_w": 118.0,
+    "cpu_w": 24.0,
+    "other_w": 30.0,
+    "estimated": True,
+    "today_wh": 1920.0,
+    "week_wh": 9630.0,
+    "month_wh": 54900.0,
+    "activity": "asr",
+}
+
+
+# ── addresses ───────────────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "address, expected",
+    [
+        ("192.168.1.20", ("192.168.1.20", 5680)),
+        ("192.168.1.20:5690", ("192.168.1.20", 5690)),
+        ("gpu-02.local", ("gpu-02.local", 5680)),
+        ("gpu-02:5680", ("gpu-02", 5680)),
+        ("[fe80::1]:5680", ("fe80::1", 5680)),
+        ("fd00::20", ("fd00::20", 5680)),
+        (" 10.0.0.5 ", ("10.0.0.5", 5680)),
+    ],
+)
+def test_peer_addresses_are_host_and_port(address, expected):
+    assert power_fleet.parse_address(address) == expected
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "",
+        "http://192.168.1.20:5680",
+        "192.168.1.20/status",
+        "user@192.168.1.20",
+        "192.168.1.20:0",
+        "192.168.1.20:99999",
+        "192.168.1.20:abc",
+        "0.0.0.0",
+        "[::]",
+        "8.8.8.8",  # public: refused (bind_is_global)
+        "[2001:4860:4860::8888]:5680",
+        "host name",
+        "192.168.1.20?x=1",
+    ],
+)
+def test_bad_or_public_peer_addresses_are_refused(address):
+    with pytest.raises(ValueError):
+        power_fleet.parse_address(address)
+
+
+def test_peer_urls_use_only_the_fixed_paths():
+    assert power_fleet.peer_url("10.0.0.5", "/status") == "http://10.0.0.5:5680/status"
+    assert (
+        power_fleet.peer_url("[fd00::20]:5681", "/power/history?range=7d")
+        == "http://[fd00::20]:5681/power/history?range=7d"
+    )
+
+
+def test_settings_validate_the_peer_list():
+    s = PowerSettings(peers=[{"name": " GPU-02 ", "address": "192.168.1.20"}])
+    assert s.peers == [PowerPeer(name="GPU-02", address="192.168.1.20")]
+    with pytest.raises(ValueError):
+        PowerSettings(peers=[{"name": "x", "address": "8.8.8.8"}])
+    with pytest.raises(ValueError):
+        PowerSettings(
+            peers=[
+                {"name": "x", "address": "10.0.0.1"},
+                {"name": "x", "address": "10.0.0.2"},
+            ]
+        )
+    with pytest.raises(ValueError):
+        PowerSettings(peers=[{"name": "", "address": "10.0.0.1"}])
+    with pytest.raises(ValueError):
+        PowerSettings(
+            peers=[{"name": f"m{i}", "address": f"10.0.0.{i}"} for i in range(17)]
+        )
+
+
+def test_the_peer_list_is_saved_live_from_the_dialog(tmp_path):
+    cfg = _agent_config(power={"other_w": 40})
+    path = tmp_path / "agent.yaml"
+    admin = MonitorAdmin(cfg, None, _registry(), path)
+    peers = [{"name": "GPU-02", "address": "192.168.1.20"}]
+    assert admin.update_config({"power": {"peers": peers}})["ok"] is True
+    assert power.get_power_settings().peers == [PowerPeer(**peers[0])]
+    assert power.get_power_settings().other_w == 40  # a partial patch
+    assert load_yaml(AgentConfig, path).power.peers == [PowerPeer(**peers[0])]
+    with pytest.raises(ValueError):
+        admin.update_config({"power": {"peers": [{"name": "w", "address": "1.1.1.1"}]}})
+    assert power.get_power_settings().peers == [PowerPeer(**peers[0])]
+
+
+# ── one bounded GET against a fake peer on 127.0.0.1 ───────────────────────
+class FakePeer:
+    """A local HTTP server answering per path; records the headers it saw."""
+
+    def __init__(self):
+        self.routes: dict[str, tuple[int, bytes, dict]] = {}
+        self.seen: list[tuple[str, dict]] = []
+        self.delay = 0.0
+        peer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                peer.seen.append((self.path, dict(self.headers)))
+                if peer.delay:
+                    time.sleep(peer.delay)
+                code, body, headers = peer.routes.get(self.path, (404, b"{}", {}))
+                self.send_response(code)
+                for key, value in headers.items():
+                    self.send_header(key, value)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except OSError:
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def json(self, path: str, value, code: int = 200, headers=None):
+        self.routes[path] = (code, json.dumps(value).encode(), headers or {})
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def peer():
+    value = FakePeer()
+    try:
+        yield value
+    finally:
+        value.close()
+
+
+def test_fetch_sends_this_agents_token_and_reads_json(peer):
+    peer.json("/status", {"machine": "GPU-02", "power": LIVE})
+    assert fetch_json(peer.url("/status"), TOKEN)["machine"] == "GPU-02"
+    ((path, headers),) = peer.seen
+    assert headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_fetch_ignores_proxy_settings(peer, monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    peer.json("/status", {"ok": True})
+    assert fetch_json(peer.url("/status"), TOKEN) == {"ok": True}
+
+
+@pytest.mark.parametrize(
+    "code, error",
+    [
+        (401, "unauthorized"),
+        (403, "unauthorized"),
+        (404, "not_found"),
+        (500, "http_error"),
+    ],
+)
+def test_fetch_maps_http_errors_to_codes(peer, code, error):
+    peer.json("/status", {"detail": "secret upstream text"}, code=code)
+    with pytest.raises(PeerError) as caught:
+        fetch_json(peer.url("/status"), TOKEN)
+    assert caught.value.code == error
+    assert "secret" not in str(caught.value)
+
+
+def test_fetch_refuses_a_redirect(peer):
+    peer.routes["/status"] = (302, b"", {"Location": "http://8.8.8.8/status"})
+    with pytest.raises(PeerError) as caught:
+        fetch_json(peer.url("/status"), TOKEN)
+    assert caught.value.code == "http_error"
+    assert [p for p, _ in peer.seen] == ["/status"]
+
+
+def test_fetch_caps_the_body_at_256_kb(peer):
+    big = b'{"x":"' + b"a" * (256 * 1024) + b'"}'
+    peer.routes["/status"] = (200, big, {})
+    with pytest.raises(PeerError) as caught:
+        fetch_json(peer.url("/status"), TOKEN)
+    assert caught.value.code == "too_large"
+
+
+def test_fetch_gives_up_after_its_timeout(peer):
+    peer.json("/status", {"ok": True})
+    peer.delay = 1.5
+    started = time.monotonic()
+    with pytest.raises(PeerError) as caught:
+        fetch_json(peer.url("/status"), TOKEN, timeout=0.3)
+    assert caught.value.code in ("unreachable", "timeout")
+    assert time.monotonic() - started < 1.4
+
+
+def test_fetch_reports_a_closed_port_and_bad_json(peer):
+    peer.routes["/status"] = (200, b"not json", {})
+    with pytest.raises(PeerError) as caught:
+        fetch_json(peer.url("/status"), TOKEN)
+    assert caught.value.code == "invalid"
+    closed = peer.port
+    peer.close()
+    with pytest.raises(PeerError) as caught:
+        fetch_json(f"http://127.0.0.1:{closed}/status", TOKEN, timeout=0.5)
+    assert caught.value.code == "unreachable"
+
+
+# ── the cache ──────────────────────────────────────────────────────────────
+class Clock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+class Peers:
+    """`fetch` answers by a part of the URL; a str answer raises PeerError."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, url, token):
+        self.calls.append((url, token))
+        for suffix, value in self.answers.items():
+            if suffix in url:
+                if isinstance(value, str):
+                    raise PeerError(value)
+                return value
+        raise PeerError("not_found")
+
+
+def fleet(peers, answers, token=TOKEN):
+    clock = Clock()
+    fetch = Peers(answers)
+    value = PowerFleet(
+        lambda: [SimpleNamespace(**p) for p in peers],
+        lambda: token,
+        fetch=fetch,
+        clock=clock,
+        wall=lambda: 1_800_000_000.0,
+    )
+    return value, fetch, clock
+
+
+HISTORY = {"range": "24h", "t": [0, 900], "avg_w": [100.0, None]}
+GPU02 = {"name": "GPU-02", "address": "192.168.1.20"}
+
+
+def test_a_peer_with_power_is_cached_with_its_history():
+    f, fetch, _clock = fleet(
+        [GPU02],
+        {
+            "/status": {"machine": "GPU-02", "version": "3.9.18", "power": LIVE},
+            "range=24h": HISTORY,
+            "range=7d": {**HISTORY, "range": "7d"},
+            "range=30d": {**HISTORY, "range": "30d"},
+        },
+    )
+    assert f.snapshot()[0]["state"] == "pending"  # before the first refresh
+    f.refresh_once()
+    (row,) = f.snapshot("7d")
+    assert row["state"] == "ok" and row["machine"] == "GPU-02"
+    assert row["power"]["w"] == 172.0 and row["power"]["activity"] == "asr"
+    assert row["history"]["range"] == "7d"
+    assert row["stale"] is False and row["age_s"] == 0.0
+    assert {token for _, token in fetch.calls} == {TOKEN}
+    assert {url.split("5680")[1] for url, _ in fetch.calls} == {
+        "/status",
+        "/power/history?range=24h",
+        "/power/history?range=7d",
+        "/power/history?range=30d",
+    }
+
+
+def test_histories_refresh_once_a_minute_and_status_every_cycle():
+    f, fetch, clock = fleet([GPU02], {"/status": {"power": LIVE}, "range=": HISTORY})
+    f.refresh_once()
+    clock.now += 5
+    f.refresh_once()
+    statuses = [u for u, _ in fetch.calls if u.endswith("/status")]
+    histories = [u for u, _ in fetch.calls if "history" in u]
+    assert len(statuses) == 2 and len(histories) == 3
+    clock.now += 60
+    f.refresh_once()
+    assert len([u for u, _ in fetch.calls if "history" in u]) == 6
+
+
+@pytest.mark.parametrize(
+    "answers, state",
+    [
+        ({"/status": {"machine": "old"}}, "no_power"),  # an older TaskPaw
+        ({"/status": {"power": None}}, "off"),  # sampling turned off
+        ({"/status": {"power": LIVE}, "range=24h": "not_found"}, "no_power"),
+        ({"/status": "unreachable"}, "unreachable"),
+        ({"/status": "unauthorized"}, "unauthorized"),
+        ({"/status": ["not", "an", "object"]}, "invalid"),
+    ],
+)
+def test_peer_states(answers, state):
+    f, _fetch, _clock = fleet([GPU02], answers)
+    f.refresh_once()
+    (row,) = f.snapshot()
+    assert row["state"] == state
+    if state != "ok":
+        assert row["power"] is None
+
+
+def test_a_public_address_saved_by_hand_is_never_fetched():
+    f, fetch, _clock = fleet([{"name": "wan", "address": "8.8.8.8"}], {})
+    f.refresh_once()
+    assert fetch.calls == []
+    assert f.snapshot()[0]["state"] == "invalid_address"
+
+
+def test_removed_peers_are_dropped():
+    peers = [GPU02, {"name": "GPU-03", "address": "192.168.1.30"}]
+    f, _fetch, _clock = fleet(peers, {"/status": {"power": LIVE}, "range=": HISTORY})
+    f.refresh_once()
+    assert len(f.snapshot()) == 2
+    del peers[1]
+    f.refresh_once()
+    assert [row["name"] for row in f.snapshot()] == ["GPU-02"]
+
+
+def test_a_route_reads_the_cache_and_never_waits_on_a_peer():
+    gate = threading.Event()
+    entered = threading.Event()
+
+    def slow(url, token):
+        entered.set()
+        gate.wait(5)
+        raise PeerError("unreachable")
+
+    f = PowerFleet(lambda: [SimpleNamespace(**GPU02)], lambda: TOKEN, fetch=slow)
+    worker = threading.Thread(target=f.refresh_once)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        started = time.monotonic()
+        (row,) = f.snapshot()
+        assert time.monotonic() - started < 0.5
+        assert row["state"] == "pending"
+    finally:
+        gate.set()
+        worker.join(5)
+
+
+def test_the_refresher_thread_starts_and_stops():
+    f = PowerFleet(lambda: [], lambda: TOKEN, fetch=Peers({}), interval=0.05)
+    f.start()
+    time.sleep(0.1)
+    assert f.stop(5) is True
+
+
+def test_a_peer_is_stale_when_it_stops_answering():
+    f, _fetch, clock = fleet([GPU02], {"/status": {"power": LIVE}, "range=": HISTORY})
+    f.refresh_once()
+    clock.now += power_fleet.STALE_SECONDS + 1
+    (row,) = f.snapshot()
+    assert row["stale"] is True and row["power"]["w"] == 172.0
+
+
+# ── the cluster's live power (媒体处理中心 集群功耗) ────────────────────────
+class _LocalSampler:
+    def live(self):
+        return {
+            "w": 286.0,
+            "gpu_w": 210.0,
+            "cpu_w": 46.0,
+            "other_w": 30.0,
+            "today_wh": 4550.0,
+            "estimated": True,
+        }
+
+
+def test_cluster_power_sums_this_machine_and_fresh_peers():
+    assert power_fleet.cluster_power() is None  # nothing sampled
+    power.set_sampler(_LocalSampler())  # type: ignore[arg-type]
+    assert power_fleet.cluster_power()["w"] == 286.0
+    f, _fetch, clock = fleet([GPU02], {"/status": {"power": LIVE}, "range=": HISTORY})
+    f.refresh_once()
+    power_fleet.set_fleet(f)
+    value = power_fleet.cluster_power()
+    assert value["w"] == pytest.approx(458.0)
+    assert value["gpu_w"] == pytest.approx(328.0)
+    assert value["today_wh"] == pytest.approx(6470.0)
+    assert value["machines"] == 2 and value["estimated"] is True
+    clock.now += power_fleet.STALE_SECONDS + 1  # a silent peer is not summed
+    assert power_fleet.cluster_power()["machines"] == 1
+
+
+# ── launcher: the control view carries the peers ────────────────────────────
+def test_the_launcher_runs_the_refresher_and_the_view_lists_peers(
+    monkeypatch, tmp_path
+):
+    from taskpaw_v3.tests.test_power_routes import _run_agent
+
+    cfg = AgentConfig(
+        server_id="s",
+        machine="HOME-PC",
+        host_metrics=False,
+        api_token=TOKEN,
+        power={"peers": [GPU02]},
+    )
+    seen: list = []
+
+    def fake_fetch(url, token, timeout=2.0, opener=None):
+        seen.append((url, token))
+        raise PeerError("unreachable")
+
+    monkeypatch.setattr(power_fleet, "fetch_json", fake_fetch)
+    shutdown, _order, kwargs = _run_agent(monkeypatch, cfg, tmp_path)
+    try:
+        fleet_ = power_fleet.get_fleet()
+        assert fleet_ is not None
+        fleet_.refresh_once()
+        view = kwargs["control"]["power_view"]("7d")
+        assert view["machine"]["name"] == "HOME-PC"
+        (row,) = view["peers"]
+        assert row["name"] == "GPU-02" and row["state"] == "unreachable"
+        assert seen and all(token == TOKEN for _, token in seen)
+    finally:
+        shutdown.shutdown()
+    assert power_fleet.get_fleet() is None
+
+
+def test_a_peer_that_stops_answering_has_no_current_figure():
+    answers = {"/status": {"power": LIVE}, "range=": HISTORY}
+    f, _fetch, _clock = fleet([GPU02], answers)
+    f.refresh_once()
+    answers["/status"] = "unreachable"
+    f.refresh_once()
+    (row,) = f.snapshot()
+    assert row["state"] == "unreachable" and row["power"] is None
+    assert row["history"] == HISTORY  # what was read stays history
