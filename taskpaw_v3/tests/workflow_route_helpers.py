@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import secrets
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from pydantic import SecretStr
 
@@ -25,6 +25,20 @@ GPU_16 = ("NVIDIA GeForce RTX 5060 Ti", 16311)
 GPU_16_FAST = ("NVIDIA GeForce RTX 5070 Ti", 16303)
 GPU_8 = ("NVIDIA GeForce RTX 5060", 8151)
 ATTESTED = "operator_attested_stopped"
+QUIET = timedelta(minutes=5, seconds=1)  # 判定已停止 needs 5 min without a renewal
+
+
+class StepClock:
+    """Real time plus an offset that only grows (the store refuses a step back)."""
+
+    def __init__(self) -> None:
+        self.offset = timedelta()
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc) + self.offset
+
+    def advance(self, delta: timedelta = QUIET) -> None:
+        self.offset += delta
 
 
 @dataclass(frozen=True)
@@ -257,9 +271,12 @@ def resolve_remote(
     remote: Remote,
     claimed: tuple[m.CommandResult, m.ClaimRequest],
     outcome: str = "succeeded",
+    *,
+    note: str | None = None,
+    timing: m.RestoreTiming | None = None,
 ) -> m.CommandResult:
     assert claimed[0].assignment_id is not None
-    return resolve_open(rt, claimed[0].assignment_id, outcome)
+    return resolve_open(rt, claimed[0].assignment_id, outcome, note=note, timing=timing)
 
 
 def operation_of(rt: LocalRuntime, current: m.AssignmentRecord) -> str:
@@ -271,9 +288,15 @@ def operation_of(rt: LocalRuntime, current: m.AssignmentRecord) -> str:
 
 
 def resolve_open(
-    rt: LocalRuntime, assignment_id: str, outcome: str = "succeeded"
+    rt: LocalRuntime,
+    assignment_id: str,
+    outcome: str = "succeeded",
+    *,
+    note: str | None = None,
+    timing: m.RestoreTiming | None = None,
 ) -> m.CommandResult:
-    """The controller's verified finish: the worker's owner stopped, then resolve."""
+    """The controller's verified finish: the worker's owner stopped, then resolve.
+    `note` and `timing` are the executor's outcome message and Jasna timing."""
     current = assignment(rt, assignment_id)
     kind = "exec_succeeded" if outcome == "succeeded" else failed_kind("transient")
     return rt.store.resolve_assignment(
@@ -293,7 +316,7 @@ def resolve_open(
                 state="stopped",
                 evidence=rt.evidence("native_owner_stopped"),
             ),
-            evidence=(rt.evidence(kind),),
+            evidence=(rt.evidence(kind, note, timing=timing),),
             outcome=outcome,  # type: ignore[arg-type]
         ),
     )

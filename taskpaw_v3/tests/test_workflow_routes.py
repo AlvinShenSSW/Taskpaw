@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import timedelta
 
 import pytest
 
@@ -17,6 +18,7 @@ from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.workflow_route_helpers import (
     ATTESTED,
     GPU_16,
+    StepClock,
     attest,
     boot,
     claim_remote,
@@ -29,13 +31,22 @@ from taskpaw_v3.tests.workflow_route_helpers import (
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow import schema
 from taskpaw_v3.workflow.auth import require_role
-from taskpaw_v3.workflow.executors import failed_kind
+from taskpaw_v3.workflow.executors import (
+    ASR_DONE,
+    RESTORE_DONE,
+    failed_kind,
+)
 from taskpaw_v3.workflow.local_dispatch import should_retry
 
 
 @pytest.fixture
-def rt(tmp_path):
-    value = runtime(tmp_path / "wf")
+def clock():
+    return StepClock()
+
+
+@pytest.fixture
+def rt(tmp_path, clock):
+    value = runtime(tmp_path / "wf", clock=clock.now)
     try:
         yield value
     finally:
@@ -124,6 +135,44 @@ def test_pin_changes_are_cas_and_current_revision_only(rt):
         set_pin(rt, film, identity())  # not an enrolled worker
     (plan,) = rt.store.list_plans(rt.operator)
     assert plan.machine is None  # the plan itself never changes (C2)
+
+
+def test_a_plan_on_the_controller_pins_auto(rt):
+    """IR9: one encoding of 自动 (NULL), as the v4 migration writes it."""
+    film = add_film(rt)  # 待处理 confirms with 本机
+    (plan,) = rt.store.list_plans(rt.operator)
+    assert plan.machine == rt.identity.worker_id  # history keeps the choice
+    assert rt.store.get_pin(rt.operator, film, 1).worker_id is None
+    set_pin(rt, film, rt.identity.worker_id)
+    pin = rt.store.get_pin(rt.operator, film, 1)
+    assert (pin.worker_id, pin.version) == (None, 2)
+
+
+def test_repin_to_auto_keeps_a_healthy_route_and_moves_its_version(rt):
+    """IR8: 改派 to 自动 keeps the route; CX2: every kept route's version moves,
+    so a pass's withdrawal decided before the 改派 loses its CAS."""
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    route(rt, film, w.worker_id)
+    before = open_route(rt, film)
+    set_pin(rt, film, None)
+    kept = open_route(rt, film)
+    assert (kept.route_id, kept.version) == (before.route_id, 2)
+    set_pin(rt, film, w.worker_id)
+    assert open_route(rt, film).version == 3
+    with pytest.raises(m.WorkflowError, match="cas_conflict"):
+        withdraw(rt, before)
+    assert open_route(rt, film).route_id == before.route_id
+
+
+def test_an_unplanned_film_takes_only_a_local_route(rt):
+    """IR13: the scheduler's kinds need a plan; the controller's own does not."""
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = add_film(rt, plan=False)
+    for kind in ("auto", "pinned"):
+        with pytest.raises(m.WorkflowError, match="precondition_failed"):
+            route(rt, film, w.worker_id, kind=kind)
+    route(rt, film, rt.identity.worker_id, kind="local")
 
 
 def test_route_commands_are_operator_only():
@@ -305,6 +354,44 @@ def test_a_new_revision_closes_the_old_route(rt):
     assert (old.input_revision, old.close_reason) == (1, "新版本")
 
 
+def test_a_new_revision_keeps_a_claimed_route_until_its_work_resolves(rt):
+    """IR6: the old revision still runs on the worker, so its route (and the
+    worker's slot) stays until that assignment resolves."""
+    from taskpaw_v3.tests.test_workflow_plans import new_revision
+
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    route(rt, film, w.worker_id)
+    claimed = claim_remote(rt, w, film, "restore")
+    new_revision(rt, film)
+    old = open_route(rt, film, 1)
+    assert old is not None and old.worker_id == w.worker_id
+    assert old in rt.store.routing_snapshot(rt.operator).routes
+    resolve_remote(rt, w, claimed)
+    assert open_route(rt, film, 1) is None
+    (closed,) = rt.store.list_routes(rt.operator, open_only=False)
+    assert closed.close_reason == "新版本"
+
+
+def test_a_failed_gpu_stage_closes_its_route_and_its_retry_routes_again(rt):
+    """IR2: a failed stage waiting for its retry holds no worker slot."""
+    w1, w2 = enrol_remote(rt, "5060 Ti-1"), enrol_remote(rt, "5060 Ti-2")
+    film = auto_film(rt)
+    route(rt, film, w1.worker_id)
+    resolve_remote(rt, w1, claim_remote(rt, w1, film, "restore"), "failed")
+    assert open_route(rt, film) is None
+    (closed,) = rt.store.list_routes(rt.operator, open_only=False)
+    assert closed.close_reason == "失败"
+    job = stage(rt, film, "restore")
+    rt.store.retry_stage(
+        rt.operator,
+        rt.meta(),
+        m.StageRetry(job_id=job.job_id, expected_version=job.version, reason="重试"),
+    )
+    route(rt, film, w2.worker_id)
+    assert claim_remote(rt, w2, film, "restore")[0].status == "running"
+
+
 def test_a_route_needs_unfinished_compute_work(rt):
     film = add_film(rt)
     d = dispatcher(rt)
@@ -333,18 +420,59 @@ def test_route_replay_is_idempotent(rt):
 
 
 # ── 判定已停止 ───────────────────────────────────────────────────────────
-def crashed(rt):
-    """A remote restore whose worker restarted: assignment and GPU unknown."""
+def crashed(rt, clock, *, quiet=True):
+    """A remote restore whose worker restarted: assignment and GPU unknown;
+    `quiet`: five minutes pass without a renewal (IR4)."""
     w = enrol_remote(rt, "5060 Ti-1")
     film = auto_film(rt)
     route(rt, film, w.worker_id)
     claimed = claim_remote(rt, w, film, "restore")
     w = boot(rt, w, identity())
+    if quiet:
+        clock.advance()
     return w, film, claimed
 
 
-def test_attest_stopped_resolves_unknown_work_and_frees_the_gpu(rt):
-    w, film, (result, _) = crashed(rt)
+def test_attest_waits_five_minutes_after_the_last_renewal(rt, clock):
+    """IR4: a worker that renewed its claim lately may still be running it."""
+    _, film, (result, _) = crashed(rt, clock, quiet=False)
+    clock.advance(timedelta(minutes=4))
+    with pytest.raises(m.WorkflowError, match="precondition_failed"):
+        attest(rt, result.assignment_id)
+    clock.advance(timedelta(minutes=1, seconds=1))
+    attest(rt, result.assignment_id)
+    assert stage(rt, film, "restore").status == "failed"
+
+
+def test_attest_refuses_the_controllers_own_work(rt, clock):
+    """IR4: the controller proves its own stop locally (restart settlement)."""
+    film = add_film(rt)
+    route(rt, film, rt.identity.worker_id, kind="local")
+    job, worker = stage(rt, film, "restore"), rt.worker()
+    tools = rt.executors["restore"].tools()
+    claimed = rt.store.claim(
+        rt.worker_auth,
+        rt.meta(),
+        m.ClaimRequest(
+            job_id=job.job_id,
+            expected_version=job.version,
+            attempt_id=identity(),
+            operation_id=identity(),
+            worker_id=worker.worker_id,
+            boot_id=rt.boot_id,
+            profile_revision=tools.profile_revision,
+            config_digest=tools.config_digest,
+            resource_id=worker.physical_binding.resource_id,
+            tool_versions=tools,
+        ),
+    )
+    clock.advance()
+    with pytest.raises(m.WorkflowError, match="precondition_failed"):
+        attest(rt, claimed.assignment_id)
+
+
+def test_attest_stopped_resolves_unknown_work_and_frees_the_gpu(rt, clock):
+    w, film, (result, _) = crashed(rt, clock)
     assert stage(rt, film, "restore").status == "unknown"
     attest(rt, result.assignment_id)
     job = stage(rt, film, "restore")
@@ -367,20 +495,21 @@ def test_attest_stopped_resolves_unknown_work_and_frees_the_gpu(rt):
     assert claim_remote(rt, w, film, "restore")[0].status == "running"
 
 
-def test_attest_keeps_a_proven_success(rt):
+def test_attest_keeps_a_proven_success(rt, clock):
     w = enrol_remote(rt, "5060 Ti-1")
     film = auto_film(rt)
     route(rt, film, w.worker_id)
     claimed = claim_remote(rt, w, film, "restore")
     finish_remote(rt, w, claimed)
     boot(rt, w, identity())
+    clock.advance()
     attest(rt, claimed[0].assignment_id)
     assert stage(rt, film, "restore").status == "succeeded"
     assert not rt.store.list_open_assignments(rt.operator)
 
 
-def test_attest_needs_operator_attestation_evidence(rt):
-    w, film, (result, command) = crashed(rt)
+def test_attest_needs_operator_attestation_evidence(rt, clock):
+    w, film, (result, command) = crashed(rt, clock)
     current = next(o.assignment for o in rt.store.list_open_assignments(rt.operator))
     for kinds in ((ATTESTED,), (failed_kind("cancelled"),)):
         with pytest.raises(m.WorkflowError, match="precondition_failed"):
@@ -465,7 +594,13 @@ def test_routing_snapshot_reads_films_routes_workers_and_samples(rt):
     w = enrol_remote(rt, "5070 Ti", gpu=GPU_16)
     film = auto_film(rt, width=3840, height=2160)
     route(rt, film, w.worker_id)
-    resolve_remote(rt, w, claim_remote(rt, w, film, "restore"))
+    resolve_remote(
+        rt,
+        w,
+        claim_remote(rt, w, film, "restore"),
+        note=RESTORE_DONE.format(applied=1, reused=0),
+        timing=m.RestoreTiming(wall=1800.0),
+    )
     snap = rt.store.routing_snapshot(rt.operator)
     (entry,) = [f for f in snap.films if f.film_id == film]
     assert (entry.restore, entry.asr, entry.max_width, entry.max_height) == (
@@ -494,7 +629,42 @@ def test_routing_snapshot_reads_films_routes_workers_and_samples(rt):
         w.worker_id,
         "standard",
     )
-    assert sample.wall_seconds >= 0
+    assert sample.wall_seconds == 1800.0
+
+
+def test_rate_samples_skip_reuse_only_and_mixed_attempts(rt):
+    """CX3: a sample is GPU throughput only when the tool ran on every volume.
+    The evidence says how many volumes ran but not their durations, so a mixed
+    attempt is left out too."""
+    timing = m.RestoreTiming(wall=1800.0)
+    full, reused = (
+        RESTORE_DONE.format(applied=1, reused=0),
+        RESTORE_DONE.format(applied=0, reused=1),
+    )
+    cases = {  # worker: (restore note, Jasna timing, ASR note)
+        "full": (full, timing, ASR_DONE.format(summary="generated_ja 1")),
+        "reused": (reused, None, ASR_DONE.format(summary="reused_zh 1")),
+        "mixed": (
+            RESTORE_DONE.format(applied=1, reused=1),
+            timing,
+            ASR_DONE.format(summary="source_ja 1，generated_ja 1"),
+        ),
+        "untimed": (full, None, ASR_DONE.format(summary="no_speech 1")),
+    }
+    names = {}
+    for name, (restore_note, wall, asr_note) in cases.items():
+        w = enrol_remote(rt, name, gpu=GPU_16)
+        names[w.worker_id] = name
+        film = auto_film(rt)
+        route(rt, film, w.worker_id)
+        claimed = claim_remote(rt, w, film, "restore")
+        resolve_remote(rt, w, claimed, note=restore_note, timing=wall)
+        resolve_remote(rt, w, claim_remote(rt, w, film, "asr"), note=asr_note)
+    samples = {
+        (s.stage, names[s.worker_id])
+        for s in rt.store.routing_snapshot(rt.operator).samples
+    }
+    assert samples == {("restore", "full"), ("asr", "full"), ("asr", "untimed")}
 
 
 # ── v3 → v4 migration ────────────────────────────────────────────────────

@@ -16,6 +16,7 @@ from taskpaw_v3.tests.test_workflow_local_dispatch import (
     runtime,
     stage,
 )
+from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.workflow_route_helpers import (
     claim_remote,
     enrol_remote,
@@ -24,8 +25,12 @@ from taskpaw_v3.tests.workflow_route_helpers import (
     route,
 )
 from taskpaw_v3.workflow import models as m
+from taskpaw_v3.workflow import routing
 from taskpaw_v3.workflow.executors import SyntheticExecutor
 from taskpaw_v3.workflow.local_dispatch import REMOTE_GPU
+from taskpaw_v3.workflow.scheduler import HAND_OVER, WorkerLive
+
+WAIT = f"{REMOTE_GPU}：5060 Ti-1"  # IR5: the wait names the remote worker
 
 
 @pytest.fixture
@@ -42,7 +47,7 @@ def test_with_a_remote_worker_the_controller_takes_no_gpu_stage(rt):
     film = add_film(rt)
     d = dispatcher(rt)
     assert d.run_once() is False
-    assert d.status().waiting == {film: REMOTE_GPU}
+    assert d.status().waiting == {film: WAIT}
     assert stage(rt, film, "restore").status == "pending"
     assert rt.store.list_routes(rt.operator, open_only=False) == ()
 
@@ -56,7 +61,7 @@ def test_a_stage_needing_no_gpu_still_runs_on_the_controller(rt):
     assert d.run_once() is True
     assert stage(rt, film, "restore").status == "succeeded"
     assert d.run_once() is False
-    assert d.status().waiting == {film: REMOTE_GPU}
+    assert d.status().waiting == {film: WAIT}
     local = rt.store.film_route(rt.operator, film, 1)
     assert (local.worker_id, local.kind) == (rt.identity.worker_id, "local")
 
@@ -108,10 +113,25 @@ def test_a_claimed_remote_route_is_never_taken_over(rt):
     assert stage(rt, film, "translate").status == "succeeded"
 
 
-def test_a_revoked_worker_still_keeps_the_controller_off_the_gpu(rt):
-    """OD1: only retiring every remote worker returns to single-machine."""
+def test_only_a_verified_unrevoked_remote_keeps_the_controller_off_the_gpu(rt):
+    """IR5: a worker still waiting for its pairing, or a revoked one, is no
+    configured remote, so the controller's GPU never halts for it."""
+    rt.store.register_worker(
+        rt.operator,
+        rt.meta(),
+        m.WorkerRegistration(
+            worker_id=identity(),
+            device_id=identity(),
+            name="待配对",
+            address="192.0.2.31",
+            port=5682,
+        ),
+    )
     w = enrol_remote(rt, "5060 Ti-1")
     film = add_film(rt)
+    d = dispatcher(rt)
+    assert d.run_once() is False
+    assert d.status().waiting == {film: WAIT}
     worker = rt.store.get_worker(rt.operator, w.worker_id).worker
     rt.store.revoke_worker(
         rt.operator,
@@ -120,16 +140,33 @@ def test_a_revoked_worker_still_keeps_the_controller_off_the_gpu(rt):
             worker_id=w.worker_id, expected_version=worker.version, reason="撤销"
         ),
     )
-    d = dispatcher(rt)
-    assert d.run_once() is False
-    assert d.status().waiting == {film: REMOTE_GPU}
-    worker = rt.store.get_worker(rt.operator, w.worker_id).worker
-    rt.store.retire_worker(
-        rt.operator,
-        rt.meta(),
-        m.WorkerRetirement(
-            worker_id=w.worker_id, expected_version=worker.version, reason="退休"
-        ),
-    )
     assert [d.run_once() for _ in range(4)] == [True, True, True, False]
     assert stage(rt, film, "translate").status == "succeeded"
+
+
+def test_the_pass_and_the_dispatcher_agree_on_a_reuse_only_restore(rt):
+    """IR3: one GPU-need rule for both. The controller runs the all-reused
+    restore; the pass routes only the ASR after it, handing the route over."""
+    rt.executors["restore"] = SyntheticExecutor("restore", uses_gpu=False)
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = add_film(rt)
+
+    def run_pass():
+        return routing.run_pass(
+            rt.store,
+            rt.operator,
+            rt.meta,
+            controller_id=rt.identity.worker_id,
+            live={w.worker_id: WorkerLive(last_seen=rt.clock.now())},
+            now=rt.clock.now(),
+            executors=rt.executors,
+        )
+
+    assert run_pass().routed == ()  # the restore is the controller's
+    d = dispatcher(rt)
+    assert d.run_once() is True
+    assert stage(rt, film, "restore").status == "succeeded"
+    outcome = run_pass()
+    assert [(r.film_id, r.worker_id) for r in outcome.routed] == [(film, w.worker_id)]
+    assert [x.reason for x in outcome.withdrawn] == [HAND_OVER]
+    assert claim_remote(rt, w, film, "asr")[0].status == "running"

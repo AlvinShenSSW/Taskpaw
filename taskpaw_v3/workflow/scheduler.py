@@ -78,9 +78,6 @@ class RouteDecision:
     reason: str  # V1: persisted on the route
     finish_at: datetime
     energy_wh: float | None
-    # OD1: the film is pinned to the controller, which means 自动; the pin is
-    # cleared before the route is opened
-    unpin: bool = False
 
 
 @dataclass(frozen=True)
@@ -250,6 +247,22 @@ def _gone(worker: m.RoutingWorker) -> bool:
     return worker.enrollment_state == "retired" or worker.admission_state == "revoked"
 
 
+def remote_workers(
+    workers: Iterable[m.RoutingWorker | m.WorkerRecord], controller_id: str
+) -> tuple[str, ...]:
+    """OD1/IR5: the names of the configured remote workers — every worker but
+    the controller that is verified and not revoked (a retired one is never
+    verified). The single predicate of the pass and the controller's dispatcher:
+    while it is empty the controller runs every stage itself (phase 1)."""
+    return tuple(
+        worker.name
+        for worker in workers
+        if worker.worker_id != controller_id
+        and worker.enrollment_state == "verified"
+        and worker.admission_state != "revoked"
+    )
+
+
 def _online(live: WorkerLive | None, now: datetime) -> bool:
     return live is not None and (now - live.last_seen).total_seconds() < OFFLINE_SECONDS
 
@@ -306,9 +319,9 @@ def eligibility(
         if not live.asr_ready:
             return "识别未就绪"
     if queued_need is not None:
-        need = staging_need(film)
+        need = queued_need + staging_need(film)  # IR11/CX1: the queue's staging too
         if (
-            queued_need + need > live.staging_cap_bytes
+            need > live.staging_cap_bytes
             or live.free_bytes - need < STAGING_RESERVE_BYTES
         ):
             return "空间不足"
@@ -345,6 +358,9 @@ def schedule(
     controller_free_bytes: int | None = None,
     gpu_stages: Mapping[str, frozenset[str]] | None = None,
 ) -> SchedulePass:
+    if not remote_workers(snapshot.workers, controller_id):
+        # IR1: single machine; the controller's dispatcher runs every stage
+        return SchedulePass((), (), {}, {})
     rates = Rates(snapshot.samples)
     films = {film.film_id: film for film in snapshot.films}
     workers = {worker.worker_id: worker for worker in snapshot.workers}
@@ -354,19 +370,22 @@ def schedule(
     )
     routes = sorted(snapshot.routes, key=lambda r: (r.routed_at, r.route_id))
 
-    # 1. withdraw unclaimed routes that can no longer run (§4.4, OD2, C12)
+    # 1. withdraw unclaimed routes that can no longer run (§4.4, OD2); the
+    # controller's unclaimed local route of a film whose next stage needs a GPU
+    # worker is handed over only when the film is routed in this pass (C12, IR1)
     withdrawals: list[Withdrawal] = []
+    hand_over: dict[str, m.FilmRoute] = {}
     for route in routes:
         film = films.get(route.film_id)
         if film is None or film.input_revision != route.input_revision:
-            continue
+            continue  # an older revision's route closes when its work resolves
         if film.claimed_by is not None:
             continue  # claimed: only its worker or 判定已停止 settles it
         stages = routed_stages(film, gpu_stages)
         reason = None
         if route.worker_id == controller_id:
             if route.kind == "local" and _ready_to_route(film, stages):
-                reason = HAND_OVER  # C12: its next stage needs a GPU worker
+                hand_over[film.film_id] = route
         elif stages and film.pin_worker_id != route.worker_id:
             # an auto route; a film pinned to this worker never moves (§4.3)
             worker = workers.get(route.worker_id)
@@ -380,9 +399,9 @@ def schedule(
             withdrawals.append(
                 Withdrawal(route.route_id, route.version, route.film_id, reason)
             )
-    gone = {w.route_id for w in withdrawals}
+    gone = {w.route_id for w in withdrawals} | {r.route_id for r in hand_over.values()}
     remaining = [route for route in routes if route.route_id not in gone]
-    open_films = {route.film_id for route in remaining}
+    open_films = {(route.film_id, route.input_revision) for route in remaining}
 
     # 2. attention: a film on a lost worker (OD2/V2)
     attention = {
@@ -392,17 +411,20 @@ def schedule(
         and not _online(live.get(route.worker_id), now)
     }
 
-    # 3. the pass state: queue length, busy time and staging per worker
+    # 3. the pass state: queue length, busy time and staging per worker; an
+    # older revision's route still running there holds its slot (IR6)
     counts = {w.worker_id: 0 for w in targets}
     busy = {w.worker_id: 0.0 for w in targets}
     needs = {w.worker_id: 0.0 for w in targets}
     outputs = 0.0
     for route in remaining:
+        if route.worker_id not in counts:
+            continue
+        counts[route.worker_id] += 1
         film = films.get(route.film_id)
-        if route.worker_id not in counts or film is None:
+        if film is None:
             continue
         stages = routed_stages(film, gpu_stages)
-        counts[route.worker_id] += 1
         busy[route.worker_id] += _cost(
             rates, workers[route.worker_id], film, stages, now
         )[0]
@@ -415,7 +437,7 @@ def schedule(
         (
             film
             for film in snapshot.films
-            if film.film_id not in open_films
+            if (film.film_id, film.input_revision) not in open_films
             and _ready_to_route(film, routed_stages(film, gpu_stages))
         ),
         key=lambda f: (
@@ -426,18 +448,19 @@ def schedule(
     )
     decisions: list[RouteDecision] = []
     waiting: dict[str, str] = {}
+    disk_full = False
     for film in candidates:
         stages = routed_stages(film, gpu_stages)
         output = film.source_bytes * OUTPUT_FACTOR if "restore" in stages else 0.0
-        if (
+        disk_full = disk_full or (
             controller_free_bytes is not None
             and outputs + output + CONTROLLER_RESERVE_BYTES > controller_free_bytes
-        ):
-            waiting[film.film_id] = CONTROLLER_DISK  # C8
+        )
+        if disk_full:  # C8/IR10: the gate stops every new route of the pass
+            waiting[film.film_id] = CONTROLLER_DISK
             continue
         pin = film.pin_worker_id
-        unpin = pin == controller_id  # OD1: 本机 is never a GPU worker → 自动
-        if pin is not None and not unpin:
+        if pin is not None:
             choice = _pinned(
                 rates, film, stages, workers.get(pin), live, now, counts, needs, busy
             )
@@ -455,9 +478,12 @@ def schedule(
             options = found
         best = _choose(options)
         worker = best.worker
-        kind: Literal["auto", "pinned"] = (
-            "pinned" if pin is not None and not unpin else "auto"
-        )
+        kind: Literal["auto", "pinned"] = "pinned" if pin is not None else "auto"
+        local = hand_over.get(film.film_id)
+        if local is not None:  # C12: routed now, so the local route goes first
+            withdrawals.append(
+                Withdrawal(local.route_id, local.version, film.film_id, HAND_OVER)
+            )
         decisions.append(
             RouteDecision(
                 film_id=film.film_id,
@@ -468,7 +494,6 @@ def schedule(
                 reason=_reason(kind, best, options),
                 finish_at=now + timedelta(seconds=best.finish),
                 energy_wh=best.energy,
-                unpin=unpin,
             )
         )
         counts[worker.worker_id] += 1

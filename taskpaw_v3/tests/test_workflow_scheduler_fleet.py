@@ -3,8 +3,11 @@
 Five fake remote workers (3 × 5060 Ti 16 GB, 1 × 5070 Ti 16 GB, 1 × 5060 8 GB)
 are routed by `routing.run_pass` on a fake clock while they claim, finish,
 fail, crash, go offline, pause and drain, and the operator withdraws, re-pins
-(改派) and attests stopped work (判定已停止). After every step the ledger
-holds the invariants of §4.4 and OD5.
+(改派) and attests stopped work (判定已停止). The controller's own dispatcher
+runs between the passes (its local routes, reuse-only restores that need no
+GPU, translate), films get new input revisions mid-run, and some passes race a
+claim, a dispatch, a finish or a 改派 between their snapshot and their writes.
+After every step the ledger holds the invariants of §4.4 and OD5.
 """
 
 from __future__ import annotations
@@ -14,12 +17,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from taskpaw_v3.tests.test_workflow_local_dispatch import add_film, runtime
+from taskpaw_v3.tests.test_workflow_local_dispatch import add_film, dispatcher, runtime
+from taskpaw_v3.tests.test_workflow_plans import new_revision
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.workflow_route_helpers import (
     GPU_8,
     GPU_16,
     GPU_16_FAST,
+    QUIET,
     Remote,
     attest,
     boot,
@@ -33,6 +38,7 @@ from taskpaw_v3.tests.workflow_route_helpers import (
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow import routing
 from taskpaw_v3.workflow import scheduler as s
+from taskpaw_v3.workflow.executors import ExecOutcome, JobContext, SyntheticExecutor
 from taskpaw_v3.workflow.local_dispatch import should_retry
 from taskpaw_v3.workflow.local_gpu import FULL_HD
 
@@ -48,12 +54,36 @@ class FakeClock:
         return self.value
 
 
+class InstantExecutor(SyntheticExecutor):
+    """Succeeds at once; a restore of a `reuse` film needs no GPU (all reused)."""
+
+    def __init__(self, stage, reuse: set[str]) -> None:
+        super().__init__(stage, uses_gpu=stage != "translate")
+        self.reuse = reuse
+
+    def needs_gpu(self, manifest: m.InputManifest) -> bool:
+        if self.stage == "restore" and manifest.film_id in self.reuse:
+            return False
+        return self.uses_gpu
+
+    def run(self, context: JobContext) -> ExecOutcome:
+        return ExecOutcome.succeeded()
+
+
+def instant(reuse: set[str]) -> list[InstantExecutor]:
+    return [InstantExecutor(stage, reuse) for stage in ("restore", "asr", "translate")]
+
+
 class Fleet:
     def __init__(self, tmp_path, seed: int) -> None:
         self.rnd = random.Random(seed)
         self.clock = FakeClock()
-        self.rt = runtime(tmp_path / "wf", clock=self.clock.now)
+        self.reuse: set[str] = set()
+        self.rt = runtime(
+            tmp_path / "wf", clock=self.clock.now, execs=instant(self.reuse)
+        )
         rt = self.rt
+        self.dispatcher = dispatcher(rt)
         self.remotes = [
             enrol_remote(rt, "5060 Ti-1", gpu=GPU_16),
             enrol_remote(rt, "5060 Ti-2", gpu=GPU_16),
@@ -64,7 +94,8 @@ class Fleet:
         self.small = self.remotes[4].worker_id
         self.online = {r.worker_id: True for r in self.remotes}
         self.paused = {r.worker_id: False for r in self.remotes}
-        self.films = []
+        self.films: list[str] = []
+        self.revision: dict[str, int] = {}
         for index in range(8):
             uhd = self.rnd.random() < 0.3
             film = add_film(
@@ -73,24 +104,33 @@ class Fleet:
                 height=2160 if uhd else 1080,
                 plan=False,
             )
-            pin = (
-                self.rnd.choice(self.remotes).worker_id
-                if self.rnd.random() < 0.25
-                else None
-            )
-            rt.store.confirm_plan(
-                rt.operator,
-                rt.meta(),
-                m.FilmPlanConfirm(
-                    film_id=film,
-                    input_revision=1,
-                    ltx_model=self.rnd.choice(("standard", "good", "high")),
-                    machine=pin,
-                ),
-            )
+            if not uhd and self.rnd.random() < 0.4:
+                # its restore is the controller's (C12); the 8 GB controller's
+                # approved profiles stop at 1080p, so only 1080p films here
+                self.reuse.add(film)
             self.films.append(film)
+            self.revision[film] = 1
+            self.plan(film)
 
     # ── helpers ─────────────────────────────────────────────────────────
+    def plan(self, film: str) -> None:
+        rt = self.rt
+        pin = (
+            self.rnd.choice(self.remotes).worker_id
+            if self.rnd.random() < 0.25
+            else None
+        )
+        rt.store.confirm_plan(
+            rt.operator,
+            rt.meta(),
+            m.FilmPlanConfirm(
+                film_id=film,
+                input_revision=self.revision[film],
+                ltx_model=self.rnd.choice(("standard", "good", "high")),
+                machine=pin,
+            ),
+        )
+
     def remote(self, worker_id: str) -> Remote:
         return next(r for r in self.remotes if r.worker_id == worker_id)
 
@@ -119,13 +159,21 @@ class Fleet:
             controller_id=rt.identity.worker_id,
             live=self.live(),
             now=self.clock.now(),
+            executors=rt.executors,
         )
         for decision in outcome.routed:
-            pin = rt.store.get_pin(rt.operator, decision.film_id, 1)
-            if pin is not None and pin.worker_id not in (None, rt.identity.worker_id):
+            pin = rt.store.get_pin(
+                rt.operator, decision.film_id, decision.input_revision
+            )
+            if pin is not None and pin.worker_id is not None:
                 assert (decision.kind, decision.worker_id) == ("pinned", pin.worker_id)
             else:
                 assert decision.kind == "auto"
+        # IR1: the controller's route is handed over only to a film routed now
+        routed = {decision.film_id for decision in outcome.routed}
+        for item in outcome.withdrawn:
+            if item.reason == s.HAND_OVER:
+                assert item.film_id in routed
         return outcome
 
     def open_assignments(self) -> list[m.AssignmentRecord]:
@@ -165,7 +213,7 @@ class Fleet:
             a
             for a in self.open_assignments()
             if a.status == "running"
-            and a.worker_id is not None
+            and a.worker_id in self.online
             and a.boot_id == self.remote(a.worker_id).boot_id
         ]
         if not candidates:
@@ -178,8 +226,10 @@ class Fleet:
 
     def retry(self, job_id: str) -> None:
         rt = self.rt
+        stage = rt.store.get_stage(rt.operator, job_id)
+        if stage.input_revision != self.revision[stage.film_id]:
+            return  # an older revision's work is never retried
         if should_retry(rt.store.list_attempts(rt.operator, job_id)):
-            stage = rt.store.get_stage(rt.operator, job_id)
             if stage.status == "failed":
                 rt.store.retry_stage(
                     rt.operator,
@@ -189,18 +239,34 @@ class Fleet:
                     ),
                 )
 
+    def dispatch(self) -> None:
+        """The controller's own dispatcher: one admission round."""
+        self.dispatcher.run_once()
+
+    def revise(self) -> None:
+        """A new input revision (regroup / new files), planned at once."""
+        film = self.rnd.choice(self.films)
+        self.revision[film] += 1
+        new_revision(self.rt, film, self.revision[film])
+        self.plan(film)
+
     def crash(self) -> None:
         remote = self.rnd.choice(self.remotes)
         self.set_remote(boot(self.rt, remote, identity()))
 
     def settle(self) -> None:
         """判定已停止 for one unknown assignment, then the worker re-posts its boot."""
-        unknown = [a for a in self.open_assignments() if a.status == "unknown"]
+        unknown = [
+            a
+            for a in self.open_assignments()
+            if a.status == "unknown" and a.worker_id in self.online
+        ]
         if not unknown:
             for remote in self.remotes:  # C6: re-post until reconciled
                 self.set_remote(boot(self.rt, remote, remote.boot_id))
             return
         current = self.rnd.choice(unknown)
+        self.clock.value += QUIET  # IR4: no renewal for five minutes
         attest(self.rt, current.assignment_id)
         self.retry(current.job_id)
         remote = self.remote(current.worker_id)
@@ -228,6 +294,7 @@ class Fleet:
     def repin(self) -> None:
         rt = self.rt
         film = self.rnd.choice(self.films)
+        revision = self.revision[film]
         target = self.rnd.choice([None, *(r.worker_id for r in self.remotes)])
         try:
             rt.store.set_pin(
@@ -235,8 +302,8 @@ class Fleet:
                 rt.meta(),
                 m.PinSet(
                     film_id=film,
-                    input_revision=1,
-                    expected_version=pin_version(rt, film),
+                    input_revision=revision,
+                    expected_version=pin_version(rt, film, revision),
                     worker_id=target,
                     reason="改派",
                 ),
@@ -264,6 +331,30 @@ class Fleet:
             ),
         )
 
+    def race(self) -> None:
+        """A pass whose snapshot goes stale before its writes (CAS loses)."""
+        store = self.rt.store
+        real = store.routing_snapshot
+        meanwhile = self.rnd.choice(
+            (
+                lambda: self.claim(self.rnd.choice(self.remotes)),
+                self.dispatch,
+                self.finish,
+                self.repin,
+            )
+        )
+
+        def racing(auth):
+            snapshot = real(auth)
+            meanwhile()
+            return snapshot
+
+        store.routing_snapshot = racing  # type: ignore[method-assign]
+        try:
+            self.run_pass()
+        finally:
+            del store.routing_snapshot
+
     # ── invariants ──────────────────────────────────────────────────────
     def check(self) -> None:
         rt = self.rt
@@ -282,7 +373,8 @@ class Fleet:
                 "SELECT film_id FROM film_routes WHERE state='open' "
                 "GROUP BY film_id,input_revision HAVING count(*)>1"
             ).fetchall()
-            # every unresolved compute claim sits on its worker's open route
+            # every unresolved compute claim, of any revision, sits on its
+            # worker's open route (IR6: a new revision keeps a claimed route)
             assert not conn.execute(
                 "SELECT a.assignment_id FROM assignments a "
                 "JOIN stages s ON s.job_id=a.job_id "
@@ -290,6 +382,12 @@ class Fleet:
                 "AND NOT EXISTS (SELECT 1 FROM film_routes r WHERE r.state='open' "
                 "AND r.film_id=s.film_id AND r.input_revision=s.input_revision "
                 "AND r.worker_id=a.worker_id)"
+            ).fetchall()
+            # S4: a worker queues at most two routes, old revisions included
+            assert not conn.execute(
+                "SELECT worker_id FROM film_routes WHERE state='open' "
+                "AND worker_id!=? GROUP BY worker_id HAVING count(*)>?",
+                (rt.identity.worker_id, s.MAX_OPEN_ROUTES),
             ).fetchall()
             # OD5: the 8 GB card never restores, nor holds a film before its restore
             assert not conn.execute(
@@ -304,11 +402,27 @@ class Fleet:
                 "AND s.status NOT IN ('succeeded','skipped')",
                 (self.small,),
             ).fetchall()
+            # IR3: a restore that needs no GPU is the controller's, never routed
+            reuse = sorted(self.reuse)
+            marks = ",".join("?" * len(reuse))
+            assert not conn.execute(
+                "SELECT 1 FROM attempts a JOIN stages s ON s.job_id=a.job_id "
+                f"WHERE s.stage='restore' AND a.worker_id!=? AND s.film_id IN ({marks})",
+                (rt.identity.worker_id, *reuse),
+            ).fetchall()
+            assert not conn.execute(
+                "SELECT 1 FROM film_routes r JOIN stages s ON s.film_id=r.film_id "
+                "AND s.input_revision=r.input_revision AND s.stage='restore' "
+                "WHERE r.state='open' AND r.worker_id!=? AND s.status='pending' "
+                f"AND r.film_id IN ({marks})",
+                (rt.identity.worker_id, *reuse),
+            ).fetchall()
             # a film pinned to a remote worker is only ever routed there
             assert not conn.execute(
                 "SELECT 1 FROM film_routes r JOIN film_pins p ON p.film_id=r.film_id "
                 "AND p.input_revision=r.input_revision WHERE r.state='open' "
-                "AND p.worker_id IS NOT NULL AND p.worker_id!=? AND p.worker_id!=r.worker_id",
+                "AND p.worker_id IS NOT NULL AND p.worker_id!=r.worker_id "
+                "AND r.worker_id!=?",
                 (rt.identity.worker_id,),
             ).fetchall()
 
@@ -326,8 +440,11 @@ class Fleet:
                 "pause",
                 "drain",
                 "tick",
+                "dispatch",
+                "revise",
+                "race",
             ),
-            weights=(6, 6, 6, 2, 2, 1, 1, 1, 1, 1, 3),
+            weights=(6, 6, 6, 2, 2, 1, 1, 1, 1, 1, 3, 3, 1, 2),
         )[0]
         if action == "pass":
             self.run_pass()
@@ -351,6 +468,12 @@ class Fleet:
             self.paused[worker] = not self.paused[worker]
         elif action == "drain":
             self.drain()
+        elif action == "dispatch":
+            self.dispatch()
+        elif action == "revise":
+            self.revise()
+        elif action == "race":
+            self.race()
         else:
             self.clock.value += timedelta(seconds=self.rnd.randint(10, 900))
 
@@ -360,16 +483,16 @@ class Fleet:
         for remote in self.remotes:
             self.online[remote.worker_id] = True
             self.paused[remote.worker_id] = False
-            worker = rt.store.get_worker(rt.operator, remote.worker_id).worker
-            if worker.admission_state != "enabled":
-                self.drain()  # flips a random worker; repeat until all enabled
         while any(
             rt.store.get_worker(rt.operator, r.worker_id).worker.admission_state
             != "enabled"
             for r in self.remotes
         ):
-            self.drain()
-        while any(a.status == "unknown" for a in self.open_assignments()):
+            self.drain()  # flips a random worker; repeat until all enabled
+        while any(
+            a.status == "unknown" and a.worker_id in self.online
+            for a in self.open_assignments()
+        ):
             self.settle()
         self.settle()
 
@@ -388,6 +511,8 @@ def test_random_fleet_sequences_never_double_run(tmp_path, seed):
             for remote in fleet.remotes:
                 fleet.claim(remote)
             fleet.finish(fail_share=0.0)
+            fleet.dispatch()
+            fleet.settle()  # C6: a worker re-posts its boot until reconciled
             fleet.check()
         rt = fleet.rt
         outcome = fleet.run_pass()
@@ -398,11 +523,23 @@ def test_random_fleet_sequences_never_double_run(tmp_path, seed):
             if restore.status in FINISHED and asr.status in FINISHED:
                 continue
             # the only film left is one pinned to the 8 GB card, waiting visibly
-            pin = rt.store.get_pin(rt.operator, film, 1)
+            pin = rt.store.get_pin(rt.operator, film, fleet.revision[film])
             assert pin.worker_id == fleet.small
             assert outcome.planned.waiting[film].startswith("等待 5060：")
     finally:
         fleet.rt.close()
+
+
+def pass_once(rt, clock, live):
+    return routing.run_pass(
+        rt.store,
+        rt.operator,
+        rt.meta,
+        controller_id=rt.identity.worker_id,
+        live=live,
+        now=clock.now(),
+        executors=rt.executors,
+    )
 
 
 def test_the_pass_persists_its_reason_on_the_route(tmp_path):
@@ -418,14 +555,8 @@ def test_the_pass_persists_its_reason_on_the_route(tmp_path):
                 film_id=film, input_revision=1, ltx_model="standard", machine=None
             ),
         )
-        outcome = routing.run_pass(
-            rt.store,
-            rt.operator,
-            rt.meta,
-            controller_id=rt.identity.worker_id,
-            live={remote.worker_id: s.WorkerLive(last_seen=clock.now())},
-            now=clock.now(),
-        )
+        live = {remote.worker_id: s.WorkerLive(last_seen=clock.now())}
+        outcome = pass_once(rt, clock, live)
         (decision,) = outcome.routed
         value = rt.store.film_route(rt.operator, film, 1)
         assert (value.worker_id, value.kind, value.reason) == (
@@ -435,15 +566,7 @@ def test_the_pass_persists_its_reason_on_the_route(tmp_path):
         )
         assert "无历史，按排队先后" in value.reason
         # a lost CAS (the film was routed meanwhile) is skipped, not raised
-        again = routing.run_pass(
-            rt.store,
-            rt.operator,
-            rt.meta,
-            controller_id=rt.identity.worker_id,
-            live={remote.worker_id: s.WorkerLive(last_seen=clock.now())},
-            now=clock.now(),
-        )
-        assert again.routed == ()
+        assert pass_once(rt, clock, live).routed == ()
     finally:
         rt.close()
 
@@ -469,40 +592,79 @@ def test_a_stale_snapshot_decision_loses_its_cas(tmp_path, monkeypatch):
             return snapshot
 
         monkeypatch.setattr(rt.store, "routing_snapshot", racing)
-        outcome = routing.run_pass(
-            rt.store,
-            rt.operator,
-            rt.meta,
-            controller_id=rt.identity.worker_id,
-            live={remote.worker_id: s.WorkerLive(last_seen=clock.now())},
-            now=clock.now(),
-        )
+        live = {remote.worker_id: s.WorkerLive(last_seen=clock.now())}
+        outcome = pass_once(rt, clock, live)
         assert outcome.routed == () and len(outcome.planned.routes) == 1
         assert rt.store.film_route(rt.operator, film, 1).reason == "并发"
     finally:
         rt.close()
 
 
-def test_a_phase1_pin_to_the_controller_becomes_auto(tmp_path):
-    """OD1: the phase-1 待处理 confirms with 本机; the pass clears that pin."""
+def test_a_withdrawal_decided_before_a_repin_loses_its_cas(tmp_path, monkeypatch):
+    """CX2: the operator pins the film to its (draining) worker after the
+    pass's snapshot; the pass's withdrawal of that route must not land."""
+    clock = FakeClock()
+    rt = runtime(tmp_path / "wf", clock=clock.now)
+    try:
+        drained = enrol_remote(rt, "5060 Ti-1", gpu=GPU_16)
+        other = enrol_remote(rt, "5060 Ti-2", gpu=GPU_16)
+        film = add_film(rt)  # 本机 → 自动
+        route(rt, film, drained.worker_id)
+        worker = rt.store.get_worker(rt.operator, drained.worker_id).worker
+        rt.store.update_worker(
+            rt.operator,
+            rt.meta(),
+            m.WorkerUpdate(
+                worker_id=worker.worker_id,
+                expected_version=worker.version,
+                address=worker.address,
+                port=worker.port,
+                network_revision=worker.network_revision,
+                workflow_participation=True,
+                admission_state="draining",
+            ),
+        )
+        real = rt.store.routing_snapshot
+
+        def racing(auth):
+            snapshot = real(auth)
+            rt.store.set_pin(
+                rt.operator,
+                rt.meta(),
+                m.PinSet(
+                    film_id=film,
+                    input_revision=1,
+                    expected_version=pin_version(rt, film),
+                    worker_id=drained.worker_id,
+                    reason="改派",
+                ),
+            )
+            return snapshot
+
+        monkeypatch.setattr(rt.store, "routing_snapshot", racing)
+        live = {
+            r.worker_id: s.WorkerLive(last_seen=clock.now()) for r in (drained, other)
+        }
+        outcome = pass_once(rt, clock, live)
+        assert [w.reason for w in outcome.planned.withdrawals] == ["停领"]
+        assert outcome.withdrawn == () and outcome.routed == ()
+        assert rt.store.film_route(rt.operator, film, 1).worker_id == drained.worker_id
+    finally:
+        rt.close()
+
+
+def test_a_plan_on_the_controller_routes_auto(tmp_path):
+    """OD1/IR9: the phase-1 待处理 confirms with 本机, which is stored as 自动."""
     clock = FakeClock()
     rt = runtime(tmp_path / "wf", clock=clock.now)
     try:
         remote = enrol_remote(rt, "5070 Ti", gpu=GPU_16_FAST)
         film = add_film(rt)  # planned with machine = the controller
-        assert rt.store.get_pin(rt.operator, film, 1).worker_id == rt.identity.worker_id
-        outcome = routing.run_pass(
-            rt.store,
-            rt.operator,
-            rt.meta,
-            controller_id=rt.identity.worker_id,
-            live={remote.worker_id: s.WorkerLive(last_seen=clock.now())},
-            now=clock.now(),
-        )
-        (decision,) = outcome.routed
-        assert (decision.kind, decision.unpin) == ("auto", True)
         pin = rt.store.get_pin(rt.operator, film, 1)
-        assert (pin.worker_id, pin.version) == (None, 2)
+        assert (pin.worker_id, pin.version) == (None, 1)
+        live = {remote.worker_id: s.WorkerLive(last_seen=clock.now())}
+        (decision,) = pass_once(rt, clock, live).routed
+        assert decision.kind == "auto"
         (plan,) = rt.store.list_plans(rt.operator)
         assert plan.machine == rt.identity.worker_id  # the plan never changes
         assert rt.store.film_route(rt.operator, film, 1).worker_id == remote.worker_id

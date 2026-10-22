@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from . import models as m
 from .auth import AuthProof
+from .executors import ComputeStage, StageExecutor, needs_gpu
 from .scheduler import RouteDecision, SchedulePass, Withdrawal, WorkerLive, schedule
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("taskpaw.workflow.routing")
 
+_GPU_STAGES: tuple[ComputeStage, ...] = ("restore", "asr")
 # Codes of a decision overtaken between the snapshot and its command.
 _RACED = frozenset(
     {
@@ -36,7 +38,6 @@ _RACED = frozenset(
         "not_found",
     }
 )
-UNPIN_REASON = "本机不参与 GPU 阶段，改为自动"  # OD1
 
 
 @dataclass(frozen=True)
@@ -54,16 +55,19 @@ def run_pass(
     controller_id: str,
     live: Mapping[str, WorkerLive],
     now: datetime,
+    executors: Mapping[ComputeStage, StageExecutor],
     controller_free_bytes: int | None = None,
-    gpu_stages: Mapping[str, frozenset[str]] | None = None,
 ) -> PassOutcome:
+    """`executors`: the controller's own, so the pass decides which stages
+    need a GPU worker by the dispatcher's rule (IR3)."""
+    snapshot = store.routing_snapshot(operator)
     planned = schedule(
-        store.routing_snapshot(operator),
+        snapshot,
         live=live,
         now=now,
         controller_id=controller_id,
         controller_free_bytes=controller_free_bytes,
-        gpu_stages=gpu_stages,
+        gpu_stages=gpu_stages(store, operator, snapshot, executors),
     )
     withdrawn = []
     for item in planned.withdrawals:
@@ -86,20 +90,6 @@ def run_pass(
     routed = []
     for decision in planned.routes:
         try:
-            pin_version = decision.pin_version
-            if decision.unpin:
-                store.set_pin(
-                    operator,
-                    meta(),
-                    m.PinSet(
-                        film_id=decision.film_id,
-                        input_revision=decision.input_revision,
-                        expected_version=pin_version,
-                        worker_id=None,
-                        reason=UNPIN_REASON,
-                    ),
-                )
-                pin_version += 1
             store.route_film(
                 operator,
                 meta(),
@@ -109,7 +99,7 @@ def run_pass(
                     input_revision=decision.input_revision,
                     worker_id=decision.worker_id,
                     kind=decision.kind,
-                    expected_pin_version=pin_version,
+                    expected_pin_version=decision.pin_version,
                     reason=decision.reason,
                 ),
             )
@@ -120,3 +110,20 @@ def run_pass(
             continue
         routed.append(decision)
     return PassOutcome(planned, tuple(routed), tuple(withdrawn))
+
+
+def gpu_stages(
+    store: WorkflowStore,
+    operator: AuthProof,
+    snapshot: m.RoutingSnapshot,
+    executors: Mapping[ComputeStage, StageExecutor],
+) -> dict[str, frozenset[str]]:
+    """Per film, its restore and ASR that need a GPU worker: `needs_gpu`, the
+    controller's dispatcher's own rule, over the film's input manifest (IR3)."""
+    result: dict[str, frozenset[str]] = {}
+    for film in snapshot.films:
+        manifest = store.get_input_manifest(operator, film.film_id, film.input_revision)
+        result[film.film_id] = frozenset(
+            stage for stage in _GPU_STAGES if needs_gpu(executors.get(stage), manifest)
+        )
+    return result

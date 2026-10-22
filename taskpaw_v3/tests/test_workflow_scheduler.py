@@ -313,10 +313,11 @@ def test_a_pinned_film_routes_only_to_its_worker():
     assert decision.reason.startswith("指定 5060 Ti-3 · 约 ")
 
 
-def test_a_pin_to_the_controller_means_auto():
+def test_a_pin_to_the_controller_is_never_routed():
+    """IR9: the store keeps 自动 as NULL; a stray controller pin only waits."""
     f = film(pin=CONTROLLER)
-    (decision,) = run([f], fleet()).routes
-    assert decision.kind == "auto"
+    result = run([f], fleet())
+    assert result.routes == () and result.waiting[f.film_id] == "指定设备不可用"
 
 
 def test_a_drained_worker_keeps_pinned_routes_and_loses_auto_ones():
@@ -400,9 +401,9 @@ def test_a_worker_without_any_heartbeat_is_offline():
     ],
 )
 def test_each_failing_rule_is_the_reason(change, overrides, reason):
-    w = fleet()[0].model_copy(update=change)
+    w, other = fleet()[0].model_copy(update=change), fleet()[1]  # a remote is set up
     f = film(pin=w.worker_id, tier="high")
-    result = run([f], [w], live=live([w], **{w.name: dict(overrides)}))
+    result = run([f], [w, other], live=live([w], **{w.name: dict(overrides)}))
     assert result.waiting[f.film_id] == f"等待 5060 Ti-1：{reason}"
 
 
@@ -429,6 +430,29 @@ def test_the_staging_cap_counts_the_workers_open_routes():
     assert result.waiting[f.film_id] == "等待 5060 Ti-1：空间不足"
 
 
+def test_free_disk_counts_the_staging_queued_in_the_same_pass():
+    """IR11/CX1: two 50 GB sources on 200 GB free do not both fit."""
+    w = worker("5060 Ti-1")
+    first, second = film(0, source=50 * GB), film(1, source=50 * GB)
+    result = run(
+        [first, second], [w], live=live([w], **{"5060 Ti-1": {"free_bytes": 200 * GB}})
+    )
+    assert routed(result) == {first.film_id: w.worker_id}
+    assert result.waiting[second.film_id] == "等待设备：空间不足"
+
+
+def test_free_disk_counts_the_staging_of_open_routes():
+    w = worker("5060 Ti-1")
+    queued, f = film(0, source=50 * GB), film(1, source=50 * GB)
+    result = run(
+        [queued, f],
+        [w],
+        routes=[open_route(queued, w)],
+        live=live([w], **{"5060 Ti-1": {"free_bytes": 200 * GB}}),
+    )
+    assert result.waiting[f.film_id] == "等待设备：空间不足"
+
+
 def test_the_controller_disk_gate_stops_all_new_routes():
     ws = fleet()
     f = film(source=40 * GB)
@@ -438,16 +462,29 @@ def test_the_controller_disk_gate_stops_all_new_routes():
     assert routed(run([f], ws, controller_free_bytes=200 * GB))
 
 
-def test_retired_and_revoked_workers_are_never_candidates():
+def test_the_controller_disk_gate_stops_every_later_route_in_the_pass():
+    """IR10: once the gate trips, a smaller film behind it waits too."""
+    big, small = film(0, source=400 * GB), film(1, source=1 * GB)
+    result = run([big, small], fleet(), controller_free_bytes=500 * GB)
+    assert result.routes == ()
+    assert result.waiting == {
+        big.film_id: "主控磁盘空间不足",
+        small.film_id: "主控磁盘空间不足",
+    }
+
+
+def test_retired_revoked_and_unpaired_workers_configure_no_remote():
+    """IR1/IR5: without a verified, unrevoked remote worker the pass decides
+    nothing; the controller runs every stage itself (phase 1)."""
     ws = [
         fleet()[0].model_copy(update={"admission_state": "revoked"}),
         fleet()[1].model_copy(update={"enrollment_state": "retired"}),
+        fleet()[2].model_copy(update={"enrollment_state": "pending_pairing"}),
     ]
-    f = film()
-    result = run([f], ws)
-    assert (
-        result.routes == () and result.waiting[f.film_id] == "等待设备：没有可用的设备"
-    )
+    result = run([film()], ws)
+    assert result == s.SchedulePass((), (), {}, {})
+    assert s.remote_workers(ws, CONTROLLER) == ()
+    assert s.remote_workers([*ws, fleet()[3]], CONTROLLER) == ("5070 Ti",)
 
 
 # ── which films are candidates ───────────────────────────────────────────
@@ -466,10 +503,8 @@ def test_only_films_with_a_pending_gpu_stage_are_candidates():
     assert set(routed(result)) == {asr_wait.film_id}
 
 
-def test_the_controllers_unclaimed_local_route_is_handed_over_for_gpu_work():
-    """C12: the controller ran a no-GPU restore; its ASR needs a GPU worker."""
-    ws = fleet()
-    controller = m.RoutingWorker(
+def controller_worker():
+    return m.RoutingWorker(
         worker_id=CONTROLLER,
         name="本机",
         enrollment_state="verified",
@@ -480,12 +515,62 @@ def test_the_controllers_unclaimed_local_route_is_handed_over_for_gpu_work():
         vram_mib=8151,
         profiles=(),
     )
+
+
+def test_the_controllers_unclaimed_local_route_is_handed_over_for_gpu_work():
+    """C12: the controller ran a no-GPU restore; its ASR needs a GPU worker."""
+    ws = fleet()
+    controller = controller_worker()
     f = film(restore="succeeded")
     local = open_route(f, controller, kind="local")
     result = run([f], [controller, *ws], routes=[local])
     assert [w.route_id for w in result.withdrawals] == [local.route_id]
     assert routed(result)[f.film_id] in {w.worker_id for w in ws}
     assert CONTROLLER not in routed(result).values()
+
+
+def test_a_single_machine_pass_never_touches_the_local_route():
+    """IR1: only the controller is enrolled; its local route stays put."""
+    controller = controller_worker()
+    f = film(restore="succeeded")
+    local = open_route(f, controller, kind="local")
+    result = run([f], [controller], routes=[local])
+    assert result == s.SchedulePass((), (), {}, {})
+
+
+def test_the_local_route_is_handed_over_only_when_the_film_is_routed():
+    """IR1: no eligible worker with a free slot keeps the controller's route."""
+    controller, w = controller_worker(), worker("5060 Ti-1")
+    f = film(restore="succeeded")
+    local = open_route(f, controller, kind="local")
+    gone = {"5060 Ti-1": {"last_seen": NOW - timedelta(minutes=5)}}
+    offline = run([f], [controller, w], routes=[local], live=live([w], **gone))
+    assert offline.withdrawals == () and offline.routes == ()
+    assert offline.waiting[f.film_id] == "等待设备：离线"
+    busy = [film(i + 1) for i in range(2)]
+    full = run(
+        [f, *busy],
+        [controller, w],
+        routes=[local, *(open_route(b, w) for b in busy)],
+    )
+    assert full.withdrawals == () and full.routes == ()
+    online = run([f], [controller, w], routes=[local])
+    assert [x.route_id for x in online.withdrawals] == [local.route_id]
+    assert routed(online) == {f.film_id: w.worker_id}
+
+
+def test_an_old_revision_route_keeps_its_slot_and_frees_the_new_revision():
+    """IR6: a claimed old-revision route stays open until its work resolves;
+    its worker is busy, and the film's new revision may be routed meanwhile."""
+    a, b = worker("5060 Ti-1"), worker("5060 Ti-2")
+    done = [film(i) for i in range(2)]  # new revisions all done: not in the snapshot
+    old = [open_route(f, a).model_copy(update={"input_revision": 1}) for f in done]
+    new = film(5)
+    assert routed(run([new], [a, b], routes=old)) == {new.film_id: b.worker_id}
+    revised = film(6, input_revision=2)
+    stale = open_route(revised, a).model_copy(update={"input_revision": 1})
+    result = run([revised], [a, b], routes=[stale])
+    assert revised.film_id in routed(result) and result.withdrawals == ()
 
 
 def test_the_controller_is_never_routed():

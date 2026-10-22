@@ -54,7 +54,7 @@ from .exec_common import (
     tool_versions,
     workcopy_ref,
 )
-from .executors import ComputeStage, ExecOutcome, JobContext
+from .executors import RESTORE_DONE, ComputeStage, ExecOutcome, JobContext
 from .local_gpu import FULL_HD, LocalGpu, max_resolution
 from .local_runtime import LocalRuntime
 from .owned_process import OwnedJob
@@ -715,7 +715,7 @@ class RestoreExecutor:
             1 for r in results if r.restore and r.restore.decision == "applied"
         )
         return ExecOutcome.succeeded(
-            f"修复完成：{applied} 卷修复，{len(results) - applied} 卷复用",
+            RESTORE_DONE.format(applied=applied, reused=len(results) - applied),
             digest,
             merge(*timings),
         )

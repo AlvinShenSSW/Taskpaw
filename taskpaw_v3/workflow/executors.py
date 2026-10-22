@@ -23,6 +23,11 @@ ComputeStage = Literal["restore", "asr", "translate"]
 # The error class survives restarts in the attempt's evidence kind (D18).
 SUCCEEDED_KIND = "exec_succeeded"
 INTERRUPTED_KIND = "exec_interrupted"
+# The success notes of restore and ASR (their evidence `note`). The store reads
+# the per-volume decisions back so that only attempts whose tool ran on every
+# volume become GPU rate samples (P2-1 CX3).
+RESTORE_DONE = "修复完成：{applied} 卷修复，{reused} 卷复用"
+ASR_DONE = "字幕来源：{summary}"
 
 
 def failed_kind(error_class: ErrorClass) -> str:
@@ -97,6 +102,17 @@ class StageExecutor(Protocol):
     def max_resolution(self, vram_mib: int) -> tuple[int, int]: ...
 
     def run(self, context: JobContext) -> ExecOutcome: ...
+
+
+def needs_gpu(executor: StageExecutor | None, manifest: InputManifest) -> bool:
+    """Whether the stage runs a GPU tool for this film: the executor's own
+    `needs_gpu(manifest)` when it has one, else its `uses_gpu`; no executor
+    assumes the GPU. The one rule of the controller's dispatcher and of the
+    scheduler's pass (P2-1 IR3)."""
+    if executor is None:
+        return True
+    decide = getattr(executor, "needs_gpu", None)
+    return bool(decide(manifest)) if callable(decide) else executor.uses_gpu
 
 
 # Exit codes of the synthetic child (sysexits-style).

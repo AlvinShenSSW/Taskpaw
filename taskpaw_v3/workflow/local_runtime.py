@@ -263,6 +263,7 @@ class LocalRuntime:
                 ),
                 clock=self.clock,
             )
+        self.store.controller_id = ident.worker_id  # P2-1 IR4/IR9
         self._operator = authenticate(
             self.store, ident.operator_credential_id, SecretStr(ident.operator_secret)
         )

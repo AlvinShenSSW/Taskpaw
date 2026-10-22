@@ -8,11 +8,13 @@ compute assignment (C9); a claimed route is never withdrawn or re-pinned.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime
 from typing import Any
 
 from .auth import AuthProof
+from .executors import ASR_DONE, RESTORE_DONE
 from .film_store import FilmCommands, _passed
 from .models import (
     CommandMeta,
@@ -41,15 +43,38 @@ ATTESTED_KIND = "operator_attested_stopped"
 CANCELLED_KIND = "exec_failed:cancelled"
 _FINISHED = ("succeeded", "skipped")
 _TERMINAL = ("succeeded", "failed", "blocked")
+QUIET_SECONDS = 300.0  # IR4: 判定已停止 needs this long without a renewal
+_RESTORE_DONE = re.compile(
+    re.escape(RESTORE_DONE)
+    .replace(r"\{applied\}", r"(\d+)")
+    .replace(r"\{reused\}", r"(\d+)")
+)
+_ASR_PREFIX = ASR_DONE.split("{", 1)[0]
+_ASR_RAN = frozenset(("generated_ja", "no_speech"))  # WhisperJAV ran on the volume
 
 
-def _sample_wall(body: str, started: str, ended: str) -> float:
-    """A restore's measured Jasna wall time, else the attempt's own span."""
+def _sample_wall(stage: str, body: str, started: str, ended: str) -> float | None:
+    """CX3: an attempt's GPU wall time when its tool ran on every volume, else
+    None. A restore needs Jasna's measured wall and no reused volume; an ASR
+    needs WhisperJAV on every volume and is timed by the attempt's span. The
+    evidence counts reused volumes but not their durations, so a mixed attempt
+    is no sample either."""
     evidence = json.loads(body).get("evidence") or ()
     summary = (evidence[-1].get("summary") or {}) if evidence else {}
-    wall = (summary.get("timing") or {}).get("wall")
-    if isinstance(wall, (int, float)) and wall > 0:
-        return float(wall)
+    note = summary.get("note") or ""
+    if stage == "restore":
+        wall = (summary.get("timing") or {}).get("wall")
+        done = _RESTORE_DONE.fullmatch(note)
+        if not (isinstance(wall, (int, float)) and wall > 0 and done):
+            return None
+        return float(wall) if int(done[1]) > 0 and int(done[2]) == 0 else None
+    if not note.startswith(_ASR_PREFIX):
+        return None
+    decisions = {
+        part.rsplit(" ", 1)[0] for part in note[len(_ASR_PREFIX) :].split("，") if part
+    }
+    if not decisions or not decisions <= _ASR_RAN:
+        return None
     return max(0.0, (parse_time(ended) - parse_time(started)).total_seconds())
 
 
@@ -88,9 +113,11 @@ class RouteCommands(FilmCommands):
                 raise WorkflowError("precondition_failed")
             if command.kind != "local":
                 pin = self._pin_row(command.film_id, command.input_revision)
-                if (pin["version"] if pin else 0) != command.expected_pin_version:
+                if pin is None:  # IR13: the scheduler routes planned films only
+                    raise WorkflowError("precondition_failed")
+                if pin["version"] != command.expected_pin_version:
                     raise WorkflowError("cas_conflict")
-                pinned = pin["worker_id"] if pin else None
+                pinned = pin["worker_id"]
                 if (command.kind == "auto" and pinned is not None) or (
                     command.kind == "pinned" and pinned != command.worker_id
                 ):
@@ -148,7 +175,11 @@ class RouteCommands(FilmCommands):
     def set_pin(
         self, auth: AuthProof, meta: CommandMeta, command: PinSet
     ) -> CommandResult:
-        """改派: a new pin; an unclaimed open route elsewhere is withdrawn with it."""
+        """改派: a new pin; an unclaimed open route elsewhere is withdrawn with it.
+
+        改派 to 自动 keeps any route (a healthy route needs no move, IR8). A kept
+        route's version moves, so a scheduler withdrawal decided before this
+        改派 loses its CAS (CX2). The controller means 自动 (IR9)."""
 
         def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
             film = self._film_row(command.film_id)
@@ -162,16 +193,23 @@ class RouteCommands(FilmCommands):
                 raise WorkflowError("cas_conflict")
             if command.worker_id is not None and not self._verified(command.worker_id):
                 raise WorkflowError("precondition_failed")
+            target = self._pin_target(command.worker_id)
             route = self._open_route(command.film_id, command.input_revision)
-            if route is not None and route["worker_id"] != command.worker_id:
+            if (
+                route is not None
+                and target is not None
+                and route["worker_id"] != target
+            ):
                 if self._compute_claim(command.film_id, command.input_revision):
                     raise WorkflowError("route_claimed")
                 self._close_route(route, now, "改派")
+            elif route is not None:
+                self._touch_route(route)
             changed = self._conn.execute(
                 "UPDATE film_pins SET worker_id=?,updated_at=?,version=version+1 "
                 "WHERE film_id=? AND input_revision=? AND version=?",
                 (
-                    command.worker_id,
+                    target,
                     timestamp(now),
                     command.film_id,
                     command.input_revision,
@@ -183,10 +221,23 @@ class RouteCommands(FilmCommands):
             return Mutation(
                 command.film_id,
                 command.expected_version + 1,
-                "pinned" if command.worker_id else "auto",
+                "pinned" if target else "auto",
             )
 
         return self._execute(auth, meta, command, "set_pin", apply)
+
+    def _touch_route(self, row: sqlite3.Row) -> None:
+        """A new route version with the same content (CX2)."""
+        value = FilmRoute.model_validate_json(row["body_json"]).model_copy(
+            update={"version": row["version"] + 1}
+        )
+        self._update(
+            "film_routes",
+            "route_id",
+            row["route_id"],
+            row["version"],
+            body_json=canonical_json(value),
+        )
 
     def attest_stopped(
         self, auth: AuthProof, meta: CommandMeta, command: StoppedAttestation
@@ -196,7 +247,9 @@ class RouteCommands(FilmCommands):
         A proven terminal stage keeps its status; anything else fails as
         `cancelled` (a free retry). The assignment and its GPU owner resolve,
         and the film's open route to that worker closes so it can be routed
-        again. The UI's two-channel check (C4) is P2-4's.
+        again. Refused for the controller's own work and within five minutes
+        of the assignment's last renewal (IR4; the store has no heartbeat yet,
+        so the UI's two-channel check (C4, P2-4) stays the other guard).
         """
 
         def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
@@ -224,6 +277,11 @@ class RouteCommands(FilmCommands):
                     for item in command.evidence
                 )
                 or not {ATTESTED_KIND, CANCELLED_KIND} <= kinds
+                # IR4: the controller proves its own stop (restart settlement),
+                # and a worker that renewed lately may still be running it
+                or assignment["worker_id"] == self.controller_id
+                or (now - parse_time(assignment["renewed_at"])).total_seconds()
+                < QUIET_SECONDS
             ):
                 raise WorkflowError("precondition_failed")
             job = self._one(
@@ -468,7 +526,10 @@ class RouteCommands(FilmCommands):
             width, height, duration = probes.get(
                 (row["film_id"], row["input_revision"]), (0, 0, None)
             )
-            if not duration:
+            wall = _sample_wall(
+                row["stage"], row["body_json"], row["started_at"], row["ended_at"]
+            )
+            if not duration or wall is None:
                 continue
             if row["worker_id"] not in models:
                 cap = WorkerRecord.model_validate_json(row["worker_json"]).capability
@@ -484,9 +545,7 @@ class RouteCommands(FilmCommands):
                     max_width=int(width),
                     max_height=int(height),
                     duration_ms=int(duration),
-                    wall_seconds=_sample_wall(
-                        row["body_json"], row["started_at"], row["ended_at"]
-                    ),
+                    wall_seconds=wall,
                     avg_w=_sample_watts(row["body_json"]),
                     ended_at=parse_time(row["ended_at"]),
                 )

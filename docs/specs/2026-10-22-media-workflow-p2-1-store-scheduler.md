@@ -1,6 +1,6 @@
 # P2-1 (#292): store v4, routes and scheduler core — frozen contract
 
-Date 2026-10-22 · Status: frozen for implementation · Base: `afk/claude-p2-271` at 7ee9700 (3.9.19 RC).
+Date 2026-10-22 · Status: frozen for implementation, amended by the review dispositions of §8 · Base: `afk/claude-p2-271` at 7ee9700 (3.9.19 RC).
 Parent design: [phase 2](2026-10-22-media-workflow-phase2-multi-machine.md); its §13 (debate
 dispositions) and §14 (operator decisions OD1–OD6) override its earlier sections, and this
 contract follows them. Home LAN, single user: the smallest complete design.
@@ -18,10 +18,10 @@ worker enrolled, a phase-1 single-machine controller behaves exactly as before.
 | R3 | `film_routes` with states `{open, closed}`; at most one open route per (film, input revision), enforced by a unique partial index. "Claimed" is derived from unresolved assignments, never stored. | C9 |
 | R4 | `route_film` and `withdraw_route` are operator commands with CAS (pin version; route version). A claimed route (unresolved compute assignment) is never withdrawn. | §6.1, C9 |
 | R5 | `claim` of every compute stage (restore, asr, translate) requires an open route of that film revision to the claiming worker (`route_required`). The controller opens its own routes implicitly (kind `local`) right before it claims, so phase 1 keeps working. | C10 |
-| R6 | Routes close by themselves: a new input revision closes the old revision's open route; a finished route closes in the resolving transaction (a `local` route once restore, asr and translate are all finished; any other route once restore and asr are). | C9 |
+| R6 | Routes close by themselves: a new input revision closes the old revision's unclaimed open route (a claimed one closes when its assignment resolves, IR6); a finished route closes in the resolving transaction (a `local` route once restore, asr and translate are all finished; any other route once restore and asr are); a route one of whose stages failed or blocked closes too, so its retry is routed again (IR2). | C9 |
 | R7 | `attest_stopped` (operator, 判定已停止) resolves an unresolved compute assignment and its resource owner as failed `cancelled` with operator attestation evidence, without owner-stopped evidence, and closes the film's open route to that worker. | §3.8, D4 |
 | R8 | The controller's executors are built from the fixed compute stage set; translate is built whenever it is a local stage, independent of `whisperjav_exe_path`. | C1 |
-| R9 | When any remote worker is configured, the controller claims no stage that needs the GPU (OD1); stages that need no GPU stay local (C12). With no remote worker, every stage runs locally exactly as in phase 1. | OD1, C12 |
+| R9 | When any remote worker is configured (verified and not revoked, IR5), the controller claims no stage that needs the GPU (OD1); stages that need no GPU stay local (C12). With no remote worker, every stage runs locally exactly as in phase 1, and the scheduler pass decides nothing (IR1). | OD1, C12 |
 | R10 | `taskpaw_v3/workflow/scheduler.py` is pure over a store snapshot plus live worker state and a clock value. Eligibility, prediction, ordering and re-assignment follow §2 below. | §4, S3–S6, OD2, OD5 |
 | R11 | The chosen route's human-readable reason (the device finish times it beat) is persisted on the route row. | V1 |
 | R12 | A film routed to a worker that is 失联 yields an attention reason 「设备失联」; nothing moves automatically. | OD2, V2 |
@@ -101,18 +101,23 @@ All are typed commands through `_execute` (idempotent replay, audit), operator r
 codes: `route_required`, `route_exists`, `route_claimed`.
 
 - **`confirm_plan`** — `FilmPlanConfirm.machine: Id | None`. A given machine must be verified.
-  Inserts the plan and its pin (`worker_id = machine`, version 1).
+  Inserts the plan and its pin (`worker_id = machine`, version 1), except that the controller
+  pins 自动 (`NULL`), the one encoding of 自动 the migration writes too (IR9). The store learns
+  the controller's worker from its runtime (`WorkflowStore.controller_id`, set on open).
 - **`set_pin`** (`PinSet`: film, revision, `expected_version` = pin version, `worker_id | None`,
-  reason) — current revision only (`cas_conflict`); a given worker must be verified. If an open
-  route exists and is not already a route to the new pinned worker, it is withdrawn in the same
-  transaction; a claimed one refuses the command (`route_claimed`).
+  reason) — current revision only (`cas_conflict`); a given worker must be verified; the
+  controller means 自动 (IR9). If an open route exists and the new pin names another worker, it
+  is withdrawn in the same transaction; a claimed one refuses the command (`route_claimed`).
+  改派 to 自动 keeps any route (IR8). A kept route's version moves, so a scheduler withdrawal
+  decided from a snapshot older than the 改派 loses its CAS (CX2).
 - **`route_film`** (`RouteOpen`: `route_id`, film, revision, worker, kind, `expected_pin_version`,
   reason) — current revision (`cas_conflict`); at least one compute stage unfinished
   (`precondition_failed`); worker verified, participating, `enabled` (`precondition_failed`);
   no open route (`route_exists`); no unresolved compute assignment of the revision on another
-  worker (`route_claimed`). For `auto`/`pinned`: the pin row's version equals
-  `expected_pin_version` (0 = no pin row) (`cas_conflict`), and the pin is NULL for `auto` or
-  equals the worker for `pinned` (`precondition_failed`). `local` skips the pin rules.
+  worker (`route_claimed`). For `auto`/`pinned`: the film revision is planned, i.e. has a pin
+  row (`precondition_failed`, IR13), the pin row's version equals `expected_pin_version`
+  (`cas_conflict`), and the pin is NULL for `auto` or equals the worker for `pinned`
+  (`precondition_failed`). `local` skips the pin rules.
 - **`withdraw_route`** (`RouteWithdraw`: `route_id`, `expected_version`, reason) — open route,
   version CAS; refused while any compute assignment of that film revision is unresolved
   (`route_claimed`).
@@ -124,34 +129,52 @@ codes: `route_required`, `route_exists`, `route_claimed`.
   `succeeded`/`failed`/`blocked` stage keeps its status), the operation resolves (`verified`
   for a proven success, else `failed`), the assignment and its resource owner resolve with no
   owner-stopped evidence, and the film's open route to that worker closes (reason 判定已停止).
-  Like `resolve_assignment` it is allowed while the authority is in recovery; the route
-  commands are not.
+  Refused (`precondition_failed`) for the controller's own assignment, whose stop the
+  controller proves locally (restart settlement), and within 5 min of the assignment's last
+  renewal (`renewed_at`), while its worker may still be running it (IR4). The store has no
+  heartbeat in P2-1; the UI's two-channel check (C4, P2-4) is the other guard. Like
+  `resolve_assignment` it is allowed while the authority is in recovery; the route commands
+  are not.
 - **`claim`** — after its existing checks, a compute stage requires an open route of the
   revision with `worker_id = command.worker_id` (`route_required`).
-- **Route closing** — `_put_input_sql` closes open routes of older revisions (新版本);
-  `resolve_assignment` and `skip_stage` close the finished route (R6, reason 完成).
+- **Route closing** — `_put_input_sql` closes unclaimed open routes of older revisions
+  (新版本); a claimed one stays open, holding its worker's slot, until its assignment resolves
+  (IR6). `resolve_assignment` and `skip_stage` close an unclaimed route whose revision is no
+  longer current (新版本), whose stages are finished (完成), or one of whose stages failed or
+  blocked (失败, IR2): a stage waiting for the operator or its retry holds no slot, and the
+  retry is routed afresh. OD2 is kept: nothing moves while a route is open; a failure already
+  ended the route's work.
 - **Reads** — `list_workers`, `film_route(film, revision)` (its open route or None),
   `list_routes(open_only)`, `get_pin`, and `routing_snapshot` (one locked read: current-revision
   films with an unfinished restore/asr or an open route, with plan, pin, stage statuses, claim
   owner and time, largest probe, summed probe duration, source bytes; open routes; workers with
   boot reconciliation, GPU model, VRAM and approved per-stage limits; succeeded restore/asr
-  attempts on a worker as rate samples, newest first).
+  attempts on a worker as rate samples, newest first). A rate sample is GPU throughput only
+  (CX3): a restore needs Jasna's measured wall time and a success note with no reused volume;
+  an ASR needs a success note whose every volume ran WhisperJAV (`generated_ja`/`no_speech`)
+  and is timed by its attempt span. The evidence counts reused volumes but not their
+  durations, so mixed attempts are left out too. The note formats are
+  `executors.RESTORE_DONE` / `ASR_DONE`, shared with the executors.
 
 ## 4. Controller runtime (executor wiring)
 
 - `pipeline.default_executors` iterates the fixed compute stage set: restore when
   `jasna_exe_path`, asr when `whisperjav_exe_path`, translate always (R8).
-- `LocalDispatcher` per admission reads whether a remote worker is configured: any worker other
-  than its own that is not `retired`. A revoked-but-not-retired worker still counts, so a
-  re-pair (pending again) never lets the controller's 5060 take restore (OD1).
+- `LocalDispatcher` per admission reads whether a remote worker is configured with
+  `scheduler.remote_workers`, the same predicate the pass uses (IR1/IR5): any worker other than
+  its own that is `verified` and not `revoked` (a retired one is never verified). A worker
+  still pairing, or revoked, does not count, so it never halts the controller's GPU work.
+- Whether a stage needs the GPU is `executors.needs_gpu(executor, manifest)` for both the
+  dispatcher and the pass (`routing.run_pass` computes `gpu_stages` with it from the
+  controller's executors, IR3).
 - Before a compute claim the dispatcher ensures an open route to itself:
   - no open route → `route_film(kind=local, reason 本机)`;
   - an open route to itself → claim;
   - an open route to another worker → if the controller will run this stage (translate, a stage
     that needs no GPU, or no remote worker is configured) and the route is unclaimed, withdraw it
     (reason 转本机) and route to itself; otherwise wait (「已派往 {name}」).
-- With a remote worker configured, a restore/asr that needs the GPU waits with 「等待 GPU 设备」 and
-  is never claimed locally; one that needs no GPU runs locally (C12). Translate is always the
+- With a remote worker configured, a restore/asr that needs the GPU waits with
+  「等待 GPU 设备：<up to three remote names>」 (IR5) and is never claimed locally; one that needs no GPU runs locally (C12). Translate is always the
   controller's, whatever its executor's GPU flag.
 - With no remote worker every reason, order and outcome of phase 1 is unchanged; the only new
   persisted facts are the controller's own route rows (and their audit rows).
@@ -161,10 +184,12 @@ codes: `route_required`, `route_exists`, `route_claimed`.
 **Inputs.** `RoutingSnapshot`; `live: Mapping[worker_id, WorkerLive]` (`last_seen` on the
 controller's clock, `paused`, `tiers_ready`, `asr_ready`, `free_bytes`, `staging_cap_bytes`
 default 500 GB, `version_ok`); `now`; `controller_id`; `controller_free_bytes` (None = unknown,
-gate skipped); `gpu_stages: Mapping[film_id, frozenset]` (stages that need a GPU; default: both).
+gate skipped); `gpu_stages: Mapping[film_id, frozenset]` (stages that need a GPU; default: both;
+`run_pass` always passes it, computed by `needs_gpu` from the controller's executors, IR3).
 **Output.** `SchedulePass(routes, withdrawals, waiting, attention)`; the routing glue
 (`routing.run_pass`) applies withdrawals then routes through the store commands; a CAS loss is
-skipped and retried next pass.
+skipped and retried next pass. While `remote_workers(snapshot.workers, controller_id)` is empty
+(single machine) the pass returns an empty `SchedulePass` (IR1).
 
 **Constants.** 失联 at 60 s without a heartbeat (S3/OD2); at most 2 open routes per worker
 (1 active + 1 prefetch, S4); 1 GB/s transfer (S6); tie window max(600 s, 5 %); restore needs
@@ -176,7 +201,9 @@ restore worker by default because the route spans both stages.
 
 **Candidates.** Planned current-revision films whose first routed stage is `pending` (restore
 pending, or restore finished and asr pending), with no unresolved compute assignment and no open
-route other than an unclaimed `local` route of the controller (C12 hand-over). Order: 4K first,
+route of that revision other than an unclaimed `local` route of the controller (C12 hand-over).
+An open route of an older revision does not block the new one; it still holds its worker's slot
+(IR6). Order: 4K first,
 then plan confirm time, then film id.
 
 **Eligibility (worker × film)**, first failing rule is the reason: not the controller (OD1,
@@ -184,14 +211,15 @@ silently skipped); not retired/revoked; `verified` 「未核验」; participatin
 「未启用」; not draining 「停领」; heartbeat < 60 s 「离线」; not paused 「暂停领取」; version
 「版本不一致」; boot reconciled 「等待对账」; restore: VRAM 「显存不足，不参与修复」, profile limit ≥ the
 film's largest probe 「显存不足 4K」/「分辨率超出设备上限」, `tiers_ready[tier]` 「缺少<tier>画质模型」;
-asr: profile limit, `asr_ready` 「识别未就绪」; worker disk 「空间不足」. A worker with 2 open routes
+asr: profile limit, `asr_ready` 「识别未就绪」; worker disk 「空间不足」 (queued + need > cap, or
+free − queued − need < 50 GB, where queued is the staging of the worker's open routes and of the
+routes already decided in this pass, IR11/CX1). A worker with 2 open routes (of any revision)
 is full (「设备队列已满」), which is not ineligibility. The controller-disk gate (Σ 1.2 × source of
-open routes with restore unfinished, plus this film, + 100 GB > controller free) stops all new
-routes with 「主控磁盘空间不足」.
+open routes with restore unfinished, plus this film, + 100 GB > controller free), once it trips
+for a film, stops every later new route of the pass with 「主控磁盘空间不足」 (IR10).
 
-**Pins.** A pin to the controller means 自动 (OD1): the decision carries `unpin`, and the
-glue clears the pin (`set_pin` NULL, CAS) before it opens the `auto` route, so the store's pin
-rules stay strict. A pinned film routes only to its pinned worker when eligible with a free
+**Pins.** 自动 is stored as NULL only; the store never keeps a pin to the controller (IR9), so
+the pass has no unpin step (a stray one waits with 「指定设备不可用」). A pinned film routes only to its pinned worker when eligible with a free
 slot; otherwise it waits with 「等待 <name>：<reason>」 and is never moved.
 
 **Prediction (S6).** ratio = wall seconds / film seconds. Per-tier factor = median restore ratio
@@ -218,7 +246,9 @@ when energy is known; 「指定 <name> · 约 … 后完成」 for a pin. Persis
 **Re-assignment.** Only an unclaimed open route is ever withdrawn, and only when: its `auto`
 worker became ineligible for the film's routed stages by a rule other than heartbeat age, disk
 or a full queue (OD2: 失联 never moves a film; disk only gates new routes); or it is the
-controller's unclaimed `local` route of a film that now has a routed GPU stage (C12 hand-over).
+controller's unclaimed `local` route of a film that now has a routed GPU stage (C12 hand-over),
+withdrawn only when the same pass routes the film (an eligible worker with a free slot exists,
+IR1).
 A `pinned` route is never withdrawn by the scheduler. Withdrawn films are re-routed in the same
 pass. 改派 goes through `set_pin`. Every open route to a 失联 worker (claimed or not) yields
 attention 「设备失联」 (OD2/V2).
@@ -244,7 +274,10 @@ attention 「设备失联」 (OD2/V2).
   gate; persisted reason. Randomised sequences over the real store (route, claim, finish, crash
   via new boot, withdraw, 改派, attest, retry) never show two unresolved assignments for a job,
   two unresolved owners of a GPU, two open routes for a film, or a claim without the claimer's
-  open route.
+  open route. Extended (IR7): the controller's dispatcher runs between passes, films get new
+  input revisions, some restores need no GPU, and passes race a claim, a dispatch, a finish or a
+  改派 between snapshot and writes; also never more than 2 open routes on a worker, a no-GPU
+  restore never routed or run remotely, and a hand-over only for a film routed in that pass.
 
 ## 7. Out of scope (later children)
 
@@ -253,3 +286,28 @@ dispatcher, `run_stage`/`ExecRuntime`, the scheduler's own thread and its trigge
 remote failures (P2-3); 待处理 自动/pin select, 改派 and 判定已停止 UI with the C4 two-channel check,
 board machine rows, route reasons in `waiting` and the drawer, per-machine energy (P2-4); 4K on
 16 GB (P2-5). `local_stages` stays a fixed rule, not a setting.
+
+## 8. Review dispositions (IR = internal review, CX = Codex outer gate)
+
+Fixed in P2-1: IR1/IR5 (one `remote_workers` predicate; a single machine decides nothing;
+hand-over only when routed), IR2 (a failed/blocked route closes), IR3 (`needs_gpu` shared),
+IR4 (no 判定已停止 for the controller or within 5 min of a renewal), IR6 (a claimed
+old-revision route stays open), IR7 (extended property suite), IR8/CX2 (改派 to 自动 keeps the
+route; a kept route's version moves), IR9 (自动 = NULL), IR10 (the disk gate stops the rest of
+the pass), IR11/CX1 (worker disk counts queued staging), IR13 (auto/pinned need a plan), CX3
+(rate samples are GPU-only).
+
+### Deferred (no code in P2-1)
+
+- **IR12** — a restart grace for 「设备失联」 (a controller restart sees every worker as 失联
+  until its first heartbeat): P2-2, with heartbeats.
+- **IR14** — the controller's local route after a refused claim stays open (a later dispatcher
+  round claims it, or the C12 hand-over takes it); revisit with the remote dispatcher (P2-3).
+- **IR15** — downgrade and backup-restore notes for v4 (a v3 build cannot open v4; restoring the
+  pre-upgrade backup loses the routes and pins made since): P2-5 docs.
+- **IR16** — over-design guard: do not grow route `kind`, `body_json` or the energy tie-break
+  beyond this contract without an operator decision.
+- **4K on the 8 GB controller** (found while fixing IR3) — the controller's approved profiles
+  cap every stage at its card's resolution, translate and an all-reused restore included, so a
+  4K film restored and transcribed on 16 GB workers waits 「没有可接 4K 的设备」 for its translate
+  on an 8 GB controller. Decouple the no-GPU stages from the card's limit with 4K on 16 GB (P2-5).

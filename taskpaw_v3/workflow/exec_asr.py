@@ -32,7 +32,7 @@ from .exec_common import (
     workcopy_ref,
     write_text_atomic,
 )
-from .executors import ComputeStage, ExecOutcome, JobContext
+from .executors import ASR_DONE, ComputeStage, ExecOutcome, JobContext
 from .local_gpu import max_resolution
 from .local_runtime import LocalRuntime
 from .stage_results import (
@@ -217,7 +217,7 @@ class AsrExecutor:
             if result.subtitle is not None:
                 counts[result.subtitle.decision] += 1
         summary = "，".join(f"{k} {v}" for k, v in counts.items() if v)
-        return ExecOutcome.succeeded(f"字幕来源：{summary}", digest)
+        return ExecOutcome.succeeded(ASR_DONE.format(summary=summary), digest)
 
     def _transcribe(
         self,

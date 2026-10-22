@@ -128,7 +128,9 @@ class FilmCommands(WorkerCommands):
 
         Only a current revision whose restore is still pending can be planned,
         once: a confirmed plan is never changed (a new revision needs its own).
-        P2-1: `machine` None is 自动; the plan's pin row starts as its machine.
+        P2-1: `machine` None is 自动; the plan's pin row starts as its machine,
+        except that the controller (never a GPU worker, OD1) pins 自动 (NULL),
+        the one encoding the v4 migration writes too (IR9).
         """
 
         def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
@@ -162,12 +164,16 @@ class FilmCommands(WorkerCommands):
                 "film_pins",
                 film_id=command.film_id,
                 input_revision=command.input_revision,
-                worker_id=command.machine,
+                worker_id=self._pin_target(command.machine),
                 updated_at=timestamp(now),
             )
             return Mutation(command.film_id, film["version"], "planned")
 
         return self._execute(auth, meta, command, "confirm_plan", apply)
+
+    def _pin_target(self, worker_id: str | None) -> str | None:
+        """A pin's stored worker: the controller means 自动 (NULL, IR9)."""
+        return None if worker_id == self.controller_id else worker_id
 
     def _verified(self, worker_id: str) -> bool:
         return bool(
@@ -228,14 +234,21 @@ class FilmCommands(WorkerCommands):
         )
 
     def _close_finished_route(self, film_id: str, revision: int, now: datetime) -> None:
-        """R6: a route whose stages are all finished and unclaimed closes (完成)."""
+        """R6: an unclaimed open route closes once its stages are all finished
+        (完成); once one of them failed or blocked and waits for the operator
+        or a retry, so it holds no worker slot and the retry is routed again
+        (失败, IR2); or once its revision is no longer current (新版本, IR6)."""
         route = self._open_route(film_id, revision)
         if route is None or self._compute_claim(film_id, revision) is not None:
             return
         statuses = self._compute_statuses(film_id, revision)
         stages = _ROUTE_STAGES.get(route["kind"], _GPU_STAGES)
-        if all(statuses.get(stage) in _FINISHED for stage in stages):
+        if self._film_row(film_id)["current_input_revision"] != revision:
+            self._close_route(route, now, "新版本")
+        elif all(statuses.get(stage) in _FINISHED for stage in stages):
             self._close_route(route, now, "完成")
+        elif any(statuses.get(stage) in ("failed", "blocked") for stage in stages):
+            self._close_route(route, now, "失败")
 
     def _film_row(self, film_id: str) -> sqlite3.Row:
         return self._one("SELECT * FROM films WHERE film_id=?", (film_id,))
@@ -428,7 +441,10 @@ class FilmCommands(WorkerCommands):
             "SELECT * FROM film_routes WHERE film_id=? AND state='open'",
             (value.film_id,),
         ).fetchall():
-            self._close_route(route, now, "新版本")  # C9: a new revision
+            # C9: a new revision. IR6: a route whose old-revision work still
+            # runs stays open (its worker is busy) and closes when that resolves.
+            if self._compute_claim(route["film_id"], route["input_revision"]) is None:
+                self._close_route(route, now, "新版本")
         job_ids = {name: str(uuid4()) for name in _STAGES}
         for index, name in enumerate(_STAGES):
             previous = (

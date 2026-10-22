@@ -37,9 +37,11 @@ from .executors import (
     StageExecutor,
     classify_exception,
     failed_kind,
+    needs_gpu,
 )
 from .local_runtime import AttemptFile, LocalRuntime, _new_id
 from .owned_process import OwnedJob
+from .scheduler import remote_workers
 from .timing import WorkflowLog, film_timing
 
 if TYPE_CHECKING:
@@ -108,11 +110,6 @@ class ReturnContext:
     cancel: threading.Event
     # the attempt's kill-on-close Job, for steps that run a child (M01 scrape)
     processes: OwnedJob | None = None
-
-
-def _needs_gpu(executor: StageExecutor, manifest: m.InputManifest) -> bool:
-    decide = getattr(executor, "needs_gpu", None)
-    return bool(decide(manifest)) if callable(decide) else executor.uses_gpu
 
 
 @dataclass
@@ -447,7 +444,7 @@ class LocalDispatcher:
         waiting: dict[str, str] = {}
         vram = rt.gpu.vram_mib if rt.gpu else 0
         gpu_waited = False
-        remote: bool | None = None  # read once, at the first compute job
+        remote: tuple[str, ...] | None = None  # read once, at the first compute job
         for job in jobs:
             if self.paused:  # a pause arrived while admission was blocked
                 return self._paused_exit()
@@ -471,18 +468,20 @@ class LocalDispatcher:
                     )
                     continue
                 if remote is None:
-                    remote = self._remote_configured()
+                    remote = remote_workers(
+                        rt.store.list_workers(rt.operator), rt.identity.worker_id
+                    )
                 if (
                     remote
                     and job.stage in REMOTE_STAGES
-                    and _needs_gpu(executor, manifest)
-                ):
-                    waiting[job.film_id] = REMOTE_GPU  # OD1: never on this GPU
+                    and needs_gpu(executor, manifest)
+                ):  # OD1: never on this GPU; IR5: name who will run it
+                    waiting[job.film_id] = f"{REMOTE_GPU}：{'、'.join(remote[:3])}"
                     continue
                 if not fits(manifest, executor.max_resolution(vram)):
                     waiting[job.film_id] = NO_4K_DEVICE
                     continue
-                gpu = _needs_gpu(executor, manifest)
+                gpu = needs_gpu(executor, manifest)
                 name = self._name(job, manifest)
                 if gpu and not self._acquire(job, name):
                     gpu_waited = True  # keep the queue place, look further (E7)
@@ -507,16 +506,6 @@ class LocalDispatcher:
         elif not gpu_waited:
             self._leave_queue()
         return False
-
-    def _remote_configured(self) -> bool:
-        """OD1: any worker but this one that is not retired. A revoked one still
-        counts, so a re-pair or revocation never puts restore on this GPU."""
-        rt = self.runtime
-        own = rt.identity.worker_id
-        return any(
-            worker.worker_id != own and worker.enrollment_state != "retired"
-            for worker in rt.store.list_workers(rt.operator)
-        )
 
     def _ensure_route(self, job: m.PendingComputeJob) -> bool:
         """C10: an open route to this worker before the claim.
