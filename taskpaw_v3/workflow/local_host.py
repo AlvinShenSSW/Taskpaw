@@ -289,6 +289,9 @@ class LocalWorkflowHost:
         # P2-2: the workers' live state, while the worker API is on
         self.fleet: FleetLive | None = None
         self.transfers: Transfers | None = None
+        # P2-3 R9: attempts stopped with 停止并重新排队, until they resolve
+        self.cancels: set[str] = set()
+        self.scheduler: Any = None  # P2-3 R13: the routing pass's thread
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
         # H3 M1/D02: one LTX model download; the session needs serialized calls
@@ -454,6 +457,57 @@ class LocalWorkflowHost:
         if self.dispatcher is not None and any(r["ok"] for r in results):
             self.dispatcher.wake()
         return results
+
+    def requeue(self, film_id: str, attempt_id: str) -> None:
+        """停止并重新排队 (P2-3 R9a); WorkflowError when it is not one."""
+        if self.runtime is None:
+            raise RuntimeError("媒体流水线尚未启动")
+        from .remote_attempts import requeue
+
+        requeue(self.runtime, self.cancels, film_id, attempt_id)
+
+    def remote_resolved(
+        self,
+        rt: LocalRuntime,
+        job: m.PendingComputeJob,
+        name: str,
+        outcome: Any,
+    ) -> None:
+        """A remote finish resolved (P2-3 §2 (5)): the 日志 row and the #286
+        events as for a local stage; the worker API then wakes dispatch."""
+        from . import board
+
+        try:
+            name = board.name_of(rt, job.film_id) or name
+        except Exception:
+            log.exception("media workflow film name unavailable")
+        if outcome.error_class != "cancelled":
+            try:
+                attempt = next(
+                    a
+                    for a in rt.store.list_attempts(rt.operator, job.job_id)
+                    if a.status in ("succeeded", "failed")
+                    and a.ended_at is not None
+                    and a.attempt_id
+                    == rt.store.get_stage(rt.operator, job.job_id).attempt_id
+                )
+                ended = attempt.ended_at
+                assert ended is not None
+                duration = (ended - attempt.started_at).total_seconds()
+                self.workflow_log.stage(
+                    name,
+                    job.stage,
+                    ok=outcome.ok,
+                    duration=duration,
+                    note=outcome.message,
+                )
+            except Exception:  # the log never changes the outcome
+                log.exception("media workflow log row failed")
+        if self.events is not None:
+            try:
+                self.events.resolved(rt, job, name, outcome)
+            except Exception:
+                log.exception("media workflow event hook failed")
 
     def retry(self, film_id: str, stage: str) -> None:
         """Requeue a failed local stage (T06-P1 D05); WorkflowError when it is not one."""

@@ -214,7 +214,7 @@ def test_a_fake_worker_pairs_probes_is_approved_boots_and_shows_online(
             "good",
         ]
         assert shown["agent_version"] == VERSION and shown["boot_reconciled"] is True
-        # no claim is possible: there is no claim route in P2-2
+        # P2-3: the claim route exists; an empty body is refused
         bearer = WorkerIdentity.load(tmp_path / "worker" / IDENTITY_NAME)
         request = urllib.request.Request(
             f"http://127.0.0.1:{server.port}/worker/v1/claim",
@@ -228,7 +228,7 @@ def test_a_fake_worker_pairs_probes_is_approved_boots_and_shows_online(
             urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
                 request, timeout=10
             )
-        assert exc.value.code == 404
+        assert exc.value.code == 422
     finally:
         assert worker.stop()
     # a restart: a new boot, the same probe is not posted again (stays verified)

@@ -811,37 +811,16 @@ class LocalDispatcher:
         rt = self.runtime
         try:
             current = rt.open_assignment(running.assignment_id)
-            kind = (
-                SUCCEEDED_KIND if outcome.ok else failed_kind(outcome.error_class)  # type: ignore[arg-type]
-            )
-            owner = running.owner
             rt.store.resolve_assignment(
                 rt.operator,
                 rt.meta(),
-                m.AssignmentResolution(
-                    assignment_id=running.assignment_id,
-                    attempt_id=running.attempt.attempt_id,
-                    expected_version=current.version,
-                    reason=outcome.message or ("完成" if outcome.ok else "失败"),
-                    operation_id=running.attempt.operation_id,
-                    local_owner=None
-                    if owner is None
-                    else owner.model_copy(
-                        update={
-                            "state": "stopped",
-                            "evidence": rt.evidence("native_owner_stopped"),
-                        }
-                    ),
-                    evidence=(
-                        rt.evidence(
-                            kind,
-                            outcome.message or None,
-                            payload_digest=outcome.result_digest,
-                            timing=outcome.timing,
-                            energy=self._energy(running),  # PWR-2, every attempt
-                        ),
-                    ),
-                    outcome="succeeded" if outcome.ok else "failed",
+                resolution(
+                    rt,
+                    current,
+                    running.attempt.operation_id,
+                    outcome,
+                    running.owner,
+                    self._energy(running),  # PWR-2, every attempt
                 ),
             )
             # IR03: the store now holds the attempt's energy; a board read
@@ -1004,16 +983,61 @@ class LocalDispatcher:
         return True
 
     def _retry_if_due(self, job_id: str) -> None:
-        """C6: bounded automatic retry by `should_retry`; interruptions never count."""
-        rt = self.runtime
-        if not should_retry(rt.store.list_attempts(rt.operator, job_id)):
-            return
-        stage = rt.store.get_stage(rt.operator, job_id)
-        if stage.status == "failed":
-            rt.store.retry_stage(
-                rt.operator,
-                rt.meta(),
-                m.StageRetry(
-                    job_id=job_id, expected_version=stage.version, reason="自动重试"
-                ),
-            )
+        retry_if_due(self.runtime, job_id)
+
+
+def retry_if_due(rt: LocalRuntime, job_id: str) -> None:
+    """C6: bounded automatic retry by `should_retry`; interruptions never
+    count. Shared by the controller's dispatcher and a remote finish (P2-3)."""
+    if not should_retry(rt.store.list_attempts(rt.operator, job_id)):
+        return
+    stage = rt.store.get_stage(rt.operator, job_id)
+    if stage.status == "failed":
+        rt.store.retry_stage(
+            rt.operator,
+            rt.meta(),
+            m.StageRetry(
+                job_id=job_id, expected_version=stage.version, reason="自动重试"
+            ),
+        )
+
+
+def resolution(
+    rt: LocalRuntime,
+    current: m.AssignmentRecord,
+    operation_id: str,
+    outcome: ExecOutcome,
+    owner: m.LocalOwnerEvidence | None,
+    energy: m.AttemptEnergy | None,
+) -> m.AssignmentResolution:
+    """The resolving command of a settled attempt: its owner stopped (made
+    by the controller), its outcome's evidence with the ledger digest, the
+    restore timing and the energy (PWR-2). Shared by both dispatch paths."""
+    kind = (
+        SUCCEEDED_KIND if outcome.ok else failed_kind(outcome.error_class)  # type: ignore[arg-type]
+    )
+    return m.AssignmentResolution(
+        assignment_id=current.assignment_id,
+        attempt_id=current.attempt_id,
+        expected_version=current.version,
+        reason=outcome.message or ("完成" if outcome.ok else "失败"),
+        operation_id=operation_id,
+        local_owner=None
+        if owner is None
+        else owner.model_copy(
+            update={
+                "state": "stopped",
+                "evidence": rt.evidence("native_owner_stopped"),
+            }
+        ),
+        evidence=(
+            rt.evidence(
+                kind,
+                outcome.message or None,
+                payload_digest=outcome.result_digest,
+                timing=outcome.timing,
+                energy=energy,
+            ),
+        ),
+        outcome="succeeded" if outcome.ok else "failed",
+    )

@@ -10,9 +10,10 @@ C14), and either state clears by itself when heartbeats return (R8).
 from __future__ import annotations
 
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field
 
@@ -55,6 +56,23 @@ class TransferLive(m.Model):
     rate: _Number
 
 
+class CurrentLive(m.Model):
+    """P2-3 §2: the worker's running stage, the dispatcher's `current` typed.
+    `elapsed_s` becomes `started_at` on the controller's clock (C14); `ltx`,
+    `energy` and `power` are the shapes the board shows unchanged."""
+
+    film_id: m.Id
+    stage: Literal["restore", "asr"]
+    attempt_id: m.Id
+    phase: Literal["running", "settling", "uploading", "finishing"]
+    progress: Annotated[str, Field(strict=True, max_length=400)] = ""
+    elapsed_s: _Number = 0.0
+    ltx: dict[str, Any] | None = None
+    energy: dict[str, Any] | None = None
+    power: dict[str, Any] | None = None
+    uses_gpu: bool = True
+
+
 class Heartbeat(m.Model):
     """What a worker reports every 5 s with a route, every 15 s idle (R7)."""
 
@@ -67,7 +85,7 @@ class Heartbeat(m.Model):
     tiers_ready: tuple[m.LtxTier, ...] = Field(max_length=3)
     asr_ready: bool
     staged: tuple[StagedFilm, ...] = Field(default=(), max_length=64)
-    current: None = None  # the running stage arrives with remote execution (P2-3)
+    current: CurrentLive | None = None  # P2-3: the running stage, typed
     transfers: tuple[TransferLive, ...] = Field(default=(), max_length=8)
 
 
@@ -107,6 +125,42 @@ class FleetLive:
         age = (now - entry.last_seen).total_seconds()
         return "online" if age < OFFLINE_SECONDS else "lost"
 
+    def currents(
+        self, now: datetime, names: Mapping[str, str]
+    ) -> dict[str, dict[str, Any]]:
+        """R15: each online worker's running stage as the board's `current`
+        (`started_at` = now − `elapsed_s`, C14), with its machine and the
+        transfer of that film as the step note."""
+        with self._lock:
+            entries = dict(self._entries)
+        found: dict[str, dict[str, Any]] = {}
+        for worker_id, entry in entries.items():
+            beat = entry.beat
+            if (now - entry.last_seen).total_seconds() >= OFFLINE_SECONDS:
+                continue
+            for item in beat.transfers:
+                found.setdefault(
+                    item.film, _transfer_current(worker_id, names, item, beat, now)
+                )
+            current = beat.current
+            if current is None:
+                continue
+            value = current.model_dump(mode="json", exclude={"elapsed_s", "phase"})
+            started = now - timedelta(seconds=current.elapsed_s)
+            transfer = next(
+                (t for t in beat.transfers if t.film == current.film_id), None
+            )
+            value.update(
+                started_at=started.isoformat(),
+                phase=current.phase,
+                machine={"id": worker_id, "name": names.get(worker_id, "")},
+                transfer=transfer_note(transfer) if transfer else None,
+            )
+            if transfer is not None:
+                value["progress"] = transfer_note(transfer)
+            found[current.film_id] = value
+        return found
+
     def snapshot(self) -> dict[str, WorkerLive]:
         """The scheduler's `live` input: every worker heard from."""
         with self._lock:
@@ -123,3 +177,41 @@ class FleetLive:
             )
             for worker_id, entry in entries.items()
         }
+
+
+def _gb(value: int) -> str:
+    return f"{value / 10**9:.1f}"
+
+
+def transfer_note(item: TransferLive) -> str:
+    """「下载源文件 12.4/38.0 GB · 610 MB/s」 / 「回传 …」 (§6.3)."""
+    label = "下载源文件" if item.dir == "down" else "回传"
+    rate = f" · {item.rate / 10**6:.0f} MB/s" if item.rate else ""
+    return f"{label} {_gb(item.done)}/{_gb(item.total)} GB{rate}"
+
+
+def _transfer_current(
+    worker_id: str,
+    names: Mapping[str, str],
+    item: TransferLive,
+    beat: Heartbeat,
+    now: datetime,
+) -> dict[str, Any]:
+    """A film being fetched (no stage claimed yet): the restore step shows
+    the download with its machine."""
+    note = transfer_note(item)
+    return {
+        "film_id": item.film,
+        "stage": "restore",
+        "attempt_id": None,
+        "progress": note,
+        "transfer": note,
+        "phase": "fetching",
+        "started_at": None,
+        "ltx": None,
+        "energy": None,
+        "power": None,
+        "uses_gpu": False,
+        "machine": {"id": worker_id, "name": names.get(worker_id, "")},
+        "fetching": True,
+    }

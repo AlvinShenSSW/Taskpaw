@@ -19,7 +19,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -30,8 +30,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from taskpaw_v3.workflow import models as m
+from taskpaw_v3.workflow import remote_attempts as ra
 from taskpaw_v3.workflow.devices import iso
 from taskpaw_v3.workflow.fleet_live import FleetLive, Heartbeat
+from taskpaw_v3.workflow.remote_attempts import AttemptRefused
 from taskpaw_v3.workflow.transfer import (
     PlanFile,
     TransferError,
@@ -193,10 +195,53 @@ class _ReleasingFile(FileResponse):
 UPLOAD_CHUNK = 4 << 20
 
 
+class AttemptReportBody(_Strict):
+    """P2-3 §5: one local attempt file as the worker found it at boot."""
+
+    attempt_id: m.Id
+    assignment_id: m.Id | None = None
+    children_alive: bool
+    ledger: bool
+    outputs_intact: bool
+    outcome: Literal["succeeded", "failed"] | None = None
+
+
 class BootBody(_Strict):
     boot_id: m.Id
     assignment_ids: list[m.Id] = Field(default=[], max_length=64)
     local_owners: list[m.LocalOwnerEvidence] = Field(default=[], max_length=64)
+    attempts: list[AttemptReportBody] = Field(default=[], max_length=64)
+
+
+class ClaimBody(_Strict):
+    """P2-3 §2: the bytes the worker wrote to `attempts/<a>.json` first."""
+
+    attempt_id: m.Id
+    operation_id: m.Id
+    job_id: m.Id
+    expected_version: m.Revision
+    boot_id: m.Id
+    tool_versions: m.ToolVersions
+
+
+class RenewBody(_Strict):
+    owner_id: m.Id
+    generation: m.Revision
+    boot_id: m.Id
+    process_identity: m.Text
+
+
+ErrorClassName = Literal["transient", "permission", "needs_attention", "cancelled"]
+
+
+class FinishModel(_Strict):
+    outcome: Literal["succeeded", "failed"]
+    error_class: ErrorClassName | None = None
+    message: str = Field(default="", max_length=2000)
+    ledger: str | None = Field(default=None, max_length=JSON_CAP)
+    payload_digest: m.Digest | None = None
+    timing: m.RestoreTiming | None = None
+    energy: m.AttemptEnergy | None = None
 
 
 @dataclass(frozen=True)
@@ -258,6 +303,10 @@ def create_worker_app(
         )
         extra = {k: v for k, v in exc.extra.items() if k != "retry_after"}
         return _error(exc.status, exc.code, headers, **extra)
+
+    @app.exception_handler(AttemptRefused)
+    async def _refused(_request: Request, exc: AttemptRefused) -> JSONResponse:
+        return _error(exc.status, exc.code)
 
     @app.exception_handler(RequestValidationError)
     async def _invalid(_request: Request, _exc: RequestValidationError):
@@ -370,14 +419,16 @@ def create_worker_app(
             return {"revision": revision, "status": result.status}
         raise ApiError(409, "cas_conflict")  # pragma: no cover - loop returns
 
-    @app.post(f"{PREFIX}/boot")
-    def boot(body: BootBody, c: Caller = authed) -> dict[str, Any]:
-        """R6: a boot; the same `boot_id` is re-posted until reconciled (C6)."""
+    def record_boot(c: Caller, body: BootBody, *, first: bool) -> str:
         rt = c.rt
         for attempt in range(2):
-            me = c.me if attempt == 0 else rt.store.authenticated_worker(c.auth)
+            me = (
+                c.me
+                if attempt == 0 and first
+                else rt.store.authenticated_worker(c.auth)
+            )
             try:
-                result = rt.store.record_boot(
+                return rt.store.record_boot(
                     c.auth,
                     rt.meta(),
                     m.BootObservation(
@@ -385,19 +436,56 @@ def create_worker_app(
                         expected_version=me.worker.version,
                         boot_id=body.boot_id,
                         known_epoch=1,
+                        # P2-3: the worker sends none; its attempt reports
+                        # carry the ids, so one the controller resolved
+                        # meanwhile never refuses the boot (§5)
                         assignment_ids=tuple(body.assignment_ids),
                         local_owners=tuple(body.local_owners),
                     ),
-                )
+                ).status
             except m.WorkflowError as exc:
                 if exc.code == "cas_conflict" and attempt == 0:
                     continue
                 raise coded(exc) from None
-            return {
-                "status": result.status,
-                "reconciled": result.status == "reconciled",
-            }
         raise ApiError(409, "cas_conflict")  # pragma: no cover - loop returns
+
+    @app.post(f"{PREFIX}/boot")
+    def boot(body: BootBody, c: Caller = authed) -> dict[str, Any]:
+        """R6/R8: a boot; a new id isolates the worker's open assignments,
+        the reported attempt files settle them (§5), and the boot is recorded
+        again so it reconciles once nothing is unresolved. The same `boot_id`
+        is re-posted until reconciled (C6)."""
+        rt = c.rt
+        status = record_boot(c, body, first=True)
+        try:
+            verdicts = ra.settle_boot(
+                rt,
+                c.worker_id,
+                body.boot_id,
+                [
+                    ra.AttemptReport(
+                        a.attempt_id,
+                        a.children_alive,
+                        a.ledger,
+                        a.outputs_intact,
+                        a.outcome,
+                    )
+                    for a in body.attempts
+                ],
+            )
+            if verdicts and status != "reconciled":
+                status = record_boot(c, body, first=False)
+            keep = ra.keep_list(rt, c.worker_id)
+        except m.WorkflowError as exc:
+            raise coded(exc) from None
+        if any(v == "interrupted" for v in verdicts.values()):
+            _wake(c.host)
+        return {
+            "status": status,
+            "reconciled": status == "reconciled",
+            "attempts": verdicts,
+            "keep": keep,
+        }
 
     @app.post(f"{PREFIX}/heartbeat")
     def heartbeat(body: Heartbeat, c: Caller = authed) -> dict[str, Any]:
@@ -411,12 +499,24 @@ def create_worker_app(
                 for r in rt.store.list_routes(rt.operator)
                 if r.worker_id == c.worker_id
             ]
-            held = _held(rt, c.worker_id) if body.staged else set()
         except m.WorkflowError as exc:
             raise coded(exc) from None
-        routed = {(r.film_id, r.input_revision) for r in routes}
         dispatcher = getattr(c.host, "dispatcher", None)
         status = dispatcher.status() if dispatcher is not None else None
+        try:
+            release = ra.release_list(
+                rt, c.worker_id, [(item.film, item.rev) for item in body.staged]
+            )
+            requeued: set[str] = getattr(c.host, "cancels", set())
+            cancel = ra.cancel_list(
+                rt,
+                c.auth,
+                c.worker_id,
+                set(requeued),
+                body.current.attempt_id if body.current else None,
+            )
+        except m.WorkflowError as exc:
+            raise coded(exc) from None
         return {
             "server_time": iso(now),
             "paused": bool(getattr(status, "paused", False)),
@@ -429,15 +529,72 @@ def create_worker_app(
                 }
                 for position, r in enumerate(routes)
             ],
-            "cancel": [],  # producers arrive with P2-3/P2-4
-            "release": [
-                {"film": item.film, "rev": item.rev}
-                for item in body.staged
-                if (item.film, item.rev) not in routed | held
-            ],
+            "cancel": cancel,  # R9
+            "release": release,  # R10
             "reconcile_needed": c.me.worker.boot_id != body.boot_id
             or not c.me.boot_reconciled,
         }
+
+    # -- remote execution (P2-3 §2) -----------------------------------------
+    @app.post(f"{PREFIX}/claim")
+    def claim(body: ClaimBody, c: Caller = authed) -> dict[str, Any]:
+        """Same bytes → the stored result (`request_results`)."""
+        try:
+            return ra.claim(c.rt, c.auth, c.me.worker, body.model_dump(mode="json"))
+        except m.WorkflowError as exc:
+            raise coded(exc) from None
+
+    @app.post(f"{PREFIX}/attempts/{{attempt_id}}/renew")
+    def renew(attempt_id: str, body: RenewBody, c: Caller = authed) -> dict[str, Any]:
+        try:
+            return ra.renew(
+                c.rt, c.auth, c.worker_id, attempt_id, body.model_dump(mode="json")
+            )
+        except m.WorkflowError as exc:
+            raise ApiError(409, "stale_attempt") from exc
+
+    @app.post(f"{PREFIX}/attempts/{{attempt_id}}/finish")
+    def finish(
+        attempt_id: str, body: FinishModel, c: Caller = authed
+    ) -> dict[str, Any]:
+        host = c.host
+        hook = getattr(host, "remote_resolved", None)
+
+        def resolved(job: m.PendingComputeJob, outcome: Any) -> None:
+            if hook is not None:
+                hook(c.rt, job, job.display_name, outcome)
+            discard = getattr(getattr(host, "cancels", None), "discard", None)
+            if callable(discard):
+                discard(attempt_id)  # R9: the requeue set clears at resolve
+            _wake(host)
+
+        try:
+            return ra.finish(
+                c.rt,
+                getattr(host, "transfers", None),
+                c.auth,
+                c.worker_id,
+                attempt_id,
+                ra.FinishBody(
+                    outcome=body.outcome,
+                    message=body.message,
+                    error_class=body.error_class,
+                    ledger=body.ledger,
+                    payload_digest=body.payload_digest,
+                    timing=body.timing,
+                    energy=body.energy,
+                ),
+                on_resolved=resolved,
+            )
+        except m.WorkflowError as exc:
+            raise coded(exc) from None
+
+    @app.get(f"{PREFIX}/attempts/{{attempt_id}}")
+    def attempt_state(attempt_id: str, c: Caller = authed) -> dict[str, Any]:
+        try:
+            return ra.attempt_view(c.rt, c.worker_id, attempt_id)
+        except m.WorkflowError as exc:
+            raise coded(exc) from None
 
     # -- transfer (R11-R17) -------------------------------------------------
     def transfers_of(c: Caller) -> Transfers:
@@ -552,11 +709,9 @@ def create_worker_app(
     return app
 
 
-def _held(rt: LocalRuntime, worker_id: str) -> set[tuple[str, int]]:
-    """Film revisions with an unresolved assignment of this worker."""
-    held = set()
-    for open_ in rt.store.list_open_assignments(rt.operator):
-        if open_.assignment.worker_id == worker_id:
-            stage = rt.store.get_stage(rt.operator, open_.assignment.job_id)
-            held.add((stage.film_id, stage.input_revision))
-    return held
+def _wake(host: Any) -> None:
+    """A resolve on this path wakes the controller's dispatcher and pass."""
+    for name in ("dispatcher", "scheduler"):
+        wake = getattr(getattr(host, name, None), "wake", None)
+        if callable(wake):
+            wake()

@@ -45,10 +45,16 @@ class Host:
     dispatcher: Any = None
     state: str = "running"
     reason: str = ""
+    # P2-3: 停止并重新排队's attempts, and the finishes the API resolved
+    cancels: set[str] = field(default_factory=set)
+    resolved: list[tuple[str, str, bool]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.fleet is None and self.runtime is not None:
             self.fleet = FleetLive(self.runtime.clock.now(), VERSION)
+
+    def remote_resolved(self, rt: Any, job: Any, name: str, outcome: Any) -> None:
+        self.resolved.append((job.film_id, job.stage, outcome.ok))
 
 
 def client(host: Host) -> TestClient:
@@ -198,5 +204,6 @@ def enrol(
     )
     boot = boot or boot_id()
     booted = api.post("/worker/v1/boot", json={"boot_id": boot}, headers=joined.headers)
-    assert booted.json() == {"status": "reconciled", "reconciled": True}
+    reply = booted.json()
+    assert (reply["status"], reply["reconciled"]) == ("reconciled", True), reply
     return joined, boot

@@ -89,6 +89,13 @@ class AdmissionBody(VersionBody):
     state: Literal["enabled", "draining"]
 
 
+class RequeueBody(BaseModel):
+    """停止并重新排队 of a running remote restore or ASR (P2-3 R9)."""
+
+    model_config = ConfigDict(extra="forbid")
+    attempt_id: str = Field(min_length=1, max_length=64)
+
+
 class LtxDownloadBody(BaseModel):
     """The 下载模型 answer to the offered request (H3 M1), as the monitor's."""
 
@@ -252,6 +259,18 @@ def register_workflow_routes(
         host = _host()
         with _mapped():
             host.retry(film_id, body.stage)
+        return {"ok": True}
+
+    @app.post("/control/workflow/films/{film_id}/requeue")
+    def workflow_requeue(film_id: str, body: RequeueBody) -> dict[str, bool]:
+        """停止并重新排队: the worker cancels its Job at its next heartbeat and
+        finishes `cancelled`, a free retry routed again (OD3)."""
+        host = _host()
+        requeue = getattr(host, "requeue", None)
+        if not callable(requeue):
+            raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
+        with _mapped():
+            requeue(film_id, body.attempt_id)
         return {"ok": True}
 
     @app.post("/control/workflow/ltx-download")

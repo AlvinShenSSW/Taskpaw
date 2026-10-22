@@ -50,6 +50,11 @@ ROUTES = {
     ("POST", f"{PREFIX}/attempts/{{attempt_id}}/outputs"),
     ("GET", f"{PREFIX}/attempts/{{attempt_id}}/outputs"),
     ("PUT", f"{PREFIX}/attempts/{{attempt_id}}/files/{{path:path}}"),
+    # P2-3 §2: remote execution
+    ("POST", f"{PREFIX}/claim"),
+    ("POST", f"{PREFIX}/attempts/{{attempt_id}}/renew"),
+    ("POST", f"{PREFIX}/attempts/{{attempt_id}}/finish"),
+    ("GET", f"{PREFIX}/attempts/{{attempt_id}}"),
 }
 
 
@@ -110,6 +115,10 @@ def _calls(headers=None):
         ("POST", f"attempts/{attempt}/outputs", []),
         ("GET", f"attempts/{attempt}/outputs", None),
         ("PUT", f"attempts/{attempt}/files/{attempt}/a.mp4", None),
+        ("POST", "claim", {}),
+        ("POST", f"attempts/{attempt}/renew", {}),
+        ("POST", f"attempts/{attempt}/finish", {"outcome": "failed"}),
+        ("GET", f"attempts/{attempt}", None),
     ]
 
 
@@ -329,7 +338,10 @@ def test_restore_is_never_approved_under_16_gb(api, rt):
 def test_boot_is_reposted_with_the_same_id(api, rt):
     joined, boot = enrol(api, rt)
     again = api.post(f"{PREFIX}/boot", json={"boot_id": boot}, headers=joined.headers)
-    assert again.json() == {"status": "reconciled", "reconciled": True}
+    assert {k: again.json()[k] for k in ("status", "reconciled")} == {
+        "status": "reconciled",
+        "reconciled": True,
+    }
     me = api.get(f"{PREFIX}/self", headers=joined.headers).json()
     assert me["worker"]["boot_id"] == boot and me["boot_reconciled"] is True
 
@@ -382,14 +394,21 @@ def test_heartbeat_makes_no_store_write(api, rt):
 
 
 def test_release_names_staged_films_without_a_route(api, rt):
+    """P2-3 R10 narrows P2-2's rule: a staged film without a route is
+    released only once it no longer needs this worker's GPU work — here its
+    revision is not current (its restore still pending keeps it)."""
     joined, boot = enrol(api, rt)
     routed, idle = add_film(rt), add_film(rt)
     route(rt, routed, joined.worker_id)
-    staged = [{"film": routed, "rev": 1}, {"film": idle, "rev": 1}]
+    staged = [
+        {"film": routed, "rev": 1},
+        {"film": idle, "rev": 1},
+        {"film": idle, "rev": 2},
+    ]
     data = api.post(
         f"{PREFIX}/heartbeat", json=beat(boot, staged=staged), headers=joined.headers
     ).json()
-    assert data["release"] == [{"film": idle, "rev": 1}]
+    assert data["release"] == [{"film": idle, "rev": 2}]
 
 
 def test_a_new_boot_or_version_shows_in_the_reply_and_live_state(api, rt, host):

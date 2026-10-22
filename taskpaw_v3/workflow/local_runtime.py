@@ -621,6 +621,12 @@ class LocalRuntime:
             time.sleep(0.25)
         return True
 
+    def resolve_interrupted(self, assignment: m.AssignmentRecord) -> None:
+        """P2-3 §5: a remote attempt whose worker restarted with its children
+        gone and nothing to show: failed `interrupted`, then a free retry."""
+        with self.lock:
+            self._resolve_interrupted(assignment, None)
+
     def _resolve_interrupted(
         self, assignment: m.AssignmentRecord, record: AttemptFile | None
     ) -> None:

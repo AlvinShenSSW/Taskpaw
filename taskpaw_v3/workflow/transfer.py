@@ -529,6 +529,16 @@ class Transfers:
                 found.append((folder, plan))
         return found
 
+    def committed(self, attempt_id: str) -> dict[str, dict[str, Any]]:
+        """P2-3 finish: the plan's committed outputs `{path: {sha256, size,
+        mtime_ns}}` after settling it; empty without a plan."""
+        with self._attempt(attempt_id):
+            plan = self._read(attempt_id)
+            if plan is None:
+                return {}
+            self._settle(attempt_id, plan)
+            return dict(plan["committed"])
+
     def view(self, attempt_id: str) -> dict[str, Any]:
         """GET outputs: each planned file's received offset and state, after
         settling its parts (IR2, IR3: this call may hash for minutes)."""
@@ -715,7 +725,34 @@ def envelope(
             for copy in manifest.readiness.workcopy.items
         ],
         "ledgers": _ledgers(rt, film_id, revision),
+        # P2-3: the claim carries the job's id and version verbatim
+        "stages": _stages(rt, film_id, revision),
+        "name": _name(rt, film_id, manifest),
     }
+
+
+def _stages(rt: LocalRuntime, film_id: str, revision: int) -> dict[str, Any]:
+    view = rt.store.get_film(rt.operator, film_id)
+    return {
+        stage.stage: {
+            "job_id": stage.job_id,
+            "version": stage.version,
+            "status": stage.status,
+        }
+        for stage in view.stages
+        if stage.stage in ("restore", "asr") and stage.input_revision == revision
+    }
+
+
+def _name(rt: LocalRuntime, film_id: str, manifest: m.InputManifest) -> str:
+    """The film's shown name for the worker's monitor (H3 D06)."""
+    from . import board
+
+    try:
+        return board.name_of(rt, film_id, manifest) or film_id
+    except Exception:  # a name never stops the envelope
+        log.exception("film name unavailable for %s", film_id)
+        return film_id
 
 
 def item_file(
