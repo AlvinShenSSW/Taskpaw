@@ -39,6 +39,7 @@ _RACED = frozenset(
         "route_claimed",
         "precondition_failed",
         "not_found",
+        "source_not_admissible",
     }
 )
 
