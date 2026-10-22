@@ -35,11 +35,21 @@ def _r(value: float, digits: int = 4) -> float:
     return round(value, digits)
 
 
-def _live(film_id: str, stage: str, current: dict[str, Any] | None) -> Any:
-    """The running attempt's energy so far, when it is this film's stage."""
+def _live(
+    film_id: str,
+    stage: str,
+    current: dict[str, Any] | None,
+    resolved: Sequence[str] = (),
+) -> Any:
+    """The running attempt's energy so far, when it is this film's stage and
+    not already among the stage's `resolved` attempts: a route takes the
+    host's status before it reads the records, so an attempt that resolved in
+    between is counted once, from its evidence (Codex PWR-2/3 r2)."""
     if not current or current.get("film_id") != film_id:
         return None
     if current.get("stage") != stage or not isinstance(current.get("energy"), dict):
+        return None
+    if current.get("attempt_id") in resolved:
         return None
     try:
         return m.AttemptEnergy.model_validate(current["energy"])
@@ -80,7 +90,7 @@ def film_energy(
     for stage in film.stages:
         if stage.stage not in STAGES:
             continue
-        live = _live(film.film_id, stage.stage, current)
+        live = _live(film.film_id, stage.stage, current, stage.attempt_ids)
         if not stage.attempt_energy and live is None:
             continue
         known += sum(1 for v in stage.attempt_energy if v is not None) + bool(live)

@@ -46,11 +46,19 @@ export function stateChip(m: Pick<Machine, "state" | "stale">): [string, "green"
   return STATE_TEXT[m.state] ?? ["离线", "red"];
 }
 
+// A peer's history is data from another machine: the backend validates it, and the page still never
+// trusts it. Anything without the arrays and totals the page reads is unavailable (null), never drawn.
+function sane(h: PowerHistory | null | undefined): PowerHistory | null {
+  if (!h || !Array.isArray(h.t) || !Array.isArray(h.avg_w) || h.avg_w.length !== h.t.length) return null;
+  if (typeof h.totals?.wh !== "number" || typeof h.totals.activity_wh !== "object" || h.totals.activity_wh === null) return null;
+  return h;
+}
+
 function peerMachine(p: PowerPeerRow, ranged: PowerPeerRow | undefined, i: number): Machine {
   return {
     id: `peer:${p.name}`, name: p.name, local: false, state: p.state, stale: p.stale, color: machineColor(i),
     hw: [p.address, p.version ? `TaskPaw ${p.version}` : null].filter(Boolean).join(" · "),
-    live: p.state === "ok" && !p.stale ? p.power : null, day: p.history, hist: ranged?.history ?? null,
+    live: p.state === "ok" && !p.stale ? p.power : null, day: sane(p.history), hist: sane(ranged?.history),
   };
 }
 

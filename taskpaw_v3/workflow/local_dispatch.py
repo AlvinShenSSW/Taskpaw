@@ -263,6 +263,9 @@ class LocalDispatcher:
                     "film_id": running.job.film_id,
                     "film": running.name or running.job.display_name,
                     "stage": running.job.stage,
+                    # PWR-2: which attempt the live energy belongs to, so a
+                    # reader that also has its resolved record counts it once
+                    "attempt_id": running.attempt.attempt_id,
                     "progress": running.progress,
                     "started_at": running.started_at,
                     # PWR-2: whether the stage owns the GPU (and so the machine)

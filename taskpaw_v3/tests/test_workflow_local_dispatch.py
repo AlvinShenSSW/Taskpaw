@@ -553,6 +553,9 @@ def test_the_running_stage_reports_text_ltx_detail_and_the_film_name(rt):
     assert started.tzinfo is not None
     assert abs((datetime.now(timezone.utc) - started).total_seconds()) < 60
     assert second.pop("started_at") == started.isoformat()
+    # PWR-2: the running attempt's id, so its live energy is never added twice
+    (attempt,) = rt.store.list_attempts(rt.operator, stage(rt, film, "restore").job_id)
+    assert first.pop("attempt_id") == second.pop("attempt_id") == attempt.attempt_id
     assert first == {
         "film_id": film,
         "film": "movie",  # the main video's stem: no package, no NFO

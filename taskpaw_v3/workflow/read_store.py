@@ -585,7 +585,12 @@ class ReadCommands(WorkflowCore):
                         reason=row["reason"],
                         first_started_at=first.get((row["film_id"], row["stage"])),
                         attempt_energy=tuple(
-                            energies.get((row["film_id"], row["stage"]), ())
+                            v
+                            for _, v in energies.get((row["film_id"], row["stage"]), ())
+                        ),
+                        attempt_ids=tuple(
+                            i
+                            for i, _ in energies.get((row["film_id"], row["stage"]), ())
                         ),
                         **_attempt_times(row["attempt_json"]),
                     )
@@ -594,11 +599,12 @@ class ReadCommands(WorkflowCore):
 
     def _attempt_energies(
         self, where: tuple[str, tuple[Any, ...]]
-    ) -> dict[tuple[str, str], list[AttemptEnergy | None]]:
-        """PWR-2: every resolved attempt's energy of the local stages per
+    ) -> dict[tuple[str, str], list[tuple[str, AttemptEnergy | None]]]:
+        """PWR-2: every resolved attempt's (id, energy) of the local stages per
         (film, stage), oldest first; the film's energy is their sum (PW05)."""
         spent = self._conn.execute(
-            "SELECT s.film_id,s.stage,json_extract(x.body_json,'$.evidence') "
+            "SELECT s.film_id,s.stage,json_extract(x.body_json,'$.evidence'),"
+            "x.attempt_id "
             "FROM films f JOIN stages s ON s.film_id=f.film_id "
             "AND s.input_revision=f.current_input_revision "
             "AND s.stage IN ('restore','asr','translate','return','scrape') "
@@ -607,9 +613,11 @@ class ReadCommands(WorkflowCore):
             "ORDER BY x.rowid",
             where[1],
         ).fetchall()
-        energies: dict[tuple[str, str], list[AttemptEnergy | None]] = {}
-        for film_id_, stage_, evidence_ in spent:
-            energies.setdefault((film_id_, stage_), []).append(_energy(evidence_))
+        energies: dict[tuple[str, str], list[tuple[str, AttemptEnergy | None]]] = {}
+        for film_id_, stage_, evidence_, attempt_id_ in spent:
+            energies.setdefault((film_id_, stage_), []).append(
+                (attempt_id_, _energy(evidence_))
+            )
         return energies
 
     def _probe_sizes(
@@ -695,7 +703,12 @@ class ReadCommands(WorkflowCore):
                     stage=row["stage"],
                     status=row["status"],
                     ended_at=parse_time(ended) if ended else None,
-                    attempt_energy=tuple(energies.get((film_id, row["stage"]), ())),
+                    attempt_energy=tuple(
+                        v for _, v in energies.get((film_id, row["stage"]), ())
+                    ),
+                    attempt_ids=tuple(
+                        i for i, _ in energies.get((film_id, row["stage"]), ())
+                    ),
                 )
             )
         return tuple(BoardFilm.model_validate(film) for film in films.values())

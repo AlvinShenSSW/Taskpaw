@@ -282,7 +282,21 @@ def fleet(peers, answers, token=TOKEN):
     return value, fetch, clock
 
 
-HISTORY = {"range": "24h", "t": [0, 900], "avg_w": [100.0, None]}
+_ACTS = ("restore", "asr", "translate", "idle", "other")
+HISTORY = {
+    "range": "24h",
+    "step_s": 900,
+    "estimated": True,
+    "t": [0, 900],
+    "covered_s": [900.0, 0.0],
+    "avg_w": [100.0, None],
+    "wh": [25.0, 0.0],
+    "gpu_wh": [15.0, 0.0],
+    "cpu_wh": [5.0, 0.0],
+    "other_wh": [5.0, 0.0],
+    "activity_wh": {k: [5.0, 0.0] for k in _ACTS},
+    "totals": {"wh": 25.0, "activity_wh": {k: 5.0 for k in _ACTS}},
+}
 GPU02 = {"name": "GPU-02", "address": "192.168.1.20"}
 
 
@@ -576,6 +590,33 @@ def test_a_failing_history_is_retried_with_a_backoff():
         {"t": [0, 900], "avg_w": None},
         {"t": [0, 900], "avg_w": [float("nan"), 1.0]},
         [1, 2],
+        # Codex r2: the whole shape, not only t / avg_w — a UI reads totals
+        {"t": [0], "avg_w": [100]},
+        {k: v for k, v in HISTORY.items() if k != "totals"},
+        {k: v for k, v in HISTORY.items() if k != "activity_wh"},
+        {k: v for k, v in HISTORY.items() if k != "wh"},
+        {**HISTORY, "wh": [25.0]},  # unequal length
+        {**HISTORY, "gpu_wh": [15.0, "x"]},
+        {**HISTORY, "cpu_wh": None},
+        {**HISTORY, "totals": {"wh": 25.0}},  # no activity totals
+        {
+            **HISTORY,
+            "totals": {"wh": "25", "activity_wh": HISTORY["totals"]["activity_wh"]},
+        },
+        {**HISTORY, "totals": {"wh": 25.0, "activity_wh": {"restore": 5.0}}},
+        {
+            **HISTORY,
+            "totals": {
+                "wh": 25.0,
+                "activity_wh": {**HISTORY["totals"]["activity_wh"], "asr": None},
+            },
+        },
+        {
+            **HISTORY,
+            "activity_wh": {k: [5.0, 0.0] for k in _ACTS[:-1]},
+        },  # a key missing
+        {**HISTORY, "activity_wh": {**HISTORY["activity_wh"], "idle": [5.0]}},
+        {**HISTORY, "activity_wh": []},
     ],
 )
 def test_an_invalid_peer_history_is_treated_as_unavailable(history):
@@ -672,3 +713,49 @@ def test_a_hanging_resolver_is_bounded(monkeypatch):
         assert time.monotonic() - started < 1.5
     finally:
         release.set()
+
+
+# ── Codex r2: recovery, bounded backoff ─────────────────────────────────────
+def test_a_peer_that_gets_the_history_after_a_404_recovers_without_a_restart():
+    answers = {"/status": {"power": LIVE}, "range=": "not_found"}
+    f, fetch, clock = fleet([GPU02], answers)
+    f.refresh_once()
+    (row,) = f.snapshot()
+    assert row["state"] == "no_power" and row["power"] is None
+    clock.now += 5
+    f.refresh_once()  # still inside the backoff: no history request, still no_power
+    assert f.snapshot()[0]["state"] == "no_power"
+    answers["range="] = HISTORY  # the peer was upgraded
+    clock.now += 60
+    f.refresh_once()  # the probe now succeeds and clears the flag
+    clock.now += 5
+    f.refresh_once()  # the next status is trusted again
+    (row,) = f.snapshot()
+    assert row["state"] == "ok" and row["power"]["w"] == 172.0
+    assert row["history"] == HISTORY
+
+
+def test_a_peer_still_without_the_history_is_probed_at_the_backoff_cadence():
+    f, fetch, clock = fleet(
+        [GPU02], {"/status": {"power": LIVE}, "range=": "not_found"}
+    )
+    for _ in range(121):  # ten minutes of 5 s cycles
+        f.refresh_once()
+        clock.now += 5
+    probes = [u for u, _ in fetch.calls if "range=24h" in u]
+    assert len(probes) == 4  # 60 s, 120 s, 240 s, then at most 5 minutes apart
+    assert f.snapshot()[0]["state"] == "no_power"
+
+
+def test_a_long_failing_history_keeps_the_five_minute_cap():
+    f, _fetch, clock = fleet(
+        [GPU02], {"/status": {"power": LIVE}, "range=": "unreachable"}
+    )
+    f.refresh_once()  # creates the entry
+    f._update(("GPU-02", "192.168.1.20"), history_fails={"24h": 2000})
+    clock.now += 600
+    now = clock.now
+    f.refresh_once()
+    entry = f._cache[("GPU-02", "192.168.1.20")]
+    assert entry["history_fails"]["24h"] == 2001
+    assert entry["history_due"]["24h"] == now + power_fleet.HISTORY_RETRY_MAX

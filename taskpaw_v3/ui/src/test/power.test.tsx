@@ -116,6 +116,21 @@ describe("功耗 tab", () => {
     expect(document.querySelectorAll("[data-use]")).toHaveLength(5);
   });
 
+  it("a peer's malformed history never breaks the tab (Codex r2)", async () => {
+    const view = (range: "24h" | "7d" | "30d") => {
+      const v = powerView(range);
+      const bad = { t: [0], avg_w: [100] } as unknown as PowerHistory; // no totals, no activity_wh
+      return { ...v, peers: (v.peers ?? []).map((p, i) => (i === 0 ? { ...p, history: bad } : p)) };
+    };
+    vi.spyOn(api, "power").mockImplementation(async (range) => view(range));
+    vi.spyOn(api, "workflowFilms").mockResolvedValue(FILMS);
+    vi.spyOn(api, "config").mockResolvedValue({ monitors: [], power: POWER_SETTINGS } as unknown as AgentConfigView);
+    wrap(<PowerPage />);
+    await screen.findByTestId("power-chart");
+    expect(document.querySelectorAll("[data-use]")).toHaveLength(5);
+    expect(screen.getAllByText("GPU-02").length).toBeGreaterThan(0);
+  });
+
   it("lists each finished film's energy from the media workflow", async () => {
     mockApi();
     const open = vi.fn();

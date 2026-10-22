@@ -1711,6 +1711,9 @@ class BoardStage(Model):
     # PWR-2: one entry per resolved attempt of this revision, oldest first;
     # None where the attempt has no energy (cut off by a crash) → 「部分」
     attempt_energy: tuple[AttemptEnergy | None, ...] = ()
+    # the same attempts' ids, in the same order: the running attempt's live
+    # figure is added only when its id is not among them (Codex PWR-2/3 r2)
+    attempt_ids: tuple[str, ...] = ()
 
 
 class BoardFilm(Model):

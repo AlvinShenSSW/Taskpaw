@@ -259,7 +259,7 @@ function EnergyTable({ machines, range }: { machines: Machine[]; range: PowerRan
 }
 
 function Uses({ machines, range }: { machines: Machine[]; range: PowerRange }) {
-  const sums = Object.fromEntries(ACTIVITY_ORDER.map((k) => [k, machines.reduce((a, m) => a + (m.hist?.totals.activity_wh[k] ?? 0), 0)])) as Record<string, number>;
+  const sums = Object.fromEntries(ACTIVITY_ORDER.map((k) => [k, machines.reduce((a, m) => a + (m.hist?.totals?.activity_wh?.[k] ?? 0), 0)])) as Record<string, number>;
   const all = Object.values(sums).reduce((a, b) => a + b, 0);
   const max = Math.max(...Object.values(sums), 0.0001);
   return (

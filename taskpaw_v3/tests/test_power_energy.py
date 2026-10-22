@@ -604,3 +604,56 @@ def test_old_evidence_without_energy_still_loads():
 def test_attempt_energy_rejects_impossible_values(bad):
     with pytest.raises(ValueError):
         m.AttemptEnergy.model_validate(bad)
+
+
+# ── Codex r2: a resolved attempt is never also counted live ────────────────
+def test_the_live_figure_is_dropped_once_its_attempt_has_resolved(rt):
+    """The route takes `status()` first and reads the records after: an attempt
+    that resolves in between must count once (from its evidence)."""
+    rig = Rig(rt)
+    executor = Ticking("restore", rig)
+    rt.executors["restore"] = executor
+    film = add_film(rt)
+    assert rig.dispatcher.run_once() is True
+    (attempt,) = attempts(rt, film, "restore")
+    stale = executor.seen[-1]  # the status captured while it was still running
+    assert stale["attempt_id"] == attempt.attempt_id
+    assert stale["energy"]["wh"] == pytest.approx(1.0)
+    row = board_row(rt, film)  # ... then the attempt resolved and was read
+    value = en.film_energy(row, stale)
+    assert value["stages"]["restore"]["wh"] == pytest.approx(1.0)  # not 2.0
+    assert value["stages"]["restore"]["attempts"] == 1
+    assert value["stages"]["restore"]["running"] is False
+    assert value["total_wh"] == pytest.approx(1.0)
+    assert board.film_row(row, {}, current=stale)["energy"][
+        "total_wh"
+    ] == pytest.approx(1.0)
+
+
+def test_a_running_attempt_still_counts_beside_the_resolved_ones():
+    done, running = identity(), identity()
+    f = film(spent={"restore": (energy(10.0),)})
+    f = f.model_copy(
+        update={
+            "stages": tuple(
+                s.model_copy(update={"attempt_ids": (done,)})
+                if s.stage == "restore"
+                else s
+                for s in f.stages
+            )
+        }
+    )
+    current = {
+        "film_id": f.film_id,
+        "stage": "restore",
+        "attempt_id": running,
+        "energy": energy(4.0).model_dump(mode="json"),
+    }
+    value = en.film_energy(f, current)
+    assert value["stages"]["restore"]["wh"] == pytest.approx(14.0)
+    assert value["stages"]["restore"]["attempts"] == 2
+    assert value["stages"]["restore"]["running"] is True
+    current["attempt_id"] = done  # the same attempt: the evidence wins
+    value = en.film_energy(f, current)
+    assert value["stages"]["restore"]["wh"] == pytest.approx(10.0)
+    assert value["stages"]["restore"]["running"] is False

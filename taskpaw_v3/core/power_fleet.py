@@ -41,6 +41,7 @@ from typing import Any, Callable, Optional
 
 from taskpaw_v3.core.http import NoRedirectHandler
 from taskpaw_v3.core.net import bind_is_global, bind_is_wildcard
+from taskpaw_v3.core.power import ACTIVITIES
 
 log = logging.getLogger("taskpaw.power.fleet")
 
@@ -252,17 +253,36 @@ def _series(value: Any, size: int) -> bool:
     )
 
 
+_SERIES = ("covered_s", "avg_w", "wh", "gpu_wh", "cpu_wh", "other_wh")
+
+
 def _history(value: Any) -> Optional[dict[str, Any]]:
-    """A peer's `/power/history` (IR05): `t` and `avg_w` equal-length lists of
-    at most MAX_POINTS points, `t` all numbers, `avg_w` numbers or nulls;
-    anything else is unavailable (None), never drawn."""
+    """A peer's `/power/history` (IR05, Codex r2): the whole shape the page
+    reads. `t` is at most MAX_POINTS numbers; every series (`covered_s`,
+    `avg_w`, `wh`, `gpu_wh`, `cpu_wh`, `other_wh`, and each activity of
+    `activity_wh`) is as long as `t` with numbers or nulls; `totals` has a
+    number `wh` and a number per activity. Anything else is unavailable
+    (None), never drawn."""
     if not isinstance(value, dict):
         return None
     t = value.get("t")
     if not isinstance(t, list) or len(t) > MAX_POINTS:
         return None
-    if not all(_num(v) is not None for v in t) or not _series(
-        value.get("avg_w"), len(t)
+    if not all(_num(v) is not None for v in t):
+        return None
+    if not all(_series(value.get(key), len(t)) for key in _SERIES):
+        return None
+    acts = value.get("activity_wh")
+    if not isinstance(acts, dict) or not all(
+        _series(acts.get(k), len(t)) for k in ACTIVITIES
+    ):
+        return None
+    totals = value.get("totals")
+    if not isinstance(totals, dict) or _num(totals.get("wh")) is None:
+        return None
+    by_activity = totals.get("activity_wh")
+    if not isinstance(by_activity, dict) or any(
+        _num(by_activity.get(k)) is None for k in ACTIVITIES
     ):
         return None
     return value
@@ -492,11 +512,15 @@ class PowerFleet:
                 entry.update(state="no_power", power=None)
             else:
                 entry.update(state="ok" if live is not None else "off", power=live)
+            # a peer that answered 404 is probed again at the backoff cadence
+            # (Codex r2): once it has the history (upgraded) the flag clears
+            probe = entry["state"] == "ok" or (
+                live is not None and entry["history_missing"]
+            )
             due = [
                 r
                 for r in RANGES
-                if entry["state"] == "ok"
-                and self._clock() >= entry["history_due"].get(r, 0.0)
+                if probe and self._clock() >= entry["history_due"].get(r, 0.0)
             ]
         queued = [
             self._submit(
@@ -534,7 +558,8 @@ class PowerFleet:
             elif code == "invalid":
                 entry["history"][range_] = None  # never draw what failed to validate
             fails[range_] = fails.get(range_, 0) + 1
-            backoff = self._history_every * 2 ** (fails[range_] - 1)
+            # the exponent is capped: 2 ** 2000 would overflow the float
+            backoff = self._history_every * 2 ** min(fails[range_] - 1, 16)
             entry["history_due"][range_] = self._clock() + min(
                 backoff, HISTORY_RETRY_MAX
             )
