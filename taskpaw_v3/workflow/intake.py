@@ -467,11 +467,23 @@ class IntakeService:
     def _request_stop(self) -> None:
         """Durable control can wait on a store/native lock; retain its own thread."""
         fence_ok = False
-        try:
-            self._begin_scan("reconnect")
-            fence_ok = True
-        except (OSError, ValueError, RuntimeError):
-            self._reason = "recovery_required"
+        for retry in (False, True):
+            try:
+                self._begin_scan("reconnect")
+                fence_ok = True
+            except m.WorkflowError as exc:
+                # The fence raced the scan in flight (stop() already refuses
+                # new ones) and that scan's begin/finish moved the root-scan
+                # version first. Once it is done nothing else writes the row:
+                # fence again. A scan that never returns keeps this thread,
+                # and so the stop's unknown, retained.
+                if exc.code == "cas_conflict" and not retry:
+                    self._scan_done.wait()
+                    continue
+                self._reason = "recovery_required"
+            except (OSError, ValueError, RuntimeError):
+                self._reason = "recovery_required"
+            break
         try:
             # A disabled/revised root may refuse the rescan fence. The existing
             # admitted native owner still needs its own durable cancel and stop.

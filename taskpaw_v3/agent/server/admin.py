@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from taskpaw_v3.agent import catalog
 from taskpaw_v3.core.config import AgentConfig, save_yaml
@@ -37,6 +37,7 @@ from taskpaw_v3.core.llm import (
     set_llm_chain,
     set_llm_settings,
 )
+from taskpaw_v3.core.power import set_power_settings
 from taskpaw_v3.core.tasklog import get_task_log
 from taskpaw_v3.monitors.registry import PluginRegistry
 from taskpaw_v3.monitors.runtime import canonical_name, effective_monitors, monitor_name
@@ -905,11 +906,13 @@ class MonitorAdmin:
         "llm_fallback2_api_key",
         "llm_fallback2_thinking_off",
         "llm_failover",
+        "power",
     )
     # Live-safe editable fields: api_token is read per request (token_ok) and the
     # LLM settings are read by monitors at call time through the process-wide
     # holders (#178; the fallback chain + failover switch, #192), so changing
-    # them never needs a restart.
+    # them never needs a restart. `power` (PWR-1 PW07) is read by the power
+    # sampler on every tick, `enabled` included.
     _LIVE_CONFIG = (
         "api_token",
         "llm_api_base",
@@ -925,6 +928,7 @@ class MonitorAdmin:
         "llm_fallback2_api_key",
         "llm_fallback2_thinking_off",
         "llm_failover",
+        "power",
     )
     # The write-only LLM keys, one per provider slot (#178, #190).
     _LLM_KEY_FIELDS = tuple(llm_slot_fields(slot)[2] for slot in LLM_SLOTS)
@@ -946,7 +950,10 @@ class MonitorAdmin:
             self._prune_validation()
             view = {
                 **copy.deepcopy(self._config.model_dump()),
-                **self._desired,
+                **{
+                    k: v.model_dump() if isinstance(v, BaseModel) else v
+                    for k, v in self._desired.items()
+                },
                 "monitor_operations": {
                     iid: {
                         **self._results.get(iid, {}),
@@ -989,6 +996,9 @@ class MonitorAdmin:
                     p[f] = ""
                 elif isinstance(key, str) and key.strip() in ("", "***"):
                     del p[f]
+            # PWR-1: a partial `power` object edits only the fields it names.
+            if isinstance(p.get("power"), dict):
+                p["power"] = {**self._desired["power"].model_dump(), **p["power"]}
             # Merge over the DESIRED scalars (so a pending edit isn't lost by a
             # later save) on top of the running config's monitors (always current).
             editables = {
@@ -1047,6 +1057,7 @@ class MonitorAdmin:
             set_llm_chain(
                 llm_chain_from_config(validated), failover=validated.llm_failover
             )
+            set_power_settings(validated.power)  # the sampler's next tick (PW07)
             return {"ok": True, "restart_required": restart_required}
 
     def llm_test(self, candidate: dict, slot: str = "primary") -> dict[str, Any]:

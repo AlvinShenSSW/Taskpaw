@@ -307,6 +307,24 @@ class RestoreTiming(Model):
     wall: Seconds = 0.0
 
 
+Watts = Annotated[float, Field(ge=0, le=100_000, allow_inf_nan=False)]
+WattHours = Annotated[float, Field(ge=0, le=10_000_000, allow_inf_nan=False)]
+
+
+class AttemptEnergy(Model):
+    """PWR-2 (#288, PW04/PW05): the machine's estimated energy the film owned
+    between the attempt's claim and its resolution (`power.EnergyDelta`).
+    Every figure is an estimate (估算)."""
+
+    wh: WattHours = 0.0
+    gpu_wh: WattHours = 0.0
+    cpu_wh: WattHours = 0.0
+    other_wh: WattHours = 0.0
+    seconds: Seconds = 0.0
+    avg_w: Watts | None = None
+    peak_w: Watts | None = None
+
+
 class EvidenceSummary(Model):
     item_ids: tuple[Id, ...] = ()
     note: Text | None = None
@@ -315,12 +333,18 @@ class EvidenceSummary(Model):
     active_writers: bool | None = None
     # U1e: a restore success's film timing; absent elsewhere and in older evidence
     timing: RestoreTiming | None = None
+    # PWR-2: every resolved compute / component attempt's energy, failed ones
+    # included; absent without a power reading and in older evidence (PW05).
+    # Older builds cannot read it back (strict validation; PW14, accepted).
+    energy: AttemptEnergy | None = None
 
     @model_serializer(mode="wrap")
     def _historical_wire(self, handler: SerializerFunctionWrapHandler) -> dict:
         payload = handler(self)
         if self.timing is None:
             payload.pop("timing", None)
+        if self.energy is None:
+            payload.pop("energy", None)
         return payload
 
 
@@ -1684,6 +1708,12 @@ class BoardStage(Model):
     ended_at: UtcTime | None = None
     first_started_at: UtcTime | None = None
     timing: RestoreTiming | None = None
+    # PWR-2: one entry per resolved attempt of this revision, oldest first;
+    # None where the attempt has no energy (cut off by a crash) → 「部分」
+    attempt_energy: tuple[AttemptEnergy | None, ...] = ()
+    # the same attempts' ids, in the same order: the running attempt's live
+    # figure is added only when its id is not among them (Codex PWR-2/3 r2)
+    attempt_ids: tuple[str, ...] = ()
 
 
 class BoardFilm(Model):
@@ -1721,6 +1751,8 @@ class BoardFilm(Model):
     final_hash: Digest | None = None
     max_width: Count = 0
     max_height: Count = 0
+    # PWR-2: the current input's summed probe duration (the prediction's film-hour)
+    duration_ms: Count | None = None
 
 
 class PackageFilm(Model):

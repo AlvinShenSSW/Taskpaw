@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from taskpaw_v3.core.config import WorkflowSettings
+from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.monitors.plugins.jasna_download_session import DownloadSession
 
 from . import intake_models as im
@@ -261,10 +262,18 @@ class LocalWorkflowHost:
         off_reasons: dict[str, str] | None = None,
         lookup_factory: LookupFactory | None = None,
         task_log: TaskLogSink | None = None,
+        event_queue: EventQueue | None = None,
     ) -> None:
         self.settings, self.data_dir, self.executors = settings, data_dir, executors
         # U1e: the agent's task log (the 日志 tab) gets a row per finished stage
         self.workflow_log = WorkflowLog(task_log)
+        from taskpaw_v3.agent.server.workflow_events import WorkflowEvents
+
+        self.events = (
+            WorkflowEvents(event_queue, data_dir / "workflow-events.json")
+            if event_queue is not None
+            else None
+        )
         self.lookup_factory = lookup_factory
         self.lookup: MetadataLookup | None = None
         self.intake_policy = intake_policy
@@ -339,6 +348,7 @@ class LocalWorkflowHost:
                 off_reasons=self.off_reasons,
                 finalizer=self.finalizer,
                 workflow_log=self.workflow_log,
+                on_resolved=self.events.resolved if self.events is not None else None,
             )
             if self._stopping.is_set():
                 return
@@ -347,6 +357,8 @@ class LocalWorkflowHost:
                 self.lookup = rt.lookup = self.lookup_factory(rt)
                 self.lookup.start()
             self.state, self.reason = "running", rt.reason
+            if self.events is not None and not self._stopping.is_set():
+                self.events.start(self)
         except Exception as exc:  # never fatal to the agent (C4)
             log.exception("media workflow failed to start")
             self.state, self.reason = "failed", str(exc) or type(exc).__name__
@@ -389,6 +401,10 @@ class LocalWorkflowHost:
             except Exception:
                 log.exception("media workflow intake stop failed")
                 confirmed = False
+        if self.events is not None:
+            # a small floor: a deadline the earlier steps spent must not make the
+            # observer's join zero-length (a spurious unconfirmed stop)
+            confirmed &= self.events.stop(timeout=max(1.0, deadline - time.monotonic()))
         if not confirmed:
             log.error("media workflow stop unconfirmed; store left open")
             self.state = "stop_unconfirmed"
@@ -538,6 +554,7 @@ def start_local_workflow(
     executors: Sequence[StageExecutor] = (),
     *,
     task_log: TaskLogSink | None = None,
+    event_queue: EventQueue | None = None,
 ) -> LocalWorkflowHost | None:
     """None unless the operator enabled the workflow and named its INBOX (C7).
     `task_log`: the agent's task log, for the workflow's 日志 rows (U1e)."""
@@ -550,7 +567,9 @@ def start_local_workflow(
     else:
         return None
     if executors:
-        host = LocalWorkflowHost(settings, data_dir, executors, task_log=task_log)
+        host = LocalWorkflowHost(
+            settings, data_dir, executors, task_log=task_log, event_queue=event_queue
+        )
     else:  # the shipped pipeline (T04 E9): tools from agent.yaml, local return
         from .pipeline import (
             MIKO_OFF,
@@ -569,6 +588,7 @@ def start_local_workflow(
             off_reasons={"scrape": MIKO_OFF},
             lookup_factory=default_lookup(settings),
             task_log=task_log,
+            event_queue=event_queue,
         )
     host.start()
     return host

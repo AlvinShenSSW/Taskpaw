@@ -251,6 +251,10 @@ def test_rows_carry_the_frozen_shape():
         "cover_source",
         # U1e: stage times, the restore breakdown and 修复→翻译
         "timing",
+        # PWR-2: the probe duration, the energy and the GPU owner's live power
+        "duration_ms",
+        "energy",
+        "live_power",
     }
     assert (row["has_poster"], row["poster_source"]) == (False, None)
     assert (row["has_cover"], row["cover_source"]) == (False, None)

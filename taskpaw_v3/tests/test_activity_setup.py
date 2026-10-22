@@ -11,6 +11,15 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def patient_writer_check(monkeypatch):
+    # Every test that reaches verify_writer starts a real interpreter (often
+    # several); on a loaded CI runner that can exceed the 5 s production
+    # budget. The budget itself is exercised in test_activity_verifier.
+    s = importlib.import_module("taskpaw_v3.integrations.activity_setup")
+    monkeypatch.setattr(s, "WRITER_CHECK_TIMEOUT", 60)
+
+
 @pytest.fixture
 def setup(tmp_path, monkeypatch, request):
     s = importlib.import_module("taskpaw_v3.integrations.activity_setup")
@@ -114,7 +123,7 @@ def put(home, tool, data):
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_install_idempotent_check_exact_uninstall(setup, existing, run):
+def test_install_idempotent_check_exact_uninstall(setup, existing, run, monkeypatch):
     s, home = setup
     original = b'{"unrelated": 1, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "do-not-run"}]}]}}'
     if existing:
@@ -829,6 +838,8 @@ def test_final_verify_io_diagnostic_distinguishes_cleanup(
     from taskpaw_v3.integrations.activity_writer import ActivityStoreError
 
     s, home = setup
+    # This fake writer starts no interpreter: check the production budget.
+    monkeypatch.setattr(s, "WRITER_CHECK_TIMEOUT", 5)
     put(home, "claude", {"keep": True})
     original_verify = s.verify_writer
     calls = 0

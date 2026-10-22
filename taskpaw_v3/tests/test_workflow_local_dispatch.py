@@ -553,12 +553,19 @@ def test_the_running_stage_reports_text_ltx_detail_and_the_film_name(rt):
     assert started.tzinfo is not None
     assert abs((datetime.now(timezone.utc) - started).total_seconds()) < 60
     assert second.pop("started_at") == started.isoformat()
+    # PWR-2: the running attempt's id, so its live energy is never added twice
+    (attempt,) = rt.store.list_attempts(rt.operator, stage(rt, film, "restore").job_id)
+    assert first.pop("attempt_id") == second.pop("attempt_id") == attempt.attempt_id
     assert first == {
         "film_id": film,
         "film": "movie",  # the main video's stem: no package, no NFO
         "stage": "restore",
         "progress": "修复 第 1/2 卷 · 阶段 2/4 encode",
         "ltx": {"ltx_stage": "2/4 encode", "current_file": "第 1/2 卷"},
+        # PWR-2: no power sampler in this test
+        "uses_gpu": True,
+        "energy": None,
+        "power": None,
     }
     assert second["progress"] == "修复 第 2/2 卷" and "ltx" not in second
     assert reporting.blocking == ["影片工作流：movie"]

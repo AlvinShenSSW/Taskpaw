@@ -377,6 +377,15 @@ class Supervisor:
                 or instance_id in self._retired
             )
 
+    def type_of(self, instance_id: str) -> Optional[str]:
+        """The plugin type of a registered (or retiring) instance; None when
+        unknown. A pure read, for the power sampler's activity (PWR-1 PW03)."""
+        with self._lock:
+            m = self._monitors.get(instance_id) or next(
+                iter(self._retired.get(instance_id, [])), None
+            )
+            return m.plugin.type_id if m is not None else None
+
     def activation_result(self, iid: str, timeout: float = 0) -> dict:
         with self._lock:
             m = self._monitors.get(iid)

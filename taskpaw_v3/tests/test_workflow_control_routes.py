@@ -152,6 +152,8 @@ def test_no_host_explains_why_and_refuses_everything_else(settings, state, reaso
             "counts": board.counts([], []),
             "dispatch": None,
             "gpu": None,
+            "power": None,  # PWR-2: nothing sampled
+            "energy_rates": [],
         }
         film = identity()
         for response in (
@@ -181,6 +183,8 @@ def test_a_host_that_is_not_running_lists_nothing(world, host, client):
         "counts": board.counts([], []),
         "dispatch": None,
         "gpu": None,
+        "power": None,
+        "energy_rates": [],
     }
     response = client.post(
         f"{BASE}/films/{world.film}/confirm", json={"performer_id": "actor"}
@@ -243,6 +247,10 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "lookup",
         # U1e
         "timing",
+        # PWR-2
+        "duration_ms",
+        "energy",
+        "live_power",
     }
     steps = {s["key"]: s["state"] for s in data["steps"]}
     assert (steps["scrape"], steps["confirm"], steps["archive"]) == (

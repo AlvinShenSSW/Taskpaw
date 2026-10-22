@@ -9,6 +9,11 @@ Retains the V2 #14 persistence/outbox ordering after cursor admission:
   >24h with exactly one local alert; prune dead letters after 7 days;
 - enqueue only when OpenClaw is **active** (enabled AND token) so the outbox
   can't fill with undeliverable rows.
+
+Single-consumer invariant (#286): the Mac monitoring Hub is the only consumer
+of an Agent's /events queue. Acknowledgement removes events for all readers.
+The future Windows controller Hub must read /status and /workflow/* only,
+never /events; cursor lineage is not a multi-consumer delivery mechanism.
 """
 
 from __future__ import annotations

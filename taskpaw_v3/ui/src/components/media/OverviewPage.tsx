@@ -9,9 +9,12 @@ import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "../../api";
+import { api, type ClusterPower } from "../../api";
+import { Bolt, Est, SplitBar, SplitLegend } from "../power/PowerParts";
+import { fmtKwhShort, fmtW, splitOf } from "../power/powerModel";
 import {
-  fmtVram, gpuLabel, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, outputLimit, REVIEW_STATES,
+  ACTIVE_STATES, fmtVram, gpuLabel, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, outputLimit,
+  REVIEW_STATES,
   type StageFilter,
   type WorkItem,
 } from "./mediaModel";
@@ -26,7 +29,10 @@ export function OverviewPage() {
   const qc = useQueryClient();
   const paused = isPaused(data);
   const pause = useMutation({
-    mutationFn: (next: boolean) => api.workflowPause(next),
+    mutationFn: (next: boolean) => {
+      if (ws.readOnly) throw new Error("只读监控");
+      return api.workflowPause(next);
+    },
     onSuccess: (_r, next) => {
       ws.toast(next ? "已暂停新的领取；所有在途任务继续。" : "已恢复新任务领取。");
       return qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY });
@@ -40,6 +46,7 @@ export function OverviewPage() {
   const review = data.review.length;
   const waiting = data.films.data?.counts.waiting_for_you ?? pending + review;
   const gpu = data.films.data?.gpu;
+  const cluster = data.films.data?.power ?? null;  // PWR-2: this machine plus the 功耗 tab's peers
   const flow: Array<[string, number, StageFilter | "pending", boolean]> = [
     ["收件", count((i) => i.status === "inbox" || i.status === "receiving"), "inbox", false],
     ["待处理", pending, "pending", true],
@@ -53,9 +60,9 @@ export function OverviewPage() {
   return (
     <>
       <PageTitle title="概览" actions={<>
-        <button type="button" className="btn ghost" disabled={pause.isPending} onClick={() => pause.mutate(!paused)}>
+        {!ws.readOnly && <button type="button" className="btn ghost" disabled={pause.isPending} onClick={() => pause.mutate(!paused)}>
           <Icon of={paused ? PlayArrowIcon : PauseIcon} />{paused ? "恢复新领取" : "暂停新领取"}
-        </button>
+        </button>}
         <button type="button" className="btn primary" onClick={() => ws.navigate("review")}>
           待确认 <span className="mono">{review}</span><Icon of={ArrowForwardIcon} />
         </button>
@@ -65,7 +72,7 @@ export function OverviewPage() {
           <strong>主控已暂停新领取</strong><p>在途修复、翻译、回传与已确认入库继续运行。</p>
         </Notice>
       )}
-      <div className="stats">
+      <div className={`stats${cluster ? " pw-stats" : ""}`}>
         <div className="panel stat">
           <div className="label">正在处理<Icon of={AutoAwesomeIcon} /></div>
           <strong>{data.active.length}<em>部影片</em></strong>
@@ -86,6 +93,7 @@ export function OverviewPage() {
           <strong>1<em>/ 1 在线</em></strong>
           <div className="note">{gpuLabel(gpu) || "本机 GPU"}</div>
         </div>
+        {cluster && <ClusterStat power={cluster} onMore={ws.openPower} />}
       </div>
       <div className="flow-strip" role="group" aria-label="各流程阶段影片数量">
         {flow.map(([name, n, key, attention]) => (
@@ -143,7 +151,7 @@ export function OverviewPage() {
                 </div>
                 <div className="actions">
                   <button type="button" className={`btn small${item.status === "ready" ? " primary" : ""}`}
-                    onClick={() => ws.openReview(item.id)}>核对入库<Icon of={ArrowForwardIcon} /></button>
+                    onClick={() => ws.readOnly ? ws.openDetail(item.id) : ws.openReview(item.id)}>{ws.readOnly ? "查看详情" : "核对入库"}<Icon of={ArrowForwardIcon} /></button>
                 </div>
               </div>
             ))}
@@ -170,10 +178,33 @@ export function OverviewPage() {
   );
 }
 
-// One active film row of the overview and the 本机 page.
+// 「集群功耗」 (PWR-2): live W of this machine and the 功耗 tab's peers, its GPU / CPU / 其他 split and
+// today's energy; every figure is an estimate.
+function ClusterStat({ power, onMore }: { power: ClusterPower; onMore?: () => void }) {
+  const split = splitOf(power);
+  return (
+    <div className="panel stat pw-stat" data-testid="cluster-power">
+      <div className="label">集群功耗 <Est /><Bolt /></div>
+      <strong>{fmtW(power.w)}<em>W · {power.machines} 台计算设备</em></strong>
+      <div className="pw-split">
+        <SplitBar split={split} />
+        <SplitLegend split={split} />
+        <div className="note">
+          <span>今日约 <span className="mono">{fmtKwhShort(power.today_wh)}</span> 度 · 5 秒刷新</span>
+          {onMore && <button type="button" className="link-btn" onClick={onMore}>功耗详情<Icon of={ArrowForwardIcon} /></button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// One active film row of the overview and the 本机 page. PW12: live W only on the GPU-owning film;
+// the other active rows show —.
 export function FilmRowView({ item }: { item: WorkItem }) {
   const ws = useWorkspace();
   const title = itemTitle(item);
+  const live = item.kind === "film" ? item.row.live_power ?? null : null;
+  const active = item.kind === "film" && ACTIVE_STATES.includes(item.status);
   return (
     <article className="film-row">
       <ItemCover item={item} />
@@ -182,6 +213,12 @@ export function FilmRowView({ item }: { item: WorkItem }) {
         <div className="meta">
           {itemNumber(item) && <span className="mono">{itemNumber(item)}</span>}
           <span>{REVIEW_STATES.includes(item.status) ? "主控编排" : "本机"}</span>
+          {active && (
+            <span className="pw-chip" data-testid="row-power" title={live ? "本机整机功耗 · 估算" : "只有占用 GPU 的影片显示整机功耗"}>
+              <Bolt />{live ? `${fmtW(live.w)} W` : "—"}
+              <span className="sr-only">{live ? "（本机整机功耗估算）" : "（不占用 GPU，不显示整机功耗）"}</span>
+            </span>
+          )}
         </div>
         <StageBlock item={item} />
       </div>

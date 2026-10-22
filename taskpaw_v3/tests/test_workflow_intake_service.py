@@ -3,6 +3,7 @@
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -16,6 +17,30 @@ from taskpaw_v3.workflow.models import WorkflowError
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Native intake service")
 package = f.package
+
+
+def _stop_evidence(obj: IntakeService) -> str:
+    """What kept stop() from proving the service quiescent, and every stack."""
+    watcher = obj._watcher
+    lines = [
+        f"status={obj.status()!r}",
+        f"stop_ok={obj._stop_ok} scan_done={obj._scan_done.is_set()}",
+        "watcher="
+        + (
+            "None"
+            if watcher is None
+            else f"alive={watcher.alive} closed={watcher.closed} "
+            f"failure={watcher.failure}"
+        ),
+    ]
+    for name in ("_stopper", "_thread", "_worker"):
+        thread = getattr(obj, name)
+        lines.append(f"{name}={thread and (thread.name, thread.is_alive())}")
+    names = {t.ident: t.name for t in threading.enumerate()}
+    for ident, frame in sys._current_frames().items():
+        lines.append(f"--- thread {names.get(ident, ident)}")
+        lines.extend(traceback.format_stack(frame))
+    return "\n".join(lines)
 
 
 @pytest.fixture
@@ -138,16 +163,62 @@ def test_actual_notification_thread_and_service_are_joined_before_stop_returns(
 ):
     h, adapter, config, obj, _ = service
     obj.start()
-    end = time.monotonic() + 5
+    # Wall-clock budgets sized for a loaded CI runner (a stop mid-scan waits on
+    # store fsyncs there); the proof is that stop() returns True only after the
+    # threads are joined, not how fast they get there.
+    end = time.monotonic() + 30
     while (
         not h.store.list_intakes(adapter, im.IntakeListQuery()).items
         and time.monotonic() < end
     ):
         time.sleep(0.02)
     assert h.store.list_intakes(adapter, im.IntakeListQuery()).items
-    assert obj.stop(timeout=5)
+    assert obj.stop(timeout=30), _stop_evidence(obj)
     assert not obj.status().running and not obj.status().retained_unknown
     assert h.store.get_intake_root_scan(adapter, config.root_id).required
+
+
+def test_stop_mid_scan_fences_after_the_scan_finishes(service, package, monkeypatch):
+    # A slow runner stops while the scanner is still writing its scan. The
+    # stop fence (a fresh required scan, CAS on the root-scan version) reads
+    # that version before the in-flight scan's finish bumps it and loses with
+    # cas_conflict (windows-latest CI). It must fence again once the scan is
+    # done, or stop() can never prove quiescence.
+    h, adapter, config, obj, _ = service
+    real_finish = h.store.finish_intake_root_scan
+    real_get = h.store.get_intake_root_scan
+    finished = threading.Event()
+
+    def finish(*args, **kwargs):
+        if obj._started:
+            obj._stop.wait(10)  # the stop arrives mid-scan
+            time.sleep(0.1)  # and its fence gets the first read
+        try:
+            return real_finish(*args, **kwargs)
+        finally:
+            finished.set()
+
+    def get(*args, **kwargs):
+        value = real_get(*args, **kwargs)
+        if threading.current_thread().name == "taskpaw-intake-stop":
+            finished.wait(5)  # the scan's finish lands between read and write
+        return value
+
+    monkeypatch.setattr(h.store, "finish_intake_root_scan", finish)
+    monkeypatch.setattr(h.store, "get_intake_root_scan", get)
+    obj.start()
+    end = time.monotonic() + 30
+    while (
+        not h.store.list_intakes(adapter, im.IntakeListQuery()).items
+        and time.monotonic() < end
+    ):
+        time.sleep(0.02)
+    assert not finished.is_set()
+    assert obj.stop(timeout=30), _stop_evidence(obj)
+    assert finished.is_set()
+    assert not obj.status().retained_unknown
+    scan = h.store.get_intake_root_scan(adapter, config.root_id)
+    assert scan.required and scan.reason == "partial_observation"
 
 
 def test_missing_record_failure_keeps_root_fenced(service, package, monkeypatch):

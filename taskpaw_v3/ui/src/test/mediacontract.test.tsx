@@ -361,3 +361,75 @@ describe("contract: 待确认 and 图文确认", () => {
     expect(within(dialog).getByRole("button", { name: "确认入库" })).toBeDisabled();
   });
 });
+
+describe("contract: power (PWR-2)", () => {
+  const queueCard = (id: string) => document.querySelector<HTMLElement>(`[data-film="${id}"]`) as HTMLElement;
+  const review = () => C.films.films.find((f) => f.film_id === REVIEW)!;
+
+  it("概览: 集群功耗 and live W only on the GPU-owning row", async () => {
+    mockApi();
+    wrap(<MediaWorkspace onOpenPower={() => undefined} />);
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    const card = await screen.findByTestId("cluster-power");
+    expect(card).toHaveTextContent("集群功耗");
+    expect(card).toHaveTextContent("估算");
+    expect(card).toHaveTextContent("286W · 1 台计算设备");
+    expect(card).toHaveTextContent("GPU 210CPU 46其他 30");
+    expect(card).toHaveTextContent("今日约 8.4 度 · 5 秒刷新");
+    expect(within(card).getByRole("button", { name: "功耗详情" })).toBeInTheDocument();
+    const chips = screen.getAllByTestId("row-power");
+    expect(chips.map((c) => c.textContent?.replace(/（.*）/, ""))).toContain("286 W");
+    expect(chips.filter((c) => c.textContent?.startsWith("286 W"))).toHaveLength(1);
+  });
+
+  it("the running restore: 本机 W with its split, and the 能耗 block so far", async () => {
+    mockApi();
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看 movie 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    expect(await within(drawer).findByTestId("pw-live")).toHaveTextContent("本机 286 W（GPU 210 · CPU 46 · 其他 30）估算");
+    const block = within(drawer).getByTestId("film-energy");
+    expect(block).toHaveTextContent("已用约0.81度");
+    const restore = block.querySelector('[data-energy="restore"]') as HTMLElement;
+    expect(restore).toHaveTextContent("进行中");
+    expect(restore).toHaveTextContent("用时 3:00:00");
+    expect(restore).toHaveTextContent("平均 271 W");
+    expect(restore).toHaveTextContent("峰值 301 W");
+    expect(restore).toHaveTextContent("本机 · NVIDIA GeForce RTX 5060");
+    expect(within(block).getAllByText("未开始")).toHaveLength(2);  // 识别, 翻译
+  });
+
+  it("a finished film: 本片约 x 度 with every stage, and the queue foot 全程 · 约 x 度", async () => {
+    mockApi();
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    await waitFor(() => expect(queueCard(REVIEW)).toBeTruthy());
+    const total = review().energy!.total_wh;
+    expect(within(queueCard(REVIEW)).getByText(`约 ${(total / 1000).toFixed(1)} 度`)).toBeInTheDocument();
+    expect(within(queueCard("film-restoring")).queryByText(/约 .* 度/)).toBeNull();
+    fireEvent.click(within(queueCard(REVIEW)).getByRole("button", { name: /详情/ }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    const block = await within(drawer).findByTestId("film-energy");
+    expect(block).toHaveTextContent(`本片约${(total / 1000).toFixed(2)}度`);
+    expect(block).toHaveTextContent("修复占 20%");
+    expect([...block.querySelectorAll("[data-energy]")].map((el) => el.getAttribute("data-energy")))
+      .toEqual(["restore", "asr", "translate", "return", "scrape"]);
+    expect(within(drawer).queryByTestId("pw-live")).toBeNull();  // not running: no live W
+  });
+
+  it("待处理: 预计耗电 per tier, 历史不足 below three films", async () => {
+    mockApi();
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    const card = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>('[data-pending="film-planning"]');
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    const line = card.querySelector("#pw-predict-film-planning") as HTMLElement;
+    expect(line).toHaveTextContent("预计耗电：标准 历史不足（已选） · 良好 历史不足 · 高 历史不足（按本机历史）");
+    expect(line.querySelector(".t.on")).toHaveAttribute("data-t", "standard");
+    fireEvent.click(within(within(card).getByRole("radiogroup", { name: "画质" })).getByRole("radio", { name: /高/ }));
+    expect(line.querySelector(".t.on")).toHaveAttribute("data-t", "high");
+  });
+});

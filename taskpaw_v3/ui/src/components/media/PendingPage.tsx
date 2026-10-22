@@ -3,6 +3,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api, HttpError, PLAN_BATCH_MAX, type LtxTier, type PlanChoice, type PlanEntry, type PlanMachine, type PlanResult } from "../../api";
+import { PredictLine } from "../power/PowerParts";
 import { fmtBytes, fmtDurationMs, machineLabel, TIER_ORDER, TIER_SHORT, tierLong } from "./mediaModel";
 import { Chip, Cover, EmptyState, Icon, Notice, PageTitle } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, MEDIA_PLANS_KEY, useWorkspace } from "./workspace";
@@ -107,12 +108,16 @@ export function PendingPage() {
   };
 
   const confirm = useMutation({
-    mutationFn: (plans: PlanChoice[]) => api.workflowConfirmPlans(plans),
+    mutationFn: (plans: PlanChoice[]) => {
+      if (ws.readOnly) throw new Error("只读监控");
+      return api.workflowConfirmPlans(plans);
+    },
   });
   // The route takes at most PLAN_BATCH_MAX items: a longer list goes in several requests, and
   // their per-film results are read as one. A failed request stops the rest; with nothing
   // confirmed it is reported as the error, else the films it carried count as not confirmed.
   const send = async (entries: PlanEntry[], chosen: (e: PlanEntry) => Choice, quiet = false) => {
+    if (ws.readOnly) return null;
     const body = entries.map((e): PlanChoice => {
       const c = chosen(e);
       return { film_id: e.film_id, input_revision: e.input_revision, ltx_model: e.needs_gpu ? c.tier : null, machine: c.machine };
@@ -150,7 +155,10 @@ export function PendingPage() {
     ws.toast(`已确认 ${res.ok.size} 部，进入影片队列${rest ? `。${rest} 部已调整或需重新查看，请单独确认。` : ""}${why ? `（${why}）` : ""}`);
   };
   const lookup = useMutation({
-    mutationFn: (filmId: string) => api.workflowLookup(filmId),
+    mutationFn: (filmId: string) => {
+      if (ws.readOnly) throw new Error("只读监控");
+      return api.workflowLookup(filmId);
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: MEDIA_PLANS_KEY }),
     onError: (e) => ws.toast(errorText(e)),
   });
@@ -164,7 +172,7 @@ export function PendingPage() {
 
   return (
     <>
-      <PageTitle title="待处理" actions={
+      <PageTitle title="待处理" actions={!ws.readOnly &&
         <button type="button" className="btn ghost" disabled={eligible.length === 0 || confirm.isPending}
           onClick={() => void confirmAll()}>
           <Icon of={CheckIcon} />全部按推荐确认
@@ -186,6 +194,7 @@ export function PendingPage() {
         <div className="pending-grid">
           {items.map((e) => (
             <PendingCard key={e.film_id} entry={e} choice={choiceOf(e)} machines={machines} stale={isStale(e)}
+              readOnly={ws.readOnly}
               busy={confirm.isPending} lookupBusy={lookup.isPending && lookup.variables === e.film_id}
               onChoice={(c) => setChoices((prev) => ({ ...prev, [e.film_id]: c }))}
               onConfirm={() => void confirmOne(e)} onDetail={() => openDetail(e)} onLookup={() => lookup.mutate(e.film_id)} />
@@ -204,8 +213,9 @@ function machineName(machines: PlanMachine[], id: string): string {
   return machines.find((x) => x.id === id)?.name ?? "本机";
 }
 
-function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onChoice, onConfirm, onDetail, onLookup }: {
+function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, readOnly, onChoice, onConfirm, onDetail, onLookup }: {
   entry: PlanEntry; choice: Choice; machines: PlanMachine[]; stale: boolean; busy: boolean; lookupBusy: boolean;
+  readOnly: boolean;
   onChoice: (c: Choice) => void; onConfirm: () => void; onDetail: () => void; onLookup: () => void;
 }) {
   const id = e.film_id;
@@ -240,7 +250,7 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onCh
         {e.lookup?.status === "failed" && (
           <div className="keyline">
             <span>{e.lookup.message || "未查到资料"}</span>
-            <button type="button" className="link-btn" disabled={!e.lookup.can_requery || lookupBusy} onClick={onLookup}>重新查询</button>
+            {!readOnly && <button type="button" className="link-btn" disabled={!e.lookup.can_requery || lookupBusy} onClick={onLookup}>重新查询</button>}
           </div>
         )}
         {(e.lookup?.status === "queued" || e.lookup?.status === "running") && <p>正在查询资料…</p>}
@@ -250,7 +260,8 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onCh
         {e.needs_gpu ? (
           <div className="plan-field">
             <span className="plan-label" id={`tier-label-${id}`}>画质</span>
-            <div className="seg" role="radiogroup" aria-labelledby={`tier-label-${id}`} aria-describedby={`tier-reason-${id}`}>
+            {readOnly ? <Chip>推荐 {tierLong(rec.ltx_model)}</Chip> : <div className="seg" role="radiogroup" aria-labelledby={`tier-label-${id}`}
+              aria-describedby={e.prediction ? `tier-reason-${id} pw-predict-${id}` : `tier-reason-${id}`}>
               {TIER_ORDER.map((t) => {
                 const on = choice.tier === t;
                 return (
@@ -261,25 +272,31 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onCh
                   </button>
                 );
               })}
-            </div>
+            </div>}
             <p className="plan-reason" id={`tier-reason-${id}`}>{rec.ltx_reason}</p>
+            <PredictLine prediction={e.prediction} tier={choice.tier} needsGpu id={`pw-predict-${id}`} />
           </div>
         ) : (
-          <div className="plan-field"><span className="plan-label">画质</span><Chip tone="green">无需修复</Chip></div>
+          <div className="plan-field">
+            <span className="plan-label">画质</span><Chip tone="green">无需修复</Chip>
+            <PredictLine prediction={e.prediction} tier={null} needsGpu={false} id={`pw-predict-${id}`} />
+          </div>
         )}
         <div className="plan-field">
+          {readOnly ? <><span className="plan-label">设备</span><Chip>推荐 {machineName(machines, rec.machine)}</Chip></> : <>
           <label className="plan-label" htmlFor={`machine-${id}`}>设备</label>
           <select id={`machine-${id}`} value={choice.machine} aria-describedby={`machine-reason-${id}`}
             onChange={(ev) => onChoice({ ...choice, machine: ev.target.value })}>
             {options.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
+          </>}
           <p className="plan-reason" id={`machine-reason-${id}`}>{machineReason}</p>
         </div>
       </div>
       <div className="pending-foot">
         <button type="button" className="btn ghost small" data-action="detail" aria-describedby={tid} onClick={onDetail}>查看详情</button>
-        <button type="button" className="btn primary small" data-action="confirm" aria-describedby={stale ? `stale-${id}` : tid}
-          disabled={stale || busy || !ready} onClick={onConfirm}>确认入队</button>
+        {!readOnly && <button type="button" className="btn primary small" data-action="confirm" aria-describedby={stale ? `stale-${id}` : tid}
+          disabled={stale || busy || !ready} onClick={onConfirm}>确认入队</button>}
       </div>
     </article>
   );

@@ -655,20 +655,23 @@ def test_cycle3_actual_queued_probe_after_hard_deadline_never_executes(
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Actual probe phase progress")
 def test_cycle3_valid_native_probes_can_outlast_copy_idle(tmp_path, monkeypatch):
+    # Budgets leave a loaded runner room (helper start-up counts toward the
+    # idle clock before the first probe): each probe (1 s) is far inside idle
+    # (3 s) and the probe deadline (20 s); the four together (4 s) outlast idle.
     synthetic_helper(tmp_path, monkeypatch)
     script = tmp_path / "probe-canary.py"
     script.write_text(
-        "import time\ntime.sleep(.30)\n" + script.read_text(encoding="utf-8"),
+        "import time\ntime.sleep(1.0)\n" + script.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     raw = work_request(4).model_dump()
-    raw["root"]["policy"].update(operation_deadline_seconds=10, idle_deadline_seconds=1)
-    raw["root"]["policy"]["probe"]["deadline_seconds"] = 1
+    raw["root"]["policy"].update(operation_deadline_seconds=90, idle_deadline_seconds=3)
+    raw["root"]["policy"]["probe"]["deadline_seconds"] = 20
     obj = owner.start_snapshot_suspended(p.IntakeWorkRequest.model_validate(raw))
     try:
         obj.resume_helper(persisted_owner_version=1)
         for sequence in range(1, 5):
-            event = obj.next_event(deadline=time.monotonic() + 5)
+            event = obj.next_event(deadline=time.monotonic() + 30)
             assert isinstance(event, p.ProbeEvent)
             obj.observe_probe(event.notice)
             obj.ack_probe(
@@ -676,9 +679,11 @@ def test_cycle3_valid_native_probes_can_outlast_copy_idle(tmp_path, monkeypatch)
                     **event.notice.model_dump(), owner_version=sequence + 1
                 )
             )
-        assert isinstance(obj.next_event(deadline=time.monotonic() + 5), p.FailureEvent)
+        assert isinstance(
+            obj.next_event(deadline=time.monotonic() + 30), p.FailureEvent
+        )
     finally:
-        proof = obj.settle(deadline=time.monotonic() + 5)
+        proof = obj.settle(deadline=time.monotonic() + 30)
     assert proof.state == "stopped" and len(list(tmp_path.glob("ran-*"))) == 4
 
 

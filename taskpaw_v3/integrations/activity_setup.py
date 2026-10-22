@@ -29,6 +29,7 @@ from taskpaw_v3.integrations.activity_writer import (
 from taskpaw_v3.monitors.session_activity import safe_path
 
 WINDOWS = sys.platform == "win32"
+WRITER_CHECK_TIMEOUT = 5  # seconds one writer check may run; tests widen it
 WRITER = Path(__file__).with_name("activity_writer.py").absolute()
 
 
@@ -310,7 +311,7 @@ def verify_writer(command: str, tool: str, state_dir: Path) -> None:
                     }
                 )
                 if verification is not None:
-                    code = verification.run(argv, payload, timeout=5)
+                    code = verification.run(argv, payload, timeout=WRITER_CHECK_TIMEOUT)
                 else:
                     code = subprocess.run(
                         argv,
@@ -318,7 +319,7 @@ def verify_writer(command: str, tool: str, state_dir: Path) -> None:
                         text=True,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
-                        timeout=5,
+                        timeout=WRITER_CHECK_TIMEOUT,
                         check=False,
                     ).returncode
             except subprocess.TimeoutExpired:

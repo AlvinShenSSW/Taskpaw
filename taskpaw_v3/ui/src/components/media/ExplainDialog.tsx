@@ -1,10 +1,9 @@
 import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../../api";
 import { Notice } from "./parts";
 import { ModalHead, ModalShell } from "./ReviewDialog";
-import { mediaFilmKey } from "./workspace";
+import { useWorkspace } from "./workspace";
 
 export type Explain = { kind: "reconcile" | "cleanup"; filmId: string } | null;
 
@@ -19,7 +18,8 @@ export function ExplainDialog({ explain, onClose }: { explain: Explain; onClose:
 }
 
 function ExplainPane({ explain, onClose }: { explain: NonNullable<Explain>; onClose: () => void }) {
-  const detail = useQuery({ queryKey: mediaFilmKey(explain.filmId), queryFn: () => api.workflowFilm(explain.filmId) });
+  const ws = useWorkspace();
+  const detail = useQuery({ queryKey: ws.filmKey(explain.filmId), queryFn: () => ws.readFilm(explain.filmId) });
   const film = detail.data;
   const title = film ? film.title || film.name : explain.filmId;
   const target = film?.archive.target_path || "尚未确定目标";

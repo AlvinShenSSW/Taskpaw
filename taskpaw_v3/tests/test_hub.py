@@ -100,6 +100,48 @@ def _store(tmp_path):
     return HubStore(tmp_path / "hub.db")
 
 
+def test_workflow_prefix_and_hub_restart_do_not_duplicate_outbox(tmp_path):
+    store = _store(tmp_path)
+    sid = store.add_server("windows", "127.0.0.1", 5680)
+    poller = Poller(store, "http://oc/hook", lambda: True, lambda: "fake")
+    poller.last_event_ids = {sid: 2}
+    _bind(poller, sid)
+    server = store.list_servers()[0]
+    batch = {
+        "proof": _cursor(),
+        "receipts": [],
+        "events": [
+            {
+                "id": 3,
+                "monitor": "media-workflow",
+                "message": "Film 待安排",
+                "level": "info",
+            },
+            {"id": 4, "monitor": "other", "message": "ordinary", "level": "info"},
+        ],
+    }
+    try:
+        store.commit_upstream_batch(server, batch, True)
+    finally:
+        store.close()
+    store = _store(tmp_path)
+    try:
+        store.commit_upstream_batch(server, batch, True)
+        payloads = [
+            json.loads(r[0])["text"]
+            for r in store._conn.execute(
+                "SELECT payload_json FROM delivery_outbox ORDER BY id"
+            )
+        ]
+        assert payloads == [
+            "TaskPaw 媒体 | Film 待安排",
+            "TaskPaw Event | windows: ordinary",
+        ]
+        assert len(store.recent_events()) == 2
+    finally:
+        store.close()
+
+
 def test_store_event_idempotent(tmp_path):
     s = _store(tmp_path)
     try:
