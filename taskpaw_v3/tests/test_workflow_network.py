@@ -47,6 +47,9 @@ def test_every_network_route_is_get_only():
     app = network()
     assert app.routes
     assert all(route.methods == {"GET"} for route in app.routes)
+    # the PWR-1 power route and the #286 workflow reads share the one network app
+    paths = {getattr(route, "path", None) for route in app.routes}
+    assert {"/power/history", "/workflow/films", "/workflow/plans"} <= paths
 
 
 @pytest.mark.parametrize(
@@ -97,6 +100,21 @@ def test_enabled_snapshot_detail_and_plans_match_control(world, host, client):
         assert response.status_code == expected.status_code == 200
         assert response.json() == expected.json()
     assert client.get("/workflow/films").json()["current"]["ltx"]["percent"] == 52
+
+
+def test_snapshot_carries_the_power_fields_like_control(
+    monkeypatch, world, host, client
+):
+    from taskpaw_v3.core import power_fleet
+
+    cluster = {"w": 120.0, "today_wh": 300.0, "machines": 1, "estimated": True}
+    monkeypatch.setattr(power_fleet, "cluster_power", lambda: dict(cluster))
+    control = _client(lambda: host, WorkflowSettings(enabled=True))
+    data = client.get("/workflow/films").json()
+    assert data == control.get("/control/workflow/films").json()
+    assert data["power"] == cluster
+    assert isinstance(data["energy_rates"], list)
+    assert all("energy" in row and "live_power" in row for row in data["films"])
 
 
 def test_pending_recommendations_match_the_control_read(tmp_path):
