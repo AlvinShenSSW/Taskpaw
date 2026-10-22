@@ -355,7 +355,12 @@ def test_a_cancel_stops_the_job_and_finishes_cancelled(tmp_path):
         until(lambda: client.finishes)
         assert client.finishes[0] == (
             attempt,
-            {"outcome": "failed", "error_class": "cancelled", "message": "已停止"},
+            {
+                "outcome": "failed",
+                "error_class": "cancelled",
+                "message": "已停止",
+                "energy": None,  # unknown, never 0
+            },
         )
         until(lambda: not (staging.root / "attempts" / f"{attempt}.json").exists())
     finally:
@@ -1233,4 +1238,181 @@ def test_ir11_the_typed_current_fits_the_heartbeat(tmp_path):
         }
     finally:
         executor.release.set()
+        assert d.stop(10)
+
+
+# ── §11 Codex r2 (CX7–CX9) ──────────────────────────────────────────────
+def _settled_ok_on_disk(tmp_path, executor):
+    """A successful stage settled on disk and never delivered (the process
+    'dies' after the settled record); returns the attempt file and folder."""
+    d, staging, client = _uploads(tmp_path, executor)
+    film = client.add()
+    reached = threading.Event()
+    real_settle = d._settle
+
+    def settle_then_die(active, outcome):
+        d._stop.set()
+        real_settle(active, outcome)
+        reached.set()
+
+    d._settle = settle_then_die  # type: ignore[method-assign]
+    d.start()
+    _observe(d, [_route(film, 0)])
+    assert reached.wait(10)
+    assert d.stop(10)
+    (path,) = (staging.root / "attempts").glob("*.json")
+    return path, staging.work_dir / path.stem
+
+
+@pytest.mark.parametrize("lost", ["ledger", "output", "changed"])
+@pytest.mark.parametrize("verdict", ["finish", None])
+def test_cx7_a_recovered_success_that_lost_its_files_fails_once(
+    tmp_path, lost, verdict
+):
+    from taskpaw_v3.workflow.stage_results import RESULT_NAME
+
+    executor = Producing()
+    path, folder = _settled_ok_on_disk(tmp_path, executor)
+    if lost == "ledger":
+        (folder / RESULT_NAME).unlink()
+    elif lost == "output":
+        (folder / "movie.mkv").unlink()
+    else:
+        with (folder / RESULT_NAME).open("ab") as fh:
+            fh.write(b" ")  # the digest the settled record holds no longer fits
+    d2, _, client2 = _uploads(tmp_path, executor)
+    attempts = {path.stem: verdict} if verdict else {}
+    d2.booted({"reconciled": True, "attempts": attempts})
+    d2.start()
+    try:
+        until(lambda: client2.finishes)
+        attempt, body = client2.finishes[0]
+        assert attempt == path.stem
+        assert body["outcome"] == "failed"
+        assert body["error_class"] == "cancelled"  # a free retry (T08-P1a R3)
+        assert "本地结果丢失" in body["message"]
+        until(lambda: not path.exists() and not folder.exists())
+        until(lambda: not d2.claimed() and d2.lease.holder() is None)
+        assert len(client2.finishes) == 1 and client2.uploads == []  # once, no loop
+    finally:
+        assert d2.stop(10)
+
+
+def test_cx7_an_intact_recovered_success_is_still_delivered(tmp_path):
+    executor = Producing()
+    path, folder = _settled_ok_on_disk(tmp_path, executor)
+    d2, _, client2 = _uploads(tmp_path, executor)
+    d2.booted({"reconciled": True, "attempts": {path.stem: "finish"}})
+    d2.start()
+    try:
+        until(lambda: client2.finishes)
+        assert client2.finishes[0][1]["outcome"] == "succeeded"
+        assert client2.uploads == [f"{path.stem}/movie.mkv"]
+    finally:
+        assert d2.stop(10)
+
+
+def test_cx7_the_worker_claims_again_after_a_lost_result(tmp_path):
+    from taskpaw_v3.workflow.stage_results import RESULT_NAME
+
+    executor = Producing()
+    path, folder = _settled_ok_on_disk(tmp_path, executor)
+    (folder / RESULT_NAME).unlink()
+    d2, _, client2 = _uploads(tmp_path, executor)
+    other = client2.add()
+    d2.booted({"reconciled": True, "attempts": {path.stem: "finish"}})
+    d2.start()
+    try:
+        _observe(d2, [_route(other, 0)])
+        until(lambda: len(client2.claims) == 1)  # not stuck in the delivery
+        until(lambda: len(client2.finishes) == 2)
+        assert [b["outcome"] for _, b in client2.finishes] == ["failed", "succeeded"]
+    finally:
+        assert d2.stop(10)
+
+
+def test_cx8_an_incomplete_download_is_reported_and_releasable(tmp_path):
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    film = client.add()
+    envelope = client.envelope(film, 1)
+    rel = envelope["workcopy"][0]["relative_path"]
+    part = staging.work_dir / f"{rel}.part"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"xx")
+    d.index.mark(film, 1, [rel], False, sizes={rel: 10})  # a download cut short
+    assert d.staged() == [{"film": film, "rev": 1, "incomplete": True}]
+    assert not d.index.complete(film, 1)
+    _observe(d, [], release=[{"film": film, "rev": 1}])  # the route moved on
+    assert not part.exists() and d.staged() == []
+    assert d.index.entries() == {}
+
+
+def test_cx8_an_active_fetch_is_never_released(tmp_path):
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    film = client.add()
+    rel = client.envelope(film, 1)["workcopy"][0]["relative_path"]
+    part = staging.work_dir / f"{rel}.part"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(b"xx")
+    d.index.mark(film, 1, [rel], False, sizes={rel: 10})
+    d._fetching = f"{film}/1"  # the fetch thread is on it
+    _observe(d, [], release=[{"film": film, "rev": 1}])
+    assert part.exists()
+    assert d.staged() == [{"film": film, "rev": 1, "incomplete": True}]
+    d._fetching = None
+    _observe(d, [], release=[{"film": film, "rev": 1}])  # asked again, now idle
+    assert not part.exists() and d.staged() == []
+
+
+class _Reading:
+    def __init__(self, owner: str) -> None:
+        self.owner = owner
+
+
+class _Delta:
+    def to_dict(self) -> dict:
+        return {
+            "wh": 1.5,
+            "gpu_wh": 1.0,
+            "cpu_wh": 0.3,
+            "other_wh": 0.2,
+            "seconds": 60.0,
+            "avg_w": 90.0,
+            "peak_w": 120.0,
+        }
+
+
+class _Sampler:
+    def reading(self, owner):
+        return _Reading(owner)
+
+    def energy_between(self, start, end):
+        return _Delta()
+
+    def live(self):
+        return None
+
+
+def test_cx9_a_cancelled_finish_keeps_the_settled_energy(tmp_path):
+    executor = Blocking()
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, executor)
+    d.power = lambda: _Sampler()
+    client.__init__(staging)
+    film = client.add()
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        assert executor.running.wait(10)
+        attempt = client.claims[0]["attempt_id"]
+        _observe(d, [_route(film, 0)], cancel=[attempt])
+        until(lambda: client.finishes)
+        body = client.finishes[0][1]
+        assert body["error_class"] == "cancelled" and body["message"] == "已停止"
+        assert body["energy"]["wh"] == 1.5 and body["energy"]["peak_w"] == 120.0
+    finally:
         assert d.stop(10)

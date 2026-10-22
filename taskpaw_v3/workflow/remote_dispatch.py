@@ -444,11 +444,15 @@ class RemoteDispatcher:
 
     def staged(self) -> list[dict[str, Any]]:
         """Staged revisions, those being released included (§11 IR2): the
-        controller names them in `release` again until their files are gone."""
+        controller names them in `release` again until their files are gone.
+        §11 CX8: a download cut short is reported too, flagged `incomplete`,
+        so a route that moved on can release it; a fetch under way is never
+        deleted (`_release_film` leaves it and is asked again)."""
         return [
             {"film": e["film"], "rev": e["rev"]}
-            for e in self.index.entries().values()
             if e.get("complete") or e.get("releasing")
+            else {"film": e["film"], "rev": e["rev"], "incomplete": True}
+            for e in self.index.entries().values()
         ][:64]
 
     def films(self) -> list[dict[str, Any]]:
@@ -1097,6 +1101,7 @@ class RemoteDispatcher:
             while not self._stop.is_set():
                 body: dict[str, Any] | None = None
                 try:
+                    self._check_result(state)
                     body = self._finish_body(state, active)
                     active.phase = "finishing"
                     state.finish_sent = True
@@ -1134,6 +1139,32 @@ class RemoteDispatcher:
                 if self._active is active:
                     self._active = None
                 self._transfers.pop((state.film_id, "up"), None)
+
+    def _check_result(self, state: AttemptState) -> None:
+        """§11 CX7: a settled success is delivered only with its ledger there,
+        matching the settled digest, and every output intact (a restart, the
+        antivirus or an operator may have taken them). Otherwise it finishes
+        failed `cancelled` (「本地结果丢失」, a free retry, T08-P1a R3) — once,
+        so the attempt leaves the delivery and the worker claims again."""
+        settled = state.settled or {}
+        if not settled.get("ok"):
+            return
+        ledger = self.staging.work_dir / state.attempt_id / RESULT_NAME
+        try:
+            digest = hashlib.sha256(ledger.read_bytes()).hexdigest()
+        except OSError:
+            digest = None
+        if (
+            digest is not None
+            and digest == settled.get("digest")
+            and self._intact(state)
+        ):
+            return
+        log.error("worker attempt %s: its local result is gone", state.attempt_id)
+        state.settled = _settled(
+            ExecOutcome.failed("cancelled", "本地结果丢失"), settled.get("energy")
+        )
+        self._save(state)
 
     def _refused(self, state: AttemptState, exc: ApiError) -> None:
         """§11 IR3: the controller refused a failed finish for good. The
@@ -1175,6 +1206,7 @@ class RemoteDispatcher:
                 "outcome": "failed",
                 "error_class": "cancelled",
                 "message": "已停止",
+                "energy": settled.get("energy"),  # §11 CX9: None only if unknown
             }
         if not settled.get("ok"):
             return {

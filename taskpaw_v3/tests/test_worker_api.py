@@ -594,3 +594,19 @@ def test_the_worker_api_serves_and_its_socket_closes_on_shutdown(monkeypatch, tm
         shutdown.shutdown()
         assert shutdown.stopped.wait(30)
     _rebind(port)  # S-7: the 5682 socket is closed
+
+
+def test_release_covers_an_incomplete_download(api, rt):
+    """§11 CX8: a half-fetched revision is reported (flagged) and the same
+    release rule names it; one still routed to this worker is kept."""
+    joined, boot = enrol(api, rt)
+    routed, idle = add_film(rt), add_film(rt)
+    route(rt, routed, joined.worker_id)
+    staged = [
+        {"film": routed, "rev": 1, "incomplete": True},
+        {"film": idle, "rev": 2, "incomplete": True},
+    ]
+    data = api.post(
+        f"{PREFIX}/heartbeat", json=beat(boot, staged=staged), headers=joined.headers
+    ).json()
+    assert data["release"] == [{"film": idle, "rev": 2}]

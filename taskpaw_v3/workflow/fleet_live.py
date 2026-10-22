@@ -48,6 +48,7 @@ class DiskLive(m.Model):
 class StagedFilm(m.Model):
     film: m.Id
     rev: m.Revision
+    incomplete: bool = False  # §11 CX8: a download cut short, still releasable
 
 
 class TransferLive(m.Model):
@@ -241,7 +242,7 @@ def _routing_facts(beat: Heartbeat) -> tuple[object, ...]:
         beat.asr_ready,
         beat.version,
         beat.protocol,
-        frozenset((s.film, s.rev) for s in beat.staged),
+        frozenset((s.film, s.rev, s.incomplete) for s in beat.staged),
         beat.boot_id,
     )
 
