@@ -581,6 +581,28 @@ def test_owner_counter_is_cumulative_across_attempts():
     assert s.energy_between(a, c).wh == pytest.approx(first.wh + second.wh)
 
 
+def test_the_peak_is_unknown_once_the_buffer_no_longer_covers_the_attempt(
+    monkeypatch,
+):
+    """Codex r3: a restore longer than the peak buffer (24 h) must not report
+    the remaining maximum as the attempt's peak; energy stays exact."""
+    monkeypatch.setattr(power, "PEAK_SAMPLES", 3)
+    clock = Clock()
+    r = Readers(gpu=[500.0, 100.0, 100.0, 100.0, 100.0, 100.0], cpu=[0.0])
+    s = sampler(clock, r)
+    s.tick()
+    claim = s.reading("f1")
+    r.activity = ("restore", "f1")
+    run_ticks(s, clock, 5)  # the 500 W sample has been evicted
+    delta = s.energy_between(claim, s.reading("f1"))
+    assert delta is not None and delta.wh > 0
+    assert delta.peak_w is None
+    # a later window the buffer still covers has its peak
+    mid = s.reading("f1")
+    run_ticks(s, clock, 1)
+    assert s.energy_between(mid, s.reading("f1")).peak_w is not None
+
+
 def test_energy_between_rejects_mismatched_readings():
     clock = Clock()
     r = Readers(gpu=[50.0], cpu=[0.0])

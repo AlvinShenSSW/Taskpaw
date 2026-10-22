@@ -303,6 +303,7 @@ class _Counter:
     other: float = 0.0
     seconds: float = 0.0
     peaks: deque = field(default_factory=lambda: deque(maxlen=PEAK_SAMPLES))
+    dropped_seq: int = -1  # the newest sample the full peak buffer evicted
 
 
 # ── storage ─────────────────────────────────────────────────────────────────
@@ -695,6 +696,8 @@ class PowerSampler:
         c.other += other
         c.wh += gpu + cpu + other
         c.seconds += dt
+        if len(c.peaks) == c.peaks.maxlen:
+            c.dropped_seq = c.peaks[0][0]
         c.peaks.append((self._seq, watts))
 
     # ── per-owner counters (PW04; the dispatcher reads these in PWR-2) ──
@@ -731,7 +734,13 @@ class PowerSampler:
                 or end.seq < start.seq
             ):
                 return None
-            peaks = [w for seq, w in c.peaks if start.seq < seq <= end.seq]
+            # Codex r3: an attempt longer than the buffer (24 h) lost early
+            # samples, so its maximum is unknown rather than understated
+            peaks = (
+                [w for seq, w in c.peaks if start.seq < seq <= end.seq]
+                if c.dropped_seq <= start.seq
+                else []
+            )
         seconds = max(0.0, end.seconds - start.seconds)
         wh = max(0.0, end.wh - start.wh)
         return EnergyDelta(
