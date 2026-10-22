@@ -27,6 +27,8 @@ const catalog: [string, string, string][] = [
   ["translate.finished", "Translation finished", "翻译完成"], ["subs.published", "Subtitles published", "字幕已发布"],
   ["subs.skipped", "skipped", "跳过"], ["subs.failed", "failed", "失败"], ["subs.skipped_bulk", "skipped", "跳过"],
   ["event.mirrored", "Alert", "提醒"], ["event.suppressed", "suppressed", "省略"],
+  ["workflow.stage.succeeded", "finished in", "完成，耗时"], ["workflow.stage.failed", "failed", "失败"],
+  ["workflow.film.translated", "total", "全程"],
 ];
 
 // Exact data shapes from the producer call sites, without invented fallback keys.
@@ -50,6 +52,13 @@ const producerData: Record<string, Record<string, unknown>> = {
   "subs.published": { srt: "LMNO-123.srt" }, "subs.skipped": { reason: "no_llm_key" }, "subs.failed": { detail: "asr failed", step: "asr" },
   "subs.skipped_bulk": { count: 3, reason: "cancelled" },
   "event.mirrored": { level: "alert", title: "Alert", message: "Original alert" }, "event.suppressed": { count: 17 },
+  // U1e: the 媒体处理中心 (timing.WorkflowLog); the film is the row's own `film`
+  "workflow.stage.succeeded": { stage: "asr", duration: 612.3 },
+  "workflow.stage.failed": { stage: "restore", duration: 5, detail: "Jasna LTX 失败（退出码 3）" },
+  "workflow.film.translated": {
+    run: 5730, restore: 3600, ltx: 2340, speed_test: 60, asr: 600, translate: 1230,
+    text: "ABF-394 全程 1:35:30（修复→翻译；修复 1:00:00，其中 LTX 0:39:00；识别 0:10:00；翻译 0:20:30）",
+  },
 };
 const reasonCodes = [
   "setup_or_launch_failed", "child_failed", "ffprobe_missing", "already restored", "name_collision", "name collision",
@@ -72,6 +81,7 @@ describe("log sentences", () => {
       setLang(lang);
       const template = String(i18n.getResource(lang, "translation", `logs.kinds.${templateKind}`));
       for (const [, field] of template.matchAll(/\{\{(\w+)\}\}/g)) {
+        if (field === "film") continue;  // the row's own film, never a data field
         expect(Object.hasOwn(data, field === "detail" && kind === "task.error" ? "reason" : field), `${kind}: ${field}`).toBe(true);
       }
       const row = entry(undefined, kind, data);
@@ -134,6 +144,28 @@ describe("log sentences", () => {
       expect(sentence).toContain(expected);
       expect(sentence).not.toMatch(/undefined|\{\{|logs\./);
     }
+  });
+  it("states a film's whole 修复→翻译 run with clocks, its details and a stage row (U1e)", () => {
+    setLang("zh-CN");
+    const summary = { ...entry(undefined, "workflow.film.translated", producerData["workflow.film.translated"]),
+      task: "媒体处理中心", task_type: "workflow", film: "ABF-394" };
+    expect(renderLogSentence(summary, i18n.t)).toBe(
+      "ABF-394 全程 1:35:30（修复→翻译；修复 1:00:00，其中 LTX 0:39:00；识别 0:10:00；翻译 0:20:30）");
+    expect(logDetails(summary, i18n.t)).toEqual(expect.arrayContaining([
+      ["全程（修复→翻译）", "1:35:30"], ["修复", "1:00:00"], ["LTX（四阶段）", "0:39:00"], ["LTX 测速", "0:01:00"],
+      ["识别", "0:10:00"], ["翻译", "0:20:30"],
+    ]));
+    const noLtx = { ...summary, data: { run: 1200, restore: null, ltx: null, asr: 600, translate: 600 } };
+    expect(renderLogSentence(noLtx, i18n.t)).toBe("ABF-394 全程 0:20:00（修复→翻译；修复 —；识别 0:10:00；翻译 0:10:00）");
+    const stage = { ...summary, id: "20260926-8", kind: "workflow.stage.succeeded", data: { stage: "asr", duration: 612.3 } };
+    expect(renderLogSentence(stage, i18n.t)).toBe("语音识别完成，耗时 10 分");
+    const failed = { ...summary, kind: "workflow.stage.failed", severity: "warn" as const,
+      data: { stage: "restore", duration: 5, detail: "Jasna LTX 失败（退出码 3）" } };
+    expect(renderLogSentence(failed, i18n.t)).toBe("修复失败：Jasna LTX 失败（退出码 3）");
+    render(<ThemeProvider theme={theme}><TaskLogRows entries={[summary, stage]} /></ThemeProvider>);
+    expect(screen.getByText(/全程 1:35:30/)).toBeInTheDocument();
+    expect(screen.getByText("语音识别完成，耗时 10 分")).toBeInTheDocument();
+    expect(screen.getAllByText("媒体处理中心 · workflow")).toHaveLength(2);
   });
   it("explains unavailable, recovered, changed, unclean, and inferred interruption", () => {
     setLang("zh-CN");

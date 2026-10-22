@@ -198,6 +198,150 @@ export type LlmTestResult = {
   note?: "thinking_unsupported";
 };
 
+// Media workflow (T06-P1 §8; U1 adds the plan gate, preflight, pause and the V3 row facts).
+// The shapes are the backend's as built (U1 spec, "API appendix"); the UI tests load the
+// responses the real routes produce (fixtures/workflow-contract.json, checked by pytest).
+// `planning` is 待处理: the restore waits for the film's plan (U1 V').
+export type FilmGroup = "planning" | "confirm" | "active" | "attention" | "archiving" | "done";
+export type LtxTier = "standard" | "good" | "high";
+export type Resolution = "4K" | "1080p";
+// U1 V': the confirmed plan of a film's current input revision (null tier = 无需修复).
+export interface FilmPlan { ltx_model: LtxTier | null; machine: string }
+// U1 §7.2: the current input and final manifests, so the 图文确认 dialog can see a change.
+export interface ManifestRevision { revision: number; hash: string }
+export interface FilmRevisions { input: ManifestRevision | null; final: ManifestRevision | null }
+export interface FilmRow {
+  film_id: string; name: string; group: FilmGroup; stage: string | null; status: string | null;
+  note: string | null; can_confirm: boolean; can_retry: boolean; retry_stage: string | null;
+  created_at: string | null; steps: WorkflowStep[];
+  // final NFO > lookup > input NFO; the cover by the same precedence
+  number: string | null; title: string | null; actors: string[];
+  has_poster: boolean; poster_source: string | null;
+  // U1b: the full landscape jacket the 大图 shows (`coverPath`); `cover_source` is its cache key
+  has_cover: boolean; cover_source: string | null;
+  resolution: Resolution | null; plan: FilmPlan | null; receipt_id: string | null; revisions: FilmRevisions;
+  // U1e: each finished stage's time, the restore breakdown and 修复→翻译
+  timing?: FilmTiming | null;
+}
+// U1e: the seconds Taskpaw saw each Jasna phase as the current one, over every LTX run and volume.
+// `ltx` is the four restore stages (`ltx_stages`, by name) only; `speed_test` is counted apart.
+export interface RestoreTiming {
+  scan: number; basicvsr: number; ltx: number; speed_test: number;
+  ltx_stages: Record<string, number>; ltx_runs: number; wall: number;
+}
+// U1e: stage → seconds of its succeeded attempt; 修复→翻译 runs from the first of restore / asr /
+// translate to the translate end; the queue wait from the plan confirm to the restore start.
+export interface FilmTiming {
+  stages: Partial<Record<string, number>>; restore_breakdown: RestoreTiming | null;
+  total_restore_to_translate: number | null; queue_wait: number | null;
+}
+// H2 R5 lifecycle step line; U1 V3 adds 「待处理」 (`plan`) after 入库扫描.
+export type StepKey =
+  "intake" | "plan" | "restore" | "asr" | "translate" | "return" | "scrape" | "confirm" | "archive" | "cleanup" | "done";
+export type StepState = "done" | "running" | "waiting" | "failed" | "pending";
+// progress: whatever the executor reports (a 0–1 fraction, a percentage, console text, …) or null.
+// H3 M1/M3: the restore step carries the LTX monitor metrics (`ltx`) while running and the
+// model download session (`download`) when it failed on missing models. U1c: the running restore
+// step also carries its heartbeat, the stage start (`started_at`, UTC ISO) and the latest plain
+// console line (`console`), whether or not a progress bar was recognised yet.
+export interface WorkflowStep {
+  key: StepKey; state: StepState; note: string | null; progress: unknown;
+  ltx?: Record<string, unknown> | null; current_file?: string | null; download?: Record<string, unknown> | null;
+  started_at?: string | null; console?: string | null; params?: RestoreParams | null;
+  // U1e: the running restore's phase times so far (the whole film)
+  timing?: RestoreTiming | null;
+}
+// U1c: the effective Jasna launch of the running video, read from its argv (paths cut to names).
+export interface RestoreParams {
+  ltx_model: LtxTier | null; model_name: string | null; fast: boolean; precision: "nvfp4" | "int8";
+  auto_split: number; large_canvas: boolean; overlap: "auto" | "on" | "off"; codec: string | null; source_codec: string | null; cq: number | null;
+  match_source_bitrate: boolean; maxrate_bps: number | null; source_bitrate_bps: number | null;
+  detection_model: string | null; clip_size: number | null; temporal_overlap: number | null; tier: string;
+  source_width: number | null; source_height: number | null; gpu: string | null; gpu_vram_mib: number | null;
+  preset: string; preset_label: string; preset_auto: boolean; argv: string;
+}
+// H2 R2/R2a: an INBOX package that is not a film yet. The backend sends codes; the UI owns the labels.
+export interface PackageRow {
+  package_id: string; name: string; state: string; reason: string | null; grouping_reasons: string[];
+  files: string[]; group: "active" | "attention"; steps: WorkflowStep[];
+}
+export interface WorkflowIntake { package_id: string; phase: string; bytes_completed: number; total: number }
+export interface WorkflowCurrent {
+  film_id: string; film: string; stage: string; progress: unknown; ltx?: Record<string, unknown>;
+}
+export interface WorkflowDispatch {
+  state: "idle" | "running" | "paused" | "stopping_unconfirmed"; reason: string; paused: boolean;
+}
+// `max_output`: the frame size the workflow restores on this card (phase 1: 1080p on every card), not the card's class.
+export interface WorkflowGpu { name: string; vram_mib: number; max_output: "4K" | "1080p" }
+// The rail badges and the overview stats; `waiting_for_you` = planning + confirm (「等待您的确认」).
+export interface WorkflowCounts {
+  planning: number; active: number; attention: number; confirm: number; archiving: number; done: number;
+  packages_attention: number; waiting_for_you: number;
+}
+export interface WorkflowFilms {
+  state: string; reason: string | null; current: WorkflowCurrent | null; intake: WorkflowIntake | null;
+  films: FilmRow[]; packages: PackageRow[]; counts: WorkflowCounts;
+  // null without a host (dispatch) or without a probed GPU
+  dispatch: WorkflowDispatch | null; gpu: WorkflowGpu | null;
+}
+export interface FilmDetail {
+  film_id: string; name: string; number: string | null; title: string | null; actors: string[];
+  marks: { restored: boolean; chinese_subtitles: boolean; uhd: boolean };
+  files: Array<{ role: string; path: string; size: number | null; volume: number | string | null }>;
+  inputs: Array<{ path: string; size: number | null }>;
+  workcopy_count: number; has_poster: boolean; poster_source: string | null;
+  has_cover: boolean; cover_source: string | null;
+  group: FilmGroup; can_confirm: boolean; can_retry: boolean; retry_stage: string | null; note: string | null;
+  stages: Array<{ stage: string; status: string; note: string | null }>; steps: WorkflowStep[];
+  archive: { status: string | null; error: string | null; target_path: string | null };
+  cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
+  resolution: Resolution | null; receipt_id: string | null; revisions: FilmRevisions; plan: FilmPlan | null;
+  timing?: FilmTiming | null;
+  // null when Miko is not configured
+  lookup: PlanLookup | null;
+}
+export interface Performer {
+  id: number | string; name: string; source_label: string | null; unc_path: string | null;
+  has_thumb: boolean; aliases: string[];
+}
+// U1 §7.3: the archive target preflight (read-only) and Filmpaw's candidates for the film's NFO
+// actors. Without a performer only `candidates` is filled; `target_path` already ends in `film_dir`.
+// `missing`: the chosen performer record is gone; `candidates` is null while Filmpaw is offline.
+export type TargetErrorCode = "offline" | "permission" | "missing" | "duplicate";
+export interface TargetPreflight {
+  film_dir: string; performer_id: string | null; target_path: string | null; absent: boolean | null;
+  error_code: TargetErrorCode | null; message: string | null;
+  candidates: { query: string[]; items: Performer[] } | null;
+}
+// U1 P3': one unplanned film on the 待处理 list, with the recommendation and its reasons
+// (backend `workflow/planning.py`). `lookup` is the Miko metadata preview (v2 L).
+export type LookupStatus = "succeeded" | "failed" | "running" | "queued";
+export interface PlanLookup {
+  status: LookupStatus; number: string | null; title: string | null; actors: string[];
+  studio: string | null; release: string | null; runtime_min: number | null; has_poster: boolean;
+  error_class: string | null; message: string | null; can_requery: boolean;
+}
+export interface PlanRecommendation { ltx_model: LtxTier | null; ltx_reason: string; machine: string; machine_reason: string }
+export interface PlanEntry {
+  film_id: string; input_revision: number; revision_changed: boolean; name: string;
+  title: string | null; number: string | null; actors: string[];
+  has_poster: boolean; poster_source: string | null; has_cover: boolean; cover_source: string | null;
+  resolution: Resolution | null;
+  width: number | null; height: number | null; duration_ms: number | null; size_bytes: number | null;
+  video_count: number; item_count: number; needs_gpu: boolean; created_at: string;
+  lookup: PlanLookup | null; recommendation: PlanRecommendation;
+}
+export interface PlanMachine { id: string; name: string; gpu: string | null; vram_mib: number | null; reason: string }
+export interface WorkflowPlans {
+  plans: PlanEntry[]; default_tier: LtxTier;
+  choices: { tiers: Array<{ value: LtxTier; label: string }>; machines: PlanMachine[] };
+}
+export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string }
+// `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
+export interface PlanResult { film_id: string; ok: boolean; error: string | null; message: string | null }
+const seg = (id: string | number) => encodeURIComponent(String(id));
+
 export type ControlRole = "agent" | "hub";
 declare global {
   interface Window {
@@ -279,13 +423,23 @@ function checkUnauthorized(role: ControlRole, res: Response) {
   if (res.status === 401) { clearControlCredentials(role); throw new ControlCredentialError(); }
 }
 
+// A non-2xx control response. Keeps the old message (detail text or "path → status")
+// and adds the status so callers can tell e.g. 503 "Filmpaw down" from other errors.
+// POST /control/workflow/plans takes 1–500 items (backend `PlansBody.plans` max_length).
+export const PLAN_BATCH_MAX = 500;
+
+export class HttpError extends Error {
+  // `code`: the backend's error code when the body names one (a 409's `cas_conflict` = a changed revision)
+  constructor(message: string, public readonly status: number, public readonly code?: string) { super(message); }
+}
+
 async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
   const { baseUrl, controlToken } = cfg(role);
   const res = await fetch(`${baseUrl}${path}`, {
     headers: { Authorization: `Bearer ${controlToken}` },
   });
   checkUnauthorized(role, res);
-  if (!res.ok) throw new Error(`${path} → ${res.status}`);
+  if (!res.ok) throw new HttpError(`${path} → ${res.status}`, res.status);
   return res.json() as Promise<T>;
 }
 
@@ -346,15 +500,34 @@ async function send<T>(
   }
   if (!res.ok) {
     let detail = `${path} → ${res.status}`;
+    let code: string | undefined;
     try {
-      const j = monitor ? payload as { detail?: unknown } : await res.json();
+      const j = monitor ? payload as { detail?: unknown; code?: unknown } : await res.json();
       if (j?.detail) detail = String(j.detail);
+      if (typeof j?.code === "string") code = j.code;
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(detail);
+    throw new HttpError(detail, res.status, code);
   }
+  if (res.status === 204) return undefined as T;
   return monitor ? payload as T : res.json() as Promise<T>;
+}
+
+// Authenticated image fetch → data: URL (T06 D01): control routes need the bearer
+// token and the packaged CSP only allows `img-src 'self' data:`.
+async function image(path: string): Promise<string> {
+  const { baseUrl, controlToken } = cfg("agent");
+  const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${controlToken}` } });
+  checkUnauthorized("agent", res);
+  if (!res.ok) throw new HttpError(`${path} → ${res.status}`, res.status);
+  const blob = await res.blob();
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("image read failed"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 const q = (name: string) => `?name=${encodeURIComponent(name)}`;
@@ -418,4 +591,38 @@ export const api = {
   hubRemoveServer: (id: number) => send<{ ok: boolean }>("hub", "DELETE", `/servers/${id}`),
   hubSetPollingToken: (polling_token: string) =>
     send<{ ok: boolean }>("hub", "PATCH", "/config", { polling_token }),
+  // Media workflow (T06-P1 §8): local control API only; paths are resolved by film id.
+  workflowFilms: () => get<WorkflowFilms>("agent", "/control/workflow/films"),
+  workflowFilm: (filmId: string) => get<FilmDetail>("agent", `/control/workflow/films/${seg(filmId)}`),
+  performers: (query: string) =>
+    get<{ items: Performer[] }>("agent", `/control/workflow/performers?${new URLSearchParams({ q: query })}`),
+  workflowConfirm: (filmId: string, performer_id: Performer["id"]) =>
+    send<{ approval_id: string }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/confirm`, { performer_id }),
+  workflowRetry: (filmId: string, stage: string) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/retry`, { stage }),
+  workflowOpen: (filmId: string, what: "inbox" | "output") =>
+    send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
+  // U1: the plan gate (待处理), the archive target preflight, metadata lookup and the global pause.
+  workflowPlans: () => get<WorkflowPlans>("agent", "/control/workflow/plans"),
+  // At most PLAN_BATCH_MAX items per request (the route's `PlansBody` max_length).
+  workflowConfirmPlans: (plans: PlanChoice[]) =>
+    send<{ results: PlanResult[] }>("agent", "POST", "/control/workflow/plans", { plans }),
+  workflowLookup: (filmId: string) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/lookup`),
+  workflowTarget: (filmId: string, performerId?: Performer["id"]) =>
+    get<TargetPreflight>("agent", `/control/workflow/films/${seg(filmId)}/target${
+      performerId === undefined ? "" : `?${new URLSearchParams({ performer_id: String(performerId) })}`}`),
+  workflowPause: (paused: boolean) =>
+    send<{ paused: boolean }>("agent", "POST", "/control/workflow/pause", { paused }),
+  // H3 M1: answer the model download offer of the workflow's own session.
+  workflowLtxDownload: (request_id: string, approved: boolean) =>
+    send<{ ok: boolean }>("agent", "POST", "/control/workflow/ltx-download", { request_id, approved }),
+  // H2 R2: open a current INBOX package folder (204 | 404 missing | 501 unsupported platform).
+  workflowOpenPackage: (packageId: string) =>
+    send<void>("agent", "POST", `/control/workflow/packages/${seg(packageId)}/open`),
+  posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
+  // U1b: the full landscape jacket (final fanart > thumb > input fanart > thumb > image attachment)
+  coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,
+  thumbPath: (performerId: Performer["id"]) => `/control/workflow/performers/${seg(performerId)}/thumb`,
+  image,
 };

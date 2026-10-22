@@ -13,6 +13,8 @@ import { Tile } from "./Tile";
 import { LtxProgress } from "./LtxProgress";
 import { readLtxProgress, withoutLtxPipelineNumbers } from "./ltxProgress.helpers";
 import { LtxDownload } from "./LtxDownload";
+import { MosaicScanProgress } from "./RestorePhaseProgress";
+import { readScanProgress } from "./restorePhase.helpers";
 
 // Live metrics dashboard for a monitor's status pane (design-system
 // pages/agent-console.md → StatusHeader: "live metric line … file N/M, fps, %").
@@ -66,6 +68,8 @@ const KNOWN = new Set([
   // #189 queue counters (an empty AV 翻译 tracker leaves them without `steps`)
   "queue_restored", "queue_pre_done", "steps", "films", "films_more",
   "ltx_stage", "ltx_progress", "ltx_download",
+  // U1c: the auto split's mosaic scan and how it split the film (shown by MosaicScanProgress)
+  "scan_progress", "split_note",
 ]);
 
 export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
@@ -110,6 +114,7 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
   const ownsLtx = Object.hasOwn(m, "ltx_progress") || ltx;
   const pipelineMetrics = ownsLtx ? withoutLtxPipelineNumbers(m) : m;
   const pipe = readPipeline(pipelineMetrics);
+  const scan = !ltx && readScanProgress(m) !== null;
 
   const gauges = [
     gpu !== undefined ? { label: "GPU", pct: gpu } : null,
@@ -136,10 +141,11 @@ export function MonitorMetrics({ metrics, taskName, filmSource, taskType }: {
     <Stack spacing={2} sx={{ mt: 2 }}>
       {pipe && <PipelineProgress pipeline={pipe} metrics={pipelineMetrics} taskName={taskName} filmSource={filmSource} taskType={taskType} />}
       {ltx && <LtxProgress metrics={m} />}
+      {scan && <MosaicScanProgress metrics={m} />}
       {filmSource?.kind === "hub" && <LtxDownload value={m.ltx_download} />}
 
       {/* Now-processing banner + current-file progress */}
-      {!pipe && !ownsLtx && currentFile && (
+      {!pipe && !ownsLtx && !scan && currentFile && (
         <Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "rgba(34,197,94,0.06)",
                    border: "1px solid", borderColor: "rgba(34,197,94,0.25)" }}>
           <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase",

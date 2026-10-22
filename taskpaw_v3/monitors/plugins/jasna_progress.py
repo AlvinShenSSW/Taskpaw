@@ -1,4 +1,9 @@
-"""Bounded snapshots of Jasna's LTX console bars, separate from film progress."""
+"""Bounded snapshots of Jasna's LTX console bars, separate from film progress.
+
+U1c: the LTX auto split first runs a whole-video ``Mosaic scan`` tqdm bar
+(jasna/mosaic_scan.py) and logs one ``LTX auto split ...`` line; both are
+pre-LTX phase facts (``scan_progress``, ``split_note``), never film progress.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +27,12 @@ _STRING_CONTROL = re.compile(r"(?:\x1b[PX^_]|[\x90\x98\x9e\x9f]).*?(?:\x1b\\|\x9
 _CSI = re.compile(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*(?:[@-~]|$)")
 _ESCAPE = re.compile(r"\x1b[@-_]")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_SCAN = re.compile(r"^Mosaic scan\s*[:：]\s*")
+_SCAN_RATE = re.compile(rf"^({_NUMBER})\s*(sample/s|s/sample)$")
+_SPLIT = re.compile(r"LTX auto split(:| skipped| found no mosaics)")
+_SPLIT_KIND = {":": "planned", " skipped": "skipped", " found no mosaics": "no_mosaics"}
+_SEGMENTS = re.compile(r"[\r\n]+")
+_CONSOLE_LIMIT = 300
 _ORDINARY = re.compile(r"^(?:Processing video|正在处理视频)\s*[:：]", re.IGNORECASE)
 _STAGE_KEYS = frozenset(
     (
@@ -35,6 +46,7 @@ _STAGE_KEYS = frozenset(
         "eta",
     )
 )
+_PHASE_KEYS = frozenset(("scan_progress",))  # an LTX/BasicVSR++ start ends the scan
 
 
 def _plain_text(line: str) -> str:
@@ -68,6 +80,12 @@ def _snapshot(text: str) -> dict | None:
         "stage_name": name,
         "raw_line": raw,
     }
+    _bar(body, _RATE, out)
+    return out
+
+
+def _bar(body: str, rate_re: re.Pattern[str], out: dict) -> None:
+    """The tqdm fields after a bar's description: percent, n/total, times, rate."""
     if pct := _PERCENT.match(body):
         if _finite(pct[1]) and 0 <= float(pct[1]) <= 100:
             out["percent"] = float(pct[1])
@@ -85,14 +103,35 @@ def _snapshot(text: str) -> dict | None:
                 if _TIME.fullmatch(value.strip()):
                     out[key] = value.strip()
         for field in fields[1:]:
-            if rate := _RATE.fullmatch(field):
+            if rate := rate_re.fullmatch(field):
                 if _finite(rate[1]):
                     out["rate_value"], out["rate_unit"] = rate[1], rate[2]
             elif field.startswith("run ") and field.endswith(" left"):
                 value = field[4:-5].strip()
                 if _TIME.fullmatch(value):
                     out["run_eta"] = value
+
+
+def _scan_snapshot(text: str) -> dict | None:
+    """The auto split's ``Mosaic scan`` bar: only its own bracketed record."""
+    header = _SCAN.match(text)
+    if header is None:
+        return None
+    close = text.find("]", header.end())
+    raw = (text[: close + 1] if close >= 0 else text)[:_RAW_LIMIT]
+    out: dict = {}
+    _bar(raw[header.end() :], _SCAN_RATE, out)
+    out.pop("run_eta", None)  # an LTX-only field
+    out["raw_line"] = raw
     return out
+
+
+def console_text(line: str) -> str:
+    """The latest non-empty plain segment of one console write, bounded."""
+    for part in reversed(_SEGMENTS.split(line)):
+        if text := _plain_text(part):
+            return text[:_CONSOLE_LIMIT]
+    return ""
 
 
 def parse_jasna_progress_line(line: str, prev: dict) -> dict:
@@ -101,12 +140,34 @@ def parse_jasna_progress_line(line: str, prev: dict) -> dict:
     Missing stage fields never inherit earlier values. Legacy fps admits only
     frame/s; legacy eta is this LTX run's estimate, never a whole-film estimate.
     Unrecognized output returns ``prev`` itself for the crash-tail collector.
+    A CR/LF-joined write is read segment by segment, so its latest bar wins.
     """
+    state = prev
+    for part in _SEGMENTS.split(line):
+        state = _parse_segment(part, state)
+    return state
+
+
+def _parse_segment(line: str, prev: dict) -> dict:
     text = _plain_text(line)
     if not text or text.startswith("Jasna: "):
         return prev
+    if (scan := _scan_snapshot(text)) is not None:
+        # a new film's scan: nothing of an earlier stage or split survives
+        drop = _STAGE_KEYS | _PHASE_KEYS | {"split_note"}
+        out = {key: value for key, value in prev.items() if key not in drop}
+        out["scan_progress"] = scan
+        return out
+    if split := _SPLIT.search(text):
+        out = {key: value for key, value in prev.items() if key not in _PHASE_KEYS}
+        out["split_note"] = {
+            "kind": _SPLIT_KIND[split[1]],
+            "text": text[:_CONSOLE_LIMIT],
+        }
+        return out
     if snapshot := _snapshot(text):
-        out = {key: value for key, value in prev.items() if key not in _STAGE_KEYS}
+        drop = _STAGE_KEYS | _PHASE_KEYS
+        out = {key: value for key, value in prev.items() if key not in drop}
         out["ltx_progress"] = snapshot
         out["ltx_stage"] = (
             f"{snapshot['stage_index']}/{snapshot['stage_total']} {snapshot['stage_name']}"
@@ -121,13 +182,15 @@ def parse_jasna_progress_line(line: str, prev: dict) -> dict:
         return out
     if text.startswith("LTX"):
         return prev  # plans/invalid headers are not ordinary percentage lines
-    if "ltx_stage" in prev or "ltx_progress" in prev:
+    if "ltx_stage" in prev or "ltx_progress" in prev or "scan_progress" in prev:
         # Accept the source-verified BasicVSR++ prefix or a filename header;
-        # an unrelated warning with a percentage cannot end the LTX snapshot.
+        # an unrelated warning with a percentage cannot end the LTX snapshot
+        # or the mosaic scan.
         probe = parse_progress_line(text, {})
         if not _ORDINARY.match(text) and set(probe) != {"current_file"}:
             return prev
-        clean = {key: value for key, value in prev.items() if key not in _STAGE_KEYS}
+        drop = _STAGE_KEYS | _PHASE_KEYS
+        clean = {key: value for key, value in prev.items() if key not in drop}
         out = parse_progress_line(text, clean)
         return out if out is not clean else prev
     return parse_progress_line(text, prev)

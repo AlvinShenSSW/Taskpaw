@@ -148,6 +148,7 @@ def run_agent(
         raise
 
     supervisor = None
+    workflow_host = None
     servers: list[uvicorn.Server] = []
     threads: list[threading.Thread] = []
     task_log = None
@@ -163,6 +164,8 @@ def run_agent(
         try:
             if runtime_started and task_log is not None:
                 task_log.record("", "agent.stopping", task_type="agent")
+            if workflow_host is not None:
+                workflow_host.stop()
             if supervisor is not None:
                 supervisor.stop()
         finally:
@@ -290,6 +293,8 @@ def run_agent(
                     films_provider=supervisor.film_page,
                     run_films_provider=supervisor.run_films,
                     prompt_responder=supervisor.respond_prompt,
+                    # late-bound: the host starts after announce_ready (T06-P1)
+                    workflow_provider=lambda: workflow_host,
                 ),
                 log_level="warning",
             )
@@ -355,6 +360,17 @@ def run_agent(
                 "boot_id": session.boot_id,
             }
         announce_ready("agent", session.base_url, **ready)
+        # After readiness and in its own thread: never delays or breaks the agent.
+        try:
+            from taskpaw_v3.workflow.local_host import start_local_workflow
+
+            workflow_host = start_local_workflow(
+                config.workflow,
+                config_path.parent if config_path is not None else None,
+                task_log=task_log,
+            )
+        except Exception:
+            log.exception("media workflow could not be started")
     except BaseException:
         shutdown.shutdown()
         raise

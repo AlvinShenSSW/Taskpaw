@@ -20,11 +20,11 @@ export type LtxSnapshot = {
 };
 
 type Metrics = Record<string, unknown>;
-const record = (v: unknown): v is Metrics => typeof v === "object" && v !== null && !Array.isArray(v);
+export const record = (v: unknown): v is Metrics => typeof v === "object" && v !== null && !Array.isArray(v);
 
 // Defense at the display/copy boundary too: an older or remote Agent must not
 // place terminal controls in the clipboard. React renders the result as text.
-function plainText(value: unknown, limit: number): string | undefined {
+export function plainText(value: unknown, limit: number): string | undefined {
   if (typeof value !== "string") return undefined;
   /* eslint-disable no-control-regex -- Terminal escape/control bytes are the data being removed. */
   const text = value.slice(0, 16384)
@@ -38,12 +38,12 @@ function plainText(value: unknown, limit: number): string | undefined {
   return text.trim() ? text : undefined;
 }
 
-function numericToken(value: unknown): string | undefined {
+export function numericToken(value: unknown): string | undefined {
   return typeof value === "string" && value.length <= 64 && NUMBER.test(value)
     && Number.isFinite(Number(value)) && Number(value) >= 0 ? value : undefined;
 }
 
-function clockToken(value: unknown): string | undefined {
+export function clockToken(value: unknown): string | undefined {
   return typeof value === "string" && value.length <= 32 && /^\d+:[0-5]\d(?::[0-5]\d)?$/.test(value)
     ? value : undefined;
 }

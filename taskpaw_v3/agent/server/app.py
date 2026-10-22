@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 if TYPE_CHECKING:
     from taskpaw_v3.agent.server.admin import MonitorAdmin
+    from taskpaw_v3.workflow.local_host import WorkflowHostLike
 
 
 from taskpaw_v3 import __version__
@@ -216,11 +217,16 @@ def create_control_app(
     control_token: str,
     control_active: Callable[[], bool],
     prompt_responder: Optional[Callable[[str, str, bool], bool]] = None,
+    workflow_provider: Optional[Callable[[], Optional["WorkflowHostLike"]]] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
-    for the desktop UI origins here (NOT on the network API)."""
+    for the desktop UI origins here (NOT on the network API).
+
+    `workflow_provider` returns the media workflow host once it exists (T06-P1):
+    the 媒体入库 routes live here and never on the network app."""
     from fastapi import HTTPException
 
+    from taskpaw_v3.agent.server.workflow_routes import register_workflow_routes
     from taskpaw_v3.core.control import add_control_guard
 
     app = FastAPI(title="TaskPaw Agent Control", docs_url=None, redoc_url=None)
@@ -264,6 +270,7 @@ def create_control_app(
         return result
 
     _register_film_routes(app, "/control/monitors", films_provider, run_films_provider)
+    register_workflow_routes(app, config.workflow, workflow_provider)
 
     @app.get("/control/status")
     def control_status() -> dict:

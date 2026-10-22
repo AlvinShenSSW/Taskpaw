@@ -15,6 +15,7 @@ import { TaskLog, TaskLogRows } from "../components/TaskLog";
 import { MonitorSelector } from "../components/MonitorSelector";
 import { MonitorWizard } from "./MonitorWizard";
 import { Settings } from "./Settings";
+import { MediaWorkspace } from "../components/media/MediaWorkspace";
 
 // HH:MM:SS in 24h, from a react-query dataUpdatedAt epoch (ms). Empty until the
 // first successful fetch. en-GB is a stable 24h format (the digits are mono via
@@ -45,7 +46,7 @@ export function AgentConsole() {
   const [selected, setSelected] = useState<string | null>(null);
   const [dialog, setDialog] = useState<null | { mode: "add" } | { mode: "edit"; name: string }>(null);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"monitors" | "logs" | "settings">("monitors");
+  const [tab, setTab] = useState<"monitors" | "media" | "logs" | "settings">("monitors");
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["agentStatus"] });
@@ -67,6 +68,7 @@ export function AgentConsole() {
     <Stack spacing={1.5}>
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ minHeight: 0 }}>
         <Tab value="monitors" label={t("agent.monitors")} />
+        <Tab value="media" label={t("media.tab")} />
         <Tab value="logs" label={t("logs.title")} />
         <Tab value="settings" label={t("settings.title")} />
       </Tabs>
@@ -77,6 +79,8 @@ export function AgentConsole() {
 
       {tab === "settings" ? (
         <Settings role="agent" />
+      ) : tab === "media" ? (
+        <MediaWorkspace />
       ) : tab === "logs" ? (
         <TaskLog tasks={names} />
       ) : status.isLoading ? (

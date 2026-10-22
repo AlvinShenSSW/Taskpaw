@@ -20,6 +20,39 @@ def _valid_port(p: int) -> int:
     return p
 
 
+class WorkflowSettings(BaseModel):
+    """Media workflow on this controller (T03-P1 C7): off unless explicitly enabled."""
+
+    enabled: bool = False
+    inbox_root: Optional[str] = None
+    data_dir: Optional[str] = None
+    ffprobe_path: Optional[str] = None
+    # T04-P1: the tools the local executors run; a missing path disables its stage.
+    jasna_exe_path: Optional[str] = None
+    whisperjav_exe_path: Optional[str] = None
+    # jasna_presets GPU id for the LTX preset; "auto" picks it from the local GPU (U1d)
+    ltx_gpu: str = "auto"
+    # M01-P1: Miko (MDCX304) for full post-processing; all three or scrape is off.
+    mdcx_python: Optional[str] = None  # python.exe of MDCX304's environment
+    mdcx_root: Optional[str] = None  # the MDCX304 checkout
+    mdcx_profile: Optional[str] = None  # the user's Miko config.json
+    # F02-P1: where Filmpaw keeps its library (workflow-endpoint.json); default %APPDATA%\Filmpaw.
+    filmpaw_data_dir: Optional[str] = None
+
+    @field_validator("ltx_gpu", mode="before")
+    @classmethod
+    def _ltx_gpu_auto(cls, value: Any) -> Any:
+        """None, empty and the old default "5060-8" mean "auto": `save_yaml` wrote
+        that default out explicitly, which would keep the auto pick (U1d) inert.
+        Auto resolves to 5060-8 on an 8 GB card, so nothing changes there; any
+        other preset id stays explicit."""
+        if value is None or (
+            isinstance(value, str) and value.strip() in ("", "5060-8")
+        ):
+            return "auto"
+        return value
+
+
 class AgentConfig(BaseModel):
     """A V3 agent's local config (`agent.yaml`)."""
 
@@ -44,6 +77,7 @@ class AgentConfig(BaseModel):
     api_token: str = ""
     # Monitor instances. Opaque dicts here; #17 defines the plugin schema.
     monitors: list[dict[str, Any]] = Field(default_factory=list)
+    workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
     # Auto-run a host_metrics self-monitor on this agent (§5b: every agent).
     host_metrics: bool = True
     # Global LLM API (#178): one OpenAI-compatible endpoint for the whole agent

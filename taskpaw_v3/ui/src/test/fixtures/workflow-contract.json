@@ -1,0 +1,2199 @@
+{
+  "films": {
+    "state": "running",
+    "reason": "",
+    "current": {
+      "film_id": "film-restoring",
+      "film": "movie",
+      "stage": "restore",
+      "progress": "修复 · 阶段 2/4 encode · 52% · 剩余 12:12",
+      "started_at": "2026-10-21T08:00:00Z",
+      "ltx": {
+        "ltx_progress": {
+          "mode": "restore",
+          "stage_index": 2,
+          "stage_total": 4,
+          "stage_name": "encode",
+          "raw_line": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]",
+          "percent": 52.0,
+          "percent_text": "52",
+          "current": "156",
+          "total": "300",
+          "elapsed": "00:27",
+          "eta": "00:25",
+          "rate_value": "5.62",
+          "rate_unit": "frame/s",
+          "run_eta": "12:12"
+        },
+        "ltx_stage": "2/4 encode",
+        "percent": 52,
+        "fps": 5.62,
+        "eta": "12:12",
+        "current_file": "movie.mkv",
+        "console": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]",
+        "params": {
+          "ltx_model": "standard",
+          "model_name": "ltx",
+          "fast": true,
+          "precision": "nvfp4",
+          "auto_split": 12,
+          "large_canvas": false,
+          "overlap": "auto",
+          "codec": "hevc",
+          "source_codec": null,
+          "cq": 20,
+          "match_source_bitrate": true,
+          "maxrate_bps": 12200000,
+          "source_bitrate_bps": 12200000,
+          "detection_model": "rfdetr-v6",
+          "clip_size": 180,
+          "temporal_overlap": 8,
+          "tier": "1080p",
+          "source_width": null,
+          "source_height": null,
+          "gpu": "NVIDIA GeForce RTX 5070 Ti",
+          "gpu_vram_mib": 16303,
+          "preset": "5070ti-16",
+          "preset_label": "RTX 5070 Ti · 16 GB",
+          "preset_auto": true,
+          "argv": "jasna.exe --input movie.mkv --output movie-破解.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
+        },
+        "timing": {
+          "scan": 312.4,
+          "basicvsr": 0.0,
+          "ltx": 683.9,
+          "speed_test": 48.2,
+          "ltx_stages": {
+            "scan": 95.3,
+            "encode": 588.6
+          },
+          "ltx_runs": 1,
+          "wall": 1102.7
+        }
+      }
+    },
+    "intake": {
+      "package_id": "package-arriving",
+      "phase": "copy",
+      "bytes_completed": 1073741824,
+      "total": 4294967296
+    },
+    "films": [
+      {
+        "film_id": "film-review",
+        "name": "ABC-123",
+        "number": null,
+        "title": "假的标题",
+        "actors": [
+          "Actor"
+        ],
+        "has_poster": true,
+        "poster_source": "final-c8947a4320f5def8",
+        "has_cover": true,
+        "cover_source": "final-ca1d8ffbc86c1e4d",
+        "resolution": "1080p",
+        "plan": {
+          "ltx_model": "standard",
+          "machine": "worker-local"
+        },
+        "receipt_id": null,
+        "revisions": {
+          "input": {
+            "revision": 1,
+            "hash": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          "final": {
+            "revision": 1,
+            "hash": "0000000000000000000000000000000000000000000000000000000000000002"
+          }
+        },
+        "group": "confirm",
+        "stage": "archive",
+        "status": "pending",
+        "note": "等待确认入库",
+        "can_confirm": true,
+        "can_retry": false,
+        "retry_stage": null,
+        "created_at": "2026-10-21T08:00:00Z",
+        "steps": [
+          {
+            "key": "intake",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "plan",
+            "state": "done",
+            "note": "标准",
+            "progress": null
+          },
+          {
+            "key": "restore",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "asr",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "translate",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "return",
+            "state": "done",
+            "note": "回传完成",
+            "progress": null
+          },
+          {
+            "key": "scrape",
+            "state": "done",
+            "note": "刮削完成",
+            "progress": null
+          },
+          {
+            "key": "confirm",
+            "state": "waiting",
+            "note": "等你确认入库",
+            "progress": null
+          },
+          {
+            "key": "archive",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "cleanup",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "done",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          }
+        ],
+        "timing": {
+          "stages": {
+            "restore": 5420.0,
+            "asr": 610.0,
+            "translate": 1230.0,
+            "return": 45.0,
+            "scrape": 95.0
+          },
+          "restore_breakdown": {
+            "scan": 312.4,
+            "basicvsr": 1105.0,
+            "ltx": 2902.4,
+            "speed_test": 48.2,
+            "ltx_stages": {
+              "compose": 651.0,
+              "denoise": 1544.1,
+              "encode": 612.0,
+              "scan": 95.3
+            },
+            "ltx_runs": 2,
+            "wall": 4401.0
+          },
+          "total_restore_to_translate": 7380.0,
+          "queue_wait": 1800.0
+        }
+      },
+      {
+        "film_id": "film-failed",
+        "name": "movie",
+        "number": null,
+        "title": null,
+        "actors": [],
+        "has_poster": false,
+        "poster_source": null,
+        "has_cover": false,
+        "cover_source": null,
+        "resolution": "1080p",
+        "plan": {
+          "ltx_model": "standard",
+          "machine": "worker-local"
+        },
+        "receipt_id": null,
+        "revisions": {
+          "input": {
+            "revision": 1,
+            "hash": "0000000000000000000000000000000000000000000000000000000000000003"
+          },
+          "final": null
+        },
+        "group": "attention",
+        "stage": "translate",
+        "status": "failed",
+        "note": "LLM 超时：翻译服务 120 秒没有响应",
+        "can_confirm": false,
+        "can_retry": true,
+        "retry_stage": "translate",
+        "created_at": "2026-10-21T08:00:00Z",
+        "steps": [
+          {
+            "key": "intake",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "plan",
+            "state": "done",
+            "note": "标准",
+            "progress": null
+          },
+          {
+            "key": "restore",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "asr",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "translate",
+            "state": "failed",
+            "note": "LLM 超时：翻译服务 120 秒没有响应",
+            "progress": null
+          },
+          {
+            "key": "return",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "scrape",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "confirm",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "archive",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "cleanup",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "done",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          }
+        ],
+        "timing": {
+          "stages": {
+            "restore": 5420.0,
+            "asr": 610.0
+          },
+          "restore_breakdown": {
+            "scan": 312.4,
+            "basicvsr": 1105.0,
+            "ltx": 2902.4,
+            "speed_test": 48.2,
+            "ltx_stages": {
+              "compose": 651.0,
+              "denoise": 1544.1,
+              "encode": 612.0,
+              "scan": 95.3
+            },
+            "ltx_runs": 2,
+            "wall": 4401.0
+          },
+          "total_restore_to_translate": null,
+          "queue_wait": 1800.0
+        }
+      },
+      {
+        "film_id": "film-restoring",
+        "name": "movie",
+        "number": null,
+        "title": null,
+        "actors": [],
+        "has_poster": false,
+        "poster_source": null,
+        "has_cover": false,
+        "cover_source": null,
+        "resolution": "1080p",
+        "plan": {
+          "ltx_model": "standard",
+          "machine": "worker-local"
+        },
+        "receipt_id": null,
+        "revisions": {
+          "input": {
+            "revision": 1,
+            "hash": "0000000000000000000000000000000000000000000000000000000000000004"
+          },
+          "final": null
+        },
+        "group": "active",
+        "stage": "restore",
+        "status": "running",
+        "note": null,
+        "can_confirm": false,
+        "can_retry": false,
+        "retry_stage": null,
+        "created_at": "2026-10-21T08:00:00Z",
+        "steps": [
+          {
+            "key": "intake",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "plan",
+            "state": "done",
+            "note": "标准",
+            "progress": null
+          },
+          {
+            "key": "restore",
+            "state": "running",
+            "note": null,
+            "progress": "修复 · 阶段 2/4 encode · 52% · 剩余 12:12",
+            "ltx": {
+              "ltx_progress": {
+                "mode": "restore",
+                "stage_index": 2,
+                "stage_total": 4,
+                "stage_name": "encode",
+                "raw_line": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]",
+                "percent": 52.0,
+                "percent_text": "52",
+                "current": "156",
+                "total": "300",
+                "elapsed": "00:27",
+                "eta": "00:25",
+                "rate_value": "5.62",
+                "rate_unit": "frame/s",
+                "run_eta": "12:12"
+              },
+              "ltx_stage": "2/4 encode",
+              "percent": 52,
+              "fps": 5.62,
+              "eta": "12:12",
+              "current_file": "movie.mkv"
+            },
+            "current_file": "movie.mkv",
+            "started_at": "2026-10-21T08:00:00Z",
+            "console": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]",
+            "params": {
+              "ltx_model": "standard",
+              "model_name": "ltx",
+              "fast": true,
+              "precision": "nvfp4",
+              "auto_split": 12,
+              "large_canvas": false,
+              "overlap": "auto",
+              "codec": "hevc",
+              "source_codec": null,
+              "cq": 20,
+              "match_source_bitrate": true,
+              "maxrate_bps": 12200000,
+              "source_bitrate_bps": 12200000,
+              "detection_model": "rfdetr-v6",
+              "clip_size": 180,
+              "temporal_overlap": 8,
+              "tier": "1080p",
+              "source_width": null,
+              "source_height": null,
+              "gpu": "NVIDIA GeForce RTX 5070 Ti",
+              "gpu_vram_mib": 16303,
+              "preset": "5070ti-16",
+              "preset_label": "RTX 5070 Ti · 16 GB",
+              "preset_auto": true,
+              "argv": "jasna.exe --input movie.mkv --output movie-破解.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
+            },
+            "timing": {
+              "scan": 312.4,
+              "basicvsr": 0.0,
+              "ltx": 683.9,
+              "speed_test": 48.2,
+              "ltx_stages": {
+                "scan": 95.3,
+                "encode": 588.6
+              },
+              "ltx_runs": 1,
+              "wall": 1102.7
+            }
+          },
+          {
+            "key": "asr",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "translate",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "return",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "scrape",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "confirm",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "archive",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "cleanup",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "done",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          }
+        ],
+        "timing": {
+          "stages": {},
+          "restore_breakdown": null,
+          "total_restore_to_translate": null,
+          "queue_wait": 1800.0
+        }
+      },
+      {
+        "film_id": "film-planning",
+        "name": "MOVIE",
+        "number": "MOVIE",
+        "title": "MOVIE 的标题",
+        "actors": [
+          "演员甲",
+          "演员乙"
+        ],
+        "has_poster": true,
+        "poster_source": "lookup-9720cd56d26874a7",
+        "has_cover": false,
+        "cover_source": null,
+        "resolution": "1080p",
+        "plan": null,
+        "receipt_id": null,
+        "revisions": {
+          "input": {
+            "revision": 1,
+            "hash": "0000000000000000000000000000000000000000000000000000000000000005"
+          },
+          "final": null
+        },
+        "group": "planning",
+        "stage": "restore",
+        "status": "pending",
+        "note": null,
+        "can_confirm": false,
+        "can_retry": false,
+        "retry_stage": null,
+        "created_at": "2026-10-21T08:00:00Z",
+        "steps": [
+          {
+            "key": "intake",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "plan",
+            "state": "waiting",
+            "note": "待安排",
+            "progress": null
+          },
+          {
+            "key": "restore",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "asr",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "translate",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "return",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "scrape",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "confirm",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "archive",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "cleanup",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "done",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          }
+        ],
+        "timing": {
+          "stages": {},
+          "restore_breakdown": null,
+          "total_restore_to_translate": null,
+          "queue_wait": null
+        }
+      },
+      {
+        "film_id": "film-planning-unknown",
+        "name": "movie",
+        "number": null,
+        "title": null,
+        "actors": [],
+        "has_poster": false,
+        "poster_source": null,
+        "has_cover": false,
+        "cover_source": null,
+        "resolution": "1080p",
+        "plan": null,
+        "receipt_id": null,
+        "revisions": {
+          "input": {
+            "revision": 1,
+            "hash": "0000000000000000000000000000000000000000000000000000000000000006"
+          },
+          "final": null
+        },
+        "group": "planning",
+        "stage": "restore",
+        "status": "pending",
+        "note": null,
+        "can_confirm": false,
+        "can_retry": false,
+        "retry_stage": null,
+        "created_at": "2026-10-21T08:00:00Z",
+        "steps": [
+          {
+            "key": "intake",
+            "state": "done",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "plan",
+            "state": "waiting",
+            "note": "待安排",
+            "progress": null
+          },
+          {
+            "key": "restore",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "asr",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "translate",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "return",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "scrape",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "confirm",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "archive",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "cleanup",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "done",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          }
+        ],
+        "timing": {
+          "stages": {},
+          "restore_breakdown": null,
+          "total_restore_to_translate": null,
+          "queue_wait": null
+        }
+      }
+    ],
+    "packages": [
+      {
+        "package_id": "package-stuck",
+        "name": "Downloads/ABF-393",
+        "state": "needs_attention",
+        "reason": "ambiguous_grouping",
+        "grouping_reasons": [
+          "unknown_attachment"
+        ],
+        "files": [
+          "setup.exe"
+        ],
+        "group": "attention",
+        "steps": [
+          {
+            "key": "intake",
+            "state": "failed",
+            "note": "ambiguous_grouping",
+            "progress": null
+          },
+          {
+            "key": "plan",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "restore",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "asr",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "translate",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "return",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "scrape",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "confirm",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "archive",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "cleanup",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "done",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          }
+        ]
+      },
+      {
+        "package_id": "package-arriving",
+        "name": "Performer/MOV-002",
+        "state": "waiting_stability",
+        "reason": "observed",
+        "grouping_reasons": [],
+        "files": [],
+        "group": "active",
+        "steps": [
+          {
+            "key": "intake",
+            "state": "running",
+            "note": "observed",
+            "progress": {
+              "package_id": "package-arriving",
+              "phase": "copy",
+              "bytes_completed": 1073741824,
+              "total": 4294967296
+            }
+          },
+          {
+            "key": "plan",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "restore",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "asr",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "translate",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "return",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "scrape",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "confirm",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "archive",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "cleanup",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          },
+          {
+            "key": "done",
+            "state": "pending",
+            "note": null,
+            "progress": null
+          }
+        ]
+      }
+    ],
+    "counts": {
+      "planning": 2,
+      "active": 1,
+      "attention": 1,
+      "confirm": 1,
+      "archiving": 0,
+      "done": 0,
+      "packages_attention": 1,
+      "waiting_for_you": 3
+    },
+    "dispatch": {
+      "state": "running",
+      "reason": "idle",
+      "paused": false
+    },
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 5060",
+      "vram_mib": 8151,
+      "max_output": "1080p"
+    }
+  },
+  "film": {
+    "film-review": {
+      "film_id": "film-review",
+      "name": "ABC-123",
+      "number": "ABC-123",
+      "title": "假的标题",
+      "actors": [
+        "Actor"
+      ],
+      "resolution": "1080p",
+      "plan": {
+        "ltx_model": "standard",
+        "machine": "worker-local"
+      },
+      "receipt_id": null,
+      "revisions": {
+        "input": {
+          "revision": 1,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000001"
+        },
+        "final": {
+          "revision": 1,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000002"
+        }
+      },
+      "lookup": {
+        "status": "queued",
+        "number": null,
+        "title": null,
+        "actors": [],
+        "studio": null,
+        "release": null,
+        "runtime_min": null,
+        "has_poster": false,
+        "error_class": null,
+        "message": null,
+        "can_requery": false
+      },
+      "marks": {
+        "restored": true,
+        "chinese_subtitles": true,
+        "uhd": false
+      },
+      "files": [
+        {
+          "role": "main_video",
+          "path": "ABC-123.mkv",
+          "size": 50,
+          "volume": null
+        },
+        {
+          "role": "generated_subtitle",
+          "path": "ABC-123.chs.srt",
+          "size": 52,
+          "volume": null
+        },
+        {
+          "role": "nfo",
+          "path": "ABC-123.nfo",
+          "size": 111,
+          "volume": null
+        },
+        {
+          "role": "poster",
+          "path": "poster.jpg",
+          "size": 16,
+          "volume": null
+        },
+        {
+          "role": "thumb",
+          "path": "thumb.jpg",
+          "size": 15,
+          "volume": null
+        },
+        {
+          "role": "fanart",
+          "path": "fanart.jpg",
+          "size": 37,
+          "volume": null
+        },
+        {
+          "role": "source_subtitle",
+          "path": "ABC-123.ja.srt",
+          "size": 67,
+          "volume": null
+        }
+      ],
+      "inputs": [
+        {
+          "path": "movie.mkv",
+          "size": 50
+        },
+        {
+          "path": "movie.ja.srt",
+          "size": 67
+        }
+      ],
+      "workcopy_count": 7,
+      "has_poster": true,
+      "poster_source": "final-c8947a4320f5def8",
+      "has_cover": true,
+      "cover_source": "final-ca1d8ffbc86c1e4d",
+      "group": "confirm",
+      "can_confirm": true,
+      "can_retry": false,
+      "retry_stage": null,
+      "note": "等待确认入库",
+      "stages": [
+        {
+          "stage": "intake",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "restore",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "asr",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "translate",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "return",
+          "status": "succeeded",
+          "note": "回传完成"
+        },
+        {
+          "stage": "scrape",
+          "status": "succeeded",
+          "note": "刮削完成"
+        },
+        {
+          "stage": "archive",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_input",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_workcopy",
+          "status": "pending",
+          "note": null
+        }
+      ],
+      "steps": [
+        {
+          "key": "intake",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "plan",
+          "state": "done",
+          "note": "标准",
+          "progress": null
+        },
+        {
+          "key": "restore",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "asr",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "translate",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "return",
+          "state": "done",
+          "note": "回传完成",
+          "progress": null
+        },
+        {
+          "key": "scrape",
+          "state": "done",
+          "note": "刮削完成",
+          "progress": null
+        },
+        {
+          "key": "confirm",
+          "state": "waiting",
+          "note": "等你确认入库",
+          "progress": null
+        },
+        {
+          "key": "archive",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "cleanup",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "done",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        }
+      ],
+      "timing": {
+        "stages": {
+          "restore": 5420.0,
+          "asr": 610.0,
+          "translate": 1230.0,
+          "return": 45.0,
+          "scrape": 95.0
+        },
+        "restore_breakdown": {
+          "scan": 312.4,
+          "basicvsr": 1105.0,
+          "ltx": 2902.4,
+          "speed_test": 48.2,
+          "ltx_stages": {
+            "compose": 651.0,
+            "denoise": 1544.1,
+            "encode": 612.0,
+            "scan": 95.3
+          },
+          "ltx_runs": 2,
+          "wall": 4401.0
+        },
+        "total_restore_to_translate": 7380.0,
+        "queue_wait": 1800.0
+      },
+      "archive": {
+        "status": "pending",
+        "error": null,
+        "target_path": null
+      },
+      "cleanup": {
+        "input": "pending",
+        "workcopy": "pending",
+        "kept": []
+      }
+    },
+    "film-failed": {
+      "film_id": "film-failed",
+      "name": "movie",
+      "number": null,
+      "title": null,
+      "actors": [],
+      "resolution": "1080p",
+      "plan": {
+        "ltx_model": "standard",
+        "machine": "worker-local"
+      },
+      "receipt_id": null,
+      "revisions": {
+        "input": {
+          "revision": 1,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000003"
+        },
+        "final": null
+      },
+      "lookup": {
+        "status": "queued",
+        "number": null,
+        "title": null,
+        "actors": [],
+        "studio": null,
+        "release": null,
+        "runtime_min": null,
+        "has_poster": false,
+        "error_class": null,
+        "message": null,
+        "can_requery": false
+      },
+      "marks": {
+        "restored": false,
+        "chinese_subtitles": false,
+        "uhd": false
+      },
+      "files": [],
+      "inputs": [
+        {
+          "path": "movie.mkv",
+          "size": 50
+        },
+        {
+          "path": "movie.ja.srt",
+          "size": 67
+        }
+      ],
+      "workcopy_count": 0,
+      "has_poster": false,
+      "poster_source": null,
+      "has_cover": false,
+      "cover_source": null,
+      "group": "attention",
+      "can_confirm": false,
+      "can_retry": true,
+      "retry_stage": "translate",
+      "note": "LLM 超时：翻译服务 120 秒没有响应",
+      "stages": [
+        {
+          "stage": "intake",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "restore",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "asr",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "translate",
+          "status": "failed",
+          "note": "LLM 超时：翻译服务 120 秒没有响应"
+        },
+        {
+          "stage": "return",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "scrape",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "archive",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_input",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_workcopy",
+          "status": "pending",
+          "note": null
+        }
+      ],
+      "steps": [
+        {
+          "key": "intake",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "plan",
+          "state": "done",
+          "note": "标准",
+          "progress": null
+        },
+        {
+          "key": "restore",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "asr",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "translate",
+          "state": "failed",
+          "note": "LLM 超时：翻译服务 120 秒没有响应",
+          "progress": null
+        },
+        {
+          "key": "return",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "scrape",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "confirm",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "archive",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "cleanup",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "done",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        }
+      ],
+      "timing": {
+        "stages": {
+          "restore": 5420.0,
+          "asr": 610.0
+        },
+        "restore_breakdown": {
+          "scan": 312.4,
+          "basicvsr": 1105.0,
+          "ltx": 2902.4,
+          "speed_test": 48.2,
+          "ltx_stages": {
+            "compose": 651.0,
+            "denoise": 1544.1,
+            "encode": 612.0,
+            "scan": 95.3
+          },
+          "ltx_runs": 2,
+          "wall": 4401.0
+        },
+        "total_restore_to_translate": null,
+        "queue_wait": 1800.0
+      },
+      "archive": {
+        "status": "pending",
+        "error": null,
+        "target_path": null
+      },
+      "cleanup": {
+        "input": "pending",
+        "workcopy": "pending",
+        "kept": []
+      }
+    },
+    "film-restoring": {
+      "film_id": "film-restoring",
+      "name": "movie",
+      "number": null,
+      "title": null,
+      "actors": [],
+      "resolution": "1080p",
+      "plan": {
+        "ltx_model": "standard",
+        "machine": "worker-local"
+      },
+      "receipt_id": null,
+      "revisions": {
+        "input": {
+          "revision": 1,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000004"
+        },
+        "final": null
+      },
+      "lookup": {
+        "status": "queued",
+        "number": null,
+        "title": null,
+        "actors": [],
+        "studio": null,
+        "release": null,
+        "runtime_min": null,
+        "has_poster": false,
+        "error_class": null,
+        "message": null,
+        "can_requery": false
+      },
+      "marks": {
+        "restored": false,
+        "chinese_subtitles": false,
+        "uhd": false
+      },
+      "files": [],
+      "inputs": [
+        {
+          "path": "movie.mkv",
+          "size": 50
+        },
+        {
+          "path": "movie.ja.srt",
+          "size": 67
+        }
+      ],
+      "workcopy_count": 0,
+      "has_poster": false,
+      "poster_source": null,
+      "has_cover": false,
+      "cover_source": null,
+      "group": "active",
+      "can_confirm": false,
+      "can_retry": false,
+      "retry_stage": null,
+      "note": null,
+      "stages": [
+        {
+          "stage": "intake",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "restore",
+          "status": "running",
+          "note": null
+        },
+        {
+          "stage": "asr",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "translate",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "return",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "scrape",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "archive",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_input",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_workcopy",
+          "status": "pending",
+          "note": null
+        }
+      ],
+      "steps": [
+        {
+          "key": "intake",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "plan",
+          "state": "done",
+          "note": "标准",
+          "progress": null
+        },
+        {
+          "key": "restore",
+          "state": "running",
+          "note": null,
+          "progress": "修复 · 阶段 2/4 encode · 52% · 剩余 12:12",
+          "ltx": {
+            "ltx_progress": {
+              "mode": "restore",
+              "stage_index": 2,
+              "stage_total": 4,
+              "stage_name": "encode",
+              "raw_line": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]",
+              "percent": 52.0,
+              "percent_text": "52",
+              "current": "156",
+              "total": "300",
+              "elapsed": "00:27",
+              "eta": "00:25",
+              "rate_value": "5.62",
+              "rate_unit": "frame/s",
+              "run_eta": "12:12"
+            },
+            "ltx_stage": "2/4 encode",
+            "percent": 52,
+            "fps": 5.62,
+            "eta": "12:12",
+            "current_file": "movie.mkv"
+          },
+          "current_file": "movie.mkv",
+          "started_at": "2026-10-21T08:00:00Z",
+          "console": "LTX 2/4 encode:  52%|█████▏    | 156/300 [00:27<00:25,  5.62frame/s, run 12:12 left]",
+          "params": {
+            "ltx_model": "standard",
+            "model_name": "ltx",
+            "fast": true,
+            "precision": "nvfp4",
+            "auto_split": 12,
+            "large_canvas": false,
+            "overlap": "auto",
+            "codec": "hevc",
+            "source_codec": null,
+            "cq": 20,
+            "match_source_bitrate": true,
+            "maxrate_bps": 12200000,
+            "source_bitrate_bps": 12200000,
+            "detection_model": "rfdetr-v6",
+            "clip_size": 180,
+            "temporal_overlap": 8,
+            "tier": "1080p",
+            "source_width": null,
+            "source_height": null,
+            "gpu": "NVIDIA GeForce RTX 5070 Ti",
+            "gpu_vram_mib": 16303,
+            "preset": "5070ti-16",
+            "preset_label": "RTX 5070 Ti · 16 GB",
+            "preset_auto": true,
+            "argv": "jasna.exe --input movie.mkv --output movie-破解.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
+          },
+          "timing": {
+            "scan": 312.4,
+            "basicvsr": 0.0,
+            "ltx": 683.9,
+            "speed_test": 48.2,
+            "ltx_stages": {
+              "scan": 95.3,
+              "encode": 588.6
+            },
+            "ltx_runs": 1,
+            "wall": 1102.7
+          }
+        },
+        {
+          "key": "asr",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "translate",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "return",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "scrape",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "confirm",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "archive",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "cleanup",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "done",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        }
+      ],
+      "timing": {
+        "stages": {},
+        "restore_breakdown": null,
+        "total_restore_to_translate": null,
+        "queue_wait": 1800.0
+      },
+      "archive": {
+        "status": "pending",
+        "error": null,
+        "target_path": null
+      },
+      "cleanup": {
+        "input": "pending",
+        "workcopy": "pending",
+        "kept": []
+      }
+    },
+    "film-planning": {
+      "film_id": "film-planning",
+      "name": "MOVIE",
+      "number": "MOVIE",
+      "title": "MOVIE 的标题",
+      "actors": [
+        "演员甲",
+        "演员乙"
+      ],
+      "resolution": "1080p",
+      "plan": null,
+      "receipt_id": null,
+      "revisions": {
+        "input": {
+          "revision": 1,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000005"
+        },
+        "final": null
+      },
+      "lookup": {
+        "status": "succeeded",
+        "number": "MOVIE",
+        "title": "MOVIE 的标题",
+        "actors": [
+          "演员甲",
+          "演员乙"
+        ],
+        "studio": "Studio",
+        "release": "2026-01-02",
+        "runtime_min": 120,
+        "has_poster": true,
+        "error_class": null,
+        "message": null,
+        "can_requery": true
+      },
+      "marks": {
+        "restored": false,
+        "chinese_subtitles": false,
+        "uhd": false
+      },
+      "files": [],
+      "inputs": [
+        {
+          "path": "movie.mkv",
+          "size": 50
+        },
+        {
+          "path": "movie.ja.srt",
+          "size": 67
+        }
+      ],
+      "workcopy_count": 0,
+      "has_poster": true,
+      "poster_source": "lookup-9720cd56d26874a7",
+      "has_cover": false,
+      "cover_source": null,
+      "group": "planning",
+      "can_confirm": false,
+      "can_retry": false,
+      "retry_stage": null,
+      "note": null,
+      "stages": [
+        {
+          "stage": "intake",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "restore",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "asr",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "translate",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "return",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "scrape",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "archive",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_input",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_workcopy",
+          "status": "pending",
+          "note": null
+        }
+      ],
+      "steps": [
+        {
+          "key": "intake",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "plan",
+          "state": "waiting",
+          "note": "待安排",
+          "progress": null
+        },
+        {
+          "key": "restore",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "asr",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "translate",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "return",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "scrape",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "confirm",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "archive",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "cleanup",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "done",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        }
+      ],
+      "timing": {
+        "stages": {},
+        "restore_breakdown": null,
+        "total_restore_to_translate": null,
+        "queue_wait": null
+      },
+      "archive": {
+        "status": "pending",
+        "error": null,
+        "target_path": null
+      },
+      "cleanup": {
+        "input": "pending",
+        "workcopy": "pending",
+        "kept": []
+      }
+    },
+    "film-planning-unknown": {
+      "film_id": "film-planning-unknown",
+      "name": "movie",
+      "number": null,
+      "title": null,
+      "actors": [],
+      "resolution": "1080p",
+      "plan": null,
+      "receipt_id": null,
+      "revisions": {
+        "input": {
+          "revision": 1,
+          "hash": "0000000000000000000000000000000000000000000000000000000000000006"
+        },
+        "final": null
+      },
+      "lookup": {
+        "status": "failed",
+        "number": null,
+        "title": null,
+        "actors": [],
+        "studio": null,
+        "release": null,
+        "runtime_min": null,
+        "has_poster": false,
+        "error_class": "needs_attention",
+        "message": "未查到资料",
+        "can_requery": true
+      },
+      "marks": {
+        "restored": false,
+        "chinese_subtitles": false,
+        "uhd": false
+      },
+      "files": [],
+      "inputs": [
+        {
+          "path": "movie.mkv",
+          "size": 50
+        },
+        {
+          "path": "movie.ja.srt",
+          "size": 67
+        }
+      ],
+      "workcopy_count": 0,
+      "has_poster": false,
+      "poster_source": null,
+      "has_cover": false,
+      "cover_source": null,
+      "group": "planning",
+      "can_confirm": false,
+      "can_retry": false,
+      "retry_stage": null,
+      "note": null,
+      "stages": [
+        {
+          "stage": "intake",
+          "status": "succeeded",
+          "note": null
+        },
+        {
+          "stage": "restore",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "asr",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "translate",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "return",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "scrape",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "archive",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_input",
+          "status": "pending",
+          "note": null
+        },
+        {
+          "stage": "cleanup_workcopy",
+          "status": "pending",
+          "note": null
+        }
+      ],
+      "steps": [
+        {
+          "key": "intake",
+          "state": "done",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "plan",
+          "state": "waiting",
+          "note": "待安排",
+          "progress": null
+        },
+        {
+          "key": "restore",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "asr",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "translate",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "return",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "scrape",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "confirm",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "archive",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "cleanup",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        },
+        {
+          "key": "done",
+          "state": "pending",
+          "note": null,
+          "progress": null
+        }
+      ],
+      "timing": {
+        "stages": {},
+        "restore_breakdown": null,
+        "total_restore_to_translate": null,
+        "queue_wait": null
+      },
+      "archive": {
+        "status": "pending",
+        "error": null,
+        "target_path": null
+      },
+      "cleanup": {
+        "input": "pending",
+        "workcopy": "pending",
+        "kept": []
+      }
+    }
+  },
+  "plans": {
+    "plans": [
+      {
+        "film_id": "film-planning",
+        "input_revision": 1,
+        "revision_changed": false,
+        "name": "MOVIE",
+        "title": "MOVIE 的标题",
+        "number": "MOVIE",
+        "actors": [
+          "演员甲",
+          "演员乙"
+        ],
+        "has_poster": true,
+        "poster_source": "lookup-9720cd56d26874a7",
+        "has_cover": false,
+        "cover_source": null,
+        "resolution": "1080p",
+        "width": 1920,
+        "height": 1080,
+        "duration_ms": 120000,
+        "size_bytes": 50,
+        "video_count": 1,
+        "item_count": 2,
+        "needs_gpu": true,
+        "created_at": "2026-10-21T08:00:00Z",
+        "lookup": {
+          "status": "succeeded",
+          "number": "MOVIE",
+          "title": "MOVIE 的标题",
+          "actors": [
+            "演员甲",
+            "演员乙"
+          ],
+          "studio": "Studio",
+          "release": "2026-01-02",
+          "runtime_min": 120,
+          "has_poster": true,
+          "error_class": null,
+          "message": null,
+          "can_requery": true
+        },
+        "recommendation": {
+          "ltx_model": "standard",
+          "ltx_reason": "默认",
+          "machine": "worker-local",
+          "machine_reason": "NVIDIA GeForce RTX 5060 8 GB"
+        }
+      },
+      {
+        "film_id": "film-planning-unknown",
+        "input_revision": 1,
+        "revision_changed": false,
+        "name": "movie",
+        "title": null,
+        "number": null,
+        "actors": [],
+        "has_poster": false,
+        "poster_source": null,
+        "has_cover": false,
+        "cover_source": null,
+        "resolution": "1080p",
+        "width": 1920,
+        "height": 1080,
+        "duration_ms": 120000,
+        "size_bytes": 50,
+        "video_count": 1,
+        "item_count": 2,
+        "needs_gpu": true,
+        "created_at": "2026-10-21T08:00:00Z",
+        "lookup": {
+          "status": "failed",
+          "number": null,
+          "title": null,
+          "actors": [],
+          "studio": null,
+          "release": null,
+          "runtime_min": null,
+          "has_poster": false,
+          "error_class": "needs_attention",
+          "message": "未查到资料",
+          "can_requery": true
+        },
+        "recommendation": {
+          "ltx_model": "standard",
+          "ltx_reason": "默认",
+          "machine": "worker-local",
+          "machine_reason": "NVIDIA GeForce RTX 5060 8 GB"
+        }
+      }
+    ],
+    "default_tier": "standard",
+    "choices": {
+      "tiers": [
+        {
+          "value": "standard",
+          "label": "标准"
+        },
+        {
+          "value": "good",
+          "label": "良好"
+        },
+        {
+          "value": "high",
+          "label": "高"
+        }
+      ],
+      "machines": [
+        {
+          "id": "worker-local",
+          "name": "本机",
+          "gpu": "NVIDIA GeForce RTX 5060",
+          "vram_mib": 8151,
+          "reason": "NVIDIA GeForce RTX 5060 8 GB"
+        }
+      ]
+    }
+  },
+  "target": {
+    "candidates": {
+      "film_dir": "ABC-123",
+      "performer_id": "actor",
+      "target_path": "\\\\nas-a\\actors\\Actor\\ABC-123",
+      "absent": true,
+      "error_code": null,
+      "message": null,
+      "candidates": {
+        "query": [
+          "Actor"
+        ],
+        "items": [
+          {
+            "id": "actor",
+            "name": "Actor",
+            "source_label": "NAS",
+            "unc_path": "\\\\nas-a\\actors\\Actor",
+            "has_thumb": false,
+            "aliases": []
+          }
+        ]
+      }
+    },
+    "selected": {
+      "film_dir": "ABC-123",
+      "performer_id": "actor",
+      "target_path": "\\\\nas-a\\actors\\Actor\\ABC-123",
+      "absent": true,
+      "error_code": null,
+      "message": null,
+      "candidates": {
+        "query": [
+          "Actor"
+        ],
+        "items": [
+          {
+            "id": "actor",
+            "name": "Actor",
+            "source_label": "NAS",
+            "unc_path": "\\\\nas-a\\actors\\Actor",
+            "has_thumb": false,
+            "aliases": []
+          }
+        ]
+      }
+    },
+    "missing": {
+      "film_dir": "ABC-123",
+      "performer_id": "gone",
+      "target_path": null,
+      "absent": null,
+      "error_code": "missing",
+      "message": "所选演员记录已不存在",
+      "candidates": {
+        "query": [
+          "Actor"
+        ],
+        "items": [
+          {
+            "id": "actor",
+            "name": "Actor",
+            "source_label": "NAS",
+            "unc_path": "\\\\nas-a\\actors\\Actor",
+            "has_thumb": false,
+            "aliases": []
+          }
+        ]
+      }
+    },
+    "offline": {
+      "film_dir": "ABC-123",
+      "performer_id": "actor",
+      "target_path": null,
+      "absent": null,
+      "error_code": "offline",
+      "message": "Filmpaw 未运行：Filmpaw 未运行（C:\\Users\\operator\\AppData\\Roaming\\Filmpaw\\workflow-endpoint.json）",
+      "candidates": null
+    }
+  }
+}

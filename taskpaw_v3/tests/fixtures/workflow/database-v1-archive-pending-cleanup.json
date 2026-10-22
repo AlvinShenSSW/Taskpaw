@@ -1,0 +1,548 @@
+{
+  "source_revision": "18e15ec40c7c7e5179c3e3559f446b8d8ad73fa2",
+  "provenance": "Unchanged T01 public WorkflowStore APIs with synthetic test fixtures; no media/NAS I/O.",
+  "fixture_sha256": "274fafd3e6a926684659759abf71b2424c5b5adcb95ab0cb177fa66249046aef",
+  "operator_credential_id": "88148920-3a9e-4796-abb5-fb9f4899eae2",
+  "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+  "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+  "final_hash": "cd2d98f3a15b933d65980a281c735bb987a6fce4a5e213bacad8aab88d952953",
+  "archive_receipt_id": "424e21ba-4add-4246-bbb9-718ac6fc22f3",
+  "cleanup_operation_id": "830e23ec-5f32-4200-8287-718b01b275b7",
+  "expected_view": {
+    "schema_version": 1,
+    "film": {
+      "schema_version": 1,
+      "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+      "intake_session_id": "0afc3d74-2a51-461a-bf8e-0a4c3444bf44",
+      "display_name": "Synthetic film",
+      "policy": {
+        "schema_version": 1,
+        "policy_revision": 1,
+        "required_stages": [
+          "intake",
+          "restore",
+          "asr",
+          "translate",
+          "return",
+          "scrape",
+          "archive",
+          "cleanup_input",
+          "cleanup_workcopy"
+        ],
+        "subtitle_requirement": "chinese",
+        "skippable_stages": [
+          "restore",
+          "asr",
+          "translate"
+        ],
+        "skip_evidence_kinds": [
+          "verified_reuse"
+        ],
+        "required_image_roles": [
+          "poster",
+          "folder_cover"
+        ],
+        "folder_cover_required": true,
+        "allowed_attachment_extensions": []
+      },
+      "current_input_revision": 1,
+      "current_final_revision": 1,
+      "current_context_revision": 1,
+      "context_state": "ready",
+      "version": 8,
+      "created_at": "2026-10-19T00:00:00Z"
+    },
+    "stages": [
+      {
+        "schema_version": 1,
+        "job_id": "3c70ae82-0e96-44c5-b053-ba21748820f1",
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "stage": "intake",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "dependency_job_ids": [],
+        "status": "succeeded",
+        "attempt_id": null,
+        "version": 1,
+        "evidence": [],
+        "reason": null
+      },
+      {
+        "schema_version": 1,
+        "job_id": "7584be71-64a9-4d45-ade0-1de9db7355f3",
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "stage": "restore",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "dependency_job_ids": [
+          "3c70ae82-0e96-44c5-b053-ba21748820f1"
+        ],
+        "status": "skipped",
+        "attempt_id": null,
+        "version": 2,
+        "evidence": [
+          {
+            "schema_version": 1,
+            "evidence_id": "409e8f57-43f4-4362-997a-a078f7eb4162",
+            "kind": "verified_reuse",
+            "producer_id": "7139bb67-3c20-48a5-9668-5917379dff24",
+            "producer_version": "synthetic-1",
+            "observed_at": "2026-10-19T00:00:00Z",
+            "received_at": "2026-10-19T00:00:00Z",
+            "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "status": "passed",
+            "summary": {
+              "schema_version": 1,
+              "item_ids": [],
+              "note": null,
+              "item_count": null,
+              "bytes_read": null,
+              "active_writers": null
+            }
+          }
+        ],
+        "reason": "Existing validated output"
+      },
+      {
+        "schema_version": 1,
+        "job_id": "a0370bf1-4f59-4669-921e-b52669a16194",
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "stage": "asr",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "dependency_job_ids": [
+          "7584be71-64a9-4d45-ade0-1de9db7355f3"
+        ],
+        "status": "skipped",
+        "attempt_id": null,
+        "version": 2,
+        "evidence": [
+          {
+            "schema_version": 1,
+            "evidence_id": "a01b958e-d9bf-460f-8a4b-2bf48ba0d217",
+            "kind": "verified_reuse",
+            "producer_id": "7139bb67-3c20-48a5-9668-5917379dff24",
+            "producer_version": "synthetic-1",
+            "observed_at": "2026-10-19T00:00:00Z",
+            "received_at": "2026-10-19T00:00:00Z",
+            "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "status": "passed",
+            "summary": {
+              "schema_version": 1,
+              "item_ids": [],
+              "note": null,
+              "item_count": null,
+              "bytes_read": null,
+              "active_writers": null
+            }
+          }
+        ],
+        "reason": "Existing validated output"
+      },
+      {
+        "schema_version": 1,
+        "job_id": "f8157e80-253a-4e8a-a057-6c3f209af44d",
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "stage": "translate",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "dependency_job_ids": [
+          "a0370bf1-4f59-4669-921e-b52669a16194"
+        ],
+        "status": "skipped",
+        "attempt_id": null,
+        "version": 2,
+        "evidence": [
+          {
+            "schema_version": 1,
+            "evidence_id": "a12d6fe7-80e5-489a-bebe-2d92058b8ffe",
+            "kind": "verified_reuse",
+            "producer_id": "7139bb67-3c20-48a5-9668-5917379dff24",
+            "producer_version": "synthetic-1",
+            "observed_at": "2026-10-19T00:00:00Z",
+            "received_at": "2026-10-19T00:00:00Z",
+            "payload_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "status": "passed",
+            "summary": {
+              "schema_version": 1,
+              "item_ids": [],
+              "note": null,
+              "item_count": null,
+              "bytes_read": null,
+              "active_writers": null
+            }
+          }
+        ],
+        "reason": "Existing validated output"
+      },
+      {
+        "schema_version": 1,
+        "job_id": "c9c1ff2d-742c-4614-acc9-1c12f3780829",
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "stage": "return",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "dependency_job_ids": [
+          "f8157e80-253a-4e8a-a057-6c3f209af44d"
+        ],
+        "status": "succeeded",
+        "attempt_id": "01154284-f547-4969-a4e1-bcd0642a486f",
+        "version": 3,
+        "evidence": [],
+        "reason": null
+      },
+      {
+        "schema_version": 1,
+        "job_id": "567169e6-d75e-4797-9e0f-988dc3f846a4",
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "stage": "scrape",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "dependency_job_ids": [
+          "c9c1ff2d-742c-4614-acc9-1c12f3780829"
+        ],
+        "status": "succeeded",
+        "attempt_id": "8f67c13e-6ad5-4ec4-a3d4-881afc169452",
+        "version": 3,
+        "evidence": [],
+        "reason": null
+      },
+      {
+        "schema_version": 1,
+        "job_id": "b68c8f5d-beb9-48d1-9d5b-23d7986560f6",
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "stage": "archive",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "dependency_job_ids": [
+          "567169e6-d75e-4797-9e0f-988dc3f846a4"
+        ],
+        "status": "succeeded",
+        "attempt_id": "646dd995-4a05-4cdf-99c0-1839569e358d",
+        "version": 3,
+        "evidence": [],
+        "reason": null
+      },
+      {
+        "schema_version": 1,
+        "job_id": "cd41d08e-b688-4a19-b230-77b1eed7fa2f",
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "stage": "cleanup_input",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "dependency_job_ids": [
+          "b68c8f5d-beb9-48d1-9d5b-23d7986560f6"
+        ],
+        "status": "running",
+        "attempt_id": "ec6f278f-c0b1-47cd-9c2e-ef693dbb9ac7",
+        "version": 2,
+        "evidence": [],
+        "reason": null
+      },
+      {
+        "schema_version": 1,
+        "job_id": "73d5efb5-6a24-47b4-9a2d-3e94b9b652e5",
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "stage": "cleanup_workcopy",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "dependency_job_ids": [
+          "b68c8f5d-beb9-48d1-9d5b-23d7986560f6"
+        ],
+        "status": "pending",
+        "attempt_id": null,
+        "version": 1,
+        "evidence": [],
+        "reason": null
+      }
+    ],
+    "context": {
+      "schema_version": 1,
+      "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+      "context_revision": 1,
+      "binding": {
+        "schema_version": 1,
+        "film_id": "7139e380-458e-43d2-b521-74d2a52f205d",
+        "input_revision": 1,
+        "input_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+        "final_revision": 1,
+        "final_hash": "cd2d98f3a15b933d65980a281c735bb987a6fce4a5e213bacad8aab88d952953",
+        "policy_revision": 1,
+        "postprocess_digest": "f41e4282749df005baeac485b5f1515352fd1de68929f1687899dbcbd25cd7c1",
+        "metadata_revision": 1,
+        "candidate_revision": 1,
+        "actor_ids": [
+          "00000000-0000-0000-0000-000000000033"
+        ],
+        "target": {
+          "schema_version": 1,
+          "root_id": "00000000-0000-0000-0000-00000000000c",
+          "host_identity": "nas-example",
+          "export_identity": "media-example",
+          "native_identity": {
+            "schema_version": 1,
+            "scheme": "windows_file_id",
+            "root_id": "00000000-0000-0000-0000-00000000000c",
+            "volume_or_export_id": "fictional-volume",
+            "object_id": "fictional-object-500",
+            "observed_at": "2026-10-19T01:00:00Z",
+            "evidence_id": "00000000-0000-0000-0000-0000000002bc"
+          },
+          "relative_path": "Performer-Sample/Film-Sample",
+          "expected_absent": true
+        },
+        "input_cleanup": {
+          "schema_version": 1,
+          "scope": "input",
+          "source_manifest_hash": "4d0232e6a825a4819f0c483fe702d315a0349fa7438f6693ae854c06a0fcbe8d",
+          "members": [
+            {
+              "schema_version": 1,
+              "item_id": "00000000-0000-0000-0000-000000000015",
+              "root_id": "00000000-0000-0000-0000-00000000000a",
+              "relative_path": "movie.mkv",
+              "size_bytes": 1024,
+              "sha256": "089168833f12e68467e8566cc5d05dfcccafe9da66e6420064458dd61811ad51",
+              "native_identity": {
+                "schema_version": 1,
+                "scheme": "windows_file_id",
+                "root_id": "00000000-0000-0000-0000-00000000000a",
+                "volume_or_export_id": "fictional-volume",
+                "object_id": "fictional-object-21",
+                "observed_at": "2026-10-19T01:00:00Z",
+                "evidence_id": "00000000-0000-0000-0000-0000000000dd"
+              }
+            },
+            {
+              "schema_version": 1,
+              "item_id": "00000000-0000-0000-0000-000000000016",
+              "root_id": "00000000-0000-0000-0000-00000000000a",
+              "relative_path": "movie.ja.srt",
+              "size_bytes": 1024,
+              "sha256": "9b884caf18683a64c97f839419ae702ff197c5fd128a59b00bf8e3a10049b6ed",
+              "native_identity": {
+                "schema_version": 1,
+                "scheme": "windows_file_id",
+                "root_id": "00000000-0000-0000-0000-00000000000a",
+                "volume_or_export_id": "fictional-volume",
+                "object_id": "fictional-object-22",
+                "observed_at": "2026-10-19T01:00:00Z",
+                "evidence_id": "00000000-0000-0000-0000-0000000000de"
+              }
+            }
+          ]
+        },
+        "input_cleanup_hash": "e747b86eba9c3d55577f38f51cd50ad13e05f255da0363b63a53d4686d9f9da0",
+        "workcopy_cleanup": {
+          "schema_version": 1,
+          "scope": "workcopy",
+          "source_manifest_hash": "cd2d98f3a15b933d65980a281c735bb987a6fce4a5e213bacad8aab88d952953",
+          "members": [
+            {
+              "schema_version": 1,
+              "item_id": "00000000-0000-0000-0000-00000000001f",
+              "root_id": "00000000-0000-0000-0000-00000000000b",
+              "relative_path": "movie.mkv",
+              "size_bytes": 1024,
+              "sha256": "089168833f12e68467e8566cc5d05dfcccafe9da66e6420064458dd61811ad51",
+              "native_identity": {
+                "schema_version": 1,
+                "scheme": "windows_file_id",
+                "root_id": "00000000-0000-0000-0000-00000000000b",
+                "volume_or_export_id": "fictional-volume",
+                "object_id": "fictional-object-31",
+                "observed_at": "2026-10-19T01:00:00Z",
+                "evidence_id": "00000000-0000-0000-0000-0000000000e7"
+              }
+            },
+            {
+              "schema_version": 1,
+              "item_id": "00000000-0000-0000-0000-000000000020",
+              "root_id": "00000000-0000-0000-0000-00000000000b",
+              "relative_path": "movie.zh.srt",
+              "size_bytes": 1024,
+              "sha256": "e32913753d9288afffae88ac8fb4e397d6ac5f55d46498d3b42aeb93e0dc507d",
+              "native_identity": {
+                "schema_version": 1,
+                "scheme": "windows_file_id",
+                "root_id": "00000000-0000-0000-0000-00000000000b",
+                "volume_or_export_id": "fictional-volume",
+                "object_id": "fictional-object-32",
+                "observed_at": "2026-10-19T01:00:00Z",
+                "evidence_id": "00000000-0000-0000-0000-0000000000e8"
+              }
+            },
+            {
+              "schema_version": 1,
+              "item_id": "00000000-0000-0000-0000-000000000021",
+              "root_id": "00000000-0000-0000-0000-00000000000b",
+              "relative_path": "movie.nfo",
+              "size_bytes": 1024,
+              "sha256": "225ab1e945f61dfdd465d952958447046e301dae83aa587bdafcc7170e5b722e",
+              "native_identity": {
+                "schema_version": 1,
+                "scheme": "windows_file_id",
+                "root_id": "00000000-0000-0000-0000-00000000000b",
+                "volume_or_export_id": "fictional-volume",
+                "object_id": "fictional-object-33",
+                "observed_at": "2026-10-19T01:00:00Z",
+                "evidence_id": "00000000-0000-0000-0000-0000000000e9"
+              }
+            },
+            {
+              "schema_version": 1,
+              "item_id": "00000000-0000-0000-0000-000000000022",
+              "root_id": "00000000-0000-0000-0000-00000000000b",
+              "relative_path": "poster.jpg",
+              "size_bytes": 1024,
+              "sha256": "97a7c2f0ae2d99d97bedd98a4ffe3c8060bd29f05da69995fe09ee0cea2684ea",
+              "native_identity": {
+                "schema_version": 1,
+                "scheme": "windows_file_id",
+                "root_id": "00000000-0000-0000-0000-00000000000b",
+                "volume_or_export_id": "fictional-volume",
+                "object_id": "fictional-object-34",
+                "observed_at": "2026-10-19T01:00:00Z",
+                "evidence_id": "00000000-0000-0000-0000-0000000000ea"
+              }
+            },
+            {
+              "schema_version": 1,
+              "item_id": "00000000-0000-0000-0000-000000000023",
+              "root_id": "00000000-0000-0000-0000-00000000000b",
+              "relative_path": "fanart.jpg",
+              "size_bytes": 1024,
+              "sha256": "b6f2c2715a00980efa60dbf44aa6e86ebb2056cab402d5ef5bc058e16d5efbdf",
+              "native_identity": {
+                "schema_version": 1,
+                "scheme": "windows_file_id",
+                "root_id": "00000000-0000-0000-0000-00000000000b",
+                "volume_or_export_id": "fictional-volume",
+                "object_id": "fictional-object-35",
+                "observed_at": "2026-10-19T01:00:00Z",
+                "evidence_id": "00000000-0000-0000-0000-0000000000eb"
+              }
+            },
+            {
+              "schema_version": 1,
+              "item_id": "00000000-0000-0000-0000-000000000024",
+              "root_id": "00000000-0000-0000-0000-00000000000b",
+              "relative_path": "folder.jpg",
+              "size_bytes": 1024,
+              "sha256": "1a910b690bcb43bdcd272e8cc3fdca66ebcbc87f761970ab1871b121b93cfbef",
+              "native_identity": {
+                "schema_version": 1,
+                "scheme": "windows_file_id",
+                "root_id": "00000000-0000-0000-0000-00000000000b",
+                "volume_or_export_id": "fictional-volume",
+                "object_id": "fictional-object-36",
+                "observed_at": "2026-10-19T01:00:00Z",
+                "evidence_id": "00000000-0000-0000-0000-0000000000ec"
+              }
+            }
+          ]
+        },
+        "workcopy_cleanup_hash": "52ef420df120b4a5c2ed16b096e530cef47009891b94dd55f89f4b78e7130868"
+      },
+      "observations": {
+        "schema_version": 1,
+        "metadata": {
+          "schema_version": 1,
+          "evidence_id": "00000000-0000-0000-0000-00000000005b",
+          "kind": "metadata",
+          "producer_id": "7139bb67-3c20-48a5-9668-5917379dff24",
+          "producer_version": "fixture-1",
+          "observed_at": "2026-10-19T01:00:00Z",
+          "received_at": "2026-10-19T01:00:00Z",
+          "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "status": "passed",
+          "summary": {
+            "schema_version": 1,
+            "item_ids": [],
+            "note": null,
+            "item_count": null,
+            "bytes_read": null,
+            "active_writers": null
+          }
+        },
+        "candidate": {
+          "schema_version": 1,
+          "evidence_id": "00000000-0000-0000-0000-00000000005c",
+          "kind": "candidate",
+          "producer_id": "7139bb67-3c20-48a5-9668-5917379dff24",
+          "producer_version": "fixture-1",
+          "observed_at": "2026-10-19T01:00:00Z",
+          "received_at": "2026-10-19T01:00:00Z",
+          "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "status": "passed",
+          "summary": {
+            "schema_version": 1,
+            "item_ids": [],
+            "note": null,
+            "item_count": null,
+            "bytes_read": null,
+            "active_writers": null
+          }
+        },
+        "target": {
+          "schema_version": 1,
+          "evidence_id": "00000000-0000-0000-0000-00000000005d",
+          "kind": "target",
+          "producer_id": "7139bb67-3c20-48a5-9668-5917379dff24",
+          "producer_version": "fixture-1",
+          "observed_at": "2026-10-19T01:00:00Z",
+          "received_at": "2026-10-19T01:00:00Z",
+          "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "status": "passed",
+          "summary": {
+            "schema_version": 1,
+            "item_ids": [],
+            "note": null,
+            "item_count": null,
+            "bytes_read": null,
+            "active_writers": null
+          }
+        },
+        "input_cleanup": {
+          "schema_version": 1,
+          "evidence_id": "00000000-0000-0000-0000-00000000005e",
+          "kind": "input_cleanup",
+          "producer_id": "7139bb67-3c20-48a5-9668-5917379dff24",
+          "producer_version": "fixture-1",
+          "observed_at": "2026-10-19T01:00:00Z",
+          "received_at": "2026-10-19T01:00:00Z",
+          "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "status": "passed",
+          "summary": {
+            "schema_version": 1,
+            "item_ids": [],
+            "note": null,
+            "item_count": null,
+            "bytes_read": null,
+            "active_writers": null
+          }
+        },
+        "workcopy_cleanup": {
+          "schema_version": 1,
+          "evidence_id": "00000000-0000-0000-0000-00000000005f",
+          "kind": "workcopy_cleanup",
+          "producer_id": "7139bb67-3c20-48a5-9668-5917379dff24",
+          "producer_version": "fixture-1",
+          "observed_at": "2026-10-19T01:00:00Z",
+          "received_at": "2026-10-19T01:00:00Z",
+          "payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "status": "passed",
+          "summary": {
+            "schema_version": 1,
+            "item_ids": [],
+            "note": null,
+            "item_count": null,
+            "bytes_read": null,
+            "active_writers": null
+          }
+        }
+      },
+      "context_hash": "446c266047edb72c877708978828cc98a25847b2f3ec4868656f3e8b26c7ddf9"
+    }
+  }
+}

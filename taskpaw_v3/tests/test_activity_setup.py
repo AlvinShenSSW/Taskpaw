@@ -772,8 +772,17 @@ def test_i216_missing_baseline_uses_selective_uninstall(
     assert not (home / ".taskpaw/hook-setup/claude.json").exists()
 
 
-def test_i216_selective_cleanup_preserves_shifted_empty_user_group(setup, run):
+def test_i216_selective_cleanup_preserves_shifted_empty_user_group(
+    setup, run, monkeypatch
+):
     s, home = setup
+    patient_run = s.subprocess.run
+
+    def patient(argv, **kwargs):  # a cold runner may need >5 s to spawn the writer
+        kwargs["timeout"] = 120
+        return patient_run(argv, **kwargs)
+
+    monkeypatch.setattr(s.subprocess, "run", patient)
     path = put(home, "claude", {"hooks": {"Stop": [{"hooks": []}]}})
     run(s, home, "install", "claude")
     data = json.loads(path.read_text())

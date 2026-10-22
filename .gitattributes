@@ -1,0 +1,2 @@
+# Hash-pinned test fixtures must keep their committed bytes on every checkout.
+taskpaw_v3/tests/fixtures/workflow/*.sql -text

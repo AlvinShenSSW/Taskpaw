@@ -13,6 +13,7 @@ from test_jasna import _events, _Launcher, _ltx_model, _managed, _patch, _probe,
 from test_jasna_subs import _setup
 
 from taskpaw_v3.monitors.plugins import jasna as J
+from taskpaw_v3.monitors.plugins import jasna_progress as P
 
 ENCODE = (
     "LTX 2/4 encode:  52.00%|█████▏    | 156/300 "
@@ -410,3 +411,140 @@ def test_current_reader_eof_tail_survives_process_exit_before_drain(
         held.release.set()
         threading.Thread.join(old_reader, timeout=2)
         inst.stop(timeout=0.5)
+
+
+# ── U1c: the auto-split mosaic scan that runs before any LTX stage ─────────
+# tqdm(total=total, desc="Mosaic scan", unit="sample") in jasna/mosaic_scan.py
+SCAN_START = "Mosaic scan:   0%|          | 0/5000 [00:00<?, ?sample/s]"
+SCAN = "Mosaic scan:  12%|█▏        | 600/5000 [00:40<04:53, 15.00sample/s]"
+SCAN_SLOW = "Mosaic scan:   1%|          | 50/5000 [01:40<2:45:00,  2.00s/sample]"
+SCAN_DONE = "Mosaic scan: 100%|██████████| 5000/5000 [05:33<00:00, 15.00sample/s]"
+BASIC = (
+    "Processing video:  15%|███ |Processed: 06:09 (36703f) | "
+    "Remaining: 30:47 (207454f) | Speed: 112.3fps"
+)
+SPLIT = (
+    "2026-10-22 10:00:00 INFO ABF-394.mp4: LTX auto split: 300 s with mosaics, "
+    "120 s (40%) of it with LTX"
+)
+SKIPPED = (
+    "ABF-394.mp4: LTX auto split skipped (not smart-render compatible); "
+    "restoring the whole video with LTX"
+)
+NO_MOSAICS = (
+    "ABF-394.mp4: LTX auto split found no mosaics; restoring the whole video with LTX"
+)
+
+
+def test_mosaic_scan_is_a_pre_ltx_phase_snapshot_not_film_progress():
+    value = J.parse_jasna_progress_line(SCAN, {"current_file": "a.mp4"})
+    assert value == {
+        "current_file": "a.mp4",
+        "scan_progress": {
+            "percent": 12.0,
+            "percent_text": "12",
+            "current": "600",
+            "total": "5000",
+            "elapsed": "00:40",
+            "eta": "04:53",
+            "rate_value": "15.00",
+            "rate_unit": "sample/s",
+            "raw_line": SCAN,
+        },
+    }
+    assert json.loads(json.dumps(value)) == value
+
+
+def test_mosaic_scan_unknowns_stay_missing_and_slow_rates_stay_literal():
+    start = J.parse_jasna_progress_line(SCAN_START, {})["scan_progress"]
+    assert start == {
+        "percent": 0.0,
+        "percent_text": "0",
+        "current": "0",
+        "total": "5000",
+        "elapsed": "00:00",
+        "raw_line": SCAN_START,
+    }
+    slow = J.parse_jasna_progress_line(SCAN_SLOW, {})["scan_progress"]
+    assert (slow["rate_value"], slow["rate_unit"], slow["eta"]) == (
+        "2.00",
+        "s/sample",
+        "2:45:00",
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "\x1b[32m" + SCAN_START + "\r" + SCAN + "\x1b[0m",
+        SCAN_START + "\r" + SCAN + "\r",
+        SCAN + "\rwarning: GPU cache 50%",
+        "\x1b]0;title\x07" + SCAN + "\x1b[K",
+    ],
+)
+def test_cr_joined_and_ansi_scan_lines_keep_the_latest_bar(line):
+    value = J.parse_jasna_progress_line(line, {})
+    assert value["scan_progress"]["current"] == "600"
+    assert value["scan_progress"]["raw_line"] == SCAN
+    assert "percent" not in value
+
+
+def test_scan_ends_on_ltx_or_basicvsr_and_ignores_unrelated_percentages():
+    scan = J.parse_jasna_progress_line(SCAN_DONE, {"current_file": "a.mp4"})
+    assert J.parse_jasna_progress_line("warning: GPU cache 50%", scan) is scan
+    ltx = J.parse_jasna_progress_line(ENCODE, scan)
+    assert "scan_progress" not in ltx and ltx["ltx_stage"] == "2/4 encode"
+    basic = J.parse_jasna_progress_line(BASIC, scan)
+    assert "scan_progress" not in basic
+    assert (basic["current_file"], basic["percent"], basic["fps"]) == (
+        "a.mp4",
+        15,
+        112.3,
+    )
+    # the next film's scan ends the previous film's LTX observation
+    again = J.parse_jasna_progress_line(SCAN, ltx)
+    assert not ({"ltx_progress", "ltx_stage", "percent", "fps", "eta"} & again.keys())
+    assert again["scan_progress"]["percent"] == 12.0
+
+
+@pytest.mark.parametrize(
+    ("line", "kind"),
+    [(SPLIT, "planned"), (SKIPPED, "skipped"), (NO_MOSAICS, "no_mosaics")],
+)
+def test_auto_split_log_lines_mark_the_phase_without_a_fake_percent(line, kind):
+    scan = J.parse_jasna_progress_line(SCAN_DONE, {"current_file": "a.mp4"})
+    value = J.parse_jasna_progress_line("\x1b[33m" + line + "\x1b[0m", scan)
+    assert value == {
+        "current_file": "a.mp4",
+        "split_note": {"kind": kind, "text": line},
+    }
+    # the note is a fact of this film: it survives into LTX, a new scan drops it
+    ltx = J.parse_jasna_progress_line(ENCODE, value)
+    assert ltx["split_note"]["kind"] == kind
+    assert "split_note" not in J.parse_jasna_progress_line(SCAN, ltx)
+
+
+def test_console_text_is_the_latest_plain_segment_bounded():
+    assert P.console_text("\x1b[32m" + SCAN_START + "\r" + SCAN + "\x1b[0m\r") == SCAN
+    assert P.console_text("  loading model…  ") == "loading model…"
+    assert P.console_text("\r\n \x1b[K") == ""
+    assert len(P.console_text("x" * 5000)) == 300
+
+
+def test_monitor_shows_the_scan_without_reporting_it_as_film_progress(
+    tmp_path, monkeypatch
+):
+    r = _setup(
+        tmp_path,
+        monkeypatch,
+        pending=["a.mp4"],
+        rcs=[None],
+        jasna_capture_progress=True,
+    )
+    r.inst.start(r.emit)
+    r.inst._consume_output(SCAN.encode())
+    status = r.inst.check(r.emit)
+    assert status.metrics["scan_progress"]["current"] == "600"
+    assert "percent" not in status.metrics
+    assert "Mosaic scan 12%" in status.detail
+    r.inst.stop(timeout=1)
