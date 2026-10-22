@@ -30,6 +30,7 @@ from .intake_protocol import ProbeArtifact
 from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
 from .lookup import MetadataLookup
+from .timing import TaskLogSink, WorkflowLog
 
 ExecutorFactory = Callable[[LocalRuntime], Sequence[StageExecutor]]
 LookupFactory = Callable[[LocalRuntime], MetadataLookup]
@@ -259,8 +260,11 @@ class LocalWorkflowHost:
         scrape_step: ReturnStep | None = None,
         off_reasons: dict[str, str] | None = None,
         lookup_factory: LookupFactory | None = None,
+        task_log: TaskLogSink | None = None,
     ) -> None:
         self.settings, self.data_dir, self.executors = settings, data_dir, executors
+        # U1e: the agent's task log (the 日志 tab) gets a row per finished stage
+        self.workflow_log = WorkflowLog(task_log)
         self.lookup_factory = lookup_factory
         self.lookup: MetadataLookup | None = None
         self.intake_policy = intake_policy
@@ -334,6 +338,7 @@ class LocalWorkflowHost:
                 scrape_step=self.scrape_step,
                 off_reasons=self.off_reasons,
                 finalizer=self.finalizer,
+                workflow_log=self.workflow_log,
             )
             if self._stopping.is_set():
                 return
@@ -531,8 +536,11 @@ def start_local_workflow(
     settings: WorkflowSettings,
     config_dir: Path | None,
     executors: Sequence[StageExecutor] = (),
+    *,
+    task_log: TaskLogSink | None = None,
 ) -> LocalWorkflowHost | None:
-    """None unless the operator enabled the workflow and named its INBOX (C7)."""
+    """None unless the operator enabled the workflow and named its INBOX (C7).
+    `task_log`: the agent's task log, for the workflow's 日志 rows (U1e)."""
     if not settings.enabled or not settings.inbox_root:
         return None
     if settings.data_dir:
@@ -542,7 +550,7 @@ def start_local_workflow(
     else:
         return None
     if executors:
-        host = LocalWorkflowHost(settings, data_dir, executors)
+        host = LocalWorkflowHost(settings, data_dir, executors, task_log=task_log)
     else:  # the shipped pipeline (T04 E9): tools from agent.yaml, local return
         from .pipeline import (
             MIKO_OFF,
@@ -560,6 +568,7 @@ def start_local_workflow(
             scrape_step=default_scrape_step(settings),
             off_reasons={"scrape": MIKO_OFF},
             lookup_factory=default_lookup(settings),
+            task_log=task_log,
         )
     host.start()
     return host

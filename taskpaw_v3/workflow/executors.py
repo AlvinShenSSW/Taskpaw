@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from .local_gpu import max_resolution
-from .models import InputManifest, PendingComputeJob, ToolVersions
+from .models import InputManifest, PendingComputeJob, RestoreTiming, ToolVersions
 from .owned_process import OwnedJob
 
 ErrorClass = Literal["transient", "permission", "needs_attention", "cancelled"]
@@ -45,6 +45,8 @@ class ExecOutcome:
     message: str = ""
     # sha256 of the stage's stage-result.json, kept in the success evidence (T04 E4)
     result_digest: str | None = None
+    # U1e: a restore's film timing, kept in the success evidence's summary
+    timing: RestoreTiming | None = None
 
     @property
     def ok(self) -> bool:
@@ -52,9 +54,12 @@ class ExecOutcome:
 
     @classmethod
     def succeeded(
-        cls, message: str = "", result_digest: str | None = None
+        cls,
+        message: str = "",
+        result_digest: str | None = None,
+        timing: RestoreTiming | None = None,
     ) -> ExecOutcome:
-        return cls(None, message, result_digest)
+        return cls(None, message, result_digest, timing)
 
     @classmethod
     def failed(cls, error_class: ErrorClass, message: str) -> ExecOutcome:

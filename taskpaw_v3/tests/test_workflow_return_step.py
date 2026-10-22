@@ -38,6 +38,16 @@ VIDEO = b"synthetic video bytes\x00" * 64
 JA = "1\n00:00:01,000 --> 00:00:02,000\nこんにちは、元気ですか\n\n".encode()
 ZH = "1\n00:00:01,000 --> 00:00:02,000\n你好，你好吗\n\n".encode()
 WORKCOPY = "intake/op-1/snapshot"
+# U1e: the phase times a real restore reports (two auto-split spans, a speed test)
+RESTORE_TIMING = m.RestoreTiming(
+    scan=312.4,
+    basicvsr=1105.0,
+    ltx=2950.6,
+    speed_test=48.2,
+    ltx_stages={"scan": 95.3, "encode": 612.0, "denoise": 1544.1, "compose": 651.0},
+    ltx_runs=2,
+    wall=4401.0,
+)
 
 
 def _tools(stage):
@@ -64,7 +74,7 @@ class _Fake:
     def max_resolution(self, vram):
         return max_resolution(vram)
 
-    def _done(self, context, videos):
+    def _done(self, context, videos, timing=None):
         digest = write_stage_result(
             context.workdir,
             StageResult(
@@ -75,7 +85,7 @@ class _Fake:
                 videos=tuple(videos),
             ),
         )
-        return ExecOutcome.succeeded(result_digest=digest)
+        return ExecOutcome.succeeded(result_digest=digest, timing=timing)
 
 
 class FakeRestore(_Fake):
@@ -103,7 +113,7 @@ class FakeRestore(_Fake):
                     video_item_id=video.item_id, volume_ordinal=1, restore=facts
                 )
             )
-        return self._done(context, videos)
+        return self._done(context, videos, RESTORE_TIMING)
 
 
 class FakeAsr(_Fake):

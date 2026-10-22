@@ -285,12 +285,42 @@ class NativeIdentity(Model):
     evidence_id: Id
 
 
+Seconds = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+LTX_STAGE_NAMES = 8  # Jasna has four; anything beyond this bound is not a stage
+
+
+class RestoreTiming(Model):
+    """U1e: the wall-clock seconds Taskpaw saw each Jasna phase as the current
+    one while restoring (`timing.PhaseTimer`), summed over every LTX run and
+    volume. `ltx` is the restore-mode stages (`ltx_stages`, by name) plus the
+    speed test; `wall` is how long the Jasna children ran."""
+
+    scan: Seconds = 0.0
+    basicvsr: Seconds = 0.0
+    ltx: Seconds = 0.0
+    speed_test: Seconds = 0.0
+    ltx_stages: dict[Annotated[str, Field(min_length=1, max_length=32)], Seconds] = (
+        Field(default_factory=dict, max_length=LTX_STAGE_NAMES)
+    )
+    ltx_runs: Count = 0
+    wall: Seconds = 0.0
+
+
 class EvidenceSummary(Model):
     item_ids: tuple[Id, ...] = ()
     note: Text | None = None
     item_count: Count | None = None
     bytes_read: Count | None = None
     active_writers: bool | None = None
+    # U1e: a restore success's film timing; absent elsewhere and in older evidence
+    timing: RestoreTiming | None = None
+
+    @model_serializer(mode="wrap")
+    def _historical_wire(self, handler: SerializerFunctionWrapHandler) -> dict:
+        payload = handler(self)
+        if self.timing is None:
+            payload.pop("timing", None)
+        return payload
 
 
 class EvidenceRef(Model):
@@ -1646,6 +1676,10 @@ class BoardStage(Model):
     status: StageStatus
     note: Text | None = None
     reason: Text | None = None
+    # U1e: the current attempt's times and a restore's phase timing
+    started_at: UtcTime | None = None
+    ended_at: UtcTime | None = None
+    timing: RestoreTiming | None = None
 
 
 class BoardFilm(Model):
@@ -1673,6 +1707,9 @@ class BoardFilm(Model):
     planned: bool = False
     plan_ltx_model: LtxTier | None = None
     plan_machine: Id | None = None
+    # U1e: when the operator confirmed it (queue wait); a backfilled plan has none
+    plan_confirmed_at: UtcTime | None = None
+    plan_backfilled: bool = False
     # V3 §7: the newest archive receipt, both manifests and the largest probe
     receipt_id: Text | None = None
     input_hash: Digest | None = None

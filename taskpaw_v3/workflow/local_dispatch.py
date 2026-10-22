@@ -34,6 +34,7 @@ from .executors import (
 )
 from .local_runtime import AttemptFile, LocalRuntime, _new_id
 from .owned_process import OwnedJob
+from .timing import WorkflowLog, film_timing
 
 if TYPE_CHECKING:
     from .finalize import Finalizer
@@ -171,8 +172,10 @@ class LocalDispatcher:
         scrape_step: ComponentStep | None = None,
         off_reasons: dict[str, str] | None = None,
         finalizer: Finalizer | None = None,
+        workflow_log: WorkflowLog | None = None,
     ) -> None:
         self.runtime, self.lease = runtime, lease
+        self.workflow_log = workflow_log or WorkflowLog(None)  # U1e: 日志 rows
         self.finalizer = finalizer
         self.return_step, self.scrape_step = return_step, scrape_step
         # unconfigured component stages, shown as the waiting reason (M01 §4.4)
@@ -628,12 +631,14 @@ class LocalDispatcher:
                             kind,
                             outcome.message or None,
                             payload_digest=outcome.result_digest,
+                            timing=outcome.timing,
                         ),
                     ),
                     outcome="succeeded" if outcome.ok else "failed",
                 ),
             )
             rt.drop_attempt(running.attempt.attempt_id)
+            self._log_resolved(running, outcome)
             if outcome.ok:
                 self._drop_other_workdirs(running)  # E4: superseded outputs
             else:
@@ -645,6 +650,26 @@ class LocalDispatcher:
                 self._running = None
             if running.uses_gpu:
                 self._release()
+
+    def _log_resolved(self, running: _Running, outcome: ExecOutcome) -> None:
+        """U1e: one 日志 row per finished attempt (a stop is no failure), and
+        when translate succeeds, the film's whole run from the store."""
+        if outcome.error_class == "cancelled":
+            return
+        try:
+            job, name = running.job, running.name or running.job.film_id
+            started = datetime.fromisoformat(running.started_at)
+            duration = (datetime.now(timezone.utc) - started).total_seconds()
+            self.workflow_log.stage(
+                name, job.stage, ok=outcome.ok, duration=duration, note=outcome.message
+            )
+            if outcome.ok and job.stage == "translate":
+                rt = self.runtime
+                films = rt.store.film_board(rt.operator, film_id=job.film_id)
+                if films:
+                    self.workflow_log.translated(name, film_timing(films[0]))
+        except Exception:  # the log never changes the stage's outcome
+            log.exception("workflow log row failed")
 
     def _drop_other_workdirs(self, running: _Running) -> None:
         rt = self.runtime

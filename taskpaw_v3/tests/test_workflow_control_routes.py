@@ -241,6 +241,8 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "receipt_id",
         "revisions",
         "lookup",
+        # U1e
+        "timing",
     }
     steps = {s["key"]: s["state"] for s in data["steps"]}
     assert (steps["scrape"], steps["confirm"], steps["archive"]) == (

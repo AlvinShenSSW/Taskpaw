@@ -68,6 +68,7 @@ from .stage_results import (
     workcopy_path,
     write_stage_result,
 )
+from .timing import PhaseTimer, merge, timing_json
 
 PROFILE_ID = "workflow-restore-ltx"
 MODEL = "ltx"  # the record's model for every tier (U1 U05)
@@ -88,6 +89,8 @@ FFPROBE_ARGS = (
 _TAIL_LINES = 8
 # U1c: an unrecognised console line refreshes the step at most this often
 CONSOLE_INTERVAL_S = 1.0
+# U1e: the clock of the phase times (a module name, so tests can drive it)
+monotonic = time.monotonic
 # The monitor's own bound for one bitrate probe (`jasna._PROBE_TIMEOUT`).
 BITRATE_PROBE_SECONDS = 5.0
 _BITRATE_POLL = 0.05
@@ -663,6 +666,7 @@ class RestoreExecutor:
         cfg = self._cfg_for(context)
         exe, fast = self._preflight(context, cfg, pending)
         results: list[VideoResult] = []
+        timings: list[m.RestoreTiming] = []  # U1e: the volumes restored so far
         for index, video in enumerate(videos, start=1):
             if context.cancel.is_set():
                 raise cancelled()
@@ -675,8 +679,18 @@ class RestoreExecutor:
                     raise attention(f"收件工作副本缺失：{video.relative_path}")
                 bitrate = self._source_bitrate(context, cfg, video, source)
                 facts = self._restore(
-                    context, cfg, exe, fast, source, label, probe, bitrate
+                    context,
+                    cfg,
+                    exe,
+                    fast,
+                    source,
+                    label,
+                    probe,
+                    bitrate,
+                    merge(*timings),
                 )
+                if facts.timing is not None:
+                    timings.append(facts.timing)
             else:
                 facts = self._reused(context, video, probe)
             results.append(
@@ -701,7 +715,9 @@ class RestoreExecutor:
             1 for r in results if r.restore and r.restore.decision == "applied"
         )
         return ExecOutcome.succeeded(
-            f"修复完成：{applied} 卷修复，{len(results) - applied} 卷复用", digest
+            f"修复完成：{applied} 卷修复，{len(results) - applied} 卷复用",
+            digest,
+            merge(*timings),
         )
 
     def _preflight(
@@ -766,7 +782,10 @@ class RestoreExecutor:
         label: str,
         probe: m.MediaProbe | None,
         bitrate: int | None,
+        earlier: m.RestoreTiming | None = None,
     ) -> RestoreFacts:
+        """One video's Jasna run. `earlier`: the film's volumes before this one,
+        so the step's live `timing` is the whole film's (U1e)."""
         workdir = context.workdir
         staging = jasna.staging_path_for(str(workdir), source)
         final = jasna.output_path_for(str(workdir), source)
@@ -806,15 +825,17 @@ class RestoreExecutor:
         console = ""
         last_emit = -math.inf
         held = False  # a console line the throttle dropped, not yet on the step
+        timer = PhaseTimer(monotonic())
 
         def publish(now: float) -> None:
             """The monitor's LtxProgress metrics (its parse state and the
-            volume, M3) plus the latest plain console line (U1c). Caller holds
-            `lock`."""
+            volume, M3) plus the latest plain console line (U1c) and the film's
+            phase times so far (U1e). Caller holds `lock`."""
             nonlocal last_emit, held
             last_emit, held = now, False
             detail = {**state, "current_file": volume, "console": console}
             detail["params"] = params
+            detail["timing"] = timing_json(merge(earlier, timer.snapshot(monotonic())))
             context.progress(progress_text(label, state), ltx=detail)
 
         def on_line(_stream: str, text: str) -> None:
@@ -834,6 +855,8 @@ class RestoreExecutor:
                     if now - last_emit < CONSOLE_INTERVAL_S:
                         held = True  # the flusher publishes it when the window ends
                         return
+                if updated is not state:
+                    timer.observe(updated, monotonic())
                 state = updated
                 publish(now)
 
@@ -866,6 +889,8 @@ class RestoreExecutor:
         finally:
             stop_flush.set()
             flusher.join(2)
+            with lock:
+                timer.close(monotonic())
         if code is None:
             raise cancelled()
         if code != 0:
@@ -892,6 +917,7 @@ class RestoreExecutor:
             file_ref(self.runtime.work_dir, final),
             facts,
             jasna.applied_maxrate(cfg, bitrate),
+            timer.snapshot(),
         )
 
     def _probe(self, context: JobContext, path: Path) -> ProbeFacts:
@@ -905,6 +931,7 @@ class RestoreExecutor:
         ref: FileRef,
         facts: ProbeFacts,
         maxrate: int | None = None,
+        timing: m.RestoreTiming | None = None,
     ) -> RestoreFacts:
         if (
             facts.video_streams < 1
@@ -922,4 +949,5 @@ class RestoreExecutor:
             video_streams=facts.video_streams,
             audio_streams=facts.audio_streams,
             maxrate=maxrate,
+            timing=timing,
         )

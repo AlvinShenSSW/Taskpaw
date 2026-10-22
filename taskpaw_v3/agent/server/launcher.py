@@ -365,7 +365,9 @@ def run_agent(
             from taskpaw_v3.workflow.local_host import start_local_workflow
 
             workflow_host = start_local_workflow(
-                config.workflow, config_path.parent if config_path is not None else None
+                config.workflow,
+                config_path.parent if config_path is not None else None,
+                task_log=task_log,
             )
         except Exception:
             log.exception("media workflow could not be started")

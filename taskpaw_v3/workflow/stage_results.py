@@ -52,6 +52,8 @@ class RestoreFacts(_Frozen):
     audio_streams: int
     # J2 (#285): the source-bitrate cap the launch applied (bits/s), else None
     maxrate: int | None = None
+    # U1e: this video's Jasna phase times (an applied restore); older results lack it
+    timing: m.RestoreTiming | None = None
 
 
 class SubtitleFacts(_Frozen):

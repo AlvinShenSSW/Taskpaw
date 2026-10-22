@@ -57,6 +57,18 @@
           "preset_label": "RTX 5070 Ti · 16 GB",
           "preset_auto": true,
           "argv": "jasna.exe --input movie.mkv --output movie-破解.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
+        },
+        "timing": {
+          "scan": 312.4,
+          "basicvsr": 0.0,
+          "ltx": 732.1,
+          "speed_test": 48.2,
+          "ltx_stages": {
+            "scan": 95.3,
+            "encode": 588.6
+          },
+          "ltx_runs": 1,
+          "wall": 1102.7
         }
       }
     },
@@ -170,7 +182,32 @@
             "note": null,
             "progress": null
           }
-        ]
+        ],
+        "timing": {
+          "stages": {
+            "restore": 5420.0,
+            "asr": 610.0,
+            "translate": 1230.0,
+            "return": 45.0,
+            "scrape": 95.0
+          },
+          "restore_breakdown": {
+            "scan": 312.4,
+            "basicvsr": 1105.0,
+            "ltx": 2950.6,
+            "speed_test": 48.2,
+            "ltx_stages": {
+              "compose": 651.0,
+              "denoise": 1544.1,
+              "encode": 612.0,
+              "scan": 95.3
+            },
+            "ltx_runs": 2,
+            "wall": 4401.0
+          },
+          "total_restore_to_translate": 7380.0,
+          "queue_wait": 1800.0
+        }
       },
       {
         "film_id": "film-failed",
@@ -270,7 +307,29 @@
             "note": null,
             "progress": null
           }
-        ]
+        ],
+        "timing": {
+          "stages": {
+            "restore": 5420.0,
+            "asr": 610.0
+          },
+          "restore_breakdown": {
+            "scan": 312.4,
+            "basicvsr": 1105.0,
+            "ltx": 2950.6,
+            "speed_test": 48.2,
+            "ltx_stages": {
+              "compose": 651.0,
+              "denoise": 1544.1,
+              "encode": 612.0,
+              "scan": 95.3
+            },
+            "ltx_runs": 2,
+            "wall": 4401.0
+          },
+          "total_restore_to_translate": null,
+          "queue_wait": 1800.0
+        }
       },
       {
         "film_id": "film-restoring",
@@ -373,6 +432,18 @@
               "preset_label": "RTX 5070 Ti · 16 GB",
               "preset_auto": true,
               "argv": "jasna.exe --input movie.mkv --output movie-破解.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
+            },
+            "timing": {
+              "scan": 312.4,
+              "basicvsr": 0.0,
+              "ltx": 732.1,
+              "speed_test": 48.2,
+              "ltx_stages": {
+                "scan": 95.3,
+                "encode": 588.6
+              },
+              "ltx_runs": 1,
+              "wall": 1102.7
             }
           },
           {
@@ -423,7 +494,13 @@
             "note": null,
             "progress": null
           }
-        ]
+        ],
+        "timing": {
+          "stages": {},
+          "restore_breakdown": null,
+          "total_restore_to_translate": null,
+          "queue_wait": 1800.0
+        }
       },
       {
         "film_id": "film-planning",
@@ -523,7 +600,13 @@
             "note": null,
             "progress": null
           }
-        ]
+        ],
+        "timing": {
+          "stages": {},
+          "restore_breakdown": null,
+          "total_restore_to_translate": null,
+          "queue_wait": null
+        }
       },
       {
         "film_id": "film-planning-unknown",
@@ -620,7 +703,13 @@
             "note": null,
             "progress": null
           }
-        ]
+        ],
+        "timing": {
+          "stages": {},
+          "restore_breakdown": null,
+          "total_restore_to_translate": null,
+          "queue_wait": null
+        }
       }
     ],
     "packages": [
@@ -1031,6 +1120,31 @@
           "progress": null
         }
       ],
+      "timing": {
+        "stages": {
+          "restore": 5420.0,
+          "asr": 610.0,
+          "translate": 1230.0,
+          "return": 45.0,
+          "scrape": 95.0
+        },
+        "restore_breakdown": {
+          "scan": 312.4,
+          "basicvsr": 1105.0,
+          "ltx": 2950.6,
+          "speed_test": 48.2,
+          "ltx_stages": {
+            "compose": 651.0,
+            "denoise": 1544.1,
+            "encode": 612.0,
+            "scan": 95.3
+          },
+          "ltx_runs": 2,
+          "wall": 4401.0
+        },
+        "total_restore_to_translate": 7380.0,
+        "queue_wait": 1800.0
+      },
       "archive": {
         "status": "pending",
         "error": null,
@@ -1215,6 +1329,28 @@
           "progress": null
         }
       ],
+      "timing": {
+        "stages": {
+          "restore": 5420.0,
+          "asr": 610.0
+        },
+        "restore_breakdown": {
+          "scan": 312.4,
+          "basicvsr": 1105.0,
+          "ltx": 2950.6,
+          "speed_test": 48.2,
+          "ltx_stages": {
+            "compose": 651.0,
+            "denoise": 1544.1,
+            "encode": 612.0,
+            "scan": 95.3
+          },
+          "ltx_runs": 2,
+          "wall": 4401.0
+        },
+        "total_restore_to_translate": null,
+        "queue_wait": 1800.0
+      },
       "archive": {
         "status": "pending",
         "error": null,
@@ -1401,6 +1537,18 @@
             "preset_label": "RTX 5070 Ti · 16 GB",
             "preset_auto": true,
             "argv": "jasna.exe --input movie.mkv --output movie-破解.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
+          },
+          "timing": {
+            "scan": 312.4,
+            "basicvsr": 0.0,
+            "ltx": 732.1,
+            "speed_test": 48.2,
+            "ltx_stages": {
+              "scan": 95.3,
+              "encode": 588.6
+            },
+            "ltx_runs": 1,
+            "wall": 1102.7
           }
         },
         {
@@ -1452,6 +1600,12 @@
           "progress": null
         }
       ],
+      "timing": {
+        "stages": {},
+        "restore_breakdown": null,
+        "total_restore_to_translate": null,
+        "queue_wait": 1800.0
+      },
       "archive": {
         "status": "pending",
         "error": null,
@@ -1639,6 +1793,12 @@
           "progress": null
         }
       ],
+      "timing": {
+        "stages": {},
+        "restore_breakdown": null,
+        "total_restore_to_translate": null,
+        "queue_wait": null
+      },
       "archive": {
         "status": "pending",
         "error": null,
@@ -1820,6 +1980,12 @@
           "progress": null
         }
       ],
+      "timing": {
+        "stages": {},
+        "restore_breakdown": null,
+        "total_restore_to_translate": null,
+        "queue_wait": null
+      },
       "archive": {
         "status": "pending",
         "error": null,

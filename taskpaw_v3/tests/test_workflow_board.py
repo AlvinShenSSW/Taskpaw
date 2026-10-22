@@ -249,6 +249,8 @@ def test_rows_carry_the_frozen_shape():
         # U1b: the full jacket the 大图 shows
         "has_cover",
         "cover_source",
+        # U1e: stage times, the restore breakdown and 修复→翻译
+        "timing",
     }
     assert (row["has_poster"], row["poster_source"]) == (False, None)
     assert (row["has_cover"], row["cover_source"]) == (False, None)

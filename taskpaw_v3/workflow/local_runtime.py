@@ -289,6 +289,7 @@ class LocalRuntime:
         producer: AuthProof | None = None,
         payload_digest: str | None = None,
         item_ids: tuple[str, ...] = (),
+        timing: m.RestoreTiming | None = None,
     ) -> m.EvidenceRef:
         """Passed evidence, signed by the operator unless another producer is named."""
         now = self.clock.now()
@@ -302,7 +303,7 @@ class LocalRuntime:
             payload_digest=payload_digest
             or m.digest({"kind": kind, "note": note or ""}),
             status="passed",
-            summary=m.EvidenceSummary(note=note, item_ids=item_ids),
+            summary=m.EvidenceSummary(note=note, item_ids=item_ids, timing=timing),
         )
 
     def worker_view(self) -> m.WorkerView:

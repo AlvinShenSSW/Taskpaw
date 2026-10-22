@@ -28,6 +28,7 @@ from .local_runtime import LocalRuntime
 from .manifest import parse_nfo_summary
 from .plan import NO_RESTORE, TIER_LABELS
 from .stage_results import StageResultError, main_videos, workcopy_path
+from .timing import film_timing
 
 STAGE_ORDER: tuple[m.Stage, ...] = (
     "intake",
@@ -71,7 +72,8 @@ _ARRIVING = {
 _COPYING = {"snapshotting", "snapshot_ready"}
 NFO_LIMIT = 262144
 _FINISHED = ("succeeded", "skipped")
-_STEP_KEYS = ("console", "params")  # reported with the LTX state, shown on the step
+# reported with the LTX state, shown on the step (U1c; U1e the live `timing`)
+_STEP_KEYS = ("console", "params", "timing")
 _TROUBLE = ("failed", "blocked", "unknown")
 _CLEANUPS: tuple[m.Stage, ...] = ("cleanup_input", "cleanup_workcopy")
 _RETRYABLE = ("failed", "blocked")
@@ -316,6 +318,7 @@ def _steps(
                     started_at=running.get("started_at"),
                     console=detail.get("console"),
                     params=detail.get("params"),
+                    timing=detail.get("timing"),
                 )
             steps.append(step)
         elif value in _RETRYABLE:
@@ -469,6 +472,8 @@ def film_row(
         "retry_stage": place["retry_stage"],
         "created_at": _time(film.created_at),
         "steps": _steps(film, place, waiting, kept or {}, current, download),
+        # U1e: each finished stage's time, the restore breakdown and 修复→翻译
+        "timing": film_timing(film),
     }
 
 
@@ -997,6 +1002,7 @@ def film_detail(
             for stage in film.stages
         ],
         "steps": row["steps"],
+        "timing": row["timing"],
         "archive": {
             "status": wf.archive_status,
             "error": film.archive_error,

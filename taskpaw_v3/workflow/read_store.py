@@ -24,6 +24,7 @@ from .models import (
     OperationView,
     PackageFilm,
     PendingComputeJob,
+    RestoreTiming,
     StageRecord,
     UnplannedFilm,
     WorkflowApproval,
@@ -461,7 +462,8 @@ class ReadCommands(WorkflowCore):
                 "a.body_json AS attempt_json,"
                 # U1 V' / V3 §7: the plan and both manifests' revisions and hashes
                 "fp.film_id IS NOT NULL AS planned,fp.ltx_model AS plan_ltx_model,"
-                "fp.machine AS plan_machine,im.manifest_hash AS input_hash,"
+                "fp.machine AS plan_machine,fp.confirmed_at AS plan_confirmed_at,"
+                "fp.backfilled AS plan_backfilled,im.manifest_hash AS input_hash,"
                 "fm.revision AS final_revision,fm.manifest_hash AS final_hash "
                 "FROM films f "
                 "LEFT JOIN manifests fm ON fm.film_id=f.film_id AND fm.kind='final' "
@@ -552,6 +554,10 @@ class ReadCommands(WorkflowCore):
                     "planned": bool(row["planned"]),
                     "plan_ltx_model": row["plan_ltx_model"],
                     "plan_machine": row["plan_machine"],
+                    "plan_confirmed_at": parse_time(row["plan_confirmed_at"])
+                    if row["plan_confirmed_at"]
+                    else None,
+                    "plan_backfilled": bool(row["plan_backfilled"]),
                     "receipt_id": receipt_ids.get(row["film_id"]),
                     "input_hash": row["input_hash"],
                     "final_revision": row["final_revision"],
@@ -567,6 +573,7 @@ class ReadCommands(WorkflowCore):
                         status=row["status"],
                         note=_attempt_note(row["attempt_json"]),
                         reason=row["reason"],
+                        **_attempt_times(row["attempt_json"]),
                     )
                 )
         return tuple(BoardFilm.model_validate(film) for film in films.values())
@@ -632,6 +639,35 @@ class ReadCommands(WorkflowCore):
                 (film_id,),
             )
             return int(row[0])
+
+
+def _attempt_times(body: str | None) -> dict[str, Any]:
+    """U1e: an attempt's start and end, and a restore success's timing
+    (`evidence[-1].summary.timing`)."""
+    if body is None:
+        return {}
+    attempt = json.loads(body)
+    evidence = attempt.get("evidence") or ()
+    timing = (evidence[-1].get("summary") or {}).get("timing") if evidence else None
+    return {
+        "started_at": parse_time(attempt["started_at"])
+        if attempt.get("started_at")
+        else None,
+        "ended_at": parse_time(attempt["ended_at"])
+        if attempt.get("ended_at")
+        else None,
+        "timing": _timing(timing),
+    }
+
+
+def _timing(value: Any) -> RestoreTiming | None:
+    """A stored restore timing; one that no longer validates never breaks the board."""
+    if not value:
+        return None
+    try:
+        return RestoreTiming.model_validate(value)
+    except ValueError:
+        return None
 
 
 def _attempt_note(body: str | None) -> str | None:

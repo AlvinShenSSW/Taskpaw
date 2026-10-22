@@ -37,6 +37,7 @@ from taskpaw_v3.tests.test_workflow_finalize import (  # noqa: F401
     probeable_video,
 )
 from taskpaw_v3.tests.test_workflow_plan_routes import with_lookup
+from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.exec_restore import (
     launch_params,
     progress_text,
@@ -44,6 +45,7 @@ from taskpaw_v3.workflow.exec_restore import (
 )
 from taskpaw_v3.workflow.executors import ExecOutcome
 from taskpaw_v3.workflow.local_gpu import LocalGpu
+from taskpaw_v3.workflow.timing import timing_json
 
 FIXTURE = Path(__file__).parents[1] / "ui/src/test/fixtures/workflow-contract.json"
 REGENERATE = "TASKPAW_WRITE_UI_CONTRACT"
@@ -102,6 +104,7 @@ class HeldRestore(ret.FakeRestore):
         detail = {**state, "current_file": "movie.mkv"}
         detail["console"] = console_text(LTX_ENCODE)  # U1c heartbeat
         detail["params"] = PARAMS  # U1c: the launch, as exec_restore reports it
+        detail["timing"] = LIVE_TIMING  # U1e: the film's phase times so far
         context.progress(progress_text("", state), ltx=detail)
         self.started.set()
         self.release.wait(30)
@@ -132,8 +135,44 @@ class ContractHost(Host):
         }
 
 
+# U1e: the live phase times of the held restore (first span, LTX encode)
+LIVE_TIMING = timing_json(
+    m.RestoreTiming(
+        scan=312.4,
+        ltx=732.1,
+        speed_test=48.2,
+        ltx_stages={"scan": 95.3, "encode": 588.6},
+        ltx_runs=1,
+        wall=1102.7,
+    )
+)
+# U1e: a film's stage durations are real elapsed time (milliseconds here), so
+# they become these operator-sized values; null stays null.
+DURATIONS = {
+    "intake": 40.0,
+    "restore": 5420.0,
+    "asr": 610.0,
+    "translate": 1230.0,
+    "return": 45.0,
+    "scrape": 95.0,
+}
+TOTAL_RUN = 7380.0
+QUEUE_WAIT = 1800.0
+
+
+def _stable_timing(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **value,
+        "stages": {stage: DURATIONS[stage] for stage in value["stages"]},
+        "total_restore_to_translate": None
+        if value["total_restore_to_translate"] is None
+        else TOTAL_RUN,
+        "queue_wait": None if value["queue_wait"] is None else QUEUE_WAIT,
+    }
+
+
 class Stable:
-    """Replaces what differs per run: ids, hashes, times and temp paths."""
+    """Replaces what differs per run: ids, hashes, times, durations and temp paths."""
 
     def __init__(self, tmp: Path, paths: dict[Path, str], names: dict[str, str]):
         self.tmp = str(tmp)
@@ -159,6 +198,8 @@ class Stable:
 
     def __call__(self, value: Any) -> Any:
         if isinstance(value, dict):
+            if isinstance(value.get("timing"), dict) and "stages" in value["timing"]:
+                value = {**value, "timing": _stable_timing(value["timing"])}
             return {self.text(k): self(v) for k, v in value.items()}
         if isinstance(value, list):
             return [self(v) for v in value]
