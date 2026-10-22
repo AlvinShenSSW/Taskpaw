@@ -35,6 +35,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import os
 import sqlite3
 import sys
 import threading
@@ -73,7 +74,9 @@ RANGES: dict[str, tuple[int, int]] = {
 }
 _DESKTOP = (65.0, 10.0, 35.0)  # tdp, idle, other (W)
 _PLATFORM_DEFAULTS = {"darwin": (20.0, 3.0, 5.0)}
-_MANUAL_ACTIVITY = {"jasna": "restore", "avsubs": "asr"}
+_MANUAL_ACTIVITY = {"jasna": "restore", "avsubs": "asr", "lada": "restore"}
+BUSY_GPU_PCT = 30.0  # GPU utilisation with no lease holder: an untracked job
+JUMP_SLACK_SECONDS = 3600  # wall clock this far past the newest bucket: a jump
 _GPU_STAGE_ACTIVITY = {"restore": "restore", "asr": "asr", "translate": "translate"}
 
 RunId = gpu_lease.RunId
@@ -145,11 +148,14 @@ def classify(
     workflow_run: Optional[RunId],
     current: Optional[tuple[str, str]],
     manual_type: Callable[[str], Optional[str]],
+    gpu_util: Optional[float] = None,
 ) -> Activity:
     """(activity, owner) of this moment. The GPU lease holder first: the
     workflow's run maps its running stage, a manual task maps its monitor type
-    (Jasna → restore, avsubs → asr). Otherwise the workflow's running non-GPU
-    stage: translate, or other (return, scrape). Otherwise idle."""
+    (Jasna / Lada → restore, avsubs → asr). Otherwise the workflow's running
+    non-GPU stage: translate, or other (return, scrape). Otherwise, a busy GPU
+    (>= BUSY_GPU_PCT) nobody holds is an untracked job (e.g. Jasna started
+    outside TaskPaw): other, never idle. Otherwise idle."""
     if holder is not None:
         if workflow_run is not None and holder == workflow_run:
             if current is None:
@@ -164,22 +170,30 @@ def classify(
     if current is not None:
         film_id, stage = current
         return ("translate" if stage == "translate" else "other", film_id)
+    if gpu_util is not None and gpu_util >= BUSY_GPU_PCT:
+        return ("other", NO_OWNER)
     return ("idle", NO_OWNER)
 
 
 def activity_source(
     manual_type: Callable[[str], Optional[str]],
     dispatcher: Callable[[], Any],
+    gpu_util: Optional[Callable[[], Optional[float]]] = None,
 ) -> Callable[[], Activity]:
     """A reader for the sampler: `gpu_lease.holder()` plus the workflow
-    dispatcher's `run_id` and `current_stage()` (None: no workflow)."""
+    dispatcher's `run_id` and `current_stage()` (None: no workflow) and the
+    GPU utilisation (the shared GPU sample unless `gpu_util` is given)."""
 
     def read() -> Activity:
         holder = gpu_lease.holder()
         d = dispatcher()
         run = getattr(d, "run_id", None) if d is not None else None
         current = d.current_stage() if d is not None else None
-        return classify(holder, run, current, manual_type)
+        try:
+            util = (gpu_util or _gpu_util_reader)()
+        except Exception:
+            util = None
+        return classify(holder, run, current, manual_type, gpu_util=util)
 
     return read
 
@@ -193,6 +207,14 @@ def read_gpu_power() -> Optional[float]:
     return None if sample is None else sample.get("power_w")
 
 
+def read_gpu_util() -> Optional[float]:
+    """GPU utilisation (%) from the shared GPU sample (None: no reading)."""
+    from taskpaw_v3.core.gpu_sample import gpu_sample
+
+    sample = gpu_sample()
+    return None if sample is None else sample.get("util_pct")
+
+
 def read_cpu_percent() -> Optional[float]:
     """CPU utilisation since this thread's previous call (never blocks)."""
     if psutil is None:
@@ -204,6 +226,7 @@ def read_cpu_percent() -> Optional[float]:
 # GPU and CPU without hiding the readers themselves.
 _gpu_reader: Callable[[], Optional[float]] = read_gpu_power
 _cpu_reader: Callable[[], Optional[float]] = read_cpu_percent
+_gpu_util_reader: Callable[[], Optional[float]] = read_gpu_util
 
 
 # ── energy records ──────────────────────────────────────────────────────────
@@ -429,7 +452,10 @@ class PowerSampler:
         self._buckets: dict[int, _Bucket] = {}  # closed, by start
         self._open: Optional[_Bucket] = None
         self._prev: Optional[tuple[float, Optional[float]]] = None  # (mono, gpu W)
-        self._now: Optional[tuple[Estimate, str]] = None  # latest (estimate, activity)
+        # latest (estimate, activity, cpu reading had a window behind it)
+        self._now: Optional[tuple[Estimate, str, bool]] = None
+        self._cutoff: Optional[float] = None  # retention cutoff of the last close
+        self._jump_logged = False
         self._seq = 0
         self._epochs = 0
         self._counters: dict[str, _Counter] = {}
@@ -446,46 +472,87 @@ class PowerSampler:
         self._thread.start()
 
     def stop(self, timeout: float = 10.0) -> bool:
-        """Stop the thread and flush the open bucket; True once it has exited."""
+        """Stop the thread; True once it has exited and the open bucket is
+        flushed. A thread that outlives `timeout` flushes it itself on exit."""
         self._stop.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
             if thread.is_alive():
                 return False
+        self._shutdown()
+        return True
+
+    def _shutdown(self) -> None:
+        """Flush the open bucket and close the store (idempotent)."""
         with self._lock:
             pending, self._open = self._open, None
             if pending is not None:
                 self._keep(pending)
-        store, self._store = self._store, None
+            store, self._store = self._store, None
         if store is not None:
             try:
-                if pending is not None:
-                    store.upsert(pending)
-            except sqlite3.Error:
-                log.warning("power bucket could not be saved at stop")
+                self._save(store, pending)
             finally:
                 store.close()
-        return True
+
+    @staticmethod
+    def _save(store: _Store, bucket: Optional[_Bucket]) -> None:
+        if bucket is None:
+            return
+        try:
+            store.upsert(bucket)
+        except sqlite3.Error:
+            log.warning("power bucket could not be saved")
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self.tick()
-            except Exception:
-                log.exception("power sample failed")
-            self._stop.wait(self._interval)
+        try:
+            while not self._stop.is_set():
+                try:
+                    self.tick()
+                except Exception:
+                    log.exception("power sample failed")
+                self._stop.wait(self._interval)
+        finally:
+            self._shutdown()  # a late exit after a timed-out stop() still writes
 
-    def _ensure_store(self) -> _Store:
-        if self._store is None:
-            path = self._data_dir / "power.db" if self._data_dir is not None else None
-            store = _Store(path)
+    def _ensure_store(self, create: bool = True) -> Optional[_Store]:
+        """The store, opened (and its retained buckets loaded) on first use.
+        Not `create`: only an existing power.db is opened, else None."""
+        if self._store is not None:
+            return self._store
+        path = self._data_dir / "power.db" if self._data_dir is not None else None
+        if not create and (path is None or not path.exists()):
+            return None
+        store = _Store(path)
+        try:
             loaded = store.load(self._wall() - RETENTION_SECONDS)
-            with self._lock:
-                for b in loaded:
-                    self._keep(b)
-            self._store = store
-        return self._store
+        except sqlite3.Error as exc:
+            store.close()
+            self._quarantine(path, exc)
+            store, loaded = _Store(None), []
+        with self._lock:
+            for b in loaded:
+                self._keep(b)
+        self._store = store
+        return store
+
+    def _quarantine(self, path: Optional[Path], exc: Exception) -> None:
+        """A power.db with a valid header but damaged pages: move it aside so
+        the next start is clean, and keep this run's data in memory."""
+        moved = None
+        if path is not None:
+            dest = path.with_name(f"{path.name}.corrupt-{int(self._wall())}")
+            try:
+                os.replace(path, dest)
+                moved = dest.name
+            except OSError:
+                pass
+        log.warning(
+            "power.db is damaged (%s); %s; keeping power data in memory",
+            type(exc).__name__,
+            f"moved to {moved}" if moved else "it could not be moved aside",
+        )
 
     # ── one sample ──────────────────────────────────────────────────────
     @staticmethod
@@ -517,10 +584,19 @@ class PowerSampler:
             return
         settings = self._settings()
         if not settings.enabled:
+            # Not sampling, but the retained history stays readable, and the
+            # open bucket is written so a restart does not lose it.
+            store = self._ensure_store(create=False)
             with self._lock:
                 self._prev, self._now = None, None
+                pending, self._open = self._open, None
+                if pending is not None:
+                    self._keep(pending)
+            if store is not None:
+                self._save(store, pending)
             return
         store = self._ensure_store()
+        assert store is not None
         model = resolve_model(settings, self._platform)
         gpu_w = self._read(self._gpu or _gpu_reader)
         cpu_pct = self._read(self._cpu or _cpu_reader)
@@ -528,11 +604,13 @@ class PowerSampler:
         now, wall = self._clock(), self._wall()
         est = estimate(model, gpu_w, cpu_pct)
         closed: Optional[_Bucket] = None
+        cutoff: Optional[float] = None
         with self._lock:
             self.ticks += 1
             self._seq += 1
             prev, self._prev = self._prev, (now, gpu_w)
-            self._now = (est, activity)
+            # the first CPU reading after a (re)start has no window behind it
+            self._now = (est, activity, prev is not None)
             dt = now - prev[0] if prev is not None else 0.0
             if prev is not None and 0 < dt <= GAP_SECONDS:
                 h = dt / 3600.0
@@ -541,9 +619,10 @@ class PowerSampler:
                 other_wh = _wall_share(model, gpu_wh, cpu_wh, model.other_w * h)
                 closed = self._add(wall, dt, gpu_wh, cpu_wh, other_wh, activity)
                 self._count(owner, now, dt, gpu_wh, cpu_wh, other_wh, est.w)
+                cutoff = self._cutoff
         if closed is not None:
             try:
-                store.upsert(closed, prune_before=wall - RETENTION_SECONDS)
+                store.upsert(closed, prune_before=cutoff)
             except sqlite3.Error:
                 log.warning("power bucket could not be saved")
 
@@ -583,9 +662,23 @@ class PowerSampler:
             kept.merge(b)
 
     def _prune(self, wall: float) -> None:
-        cutoff = wall - RETENTION_SECONDS
-        for start in [s for s in self._buckets if s < cutoff]:
-            del self._buckets[start]
+        """Drop expired buckets and idle counters. A wall clock that has jumped
+        ahead of the newest bucket (a bad RTC, an NTP step) would expire the
+        whole history, so then nothing is pruned (and nothing in the store)."""
+        newest = max(self._buckets, default=None)
+        if newest is not None and wall - newest > BUCKET_SECONDS + JUMP_SLACK_SECONDS:
+            self._cutoff = None
+            if not self._jump_logged:
+                self._jump_logged = True
+                log.warning(
+                    "wall clock is %d s ahead of the newest power bucket; "
+                    "not pruning history",
+                    int(wall - newest),
+                )
+        else:
+            self._cutoff = wall - RETENTION_SECONDS
+            for start in [s for s in self._buckets if s < self._cutoff]:
+                del self._buckets[start]
         idle = self._clock() - OWNER_IDLE_SECONDS
         for owner in [o for o, c in self._counters.items() if c.last < idle]:
             del self._counters[owner]
@@ -683,16 +776,18 @@ class PowerSampler:
         with self._lock:
             if self._now is None:
                 return None
-            est, activity = self._now
+            est, activity, cpu_ok = self._now
             buckets = self._all_buckets()
+        # a bucket from a wall clock that has since stepped back is not now
+        open_end = int(wall // BUCKET_SECONDS) * BUCKET_SECONDS + BUCKET_SECONDS
         totals = {
-            key: sum(b.wh for b in buckets if b.start >= since)
+            key: sum(b.wh for b in buckets if since <= b.start < open_end)
             for key, since in starts.items()
         }
         return {
-            "w": round(est.w, 1),
+            "w": round(est.w if cpu_ok else est.w - est.cpu_w, 1),
             "gpu_w": None if est.gpu_w is None else round(est.gpu_w, 1),
-            "cpu_w": round(est.cpu_w, 1),
+            "cpu_w": round(est.cpu_w, 1) if cpu_ok else None,
             "other_w": round(est.other_w, 1),
             "estimated": True,
             "today_wh": _r(totals["today"]),

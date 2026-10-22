@@ -84,7 +84,7 @@
   - A single `gpu_sample()` with a 4 s cache and a lock queries `utilization.gpu,memory.used,memory.total,power.draw`.
   - `power.draw` is parsed on its own, so `[N/A]` gives None power while the rest stays.
   - `read_gpu` delegates to it, so existing GPU% and VRAM consumers are unchanged.
-- **PW03. Activity source.** Activity comes from `gpu_lease.holder()`, mapped to restore or asr (workflow or manual Jasna/avsubs/lada). Otherwise the workflow's running non-GPU stage gives translate or other. Otherwise the machine is idle. No heuristics.
+- **PW03. Activity source.** Activity comes from `gpu_lease.holder()`, mapped to restore or asr (workflow or manual Jasna/avsubs/lada). Otherwise the workflow's running non-GPU stage gives translate or other. Otherwise, a GPU at 30% utilisation or more that nobody holds (an untracked job, e.g. Jasna started outside TaskPaw) is other with owner none, not idle. Otherwise the machine is idle. No other heuristics.
 - **PW04. One owner per sample.**
   - Each sample belongs to exactly one (activity, owner film_id | manual | none).
   - Per-film energy = the sum of that film's samples, read from a cumulative per-owner counter at claim and at resolve by the dispatcher.
