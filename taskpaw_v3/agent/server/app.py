@@ -153,8 +153,11 @@ def create_network_app(
         Callable[[str, object, object, object], Optional[dict]]
     ] = None,
     power_history: Optional[Callable[[str], dict]] = None,
+    workflow_provider: Optional[Callable[[], Optional["WorkflowHostLike"]]] = None,
 ) -> FastAPI:
-    app = FastAPI(title="TaskPaw Agent", docs_url=None, redoc_url=None)
+    app = FastAPI(
+        title="TaskPaw Agent", docs_url=None, redoc_url=None, openapi_url=None
+    )
 
     def _auth(request: Request) -> bool:
         return token_ok(config.api_token, request.headers.get("Authorization"))
@@ -225,6 +228,9 @@ def create_network_app(
 
     _register_validation_handler(app, "/monitors", _auth)
     _register_film_routes(app, "/monitors", films_provider, run_films_provider, _auth)
+    from .workflow_network import register_workflow_network
+
+    register_workflow_network(app, config.workflow, workflow_provider, _auth)
     return app
 
 

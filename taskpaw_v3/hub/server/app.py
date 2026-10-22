@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -34,6 +34,11 @@ from taskpaw_v3.hub.server.film_proxy import (
 )
 from taskpaw_v3.hub.server.poller import Poller
 from taskpaw_v3.hub.server.store import HubStore
+from taskpaw_v3.hub.server.workflow_proxy import (
+    WorkflowProxyError,
+    WorkflowResource,
+    fetch_agent_workflow,
+)
 
 log = logging.getLogger("taskpaw.hub")
 
@@ -208,6 +213,12 @@ def _register_read_routes(
             {"error": exc.code, "detail": exc.detail}, status_code=exc.status_code
         )
 
+    def _workflow_error(code: str) -> JSONResponse:
+        exc = WorkflowProxyError.for_code(code)
+        return JSONResponse(
+            {"error": exc.code, "detail": exc.detail}, status_code=exc.status_code
+        )
+
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
         if re.fullmatch(
@@ -216,6 +227,13 @@ def _register_read_routes(
             if not authorize(request):
                 return _unauthorized()
             return _film_error("invalid_parameters")
+        if re.fullmatch(
+            r"/servers/[^/]+/workflow/(?:films(?:/[^/]+(?:/(?:poster|cover))?)?|plans)",
+            request.url.path,
+        ):
+            if not authorize(request):
+                return _unauthorized()
+            return _workflow_error("invalid_parameters")
         return await request_validation_exception_handler(request, exc)
 
     def _film_page(request: Request, sid: int, resource: FilmResource, params: dict):
@@ -275,6 +293,57 @@ def _register_read_routes(
             "run-films",
             {"name": name, "filter": filter, "page": page, "size": size},
         )
+
+    def _workflow(
+        request: Request,
+        sid: int,
+        resource: WorkflowResource,
+        film_id: str | None = None,
+    ) -> Response:
+        if not authorize(request):
+            return _unauthorized()
+        server = store.get_server(sid)
+        if server is None:
+            return _workflow_error("unknown_server")
+        if not server["enabled"]:
+            return _workflow_error("agent_disabled")
+        if not service.poller.snapshot_statuses().get(sid, {}).get("online"):
+            return _workflow_error("agent_offline")
+        try:
+            body, media_type = fetch_agent_workflow(
+                server,
+                resource,
+                service.poller._auth_headers(),
+                film_id=film_id,
+                timeout=service.poller.http_timeout,
+            )
+            return Response(
+                body,
+                media_type=media_type,
+                headers={"X-Content-Type-Options": "nosniff"},
+            )
+        except WorkflowProxyError as exc:
+            return _workflow_error(exc.code)
+
+    @app.get("/servers/{sid}/workflow/films")
+    def workflow_films(request: Request, sid: int) -> Response:
+        return _workflow(request, sid, "films")
+
+    @app.get("/servers/{sid}/workflow/plans")
+    def workflow_plans(request: Request, sid: int) -> Response:
+        return _workflow(request, sid, "plans")
+
+    @app.get("/servers/{sid}/workflow/films/{film_id}")
+    def workflow_film(request: Request, sid: int, film_id: str) -> Response:
+        return _workflow(request, sid, "film", film_id)
+
+    @app.get("/servers/{sid}/workflow/films/{film_id}/poster")
+    def workflow_poster(request: Request, sid: int, film_id: str) -> Response:
+        return _workflow(request, sid, "poster", film_id)
+
+    @app.get("/servers/{sid}/workflow/films/{film_id}/cover")
+    def workflow_cover(request: Request, sid: int, film_id: str) -> Response:
+        return _workflow(request, sid, "cover", film_id)
 
     @app.get("/ping")
     def ping() -> dict:

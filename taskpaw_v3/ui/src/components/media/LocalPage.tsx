@@ -11,13 +11,13 @@ import { isPaused, useWorkspace } from "./workspace";
 // 停止本机任务 need dispatcher stop semantics and come later.
 export function LocalPage() {
   const ws = useWorkspace();
-  const status = useQuery({ queryKey: ["agentStatus"], queryFn: api.agentStatus, refetchInterval: 5000 });
+  const status = useQuery({ queryKey: ["agentStatus"], queryFn: api.agentStatus, refetchInterval: 5000, enabled: !ws.readOnly });
   const gpu = ws.data.films.data?.gpu;
   const vram = gpu ? fmtVram(gpu.vram_mib) : null;
   const limit4k = gpu?.max_output === "4K";
   const current = ws.data.films.data?.current;
   const running = current ? ws.data.items.find((i) => i.id === current.film_id) : undefined;
-  const machine = status.data?.machine ?? "本机";
+  const machine = ws.readOnly ? ws.server?.snapshot?.machine ?? ws.server?.name : status.data?.machine ?? "本机";
   return (
     <>
       <PageTitle title="本机" />

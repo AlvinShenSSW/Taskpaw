@@ -177,11 +177,16 @@ class LocalDispatcher:
         finalizer: Finalizer | None = None,
         workflow_log: WorkflowLog | None = None,
         power: Callable[[], Any] | None = None,
+        on_resolved: Callable[
+            [LocalRuntime, m.PendingComputeJob, str, ExecOutcome], None
+        ]
+        | None = None,
     ) -> None:
         self.runtime, self.lease = runtime, lease
         # PWR-2: the agent's power sampler, read late (it starts after the host)
         self.power = power or power_estimate.get_sampler
         self.workflow_log = workflow_log or WorkflowLog(None)  # U1e: 日志 rows
+        self.on_resolved = on_resolved
         self.finalizer = finalizer
         self.return_step, self.scrape_step = return_step, scrape_step
         # unconfigured component stages, shown as the waiting reason (M01 §4.4)
@@ -754,6 +759,16 @@ class LocalDispatcher:
                     self.workflow_log.translated(name, film_timing(films[0]))
         except Exception:  # the log never changes the stage's outcome
             log.exception("workflow log row failed")
+        if self.on_resolved is not None:
+            try:
+                self.on_resolved(
+                    self.runtime,
+                    running.job,
+                    running.name or running.job.film_id,
+                    outcome,
+                )
+            except Exception:  # the second sink cannot affect execution or TaskLog
+                log.exception("workflow event hook failed")
 
     def _drop_other_workdirs(self, running: _Running) -> None:
         rt = self.runtime

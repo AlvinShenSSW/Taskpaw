@@ -58,7 +58,10 @@ function FilmCard({ item }: { item: WorkItem }) {
   const ws = useWorkspace();
   const title = itemTitle(item);
   const open = useMutation({
-    mutationFn: () => (item.kind === "package" ? api.workflowOpenPackage(item.pkg.package_id) : api.workflowOpen(item.id, "inbox")),
+    mutationFn: () => {
+      if (ws.readOnly) throw new Error("只读监控");
+      return item.kind === "package" ? api.workflowOpenPackage(item.pkg.package_id) : api.workflowOpen(item.id, "inbox");
+    },
     onError: (e) => ws.toast(errorText(e)),
   });
   const runner = ws.data.films.data?.intake;
@@ -101,7 +104,7 @@ function FilmCard({ item }: { item: WorkItem }) {
         {item.kind === "film" ? (
           <button type="button" className="btn ghost small" aria-label={`查看 ${title} 详情`} onClick={() => ws.openDetail(item.id)}>查看详情</button>
         ) : (
-          <button type="button" className="btn ghost small" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>
+          !ws.readOnly && <button type="button" className="btn ghost small" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>
         )}
       </div>
     </article>

@@ -192,6 +192,67 @@ def test_tasklog_launcher_order_and_direct_failure_alert(tmp_path, monkeypatch):
     assert calls[-1] == "agent.stopping"
 
 
+def test_workflow_events_and_network_provider_are_wired_without_live_services(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import uvicorn
+    from fastapi.testclient import TestClient
+
+    from taskpaw_v3.agent.server import launcher
+    from taskpaw_v3.core.lifecycle import GracefulShutdown
+    from taskpaw_v3.core.protocol import EventQueue
+    from taskpaw_v3.monitors import runtime
+    from taskpaw_v3.workflow import local_host
+
+    queue = EventQueue("m")
+    config = _llm_cfg()
+    config.workflow.enabled = True
+    shutdown = GracefulShutdown()
+    monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
+    monkeypatch.setattr(
+        launcher, "reclaim_ports_from_stale_instance", lambda *a, **k: None
+    )
+    monkeypatch.setattr(launcher, "claim_port", lambda *a, **k: Mock())
+    monkeypatch.setattr(launcher, "announce_ready", lambda *a, **k: None)
+    monkeypatch.setattr(runtime, "build_supervisor", lambda *a, **k: Mock())
+    monkeypatch.setattr(
+        "taskpaw_v3.agent.server.admin.MonitorAdmin.status_view", lambda self: {}
+    )
+    apps = []
+    monkeypatch.setattr(uvicorn, "Config", lambda app, **kw: apps.append(app))
+    monkeypatch.setattr(uvicorn, "Server", lambda *a, **kw: Mock())
+    host = SimpleNamespace(
+        state="running",
+        events=SimpleNamespace(snapshot=lambda: {"counts": {"planning": 1}}),
+        stop=Mock(),
+    )
+
+    def start(*args, **kwargs):
+        assert kwargs["event_queue"] is queue
+        assert kwargs["task_log"] is not None
+        return host
+
+    monkeypatch.setattr(local_host, "start_local_workflow", start)
+    launcher.run_agent(
+        config,
+        queue=queue,
+        shutdown=shutdown,
+        config_path=tmp_path / "agent.yaml",
+        block=False,
+    )
+    try:
+        network = TestClient(apps[0])
+        assert network.get("/status").json()["workflow"] == {"counts": {"planning": 1}}
+        host.state = "stopped"
+        assert network.get("/status").json()["workflow"] is None
+    finally:
+        shutdown.shutdown()
+    host.stop.assert_called_once()
+
+
 def test_run_agent_sets_llm_holder_before_port_reclaim(monkeypatch):
     # T-L1: the holder is initialised BEFORE the stale-port reclaim — hence before
     # every socket claim and the supervisor.

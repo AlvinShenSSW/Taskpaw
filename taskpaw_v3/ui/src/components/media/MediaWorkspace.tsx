@@ -14,6 +14,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { Dialog, GlobalStyles, Snackbar, useMediaQuery } from "@mui/material";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { POWER_CSS } from "../power/powerStyles";
+import { api as requests, type HubServer } from "../../api";
 import { ExceptionsPage } from "./ExceptionsPage";
 import { ExplainDialog, type Explain } from "./ExplainDialog";
 import { FilmDrawer } from "./FilmDrawer";
@@ -28,7 +29,7 @@ import { QueuePage } from "./QueuePage";
 import { ReviewDialog } from "./ReviewDialog";
 import { ReviewPage } from "./ReviewPage";
 import {
-  errorText, focusOnMount, isPaused, useMediaData, WorkspaceContext, type MediaData, type PageKey, type WorkspaceApi,
+  errorText, focusOnMount, isPaused, mediaFilmKey, mediaSourceKey, useMediaData, WorkspaceContext, type MediaData, type PageKey, type WorkspaceApi,
 } from "./workspace";
 
 // The ten pages of the workspace, in rail order (build spec §1 + U1 V2). The last four are
@@ -76,8 +77,17 @@ function NavList({ page, data, onPick, label }: { page: PageKey; data: MediaData
 
 // 「媒体处理中心」 (build spec V3 + U1). Phase 1 mounts it as the AgentConsole tab; it does not
 // depend on the console, so the Hub can mount the same component later. `onOpenPower` (PWR-2): the
-// 集群功耗 card's 「功耗详情」 link, given by a host that has the 功耗 tab.
-export function MediaWorkspace({ onOpenPower }: { onOpenPower?: () => void } = {}) {
+// 集群功耗 card's 「功耗详情」 link, given by a host that has the 功耗 tab (the Agent console only).
+type Props =
+  | { readOnly?: false; server?: never; onOpenPower?: () => void }
+  | { readOnly: true; server: HubServer; onOpenPower?: never };
+
+export function MediaWorkspace(props: Props = {}) {
+  // Source changes close old drawers/lightboxes and reset navigation to the new source.
+  return <MediaWorkspaceContent key={props.server?.id ?? "agent"} {...props} />;
+}
+
+function MediaWorkspaceContent({ readOnly = false, server, onOpenPower }: Props) {
   const narrow = useMediaQuery("(max-width:900px)");
   const [page, setPage] = useState<PageKey>("overview");
   const [queueStage, setQueueStage] = useState<StageFilter>("all");
@@ -85,7 +95,7 @@ export function MediaWorkspace({ onOpenPower }: { onOpenPower?: () => void } = {
   const [review, setReview] = useState<string | null>(null);
   // The target preflight polls only while a view that shows it is mounted (IR05); 异常 lists the
   // films whose target is offline, unwritable or taken, so it refreshes them too (Codex r6 P2).
-  const data = useMediaData(PREFLIGHT_PAGES.has(page) || review !== null);
+  const data = useMediaData(PREFLIGHT_PAGES.has(page) || review !== null, server?.id, readOnly);
   const [explain, setExplain] = useState<Explain>(null);
   const [toast, setToast] = useState<{ text: string; key: number } | null>(null);
   const [navOpen, setNavOpen] = useState(false);
@@ -109,13 +119,15 @@ export function MediaWorkspace({ onOpenPower }: { onOpenPower?: () => void } = {
   }, [moves]);
 
   const api: WorkspaceApi = useMemo(() => ({
-    data, navigate, queueStage, setQueueStage,
+    data, navigate, queueStage, setQueueStage, readOnly, server,
+    readFilm: (id) => server ? requests.hubWorkflowFilm(server.id, id) : requests.workflowFilm(id),
+    filmKey: (id) => mediaSourceKey(mediaFilmKey(id), server?.id),
     openDetail: (id) => { setReview(null); setExplain(null); setDrawer(id); },
-    openReview: (id) => { setDrawer(null); setExplain(null); setReview(id); },
+    openReview: (id) => { if (readOnly) return; setDrawer(null); setExplain(null); setReview(id); },
     openExplain: (kind, id) => { setDrawer(null); setReview(null); setExplain({ kind, filmId: id }); },
     toast: (text) => setToast({ text, key: Date.now() }),
-    openPower: onOpenPower,
-  }), [data, navigate, queueStage, onOpenPower]);
+    openPower: readOnly ? undefined : onOpenPower,
+  }), [data, navigate, queueStage, readOnly, server, onOpenPower]);
 
   const current = PAGES.find((p) => p.key === page) ?? PAGES[0];
   const films = data.films.data;
@@ -138,6 +150,7 @@ export function MediaWorkspace({ onOpenPower }: { onOpenPower?: () => void } = {
       <GlobalStyles styles={MEDIA_CSS} />
       <GlobalStyles styles={POWER_CSS} />
       <div className="mw mw-root" data-testid="media-workspace">
+        {readOnly && <Notice>只读监控 · 操作请在主控电脑上进行</Notice>}
         <a className="skip-link" href="#mw-main" onClick={(e) => { e.preventDefault(); mainRef.current?.focus(); }}>跳至主要内容</a>
         <div className="scope-banner">
           <div className="scope-left">
@@ -185,7 +198,7 @@ export function MediaWorkspace({ onOpenPower }: { onOpenPower?: () => void } = {
           onPick={(p) => { navPicked.current = true; setNavOpen(false); navigate(p); }} />
       </Dialog>
       <FilmDrawer filmId={drawer} onClose={() => setDrawer(null)} />
-      <ReviewDialog filmId={review} onClose={() => setReview(null)} />
+      {!readOnly && <ReviewDialog filmId={review} onClose={() => setReview(null)} />}
       <ExplainDialog explain={explain} onClose={() => setExplain(null)} />
     </WorkspaceContext.Provider>
   );

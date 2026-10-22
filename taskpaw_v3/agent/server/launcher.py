@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from taskpaw_v3 import __version__
 from taskpaw_v3.core import power, power_fleet
@@ -311,7 +311,7 @@ def run_agent(
             for name, entry in monitors.items():
                 if isinstance(entry, dict) and name in last_seen:
                     entry["last_event_at"] = last_seen[name]
-            return {
+            status: dict[str, Any] = {
                 "machine": config.machine,
                 "server_id": config.server_id,
                 "os": platform.platform(),
@@ -320,6 +320,15 @@ def run_agent(
                 # PWR-1: the live estimate (null while sampling is off)
                 "power": sampler.live(),
             }
+            if config.workflow.enabled:
+                status["workflow"] = (
+                    workflow_host.events.snapshot()
+                    if workflow_host is not None
+                    and workflow_host.state == "running"
+                    and workflow_host.events is not None
+                    else None
+                )
+            return status
 
         net = uvicorn.Server(
             uvicorn.Config(
@@ -330,6 +339,7 @@ def run_agent(
                     films_provider=supervisor.film_page,
                     run_films_provider=supervisor.run_films,
                     power_history=sampler.history,
+                    workflow_provider=lambda: workflow_host,
                 ),
                 log_level="warning",
             )
@@ -428,6 +438,7 @@ def run_agent(
                 config.workflow,
                 config_path.parent if config_path is not None else None,
                 task_log=task_log,
+                event_queue=queue,
             )
         except Exception:
             log.exception("media workflow could not be started")

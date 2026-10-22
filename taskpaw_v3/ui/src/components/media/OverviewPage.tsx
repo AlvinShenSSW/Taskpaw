@@ -29,7 +29,10 @@ export function OverviewPage() {
   const qc = useQueryClient();
   const paused = isPaused(data);
   const pause = useMutation({
-    mutationFn: (next: boolean) => api.workflowPause(next),
+    mutationFn: (next: boolean) => {
+      if (ws.readOnly) throw new Error("只读监控");
+      return api.workflowPause(next);
+    },
     onSuccess: (_r, next) => {
       ws.toast(next ? "已暂停新的领取；所有在途任务继续。" : "已恢复新任务领取。");
       return qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY });
@@ -57,9 +60,9 @@ export function OverviewPage() {
   return (
     <>
       <PageTitle title="概览" actions={<>
-        <button type="button" className="btn ghost" disabled={pause.isPending} onClick={() => pause.mutate(!paused)}>
+        {!ws.readOnly && <button type="button" className="btn ghost" disabled={pause.isPending} onClick={() => pause.mutate(!paused)}>
           <Icon of={paused ? PlayArrowIcon : PauseIcon} />{paused ? "恢复新领取" : "暂停新领取"}
-        </button>
+        </button>}
         <button type="button" className="btn primary" onClick={() => ws.navigate("review")}>
           待确认 <span className="mono">{review}</span><Icon of={ArrowForwardIcon} />
         </button>
@@ -148,7 +151,7 @@ export function OverviewPage() {
                 </div>
                 <div className="actions">
                   <button type="button" className={`btn small${item.status === "ready" ? " primary" : ""}`}
-                    onClick={() => ws.openReview(item.id)}>核对入库<Icon of={ArrowForwardIcon} /></button>
+                    onClick={() => ws.readOnly ? ws.openDetail(item.id) : ws.openReview(item.id)}>{ws.readOnly ? "查看详情" : "核对入库"}<Icon of={ArrowForwardIcon} /></button>
                 </div>
               </div>
             ))}

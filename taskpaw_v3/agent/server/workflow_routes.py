@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
@@ -25,20 +23,9 @@ if TYPE_CHECKING:
     from taskpaw_v3.workflow.local_host import WorkflowHostLike
     from taskpaw_v3.workflow.local_runtime import LocalRuntime
 
-WorkflowProvider = Callable[[], Optional["WorkflowHostLike"]]
-
-_CONFLICTS = {
-    "cas_conflict": "影片状态已变化，请刷新后重试",
-    "precondition_failed": "当前状态不允许此操作",
-}
-
-
-class CodedConflict(HTTPException):
-    """A 409 whose body also names the store's error code (U1 Codex r4 F2)."""
-
-    def __init__(self, detail: str, code: str):
-        super().__init__(status_code=409, detail=detail)
-        self.code = code
+from . import workflow_reads as reads
+from .workflow_reads import CodedConflict, WorkflowProvider, _mapped
+from .workflow_reads import off_state as off_state  # retained for callers
 
 
 class ConfirmBody(BaseModel):
@@ -94,47 +81,6 @@ def open_folder(path: Path) -> None:
     raise NotImplementedError("只支持在 Windows 上打开文件夹")
 
 
-def off_state(settings: WorkflowSettings) -> tuple[str, str]:
-    """Why there is no workflow host (D07)."""
-    if not settings.enabled:
-        return "off", "未启用"
-    if not settings.inbox_root:
-        return "off", "未设置收件目录"
-    return "failed", "启动失败（见日志）"
-
-
-@contextmanager
-def _mapped() -> Iterator[None]:
-    """Domain errors as HTTP statuses (§8); HTTPException passes through."""
-    from taskpaw_v3.workflow.filmpaw_client import FilmpawRefused, FilmpawUnavailable
-    from taskpaw_v3.workflow.finalize import ConfirmError
-    from taskpaw_v3.workflow.models import WorkflowError
-
-    try:
-        yield
-    except ConfirmError as exc:
-        if exc.code in _CONFLICTS:
-            raise CodedConflict(str(exc), exc.code) from None
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    except WorkflowError as exc:
-        if exc.code in _CONFLICTS:
-            raise CodedConflict(_CONFLICTS[exc.code], exc.code) from None
-        if exc.code == "not_found":
-            raise HTTPException(status_code=404, detail="未知影片") from None
-        raise HTTPException(
-            status_code=503, detail=f"媒体流水线暂不可用：{exc.code}"
-        ) from None
-    except FilmpawUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
-    except FilmpawRefused as exc:
-        status = 404 if exc.status == 404 else 503
-        raise HTTPException(status_code=status, detail=exc.message) from None
-    except NotImplementedError as exc:
-        raise HTTPException(status_code=501, detail=str(exc)) from None
-    except RuntimeError as exc:  # the host has not started its runtime yet
-        raise HTTPException(status_code=503, detail=str(exc)) from None
-
-
 def register_workflow_routes(
     app: FastAPI, settings: WorkflowSettings, provider: WorkflowProvider | None
 ) -> None:
@@ -145,19 +91,10 @@ def register_workflow_routes(
         )
 
     def _host() -> WorkflowHostLike:
-        host = provider() if provider is not None else None
-        if host is None:
-            raise HTTPException(status_code=503, detail=off_state(settings)[1])
-        if host.state != "running" or host.runtime is None:
-            raise HTTPException(status_code=503, detail=host.reason or host.state)
-        return host
+        return reads.require_host(settings, provider)
 
     def _runtime(host: WorkflowHostLike) -> LocalRuntime:
-        assert host.runtime is not None  # checked by _host
-        return host.runtime
-
-    def _not_found() -> HTTPException:
-        return HTTPException(status_code=404, detail="未知影片")
+        return reads.runtime(host)
 
     def _open(path: Path | None) -> Response:
         if path is None:
@@ -170,28 +107,6 @@ def register_workflow_routes(
             ) from None
         return Response(status_code=204)
 
-    def _empty(state: str, reason: str) -> dict[str, Any]:
-        from taskpaw_v3.workflow import board
-
-        return {
-            "state": state,
-            "reason": reason,
-            "current": None,
-            "intake": None,
-            "films": [],
-            "packages": [],
-            "counts": board.counts([], []),
-            "dispatch": None,
-            "gpu": None,
-            "power": _cluster_power(),
-            "energy_rates": [],
-        }
-
-    def _cluster_power() -> dict[str, Any] | None:
-        from taskpaw_v3.core import power_fleet
-
-        return power_fleet.cluster_power()
-
     def _dispatcher(host: WorkflowHostLike) -> Any:
         dispatcher = getattr(host, "dispatcher", None)
         if dispatcher is None:
@@ -200,114 +115,29 @@ def register_workflow_routes(
 
     @app.get("/control/workflow/films")
     def workflow_films() -> dict[str, Any]:
-        host = provider() if provider is not None else None
-        if host is None:
-            return _empty(*off_state(settings))
-        if host.state != "running" or host.runtime is None:
-            return _empty(host.state, host.reason)
-        from taskpaw_v3.workflow import board
-        from taskpaw_v3.workflow import energy as en
-        from taskpaw_v3.workflow.planning import max_output
-
-        status = host.status()
-        dispatch = status.get("dispatch") or {}
-        current, intake = dispatch.get("current"), status.get("intake")
-        rt = host.runtime
-        with _mapped():
-            films = rt.store.film_board(rt.operator)
-            packages = rt.store.list_intake_board(rt.operator)
-            facts = board.row_facts(rt, films)
-            # PW13: the history apart from the display board's limit
-            history = rt.store.energy_history(rt.operator)
-        rows = board.film_rows(
-            films,
-            dict(dispatch.get("waiting") or {}),
-            current,
-            status.get("ltx_download"),
-            facts=facts,
-        )
-        package_rows = board.package_rows(packages, intake)
-        gpu = rt.gpu
-        return {
-            "state": host.state,
-            "reason": host.reason,
-            "current": current,
-            "intake": intake,
-            "films": rows,
-            "packages": package_rows,
-            # U1 V' / V3 §7.4: the rail badges, the dispatch state and the card
-            "counts": board.counts(rows, package_rows),
-            "dispatch": {
-                "state": dispatch.get("state", "idle"),
-                "reason": dispatch.get("reason", ""),
-                "paused": bool(dispatch.get("paused", False)),
-            }
-            if dispatch
-            else None,
-            # `max_output`: what the workflow restores, not what the card could (phase 1)
-            "gpu": {
-                "name": gpu.name,
-                "vram_mib": gpu.vram_mib,
-                "max_output": max_output(rt),
-            }
-            if gpu is not None
-            else None,
-            # PWR-2: the cluster's live estimate (this machine plus the 功耗
-            # tab's peers) and the history behind 预计耗电 / 每片能耗
-            "power": _cluster_power(),
-            "energy_rates": en.rates(history),
-        }
+        return reads.films(settings, provider)
 
     @app.get("/control/workflow/films/{film_id}")
     def workflow_film(film_id: str) -> dict[str, Any]:
-        from taskpaw_v3.workflow import board
-
-        host = _host()
-        status = host.status()
-        dispatch = dict(status.get("dispatch") or {})
-        with _mapped():
-            detail = board.film_detail(
-                _runtime(host),
-                film_id,
-                dict(dispatch.get("waiting") or {}),
-                dispatch.get("current"),
-                status.get("ltx_download"),
-            )
-        if detail is None:
-            raise _not_found()
-        return detail
+        return reads.film(settings, provider, film_id)
 
     @app.get("/control/workflow/films/{film_id}/poster")
     def workflow_poster(film_id: str) -> FileResponse:
         from taskpaw_v3.workflow import board
 
-        host = _host()
-        with _mapped():
-            path = board.poster_path(_runtime(host), film_id)
-        if path is None:
-            raise HTTPException(status_code=404, detail="没有封面")
+        path = reads.image_path(settings, provider, film_id, "poster")
         return FileResponse(path, media_type=board.image_type(path))
 
     @app.get("/control/workflow/films/{film_id}/cover")
     def workflow_cover(film_id: str) -> FileResponse:
-        """U1b: the full landscape jacket the 大图 shows (`board.jacket`)."""
         from taskpaw_v3.workflow import board
 
-        host = _host()
-        with _mapped():
-            path = board.cover_path(_runtime(host), film_id)
-        if path is None:
-            raise HTTPException(status_code=404, detail="没有完整封面")
+        path = reads.image_path(settings, provider, film_id, "cover")
         return FileResponse(path, media_type=board.image_type(path))
 
-    # ── U1 P3': 待处理 ──────────────────────────────────────────────────
     @app.get("/control/workflow/plans")
     def workflow_plans() -> dict[str, Any]:
-        from taskpaw_v3.workflow.planning import plan_list
-
-        host = _host()
-        with _mapped():
-            return plan_list(_runtime(host))
+        return reads.plans(settings, provider)
 
     @app.post("/control/workflow/plans")
     def workflow_confirm_plans(body: PlansBody) -> dict[str, Any]:

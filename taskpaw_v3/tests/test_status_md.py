@@ -10,6 +10,68 @@ import json
 from taskpaw_v3.hub.server.status_md import render_status_md
 
 
+def test_workflow_section_counts_progress_and_hub_local_day():
+    from datetime import datetime, timedelta
+
+    local = (
+        datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+    )
+    summary = {
+        "counts": {"planning": 2, "active": 1, "confirm": 3, "attention": 4},
+        "completed_at": [local.isoformat(), (local - timedelta(days=1)).isoformat()],
+        "current": {
+            "film": "ABF-394",
+            "stage": "restore",
+            "started_at": (local - timedelta(seconds=762)).isoformat(),
+            "ltx": {
+                "stage_index": 2,
+                "stage_total": 4,
+                "stage_name": "encode",
+                "percent": 52,
+            },
+        },
+    }
+    statuses = [
+        {
+            "name": "windows",
+            "reachable": True,
+            "status_json": json.dumps({"workflow": summary}),
+        }
+    ]
+    md = render_status_md(statuses, local.strftime("%Y-%m-%d %H:%M:%S"))
+    assert "## 媒体处理" in md
+    assert "待处理 2 · 处理中 1 · 待确认 3 · 异常 4 · 完成今日 1" in md
+    assert "ABF-394 修复 · LTX 2/4 encode 52% · 已用 0:12:42" in md
+    statuses[0]["reachable"] = False
+    offline = render_status_md(statuses, local.strftime("%Y-%m-%d %H:%M:%S"))
+    assert "媒体处理" in offline and "离线" in offline
+    assert "encode 52%" not in offline
+
+
+def test_workflow_section_handles_unavailable_and_bad_values():
+    payload = {
+        "counts": {"planning": float("nan"), "active": True},
+        "current": {
+            "film": "Film\n## injected",
+            "stage": "restore",
+            "ltx": {"percent": "bad"},
+        },
+        "completed_at": [None, "bad", "2026-10-22T10:00:00"],
+    }
+    rows = [
+        {
+            "name": "box",
+            "reachable": True,
+            "status_json": json.dumps({"workflow": payload}),
+        }
+    ]
+    text = render_status_md(rows, "2026-10-22 12:00:00")
+    assert "\n## injected" not in text and "nan" not in text
+    assert "待处理 0" in text and "完成今日 0" in text
+    rows[0]["status_json"] = json.dumps({"workflow": None})
+    assert "暂不可用" in render_status_md(rows, "2026-10-22 12:00:00")
+
+
 def test_v3_metrics_render_in_v2_format_for_openclaw():
     # V3 keeps state + a structured metrics dict; status.md must re-embed the
     # metrics as V2-format strings so the OpenClaw daily-report regexes (CPU %, RAM

@@ -36,13 +36,19 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const qc = useQueryClient();
   const titleRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => { titleRef.current?.focus({ preventScroll: true }); }, []);
-  const detail = useQuery({ queryKey: mediaFilmKey(filmId), queryFn: () => api.workflowFilm(filmId), refetchInterval: 5000 });
+  const detail = useQuery({ queryKey: ws.filmKey(filmId), queryFn: () => ws.readFilm(filmId), refetchInterval: 5000 });
   const film = detail.data;
   const item = ws.data.items.find((i) => i.id === filmId);
   const plan = ws.data.plans.data?.plans.find((e) => e.film_id === filmId);
-  const open = useMutation({ mutationFn: () => api.workflowOpen(filmId, "inbox"), onError: (e) => ws.toast(errorText(e)) });
+  const open = useMutation({ mutationFn: () => {
+    if (ws.readOnly) throw new Error("只读监控");
+    return api.workflowOpen(filmId, "inbox");
+  }, onError: (e) => ws.toast(errorText(e)) });
   const retry = useMutation({
-    mutationFn: (stage: string) => api.workflowRetry(filmId, stage),
+    mutationFn: (stage: string) => {
+      if (ws.readOnly) throw new Error("只读监控");
+      return api.workflowRetry(filmId, stage);
+    },
     onSuccess: () => {
       ws.toast("已重新排队；原始来源保留。");
       void qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY });
@@ -53,6 +59,7 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   const reasons = useIntakeReasons();
   const status = item?.status ?? (film?.group === "planning" ? "pending" : "receiving");
   const primary = () => {
+    if (ws.readOnly) return <button type="button" className="btn ghost" onClick={onClose}>关闭</button>;
     if (REVIEW_STATES.includes(status)) {
       return <button type="button" className="btn primary" onClick={() => ws.openReview(filmId)}>查看并确认入库</button>;
     }
@@ -85,7 +92,7 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
       <div className="modal-foot">
         <p>阶段结果与来源清理分别记录。</p>
         <div className="actions">
-          <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>
+          {!ws.readOnly && <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>}
           {primary()}
         </div>
       </div>
@@ -161,7 +168,7 @@ function DrawerBody({ film, item, status, plan }: {
           <p className="small muted" style={{ marginTop: 10 }}>由阶段日志提供；不包含翻译、回传、刮削与入库。</p>
         </div>
       ) : download ? (
-        <LtxDownload value={download} onRespond={(requestId, approved) => api.workflowLtxDownload(requestId, approved)}
+        <LtxDownload value={download} onRespond={ws.readOnly ? undefined : (requestId, approved) => api.workflowLtxDownload(requestId, approved)}
           onError={(e) => ws.toast(errorText(e))} />
       ) : (
         <Notice icon={InfoOutlinedIcon}>

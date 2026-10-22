@@ -314,6 +314,108 @@ def _last_seen_hms(ts: Optional[str]) -> str:
         return ts
 
 
+def _workflow_time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return stamp.astimezone() if stamp.tzinfo is not None else None
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _workflow_progress(current: Any, now: datetime) -> str:
+    if not isinstance(current, dict):
+        return ""
+    name = _inline(str(current.get("film") or ""))
+    if not name:
+        return ""
+    labels = {
+        "restore": "修复",
+        "asr": "识别",
+        "translate": "翻译",
+        "return": "回传",
+        "scrape": "刮削",
+    }
+    stage = current.get("stage")
+    label = labels.get(stage, "处理中") if isinstance(stage, str) else "处理中"
+    parts = [f"{name} {label}"]
+    ltx = current.get("ltx")
+    if isinstance(ltx, dict):
+        index: Any = ltx.get("stage_index")
+        total: Any = ltx.get("stage_total")
+        stage_name = _inline(str(ltx.get("stage_name") or ""), 40)
+        percent: Any = ltx.get("percent")
+        if _is_num(index) and _is_num(total) and 1 <= index <= total:
+            text = f"LTX {int(index)}/{int(total)} {stage_name}".rstrip()
+            if _is_num(percent) and 0 <= percent <= 100:
+                text += f" {percent:.0f}%"
+            parts.append(text)
+    elif isinstance(current.get("progress"), str) and current["progress"]:
+        parts.append(_inline(current["progress"]))
+    start = _workflow_time(current.get("started_at"))
+    if start is not None and start <= now:
+        seconds = int((now - start).total_seconds())
+        parts.append(
+            f"已用 {seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+        )
+    return " · ".join(parts)
+
+
+def _workflow_lines(statuses: list[dict[str, Any]], now: str) -> list[str]:
+    sources = []
+    for status in statuses:
+        try:
+            data = json.loads(status.get("status_json") or "{}")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict) and "workflow" in data:
+            sources.append((status, data["workflow"]))
+    if not sources:
+        return []
+    try:
+        point = datetime.strptime(now, "%Y-%m-%d %H:%M:%S").astimezone()
+    except ValueError:
+        point = datetime.now().astimezone()
+    lines = ["## 媒体处理"]
+    for status, workflow in sources:
+        name = _inline(str(status.get("name", "unknown")))
+        if not status.get("reachable"):
+            lines.append(f"- {name}: 离线")
+            continue
+        if not isinstance(workflow, dict):
+            lines.append(f"- {name}: 暂不可用")
+            continue
+        counts = workflow.get("counts")
+        counts = counts if isinstance(counts, dict) else {}
+
+        def count(key: str) -> int:
+            value: Any = counts.get(key)
+            return max(0, int(value)) if _is_num(value) else 0
+
+        completions = workflow.get("completed_at")
+        today = (
+            sum(
+                1
+                for value in completions
+                if (stamp := _workflow_time(value)) is not None
+                and stamp.date() == point.date()
+            )
+            if isinstance(completions, list)
+            else 0
+        )
+        lines.append(
+            f"- {name}: 待处理 {count('planning')} · "
+            f"处理中 {count('active') + count('archiving')} · "
+            f"待确认 {count('confirm')} · "
+            f"异常 {count('attention') + count('packages_attention')} · 完成今日 {today}"
+        )
+        progress = _workflow_progress(workflow.get("current"), point)
+        if progress:
+            lines.append(f"- {progress}")
+    return [*lines, ""]
+
+
 def render_status_md(statuses: list[dict[str, Any]], now: str) -> str:
     """Build the status.md text. `statuses` = snapshot rows
     ({name, reachable, status_json, last_seen}); offline servers render last_seen.
@@ -344,6 +446,7 @@ def render_status_md(statuses: list[dict[str, Any]], now: str) -> str:
             )
             lines.append(f"  Upstream: {reason}{detail}")
         lines.append("")
+    lines.extend(_workflow_lines(statuses, now))
     return "\n".join(lines)
 
 
