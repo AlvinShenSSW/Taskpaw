@@ -453,6 +453,7 @@ def test_the_launcher_runs_the_refresher_and_the_view_lists_peers(
     try:
         fleet_ = power_fleet.get_fleet()
         assert fleet_ is not None
+        assert fleet_._own() == ("s", "HOME-PC")  # IR06: knows this agent
         fleet_.refresh_once()
         view = kwargs["control"]["power_view"]("7d")
         assert view["machine"]["name"] == "HOME-PC"
@@ -473,3 +474,201 @@ def test_a_peer_that_stops_answering_has_no_current_figure():
     (row,) = f.snapshot()
     assert row["state"] == "unreachable" and row["power"] is None
     assert row["history"] == HISTORY  # what was read stays history
+
+
+# ── scheduling and shutdown (Codex PWR-2/3) ─────────────────────────────────
+def wait_until(condition, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
+
+
+def test_stop_cancels_queued_peers_and_returns_within_its_budget():
+    gate = threading.Event()
+    started: list[float] = []
+    lock = threading.Lock()
+
+    def slow(url, token):
+        with lock:
+            started.append(time.monotonic())
+        gate.wait(1.0)  # a peer that answers late
+        raise PeerError("unreachable")
+
+    peers = [SimpleNamespace(name=f"m{i}", address=f"10.0.0.{i + 1}") for i in range(8)]
+    f = PowerFleet(lambda: peers, lambda: TOKEN, fetch=slow, interval=0.05)
+    f.start()
+    try:
+        assert wait_until(lambda: len(started) >= 4)  # every worker is busy
+        stopped = time.monotonic()
+        assert f.stop(5) is True
+        assert time.monotonic() - stopped < 3.0
+        assert all(at < stopped for at in started)  # nothing started after stop
+        count = len(started)
+        time.sleep(0.2)
+        assert len(started) == count
+    finally:
+        gate.set()
+    f.refresh_once()  # after stop: a no-op, never an error
+    assert len(started) == count
+
+
+def test_a_slow_history_never_delays_the_status_refresh():
+    gate = threading.Event()
+    statuses: list[str] = []
+
+    def fetch(url, token):
+        if url.endswith("/status"):
+            statuses.append(url)
+            return {"power": LIVE}
+        gate.wait(5)  # every history hangs
+        return HISTORY
+
+    clock = Clock()
+    f = PowerFleet(
+        lambda: [SimpleNamespace(**GPU02)], lambda: TOKEN, fetch=fetch, clock=clock
+    )
+    try:
+        f.refresh_once(wait=False)
+        assert wait_until(lambda: len(statuses) == 1)
+        clock.now += 5
+
+        def cycle():  # the loop's next cycles, the histories still hanging
+            f.refresh_once(wait=False)
+            return len(statuses) >= 2
+
+        assert wait_until(cycle)
+        assert f.snapshot()[0]["state"] == "ok"
+    finally:
+        gate.set()
+        assert f.stop(5) is True
+
+
+def test_a_failing_history_is_retried_with_a_backoff():
+    f, fetch, clock = fleet(
+        [GPU02],
+        {"/status": {"power": LIVE}, "range=24h": "unreachable", "range=": HISTORY},
+    )
+    for _ in range(121):  # ten minutes of 5 s cycles
+        f.refresh_once()
+        clock.now += 5
+    failing = [u for u, _ in fetch.calls if "range=24h" in u]
+    healthy = [u for u, _ in fetch.calls if "range=7d" in u]
+    statuses = [u for u, _ in fetch.calls if u.endswith("/status")]
+    assert len(statuses) == 121
+    assert len(healthy) == 11  # once a minute
+    # 60 s, then 120 s, then 240 s, then at most 5 min apart: 100, 160, 280, 520
+    assert len(failing) == 4
+    assert f.snapshot("7d")[0]["history"] == HISTORY
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        {"t": [0, 900], "avg_w": [1.0]},  # unequal lengths
+        {"t": list(range(169)), "avg_w": [1.0] * 169},  # more than 168 points
+        {"t": [0, 900], "avg_w": [1.0, "2"]},
+        {"t": [0, "900"], "avg_w": [1.0, 2.0]},
+        {"t": [0, 900], "avg_w": [True, 2.0]},
+        {"t": [0, None], "avg_w": [1.0, 2.0]},
+        {"t": [0, 900], "avg_w": None},
+        {"t": [0, 900], "avg_w": [float("nan"), 1.0]},
+        [1, 2],
+    ],
+)
+def test_an_invalid_peer_history_is_treated_as_unavailable(history):
+    f, _fetch, _clock = fleet([GPU02], {"/status": {"power": LIVE}, "range=": history})
+    f.refresh_once()
+    (row,) = f.snapshot()
+    assert row["state"] == "ok" and row["history"] is None
+
+
+def test_a_valid_peer_history_keeps_nulls_as_gaps():
+    f, _fetch, _clock = fleet([GPU02], {"/status": {"power": LIVE}, "range=": HISTORY})
+    f.refresh_once()
+    assert f.snapshot()[0]["history"]["avg_w"] == [100.0, None]
+
+
+def test_a_peer_that_is_this_agent_is_not_counted_twice():
+    clock = Clock()
+    fetch = Peers({"/status": {"machine": "HOME-PC", "server_id": "s", "power": LIVE}})
+    f = PowerFleet(
+        lambda: [SimpleNamespace(**GPU02)],
+        lambda: TOKEN,
+        fetch=fetch,
+        clock=clock,
+        own=lambda: ("s", "HOME-PC"),
+    )
+    f.refresh_once()
+    (row,) = f.snapshot()
+    assert row["state"] == "self" and row["power"] is None and row["history"] is None
+    assert [u for u, _ in fetch.calls if "history" in u] == []
+    power_fleet.set_fleet(f)
+    assert power_fleet.cluster_power() is None  # nothing local, the peer skipped
+
+
+def test_another_machine_with_its_own_server_id_is_counted():
+    fetch = Peers(
+        {
+            "/status": {"machine": "GPU-02", "server_id": "g2", "power": LIVE},
+            "range=": HISTORY,
+        }
+    )
+    f = PowerFleet(
+        lambda: [SimpleNamespace(**GPU02)],
+        lambda: TOKEN,
+        fetch=fetch,
+        clock=Clock(),
+        own=lambda: ("s", "HOME-PC"),
+    )
+    f.refresh_once()
+    assert f.snapshot()[0]["state"] == "ok"
+
+
+# ── a hostname is resolved once and checked (IR04) ──────────────────────────
+def test_a_hostname_resolving_to_a_public_address_is_never_contacted(peer, monkeypatch):
+    peer.json("/status", {"ok": True})
+    monkeypatch.setattr(
+        power_fleet,
+        "_getaddrinfo",
+        lambda host, port, **kw: [(2, 1, 6, "", ("8.8.8.8", port))],
+    )
+    with pytest.raises(PeerError) as caught:
+        fetch_json(f"http://gpu-02.lan:{peer.port}/status", TOKEN)
+    assert caught.value.code == "invalid_address"
+    assert peer.seen == []
+
+
+def test_a_hostname_is_fetched_at_the_address_it_resolved_to(peer, monkeypatch):
+    peer.json("/status", {"ok": True})
+    calls = []
+
+    def resolve(host, port, **kw):
+        calls.append(host)
+        return [(2, 1, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(power_fleet, "_getaddrinfo", resolve)
+    assert fetch_json(f"http://gpu-02.lan:{peer.port}/status", TOKEN) == {"ok": True}
+    assert calls == ["gpu-02.lan"]  # one resolution, then that address
+    ((_path, headers),) = peer.seen
+    assert headers["Host"] == f"gpu-02.lan:{peer.port}"
+
+
+def test_a_hanging_resolver_is_bounded(monkeypatch):
+    release = threading.Event()
+
+    def hang(host, port, **kw):
+        release.wait(5)
+        return [(2, 1, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(power_fleet, "_getaddrinfo", hang)
+    started = time.monotonic()
+    try:
+        with pytest.raises(PeerError) as caught:
+            fetch_json("http://gpu-02.lan:5680/status", TOKEN, timeout=0.3)
+        assert caught.value.code == "unreachable"
+        assert time.monotonic() - started < 1.5
+    finally:
+        release.set()

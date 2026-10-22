@@ -16,6 +16,10 @@ export const finalRevision = (revisions: FilmRevisions | null | undefined) =>
   (revisions?.final ? `${revisions.final.revision}:${revisions.final.hash}` : null);
 export const mediaTargetKey = (filmId: string, final: string | null) => ["mediaTarget", filmId, final] as const;
 const POLL_MS = 5000;
+// A dialog title's ref: focus it once when it mounts (IR01). A module-level function keeps one identity,
+// so React does not call it again on every render — an inline `ref={(el) => el?.focus()}` would pull the
+// focus back to the title on each keystroke and each poll.
+export const focusOnMount = (el: HTMLElement | null) => { el?.focus({ preventScroll: true }); };
 export const PREFLIGHT_MS = 30000;
 // Each preflight asks Filmpaw and stats the NAS, so at most this many films per poll cycle (IR05).
 export const PREFLIGHT_MAX = 10;

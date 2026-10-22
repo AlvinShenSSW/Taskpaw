@@ -217,6 +217,8 @@ def register_workflow_routes(
             films = rt.store.film_board(rt.operator)
             packages = rt.store.list_intake_board(rt.operator)
             facts = board.row_facts(rt, films)
+            # PW13: the history apart from the display board's limit
+            history = rt.store.energy_history(rt.operator)
         rows = board.film_rows(
             films,
             dict(dispatch.get("waiting") or {}),
@@ -253,7 +255,7 @@ def register_workflow_routes(
             # PWR-2: the cluster's live estimate (this machine plus the 功耗
             # tab's peers) and the history behind 预计耗电 / 每片能耗
             "power": _cluster_power(),
-            "energy_rates": en.rates(films),
+            "energy_rates": en.rates(history),
         }
 
     @app.get("/control/workflow/films/{film_id}")

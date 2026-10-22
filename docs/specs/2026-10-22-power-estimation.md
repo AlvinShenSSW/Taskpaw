@@ -116,3 +116,13 @@
 - **PW13.** Prediction tiers are resolution × quality (4K/1080p × 标准/良好/高).
 - **PW14.** Older builds cannot read `summary.energy` (strict validation). This is accepted and noted.
 - **Machine fact.** The controller machine has an RTX 5060 8 GB (power limit 145 W, idle about 45 W). A 4K standard restore is expected well below the 5070 Ti numbers in the previews.
+
+## PWR-2/3 review decisions
+
+- **Missing, never zero.** An attempt whose interval the sampler did not cover has no energy (None), not 0 Wh: sampling off at resolve, or the counted seconds short of the elapsed time by more than two gaps (2 × 15 s; sampling off for a while, a stalled sampler). Such an attempt makes the film 「部分」, and the film leaves the prediction history.
+- **Prediction history.** It is read from the store apart from the display board (which keeps the newest 20 finished films): the newest 10 complete films per machine × resolution × tier.
+- **Peer refresh.** `/status` is queued every 5 s; each history range every 60 s on its own pool, so a slow history never delays a status. A failing history backs off 60 s → 120 s → 240 s → at most 5 min. Stopping cancels queued requests, starts no new one and joins the requests in flight within the stop budget.
+- **Peer addresses.** A hostname is resolved once per request (bounded) and refused when any answer is public; the request goes to that address. On the trusted home LAN a mistyped *private* address still receives the token; this is accepted.
+- **Peer data.** A peer's history must be equal-length `t` / `avg_w` lists of at most 168 numbers (or nulls in `avg_w`), else it is unavailable. A peer whose `/status` reports this agent's own `server_id` (else machine name) is listed as 「就是本机，不重复计入」 and not summed.
+- **Peer list in the dialog.** A row typed but not 添加-ed is added on 保存, or the save is blocked with its hint. Per-peer estimate parameters are edited on that machine's own TaskPaw, not in this dialog (a deviation from the preview, which edits every machine in one dialog).
+- **IR08.** Accepted at home scale (single user, a handful of machines); no change.

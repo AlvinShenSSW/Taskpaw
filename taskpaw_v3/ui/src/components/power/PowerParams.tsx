@@ -8,6 +8,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { api, type LivePower, type PowerPeerSetting, type PowerSettings } from "../../api";
 import { Icon, Notice } from "../media/parts";
+import { focusOnMount } from "../media/workspace";
 import { fmtW } from "./powerModel";
 import { platformDefaults } from "./powerView";
 
@@ -59,7 +60,7 @@ function ParamsBody({ onClose, settings, live, machineName, os, onSaved }: {
       : "插座读数低于当前 GPU + CPU 估算，请在机器空闲时重新读数。";
 
   const save = useMutation({
-    mutationFn: () => api.updateConfig({
+    mutationFn: (peers: PowerPeerSetting[]) => api.updateConfig({
       power: {
         other_w: num(other), psu_efficiency: num(eff), cpu_source: cpuSource, tdp_w: num(tdp), idle_w: num(idle), peers,
       },
@@ -73,20 +74,34 @@ function ParamsBody({ onClose, settings, live, machineName, os, onSaved }: {
     onError: (e) => setError(e instanceof Error ? e.message : String(e)),
   });
 
-  const addPeer = () => {
+  // The peer list with the typed row appended, or null (and the hint shown) when that row is invalid.
+  const withTyped = (): PowerPeerSetting[] | null => {
     const name = peerName.trim(), address = peerAddress.trim();
-    if (!name || !address) { setPeerError("请填写名称和地址。"); return; }
-    if (peers.some((p) => p.name === name)) { setPeerError("名称已存在。"); return; }
-    if (!PEER_ADDRESS.test(address) || address.includes("://")) { setPeerError("地址格式：主机或 IP，可带 :端口（默认 5680）。"); return; }
-    setPeers([...peers, { name, address }]);
+    if (!name && !address) return peers;
+    if (!name || !address) { setPeerError("请填写名称和地址。"); return null; }
+    if (peers.some((p) => p.name === name)) { setPeerError("名称已存在。"); return null; }
+    if (!PEER_ADDRESS.test(address) || address.includes("://")) { setPeerError("地址格式：主机或 IP，可带 :端口（默认 5680）。"); return null; }
     setPeerName(""); setPeerAddress(""); setPeerError(null);
+    return [...peers, { name, address }];
+  };
+  const addPeer = () => {
+    if (!peerName.trim() && !peerAddress.trim()) { setPeerError("请填写名称和地址。"); return; }
+    const next = withTyped();
+    if (next) setPeers(next);
+  };
+  // IR07: a row typed but not 添加-ed is saved too; an incomplete one blocks the save with its hint.
+  const onSave = () => {
+    const next = withTyped();
+    if (!next) return;
+    setPeers(next);
+    save.mutate(next);
   };
 
   return (
     <>
       <div className="modal-head">
         <div>
-          <h2 id="pw-params-title" tabIndex={-1} ref={(el) => el?.focus({ preventScroll: true })}>估算参数</h2>
+          <h2 id="pw-params-title" tabIndex={-1} ref={focusOnMount}>估算参数</h2>
           <p>按机器设置；保存后实时功耗与之后的能耗按新参数估算</p>
         </div>
         <button type="button" className="btn ghost icon-btn" aria-label="关闭估算参数" onClick={onClose}><Icon of={CloseIcon} /></button>
@@ -191,7 +206,7 @@ function ParamsBody({ onClose, settings, live, machineName, os, onSaved }: {
         <p>不涉及电价；只用于看分布和每片能耗。</p>
         <div className="actions">
           <button type="button" className="btn ghost" onClick={onClose}>取消</button>
-          <button type="button" className="btn primary" disabled={save.isPending} onClick={() => save.mutate()}>保存</button>
+          <button type="button" className="btn primary" disabled={save.isPending} onClick={onSave}>保存</button>
         </div>
       </div>
     </>

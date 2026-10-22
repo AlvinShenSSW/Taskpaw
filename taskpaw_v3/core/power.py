@@ -20,7 +20,9 @@ is an estimate (估算); there is no billing claim and no electricity price.
   or `none`. The GPU lease holder decides first; otherwise the workflow's
   running non-GPU stage; otherwise idle. No heuristics. Every owner has a
   cumulative in-memory counter: the dispatcher (PWR-2) takes `reading(film)`
-  at claim and at resolve and keeps `energy_between(a, b)`.
+  at claim and at resolve and keeps `energy_between(a, b)`. An interval the
+  counter did not cover — sampling off, a gap — has no value (None), never a
+  measured zero (IR02).
 - **Storage (PW07, PW11).** 15-minute buckets (Wh per activity plus GPU / CPU
   / other Wh and the covered seconds), keyed by UTC epoch, kept 35 days in
   `power.db` under the data dir (in memory without one). Only the sampler
@@ -269,6 +271,7 @@ class OwnerReading:
     cpu_wh: float
     other_wh: float
     seconds: float
+    at: float = 0.0  # the sampler's monotonic clock at the reading
 
 
 @dataclass(frozen=True)
@@ -715,13 +718,20 @@ class PowerSampler:
                 cpu_wh=c.cpu,
                 other_wh=c.other,
                 seconds=c.seconds,
+                at=self._clock(),
             )
 
     def energy_between(
         self, start: OwnerReading, end: OwnerReading
     ) -> Optional[EnergyDelta]:
         """The owner's energy between two readings; None when they are not of
-        one counter (another owner, a dropped counter, another sampler)."""
+        one counter (another owner, a dropped counter, another sampler), or
+        when the counter did not cover the interval (IR02): sampling is off,
+        or the counted seconds fall clearly short of the elapsed time (sampling
+        was off for a while, or a gap dropped windows). An unsampled interval
+        is missing energy, not a measured zero."""
+        if not self._settings().enabled:
+            return None
         with self._lock:
             c = self._counters.get(start.owner)
             if (
@@ -742,6 +752,10 @@ class PowerSampler:
                 else []
             )
         seconds = max(0.0, end.seconds - start.seconds)
+        # A window is integrated by the owner at its end, so the counted time
+        # can differ from the elapsed by up to a window at each side.
+        if seconds < (end.at - start.at) - 2 * GAP_SECONDS:
+            return None
         wh = max(0.0, end.wh - start.wh)
         return EnergyDelta(
             wh=wh,

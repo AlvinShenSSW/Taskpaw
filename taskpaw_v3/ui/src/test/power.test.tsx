@@ -6,8 +6,9 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { api, HttpError, type AgentConfigView, type WorkflowFilms } from "../api";
+import { api, HttpError, type AgentConfigView, type LivePower, type PowerHistory, type WorkflowFilms } from "../api";
 import { PowerPage } from "../components/power/PowerPage";
+import { PowerParams } from "../components/power/PowerParams";
 import { chartSeries, machinesOf, stateChip } from "../components/power/powerView";
 import { fmtKwh, fmtKwhShort, predictFromRates } from "../components/power/powerModel";
 import { EnergyBlock, PredictLine } from "../components/power/PowerParts";
@@ -168,6 +169,23 @@ describe("估算参数", () => {
     expect(await screen.findByText("估算参数已保存，实时功耗已按新参数估算。")).toBeInTheDocument();
   });
 
+  it("focuses the title once on open and keeps focus in an input across typing and a parent rerender (IR01)", async () => {
+    const qc = new QueryClient();
+    const tree = (live: LivePower) => (
+      <ThemeProvider theme={theme}><QueryClientProvider client={qc}>
+        <PowerParams open onClose={() => {}} settings={POWER_SETTINGS} live={live} machineName="HOME-PC" os="Windows" onSaved={() => {}} />
+      </QueryClientProvider></ThemeProvider>
+    );
+    const r = render(tree({ w: 286, gpu_w: 210, cpu_w: 46, other_w: 30 } as LivePower));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "估算参数" })).toHaveFocus());
+    const plug = screen.getByLabelText("插座读数");
+    plug.focus();
+    fireEvent.change(plug, { target: { value: "3" } });
+    expect(plug).toHaveFocus();
+    r.rerender(tree({ w: 290, gpu_w: 212, cpu_w: 48, other_w: 30 } as LivePower));  // the 5 s poll
+    expect(plug).toHaveFocus();
+  });
+
   it("calibrates the baseline from the plug reading in the browser", async () => {
     const { dialog } = await openDialog();
     const fill = within(dialog).getByRole("button", { name: "填入基线" });
@@ -197,6 +215,19 @@ describe("估算参数", () => {
     const sent = (update.mock.calls[0][0] as { power: { peers: unknown[] } }).power.peers;
     expect(sent).toEqual([...POWER_SETTINGS.peers.slice(0, 3), { name: "GPU-03", address: "192.168.1.31:5680" }]);
   });
+
+  it("saves a typed peer that was not added yet, and blocks the save on an incomplete one (IR07)", async () => {
+    const { dialog, update } = await openDialog();
+    fireEvent.change(within(dialog).getByLabelText("名称"), { target: { value: "GPU-09" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("请填写名称和地址。");
+    expect(update).not.toHaveBeenCalled();
+    fireEvent.change(within(dialog).getByLabelText("地址"), { target: { value: "192.168.1.39" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(update).toHaveBeenCalled());
+    const sent = (update.mock.calls[0][0] as { power: { peers: unknown[] } }).power.peers;
+    expect(sent).toEqual([...POWER_SETTINGS.peers, { name: "GPU-09", address: "192.168.1.39" }]);
+  });
 });
 
 describe("power view model", () => {
@@ -208,6 +239,17 @@ describe("power view model", () => {
     expect(series[0].values[40]).toBeNull();
     expect(stateChip({ state: "ok", stale: true })[0]).toBe("数据过期");
     expect(stateChip({ state: "no_power", stale: false })[0]).toBe("无功耗数据（需升级 TaskPaw）");
+    expect(stateChip({ state: "self", stale: false })[0]).toBe("就是本机，不重复计入");
+  });
+
+  it("aggregates by timestamp only: an unmatched peer point is a gap, never shifted by index", () => {
+    const hist = (t: number[], avg_w: Array<number | null>) => ({ t, avg_w }) as unknown as PowerHistory;
+    const m = (id: string, h: PowerHistory) => ({
+      id, name: id, hw: "", local: id === "local", state: "ok", stale: false, color: "#000", live: null, day: null, hist: h,
+    });
+    const { series, times } = chartSeries([m("local", hist([900, 1800], [5, 6])), m("peer", hist([0, 900], [10, 20]))]);
+    expect(times).toEqual([900, 1800]);
+    expect(series[1].values).toEqual([20, null]);
   });
 
   it("predicts from the rates only with enough history", () => {

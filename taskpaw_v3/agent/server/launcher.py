@@ -283,6 +283,8 @@ def run_agent(
         peers = fleet = power_fleet.PowerFleet(
             lambda: power.get_power_settings().peers,
             lambda: config.api_token,
+            # IR06: this agent's own address entered as a peer is not summed twice
+            own=lambda: (config.server_id, config.machine),
         )
 
         def _power_view(range_: str) -> dict:

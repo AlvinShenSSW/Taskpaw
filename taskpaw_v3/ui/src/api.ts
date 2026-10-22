@@ -376,7 +376,8 @@ export interface PowerHistory {
   activity_wh: Record<PowerActivity, number[]>; totals: { wh: number; activity_wh: Record<PowerActivity, number> };
 }
 // PW06: `state` ok | off (sampling off) | no_power (an older TaskPaw) | pending | unreachable | unauthorized
-// | invalid_address | invalid | timeout | too_large | http_error | not_found.
+// | invalid_address | invalid | timeout | too_large | http_error | not_found | self (this agent's own address:
+// listed, never summed twice — IR06).
 export interface PowerPeerRow {
   name: string; address: string; state: string; error: string | null; machine: string | null; version: string | null;
   os: string | null; power: LivePower | null; history: PowerHistory | null; age_s: number | null; stale: boolean;

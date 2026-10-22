@@ -28,7 +28,7 @@ import { QueuePage } from "./QueuePage";
 import { ReviewDialog } from "./ReviewDialog";
 import { ReviewPage } from "./ReviewPage";
 import {
-  errorText, isPaused, useMediaData, WorkspaceContext, type MediaData, type PageKey, type WorkspaceApi,
+  errorText, focusOnMount, isPaused, useMediaData, WorkspaceContext, type MediaData, type PageKey, type WorkspaceApi,
 } from "./workspace";
 
 // The ten pages of the workspace, in rail order (build spec §1 + U1 V2). The last four are
@@ -178,7 +178,7 @@ export function MediaWorkspace({ onOpenPower }: { onOpenPower?: () => void } = {
         } }}
         PaperProps={{ className: "mw mw-nav", sx: { backgroundImage: "none" }, "aria-labelledby": "mw-nav-title" } as object}>
         <div className="mobile-nav-head">
-          <h2 id="mw-nav-title" tabIndex={-1} ref={(el) => el?.focus({ preventScroll: true })}>工作台导航</h2>
+          <h2 id="mw-nav-title" tabIndex={-1} ref={focusOnMount}>工作台导航</h2>
           <button type="button" className="btn ghost icon-btn" aria-label="关闭主导航" onClick={() => setNavOpen(false)}><Icon of={CloseIcon} /></button>
         </div>
         <NavList page={page} data={data} label="媒体处理中心导航"

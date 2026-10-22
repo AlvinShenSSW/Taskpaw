@@ -39,6 +39,7 @@ const STATE_TEXT: Record<string, [string, "green" | "amber" | "red" | "neutral"]
   pending: ["检查中", "neutral"],
   unauthorized: ["API Token 不一致", "red"],
   invalid_address: ["地址无效或为公网地址", "red"],
+  self: ["就是本机，不重复计入", "amber"],
 };
 export function stateChip(m: Pick<Machine, "state" | "stale">): [string, "green" | "amber" | "red" | "neutral"] {
   if (m.state === "ok" && m.stale) return ["数据过期", "amber"];
@@ -64,7 +65,9 @@ export function machinesOf(day: PowerView | undefined, ranged: PowerView | undef
   return [local, ...peers];
 }
 
-// Align every machine's points on the local machine's time axis (same range, same step).
+// Align every machine's points on the local machine's time axis (same range, same step), by timestamp
+// only: a point whose bucket start the local axis does not have is a gap (null), never moved to the
+// same index (a peer whose clock or range start differs would otherwise be drawn at the wrong time).
 export function chartSeries(machines: Machine[]): { series: ChartSeries[]; times: number[] } {
   const base = machines.find((m) => m.hist)?.hist;
   if (!base) return { series: [], times: [] };
@@ -72,11 +75,7 @@ export function chartSeries(machines: Machine[]): { series: ChartSeries[]; times
   const series = machines.filter((m) => m.hist).map((m) => {
     const h = m.hist as PowerHistory;
     const at = new Map(h.t.map((t, i) => [t, h.avg_w[i]] as const));
-    const byIndex = h.t.length === times.length;
-    return {
-      id: m.id, name: m.name, color: m.color,
-      values: times.map((t, i) => (at.has(t) ? at.get(t) ?? null : byIndex ? h.avg_w[i] ?? null : null)),
-    };
+    return { id: m.id, name: m.name, color: m.color, values: times.map((t) => at.get(t) ?? null) };
   });
   return { series, times };
 }

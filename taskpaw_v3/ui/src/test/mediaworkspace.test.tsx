@@ -111,7 +111,7 @@ describe("MediaWorkspace shell", () => {
       addListener: () => {}, removeListener: () => {}, addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
     }));
     mockApi();
-    wrap(<MediaWorkspace />);
+    const { qc, rerender } = wrap(<MediaWorkspace />);
     await screen.findByRole("heading", { level: 1, name: "概览" });
     expect(screen.queryByRole("navigation", { name: "媒体处理中心导航" })).not.toBeInTheDocument();
     const trigger = screen.getByRole("button", { name: "工作区导航" });
@@ -119,6 +119,11 @@ describe("MediaWorkspace shell", () => {
     const dialog = await screen.findByRole("dialog", { name: "工作台导航" });
     expect(within(dialog).getByRole("button", { name: "关闭主导航" })).toBeInTheDocument();
     await waitFor(() => expect(within(dialog).getByRole("heading", { name: "工作台导航" })).toHaveFocus());
+    // IR01: the title is focused once on open, not again on every rerender (the poll, a keystroke)
+    const item = within(dialog).getByRole("button", { name: /^影片队列/ });
+    item.focus();
+    rerender(<ThemeProvider theme={theme}><QueryClientProvider client={qc}><MediaWorkspace /></QueryClientProvider></ThemeProvider>);
+    expect(item).toHaveFocus();
     fireEvent.keyDown(dialog, { key: "Escape" });
     await waitFor(() => expect(trigger).toHaveFocus());
     fireEvent.click(trigger);

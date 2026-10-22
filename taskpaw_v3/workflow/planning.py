@@ -140,7 +140,8 @@ def plan_list(rt: LocalRuntime) -> dict[str, Any]:
     history = _history(rt, films)
     default = default_tier(rt)
     gpu_name, vram = _gpu(rt)
-    rates = en.rates(films.values())  # PWR-2 PW13: 预计耗电 from this history
+    # PWR-2 PW13: 预计耗电 from the uncapped history, not the display board
+    rates = en.rates(rt.store.energy_history(op))
     entries = []
     for item in unplanned:
         film = films.get(item.film_id)

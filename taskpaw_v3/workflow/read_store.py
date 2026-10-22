@@ -527,41 +527,14 @@ class ReadCommands(WorkflowCore):
                 f"JOIN attempts x ON x.job_id=s.job_id {where[0]}",
                 where[1],
             ).fetchall()
-            # PWR-2: every resolved attempt's evidence of the local stages, oldest
-            # first; the film's energy is their sum (PW05)
-            spent = self._conn.execute(
-                "SELECT s.film_id,s.stage,json_extract(x.body_json,'$.evidence') "
-                "FROM films f JOIN stages s ON s.film_id=f.film_id "
-                "AND s.input_revision=f.current_input_revision "
-                "AND s.stage IN ('restore','asr','translate','return','scrape') "
-                "JOIN attempts x ON x.job_id=s.job_id "
-                f"AND json_extract(x.body_json,'$.ended_at') IS NOT NULL {where[0]} "
-                "ORDER BY x.rowid",
-                where[1],
-            ).fetchall()
-            # the largest probe of each current input (V3 §7 resolution) and,
-            # PWR-2, the summed probe duration
-            probes = self._conn.execute(
-                "SELECT f.film_id,max(json_extract(p.value,'$.width')),"
-                "max(json_extract(p.value,'$.height')),"
-                "sum(json_extract(p.value,'$.duration_ms')) FROM films f "
-                "JOIN manifests im ON im.film_id=f.film_id AND im.kind='input' "
-                "AND im.revision=f.current_input_revision,"
-                "json_each(im.body_json,'$.readiness.media_probes') p "
-                f"{where[0]} GROUP BY f.film_id",
-                where[1],
-            ).fetchall()
+            energies = self._attempt_energies(where)
+            sizes, durations = self._probe_sizes(where)
         used = {row["approval_id"] for row in archives if row["approval_id"]}
         open_films = {row["film_id"] for row in archives if row["open"]}
         errors = {row["film_id"]: row["error"] for row in archives}  # newest wins
         active = {row["film_id"] for row in approvals if row["approval_id"] not in used}
         package_films = {row["package_id"]: row["films"] for row in counts}
         receipt_ids = {row[0]: row[1] for row in receipts}  # newest wins
-        sizes = {row[0]: (row[1] or 0, row[2] or 0) for row in probes}
-        durations = {row[0]: row[3] for row in probes}
-        energies: dict[tuple[str, str], list[AttemptEnergy | None]] = {}
-        for film_id_, stage_, evidence_ in spent:
-            energies.setdefault((film_id_, stage_), []).append(_energy(evidence_))
         first: dict[tuple[str, str], datetime] = {}
         for film_id_, stage_, begun in firsts:
             if not begun:
@@ -600,7 +573,7 @@ class ReadCommands(WorkflowCore):
                     "final_hash": row["final_hash"],
                     "max_width": sizes.get(row["film_id"], (0, 0))[0],
                     "max_height": sizes.get(row["film_id"], (0, 0))[1],
-                    "duration_ms": _duration(durations.get(row["film_id"])),
+                    "duration_ms": durations.get(row["film_id"]),
                 },
             )
             if row["stage"] is not None:
@@ -617,6 +590,114 @@ class ReadCommands(WorkflowCore):
                         **_attempt_times(row["attempt_json"]),
                     )
                 )
+        return tuple(BoardFilm.model_validate(film) for film in films.values())
+
+    def _attempt_energies(
+        self, where: tuple[str, tuple[Any, ...]]
+    ) -> dict[tuple[str, str], list[AttemptEnergy | None]]:
+        """PWR-2: every resolved attempt's energy of the local stages per
+        (film, stage), oldest first; the film's energy is their sum (PW05)."""
+        spent = self._conn.execute(
+            "SELECT s.film_id,s.stage,json_extract(x.body_json,'$.evidence') "
+            "FROM films f JOIN stages s ON s.film_id=f.film_id "
+            "AND s.input_revision=f.current_input_revision "
+            "AND s.stage IN ('restore','asr','translate','return','scrape') "
+            "JOIN attempts x ON x.job_id=s.job_id "
+            f"AND json_extract(x.body_json,'$.ended_at') IS NOT NULL {where[0]} "
+            "ORDER BY x.rowid",
+            where[1],
+        ).fetchall()
+        energies: dict[tuple[str, str], list[AttemptEnergy | None]] = {}
+        for film_id_, stage_, evidence_ in spent:
+            energies.setdefault((film_id_, stage_), []).append(_energy(evidence_))
+        return energies
+
+    def _probe_sizes(
+        self, where: tuple[str, tuple[Any, ...]]
+    ) -> tuple[dict[str, tuple[int, int]], dict[str, int | None]]:
+        """The largest probe of each current input (V3 §7 resolution) and,
+        PWR-2, the summed probe duration."""
+        probes = self._conn.execute(
+            "SELECT f.film_id,max(json_extract(p.value,'$.width')),"
+            "max(json_extract(p.value,'$.height')),"
+            "sum(json_extract(p.value,'$.duration_ms')) FROM films f "
+            "JOIN manifests im ON im.film_id=f.film_id AND im.kind='input' "
+            "AND im.revision=f.current_input_revision,"
+            "json_each(im.body_json,'$.readiness.media_probes') p "
+            f"{where[0]} GROUP BY f.film_id",
+            where[1],
+        ).fetchall()
+        sizes = {row[0]: (row[1] or 0, row[2] or 0) for row in probes}
+        return sizes, {row[0]: _duration(row[3]) for row in probes}
+
+    def energy_history(self, auth: AuthProof) -> tuple[BoardFilm, ...]:
+        """PWR-2 PW13: every planned film whose current translate finished,
+        with only what the 预计耗电 history reads: plan tier and machine,
+        size, probe duration and the local stages' attempt energies.
+
+        Read apart from `film_board`, whose display limit keeps only the
+        newest finished films: the history takes the newest films per machine
+        x resolution x tier (`energy.rates`), so a tier used less often does
+        not fall out behind a run of another tier (Codex PWR-2/3). The other
+        board fields are left empty."""
+        where: tuple[str, tuple[Any, ...]] = (
+            "WHERE EXISTS (SELECT 1 FROM stages t WHERE t.film_id=f.film_id "
+            "AND t.input_revision=f.current_input_revision AND t.stage='translate' "
+            "AND t.status IN ('succeeded','skipped')) "
+            "AND EXISTS (SELECT 1 FROM film_plans q WHERE q.film_id=f.film_id "
+            "AND q.input_revision=f.current_input_revision)",
+            (),
+        )
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            rows = self._conn.execute(
+                "SELECT f.film_id,f.display_name,f.created_at,"
+                "fp.ltx_model,fp.machine,s.stage,s.status,"
+                "json_extract(a.body_json,'$.ended_at') AS ended_at FROM films f "
+                "JOIN film_plans fp ON fp.film_id=f.film_id "
+                "AND fp.input_revision=f.current_input_revision "
+                "JOIN stages s ON s.film_id=f.film_id "
+                "AND s.input_revision=f.current_input_revision "
+                "AND s.stage IN ('restore','asr','translate','return','scrape') "
+                "LEFT JOIN attempts a ON a.attempt_id=s.current_attempt_id "
+                f"{where[0]} ORDER BY f.created_at,f.film_id,s.rowid",
+                where[1],
+            ).fetchall()
+            energies = self._attempt_energies(where)
+            sizes, durations = self._probe_sizes(where)
+        films: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            film_id = row["film_id"]
+            film = films.setdefault(
+                film_id,
+                {
+                    "film_id": film_id,
+                    "display_name": row["display_name"],
+                    "created_at": parse_time(row["created_at"]),
+                    "final_name": None,
+                    "stages": [],
+                    "approval_active": False,
+                    "archive_open": False,
+                    "archive_error": None,
+                    "planned": True,
+                    "plan_ltx_model": row["ltx_model"],
+                    "plan_machine": row["machine"],
+                    "max_width": sizes.get(film_id, (0, 0))[0],
+                    "max_height": sizes.get(film_id, (0, 0))[1],
+                    "duration_ms": durations.get(film_id),
+                },
+            )
+            ended = row["ended_at"]
+            film["stages"].append(
+                BoardStage(
+                    stage=row["stage"],
+                    status=row["status"],
+                    ended_at=parse_time(ended) if ended else None,
+                    attempt_energy=tuple(energies.get((film_id, row["stage"]), ())),
+                )
+            )
         return tuple(BoardFilm.model_validate(film) for film in films.values())
 
     def package_films(

@@ -311,7 +311,8 @@ class LocalDispatcher:
 
     def _energy(self, running: _Running) -> m.AttemptEnergy | None:
         """The film's energy from the claim to now; None when there is no
-        value (no sampler, sampling off or restarted, another counter)."""
+        value (no sampler, sampling off or restarted, another counter, an
+        interval the counter did not cover — IR02: missing, never a zero)."""
         start = running.energy_start
         sampler = self._sampler() if start is not None else None
         if sampler is None:
@@ -713,6 +714,10 @@ class LocalDispatcher:
                     outcome="succeeded" if outcome.ok else "failed",
                 ),
             )
+            # IR03: the store now holds the attempt's energy; a board read
+            # must not add it again as the running stage's
+            with self._lock:
+                self._running = None
             rt.drop_attempt(running.attempt.attempt_id)
             self._log_resolved(running, outcome)
             if outcome.ok:

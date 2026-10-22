@@ -15,7 +15,12 @@ import pytest
 from taskpaw_v3.core import power
 from taskpaw_v3.core.config import PowerSettings
 from taskpaw_v3.core.gpu_lease import GpuLease
-from taskpaw_v3.tests.test_workflow_local_dispatch import add_film, runtime, stage
+from taskpaw_v3.tests.test_workflow_local_dispatch import (
+    add_film,
+    plan_film,
+    runtime,
+    stage,
+)
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.workflow import board
 from taskpaw_v3.workflow import energy as en
@@ -57,9 +62,12 @@ class Rig:
     def __init__(self, rt, *, sampler=True):
         self.mono, self.wall = Clock(), Clock(1_800_000_000.0)
         self.rt = rt
+        self.enabled = True  # `power.enabled`, read on every tick (applied live)
         self.sampler = (
             power.PowerSampler(
-                lambda: PowerSettings(tdp_w=65, idle_w=10, other_w=30),
+                lambda: PowerSettings(
+                    enabled=self.enabled, tdp_w=65, idle_w=10, other_w=30
+                ),
                 activity=power.activity_source(
                     lambda _iid: None, lambda: self.dispatcher
                 ),
@@ -82,6 +90,11 @@ class Rig:
         self.wall.now += 5
         if self.sampler is not None:
             self.sampler.tick()
+
+    def stall(self, seconds: float) -> None:
+        """Time passes without a sample (a stalled thread, a sleeping machine)."""
+        self.mono.now += seconds
+        self.wall.now += seconds
 
 
 @pytest.fixture
@@ -166,6 +179,181 @@ def test_an_attempt_without_a_value_makes_the_film_partial(rt):
     assert value["partial"] is True
     assert value["stages"]["restore"]["partial"] is True
     assert value["stages"]["restore"]["wh"] == pytest.approx(1.0)
+
+
+# ── an unsampled interval is missing energy, never a measured zero (IR02) ──
+class Scripted(Ticking):
+    """A stage that runs `script(rig)` instead of plain ticks."""
+
+    def __init__(self, stage_, rig, script, **kw):
+        super().__init__(stage_, rig, **kw)
+        self.script = script
+
+    def run(self, context):
+        self.script(self.rig)
+        return ExecOutcome.succeeded()
+
+
+def _restore_energy(rt, rig, script):
+    rt.executors["restore"] = Scripted("restore", rig, script)
+    film = add_film(rt)
+    assert rig.dispatcher.run_once() is True
+    (attempt,) = attempts(rt, film, "restore")
+    return film, attempt.evidence[-1].summary.energy
+
+
+def test_with_sampling_disabled_an_attempt_has_no_energy(rt):
+    rig = Rig(rt)
+    rig.enabled = False
+
+    def script(r):
+        for _ in range(3):
+            r.tick()
+
+    film, energy = _restore_energy(rt, rig, script)
+    assert energy is None  # not 0 Wh
+    assert en.film_energy(board_row(rt, film)) is None
+
+
+def test_sampling_turned_off_mid_attempt_leaves_no_value(rt):
+    rig = Rig(rt)
+
+    def off_until_the_end(r):
+        r.tick(), r.tick()
+        r.enabled = False
+        for _ in range(12):
+            r.tick()
+
+    _, energy = _restore_energy(rt, rig, off_until_the_end)
+    assert energy is None
+
+
+def test_sampling_off_for_a_while_then_on_again_leaves_no_value(rt):
+    rig = Rig(rt)
+
+    def off_then_on(r):
+        r.tick(), r.tick()
+        r.enabled = False
+        for _ in range(12):  # 60 s not sampled
+            r.tick()
+        r.enabled = True
+        for _ in range(3):
+            r.tick()
+
+    _, energy = _restore_energy(rt, rig, off_then_on)
+    assert energy is None
+
+
+def test_a_long_gap_between_samples_leaves_no_value(rt):
+    rig = Rig(rt)
+
+    def gap(r):
+        r.tick(), r.tick()
+        r.stall(120)  # no sample for two minutes: the next window is dropped
+        for _ in range(3):
+            r.tick()
+
+    _, energy = _restore_energy(rt, rig, gap)
+    assert energy is None
+
+
+def test_a_short_scheduling_jitter_still_counts(rt):
+    rig = Rig(rt)
+
+    def jitter(r):
+        r.tick(), r.tick()
+        r.stall(8)  # one dropped window (13 s) is within the tolerance
+        for _ in range(3):
+            r.tick()
+
+    _, energy = _restore_energy(rt, rig, jitter)
+    assert energy is not None and energy.wh > 0
+
+
+def test_an_unsampled_attempt_makes_the_film_partial_and_leaves_history(rt):
+    rig = Rig(rt)
+    calls = []
+
+    def first_gaps(r):
+        calls.append(1)
+        r.tick()
+        if len(calls) == 1:
+            r.stall(120)
+        r.tick(), r.tick()
+
+    class FailOnce(Scripted):
+        def run(self, context):
+            self.script(self.rig)
+            if len(calls) == 1:
+                return ExecOutcome.failed("transient", "boom")
+            return ExecOutcome.succeeded()
+
+    rt.executors["restore"] = FailOnce("restore", rig, first_gaps)
+    film = add_film(rt)
+    assert rig.dispatcher.run_once() is True
+    assert rig.dispatcher.run_once() is True
+    restore = next(s for s in board_row(rt, film).stages if s.stage == "restore")
+    assert restore.attempt_energy[0] is None and restore.attempt_energy[1]
+    value = en.film_energy(board_row(rt, film))
+    assert value["partial"] is True
+    assert en.history([board_row(rt, film)]) == []
+
+
+def test_once_resolved_the_attempt_is_no_longer_running(rt, monkeypatch):
+    """IR03: right after the resolution is stored, the board must not add the
+    attempt's energy a second time as the running stage's."""
+    rig = Rig(rt)
+    rt.executors["restore"] = Ticking("restore", rig)
+    film = add_film(rt)
+    seen = []
+    drop = rig.dispatcher._drop_other_workdirs
+
+    def during_cleanup(running):
+        current = rig.dispatcher.status().current
+        seen.append((current, board.film_row(board_row(rt, film), {}, current=current)))
+        drop(running)
+
+    monkeypatch.setattr(rig.dispatcher, "_drop_other_workdirs", during_cleanup)
+    assert rig.dispatcher.run_once() is True
+    ((current, row),) = seen
+    assert current is None
+    assert row["energy"]["total_wh"] == pytest.approx(1.0)
+
+
+def test_prediction_history_is_not_capped_by_the_board(rt):
+    """Codex: the board keeps only the newest 20 finished films; the history
+    behind 预计耗电 keeps the newest 10 per machine × resolution × tier."""
+    from taskpaw_v3.workflow.planning import plan_list
+
+    rig = Rig(rt)
+    for name in ("restore", "asr", "translate"):
+        rt.executors[name] = Ticking(name, rig)
+
+    def finished(tier):
+        film_id = add_film(rt, plan=False)
+        plan_film(rt, film_id, tier=tier)
+        while rig.dispatcher.run_once():
+            pass
+        assert stage(rt, film_id, "translate").status == "succeeded"
+        return film_id
+
+    standard = [finished("standard") for _ in range(5)]
+    for _ in range(20):
+        finished("high")
+    # cleaned up: the films count as fully finished on the board (D13)
+    rt.store._conn.execute(
+        "UPDATE stages SET status='succeeded' "
+        "WHERE stage IN ('cleanup_input','cleanup_workcopy')"
+    )
+    shown = {f.film_id for f in rt.store.film_board(rt.operator)}
+    assert not shown & set(standard)  # the display board dropped them
+    rates = {r["tier"]: r for r in en.rates(rt.store.energy_history(rt.operator))}
+    assert rates["standard"]["films"] == 5 and rates["standard"]["wh_per_hour"]
+    assert rates["high"]["films"] == 10  # the newest 10 per bucket
+    add_film(rt, plan=False)  # a 待处理 entry
+    (entry,) = plan_list(rt)["plans"]
+    assert entry["prediction"]["standard"] is not None
+    assert entry["prediction"]["high"] is not None
 
 
 def test_a_restarted_sampler_gives_no_value_rather_than_a_wrong_one(rt):
