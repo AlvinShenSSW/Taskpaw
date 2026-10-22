@@ -121,7 +121,7 @@ def test_empty_or_corrupt_database_is_preserved_and_rejected(tmp_path, contents)
     "mutation",
     [
         "PRAGMA application_id=42",
-        "PRAGMA user_version=4",
+        "PRAGMA user_version=5",
         "PRAGMA user_version=0",
         "DROP TABLE cleanup_items",
         "ALTER TABLE films ADD COLUMN unexpected TEXT",

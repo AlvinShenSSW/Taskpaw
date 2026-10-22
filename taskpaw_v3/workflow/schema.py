@@ -1,8 +1,9 @@
 """Versioned workflow SQLite format; the store owns leases and transactions.
 
-Known v1 and v2 databases receive a verified backup before the atomic upgrade to
-v3 (v2: intake tables; v3: the U1 film plans). Unknown or damaged databases are
-never repaired or automatically restored.
+Known v1, v2 and v3 databases receive a verified backup before the atomic upgrade
+to v4 (v2: intake tables; v3: the U1 film plans; v4: P2-1 nullable plan machine,
+pins and routes). Unknown or damaged databases are never repaired or
+automatically restored.
 The caller must hold its FileLease before connecting, and retain it until close.
 """
 
@@ -22,8 +23,8 @@ from taskpaw_v3.hub.server.outbox_migration import (
 from . import schema_intake
 
 APPLICATION_ID = 0x54505746  # TPWF, separate from the monitoring database.
-SCHEMA_VERSION = 3
-SUPPORTED_VERSIONS = (1, 2, SCHEMA_VERSION)
+SCHEMA_VERSION = 4
+SUPPORTED_VERSIONS = (1, 2, 3, SCHEMA_VERSION)
 # U04: the tier a v3 upgrade records for restores that already ran. Every
 # workflow LTX preset's `standard` profile restores with this tier.
 BACKFILL_LTX_MODEL = "standard"
@@ -391,11 +392,67 @@ V3_TABLES = {
 }
 V3_INDEXES: dict[str, str] = {}
 
-TABLES = {**V2_TABLES, **V3_TABLES}
-INDEXES = {**V2_INDEXES, **V3_INDEXES}
+# Frozen v3 format. Never edited; v4 replaces `film_plans` and adds the rest.
+_V3_FULL_TABLES = {**V2_TABLES, **V3_TABLES}
+_V3_FULL_INDEXES = {**V2_INDEXES, **V3_INDEXES}
+
+# P2-1 (#292). `film_plans.machine` is nullable (NULL = 自动); a plan stays
+# immutable, the effective pin is the mutable, CAS'd `film_pins` row (C2).
+# `film_routes`: which worker a film revision is routed to; "claimed" is
+# derived from unresolved assignments, never stored (C9). `kind`: `auto` and
+# `pinned` come from the scheduler, `local` is the controller's own implicit
+# route (C10).
+V4_TABLES = {
+    "film_plans": """CREATE TABLE film_plans (
+        film_id TEXT NOT NULL REFERENCES films(film_id) ON DELETE RESTRICT,
+        manifest_kind TEXT NOT NULL DEFAULT 'input' CHECK(manifest_kind='input'),
+        input_revision INTEGER NOT NULL CHECK(input_revision>0),
+        ltx_model TEXT CHECK(ltx_model IN ('standard','good','high')),
+        machine TEXT REFERENCES workers(worker_id) ON DELETE RESTRICT,
+        confirmed_at TEXT NOT NULL,
+        backfilled INTEGER NOT NULL DEFAULT 0 CHECK(backfilled IN (0,1)),
+        actors TEXT NOT NULL DEFAULT '[]',
+        PRIMARY KEY(film_id,input_revision),
+        FOREIGN KEY(film_id,manifest_kind,input_revision)
+            REFERENCES manifests(film_id,kind,revision) ON DELETE RESTRICT
+    )""",
+    "film_pins": """CREATE TABLE film_pins (
+        film_id TEXT NOT NULL,
+        input_revision INTEGER NOT NULL,
+        worker_id TEXT REFERENCES workers(worker_id) ON DELETE RESTRICT,
+        updated_at TEXT NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1 CHECK(version>0),
+        PRIMARY KEY(film_id,input_revision),
+        FOREIGN KEY(film_id,input_revision)
+            REFERENCES film_plans(film_id,input_revision) ON DELETE RESTRICT
+    )""",
+    "film_routes": """CREATE TABLE film_routes (
+        route_id TEXT PRIMARY KEY NOT NULL,
+        film_id TEXT NOT NULL REFERENCES films(film_id) ON DELETE RESTRICT,
+        input_revision INTEGER NOT NULL CHECK(input_revision>0),
+        worker_id TEXT NOT NULL REFERENCES workers(worker_id) ON DELETE RESTRICT,
+        kind TEXT NOT NULL CHECK(kind IN ('auto','pinned','local')),
+        state TEXT NOT NULL CHECK(state IN ('open','closed')),
+        reason TEXT NOT NULL,
+        routed_at TEXT NOT NULL,
+        closed_at TEXT,
+        close_reason TEXT,
+        version INTEGER NOT NULL DEFAULT 1 CHECK(version>0),
+        body_json TEXT NOT NULL CHECK(json_valid(body_json)),
+        CHECK((state='closed')=(closed_at IS NOT NULL AND close_reason IS NOT NULL))
+    )""",
+}
+V4_INDEXES = {
+    "one_open_route_per_film": """CREATE UNIQUE INDEX one_open_route_per_film
+        ON film_routes(film_id,input_revision) WHERE state='open'""",
+}
+
+TABLES = {**V2_TABLES, **V4_TABLES}
+INDEXES = {**V2_INDEXES, **V4_INDEXES}
 _FORMATS = {
     1: (V1_TABLES, V1_INDEXES),
     2: (V2_TABLES, V2_INDEXES),
+    3: (_V3_FULL_TABLES, _V3_FULL_INDEXES),
     SCHEMA_VERSION: (TABLES, INDEXES),
 }
 
@@ -605,6 +662,32 @@ def _backfill_plans(conn: sqlite3.Connection) -> None:
     )
 
 
+def _rebuild_plans(conn: sqlite3.Connection) -> None:
+    """v3 → v4: the same rows in a table whose `machine` may be NULL.
+
+    The old table is renamed away first, so the new one is created under its
+    own name and `sqlite_master` holds the exact v4 DDL the reopen compares.
+    Nothing references `film_plans` in v3, so the rename rewrites no FK."""
+    conn.execute("ALTER TABLE film_plans RENAME TO film_plans_v3")
+    conn.execute(V4_TABLES["film_plans"])
+    conn.execute(
+        "INSERT INTO film_plans (film_id,manifest_kind,input_revision,ltx_model,"
+        "machine,confirmed_at,backfilled,actors) SELECT film_id,manifest_kind,"
+        "input_revision,ltx_model,machine,confirmed_at,backfilled,actors "
+        "FROM film_plans_v3"
+    )
+    conn.execute("DROP TABLE film_plans_v3")
+
+
+def _pin_plans(conn: sqlite3.Connection) -> None:
+    """D9 as revised (§13, OD1): 本机 is never a routable GPU worker, so every
+    phase-1 plan's pin becomes 自动. The plan keeps its machine as history."""
+    conn.execute(
+        "INSERT INTO film_pins (film_id,input_revision,worker_id,updated_at) "
+        "SELECT film_id,input_revision,NULL,confirmed_at FROM film_plans"
+    )
+
+
 def _migrate(conn: sqlite3.Connection, version: int) -> None:
     """One transaction from a supported older version to SCHEMA_VERSION."""
     if conn.in_transaction:
@@ -612,13 +695,22 @@ def _migrate(conn: sqlite3.Connection, version: int) -> None:
     try:
         conn.execute("BEGIN IMMEDIATE")
         validate_schema(conn, version=version)
-        added = []
         if version < 2:
-            added += [*schema_intake.TABLES.values(), *schema_intake.INDEXES.values()]
-        added += [*V3_TABLES.values(), *V3_INDEXES.values()]
-        for statement in added:
+            for statement in (
+                *schema_intake.TABLES.values(),
+                *schema_intake.INDEXES.values(),
+            ):
+                conn.execute(statement)
+        if version < 3:
+            conn.execute(V4_TABLES["film_plans"])
+            _backfill_plans(conn)
+        else:
+            _rebuild_plans(conn)
+        for name in ("film_pins", "film_routes"):
+            conn.execute(V4_TABLES[name])
+        for statement in V4_INDEXES.values():
             conn.execute(statement)
-        _backfill_plans(conn)
+        _pin_plans(conn)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         validate_schema(conn)
         conn.commit()

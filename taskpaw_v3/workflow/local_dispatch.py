@@ -4,6 +4,11 @@ One thread claims ready compute stages, runs them through their executor inside
 a per-attempt kill-on-close Job, and resolves the attempt only after the Job has
 settled. GPU stages share the agent's process-wide `gpu_lease` with manual
 Jasna / subtitle tasks (C5).
+
+P2-1 (#292): a compute claim needs an open route to this worker, which the
+dispatcher opens itself (kind `local`) right before it claims (C10). Once a
+remote worker is configured the controller's GPU takes no stage that needs it
+(OD1); stages that need no GPU still run here (C12).
 """
 
 from __future__ import annotations
@@ -49,6 +54,10 @@ POLL_SECONDS = 5.0
 STOP_SETTLE_SECONDS = 30.0
 RENEW_SECONDS = 3600.0
 NO_4K_DEVICE = "没有可接 4K 的设备"
+REMOTE_GPU = "等待 GPU 设备"  # OD1: a remote worker restores and transcribes
+REMOTE_STAGES = frozenset({"restore", "asr"})  # translate is always the controller's
+LOCAL_ROUTE = "本机"
+TAKE_OVER = "转本机"
 
 
 class Lease(Protocol):
@@ -438,6 +447,7 @@ class LocalDispatcher:
         waiting: dict[str, str] = {}
         vram = rt.gpu.vram_mib if rt.gpu else 0
         gpu_waited = False
+        remote: bool | None = None  # read once, at the first compute job
         for job in jobs:
             if self.paused:  # a pause arrived while admission was blocked
                 return self._paused_exit()
@@ -459,6 +469,15 @@ class LocalDispatcher:
                     waiting[job.film_id] = (
                         rt.reason if rt.gpu is None else "没有可用的执行器"
                     )
+                    continue
+                if remote is None:
+                    remote = self._remote_configured()
+                if (
+                    remote
+                    and job.stage in REMOTE_STAGES
+                    and _needs_gpu(executor, manifest)
+                ):
+                    waiting[job.film_id] = REMOTE_GPU  # OD1: never on this GPU
                     continue
                 if not fits(manifest, executor.max_resolution(vram)):
                     waiting[job.film_id] = NO_4K_DEVICE
@@ -488,6 +507,64 @@ class LocalDispatcher:
         elif not gpu_waited:
             self._leave_queue()
         return False
+
+    def _remote_configured(self) -> bool:
+        """OD1: any worker but this one that is not retired. A revoked one still
+        counts, so a re-pair or revocation never puts restore on this GPU."""
+        rt = self.runtime
+        own = rt.identity.worker_id
+        return any(
+            worker.worker_id != own and worker.enrollment_state != "retired"
+            for worker in rt.store.list_workers(rt.operator)
+        )
+
+    def _ensure_route(self, job: m.PendingComputeJob) -> bool:
+        """C10: an open route to this worker before the claim.
+
+        Without one the controller opens its own (`local`). Another worker's
+        route is taken over only while unclaimed: the dispatcher reaches here
+        only for a stage it runs itself (translate, a stage that needs no GPU,
+        or any stage when no remote worker is configured)."""
+        rt = self.runtime
+        own = rt.identity.worker_id
+        try:
+            route = rt.store.film_route(rt.operator, job.film_id, job.input_revision)
+            if route is not None and route.worker_id == own:
+                return True
+            if route is not None:
+                try:
+                    rt.store.withdraw_route(
+                        rt.operator,
+                        rt.meta(),
+                        m.RouteWithdraw(
+                            route_id=route.route_id,
+                            expected_version=route.version,
+                            reason=TAKE_OVER,
+                        ),
+                    )
+                except m.WorkflowError as exc:
+                    if exc.code != "route_claimed":
+                        raise
+                    worker = rt.store.get_worker(rt.operator, route.worker_id).worker
+                    self._reason = f"已派往 {worker.name}"
+                    return False
+            rt.store.route_film(
+                rt.operator,
+                rt.meta(),
+                m.RouteOpen(
+                    route_id=_new_id(),
+                    film_id=job.film_id,
+                    input_revision=job.input_revision,
+                    worker_id=own,
+                    kind="local",
+                    expected_pin_version=0,
+                    reason=LOCAL_ROUTE,
+                ),
+            )
+            return True
+        except m.WorkflowError as exc:
+            self._reason = f"领取失败：{exc}"
+            return False
 
     def _set_waiting(self, waiting: dict[str, str]) -> None:
         with self._lock:
@@ -546,6 +623,9 @@ class LocalDispatcher:
         if self.paused:  # re-checked at the claim, after any blocking lease wait
             self._release_if_holding()
             self._reason = "paused"
+            return False
+        if not self._ensure_route(job):
+            self._release_if_holding()
             return False
         tools = executor.tools(job)  # U1 P4': the planned tier, read once
         attempt = AttemptFile(

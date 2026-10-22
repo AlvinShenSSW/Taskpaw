@@ -675,10 +675,35 @@ def plan(h, film_id, worker_id, *, revision=1):
             raise
 
 
+def ensure_route(h, film_id, worker_id, revision):
+    """P2-1 C10: a compute claim needs an open route to the claiming worker."""
+    route = h.store.film_route(h.operator, film_id, revision)
+    if route is not None:
+        return
+    try:
+        h.store.route_film(
+            h.operator,
+            h.meta(),
+            m.RouteOpen(
+                route_id=identity(),
+                film_id=film_id,
+                input_revision=revision,
+                worker_id=worker_id,
+                kind="local",
+                expected_pin_version=0,
+                reason="test",
+            ),
+        )
+    except m.WorkflowError as exc:  # e.g. a disabled worker: the claim says why
+        if exc.code not in ("precondition_failed", "route_claimed"):
+            raise
+
+
 def claim_compute(h, film_id, worker, auth, *, name="restore"):
     job = stage(h, film_id, name)
     if name == "restore":
         plan(h, film_id, worker.worker_id, revision=job.input_revision)
+    ensure_route(h, film_id, worker.worker_id, job.input_revision)
     command = m.ClaimRequest(
         job_id=job.job_id,
         expected_version=job.version,

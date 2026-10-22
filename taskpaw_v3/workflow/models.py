@@ -1551,7 +1551,7 @@ class FilmPlanConfirm(Model):
     film_id: Id
     input_revision: Revision
     ltx_model: LtxTier | None
-    machine: Id
+    machine: Id | None  # P2-1: None = 自动
     actors: tuple[Text, ...] = ()  # the film's actors as the operator saw them
 
 
@@ -1563,10 +1563,148 @@ class FilmPlan(Model):
     film_id: Id
     input_revision: Revision
     ltx_model: LtxTier | None
-    machine: Id
+    machine: Id | None  # the operator's choice at confirm; None = 自动 (P2-1)
     confirmed_at: UtcTime
     backfilled: bool = False
     actors: tuple[Text, ...] = ()  # snapshot at confirm time; () when unknown
+
+
+RouteKind = Literal["auto", "pinned", "local"]
+RoutedStage = Literal["restore", "asr"]
+
+
+class FilmPin(Model):
+    """P2-1 C2: the mutable, CAS'd machine choice of one plan; None = 自动."""
+
+    film_id: Id
+    input_revision: Revision
+    worker_id: Id | None
+    version: Revision
+    updated_at: UtcTime
+
+
+class FilmRoute(Model):
+    """P2-1 C9: a film revision routed to one worker. "Claimed" is derived from
+    unresolved assignments; `reason` is the persisted human-readable choice (V1)."""
+
+    route_id: Id
+    film_id: Id
+    input_revision: Revision
+    worker_id: Id
+    kind: RouteKind
+    state: Literal["open", "closed"]
+    reason: Text
+    routed_at: UtcTime
+    closed_at: UtcTime | None = None
+    close_reason: Text | None = None
+    version: Revision
+
+
+class RouteOpen(Model):
+    """Route a film revision (operator). `expected_pin_version` is the pin row's
+    version the decision saw (0: no pin row); `local` routes skip the pin rules."""
+
+    route_id: Id
+    film_id: Id
+    input_revision: Revision
+    worker_id: Id
+    kind: RouteKind
+    expected_pin_version: Count
+    reason: Text
+
+
+class RouteWithdraw(VersionedCommand):
+    """Close an unclaimed open route; `expected_version` is the route's."""
+
+    route_id: Id
+    reason: Text
+
+
+class PinSet(VersionedCommand):
+    """改派: change a plan's pin; `expected_version` is the pin's."""
+
+    film_id: Id
+    input_revision: Revision
+    worker_id: Id | None
+    reason: Text
+
+
+class StoppedAttestation(VersionedCommand):
+    """判定已停止: the operator attests an unresolved compute assignment stopped;
+    `expected_version` is the assignment's."""
+
+    assignment_id: Id
+    attempt_id: Id
+    operation_id: Id
+    reason: Text
+    evidence: tuple[EvidenceRef, ...]
+
+
+class RoutingProfile(Model):
+    stage: Literal["restore", "asr", "translate"]
+    max_width: Revision
+    max_height: Revision
+
+
+class RoutingWorker(Model):
+    """A worker as the scheduler sees it in the store (heartbeats come apart)."""
+
+    worker_id: Id
+    name: Text
+    enrollment_state: EnrollmentState
+    admission_state: AdmissionState
+    participation: bool
+    boot_reconciled: bool
+    gpu_model: Text | None
+    vram_mib: Count
+    profiles: tuple[RoutingProfile, ...]
+
+
+class RoutingFilm(Model):
+    """A current-revision film with GPU work left or an open route."""
+
+    film_id: Id
+    input_revision: Revision
+    display_name: Text
+    created_at: UtcTime
+    planned: bool
+    confirmed_at: UtcTime | None
+    ltx_model: LtxTier | None
+    pin_worker_id: Id | None
+    pin_version: Count
+    restore: StageStatus
+    asr: StageStatus
+    translate: StageStatus
+    # the worker, stage and claim time of the film's unresolved compute assignment
+    claimed_by: Id | None = None
+    claimed_stage: Literal["restore", "asr", "translate"] | None = None
+    claimed_at: UtcTime | None = None
+    max_width: Count = 0
+    max_height: Count = 0
+    duration_ms: Count | None = None
+    source_bytes: Count = 0
+
+
+class RateSample(Model):
+    """One succeeded restore/ASR attempt on a worker: the prediction's history."""
+
+    stage: RoutedStage
+    worker_id: Id
+    gpu_model: Text | None
+    tier: LtxTier | None
+    max_width: Count
+    max_height: Count
+    duration_ms: Count
+    wall_seconds: Seconds
+    avg_w: Watts | None
+    ended_at: UtcTime
+
+
+class RoutingSnapshot(Model):
+    films: tuple[RoutingFilm, ...]
+    routes: tuple[FilmRoute, ...]  # open routes only
+    workers: tuple[RoutingWorker, ...]
+    samples: tuple[RateSample, ...]  # newest first
 
 
 class UnplannedFilm(Model):

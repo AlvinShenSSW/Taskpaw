@@ -66,6 +66,7 @@ _RECOVERY_COMMANDS = frozenset(
         "revoke_worker",
         "mark_unknown",
         "resolve_assignment",
+        "attest_stopped",
         "revoke_approval",
         "finish_attempt",
         "accept_artifact_receipt",

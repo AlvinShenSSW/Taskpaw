@@ -24,6 +24,7 @@ from .models import (
     FilmCreate,
     FilmPlanConfirm,
     FilmRecord,
+    FilmRoute,
     FinalManifest,
     FinalManifestPut,
     InputManifest,
@@ -55,6 +56,11 @@ _STAGES: tuple[Stage, ...] = (
     "cleanup_workcopy",
 )
 _COMPUTE = frozenset(("restore", "asr", "translate"))
+_FINISHED = ("succeeded", "skipped")
+# P2-1 R6: the stages a route serves. The controller's own `local` route runs
+# the whole compute chain; any other route ends with the GPU stages.
+_ROUTE_STAGES = {"local": ("restore", "asr", "translate")}
+_GPU_STAGES = ("restore", "asr")
 
 
 def native_identity_key(identity: NativeIdentity | None) -> str | None:
@@ -122,6 +128,7 @@ class FilmCommands(WorkerCommands):
 
         Only a current revision whose restore is still pending can be planned,
         once: a confirmed plan is never changed (a new revision needs its own).
+        P2-1: `machine` None is 自动; the plan's pin row starts as its machine.
         """
 
         def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
@@ -140,10 +147,7 @@ class FilmCommands(WorkerCommands):
             ).fetchone()
             if restore is None or restore["status"] != "pending":
                 raise WorkflowError("precondition_failed")
-            if not self._conn.execute(
-                "SELECT 1 FROM workers WHERE worker_id=? AND enrollment_state='verified'",
-                (command.machine,),
-            ).fetchone():
+            if command.machine is not None and not self._verified(command.machine):
                 raise WorkflowError("precondition_failed")
             self._insert(
                 "film_plans",
@@ -154,9 +158,84 @@ class FilmCommands(WorkerCommands):
                 confirmed_at=timestamp(now),
                 actors=json.dumps(list(command.actors), ensure_ascii=False),
             )
+            self._insert(
+                "film_pins",
+                film_id=command.film_id,
+                input_revision=command.input_revision,
+                worker_id=command.machine,
+                updated_at=timestamp(now),
+            )
             return Mutation(command.film_id, film["version"], "planned")
 
         return self._execute(auth, meta, command, "confirm_plan", apply)
+
+    def _verified(self, worker_id: str) -> bool:
+        return bool(
+            self._conn.execute(
+                "SELECT 1 FROM workers WHERE worker_id=? AND enrollment_state='verified' "
+                "AND admission_state!='revoked'",
+                (worker_id,),
+            ).fetchone()
+        )
+
+    # ── routes (P2-1) ───────────────────────────────────────────────────
+    def _open_route(self, film_id: str, revision: int) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT * FROM film_routes WHERE film_id=? AND input_revision=? "
+            "AND state='open'",
+            (film_id, revision),
+        ).fetchone()
+        return row
+
+    def _compute_claim(self, film_id: str, revision: int) -> sqlite3.Row | None:
+        """The revision's unresolved compute assignment: what makes a route claimed (C9)."""
+        row: sqlite3.Row | None = self._conn.execute(
+            "SELECT a.* FROM assignments a JOIN stages s ON s.job_id=a.job_id "
+            "WHERE s.film_id=? AND s.input_revision=? "
+            "AND s.stage IN ('restore','asr','translate') AND a.resolved_at IS NULL",
+            (film_id, revision),
+        ).fetchone()
+        return row
+
+    def _compute_statuses(self, film_id: str, revision: int) -> dict[str, str]:
+        return {
+            row[0]: row[1]
+            for row in self._conn.execute(
+                "SELECT stage,status FROM stages WHERE film_id=? AND input_revision=? "
+                "AND stage IN ('restore','asr','translate')",
+                (film_id, revision),
+            )
+        }
+
+    def _close_route(self, row: sqlite3.Row, now: datetime, reason: str) -> int:
+        value = FilmRoute.model_validate_json(row["body_json"]).model_copy(
+            update={
+                "state": "closed",
+                "closed_at": now,
+                "close_reason": reason,
+                "version": row["version"] + 1,
+            }
+        )
+        return self._update(
+            "film_routes",
+            "route_id",
+            row["route_id"],
+            row["version"],
+            state="closed",
+            closed_at=timestamp(now),
+            close_reason=reason,
+            body_json=canonical_json(value),
+        )
+
+    def _close_finished_route(self, film_id: str, revision: int, now: datetime) -> None:
+        """R6: a route whose stages are all finished and unclaimed closes (完成)."""
+        route = self._open_route(film_id, revision)
+        if route is None or self._compute_claim(film_id, revision) is not None:
+            return
+        statuses = self._compute_statuses(film_id, revision)
+        stages = _ROUTE_STAGES.get(route["kind"], _GPU_STAGES)
+        if all(statuses.get(stage) in _FINISHED for stage in stages):
+            self._close_route(route, now, "完成")
 
     def _film_row(self, film_id: str) -> sqlite3.Row:
         return self._one("SELECT * FROM films WHERE film_id=?", (film_id,))
@@ -345,6 +424,11 @@ class FilmCommands(WorkerCommands):
             raise WorkflowError("precondition_failed")
         self._check_attachments(film, value)
         self._manifest_insert(value, now)
+        for route in self._conn.execute(
+            "SELECT * FROM film_routes WHERE film_id=? AND state='open'",
+            (value.film_id,),
+        ).fetchall():
+            self._close_route(route, now, "新版本")  # C9: a new revision
         job_ids = {name: str(uuid4()) for name in _STAGES}
         for index, name in enumerate(_STAGES):
             previous = (
@@ -486,6 +570,10 @@ class FilmCommands(WorkerCommands):
                 self._check_worker_claim(
                     principal, command, self._input(job), job["stage"]
                 )
+                # P2-1 C10: only the worker the film revision is routed to
+                route = self._open_route(job["film_id"], job["input_revision"])
+                if route is None or route["worker_id"] != command.worker_id:
+                    raise WorkflowError("route_required")
             elif (
                 command.worker_id is not None
                 or command.resource_id is not None
@@ -1043,6 +1131,7 @@ class FilmCommands(WorkerCommands):
                 assignment, "resolved", now, owner=command.local_owner
             )
             self._publish_final(job, final)
+            self._close_finished_route(job["film_id"], job["input_revision"], now)
             return Mutation(
                 assignment["assignment_id"],
                 version,
@@ -1107,6 +1196,7 @@ class FilmCommands(WorkerCommands):
             version = self._set_stage(
                 job, "skipped", evidence=command.evidence, reason=command.reason
             )
+            self._close_finished_route(job["film_id"], job["input_revision"], now)
             return Mutation(job["job_id"], version, "skipped")
 
         return self._execute(auth, meta, command, "skip_stage", apply)

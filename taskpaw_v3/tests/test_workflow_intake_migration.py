@@ -17,8 +17,8 @@ FIXTURES = Path(__file__).parent / "fixtures/workflow"
 FIXTURE = FIXTURES / "database-v1-archive-pending-cleanup.sql"
 META = json.loads(FIXTURE.with_suffix(".json").read_text(encoding="utf-8"))
 INTAKE_TABLES = set(schema_intake.TABLES)
-# tables a v1 file gains on its upgrade (v2 intake, v3 U1 plans)
-ADDED_TABLES = INTAKE_TABLES | set(schema.V3_TABLES)
+# tables a v1 file gains on its upgrade (v2 intake, v3 U1 plans, v4 pins/routes)
+ADDED_TABLES = INTAKE_TABLES | set(schema.V4_TABLES)
 
 
 def legacy_database(path):
@@ -60,7 +60,7 @@ def test_upgrade_preserves_all_legacy_rows_and_receipt_bound_public_view(tmp_pat
         )
     assert rows(path) == before
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         assert ADDED_TABLES <= {
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -105,7 +105,7 @@ def test_upgrade_failure_rolls_back_schema_version_and_preserves_business_facts(
         def execute(self, sql, *args, **kwargs):
             if point == "ddl" and sql.startswith("CREATE TABLE intake_snapshots"):
                 raise sqlite3.OperationalError("injected intake DDL failure")
-            if point == "version" and sql == "PRAGMA user_version=3":
+            if point == "version" and sql == "PRAGMA user_version=4":
                 raise sqlite3.OperationalError("injected version failure")
             return super().execute(sql, *args, **kwargs)
 
@@ -135,7 +135,7 @@ def test_upgrade_failure_rolls_back_schema_version_and_preserves_business_facts(
 @pytest.mark.parametrize(
     "mutation",
     [
-        "PRAGMA user_version=4",
+        "PRAGMA user_version=5",
         "DROP INDEX source_identity_references",
         "ALTER TABLE films ADD COLUMN extra TEXT",
     ],

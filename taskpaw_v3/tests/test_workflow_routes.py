@@ -1,0 +1,608 @@
+"""P2-1 (#292): schema v4, pins, routes, the claim route check and 判定已停止."""
+
+from __future__ import annotations
+
+import sqlite3
+
+import pytest
+
+from taskpaw_v3.tests.test_workflow_local_dispatch import (
+    add_film,
+    dispatcher,
+    open_assignments,
+    runtime,
+    stage,
+)
+from taskpaw_v3.tests.test_workflow_store import identity
+from taskpaw_v3.tests.workflow_route_helpers import (
+    ATTESTED,
+    GPU_16,
+    attest,
+    boot,
+    claim_remote,
+    enrol_remote,
+    finish_remote,
+    pin_version,
+    resolve_remote,
+    route,
+)
+from taskpaw_v3.workflow import models as m
+from taskpaw_v3.workflow import schema
+from taskpaw_v3.workflow.auth import require_role
+from taskpaw_v3.workflow.executors import failed_kind
+from taskpaw_v3.workflow.local_dispatch import should_retry
+
+
+@pytest.fixture
+def rt(tmp_path):
+    value = runtime(tmp_path / "wf")
+    try:
+        yield value
+    finally:
+        value.close()
+
+
+def confirm(rt, film_id, machine, *, tier="standard", revision=1):
+    return rt.store.confirm_plan(
+        rt.operator,
+        rt.meta(),
+        m.FilmPlanConfirm(
+            film_id=film_id, input_revision=revision, ltx_model=tier, machine=machine
+        ),
+    )
+
+
+def set_pin(rt, film_id, worker_id, *, revision=1, version=None):
+    return rt.store.set_pin(
+        rt.operator,
+        rt.meta(),
+        m.PinSet(
+            film_id=film_id,
+            input_revision=revision,
+            expected_version=version or pin_version(rt, film_id, revision),
+            worker_id=worker_id,
+            reason="改派",
+        ),
+    )
+
+
+def open_route(rt, film_id, revision=1):
+    return rt.store.film_route(rt.operator, film_id, revision)
+
+
+def withdraw(rt, route_value, reason="测试撤回"):
+    return rt.store.withdraw_route(
+        rt.operator,
+        rt.meta(),
+        m.RouteWithdraw(
+            route_id=route_value.route_id,
+            expected_version=route_value.version,
+            reason=reason,
+        ),
+    )
+
+
+def auto_film(rt, **kw):
+    film = add_film(rt, plan=False, **kw)
+    confirm(rt, film, None)
+    return film
+
+
+# ── plans and pins ───────────────────────────────────────────────────────
+def test_new_databases_are_v4_with_routes_and_pins(rt):
+    assert schema.SCHEMA_VERSION == 4
+    assert {"film_plans", "film_pins", "film_routes"} <= set(schema.TABLES)
+    assert "one_open_route_per_film" in schema.INDEXES
+
+
+def test_a_plan_may_leave_the_machine_to_auto(rt):
+    film = auto_film(rt)
+    (plan,) = rt.store.list_plans(rt.operator)
+    assert (plan.film_id, plan.machine) == (film, None)
+    pin = rt.store.get_pin(rt.operator, film, 1)
+    assert (pin.worker_id, pin.version) == (None, 1)
+
+
+def test_a_given_machine_is_the_first_pin(rt):
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = add_film(rt, plan=False)
+    confirm(rt, film, w.worker_id)
+    assert rt.store.get_pin(rt.operator, film, 1).worker_id == w.worker_id
+    with pytest.raises(m.WorkflowError, match="plan_exists"):
+        confirm(rt, film, None)
+
+
+def test_pin_changes_are_cas_and_current_revision_only(rt):
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    set_pin(rt, film, w.worker_id)
+    pin = rt.store.get_pin(rt.operator, film, 1)
+    assert (pin.worker_id, pin.version) == (w.worker_id, 2)
+    with pytest.raises(m.WorkflowError, match="cas_conflict"):
+        set_pin(rt, film, None, version=1)
+    with pytest.raises(m.WorkflowError, match="precondition_failed"):
+        set_pin(rt, film, identity())  # not an enrolled worker
+    (plan,) = rt.store.list_plans(rt.operator)
+    assert plan.machine is None  # the plan itself never changes (C2)
+
+
+def test_route_commands_are_operator_only():
+    for command in ("route_film", "withdraw_route", "set_pin", "attest_stopped"):
+        require_role("operator", command)
+        with pytest.raises(m.WorkflowError, match="forbidden"):
+            require_role("compute_worker", command)
+
+
+# ── routes and the claim gate ────────────────────────────────────────────
+def test_a_remote_claim_needs_an_open_route_to_that_worker(rt):
+    w1, w2 = enrol_remote(rt, "5060 Ti-1"), enrol_remote(rt, "5060 Ti-2")
+    film = auto_film(rt)
+    with pytest.raises(m.WorkflowError, match="route_required"):
+        claim_remote(rt, w1, film, "restore")
+    route(rt, film, w2.worker_id)
+    with pytest.raises(m.WorkflowError, match="route_required"):
+        claim_remote(rt, w1, film, "restore")
+    result, _ = claim_remote(rt, w2, film, "restore")
+    assert result.status == "running"
+    value = open_route(rt, film)
+    assert (value.worker_id, value.kind, value.state) == (w2.worker_id, "auto", "open")
+
+
+def test_one_open_route_per_film_and_pin_rules_per_kind(rt):
+    w1, w2 = enrol_remote(rt, "5060 Ti-1"), enrol_remote(rt, "5060 Ti-2")
+    film = auto_film(rt)
+    with pytest.raises(m.WorkflowError, match="precondition_failed"):
+        route(rt, film, w1.worker_id, kind="pinned")  # the pin is 自动
+    route(rt, film, w1.worker_id)
+    with pytest.raises(m.WorkflowError, match="route_exists"):
+        route(rt, film, w2.worker_id)
+    pinned = auto_film(rt)
+    set_pin(rt, pinned, w2.worker_id)
+    with pytest.raises(m.WorkflowError, match="precondition_failed"):
+        route(rt, pinned, w1.worker_id, kind="pinned")
+    with pytest.raises(m.WorkflowError, match="precondition_failed"):
+        route(rt, pinned, w2.worker_id, kind="auto")
+    route(rt, pinned, w2.worker_id, kind="pinned")
+    # `local` is the controller's own route: no pin rule
+    local = auto_film(rt)
+    set_pin(rt, local, w2.worker_id)
+    route(rt, local, rt.identity.worker_id, kind="local")
+
+
+def test_a_route_is_cas_on_the_pin_and_the_current_revision(rt):
+    from taskpaw_v3.tests.test_workflow_plans import new_revision
+
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    stale_pin = pin_version(rt, film)
+    set_pin(rt, film, None)  # 改派 back to 自动: a new version
+    with pytest.raises(m.WorkflowError, match="cas_conflict"):
+        rt.store.route_film(
+            rt.operator,
+            rt.meta(),
+            m.RouteOpen(
+                route_id=identity(),
+                film_id=film,
+                input_revision=1,
+                worker_id=w.worker_id,
+                kind="auto",
+                expected_pin_version=stale_pin,
+                reason="旧快照",
+            ),
+        )
+    new_revision(rt, film)
+    with pytest.raises(m.WorkflowError, match="cas_conflict"):
+        route(rt, film, w.worker_id)  # revision 1 is no longer current
+
+
+def test_only_an_enabled_verified_worker_is_routed(rt):
+    w = enrol_remote(rt, "5060 Ti-1")
+    worker = rt.store.get_worker(rt.operator, w.worker_id).worker
+    rt.store.update_worker(
+        rt.operator,
+        rt.meta(),
+        m.WorkerUpdate(
+            worker_id=w.worker_id,
+            expected_version=worker.version,
+            address=worker.address,
+            port=worker.port,
+            network_revision=worker.network_revision,
+            workflow_participation=True,
+            admission_state="draining",
+        ),
+    )
+    film = auto_film(rt)
+    with pytest.raises(m.WorkflowError, match="precondition_failed"):
+        route(rt, film, w.worker_id)
+
+
+def test_withdraw_frees_an_unclaimed_route_and_the_claim_is_refused(rt):
+    w1, w2 = enrol_remote(rt, "5060 Ti-1"), enrol_remote(rt, "5060 Ti-2")
+    film = auto_film(rt)
+    route(rt, film, w1.worker_id)
+    value = open_route(rt, film)
+    withdraw(rt, value, "设备停领")
+    assert open_route(rt, film) is None
+    (closed,) = rt.store.list_routes(rt.operator, open_only=False)
+    assert (closed.state, closed.close_reason) == ("closed", "设备停领")
+    with pytest.raises(m.WorkflowError, match="route_required"):
+        claim_remote(rt, w1, film, "restore")
+    with pytest.raises(m.WorkflowError, match="cas_conflict"):
+        withdraw(rt, value)  # already closed: its version moved on
+    route(rt, film, w2.worker_id)
+    claim_remote(rt, w2, film, "restore")
+
+
+def test_a_claimed_route_is_never_withdrawn_or_repinned(rt):
+    w1, w2 = enrol_remote(rt, "5060 Ti-1"), enrol_remote(rt, "5060 Ti-2")
+    film = auto_film(rt)
+    route(rt, film, w1.worker_id)
+    claim_remote(rt, w1, film, "restore")
+    with pytest.raises(m.WorkflowError, match="route_claimed"):
+        withdraw(rt, open_route(rt, film))
+    with pytest.raises(m.WorkflowError, match="route_claimed"):
+        set_pin(rt, film, w2.worker_id)
+    assert open_route(rt, film).worker_id == w1.worker_id
+
+
+def test_repin_withdraws_an_unclaimed_route_but_keeps_a_matching_one(rt):
+    w1, w2 = enrol_remote(rt, "5060 Ti-1"), enrol_remote(rt, "5060 Ti-2")
+    film = auto_film(rt)
+    route(rt, film, w1.worker_id)
+    set_pin(rt, film, w1.worker_id)  # already there: the route stays
+    assert open_route(rt, film).worker_id == w1.worker_id
+    set_pin(rt, film, w2.worker_id)  # 改派
+    assert open_route(rt, film) is None
+    route(rt, film, w2.worker_id, kind="pinned")
+    claim_remote(rt, w2, film, "restore")
+
+
+def test_asr_stays_on_the_route_and_the_route_closes_after_the_gpu_stages(rt):
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    route(rt, film, w.worker_id)
+    resolve_remote(rt, w, claim_remote(rt, w, film, "restore"))
+    assert open_route(rt, film).worker_id == w.worker_id  # between restore and ASR
+    resolve_remote(rt, w, claim_remote(rt, w, film, "asr"))
+    assert open_route(rt, film) is None  # restore and ASR done: the slot is free
+    (done,) = rt.store.list_routes(rt.operator, open_only=False)
+    assert done.close_reason == "完成"
+    # translate is the controller's: its own implicit route, closed when done
+    d = dispatcher(rt)
+    assert d.run_once() is True
+    assert stage(rt, film, "translate").status == "succeeded"
+    routes = rt.store.list_routes(rt.operator, open_only=False)
+    assert [(r.kind, r.state) for r in routes] == [
+        ("auto", "closed"),
+        ("local", "closed"),
+    ]
+
+
+def test_single_machine_runs_on_one_local_route_closed_at_the_end(rt):
+    film = add_film(rt)
+    d = dispatcher(rt)
+    assert [d.run_once() for _ in range(4)] == [True, True, True, False]
+    (local,) = rt.store.list_routes(rt.operator, open_only=False)
+    assert (local.worker_id, local.kind, local.state, local.reason) == (
+        rt.identity.worker_id,
+        "local",
+        "closed",
+        "本机",
+    )
+    assert open_assignments(rt) == []
+    assert stage(rt, film, "translate").status == "succeeded"
+
+
+def test_a_new_revision_closes_the_old_route(rt):
+    from taskpaw_v3.tests.test_workflow_plans import new_revision
+
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    route(rt, film, w.worker_id)
+    new_revision(rt, film)
+    assert open_route(rt, film) is None
+    (old,) = rt.store.list_routes(rt.operator, open_only=False)
+    assert (old.input_revision, old.close_reason) == (1, "新版本")
+
+
+def test_a_route_needs_unfinished_compute_work(rt):
+    film = add_film(rt)
+    d = dispatcher(rt)
+    while d.run_once():
+        pass
+    with pytest.raises(m.WorkflowError, match="precondition_failed"):
+        route(rt, film, rt.identity.worker_id, kind="local")
+
+
+def test_route_replay_is_idempotent(rt):
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    meta = rt.meta()
+    command = m.RouteOpen(
+        route_id=identity(),
+        film_id=film,
+        input_revision=1,
+        worker_id=w.worker_id,
+        kind="auto",
+        expected_pin_version=1,
+        reason="自动",
+    )
+    first = rt.store.route_film(rt.operator, meta, command)
+    assert rt.store.route_film(rt.operator, meta, command) == first
+    assert len(rt.store.list_routes(rt.operator)) == 1
+
+
+# ── 判定已停止 ───────────────────────────────────────────────────────────
+def crashed(rt):
+    """A remote restore whose worker restarted: assignment and GPU unknown."""
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    route(rt, film, w.worker_id)
+    claimed = claim_remote(rt, w, film, "restore")
+    w = boot(rt, w, identity())
+    return w, film, claimed
+
+
+def test_attest_stopped_resolves_unknown_work_and_frees_the_gpu(rt):
+    w, film, (result, _) = crashed(rt)
+    assert stage(rt, film, "restore").status == "unknown"
+    attest(rt, result.assignment_id)
+    job = stage(rt, film, "restore")
+    assert job.status == "failed"
+    (attempt,) = rt.store.list_attempts(rt.operator, job.job_id)
+    assert {e.kind for e in attempt.evidence} == {ATTESTED, failed_kind("cancelled")}
+    assert attempt.status == "failed" and should_retry([attempt])  # a free retry
+    assert not [o for o in rt.store.list_open_assignments(rt.operator)]
+    assert open_route(rt, film) is None
+    (closed,) = rt.store.list_routes(rt.operator, open_only=False)
+    assert closed.close_reason == "判定已停止"
+    # the worker's boot reconciles and its GPU takes the next film
+    w = boot(rt, w, w.boot_id)
+    rt.store.retry_stage(
+        rt.operator,
+        rt.meta(),
+        m.StageRetry(job_id=job.job_id, expected_version=job.version, reason="重派"),
+    )
+    route(rt, film, w.worker_id)
+    assert claim_remote(rt, w, film, "restore")[0].status == "running"
+
+
+def test_attest_keeps_a_proven_success(rt):
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    route(rt, film, w.worker_id)
+    claimed = claim_remote(rt, w, film, "restore")
+    finish_remote(rt, w, claimed)
+    boot(rt, w, identity())
+    attest(rt, claimed[0].assignment_id)
+    assert stage(rt, film, "restore").status == "succeeded"
+    assert not rt.store.list_open_assignments(rt.operator)
+
+
+def test_attest_needs_operator_attestation_evidence(rt):
+    w, film, (result, command) = crashed(rt)
+    current = next(o.assignment for o in rt.store.list_open_assignments(rt.operator))
+    for kinds in ((ATTESTED,), (failed_kind("cancelled"),)):
+        with pytest.raises(m.WorkflowError, match="precondition_failed"):
+            rt.store.attest_stopped(
+                rt.operator,
+                rt.meta(),
+                m.StoppedAttestation(
+                    assignment_id=current.assignment_id,
+                    attempt_id=current.attempt_id,
+                    expected_version=current.version,
+                    operation_id=command.operation_id,
+                    reason="缺少证明",
+                    evidence=tuple(rt.evidence(kind) for kind in kinds),
+                ),
+            )
+    with pytest.raises(m.WorkflowError, match="stale_attempt"):
+        rt.store.attest_stopped(
+            rt.operator,
+            rt.meta(),
+            m.StoppedAttestation(
+                assignment_id=current.assignment_id,
+                attempt_id=identity(),
+                expected_version=current.version,
+                operation_id=command.operation_id,
+                reason="错误的尝试",
+                evidence=(
+                    rt.evidence(ATTESTED),
+                    rt.evidence(failed_kind("cancelled")),
+                ),
+            ),
+        )
+    attest(rt, result.assignment_id)
+    with pytest.raises(m.WorkflowError, match="cas_conflict"):
+        attest_again = m.StoppedAttestation(
+            assignment_id=current.assignment_id,
+            attempt_id=current.attempt_id,
+            expected_version=current.version,
+            operation_id=command.operation_id,
+            reason="重复",
+            evidence=(rt.evidence(ATTESTED), rt.evidence(failed_kind("cancelled"))),
+        )
+        rt.store.attest_stopped(rt.operator, rt.meta(), attest_again)
+
+
+def test_attest_refuses_component_assignments(rt):
+    """Return and scrape run on the controller and settle by restart, not attestation."""
+    film = add_film(rt)
+    d = dispatcher(rt)
+    for _ in range(3):
+        assert d.run_once() is True
+    job = stage(rt, film, "return")
+    tools = m.ToolVersions(
+        tool="synthetic",
+        tool_version="1",
+        model="synthetic",
+        model_version="1",
+        profile="synthetic",
+        profile_revision=1,
+        config_digest="c" * 64,
+    )
+    claimed = rt.store.claim(
+        rt.receiver_auth,
+        rt.meta(),
+        m.ClaimRequest(
+            job_id=job.job_id,
+            expected_version=job.version,
+            attempt_id=identity(),
+            operation_id=identity(),
+            worker_id=None,
+            boot_id=rt.boot_id,
+            profile_revision=1,
+            config_digest=tools.config_digest,
+            resource_id=None,
+            tool_versions=tools,
+        ),
+    )
+    with pytest.raises(m.WorkflowError, match="precondition_failed"):
+        attest(rt, claimed.assignment_id)
+
+
+def test_routing_snapshot_reads_films_routes_workers_and_samples(rt):
+    w = enrol_remote(rt, "5070 Ti", gpu=GPU_16)
+    film = auto_film(rt, width=3840, height=2160)
+    route(rt, film, w.worker_id)
+    resolve_remote(rt, w, claim_remote(rt, w, film, "restore"))
+    snap = rt.store.routing_snapshot(rt.operator)
+    (entry,) = [f for f in snap.films if f.film_id == film]
+    assert (entry.restore, entry.asr, entry.max_width, entry.max_height) == (
+        "succeeded",
+        "pending",
+        3840,
+        2160,
+    )
+    assert entry.pin_worker_id is None and entry.pin_version == 1
+    assert entry.source_bytes > 0 and entry.claimed_by is None
+    (r,) = snap.routes
+    assert (r.film_id, r.worker_id) == (film, w.worker_id)
+    remote = next(x for x in snap.workers if x.worker_id == w.worker_id)
+    assert (remote.gpu_model, remote.vram_mib, remote.boot_reconciled) == (
+        GPU_16[0],
+        GPU_16[1],
+        True,
+    )
+    assert {(p.stage, p.max_width) for p in remote.profiles} == {
+        ("restore", 3840),
+        ("asr", 3840),
+    }
+    (sample,) = snap.samples
+    assert (sample.stage, sample.worker_id, sample.tier) == (
+        "restore",
+        w.worker_id,
+        "standard",
+    )
+    assert sample.wall_seconds >= 0
+
+
+# ── v3 → v4 migration ────────────────────────────────────────────────────
+def as_v3(path) -> None:
+    """Turn a v4 file back into the exact v3 format."""
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE film_routes")
+        conn.execute("DROP TABLE film_pins")
+        conn.execute("ALTER TABLE film_plans RENAME TO plans_v4")
+        conn.execute(schema.V3_TABLES["film_plans"])
+        conn.execute("INSERT INTO film_plans SELECT * FROM plans_v4")
+        conn.execute("DROP TABLE plans_v4")
+        conn.execute("PRAGMA user_version=3")
+
+
+def test_v3_upgrade_keeps_every_plan_and_pins_it_to_auto(tmp_path):
+    first = runtime(tmp_path / "wf")
+    done = add_film(first)
+    waiting = add_film(first)
+    d = dispatcher(first)
+    for _ in range(3):
+        assert d.run_once() is True  # `done` runs all its compute stages
+    before = [
+        (p.film_id, p.ltx_model, p.machine, p.confirmed_at, p.backfilled)
+        for p in first.store.list_plans(first.operator)
+    ]
+    worker = first.identity.worker_id
+    first.close()
+    path = tmp_path / "wf" / "workflow.db"
+    as_v3(path)
+    again = runtime(tmp_path / "wf")
+    try:
+        plans = again.store.list_plans(again.operator)
+        assert [
+            (p.film_id, p.ltx_model, p.machine, p.confirmed_at, p.backfilled)
+            for p in plans
+        ] == before
+        assert {p.machine for p in plans} == {worker}  # history kept
+        for film in (done, waiting):
+            pin = again.store.get_pin(again.operator, film, 1)
+            assert (pin.worker_id, pin.version) == (None, 1)  # D9/OD1: 自动
+        assert again.store.list_routes(again.operator, open_only=False) == ()
+        d = dispatcher(again)
+        while d.run_once():
+            pass
+        assert stage(again, waiting, "translate").status == "succeeded"
+    finally:
+        again.close()
+    backups = list((tmp_path / "wf").glob("*.bak"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute(
+            "SELECT \"notnull\" FROM pragma_table_info('film_plans') WHERE name='machine'"
+        ).fetchone() == (0,)
+
+
+@pytest.mark.parametrize("point", ["rebuild", "routes", "pins", "commit"])
+def test_v3_upgrade_failure_keeps_the_v3_file(tmp_path, monkeypatch, point):
+    rt = runtime(tmp_path / "wf")
+    add_film(rt)
+    rt.close()
+    path = tmp_path / "wf" / "workflow.db"
+    as_v3(path)
+    with sqlite3.connect(path) as conn:
+        plans_before = conn.execute("SELECT * FROM film_plans").fetchall()
+    real_connect = sqlite3.connect
+
+    class FailingConnection(sqlite3.Connection):
+        def execute(self, sql, *args, **kwargs):
+            if point == "rebuild" and sql.startswith("ALTER TABLE film_plans"):
+                raise sqlite3.OperationalError("injected rebuild failure")
+            if point == "routes" and sql.startswith("CREATE TABLE film_routes"):
+                raise sqlite3.OperationalError("injected routes DDL failure")
+            if point == "pins" and sql.startswith("INSERT INTO film_pins"):
+                raise sqlite3.OperationalError("injected pin failure")
+            return super().execute(sql, *args, **kwargs)
+
+        def commit(self):
+            if point == "commit" and self.in_transaction:
+                raise sqlite3.OperationalError("injected commit failure")
+            return super().commit()
+
+    def connect(database, *args, **kwargs):
+        if str(database).endswith("?mode=rw"):
+            kwargs["factory"] = FailingConnection
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(schema.sqlite3, "connect", connect)
+    with pytest.raises(schema.SchemaError, match="migration_failed"):
+        schema.connect_existing(path)
+    monkeypatch.undo()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+        assert not {"film_pins", "film_routes", "film_plans_v3"} & names
+        assert conn.execute("SELECT * FROM film_plans").fetchall() == plans_before
+    schema.validate_schema(sqlite3.connect(path), version=3)
+    assert len(list((tmp_path / "wf").glob("*.bak"))) == 1
+
+
+def test_a_modified_route_table_is_rejected(tmp_path):
+    rt = runtime(tmp_path / "wf")
+    rt.close()
+    path = tmp_path / "wf" / "workflow.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP INDEX one_open_route_per_film")
+    with pytest.raises(schema.SchemaError, match="invalid_schema"):
+        schema.connect_existing(path)
