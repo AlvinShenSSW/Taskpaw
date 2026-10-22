@@ -547,6 +547,7 @@ class WorkerHost:
         probe = self._probe(self.settings, staging)
         if probe is None:
             self._probe_body, self._probe_due = {}, 0.0
+            self._tiers, self._asr_ready = (), False  # CX8: nothing is ready
             return
         self._probe_due = time.monotonic() + self.probe_seconds
         self._tiers, self._asr_ready = probe.tiers_ready, probe.asr_ready

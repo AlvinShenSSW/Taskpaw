@@ -1112,3 +1112,176 @@ def test_readiness_is_refreshed_without_reposting_an_unchanged_probe(tmp_path):
         assert fake.calls.count("capabilities") == 1
     finally:
         assert worker.stop()
+
+
+# ── Codex round 2 (CX6, CX7, CX8) ───────────────────────────────────────
+class CutServer:
+    """A raw loopback server: each request gets the next scripted reply (a
+    status line, headers and a body of which only `send` bytes are written
+    before the connection is cut). Records every request's headers."""
+
+    def __init__(self, replies) -> None:
+        import socket
+
+        self.replies, self.requests = list(replies), []
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        self.port = self.sock.getsockname()[1]
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        for status, headers, body, send in self.replies:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:  # stopped with replies left
+                return
+            with conn:
+                raw = b""
+                while b"\r\n\r\n" not in raw:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    raw += chunk
+                self.requests.append(raw.decode("latin-1"))
+                head = f"HTTP/1.1 {status}\r\n" + "".join(
+                    f"{k}: {v}\r\n" for k, v in headers.items()
+                )
+                conn.sendall(head.encode() + b"\r\n" + body[:send])
+
+    def stop(self) -> None:
+        self.sock.close()
+
+
+def test_a_truncated_reply_is_transient(tmp_path):
+    """CX6: IncompleteRead and a cut or partial JSON body are `unreachable`."""
+    body = b'{"worker_id": "abcdefghij"}'
+    cut = CutServer(
+        [("200 OK", {"Content-Length": str(len(body))}, body, 10)] * 2
+        + [("200 OK", {"Content-Length": "5"}, b'{"wor', 5)]
+    )
+    try:
+        client = WorkerClient("127.0.0.1", cut.port, timeout=5)
+        for _ in range(2):  # a short body (IncompleteRead), then a partial JSON
+            with pytest.raises(ApiError) as exc:
+                client.call("GET", "/self", auth=False)
+            assert exc.value.transient and exc.value.code == "unreachable"
+        with pytest.raises(ApiError) as exc:
+            client.call("GET", "/self", auth=False)
+        assert exc.value.transient
+    finally:
+        cut.stop()
+
+
+def test_a_pair_reply_cut_mid_body_recovers_through_self(tmp_path, rt, host, server):
+    """CX6: /pair commits, the reply body is cut, /self proves the pairing."""
+    import http.client
+
+    issued = code_for(rt, server)
+
+    class CutClient(WorkerClient):
+        def open(self, method, path, **kw):
+            reply = super().open(method, path, **kw)
+            if path != "/pair":
+                return reply
+            reply.read()  # the server committed; the client never sees it
+
+            class Cut:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def read(self, *args):
+                    raise http.client.IncompleteRead(b"{", 20)
+
+            return Cut()
+
+    worker = worker_host(tmp_path, client_factory=CutClient)
+    try:
+        status = worker.join(issued["code"], str(tmp_path / "staging"))
+        assert status["worker_id"] == issued["worker_id"]
+        until(lambda: worker.state == "running")
+    finally:
+        worker.stop()
+
+
+def test_a_download_cut_by_an_early_eof_keeps_its_part_and_resumes(tmp_path):
+    """CX7: 100 KB cut after 10 KB: the part stays, the next request is a
+    Range from 10240, and the file completes."""
+    data = random.Random(7).randbytes(100 * 1024)
+    digest = sha(data)
+    envelope = {
+        "film": "f",
+        "rev": 1,
+        "workcopy": [
+            {
+                "item_id": "00000000-0000-4000-8000-0000000000aa",
+                "relative_path": "a.bin",
+                "size": len(data),
+                "sha256": digest,
+            }
+        ],
+    }
+    base = {"X-Sha256": digest, "X-Size": str(len(data))}
+    cut = CutServer(
+        [
+            ("200 OK", {**base, "Content-Length": str(len(data))}, data, 10240),
+            (
+                "206 Partial Content",
+                {**base, "Content-Length": str(len(data) - 10240)},
+                data[10240:],
+                len(data),
+            ),
+        ]
+    )
+    staging = st.Staging(tmp_path / "staging", 500, free_bytes=lambda p: 2_000 * 10**9)
+    try:
+        client = WorkerClient(
+            "127.0.0.1", cut.port, (PAIRING, SecretStr("s" * 43)), timeout=5
+        )
+        with pytest.raises(ApiError) as exc:
+            client.download_film(envelope, staging)
+        assert exc.value.transient
+        part = staging.work_dir / "a.bin.part"
+        assert part.read_bytes() == data[:10240]
+        paths = client.download_film(envelope, staging)
+        assert paths[0].read_bytes() == data and not part.exists()
+        assert "range: bytes=10240-" in cut.requests[1].lower()
+        assert "range" not in cut.requests[0].lower()
+    finally:
+        cut.stop()
+
+
+def test_a_missing_gpu_reading_withdraws_readiness(tmp_path, rt, host, server):
+    """CX8: after a good probe, losing the GPU reading clears the advertised
+    tiers and ASR; 设备 shows the worker ineligible until a probe returns."""
+    readings = [True]
+
+    def flaky(settings, staging):
+        if readings[-1]:
+            return Probe(probe("fake"), ("standard", "good"), True)
+        return None
+
+    issued = code_for(rt, server)
+    worker = worker_host(tmp_path, probe=flaky, probe_seconds=0.1)
+    try:
+        worker.join(issued["code"], str(tmp_path / "staging"))
+        until(lambda: worker.state == "running")
+        version = row(rt, host, issued["worker_id"])["version"]
+        devices.approve(rt, issued["worker_id"], version, restore=True, asr=True)
+        until(lambda: row(rt, host, issued["worker_id"])["eligible"])
+        readings.append(False)
+        shown = until(
+            lambda: (
+                (r := row(rt, host, issued["worker_id"]))["asr_ready"] is False and r
+            )
+        )
+        assert shown["tiers_ready"] == [] and shown["eligible"] is False
+        assert shown["eligibility"] != "可接单"
+        readings.append(True)
+        until(lambda: row(rt, host, issued["worker_id"])["eligible"])
+    finally:
+        assert worker.stop()

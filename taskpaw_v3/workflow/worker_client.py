@@ -15,6 +15,7 @@ part on the controller, so they get a long timeout (IR3).
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -136,7 +137,7 @@ class WorkerClient:
             return self._opener.open(request, timeout=timeout or self.timeout)
         except urllib.error.HTTPError as exc:
             raise _api_error(exc) from None
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
             raise ApiError(0, "unreachable") from None
 
     def call(
@@ -153,10 +154,7 @@ class WorkerClient:
         with self.open(
             method, path, data=data, headers=headers, auth=auth, timeout=timeout
         ) as reply:
-            try:
-                return json.loads(reply.read() or b"null")
-            except (OSError, ValueError):
-                raise ApiError(0, "unreachable") from None
+            return _read_json(reply, default=b"null")
 
     # ── enrollment and live state ────────────────────────────────────────
     def pair(
@@ -272,7 +270,10 @@ class WorkerClient:
                         while True:
                             if cancel is not None and cancel.is_set():
                                 raise ApiError(0, "cancelled")
-                            chunk = reply.read(CHUNK)
+                            try:
+                                chunk = reply.read(CHUNK)
+                            except (http.client.HTTPException, OSError):
+                                raise ApiError(0, "unreachable") from None  # CX7
                             if not chunk:
                                 break
                             stream.write(chunk)
@@ -282,6 +283,8 @@ class WorkerClient:
                                 on_progress(before + offset, total)
                         stream.flush()
                         os.fsync(stream.fileno())
+                if offset < size:  # CX7: the reply ended early; the part stays
+                    raise ApiError(0, "unreachable")
             if size == 0:
                 part.touch()  # CX5: an empty work copy has nothing to fetch
             if offset == size and digest.hexdigest() == sha:
@@ -326,7 +329,7 @@ class WorkerClient:
                 with self.open(
                     "PUT", url, data=_blocks(local, received), headers=headers
                 ) as reply:
-                    result = json.loads(reply.read())
+                    result = _read_json(reply)
                 if isinstance(result, dict) and result.get("done") is True:
                     return result
                 last = ApiError(0, "unreachable")
@@ -346,6 +349,15 @@ class WorkerClient:
         if entry is None:
             raise ApiError(404, "not_found")
         return dict(entry)
+
+
+def _read_json(reply: Any, *, default: bytes = b"") -> Any:
+    """A reply body as JSON; a cut or partial body is a transient failure
+    (CX6), so a lost-reply recovery such as /self still runs."""
+    try:
+        return json.loads(reply.read() or default)
+    except (http.client.HTTPException, OSError, ValueError):
+        raise ApiError(0, "unreachable") from None
 
 
 def _api_error(exc: urllib.error.HTTPError) -> ApiError:
