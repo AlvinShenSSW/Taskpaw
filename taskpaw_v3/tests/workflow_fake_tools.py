@@ -54,8 +54,14 @@ def jasna(argv: list[str]) -> int:
     mode = cfg.get("mode", "copy")
     if mode == "sleep":
         print("started", flush=True)
-        time.sleep(60)
-        return 0
+        if not cfg.get("release"):
+            time.sleep(60)
+            return 0
+        # P2-3 §11 IR13: held until the test creates the release file, then
+        # the restore completes normally (an event, never a wall-clock wait)
+        release, deadline = Path(cfg["release"]), time.monotonic() + 120
+        while not release.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
     if mode == "fail":
         print("RuntimeError: CUDA out of memory", flush=True)
         return 3

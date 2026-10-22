@@ -267,12 +267,15 @@ function RemoteStep({ filmId, step }: { filmId: string; step: WorkflowStep }) {
   });
   const name = step.machine?.name ?? "";
   const stage = stageName(step.key);
+  // P2-3 §11 CX5: once the worker uploads or finishes, the stage settled ok and its finished GPU
+  // work is delivered, never discarded — no stop is offered (the controller refuses one too).
+  const stoppable = !step.phase || step.phase === "running" || step.phase === "settling";
   return (
     <section className="panel spacer-top" aria-label="设备" data-testid="remote-step">
       <dl className="facts">
         <dt>设备</dt><dd>{name} · {stage}{step.phase === "uploading" || step.phase === "finishing" ? " · 回传中" : ""}</dd>
       </dl>
-      {!ws.readOnly && step.attempt_id && (
+      {!ws.readOnly && step.attempt_id && stoppable && (
         <div className="actions spacer-top">
           <button type="button" className="btn ghost" onClick={() => setAsking(true)}>停止并重新排队</button>
         </div>

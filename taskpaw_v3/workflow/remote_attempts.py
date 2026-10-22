@@ -28,6 +28,7 @@ from .stage_results import RESULT_NAME
 from .transfer import TransferError, Transfers, validate_finish_refs
 
 if TYPE_CHECKING:
+    from .fleet_live import FleetLive
     from .local_runtime import LocalRuntime
 
 log = logging.getLogger("taskpaw.workflow.remote")
@@ -466,10 +467,22 @@ def cancel_list(
     return cancel
 
 
-def requeue(rt: LocalRuntime, cancels: set[str], film_id: str, attempt_id: str) -> None:
+SETTLED_PHASES = ("uploading", "finishing")  # §11 CX5: the GPU work is done
+
+
+def requeue(
+    rt: LocalRuntime,
+    cancels: set[str],
+    film_id: str,
+    attempt_id: str,
+    *,
+    fleet: FleetLive | None = None,
+) -> None:
     """停止并重新排队 (OD3, R9a): only the film's current, unresolved remote
     restore or ASR attempt; it goes into the heartbeat's `cancel` until it
-    resolves (in memory: a controller restart forgets the request)."""
+    resolves (in memory: a controller restart forgets the request). §11 CX5:
+    once the worker reports the attempt uploading or finishing its stage
+    settled ok, and finished GPU work is never discarded: `already_settled`."""
     view = rt.store.get_film(rt.operator, film_id)
     stage = next(
         (
@@ -495,4 +508,17 @@ def requeue(rt: LocalRuntime, cancels: set[str], film_id: str, attempt_id: str) 
         or running.worker_id in (None, rt.identity.worker_id)
     ):
         raise m.WorkflowError("precondition_failed")
+    if worker_phase(fleet, running.worker_id, attempt_id) in SETTLED_PHASES:
+        raise m.WorkflowError("already_settled")
     cancels.add(attempt_id)
+
+
+def worker_phase(
+    fleet: FleetLive | None, worker_id: str | None, attempt_id: str
+) -> str | None:
+    """The phase the worker last reported for `attempt_id` (None: unknown)."""
+    entry = fleet.entry(worker_id) if fleet is not None and worker_id else None
+    current = entry.beat.current if entry is not None else None
+    if current is None or current.attempt_id != attempt_id:
+        return None
+    return current.phase

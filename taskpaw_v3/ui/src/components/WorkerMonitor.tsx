@@ -85,6 +85,7 @@ export function WorkerMonitor() {
       <Card>
         <CardContent>
           <Typography variant="subtitle1" component="h2" sx={{ mb: 1 }}>影片</Typography>
+          {w.dispatch_notice && <Alert severity="warning" sx={{ mb: 1.5 }}>{w.dispatch_notice}</Alert>}
           {films.length === 0 ? (
             <Typography variant="body2" color="text.secondary">没有派到本机的影片{w.dispatch_reason && w.dispatch_reason !== "idle" ? ` · ${w.dispatch_reason}` : ""}</Typography>
           ) : (

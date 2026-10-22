@@ -187,6 +187,8 @@ export type WorkerConsole = {
   // P2-3 §6: the 媒体处理 tab of a worker
   controller_paused?: boolean; pending?: boolean; films?: WorkerFilm[]; current?: WorkerCurrent | null;
   transfers?: WorkerTransfer[]; dispatch_reason?: string | null;
+  // P2-3 §11 IR3: what needs the operator (the controller refused a failed result)
+  dispatch_notice?: string | null;
   staging?: { used: number | null; cap: number }; gpu?: { name: string | null; vram_mib: number | null; hold: string };
 };
 // P2-3: a film routed to this worker (position 0 当前, 1 预取) and its envelope's stage statuses.

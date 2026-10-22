@@ -477,14 +477,17 @@ def test_a_ledger_with_outputs_is_finished_without_a_re_run(api, rt, world):
 
 # ── 停止并重新排队 (R9a): the control route and its set ─────────────────
 class ControlHost:
-    def __init__(self, rt, cancels):
+    def __init__(self, rt, cancels, fleet=None):
         self.state, self.reason, self.runtime = "running", "", rt
         self.cancels, self.dispatcher, self.finalizer = cancels, None, None
+        self.fleet = fleet
 
     def requeue(self, film_id: str, attempt_id: str) -> None:
         from taskpaw_v3.workflow import remote_attempts
 
-        remote_attempts.requeue(self.runtime, self.cancels, film_id, attempt_id)
+        remote_attempts.requeue(
+            self.runtime, self.cancels, film_id, attempt_id, fleet=self.fleet
+        )
 
 
 def control(rt, host):
@@ -524,3 +527,30 @@ def test_requeue_marks_a_running_remote_attempt_until_its_finish(api, rt, host, 
     body = {"outcome": "failed", "error_class": "cancelled", "message": "已停止"}
     assert finish(api, joined, a, body).status_code == 200
     assert host.cancels == set()  # cleared at resolve
+
+
+@pytest.mark.parametrize("phase", ["uploading", "finishing"])
+def test_requeue_is_refused_once_the_worker_settled_its_stage(
+    api, rt, host, world, phase
+):
+    """§11 CX5: finished GPU work is never discarded — once the worker
+    uploads or finishes, 停止并重新排队 answers 409 `already_settled`."""
+    joined, boot, film_id, _ = world
+    a = _claimed(api, rt, world)
+    ctl = control(rt, ControlHost(rt, host.cancels, host.fleet))
+    url = f"/control/workflow/films/{film_id}/requeue"
+    running = beat(boot, current=current(film_id, a, phase="settling"))
+    assert (
+        api.post(f"{P}/heartbeat", json=running, headers=joined.headers).status_code
+        == 200
+    )
+    assert ctl.post(url, json={"attempt_id": a}).status_code == 200  # still on
+    host.cancels.clear()
+    late = beat(boot, current=current(film_id, a, phase=phase))
+    assert (
+        api.post(f"{P}/heartbeat", json=late, headers=joined.headers).status_code == 200
+    )
+    refused = ctl.post(url, json={"attempt_id": a})
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == "修复已完成，正在回传"
+    assert host.cancels == set()

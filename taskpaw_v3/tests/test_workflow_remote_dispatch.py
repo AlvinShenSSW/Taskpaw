@@ -166,13 +166,25 @@ class Scripted:
 
     def claim(self, body):
         self.claims.append(body)
+        self._status(body["attempt_id"], "running")
         return {"assignment_id": ident(), "attempt_id": body["attempt_id"]}
+
+    def _status(self, attempt_id, status):
+        """The stage of a claimed attempt moves on as the store would."""
+        job = next(
+            (c["job_id"] for c in self.claims if c["attempt_id"] == attempt_id), None
+        )
+        for film in self.films.values():
+            for record in film["stages"].values():
+                if record["job_id"] == job:
+                    record["status"] = status
 
     def renew(self, attempt_id, body):
         return {"version": 2}
 
     def finish(self, attempt_id, body):
         self.finishes.append((attempt_id, body))
+        self._status(attempt_id, body["outcome"])
         return {"state": "resolved", "outcome": body["outcome"]}
 
     def attempt(self, attempt_id):
@@ -488,6 +500,54 @@ def test_a_paused_worker_loses_its_unclaimed_auto_route(tmp_path):
         rt.close()
 
 
+def test_a_route_overtaken_by_a_race_is_logged_with_its_code(
+    tmp_path, monkeypatch, caplog
+):
+    """§11: a decision the store refuses with a tolerated code is skipped,
+    logged at INFO with the code and named in the outcome."""
+    import logging
+
+    from taskpaw_v3.tests.test_workflow_local_dispatch import add_film, runtime
+    from taskpaw_v3.tests.workflow_route_helpers import enrol_remote
+    from taskpaw_v3.workflow import models as m
+    from taskpaw_v3.workflow.routing import run_pass
+
+    rt = runtime(tmp_path / "wf")
+    try:
+        remote = enrol_remote(rt, "5060 Ti-1")
+        film = add_film(rt)
+        now = rt.clock.now()
+        fleet = FleetLive(now - timedelta(minutes=5), VERSION)
+        fleet.observe(
+            remote.worker_id, Heartbeat.model_validate(beat(remote.boot_id)), now
+        )
+
+        def refused(*args, **kw):
+            raise m.WorkflowError("source_not_admissible")
+
+        monkeypatch.setattr(rt.store, "route_film", refused)
+        with caplog.at_level(logging.INFO, logger="taskpaw.workflow"):
+            outcome = run_pass(
+                rt.store,
+                rt.operator,
+                rt.meta,
+                controller_id=rt.identity.worker_id,
+                live=fleet.snapshot(),
+                now=now,
+                executors=rt.executors,
+                remote_enabled=True,
+            )
+        assert [d.film_id for d in outcome.planned.routes] == [film]
+        assert outcome.routed == ()
+        assert outcome.overtaken == ((film, "source_not_admissible"),)
+        assert any(
+            r.levelno == logging.INFO and "code=source_not_admissible" in r.message
+            for r in caplog.records
+        )
+    finally:
+        rt.close()
+
+
 # ── R13 the routing thread ──────────────────────────────────────────────
 class Ticks:
     """The thread's timer: each `tick()` ends one wait as a timeout."""
@@ -660,3 +720,517 @@ def test_a_staged_file_held_open_keeps_its_release_for_later(tmp_path, monkeypat
     monkeypatch.setattr(Path, "unlink", real)
     _observe(d, [], release=[{"film": film, "rev": 1}])
     assert not held.exists() and d.staged() == []
+
+
+# ── §11 review dispositions ─────────────────────────────────────────────
+OUTPUT = b"restored video"
+
+
+class Producing:
+    """A restore that writes one output and its ledger (with timing)."""
+
+    stage = "restore"
+    uses_gpu = True
+
+    def __init__(self, message: str = "ok") -> None:
+        self.runs, self.message = 0, message
+        self.timing = {"scan": 1.0, "ltx": 4.0, "ltx_runs": 1, "wall": 6.0}
+
+    def tools(self, job=None):
+        return SyntheticExecutor("restore").tools()
+
+    def max_resolution(self, vram):
+        return (1920, 1080)
+
+    def run(self, context):
+        from taskpaw_v3.workflow import models as m
+        from taskpaw_v3.workflow.stage_results import RESULT_NAME
+
+        self.runs += 1
+        attempt = context.workdir.name
+        (context.workdir / "movie.mkv").write_bytes(OUTPUT)
+        ledger = {
+            "schema_version": 1,
+            "film_id": context.job.film_id,
+            "input_revision": context.job.input_revision,
+            "stage": "restore",
+            "attempt_id": attempt,
+            "videos": [
+                {
+                    "video_item_id": ident(),
+                    "volume_ordinal": None,
+                    "restore": {
+                        "decision": "applied",
+                        "file": {
+                            "path": f"{attempt}/movie.mkv",
+                            "sha256": hashlib.sha256(OUTPUT).hexdigest(),
+                            "size": len(OUTPUT),
+                        },
+                        "width": 1920,
+                        "height": 1080,
+                        "duration_ms": 1000,
+                        "video_streams": 1,
+                        "audio_streams": 1,
+                        "timing": self.timing,
+                    },
+                }
+            ],
+        }
+        raw = json.dumps(ledger).encode("utf-8")
+        (context.workdir / RESULT_NAME).write_bytes(raw)
+        return ExecOutcome.succeeded(
+            self.message,
+            hashlib.sha256(raw).hexdigest(),
+            m.RestoreTiming.model_validate(self.timing),
+        )
+
+
+class Uploads(Scripted):
+    """Scripted plus an output plan and uploads (`gate`: each upload waits
+    for it, or for the dispatcher's stop)."""
+
+    def __init__(self, staging: Staging) -> None:
+        super().__init__(staging)
+        self.uploads: list[str] = []
+        self.gate: threading.Event | None = None
+        self.uploading = threading.Event()
+        self.cancelled = threading.Event()
+        self.upload_error: ApiError | None = None
+        self.upload_once: ApiError | None = None
+        self.finish_error: ApiError | None = None
+
+    def plan_outputs(self, attempt_id, files):
+        return {"files": list(files)}
+
+    def upload_file(self, attempt_id, path, local, *, size, sha256, **kw):
+        self.uploads.append(path)
+        self.uploading.set()
+        cancel = kw.get("cancel")
+        if self.gate is not None:
+            while not self.gate.wait(0.01):
+                if cancel is not None and cancel.is_set():
+                    self.cancelled.set()
+                    raise ApiError(0, "unreachable")
+        once, self.upload_once = self.upload_once, None
+        if once is not None:
+            raise once
+        if self.upload_error is not None:
+            raise self.upload_error
+        return {"done": True}
+
+    def finish(self, attempt_id, body):
+        self.finishes.append((attempt_id, body))
+        if self.finish_error is not None:
+            raise self.finish_error
+        self._status(attempt_id, body["outcome"])
+        return {"state": "resolved", "outcome": body["outcome"]}
+
+
+def _uploads(tmp_path, executor, **kw):
+    client = Uploads.__new__(Uploads)
+    d, staging = _dispatcher(tmp_path, lambda: client, executor, **kw)
+    client.__init__(staging)
+    return d, staging, client
+
+
+class FakeJob:
+    """An `OwnedJob` whose processes outlive the stop until `gone` is set."""
+
+    def __init__(self) -> None:
+        self.gone = threading.Event()
+
+    def settle(self, timeout: float) -> bool:
+        return self.gone.wait(min(timeout, 0.05))
+
+    def terminate(self) -> None:
+        pass
+
+
+def test_cx1_stop_stays_unconfirmed_while_the_children_survive(tmp_path, monkeypatch):
+    from taskpaw_v3.workflow import remote_dispatch as rd
+    from taskpaw_v3.workflow.local_dispatch import StageRun
+
+    job, ran = FakeJob(), threading.Event()
+
+    def unsettled(executor, job_, manifest, workdir, cancel, **kw):
+        ran.set()
+        assert cancel.wait(10)
+        return StageRun(ExecOutcome.failed("cancelled", "已停止"), job, False)
+
+    monkeypatch.setattr(rd, "run_stage", unsettled)
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    film = client.add()
+    d.start()
+    _observe(d, [_route(film, 0)])
+    assert ran.wait(10)
+    assert d.stop(1.0) is False  # the tree still runs: not confirmed
+    assert d.lease.holder() == d.run_id  # and it keeps the GPU (C4)
+    assert d.stop(0.2) is False  # asked again: settled again, still running
+    job.gone.set()
+    assert d.stop(1.0) is True  # a later call settles it
+    assert d.lease.holder() is None
+    (path,) = (staging.root / "attempts").glob("*.json")
+    settled = json.loads(path.read_text(encoding="utf-8"))["settled"]
+    assert settled["error_class"] == "cancelled"  # persisted, never finished
+    assert client.finishes == []
+
+
+def _held_attempt(staging, film):
+    attempt = ident()
+    (staging.root / "attempts").mkdir(parents=True, exist_ok=True)
+    (staging.root / "attempts" / f"{attempt}.json").write_text(
+        json.dumps(
+            {
+                "attempt_id": attempt,
+                "film_id": film,
+                "rev": 1,
+                "stage": "restore",
+                "request": {},
+                "assignment_id": ident(),
+                "children": ["1:1"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return attempt
+
+
+def test_cx2_a_held_child_of_an_earlier_boot_reserves_the_gpu(tmp_path):
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    film = client.add()
+    attempt = _held_attempt(staging, film)
+    d.start()
+    try:
+        d.booted({"reconciled": False, "attempts": {attempt: "held"}, "keep": []})
+        assert d.lease.holder() == d.run_id
+        assert d.lease.blocking_label() == "上次的任务进程仍在运行"
+        assert not d.lease.try_acquire(("jasna-1", 7), 0.01, "Jasna：手动")
+        d.lease.withdraw(("jasna-1", 7))
+        _observe(d, [_route(film, 0)], reconciled=False)
+        until(lambda: d.reason == "等待对账")  # the gate failed …
+        d.wake()
+        until(lambda: d.reason == "等待对账")
+        assert d.lease.holder() == d.run_id  # … and kept the reservation
+        d.booted({"reconciled": True, "attempts": {attempt: "interrupted"}})
+        _observe(d, [])
+        until(lambda: d.lease.holder() is None)  # confirmed stopped: free
+        assert d.lease.try_acquire(("jasna-1", 7), 0.01, "Jasna：手动")
+        d.lease.release(("jasna-1", 7))
+    finally:
+        assert d.stop(10)
+
+
+def test_cx5_a_cancel_after_a_successful_settle_keeps_the_success(tmp_path):
+    executor = Producing()
+    d, staging, client = _uploads(tmp_path, executor)
+    client.gate = threading.Event()
+    film = client.add()
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        assert client.uploading.wait(10)
+        attempt = client.claims[0]["attempt_id"]
+        assert d.current()["phase"] == "uploading"
+        _observe(d, [_route(film, 0)], cancel=[attempt])  # too late: settled ok
+        client.upload_once = ApiError(0, "unreachable")  # the body is built again
+        client.gate.set()
+        until(lambda: client.finishes)
+        assert client.finishes[0][1]["outcome"] == "succeeded"
+        assert executor.runs == 1
+    finally:
+        assert d.stop(10)
+
+
+def test_cx6_a_lost_settled_write_is_retried_before_the_delivery(tmp_path, monkeypatch):
+    from taskpaw_v3.workflow import remote_dispatch as rd
+
+    executor = Producing()
+    d, staging, client = _uploads(tmp_path, executor)
+    film = client.add()
+    real, refuse = rd.atomic_json, threading.Event()
+    refused = {"n": 0}
+
+    def flaky(path, value):
+        if path.parent.name == "attempts" and value.get("settled") and refuse.is_set():
+            refused["n"] += 1
+            raise PermissionError(32, "sharing violation")
+        return real(path, value)
+
+    monkeypatch.setattr(rd, "atomic_json", flaky)
+    refuse.set()
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        until(lambda: refused["n"] >= rd.SAVE_TRIES + 1)  # settle, then a retry
+        assert client.finishes == [] and d.claimed()  # never dropped
+        refuse.clear()
+        until(lambda: client.finishes)
+        assert client.finishes[0][1]["outcome"] == "succeeded"
+        assert len(client.claims) == 1 and executor.runs == 1  # no re-run
+    finally:
+        assert d.stop(10)
+
+
+def test_ir2_a_staged_file_gone_is_fetched_again_before_a_claim(tmp_path):
+    executor = Blocking()
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, executor)
+    client.__init__(staging)
+    film = client.add()
+    envelope = client.envelope(film, 1)
+    client.download_film(envelope, staging)
+    rel = envelope["workcopy"][0]["relative_path"]
+    d.index.mark(film, 1, [rel], True, sizes={rel: 10})
+    (staging.work_dir / rel).unlink()  # gone behind the index's back
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        assert executor.running.wait(10)
+        assert client.downloads == [film, film]  # fetched again first
+        assert (staging.work_dir / rel).stat().st_size == 10
+    finally:
+        executor.release.set()
+        assert d.stop(10)
+
+
+def test_ir2_a_release_in_progress_is_never_claimable(tmp_path, monkeypatch):
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    film = client.add()
+    envelope = client.envelope(film, 1)
+    client.download_film(envelope, staging)
+    rel = envelope["workcopy"][0]["relative_path"]
+    d.index.mark(film, 1, [rel], True, sizes={rel: 10})
+    held = staging.work_dir / rel
+    real = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self == held:
+            raise PermissionError(32, "in use")
+        return real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    _observe(d, [], release=[{"film": film, "rev": 1}])
+    assert held.exists() and d.staged() == [{"film": film, "rev": 1}]
+    assert not d.index.complete(film, 1)  # releasing: never claimed again
+
+
+def test_ir3_a_refused_failed_finish_ends_and_frees_the_gpu(tmp_path):
+    class Long(Blocking):
+        def run(self, context):
+            self.runs += 1
+            return ExecOutcome.failed("needs_attention", "错" * 5000)
+
+    executor = Long()
+    d, staging, client = _uploads(tmp_path, executor)
+    client.finish_error = ApiError(422, "invalid_request")
+    film = client.add()
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        until(lambda: client.finishes)
+        attempt, body = client.finishes[0]
+        assert len(body["message"]) <= 2000  # the model's limit, at the source
+        refused = staging.root / "attempts" / "refused" / f"{attempt}.json"
+        until(refused.exists)  # kept for inspection
+        until(lambda: d.lease.holder() is None)
+        assert "invalid_request" in (d.notice or "")
+        assert not (staging.root / "attempts" / f"{attempt}.json").exists()
+        _observe(d, [])
+        until(lambda: d.reason == "idle")
+        assert len(client.finishes) == 1  # terminal: never sent again
+    finally:
+        assert d.stop(10)
+
+
+def test_ir5_recover_collects_a_dropped_attempt_and_orphan_work(tmp_path):
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    gone = _held_attempt(staging, ident())  # the controller answers 404
+    (staging.work_dir / gone).mkdir(parents=True)
+    (staging.work_dir / gone / "big.mkv").write_bytes(b"x")
+    orphan = staging.work_dir / ident()  # no attempt file at all
+    orphan.mkdir()
+    copies = staging.work_dir / "copies"
+    copies.mkdir()
+    assert d.recover(client)
+    assert not (staging.work_dir / gone).exists() and not orphan.exists()
+    assert copies.exists()
+    assert list((staging.root / "attempts").glob("*.json")) == []
+
+
+def test_ir5_nothing_is_swept_while_an_attempt_is_unknown(tmp_path):
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    _held_attempt(staging, ident())
+    orphan = staging.work_dir / ident()
+    orphan.mkdir(parents=True)
+
+    def unreachable(attempt_id):
+        raise ApiError(0, "unreachable")
+
+    client.attempt = unreachable  # type: ignore[method-assign]
+    with pytest.raises(ApiError):
+        d.recover(client)
+    assert orphan.exists()
+
+
+def test_ir6_stop_interrupts_an_upload_and_ir8_keeps_the_started_time(tmp_path):
+    now = [100.0]
+    executor = Producing()
+    client = Uploads.__new__(Uploads)
+    staging = Staging(tmp_path / "staging", 500, free_bytes=lambda p: 2_000 * GB)
+    d = RemoteDispatcher(
+        staging,
+        lambda: client,
+        {"restore": executor},
+        WorkerRuntime(staging.root),
+        boot_id=ident(),
+        lease=GpuLease(),
+        power=lambda: None,
+        poll=0.02,
+        stop_settle=5.0,
+        backoff_base=0.01,
+        clock=lambda: now[0],
+    )
+    client.__init__(staging)
+    client.gate = threading.Event()  # never opened: only the stop ends it
+    film = client.add()
+    d.start()
+    stopped = False
+    try:
+        _observe(d, [_route(film, 0)])
+        assert client.uploading.wait(10)
+        now[0] += 50.0
+        current = d.current()
+        assert current["phase"] == "uploading"
+        assert current["elapsed_s"] >= 50.0  # IR8: 用时 counts from the claim
+        assert d.stop(10) is True  # IR6: the upload saw the stop
+        stopped = True
+        assert client.cancelled.is_set() and client.finishes == []
+        (path,) = (staging.root / "attempts").glob("*.json")
+        assert json.loads(path.read_text(encoding="utf-8"))["settled"]["ok"]
+    finally:
+        client.gate.set()
+        if not stopped:
+            d.stop(10)
+
+
+def test_ir7_a_mismatching_output_is_sent_whole_three_times_in_all(tmp_path):
+    executor = Producing()
+    d, staging, client = _uploads(tmp_path, executor)
+    client.upload_error = ApiError(409, "hash_mismatch")
+    film = client.add()
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        until(lambda: client.finishes)
+        assert len(client.uploads) == 1  # one call: the client's three sends
+        body = client.finishes[-1][1]
+        assert body["outcome"] == "failed"
+        assert body["error_class"] == "needs_attention"
+    finally:
+        assert d.stop(10)
+
+
+def test_ir9_a_ledger_found_at_boot_finishes_with_its_timing(tmp_path):
+    executor = Producing()
+    d, staging, client = _uploads(tmp_path, executor)
+    film = client.add()
+    reached = threading.Event()
+    d._settle = lambda active, outcome: reached.set()  # type: ignore[method-assign]
+    d.start()
+    _observe(d, [_route(film, 0)])
+    assert reached.wait(10)  # the process 'dies' before the settled record
+    d._unsettled = None
+    assert d.stop(10)
+    (path,) = (staging.root / "attempts").glob("*.json")
+    d2, _, client2 = _uploads(tmp_path, executor)
+    d2.booted({"reconciled": False, "attempts": {path.stem: "finish"}})
+    d2.start()
+    try:
+        until(lambda: client2.finishes)
+        body = client2.finishes[0][1]
+        assert body["outcome"] == "succeeded"
+        assert body["timing"]["wall"] == 6.0 and body["energy"] is None
+    finally:
+        assert d2.stop(10)
+
+
+def test_ir1_a_settled_attempt_is_delivered_whatever_the_boot_says(tmp_path):
+    executor = Producing()
+    d, staging, client = _uploads(tmp_path, executor)
+    film = client.add()
+    reached = threading.Event()
+    real_settle = d._settle
+
+    def settle_then_die(active, outcome):  # settled on disk, never delivered
+        d._stop.set()
+        real_settle(active, outcome)
+        reached.set()
+
+    d._settle = settle_then_die  # type: ignore[method-assign]
+    d.start()
+    _observe(d, [_route(film, 0)])
+    assert reached.wait(10)
+    assert d.stop(10)
+    (path,) = (staging.root / "attempts").glob("*.json")
+    d2, _, client2 = _uploads(tmp_path, executor)
+    d2.booted({"reconciled": True, "attempts": {}})  # no verdict for it
+    d2.start()
+    try:
+        until(lambda: client2.finishes)
+        assert client2.finishes[0][0] == path.stem
+        until(lambda: not path.exists())
+    finally:
+        assert d2.stop(10)
+
+
+def test_ir11_the_typed_current_fits_the_heartbeat(tmp_path):
+    class Sampler:
+        def live(self):
+            return {
+                "w": 120.0,
+                "gpu_w": 90.0,
+                "cpu_w": 20.0,
+                "other_w": 10.0,
+                "today_wh": 999.0,
+                "activity": "workflow",
+            }
+
+        def reading(self, owner):
+            return None
+
+    executor = Blocking()
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, executor)
+    d.power = lambda: Sampler()
+    client.__init__(staging)
+    film = client.add()
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        assert executor.running.wait(10)
+        with d._lock:
+            active = d._active
+        assert active is not None
+        active.ltx = {"console": "x" * 200_000, "params": {"p": "y" * 100_000}}
+        value = d.current()
+        assert len(json.dumps(value).encode("utf-8")) <= 32 << 10
+        assert value["power"] == {
+            "w": 120.0,
+            "gpu_w": 90.0,
+            "cpu_w": 20.0,
+            "other_w": 10.0,
+            "estimated": True,
+        }
+    finally:
+        executor.release.set()
+        assert d.stop(10)

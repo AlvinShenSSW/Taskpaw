@@ -48,13 +48,14 @@ from .executors import ExecRuntime, StageExecutor
 from .fleet_live import PROTOCOL
 from .keep_awake import KeepAwake
 from .local_gpu import LocalGpu
-from .remote_dispatch import RemoteDispatcher, WorkerRuntime
+from .remote_dispatch import UNSETTLED, RemoteDispatcher, WorkerRuntime
 from .staging import Staging, StagingError, validate_dir
 from .worker_client import ApiError, WorkerClient, backoff
 
 log = logging.getLogger("taskpaw.workflow.remote_worker")
 
 IDENTITY_NAME = "worker-identity.json"
+STATE_NAME = "worker-state.json"  # P2-3 §11 IR10: 暂停领取 across restarts
 PENDING_NAME = "worker-identity.pending.json"  # IR7: a pairing not yet confirmed
 UNSAVED_REASON = "身份文件未保存，重试中"
 REVOKED_REASON = "凭据已撤销，请重新加入"
@@ -75,6 +76,11 @@ class JoinError(ValueError):
 
 class _Switch(Exception):
     """CX13: a pending identity was confirmed mid-session; run on it."""
+
+
+class _Busy(Exception):
+    """P2-3 §11 CX1/CX3: the previous session's dispatcher still has live
+    processes; no new one runs until they are gone (retried with backoff)."""
 
 
 @dataclass(frozen=True, repr=False)
@@ -376,7 +382,12 @@ class WorkerHost:
         self.keep_awake = keep_awake or KeepAwake()
         self.dispatch_poll, self.stop_settle = dispatch_poll, stop_settle
         self.dispatcher: RemoteDispatcher | None = None
-        self.local_paused = False  # R12: 暂停领取 on the worker's own monitor
+        # §11 CX3: the session the dispatcher is bound to (credential, staging)
+        self._dispatcher_key: tuple[str, ...] | None = None
+        self._probe_gpu: LocalGpu | None = None  # §11 CX4: the last GPU read
+        self.state_path = data_dir / STATE_NAME
+        # R12: 暂停领取 on the worker's own monitor; §11 IR10: kept on disk
+        self.local_paused = _load_paused(self.state_path)
         self._hold = "none"
         self._client_factory = client_factory
         self.version = version or __version__
@@ -385,7 +396,9 @@ class WorkerHost:
             idle_seconds,
             backoff_base,
         )
-        self.boot_id = str(uuid.uuid4())  # one per process start (R6)
+        # R6; §11 IR1: a new one with every new dispatcher (a new session
+        # identity or after a revoke), so the boot settles what came before
+        self.boot_id = str(uuid.uuid4())
         self.state, self.reason = "unjoined", "尚未加入媒体工作流"
         self.identity: WorkerIdentity | None = None
         self._unsaved = False  # a paired identity not yet in the identity file
@@ -441,12 +454,19 @@ class WorkerHost:
 
     def set_paused(self, paused: bool) -> None:
         """R12: 暂停领取 — no claim; in-flight work, uploads and prefetch go on.
-        The heartbeat reports it; the controller treats it like 停领 (S8)."""
+        The heartbeat reports it; the controller treats it like 停领 (S8).
+        §11 IR10: the controller's own 暂停派发 stays in force, and the choice
+        is written to `worker-state.json` (a failed write keeps it in memory)."""
         self.local_paused = bool(paused)
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            atomic_json(self.state_path, {"paused": self.local_paused})
+        except OSError:
+            log.warning("cannot save 暂停领取; it lasts until the restart")
         dispatcher = self.dispatcher
         if dispatcher is not None:
             dispatcher.observe(
-                {"routes": self.routes},
+                {"routes": self.routes, "paused": self.paused},
                 reconciled=self.reconciled,
                 tiers=self._tiers,
                 asr_ready=self._asr_ready,
@@ -653,10 +673,14 @@ class WorkerHost:
 
     def _revoked(self) -> None:
         """R8/crash matrix 10: the credential is gone — the running Job is
-        cancelled and settled, its outcome kept; nothing more is sent."""
-        self._stop_dispatcher()  # first: 「凭据已撤销」 means the Job settled
-        # a re-join builds a new one, which reports the settled attempt at boot
-        self.dispatcher = None
+        cancelled and settled, its outcome kept; nothing more is sent with
+        it. A join afterwards builds a new dispatcher with a new boot id
+        (§11 IR1), which settles or collects the kept attempt file. A Job
+        whose processes outlive the stop keeps this dispatcher, and the GPU,
+        until a later stop confirms them gone (§11 CX1)."""
+        # first: 「凭据已撤销」 means the Job settled
+        if self._stop_dispatcher():
+            self.dispatcher = None
         self.state, self.reason = "revoked", REVOKED_REASON
         self._stop.set()
 
@@ -713,6 +737,8 @@ class WorkerHost:
                     self._refused.add(current.credential_id)
                     continue
                 reason = f"主控拒绝了请求（{exc.code}），正在重试"
+            except _Busy:
+                reason = f"{UNSETTLED}，正在重试"
             except (StagingError, OSError):
                 reason = "暂存目录不可用，正在重试"
             except Exception:
@@ -817,6 +843,8 @@ class WorkerHost:
             return
         self._probe_due = time.monotonic() + self.probe_seconds
         self._tiers, self._asr_ready = probe.tiers_ready, probe.asr_ready
+        self._probe_gpu = _gpu_of(probe.body)
+        self._bind_gpu()
         if record is None:
             me = self._retry(client.self_view)
             if me is None:
@@ -842,22 +870,35 @@ class WorkerHost:
         return self.reconciled
 
     def _ensure_dispatcher(self, staging: Staging) -> RemoteDispatcher:
-        if self.dispatcher is None:
-            body = self._probe_body
-            gpu = (
-                LocalGpu(
-                    str(body.get("gpu_model")),
-                    str(body.get("gpu_identity")),
-                    int(body.get("vram_mib") or 0),
-                )
-                if body
-                else None
-            )
+        """The dispatcher of this session. §11 CX3: one bound to another
+        identity or staging folder (a re-join, a confirmed pending pairing),
+        or one already stopped (a revoke), is quiesced first — its Job is
+        stopped and settled — and a new one is built with this session's
+        client, staging and a new boot id (IR1). Live processes it cannot
+        settle raise `_Busy`: nothing new runs beside them (CX1)."""
+        ident = self.identity
+        assert ident is not None
+        key = (
+            ident.credential_id,
+            ident.controller_host,
+            str(ident.controller_port),
+            str(staging.root),
+        )
+        old = self.dispatcher
+        if old is not None and (old.halted or self._dispatcher_key != key):
+            if not old.stop(self.stop_settle):
+                raise _Busy
+            self.dispatcher = old = None
+        if old is None:
+            self.boot_id, self.reconciled = str(uuid.uuid4()), False
+            gpu = self._probe_gpu
             runtime = WorkerRuntime(staging.root, gpu)
-            self.dispatcher = RemoteDispatcher(
+            # §11 CX4: no executors before a GPU reading; bound once it comes
+            executors = self._executor_factory(runtime) if gpu is not None else []
+            old = self.dispatcher = RemoteDispatcher(
                 staging,
-                self._client,
-                {e.stage: e for e in self._executor_factory(runtime)},
+                self._bound_client(ident),
+                {e.stage: e for e in executors},
                 runtime,
                 boot_id=self.boot_id,
                 lease=self._lease if self._lease is not None else _gpu_lease(),
@@ -866,7 +907,27 @@ class WorkerHost:
                 stop_settle=self.stop_settle,
                 backoff_base=self.backoff_base,
             )
-        return self.dispatcher
+            self._dispatcher_key = key
+        return old
+
+    def _bound_client(self, ident: WorkerIdentity) -> Callable[[], WorkerClient]:
+        """§11 CX3: the dispatcher's calls always use the identity of the
+        session that built it, never one switched in later."""
+        return lambda: self._client_factory(
+            ident.controller_host, ident.controller_port, ident.credential
+        )
+
+    def _bind_gpu(self) -> None:
+        """§11 CX4: a GPU read after the dispatcher was built (or a changed
+        card) rebuilds its executors, only between attempts; tried again at
+        every probe until it can."""
+        dispatcher, gpu = self.dispatcher, self._probe_gpu
+        if dispatcher is None or gpu is None or dispatcher.halted:
+            return
+        if dispatcher.runtime.gpu == gpu and dispatcher.executors:
+            return
+        if dispatcher.rebind(gpu, self._executor_factory):
+            log.info("worker executors bound to %s", gpu.name)
 
     def _apply(self, reply: Mapping[str, Any]) -> None:
         with self._lock:
@@ -999,6 +1060,8 @@ class WorkerHost:
             "current": _monitor_current(dispatcher.current() if dispatcher else None),
             "transfers": dispatcher.transfers() if dispatcher else [],
             "dispatch_reason": dispatcher.reason if dispatcher else None,
+            # §11 IR3: what needs the operator (a refused failed finish)
+            "dispatch_notice": dispatcher.notice if dispatcher else None,
             "staging": staging,
             "gpu": {
                 "name": self._probe_body.get("gpu_model"),
@@ -1010,6 +1073,28 @@ class WorkerHost:
 
 def _int(value: Any) -> int | None:
     return int(value) if isinstance(value, (int, float)) and value >= 0 else None
+
+
+def _gpu_of(body: Mapping[str, Any]) -> LocalGpu | None:
+    if not body.get("gpu_identity"):
+        return None
+    return LocalGpu(
+        str(body.get("gpu_model")),
+        str(body.get("gpu_identity")),
+        int(body.get("vram_mib") or 0),
+    )
+
+
+def _load_paused(path: Path) -> bool:
+    """§11 IR10: the saved 暂停领取 (absent or unreadable: not paused)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        log.warning("unreadable worker state ignored")
+        return False
+    return isinstance(data, dict) and data.get("paused") is True
 
 
 def start_worker_host(

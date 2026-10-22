@@ -50,6 +50,8 @@ class PassOutcome:
     planned: SchedulePass
     routed: tuple[RouteDecision, ...]
     withdrawn: tuple[Withdrawal, ...]
+    # P2-3 §11: (film, code) of each decision a tolerated race overtook
+    overtaken: tuple[tuple[str, str], ...] = ()
 
 
 def run_pass(
@@ -96,7 +98,9 @@ def run_pass(
         except m.WorkflowError as exc:
             if exc.code not in _RACED:
                 raise
-            log.info("route withdrawal of %s overtaken: %s", item.film_id, exc)
+            log.info(
+                "route withdrawal of %s overtaken (code=%s)", item.film_id, exc.code
+            )
             lost = True
             continue
         withdrawn.append(item)
@@ -116,8 +120,13 @@ def run_pass(
             remote_enabled=remote_enabled,
             live_since=live_since,
         )
-        return PassOutcome(again.planned, again.routed, (*withdrawn, *again.withdrawn))
-    routed = []
+        return PassOutcome(
+            again.planned,
+            again.routed,
+            (*withdrawn, *again.withdrawn),
+            again.overtaken,
+        )
+    routed, overtaken = [], []
     for decision in planned.routes:
         try:
             store.route_film(
@@ -136,10 +145,11 @@ def run_pass(
         except m.WorkflowError as exc:
             if exc.code not in _RACED:
                 raise
-            log.info("route of %s overtaken: %s", decision.film_id, exc)
+            log.info("route of %s overtaken (code=%s)", decision.film_id, exc.code)
+            overtaken.append((decision.film_id, exc.code))
             continue
         routed.append(decision)
-    return PassOutcome(planned, tuple(routed), tuple(withdrawn))
+    return PassOutcome(planned, tuple(routed), tuple(withdrawn), tuple(overtaken))
 
 
 def gpu_stages(

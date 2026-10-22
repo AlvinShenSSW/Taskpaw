@@ -580,6 +580,56 @@ def test_upload_resumes_across_a_controller_restart(enrolled, rt, host, free, tm
     assert (entry["mismatches"], entry["received"], entry["done"]) == (3, 0, False)
 
 
+def test_a_stop_ends_an_upload_within_one_block(enrolled, rt, tmp_path, monkeypatch):
+    """P2-3 §11 IR6: the stop event ends the stream as a cut; no offset read
+    follows, and the next send goes on from the controller's offset."""
+    from taskpaw_v3.workflow import worker_client as wc
+    from taskpaw_v3.workflow.auth import authenticate
+
+    client, staging, film_id, _, worker_id, worker = enrolled
+    resource = rt.store.get_worker(
+        rt.operator, worker_id
+    ).worker.physical_binding.resource_id
+    ident = WorkerIdentity.load(tmp_path / "worker" / IDENTITY_NAME)
+    auth = authenticate(rt.store, ident.credential_id, ident.secret)
+    remote = Remote(worker_id, "5060 Ti-1", auth, worker.boot_id, resource)
+    _, command = claim_remote(rt, remote, film_id, "restore")
+    a = command.attempt_id
+    path = f"{a}/movie.mp4"
+    local = tmp_path / "out.mp4"
+    local.write_bytes(OUTPUT)
+    client.plan_outputs(a, [{"path": path, "size": len(OUTPUT), "sha256": sha(OUTPUT)}])
+    monkeypatch.setattr(wc, "CHUNK", max(1, len(OUTPUT) // 8))
+    stop, sent = threading.Event(), []
+    reads = []
+    real_entry = WorkerClient._entry
+
+    def entry(self, attempt_id, p):
+        reads.append(p)
+        return real_entry(self, attempt_id, p)
+
+    monkeypatch.setattr(WorkerClient, "_entry", entry)
+
+    def progress(offset):
+        sent.append(offset)
+        stop.set()  # the worker stops after the first block
+
+    with pytest.raises(ApiError) as exc:
+        client.upload_file(
+            a,
+            path,
+            local,
+            size=len(OUTPUT),
+            sha256=sha(OUTPUT),
+            on_progress=progress,
+            cancel=stop,
+        )
+    assert exc.value.transient and len(sent) == 1
+    assert reads == [path]  # the offset read before the send, none after
+    done = client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
+    assert done["done"] is True and (rt.work_dir / path).read_bytes() == OUTPUT
+
+
 # ── the worker console routes ───────────────────────────────────────────
 def _control(settings, provider):
     config = AgentConfig(server_id="s", machine="m", workflow=settings)
@@ -1990,3 +2040,69 @@ def test_a_first_join_whose_reply_was_lost_is_held_until_it_settles(tmp_path, la
         until(lambda: not (data / PENDING_NAME).exists())
     finally:
         assert worker.stop()
+
+
+# ── P2-3 §11 review dispositions ────────────────────────────────────────
+def test_cx4_the_executors_are_built_once_the_gpu_is_read(tmp_path):
+    """No GPU reading at start: no executors yet (never one built for no
+    GPU); the first good probe binds them to the card it read."""
+    from taskpaw_v3.core.gpu_lease import GpuLease
+    from taskpaw_v3.workflow.executors import SyntheticExecutor
+
+    fake = FakeController()
+    good, misses = fake_probe(), {"left": 3}
+
+    def flaky(settings, staging):
+        if misses["left"] > 0:
+            misses["left"] -= 1
+            return None
+        return good(settings, staging)
+
+    built = []
+
+    def factory(runtime):
+        built.append(runtime.gpu)
+        return [SyntheticExecutor("restore")]
+
+    worker = loop_worker(
+        tmp_path,
+        fake,
+        probe=flaky,
+        probe_seconds=0.0,
+        executor_factory=factory,
+        lease=GpuLease(),
+    )
+    try:
+        worker.start()
+        until(
+            lambda: (
+                worker.dispatcher is not None
+                and "restore" in worker.dispatcher.executors
+            )
+        )
+        assert built and all(gpu is not None for gpu in built)
+        assert worker.dispatcher.runtime.gpu is not None
+    finally:
+        assert worker.stop()
+
+
+def test_ir10_the_local_pause_keeps_the_controllers_and_survives_a_restart(
+    tmp_path,
+):
+    from taskpaw_v3.core.gpu_lease import GpuLease
+
+    fake = FakeController()
+    paused = {"routes": [], "paused": True, "reconcile_needed": False}
+    fake.script["heartbeat"] = [paused] * 10_000
+    worker = loop_worker(tmp_path, fake, lease=GpuLease())
+    try:
+        worker.start()
+        until(lambda: worker.paused and worker.dispatcher is not None)
+        until(lambda: worker.dispatcher._paused)
+        worker.set_paused(False)  # 恢复领取 here: the controller's 暂停 stays
+        assert worker.dispatcher._paused is True
+        worker.set_paused(True)
+    finally:
+        assert worker.stop()
+    again = worker_host(tmp_path, client_factory=FakeController(), lease=GpuLease())
+    assert again.local_paused is True and again.status()["paused"] is True

@@ -330,6 +330,7 @@ class WorkerClient:
         sha256: str,
         attempts: int = 3,
         on_progress: Callable[[int], None] | None = None,
+        cancel: threading.Event | None = None,
     ) -> dict[str, Any]:
         """One output from the controller's received offset to the end.
 
@@ -337,13 +338,17 @@ class WorkerClient:
         committed is 503 `commit_pending` (transient), never done (IR2). After
         any cut, refusal or reset the next offset comes from GET outputs, which
         also reads the real refusal when the server answered before reading
-        the body (IR12) and rebuilds the hash state of a part (IR3)."""
+        the body (IR12) and rebuilds the hash state of a part (IR3). A set
+        `cancel` ends the stream within one block (P2-3 §11 IR6) as a cut:
+        the controller keeps the received prefix for the next start."""
         entry = self._entry(attempt_id, path)
         url = f"/attempts/{attempt_id}/files/{quote(path, safe='/')}"
         last: ApiError | None = None
         for _ in range(attempts):
             if entry["done"]:
                 return entry
+            if cancel is not None and cancel.is_set():
+                raise last or ApiError(0, "unreachable")
             received = int(entry["received"])
             if received >= size:  # GET just tried the commit again
                 raise ApiError(503, "commit_pending")
@@ -356,7 +361,7 @@ class WorkerClient:
                 with self.open(
                     "PUT",
                     url,
-                    data=_blocks(local, received, on_progress),
+                    data=_blocks(local, received, on_progress, cancel),
                     headers=headers,
                 ) as reply:
                     result = _read_json(reply)
@@ -367,6 +372,8 @@ class WorkerClient:
                 if exc.code not in _RESUMABLE:
                     raise
                 last = exc  # S1: after a hash_mismatch the plan says received 0
+            if cancel is not None and cancel.is_set():
+                raise last  # stopped: no offset read; the next start asks
             entry = self._entry(attempt_id, path)
         if entry["done"]:
             return entry
@@ -455,12 +462,21 @@ def _sha_file(path: Path) -> str:
     return _hash_prefix(path, path.stat().st_size).hexdigest()
 
 
+class _Stopped(OSError):
+    """A stop during an upload: the stream ends as a cut (§11 IR6)."""
+
+
 def _blocks(
-    path: Path, offset: int, on_progress: Callable[[int], None] | None = None
+    path: Path,
+    offset: int,
+    on_progress: Callable[[int], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> Iterator[bytes]:
     with path.open("rb") as stream:
         stream.seek(offset)
         while True:
+            if cancel is not None and cancel.is_set():
+                raise _Stopped("upload stopped")
             chunk = stream.read(CHUNK)
             if not chunk:
                 return

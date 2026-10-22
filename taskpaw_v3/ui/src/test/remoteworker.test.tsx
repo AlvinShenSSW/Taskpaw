@@ -103,6 +103,13 @@ describe("worker 媒体处理 monitor", () => {
       .toEqual(["done", "done", "done", "current", "pending"]);
   });
 
+  it("shows a refused result that needs the operator (§11 IR3)", async () => {
+    const notice = "主控拒绝了 ABF-401 的失败结果（invalid_request），记录已保留";
+    vi.spyOn(api, "workflowWorker").mockResolvedValue(running({ dispatch_notice: notice }));
+    wrap(<WorkerMonitor />);
+    expect(await screen.findByText(notice)).toBeInTheDocument();
+  });
+
   it("is one column of cards at 390 px, its rows wrapping", async () => {
     vi.stubGlobal("innerWidth", 390);
     vi.spyOn(api, "workflowWorker").mockResolvedValue(running());
@@ -176,5 +183,25 @@ describe("remote progress on the controller", () => {
     expect(requeue).not.toHaveBeenCalled();
     const local = detail("abf-402", { steps: steps("asr", "running", { progress: "50%" }) });
     expect(local.steps?.some((s) => s.machine)).toBe(false);
+  });
+
+  it("offers no requeue once the worker uploads its finished stage (§11 CX5)", async () => {
+    const uploading = (phase: "uploading" | "finishing" | "settling") => restoreSteps("ltx").map((st) =>
+      st.key === "restore" ? { ...st, machine: MACHINE, attempt_id: "a1", phase } : st);
+    mockController();
+    for (const phase of ["uploading", "finishing"] as const) {
+      vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => detail(id, id === "abf-401" ? { steps: uploading(phase) } : {}));
+      const view = wrap(<MediaWorkspace />);
+      fireEvent.click(await screen.findByRole("button", { name: "查看 浮光之间 详情" }));
+      const remote = await screen.findByTestId("remote-step");
+      expect(within(remote).getByText("5070 Ti · 修复 · 回传中")).toBeInTheDocument();
+      expect(within(remote).queryByRole("button", { name: "停止并重新排队" })).not.toBeInTheDocument();
+      view.unmount();
+    }
+    vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => detail(id, id === "abf-401" ? { steps: uploading("settling") } : {}));
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看 浮光之间 详情" }));
+    const remote = await screen.findByTestId("remote-step");
+    expect(within(remote).getByRole("button", { name: "停止并重新排队" })).toBeInTheDocument();  // still stoppable
   });
 });

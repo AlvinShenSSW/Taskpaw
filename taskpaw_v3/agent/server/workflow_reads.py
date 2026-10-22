@@ -23,6 +23,8 @@ WorkflowProvider = Callable[[], "WorkflowHostLike | None"]
 _CONFLICTS = {
     "cas_conflict": "影片状态已变化，请刷新后重试",
     "precondition_failed": "当前状态不允许此操作",
+    # P2-3 §11 CX5: 停止并重新排队 after the worker's stage settled ok
+    "already_settled": "修复已完成，正在回传",
 }
 
 

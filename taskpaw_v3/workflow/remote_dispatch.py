@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import threading
 import time
@@ -43,6 +44,7 @@ from .local_gpu import LocalGpu
 from .owned_process import own_identity, process_alive
 from .stage_results import RESULT_NAME, StageResult, StageResultError
 from .staging import Staging, StagingError
+from .timing import merge as merge_timing
 from .transfer import ledger_refs
 from .worker_client import ApiError, WorkerClient, backoff
 
@@ -59,6 +61,12 @@ SAVE_PAUSE = 0.05
 _FINISHED = ("succeeded", "skipped")
 UNSETTLED = "停止未确认：任务进程仍在运行"
 UNKNOWN_GPU = "GPU 有未知占用"
+HELD = "上次的任务进程仍在运行"  # §11 CX2: the GPU lease's holder label
+REFUSED_DIR = "refused"  # §11 IR3: attempt files the controller refused
+MESSAGE_CAP = 2000  # §11 IR3: the finish model's `message` limit
+CURRENT_CAP = 32 << 10  # §11 IR11: `current` within the 64 KiB heartbeat
+_PERMANENT = frozenset({400, 404, 413, 422})  # §11 IR3: never accepted later
+_WATTS = ("w", "gpu_w", "cpu_w", "other_w")
 
 
 # ── the executors' runtime on a worker ──────────────────────────────────
@@ -160,20 +168,45 @@ class StagedIndex:
         with self._lock:
             return self._read()
 
-    def mark(self, film: str, rev: int, paths: list[str], complete: bool) -> None:
+    def mark(
+        self,
+        film: str,
+        rev: int,
+        paths: list[str],
+        complete: bool,
+        *,
+        sizes: Mapping[str, int] | None = None,
+        releasing: bool = False,
+    ) -> None:
+        """`sizes`: each path's verified size, kept from the last mark when
+        not given; `releasing` (§11 IR2): being deleted, never claimable."""
         with self._lock:
             data = self._read()
+            old = data.get(f"{film}/{rev}") or {}
             data[f"{film}/{rev}"] = {
                 "film": film,
                 "rev": rev,
                 "paths": paths,
-                "complete": complete,
+                "complete": complete and not releasing,
+                "releasing": releasing,
+                "sizes": dict(sizes) if sizes is not None else old.get("sizes", {}),
             }
             atomic_json(self.path, data)
 
     def complete(self, film: str, rev: int) -> bool:
         entry = self.entries().get(f"{film}/{rev}")
-        return bool(entry and entry.get("complete"))
+        return bool(entry and entry.get("complete") and not entry.get("releasing"))
+
+    def begin_release(self, film: str, rev: int) -> list[str]:
+        """§11 IR2: no longer complete before the first file is deleted."""
+        with self._lock:
+            data = self._read()
+            entry = data.get(f"{film}/{rev}")
+            if entry is None:
+                return []
+            entry.update(complete=False, releasing=True)
+            atomic_json(self.path, data)
+        return list(entry.get("paths", []))
 
     def remove(self, film: str, rev: int) -> list[str]:
         with self._lock:
@@ -250,10 +283,16 @@ class RemoteDispatcher:
         self._active: _Active | None = None
         self._unsettled: tuple[_Active, ExecOutcome, Any] | None = None
         self._holding = False
+        self._lease_lock = threading.Lock()  # `_holding` and the lease calls
+        self._tick_lock = threading.Lock()  # held by the run thread per tick
+        # §11 CX6: settled outcomes whose file never landed (retried first)
+        self._unsaved: dict[str, AttemptState] = {}
+        self._started: dict[str, float] = {}  # §11 IR8: claim time per attempt
         self._fetching: str | None = None
         self._transfers: dict[tuple[str, str], Transfer] = {}
         self._envelopes: dict[tuple[str, int], dict[str, Any]] = {}
         self.reason = "idle"
+        self.notice: str | None = None  # §11 IR3: what needs the operator
 
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self) -> None:
@@ -270,7 +309,9 @@ class RemoteDispatcher:
 
     def stop(self, timeout: float = 60.0) -> bool:
         """Cancel the running Job, let it settle (its outcome is persisted,
-        never finished on the way out) and join both threads."""
+        never finished on the way out) and join both threads. §11 CX1: False
+        while the Job's processes survive — they keep the GPU, and a later
+        call settles them again (C4)."""
         self._stop.set()
         self._wake.set()
         with self._lock:
@@ -280,10 +321,35 @@ class RemoteDispatcher:
         deadline = time.monotonic() + timeout
         for thread in self._threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        alive = any(t.is_alive() for t in self._threads)
-        if not alive and self._unsettled is None:
-            self._release()
-        return not alive
+        if any(t.is_alive() for t in self._threads):
+            return False
+        if self._unsettled is not None and not self._settle_now(
+            max(0.0, deadline - time.monotonic())
+        ):
+            return False
+        self._release(force=True)
+        return True
+
+    @property
+    def halted(self) -> bool:
+        """`stop()` was called: this dispatcher never runs again."""
+        return self._stop.is_set()
+
+    def rebind(self, gpu: LocalGpu, factory: Callable[[WorkerRuntime], Any]) -> bool:
+        """§11 CX4: the executors for a GPU read after start, only between
+        attempts; False (tried again at the next probe) while one runs."""
+        if not self._tick_lock.acquire(blocking=False):
+            return False
+        try:
+            with self._lock:
+                busy = self._active is not None or self._unsettled is not None
+            if busy:
+                return False
+            self.runtime.gpu = gpu
+            self.executors = {e.stage: e for e in factory(self.runtime)}
+            return True
+        finally:
+            self._tick_lock.release()
 
     def wake(self) -> None:
         self._wake.set()
@@ -357,10 +423,10 @@ class RemoteDispatcher:
             "elapsed_s": min(999_999.0, max(0.0, self._clock() - active.started)),
             "ltx": active.ltx,
             "energy": self._energy_dict(active),
-            "power": self._live_power() if active.uses_gpu else None,
+            "power": _watts(self._live_power()) if active.uses_gpu else None,
             "uses_gpu": active.uses_gpu,
         }
-        return value
+        return _bounded(value)
 
     def transfers(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -377,10 +443,12 @@ class RemoteDispatcher:
         ][:8]
 
     def staged(self) -> list[dict[str, Any]]:
+        """Staged revisions, those being released included (§11 IR2): the
+        controller names them in `release` again until their files are gone."""
         return [
             {"film": e["film"], "rev": e["rev"]}
             for e in self.index.entries().values()
-            if e.get("complete")
+            if e.get("complete") or e.get("releasing")
         ][:64]
 
     def films(self) -> list[dict[str, Any]]:
@@ -447,20 +515,49 @@ class RemoteDispatcher:
         return False
 
     def recover(self, client: WorkerClient) -> bool:
-        """At start, before the first boot: an attempt file the controller
-        does not know (404: the claim never landed) is dropped; a resolved one
-        (the finish reply was lost) is collected. The rest go to the boot."""
+        """At start, before the first boot: an attempt the controller does
+        not know (404: the claim never landed) or has resolved (the finish
+        reply was lost) is collected, its work folder included (§11 IR5). The
+        rest go to the boot. Once every file was answered, work folders no
+        attempt file names are swept; an error leaves everything (unknown)."""
         for state in self._states():
             try:
                 found = client.attempt(state.attempt_id)
             except ApiError as exc:
                 if exc.status == 404:
-                    self._drop(state.attempt_id)
+                    self._collect(state.attempt_id)
                     continue
                 raise
             if found.get("state") == "resolved":
                 self._collect(state.attempt_id)
+        self._sweep_orphans()
         return True
+
+    def _sweep_orphans(self) -> None:
+        """§11 IR5: `work/<uuid>/` folders no attempt file (or the active
+        attempt) names; work copies (`copies/…`) are never touched. Skipped
+        while a tick runs: a claim it makes meanwhile is never swept."""
+        if not self._tick_lock.acquire(blocking=False):
+            return
+        try:
+            known = {p.name.split(".")[0] for p in self.attempt_dir.glob("*")}
+            with self._lock:
+                if self._active is not None:
+                    known.add(self._active.state.attempt_id)
+            try:
+                folders = list(self.staging.work_dir.iterdir())
+            except OSError:
+                return
+            for folder in folders:
+                if (
+                    folder.is_dir()
+                    and _is_uuid(folder.name)
+                    and folder.name not in known
+                ):
+                    log.info("orphan worker work folder %s removed", folder.name)
+                    shutil.rmtree(folder, ignore_errors=True)
+        finally:
+            self._tick_lock.release()
 
     def reports(self) -> list[dict[str, Any]]:
         """§5: each local attempt file as found now."""
@@ -517,12 +614,26 @@ class RemoteDispatcher:
                 if state is not None:
                     self._prepare_finish(state)
                     deliver.append(attempt_id)
+        # §11 IR1: a settled local attempt is delivered whatever the reply
+        # says (finish is idempotent by state; a stale one answers 409)
+        with self._lock:
+            active = self._active.state.attempt_id if self._active else None
+        for state in self._states():
+            if (
+                state.settled is not None
+                and verdicts.get(state.attempt_id) not in ("interrupted", "held")
+                and state.attempt_id not in deliver
+                and state.attempt_id != active
+            ):
+                deliver.append(state.attempt_id)
         with self._lock:
             self._held = held
             for attempt_id in deliver:
                 if attempt_id not in self._deliver:
                     self._deliver.append(attempt_id)
             self._reconciled = bool(reply.get("reconciled"))
+        if held:  # §11 CX2: the GPU stays reserved until they are gone
+            self._acquire(HELD)
         if "keep" in reply:
             keep = {(str(k["film"]), int(k["rev"])) for k in reply.get("keep") or []}
             for entry in list(self.index.entries().values()):
@@ -533,7 +644,8 @@ class RemoteDispatcher:
 
     def _prepare_finish(self, state: AttemptState) -> None:
         """A ledger found after a restart: settled from the ledger itself
-        (no energy: the sampler restarted, R14; no timing kept)."""
+        (no energy: the sampler restarted, R14); the timing is the ledger's
+        restore timings (§11 IR9)."""
         if state.settled is not None:
             return
         ledger = self.staging.work_dir / state.attempt_id / RESULT_NAME
@@ -543,7 +655,10 @@ class RemoteDispatcher:
             state.settled = _settled(ExecOutcome.failed("needs_attention", "结果缺失"))
         else:
             state.settled = _settled(
-                ExecOutcome.succeeded("", hashlib.sha256(raw).hexdigest()), None
+                ExecOutcome.succeeded(
+                    "", hashlib.sha256(raw).hexdigest(), _ledger_timing(raw)
+                ),
+                None,
             )
         self._save(state)
 
@@ -561,10 +676,13 @@ class RemoteDispatcher:
         with self._lock:
             self._cancelled.discard(attempt_id)
             self._held.discard(attempt_id)
+            self._unsaved.pop(attempt_id, None)
+            self._started.pop(attempt_id, None)
 
     def _release_film(self, film: str, rev: int) -> None:
         """Delete a staged film revision's source files — never while an
-        attempt of it is local or it is being fetched."""
+        attempt of it is local or it is being fetched. §11 IR2: the entry is
+        marked releasing first, so no claim ever sees it complete again."""
         with self._lock:
             if self._fetching == f"{film}/{rev}":
                 return
@@ -575,7 +693,7 @@ class RemoteDispatcher:
             return
         root = self.staging.work_dir
         kept = []
-        for relative in self.index.remove(film, rev):
+        for relative in self.index.begin_release(film, rev):
             for path in (root / relative, root / f"{relative}.part"):
                 try:
                     path.unlink()
@@ -585,12 +703,33 @@ class RemoteDispatcher:
                     log.warning("staged file %s could not be deleted", relative)
                     kept.append(relative)
             _prune(root, (root / relative).parent)
-        if kept:  # still staged: the next release (or boot) deletes it
-            self.index.mark(film, rev, sorted(set(kept)), complete=True)
+        if kept:  # still releasing: the next release (or boot) deletes it
+            self.index.mark(film, rev, sorted(set(kept)), False, releasing=True)
             return
+        self.index.remove(film, rev)
         with self._lock:
             self._envelopes.pop((film, rev), None)
         log.info("released the staged source of %s/%s", film, rev)
+
+    def _staged_ok(self, film: str, rev: int) -> bool:
+        """§11 IR2: complete in the index and every file still there at its
+        verified size; a missing or changed one is fetched again first."""
+        entry = self.index.entries().get(f"{film}/{rev}")
+        if not entry or not entry.get("complete") or entry.get("releasing"):
+            return False
+        sizes = entry.get("sizes") or {}
+        for relative in entry.get("paths", []):
+            try:
+                size = (self.staging.work_dir / relative).stat().st_size
+            except OSError:
+                size = -1
+            if size < 0 or (relative in sizes and size != int(sizes[relative])):
+                log.warning(
+                    "staged file %s is gone or changed; fetching again", relative
+                )
+                self.index.mark(film, rev, list(entry["paths"]), False)
+                return False
+        return True
 
     # ── fetch (R7) ───────────────────────────────────────────────────────
     def _fetch_loop(self) -> None:
@@ -630,8 +769,11 @@ class RemoteDispatcher:
             envelope = client.envelope(film, rev)
             with self._lock:
                 self._envelopes[film, rev] = envelope
-            paths = [str(c["relative_path"]) for c in envelope["workcopy"]]
-            self.index.mark(film, rev, paths, complete=False)
+            sizes = {
+                str(c["relative_path"]): int(c["size"]) for c in envelope["workcopy"]
+            }
+            paths = list(sizes)
+            self.index.mark(film, rev, paths, complete=False, sizes=sizes)
             key = f"{film}/{rev}"
             with self._lock:
                 self._fetching = key
@@ -648,6 +790,9 @@ class RemoteDispatcher:
                         film, "down", done, t, started
                     ),
                 )
+                # §11 IR2: complete while still `_fetching`, so a release
+                # never deletes the files between the download and the mark
+                self.index.mark(film, rev, paths, complete=True, sizes=sizes)
             except StagingError as exc:
                 self.reason = str(exc)  # 空间不足: try the next position
                 continue
@@ -655,7 +800,6 @@ class RemoteDispatcher:
                 with self._lock:
                     self._fetching = None
                     self._transfers.pop((film, "down"), None)
-            self.index.mark(film, rev, paths, complete=True)
             self._wake.set()
             return True
         return False
@@ -673,7 +817,8 @@ class RemoteDispatcher:
     def _run_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                worked = self._tick()
+                with self._tick_lock:
+                    worked = self._tick()
             except Exception:
                 log.exception("worker dispatch tick failed")
                 worked = False
@@ -713,7 +858,7 @@ class RemoteDispatcher:
             return None
         route = routes[0]
         film, rev = str(route["film"]), int(route["rev"])
-        if not self.index.complete(film, rev):
+        if not self._staged_ok(film, rev):
             self.reason = "等待源文件"
             return None
         envelope = self._client().envelope(film, rev)  # fresh job versions
@@ -757,14 +902,13 @@ class RemoteDispatcher:
             return False
         envelope, stage = gate
         label = f"影片工作流：{envelope.get('name') or envelope['film']}"
-        if not self.lease.try_acquire(self.run_id, self.poll, label):
+        if not self._acquire(label):
             self.reason = "等待 GPU：" + (
                 self.lease.blocking_label()
                 if hasattr(self.lease, "blocking_label")
                 else ""
             )
             return False
-        self._holding = True
         return self._claim_and_run(envelope, stage)
 
     def _job(self, envelope: Mapping[str, Any], stage: str) -> m.PendingComputeJob:
@@ -822,6 +966,7 @@ class RemoteDispatcher:
         active.energy_start = self._energy_reading(job.film_id)
         with self._lock:
             self._active = active
+            self._started[attempt_id] = active.started
         self.runtime.use(envelope)
         if attempt_id in self._cancelled or self._stop.is_set():
             active.cancel.set()
@@ -887,9 +1032,15 @@ class RemoteDispatcher:
             log.warning("worker attempt renew failed: %s", exc)
 
     def _finish_unsettled(self) -> bool:
+        return self._settle_now(0.0)
+
+    def _settle_now(self, budget: float) -> bool:
+        """C4: settle the unsettled Job again; True once its processes are
+        gone and its outcome is recorded."""
         assert self._unsettled is not None
         active, outcome, processes = self._unsettled
-        if processes is not None and not processes.settle(0):
+        if processes is not None and not processes.settle(budget):
+            self.reason = UNSETTLED
             return False
         self._unsettled = None
         self._settle(active, outcome)
@@ -897,34 +1048,54 @@ class RemoteDispatcher:
 
     def _settle(self, active: _Active, outcome: ExecOutcome) -> None:
         """Crash point `settled`: the outcome, ledger digest, timing and the
-        film's energy since the claim (R14) are persisted before any upload."""
+        film's energy since the claim (R14) are persisted before any upload.
+        §11 CX6: a write that never lands keeps the outcome in memory; it is
+        written again before the delivery, which waits for it."""
         state = active.state
         energy = self._energy(active)
         state.settled = _settled(outcome, energy)
-        self._save(state)
+        saved = self._save(state)
         with self._lock:
+            if not saved:
+                self._unsaved[state.attempt_id] = state
             self._active = None
+            if not self._stop.is_set() and state.attempt_id not in self._deliver:
+                self._deliver.insert(0, state.attempt_id)
         if self._stop.is_set():  # shut down: the next start finishes it
             return
-        with self._lock:
-            self._deliver.insert(0, state.attempt_id)
         self._deliver_one(state.attempt_id)
 
     # ── upload and finish ────────────────────────────────────────────────
     def _deliver_one(self, attempt_id: str) -> bool:
         """Upload (success only) then finish, retried with backoff until a
         definite answer; the GPU stays held until the finish resolves (D3)."""
-        state = AttemptState.load(self._path(attempt_id))
+        with self._lock:
+            unsaved = self._unsaved.get(attempt_id)
+            started = self._started.get(attempt_id)
+        if unsaved is not None:  # §11 CX6: durable before anything is sent
+            if not self._save(unsaved):
+                self.reason = "无法写入任务记录（暂存目录），正在重试"
+                return False
+            with self._lock:
+                self._unsaved.pop(attempt_id, None)
+        state = unsaved or AttemptState.load(self._path(attempt_id))
         if state is None or state.settled is None:
             with self._lock:
                 self._deliver = [a for a in self._deliver if a != attempt_id]
             return True
-        active = _Active(state, self._clock(), False, phase="uploading")
+        # §11 IR8: 用时 goes on from the claim (a boot finish starts now)
+        active = _Active(
+            state,
+            self._clock() if started is None else started,
+            False,
+            phase="uploading",
+        )
         with self._lock:
             self._active = active
         failures = 0
         try:
             while not self._stop.is_set():
+                body: dict[str, Any] | None = None
                 try:
                     body = self._finish_body(state, active)
                     active.phase = "finishing"
@@ -938,7 +1109,8 @@ class RemoteDispatcher:
                         log.info("worker attempt %s is stale; discarded", attempt_id)
                         self._done(attempt_id)
                         return True
-                    if exc.status == 422 and state.settled.get("ok"):
+                    failing = body is not None and body.get("outcome") == "failed"
+                    if exc.status == 422 and state.settled.get("ok") and not failing:
                         state.settled = _settled(
                             ExecOutcome.failed(
                                 "needs_attention", f"主控拒绝了结果（{exc.code}）"
@@ -947,6 +1119,9 @@ class RemoteDispatcher:
                         )
                         self._save(state)
                         continue
+                    if failing and exc.status in _PERMANENT:  # §11 IR3
+                        self._refused(state, exc)
+                        return True
                     if not exc.transient and exc.status != 422:
                         log.warning("worker finish refused: %s", exc)
                     failures += 1
@@ -960,11 +1135,42 @@ class RemoteDispatcher:
                     self._active = None
                 self._transfers.pop((state.film_id, "up"), None)
 
+    def _refused(self, state: AttemptState, exc: ApiError) -> None:
+        """§11 IR3: the controller refused a failed finish for good. The
+        attempt file moves to `attempts/refused/` for inspection; the GPU is
+        free; the controller's assignment stays until a later boot settles it
+        (not reported → interrupted, a free retry)."""
+        attempt_id = state.attempt_id
+        log.error(
+            "worker attempt %s: the controller refused its failed finish (%s);"
+            " its record is kept in %s/%s",
+            attempt_id,
+            exc,
+            ATTEMPTS_DIR,
+            REFUSED_DIR,
+        )
+        folder = self.attempt_dir / REFUSED_DIR
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.replace(self._path(attempt_id), folder / f"{attempt_id}.json")
+        except OSError:
+            log.exception("refused worker attempt %s not moved", attempt_id)
+        self.notice = f"主控拒绝了 {state.name or state.film_id} 的失败结果（{exc.code}），记录已保留"
+        with self._lock:
+            self._deliver = [a for a in self._deliver if a != attempt_id]
+            self._cancelled.discard(attempt_id)
+            self._started.pop(attempt_id, None)
+            self._unsaved.pop(attempt_id, None)
+        self._release()
+        self._wake.set()
+
     def _finish_body(self, state: AttemptState, active: _Active) -> dict[str, Any]:
         settled = dict(state.settled or {})
         with self._lock:
             cancelled = state.attempt_id in self._cancelled
-        if cancelled:  # R9: the operator's stop wins over any outcome
+        # R9: the operator's stop wins over a failure; §11 CX5: never over a
+        # stage that already settled ok (finished GPU work is delivered)
+        if cancelled and not settled.get("ok"):
             return {
                 "outcome": "failed",
                 "error_class": "cancelled",
@@ -974,7 +1180,7 @@ class RemoteDispatcher:
             return {
                 "outcome": "failed",
                 "error_class": settled.get("error_class") or "needs_attention",
-                "message": settled.get("message") or "失败",
+                "message": _cap(settled.get("message") or "失败"),
                 "energy": settled.get("energy"),
             }
         ledger = self.staging.work_dir / state.attempt_id / RESULT_NAME
@@ -982,7 +1188,7 @@ class RemoteDispatcher:
         self._upload(state, raw, active)
         return {
             "outcome": "succeeded",
-            "message": settled.get("message") or "",
+            "message": _cap(settled.get("message") or ""),
             "ledger": raw.decode("utf-8"),
             "payload_digest": hashlib.sha256(raw).hexdigest(),
             "timing": settled.get("timing"),
@@ -991,7 +1197,9 @@ class RemoteDispatcher:
 
     def _upload(self, state: AttemptState, raw: bytes, active: _Active) -> None:
         """Each output under `<a>/` the ledger names (C3: work-copy refs are
-        never uploaded); three whole-file mismatches need the operator."""
+        never uploaded); three whole-file mismatches need the operator — the
+        client's own three sends, never retried around it (§11 IR7). The
+        stop interrupts a send; the controller keeps its offset (§11 IR6)."""
         result = StageResult.model_validate_json(raw)
         prefix = f"{state.attempt_id}/"
         files = [ref for ref in ledger_refs(result) if ref.path.startswith(prefix)]
@@ -1012,22 +1220,21 @@ class RemoteDispatcher:
                     state.film_id, "up", done_before + offset, total, started
                 )
 
-            for _ in range(MAX_MISMATCHES):
-                try:
-                    client.upload_file(
-                        state.attempt_id,
-                        ref.path,
-                        self.staging.work_dir / ref.path,
-                        size=ref.size,
-                        sha256=ref.sha256,
-                        on_progress=sent,
-                    )
-                    break
-                except ApiError as exc:
-                    if exc.code != "hash_mismatch":
-                        raise
-            else:
-                raise ApiError(422, "hash_mismatch")
+            try:
+                client.upload_file(
+                    state.attempt_id,
+                    ref.path,
+                    self.staging.work_dir / ref.path,
+                    size=ref.size,
+                    sha256=ref.sha256,
+                    attempts=MAX_MISMATCHES,
+                    on_progress=sent,
+                    cancel=self._stop,
+                )
+            except ApiError as exc:
+                if exc.code == "hash_mismatch":
+                    raise ApiError(422, "hash_mismatch") from None
+                raise
             before += ref.size
             active.progress = f"回传 {before}/{total}"
 
@@ -1039,12 +1246,24 @@ class RemoteDispatcher:
         self._release()
         self._wake.set()
 
-    def _release(self) -> None:
-        if self._holding:
-            self.lease.release(self.run_id)
-            self._holding = False
-        else:
-            self.lease.withdraw(self.run_id)
+    def _acquire(self, label: str) -> bool:
+        with self._lease_lock:
+            if not self.lease.try_acquire(self.run_id, self.poll, label):
+                return False
+            self._holding = True
+            return True
+
+    def _release(self, *, force: bool = False) -> None:
+        """Free the GPU (or stop waiting for it). §11 CX2: never while a
+        child of an earlier boot is held, except at `stop()`."""
+        with self._lease_lock:
+            if self._held and not force:
+                return
+            if self._holding:
+                self.lease.release(self.run_id)
+                self._holding = False
+            else:
+                self.lease.withdraw(self.run_id)
 
     # ── power (R14) ──────────────────────────────────────────────────────
     def _sampler(self) -> Any:
@@ -1099,13 +1318,69 @@ def _settled(
     return {
         "ok": outcome.ok,
         "error_class": outcome.error_class,
-        "message": outcome.message,
+        "message": _cap(outcome.message or ""),
         "digest": outcome.result_digest,
         "timing": None
         if outcome.timing is None
         else outcome.timing.model_dump(mode="json", exclude={"schema_version"}),
         "energy": energy,
     }
+
+
+def _cap(text: str) -> str:
+    """§11 IR3: a finish message within the model's limit."""
+    return text if len(text) <= MESSAGE_CAP else text[: MESSAGE_CAP - 1] + "…"
+
+
+def _is_uuid(name: str) -> bool:
+    try:
+        return str(uuid.UUID(name)) == name
+    except ValueError:
+        return False
+
+
+def _ledger_timing(raw: bytes) -> m.RestoreTiming | None:
+    """§11 IR9: the restore timings a ledger records, summed (or None)."""
+    try:
+        result = StageResult.model_validate_json(raw)
+    except ValueError:
+        return None
+    return merge_timing(
+        *(v.restore.timing for v in result.videos if v.restore is not None)
+    )
+
+
+def _watts(live: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """§11 IR11: only the live watts travel in a heartbeat."""
+    if not live:
+        return None
+    return {**{k: live.get(k) for k in _WATTS}, "estimated": True}
+
+
+def _size(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+
+def _bounded(value: dict[str, Any]) -> dict[str, Any]:
+    """§11 IR11: `current` within `CURRENT_CAP` — the console line is cut,
+    then the 本片参数, then the LTX detail, then the energy go."""
+    if _size(value) <= CURRENT_CAP:
+        return value
+    ltx = dict(value.get("ltx") or {})
+    console = ltx.get("console")
+    if isinstance(console, str):
+        ltx["console"] = console[-400:]
+    elif isinstance(console, list):
+        ltx["console"] = [str(line)[-400:] for line in console[-5:]]
+    value = {**value, "ltx": ltx or None}
+    if _size(value) > CURRENT_CAP:
+        ltx.pop("params", None)
+        value["ltx"] = ltx or None
+    if _size(value) > CURRENT_CAP:
+        value["ltx"] = None
+    if _size(value) > CURRENT_CAP:
+        value["energy"] = None
+    return value
 
 
 def _prune(root: Path, folder: Path) -> None:

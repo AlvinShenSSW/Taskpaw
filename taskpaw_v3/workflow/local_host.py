@@ -521,7 +521,7 @@ class LocalWorkflowHost:
             raise RuntimeError("媒体流水线尚未启动")
         from .remote_attempts import requeue
 
-        requeue(self.runtime, self.cancels, film_id, attempt_id)
+        requeue(self.runtime, self.cancels, film_id, attempt_id, fleet=self.fleet)
 
     def remote_resolved(
         self,

@@ -13,12 +13,14 @@ job, at most one unresolved owner per GPU, and how often the fake Jasna ran.
 
 from __future__ import annotations
 
+import functools
 import json
 import threading
 import uuid
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 import pytest
 
@@ -31,7 +33,7 @@ from taskpaw_v3.tests.test_workflow_remote_worker import Server, until
 from taskpaw_v3.tests.test_workflow_scrape_step import scrape_step
 from taskpaw_v3.tests.workflow_exec_helpers import Tools, video
 from taskpaw_v3.tests.workflow_route_helpers import StepClock, attest
-from taskpaw_v3.workflow import board, devices, local_host
+from taskpaw_v3.workflow import board, devices, local_host, routing, transfer
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.executors import SyntheticExecutor
 from taskpaw_v3.workflow.keep_awake import KeepAwake
@@ -40,11 +42,15 @@ from taskpaw_v3.workflow.local_runtime import LocalRuntime
 from taskpaw_v3.workflow.remote_dispatch import AttemptState
 from taskpaw_v3.workflow.remote_worker import Probe, WorkerHost, probe_body
 from taskpaw_v3.workflow.return_step import LocalReturnStep
+from taskpaw_v3.workflow.scheduler import CONTROLLER_DISK
 from taskpaw_v3.workflow.worker_client import ApiError, WorkerClient
 
 WORKER_GPU = LocalGpu("NVIDIA GeForce RTX 5060 Ti", "GPU-fake-16gb", 16311)
 VERSION = __version__  # the controller's own: no 「版本不一致」
 LONG = 60.0  # a condition wait's ceiling; never a timing budget
+# §11 Linux CI: the controller's free disk is injected, never the runner's
+# (a GitHub Linux runner has far less than the C8 reserve of 100 GB free)
+CONTROLLER_FREE = 2_000 * 10**9
 
 
 @pytest.fixture(autouse=True)
@@ -112,6 +118,25 @@ class World:
             )
 
         monkeypatch.setattr(local_host, "LocalRuntime", make_runtime)
+        # the C8 gates of the routing pass and of the output plans read this,
+        # not the host's disk; `free` lets a test shrink it
+        self.free = CONTROLLER_FREE
+        monkeypatch.setattr(transfer, "disk_free", lambda path: self.free)
+        monkeypatch.setattr(
+            local_host,
+            "Transfers",
+            functools.partial(transfer.Transfers, free_bytes=lambda p: self.free),
+        )
+        # every real pass, so a decision that never routes is named (§11)
+        self.passes: list[Any] = []
+        real_pass = routing.run_pass
+
+        def recorded(*args: Any, **kw: Any) -> Any:
+            outcome = real_pass(*args, **kw)
+            self.passes.append(outcome)
+            return outcome
+
+        monkeypatch.setattr(routing, "run_pass", recorded)
         self.settings = WorkflowSettings(
             enabled=True, role="controller", remote_workers=True
         )
@@ -262,6 +287,14 @@ class World:
     def jasna_runs(self) -> int:
         return len(self.tools.runs(self.tools.jasna_exe))
 
+    def hold_jasna(self) -> Path:
+        """§11 IR13: the next Jasna runs until the returned file exists, so a
+        test acts while the restore is still running (an event, never a
+        wall-clock linger)."""
+        release = self.tmp / f"release-{uuid.uuid4()}"
+        self.tools.set_jasna(mode="sleep", release=str(release))
+        return release
+
     def invariants(self) -> None:
         """≤ 1 unresolved assignment per job, ≤ 1 unresolved GPU owner."""
         open_ = self.rt.store.list_open_assignments(self.rt.operator)
@@ -288,17 +321,26 @@ class World:
         rt, fleet = self.rt, self.host.fleet
         assert fleet is not None
         snap = rt.store.routing_snapshot(rt.operator)
-        planned = schedule(
+        planned = schedule(  # with the real pass's inputs (§11)
             snap,
             live=fleet.snapshot(),
             now=rt.clock.now(),
             controller_id=rt.identity.worker_id,
+            controller_free_bytes=self.free,
             gpu_stages=gpu_stages(rt.store, rt.operator, snap, rt.executors),
             remote_enabled=True,
+            live_since=fleet.started_at,
         )
         lines.append(
             f"pass {planned.waiting} {planned.routes} passes={self.host.scheduler.passes}"
         )
+        if self.passes:
+            last = self.passes[-1]
+            lines.append(
+                f"last pass waiting={last.planned.waiting} "
+                f"routed={[d.film_id for d in last.routed]} "
+                f"overtaken={list(last.overtaken)}"
+            )
         lines.append(f"live {fleet.snapshot()}")
         for worker in self.workers:
             d = worker.dispatcher
@@ -323,8 +365,30 @@ def world(tmp_path, monkeypatch):
 
 
 def routed_film(world: World) -> str:
+    """A planned film and a routing pass; it must become a route. §11: a
+    decision the store refuses (a tolerated race) or a pass holding it for
+    the controller's disk fails at once, naming the code or the reason."""
     film = ret.add_real_film(world.rt)
+    seen = len(world.passes)
     world.wake()
+
+    def routed() -> bool:
+        for outcome in world.passes[seen:]:
+            codes = [code for f, code in outcome.overtaken if f == film]
+            if codes:
+                raise AssertionError(f"route_film refused {film}: {codes}")
+            if outcome.planned.waiting.get(film) == CONTROLLER_DISK:
+                raise AssertionError(f"pass held {film}: {CONTROLLER_DISK}")
+            if any(d.film_id == film for d in outcome.routed):
+                return True
+        return world.rt.store.film_route(world.rt.operator, film, 1) is not None
+
+    try:
+        until(routed, LONG)
+    except AssertionError as exc:
+        if str(exc) != "condition not reached":
+            raise
+        raise AssertionError(world.explain(film)) from None
     return film
 
 
@@ -384,6 +448,16 @@ def test_the_board_shows_the_remote_running_stage_with_its_machine(world):
     assert current["machine"] == {"id": world.issued["w1"]["worker_id"], "name": "w1"}
     assert current["started_at"] and current["uses_gpu"] is True
     wait_status(world, film, "restore", "succeeded")
+
+
+def test_a_decision_that_never_routes_fails_fast_and_names_why(world):
+    """§11 (Linux CI): the pass held every remote route because the test
+    controller read the runner's own disk (< the 100 GB C8 reserve). The
+    helper now names that at the first pass instead of a 60 s timeout."""
+    world.join()
+    world.free = 20 * 10**9  # a GitHub Linux runner's free disk
+    with pytest.raises(AssertionError, match=CONTROLLER_DISK):
+        routed_film(world)
 
 
 # ── the crash matrix (§5) ───────────────────────────────────────────────
@@ -460,11 +534,15 @@ def test_case_3_a_worker_restart_without_a_ledger_is_a_free_retry(world):
 
 
 def test_case_4_the_worker_runs_on_while_the_controller_restarts(world):
-    world.tools.set_jasna(linger=1.0)
+    release = world.hold_jasna()
     worker = world.join()
     film = routed_film(world)
-    until(lambda: (worker.dispatcher.current() or {}).get("phase") == "running", LONG)
+    until(lambda: world.jasna_runs() == 1, LONG)  # Jasna is running
     world.restart_controller()
+    # the restart came while the restore still ran
+    assert world.status(film, "restore") == "running"
+    assert (worker.dispatcher.current() or {}).get("phase") == "running"
+    release.touch()
     wait_status(world, film, "restore", "succeeded")
     assert len(world.attempts(film, "restore")) == 1 and world.jasna_runs() == 1
     world.invariants()
@@ -481,14 +559,22 @@ def test_case_5_a_ledger_with_outputs_is_finished_without_a_re_run(world):
     (restore,) = world.attempts(film, "restore")
     assert world.jasna_runs() == 1  # no GPU re-run
     assert restore.evidence[0].summary.energy is None  # cut: never 0 (R14)
+    timing = restore.evidence[0].summary.timing  # §11 IR9: from the ledger
+    assert timing is not None and timing.wall > 0
     world.invariants()
 
 
 def test_case_6_a_controller_restart_mid_upload_resumes_the_part(world, monkeypatch):
     cut = threading.Event()
     real = WorkerClient.upload_file
+    resumed: list[int] = []
 
     def upload(self, attempt_id, path, local, *, size, sha256, **kw):
+        if cut.is_set() and not resumed:  # §11 IR12: where the resend starts
+            entry = next(
+                f for f in self.outputs(attempt_id)["files"] if f["path"] == path
+            )
+            resumed.append(int(entry["received"]))
         if not cut.is_set():
             cut.set()
             half = size // 2
@@ -497,7 +583,7 @@ def test_case_6_a_controller_restart_mid_upload_resumes_the_part(world, monkeypa
             try:  # half the body, then the controller goes away
                 self.open(
                     "PUT",
-                    f"/attempts/{attempt_id}/files/{path}",
+                    f"/attempts/{attempt_id}/files/{quote(path, safe='/')}",
                     data=body,
                     headers={
                         "Content-Range": f"bytes 0-{size - 1}/{size}",
@@ -515,19 +601,28 @@ def test_case_6_a_controller_restart_mid_upload_resumes_the_part(world, monkeypa
     film = routed_film(world)
     wait_status(world, film, "restore", "succeeded")
     assert cut.is_set() and world.jasna_runs() == 1
+    assert resumed and resumed[0] > 0  # the prefix survived the restart
     world.invariants()
 
 
 def test_case_7_a_lost_finish_reply_then_a_worker_restart_is_collected(
     world, monkeypatch
 ):
+    """§11 IR12: the reply is lost and the worker process ends before it
+    sends the finish again; the next process's `recover()` reads `resolved`
+    and collects the attempt (no second finish)."""
     gone, real = threading.Event(), WorkerClient.finish
+    sent: list[str] = []
 
     def finish(self, attempt_id, body):
         result = real(self, attempt_id, body)
+        sent.append(attempt_id)
         if not gone.is_set() and body.get("outcome") == "succeeded":
             gone.set()
-            raise ApiError(0, "unreachable")  # the reply is lost …
+            # the process dies before the reply arrives: nothing is resent
+            dispatcher = world.workers[-1].dispatcher
+            assert dispatcher is not None and dispatcher._stop.wait(LONG)
+            raise ApiError(0, "unreachable")
         return result
 
     monkeypatch.setattr(WorkerClient, "finish", finish)
@@ -535,12 +630,14 @@ def test_case_7_a_lost_finish_reply_then_a_worker_restart_is_collected(
     film = routed_film(world)
     assert gone.wait(LONG)
     wait_status(world, film, "restore", "succeeded")
+    staging = world.tmp / "w1" / "staging"
+    (restore,) = world.attempts(film, "restore")
+    assert (staging / "attempts" / f"{restore.attempt_id}.json").exists()
     worker = world.restart_worker(worker)  # … and the worker restarts
     wait_status(world, film, "asr", "succeeded")
-    staging = world.tmp / "w1" / "staging"
     until(lambda: not list((staging / "attempts").glob("*.json")), LONG)
-    restore = world.attempts(film, "restore")[0].attempt_id
-    assert not (staging / "work" / restore).exists()
+    assert not (staging / "work" / restore.attempt_id).exists()
+    assert sent.count(restore.attempt_id) == 1  # collected, never resent
     assert world.jasna_runs() == 1
     world.invariants()
 
@@ -584,11 +681,11 @@ class Partition:
 
 @pytest.mark.parametrize("attested", [False, True])
 def test_case_9_a_partition_moves_nothing_until_attested(world, attested):
-    world.tools.set_jasna(linger=2.0)
+    release = world.hold_jasna()
     net = Partition()
     worker = world.join(client_factory=net)
     film = routed_film(world)
-    until(lambda: (worker.dispatcher.current() or {}).get("phase") == "running", LONG)
+    until(lambda: world.jasna_runs() == 1, LONG)  # Jasna is running
     net.cut.set()
     until(lambda: worker.state == "connecting", LONG)  # a beat failed after the cut
     world.clock.advance(timedelta(seconds=61))  # 失联 on the controller's clock
@@ -607,10 +704,13 @@ def test_case_9_a_partition_moves_nothing_until_attested(world, attested):
         ]
         attest(world.rt, open_.assignment.assignment_id)  # 判定已停止
     assert worker.dispatcher.claimed()  # the worker keeps its claim meanwhile
+    assert (worker.dispatcher.current() or {}).get("phase") == "running"
     net.cut.clear()
     staging = world.tmp / "w1" / "staging"
     (first,) = world.attempts(film, "restore")
-    if attested:  # the finish is stale (409): killed and discarded
+    if not attested:
+        release.touch()  # the restore ends only after the partition
+    if attested:  # the stale current is cancelled (killed), then discarded
         until(lambda: not list((staging / "attempts").glob("*.json")), LONG)
         assert not (staging / "work" / first.attempt_id).exists()
         assert world.status(film, "restore") == "failed"
@@ -708,11 +808,15 @@ def test_pause_stops_claims_and_withdraws_the_unclaimed_route(world):
 
 
 def test_in_flight_work_completes_while_paused(world):
-    world.tools.set_jasna(linger=1.0)
+    release = world.hold_jasna()
     worker = world.join()
     film = routed_film(world)
-    until(lambda: world.status(film, "restore") == "running", LONG)
+    until(lambda: world.jasna_runs() == 1, LONG)  # Jasna is running
     worker.set_paused(True)
+    worker_id = world.issued["w1"]["worker_id"]
+    until(lambda: world.host.fleet.entry(worker_id).beat.paused, LONG)  # type: ignore[union-attr]
+    assert world.status(film, "restore") == "running"  # paused mid-run
+    release.touch()
     wait_status(world, film, "restore", "succeeded")  # the run goes on
     assert world.attempts(film, "asr") == []  # but nothing new is claimed
     worker.set_paused(False)
@@ -720,24 +824,62 @@ def test_in_flight_work_completes_while_paused(world):
     wait_status(world, film, "asr", "succeeded")
 
 
-def test_a_worker_re_paired_mid_run_finishes_its_attempt(world):
-    """Self-review: 重新配对 while a stage runs. The join halts only the
-    heartbeat loop; the dispatcher keeps the Job and finishes it with the new
-    credential (the old one is revoked by the pairing)."""
-    world.tools.set_jasna(linger=1.5)
+def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
+    """§11 CX3 + IR1: 重新配对 while a stage runs. The old session's
+    dispatcher is quiesced (its Job stopped and settled) before the new
+    identity runs; a new dispatcher with a new boot id finishes the attempt
+    `cancelled`, a free retry that runs again on the same worker."""
+    release = world.hold_jasna()
     worker = world.join()
     film = routed_film(world)
-    until(lambda: world.status(film, "restore") == "running", LONG)
+    until(lambda: world.jasna_runs() == 1, LONG)  # Jasna is running
+    old, boot = worker.dispatcher, worker.boot_id
+    assert old is not None
     worker_id = world.issued["w1"]["worker_id"]
     record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
     code = devices.repair(
         world.rt, worker_id, record.version, host="127.0.0.1", port=world.server.port
     )["code"]
     worker.join(code, str(world.tmp / "w1" / "staging"))
+    until(lambda: worker.dispatcher is not None and worker.dispatcher is not old, LONG)
+    assert old.halted and not any(t.is_alive() for t in old._threads)
+    assert worker.boot_id != boot
+    release.touch()  # the retry's Jasna runs straight through
     record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
     if record.enrollment_state != "verified":
         devices.approve(world.rt, worker_id, record.version, restore=True, asr=True)
     world.wake()
     wait_status(world, film, "asr", "succeeded")
-    assert len(world.attempts(film, "restore")) == 1 and world.jasna_runs() == 1
+    first, second = world.attempts(film, "restore")
+    first, second = world.attempts(film, "restore")
+    assert {e.kind for e in first.evidence} == {"exec_failed:cancelled"}
+    assert second.status == "succeeded" and world.jasna_runs() == 2
+    world.invariants()
+
+
+def test_a_revoked_worker_joined_again_in_the_same_process(world):
+    """§11 IR1/IR5: after 撤销 the same process joins as a new device. Its
+    dispatcher has a new boot id; the old credential's attempt file is
+    unknown to the new identity (404) and collected with its work folder."""
+    release = world.hold_jasna()
+    worker = world.join()
+    film = routed_film(world)
+    until(lambda: world.jasna_runs() == 1, LONG)  # Jasna is running
+    attempt = world.stage(film, "restore").attempt_id
+    worker_id = world.issued["w1"]["worker_id"]
+    record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
+    devices.revoke(world.rt, worker_id, record.version)
+    until(lambda: worker.state == "revoked", LONG)
+    staging = world.tmp / "w1" / "staging"
+    assert (staging / "attempts" / f"{attempt}.json").exists()  # settled, kept
+    boot = worker.boot_id
+    release.touch()
+    issued = devices.add_device(
+        world.rt, "w1-b", "192.168.1.31", host="127.0.0.1", port=world.server.port
+    )
+    worker.join(issued["code"], str(staging))
+    until(lambda: worker.reconciled and worker.state == "running", LONG)
+    assert worker.boot_id != boot
+    until(lambda: not (staging / "attempts" / f"{attempt}.json").exists(), LONG)
+    assert not (staging / "work" / attempt).exists()
     world.invariants()
