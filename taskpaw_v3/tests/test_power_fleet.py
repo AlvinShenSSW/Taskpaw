@@ -698,6 +698,48 @@ def test_a_hostname_is_fetched_at_the_address_it_resolved_to(peer, monkeypatch):
     assert headers["Host"] == f"gpu-02.lan:{peer.port}"
 
 
+def test_every_validated_address_is_tried_in_order_on_one_resolution(peer, monkeypatch):
+    peer.json("/status", {"ok": True})  # the fake peer listens on IPv4 only
+    calls = []
+
+    def resolve(host, port, **kw):
+        calls.append(host)
+        return [(10, 1, 6, "", ("::1", port, 0, 0)), (2, 1, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(power_fleet, "_getaddrinfo", resolve)
+    assert fetch_json(f"http://gpu-02.lan:{peer.port}/status", TOKEN) == {"ok": True}
+    assert calls == ["gpu-02.lan"]  # resolved once, the second address answered
+    ((_path, headers),) = peer.seen
+    assert headers["Host"] == f"gpu-02.lan:{peer.port}"
+
+
+def test_an_answering_address_is_final_and_all_dead_addresses_are_unreachable(
+    peer, monkeypatch
+):
+    peer.json("/status", {"error": "no"}, code=401)
+
+    def both(host, port, **kw):
+        return [(2, 1, 6, "", ("127.0.0.1", port)), (2, 1, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(power_fleet, "_getaddrinfo", both)
+    with pytest.raises(PeerError) as caught:
+        fetch_json(f"http://gpu-02.lan:{peer.port}/status", TOKEN)
+    assert caught.value.code == "unauthorized"
+    assert len(peer.seen) == 1  # a real answer is never retried on the next address
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    port = closed.getsockname()[1]
+    closed.close()
+
+    def dead(host, p, **kw):
+        return [(10, 1, 6, "", ("::1", port, 0, 0)), (2, 1, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(power_fleet, "_getaddrinfo", dead)
+    with pytest.raises(PeerError) as caught:
+        fetch_json(f"http://gpu-02.lan:{port}/status", TOKEN)
+    assert caught.value.code == "unreachable"
+
+
 def test_a_hanging_resolver_is_bounded(monkeypatch):
     release = threading.Event()
 

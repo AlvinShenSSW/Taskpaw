@@ -10,7 +10,7 @@ import { api, HttpError, type AgentConfigView, type LivePower, type PowerHistory
 import { PowerPage } from "../components/power/PowerPage";
 import { PowerParams } from "../components/power/PowerParams";
 import { chartSeries, machinesOf, stateChip } from "../components/power/powerView";
-import { fmtKwh, fmtKwhShort, predictFromRates } from "../components/power/powerModel";
+import { fmtKwh, fmtKwhCell, fmtKwhShort, predictFromRates } from "../components/power/powerModel";
 import { EnergyBlock, PredictLine } from "../components/power/PowerParts";
 import { theme } from "../theme";
 import { setLang } from "../i18n";
@@ -157,6 +157,29 @@ describe("功耗 tab", () => {
     const foot = document.querySelector("tfoot") as HTMLElement;
     expect(foot).toHaveTextContent("含过期数据");
     expect(foot).toHaveTextContent("7.30");  // 4.55 + 1.92 + 0.83
+  });
+
+  it("activity totals count only the displayed window; an aged-out peer history adds nothing (Codex r4)", async () => {
+    const aged = (range: "24h" | "7d" | "30d") => {
+      const v = powerView(range);
+      return {
+        ...v,
+        peers: (v.peers ?? []).map((p) => (p.name === "GPU-02" && p.history
+          ? { ...p, state: "unreachable", power: null, history: { ...p.history, t: p.history.t.map((t) => t - 7 * 86400) } } : p)),
+      };
+    };
+    vi.spyOn(api, "power").mockImplementation(async (range) => aged(range));
+    vi.spyOn(api, "workflowFilms").mockResolvedValue(FILMS);
+    vi.spyOn(api, "config").mockResolvedValue({ monitors: [], power: POWER_SETTINGS } as unknown as AgentConfigView);
+    wrap(<PowerPage />);
+    await screen.findByTestId("power-chart");
+    const v = powerView("24h");
+    const inWindow = (h: PowerHistory) => h.activity_wh.restore.concat(h.activity_wh.asr, h.activity_wh.translate, h.activity_wh.idle, h.activity_wh.other)
+      .reduce((a, b) => a + b, 0);
+    const expected = inWindow(v.history) + inWindow(v.peers![1].history!);
+    const stale = expected + v.peers![0].history!.totals.wh;
+    expect(fmtKwhCell(stale)).not.toBe(fmtKwhCell(expected));
+    expect(screen.getByText(/^最近 24 小时 · 共约/)).toHaveTextContent(`共约 ${fmtKwhCell(expected)} 度`);
   });
 
   it("an alias of the same machine is listed and not counted (Codex r3)", async () => {

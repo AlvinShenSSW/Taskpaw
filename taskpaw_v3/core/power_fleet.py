@@ -180,17 +180,17 @@ def _build_opener(watch: Optional[_Watch] = None) -> urllib.request.OpenerDirect
 _getaddrinfo = socket.getaddrinfo  # replaced in tests
 
 
-def resolve_host(host: str, port: int, timeout: float = TIMEOUT) -> str:
-    """The one address a peer's hostname is fetched at (IR04).
+def resolve_host(host: str, port: int, timeout: float = TIMEOUT) -> list[str]:
+    """The validated addresses a peer's hostname is fetched at, in answer order (IR04).
 
     Resolved once per request, bounded by `timeout` (getaddrinfo itself has no
     timeout, so it runs on a daemon thread), and refused when any answer is a
-    public or wildcard address. The request then goes to that address, so the
-    check and the connection see the same answer. An IP literal is used as is
-    (`parse_address` already classified it)."""
+    public or wildcard address. The request then goes to those addresses only,
+    so the check and the connection see the same answers. An IP literal is used
+    as is (`parse_address` already classified it)."""
     try:
         ipaddress.ip_address(host)
-        return host
+        return [host]
     except ValueError:
         pass
     result: list[Any] = []
@@ -206,12 +206,12 @@ def resolve_host(host: str, port: int, timeout: float = TIMEOUT) -> str:
     worker.join(timeout)
     if not result or isinstance(result[0], OSError):
         raise PeerError("unreachable")
-    addresses = [str(info[4][0]) for info in result[0]]
+    addresses = list(dict.fromkeys(str(info[4][0]) for info in result[0]))
     if not addresses:
         raise PeerError("unreachable")
     if any(bind_is_global(a) or bind_is_wildcard(a) for a in addresses):
         raise PeerError("invalid_address")
-    return addresses[0]
+    return addresses
 
 
 def _read_capped(resp: Any, deadline: float) -> bytes:
@@ -237,20 +237,47 @@ def fetch_json(
 ) -> Any:
     """GET a peer's JSON with this agent's Bearer token; PeerError otherwise.
 
-    A hostname is resolved first (`resolve_host`) and the request is sent to
-    that address with the original `Host`; the whole call stays in `timeout`."""
+    A hostname is resolved once (`resolve_host`) and the request is sent to the
+    validated addresses in order, with the original `Host`, until one answers
+    (an unreachable or silent address moves on to the next; a real HTTP answer
+    does not). The whole call stays in `timeout`: each address gets an equal
+    share of what is left (Windows takes about 2 s to give up on a refused
+    connection, so the first address cannot be allowed to use it all)."""
     deadline = time.monotonic() + timeout
     headers = {"Accept": "application/json"}
     if token.strip():
         headers["Authorization"] = f"Bearer {token.strip()}"
     parts = urllib.parse.urlsplit(url)
     host, port = parts.hostname or "", parts.port or DEFAULT_PORT
-    address = resolve_host(host, port, timeout)
-    if address != host:
-        headers["Host"] = parts.netloc
-        ip = ipaddress.ip_address(address.split("%", 1)[0])
-        shown = f"[{address.replace('%', '%25')}]" if ip.version == 6 else address
-        url = urllib.parse.urlunsplit(parts._replace(netloc=f"{shown}:{port}"))
+    addresses = resolve_host(host, port, timeout)
+    last = PeerError("unreachable")
+    for index, address in enumerate(addresses):
+        now = time.monotonic()
+        attempt = now + max(0.05, deadline - now) / (len(addresses) - index)
+        target, sent = url, dict(headers)
+        if address != host:
+            sent["Host"] = parts.netloc
+            ip = ipaddress.ip_address(address.split("%", 1)[0])
+            shown = f"[{address.replace('%', '%25')}]" if ip.version == 6 else address
+            target = urllib.parse.urlunsplit(parts._replace(netloc=f"{shown}:{port}"))
+        try:
+            return _get_json(target, sent, attempt, opener)
+        except PeerError as exc:
+            if exc.code not in ("unreachable", "timeout"):
+                raise
+            last = exc
+        if time.monotonic() >= deadline:
+            break
+    raise last
+
+
+def _get_json(
+    url: str,
+    headers: dict[str, str],
+    deadline: float,
+    opener: Optional[urllib.request.OpenerDirector],
+) -> Any:
+    """One GET at one address, inside this attempt's `deadline` (never past the request's)."""
     left = max(0.05, deadline - time.monotonic())
     request = urllib.request.Request(url, headers=headers, method="GET")
     watch = _Watch()

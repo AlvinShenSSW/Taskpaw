@@ -22,7 +22,7 @@ import {
   ACTIVITY_LABEL, ACTIVITY_ORDER, activityNow, clock, clockHM, fmtKwh, fmtKwhCell, fmtKwhShort, fmtW, kwh, restoreShare,
   splitOf, sumSplits, TIER_SHORT_ALL,
 } from "./powerModel";
-import { chartSeries, machinesOf, peakOf, rangeAgg, rangeLabel, stateChip, type Machine } from "./powerView";
+import { activityTotals, chartSeries, machinesOf, peakOf, rangeAgg, rangeLabel, stateChip, type Machine } from "./powerView";
 import { POWER_CSS } from "./powerStyles";
 
 const RANGES: PowerRange[] = ["24h", "7d", "30d"];
@@ -264,7 +264,7 @@ function EnergyTable({ machines, range }: { machines: Machine[]; range: PowerRan
 }
 
 function Uses({ machines, range }: { machines: Machine[]; range: PowerRange }) {
-  const sums = Object.fromEntries(ACTIVITY_ORDER.map((k) => [k, machines.reduce((a, m) => a + (m.hist?.totals?.activity_wh?.[k] ?? 0), 0)])) as Record<string, number>;
+  const sums = activityTotals(machines);
   const all = Object.values(sums).reduce((a, b) => a + b, 0);
   const max = Math.max(...Object.values(sums), 0.0001);
   return (

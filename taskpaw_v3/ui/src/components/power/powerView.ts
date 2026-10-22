@@ -1,6 +1,6 @@
 // PWR-3: the 功耗 tab's pure view model — machines from the control view, chart series, ranges.
 import type { LivePower, PeerEnergy, PowerHistory, PowerPeerRow, PowerRange, PowerView } from "../../api";
-import { machineColor } from "./powerModel";
+import { ACTIVITY_ORDER, machineColor } from "./powerModel";
 
 export interface ChartSeries { id: string; name: string; color: string; values: Array<number | null> }
 
@@ -98,6 +98,27 @@ export function chartSeries(machines: Machine[]): { series: ChartSeries[]; times
     return { id: m.id, name: m.name, color: m.color, values: times.map((t) => at.get(t) ?? null) };
   });
   return { series, times };
+}
+
+// Wh per activity over the displayed window only: the same timestamps the chart draws (the first
+// machine's axis), for every machine. A history's cached `totals` also cover points an offline peer
+// no longer shows, so they are never used; a missing or non-finite point counts as nothing.
+export function activityTotals(machines: Machine[]): Record<string, number> {
+  const sums = Object.fromEntries(ACTIVITY_ORDER.map((k) => [k, 0])) as Record<string, number>;
+  const window = new Set(chartSeries(machines).times);
+  for (const m of machines) {
+    const h = m.hist;
+    if (!h) continue;
+    for (const k of ACTIVITY_ORDER) {
+      const wh = h.activity_wh?.[k];
+      if (!Array.isArray(wh)) continue;
+      h.t.forEach((t, i) => {
+        const v = wh[i];
+        if (window.has(t) && typeof v === "number" && Number.isFinite(v)) sums[k] += v;
+      });
+    }
+  }
+  return sums;
 }
 
 // PW09 defaults per platform: tdp / idle / other W.
