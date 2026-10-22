@@ -18,6 +18,7 @@ from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.workflow_route_helpers import (
     ATTESTED,
     GPU_16,
+    GPU_16_FAST,
     StepClock,
     attest,
     boot,
@@ -27,6 +28,7 @@ from taskpaw_v3.tests.workflow_route_helpers import (
     pin_version,
     resolve_remote,
     route,
+    swap_gpu,
 )
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow import schema
@@ -373,6 +375,25 @@ def test_a_new_revision_keeps_a_claimed_route_until_its_work_resolves(rt):
     assert closed.close_reason == "新版本"
 
 
+def test_the_snapshot_carries_an_old_revision_routes_own_facts(rt):
+    """CX5: the old revision's route is accounted with the old revision's
+    claim, stages and size, not the current revision's (or none at all)."""
+    from taskpaw_v3.tests.test_workflow_plans import new_revision
+
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    route(rt, film, w.worker_id)
+    claim_remote(rt, w, film, "restore")
+    new_revision(rt, film)
+    snap = rt.store.routing_snapshot(rt.operator)
+    (old,) = snap.older_revisions
+    assert (old.film_id, old.input_revision, old.restore) == (film, 1, "running")
+    assert (old.claimed_by, old.claimed_stage) == (w.worker_id, "restore")
+    assert old.source_bytes > 0 and old.max_width == 1920 and old.duration_ms
+    current = [f for f in snap.films if f.film_id == film]
+    assert [(f.input_revision, f.claimed_by) for f in current] == [(2, None)]
+
+
 def test_a_failed_gpu_stage_closes_its_route_and_its_retry_routes_again(rt):
     """IR2: a failed stage waiting for its retry holds no worker slot."""
     w1, w2 = enrol_remote(rt, "5060 Ti-1"), enrol_remote(rt, "5060 Ti-2")
@@ -665,6 +686,27 @@ def test_rate_samples_skip_reuse_only_and_mixed_attempts(rt):
         for s in rt.store.routing_snapshot(rt.operator).samples
     }
     assert samples == {("restore", "full"), ("asr", "full"), ("asr", "untimed")}
+
+
+def test_rate_samples_keep_the_gpu_model_they_ran_on(rt):
+    """CX6: a sample is the GPU the attempt held at claim, not the worker's
+    current card: after a swap the old samples stay with the old model."""
+    w = enrol_remote(rt, "5060 Ti-1", gpu=GPU_16)
+    done = RESTORE_DONE.format(applied=1, reused=0)
+
+    def restore(remote):
+        film = auto_film(rt)
+        route(rt, film, remote.worker_id)
+        claimed = claim_remote(rt, remote, film, "restore")
+        resolve_remote(
+            rt, remote, claimed, note=done, timing=m.RestoreTiming(wall=1800.0)
+        )
+
+    restore(w)
+    w = swap_gpu(rt, w, GPU_16_FAST)
+    restore(w)
+    samples = rt.store.routing_snapshot(rt.operator).samples
+    assert [s.gpu_model for s in samples] == [GPU_16_FAST[0], GPU_16[0]]
 
 
 # ── v3 → v4 migration ────────────────────────────────────────────────────

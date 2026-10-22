@@ -4,8 +4,11 @@ The scheduler is pure; this is its only writer. Withdrawals go first so a
 withdrawn film can be routed again in the same pass. Every write is a CAS'd
 operator command: a decision that lost its race (the film was routed, claimed
 or re-pinned meanwhile, the worker drained) is skipped and decided again by
-the next pass. The pass's own thread and triggers come with remote execution
-(P2-3).
+the next pass. The route decisions count the slots and staging the pass's
+withdrawals free, so after a lost withdrawal none of them is applied: the pass
+decides once more from a fresh snapshot, and after a second loss leaves the
+routing to the next pass (CX4). The pass's own thread and triggers come with
+remote execution (P2-3).
 """
 
 from __future__ import annotations
@@ -57,6 +60,7 @@ def run_pass(
     now: datetime,
     executors: Mapping[ComputeStage, StageExecutor],
     controller_free_bytes: int | None = None,
+    retry: bool = True,
 ) -> PassOutcome:
     """`executors`: the controller's own, so the pass decides which stages
     need a GPU worker by the dispatcher's rule (IR3)."""
@@ -70,6 +74,7 @@ def run_pass(
         gpu_stages=gpu_stages(store, operator, snapshot, executors),
     )
     withdrawn = []
+    lost = False
     for item in planned.withdrawals:
         try:
             store.withdraw_route(
@@ -85,8 +90,24 @@ def run_pass(
             if exc.code not in _RACED:
                 raise
             log.info("route withdrawal of %s overtaken: %s", item.film_id, exc)
+            lost = True
             continue
         withdrawn.append(item)
+    if lost:  # CX4: the route decisions counted its slot and staging as freed
+        if not retry:
+            return PassOutcome(planned, (), tuple(withdrawn))
+        again = run_pass(
+            store,
+            operator,
+            meta,
+            controller_id=controller_id,
+            live=live,
+            now=now,
+            executors=executors,
+            controller_free_bytes=controller_free_bytes,
+            retry=False,
+        )
+        return PassOutcome(again.planned, again.routed, (*withdrawn, *again.withdrawn))
     routed = []
     for decision in planned.routes:
         try:
@@ -117,13 +138,14 @@ def gpu_stages(
     operator: AuthProof,
     snapshot: m.RoutingSnapshot,
     executors: Mapping[ComputeStage, StageExecutor],
-) -> dict[str, frozenset[str]]:
-    """Per film, its restore and ASR that need a GPU worker: `needs_gpu`, the
-    controller's dispatcher's own rule, over the film's input manifest (IR3)."""
-    result: dict[str, frozenset[str]] = {}
-    for film in snapshot.films:
+) -> dict[tuple[str, int], frozenset[str]]:
+    """Per film revision, its restore and ASR that need a GPU worker:
+    `needs_gpu`, the controller's dispatcher's own rule, over that revision's
+    input manifest (IR3); an open route's older revision too (CX5)."""
+    result: dict[tuple[str, int], frozenset[str]] = {}
+    for film in (*snapshot.older_revisions, *snapshot.films):
         manifest = store.get_input_manifest(operator, film.film_id, film.input_revision)
-        result[film.film_id] = frozenset(
+        result[film.film_id, film.input_revision] = frozenset(
             stage for stage in _GPU_STAGES if needs_gpu(executors.get(stage), manifest)
         )
     return result

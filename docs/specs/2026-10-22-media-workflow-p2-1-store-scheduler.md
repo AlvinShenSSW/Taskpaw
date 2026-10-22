@@ -149,7 +149,11 @@ codes: `route_required`, `route_exists`, `route_claimed`.
   films with an unfinished restore/asr or an open route, with plan, pin, stage statuses, claim
   owner and time, largest probe, summed probe duration, source bytes; open routes; workers with
   boot reconciliation, GPU model, VRAM and approved per-stage limits; succeeded restore/asr
-  attempts on a worker as rate samples, newest first). A rate sample is GPU throughput only
+  attempts on a worker as rate samples, newest first). `older_revisions` carries the same facts
+  for every older revision an open route still holds, so the pass accounts that route with its
+  own revision (CX5). A sample's GPU model is the probe of the physical GPU its assignment held
+  at claim (`assignments.physical_resource_id` → the probed capability bound to it), never the
+  worker's current card; an attempt without a held GPU has no model (CX6). A rate sample is GPU throughput only
   (CX3): a restore needs Jasna's measured wall time and a success note with no reused volume;
   an ASR needs a success note whose every volume ran WhisperJAV (`generated_ja`/`no_speech`)
   and is timed by its attempt span. The evidence counts reused volumes but not their
@@ -184,11 +188,14 @@ codes: `route_required`, `route_exists`, `route_claimed`.
 **Inputs.** `RoutingSnapshot`; `live: Mapping[worker_id, WorkerLive]` (`last_seen` on the
 controller's clock, `paused`, `tiers_ready`, `asr_ready`, `free_bytes`, `staging_cap_bytes`
 default 500 GB, `version_ok`); `now`; `controller_id`; `controller_free_bytes` (None = unknown,
-gate skipped); `gpu_stages: Mapping[film_id, frozenset]` (stages that need a GPU; default: both;
-`run_pass` always passes it, computed by `needs_gpu` from the controller's executors, IR3).
+gate skipped); `gpu_stages: Mapping[(film_id, input_revision), frozenset]` (stages that need a
+GPU; default: both; `run_pass` always passes it, computed by `needs_gpu` from the controller's
+executors over each revision's manifest, IR3).
 **Output.** `SchedulePass(routes, withdrawals, waiting, attention)`; the routing glue
 (`routing.run_pass`) applies withdrawals then routes through the store commands; a CAS loss is
-skipped and retried next pass. While `remote_workers(snapshot.workers, controller_id)` is empty
+skipped and retried next pass. The route decisions count the slots and staging the withdrawals
+free, so after a lost withdrawal none is applied: the pass decides once more from a fresh
+snapshot, and after a second loss leaves routing to the next pass (CX4). While `remote_workers(snapshot.workers, controller_id)` is empty
 (single machine) the pass returns an empty `SchedulePass` (IR1).
 
 **Constants.** 失联 at 60 s without a heartbeat (S3/OD2); at most 2 open routes per worker
@@ -203,7 +210,7 @@ restore worker by default because the route spans both stages.
 pending, or restore finished and asr pending), with no unresolved compute assignment and no open
 route of that revision other than an unclaimed `local` route of the controller (C12 hand-over).
 An open route of an older revision does not block the new one; it still holds its worker's slot
-(IR6). Order: 4K first,
+(IR6) and is accounted with its own revision's busy time, staging and output (CX5). Order: 4K first,
 then plan confirm time, then film id.
 
 **Eligibility (worker × film)**, first failing rule is the reason: not the controller (OD1,
@@ -295,7 +302,8 @@ IR4 (no 判定已停止 for the controller or within 5 min of a renewal), IR6 (a
 old-revision route stays open), IR7 (extended property suite), IR8/CX2 (改派 to 自动 keeps the
 route; a kept route's version moves), IR9 (自动 = NULL), IR10 (the disk gate stops the rest of
 the pass), IR11/CX1 (worker disk counts queued staging), IR13 (auto/pinned need a plan), CX3
-(rate samples are GPU-only).
+(rate samples are GPU-only), CX4 (no route decision applied after a lost withdrawal; one fresh
+retry), CX5 (open routes accounted per revision), CX6 (samples keep their attempt-time GPU).
 
 ### Deferred (no code in P2-1)
 

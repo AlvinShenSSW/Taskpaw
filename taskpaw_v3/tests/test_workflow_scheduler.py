@@ -125,9 +125,10 @@ def live(workers, **overrides):
     return values
 
 
-def run(films, workers, *, routes=(), samples=(), now=NOW, **kw):
+def run(films, workers, *, routes=(), samples=(), now=NOW, older=(), **kw):
     snapshot = m.RoutingSnapshot(
         films=tuple(films),
+        older_revisions=tuple(older),
         routes=tuple(routes),
         workers=tuple(workers),
         samples=tuple(samples),
@@ -498,7 +499,7 @@ def test_only_films_with_a_pending_gpu_stage_are_candidates():
     result = run(
         [done, failed, unplanned, no_gpu, asr_wait],
         ws,
-        gpu_stages={no_gpu.film_id: frozenset()},
+        gpu_stages={(no_gpu.film_id, 1): frozenset()},
     )
     assert set(routed(result)) == {asr_wait.film_id}
 
@@ -571,6 +572,30 @@ def test_an_old_revision_route_keeps_its_slot_and_frees_the_new_revision():
     stale = open_route(revised, a).model_copy(update={"input_revision": 1})
     result = run([revised], [a, b], routes=[stale])
     assert revised.film_id in routed(result) and result.withdrawals == ()
+
+
+def test_an_old_revision_route_is_accounted_with_its_own_facts():
+    """CX5: a claimed old-revision route holds its own revision's staging,
+    busy time and output, whether the current revision is finished (absent
+    from `films`) or still has smaller work of its own."""
+    w = worker("5060 Ti-1")
+    claim = dict(claimed_by=w.worker_id, claimed_stage="restore", claimed_at=NOW)
+    old = film(0, source=150 * GB, restore="running", **claim)
+    stale = open_route(old, w)
+    f = film(1, source=100 * GB, pin=w.worker_id)
+    # 2.2 × 150 + 2 = 332 GB queued; + 222 GB > 500 GB
+    finished = run([f], [w], routes=[stale], older=[old])
+    assert finished.waiting[f.film_id] == "等待 5060 Ti-1：空间不足"
+    current = old.model_copy(
+        update={"input_revision": 2, "source_bytes": 1 * GB, "restore": "pending"}
+        | dict.fromkeys(claim)
+    )
+    revised = run([current, f], [w], routes=[stale], older=[old])
+    assert revised.waiting[f.film_id] == "等待 5060 Ti-1：空间不足"
+    assert revised.withdrawals == ()
+    gate = run([f], [w], routes=[stale], older=[old], controller_free_bytes=380 * GB)
+    # 1.2 × 150 = 180 GB coming back + 120 GB + 100 GB reserve > 380 GB
+    assert gate.waiting[f.film_id] == "主控磁盘空间不足"
 
 
 def test_the_controller_is_never_routed():

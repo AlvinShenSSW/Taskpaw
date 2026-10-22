@@ -1661,7 +1661,8 @@ class RoutingWorker(Model):
 
 
 class RoutingFilm(Model):
-    """A current-revision film with GPU work left or an open route."""
+    """A film revision's routing facts: the current revision with GPU work left
+    or an open route, or an older revision an open route still holds."""
 
     film_id: Id
     input_revision: Revision
@@ -1701,7 +1702,9 @@ class RateSample(Model):
 
 
 class RoutingSnapshot(Model):
-    films: tuple[RoutingFilm, ...]
+    films: tuple[RoutingFilm, ...]  # current revisions
+    # CX5: the older revisions open routes still hold, with their own facts
+    older_revisions: tuple[RoutingFilm, ...] = ()
     routes: tuple[FilmRoute, ...]  # open routes only
     workers: tuple[RoutingWorker, ...]
     samples: tuple[RateSample, ...]  # newest first

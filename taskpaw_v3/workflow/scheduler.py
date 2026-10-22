@@ -114,12 +114,16 @@ def staging_need(film: m.RoutingFilm) -> float:
     return film.source_bytes * (1 + OUTPUT_FACTOR) + STAGING_EXTRA_BYTES
 
 
+# per (film id, input revision): its restore and ASR that need a GPU worker
+GpuStages = Mapping[tuple[str, int], frozenset[str]]
+
+
 def routed_stages(
-    film: m.RoutingFilm, gpu_stages: Mapping[str, frozenset[str]] | None
+    film: m.RoutingFilm, gpu_stages: GpuStages | None
 ) -> tuple[m.RoutedStage, ...]:
-    """The film's unfinished restore and ASR that need a GPU worker."""
+    """The film revision's unfinished restore and ASR that need a GPU worker."""
     needs = (
-        gpu_stages.get(film.film_id, frozenset(_ROUTED))
+        gpu_stages.get((film.film_id, film.input_revision), frozenset(_ROUTED))
         if gpu_stages is not None
         else frozenset(_ROUTED)
     )
@@ -356,13 +360,17 @@ def schedule(
     now: datetime,
     controller_id: str,
     controller_free_bytes: int | None = None,
-    gpu_stages: Mapping[str, frozenset[str]] | None = None,
+    gpu_stages: GpuStages | None = None,
 ) -> SchedulePass:
     if not remote_workers(snapshot.workers, controller_id):
         # IR1: single machine; the controller's dispatcher runs every stage
         return SchedulePass((), (), {}, {})
     rates = Rates(snapshot.samples)
     films = {film.film_id: film for film in snapshot.films}
+    facts = {  # CX5: every open route is accounted with its own revision
+        (film.film_id, film.input_revision): film
+        for film in (*snapshot.older_revisions, *snapshot.films)
+    }
     workers = {worker.worker_id: worker for worker in snapshot.workers}
     targets = sorted(
         (w for w in snapshot.workers if w.worker_id != controller_id),  # OD1
@@ -412,7 +420,8 @@ def schedule(
     }
 
     # 3. the pass state: queue length, busy time and staging per worker; an
-    # older revision's route still running there holds its slot (IR6)
+    # older revision's route still running there holds its slot (IR6) and its
+    # own revision's busy time, staging and output (CX5)
     counts = {w.worker_id: 0 for w in targets}
     busy = {w.worker_id: 0.0 for w in targets}
     needs = {w.worker_id: 0.0 for w in targets}
@@ -421,7 +430,7 @@ def schedule(
         if route.worker_id not in counts:
             continue
         counts[route.worker_id] += 1
-        film = films.get(route.film_id)
+        film = facts.get((route.film_id, route.input_revision))
         if film is None:
             continue
         stages = routed_stages(film, gpu_stages)

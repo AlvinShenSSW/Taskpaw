@@ -646,9 +646,74 @@ def test_a_withdrawal_decided_before_a_repin_loses_its_cas(tmp_path, monkeypatch
             r.worker_id: s.WorkerLive(last_seen=clock.now()) for r in (drained, other)
         }
         outcome = pass_once(rt, clock, live)
-        assert [w.reason for w in outcome.planned.withdrawals] == ["停领"]
+        # the lost withdrawal sends the pass to a fresh snapshot (CX4), where
+        # the pin keeps the route
+        assert outcome.planned.withdrawals == ()
         assert outcome.withdrawn == () and outcome.routed == ()
         assert rt.store.film_route(rt.operator, film, 1).worker_id == drained.worker_id
+    finally:
+        rt.close()
+
+
+def test_a_lost_withdrawal_frees_no_slot_for_the_pass(tmp_path, monkeypatch):
+    """CX4: the pass withdraws a route the worker cannot run and gives its slot
+    to a waiting film; the operator pins the film to that worker after the
+    snapshot, so the withdrawal loses. The waiting film must not become the
+    worker's third open route: the pass decides again from a fresh snapshot."""
+    clock = FakeClock()
+    rt = runtime(tmp_path / "wf", clock=clock.now)
+    try:
+        worker = enrol_remote(rt, "5070 Ti", gpu=GPU_16_FAST)
+        films = []
+        for tier in ("high", "standard", "standard"):
+            film = add_film(rt, plan=False)
+            rt.store.confirm_plan(
+                rt.operator,
+                rt.meta(),
+                m.FilmPlanConfirm(
+                    film_id=film, input_revision=1, ltx_model=tier, machine=None
+                ),
+            )
+            films.append(film)
+        lacking, queued, waiting = films
+        route(rt, lacking, worker.worker_id)
+        route(rt, queued, worker.worker_id)
+        real = rt.store.routing_snapshot
+        raced = []
+
+        def racing(auth):
+            snapshot = real(auth)
+            if not raced:
+                raced.append(True)
+                rt.store.set_pin(
+                    rt.operator,
+                    rt.meta(),
+                    m.PinSet(
+                        film_id=lacking,
+                        input_revision=1,
+                        expected_version=pin_version(rt, lacking),
+                        worker_id=worker.worker_id,
+                        reason="改派",
+                    ),
+                )
+            return snapshot
+
+        monkeypatch.setattr(rt.store, "routing_snapshot", racing)
+        live = {
+            worker.worker_id: s.WorkerLive(
+                last_seen=clock.now(), tiers_ready=frozenset({"standard"})
+            )
+        }
+        outcome = pass_once(rt, clock, live)
+        assert outcome.withdrawn == () and outcome.routed == ()
+        assert rt.store.film_route(rt.operator, waiting, 1) is None
+        mine = [
+            r
+            for r in rt.store.list_routes(rt.operator)
+            if r.worker_id == worker.worker_id
+        ]
+        assert len(mine) == s.MAX_OPEN_ROUTES
+        assert outcome.planned.waiting[waiting] == f"等待设备：{s.QUEUE_FULL}"
     finally:
         rt.close()
 

@@ -21,6 +21,7 @@ from .models import (
     CommandResult,
     FilmPin,
     FilmRoute,
+    HardwareProbe,
     PinSet,
     RateSample,
     RouteOpen,
@@ -370,8 +371,10 @@ class RouteCommands(FilmCommands):
         """The scheduler's store input, read in one locked snapshot (§5)."""
         with self._lock:
             self._operator_read(auth)
+            films = self._routing_films()
             return RoutingSnapshot(
-                films=self._routing_films(),
+                films=tuple(film for current, film in films if current),
+                older_revisions=tuple(film for current, film in films if not current),
                 routes=tuple(
                     FilmRoute.model_validate_json(row[0])
                     for row in self._conn.execute(
@@ -383,96 +386,94 @@ class RouteCommands(FilmCommands):
                 samples=self._rate_samples(),
             )
 
-    def _probes(self, current_only: bool) -> dict[tuple[str, int], tuple[Any, ...]]:
+    def _probes(self) -> dict[tuple[str, int], tuple[Any, ...]]:
         """(largest width, height, summed duration) per input manifest."""
-        join = (
-            "JOIN films f ON f.film_id=im.film_id "
-            "AND f.current_input_revision=im.revision "
-            if current_only
-            else ""
-        )
         rows = self._conn.execute(
             "SELECT im.film_id,im.revision,max(json_extract(p.value,'$.width')),"
             "max(json_extract(p.value,'$.height')),"
-            "sum(json_extract(p.value,'$.duration_ms')) FROM manifests im "
-            f"{join},json_each(im.body_json,'$.readiness.media_probes') p "
+            "sum(json_extract(p.value,'$.duration_ms')) FROM manifests im,"
+            "json_each(im.body_json,'$.readiness.media_probes') p "
             "WHERE im.kind='input' GROUP BY im.film_id,im.revision"
         ).fetchall()
         return {(row[0], row[1]): (row[2] or 0, row[3] or 0, row[4]) for row in rows}
 
-    def _routing_films(self) -> tuple[RoutingFilm, ...]:
+    def _routing_films(self) -> list[tuple[bool, RoutingFilm]]:
+        """(current, facts) of each current revision with GPU work left or an
+        open route, and of each older revision an open route holds (CX5)."""
         rows = self._conn.execute(
-            "SELECT f.film_id,f.current_input_revision AS revision,f.display_name,"
-            "f.created_at,p.film_id IS NOT NULL AS planned,p.confirmed_at,p.ltx_model,"
-            "pin.worker_id AS pin_worker_id,coalesce(pin.version,0) AS pin_version "
-            "FROM films f LEFT JOIN film_plans p ON p.film_id=f.film_id "
-            "AND p.input_revision=f.current_input_revision "
-            "LEFT JOIN film_pins pin ON pin.film_id=f.film_id "
-            "AND pin.input_revision=f.current_input_revision "
-            "WHERE f.current_input_revision IS NOT NULL AND (EXISTS (SELECT 1 FROM "
-            "stages s WHERE s.film_id=f.film_id AND s.input_revision=f.current_input_revision "
+            "WITH k(film_id,revision) AS (SELECT f.film_id,f.current_input_revision "
+            "FROM films f WHERE f.current_input_revision IS NOT NULL AND EXISTS "
+            "(SELECT 1 FROM stages s WHERE s.film_id=f.film_id "
+            "AND s.input_revision=f.current_input_revision "
             "AND s.stage IN ('restore','asr') AND s.status NOT IN ('succeeded','skipped')) "
-            "OR EXISTS (SELECT 1 FROM film_routes r WHERE r.film_id=f.film_id "
-            "AND r.input_revision=f.current_input_revision AND r.state='open')) "
-            "ORDER BY f.created_at,f.film_id"
+            "UNION SELECT film_id,input_revision FROM film_routes WHERE state='open') "
+            "SELECT k.film_id,k.revision,k.revision=f.current_input_revision AS current,"
+            "f.display_name,f.created_at,p.film_id IS NOT NULL AS planned,"
+            "p.confirmed_at,p.ltx_model,pin.worker_id AS pin_worker_id,"
+            "coalesce(pin.version,0) AS pin_version FROM k "
+            "JOIN films f ON f.film_id=k.film_id "
+            "LEFT JOIN film_plans p ON p.film_id=k.film_id AND p.input_revision=k.revision "
+            "LEFT JOIN film_pins pin ON pin.film_id=k.film_id "
+            "AND pin.input_revision=k.revision "
+            "ORDER BY f.created_at,f.film_id,k.revision"
         ).fetchall()
-        statuses: dict[str, dict[str, Any]] = {}
-        for film_id, stage, status in self._conn.execute(
-            "SELECT s.film_id,s.stage,s.status FROM stages s JOIN films f "
-            "ON f.film_id=s.film_id AND f.current_input_revision=s.input_revision "
-            "WHERE s.stage IN ('restore','asr','translate')"
+        statuses: dict[tuple[str, int], dict[str, Any]] = {}
+        for film_id, revision, stage, status in self._conn.execute(
+            "SELECT film_id,input_revision,stage,status FROM stages "
+            "WHERE stage IN ('restore','asr','translate')"
         ):
-            statuses.setdefault(film_id, {})[stage] = status
+            statuses.setdefault((film_id, revision), {})[stage] = status
         claims = {
-            row[0]: row[1:]
+            (row[0], row[1]): row[2:]
             for row in self._conn.execute(
-                "SELECT s.film_id,a.worker_id,s.stage,a.claimed_at FROM assignments a "
-                "JOIN stages s ON s.job_id=a.job_id JOIN films f ON f.film_id=s.film_id "
-                "AND f.current_input_revision=s.input_revision "
+                "SELECT s.film_id,s.input_revision,a.worker_id,s.stage,a.claimed_at "
+                "FROM assignments a JOIN stages s ON s.job_id=a.job_id "
                 "WHERE a.resolved_at IS NULL AND s.stage IN ('restore','asr','translate')"
             )
         }
         sizes = {
-            row[0]: row[1]
+            (row[0], row[1]): row[2]
             for row in self._conn.execute(
-                "SELECT i.film_id,sum(i.size_bytes) FROM manifest_items i JOIN films f "
-                "ON f.film_id=i.film_id AND f.current_input_revision=i.revision "
-                "WHERE i.kind='input' GROUP BY i.film_id"
+                "SELECT film_id,revision,sum(size_bytes) FROM manifest_items "
+                "WHERE kind='input' GROUP BY film_id,revision"
             )
         }
-        probes = self._probes(current_only=True)
+        probes = self._probes()
         films = []
         for row in rows:
             film_id, revision = row["film_id"], row["revision"]
-            stage = statuses.get(film_id, {})
-            claim = claims.get(film_id)
+            stage = statuses.get((film_id, revision), {})
+            claim = claims.get((film_id, revision))
             width, height, duration = probes.get((film_id, revision), (0, 0, None))
             films.append(
-                RoutingFilm(
-                    film_id=film_id,
-                    input_revision=revision,
-                    display_name=row["display_name"],
-                    created_at=parse_time(row["created_at"]),
-                    planned=bool(row["planned"]),
-                    confirmed_at=parse_time(row["confirmed_at"])
-                    if row["confirmed_at"]
-                    else None,
-                    ltx_model=row["ltx_model"],
-                    pin_worker_id=row["pin_worker_id"],
-                    pin_version=row["pin_version"],
-                    restore=stage.get("restore", "pending"),
-                    asr=stage.get("asr", "pending"),
-                    translate=stage.get("translate", "pending"),
-                    claimed_by=claim[0] if claim else None,
-                    claimed_stage=claim[1] if claim else None,
-                    claimed_at=parse_time(claim[2]) if claim else None,
-                    max_width=int(width),
-                    max_height=int(height),
-                    duration_ms=int(duration) if duration else None,
-                    source_bytes=int(sizes.get(film_id) or 0),
+                (
+                    bool(row["current"]),
+                    RoutingFilm(
+                        film_id=film_id,
+                        input_revision=revision,
+                        display_name=row["display_name"],
+                        created_at=parse_time(row["created_at"]),
+                        planned=bool(row["planned"]),
+                        confirmed_at=parse_time(row["confirmed_at"])
+                        if row["confirmed_at"]
+                        else None,
+                        ltx_model=row["ltx_model"],
+                        pin_worker_id=row["pin_worker_id"],
+                        pin_version=row["pin_version"],
+                        restore=stage.get("restore", "pending"),
+                        asr=stage.get("asr", "pending"),
+                        translate=stage.get("translate", "pending"),
+                        claimed_by=claim[0] if claim else None,
+                        claimed_stage=claim[1] if claim else None,
+                        claimed_at=parse_time(claim[2]) if claim else None,
+                        max_width=int(width),
+                        max_height=int(height),
+                        duration_ms=int(duration) if duration else None,
+                        source_bytes=int(sizes.get((film_id, revision)) or 0),
+                    ),
                 )
             )
-        return tuple(films)
+        return films
 
     def _routing_workers(self) -> tuple[RoutingWorker, ...]:
         rows = self._conn.execute(
@@ -510,17 +511,28 @@ class RouteCommands(FilmCommands):
         return tuple(workers)
 
     def _rate_samples(self) -> tuple[RateSample, ...]:
+        """CX6: a sample's GPU model is the probe of the physical GPU its
+        assignment held at claim, so a later card swap never relabels it; an
+        attempt without a held GPU has no model and keys no rate."""
         rows = self._conn.execute(
             "SELECT s.stage,a.worker_id,a.started_at,a.ended_at,a.body_json,s.film_id,"
-            "s.input_revision,p.ltx_model,w.body_json AS worker_json FROM attempts a "
-            "JOIN stages s ON s.job_id=a.job_id JOIN workers w ON w.worker_id=a.worker_id "
+            "s.input_revision,p.ltx_model,g.physical_resource_id AS resource_id "
+            "FROM attempts a JOIN stages s ON s.job_id=a.job_id "
+            "JOIN assignments g ON g.attempt_id=a.attempt_id "
             "LEFT JOIN film_plans p ON p.film_id=s.film_id "
             "AND p.input_revision=s.input_revision "
             "WHERE a.status='succeeded' AND s.stage IN ('restore','asr') "
             "AND a.ended_at IS NOT NULL ORDER BY a.ended_at DESC,a.rowid DESC"
         ).fetchall()
-        probes = self._probes(current_only=False)
-        models: dict[str, str | None] = {}
+        probes = self._probes()
+        models = {  # the probed model per physical GPU, newest probe last
+            resource: HardwareProbe.model_validate_json(body).gpu_model
+            for resource, body in self._conn.execute(
+                "SELECT physical_resource_id,body_json FROM capabilities "
+                "WHERE kind='probed' AND physical_resource_id IS NOT NULL "
+                "ORDER BY worker_id,revision"
+            )
+        }
         samples = []
         for row in rows:
             width, height, duration = probes.get(
@@ -531,16 +543,11 @@ class RouteCommands(FilmCommands):
             )
             if not duration or wall is None:
                 continue
-            if row["worker_id"] not in models:
-                cap = WorkerRecord.model_validate_json(row["worker_json"]).capability
-                models[row["worker_id"]] = (
-                    cap.probed.gpu_model if cap and cap.probed else None
-                )
             samples.append(
                 RateSample(
                     stage=row["stage"],
                     worker_id=row["worker_id"],
-                    gpu_model=models[row["worker_id"]],
+                    gpu_model=models.get(row["resource_id"]),
                     tier=row["ltx_model"] if row["stage"] == "restore" else None,
                     max_width=int(width),
                     max_height=int(height),

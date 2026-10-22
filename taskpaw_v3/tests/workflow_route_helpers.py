@@ -185,6 +185,54 @@ def enrol_remote(
     return boot(rt, remote, identity())
 
 
+def swap_gpu(rt: LocalRuntime, remote: Remote, gpu: tuple[str, int]) -> Remote:
+    """A new card in the same machine: a new probe, physical GPU and approval."""
+    store, op, now = rt.store, rt.operator, rt.clock.now()
+    worker = store.get_worker(op, remote.worker_id).worker
+    cap = worker.capability
+    assert cap is not None and cap.probed is not None and cap.approved is not None
+    revision = cap.revision + 1
+    probe = cap.probed.model_copy(
+        update={
+            "revision": revision,
+            "observed_at": now,
+            "gpu_model": gpu[0],
+            "vram_mib": gpu[1],
+            "gpu_identity": f"gpu-{identity()}",
+        }
+    )
+    resource_id = identity()
+    store.record_capabilities(
+        op,
+        rt.meta(),
+        m.CapabilityUpdate(
+            worker_id=remote.worker_id,
+            expected_version=worker.version,
+            capability=m.CapabilityRevision(
+                revision=revision,
+                declared=None,
+                probed=probe,
+                approved=cap.approved.model_copy(
+                    update={
+                        "revision": revision,
+                        "probe_revision": revision,
+                        "approved_at": now,
+                    }
+                ),
+            ),
+            physical_binding=m.PhysicalGpuBinding(
+                resource_id=resource_id,
+                device_id=worker.device_id,
+                device_identity=probe.device_identity,
+                gpu_identity=probe.gpu_identity,
+                capability_revision=revision,
+                evidence=rt.evidence("physical_identity"),
+            ),
+        ),
+    )
+    return replace(remote, resource_id=resource_id)
+
+
 def boot(rt: LocalRuntime, remote: Remote, boot_id: str) -> Remote:
     """Post a boot (a new id isolates the worker's open assignments)."""
     worker = rt.store.get_worker(rt.operator, remote.worker_id).worker
