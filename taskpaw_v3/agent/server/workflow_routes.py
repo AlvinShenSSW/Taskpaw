@@ -188,6 +188,9 @@ def register_workflow_routes(
         dispatcher = getattr(host, "dispatcher", None)
         if dispatcher is not None and any(r["ok"] for r in results):
             dispatcher.wake()
+        scheduler = getattr(host, "scheduler", None)  # P2-3 R13
+        if scheduler is not None and any(r["ok"] for r in results):
+            scheduler.wake()
         return {"results": results}
 
     @app.post("/control/workflow/films/{film_id}/lookup")
@@ -438,6 +441,17 @@ def register_workflow_routes(
         if host is None or settings.role != "worker":
             return _worker_off()
         return {**host.status(), "role": "worker"}
+
+    @app.post("/control/workflow/worker/pause")
+    def workflow_worker_pause(body: PauseBody) -> dict[str, Any]:
+        """暂停领取 / 恢复领取 (P2-3 R12): no new claim; in-flight runs,
+        uploads and prefetch continue; the controller sees it at the next
+        heartbeat and treats the worker like 停领 (S8)."""
+        host = worker_provider() if worker_provider is not None else None
+        if host is None or settings.role != "worker":
+            raise HTTPException(status_code=409, detail=_worker_off()["reason"])
+        host.set_paused(body.paused)
+        return {"paused": body.paused}
 
     @app.post("/control/workflow/worker/join")
     async def workflow_worker_join(request: Request) -> dict[str, Any]:

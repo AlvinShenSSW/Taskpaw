@@ -8,12 +8,13 @@ the next pass. The route decisions count the slots and staging the pass's
 withdrawals free, so after a lost withdrawal none of them is applied: the pass
 decides once more from a fresh snapshot, and after a second loss leaves the
 routing to the next pass (CX4). The pass's own thread and triggers come with
-remote execution (P2-3).
+remote execution (P2-3): `RoutingThread`.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -63,6 +64,7 @@ def run_pass(
     controller_free_bytes: int | None = None,
     retry: bool = True,
     remote_enabled: bool = False,
+    live_since: datetime | None = None,
 ) -> PassOutcome:
     """`executors`: the controller's own, so the pass decides which stages
     need a GPU worker by the dispatcher's rule (IR3). `remote_enabled`: the
@@ -76,6 +78,7 @@ def run_pass(
         controller_free_bytes=controller_free_bytes,
         gpu_stages=gpu_stages(store, operator, snapshot, executors),
         remote_enabled=remote_enabled,
+        live_since=live_since,
     )
     withdrawn = []
     lost = False
@@ -111,6 +114,7 @@ def run_pass(
             controller_free_bytes=controller_free_bytes,
             retry=False,
             remote_enabled=remote_enabled,
+            live_since=live_since,
         )
         return PassOutcome(again.planned, again.routed, (*withdrawn, *again.withdrawn))
     routed = []
@@ -154,3 +158,66 @@ def gpu_stages(
             stage for stage in _GPU_STAGES if needs_gpu(executors.get(stage), manifest)
         )
     return result
+
+
+Wait = Callable[[threading.Event, float], bool]
+
+
+def _wait(event: threading.Event, timeout: float) -> bool:
+    return event.wait(timeout)
+
+
+class RoutingThread:
+    """P2-3 R13: the controller's routing pass on its own thread — at start,
+    on every `wake()` (plan confirm, any resolve, a FleetLive change) and
+    every `interval` seconds. Wakes during a pass coalesce into one more pass;
+    `stop()` joins the thread. `wait` is the injectable timer (tests)."""
+
+    def __init__(
+        self,
+        run: Callable[[], object],
+        *,
+        interval: float = 30.0,
+        wait: Wait = _wait,
+        name: str = "workflow-routing",
+    ) -> None:
+        self._run, self.interval, self._wait_for = run, interval, wait
+        self._name = name
+        self._wake, self._stop = threading.Event(), threading.Event()
+        self._thread: threading.Thread | None = None
+        self.passes = 0
+        self._passed = threading.Condition()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, name=self._name, daemon=True)
+        self._thread.start()
+
+    def wake(self) -> None:
+        self._wake.set()
+
+    def stop(self, timeout: float = 30.0) -> bool:
+        self._stop.set()
+        self._wake.set()
+        if self._thread is None:
+            return True
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+    def wait_passes(self, count: int, timeout: float = 10.0) -> bool:
+        """Until `count` passes ran (tests synchronize on passes, not time)."""
+        with self._passed:
+            return self._passed.wait_for(lambda: self.passes >= count, timeout)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self._wake.clear()
+            try:
+                self._run()
+            except Exception:  # a failed pass is retried by the next trigger
+                log.exception("workflow routing pass failed")
+            with self._passed:
+                self.passes += 1
+                self._passed.notify_all()
+            if self._stop.is_set():
+                return
+            self._wait_for(self._wake, self.interval)

@@ -1,0 +1,1089 @@
+"""P2-3 (#294) §3–§5: a GPU worker's dispatcher.
+
+One fetch thread stages the routed films' work copies (position 0 first, then
+position 1 within the disk rule, R7); one run thread claims the position-0
+route's next stage only when the claim gate holds (R6), runs it through the
+shared `run_stage()`, settles it, uploads its outputs and finishes it. Every
+step that a crash could interrupt is persisted first in
+`staging/attempts/<a>.json` (`request` → `claimed` → `settled` → `finish
+sent`), so a restart reports it to the controller's boot settlement (§5) and
+never runs a GPU stage twice: a ledger with intact outputs is uploaded and
+finished, not re-run. A lost reply is never taken as proof that anything
+stopped; only a settled Job is.
+
+`WorkerRuntime` is the executors' `ExecRuntime` here: the staging work folder,
+the local GPU, and the earlier stages' ledgers from the route envelope, each
+checked against its digest.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import shutil
+import threading
+import time
+import uuid
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from taskpaw_v3.core import gpu_lease
+from taskpaw_v3.core import power as power_estimate
+from taskpaw_v3.core.generation import next_generation
+from taskpaw_v3.core.state import atomic_json
+
+from . import models as m
+from .executors import ExecOutcome, StageExecutor
+from .local_dispatch import run_stage
+from .local_gpu import LocalGpu
+from .owned_process import own_identity, process_alive
+from .stage_results import RESULT_NAME, StageResult, StageResultError
+from .staging import Staging, StagingError
+from .transfer import ledger_refs
+from .worker_client import ApiError, WorkerClient, backoff
+
+log = logging.getLogger("taskpaw.workflow.remote_dispatch")
+
+ATTEMPTS_DIR = "attempts"
+INDEX_NAME = "routes.json"
+POLL_SECONDS = 5.0
+STOP_SETTLE_SECONDS = 30.0
+MAX_MISMATCHES = 3  # §3.5: three whole-file mismatches need the operator
+STAGES = ("restore", "asr")
+_FINISHED = ("succeeded", "skipped")
+UNSETTLED = "停止未确认：任务进程仍在运行"
+UNKNOWN_GPU = "GPU 有未知占用"
+
+
+# ── the executors' runtime on a worker ──────────────────────────────────
+class WorkerRuntime:
+    """`ExecRuntime` over a staging folder and the route envelopes."""
+
+    def __init__(self, staging_root: Path, gpu: LocalGpu | None = None) -> None:
+        self._root, self._gpu = staging_root, gpu
+        self._lock = threading.Lock()
+        self._envelopes: dict[str, Mapping[str, Any]] = {}
+
+    @property
+    def work_dir(self) -> Path:
+        return self._root / "work"
+
+    @property
+    def gpu(self) -> LocalGpu | None:
+        return self._gpu
+
+    @gpu.setter
+    def gpu(self, value: LocalGpu | None) -> None:
+        self._gpu = value
+
+    def use(self, envelope: Mapping[str, Any]) -> None:
+        """The envelope a stage of its film runs with (its earlier ledgers)."""
+        with self._lock:
+            self._envelopes[str(envelope["film"])] = envelope
+
+    def stage_result(self, film_id: str, stage: str) -> StageResult | None:
+        with self._lock:
+            envelope = self._envelopes.get(film_id)
+        if envelope is None:
+            raise StageResultError(f"{stage} 阶段没有可核对的结果")
+        ledger = (envelope.get("ledgers") or {}).get(stage)
+        if ledger is None:
+            if stage not in (envelope.get("stages") or {}):
+                return None  # the film has no such stage
+            raise StageResultError(f"{stage} 阶段尚未成功")
+        raw = str(ledger.get("text", "")).encode("utf-8")
+        if hashlib.sha256(raw).hexdigest() != ledger.get("payload_digest"):
+            raise StageResultError(f"{stage} 阶段结果与记录不符")
+        try:
+            result = StageResult.model_validate_json(raw)
+        except ValueError:
+            raise StageResultError(f"{stage} 阶段结果无法读取") from None
+        if (
+            result.film_id != film_id
+            or result.stage != stage
+            or result.attempt_id != ledger.get("attempt_id")
+            or result.input_revision != envelope.get("rev")
+        ):
+            raise StageResultError(f"{stage} 阶段结果属于其他影片或版本")
+        return result
+
+
+# ── persisted state ─────────────────────────────────────────────────────
+@dataclass
+class AttemptState:
+    """`attempts/<a>.json`: the crash points of one attempt (§3)."""
+
+    attempt_id: str
+    film_id: str
+    rev: int
+    stage: str
+    request: dict[str, Any]  # the exact claim body, written before sending
+    name: str = ""
+    assignment_id: str | None = None
+    children: list[str] = field(default_factory=list)
+    settled: dict[str, Any] | None = None  # outcome, digest, timing, energy
+    finish_sent: bool = False
+
+    @classmethod
+    def load(cls, path: Path) -> AttemptState | None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return cls(**data)
+        except FileNotFoundError:
+            return None
+        except (ValueError, TypeError):
+            log.warning("unreadable worker attempt file %s ignored", path.name)
+            return None
+
+
+class StagedIndex:
+    """`routes.json`: which work-copy files belong to which film revision."""
+
+    def __init__(self, root: Path) -> None:
+        self.path = root / INDEX_NAME
+        self._lock = threading.Lock()
+
+    def _read(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def entries(self) -> dict[str, Any]:
+        with self._lock:
+            return self._read()
+
+    def mark(self, film: str, rev: int, paths: list[str], complete: bool) -> None:
+        with self._lock:
+            data = self._read()
+            data[f"{film}/{rev}"] = {
+                "film": film,
+                "rev": rev,
+                "paths": paths,
+                "complete": complete,
+            }
+            atomic_json(self.path, data)
+
+    def complete(self, film: str, rev: int) -> bool:
+        entry = self.entries().get(f"{film}/{rev}")
+        return bool(entry and entry.get("complete"))
+
+    def remove(self, film: str, rev: int) -> list[str]:
+        with self._lock:
+            data = self._read()
+            entry = data.pop(f"{film}/{rev}", None)
+            atomic_json(self.path, data)
+        return list(entry.get("paths", [])) if entry else []
+
+
+@dataclass
+class _Active:
+    """The attempt the run thread holds (claimed, running or delivering)."""
+
+    state: AttemptState
+    started: float  # monotonic, for `elapsed_s`
+    uses_gpu: bool
+    cancel: threading.Event = field(default_factory=threading.Event)
+    phase: str = "running"
+    progress: str = ""
+    ltx: dict[str, Any] | None = None
+    energy_start: Any = None
+
+
+@dataclass
+class Transfer:
+    film: str
+    dir: str
+    done: int
+    total: int
+    started: float
+    rate: float = 0.0
+
+
+# ── the dispatcher ──────────────────────────────────────────────────────
+class RemoteDispatcher:
+    def __init__(
+        self,
+        staging: Staging,
+        client: Callable[[], WorkerClient],
+        executors: Mapping[str, StageExecutor],
+        runtime: WorkerRuntime,
+        *,
+        boot_id: str,
+        lease: Any = gpu_lease,
+        power: Callable[[], Any] | None = None,
+        poll: float = POLL_SECONDS,
+        stop_settle: float = STOP_SETTLE_SECONDS,
+        backoff_base: float = 1.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.staging, self._client = staging, client
+        self.executors, self.runtime = dict(executors), runtime
+        self.boot_id, self.lease = boot_id, lease
+        self.power = power or power_estimate.get_sampler
+        self.poll, self.stop_settle = poll, stop_settle
+        self.backoff_base, self._clock = backoff_base, clock
+        # never equal to a manual task's RunId (C5); the sampler reads it (R14)
+        self.run_id: gpu_lease.RunId = ("workflow", next_generation())
+        self.attempt_dir = staging.root / ATTEMPTS_DIR
+        self.index = StagedIndex(staging.root)
+        self._lock = threading.Lock()
+        self._stop, self._wake = threading.Event(), threading.Event()
+        self._threads: list[threading.Thread] = []
+        # what the heartbeat last said (the gate's inputs)
+        self._routes: list[dict[str, Any]] = []
+        self._reconciled = False
+        self._paused = False
+        self._tiers: tuple[str, ...] = ()
+        self._asr_ready = False
+        self._hold = "none"
+        self._held: set[str] = set()  # boot: a child of an earlier boot runs
+        self._deliver: list[str] = []  # attempts to upload/finish (boot: finish)
+        self._cancelled: set[str] = set()
+        self._active: _Active | None = None
+        self._unsettled: tuple[_Active, ExecOutcome, Any] | None = None
+        self._holding = False
+        self._fetching: str | None = None
+        self._transfers: dict[tuple[str, str], Transfer] = {}
+        self._envelopes: dict[tuple[str, int], dict[str, Any]] = {}
+        self.reason = "idle"
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+    def start(self) -> None:
+        if self._threads:
+            return
+        self.attempt_dir.mkdir(parents=True, exist_ok=True)
+        for target, name in (
+            (self._fetch_loop, "workflow-worker-fetch"),
+            (self._run_loop, "workflow-worker-run"),
+        ):
+            thread = threading.Thread(target=target, name=name, daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    def stop(self, timeout: float = 60.0) -> bool:
+        """Cancel the running Job, let it settle (its outcome is persisted,
+        never finished on the way out) and join both threads."""
+        self._stop.set()
+        self._wake.set()
+        with self._lock:
+            active = self._active
+        if active is not None:
+            active.cancel.set()
+        deadline = time.monotonic() + timeout
+        for thread in self._threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        alive = any(t.is_alive() for t in self._threads)
+        if not alive and self._unsettled is None:
+            self._release()
+        return not alive
+
+    def wake(self) -> None:
+        self._wake.set()
+
+    # ── what the heartbeat thread reads and writes ───────────────────────
+    def observe(
+        self,
+        reply: Mapping[str, Any],
+        *,
+        reconciled: bool,
+        tiers: Iterable[str],
+        asr_ready: bool,
+        hold: str,
+        paused: bool,
+    ) -> None:
+        """A heartbeat reply: routes, cancel (R9), release (R10) and the
+        claim gate's other inputs (R6)."""
+        with self._lock:
+            self._routes = sorted(
+                reply.get("routes") or [], key=lambda r: r.get("position", 0)
+            )
+            self._reconciled = reconciled
+            self._paused = paused or bool(reply.get("paused"))
+            self._tiers, self._asr_ready = tuple(tiers), asr_ready
+            self._hold = hold
+            active = self._active
+        for attempt_id in reply.get("cancel") or []:
+            self._cancel(str(attempt_id), active)
+        for item in reply.get("release") or []:
+            self._release_film(str(item["film"]), int(item["rev"]))
+        self._wake.set()
+
+    def _cancel(self, attempt_id: str, active: _Active | None) -> None:
+        """(a) 停止并重新排队 → the Job stops, the finish reports `cancelled`;
+        (b) a stale attempt → the same, and the controller's 409 discards it."""
+        with self._lock:
+            self._cancelled.add(attempt_id)
+        if active is not None and active.state.attempt_id == attempt_id:
+            active.cancel.set()
+        log.info("worker attempt %s cancelled by the controller", attempt_id)
+
+    def claimed(self) -> bool:
+        """An unresolved claim is held (keep-awake, R11)."""
+        with self._lock:
+            if self._active is not None or self._unsettled is not None:
+                return True
+            if self._deliver or self._held:
+                return True
+        return any(self._states())
+
+    def current_stage(self) -> tuple[str, str] | None:
+        """(film_id, stage) of the running stage, for the power sampler (R14)."""
+        with self._lock:
+            active = self._active
+        if active is None or active.phase != "running":
+            return None
+        return active.state.film_id, active.state.stage
+
+    def current(self) -> dict[str, Any] | None:
+        """The heartbeat's typed `current` (§2)."""
+        with self._lock:
+            active = self._active
+        if active is None:
+            return None
+        value: dict[str, Any] = {
+            "film_id": active.state.film_id,
+            "stage": active.state.stage,
+            "attempt_id": active.state.attempt_id,
+            "phase": active.phase,
+            "progress": active.progress[-400:],
+            "elapsed_s": max(0.0, self._clock() - active.started),
+            "ltx": active.ltx,
+            "energy": self._energy_dict(active),
+            "power": self._live_power() if active.uses_gpu else None,
+            "uses_gpu": active.uses_gpu,
+        }
+        return value
+
+    def transfers(self) -> list[dict[str, Any]]:
+        with self._lock:
+            items = list(self._transfers.values())
+        return [
+            {
+                "film": t.film,
+                "dir": t.dir,
+                "done": t.done,
+                "total": t.total,
+                "rate": round(t.rate, 1),
+            }
+            for t in items
+        ][:8]
+
+    def staged(self) -> list[dict[str, Any]]:
+        return [
+            {"film": e["film"], "rev": e["rev"]}
+            for e in self.index.entries().values()
+            if e.get("complete")
+        ][:64]
+
+    def films(self) -> list[dict[str, Any]]:
+        """The worker monitor's routed and claimed films (§6)."""
+        with self._lock:
+            routes = list(self._routes)
+            active = self._active
+            envelopes = dict(self._envelopes)
+            fetching = self._fetching
+        rows = []
+        for route in routes:
+            key = (str(route["film"]), int(route["rev"]))
+            envelope = envelopes.get(key) or {}
+            state = "queued"
+            if fetching == f"{key[0]}/{key[1]}":
+                state = "fetching"
+            elif self.index.complete(*key):
+                state = "staged"
+            if active is not None and active.state.film_id == key[0]:
+                state = active.phase
+            rows.append(
+                {
+                    "film": key[0],
+                    "rev": key[1],
+                    "name": envelope.get("name") or key[0],
+                    "position": route.get("position", 0),
+                    "state": state,
+                    "stages": {
+                        name: value.get("status")
+                        for name, value in (envelope.get("stages") or {}).items()
+                    },
+                }
+            )
+        return rows
+
+    # ── boot (R8, §5) ─────────────────────────────────────────────────────
+    def _states(self) -> list[AttemptState]:
+        states = []
+        for path in sorted(self.attempt_dir.glob("*.json")):
+            state = AttemptState.load(path)
+            if state is not None:
+                states.append(state)
+        return states
+
+    def _path(self, attempt_id: str) -> Path:
+        return self.attempt_dir / f"{attempt_id}.json"
+
+    def _save(self, state: AttemptState) -> None:
+        self.attempt_dir.mkdir(parents=True, exist_ok=True)
+        atomic_json(self._path(state.attempt_id), asdict(state))
+
+    def recover(self, client: WorkerClient) -> bool:
+        """At start, before the first boot: an attempt file the controller
+        does not know (404: the claim never landed) is dropped; a resolved one
+        (the finish reply was lost) is collected. The rest go to the boot."""
+        for state in self._states():
+            try:
+                found = client.attempt(state.attempt_id)
+            except ApiError as exc:
+                if exc.status == 404:
+                    self._drop(state.attempt_id)
+                    continue
+                raise
+            if found.get("state") == "resolved":
+                self._collect(state.attempt_id)
+        return True
+
+    def reports(self) -> list[dict[str, Any]]:
+        """§5: each local attempt file as found now."""
+        values = []
+        # every file, the one being delivered included: a re-post that left
+        # it out would let the controller settle it as interrupted and run
+        # the stage again (the controller ignores this boot's own claims)
+        for state in self._states():
+            ledger = self.staging.work_dir / state.attempt_id / RESULT_NAME
+            settled = state.settled
+            values.append(
+                {
+                    "attempt_id": state.attempt_id,
+                    "assignment_id": state.assignment_id,
+                    "children_alive": any(process_alive(c) for c in state.children),
+                    "ledger": ledger.is_file(),
+                    "outputs_intact": self._intact(state),
+                    "outcome": None
+                    if settled is None
+                    else ("succeeded" if settled.get("ok") else "failed"),
+                }
+            )
+        return values
+
+    def _intact(self, state: AttemptState) -> bool:
+        """The ledger parses and every output it names is there in full."""
+        ledger = self.staging.work_dir / state.attempt_id / RESULT_NAME
+        try:
+            result = StageResult.model_validate_json(ledger.read_bytes())
+        except (OSError, ValueError):
+            return False
+        for ref in ledger_refs(result):
+            path = self.staging.work_dir / ref.path
+            try:
+                if path.stat().st_size != ref.size:
+                    return False
+            except OSError:
+                return False
+        return True
+
+    def booted(self, reply: Mapping[str, Any]) -> None:
+        """The boot reply: interrupted attempts are collected, held ones wait,
+        `finish` ones are delivered without a re-run; staged sources missing
+        from `keep` go (nothing while an attempt is unknown: those are kept)."""
+        verdicts = dict(reply.get("attempts") or {})
+        held, deliver = set(), []
+        for attempt_id, verdict in verdicts.items():
+            if verdict == "interrupted":
+                self._collect(attempt_id)
+            elif verdict == "held":
+                held.add(attempt_id)
+            elif verdict == "finish":
+                state = AttemptState.load(self._path(attempt_id))
+                if state is not None:
+                    self._prepare_finish(state)
+                    deliver.append(attempt_id)
+        with self._lock:
+            self._held = held
+            for attempt_id in deliver:
+                if attempt_id not in self._deliver:
+                    self._deliver.append(attempt_id)
+            self._reconciled = bool(reply.get("reconciled"))
+        if "keep" in reply:
+            keep = {(str(k["film"]), int(k["rev"])) for k in reply.get("keep") or []}
+            for entry in list(self.index.entries().values()):
+                key = (str(entry["film"]), int(entry["rev"]))
+                if key not in keep:
+                    self._release_film(*key)
+        self._wake.set()
+
+    def _prepare_finish(self, state: AttemptState) -> None:
+        """A ledger found after a restart: settled from the ledger itself
+        (no energy: the sampler restarted, R14; no timing kept)."""
+        if state.settled is not None:
+            return
+        ledger = self.staging.work_dir / state.attempt_id / RESULT_NAME
+        try:
+            raw = ledger.read_bytes()
+        except OSError:
+            state.settled = _settled(ExecOutcome.failed("needs_attention", "结果缺失"))
+        else:
+            state.settled = _settled(
+                ExecOutcome.succeeded("", hashlib.sha256(raw).hexdigest()), None
+            )
+        self._save(state)
+
+    # ── GC (R10) ─────────────────────────────────────────────────────────
+    def _drop(self, attempt_id: str) -> None:
+        try:
+            self._path(attempt_id).unlink()
+        except FileNotFoundError:
+            pass
+
+    def _collect(self, attempt_id: str) -> None:
+        """A resolved attempt: its work folder and its file go."""
+        shutil.rmtree(self.staging.work_dir / attempt_id, ignore_errors=True)
+        self._drop(attempt_id)
+        with self._lock:
+            self._cancelled.discard(attempt_id)
+            self._held.discard(attempt_id)
+
+    def _release_film(self, film: str, rev: int) -> None:
+        """Delete a staged film revision's source files — never while an
+        attempt of it is local or it is being fetched."""
+        with self._lock:
+            if self._fetching == f"{film}/{rev}":
+                return
+            active = self._active
+        if active is not None and active.state.film_id == film:
+            return
+        if any(s.film_id == film and s.rev == rev for s in self._states()):
+            return
+        root = self.staging.work_dir
+        for relative in self.index.remove(film, rev):
+            for path in (root / relative, root / f"{relative}.part"):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    log.warning("staged file %s could not be deleted", relative)
+            _prune(root, (root / relative).parent)
+        with self._lock:
+            self._envelopes.pop((film, rev), None)
+        log.info("released the staged source of %s/%s", film, rev)
+
+    # ── fetch (R7) ───────────────────────────────────────────────────────
+    def _fetch_loop(self) -> None:
+        failures = 0
+        while not self._stop.is_set():
+            try:
+                worked = self._fetch_once()
+                failures = 0
+            except ApiError as exc:
+                if not exc.transient and exc.status != 404:
+                    log.warning("worker fetch refused: %s", exc)
+                failures += 1
+                worked = False
+            except Exception:
+                log.exception("worker fetch failed")
+                failures += 1
+                worked = False
+            if not worked:
+                delay = (
+                    backoff(failures - 1, base=self.backoff_base)
+                    if failures
+                    else self.poll
+                )
+                self._stop.wait(delay)
+
+    def _fetch_once(self) -> bool:
+        """Position 0 first, then position 1; one film per pass so a newly
+        routed position 0 is never stuck behind a prefetch. A download error
+        never creates an attempt."""
+        with self._lock:
+            routes = list(self._routes[:2])
+        client = self._client()
+        for route in routes:
+            film, rev = str(route["film"]), int(route["rev"])
+            if self.index.complete(film, rev):
+                continue
+            envelope = client.envelope(film, rev)
+            with self._lock:
+                self._envelopes[film, rev] = envelope
+            paths = [str(c["relative_path"]) for c in envelope["workcopy"]]
+            self.index.mark(film, rev, paths, complete=False)
+            key = f"{film}/{rev}"
+            with self._lock:
+                self._fetching = key
+            total = sum(int(c["size"]) for c in envelope["workcopy"])
+            started = self._clock()
+            self._progress(film, "down", 0, total, started)
+            try:
+                self.staging.work_dir.mkdir(parents=True, exist_ok=True)
+                client.download_film(
+                    envelope,
+                    self.staging,
+                    cancel=self._stop,
+                    on_progress=lambda done, t: self._progress(
+                        film, "down", done, t, started
+                    ),
+                )
+            except StagingError as exc:
+                self.reason = str(exc)  # 空间不足: try the next position
+                continue
+            finally:
+                with self._lock:
+                    self._fetching = None
+                    self._transfers.pop((film, "down"), None)
+            self.index.mark(film, rev, paths, complete=True)
+            self._wake.set()
+            return True
+        return False
+
+    def _progress(
+        self, film: str, direction: str, done: int, total: int, started: float
+    ) -> None:
+        elapsed = max(1e-6, self._clock() - started)
+        with self._lock:
+            self._transfers[film, direction] = Transfer(
+                film, direction, done, total, started, done / elapsed
+            )
+
+    # ── run (R6) ─────────────────────────────────────────────────────────
+    def _run_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                worked = self._tick()
+            except Exception:
+                log.exception("worker dispatch tick failed")
+                worked = False
+            if not worked and not self._stop.is_set():
+                self._wake.wait(self.poll)
+                self._wake.clear()
+        if self._unsettled is None:  # a still-running tree keeps the GPU (C4)
+            self._release()
+
+    def _tick(self) -> bool:
+        if self._unsettled is not None:
+            return self._finish_unsettled()
+        with self._lock:
+            pending = list(self._deliver)
+        if pending:
+            return self._deliver_one(pending[0])
+        return self._admit()
+
+    def _gate(self) -> tuple[dict[str, Any], str] | None:
+        """R6: the position-0 route and its next stage, or None (the reason
+        is kept for the monitor)."""
+        with self._lock:
+            routes, reconciled = list(self._routes), self._reconciled
+            paused, hold, held = self._paused, self._hold, set(self._held)
+            tiers, asr_ready = self._tiers, self._asr_ready
+        if not routes:
+            self.reason = "idle"
+            return None
+        if not reconciled or held:
+            self.reason = "等待对账"
+            return None
+        if paused:
+            self.reason = "暂停领取"
+            return None
+        if hold == "unknown":
+            self.reason = UNKNOWN_GPU
+            return None
+        route = routes[0]
+        film, rev = str(route["film"]), int(route["rev"])
+        if not self.index.complete(film, rev):
+            self.reason = "等待源文件"
+            return None
+        envelope = self._client().envelope(film, rev)  # fresh job versions
+        with self._lock:
+            self._envelopes[film, rev] = envelope
+        stages = envelope.get("stages") or {}
+        stage = next(
+            (
+                name
+                for name in STAGES
+                if (stages.get(name) or {}).get("status") == "pending"
+                and all(
+                    (stages.get(before) or {}).get("status") in (*_FINISHED, None)
+                    for before in STAGES[: STAGES.index(name)]
+                )
+            ),
+            None,
+        )
+        if stage is None or stage not in self.executors:
+            self.reason = "等待主控" if stage is None else "没有可用的执行器"
+            return None
+        if stage == "restore" and envelope.get("ltx_model") not in (*tiers, None):
+            self.reason = "缺少画质模型"
+            return None
+        if stage == "asr" and not asr_ready:
+            self.reason = "识别未就绪"
+            return None
+        return envelope, stage
+
+    def _admit(self) -> bool:
+        gate = self._gate()
+        if gate is None:
+            self._release()
+            return False
+        envelope, stage = gate
+        label = f"影片工作流：{envelope.get('name') or envelope['film']}"
+        if not self.lease.try_acquire(self.run_id, self.poll, label):
+            self.reason = "等待 GPU：" + (
+                self.lease.blocking_label()
+                if hasattr(self.lease, "blocking_label")
+                else ""
+            )
+            return False
+        self._holding = True
+        return self._claim_and_run(envelope, stage)
+
+    def _job(self, envelope: Mapping[str, Any], stage: str) -> m.PendingComputeJob:
+        record = envelope["stages"][stage]
+        return m.PendingComputeJob(
+            job_id=record["job_id"],
+            film_id=envelope["film"],
+            display_name=envelope.get("name") or envelope["film"],
+            stage=stage,  # type: ignore[arg-type]
+            input_revision=envelope["rev"],
+            version=record["version"],
+            film_created_at=datetime.now(timezone.utc),
+            ltx_model=envelope.get("ltx_model") if stage == "restore" else None,
+        )
+
+    def _claim_and_run(self, envelope: Mapping[str, Any], stage: str) -> bool:
+        executor = self.executors[stage]
+        try:  # everything that can refuse runs before the claim
+            job = self._job(envelope, stage)
+            manifest = m.InputManifest.model_validate(envelope["manifest"])
+            tools = executor.tools(job)
+        except Exception:
+            log.exception("worker cannot prepare %s of %s", stage, envelope["film"])
+            self._release()
+            self.reason = "主控的影片信息无法读取"
+            return False
+        attempt_id = str(uuid.uuid4())
+        state = AttemptState(
+            attempt_id=attempt_id,
+            film_id=job.film_id,
+            rev=job.input_revision,
+            stage=stage,
+            name=job.display_name,
+            request={
+                "attempt_id": attempt_id,
+                "operation_id": str(uuid.uuid4()),
+                "job_id": job.job_id,
+                "expected_version": job.version,
+                "boot_id": self.boot_id,
+                "tool_versions": tools.model_dump(mode="json"),
+            },
+        )
+        self._save(state)  # crash point `request`: before sending
+        claimed = self._send_claim(state)
+        if claimed is None:
+            return False
+        state.assignment_id = claimed.get("assignment_id")
+        self._save(state)  # crash point `claimed`
+        self._renew_once(state)
+        uses_gpu = True
+        active = _Active(state, self._clock(), uses_gpu)
+        active.energy_start = self._energy_reading(job.film_id)
+        with self._lock:
+            self._active = active
+        self.runtime.use(envelope)
+        if attempt_id in self._cancelled or self._stop.is_set():
+            active.cancel.set()
+
+        def launched(identity: str) -> None:
+            state.children.append(identity)
+            self._save(state)
+
+        def progress(text: str, ltx: dict[str, Any] | None = None) -> None:
+            active.progress = text[-200:]
+            active.ltx = ltx
+
+        self.reason = "running"
+        result = run_stage(
+            executor,
+            job,
+            manifest,
+            self.staging.work_dir / attempt_id,
+            active.cancel,
+            on_launch=launched,
+            progress=progress,
+            stop_settle=self.stop_settle,
+        )
+        if not result.settled:  # C4: the lease stays, settle again each tick
+            active.phase = "settling"
+            self._unsettled = (active, result.outcome, result.processes)
+            self.reason = UNSETTLED
+            return True
+        self._settle(active, result.outcome)
+        return True
+
+    def _send_claim(self, state: AttemptState) -> dict[str, Any] | None:
+        """The same bytes until a definite answer (C2 replay); a refusal drops
+        the attempt file and frees the GPU."""
+        failures = 0
+        while not self._stop.is_set():
+            try:
+                return self._client().claim(state.request)
+            except ApiError as exc:
+                if exc.transient:
+                    failures += 1
+                    self._stop.wait(backoff(failures - 1, base=self.backoff_base))
+                    continue
+                self._drop(state.attempt_id)
+                self._release()
+                self.reason = f"领取失败：{exc.code}"
+                return None
+        return None  # stopped: the file stays; the next start asks the controller
+
+    def _renew_once(self, state: AttemptState) -> None:
+        """C5: one renew records the owner; a failure never stops the Job."""
+        try:
+            self._client().renew(
+                state.attempt_id,
+                {
+                    "owner_id": str(uuid.uuid4()),
+                    "generation": 1,
+                    "boot_id": self.boot_id,
+                    "process_identity": own_identity(),
+                },
+            )
+        except ApiError as exc:
+            log.warning("worker attempt renew failed: %s", exc)
+
+    def _finish_unsettled(self) -> bool:
+        assert self._unsettled is not None
+        active, outcome, processes = self._unsettled
+        if processes is not None and not processes.settle(0):
+            return False
+        self._unsettled = None
+        self._settle(active, outcome)
+        return True
+
+    def _settle(self, active: _Active, outcome: ExecOutcome) -> None:
+        """Crash point `settled`: the outcome, ledger digest, timing and the
+        film's energy since the claim (R14) are persisted before any upload."""
+        state = active.state
+        energy = self._energy(active)
+        state.settled = _settled(outcome, energy)
+        self._save(state)
+        with self._lock:
+            self._active = None
+        if self._stop.is_set():  # shut down: the next start finishes it
+            return
+        with self._lock:
+            self._deliver.insert(0, state.attempt_id)
+        self._deliver_one(state.attempt_id)
+
+    # ── upload and finish ────────────────────────────────────────────────
+    def _deliver_one(self, attempt_id: str) -> bool:
+        """Upload (success only) then finish, retried with backoff until a
+        definite answer; the GPU stays held until the finish resolves (D3)."""
+        state = AttemptState.load(self._path(attempt_id))
+        if state is None or state.settled is None:
+            with self._lock:
+                self._deliver = [a for a in self._deliver if a != attempt_id]
+            return True
+        active = _Active(state, self._clock(), False, phase="uploading")
+        with self._lock:
+            self._active = active
+        failures = 0
+        try:
+            while not self._stop.is_set():
+                try:
+                    body = self._finish_body(state, active)
+                    active.phase = "finishing"
+                    state.finish_sent = True
+                    self._save(state)  # crash point `finish sent`
+                    self._client().finish(attempt_id, body)
+                    self._done(attempt_id)
+                    return True
+                except ApiError as exc:
+                    if exc.status == 409 and exc.code == "stale_attempt":
+                        log.info("worker attempt %s is stale; discarded", attempt_id)
+                        self._done(attempt_id)
+                        return True
+                    if exc.status == 422 and state.settled.get("ok"):
+                        state.settled = _settled(
+                            ExecOutcome.failed(
+                                "needs_attention", f"主控拒绝了结果（{exc.code}）"
+                            ),
+                            state.settled.get("energy"),
+                        )
+                        self._save(state)
+                        continue
+                    if not exc.transient and exc.status != 422:
+                        log.warning("worker finish refused: %s", exc)
+                    failures += 1
+                    self.reason = "回传失败，正在重试"
+                    if self._stop.wait(backoff(failures - 1, base=self.backoff_base)):
+                        return False
+            return False
+        finally:
+            with self._lock:
+                if self._active is active:
+                    self._active = None
+                self._transfers.pop((state.film_id, "up"), None)
+
+    def _finish_body(self, state: AttemptState, active: _Active) -> dict[str, Any]:
+        settled = dict(state.settled or {})
+        with self._lock:
+            cancelled = state.attempt_id in self._cancelled
+        if cancelled:  # R9: the operator's stop wins over any outcome
+            return {
+                "outcome": "failed",
+                "error_class": "cancelled",
+                "message": "已停止",
+            }
+        if not settled.get("ok"):
+            return {
+                "outcome": "failed",
+                "error_class": settled.get("error_class") or "needs_attention",
+                "message": settled.get("message") or "失败",
+                "energy": settled.get("energy"),
+            }
+        ledger = self.staging.work_dir / state.attempt_id / RESULT_NAME
+        raw = ledger.read_bytes()
+        self._upload(state, raw, active)
+        return {
+            "outcome": "succeeded",
+            "message": settled.get("message") or "",
+            "ledger": raw.decode("utf-8"),
+            "payload_digest": hashlib.sha256(raw).hexdigest(),
+            "timing": settled.get("timing"),
+            "energy": settled.get("energy"),
+        }
+
+    def _upload(self, state: AttemptState, raw: bytes, active: _Active) -> None:
+        """Each output under `<a>/` the ledger names (C3: work-copy refs are
+        never uploaded); three whole-file mismatches need the operator."""
+        result = StageResult.model_validate_json(raw)
+        prefix = f"{state.attempt_id}/"
+        files = [ref for ref in ledger_refs(result) if ref.path.startswith(prefix)]
+        if not files:
+            return
+        client = self._client()
+        client.plan_outputs(
+            state.attempt_id,
+            [{"path": f.path, "size": f.size, "sha256": f.sha256} for f in files],
+        )
+        total = sum(f.size for f in files)
+        started, before = self._clock(), 0
+        for ref in files:
+            done_before = before
+
+            def sent(offset: int, done_before: int = done_before) -> None:
+                self._progress(
+                    state.film_id, "up", done_before + offset, total, started
+                )
+
+            for _ in range(MAX_MISMATCHES):
+                try:
+                    client.upload_file(
+                        state.attempt_id,
+                        ref.path,
+                        self.staging.work_dir / ref.path,
+                        size=ref.size,
+                        sha256=ref.sha256,
+                        on_progress=sent,
+                    )
+                    break
+                except ApiError as exc:
+                    if exc.code != "hash_mismatch":
+                        raise
+            else:
+                raise ApiError(422, "hash_mismatch")
+            before += ref.size
+            active.progress = f"回传 {before}/{total}"
+
+    def _done(self, attempt_id: str) -> None:
+        """The finish resolved (or the attempt is stale): GC, free the GPU."""
+        self._collect(attempt_id)
+        with self._lock:
+            self._deliver = [a for a in self._deliver if a != attempt_id]
+        self._release()
+        self._wake.set()
+
+    def _release(self) -> None:
+        if self._holding:
+            self.lease.release(self.run_id)
+            self._holding = False
+        else:
+            self.lease.withdraw(self.run_id)
+
+    # ── power (R14) ──────────────────────────────────────────────────────
+    def _sampler(self) -> Any:
+        try:
+            return self.power()
+        except Exception:
+            return None
+
+    def _energy_reading(self, film_id: str) -> Any:
+        sampler = self._sampler()
+        if sampler is None:
+            return None
+        try:
+            return sampler.reading(film_id)
+        except Exception:
+            log.exception("worker power reading failed")
+            return None
+
+    def _energy(self, active: _Active) -> dict[str, Any] | None:
+        """The film's energy from the claim to now; None (never 0) without a
+        reading, or when the sampler restarted in between."""
+        start = active.energy_start
+        sampler = self._sampler() if start is not None else None
+        if sampler is None:
+            return None
+        try:
+            delta = sampler.energy_between(start, sampler.reading(start.owner))
+            if delta is None:
+                return None
+            value = m.AttemptEnergy.model_validate(delta.to_dict())
+        except Exception:
+            log.exception("worker attempt energy unavailable")
+            return None
+        data = value.model_dump(mode="json")
+        data.pop("schema_version", None)
+        return data
+
+    def _energy_dict(self, active: _Active) -> dict[str, Any] | None:
+        return self._energy(active) if active.phase == "running" else None
+
+    def _live_power(self) -> dict[str, Any] | None:
+        sampler = self._sampler()
+        try:
+            return sampler.live() if sampler is not None else None
+        except Exception:
+            return None
+
+
+def _settled(
+    outcome: ExecOutcome, energy: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    return {
+        "ok": outcome.ok,
+        "error_class": outcome.error_class,
+        "message": outcome.message,
+        "digest": outcome.result_digest,
+        "timing": None
+        if outcome.timing is None
+        else outcome.timing.model_dump(mode="json", exclude={"schema_version"}),
+        "energy": energy,
+    }
+
+
+def _prune(root: Path, folder: Path) -> None:
+    """Remove empty folders up to (not including) `root`."""
+    root = root.resolve()
+    current = folder.resolve()
+    while current != root and root in current.parents:
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent

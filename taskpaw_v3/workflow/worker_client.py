@@ -22,7 +22,7 @@ import os
 import threading
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -178,12 +178,38 @@ class WorkerClient:
     def capabilities(self, probe: Mapping[str, Any]) -> dict[str, Any]:
         return self.call("POST", "/capabilities", dict(probe))
 
-    def boot(self, boot_id: str) -> dict[str, Any]:
+    def boot(
+        self, boot_id: str, attempts: Sequence[Mapping[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        """P2-3 §5: `attempts` reports the local attempt files."""
         return self.call(
             "POST",
             "/boot",
-            {"boot_id": boot_id, "assignment_ids": [], "local_owners": []},
+            {
+                "boot_id": boot_id,
+                "assignment_ids": [],
+                "local_owners": [],
+                "attempts": list(attempts or []),
+            },
         )
+
+    # ── remote execution (P2-3) ──────────────────────────────────────────
+    def claim(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        return self.call("POST", "/claim", dict(body))
+
+    def renew(self, attempt_id: str, body: Mapping[str, Any]) -> dict[str, Any]:
+        return self.call("POST", f"/attempts/{attempt_id}/renew", dict(body))
+
+    def finish(self, attempt_id: str, body: Mapping[str, Any]) -> dict[str, Any]:
+        return self.call(
+            "POST",
+            f"/attempts/{attempt_id}/finish",
+            dict(body),
+            timeout=self.verify_timeout,  # the refs are checked first
+        )
+
+    def attempt(self, attempt_id: str) -> dict[str, Any]:
+        return self.call("GET", f"/attempts/{attempt_id}")
 
     def heartbeat(self, beat: Mapping[str, Any]) -> dict[str, Any]:
         return self.call("POST", "/heartbeat", dict(beat))
@@ -303,6 +329,7 @@ class WorkerClient:
         size: int,
         sha256: str,
         attempts: int = 3,
+        on_progress: Callable[[int], None] | None = None,
     ) -> dict[str, Any]:
         """One output from the controller's received offset to the end.
 
@@ -327,7 +354,10 @@ class WorkerClient:
             }
             try:
                 with self.open(
-                    "PUT", url, data=_blocks(local, received), headers=headers
+                    "PUT",
+                    url,
+                    data=_blocks(local, received, on_progress),
+                    headers=headers,
                 ) as reply:
                     result = _read_json(reply)
                 if isinstance(result, dict) and result.get("done") is True:
@@ -425,14 +455,19 @@ def _sha_file(path: Path) -> str:
     return _hash_prefix(path, path.stat().st_size).hexdigest()
 
 
-def _blocks(path: Path, offset: int) -> Iterator[bytes]:
+def _blocks(
+    path: Path, offset: int, on_progress: Callable[[int], None] | None = None
+) -> Iterator[bytes]:
     with path.open("rb") as stream:
         stream.seek(offset)
         while True:
             chunk = stream.read(CHUNK)
             if not chunk:
                 return
+            offset += len(chunk)
             yield chunk
+            if on_progress is not None:
+                on_progress(offset)
 
 
 __all__ = [

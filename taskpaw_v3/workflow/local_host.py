@@ -356,7 +356,7 @@ class LocalWorkflowHost:
                 off_reasons=self.off_reasons,
                 finalizer=self.finalizer,
                 workflow_log=self.workflow_log,
-                on_resolved=self.events.resolved if self.events is not None else None,
+                on_resolved=self._local_resolved,
                 remote_enabled=self.settings.remote_workers
                 and self.settings.role == "controller",
             )
@@ -369,10 +369,19 @@ class LocalWorkflowHost:
             if self.settings.remote_workers and self.settings.role == "controller":
                 from taskpaw_v3 import __version__
 
+                from .routing import RoutingThread
+
                 # R9: the restart grace counts from here (IR12, C14)
-                self.fleet = FleetLive(rt.clock.now(), __version__)
+                self.fleet = FleetLive(
+                    rt.clock.now(), __version__, on_change=self._wake_scheduler
+                )
                 self.transfers = Transfers(rt.work_dir, live=lambda: live_attempts(rt))
                 self.transfers.sweep()  # IR5: settled attempts' plans go
+                # P2-3 R13: the routing pass's own thread
+                self.scheduler = RoutingThread(self._route_pass)
+                if self._stopping.is_set():
+                    return
+                self.scheduler.start()
             self.state, self.reason = "running", rt.reason
             if self.events is not None and not self._stopping.is_set():
                 self.events.start(self)
@@ -408,6 +417,8 @@ class LocalWorkflowHost:
                 self._download_lock.release()
         else:
             confirmed = False
+        if self.scheduler is not None:  # R13: before the dispatcher it wakes
+            confirmed &= self.scheduler.stop(timeout=min(timeout, 30.0))
         if self.dispatcher is not None:
             confirmed &= self.dispatcher.stop(timeout=timeout)
         if self.lookup is not None:
@@ -454,9 +465,55 @@ class LocalWorkflowHost:
         from .planning import confirm_plans
 
         results = confirm_plans(self.runtime, items)
-        if self.dispatcher is not None and any(r["ok"] for r in results):
-            self.dispatcher.wake()
+        if any(r["ok"] for r in results):
+            if self.dispatcher is not None:
+                self.dispatcher.wake()
+            self._wake_scheduler()  # R13: a confirmed plan
         return results
+
+    # ── routing (P2-3 R13) ──────────────────────────────────────────────
+    def _wake_scheduler(self) -> None:
+        if self.scheduler is not None:
+            self.scheduler.wake()
+
+    def _local_resolved(
+        self, rt: LocalRuntime, job: m.PendingComputeJob, name: str, outcome: Any
+    ) -> None:
+        """The controller's own dispatcher resolved a stage: the #286 events,
+        then a routing pass (a failed route closes; a finished one frees a
+        worker's slot)."""
+        if self.events is not None:
+            self.events.resolved(rt, job, name, outcome)
+        self._wake_scheduler()
+
+    def _route_pass(self) -> None:
+        """One `routing.run_pass` over the live fleet; a routed or withdrawn
+        film wakes the controller's dispatcher (a hand-over or a local
+        route)."""
+        rt, fleet = self.runtime, self.fleet
+        if rt is None or fleet is None:
+            return
+        from .routing import run_pass
+        from .transfer import disk_free
+
+        try:
+            free: int | None = disk_free(rt.work_dir)
+        except OSError:
+            free = None
+        outcome = run_pass(
+            rt.store,
+            rt.operator,
+            rt.meta,
+            controller_id=rt.identity.worker_id,
+            live=fleet.snapshot(),
+            now=rt.clock.now(),
+            executors=rt.executors,
+            controller_free_bytes=free,
+            remote_enabled=True,
+            live_since=fleet.started_at,
+        )
+        if (outcome.routed or outcome.withdrawn) and self.dispatcher is not None:
+            self.dispatcher.wake()
 
     def requeue(self, film_id: str, attempt_id: str) -> None:
         """停止并重新排队 (P2-3 R9a); WorkflowError when it is not one."""

@@ -305,8 +305,13 @@ def run_agent(
 
         sampler = power_sampler = power.PowerSampler(
             power.get_power_settings,
+            # P2-3 R14: a worker's dispatcher owns its films' energy too
             activity=power.activity_source(
-                _monitor_type, lambda: getattr(workflow_host, "dispatcher", None)
+                _monitor_type,
+                lambda: (
+                    getattr(workflow_host, "dispatcher", None)
+                    or getattr(worker_host, "dispatcher", None)
+                ),
             ),
             data_dir=config_path.parent if config_path is not None else None,
         )

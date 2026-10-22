@@ -1046,7 +1046,7 @@ class FakeController:
         }
         return reply
 
-    def boot(self, boot_id):
+    def boot(self, boot_id, attempts=None):
         return self._next("boot", {"status": "reconciled", "reconciled": True})
 
     def heartbeat(self, beat):
@@ -1837,7 +1837,7 @@ class _IdentityClient:
         self._answer()
         return {"revision": 1, "status": "applied"}
 
-    def boot(self, boot_id):
+    def boot(self, boot_id, attempts=None):
         self._answer()
         return {"status": "reconciled", "reconciled": True}
 

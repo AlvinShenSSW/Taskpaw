@@ -32,7 +32,7 @@ import secrets
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,7 +44,11 @@ from taskpaw_v3.core.config import WorkflowSettings
 from taskpaw_v3.core.net import bind_is_global, bind_is_wildcard
 from taskpaw_v3.core.state import atomic_json
 
+from .executors import ExecRuntime, StageExecutor
 from .fleet_live import PROTOCOL
+from .keep_awake import KeepAwake
+from .local_gpu import LocalGpu
+from .remote_dispatch import RemoteDispatcher, WorkerRuntime
 from .staging import Staging, StagingError, validate_dir
 from .worker_client import ApiError, WorkerClient, backoff
 
@@ -172,51 +176,49 @@ class Probe:
 
 
 ProbeFn = Callable[[WorkflowSettings, Staging], "Probe | None"]
+ExecutorFactory = Callable[[WorkerRuntime], Sequence[StageExecutor]]
 
 
-def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
-    """GPU and identity, free disk, and the restore/ASR executors' profiles.
-
-    The executors are built only for `tools()` and `max_resolution()`; their
-    runtime arrives with remote execution (P2-3, `ExecRuntime`)."""
-    from taskpaw_v3.monitors.plugins import jasna
-
+def worker_executors(
+    settings: WorkflowSettings, runtime: ExecRuntime, gpu: LocalGpu | None
+) -> list[StageExecutor]:
+    """The worker's restore and ASR executors from its tool settings — the
+    same for the probe (profiles) and the dispatcher (runs), so a claim's
+    tools always match the approved profile."""
     from .exec_asr import AsrExecutor
     from .exec_restore import RestoreExecutor, resolve_gpu_preset
-    from .executors import ExecRuntime, StageExecutor
-    from .local_gpu import machine_identity, query_gpu
-    from .models import ProfileCapability
 
-    gpu = query_gpu()
-    if gpu is None:
-        return None
-    unbound = cast(ExecRuntime, None)  # never used by tools()/max_resolution()
     executors: list[StageExecutor] = []
-    tiers: tuple[str, ...] = ()
-    restore = None
     if settings.jasna_exe_path:
         auto = settings.ltx_gpu == "auto"
-        preset = resolve_gpu_preset(gpu) if auto else settings.ltx_gpu
+        preset = resolve_gpu_preset(gpu) if auto and gpu else settings.ltx_gpu
         try:
-            restore = RestoreExecutor(
-                unbound, settings.jasna_exe_path, preset, preset_auto=auto
+            executors.append(
+                RestoreExecutor(
+                    runtime,
+                    settings.jasna_exe_path,
+                    preset,
+                    preset_auto=auto,
+                    ffprobe=settings.ffprobe_path,
+                )
             )
-            executors.append(restore)
         except ValueError:
-            log.warning("worker restore probe: invalid Jasna settings")
-    if restore is not None and Path(settings.jasna_exe_path or "").is_file():
-        fast = restore.cfg.ltx_fast and jasna.fast_supported(jasna.query_gpus())
-        folder = str(Path(settings.jasna_exe_path or "").parent)
-        tiers = tuple(
-            tier for tier in TIERS if not jasna.ltx_missing_files(folder, tier, fast)
-        )
-    asr_ready = False
+            log.warning("worker restore: invalid Jasna settings")
     if settings.whisperjav_exe_path:
         try:
-            executors.append(AsrExecutor(unbound, settings.whisperjav_exe_path))
-            asr_ready = Path(settings.whisperjav_exe_path).is_file()
+            executors.append(AsrExecutor(runtime, settings.whisperjav_exe_path))
         except ValueError:
-            log.warning("worker ASR probe: invalid WhisperJAV settings")
+            log.warning("worker ASR: invalid WhisperJAV settings")
+    return executors
+
+
+def probe_body(
+    executors: Sequence[StageExecutor], gpu: LocalGpu, staging: Staging
+) -> dict[str, Any]:
+    """The controller's `ProbeBody` for these executors on this GPU."""
+    from .local_gpu import machine_identity
+    from .models import ProfileCapability
+
     profiles = []
     digests = []
     for executor in executors:
@@ -237,7 +239,7 @@ def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
             ).model_dump(mode="json", exclude={"schema_version"})
         )
     fingerprint = hashlib.sha256("|".join(sorted(digests)).encode()).hexdigest()
-    body = {
+    return {
         "source": "nvidia-smi",
         "cpu": "worker",
         "ram_mib": 1,
@@ -250,7 +252,34 @@ def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
         "profiles": profiles,
         "config_digest": fingerprint,  # CX9: a setting change needs 核验
     }
-    return Probe(body, tiers, asr_ready)
+
+
+def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
+    """GPU and identity, free disk, and the restore/ASR executors' profiles;
+    the executors are built only for `tools()` and `max_resolution()`."""
+    from taskpaw_v3.monitors.plugins import jasna
+
+    from .exec_restore import RestoreExecutor
+    from .local_gpu import query_gpu
+
+    gpu = query_gpu()
+    if gpu is None:
+        return None
+    unbound = cast(ExecRuntime, None)  # never used by tools()/max_resolution()
+    executors = worker_executors(settings, unbound, gpu)
+    restore = next((e for e in executors if isinstance(e, RestoreExecutor)), None)
+    tiers: tuple[str, ...] = ()
+    if restore is not None and Path(settings.jasna_exe_path or "").is_file():
+        fast = restore.cfg.ltx_fast and jasna.fast_supported(jasna.query_gpus())
+        folder = str(Path(settings.jasna_exe_path or "").parent)
+        tiers = tuple(
+            tier for tier in TIERS if not jasna.ltx_missing_files(folder, tier, fast)
+        )
+    asr_ready = (
+        any(e.stage == "asr" for e in executors)
+        and Path(settings.whisperjav_exe_path or "").is_file()
+    )
+    return Probe(probe_body(executors, gpu, staging), tiers, asr_ready)
 
 
 def probe_changed(probe: Mapping[str, Any], record: Mapping[str, Any]) -> bool:
@@ -282,13 +311,22 @@ def default_gpu_live() -> dict[str, Any]:
     """The heartbeat's GPU: the shared nvidia-smi sample and the lease."""
     from taskpaw_v3.core import gpu_lease
     from taskpaw_v3.core.gpu_sample import gpu_sample
+    from taskpaw_v3.core.power import BUSY_GPU_PCT
 
     sample = gpu_sample() or {}
+    holder = gpu_lease.holder()
+    util = sample.get("util_pct")
+    if holder is not None:
+        hold = "workflow" if holder[0] == "workflow" else "manual"
+    elif isinstance(util, (int, float)) and util >= BUSY_GPU_PCT:
+        hold = "unknown"  # 「GPU 有未知占用」: busy with no lease holder (R6)
+    else:
+        hold = "none"
     return {
         "used_mib": sample.get("mem_used_mb"),
-        "util": sample.get("util_pct"),
+        "util": util,
         "power_w": sample.get("power_w"),
-        "hold": "manual" if gpu_lease.holder() is not None else "none",
+        "hold": hold,
     }
 
 
@@ -309,6 +347,12 @@ class WorkerHost:
         probe_seconds: float = PROBE_SECONDS,
         pending_seconds: float = PENDING_SECONDS,
         staging_free: Callable[[Path], int] | None = None,
+        executor_factory: ExecutorFactory | None = None,
+        lease: Any = None,
+        power: Callable[[], Any] | None = None,
+        keep_awake: KeepAwake | None = None,
+        dispatch_poll: float = 5.0,
+        stop_settle: float = 30.0,
     ) -> None:
         """`staging_free`: the staging disk's free bytes (tests inject it so
         no result depends on the host's real disk)."""
@@ -324,6 +368,16 @@ class WorkerHost:
         self._closed = False  # CX10: set by stop(); nothing spawns after it
         self._probe, self._gpu_live = probe, gpu_live
         self._staging_free = staging_free
+        # P2-3: remote execution (R6–R14)
+        self._executor_factory = executor_factory or (
+            lambda runtime: worker_executors(settings, runtime, runtime.gpu)
+        )
+        self._lease, self._power = lease, power
+        self.keep_awake = keep_awake or KeepAwake()
+        self.dispatch_poll, self.stop_settle = dispatch_poll, stop_settle
+        self.dispatcher: RemoteDispatcher | None = None
+        self.local_paused = False  # R12: 暂停领取 on the worker's own monitor
+        self._hold = "none"
         self._client_factory = client_factory
         self.version = version or __version__
         self.active, self.idle, self.backoff_base = (
@@ -340,7 +394,6 @@ class WorkerHost:
         self.worker_id: str | None = None
         self.routes: list[dict[str, Any]] = []
         self.paused = False
-        self.staged: list[dict[str, Any]] = []  # filled by the fetch loop (P2-3)
         self.last_heartbeat: datetime | None = None
         self.reconciled = False
         self._probe_body: Mapping[str, Any] = {}
@@ -377,9 +430,29 @@ class WorkerHost:
             log.error("media workflow join did not return in time")
             return False
         try:
-            return self._halt(timeout)
+            halted = self._halt(timeout)
+            return self._stop_dispatcher(timeout) and halted
         finally:
             self._join_lock.release()
+
+    def _stop_dispatcher(self, timeout: float = 60.0) -> bool:
+        dispatcher = self.dispatcher
+        return dispatcher is None or dispatcher.stop(timeout)
+
+    def set_paused(self, paused: bool) -> None:
+        """R12: 暂停领取 — no claim; in-flight work, uploads and prefetch go on.
+        The heartbeat reports it; the controller treats it like 停领 (S8)."""
+        self.local_paused = bool(paused)
+        dispatcher = self.dispatcher
+        if dispatcher is not None:
+            dispatcher.observe(
+                {"routes": self.routes},
+                reconciled=self.reconciled,
+                tiers=self._tiers,
+                asr_ready=self._asr_ready,
+                hold=self._hold,
+                paused=self.local_paused,
+            )
 
     def _halt(self, timeout: float) -> bool:
         self._stop.set()
@@ -579,6 +652,9 @@ class WorkerHost:
         return None
 
     def _revoked(self) -> None:
+        """R8/crash matrix 10: the credential is gone — the running Job is
+        cancelled and settled, its outcome kept; nothing more is sent."""
+        self._stop_dispatcher()  # first: 「凭据已撤销」 means the Job settled
         self.state, self.reason = "revoked", REVOKED_REASON
         self._stop.set()
 
@@ -586,6 +662,12 @@ class WorkerHost:
         return identity is not None and identity.credential_id not in self._refused
 
     def _run(self) -> None:
+        try:
+            self._loop()
+        finally:
+            self.keep_awake.hold(False)  # R11: cleared by the thread that set it
+
+    def _loop(self) -> None:
         """IR8, CX14 — one rule. A 401/403 refuses only the identity it was
         sent with and a transient error refuses none; the loop ends for good
         only when every identity the worker holds is refused, or on `stop()`.
@@ -683,8 +765,12 @@ class WorkerHost:
         self.worker_id = me["worker"]["worker_id"]
         staging = self.staging()
         self._refresh(client, staging, me["worker"])
+        dispatcher = self._ensure_dispatcher(staging)
+        if self._retry(lambda: dispatcher.recover(client)) is None:
+            return
         if self._boot_once(client) is None:
             return
+        dispatcher.start()
         failures = 0
         while not self._stop.is_set():
             try:
@@ -704,6 +790,8 @@ class WorkerHost:
             failures = 0
             self._promote()
             self._apply(reply)
+            # R11: from this long-lived thread only
+            self.keep_awake.hold(bool(self.routes) or dispatcher.claimed())
             if reply.get("reconcile_needed") or not self.reconciled:
                 if self._boot_once(client) is None:  # IR6: beats go on meanwhile
                     return
@@ -738,19 +826,61 @@ class WorkerHost:
         self._probe_body = probe.body
 
     def _boot_once(self, client: WorkerClient) -> bool | None:
-        """R6: post the same boot id; True once reconciled (C6), None when the
-        loop must end. Unreconciled, the next beat posts it again (IR6)."""
-        reply = self._retry(lambda: client.boot(self.boot_id))
+        """R6/R8: post the same boot id with the local attempt files; True
+        once reconciled (C6), None when the loop must end. Unreconciled, the
+        next beat posts it again (IR6)."""
+        dispatcher = self.dispatcher
+        reports = dispatcher.reports() if dispatcher is not None else []
+        reply = self._retry(lambda: client.boot(self.boot_id, reports))
         if reply is None:
             return None
         self.reconciled = bool(reply.get("reconciled"))
+        if dispatcher is not None:
+            dispatcher.booted(reply)
         return self.reconciled
+
+    def _ensure_dispatcher(self, staging: Staging) -> RemoteDispatcher:
+        if self.dispatcher is None:
+            body = self._probe_body
+            gpu = (
+                LocalGpu(
+                    str(body.get("gpu_model")),
+                    str(body.get("gpu_identity")),
+                    int(body.get("vram_mib") or 0),
+                )
+                if body
+                else None
+            )
+            runtime = WorkerRuntime(staging.root, gpu)
+            self.dispatcher = RemoteDispatcher(
+                staging,
+                self._client,
+                {e.stage: e for e in self._executor_factory(runtime)},
+                runtime,
+                boot_id=self.boot_id,
+                lease=self._lease if self._lease is not None else _gpu_lease(),
+                power=self._power,
+                poll=self.dispatch_poll,
+                stop_settle=self.stop_settle,
+                backoff_base=self.backoff_base,
+            )
+        return self.dispatcher
 
     def _apply(self, reply: Mapping[str, Any]) -> None:
         with self._lock:
             self.routes = list(reply.get("routes") or [])
             self.paused = bool(reply.get("paused"))
             self.last_heartbeat = datetime.now(timezone.utc)
+        dispatcher = self.dispatcher
+        if dispatcher is not None:
+            dispatcher.observe(
+                reply,
+                reconciled=self.reconciled,
+                tiers=self._tiers,
+                asr_ready=self._asr_ready,
+                hold=self._hold,
+                paused=self.local_paused,
+            )
         if self._unsaved:
             reason = UNSAVED_REASON
         elif self._pending_check is not None:
@@ -765,12 +895,14 @@ class WorkerHost:
 
     def _beat(self, staging: Staging) -> dict[str, Any]:
         live = dict(self._gpu_live())
+        self._hold = str(live.get("hold", "none"))
         body = self._probe_body
+        dispatcher = self.dispatcher
         return {
             "boot_id": self.boot_id,
             "version": self.version,
             "protocol": PROTOCOL,
-            "paused": False,  # 暂停领取 arrives with the worker monitor (P2-3)
+            "paused": self.local_paused,  # R12
             "gpu": {
                 "name": body.get("gpu_model"),
                 "vram_mib": body.get("vram_mib"),
@@ -786,9 +918,9 @@ class WorkerHost:
             },
             "tiers_ready": list(self._tiers),
             "asr_ready": self._asr_ready,
-            "staged": list(self.staged),
-            "current": None,
-            "transfers": [],
+            "staged": dispatcher.staged() if dispatcher else [],
+            "current": dispatcher.current() if dispatcher else None,
+            "transfers": dispatcher.transfers() if dispatcher else [],
         }
 
     def status(self) -> dict[str, Any]:
@@ -812,8 +944,35 @@ class WorkerHost:
             "last_heartbeat": seen.isoformat() if seen else None,
             "reconciled": self.reconciled,
             "routes": routes,
-            "paused": self.paused,
+            "paused": self.local_paused,  # R12: 暂停领取 on this worker
+            "controller_paused": self.paused,  # 暂停派发 on the controller
             "pending": self._pending_check is not None,
+            **self._monitor(),
+        }
+
+    def _monitor(self) -> dict[str, Any]:
+        """§6: films, the running step, transfers, staging and the GPU hold."""
+        dispatcher = self.dispatcher
+        staging: dict[str, Any] = {"used": None, "cap": self.settings.staging_cap_gb}
+        if dispatcher is not None:
+            try:
+                staging = {
+                    "used": dispatcher.staging.used(),
+                    "cap": dispatcher.staging.cap,
+                }
+            except OSError:
+                pass
+        return {
+            "films": dispatcher.films() if dispatcher else [],
+            "current": dispatcher.current() if dispatcher else None,
+            "transfers": dispatcher.transfers() if dispatcher else [],
+            "dispatch_reason": dispatcher.reason if dispatcher else None,
+            "staging": staging,
+            "gpu": {
+                "name": self._probe_body.get("gpu_model"),
+                "vram_mib": self._probe_body.get("vram_mib"),
+                "hold": self._hold,
+            },
         }
 
 
@@ -836,3 +995,9 @@ def start_worker_host(
     host = WorkerHost(settings, data_dir)
     host.start()
     return host
+
+
+def _gpu_lease() -> Any:
+    from taskpaw_v3.core import gpu_lease
+
+    return gpu_lease

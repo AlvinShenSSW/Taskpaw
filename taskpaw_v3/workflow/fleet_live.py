@@ -10,7 +10,7 @@ C14), and either state clears by itself when heartbeats return (R8).
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -96,14 +96,28 @@ class LiveEntry:
 
 
 class FleetLive:
-    def __init__(self, started_at: datetime, version: str) -> None:
+    def __init__(
+        self,
+        started_at: datetime,
+        version: str,
+        on_change: Callable[[], None] | None = None,
+    ) -> None:
+        """`on_change`: P2-3 R13 — called (outside the lock) when a beat
+        changes what the routing pass decides on."""
         self.started_at, self.version = started_at, version
+        self.on_change = on_change
         self._lock = threading.Lock()
         self._entries: dict[str, LiveEntry] = {}
 
     def observe(self, worker_id: str, beat: Heartbeat, now: datetime) -> None:
         with self._lock:
+            old = self._entries.get(worker_id)
             self._entries[worker_id] = LiveEntry(beat, now)
+        if self.on_change is not None and _changed(old, beat, now):
+            try:
+                self.on_change()
+            except Exception:  # a trigger never refuses a heartbeat
+                pass
 
     def forget(self, worker_id: str) -> None:
         """A revoked worker leaves the live state at once (IR14)."""
@@ -215,3 +229,25 @@ def _transfer_current(
         "machine": {"id": worker_id, "name": names.get(worker_id, "")},
         "fetching": True,
     }
+
+
+def _routing_facts(beat: Heartbeat) -> tuple[object, ...]:
+    """What the pass reads of a beat: pause, readiness, version, staged set."""
+    return (
+        beat.paused,
+        frozenset(beat.tiers_ready),
+        beat.asr_ready,
+        beat.version,
+        beat.protocol,
+        frozenset((s.film, s.rev) for s in beat.staged),
+        beat.boot_id,
+    )
+
+
+def _changed(old: LiveEntry | None, beat: Heartbeat, now: datetime) -> bool:
+    """R13: a new entry, one back from 失联, or changed routing facts."""
+    if old is None:
+        return True
+    if (now - old.last_seen).total_seconds() >= OFFLINE_SECONDS:
+        return True
+    return _routing_facts(old.beat) != _routing_facts(beat)
