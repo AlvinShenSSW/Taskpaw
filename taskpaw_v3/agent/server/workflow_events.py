@@ -288,6 +288,7 @@ def _current(value: Any) -> dict[str, Any] | None:
         k: value[k] for k in ("film", "stage", "progress", "started_at") if k in value
     }
     ltx = value.get("ltx")
+    ltx = ltx.get("ltx_progress") if isinstance(ltx, dict) else None
     if isinstance(ltx, dict):
         result["ltx"] = {
             k: ltx[k]

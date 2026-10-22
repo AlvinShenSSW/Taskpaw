@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -12,6 +13,8 @@ import pytest
 from taskpaw_v3.agent.server import workflow_events as events
 from taskpaw_v3.core.config import WorkflowSettings
 from taskpaw_v3.core.protocol import EventQueue
+from taskpaw_v3.hub.server.status_md import render_status_md
+from taskpaw_v3.monitors.plugins.jasna_progress import parse_jasna_progress_line
 from taskpaw_v3.tests.test_workflow_timing import Recorder, board_film
 from taskpaw_v3.workflow import board, planning
 from taskpaw_v3.workflow.executors import ExecOutcome
@@ -254,6 +257,43 @@ def test_summary_reads_all_completed_films_and_clears_on_error(observer, monkeyp
     )
     sink.observe(host)
     assert sink.snapshot() is None
+
+
+@pytest.mark.parametrize(
+    ("line", "progress", "expected"),
+    [
+        (
+            "LTX 2/4 encode:  52%|█████▏    | 156/300 "
+            "[00:27<00:25,  5.62frame/s, run 12:12 left]",
+            "修复 52%",
+            "ABF-394 修复 · LTX 2/4 encode 52%",
+        ),
+        ("Opening video", "正在打开视频", "ABF-394 修复 · 正在打开视频"),
+    ],
+)
+def test_real_restore_progress_reaches_hub_status(
+    observer, monkeypatch, line, progress, expected
+):
+    sink, _queue = observer
+    current = {
+        "film": "ABF-394",
+        "stage": "restore",
+        "progress": progress,
+        "ltx": parse_jasna_progress_line(line, {}),
+    }
+    host, _ = host_for(monkeypatch, [], current=current)
+    sink.observe(host)
+    text = render_status_md(
+        [
+            {
+                "name": "Windows",
+                "reachable": True,
+                "status_json": json.dumps({"workflow": sink.snapshot()}),
+            }
+        ],
+        "2026-10-22 12:12:42",
+    )
+    assert expected in text
 
 
 def test_summary_drops_old_completions_and_snapshot_is_independent(
