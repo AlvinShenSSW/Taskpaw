@@ -9,7 +9,7 @@ license = { text = "MIT" }
 # GUI deps are optional (see [project.optional-dependencies]) so that headless
 # environments and CI can install and test without a GUI backend.
 dependencies = [
-    "psutil>=5.9.0,<6.0.0",
+    "psutil>=5.9.6,<6.0.0",
 ]
 
 [project.optional-dependencies]

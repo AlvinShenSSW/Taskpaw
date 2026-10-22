@@ -71,6 +71,7 @@ def _power_isolation(monkeypatch):
 
     monkeypatch.setattr(power, "_gpu_reader", lambda: None)
     monkeypatch.setattr(power, "_cpu_reader", lambda: 0.0)
+    monkeypatch.setattr(power, "_gpu_util_reader", lambda: None)
     gpu_sample._reset_for_tests()
     power._reset_for_tests()
     power_fleet._reset_for_tests()

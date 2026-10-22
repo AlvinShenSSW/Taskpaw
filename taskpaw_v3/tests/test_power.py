@@ -7,6 +7,7 @@ depends on this machine's GPU.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import sys
 import threading
@@ -389,6 +390,25 @@ def test_live_status_field_shape():
     assert live["today_wh"] > 0
 
 
+def test_live_cpu_is_none_until_the_baseline_has_a_window():
+    clock = Clock()
+    r = Readers(gpu=[120.0], cpu=[0.0, 50.0])
+    s = sampler(clock, r)
+    s.tick()  # the first reading has no window behind it
+    first = s.live()
+    assert first["cpu_w"] is None
+    assert first["gpu_w"] == 120.0
+    assert first["w"] == pytest.approx(120.0 + first["other_w"])  # CPU omitted
+    run_ticks(s, clock, 1)
+    assert s.live()["cpu_w"] == pytest.approx(37.5)
+    # a pause drops the baseline again
+    s.settings_holder["cfg"] = settings(enabled=False)
+    run_ticks(s, clock, 1)
+    s.settings_holder["cfg"] = settings()
+    s.tick()
+    assert s.live()["cpu_w"] is None
+
+
 # ── PW03/PW04: attribution ──────────────────────────────────────────────────
 def manual_types(kind):
     return {"jasna-1": "jasna", "subs": "avsubs", "lada-1": "lada"}.get(kind)
@@ -409,7 +429,7 @@ WF = ("workflow", 7)
         # the GPU owner wins over the workflow's running non-GPU stage
         (("jasna-1", 3), ("f2", "translate"), ("restore", power.MANUAL)),
         (("subs", 4), ("f2", "return"), ("asr", power.MANUAL)),
-        (("lada-1", 1), None, ("other", power.MANUAL)),
+        (("lada-1", 1), None, ("restore", power.MANUAL)),
         (("gone", 1), None, ("other", power.MANUAL)),
         (None, ("f3", "translate"), ("translate", "f3")),
         (None, ("f3", "return"), ("other", "f3")),
@@ -419,6 +439,43 @@ WF = ("workflow", 7)
 )
 def test_classify_precedence(holder, current, expected):
     assert power.classify(holder, WF, current, manual_types) == expected
+
+
+@pytest.mark.parametrize(
+    "util,expected",
+    [
+        (None, ("idle", power.NO_OWNER)),
+        (0.0, ("idle", power.NO_OWNER)),
+        (29.9, ("idle", power.NO_OWNER)),
+        (30.0, ("other", power.NO_OWNER)),  # an untracked GPU job
+        (95.0, ("other", power.NO_OWNER)),
+    ],
+)
+def test_classify_busy_gpu_without_a_holder_is_other(util, expected):
+    assert power.classify(None, WF, None, manual_types, gpu_util=util) == expected
+
+
+def test_classify_gpu_util_never_overrides_a_known_owner():
+    assert power.classify(("jasna-1", 1), WF, None, manual_types, gpu_util=99.0) == (
+        "restore",
+        power.MANUAL,
+    )
+    assert power.classify(
+        None, WF, ("f3", "translate"), manual_types, gpu_util=99.0
+    ) == ("translate", "f3")
+
+
+def test_activity_source_busy_gpu_without_a_lease_is_other():
+    util = [None]
+    read = power.activity_source(manual_types, lambda: None, lambda: util[0])
+    assert read() == ("idle", "none")
+    util[0] = 80.0
+    assert read() == ("other", "none")
+
+    def boom():
+        raise RuntimeError("smi")
+
+    assert power.activity_source(manual_types, lambda: None, boom)() == ("idle", "none")
 
 
 def test_classify_without_a_workflow():
@@ -524,6 +581,28 @@ def test_owner_counter_is_cumulative_across_attempts():
     assert s.energy_between(a, c).wh == pytest.approx(first.wh + second.wh)
 
 
+def test_the_peak_is_unknown_once_the_buffer_no_longer_covers_the_attempt(
+    monkeypatch,
+):
+    """Codex r3: a restore longer than the peak buffer (24 h) must not report
+    the remaining maximum as the attempt's peak; energy stays exact."""
+    monkeypatch.setattr(power, "PEAK_SAMPLES", 3)
+    clock = Clock()
+    r = Readers(gpu=[500.0, 100.0, 100.0, 100.0, 100.0, 100.0], cpu=[0.0])
+    s = sampler(clock, r)
+    s.tick()
+    claim = s.reading("f1")
+    r.activity = ("restore", "f1")
+    run_ticks(s, clock, 5)  # the 500 W sample has been evicted
+    delta = s.energy_between(claim, s.reading("f1"))
+    assert delta is not None and delta.wh > 0
+    assert delta.peak_w is None
+    # a later window the buffer still covers has its peak
+    mid = s.reading("f1")
+    run_ticks(s, clock, 1)
+    assert s.energy_between(mid, s.reading("f1")).peak_w is not None
+
+
 def test_energy_between_rejects_mismatched_readings():
     clock = Clock()
     r = Readers(gpu=[50.0], cpu=[0.0])
@@ -595,33 +674,23 @@ def test_counters_survive_a_restart(tmp_path):
     s3.stop()
 
 
-def test_retention_drops_buckets_older_than_35_days(tmp_path):
+def test_retention_keeps_only_the_newest_max_buckets(tmp_path):
     db = tmp_path / "power.db"
-    clock = Clock()
+    base = int(T0) - 2 * 86400
+    # two more than the cap, all in the past, oldest first
+    seed_db(tmp_path, [(base - i * 900, 1.0) for i in range(power.MAX_BUCKETS + 2)])
+    oldest = base - (power.MAX_BUCKETS + 1) * 900
+    clock = Clock(wall=T0 + 890)
     s = sampler(clock, Readers(gpu=[10.0]), data_dir=tmp_path)
     s.tick()
-    s.stop()
-    con = sqlite3.connect(str(db))
-    old = int(T0) - 36 * 86400
-    keep = int(T0) - 34 * 86400
-    for start in (old, keep):
-        con.execute(
-            "INSERT INTO power_buckets VALUES (?, 900, 1, 1, 1, 0, 0, 0, 3, 0)",
-            (start,),
-        )
-    con.commit()
-    con.close()
-    s2 = sampler(clock, Readers(gpu=[10.0]), data_dir=tmp_path)
-    s2.tick()
-    assert s2.history("30d")["totals"]["wh"] == 0  # 34 days ago is outside 30d
-    run_ticks(s2, clock, 1)  # energy in the 10:00 bucket
-    assert old in [row[0] for row in rows(db)]
-    clock.advance(900)  # a gap, then energy in the next bucket closes 10:00
-    s2.tick()
-    run_ticks(s2, clock, 1)
+    assert len(s._buckets) == power.MAX_BUCKETS  # load keeps the newest only
+    assert oldest not in s._buckets
+    run_ticks(s, clock, 4)  # crosses 10:15: the 10:00 bucket closes
     starts = [row[0] for row in rows(db)]
-    assert old not in starts and keep in starts
-    s2.stop()
+    assert len(starts) == power.MAX_BUCKETS
+    assert oldest not in starts and base in starts and int(T0) in starts
+    assert len(s._buckets) == power.MAX_BUCKETS
+    s.stop()
 
 
 def test_no_data_dir_keeps_everything_in_memory(tmp_path, monkeypatch):
@@ -641,6 +710,169 @@ def test_unopenable_database_falls_back_to_memory(tmp_path):
     s.tick()
     run_ticks(s, clock, 1)
     assert s.history("24h")["totals"]["wh"] > 0
+    s.stop()
+
+
+def seed_db(tmp_path, entries):
+    con = sqlite3.connect(str(tmp_path / "power.db"))
+    con.execute(power._SCHEMA)
+    for start, wh in entries:
+        con.execute(
+            "INSERT INTO power_buckets VALUES (?, 900, ?, 0, 0, 0, 0, 0, ?, 0)",
+            (int(start), wh, wh),
+        )
+    con.commit()
+    con.close()
+
+
+def test_history_is_available_while_sampling_is_disabled_at_boot(tmp_path):
+    seed_db(tmp_path, [(T0 - 900, 2.0), (T0 - 1800, 3.0)])
+    clock = Clock()
+    s = sampler(
+        clock, Readers(gpu=[10.0]), cfg=settings(enabled=False), data_dir=tmp_path
+    )
+    s.tick()
+    assert s.live() is None
+    h = s.history("24h")
+    assert h["totals"]["wh"] == pytest.approx(5.0)
+    assert power.power_view(s)["history"]["totals"]["wh"] == pytest.approx(5.0)
+    s.stop()
+
+
+def test_disabling_live_flushes_the_open_bucket_and_keeps_history(tmp_path):
+    clock = Clock()
+    s = sampler(clock, Readers(gpu=[100.0], cpu=[0.0]), data_dir=tmp_path)
+    s.tick()
+    run_ticks(s, clock, 3)
+    assert rows(tmp_path / "power.db") == []  # the open bucket is memory only
+    before = s.history("24h")["totals"]["wh"]
+    assert before > 0
+    s.settings_holder["cfg"] = settings(enabled=False)
+    run_ticks(s, clock, 1)
+    stored = rows(tmp_path / "power.db")
+    assert len(stored) == 1 and stored[0][0] == int(T0)
+    assert s.history("24h")["totals"]["wh"] == pytest.approx(before)
+    run_ticks(s, clock, 2)  # nothing is written twice
+    assert len(rows(tmp_path / "power.db")) == 1
+    s.settings_holder["cfg"] = settings()
+    s.tick()
+    run_ticks(s, clock, 2)  # re-enabled: same bucket, additive
+    s.stop()
+    assert len(rows(tmp_path / "power.db")) == 1
+    assert s.history("24h")["totals"]["wh"] > before
+
+
+def test_disabled_without_a_database_creates_none(tmp_path):
+    s = sampler(
+        Clock(), Readers(gpu=[10.0]), cfg=settings(enabled=False), data_dir=tmp_path
+    )
+    s.tick()
+    s.stop()
+    assert list(tmp_path.iterdir()) == []
+
+
+def damage(path):
+    con = sqlite3.connect(str(path))
+    con.execute(power._SCHEMA)
+    base = int(T0) - 3000 * 900
+    for i in range(3000):
+        con.execute(power._UPSERT, (base + 900 * i, 1, 1, 1, 1, 0, 0, 0, 1, 0))
+    con.commit()
+    con.close()
+    raw = bytearray(path.read_bytes())
+    for off in range(4096 * 2, len(raw), 4096):
+        raw[off : off + 100] = b"\xff" * 100
+    path.write_bytes(bytes(raw))
+
+
+def test_partly_corrupt_database_falls_back_to_memory_with_one_warning(
+    tmp_path, caplog
+):
+    db = tmp_path / "power.db"
+    damage(db)
+    clock = Clock()
+    s = sampler(clock, Readers(gpu=[10.0]), data_dir=tmp_path)
+    with caplog.at_level(logging.WARNING, logger="taskpaw.power"):
+        s.tick()  # must not raise
+        run_ticks(s, clock, 3)
+    assert s.live() is not None
+    assert s.history("24h")["totals"]["wh"] > 0
+    assert len(list(tmp_path.glob("power.db.corrupt-*"))) == 1
+    assert not db.exists()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    s.stop()
+
+
+def test_corrupt_database_that_cannot_be_renamed_still_runs(tmp_path, monkeypatch):
+    damage(tmp_path / "power.db")
+
+    def refuse(*_a, **_k):
+        raise OSError("locked")
+
+    monkeypatch.setattr(power.os, "replace", refuse)
+    clock = Clock()
+    s = sampler(clock, Readers(gpu=[10.0]), data_dir=tmp_path)
+    s.tick()
+    run_ticks(s, clock, 1)
+    assert s.live() is not None
+    s.stop()
+
+
+def test_future_buckets_are_not_in_today_week_month(tmp_path):
+    seed_db(
+        tmp_path,
+        [(T0 - 900, 1.0), (T0 + 5 * 86400, 100.0), (T0 + 2 * 3600, 50.0)],
+    )
+    clock = Clock()
+    s = sampler(clock, Readers(gpu=[None]), data_dir=tmp_path)
+    s.settings_holder["cfg"] = settings(other_w=0, idle_w=0, tdp_w=0)
+    s.tick()
+    live = s.live()
+    assert live["today_wh"] == pytest.approx(1.0)
+    assert live["week_wh"] == pytest.approx(1.0)
+    assert live["month_wh"] == pytest.approx(1.0)
+    s.stop()
+
+
+def test_forward_clock_jump_never_prunes_history(tmp_path):
+    keep = int(T0) - 34 * 86400
+    seed_db(tmp_path, [(keep, 1.0)])
+    clock = Clock()
+    s = sampler(clock, Readers(gpu=[10.0]), data_dir=tmp_path)
+    s.tick()
+    run_ticks(s, clock, 1)
+    clock.wall_t += 400 * 86400  # the RTC jumps a year ahead
+    run_ticks(s, clock, 540)  # three more closures, each future-dated
+    assert keep in [row[0] for row in rows(tmp_path / "power.db")]
+    assert keep in s._buckets
+    s.stop()
+
+
+def test_normal_operation_never_exceeds_max_buckets(tmp_path):
+    base = int(T0) - 86400
+    seed_db(tmp_path, [(base - i * 900, 1.0) for i in range(power.MAX_BUCKETS)])
+    clock = Clock(wall=T0 + 890)
+    s = sampler(clock, Readers(gpu=[10.0]), data_dir=tmp_path)
+    s.tick()
+    run_ticks(s, clock, 540)  # a few closures on top of a full history
+    assert len(rows(tmp_path / "power.db")) == power.MAX_BUCKETS
+    assert len(s._buckets) == power.MAX_BUCKETS
+    s.stop()
+
+
+def test_history_and_live_agree_after_a_backward_clock_step(tmp_path):
+    # a bucket later than now (the clock stepped back) is in neither total,
+    # even where the 7d step boundary rounds past the current interval
+    seed_db(tmp_path, [(T0 - 900, 1.0), (T0 + 1800, 50.0)])
+    clock = Clock()
+    s = sampler(clock, Readers(gpu=[None]), data_dir=tmp_path)
+    s.settings_holder["cfg"] = settings(other_w=0, idle_w=0, tdp_w=0)
+    s.tick()
+    hist = s.history("7d")
+    assert hist["totals"]["wh"] == pytest.approx(1.0)
+    assert hist["totals"]["wh"] == pytest.approx(s.live()["today_wh"])
+    assert sum(hist["covered_s"]) == pytest.approx(900)
     s.stop()
 
 
@@ -744,6 +976,43 @@ def test_thread_samples_until_stopped(tmp_path):
     time.sleep(0.05)
     assert s.ticks == count
     assert s.stop(timeout=1) is True  # idempotent
+
+
+def test_loop_flushes_the_open_bucket_when_it_exits_after_stop_timed_out(tmp_path):
+    gate = threading.Event()
+    entered = threading.Event()
+    blocking = [False]
+    r = Readers(gpu=[10.0], cpu=[0.0])
+
+    def gpu():
+        if blocking[0]:
+            entered.set()
+            gate.wait(5)
+        return r.read_gpu()
+
+    s = power.PowerSampler(
+        lambda: settings(),
+        activity=r.read_activity,
+        gpu=gpu,
+        cpu=r.read_cpu,
+        data_dir=tmp_path,
+        interval=0.01,
+        platform="win32",
+    )
+    s.start()
+    deadline = time.monotonic() + 5
+    while s.ticks < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    blocking[0] = True
+    assert entered.wait(5)
+    assert s.stop(timeout=0.05) is False  # the thread is still inside a tick
+    assert rows(tmp_path / "power.db") == []
+    gate.set()
+    thread = s._thread
+    thread.join(5)
+    assert not thread.is_alive()
+    assert len(rows(tmp_path / "power.db")) >= 1  # the late exit still wrote
+    assert s.stop(timeout=1) is True
 
 
 def test_default_cpu_reader_uses_psutil_without_blocking(monkeypatch):

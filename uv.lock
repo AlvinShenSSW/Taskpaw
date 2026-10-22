@@ -1140,7 +1140,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'v3'", specifier = ">=0.110,<1.0" },
     { name = "pillow", marker = "python_full_version >= '3.11' and extra == 'tray'", specifier = ">=13.0.0,<14.0.0" },
     { name = "pillow", marker = "python_full_version < '3.11' and extra == 'tray'", specifier = ">=12.3.0,<13.0.0" },
-    { name = "psutil", specifier = ">=5.9.0,<6.0.0" },
+    { name = "psutil", specifier = ">=5.9.6,<6.0.0" },
     { name = "pydantic", marker = "extra == 'v3'", specifier = ">=2.5,<3.0" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.0.0,<7.0.0" },
     { name = "pystray", marker = "extra == 'tray'", specifier = ">=0.19.0,<1.0.0" },
