@@ -13,8 +13,10 @@ import json
 import socket
 import threading
 import time
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -512,23 +514,33 @@ def test_stop_cancels_queued_peers_and_returns_within_its_budget():
     def slow(url, token):
         with lock:
             started.append(time.monotonic())
-        gate.wait(1.0)  # a peer that answers late
+        gate.wait(10.0)  # a peer that answers when the test lets it
         raise PeerError("unreachable")
 
     peers = [SimpleNamespace(name=f"m{i}", address=f"10.0.0.{i + 1}") for i in range(8)]
     f = PowerFleet(lambda: peers, lambda: TOKEN, fetch=slow, interval=0.05)
     f.start()
+    result: list[bool] = []
+    stopping = threading.Thread(target=lambda: result.append(f.stop(5)))
     try:
         assert wait_until(lambda: len(started) >= 4)  # every worker is busy
+        # Deterministic: the four busy workers are released only once stop()
+        # has begun, so each then finds the other four peers queued and must
+        # start none of them (no wall-clock race with the gate).
         stopped = time.monotonic()
-        assert f.stop(5) is True
+        stopping.start()
+        assert wait_until(f._stop.is_set)
+        gate.set()
+        stopping.join(5)
+        assert result == [True]
         assert time.monotonic() - stopped < 3.0
-        assert all(at < stopped for at in started)  # nothing started after stop
-        count = len(started)
+        assert len(started) == 4  # the queued peers never started
         time.sleep(0.2)
-        assert len(started) == count
+        assert len(started) == 4
     finally:
         gate.set()
+        stopping.join(5)
+    count = len(started)
     f.refresh_once()  # after stop: a no-op, never an error
     assert len(started) == count
 
@@ -987,6 +999,97 @@ def test_a_trickling_peer_cannot_outlive_the_request_deadline(trickle, body):
         fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=0.05)
     assert time.monotonic() - started < 0.4
     assert caught.value.code == "timeout"
+
+
+class SilentPeer:
+    """Accepts, then says nothing: the first byte never comes."""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.conns: list[socket.socket] = []
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while True:
+            try:
+                self.conns.append(self.sock.accept()[0])
+            except OSError:
+                return
+
+    def close(self):
+        self.sock.close()
+        for conn in self.conns:
+            conn.close()
+
+
+class _NeverFires:
+    """A `threading.Timer` that never fires: the watch loses the race against
+    the socket's own timeout, the ordering macOS produces."""
+
+    def __init__(self, interval, function, *a, **kw):
+        self.daemon = False
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        pass
+
+
+def test_the_socket_timeout_winning_the_race_is_still_a_timeout(monkeypatch):
+    # The watch's timer and the socket's recv timeout share one duration; with
+    # the timer losing, the recv timeout surfaces as a URLError / OSError after
+    # the connection was made. That is a timeout, not an unreachable peer.
+    peer_ = SilentPeer()
+    monkeypatch.setattr(power_fleet, "_Timer", _NeverFires)
+    try:
+        started = time.monotonic()
+        with pytest.raises(PeerError) as caught:
+            fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=0.05)
+        assert time.monotonic() - started < 1.0
+        assert caught.value.code == "timeout"
+    finally:
+        peer_.close()
+
+
+@pytest.mark.parametrize("raised", [TimeoutError("timed out"), OSError("reset")])
+def test_a_failure_after_connect_at_the_deadline_is_a_timeout(monkeypatch, raised):
+    # Same ordering with a fake connection: connected, no timer, the failure
+    # surfaces at (or past) the attempt deadline, wrapped as urllib wraps it.
+    watch_box: list[Any] = []
+    real_watch = power_fleet._Watch
+
+    def make_watch():
+        watch_box.append(real_watch())
+        return watch_box[0]
+
+    class Opener:
+        def open(self, request, timeout):
+            watch_box[0].track(object())  # the connect succeeded
+            time.sleep(timeout)  # the attempt's deadline passes
+            raise urllib.error.URLError(raised)
+
+    monkeypatch.setattr(power_fleet, "_Watch", make_watch)
+    monkeypatch.setattr(power_fleet, "_Timer", _NeverFires)
+    with pytest.raises(PeerError) as caught:
+        fetch_json("http://127.0.0.1:9/status", TOKEN, timeout=0.05, opener=Opener())
+    assert caught.value.code == "timeout"
+
+
+def test_a_refused_connect_is_still_unreachable(monkeypatch):
+    # No connection was ever made, so the deadline does not turn it into a timeout.
+    class Opener:
+        def open(self, request, timeout):
+            time.sleep(timeout)  # even when the refusal arrives late
+            raise urllib.error.URLError(ConnectionRefusedError("refused"))
+
+    monkeypatch.setattr(power_fleet, "_Timer", _NeverFires)
+    with pytest.raises(PeerError) as caught:
+        fetch_json("http://127.0.0.1:9/status", TOKEN, timeout=0.05, opener=Opener())
+    assert caught.value.code == "unreachable"
 
 
 def test_stop_does_not_wait_on_a_trickling_peer_beyond_its_budget(trickle):

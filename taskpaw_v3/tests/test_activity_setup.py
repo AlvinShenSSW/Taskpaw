@@ -114,8 +114,12 @@ def put(home, tool, data):
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_install_idempotent_check_exact_uninstall(setup, existing, run):
+def test_install_idempotent_check_exact_uninstall(setup, existing, run, monkeypatch):
     s, home = setup
+    # Real interpreter starts here (many of them) can exceed the 5 s production
+    # budget on a loaded CI runner; the budget itself is exercised in
+    # test_activity_verifier.
+    monkeypatch.setattr(s, "WRITER_CHECK_TIMEOUT", 60)
     original = b'{"unrelated": 1, "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "do-not-run"}]}]}}'
     if existing:
         for tool in ("claude", "codex"):

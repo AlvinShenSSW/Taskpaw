@@ -149,6 +149,22 @@ class _Watch:
     def cut(self) -> bool:
         return self.fired and self.connected
 
+    def expired(self, exc: BaseException, deadline: float) -> bool:
+        """A failure after the connection was made is a timeout when the
+        watch cut it, the attempt's deadline has passed, or the socket's own
+        timeout raised it. The socket timeout and the watch's timer share one
+        duration, so which of them wins is the platform's scheduling (macOS
+        lets the recv timeout surface first): both are the same outcome. A
+        refused or reset connect never connected, so it stays unreachable."""
+        if self.cut:
+            return True
+        with self._lock:
+            connected = self.connected
+        if not connected:
+            return False
+        reason = getattr(exc, "reason", exc)
+        return isinstance(reason, TimeoutError) or time.monotonic() >= deadline
+
     @staticmethod
     def _kill(sock: Any) -> None:
         for action in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
@@ -178,6 +194,7 @@ def _build_opener(watch: Optional[_Watch] = None) -> urllib.request.OpenerDirect
 
 
 _getaddrinfo = socket.getaddrinfo  # replaced in tests
+_Timer = threading.Timer  # replaced in tests
 
 
 def resolve_host(host: str, port: int, timeout: float = TIMEOUT) -> list[str]:
@@ -281,7 +298,7 @@ def _get_json(
     left = max(0.05, deadline - time.monotonic())
     request = urllib.request.Request(url, headers=headers, method="GET")
     watch = _Watch()
-    timer = threading.Timer(left, watch.fire)
+    timer = _Timer(left, watch.fire)
     timer.daemon = True
     timer.start()
     try:
@@ -289,20 +306,24 @@ def _get_json(
             resp = (opener or _build_opener(watch)).open(request, timeout=left)
         except urllib.error.HTTPError as exc:
             exc.close()
-            if watch.cut:
+            if watch.expired(exc, deadline):
                 raise PeerError("timeout") from None
             if exc.code in (401, 403):
                 raise PeerError("unauthorized") from None
             if exc.code == 404:
                 raise PeerError("not_found") from None
             raise PeerError("http_error") from None
-        except (urllib.error.URLError, http.client.HTTPException, OSError):
-            raise PeerError("timeout" if watch.cut else "unreachable") from None
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+            raise PeerError(
+                "timeout" if watch.expired(exc, deadline) else "unreachable"
+            ) from None
         try:
             with resp:
                 body = _read_capped(resp, deadline)
-        except (http.client.HTTPException, OSError, ValueError):
-            raise PeerError("timeout" if watch.cut else "unreachable") from None
+        except (http.client.HTTPException, OSError, ValueError) as exc:
+            raise PeerError(
+                "timeout" if watch.expired(exc, deadline) else "unreachable"
+            ) from None
         if watch.cut:  # the socket was cut: what was read is not the answer
             raise PeerError("timeout")
     finally:
@@ -498,11 +519,14 @@ class PowerFleet:
         loop and the requests in flight joined. False when one outlived it."""
         deadline = time.monotonic() + timeout
         self._stop.set()
+        # queued requests are cancelled before anything else is joined, so a
+        # worker finishing meanwhile finds nothing queued (and every job
+        # re-checks `_stop` when it starts)
+        for pool in (self._statuses, self._histories):
+            pool.shutdown(wait=False, cancel_futures=True)
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(max(0.0, deadline - time.monotonic()))
-        for pool in (self._statuses, self._histories):
-            pool.shutdown(wait=False, cancel_futures=True)
         with self._lock:
             running = list(self._pending.values())
         _done, left = wait_futures(running, max(0.0, deadline - time.monotonic()))

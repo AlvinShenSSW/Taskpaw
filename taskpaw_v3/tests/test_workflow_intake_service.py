@@ -138,14 +138,17 @@ def test_actual_notification_thread_and_service_are_joined_before_stop_returns(
 ):
     h, adapter, config, obj, _ = service
     obj.start()
-    end = time.monotonic() + 5
+    # Wall-clock budgets sized for a loaded CI runner (a stop mid-scan waits on
+    # store fsyncs there); the proof is that stop() returns True only after the
+    # threads are joined, not how fast they get there.
+    end = time.monotonic() + 30
     while (
         not h.store.list_intakes(adapter, im.IntakeListQuery()).items
         and time.monotonic() < end
     ):
         time.sleep(0.02)
     assert h.store.list_intakes(adapter, im.IntakeListQuery()).items
-    assert obj.stop(timeout=5)
+    assert obj.stop(timeout=30)
     assert not obj.status().running and not obj.status().retained_unknown
     assert h.store.get_intake_root_scan(adapter, config.root_id).required
 
