@@ -1725,3 +1725,176 @@ def test_a_later_refusal_of_the_pending_identity_drops_it(tmp_path, rt, host, se
         assert (tmp_path / "worker" / IDENTITY_NAME).read_bytes() == kept
     finally:
         assert worker.stop()
+
+
+# ── Codex round 6 (CX14): stop only when every identity is refused ──────
+PENDING_CRED = "00000000-0000-4000-8000-0000000000fd"
+PENDING_WORKER = "00000000-0000-4000-8000-000000000004"
+SAVED_KINDS = ["valid", "401", "unreachable>valid"]
+PENDING_KINDS = ["none", "200", "401", "unreachable>200", "unreachable>401"]
+
+
+class Identities:
+    """A client factory: each credential answers as its kind says — valid
+    (200), refused (401), or unreachable until `up` is set, then one of
+    those. Records which credentials were refused and every attempt."""
+
+    def __init__(
+        self, kinds: dict[str, str], worker_ids: dict[str, str], default=""
+    ) -> None:
+        self.kinds, self.worker_ids, self.default = kinds, worker_ids, default
+        self.up = threading.Event()
+        self.refused: set[str] = set()
+        self.attempts: dict[str, int] = {}
+
+    def __call__(self, host, port, credential, **kw):
+        return _IdentityClient(self, credential[0])
+
+
+class _IdentityClient:
+    def __init__(self, owner: Identities, cid: str) -> None:
+        self.owner, self.cid = owner, cid
+
+    def _answer(self) -> None:
+        owner = self.owner
+        kind = owner.kinds.setdefault(self.cid, owner.default)
+        owner.attempts[self.cid] = owner.attempts.get(self.cid, 0) + 1
+        if kind.startswith("unreachable") and not owner.up.is_set():
+            raise ApiError(0, "unreachable")
+        if kind.endswith("401"):
+            owner.refused.add(self.cid)
+            raise ApiError(401, "unauthorized")
+
+    def self_view(self):
+        self._answer()
+        worker_id = self.owner.worker_ids.get(self.cid, PENDING_WORKER)
+        return {"worker": {"worker_id": worker_id}}
+
+    def pair(self, pairing_id, ticket, credential_id, secret):
+        for cid in list(self.owner.kinds):  # the device's old credential goes
+            if cid != self.cid:
+                self.owner.kinds[cid] = "401"
+        raise ApiError(0, "unreachable")  # and the reply is lost (R3)
+
+    def capabilities(self, body):
+        self._answer()
+        return {"revision": 1, "status": "applied"}
+
+    def boot(self, boot_id):
+        self._answer()
+        return {"status": "reconciled", "reconciled": True}
+
+    def heartbeat(self, beat):
+        self._answer()
+        return {"routes": [], "reconcile_needed": False}
+
+
+@pytest.mark.parametrize("pending_kind", PENDING_KINDS)
+@pytest.mark.parametrize("saved_kind", SAVED_KINDS)
+def test_a_worker_stops_only_when_every_identity_it_holds_is_refused(
+    tmp_path, saved_kind, pending_kind
+):
+    """CX14: a 401 refuses only the identity it was sent with; a transient
+    error refuses nothing; a usable identity is never blocked. The end state
+    after connectivity returns: online on the valid identity (a confirmed
+    pending one wins), else 「凭据已撤销，请重新加入」 — and no file is lost."""
+    saved_cred = "00000000-0000-4000-8000-000000000002"
+    kinds = {saved_cred: saved_kind}
+    worker_ids = {saved_cred: WORKER, PENDING_CRED: PENDING_WORKER}
+    data = tmp_path / "worker"
+    if pending_kind != "none":
+        kinds[PENDING_CRED] = pending_kind.replace("200", "valid")
+        data.mkdir()
+        WorkerIdentity(
+            controller_host="127.0.0.1",
+            controller_port=2,
+            pairing_id=PAIRING,
+            credential_id=PENDING_CRED,
+            secret=SecretStr("p" * 43),
+            staging_dir=str(tmp_path / "staging"),
+            ticket=SecretStr(TICKET),
+        ).save(data / PENDING_NAME)
+    fake = Identities(kinds, worker_ids)
+    worker = loop_worker(tmp_path, fake, pending_seconds=0.05)
+    saved_bytes = (data / IDENTITY_NAME).read_bytes()
+    early: list[str] = []
+    revoked = worker._revoked
+
+    def checked_revoked():  # the invariant, at the moment the loop gives up
+        held = set(kinds) - ({PENDING_CRED} if pending_kind == "none" else set())
+        if not held <= fake.refused:
+            early.append(f"stopped holding unrefused {held - fake.refused}")
+        revoked()
+
+    worker._revoked = checked_revoked  # type: ignore[method-assign]
+    worker.start()
+    try:
+        unreachable = [c for c, k in kinds.items() if k.startswith("unreachable")]
+        if pending_kind == "200":  # confirmed at start: the saved one is never used
+            unreachable = [c for c in unreachable if c != saved_cred]
+        if unreachable:
+            reachable = set(kinds) - set(unreachable)
+            until(
+                lambda: (
+                    all(fake.attempts.get(c, 0) >= 3 for c in unreachable)
+                    and all(fake.attempts.get(c, 0) >= 1 for c in reachable)
+                )
+            )
+            # an unrefused identity remains: the loop is still trying
+            assert worker._thread is not None and worker._thread.is_alive()
+            assert worker.state != "revoked"
+            fake.up.set()
+        if pending_kind.endswith("200"):
+            expected = (PENDING_CRED, PENDING_WORKER)
+        elif saved_kind != "401":
+            expected = (saved_cred, WORKER)
+        else:
+            expected = None
+        if expected is None:
+            until(lambda: worker.state == "revoked")
+            assert worker.reason == "凭据已撤销，请重新加入"
+            until(lambda: not worker._thread.is_alive())
+        else:
+            until(
+                lambda: (
+                    worker.state == "running"
+                    and worker.reason == "在线"
+                    and worker.worker_id == expected[1]
+                )
+            )
+        assert early == []
+        until(lambda: not (data / PENDING_NAME).exists())
+        loaded = WorkerIdentity.load(data / IDENTITY_NAME)
+        assert loaded is not None
+        if expected is not None and expected[0] == PENDING_CRED:
+            assert loaded.credential_id == PENDING_CRED
+            assert loaded.worker_id == PENDING_WORKER and loaded.ticket is None
+        else:
+            assert (data / IDENTITY_NAME).read_bytes() == saved_bytes
+    finally:
+        assert worker.stop()
+
+
+def test_a_re_join_whose_reply_was_lost_is_held_until_it_settles(tmp_path):
+    """CX14 in process: the pair landed (the old credential is revoked) but
+    its reply and `/self` were lost. The worker resumes the old identity,
+    whose 401 hands over to the held pending one instead of stopping."""
+    saved_cred = "00000000-0000-4000-8000-000000000002"
+    fake = Identities({saved_cred: "valid"}, {saved_cred: WORKER}, "unreachable>valid")
+    worker = loop_worker(tmp_path, fake, pending_seconds=0.05)
+    code = f"TP1:127.0.0.1:2:00000000-0000-4000-8000-000000000005:{TICKET}"
+    try:
+        worker.start()
+        until(lambda: worker.reason == "在线")
+        with pytest.raises(JoinError):
+            worker.join(code, str(tmp_path / "staging"))
+        until(lambda: saved_cred in fake.refused and worker.status()["pending"])
+        assert worker._thread is not None and worker._thread.is_alive()
+        assert worker.state != "revoked"
+        fake.up.set()
+        until(lambda: worker.reason == "在线" and worker.worker_id == PENDING_WORKER)
+        loaded = WorkerIdentity.load(tmp_path / "worker" / IDENTITY_NAME)
+        assert loaded is not None and loaded.worker_id == PENDING_WORKER
+        assert not (tmp_path / "worker" / PENDING_NAME).exists()
+    finally:
+        assert worker.stop()

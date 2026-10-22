@@ -12,8 +12,9 @@ It is re-run every 60 s for the tier and ASR readiness, and at every beat
 while the GPU cannot be read (CX4, IR8). The boot is re-posted with the same
 id until reconciled (R6, C6) while heartbeats run — every 5 s with a route,
 15 s idle, backing off up to 30 s while the controller is unreachable (R7, R8,
-IR6). An ordinary error is shown, backed off and retried; only a revoked
-credential or `stop()` ends the loop (IR8). P2-2 runs no stage, claims nothing.
+IR6). An ordinary error is shown, backed off and retried; only `stop()`, or
+a refusal of every identity the worker holds, ends the loop (IR8, CX14).
+P2-2 runs no stage, claims nothing.
 
 The identity file holds the secret like the local identity file (home LAN,
 single user, P0); it is written atomically and never logged, and `repr`
@@ -52,6 +53,8 @@ log = logging.getLogger("taskpaw.workflow.remote_worker")
 IDENTITY_NAME = "worker-identity.json"
 PENDING_NAME = "worker-identity.pending.json"  # IR7: a pairing not yet confirmed
 UNSAVED_REASON = "身份文件未保存，重试中"
+REVOKED_REASON = "凭据已撤销，请重新加入"
+REFUSED = frozenset({401, 403})  # CX14: this credential is no longer accepted
 PENDING_REASON = "新的配对待确认"  # CX13: a pending pairing not yet settled
 ACTIVE_SECONDS = 5.0  # with an open route (R7)
 IDLE_SECONDS = 15.0
@@ -64,6 +67,10 @@ _TICKET = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 
 class JoinError(ValueError):
     """加入 refused; the message is UI text and never echoes the code."""
+
+
+class _Switch(Exception):
+    """CX13: a pending identity was confirmed mid-session; run on it."""
 
 
 @dataclass(frozen=True, repr=False)
@@ -325,7 +332,8 @@ class WorkerHost:
         self.state, self.reason = "unjoined", "尚未加入媒体工作流"
         self.identity: WorkerIdentity | None = None
         self._unsaved = False  # a paired identity not yet in the identity file
-        self._pending_check: WorkerIdentity | None = None  # found at start()
+        self._pending_check: WorkerIdentity | None = None  # not yet settled
+        self._refused: set[str] = set()  # CX14: credential ids refused 401/403
         self.worker_id: str | None = None
         self.routes: list[dict[str, Any]] = []
         self.paused = False
@@ -456,12 +464,13 @@ class WorkerHost:
             try:
                 worker_id = self._recover(client, exc)
             except JoinError:
-                self._resume(old)
+                self._resume(old, identity)
                 raise
         identity.worker_id, identity.ticket = worker_id, None
         # the old credential is gone on the controller: from here the worker
         # runs on this identity even if the file cannot be written yet
         self._pending_check = None
+        self._refused.discard(identity.credential_id)  # CX14: accepted again
         self.identity, self.worker_id = identity, worker_id
         self._unsaved = True
         self.reconciled = False
@@ -489,11 +498,14 @@ class WorkerHost:
         self._unsaved = False
         return True
 
-    def _resume(self, old: WorkerIdentity | None) -> None:
-        """IR7: a failed re-join leaves the working identity running."""
+    def _resume(self, old: WorkerIdentity | None, pending: WorkerIdentity) -> None:
+        """IR7: a failed re-join leaves the working identity running. CX14:
+        the pair may still have landed (a lost reply), so its identity is held
+        as pending and settled by the loop like one found at start."""
         if old is None or not old.worker_id:
             return
         self.identity, self.worker_id = old, old.worker_id
+        self._pending_check, self._pending_due = pending, 0.0
         if self._closed:  # CX10
             self.state, self.reason = "stopped", "已停止"
             return
@@ -517,44 +529,80 @@ class WorkerHost:
     def _wait(self, seconds: float) -> bool:
         return self._stop.wait(seconds)
 
+    def _pause(self, seconds: float) -> bool:
+        """A wait inside a session. CX13/CX14: an unsettled pending identity
+        is checked whenever due, so neither a healthy nor an unreachable saved
+        identity ever holds it back; a confirmation raises `_Switch`."""
+        pending = self._pending_check
+        if pending is not None and time.monotonic() >= self._pending_due:
+            self._pending_due = time.monotonic() + self.pending_seconds
+            if self._check_pending(pending) == "promoted":
+                raise _Switch
+        return self._wait(seconds)
+
     def _retry(self, call: Callable[[], Any]) -> Any:
-        """Transient failures back off up to 30 s; a 401 ends the loop."""
+        """Transient failures back off up to 30 s; any other error, a refusal
+        included, goes to the loop."""
         attempt = 0
         while not self._stop.is_set():
             try:
                 return call()
             except ApiError as exc:
-                if exc.status == 401:
-                    self._revoked()
-                    return None
                 if not exc.transient:
                     raise
                 self.reason = "无法连接主控，正在重试"
                 delay = exc.retry_after or backoff(attempt, base=self.backoff_base)
                 attempt += 1
-                if self._wait(delay):
+                if self._pause(delay):
                     return None
         return None
 
     def _revoked(self) -> None:
-        self.state, self.reason = "revoked", "凭据已失效，请重新加入"
+        self.state, self.reason = "revoked", REVOKED_REASON
         self._stop.set()
 
+    def _usable(self, identity: WorkerIdentity | None) -> bool:
+        return identity is not None and identity.credential_id not in self._refused
+
     def _run(self) -> None:
-        """IR8: only `stop()` or a revoked credential ends the loop; any other
-        error is shown, logged, backed off and the session starts again."""
-        self._settle_pending()
-        if self.identity is None or self._stop.is_set():
-            return
-        client = self._client()
+        """IR8, CX14 — one rule. A 401/403 refuses only the identity it was
+        sent with and a transient error refuses none; the loop ends for good
+        only when every identity the worker holds is refused, or on `stop()`.
+        Until then it retries with backoff: a usable saved identity runs while
+        a pending one waits (CX13), a refused one hands over to the pending
+        one, and a confirmed pending one is promoted and run. Any other error
+        is shown, logged, backed off and the session starts again."""
         failures = 0
         while not self._stop.is_set():
+            current, pending = self.identity, self._pending_check
+            usable = self._usable(current)
             try:
-                if not self._session(client):
+                if pending is not None and (
+                    not usable or time.monotonic() >= self._pending_due
+                ):
+                    self._pending_due = time.monotonic() + self.pending_seconds
+                    if self._check_pending(pending) != "unsettled":
+                        continue  # promoted or dropped: choose again
+                    if not usable:
+                        self.state = "connecting"
+                        self.reason = "无法连接主控，正在重试"
+                        failures += 1
+                        if self._wait(backoff(failures - 1, base=self.backoff_base)):
+                            return
+                        continue
+                if current is None or not usable:
+                    self._revoked()  # every identity it held was refused
                     return
-                client, failures = self._client(), 0  # CX13: a pending pairing won
+                self._session(self._client())
+                failures = 0
+                continue
+            except _Switch:  # CX13: a pending pairing was confirmed
+                failures = 0
                 continue
             except ApiError as exc:
+                if exc.status in REFUSED and current is not None:
+                    self._refused.add(current.credential_id)
+                    continue
                 reason = f"主控拒绝了请求（{exc.code}），正在重试"
             except (StagingError, OSError):
                 reason = "暂存目录不可用，正在重试"
@@ -567,28 +615,9 @@ class WorkerHost:
             if self._wait(backoff(failures - 1, base=self.backoff_base)):
                 return
 
-    def _settle_pending(self) -> None:
-        """A pending identity found at start (a pair whose save failed, a lost
-        reply, or a re-join to a controller that was unreachable). One bounded
-        check: 200 promotes it, 401 drops it. Unreachable (or any other
-        answer) starts the saved identity at once and the session checks again
-        (CX13); with no saved identity it retries with backoff."""
-        pending = self._pending_check
-        if pending is None:
-            return
-        attempt = 0
-        while self._check_pending(pending) == "unsettled":
-            if self.identity is not None:
-                self._pending_due = time.monotonic() + self.pending_seconds
-                return
-            self.reason = "无法连接主控，正在重试"
-            attempt += 1
-            if self._wait(backoff(attempt - 1, base=self.backoff_base)):
-                return
-
     def _check_pending(self, pending: WorkerIdentity) -> str:
-        """One `/self` with the pending credential: "promoted", "dropped" or
-        "unsettled" (unreachable or any other answer; it stays pending)."""
+        """One bounded `/self` with the pending credential: "promoted" (200),
+        "dropped" (refused) or "unsettled" (any other answer; it stays)."""
         client = self._client_factory(
             pending.controller_host,
             pending.controller_port,
@@ -598,7 +627,7 @@ class WorkerHost:
         try:
             me = client.self_view()
         except ApiError as exc:
-            if exc.status != 401:
+            if exc.status not in REFUSED:
                 return "unsettled"
             self._pending_check = None
             self._drop_pending(pending)
@@ -620,24 +649,22 @@ class WorkerHost:
         except OSError:
             log.warning("cannot remove a refused pending worker identity")
 
-    def _session(self, client: WorkerClient) -> bool:
-        """True when a pending pairing was confirmed: run again on it."""
+    def _session(self, client: WorkerClient) -> None:
+        """Runs until `stop()`; a refusal or other error is raised to the loop,
+        a confirmed pending identity raises `_Switch`."""
         me = self._retry(client.self_view)
         if me is None:
-            return False
+            return
         self.worker_id = me["worker"]["worker_id"]
         staging = self.staging()
         self._refresh(client, staging, me["worker"])
         if self._boot_once(client) is None:
-            return False
+            return
         failures = 0
         while not self._stop.is_set():
             try:
                 reply = client.heartbeat(self._beat(staging))
             except ApiError as exc:
-                if exc.status == 401:
-                    self._revoked()
-                    return False
                 if exc.transient:
                     self.state, self.reason = "connecting", "无法连接主控，正在重试"
                 elif exc.status in (413, 422):  # IR15: say what was refused
@@ -646,31 +673,19 @@ class WorkerHost:
                 else:
                     raise
                 failures += 1
-                if self._wait(backoff(failures - 1, base=self.backoff_base)):
-                    return False
+                if self._pause(backoff(failures - 1, base=self.backoff_base)):
+                    return
                 continue
             failures = 0
             self._promote()
-            if self._recheck_pending():
-                return True
             self._apply(reply)
             if reply.get("reconcile_needed") or not self.reconciled:
                 if self._boot_once(client) is None:  # IR6: beats go on meanwhile
-                    return False
-            if self._wait(self.active if self.routes else self.idle):
-                return False
+                    return
+            if self._pause(self.active if self.routes else self.idle):
+                return
             if time.monotonic() >= self._probe_due:
                 self._refresh(client, staging)
-        return False
-
-    def _recheck_pending(self) -> bool:
-        """CX13: an unsettled pairing is checked again once due, in the beat
-        loop; True when it was confirmed and the worker must switch to it."""
-        pending = self._pending_check
-        if pending is None or time.monotonic() < self._pending_due:
-            return False
-        self._pending_due = time.monotonic() + self.pending_seconds
-        return self._check_pending(pending) == "promoted"
 
     def _refresh(
         self,
