@@ -162,7 +162,7 @@ export type DeviceProfile = {
   stage: "restore" | "asr" | "translate"; tool: string; tool_version: string; model: string; model_version: string;
   profile: string; max_width: number; max_height: number;
 };
-export type DeviceProbe = { gpu_model: string; vram_mib: number; free_disk_bytes: number; profiles: DeviceProfile[] };
+export type DeviceProbe = { gpu_model: string; vram_mib: number; free_disk_bytes: number; profiles: DeviceProfile[]; config_digest?: string | null };
 export type DeviceRow = {
   worker_id: string; version: number; name: string; address: string; port: number;
   enrollment_state: "pending_pairing" | "pending_validation" | "verified" | "retired";

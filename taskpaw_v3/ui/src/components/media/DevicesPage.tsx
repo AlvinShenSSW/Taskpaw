@@ -253,6 +253,10 @@ function ProbeRows({ probe, approved }: { probe: DeviceProbe; approved: DevicePr
       const old = approved?.profiles.find((o) => o.stage === p.stage);
       return [STAGE_LABEL[p.stage] ?? p.stage, profileKey(p), old ? profileKey(old) : approved ? "—" : null];
     }),
+    // CX9: a changed executor setting needs 核验 again; an older probe has no fingerprint
+    ...(probe.config_digest
+      ? [["配置", probe.config_digest.slice(0, 12), approved ? (approved.config_digest ?? "—").slice(0, 12) : null] as [string, string, string | null]]
+      : []),
   ];
   return (
     <table className="files-table probe-table">
@@ -263,7 +267,7 @@ function ProbeRows({ probe, approved }: { probe: DeviceProbe; approved: DevicePr
           return (
             <tr key={label} className={diff ? "changed" : undefined}>
               <th scope="row">{label}</th>
-              <td>{now}{diff && <Chip tone="amber">已变化</Chip>}</td>
+              <td>{now}{diff && <Chip tone="amber">{label === "配置" ? "配置变更" : "已变化"}</Chip>}</td>
               <td>{before ?? "首次核验"}</td>
             </tr>
           );

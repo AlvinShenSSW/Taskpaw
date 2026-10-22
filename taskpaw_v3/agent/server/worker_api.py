@@ -153,6 +153,7 @@ class ProbeBody(_Strict):
     free_disk_bytes: m.Count
     model_ready: bool
     profiles: list[m.ProfileCapability] = Field(default=[], max_length=16)
+    config_digest: m.Digest | None = None  # CX9
     approved: Any = None  # never accepted from a worker (403)
 
 

@@ -22,6 +22,7 @@ hides it (S-6).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -207,8 +208,10 @@ def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
         except ValueError:
             log.warning("worker ASR probe: invalid WhisperJAV settings")
     profiles = []
+    digests = []
     for executor in executors:
         tools = executor.tools()
+        digests.append(f"{tools.profile}:{tools.config_digest}")
         width, height = executor.max_resolution(gpu.vram_mib)
         profiles.append(
             ProfileCapability(
@@ -223,6 +226,7 @@ def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
                 max_height=height,
             ).model_dump(mode="json", exclude={"schema_version"})
         )
+    fingerprint = hashlib.sha256("|".join(sorted(digests)).encode()).hexdigest()
     body = {
         "source": "nvidia-smi",
         "cpu": "worker",
@@ -234,17 +238,20 @@ def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
         "free_disk_bytes": staging.free(),
         "model_ready": bool(profiles),
         "profiles": profiles,
+        "config_digest": fingerprint,  # CX9: a setting change needs 核验
     }
     return Probe(body, tiers, asr_ready)
 
 
 def probe_changed(probe: Mapping[str, Any], record: Mapping[str, Any]) -> bool:
-    """R4: identity, VRAM or the proposed profiles differ from the record."""
+    """R4: identity, VRAM, the proposed profiles or the executors' config
+    fingerprint differ from the record."""
     cap = record.get("capability") or {}
     old = cap.get("probed") or {}
     if not old:
         return True
-    keys = ("device_identity", "gpu_identity", "vram_mib")
+    # CX9: a stored probe without a fingerprint compares as changed (once)
+    keys = ("device_identity", "gpu_identity", "vram_mib", "config_digest")
 
     def profiles(value: Mapping[str, Any]) -> list[Any]:
         return [
@@ -299,6 +306,7 @@ class WorkerHost:
         self.probe_seconds = probe_seconds
         self._probe_due = 0.0  # monotonic; 0: probe at the next beat
         self._join_lock = threading.Lock()  # IR7: one join at a time
+        self._closed = False  # CX10: set by stop(); nothing spawns after it
         self._probe, self._gpu_live = probe, gpu_live
         self._client_factory = client_factory
         self.version = version or __version__
@@ -332,6 +340,8 @@ class WorkerHost:
         self._spawn()
 
     def _spawn(self) -> None:
+        if self._closed:  # CX10: shut down while a join was in flight
+            return
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run, name="workflow-worker", daemon=True
@@ -339,7 +349,19 @@ class WorkerHost:
         self._thread.start()
 
     def stop(self, timeout: float = 30.0) -> bool:
-        """S-7: stop and join the loop; False if it did not end in time."""
+        """S-7: stop for good and join the loop; False if it did not end in
+        time. An in-flight join is waited for (CX10): it can no longer spawn."""
+        self._closed = True
+        self._stop.set()
+        if not self._join_lock.acquire(timeout=timeout):
+            log.error("media workflow join did not return in time")
+            return False
+        try:
+            return self._halt(timeout)
+        finally:
+            self._join_lock.release()
+
+    def _halt(self, timeout: float) -> bool:
         self._stop.set()
         thread = self._thread
         if thread is not None:
@@ -376,7 +398,9 @@ class WorkerHost:
             return self._join(parsed, root)
 
     def _join(self, parsed: PairingCode, root: Path) -> dict[str, Any]:
-        if not self.stop():
+        if self._closed:
+            raise JoinError("工作流已停止")
+        if not self._halt(30.0):
             raise JoinError("工作流仍在停止，请稍后再试")
         old = self.identity or WorkerIdentity.load(self.identity_path)
         # the same code again after a lost reply reuses its unconfirmed
@@ -425,6 +449,8 @@ class WorkerHost:
         self.reconciled = False
         self.state, self.reason = "connecting", "正在连接主控"
         log.info("joined the media workflow as worker %s", worker_id)
+        if self._closed:  # CX10: the pairing stands; nothing starts after stop()
+            self.state, self.reason = "stopped", "已停止"
         self._spawn()
         return self.status()
 
@@ -433,6 +459,9 @@ class WorkerHost:
         if old is None or not old.worker_id:
             return
         self.identity, self.worker_id = old, old.worker_id
+        if self._closed:  # CX10
+            self.state, self.reason = "stopped", "已停止"
+            return
         self.state, self.reason = "connecting", "正在连接主控"
         self._spawn()
 

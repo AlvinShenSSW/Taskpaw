@@ -853,12 +853,17 @@ class HardwareProbe(HardwareDeclaration):
     # P2-2 (#293): a remote worker's proposed profiles (its executors' tools);
     # the operator approves a subset. Absent from older rows and local probes.
     profiles: tuple[ProfileCapability, ...] = ()
+    # P2-2 (#293, CX9): a fingerprint of the worker's executor settings; a
+    # change needs 核验 again. Absent from older rows and local probes.
+    config_digest: Digest | None = None
 
     @model_serializer(mode="wrap")
     def _historical_wire(self, handler: SerializerFunctionWrapHandler) -> dict:
         payload = handler(self)
         if not self.profiles:
             payload.pop("profiles", None)
+        if self.config_digest is None:
+            payload.pop("config_digest", None)
         return payload
 
 

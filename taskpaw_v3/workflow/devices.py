@@ -273,6 +273,7 @@ def _probe(probe: m.HardwareProbe | None) -> dict[str, Any] | None:
         "vram_mib": probe.vram_mib,
         "free_disk_bytes": probe.free_disk_bytes,
         "profiles": _profiles(probe.profiles),
+        "config_digest": probe.config_digest,
     }
 
 

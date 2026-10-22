@@ -162,6 +162,17 @@ describe("设备 v1", () => {
     await waitFor(() => expect(calls.approve).toHaveBeenCalledWith("validate", 3, true, false));
   });
 
+  it("核验并启用 shows 配置变更 when only the config fingerprint differs", async () => {
+    const base = ROWS.find((r) => r.worker_id === "validate")!;
+    mockApi({ ...VIEW, workers: [{ ...base, probe: { ...base.probe!, profiles: base.approved!.probe!.profiles, config_digest: "b".repeat(64) },
+      approved: { ...base.approved!, probe: { ...base.approved!.probe!, config_digest: null } } }] });
+    await openDevices();
+    fireEvent.click(within(card("5060 Ti-2")).getByRole("button", { name: "核验并启用" }));
+    const dialog = await screen.findByRole("dialog", { name: "核验并启用 · 5060 Ti-2" });
+    expect(within(dialog).getAllByText("配置变更")).toHaveLength(1);
+    expect(within(dialog).queryByText("已变化")).toBeNull();
+  });
+
   it("disables 修复 under 16 GB with the reason", async () => {
     const calls = mockApi();
     await openDevices();

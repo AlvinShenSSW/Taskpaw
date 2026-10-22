@@ -1285,3 +1285,161 @@ def test_a_missing_gpu_reading_withdraws_readiness(tmp_path, rt, host, server):
         until(lambda: row(rt, host, issued["worker_id"])["eligible"])
     finally:
         assert worker.stop()
+
+
+# ── Codex round 3 (CX9, CX10) ───────────────────────────────────────────
+def test_the_config_fingerprint_is_part_of_the_probe_comparison():
+    """CX9: a changed executor setting needs 核验; a stored probe without a
+    fingerprint compares as changed once."""
+    body = probe("w", config_digest="a" * 64)
+    record = {"capability": {"probed": {**body, "revision": 1}}}
+    assert not probe_changed(body, record)
+    assert probe_changed(dict(body, config_digest="b" * 64), record)
+    old = {"capability": {"probed": {**probe("w"), "revision": 1}}}
+    assert probe_changed(body, old)
+
+
+def test_a_stored_probe_without_a_fingerprint_is_reposted_once(tmp_path):
+    """CX9: after an upgrade the worker posts once, then stays quiet."""
+    fake = FakeController()
+    fake.record = {
+        "worker_id": WORKER,
+        "capability": {"probed": {**probe("fake"), "revision": 1}},
+    }
+    digest = ["a" * 64]
+
+    def run(settings, staging):
+        return Probe(probe("fake", config_digest=digest[0]), ("standard",), True)
+
+    worker = loop_worker(tmp_path, fake, probe=run, probe_seconds=0.05)
+    try:
+        worker.start()
+        until(lambda: fake.calls.count("capabilities") == 1)
+        time.sleep(0.4)  # several probe rounds
+        assert fake.calls.count("capabilities") == 1
+        digest[0] = "b" * 64
+        until(lambda: fake.calls.count("capabilities") == 2)
+    finally:
+        assert worker.stop()
+
+
+def test_the_default_probe_fingerprints_the_executor_settings(tmp_path, monkeypatch):
+    """CX9: another WhisperJAV path is another fingerprint."""
+    from types import SimpleNamespace
+
+    from taskpaw_v3.workflow import local_gpu
+    from taskpaw_v3.workflow.remote_worker import default_probe
+
+    gpu = SimpleNamespace(name="GPU", vram_mib=16311, uuid="gpu-x")
+    monkeypatch.setattr(local_gpu, "query_gpu", lambda: gpu)
+    monkeypatch.setattr(local_gpu, "machine_identity", lambda: "device-x")
+    staging = SimpleNamespace(free=lambda: 10**12)
+
+    def digest(exe):
+        settings = WorkflowSettings(
+            enabled=True, role="worker", whisperjav_exe_path=str(tmp_path / exe)
+        )
+        return default_probe(settings, staging).body["config_digest"]
+
+    first = digest("a.exe")
+    assert len(first) == 64 and digest("a.exe") == first
+    assert digest("b.exe") != first
+
+
+def test_the_approve_dialog_data_carries_the_fingerprints(tmp_path, rt, host, server):
+    """CX9: 设备 hands the dialog the probe's and the approved probe's digest."""
+    issued = code_for(rt, server)
+    first = worker_host(
+        tmp_path,
+        probe=lambda s, g: Probe(probe("fake", config_digest="a" * 64), (), True),
+    )
+    first.join(issued["code"], str(tmp_path / "staging"))
+    until(lambda: first.state == "running")
+    shown = row(rt, host, issued["worker_id"])
+    assert shown["probe"]["config_digest"] == "a" * 64
+    devices.approve(rt, issued["worker_id"], shown["version"], restore=True, asr=True)
+    assert first.stop()
+    second = worker_host(
+        tmp_path,
+        probe=lambda s, g: Probe(probe("fake", config_digest="b" * 64), (), True),
+    )
+    try:
+        second.start()
+        until(
+            lambda: (
+                row(rt, host, issued["worker_id"])["enrollment_state"]
+                == "pending_validation"
+            )
+        )
+        shown = row(rt, host, issued["worker_id"])
+        assert shown["probe"]["config_digest"] == "b" * 64
+        assert shown["approved"]["probe"]["config_digest"] == "a" * 64
+    finally:
+        assert second.stop()
+
+
+@pytest.mark.parametrize("expires", [False, True], ids=["paired", "refused"])
+def test_a_shutdown_during_a_join_leaves_no_worker_running(
+    tmp_path, rt, host, server, clock, expires
+):
+    """CX10: stop() while /pair is in flight; the join then completes (or is
+    refused and resumes the old identity). No heartbeat thread starts after
+    shutdown and the identity files stay consistent."""
+    issued = code_for(rt, server)
+    entered, release = threading.Event(), threading.Event()
+    block = threading.Event()
+
+    class Slow(WorkerClient):
+        def pair(self, *args, **kw):
+            if block.is_set():
+                entered.set()
+                assert release.wait(10)
+            return super().pair(*args, **kw)
+
+    worker = worker_host(tmp_path, client_factory=Slow)
+    code = issued["code"]
+    if expires:  # a working identity first, then a re-join with an expired code
+        worker.join(code, str(tmp_path / "staging"))
+        until(lambda: worker.state == "running")
+        code = devices.repair(
+            rt,
+            issued["worker_id"],
+            row(rt, host, issued["worker_id"])["version"],
+            host="127.0.0.1",
+            port=server.port,
+        )["code"]
+        clock.advance(timedelta(minutes=16))
+    block.set()
+    outcome: list[object] = []
+
+    def joiner():
+        try:
+            outcome.append(worker.join(code, str(tmp_path / "staging")))
+        except Exception as exc:  # noqa: BLE001 - recorded for the assertions
+            outcome.append(exc)
+
+    thread = threading.Thread(target=joiner)
+    thread.start()
+    assert entered.wait(10)
+    stopped: list[bool] = []
+    stopper = threading.Thread(target=lambda: stopped.append(worker.stop(10)))
+    stopper.start()
+    time.sleep(0.2)
+    assert stopper.is_alive()  # waits for the in-flight join
+    release.set()
+    thread.join(10)
+    stopper.join(10)
+    assert not thread.is_alive() and not stopper.is_alive()
+    assert stopped == [True]
+    assert not any(
+        t.name == "workflow-worker" and t.is_alive() for t in threading.enumerate()
+    )
+    assert worker._stop.is_set() and worker.state == "stopped"
+    identity = tmp_path / "worker" / IDENTITY_NAME
+    assert identity.exists()  # the pairing stands, or the old identity stayed
+    assert (WorkerIdentity.load(identity) or pytest.fail()).worker_id == (
+        issued["worker_id"]
+    )
+    assert not (tmp_path / "worker" / PENDING_NAME).exists() or expires
+    with pytest.raises(JoinError):  # closed for good
+        worker.join(code, str(tmp_path / "staging"))
