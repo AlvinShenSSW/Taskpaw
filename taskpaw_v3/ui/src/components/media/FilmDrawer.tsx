@@ -7,11 +7,12 @@ import { useTranslation } from "react-i18next";
 import { api, type FilmDetail, type PlanEntry } from "../../api";
 import { LtxDownload } from "../LtxDownload";
 import {
-  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, packageNote, REVIEW_STATES, restoreStep,
-  machineLabel, STATUS_META, stageName, tierLong, type WorkItem,
+  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
+  machineLabel, STATUS_META, stageName, stepDurations, tierLong, type WorkItem,
 } from "./mediaModel";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
 import { RestoreLivePanel } from "./RestoreLivePanel";
+import { TimingBlock } from "./TimingParts";
 import { errorText, MEDIA_FILMS_KEY, mediaFilmKey, useIntakeReasons, useWorkspace } from "./workspace";
 
 const BACKDROP = { sx: { backgroundColor: "#030812BA", backdropFilter: "blur(4px)" } };
@@ -100,6 +101,7 @@ function DrawerBody({ film, item, status, plan }: {
   const restore = restoreStep(film);
   const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
   const download = restore?.download ?? null;
+  const timing = readFilmTiming(film.timing);
   const changed = film.cleanup.kept.some((k) => k.status === "blocked_changed" || k.status === "blocked_identity");
   const final = film.files.length > 0;
   const subtitle = film.marks.chinese_subtitles ? "字幕：已验证的非空中文字幕。"
@@ -134,7 +136,7 @@ function DrawerBody({ film, item, status, plan }: {
           <p>来源：主控收件目录 INBOX · 本机</p>
         </div>
       </div>
-      <div className="detail-steps"><StepLine steps={film.steps} title={title} /></div>
+      <div className="detail-steps"><StepLine steps={film.steps} title={title} durations={stepDurations(timing)} /></div>
       {running ? (
         <div>
           <RestoreLivePanel step={running} />
@@ -149,6 +151,7 @@ function DrawerBody({ film, item, status, plan }: {
             : [STATUS_META[status][0], item?.kind === "film" ? item.row.note : film.note].filter(Boolean).join("：")}
         </Notice>
       )}
+      <TimingBlock timing={timing} />
       <section className="panel final-panel spacer-top">
         <h3>{final ? "本次 Miko 最终成品" : "Miko 完整后处理"}</h3>
         <p className="small spacer-top">{subtitle}</p>

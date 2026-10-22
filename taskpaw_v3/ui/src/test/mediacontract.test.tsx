@@ -181,6 +181,68 @@ describe("contract: drawer", () => {
   });
 });
 
+describe("contract: 用时 (U1e)", () => {
+  const queueCard = (id: string) => document.querySelector<HTMLElement>(`[data-film="${id}"]`) as HTMLElement;
+  const cell = (root: HTMLElement, name: string) => root.querySelector<HTMLElement>(`[data-timing="${name}"]`)?.textContent;
+
+  it("the running restore: LTX 合计用时 so far beside the unchanged LtxProgress", async () => {
+    mockApi();
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看 movie 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    const card = await within(drawer).findByTestId("ltx-timing");
+    expect(within(drawer).getByTestId("ltx-progress")).toBeInTheDocument();
+    expect(card).toHaveTextContent("LTX 合计用时 0:12:12");
+    expect(card).toHaveTextContent("至今");
+    expect(cell(card, "scan")).toBe("scan · 扫描0:01:35");
+    expect(cell(card, "encode")).toBe("encode · 编码0:09:49");
+    expect(cell(card, "denoise")).toBe("denoise · 去噪0:00:00");
+    expect(cell(card, "compose")).toBe("compose · 合成0:00:00");
+    expect(cell(card, "speed_test")).toBe("测速0:00:48");
+    // nothing has finished yet: only the queue wait
+    const timing = within(drawer).getByTestId("film-timing");
+    expect(within(timing).getByText("排队等待")).toBeInTheDocument();
+    expect(within(timing).queryByText("修复→翻译合计")).toBeNull();
+  });
+
+  it("a finished film: 用时 per stage, the 修复 breakdown, the LTX stage times and 修复→翻译", async () => {
+    mockApi();
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    await waitFor(() => expect(queueCard(REVIEW)).toBeTruthy());
+    fireEvent.click(within(queueCard(REVIEW)).getByRole("button", { name: /详情/ }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    const block = await within(drawer).findByTestId("film-timing");
+    const rows = [...block.querySelectorAll("dl.facts > dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
+    expect(rows).toEqual([
+      ["修复", "1:30:20扫描马赛克 0:05:12 · BasicVSR++ 0:18:25 · LTX 0:49:11"],
+      ["识别", "0:10:10"], ["翻译", "0:20:30"], ["回传", "0:00:45"], ["整理", "0:01:35"],
+      ["修复→翻译合计", "2:03:00"],
+      ["排队等待", "0:30:00确认安排到开始修复，不计入合计"],
+    ]);
+    const ltx = within(block).getByTestId("ltx-timing");
+    expect(ltx).toHaveTextContent("LTX 合计用时 0:49:11");
+    expect(ltx).toHaveTextContent("2 段 LTX");
+    expect([...ltx.querySelectorAll("[data-timing]")].map((el) => el.getAttribute("data-timing")))
+      .toEqual(["scan", "encode", "denoise", "compose", "speed_test"]);  // Jasna's order, not the stored one
+    expect(cell(ltx, "denoise")).toBe("denoise · 去噪0:25:44");
+    // the step line: each finished step's time under its label
+    const line = within(drawer).getByRole("list", { name: /生命周期/ });
+    expect(line.querySelector('[data-step="restore"] .step-time')).toHaveTextContent("1:30:20");
+    expect(line.querySelector('[data-step="plan"] .step-time')).toBeNull();
+  });
+
+  it("queue cards: 全程 once translate finished, and step times under the labels", async () => {
+    mockApi();
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    await waitFor(() => expect(queueCard(REVIEW)).toBeTruthy());
+    expect(within(queueCard(REVIEW)).getByText(/全程 2:03/)).toBeInTheDocument();
+    expect(queueCard(REVIEW).querySelector('[data-step="translate"] .step-time')).toHaveTextContent("0:20:30");
+    expect(within(queueCard("film-restoring")).queryByText(/全程/)).toBeNull();
+  });
+});
+
 describe("contract: the cover lightbox (U1b)", () => {
   it("the review film's cover opens Miko's full fanart; a film without one shows its poster", async () => {
     const m = mockApi();

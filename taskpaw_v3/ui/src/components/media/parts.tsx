@@ -5,10 +5,10 @@ import CloseIcon from "@mui/icons-material/Close";
 import { CircularProgress, Dialog } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, type ReactNode, type SyntheticEvent } from "react";
-import { api, type WorkflowStep } from "../../api";
+import { api, type StepKey, type WorkflowStep } from "../../api";
 import {
-  currentStep, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL, STATUS_META,
-  STEP_LABEL,
+  currentStep, fmtDuration, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL,
+  STATUS_META, STEP_LABEL,
   stageLine, type ChipTone, type RestoreLive, type StatusKey, type WorkItem,
 } from "./mediaModel";
 import { useNow } from "./useNow";
@@ -263,10 +263,20 @@ export function StageBlock({ item }: { item: WorkItem }) {
   );
 }
 
-// The lifecycle step line (operator decision 4; U1 V3 adds 待处理).
-export function StepLine({ steps, title }: { steps?: WorkflowStep[] | null; title: string }) {
+// The lifecycle step line (operator decision 4; U1 V3 adds 待处理). U1e: a finished step with a
+// time shows it under its label, small and muted.
+export function StepLine({ steps, title, durations }: {
+  steps?: WorkflowStep[] | null; title: string; durations?: Partial<Record<StepKey, number>>;
+}) {
   const line = lifecycle(steps);
   const cur = currentStep(line);
+  const label = (key: StepKey, done: boolean) => {
+    const seconds = done ? durations?.[key] : undefined;
+    if (seconds === undefined) return STEP_LABEL[key];
+    return (
+      <span className="step-label">{STEP_LABEL[key]}<span className="step-time" aria-label={`用时 ${fmtDuration(seconds)}`}>{fmtDuration(seconds)}</span></span>
+    );
+  };
   return (
     <ol className="step-line" aria-label={`${title} 生命周期`}>
       {line.map((s, i) => {
@@ -279,7 +289,7 @@ export function StepLine({ steps, title }: { steps?: WorkflowStep[] | null; titl
           );
         }
         return s.state === "done"
-          ? <li key={s.key} className="done" data-step={s.key}>{STEP_LABEL[s.key]}<span className="sr-only">（已完成）</span></li>
+          ? <li key={s.key} className="done" data-step={s.key}>{label(s.key, true)}<span className="sr-only">（已完成）</span></li>
           : <li key={s.key} data-step={s.key}>{STEP_LABEL[s.key]}</li>;
       })}
     </ol>

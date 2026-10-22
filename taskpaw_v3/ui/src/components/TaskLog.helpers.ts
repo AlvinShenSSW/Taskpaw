@@ -44,11 +44,21 @@ const FIELDS = [
   "kept_ja", "paused", "reason", "detail", "step", "elapsed", "reconstructed", "holder", "index", "total",
   "mode", "profile", "output", "exit_code", "tail", "at_stop", "engine", "model", "lines", "resumed", "from", "to",
   "kind", "count", "minutes", "by_model", "srt", "no_speech", "level", "title", "message", "since_cap",
+  // U1e: the 媒体处理中心's stage rows and a film's 修复→翻译 summary (seconds, shown as clocks)
+  "stage", "run", "restore", "ltx", "asr", "translate",
 ] as const;
 const COUNTS = new Set(["queued", "done", "failed", "skipped", "kept_ja", "paused", "lines", "resumed", "count"]);
+const CLOCKS = new Set(["run", "restore", "ltx", "asr", "translate"]);
+
+// 「1:35:30」: a film's stage time in the summary sentence.
+function clockText(value: number): string {
+  const total = Math.max(0, Math.round(value));
+  return `${Math.floor(total / 3600)}:${String(Math.floor(total % 3600 / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
 
 function valueText(key: string, value: unknown, t: TFunction): string {
   if (typeof value === "number" && Number.isFinite(value)) {
+    if (CLOCKS.has(key)) return clockText(value);
     if (key === "duration" || key === "elapsed") {
       const seconds = Math.max(0, Math.round(value));
       const hours = Math.floor(seconds / 3600);
@@ -66,7 +76,7 @@ function valueText(key: string, value: unknown, t: TFunction): string {
   // operator.update contains field names, never config values.
   if (key === "fields" && Array.isArray(value)) return value.map(logSafeText).filter(Boolean).join(", ");
   const text = logSafeText(value);
-  if (["step", "previous_exit"].includes(key) && text) return t(`logs.values.${text}`, { defaultValue: text });
+  if (["step", "previous_exit", "stage"].includes(key) && text) return t(`logs.values.${text}`, { defaultValue: text });
   if (["reason", "detail", "kind"].includes(key) && text) return t(`logs.reasons.${text}`, { defaultValue: text });
   return text;
 }
@@ -89,6 +99,8 @@ export function renderLogSentence(entry: LogEntry, t: TFunction): string {
   for (const key of FIELDS) values[key] = valueText(key, data[key], t) || (COUNTS.has(key) ? "0" : t("logs.unknown"));
   values.model = data.model == null ? t("logs.noModel") : valueText("model", data.model, t);
   values.detail = valueText("detail", data.detail ?? data.reason, t) || t("logs.unknown");
+  for (const key of CLOCKS) values[key] = valueText(key, data[key], t) || "—";
+  values.film = logSafeText(entry.film) || t("logs.unknown");
   let kind = entry.kind.replaceAll(".", "_");
   if (entry.kind === "agent.started" && data.previous_exit === "unclean") kind = "agent_unclean";
   if (entry.kind === "task.interrupted" && data.reconstructed) kind = "task_inferred";
@@ -99,6 +111,7 @@ export function renderLogSentence(entry: LogEntry, t: TFunction): string {
   }
   if (entry.kind === "subs.published" && data.no_speech) kind = "subs_no_speech";
   if (entry.kind === "event.suppressed" && data.since_cap) kind = "event_capped";
+  if (entry.kind === "workflow.film.translated" && data.ltx == null) kind = "workflow_film_translated_noltx";
   const key = `logs.kinds.${kind}`;
   const sentence = t(key, { ...values, defaultValue: "" });
   return sentence || t("logs.kinds.unknown", {

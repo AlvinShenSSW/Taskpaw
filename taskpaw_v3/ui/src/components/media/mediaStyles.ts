@@ -172,6 +172,13 @@ export const MEDIA_CSS = `
 .mw .step-line li.done{color:#b9c8da}
 .mw .step-line li.current{color:var(--green-light);font-weight:600}
 .mw .step-line li.failed{color:var(--red);font-weight:600}
+.mw .step-line li{display:flex;align-items:flex-start}
+.mw .step-line .step-label{display:inline-flex;flex-direction:column;align-items:center}
+.mw .step-line .step-time{font-size:9px;line-height:1.3;color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums}
+.mw .timing-panel{padding:18px 20px}
+.mw .timing-panel h3{margin:0;font-size:14px}
+.mw .timing-sub{display:block;margin-top:2px}
+.mw .film-card .run-total{color:var(--text)}
 .mw .detail-steps{margin:-6px 0 22px;padding:12px 14px;border:1px solid #2d405a;border-radius:8px;background:#0c1729}
 
 /* toolbar, filters, inputs */

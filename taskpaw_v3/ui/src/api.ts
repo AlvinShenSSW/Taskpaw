@@ -220,6 +220,20 @@ export interface FilmRow {
   // U1b: the full landscape jacket the 大图 shows (`coverPath`); `cover_source` is its cache key
   has_cover: boolean; cover_source: string | null;
   resolution: Resolution | null; plan: FilmPlan | null; receipt_id: string | null; revisions: FilmRevisions;
+  // U1e: each finished stage's time, the restore breakdown and 修复→翻译
+  timing?: FilmTiming | null;
+}
+// U1e: the seconds Taskpaw saw each Jasna phase as the current one, over every LTX run and volume.
+// `ltx` is the four restore stages (`ltx_stages`, by name) plus the speed test.
+export interface RestoreTiming {
+  scan: number; basicvsr: number; ltx: number; speed_test: number;
+  ltx_stages: Record<string, number>; ltx_runs: number; wall: number;
+}
+// U1e: stage → seconds of its succeeded attempt; 修复→翻译 runs from the first of restore / asr /
+// translate to the translate end; the queue wait from the plan confirm to the restore start.
+export interface FilmTiming {
+  stages: Partial<Record<string, number>>; restore_breakdown: RestoreTiming | null;
+  total_restore_to_translate: number | null; queue_wait: number | null;
 }
 // H2 R5 lifecycle step line; U1 V3 adds 「待处理」 (`plan`) after 入库扫描.
 export type StepKey =
@@ -234,6 +248,8 @@ export interface WorkflowStep {
   key: StepKey; state: StepState; note: string | null; progress: unknown;
   ltx?: Record<string, unknown> | null; current_file?: string | null; download?: Record<string, unknown> | null;
   started_at?: string | null; console?: string | null; params?: RestoreParams | null;
+  // U1e: the running restore's phase times so far (the whole film)
+  timing?: RestoreTiming | null;
 }
 // U1c: the effective Jasna launch of the running video, read from its argv (paths cut to names).
 export interface RestoreParams {
@@ -281,6 +297,7 @@ export interface FilmDetail {
   archive: { status: string | null; error: string | null; target_path: string | null };
   cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
   resolution: Resolution | null; receipt_id: string | null; revisions: FilmRevisions; plan: FilmPlan | null;
+  timing?: FilmTiming | null;
   // null when Miko is not configured
   lookup: PlanLookup | null;
 }

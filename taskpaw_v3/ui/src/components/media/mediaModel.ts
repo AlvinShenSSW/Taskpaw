@@ -1,9 +1,10 @@
 // 媒体处理中心 V3: the status vocabulary (build spec §3) and how a backend row maps onto it.
 // Pure functions only; the components and tests share them.
 import type {
-  FilmRow, LtxTier, PackageRow, RestoreParams, StepKey, TargetPreflight, WorkflowFilms, WorkflowStep,
+  FilmRow, FilmTiming, LtxTier, PackageRow, RestoreParams, RestoreTiming, StepKey, TargetPreflight, WorkflowFilms,
+  WorkflowStep,
 } from "../../api";
-import { plainText, readLtxProgress, record, type LtxSnapshot } from "../ltxProgress.helpers";
+import { LTX_STAGES, plainText, readLtxProgress, record, type LtxSnapshot } from "../ltxProgress.helpers";
 import {
   readBasicProgress, readScanProgress, readSplitNote, type BasicSnapshot, type ScanSnapshot, type SplitNote,
 } from "../restorePhase.helpers";
@@ -118,6 +119,7 @@ export interface RestoreLive {
   ltx: LtxSnapshot | null;
   metrics: Record<string, unknown>; // the step's parse state, for the shared progress cards
   params: RestoreParams | null;
+  timing: RestoreTiming | null; // U1e: the film's phase times so far
 }
 
 export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null {
@@ -131,7 +133,82 @@ export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null 
   const started = typeof step.started_at === "string" ? Date.parse(step.started_at) : NaN;
   const phase: RestorePhase = ltx ? "ltx" : scan ? "scan" : basic ? "basic" : split ? "split" : console ? "working" : "starting";
   const params = readParams(step.params);
-  return { phase, startedAt: Number.isFinite(started) ? started : null, console, split, scan, basic, ltx, metrics, params };
+  return {
+    phase, startedAt: Number.isFinite(started) ? started : null, console, split, scan, basic, ltx, metrics, params,
+    timing: readRestoreTiming(step.timing),
+  };
+}
+
+// ── 用时 (U1e): how long a film took, read defensively ──────────────────
+const seconds = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+
+export function readRestoreTiming(value: unknown): RestoreTiming | null {
+  if (!record(value)) return null;
+  const stages: Record<string, number> = {};
+  if (record(value.ltx_stages)) {
+    for (const [name, v] of Object.entries(value.ltx_stages)) {
+      const s = seconds(v);
+      if (s !== null && name.length <= 32) stages[name] = s;
+    }
+  }
+  return {
+    scan: seconds(value.scan) ?? 0, basicvsr: seconds(value.basicvsr) ?? 0, ltx: seconds(value.ltx) ?? 0,
+    speed_test: seconds(value.speed_test) ?? 0, ltx_stages: stages, ltx_runs: int(value.ltx_runs) ?? 0,
+    wall: seconds(value.wall) ?? 0,
+  };
+}
+
+export function readFilmTiming(value: unknown): FilmTiming | null {
+  if (!record(value)) return null;
+  const stages: Record<string, number> = {};
+  if (record(value.stages)) {
+    for (const [key, v] of Object.entries(value.stages)) {
+      const s = seconds(v);
+      if (s !== null) stages[key] = s;
+    }
+  }
+  return {
+    stages, restore_breakdown: readRestoreTiming(value.restore_breakdown),
+    total_restore_to_translate: seconds(value.total_restore_to_translate), queue_wait: seconds(value.queue_wait),
+  };
+}
+
+// Whether a restore timing has any LTX time to show (a reused or BasicVSR-only film has none).
+export const hasLtxTime = (t: RestoreTiming | null): t is RestoreTiming => !!t && (t.ltx > 0 || t.ltx_runs > 0);
+
+export const LTX_STAGE_ZH: Record<(typeof LTX_STAGES)[number], string> = {
+  scan: "扫描", encode: "编码", denoise: "去噪", compose: "合成",
+};
+
+// The four LTX stages in Jasna's order (a stage that never ran reads 0), then any other name.
+export function ltxStageTimes(t: RestoreTiming): Array<[string, string, number]> {
+  const rows: Array<[string, string, number]> = LTX_STAGES.map((s) => [s, LTX_STAGE_ZH[s], t.ltx_stages[s] ?? 0]);
+  for (const [name, v] of Object.entries(t.ltx_stages)) {
+    if (!(LTX_STAGES as readonly string[]).includes(name)) rows.push([name, "", v]);
+  }
+  return rows;
+}
+
+// The 用时 block's stage rows, in lifecycle order: only stages that finished with a time.
+export const TIMING_STAGES: Array<[string, string]> = [
+  ["restore", "修复"], ["asr", "识别"], ["translate", "翻译"], ["return", "回传"], ["scrape", "整理"],
+];
+
+// The step line's duration under a finished step (U1e); the board's stage keys match the step keys.
+export function stepDurations(timing: FilmTiming | null | undefined): Partial<Record<StepKey, number>> {
+  const out: Partial<Record<StepKey, number>> = {};
+  for (const key of STEP_KEYS) {
+    const v = timing?.stages[key];
+    if (typeof v === "number") out[key] = v;
+  }
+  return out;
+}
+
+// 「1:05」: hours and minutes (the queue card's 全程).
+export function fmtHoursMinutes(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value < 0) return "—";
+  const minutes = Math.round(value / 60);
+  return `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
 // ── 本片参数 (U1c): the effective launch, read defensively ──────────────

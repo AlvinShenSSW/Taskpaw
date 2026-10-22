@@ -4,8 +4,8 @@ import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../../api";
 import {
-  fmtBytes, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, STAGE_OPTIONS, type StageFilter,
-  type WorkItem,
+  fmtBytes, fmtHoursMinutes, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, readFilmTiming,
+  STAGE_OPTIONS, stepDurations, type StageFilter, type WorkItem,
 } from "./mediaModel";
 import { Chip, EmptyState, Icon, ItemCover, PageTitle, StageBlock, StatusChip, StepLine } from "./parts";
 import { errorText, useWorkspace } from "./workspace";
@@ -64,6 +64,8 @@ function FilmCard({ item }: { item: WorkItem }) {
   const intake = item.kind === "package" && runner && runner.package_id === item.pkg.package_id && runner.total > 0 ? runner : null;
   const intakePercent = intake ? Math.min(100, Math.floor((intake.bytes_completed / intake.total) * 100)) : 0;
   const meta = [itemNumber(item), itemResolution(item)].filter(Boolean).join(" · ");
+  const timing = item.kind === "film" ? readFilmTiming(item.row.timing) : null;  // U1e
+  const run = timing?.total_restore_to_translate ?? null;
   return (
     <article className="panel film-card" data-film={item.id}>
       <div className="top">
@@ -85,9 +87,12 @@ function FilmCard({ item }: { item: WorkItem }) {
           </>
         )}
       </div>
-      <StepLine steps={item.kind === "film" ? item.row.steps : item.pkg.steps} title={title} />
+      <StepLine steps={item.kind === "film" ? item.row.steps : item.pkg.steps} title={title} durations={stepDurations(timing)} />
       <div className="card-foot">
-        <span>{item.kind === "package" ? "INBOX" : isRestoring(item.status) ? "本机" : "INBOX"}</span>
+        <span>
+          {item.kind === "package" ? "INBOX" : isRestoring(item.status) ? "本机" : "INBOX"}
+          {run !== null && <span className="mono run-total" title="修复开始到翻译结束"> · 全程 {fmtHoursMinutes(run)}</span>}
+        </span>
         {item.kind === "film" ? (
           <button type="button" className="btn ghost small" aria-label={`查看 ${title} 详情`} onClick={() => ws.openDetail(item.id)}>查看详情</button>
         ) : (

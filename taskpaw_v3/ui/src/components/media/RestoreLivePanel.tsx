@@ -1,6 +1,6 @@
 // U1c: the drawer's running 修复 step. A heartbeat (已用, ticking from the stage start, plus the
 // latest console line) above the phase's card: the mosaic scan, BasicVSR++, then the Jasna
-// monitor's own LtxProgress, unchanged.
+// monitor's own LtxProgress, unchanged. U1e: under it, 「LTX 合计用时」 so far.
 import { Box, Typography } from "@mui/material";
 import type { RestoreParams, WorkflowStep } from "../../api";
 import { LtxProgress } from "../LtxProgress";
@@ -8,6 +8,7 @@ import type { SplitNote } from "../restorePhase.helpers";
 import { ConsoleFold, DATA, ProgressFrame } from "../progressParts";
 import { BasicVsrProgress, MosaicScanProgress } from "../RestorePhaseProgress";
 import { heartbeatText, paramRows, presetText, restoreLive, SPLIT_LABEL, SPLIT_NOTE, type RestoreLive } from "./mediaModel";
+import { LtxTimingCard } from "./TimingParts";
 import { useNow } from "./useNow";
 
 function phaseLabel(live: RestoreLive): string {
@@ -78,6 +79,7 @@ export function RestoreLivePanel({ step }: { step: WorkflowStep }) {
       {live.phase === "ltx" && <LtxProgress metrics={live.metrics} />}
       {live.phase === "scan" && <MosaicScanProgress metrics={live.metrics} />}
       {live.phase === "basic" && <BasicVsrProgress metrics={live.metrics} />}
+      <LtxTimingCard timing={live.timing} live />
     </Box>
   );
 }
