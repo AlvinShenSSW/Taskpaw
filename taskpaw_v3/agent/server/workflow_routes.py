@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
@@ -87,6 +88,14 @@ class AdmissionBody(VersionBody):
     state: Literal["enabled", "draining"]
 
 
+class JoinBody(BaseModel):
+    """加入 on a worker: the controller's pairing code and the staging dir."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    code: str = Field(min_length=1, max_length=1024)
+    staging_dir: str = Field(min_length=1, max_length=1024)
+
+
 class LtxDownloadBody(BaseModel):
     """The 下载模型 answer to the offered request (H3 M1), as the monitor's."""
 
@@ -109,6 +118,7 @@ def register_workflow_routes(
     provider: WorkflowProvider | None,
     *,
     worker_api_host: str = "127.0.0.1",
+    worker_provider: Callable[[], Any] | None = None,
 ) -> None:
     @app.exception_handler(CodedConflict)
     async def _coded_conflict(_request: Any, exc: CodedConflict) -> JSONResponse:
@@ -385,6 +395,44 @@ def register_workflow_routes(
 
         _device(lambda rt, _fleet: devices.retire(rt, worker_id, body.expected_version))
         return {"ok": True}
+
+    # ── the worker console (P2-2, role=worker) ──────────────────────────
+    def _worker_off() -> dict[str, Any]:
+        if settings.role != "worker":
+            reason = "本机是主控，不是工作机"
+        elif not settings.enabled:
+            reason = "未启用"
+        else:
+            reason = "启动失败（见日志）"
+        return {
+            "state": "off",
+            "reason": reason,
+            "role": settings.role,
+            "controller": None,
+            "credential": None,
+            "staging_dir": settings.staging_dir,
+            "staging_cap_gb": settings.staging_cap_gb,
+        }
+
+    @app.get("/control/workflow/worker")
+    def workflow_worker() -> dict[str, Any]:
+        host = worker_provider() if worker_provider is not None else None
+        if host is None or settings.role != "worker":
+            return _worker_off()
+        return {**host.status(), "role": "worker"}
+
+    @app.post("/control/workflow/worker/join")
+    def workflow_worker_join(body: JoinBody) -> dict[str, Any]:
+        """加入 / 重新加入: the code is never logged nor echoed back."""
+        from taskpaw_v3.workflow.remote_worker import JoinError
+
+        host = worker_provider() if worker_provider is not None else None
+        if host is None or settings.role != "worker":
+            raise HTTPException(status_code=409, detail=_worker_off()["reason"])
+        try:
+            return {**host.join(body.code, body.staging_dir), "role": "worker"}
+        except JoinError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
 
     @app.post("/control/workflow/packages/{package_id}/open", status_code=204)
     def workflow_open_package(package_id: str) -> Response:

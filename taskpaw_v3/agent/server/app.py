@@ -251,6 +251,7 @@ def create_control_app(
     prompt_responder: Optional[Callable[[str, str, bool], bool]] = None,
     workflow_provider: Optional[Callable[[], Optional["WorkflowHostLike"]]] = None,
     power_view: Optional[Callable[[str], dict]] = None,
+    worker_provider: Optional[Callable[[], Any]] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API).
@@ -304,7 +305,11 @@ def create_control_app(
 
     _register_film_routes(app, "/control/monitors", films_provider, run_films_provider)
     register_workflow_routes(
-        app, config.workflow, workflow_provider, worker_api_host=config.bind_host
+        app,
+        config.workflow,
+        workflow_provider,
+        worker_api_host=config.bind_host,
+        worker_provider=worker_provider,
     )
 
     @app.get("/control/status")

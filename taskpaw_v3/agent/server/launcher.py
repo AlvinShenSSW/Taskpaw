@@ -178,6 +178,7 @@ def run_agent(
 
     supervisor = None
     workflow_host = None
+    worker_host = None  # P2-2: role=worker
     power_sampler: Optional[power.PowerSampler] = None
     fleet: Optional[power_fleet.PowerFleet] = None
     servers: list[uvicorn.Server] = []
@@ -197,6 +198,8 @@ def run_agent(
                 task_log.record("", "agent.stopping", task_type="agent")
             if workflow_host is not None:
                 workflow_host.stop()
+            if worker_host is not None:  # S-7: joins its thread
+                worker_host.stop()
             if supervisor is not None:
                 supervisor.stop()
         finally:
@@ -392,6 +395,7 @@ def run_agent(
                     # late-bound: the host starts after announce_ready (T06-P1)
                     workflow_provider=lambda: workflow_host,
                     power_view=_power_view,
+                    worker_provider=lambda: worker_host,
                 ),
                 log_level="warning",
             )
@@ -484,14 +488,20 @@ def run_agent(
         announce_ready("agent", session.base_url, **ready)
         # After readiness and in its own thread: never delays or breaks the agent.
         try:
-            from taskpaw_v3.workflow.local_host import start_local_workflow
+            config_dir = config_path.parent if config_path is not None else None
+            if config.workflow.role == "worker":  # P2-2: no store, no events
+                from taskpaw_v3.workflow.remote_worker import start_worker_host
 
-            workflow_host = start_local_workflow(
-                config.workflow,
-                config_path.parent if config_path is not None else None,
-                task_log=task_log,
-                event_queue=queue,
-            )
+                worker_host = start_worker_host(config.workflow, config_dir)
+            else:
+                from taskpaw_v3.workflow.local_host import start_local_workflow
+
+                workflow_host = start_local_workflow(
+                    config.workflow,
+                    config_dir,
+                    task_log=task_log,
+                    event_queue=queue,
+                )
         except Exception:
             log.exception("media workflow could not be started")
     except BaseException:
