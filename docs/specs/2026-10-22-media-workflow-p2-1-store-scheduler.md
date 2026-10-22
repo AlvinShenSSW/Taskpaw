@@ -121,9 +121,11 @@ codes: `route_required`, `route_exists`, `route_claimed`.
   belongs to a worker (component stages are refused); evidence is all passed, produced by the
   operator, and includes the kinds `operator_attested_stopped` and `exec_failed:cancelled`
   (the latter keeps it a free retry, T08-P1a R3). Stage and attempt become `failed` (a proven
-  `succeeded`/`failed`/`blocked` stage keeps its status), the operation resolves `failed`, the
-  assignment and its resource owner resolve with no owner-stopped evidence, and the film's open
-  route to that worker closes (reason 判定已停止). Allowed while the authority is in recovery.
+  `succeeded`/`failed`/`blocked` stage keeps its status), the operation resolves (`verified`
+  for a proven success, else `failed`), the assignment and its resource owner resolve with no
+  owner-stopped evidence, and the film's open route to that worker closes (reason 判定已停止).
+  Like `resolve_assignment` it is allowed while the authority is in recovery; the route
+  commands are not.
 - **`claim`** — after its existing checks, a compute stage requires an open route of the
   revision with `worker_id = command.worker_id` (`route_required`).
 - **Route closing** — `_put_input_sql` closes open routes of older revisions (新版本);
@@ -149,7 +151,8 @@ codes: `route_required`, `route_exists`, `route_claimed`.
     that needs no GPU, or no remote worker is configured) and the route is unclaimed, withdraw it
     (reason 转本机) and route to itself; otherwise wait (「已派往 {name}」).
 - With a remote worker configured, a restore/asr that needs the GPU waits with 「等待 GPU 设备」 and
-  is never claimed locally; one that needs no GPU runs locally (C12).
+  is never claimed locally; one that needs no GPU runs locally (C12). Translate is always the
+  controller's, whatever its executor's GPU flag.
 - With no remote worker every reason, order and outcome of phase 1 is unchanged; the only new
   persisted facts are the controller's own route rows (and their audit rows).
 
@@ -180,15 +183,16 @@ then plan confirm time, then film id.
 silently skipped); not retired/revoked; `verified` 「未核验」; participating and not disabled
 「未启用」; not draining 「停领」; heartbeat < 60 s 「离线」; not paused 「暂停领取」; version
 「版本不一致」; boot reconciled 「等待对账」; restore: VRAM 「显存不足，不参与修复」, profile limit ≥ the
-film's largest probe 「显存不足 4K」/「分辨率超出设备上限」, `tiers_ready[tier]` 「缺少<tier>模型」;
+film's largest probe 「显存不足 4K」/「分辨率超出设备上限」, `tiers_ready[tier]` 「缺少<tier>画质模型」;
 asr: profile limit, `asr_ready` 「识别未就绪」; worker disk 「空间不足」. A worker with 2 open routes
 is full (「设备队列已满」), which is not ineligibility. The controller-disk gate (Σ 1.2 × source of
 open routes with restore unfinished, plus this film, + 100 GB > controller free) stops all new
 routes with 「主控磁盘空间不足」.
 
-**Pins.** A pin to the controller means 自动 (OD1). A pinned film routes only to its pinned
-worker when eligible with a free slot; otherwise it waits with 「等待 <name>：<reason>」 and is
-never moved.
+**Pins.** A pin to the controller means 自动 (OD1): the decision carries `unpin`, and the
+glue clears the pin (`set_pin` NULL, CAS) before it opens the `auto` route, so the store's pin
+rules stay strict. A pinned film routes only to its pinned worker when eligible with a free
+slot; otherwise it waits with 「等待 <name>：<reason>」 and is never moved.
 
 **Prediction (S6).** ratio = wall seconds / film seconds. Per-tier factor = median restore ratio
 of the tier ÷ median of `standard` (1.0 without both). Restore base per (GPU model, resolution
@@ -197,12 +201,15 @@ model. No sample → ratio 1.0 (D10: film duration, FIFO onto the least loaded).
 unknown → 1 h. `cost(w, f) = fetch + Σ est + upload` with fetch = source / 1 GB/s while restore is
 still pending, upload = 1.2 × source / 1 GB/s while restore is unfinished.
 `free_at(w) = now + Σ remaining cost of w's open routes`, a claimed stage's estimate reduced by
-its elapsed time (floor 120 s). `finish = free_at + cost`. Energy = Σ est × median `avg_w` of
-(stage, GPU model) samples; unknown if any is missing.
+its elapsed time (floor 120 s). `finish = free_at + cost`. Energy (§4.2) = the first routed
+stage's estimate × the median `avg_w` of that (stage, GPU model); unknown without a sample.
+Samples with no wall time or duration are ignored.
 
-**Choice.** Minimum finish; among finishes within the tie window of the best: lower energy (only
-when every tied candidate has one), then fewer open routes, then name, then id. Each route
-updates the pass state (route counts, `free_at`, controller output total).
+**Choice.** Minimum finish (then fewer open routes, name, id). When every candidate within the
+tie window of the best has an energy, the lowest energy among them wins instead (then fewer
+routes, name, id). Each route updates the pass state (route counts, `free_at`, staging, the
+controller output total). A film with no eligible worker waits with 「等待设备：<reasons>」
+(「设备队列已满」 when eligible workers are only full, 「没有可用的设备」 when there are none).
 
 **Reason (V1).** 「自动 · 约 2 小时 10 分后在 5070 Ti 完成 · 胜过 5060 Ti-2 约 2 小时 40 分」 (up to
 three beaten devices), plus 「 · 无历史，按排队先后」 when no sample was used, plus 「 · 约 0.9 度」
