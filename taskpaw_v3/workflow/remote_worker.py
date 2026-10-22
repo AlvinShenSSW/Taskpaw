@@ -655,6 +655,8 @@ class WorkerHost:
         """R8/crash matrix 10: the credential is gone — the running Job is
         cancelled and settled, its outcome kept; nothing more is sent."""
         self._stop_dispatcher()  # first: 「凭据已撤销」 means the Job settled
+        # a re-join builds a new one, which reports the settled attempt at boot
+        self.dispatcher = None
         self.state, self.reason = "revoked", REVOKED_REASON
         self._stop.set()
 

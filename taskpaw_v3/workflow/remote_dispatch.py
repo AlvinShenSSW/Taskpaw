@@ -54,6 +54,8 @@ POLL_SECONDS = 5.0
 STOP_SETTLE_SECONDS = 30.0
 MAX_MISMATCHES = 3  # §3.5: three whole-file mismatches need the operator
 STAGES = ("restore", "asr")
+SAVE_TRIES = 5  # a file held by antivirus / the indexer for a moment (H1-2)
+SAVE_PAUSE = 0.05
 _FINISHED = ("succeeded", "skipped")
 UNSETTLED = "停止未确认：任务进程仍在运行"
 UNKNOWN_GPU = "GPU 有未知占用"
@@ -352,7 +354,7 @@ class RemoteDispatcher:
             "attempt_id": active.state.attempt_id,
             "phase": active.phase,
             "progress": active.progress[-400:],
-            "elapsed_s": max(0.0, self._clock() - active.started),
+            "elapsed_s": min(999_999.0, max(0.0, self._clock() - active.started)),
             "ltx": active.ltx,
             "energy": self._energy_dict(active),
             "power": self._live_power() if active.uses_gpu else None,
@@ -426,9 +428,23 @@ class RemoteDispatcher:
     def _path(self, attempt_id: str) -> Path:
         return self.attempt_dir / f"{attempt_id}.json"
 
-    def _save(self, state: AttemptState) -> None:
-        self.attempt_dir.mkdir(parents=True, exist_ok=True)
-        atomic_json(self._path(state.attempt_id), asdict(state))
+    def _save(self, state: AttemptState) -> bool:
+        """Write the attempt file; a sharing violation (antivirus, the
+        indexer) is retried briefly. False when it never landed: the caller
+        decides (the request must be on disk before the claim is sent)."""
+        for attempt in range(SAVE_TRIES):
+            try:
+                self.attempt_dir.mkdir(parents=True, exist_ok=True)
+                atomic_json(self._path(state.attempt_id), asdict(state))
+                return True
+            except OSError:
+                if attempt + 1 == SAVE_TRIES:
+                    log.exception(
+                        "worker attempt file %s not written", state.attempt_id
+                    )
+                    return False
+                time.sleep(SAVE_PAUSE * (attempt + 1))
+        return False
 
     def recover(self, client: WorkerClient) -> bool:
         """At start, before the first boot: an attempt file the controller
@@ -558,15 +574,20 @@ class RemoteDispatcher:
         if any(s.film_id == film and s.rev == rev for s in self._states()):
             return
         root = self.staging.work_dir
+        kept = []
         for relative in self.index.remove(film, rev):
             for path in (root / relative, root / f"{relative}.part"):
                 try:
                     path.unlink()
                 except FileNotFoundError:
                     pass
-                except OSError:
+                except OSError:  # held open: kept, released again later
                     log.warning("staged file %s could not be deleted", relative)
+                    kept.append(relative)
             _prune(root, (root / relative).parent)
+        if kept:  # still staged: the next release (or boot) deletes it
+            self.index.mark(film, rev, sorted(set(kept)), complete=True)
+            return
         with self._lock:
             self._envelopes.pop((film, rev), None)
         log.info("released the staged source of %s/%s", film, rev)
@@ -723,7 +744,14 @@ class RemoteDispatcher:
         return envelope, stage
 
     def _admit(self) -> bool:
-        gate = self._gate()
+        try:
+            gate = self._gate()
+        except ApiError as exc:  # the envelope read: shown, tried again next tick
+            self.reason = (
+                "无法连接主控" if exc.transient else f"主控拒绝了请求（{exc.code}）"
+            )
+            self._release()
+            return False
         if gate is None:
             self._release()
             return False
@@ -779,7 +807,10 @@ class RemoteDispatcher:
                 "tool_versions": tools.model_dump(mode="json"),
             },
         )
-        self._save(state)  # crash point `request`: before sending
+        if not self._save(state):  # crash point `request`: before sending
+            self._release()
+            self.reason = "无法写入任务记录（暂存目录）"
+            return False
         claimed = self._send_claim(state)
         if claimed is None:
             return False

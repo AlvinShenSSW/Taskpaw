@@ -11,6 +11,7 @@ import json
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -584,3 +585,78 @@ def test_the_controller_host_stops_its_routing_thread(tmp_path):
     host._wake_scheduler()
     assert thread.wait_passes(2)
     assert thread.stop(10)
+
+
+# ── self-review: Windows file locks ─────────────────────────────────────
+def test_a_held_attempt_file_is_retried_and_a_lost_request_write_sends_nothing(
+    tmp_path, monkeypatch
+):
+    from taskpaw_v3.workflow import remote_dispatch as rd
+
+    executor = Blocking()
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, executor)
+    client.__init__(staging)
+    film = client.add()
+    real, refusals = rd.atomic_json, {"left": 2}
+
+    def flaky(path, value):
+        if path.parent.name == "attempts" and refusals["left"] > 0:
+            refusals["left"] -= 1
+            raise PermissionError(32, "sharing violation")
+        return real(path, value)
+
+    monkeypatch.setattr(rd, "atomic_json", flaky)
+    d.start()
+    try:
+        _observe(d, [_route(film, 0)])
+        assert executor.running.wait(10)  # two refusals, then the claim went out
+        assert len(client.claims) == 1
+    finally:
+        executor.release.set()
+        assert d.stop(10)
+    refusals["left"] = 10**6  # the request can never be written: no claim
+    executor2 = Blocking()
+    d2, _ = _dispatcher(tmp_path / "b", lambda: client, executor2)
+    d2.staging = staging
+    other = client.add()
+    d2.index = d.index
+    client.download_film(client.envelope(other, 1), staging)
+    d.index.mark(
+        other,
+        1,
+        [c["relative_path"] for c in client.envelope(other, 1)["workcopy"]],
+        True,
+    )
+    before = len(client.claims)
+    d2.start()
+    try:
+        _observe(d2, [_route(other, 0)])
+        until(lambda: d2.reason.startswith("无法写入"))
+        assert len(client.claims) == before and executor2.runs == 0
+    finally:
+        assert d2.stop(10)
+
+
+def test_a_staged_file_held_open_keeps_its_release_for_later(tmp_path, monkeypatch):
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    film = client.add()
+    envelope = client.envelope(film, 1)
+    client.download_film(envelope, staging)
+    d.index.mark(film, 1, [c["relative_path"] for c in envelope["workcopy"]], True)
+    held = staging.work_dir / envelope["workcopy"][0]["relative_path"]
+    real = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self == held:
+            raise PermissionError(32, "in use")
+        return real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    _observe(d, [], release=[{"film": film, "rev": 1}])
+    assert held.exists() and d.staged() == [{"film": film, "rev": 1}]  # asked again
+    monkeypatch.setattr(Path, "unlink", real)
+    _observe(d, [], release=[{"film": film, "rev": 1}])
+    assert not held.exists() and d.staged() == []

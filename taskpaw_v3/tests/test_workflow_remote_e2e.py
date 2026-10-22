@@ -631,10 +631,11 @@ def test_case_10_a_revoke_mid_run_cancels_and_settles_the_job(world):
     until(lambda: world.status(film, "restore") == "running", LONG)
     worker_id = world.issued["w1"]["worker_id"]
     record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
+    dispatcher = worker.dispatcher
+    assert dispatcher is not None
     devices.revoke(world.rt, worker_id, record.version)
     until(lambda: worker.state == "revoked", LONG)
-    dispatcher = worker.dispatcher
-    assert dispatcher is not None and dispatcher.current() is None  # settled
+    assert dispatcher.current() is None and worker.dispatcher is None  # settled
     assert not any(t.is_alive() for t in dispatcher._threads)
     (open_,) = [
         o
@@ -717,3 +718,26 @@ def test_in_flight_work_completes_while_paused(world):
     worker.set_paused(False)
     world.wake()
     wait_status(world, film, "asr", "succeeded")
+
+
+def test_a_worker_re_paired_mid_run_finishes_its_attempt(world):
+    """Self-review: 重新配对 while a stage runs. The join halts only the
+    heartbeat loop; the dispatcher keeps the Job and finishes it with the new
+    credential (the old one is revoked by the pairing)."""
+    world.tools.set_jasna(linger=1.5)
+    worker = world.join()
+    film = routed_film(world)
+    until(lambda: world.status(film, "restore") == "running", LONG)
+    worker_id = world.issued["w1"]["worker_id"]
+    record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
+    code = devices.repair(
+        world.rt, worker_id, record.version, host="127.0.0.1", port=world.server.port
+    )["code"]
+    worker.join(code, str(world.tmp / "w1" / "staging"))
+    record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
+    if record.enrollment_state != "verified":
+        devices.approve(world.rt, worker_id, record.version, restore=True, asr=True)
+    world.wake()
+    wait_status(world, film, "asr", "succeeded")
+    assert len(world.attempts(film, "restore")) == 1 and world.jasna_runs() == 1
+    world.invariants()
