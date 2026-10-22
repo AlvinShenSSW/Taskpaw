@@ -27,6 +27,7 @@ from .models import (
     PairingIssue,
     StageRecord,
     TlsBinding,
+    WorkerAttempt,
     WorkerRecord,
     WorkerRegistration,
     WorkerRetirement,
@@ -662,6 +663,37 @@ class WorkerCommands(ReadCommands):
                 (worker.worker_id, worker.boot_id),
             ).fetchone()
             return WorkerSelf(worker=worker, boot_reconciled=bool(row and row[0]))
+
+    def worker_attempt(self, auth: AuthProof, attempt_id: str) -> WorkerAttempt:
+        """C7: the caller's own compute attempt while it may still upload — its
+        assignment unresolved (an `unknown` one included) and the attempt
+        current for its job; anything else is `stale_attempt`."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "compute_worker" or not principal["worker_id"]:
+                raise WorkflowError("forbidden")
+            row = self._conn.execute(
+                "SELECT a.attempt_id,a.job_id,s.film_id,s.input_revision,s.stage,"
+                "s.current_attempt_id,g.worker_id,g.resolved_at FROM attempts a "
+                "JOIN stages s ON s.job_id=a.job_id "
+                "JOIN assignments g ON g.attempt_id=a.attempt_id WHERE a.attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["worker_id"] != principal["worker_id"]
+                or row["resolved_at"] is not None
+                or row["current_attempt_id"] != attempt_id
+                or row["stage"] not in ("restore", "asr", "translate")
+            ):
+                raise WorkflowError("stale_attempt")
+            return WorkerAttempt(
+                attempt_id=row["attempt_id"],
+                job_id=row["job_id"],
+                film_id=row["film_id"],
+                input_revision=row["input_revision"],
+                stage=row["stage"],
+            )
 
     def grant_component(
         self, auth: AuthProof, meta: CommandMeta, command: ComponentGrant

@@ -22,14 +22,21 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.devices import iso
 from taskpaw_v3.workflow.fleet_live import FleetLive, Heartbeat
+from taskpaw_v3.workflow.transfer import (
+    PlanFile,
+    TransferError,
+    Transfers,
+    parse_content_range,
+)
 
 if TYPE_CHECKING:
     from taskpaw_v3.workflow.auth import AuthProof
@@ -58,6 +65,7 @@ class ControllerHost(Protocol):
     state: str
     runtime: LocalRuntime | None
     fleet: FleetLive | None
+    transfers: Transfers | None
     dispatcher: Any
 
 
@@ -146,6 +154,29 @@ class ProbeBody(_Strict):
     approved: Any = None  # never accepted from a worker (403)
 
 
+class OutputFile(_Strict):
+    path: str = Field(min_length=1, max_length=1024)
+    size: int = Field(ge=0, le=10**15)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class _ReleasingFile(FileResponse):
+    """A ranged work-copy stream whose download slot frees when it ends (R17)."""
+
+    def __init__(self, *args: Any, on_close: Callable[[], None], **kw: Any) -> None:
+        super().__init__(*args, **kw)
+        self._on_close = on_close
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._on_close()
+
+
+UPLOAD_CHUNK = 4 << 20
+
+
 class BootBody(_Strict):
     boot_id: m.Id
     assignment_ids: list[m.Id] = Field(default=[], max_length=64)
@@ -193,6 +224,16 @@ def create_worker_app(provider: HostProvider) -> FastAPI:
     @app.exception_handler(ApiError)
     async def _api_error(_request: Request, exc: ApiError) -> JSONResponse:
         return _error(exc.status, exc.code, exc.headers, **exc.extra)
+
+    @app.exception_handler(TransferError)
+    async def _transfer_error(_request: Request, exc: TransferError) -> JSONResponse:
+        headers = (
+            {"Retry-After": str(exc.extra["retry_after"])}
+            if "retry_after" in exc.extra
+            else None
+        )
+        extra = {k: v for k, v in exc.extra.items() if k != "retry_after"}
+        return _error(exc.status, exc.code, headers, **extra)
 
     @app.exception_handler(RequestValidationError)
     async def _invalid(_request: Request, _exc: RequestValidationError):
@@ -373,6 +414,104 @@ def create_worker_app(provider: HostProvider) -> FastAPI:
             "reconcile_needed": c.me.worker.boot_id != body.boot_id
             or not c.me.boot_reconciled,
         }
+
+    # -- transfer (R11-R17) -------------------------------------------------
+    def transfers_of(c: Caller) -> Transfers:
+        transfers = getattr(c.host, "transfers", None)
+        if transfers is None:
+            raise ApiError(503, "controller_starting")
+        return transfers
+
+    def own_attempt(c: Caller, attempt_id: str) -> m.WorkerAttempt:
+        """C7/R14: current, unresolved and the caller's own (else 409)."""
+        try:
+            return c.rt.store.worker_attempt(c.auth, attempt_id)
+        except m.WorkflowError as exc:
+            raise coded(exc) from None
+
+    @app.get(f"{PREFIX}/films/{{film_id}}/{{revision}}")
+    def film_envelope(film_id: str, revision: int, c: Caller = authed) -> JSONResponse:
+        from taskpaw_v3.workflow.transfer import envelope
+
+        try:
+            value = envelope(c.rt, c.worker_id, film_id, revision)
+        except m.WorkflowError as exc:
+            raise coded(exc) from None
+        response = JSONResponse(value)
+        if len(response.body) > JSON_CAP:
+            raise ApiError(413, "too_large")
+        return response
+
+    @app.get(f"{PREFIX}/films/{{film_id}}/{{revision}}/items/{{item_id}}")
+    def film_item(
+        film_id: str, revision: int, item_id: str, c: Caller = authed
+    ) -> FileResponse:
+        from taskpaw_v3.workflow.transfer import item_file
+
+        transfers = transfers_of(c)
+        try:
+            path, copy = item_file(c.rt, c.worker_id, film_id, revision, item_id)
+        except m.WorkflowError as exc:
+            raise coded(exc) from None
+        transfers.acquire(c.worker_id, "down")
+        return _ReleasingFile(
+            path,
+            media_type="application/octet-stream",
+            headers={"X-Sha256": copy.sha256, "X-Size": str(copy.size_bytes)},
+            on_close=lambda: transfers.release(c.worker_id, "down"),
+        )
+
+    @app.post(f"{PREFIX}/attempts/{{attempt_id}}/outputs")
+    def post_outputs(
+        attempt_id: str, files: list[OutputFile], c: Caller = authed
+    ) -> dict[str, Any]:
+        own_attempt(c, attempt_id)
+        return transfers_of(c).put_plan(
+            attempt_id, [PlanFile(f.path, f.size, f.sha256) for f in files]
+        )
+
+    @app.get(f"{PREFIX}/attempts/{{attempt_id}}/outputs")
+    def get_outputs(attempt_id: str, c: Caller = authed) -> dict[str, Any]:
+        own_attempt(c, attempt_id)
+        return transfers_of(c).view(attempt_id)
+
+    @app.put(f"{PREFIX}/attempts/{{attempt_id}}/files/{{path:path}}")
+    async def put_file(
+        attempt_id: str, path: str, request: Request, c: Caller = authed
+    ) -> dict[str, Any]:
+        """R13: one streaming PUT from the received offset to the end."""
+        transfers = transfers_of(c)
+        await run_in_threadpool(own_attempt, c, attempt_id)
+        offset, total = parse_content_range(request.headers.get("content-range"))
+        expected = total - offset
+        length = request.headers.get("content-length")
+        if length is not None and (not length.isdigit() or int(length) > expected):
+            raise ApiError(413, "too_large")
+        transfers.acquire(c.worker_id, "up")
+        try:
+            upload = await run_in_threadpool(
+                transfers.open_upload, attempt_id, path, offset, total
+            )
+            try:
+                got, buffer = 0, bytearray()
+                async for chunk in request.stream():
+                    got += len(chunk)
+                    if got > expected:
+                        await run_in_threadpool(upload.truncate)
+                        raise ApiError(413, "too_large")
+                    buffer += chunk
+                    if len(buffer) >= UPLOAD_CHUNK:
+                        await run_in_threadpool(upload.write, bytes(buffer))
+                        buffer.clear()
+                if buffer:
+                    await run_in_threadpool(upload.write, bytes(buffer))
+                if got < expected:
+                    raise ApiError(409, "offset_mismatch", received=offset + got)
+                return await run_in_threadpool(upload.finish)
+            finally:
+                await run_in_threadpool(upload.close)
+        finally:
+            transfers.release(c.worker_id, "up")
 
     return app
 

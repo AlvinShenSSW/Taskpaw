@@ -37,13 +37,18 @@ from taskpaw_v3.workflow import devices
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.auth import digest_secret
 
-# The §2 table of P2-2 commit 3 (the transfer routes arrive with commit 4).
+# The §2 table, exactly.
 ROUTES = {
     ("POST", f"{PREFIX}/pair"),
     ("GET", f"{PREFIX}/self"),
     ("POST", f"{PREFIX}/capabilities"),
     ("POST", f"{PREFIX}/boot"),
     ("POST", f"{PREFIX}/heartbeat"),
+    ("GET", f"{PREFIX}/films/{{film_id}}/{{revision}}"),
+    ("GET", f"{PREFIX}/films/{{film_id}}/{{revision}}/items/{{item_id}}"),
+    ("POST", f"{PREFIX}/attempts/{{attempt_id}}/outputs"),
+    ("GET", f"{PREFIX}/attempts/{{attempt_id}}/outputs"),
+    ("PUT", f"{PREFIX}/attempts/{{attempt_id}}/files/{{path:path}}"),
 }
 
 
@@ -93,11 +98,17 @@ def test_routes_equal_the_contract_table_with_no_docs():
 
 # ── S-3: Bearer of a compute worker everywhere but /pair ─────────────────
 def _calls(headers=None):
+    film, attempt = uuid.uuid4(), uuid.uuid4()
     return [
         ("GET", "self", None),
         ("POST", "capabilities", probe()),
         ("POST", "boot", {"boot_id": boot_id()}),
         ("POST", "heartbeat", beat(boot_id())),
+        ("GET", f"films/{film}/1", None),
+        ("GET", f"films/{film}/1/items/{uuid.uuid4()}", None),
+        ("POST", f"attempts/{attempt}/outputs", []),
+        ("GET", f"attempts/{attempt}/outputs", None),
+        ("PUT", f"attempts/{attempt}/files/{attempt}/a.mp4", None),
     ]
 
 

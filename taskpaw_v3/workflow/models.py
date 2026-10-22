@@ -1777,6 +1777,16 @@ class WorkerView(Model):
     assignments: tuple[AssignmentRecord, ...]
 
 
+class WorkerAttempt(Model):
+    """A current, unresolved compute attempt of the calling worker (C7)."""
+
+    attempt_id: Id
+    job_id: Id
+    film_id: Id
+    input_revision: Revision
+    stage: Literal["restore", "asr", "translate"]
+
+
 class WorkerSelf(Model):
     """A remote worker's own record as its credential reads it (P2-2 `GET /self`)."""
 

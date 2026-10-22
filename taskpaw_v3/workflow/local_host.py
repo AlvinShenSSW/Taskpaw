@@ -33,6 +33,7 @@ from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
 from .lookup import MetadataLookup
 from .timing import TaskLogSink, WorkflowLog
+from .transfer import Transfers
 
 ExecutorFactory = Callable[[LocalRuntime], Sequence[StageExecutor]]
 LookupFactory = Callable[[LocalRuntime], MetadataLookup]
@@ -287,6 +288,7 @@ class LocalWorkflowHost:
         self.finalizer: Finalizer | None = None
         # P2-2: the workers' live state, while the worker API is on
         self.fleet: FleetLive | None = None
+        self.transfers: Transfers | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
         # H3 M1/D02: one LTX model download; the session needs serialized calls
@@ -364,6 +366,7 @@ class LocalWorkflowHost:
 
                 # R9: the restart grace counts from here (IR12, C14)
                 self.fleet = FleetLive(rt.clock.now(), __version__)
+                self.transfers = Transfers(rt.work_dir)
             self.state, self.reason = "running", rt.reason
             if self.events is not None and not self._stopping.is_set():
                 self.events.start(self)
