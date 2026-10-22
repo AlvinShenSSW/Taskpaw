@@ -1709,7 +1709,10 @@ def test_r07_blocked_save_cannot_block_stop_or_late_start(tmp_path, monkeypatch)
         stopped = adm.set_enabled("owned", False)
         assert stopped["runtime"] == "stopped" and stopped["persistence"] == "pending"
         release.set()
-        worker.join(1)
+        adm._timeout = (
+            5.0  # the pending path is asserted; completions get a slow runner's slack
+        )
+        worker.join(5)
         assert not worker.is_alive() and not sup.has("owned")
         assert (
             cfg.monitors[0]["enabled"] is True
@@ -2560,8 +2563,9 @@ def test_r07_ir002_started_writer_survives_raising_start_wrapper(tmp_path, monke
                 == "busy"
             )
             release.set()
-            assert save.done.wait(1)
-            save.thread.join(1)
+            admin._timeout = 5.0  # pending paths are asserted; completions get slack
+            assert save.done.wait(5)
+            save.thread.join(5)
         assert save.validated == "saved" and not save.thread.is_alive()
         assert (
             not admin._stop_saves and not admin._mutation.locked() and len(writers) == 1

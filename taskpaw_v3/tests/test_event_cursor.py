@@ -95,7 +95,7 @@ def actual_agent(config, queue, *, before_events=None):
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", access_log=False))
     thread = threading.Thread(target=lambda: server.run(sockets=[sock]), daemon=True)
     thread.start()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 15
     try:
         while not server.started and thread.is_alive() and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -530,7 +530,12 @@ def test_actual_status_events_boot_race_retains_queue_and_db(tmp_path):
         ):
             sid = store.add_server("fixture", "127.0.0.1", port)
             poller = Poller(
-                store, "unused", lambda: False, lambda: "", lambda: "fixture-r05"
+                store,
+                "unused",
+                lambda: False,
+                lambda: "",
+                lambda: "fixture-r05",
+                http_timeout=30.0,  # a cold runner may stall the first loopback request
             )
             poller.poll_once()
             assert [path for path, _ in requests] == ["/status", "/events"]

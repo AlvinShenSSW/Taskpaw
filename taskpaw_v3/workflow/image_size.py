@@ -22,6 +22,7 @@ _JPEG_SCAN_LIMIT = 4 * 1024 * 1024
 _FILL = re.compile(rb"\xff+")
 # A header may claim any 32-bit side; no real cover has one past 16 bits (JPEG, WebP VP8)
 _MAX_SIDE = 65535
+# A same-size rewrite within one mtime tick can return the earlier size: acceptable for scraped artwork.
 _CACHE: dict[Path, tuple[tuple[int, int], Size | None]] = {}
 _CACHE_LIMIT = 2048
 

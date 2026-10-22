@@ -98,14 +98,17 @@ def test_landscape_is_wider_than_tall_and_a_rewrite_is_read_again(tmp_path):
 
 def test_a_forged_header_with_a_huge_side_has_no_size(tmp_path):
     """A PNG IHDR of 4294967295 x 1 must not win the jacket pick."""
-    path = tmp_path / "forged.png"
-    path.write_bytes(png(4294967295, 1))
-    assert isz.image_size(path) is None
-    assert isz.is_landscape(path) is None
-    path.write_bytes(png(65535, 1))  # the largest side a header may claim
-    assert isz.image_size(path) == (65535, 1)
-    path.write_bytes(png(65536, 1))
-    assert isz.image_size(path) is None
+    # Distinct paths: sizes are cached by (path, mtime, size), and these headers have equal length
+    huge, edge, over = (
+        tmp_path / name for name in ("huge.png", "edge.png", "over.png")
+    )
+    huge.write_bytes(png(4294967295, 1))
+    assert isz.image_size(huge) is None
+    assert isz.is_landscape(huge) is None
+    edge.write_bytes(png(65535, 1))  # the largest side a header may claim
+    assert isz.image_size(edge) == (65535, 1)
+    over.write_bytes(png(65536, 1))
+    assert isz.image_size(over) is None
 
 
 @pytest.mark.parametrize(

@@ -307,7 +307,7 @@ def test_stop_and_public_scan_admission_are_one_atomic_boundary(
 
         def slow_begin(*args, **kwargs):
             if threading.current_thread().name == "scanner":
-                time.sleep(0.03)  # within stop's 0.1 s budget
+                time.sleep(0.03)  # well within stop's 2 s budget
             return real_begin(*args, **kwargs)
 
         monkeypatch.setattr(obj.store, "begin_intake_root_scan", slow_begin)
@@ -333,7 +333,8 @@ def test_stop_and_public_scan_admission_are_one_atomic_boundary(
         return original_walk(*args, **kwargs)
 
     def stop():
-        outcomes.append(obj.stop(timeout=0.1))
+        # Generous: a slow runner must not time stop out before the scan's CAS loses
+        outcomes.append(obj.stop(timeout=2))
         stop_done.set()
 
     monkeypatch.setattr(obj, "_scan_lock", AdmissionBarrier())

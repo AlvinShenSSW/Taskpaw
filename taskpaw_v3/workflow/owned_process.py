@@ -269,6 +269,9 @@ class OwnedJob:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            # Raw pipes: a buffered reader's read(65536) blocks until 64 KiB or EOF,
+            # so live output (Jasna progress) would only arrive when the child exits.
+            bufsize=0,
             start_new_session=True,
         )
         child = Child(self, f"{popen.pid}:0", popen)

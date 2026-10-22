@@ -90,6 +90,28 @@ def test_wait_returns_none_when_cancelled(tmp_path):
     assert job.settle(timeout=15)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pipes")
+def test_a_posix_childs_line_arrives_while_it_is_still_running(tmp_path):
+    arrived = []
+    got = threading.Event()
+
+    def sink(name, text):
+        arrived.append(time.monotonic())
+        got.set()
+
+    job = OwnedJob()
+    script = "import time; print('live', flush=True); time.sleep(4)"
+    started = time.monotonic()
+    child = job.launch([sys.executable, "-c", script], cwd=str(tmp_path), on_line=sink)
+    try:
+        assert got.wait(timeout=2.5), "the line only arrived at exit"
+        assert child.poll() is None  # still running when the line landed
+    finally:
+        job.terminate()
+        assert job.settle(timeout=15)
+    assert arrived[0] - started < 2.5
+
+
 def test_unknown_or_reused_identity_is_not_alive():
     assert not process_alive("not-an-identity")
     assert not process_alive("999999999:1")
