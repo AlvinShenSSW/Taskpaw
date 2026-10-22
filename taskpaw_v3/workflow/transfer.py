@@ -220,6 +220,9 @@ class Transfers:
         # (attempt, path) → (size, mtime_ns, sha256 state) of a closed part
         self._digests: dict[tuple[str, str], tuple[int, int, Any]] = {}
         self._uploading: set[tuple[str, str]] = set()
+        # CX15: a counter of plan writes and each attempt's latest one
+        self._writes = 0
+        self._written: dict[str, int] = {}
 
     # ── R17: one stream per worker and direction ─────────────────────────
     def acquire(self, worker_id: str, direction: str) -> None:
@@ -315,7 +318,13 @@ class Transfers:
     def sweep(self) -> None:
         """IR5: delete the plans and parts of attempts that can no longer
         upload — resolved, not current for their job, or unknown to the store
-        — so they stop reserving disk (start, plan creation, GET outputs)."""
+        — so they stop reserving disk (start, plan creation, GET outputs).
+        CX15: each folder is re-checked under its attempt lock right before
+        it goes (a fresh liveness read, no upload holding it, no plan written
+        since the snapshot), so a claim, plan or PUT landing between the
+        snapshot and the scan is never deleted."""
+        with self._lock:
+            started = self._writes
         live = self._live_ids()
         root = self.work_dir / INCOMING
         if live is None or not root.is_dir():
@@ -327,12 +336,26 @@ class Transfers:
             if attempt_id in live or attempt_id in busy:
                 continue
             with self._attempt(attempt_id):
+                if not self._sweepable(attempt_id, started):
+                    continue
                 shutil.rmtree(folder, ignore_errors=True)
             with self._lock:
                 self._locks.pop(attempt_id, None)
+                self._written.pop(attempt_id, None)
                 for key in [k for k in self._digests if k[0] == attempt_id]:
                     del self._digests[key]
             log.info("swept the upload plan of settled attempt %s", attempt_id)
+
+    def _sweepable(self, attempt_id: str, started: int) -> bool:
+        """CX15, under the attempt's lock: still not live on a fresh read, no
+        stream holds it and its plan (if any) predates the sweep's snapshot."""
+        fresh = self._live_ids()
+        if fresh is None or attempt_id in fresh:
+            return False
+        with self._lock:
+            if any(attempt == attempt_id for attempt, _ in self._uploading):
+                return False
+            return self._written.get(attempt_id, -1) <= started
 
     # ── plans ────────────────────────────────────────────────────────────
     def _plan_file(self, attempt_id: str) -> Path:
@@ -352,6 +375,9 @@ class Transfers:
 
     def _write(self, attempt_id: str, plan: dict[str, Any]) -> None:
         atomic_json(self._plan_file(attempt_id), plan)
+        with self._lock:  # CX15: a sweep that started before this keeps it
+            self._writes += 1
+            self._written[attempt_id] = self._writes
 
     @staticmethod
     def _files(plan: dict[str, Any]) -> list[PlanFile]:

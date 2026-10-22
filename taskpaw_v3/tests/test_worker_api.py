@@ -8,6 +8,7 @@ in the launcher tests below.
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import uuid
 from datetime import timedelta
@@ -509,6 +510,20 @@ def test_default_config_claims_no_worker_api_port(monkeypatch):
     assert seen == [["agent network API", "agent control API"]] * 3
 
 
+def _rebind(port: int) -> None:
+    """Bind `port` to prove no listener holds it. On POSIX the port may sit in
+    TIME_WAIT after the test's own request, so the probe sets SO_REUSEADDR as
+    uvicorn's listener does (a live listener still refuses it). Never on
+    Windows, where SO_REUSEADDR would steal a port in use."""
+    probe = socket.socket()
+    try:
+        if os.name != "nt":
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("127.0.0.1", port))
+    finally:
+        probe.close()
+
+
 def test_worker_api_collision_fails_loudly_and_releases_the_others(monkeypatch):
     from taskpaw_v3.agent.server import launcher
 
@@ -525,11 +540,7 @@ def test_worker_api_collision_fails_loudly_and_releases_the_others(monkeypatch):
     finally:
         taken.close()
     for port in (config.bind_port, config.control_port):
-        probe_sock = socket.socket()
-        try:
-            probe_sock.bind(("127.0.0.1", port))  # released after the failure
-        finally:
-            probe_sock.close()
+        _rebind(port)  # released after the failure
 
 
 def test_the_worker_api_serves_and_its_socket_closes_on_shutdown(monkeypatch, tmp_path):
@@ -563,8 +574,4 @@ def test_the_worker_api_serves_and_its_socket_closes_on_shutdown(monkeypatch, tm
     finally:
         shutdown.shutdown()
         assert shutdown.stopped.wait(30)
-    again = socket.socket()
-    try:
-        again.bind(("127.0.0.1", port))  # S-7: the 5682 socket is closed
-    finally:
-        again.close()
+    _rebind(port)  # S-7: the 5682 socket is closed

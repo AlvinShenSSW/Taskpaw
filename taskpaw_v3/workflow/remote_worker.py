@@ -309,7 +309,10 @@ class WorkerHost:
         backoff_base: float = 1.0,
         probe_seconds: float = PROBE_SECONDS,
         pending_seconds: float = PENDING_SECONDS,
+        staging_free: Callable[[Path], int] | None = None,
     ) -> None:
+        """`staging_free`: the staging disk's free bytes (tests inject it so
+        no result depends on the host's real disk)."""
         from taskpaw_v3 import __version__
 
         self.settings, self.data_dir = settings, data_dir
@@ -321,6 +324,7 @@ class WorkerHost:
         self._join_lock = threading.Lock()  # IR7: one join at a time
         self._closed = False  # CX10: set by stop(); nothing spawns after it
         self._probe, self._gpu_live = probe, gpu_live
+        self._staging_free = staging_free
         self._client_factory = client_factory
         self.version = version or __version__
         self.active, self.idle, self.backoff_base = (
@@ -392,7 +396,11 @@ class WorkerHost:
 
     def staging(self) -> Staging:
         root = self.identity.staging_dir if self.identity else ""
-        return Staging(validate_dir(root), self.settings.staging_cap_gb)
+        return Staging(
+            validate_dir(root),
+            self.settings.staging_cap_gb,
+            free_bytes=self._staging_free,
+        )
 
     def _client(self) -> WorkerClient:
         ident = self.identity
@@ -464,7 +472,8 @@ class WorkerHost:
             try:
                 worker_id = self._recover(client, exc)
             except JoinError:
-                self._resume(old, identity)
+                # CX16: a first join is held only while the pair may have landed
+                self._resume(old, identity, held=exc.transient)
                 raise
         identity.worker_id, identity.ticket = worker_id, None
         # the old credential is gone on the controller: from here the worker
@@ -498,13 +507,26 @@ class WorkerHost:
         self._unsaved = False
         return True
 
-    def _resume(self, old: WorkerIdentity | None, pending: WorkerIdentity) -> None:
+    def _resume(
+        self,
+        old: WorkerIdentity | None,
+        pending: WorkerIdentity,
+        *,
+        held: bool = True,
+    ) -> None:
         """IR7: a failed re-join leaves the working identity running. CX14:
         the pair may still have landed (a lost reply), so its identity is held
-        as pending and settled by the loop like one found at start."""
-        if old is None or not old.worker_id:
+        as pending and settled by the loop like one found at start. CX16: a
+        first join (no working identity) is held the same way; the loop runs
+        with no saved identity until the pending one settles; `held` is False
+        when the controller refused the pair itself, so nothing can have
+        landed."""
+        if old is not None and old.worker_id:
+            self.identity, self.worker_id = old, old.worker_id
+        elif not held:
             return
-        self.identity, self.worker_id = old, old.worker_id
+        else:
+            self.identity, self.worker_id = None, None
         self._pending_check, self._pending_due = pending, 0.0
         if self._closed:  # CX10
             self.state, self.reason = "stopped", "已停止"
@@ -590,7 +612,11 @@ class WorkerHost:
                         if self._wait(backoff(failures - 1, base=self.backoff_base)):
                             return
                         continue
-                if current is None or not usable:
+                if current is None:  # CX16: a first join that never landed
+                    self.state, self.reason = "unjoined", "加入失败，请重新加入"
+                    self._stop.set()
+                    return
+                if not usable:
                     self._revoked()  # every identity it held was refused
                     return
                 self._session(self._client())

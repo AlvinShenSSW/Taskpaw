@@ -157,7 +157,7 @@ def worker_host(tmp_path, *, probe=None, **kw) -> WorkerHost:
         active_seconds=0.05,
         idle_seconds=0.05,
         backoff_base=0.02,
-        **kw,
+        **{"staging_free": lambda path: 2_000 * 10**9, **kw},  # never the host disk
     )
 
 
@@ -309,6 +309,8 @@ def test_the_same_code_after_an_unreachable_reply_reuses_the_credential(
     assert not (tmp_path / "worker" / IDENTITY_NAME).exists()
     stored = WorkerIdentity.load(tmp_path / "worker" / PENDING_NAME)
     assert stored is not None and stored.worker_id is None
+    assert first.status()["pending"]  # CX16: held and checked by the loop
+    assert first.stop()
     second = worker_host(tmp_path)
     try:
         status = second.join(issued["code"], str(tmp_path / "staging"))
@@ -1319,7 +1321,9 @@ def test_a_missing_gpu_reading_withdraws_readiness(tmp_path, rt, host, server):
         return None
 
     issued = code_for(rt, server)
-    worker = worker_host(tmp_path, probe=flaky, probe_seconds=0.1)
+    # probe_seconds=0: every beat probes again, so the change shows at the
+    # next beat whatever the runner's load (no refresh interval to wait out)
+    worker = worker_host(tmp_path, probe=flaky, probe_seconds=0.0)
     try:
         worker.join(issued["code"], str(tmp_path / "staging"))
         until(lambda: worker.state == "running")
@@ -1949,5 +1953,40 @@ def test_a_re_join_whose_reply_was_lost_is_held_until_it_settles(tmp_path):
         loaded = WorkerIdentity.load(tmp_path / "worker" / IDENTITY_NAME)
         assert loaded is not None and loaded.worker_id == PENDING_WORKER
         assert not (tmp_path / "worker" / PENDING_NAME).exists()
+    finally:
+        assert worker.stop()
+
+
+# ── P2-3 R1 / CX16: a first join whose reply and /self were both lost ───
+@pytest.mark.parametrize("later", ["200", "401"])
+def test_a_first_join_whose_reply_was_lost_is_held_until_it_settles(tmp_path, later):
+    """CX16: no saved identity; `/pair` landed but its reply and the `/self`
+    recovery were lost. The pending identity is kept and checked by the loop
+    (no saved identity): a later 200 promotes it, a later 401 drops it."""
+    fake = Identities({}, {}, f"unreachable>{'valid' if later == '200' else '401'}")
+    worker = worker_host(tmp_path, client_factory=fake, pending_seconds=0.05)
+    code = f"TP1:127.0.0.1:2:00000000-0000-4000-8000-000000000005:{TICKET}"
+    data = tmp_path / "worker"
+    try:
+        with pytest.raises(JoinError):
+            worker.join(code, str(tmp_path / "staging"))
+        assert (data / PENDING_NAME).exists() and not (data / IDENTITY_NAME).exists()
+        until(lambda: worker.status()["pending"] and len(fake.attempts) == 1)
+        (cid,) = fake.attempts
+        until(lambda: fake.attempts[cid] >= 3)  # /pair's /self, then the loop's
+        assert worker._thread is not None and worker._thread.is_alive()
+        fake.up.set()
+        if later == "200":
+            until(
+                lambda: worker.reason == "在线" and worker.worker_id == PENDING_WORKER
+            )
+            loaded = WorkerIdentity.load(data / IDENTITY_NAME)
+            assert loaded is not None and loaded.worker_id == PENDING_WORKER
+            assert loaded.ticket is None
+        else:
+            until(lambda: worker.state == "unjoined")
+            assert worker.reason == "加入失败，请重新加入"
+            assert not (data / IDENTITY_NAME).exists()
+        until(lambda: not (data / PENDING_NAME).exists())
     finally:
         assert worker.stop()

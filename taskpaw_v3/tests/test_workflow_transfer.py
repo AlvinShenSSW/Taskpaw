@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import random
+import threading
 import uuid
 
 import pytest
@@ -941,3 +942,108 @@ def test_unit_plans_count_only_live_attempts(tmp_path):
     t.put_plan(a, [PlanFile(f"{a}/x.mp4", 10, "a" * 64)])
     assert len(t._plans(frozenset({a}))) == 1
     assert t._plans(frozenset()) == []
+
+
+# ── P2-3 R1 / CX15: the sweep re-checks each folder before it deletes it ──
+class _Racing:
+    """A `live` source whose first read (the sweep's snapshot) misses the
+    attempt; `during` runs inside a later read, as if a claim, a plan or an
+    upload had landed between the snapshot and the deletion."""
+
+    def __init__(self, attempt_id: str, *, fresh: set[str], during=None) -> None:
+        self.attempt_id, self.fresh, self.during = attempt_id, fresh, during
+        self.reads = 0
+
+    def __call__(self) -> set[str]:
+        self.reads += 1
+        if self.reads == 1:
+            return set()
+        if self.during is not None:
+            during, self.during = self.during, None
+            during()
+        return set(self.fresh)
+
+
+def _stale_plan(t: Transfers, a: str) -> None:
+    folder = t.incoming(a)
+    folder.mkdir(parents=True, exist_ok=True)
+    plan = {
+        "attempt_id": a,
+        "files": [{"path": f"{a}/x.mp4", "size": 4, "sha256": sha(b"abcd")}],
+        "committed": {},
+        "mismatches": {},
+    }
+    # written by an earlier process: only the store's liveness speaks for it
+    (folder / tr.PLAN_NAME).write_text(json.dumps(plan), encoding="utf-8")
+
+
+def test_a_sweep_keeps_an_attempt_that_became_live_after_its_snapshot(tmp_path):
+    a = str(uuid.uuid4())
+    live = _Racing(a, fresh={a})
+    t = Transfers(tmp_path, free_bytes=lambda p: 10**15, live=live)
+    _stale_plan(t, a)
+    t.sweep()
+    assert (t.incoming(a) / tr.PLAN_NAME).is_file()
+    assert live.reads >= 2  # re-read under the attempt lock
+
+
+def test_a_sweep_keeps_a_plan_written_after_its_snapshot(tmp_path):
+    a = str(uuid.uuid4())
+    t = Transfers(tmp_path, free_bytes=lambda p: 10**15, live=lambda: set())
+    live = _Racing(a, fresh=set(), during=lambda: _write_plan_now(t, a))
+    t._live = live
+    t.incoming(a).mkdir(parents=True)
+    t.sweep()
+    assert (t.incoming(a) / tr.PLAN_NAME).is_file()
+    t._live = lambda: set()
+    t.sweep()  # a later sweep, with the attempt still not live, deletes it
+    assert not t.incoming(a).exists()
+
+
+def _write_plan_now(t: Transfers, a: str) -> None:
+    """A plan written as `put_plan` writes it (the attempt's lock held)."""
+    with t._attempt(a):
+        t._write(a, {"attempt_id": a, "files": [], "committed": {}, "mismatches": {}})
+
+
+def test_a_sweep_keeps_an_attempt_an_upload_opened_meanwhile(tmp_path):
+    a = str(uuid.uuid4())
+    t = Transfers(tmp_path, free_bytes=lambda p: 10**15, live=lambda: {a})
+    t.put_plan(a, [PlanFile(f"{a}/x.mp4", 4, sha(b"abcd"))])
+    opened = []
+    t._live = _Racing(
+        a,
+        fresh=set(),
+        during=lambda: opened.append(t.open_upload(a, f"{a}/x.mp4", 0, 4)),
+    )
+    t.sweep()
+    assert opened and (t.incoming(a) / tr.PLAN_NAME).is_file()
+    opened[0].write(b"abcd")
+    assert opened[0].finish()["done"] is True
+
+
+def test_a_concurrent_plan_survives_a_sweep(tmp_path):
+    """CX15 with real threads: a plan posted while a sweep runs is never
+    lost — the sweep's snapshot is taken before the attempt is live."""
+    a = str(uuid.uuid4())
+    live_ids: set[str] = set()
+    snapshot_taken, plan_posted = threading.Event(), threading.Event()
+
+    def live() -> set[str]:
+        value = set(live_ids)
+        if not snapshot_taken.is_set():
+            snapshot_taken.set()
+            assert plan_posted.wait(10)  # the plan lands after the snapshot
+        return value
+
+    t = Transfers(tmp_path, free_bytes=lambda p: 10**15, live=live)
+    t.incoming(a).mkdir(parents=True)  # the folder exists at the scan
+    sweeper = threading.Thread(target=t.sweep)
+    sweeper.start()
+    assert snapshot_taken.wait(10)
+    live_ids.add(a)  # the claim committed
+    _write_plan_now(t, a)
+    plan_posted.set()
+    sweeper.join(10)
+    assert not sweeper.is_alive()
+    assert (t.incoming(a) / tr.PLAN_NAME).is_file()
