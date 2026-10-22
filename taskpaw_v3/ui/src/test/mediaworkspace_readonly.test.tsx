@@ -21,6 +21,8 @@ let requests: Recorded[];
 let servers: HubServer[];
 let available: Set<number>;
 let override: Partial<FilmDetail>;
+let filmsExtra: Record<string, unknown>;
+let planExtra: Record<string, unknown>;
 
 function mount(ui: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -41,10 +43,10 @@ function serve() {
     const match = url.pathname.match(/^\/servers\/(\d+)\/workflow\/(.+)$/);
     if (!match || !available.has(Number(match[1]))) return Response.json({ error: "workflow_unavailable" }, { status: 404 });
     const [, sid, resource] = match;
-    if (resource === "films") return Response.json(FILMS_RESPONSE);
+    if (resource === "films") return Response.json({ ...FILMS_RESPONSE, ...filmsExtra });
     if (resource === "plans") return Response.json({ ...PLANS, plans: PLANS.plans.map(p => ({ ...p,
       has_poster: true, poster_source: "lookup-1", has_cover: true, cover_source: "lookup-1",
-      lookup: lookupFailed("未查到资料", true),
+      lookup: lookupFailed("未查到资料", true), ...planExtra,
     })) });
     if (/\/poster$|\/cover$/.test(resource)) {
       // jsdom's FileReader accepts jsdom Blob rather than Node's Response Blob.
@@ -80,7 +82,7 @@ function onlyHubGets() {
 beforeEach(() => {
   setLang("zh-CN");
   setDevControlCredential("hub", "test-hub-control", HUB_BASE);
-  requests = []; servers = [SERVER]; available = new Set([7]); override = {};
+  requests = []; servers = [SERVER]; available = new Set([7]); override = {}; filmsExtra = {}; planExtra = {};
   vi.spyOn(window, "scrollTo").mockImplementation(() => {});
   serve();
 });
@@ -124,6 +126,22 @@ describe("#286 Hub media read-only workspace", () => {
       if (label === "本机") expect(screen.getByText("WINDOWS-GPU")).toBeInTheDocument();
     }
     onlyHubGets();
+  });
+
+  it("shows the power figures as display only, without the Agent's 功耗详情 link", async () => {
+    filmsExtra = { power: { w: 286, gpu_w: 210, cpu_w: 46, other_w: 30, today_wh: 8400, machines: 1, peers: 0, estimated: true },
+      energy_rates: [] };
+    planExtra = { prediction: { machine: "m", resolution: "4K", min_films: 3, films: { standard: 5, good: 4, high: 3, none: 0 },
+      standard: 1400, good: 2300, high: 5300, none: null, estimated: true } };
+    mount(<MediaWorkspace readOnly server={SERVER} />);
+    await screen.findByRole("heading", { name: "概览", level: 1 });
+    const card = await screen.findByTestId("cluster-power");
+    expect(card).toHaveTextContent("286W · 1 台计算设备");
+    expect(within(card).queryByRole("button")).toBeNull();
+    await go("待处理");
+    await screen.findByText("星河之外");
+    expect(screen.getAllByText(/预计耗电/).length).toBeGreaterThan(0);
+    noControls(); onlyHubGets();
   });
 
   it("keeps LTX details, step line, parameters, timing and authenticated cover lightbox", async () => {
