@@ -218,3 +218,17 @@ it("R07 stopped but unsaved status offers Stop retry rather than restarting", as
   expect(screen.queryByRole("button", { name: /^Start$|^启动$/ })).not.toBeInTheDocument();
   expect(screen.getByText(/Restart may run it again|重启可能再次运行/)).toBeInTheDocument();
 });
+
+// PWR-3: 「功耗」 is a top-level tab right after 媒体处理中心.
+describe("AgentConsole 功耗 tab", () => {
+  beforeEach(stubFetch);
+
+  it("sits next to 媒体处理中心 and opens the power page", async () => {
+    renderConsole();
+    const tabs = screen.getAllByRole("tab").map((t) => t.textContent);
+    const media = tabs.findIndex((t) => t === "Media Center" || t === "媒体处理中心");
+    expect(tabs[media + 1]).toMatch(/^Power$|^功耗$/);
+    fireEvent.click(screen.getByRole("tab", { name: /^Power$|^功耗$/ }));
+    expect(await screen.findByTestId("power-page")).toBeInTheDocument();
+  });
+});

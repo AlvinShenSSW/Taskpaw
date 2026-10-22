@@ -416,6 +416,7 @@ const en = {
     llmFailover: "Use the fallback models while the primary is unavailable",
     llmFailoverHint: "On (default): while the primary model is down, rate-limited or out of credit, lines go to the fallback models. Off: translation waits for the primary to recover (lines it refuses still go to the fallbacks).",
   },
+  power: { tab: "Power" },
   media: {
     tab: "Media Center",
     groups: { confirm: "Awaiting confirmation", active: "In progress", attention: "Needs attention",
@@ -866,6 +867,7 @@ const zh: typeof en = {
     llmFailover: "主模型不可用时改用备用模型",
     llmFailoverHint: "开启(默认):主模型宕机、限流或额度用尽期间,句子改由备用模型翻译。关闭:翻译会等待主模型恢复(主模型拒绝的句子仍交给备用模型)。",
   },
+  power: { tab: "功耗" },
   media: {
     tab: "媒体处理中心",
     groups: { confirm: "待确认入库", active: "处理中", attention: "需处理", archiving: "已确认待归档与清理", done: "已完成" },
