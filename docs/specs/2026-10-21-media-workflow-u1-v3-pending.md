@@ -177,6 +177,48 @@ After installing the U1 build the operator wrote: 「封面被裁切了，可以
 - **Lookup budget.** MDCX304 8a3f519 gives `lookup_one` its own 270 s budget: 240 s for metadata and 30 s for the poster. Taskpaw's wall-clock kill moves from 150 s to **300 s**, so a slow site ends with lookup_one's own 「资料查询超时」 result instead of a killed process.
 - **Codex r6 P2s.** The 异常 page polls the target preflights, still only for the top ten films, because it lists films whose target is offline, unwritable or taken. 待处理 hides a confirmed film by `(film_id, input_revision)`, so a newer revision that has not been planned shows again, flagged as changed.
 
+## U1e (operator feedback 2026-10-22): how long a film took
+
+> 四个阶段的合计用时要有一个地方显示。日志里最后也要体现一部片从开始到翻译结束的全部时间。
+
+(Show the combined time of the four LTX stages somewhere. The log must also end with a film's total time, from the start to the end of translation.)
+
+- **What the code showed.**
+  - The TaskPaw 「日志」 tab reads the agent's persistent task log (`TaskLog`, `logs/tasklog-YYYYMMDD.jsonl`), not the in-memory event queue. The queue feeds the Hub and OpenClaw, and monitor events reach the log only as `event.mirrored` copies. The workflow writes neither today.
+  - A stage result lives in `work/<attempt_id>/`. `cleanup_workcopy` reclaims that directory, so a timing kept only there would vanish once the film is done.
+- **E1. LTX timing** (restore executor).
+  - A pure `PhaseTimer` reads each parsed Jasna state (`parse_jasna_progress_line`). It measures, on the monotonic clock, how long Taskpaw saw each phase as the current one:
+    - `scan`: the auto split's Mosaic scan (扫描马赛克);
+    - `basicvsr`: BasicVSR++ spans;
+    - each restore-mode LTX stage by name (`scan`, `encode`, `denoise`, `compose`);
+    - `speed_test`: every LTX speed-test line (测速), whatever its stage.
+  - A phase's time runs from its first line until another phase begins, a state change names none of them (a new file header or the split note), or the child exits.
+  - `ltx` is the four stages plus the speed test. `ltx_runs` counts LTX runs: a restore-mode stage starts a new run unless it follows a lower stage of the same run. The auto split launches one run per span. `wall` is the time the Jasna children ran.
+  - It is accumulated over every run and every volume of the film, as `RestoreTiming` (seconds, one decimal).
+  - Each applied video's `RestoreFacts.timing` keeps its own copy. The field is optional, so older stage results still load.
+  - The film total goes into the restore's success evidence as `summary.timing`. It is omitted when absent, so older evidence is unchanged, and it survives the work-dir reclaim.
+  - While the step runs, it carries `timing`: the film so far, with the current phase counted up to now.
+- **E2. Film timing** (board, from the store).
+  - Each stage's duration is its current succeeded attempt's `ended_at − started_at`.
+  - The start is the earliest of those attempts among restore, asr and translate, which is normally the restore attempt (the real processing start). The end is the translate attempt's `ended_at`.
+  - Queue wait runs from the plan's `confirmed_at` to the restore attempt's start. It is null for a backfilled plan, or when the result is negative.
+  - Rows and the detail carry `timing`: `{stages: {stage: seconds}, restore_breakdown: RestoreTiming | null, total_restore_to_translate, queue_wait}`.
+- **E3. UI.**
+  - **Drawer.**
+    - A compact 「LTX 合计用时」 card shows the total plus the four stage times and 测速 when one ran. It reuses the shared progress parts (`ProgressFrame`, `DATA`). It shows live on the running 修复 step and from `restore_breakdown` once restore has finished.
+    - A 「用时」 block lists 修复 (with 扫描马赛克 / BasicVSR++ / LTX), 识别, 翻译, 回传, 整理, then 「修复→翻译合计」, with 「排队等待」 on its own row.
+    - The Jasna monitor's own LtxProgress is unchanged.
+  - **Step line.** Every finished step that has a duration shows it under its label, small and muted.
+  - **Queue card.** Once translate has finished, the foot shows 「全程 h:mm」.
+- **E4. Log.**
+  - The launcher hands its `TaskLog` to the workflow host and then to the dispatcher. After each resolved attempt, the dispatcher writes a task-log row (task 「媒体处理中心」, task_type `workflow`, `film` = the shown name):
+    - `workflow.stage.succeeded` `{stage, duration}`;
+    - `workflow.stage.failed` (severity warn) `{stage, duration, detail}`.
+  - When translate succeeds, it also writes `workflow.film.translated` `{run, restore, ltx, asr, translate, text}`, where `text` reads 「{film} 修复→翻译完成，全程 {h:mm:ss}（修复 {..}，其中 LTX {..}；识别 {..}；翻译 {..}）」.
+  - The task log is persistent, so the summary is too. It is not copied into the film record.
+  - The 日志 tab gains these kinds and fields; the times show as clocks.
+  - Nothing goes to the Hub event queue, so no OpenClaw notice is sent per stage.
+
 ## API appendix (backend as built, U1)
 
 All routes are on the loopback control API under `/control/workflow`, with the existing bearer token. JSON field names are final; the frontend aligns to this section. Labels, toasts and colours stay in the UI.
