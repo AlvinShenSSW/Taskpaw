@@ -62,6 +62,23 @@ def _gpu_lease_isolation():
 
 
 @pytest.fixture(autouse=True)
+def _power_isolation(monkeypatch):
+    """PWR-1 (#287): no test reads this machine's GPU or CPU through the power
+    sampler, and the process-wide holders (settings, sampler) and the shared
+    nvidia-smi cache start fresh. Tests that exercise a reader call it directly
+    or pass their own fakes."""
+    from taskpaw_v3.core import gpu_sample, power
+
+    monkeypatch.setattr(power, "_gpu_reader", lambda: None)
+    monkeypatch.setattr(power, "_cpu_reader", lambda: 0.0)
+    gpu_sample._reset_for_tests()
+    power._reset_for_tests()
+    yield
+    gpu_sample._reset_for_tests()
+    power._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_bitrate_probe(monkeypatch):
     """#285: `match_source_bitrate` is on by default, so every managed Jasna
     launch would run ffprobe for the source bitrate — against the fake

@@ -8,10 +8,17 @@ and testable.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 def _valid_port(p: int) -> int:
@@ -53,6 +60,33 @@ class WorkflowSettings(BaseModel):
         return value
 
 
+class PowerSettings(BaseModel):
+    """Per-machine power estimate (PWR-1, #287; `power:` in agent.yaml).
+
+    Machine W = GPU (nvidia-smi `power.draw`) + CPU (`idle + (tdp − idle) ×
+    utilisation`) + other (a baseline), optionally divided by the PSU
+    efficiency (null = 「不计」: a plug-calibrated baseline already holds the
+    loss). None for tdp/idle/other means this platform's default (Windows
+    65 / 10 / 35 W, macOS 20 / 3 / 5 W). Every figure is an estimate; measured
+    CPU sources are a disabled future option (PW10), so only "estimate" or
+    "none" is accepted. Unknown keys are ignored like AgentConfig's, so an
+    agent.yaml written by a newer build (e.g. PWR-3 peers) still loads."""
+
+    enabled: bool = True
+    tdp_w: Optional[float] = Field(None, ge=0, le=2000)
+    idle_w: Optional[float] = Field(None, ge=0, le=2000)
+    other_w: Optional[float] = Field(None, ge=0, le=2000)
+    psu_efficiency: Optional[float] = Field(None, gt=0, le=1)
+    cpu_source: Literal["estimate", "none"] = "estimate"
+
+    @model_validator(mode="after")
+    def _idle_within_tdp(self) -> "PowerSettings":
+        if self.tdp_w is not None and self.idle_w is not None:
+            if self.idle_w > self.tdp_w:
+                raise ValueError("power.idle_w must not exceed power.tdp_w")
+        return self
+
+
 class AgentConfig(BaseModel):
     """A V3 agent's local config (`agent.yaml`)."""
 
@@ -78,6 +112,8 @@ class AgentConfig(BaseModel):
     # Monitor instances. Opaque dicts here; #17 defines the plugin schema.
     monitors: list[dict[str, Any]] = Field(default_factory=list)
     workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
+    # PWR-1 (#287): this machine's power estimate; live-applied (PW07).
+    power: PowerSettings = Field(default_factory=PowerSettings)
     # Auto-run a host_metrics self-monitor on this agent (§5b: every agent).
     host_metrics: bool = True
     # Global LLM API (#178): one OpenAI-compatible endpoint for the whole agent
