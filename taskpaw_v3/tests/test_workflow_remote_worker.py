@@ -75,12 +75,12 @@ IDLE = 1.0  # the test server drops a stream after 1 s without progress (IR4)
 
 
 class Server:
-    def __init__(self, host: Host) -> None:
+    def __init__(self, host: Host, **app: object) -> None:
         self.sock = claim_port("127.0.0.1", 0, "test worker API")
         self.port = self.sock.getsockname()[1]
         self.server = uvicorn.Server(
             uvicorn.Config(
-                create_worker_app(lambda: host, idle_seconds=IDLE),
+                create_worker_app(lambda: host, idle_seconds=IDLE, **app),
                 log_level="warning",
                 access_log=False,
             )
@@ -848,6 +848,28 @@ def _raw_put(port, client, a, path, total, first):
 PREFIX = "/worker/v1"
 
 
+def _reply(sock):
+    """The status and body of one HTTP/1.1 reply read off a raw socket."""
+    crlf = b"\r\n"
+    data = b""
+    while crlf * 2 not in data:
+        chunk = sock.recv(4096)
+        assert chunk, "the server closed without a reply"
+        data += chunk
+    head, _, body = data.partition(crlf * 2)
+    lines = head.decode("latin-1").split("\r\n")
+    length = 0
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        if name.lower() == "content-length":
+            length = int(value)
+    while len(body) < length:
+        chunk = sock.recv(4096)
+        assert chunk, "the server closed mid-reply"
+        body += chunk
+    return int(lines[0].split()[1]), body
+
+
 class _Errors(logging.Handler):
     def __init__(self) -> None:
         super().__init__(logging.ERROR)
@@ -881,23 +903,54 @@ def test_a_client_disconnect_keeps_its_bytes_and_logs_no_error(
 
 
 def test_a_stalled_upload_frees_its_slot_and_a_concurrent_put_is_429(
-    enrolled, rt, host, server, tmp_path
+    enrolled, rt, host, tmp_path
 ):
     """IR4/IR18: a second PUT while the first streams is 429; a stream with no
-    progress for the idle time is dropped, keeping what arrived."""
+    progress for the idle time is dropped, keeping what arrived.
+
+    The idle timeout is the app's `bound` seam, tripped by an event rather than
+    a wall-clock wait: the stall lasts exactly until the 429 is observed, so
+    no scheduler delay can free the slot early or hold it late."""
+    import asyncio
+
+    idle = threading.Event()  # set = the idle time has now elapsed
+    waits = []  # one entry per body read the stalled PUT has started
+
+    async def bound(read, seconds):
+        assert seconds == IDLE
+        waits.append(seconds)
+        task = asyncio.ensure_future(read)
+        try:
+            while not task.done():
+                if idle.is_set():
+                    raise asyncio.TimeoutError
+                await asyncio.wait({task}, timeout=0.005)
+            return task.result()
+        finally:
+            task.cancel()
+
+    stalled = Server(host, bound=bound)
     client, _, _, a, path, local = _attempt(enrolled, rt, tmp_path)
-    sock = _raw_put(server.port, client, a, path, len(OUTPUT), OUTPUT[:1000])
+    sock = _raw_put(stalled.port, client, a, path, len(OUTPUT), OUTPUT[:1000])
     try:
-        until(lambda: host.transfers._streams)
-        with pytest.raises(ApiError) as exc:
-            client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
-        assert exc.value.code == "busy" and exc.value.status == 429
-        until(lambda: not host.transfers._streams, timeout=IDLE * 5)
+        until(lambda: host.transfers._streams and len(waits) >= 2)  # body consumed
+        # a head with no body: the 429 is read whole (a full upload would race
+        # the server closing on its refusal and surface as a reset instead)
+        second = _raw_put(stalled.port, client, a, path, len(OUTPUT), b"")
+        try:
+            status, body = _reply(second)
+        finally:
+            second.close()
+        assert status == 429 and b'"busy"' in body
+        assert host.transfers._streams  # still held until the idle time elapses
+        idle.set()
+        until(lambda: not host.transfers._streams)
         assert client.outputs(a)["files"][0]["received"] == 1000
         done = client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
         assert done["done"] is True and (rt.work_dir / path).read_bytes() == OUTPUT
     finally:
         sock.close()
+        stalled.stop()
 
 
 def test_a_stalled_download_frees_its_slot(tmp_path):
@@ -924,7 +977,7 @@ def test_a_stalled_download_frees_its_slot(tmp_path):
         response = _ReleasingFile(data, on_close=lambda: closed.append(1), idle=0.1)
         await response(scope, receive, send)
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), 60))  # a hang guard; idle trips at 0.1 s
     assert closed == [1]
 
 

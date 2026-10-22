@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Protocol
@@ -225,8 +225,14 @@ def _running(provider: HostProvider) -> tuple[ControllerHost, LocalRuntime, Flee
 
 
 def create_worker_app(
-    provider: HostProvider, *, idle_seconds: float = IDLE_SECONDS
+    provider: HostProvider,
+    *,
+    idle_seconds: float = IDLE_SECONDS,
+    bound: Callable[[Awaitable[Message], float], Awaitable[Message]] = asyncio.wait_for,
 ) -> FastAPI:
+    """`bound(awaitable, idle_seconds)` is the idle-timeout seam (IR4): it
+    raises `asyncio.TimeoutError` once a body read has made no progress. Tests
+    swap it to trip the timeout on an event instead of a wall-clock wait."""
     from taskpaw_v3.workflow.auth import (
         authenticate,
         authenticate_pairing,
@@ -515,9 +521,7 @@ def create_worker_app(
                 got, buffer, more = 0, bytearray(), True
                 while more:
                     try:  # IR4: a body without progress frees the slot
-                        message = await asyncio.wait_for(
-                            request.receive(), idle_seconds
-                        )
+                        message = await bound(request.receive(), idle_seconds)
                     except asyncio.TimeoutError:  # py3.10: not the builtin
                         log.warning("an upload stalled; its stream was dropped")
                         more = False
