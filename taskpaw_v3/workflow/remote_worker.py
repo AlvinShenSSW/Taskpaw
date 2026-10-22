@@ -473,6 +473,8 @@ class WorkerHost:
                 hold=self._hold,
                 paused=self.local_paused,
             )
+            if self.local_paused:  # §11 CX10: no claim starts after this returns
+                dispatcher.acknowledge_pause()
 
     def _halt(self, timeout: float) -> bool:
         self._stop.set()

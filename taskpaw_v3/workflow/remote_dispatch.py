@@ -285,6 +285,8 @@ class RemoteDispatcher:
         self._holding = False
         self._lease_lock = threading.Lock()  # `_holding` and the lease calls
         self._tick_lock = threading.Lock()  # held by the run thread per tick
+        # §11 CX10: the final pause check and the claim's first send are one step
+        self._admission = threading.Lock()
         # §11 CX6: settled outcomes whose file never landed (retried first)
         self._unsaved: dict[str, AttemptState] = {}
         self._started: dict[str, float] = {}  # §11 IR8: claim time per attempt
@@ -381,6 +383,13 @@ class RemoteDispatcher:
         for item in reply.get("release") or []:
             self._release_film(str(item["film"]), int(item["rev"]))
         self._wake.set()
+
+    def acknowledge_pause(self) -> None:
+        """§11 CX10: returns once no claim can start any more. Called after
+        `observe(paused=True)`: an admission that read `paused` earlier either
+        has its first claim already sent or sees the flag and sends nothing."""
+        with self._admission:
+            pass
 
     def _cancel(self, attempt_id: str, active: _Active | None) -> None:
         """(a) 停止并重新排队 → the Job stops, the finish reports `cancelled`;
@@ -1005,9 +1014,20 @@ class RemoteDispatcher:
     def _send_claim(self, state: AttemptState) -> dict[str, Any] | None:
         """The same bytes until a definite answer (C2 replay); a refusal drops
         the attempt file and frees the GPU."""
-        failures = 0
+        failures, first = 0, True
         while not self._stop.is_set():
             try:
+                if first:  # §11 CX10: re-check under the admission lock
+                    first = False
+                    with self._admission:
+                        with self._lock:
+                            paused = self._paused
+                        if paused:
+                            self._drop(state.attempt_id)
+                            self._release()
+                            self.reason = "暂停领取"
+                            return None
+                        return self._client().claim(state.request)
                 return self._client().claim(state.request)
             except ApiError as exc:
                 if exc.transient:

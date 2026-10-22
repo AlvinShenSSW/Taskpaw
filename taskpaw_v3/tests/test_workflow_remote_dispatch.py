@@ -1416,3 +1416,40 @@ def test_cx9_a_cancelled_finish_keeps_the_settled_energy(tmp_path):
         assert body["energy"]["wh"] == 1.5 and body["energy"]["peak_w"] == 120.0
     finally:
         assert d.stop(10)
+
+
+def test_cx10_a_pause_during_the_envelope_read_admits_no_claim(tmp_path):
+    """§11 CX10: the gate's `paused` was read before the envelope request; a
+    pause acknowledged while that request is in flight must still stop the
+    claim."""
+    executor = Blocking()
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, executor)
+    client.__init__(staging)
+    film = client.add()
+    reading, proceed = threading.Event(), threading.Event()
+    envelope = client.envelope
+
+    def slow_envelope(film_id, rev):
+        if threading.current_thread().name == "workflow-worker-run":  # the gate
+            reading.set()
+            assert proceed.wait(10)
+        return envelope(film_id, rev)
+
+    client.envelope = slow_envelope  # type: ignore[method-assign]
+    routes = [_route(film, 0)]
+    d.start()
+    try:
+        _observe(d, routes)
+        assert reading.wait(10)  # the gate passed `paused=False` and waits
+        _observe(d, routes, paused=True)
+        d.acknowledge_pause()  # what WorkerHost.set_paused(True) ends with
+        proceed.set()
+        until(lambda: d.reason == "暂停领取")
+        assert client.claims == [] and executor.runs == 0
+        assert list((staging.root / "attempts").glob("*.json")) == []
+        assert not d.claimed()
+    finally:
+        proceed.set()
+        executor.release.set()
+        assert d.stop(10)
