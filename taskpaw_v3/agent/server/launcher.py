@@ -28,6 +28,8 @@ from taskpaw_v3.core.net import (  # re-export
     PortBindError,
     PortInUseError,
     announce_ready,
+    bind_is_global,
+    bind_is_wildcard,
     claim_port,
     guard_bind_exposure,
     loopback_url,
@@ -53,6 +55,19 @@ __all__ = [
     "ensure_port_free",
     "effective_monitors",
 ]
+
+
+WORKER_API = "agent worker API"
+
+
+def guard_worker_api(host: str) -> None:
+    """S-1: the worker API binds the agent's LAN bind_host; a wildcard or a
+    public address is refused before any socket is claimed."""
+    if bind_is_wildcard(host) or bind_is_global(host):
+        raise ValueError(
+            f"refusing to bind the {WORKER_API} to {host!r} — use a specific "
+            f"private LAN address."
+        )
 
 
 def ensure_port_free(host: str, port: int, what: str) -> None:
@@ -99,6 +114,14 @@ def run_agent(
     # — so a hand-edited agent.yaml / bootstrap can't bind wildcard/public/non-
     # loopback-without-token unguarded (#114/Kimi). Raised BEFORE any socket claim.
     guard_bind_exposure(config.bind_host, config.api_token, label="agent network API")
+    # P2-2 (#293): the worker API (a third server) only on a controller with
+    # remote workers on; it binds bind_host, never a wildcard or public address
+    workflow = config.workflow
+    worker_api = (
+        workflow.enabled and workflow.role == "controller" and workflow.remote_workers
+    )
+    if worker_api:
+        guard_worker_api(config.bind_host)
     strip_control_env()
 
     # Publish the global LLM settings (#178) BEFORE the stale-port reclaim, any
@@ -119,28 +142,32 @@ def run_agent(
     # or ours — a foreign service on either port aborts the whole reclaim so we never
     # kill the old agent when startup would fail here anyway (claim_port then fails
     # loudly as before).
-    reclaim_ports_from_stale_instance(
-        [
-            (config.bind_host, config.bind_port, "agent network API"),
-            (config.control_host, config.control_port, "agent control API"),
-        ],
-        role="agent",
-    )
+    ports = [
+        (config.bind_host, config.bind_port, "agent network API"),
+        (config.control_host, config.control_port, "agent control API"),
+    ]
+    if worker_api:
+        ports.append((config.bind_host, workflow.worker_api_port, WORKER_API))
+    reclaim_ports_from_stale_instance(ports, role="agent")
 
     # Validate after stale-instance reclaim, before fresh claims or writers.
     queue = queue if queue is not None else build_queue(config, state_path)
     shutdown = shutdown or GracefulShutdown()
-    net_sock = ctl_sock = None
+    net_sock = ctl_sock = api_sock = None
     try:
         net_sock = claim_port(config.bind_host, config.bind_port, "agent network API")
         ctl_sock = claim_port(
             config.control_host, config.control_port, "agent control API"
         )
+        if worker_api:  # a collision fails startup loudly, like the other two
+            api_sock = claim_port(
+                config.bind_host, workflow.worker_api_port, WORKER_API
+            )
         session = bootstrap_control(
             "agent", loopback_url(config.control_host, config.control_port), config_path
         )
     except BaseException:
-        for sock in (net_sock, ctl_sock):
+        for sock in (net_sock, ctl_sock, api_sock):
             if sock is not None:
                 try:
                     sock.close()
@@ -194,7 +221,9 @@ def run_agent(
                         and thread is not threading.current_thread()
                     ):
                         thread.join(timeout=10)
-                for sock in (net_sock, ctl_sock):
+                for sock in (net_sock, ctl_sock, api_sock):
+                    if sock is None:
+                        continue
                     try:
                         sock.close()
                     except OSError:
@@ -369,6 +398,19 @@ def run_agent(
         )
 
         servers.extend((net, ctl))
+        api = None
+        if worker_api:
+            from .worker_api import create_worker_app
+
+            # S-6: no access log, so no path or header ever reaches a log
+            api = uvicorn.Server(
+                uvicorn.Config(
+                    create_worker_app(lambda: workflow_host),
+                    log_level="warning",
+                    access_log=False,
+                )
+            )
+            servers.append(api)
 
         def _serve(server, sock, label):
             try:
@@ -391,6 +433,14 @@ def run_agent(
                 ),
             )
         )
+        if api is not None:
+            threads.append(
+                threading.Thread(
+                    target=lambda: _serve(api, api_sock, "worker API"),
+                    name="agent-worker-api",
+                    daemon=True,
+                )
+            )
         shutdown.install_signal_handlers()
         # Cleanup is already registered even if start() fails part way through.
         startup.checkpoint()

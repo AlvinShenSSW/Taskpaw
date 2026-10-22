@@ -27,6 +27,7 @@ from .exec_common import MISSING_LTX
 from .executors import StageExecutor
 from .filmpaw_client import FilmpawClient
 from .finalize import Finalizer
+from .fleet_live import FleetLive
 from .intake_protocol import ProbeArtifact
 from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
@@ -284,6 +285,8 @@ class LocalWorkflowHost:
         self.intake: Any = None
         self.dispatcher: LocalDispatcher | None = None
         self.finalizer: Finalizer | None = None
+        # P2-2: the workers' live state, while the worker API is on
+        self.fleet: FleetLive | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
         # H3 M1/D02: one LTX model download; the session needs serialized calls
@@ -356,6 +359,11 @@ class LocalWorkflowHost:
             if self.lookup_factory is not None:  # U1 L: off the dispatch thread
                 self.lookup = rt.lookup = self.lookup_factory(rt)
                 self.lookup.start()
+            if self.settings.remote_workers and self.settings.role == "controller":
+                from taskpaw_v3 import __version__
+
+                # R9: the restart grace counts from here (IR12, C14)
+                self.fleet = FleetLive(rt.clock.now(), __version__)
             self.state, self.reason = "running", rt.reason
             if self.events is not None and not self._stopping.is_set():
                 self.events.start(self)

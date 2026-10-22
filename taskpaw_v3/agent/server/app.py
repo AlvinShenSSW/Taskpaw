@@ -303,7 +303,9 @@ def create_control_app(
         return result
 
     _register_film_routes(app, "/control/monitors", films_provider, run_films_provider)
-    register_workflow_routes(app, config.workflow, workflow_provider)
+    register_workflow_routes(
+        app, config.workflow, workflow_provider, worker_api_host=config.bind_host
+    )
 
     @app.get("/control/status")
     def control_status() -> dict:

@@ -65,6 +65,28 @@ class PauseBody(BaseModel):
     paused: StrictBool
 
 
+class DeviceBody(BaseModel):
+    """添加设备: a name and the worker's address (`host[:port]`)."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=64)
+    address: str = Field(min_length=1, max_length=255)
+
+
+class VersionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int = Field(gt=0, strict=True)
+
+
+class ApproveBody(VersionBody):
+    restore: StrictBool
+    asr: StrictBool
+
+
+class AdmissionBody(VersionBody):
+    state: Literal["enabled", "draining"]
+
+
 class LtxDownloadBody(BaseModel):
     """The 下载模型 answer to the offered request (H3 M1), as the monitor's."""
 
@@ -82,7 +104,11 @@ def open_folder(path: Path) -> None:
 
 
 def register_workflow_routes(
-    app: FastAPI, settings: WorkflowSettings, provider: WorkflowProvider | None
+    app: FastAPI,
+    settings: WorkflowSettings,
+    provider: WorkflowProvider | None,
+    *,
+    worker_api_host: str = "127.0.0.1",
 ) -> None:
     @app.exception_handler(CodedConflict)
     async def _coded_conflict(_request: Any, exc: CodedConflict) -> JSONResponse:
@@ -249,6 +275,116 @@ def register_workflow_routes(
         inbox = host.finalizer.inbox if host.finalizer is not None else None
         with _mapped():
             return _open(board.folder(_runtime(host), inbox, film_id, body.what))
+
+    # ── 设备 (P2-2): enrollment and admission of remote workers ─────────
+    def _device(run: Any) -> Any:
+        from taskpaw_v3.workflow.models import WorkflowError
+
+        host = _host()
+        with _mapped():
+            try:
+                return run(_runtime(host), getattr(host, "fleet", None))
+            except WorkflowError as exc:
+                if exc.code == "owner_unresolved":
+                    raise CodedConflict(
+                        "仍有未结束的任务，不能退休", exc.code
+                    ) from None
+                if exc.code == "invalid_request":
+                    raise HTTPException(
+                        status_code=422, detail="地址无效（主机名或 IP，可带端口）"
+                    ) from None
+                if exc.code == "not_found":
+                    raise HTTPException(status_code=404, detail="未知设备") from None
+                raise
+
+    def _remote_on() -> None:
+        if not settings.remote_workers:
+            raise HTTPException(
+                status_code=409, detail="未开启远程设备（workflow.remote_workers）"
+            )
+
+    @app.get("/control/workflow/devices")
+    def workflow_devices() -> dict[str, Any]:
+        from taskpaw_v3.workflow import devices
+
+        return _device(
+            lambda rt, fleet: devices.device_view(
+                rt, fleet, remote_workers=settings.remote_workers
+            )
+        )
+
+    @app.post("/control/workflow/devices")
+    def workflow_add_device(body: DeviceBody) -> dict[str, Any]:
+        """添加设备: the pairing code is shown once and never logged."""
+        from taskpaw_v3.workflow import devices
+
+        _remote_on()
+        return _device(
+            lambda rt, _fleet: devices.add_device(
+                rt,
+                body.name,
+                body.address,
+                host=worker_api_host,
+                port=settings.worker_api_port,
+            )
+        )
+
+    @app.post("/control/workflow/devices/{worker_id}/pairing")
+    def workflow_repair_device(worker_id: str, body: VersionBody) -> dict[str, Any]:
+        from taskpaw_v3.workflow import devices
+
+        _remote_on()
+        return _device(
+            lambda rt, _fleet: devices.repair(
+                rt,
+                worker_id,
+                body.expected_version,
+                host=worker_api_host,
+                port=settings.worker_api_port,
+            )
+        )
+
+    @app.post("/control/workflow/devices/{worker_id}/approve")
+    def workflow_approve_device(worker_id: str, body: ApproveBody) -> dict[str, bool]:
+        from taskpaw_v3.workflow import devices
+
+        _device(
+            lambda rt, _fleet: devices.approve(
+                rt,
+                worker_id,
+                body.expected_version,
+                restore=body.restore,
+                asr=body.asr,
+            )
+        )
+        return {"ok": True}
+
+    @app.post("/control/workflow/devices/{worker_id}/admission")
+    def workflow_device_admission(
+        worker_id: str, body: AdmissionBody
+    ) -> dict[str, bool]:
+        from taskpaw_v3.workflow import devices
+
+        _device(
+            lambda rt, _fleet: devices.set_admission(
+                rt, worker_id, body.expected_version, body.state
+            )
+        )
+        return {"ok": True}
+
+    @app.post("/control/workflow/devices/{worker_id}/revoke")
+    def workflow_revoke_device(worker_id: str, body: VersionBody) -> dict[str, bool]:
+        from taskpaw_v3.workflow import devices
+
+        _device(lambda rt, _fleet: devices.revoke(rt, worker_id, body.expected_version))
+        return {"ok": True}
+
+    @app.post("/control/workflow/devices/{worker_id}/retire")
+    def workflow_retire_device(worker_id: str, body: VersionBody) -> dict[str, bool]:
+        from taskpaw_v3.workflow import devices
+
+        _device(lambda rt, _fleet: devices.retire(rt, worker_id, body.expected_version))
+        return {"ok": True}
 
     @app.post("/control/workflow/packages/{package_id}/open", status_code=204)
     def workflow_open_package(package_id: str) -> Response:

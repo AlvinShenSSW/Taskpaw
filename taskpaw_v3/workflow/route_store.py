@@ -12,11 +12,13 @@ import re
 import sqlite3
 from datetime import datetime
 from typing import Any
+from uuid import UUID, uuid5
 
 from .auth import AuthProof
 from .executors import ASR_DONE, RESTORE_DONE
 from .film_store import FilmCommands, _passed
 from .models import (
+    ApprovedCapability,
     CommandMeta,
     CommandResult,
     FilmPin,
@@ -367,6 +369,53 @@ class RouteCommands(FilmCommands):
                 "SELECT body_json FROM workers ORDER BY name,worker_id"
             ).fetchall()
             return tuple(WorkerRecord.model_validate_json(row[0]) for row in rows)
+
+    def routing_workers(self, auth: AuthProof) -> tuple[RoutingWorker, ...]:
+        """Every worker as the scheduler sees it (the 设备 page, P2-2)."""
+        with self._lock:
+            self._operator_read(auth)
+            return self._routing_workers()
+
+    def last_approval(
+        self, auth: AuthProof, worker_id: str
+    ) -> tuple[ApprovedCapability, HardwareProbe] | None:
+        """The worker's newest approved capability and the probe it approved
+        (核验并启用 compares a new probe with it, P2-2)."""
+        with self._lock:
+            self._operator_read(auth)
+            row = self._conn.execute(
+                "SELECT a.body_json,p.body_json FROM capabilities a "
+                "JOIN capabilities p ON p.worker_id=a.worker_id AND p.kind='probed' "
+                "AND p.revision=a.probe_revision "
+                "WHERE a.worker_id=? AND a.kind='approved' "
+                "ORDER BY a.revision DESC LIMIT 1",
+                (worker_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return (
+                ApprovedCapability.model_validate_json(row[0]),
+                HardwareProbe.model_validate_json(row[1]),
+            )
+
+    def pairing_slot(self, auth: AuthProof, pairing_id: str) -> tuple[str, str, int]:
+        """(worker, device, next credential generation) a pairing completes
+        with; the server fills them in for `POST /pair` (P2-2 R2)."""
+        with self._lock:
+            self._operator_read(auth)
+            row = self._one(
+                "SELECT worker_id,device_id FROM pairings WHERE pairing_id=?",
+                (pairing_id,),
+                code="unauthorized",
+            )
+            principal = str(
+                uuid5(UUID(row["worker_id"]), "workflow-compute-principal-v1")
+            )
+            generation = self._one(
+                "SELECT coalesce(max(generation),0) FROM credentials WHERE principal_id=?",
+                (principal,),
+            )[0]
+            return row["worker_id"], row["device_id"], int(generation) + 1
 
     def routing_snapshot(self, auth: AuthProof) -> RoutingSnapshot:
         """The scheduler's store input, read in one locked snapshot (§5)."""

@@ -29,7 +29,8 @@ def register_workflow_network(
                 detail="unauthorized",
                 headers={"WWW-Authenticate": 'Bearer realm="TaskPaw"'},
             )
-        if not settings.enabled:
+        # P2-2 S-5: a worker is never the Hub's workflow source
+        if not settings.enabled or settings.role == "worker":
             raise HTTPException(status_code=404, detail="未启用媒体处理")
 
     def bounded_json(value: dict) -> JSONResponse:
