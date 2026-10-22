@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>TaskPaw · 功耗 · V3 设计演示</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1120;--surface:#111a2e;--low:#0d1626;--line:#263650;--text:#f8fafc;--muted:#a8b5c7;--green:#22c55e;--green-light:#97e8b4;--blue:#75d2fa;--amber:#fbc76a;--red:#fda4af;
+  --sans:"Fira Sans","Noto Sans SC",system-ui,"Microsoft YaHei",sans-serif;--mono:"Fira Code",Consolas,"Microsoft YaHei",monospace;
+  --pw-gpu:#1c9a52;--pw-cpu:#86dca8;--pw-other:#5b6b85}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:radial-gradient(1000px 650px at 80% -200px,#38bdf80b,transparent),var(--bg);color:var(--text);font:14px/1.6 var(--sans);overflow-x:hidden}
+h1,h2,h3,p{margin:0}
+button,input,select{font:inherit}
+button{cursor:pointer;color:inherit}
+a{color:var(--blue)}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--blue);outline-offset:4px}
+.icon{width:17px;height:17px;flex:none;vertical-align:middle}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--muted)}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.skip-link{position:fixed;top:-100px;left:12px;z-index:200;background:var(--green);color:#06210f;padding:12px;border-radius:8px}
+.skip-link:focus{top:12px}
+/* app shell (same as the V3 integration preview) */
+.v3-appbar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 25px;background:linear-gradient(180deg,#0d1626eb,#0d1626c9);border-bottom:1px solid #2b6b4a;box-shadow:0 1px 0 #38bdf827}
+.v3-wordmark{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:600;letter-spacing:.3px;min-width:0}
+.v3-wordmark svg{color:var(--green);width:27px;height:27px;flex:none}
+.v3-version{font:9px var(--mono);color:var(--green-light);border:1px solid #22c55e66;border-radius:4px;padding:2px 5px;letter-spacing:1px}
+.v3-role{color:#c4d0e0;font-size:13px;font-weight:400;margin-left:14px}
+.v3-status{display:flex;gap:12px;align-items:center;font-size:11px;color:var(--muted)}
+.v3-tabs{display:flex;gap:5px;align-items:center;padding:0 25px;border-bottom:1px solid var(--line);background:#0c1525;flex-wrap:wrap}
+.v3-tab{min-height:51px;border:0;border-bottom:2px solid transparent;background:none;color:var(--muted);padding:10px 16px;font-size:13px;display:inline-flex;align-items:center;text-decoration:none;transition:color .16s}
+.v3-tab:hover{color:var(--text)}
+.v3-tab[aria-current=page]{color:#a0e8b9;border-color:var(--green)}
+.v3-tab.new-tab{margin-left:auto}
+/* tokens from the build spec §2 */
+.content{padding:27px;max-width:1650px;margin:0 auto;min-width:0}
+.panel{border:1px solid var(--line);border-radius:12px;background:linear-gradient(170deg,var(--surface),var(--low));min-width:0;overflow:hidden}
+.panel-head{padding:18px 20px;display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.panel-head h2{font-size:17px;font-weight:600}
+.panel-head p{font-size:11px;color:var(--muted);margin-top:3px}
+.panel-body{padding:20px}
+.btn{min-height:44px;padding:9px 14px;display:inline-flex;justify-content:center;align-items:center;gap:8px;border:1px solid #344861;border-radius:8px;background:#17243a;color:#e1eaf5;font-size:12px;font-weight:500;line-height:1.5;transition:background .16s,border-color .16s}
+.btn:hover:not(:disabled){background:#20324b;border-color:#4c6584}
+.btn.primary{background:var(--green);color:#06210f;border-color:var(--green);font-weight:650}
+.btn.primary:hover:not(:disabled){background:#4bd37e}
+.btn.ghost{background:transparent}
+.btn.small{font-size:11px;padding:8px 11px}
+.btn.icon-btn{width:44px;padding:0}
+.btn:disabled{opacity:.52;cursor:not-allowed}
+.filter-pill{min-height:44px;padding:7px 13px;border:1px solid #33455d;border-radius:7px;background:transparent;color:var(--muted);font-size:11px;transition:background .16s,border-color .16s,color .16s}
+.filter-pill:hover{color:var(--text)}
+.filter-pill[aria-pressed=true]{border-color:#48805d;background:#22c55e0d;color:#a0e8b9}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border:1px solid #344861;border-radius:5px;background:#1b2940;color:#c8d7e9;font-size:10px;line-height:1.6;white-space:nowrap}
+.chip.green{background:#22c55e0e;border-color:#22c55e42;color:#97e8b4}
+.chip.blue{background:#38bdf80c;border-color:#38bdf83d;color:#75d2fa}
+.chip.amber{background:#f59e0b0d;border-color:#f59e0b42;color:#fbc76a}
+.notice{padding:13px 16px;border:1px solid #3d536d;background:#1a2b414d;border-radius:8px;color:#c0d4e9;font-size:12px;display:flex;gap:10px;align-items:flex-start;margin-bottom:20px}
+.notice .icon{margin-top:2px;color:#8eabc2}
+.est{display:inline-flex;align-items:center;font:9px/1.5 var(--sans);letter-spacing:0;padding:0 5px;border:1px solid #3d536d;border-radius:4px;color:#c0d4e9;background:#1a2b414d;vertical-align:middle}
+input,select{background:#0d1728;border:1px solid #3b4d66;border-radius:8px;min-height:44px;color:#e0e9f5;padding:9px 12px;max-width:100%;font-size:12px;width:100%}
+input:disabled,select:disabled{opacity:.52}
+input::placeholder{color:#99abc1}
+/* title row: page name + actions (no slogan) */
+.title-row{display:flex;justify-content:space-between;align-items:center;gap:12px 18px;flex-wrap:wrap;margin-bottom:18px}
+.title-row h1{font-size:20px;font-weight:600;letter-spacing:-.2px}
+.title-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.range{display:flex;gap:6px;flex-wrap:wrap}
+/* stats */
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:22px}
+.stat{padding:18px 20px;min-width:0}
+.stat .label{font-size:11px;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.stat .label .icon{color:#8eabc2;width:16px}
+.stat strong.big{display:block;font:500 31px/1.5 var(--mono);letter-spacing:-1px}
+.stat strong.big em{font:12px var(--sans);color:var(--muted);margin-left:8px;font-style:normal;letter-spacing:0}
+.stat .note{font-size:10px;color:var(--muted)}
+.stat .note .mono{font-size:10px;color:#c3d0e0}
+/* GPU / CPU / 其他 split */
+.split-bar{display:flex;gap:2px;height:8px;border-radius:4px;overflow:hidden;background:#27364b;margin:6px 0 6px}
+.split-bar span{display:block;height:100%;min-width:2px}
+.split-bar .g{background:var(--pw-gpu)}.split-bar .c{background:var(--pw-cpu)}.split-bar .o{background:var(--pw-other)}
+.split-legend{display:flex;flex-wrap:wrap;gap:1px 10px;font-size:10px;color:#c3d0e0;line-height:1.7}
+.split-legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
+.split-legend i.g{background:var(--pw-gpu)}.split-legend i.c{background:var(--pw-cpu)}.split-legend i.o{background:var(--pw-other)}
+.split-legend .mono{font-size:10px}
+/* machine list */
+.machines{list-style:none;margin:0;padding:0}
+.machine{display:grid;grid-template-columns:minmax(210px,1.25fr) minmax(190px,1.15fr) minmax(210px,1.1fr) 150px 92px;grid-template-areas:"id act pow spark today";gap:10px 22px;align-items:center;padding:16px 20px;border-bottom:1px solid #22324a99}
+.machine:last-child{border-bottom:0}
+.m-id{grid-area:id;display:flex;gap:12px;align-items:flex-start;min-width:0}
+.swatch{width:10px;height:10px;border-radius:3px;flex:none;margin-top:6px}
+.m-id h3{font-size:14px;font-weight:600}
+.m-id .hw{font-size:11px;color:var(--muted)}
+.m-id .chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green)}
+.m-act{grid-area:act;min-width:0;font-size:12px;color:#d8e5f6}
+.m-act .k{display:block;font-size:10px;color:var(--muted)}
+.m-act .idle{color:var(--muted)}
+.m-pow{grid-area:pow;min-width:0}
+.m-pow .w{font:500 21px/1.3 var(--mono);letter-spacing:-.5px}
+.m-pow .w small{font:11px var(--sans);color:var(--muted);margin-left:5px;letter-spacing:0}
+.m-spark{grid-area:spark;min-width:0}
+.m-spark svg{display:block;width:100%;height:36px}
+.m-spark .k{display:flex;justify-content:space-between;font-size:10px;color:var(--muted)}
+.m-today{grid-area:today;text-align:right}
+.m-today .k{display:block;font-size:10px;color:var(--muted)}
+.m-today strong{font:500 16px/1.5 var(--mono)}
+.m-today strong small{font:10px var(--sans);color:var(--muted);margin-left:3px}
+/* chart */
+.legend{display:flex;gap:6px;flex-wrap:wrap;padding:14px 20px 0}
+.legend button{min-height:44px;display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid #33455d;border-radius:7px;background:transparent;color:#c3d0e0;font-size:11px;transition:background .16s,border-color .16s,opacity .16s}
+.legend button i{width:10px;height:10px;border-radius:3px}
+.legend button[aria-pressed=false]{opacity:.62;color:var(--muted);border-style:dashed}
+.legend button[aria-pressed=false] i{background:transparent!important;border:1.5px solid currentColor}
+.legend button .mono{font-size:10px;color:var(--muted)}
+.chart-wrap{position:relative;padding:8px 12px 4px 8px;min-width:0}
+.chart{position:relative;outline-offset:2px;border-radius:8px}
+.chart svg{display:block;width:100%}
+.chart text{fill:#8fa1b8;font:10px var(--mono)}
+.chart-tip{position:absolute;top:10px;pointer-events:none;min-width:178px;padding:10px 12px;background:#101a2cf2;border:1px solid #3b506c;border-radius:9px;box-shadow:0 10px 30px #0009;font-size:11px;color:#d8e5f6;opacity:0;transition:opacity .12s;z-index:3}
+.chart-tip.show{opacity:1}
+.chart-tip .t{font:10px var(--mono);color:var(--muted);margin-bottom:5px}
+.chart-tip .r{display:flex;justify-content:space-between;gap:14px;line-height:1.75}
+.chart-tip .r i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px}
+.chart-tip .r b{font:500 11px var(--mono)}
+.chart-tip .tot{border-top:1px solid var(--line);margin-top:4px;padding-top:4px}
+.chart-foot{display:flex;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;padding:6px 20px 16px;font-size:10px;color:var(--muted)}
+/* layout */
+.stack{display:flex;flex-direction:column;gap:20px;min-width:0}
+.two-col{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(300px,1fr);gap:20px;align-items:start}
+.scroller{overflow-x:auto;min-width:0;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
+th{font-size:11px;color:var(--muted);font-weight:500}
+td.num,th.num{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+th.num{font-family:var(--sans)}
+.sel{background:#22c55e0a}
+th.sel{color:#a0e8b9}
+tfoot td{color:var(--text);font-weight:500;border-bottom:0}
+tbody tr:last-child td{border-bottom-color:#344861}
+.ename{display:flex;align-items:center;gap:8px}
+.share{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+.share .bar{width:70px;height:5px;border-radius:3px;background:#27364b;overflow:hidden}
+.share .bar span{display:block;height:100%;background:linear-gradient(90deg,#169a4c,#39d373);border-radius:3px}
+.uses{list-style:none;margin:0;padding:6px 20px 10px}
+.use{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;padding:12px 0;border-bottom:1px solid #22324a}
+.use:last-child{border-bottom:0}
+.use .n{font-size:12px;color:#d8e5f6}
+.use .n small{display:block;font-size:10px;color:var(--muted)}
+.use .v{text-align:right;font:12px var(--mono)}
+.use .v small{display:block;font:10px var(--mono);color:var(--muted)}
+.use .bar{grid-column:1/-1;height:6px;border-radius:3px;background:#27364b;overflow:hidden}
+.use .bar span{display:block;height:100%;background:linear-gradient(90deg,#169a4c,#39d373);border-radius:3px}
+.hist{display:flex;gap:8px;flex-wrap:wrap;padding:14px 20px;border-bottom:1px solid var(--line);font-size:11px;color:var(--muted);align-items:center}
+.hist .chip .mono{font-size:10px;color:var(--text)}
+.kwh-cell{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+.kwh-cell .bar{width:56px;height:5px;border-radius:3px;background:#27364b;overflow:hidden}
+.kwh-cell .bar span{display:block;height:100%;background:linear-gradient(90deg,#169a4c,#39d373)}
+.film{display:flex;flex-direction:column}
+.film .code{font:12px var(--mono);color:#d8e5f6}
+.film .res{font-size:10px;color:var(--muted)}
+.section-note{font-size:10px;color:var(--muted);padding:12px 20px 16px;line-height:1.75}
+/* dialog */
+.modal{border:1px solid #3b506c;border-radius:14px;background:#101a2c;color:var(--text);padding:0;max-height:calc(100dvh - 40px);width:min(760px,calc(100% - 32px));box-shadow:0 25px 100px #000a}
+.modal[open]{display:flex;flex-direction:column;overflow:hidden}
+.modal::backdrop{background:#030812ba;backdrop-filter:blur(4px)}
+.modal-head{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:20px 24px;border-bottom:1px solid var(--line);flex:none}
+.modal-head h2{font-size:18px}
+.modal-head h2:focus{outline:none}
+.modal-head p{font-size:11px;color:var(--muted);margin-top:3px}
+.modal-body{padding:22px 24px;overflow:auto;min-height:0}
+.modal-foot{display:flex;gap:10px;justify-content:space-between;align-items:center;padding:16px 24px;border-top:1px solid var(--line);background:#0e1727;flex-wrap:wrap;flex:none}
+.modal-foot .note{font-size:10px;color:var(--muted);max-width:310px}
+.modal-foot .actions{display:flex;gap:8px;flex-wrap:wrap}
+body:has(dialog[open]){overflow:hidden}
+.param{border:1px solid #2d405a;border-radius:10px;padding:14px 16px 16px;margin:0 0 12px;background:#0c1626;min-width:0}
+.param legend{padding:0 6px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:4px 8px;flex-wrap:wrap}
+.param legend small{font-size:10px;font-weight:400;color:var(--muted)}
+.param-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.field{display:flex;flex-direction:column;gap:5px;min-width:0}
+.field label{font-size:11px;color:#c9d6e7}
+.field .hint{font-size:10px;color:var(--muted);line-height:1.5}
+.unit-input{position:relative}
+.unit-input input{padding-right:34px}
+.unit-input span{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--muted);pointer-events:none}
+.param .src{font-size:10px;color:var(--muted);margin-top:10px}
+.calib{border:1px solid #345c47;border-radius:10px;padding:14px 16px;background:#0b1727;margin-top:16px}
+.calib h3{font-size:13px;margin-bottom:4px}
+.calib p{font-size:11px;color:var(--muted);line-height:1.7}
+.calib-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) auto;gap:12px;align-items:end;margin-top:12px}
+.calib-out{margin-top:10px;font-size:12px;color:#a7e8bc;min-height:20px}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);z-index:100;max-width:min(620px,calc(100% - 28px));padding:13px 18px;background:#22364a;border:1px solid #4d6a81;border-radius:9px;color:#ecf6ff;box-shadow:0 7px 30px #0008;font-size:12px;opacity:0;pointer-events:none;transition:opacity .2s}
+.toast.show{opacity:1}
+@media(min-width:1600px){.content{padding:36px}}
+@media(max-width:1300px){.machine{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) 140px;grid-template-areas:"id act today" "pow spark spark";row-gap:12px}.m-spark svg{height:40px}}
+@media(max-width:1200px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.two-col{grid-template-columns:1fr}.param-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:900px){.content{padding:24px}.v3-status .host-health{display:none}.machine{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"id today" "act act" "pow pow" "spark spark"}}
+@media(max-width:600px){body{font-size:13px}.content{padding:22px 15px}.v3-appbar{padding:13px 15px;gap:10px}.v3-wordmark{font-size:17px;gap:7px}.v3-wordmark svg{width:23px;height:23px}.v3-role{display:none}.v3-status{gap:5px;font-size:10px}.v3-status .version{display:none}.v3-tabs{padding:0 6px;gap:0}.v3-tab{min-height:46px;font-size:11px;padding:9px 9px}.v3-tab.new-tab{margin-left:0}
+  .title-row{align-items:flex-start}.title-actions{width:100%}.range{flex:1}.range .filter-pill{flex:1;padding:7px 8px}.title-actions>.btn{flex:none}
+  .stats{grid-template-columns:1fr 1fr;gap:10px}.stat{padding:14px}.stat strong.big{font-size:24px}.stat strong.big em{margin-left:5px;font-size:11px}
+  .panel-head{padding:15px}.panel-head h2{font-size:15px}.machine{padding:14px 15px;gap:8px 14px}.legend{padding:12px 15px 0}.chart-wrap{padding:6px 6px 2px 2px}.chart-foot{padding:6px 15px 14px}.uses{padding:4px 15px 8px}.hist{padding:12px 15px}.section-note{padding:12px 15px 14px}
+  th,td{padding:10px 10px;font-size:11px}
+  .modal{width:100%;max-height:100dvh;height:100dvh;border-radius:0}.modal-head,.modal-body,.modal-foot{padding-left:16px;padding-right:16px}.param{padding:12px}.param legend small{flex-basis:100%}.param-grid{grid-template-columns:1fr 1fr;gap:10px}.calib-grid{grid-template-columns:1fr 1fr}.calib-grid .btn{grid-column:1/-1}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@media(forced-colors:active){.split-bar span,.share .bar span,.use .bar span{forced-color-adjust:none}}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">跳至主要内容</a>
+<header class="v3-appbar">
+  <div class="v3-wordmark"><span id="paw"></span><span>TaskPaw</span><span class="v3-version">V3</span><span class="v3-role">Hub 仪表盘 · 含本机 Agent</span></div>
+  <div class="v3-status"><span class="host-health">Windows 主控 · 6 台机器</span><span class="chip green">本地 API · 正常</span><span class="version">设计演示 · 数据虚构</span></div>
+</header>
+<nav class="v3-tabs" aria-label="TaskPaw 应用导航">
+  <button class="v3-tab" data-stub="机群">机群</button>
+  <button class="v3-tab" data-stub="管理">管理</button>
+  <button class="v3-tab" data-stub="事件 / 日志">事件 / 日志</button>
+  <button class="v3-tab" data-stub="本机监控">本机监控</button>
+  <a class="v3-tab" href="#main" aria-current="page">功耗</a>
+  <button class="v3-tab" data-stub="设置">设置</button>
+  <a class="v3-tab new-tab" href="media-workflow-v3-power.html#overview">媒体处理中心</a>
+</nav>
+
+<main class="content" id="main" tabindex="-1">
+  <div class="title-row">
+    <h1>功耗</h1>
+    <div class="title-actions">
+      <div class="range" role="group" aria-label="时间范围">
+        <button class="filter-pill" data-range="24h" aria-pressed="true">24 小时</button>
+        <button class="filter-pill" data-range="7d" aria-pressed="false">7 天</button>
+        <button class="filter-pill" data-range="30d" aria-pressed="false">30 天</button>
+      </div>
+      <button class="btn ghost" id="open-params" aria-haspopup="dialog"><span data-icon="tune"></span>估算参数</button>
+    </div>
+  </div>
+
+  <div class="notice"><span data-icon="info"></span><div>整机实测请以智能插座为准；此处为估算，用于看分布和每片能耗。</div></div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="stack">
+    <section class="panel" aria-labelledby="machines-title">
+      <div class="panel-head"><div><h2 id="machines-title">机器</h2><p>整机 = GPU 实测 + CPU + 其他基线 · 每 5 秒刷新 · 全部为估算</p></div><span class="chip" id="machine-count"></span></div>
+      <ul class="machines" id="machines"></ul>
+    </section>
+
+    <section class="panel" aria-labelledby="chart-title">
+      <div class="panel-head"><div><h2 id="chart-title">功耗分布</h2><p id="chart-sub"></p></div><span class="chip" id="chart-range-chip"></span></div>
+      <div class="legend" role="group" aria-label="显示或隐藏机器" id="legend"></div>
+      <div class="chart-wrap">
+        <div class="chart" id="chart" tabindex="0" aria-describedby="chart-help"></div>
+        <div class="chart-tip" id="chart-tip" aria-hidden="true"></div>
+      </div>
+      <div class="chart-foot"><span id="chart-help">按机器堆叠；悬停或用 ← → 键逐点查看，Home / End 跳到首尾。</span><span id="chart-agg"></span></div>
+      <p class="sr-only" id="chart-live" aria-live="polite"></p>
+    </section>
+
+    <div class="two-col">
+      <section class="panel" aria-labelledby="energy-title">
+        <div class="panel-head"><div><h2 id="energy-title">耗电 · 按机器</h2><p>单位：度（kWh）· 日历口径 · 估算</p></div></div>
+        <div class="scroller" role="region" aria-labelledby="energy-title" tabindex="0"><table id="energy-table"></table></div>
+      </section>
+      <section class="panel" aria-labelledby="uses-title">
+        <div class="panel-head"><div><h2 id="uses-title">按用途</h2><p id="uses-sub"></p></div></div>
+        <ul class="uses" id="uses"></ul>
+        <p class="section-note">空闲 = 机器在线但没有任务；其他 = 主控编排、Hub、回传与整理。GPU 任务独占整机，整机功耗全部计入该用途。</p>
+      </section>
+    </div>
+
+    <section class="panel" aria-labelledby="films-title">
+      <div class="panel-head"><div><h2 id="films-title">每片能耗</h2><p>最近完成的 8 部 · 修复 + 识别 + 翻译 + 主控分摊</p></div><a class="btn ghost small" href="media-workflow-v3-power.html#queue">在影片队列中查看</a></div>
+      <div class="hist" id="hist"></div>
+      <div class="scroller" role="region" aria-labelledby="films-title" tabindex="0"><table id="films-table"></table></div>
+      <p class="section-note">每片能耗 = 各阶段用时 × 执行机器该时段的平均估算功率。「度 / 片长小时」用于预计：待处理页按本机同画质的历史平均推算每部影片的耗电。</p>
+    </section>
+  </div>
+</main>
+
+<dialog class="modal" id="params" aria-labelledby="params-title">
+  <div class="modal-head"><div><h2 id="params-title" tabindex="-1">估算参数</h2><p>按机器设置；保存后实时功耗与之后的能耗按新参数估算</p></div><button class="btn ghost icon-btn" data-close aria-label="关闭估算参数"><span data-icon="close"></span></button></div>
+  <div class="modal-body">
+    <div class="notice"><span data-icon="info"></span><div>整机功耗 = GPU（nvidia-smi 实测）+ CPU（实测或按占用 × TDP 估算）+ 其他基线（主板、内存、硬盘、风扇），可选再除以电源效率。用插座校准基线后，电源损耗已包含在基线里，电源效率保持「不计」即可。</div></div>
+    <div id="param-list"></div>
+    <section class="calib" aria-labelledby="calib-title">
+      <h3 id="calib-title">按插座读数校准其他基线</h3>
+      <p>让机器空闲约 10 分钟，读米家插座当前功率填入下方：其他基线 = 插座读数 × 电源效率 − 当前 GPU − 当前 CPU。满载时再对一次，两次相差超过 10% 时以满载为准。</p>
+      <div class="calib-grid">
+        <div class="field"><label for="calib-machine">机器</label><select id="calib-machine"></select></div>
+        <div class="field"><label for="calib-plug">插座读数</label><div class="unit-input"><input id="calib-plug" type="number" inputmode="decimal" min="0" max="2000" placeholder="例如 61"><span>W</span></div></div>
+        <button class="btn" id="calib-apply" disabled>填入基线</button>
+      </div>
+      <p class="calib-out" id="calib-out" aria-live="polite"></p>
+    </section>
+  </div>
+  <div class="modal-foot"><span class="note">不涉及电价；只用于看分布和每片能耗。</span><div class="actions"><button class="btn ghost" data-close>取消</button><button class="btn primary" id="params-save">保存</button></div></div>
+</dialog>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+'use strict';
+// Design preview. All data invented; no network, storage or device access.
+const $=(s,r=document)=>r.querySelector(s);
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const ICONS={info:'<circle cx="12" cy="12" r="9"/><path d="M12 10v7m0-11v1"/>',close:'<path d="m6 6 12 12M6 18 18 6"/>',tune:'<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/>',bolt:'<path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"/>',cal:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4m8-4v4"/>',gpu:'<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="9" cy="12" r="3"/><path d="M15 10h4m-4 4h4"/>',film:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4m-4 6h4m10-6h4m-4 6h4"/>'};
+const icon=n=>`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]}</svg>`;
+$('#paw').outerHTML='<svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"><ellipse cx="7" cy="12" rx="3" ry="4" transform="rotate(-25 7 12)"/><ellipse cx="13" cy="7" rx="3" ry="4"/><ellipse cx="21" cy="7" rx="3" ry="4"/><ellipse cx="27" cy="13" rx="3" ry="4" transform="rotate(25 27 13)"/><path d="M7 24c0-4 5-11 10-11s10 7 10 11c0 5-7 3-10 3s-10 2-10-3Z"/></svg>';
+document.querySelectorAll('[data-icon]').forEach(el=>{el.outerHTML=icon(el.dataset.icon)});
+
+// ---- machines: live split + estimation parameters ----
+// Series colours: validated categorical order (dark surface #111a2e, adjacent CVD ΔE >= 8.3).
+const machines=[
+ {id:'win',name:'Windows 主控',hw:'主控 + 本机 Agent · RTX 5070 Ti 16 GB',roles:[['主控','green'],['Jasna GPU','blue']],color:'#3987e5',gpu:210,cpu:46,base:30,eff:0,cpuSrc:'measured',tdp:125,gpuSrc:'nvidia-smi 实测',cpuNote:'CPU 封装功耗（LibreHardwareMonitor）',act:['Jasna','ABF-394 · LTX 2/4 encode'],jasna:true,
+  sim:{busy:[268,298],idle:[56,66],busyH:6,idleH:2.5,kind:'restore',asrEvery:5,tail:[['busy',42]]}},
+ {id:'gpu02',name:'GPU-02',hw:'RTX 5060 Ti 16 GB',roles:[['Jasna GPU','blue']],color:'#d95926',gpu:118,cpu:24,base:30,eff:0,cpuSrc:'measured',tdp:65,gpuSrc:'nvidia-smi 实测',cpuNote:'CPU 封装功耗（RAPL）',act:['语音识别','SSIS-812 · Whisper'],jasna:true,
+  sim:{busy:[158,178],idle:[50,58],busyH:2.5,idleH:3,kind:'mix',tail:[['busy',4]]}},
+ {id:'gpu03',name:'GPU-03',hw:'RTX 5060 8 GB',roles:[['Jasna GPU','blue'],['仅 1080p','']],color:'#9085e9',gpu:104,cpu:20,base:24,eff:0,cpuSrc:'measured',tdp:65,gpuSrc:'nvidia-smi 实测',cpuNote:'CPU 封装功耗（RAPL）',act:['Jasna','MIDV-511 · LTX 3/4 denoise'],jasna:true,
+  sim:{busy:[134,152],idle:[46,54],busyH:3,idleH:2.5,kind:'restore',tail:[['busy',7]]}},
+ {id:'gpu04',name:'GPU-04',hw:'RTX 5060 8 GB',roles:[['Jasna GPU','blue'],['仅 1080p','']],color:'#c98500',gpu:9,cpu:11,base:32,eff:0,cpuSrc:'estimate',tdp:65,gpuSrc:'nvidia-smi 实测',cpuNote:'按占用 × TDP 估算',act:null,jasna:true,
+  sim:{busy:[132,148],idle:[48,55],busyH:2.5,idleH:7,kind:'restore',tail:[['idle',10]]}},
+ {id:'trans',name:'翻译机',hw:'无独显 · i5-12400',roles:[['翻译','']],color:'#d55181',gpu:null,cpu:33,base:28,eff:0,cpuSrc:'estimate',tdp:65,gpuSrc:'无独显',cpuNote:'按占用 × TDP 估算',act:['翻译','SSIS-809 · 字幕 140 / 312 条'],jasna:false,
+  sim:{busy:[56,66],idle:[37,43],busyH:0.6,idleH:1.6,kind:'translate',tail:[['busy',2]]}},
+ {id:'mac',name:'Mac mini',hw:'Hub / OpenClaw · M4',roles:[['Hub','green'],['OpenClaw','']],color:'#2aa5b8',gpu:null,cpu:6,base:5,eff:0,cpuSrc:'measured',tdp:20,gpuSrc:'与 CPU 合计（powermetrics）',cpuNote:'CPU + GPU 封装功耗（powermetrics）',act:['Hub','轮询 6 台 · OpenClaw 待命'],jasna:false,
+  sim:{busy:[12,16],idle:[8,11],busyH:0.3,idleH:1.2,kind:'other',tail:[]}}
+];
+const live=m=>{const g=m.gpu||0,c=m.cpuSrc==='none'?0:m.cpu,dc=g+c+m.base,total=Math.round(m.eff?dc/(m.eff/100):dc);return {gpu:g,cpu:c,other:total-g-c,total}};
+const sumLive=list=>list.reduce((a,m)=>{const l=live(m);a.gpu+=l.gpu;a.cpu+=l.cpu;a.other+=l.other;a.total+=l.total;return a},{gpu:0,cpu:0,other:0,total:0});
+
+// ---- simulated history: 30 days at 15-minute resolution, ending now ----
+const STEP=15*60*1000,N=30*96,END=new Date(2026,9,22,17,30).getTime();
+const times=Array.from({length:N},(_,i)=>END-(N-1-i)*STEP);
+function rng(seed){return()=>{seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function simulate(m,seed){const s=m.sim,r=rng(seed),w=new Array(N),kind=new Array(N);let busy=r()<.5,left=0,seg=0;
+  const len=b=>(b?s.busyH:s.idleH)*(0.45+r()*1.1);left=len(busy);
+  for(let i=0;i<N;i++){if(left<=0){busy=!busy;left=len(busy);seg++}
+    const [lo,hi]=busy?s.busy:s.idle;w[i]=lo+(hi-lo)*(0.5+0.5*Math.sin(i*0.37+seed)*r());
+    kind[i]=!busy?(s.kind==='other'?'other':'idle'):s.kind==='mix'?(seg%5<3?'asr':'restore'):s.kind==='restore'&&s.asrEvery&&seg%s.asrEvery===0?'asr':s.kind;left-=0.25}
+  for(const [state,n] of s.tail){for(let i=N-n;i<N;i++){const [lo,hi]=state==='busy'?s.busy:s.idle;w[i]=lo+(hi-lo)*r();kind[i]=state==='busy'?(s.kind==='mix'?'asr':s.kind):(s.kind==='other'?'other':'idle')}}
+  return {w,kind}}
+machines.forEach((m,i)=>{const sim=simulate(m,11+i*97);m.w=sim.w;m.kind=sim.kind;m.w[N-1]=live(m).total});
+const idxFrom=date=>Math.max(0,times.findIndex(t=>t>=date.getTime()));
+const CAL={today:idxFrom(new Date(2026,9,22)),week:idxFrom(new Date(2026,9,19)),month:idxFrom(new Date(2026,9,1))};
+const kwh=(m,from,to=N)=>{let s=0;for(let i=from;i<to;i++)s+=m.w[i]*0.25/1000;return s};
+const RANGES={'24h':{label:'24 小时',n:96,agg:1,cal:'today',calLabel:'今日',fmt:t=>{const d=new Date(t);return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`},tickEvery:16,aggText:'每点 15 分钟平均'},
+  '7d':{label:'7 天',n:672,agg:4,cal:'week',calLabel:'本周',fmt:t=>{const d=new Date(t);return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:00`},tick:t=>{const d=new Date(t);return `${d.getMonth()+1}/${d.getDate()}`},tickEvery:24,aggText:'每点 1 小时平均'},
+  '30d':{label:'30 天',n:N,agg:24,cal:'month',calLabel:'本月',fmt:t=>{const d=new Date(t);return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:00 起 6 小时`},tick:t=>{const d=new Date(t);return `${d.getMonth()+1}/${d.getDate()}`},tickEvery:20,aggText:'每点 6 小时平均'}};
+const state={range:'24h',hidden:new Set(),hover:null};
+
+function bucket(m,r){const R=RANGES[r],start=N-R.n,out=[],ts=[];for(let i=start;i<N;i+=R.agg){let s=0;for(let k=0;k<R.agg;k++)s+=m.w[i+k];out.push(s/R.agg);ts.push(times[i])}return {v:out,t:ts}}
+const fmtK=x=>x>=100?x.toFixed(0):x>=10?x.toFixed(1):x.toFixed(2);
+function splitBar(l){return `<div class="split-bar" aria-hidden="true"><span class="g" style="width:${l.gpu/l.total*100}%"></span><span class="c" style="width:${l.cpu/l.total*100}%"></span><span class="o" style="width:${l.other/l.total*100}%"></span></div>`}
+function splitLegend(l,m){return `<div class="split-legend"><span><i class="g"></i>GPU <span class="mono">${m&&m.gpu===null?'—':l.gpu}</span></span><span><i class="c"></i>CPU <span class="mono">${m&&m.cpuSrc==='none'?'—':l.cpu}</span></span><span><i class="o"></i>其他 <span class="mono">${l.other}</span></span></div>`}
+
+function renderStats(){const all=sumLive(machines),j=sumLive(machines.filter(m=>m.jasna)),
+  t=machines.reduce((s,m)=>s+kwh(m,CAL.today),0),wk=machines.reduce((s,m)=>s+kwh(m,CAL.week),0),mo=machines.reduce((s,m)=>s+kwh(m,CAL.month),0);
+  const busy=machines.filter(m=>m.jasna&&m.act).length;
+  $('#stats').innerHTML=`<div class="panel stat"><div class="label">全部机器实时 <span class="est">估算</span>${icon('bolt')}</div><strong class="big">${all.total}<em>W · ${machines.length} 台</em></strong>${splitBar(all)}${splitLegend(all)}</div>
+  <div class="panel stat"><div class="label">耗电 <span class="est">估算</span>${icon('cal')}</div><strong class="big">${t.toFixed(1)}<em>度 · 今日</em></strong><div class="note">本周约 <span class="mono">${wk.toFixed(1)}</span> 度 · 本月约 <span class="mono">${mo.toFixed(0)}</span> 度</div><div class="note">今日 00:00 起 · 本周自周一 · 本月自 10/1</div></div>
+  <div class="panel stat"><div class="label">Jasna 集群实时 <span class="est">估算</span>${icon('gpu')}</div><strong class="big">${j.total}<em>W · GPU 机器</em></strong>${splitBar(j)}<div class="note">${machines.filter(m=>m.jasna).length} 台 GPU 机器 · ${busy} 台在工作 · 占全部 ${Math.round(j.total/all.total*100)}%</div></div>
+  <div class="panel stat"><div class="label">每片能耗 · 4K 标准 <span class="est">估算</span>${icon('film')}</div><strong class="big">1.3<em>度 / 部</em></strong><div class="note">近 30 天 23 部 · 4K 高约 <span class="mono">5.0</span> · 1080p 标准约 <span class="mono">0.37</span></div></div>`}
+
+function spark(m){const v=m.w.slice(N-96),W=150,H=36,max=Math.max(...v),min=Math.min(...v),sc=x=>H-3-(H-6)*(x-min)/Math.max(1,max-min);
+  const pts=v.map((x,i)=>`${(i/(v.length-1)*W).toFixed(1)},${sc(x).toFixed(1)}`).join(' ');
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="${m.color}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg><span class="k"><span>24 小时</span><span class="mono">${Math.round(min)}–${Math.round(max)} W</span></span><span class="sr-only">${m.name} 24 小时功耗 ${Math.round(min)} 到 ${Math.round(max)} 瓦</span>`}
+
+function renderMachines(){$('#machine-count').textContent=`${machines.length} 台 · 全部在线`;
+  $('#machines').innerHTML=machines.map(m=>{const l=live(m);
+   return `<li class="machine"><div class="m-id"><span class="swatch" style="background:${m.color}" aria-hidden="true"></span><div><h3>${esc(m.name)}</h3><div class="hw">${esc(m.hw)}</div><div class="chips">${m.roles.map(([r,c])=>`<span class="chip ${c}">${r}</span>`).join('')}<span class="chip green"><span class="dot" aria-hidden="true"></span>在线</span></div></div></div>
+   <div class="m-act"><span class="k">当前</span>${m.act?`<strong>${esc(m.act[0])}</strong> · ${esc(m.act[1])}`:'<span class="idle">空闲</span>'}</div>
+   <div class="m-pow"><div class="w">${l.total}<small>W · 估算</small></div>${splitBar(l)}${splitLegend(l,m)}</div>
+   <div class="m-spark">${spark(m)}</div>
+   <div class="m-today"><span class="k">今日</span><strong>${kwh(m,CAL.today).toFixed(2)}<small>度</small></strong></div></li>`}).join('')}
+
+function renderLegend(){$('#legend').innerHTML=machines.map(m=>`<button data-series="${m.id}" aria-pressed="${!state.hidden.has(m.id)}"><i style="background:${m.color}"></i>${esc(m.name)}</button>`).join('')}
+
+function renderChart(){const R=RANGES[state.range],el=$('#chart'),W=Math.max(280,el.clientWidth),H=W<600?230:300,M={l:44,r:10,t:22,b:26};
+  const vis=machines.filter(m=>!state.hidden.has(m.id)),data=vis.map(m=>bucket(m,state.range)),n=data[0]?data[0].v.length:0,ts=data[0]?data[0].t:[];
+  const cum=[];let prev=new Array(n).fill(0);data.forEach(d=>{const top=d.v.map((x,i)=>prev[i]+x);cum.push({lo:prev,hi:top});prev=top});
+  const maxRaw=Math.max(...prev,1),step=maxRaw>800?200:maxRaw>300?100:50,maxY=Math.ceil(maxRaw/step)*step;
+  const x=i=>M.l+(W-M.l-M.r)*i/Math.max(1,n-1),y=v=>M.t+(H-M.t-M.b)*(1-v/maxY);
+  let g='';for(let v=0;v<=maxY;v+=step){g+=`<line x1="${M.l}" x2="${W-M.r}" y1="${y(v)}" y2="${y(v)}" stroke="${v===0?'#3b4d66':'#22324a'}" stroke-width="1"/><text x="${M.l-6}" y="${y(v)+3}" text-anchor="end">${v}</text>`}
+  g+=`<text x="${M.l-6}" y="9" text-anchor="end" style="font-size:9px">W</text>`;
+  const every=W<600?R.tickEvery*2:R.tickEvery;let ticks='';for(let i=n-1;i>=0;i-=every){const lab=(R.tick||R.fmt)(ts[i]);ticks+=`<line x1="${x(i)}" x2="${x(i)}" y1="${H-M.b}" y2="${H-M.b+4}" stroke="#3b4d66"/><text x="${x(i)}" y="${H-8}" text-anchor="${i===n-1?'end':'middle'}">${i===n-1?'现在':lab}</text>`}
+  const areas=cum.map((c,k)=>{let d=`M${x(0)},${y(c.hi[0])}`;for(let i=1;i<n;i++)d+=`L${x(i).toFixed(1)},${y(c.hi[i]).toFixed(1)}`;for(let i=n-1;i>=0;i--)d+=`L${x(i).toFixed(1)},${y(c.lo[i]).toFixed(1)}`;
+    return `<path d="${d}Z" fill="${vis[k].color}" fill-opacity=".88" stroke="#0d1626" stroke-width="1.5" stroke-linejoin="round"/>`}).join('');
+  const last=prev[n-1]||0;
+  el.innerHTML=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="${R.label}功耗按机器堆叠面积图，当前合计约 ${Math.round(last)} 瓦，峰值约 ${Math.round(maxRaw)} 瓦">${g}${areas}${ticks}<line id="xh" x1="0" x2="0" y1="${M.t}" y2="${H-M.b}" stroke="#e1eaf5" stroke-width="1" opacity="0"/><rect x="${M.l}" y="${M.t}" width="${W-M.l-M.r}" height="${H-M.t-M.b}" fill="transparent" id="hit"/></svg>`;
+  $('#chart-sub').textContent=`${R.label} · 按机器堆叠 · ${R.aggText} · 估算`;$('#chart-range-chip').textContent=`峰值约 ${Math.round(maxRaw)} W`;
+  $('#chart-agg').textContent=`显示 ${vis.length} / ${machines.length} 台`;
+  const ctx={x,n,ts,data,vis,W,M,R};el._ctx=ctx;
+  const hit=$('#hit',el);hit.addEventListener('pointermove',e=>{const r=el.getBoundingClientRect(),px=e.clientX-r.left;const i=Math.round((px-M.l)/(W-M.l-M.r)*(n-1));showTip(Math.max(0,Math.min(n-1,i)),false)});
+  hit.addEventListener('pointerleave',()=>{if(document.activeElement!==el)hideTip()});
+  if(state.hover!==null)showTip(Math.min(state.hover,n-1),false)}
+function showTip(i,announce){const el=$('#chart'),c=el._ctx;if(!c||!c.n)return;state.hover=i;const xh=$('#xh',el);xh.setAttribute('x1',c.x(i));xh.setAttribute('x2',c.x(i));xh.setAttribute('opacity','.55');
+  let tot=0;const rows=c.vis.map((m,k)=>{const v=c.data[k].v[i];tot+=v;return {m,v}}).reverse();
+  const tip=$('#chart-tip');tip.innerHTML=`<div class="t">${i===c.n-1?'现在':c.R.fmt(c.ts[i])}</div>${rows.map(r=>`<div class="r"><span><i style="background:${r.m.color}"></i>${esc(r.m.name)}</span><b>${Math.round(r.v)} W</b></div>`).join('')}<div class="r tot"><span>合计（估算）</span><b>${Math.round(tot)} W</b></div>`;
+  tip.classList.add('show');const wrap=tip.parentElement.getBoundingClientRect(),tw=tip.offsetWidth,px=c.x(i)+8;let left=px+14;if(left+tw>wrap.width-6)left=px-tw-10;tip.style.left=Math.max(6,left)+'px';
+  if(announce)$('#chart-live').textContent=`${i===c.n-1?'现在':c.R.fmt(c.ts[i])}，合计约 ${Math.round(tot)} 瓦；`+rows.map(r=>`${r.m.name} ${Math.round(r.v)} 瓦`).join('，')}
+function hideTip(){state.hover=null;$('#chart-tip').classList.remove('show');const xh=$('#xh');if(xh)xh.setAttribute('opacity','0')}
+
+function renderEnergy(){const R=RANGES[state.range],cols=[['today','今日'],['week','本周'],['month','本月']];
+  const rows=machines.map(m=>({m,v:{today:kwh(m,CAL.today),week:kwh(m,CAL.week),month:kwh(m,CAL.month)}}));
+  const tot={today:0,week:0,month:0};rows.forEach(r=>cols.forEach(([k])=>tot[k]+=r.v[k]));
+  $('#energy-table').innerHTML=`<thead><tr><th scope="col">机器</th>${cols.map(([k,l])=>`<th scope="col" class="num ${k===R.cal?'sel':''}">${l}</th>`).join('')}<th scope="col" class="num">占比（${R.calLabel}）</th></tr></thead><tbody>${rows.map(r=>{const share=r.v[R.cal]/tot[R.cal];return `<tr><th scope="row" style="font-weight:400;color:#d8e5f6"><span class="ename"><span class="swatch" style="background:${r.m.color};margin:0" aria-hidden="true"></span>${esc(r.m.name)}</span></th>${cols.map(([k])=>`<td class="num ${k===R.cal?'sel':''}">${fmtK(r.v[k])}</td>`).join('')}<td><span class="share"><span class="bar" aria-hidden="true"><span style="width:${share*100}%"></span></span><span class="mono">${Math.round(share*100)}%</span></span></td></tr>`}).join('')}</tbody><tfoot><tr><td>合计（估算）</td>${cols.map(([k])=>`<td class="num ${k===R.cal?'sel':''}">${fmtK(tot[k])}</td>`).join('')}<td class="num">100%</td></tr></tfoot>`;
+  // 按用途 over the selected rolling range
+  const from=N-R.n,names={restore:['Jasna 修复','LTX 编码 / 去噪 · GPU 独占整机'],asr:['语音识别','Whisper · GPU 独占整机'],translate:['翻译','字幕翻译 · 翻译机'],idle:['空闲','在线、无任务'],other:['其他','Hub、主控编排、回传与整理']},sums={restore:0,asr:0,translate:0,idle:0,other:0};
+  machines.forEach(m=>{for(let i=from;i<N;i++)sums[m.kind[i]]+=m.w[i]*0.25/1000});
+  const all=Object.values(sums).reduce((a,b)=>a+b,0),max=Math.max(...Object.values(sums));
+  $('#uses-sub').textContent=`最近 ${R.label} · 共约 ${fmtK(all)} 度 · 估算`;
+  $('#uses').innerHTML=Object.keys(names).map(k=>`<li class="use"><span class="n">${names[k][0]}<small>${names[k][1]}</small></span><span class="v">${fmtK(sums[k])} 度<small>${Math.round(sums[k]/all*100)}%</small></span><span class="bar" aria-hidden="true"><span style="width:${sums[k]/max*100}%"></span></span></li>`).join('')}
+
+const films=[
+ ['SSIS-798','4K','高','2:12:40','17:52',5.08,'Windows 主控','10/21 23:40',94],
+ ['MIDV-502','1080p','标准','1:58:10','2:51',0.36,'GPU-03','10/22 13:05',79],
+ ['SONE-330','4K','良好','2:21:05','8:26',2.31,'Windows 主控','10/22 06:58',93],
+ ['IPZZ-207','1080p','良好','2:05:30','4:02',0.62,'GPU-02','10/22 04:12',88],
+ ['JUR-118','1080p','无需修复','1:49:12','0:41',0.05,'GPU-02 · 仅识别','10/21 21:30',0],
+ ['ABF-388','4K','标准','2:01:44','4:55',1.30,'Windows 主控','10/21 14:22',92],
+ ['MIDV-498','1080p','标准','2:10:20','3:09',0.39,'GPU-04','10/21 11:47',80],
+ ['SSIS-790','4K','标准','1:56:02','4:41',1.24,'Windows 主控','10/21 09:03',92]];
+function renderFilms(){$('#hist').innerHTML=`<span>历史平均 · 度 / 片长小时：</span><span class="chip">4K 标准 <span class="mono">0.64</span></span><span class="chip">4K 良好 <span class="mono">1.05</span></span><span class="chip">4K 高 <span class="mono">2.33</span></span><span class="chip">1080p 标准 <span class="mono">0.18</span></span><span class="chip">1080p 良好 <span class="mono">0.30</span></span>`;
+  const max=Math.max(...films.map(f=>f[5])),hours=d=>{const [h,m,s]=d.split(':').map(Number);return h+m/60+s/3600};
+  $('#films-table').innerHTML=`<thead><tr><th scope="col">影片</th><th scope="col">画质</th><th scope="col" class="num">片长</th><th scope="col" class="num">全程</th><th scope="col" class="num">能耗</th><th scope="col" class="num">度 / 片长小时</th><th scope="col" class="num">修复占比</th><th scope="col">修复设备</th><th scope="col">完成</th></tr></thead><tbody>${films.map(f=>`<tr><th scope="row" style="font-weight:400"><span class="film"><span class="code">${f[0]}</span><span class="res">${f[1]}</span></span></th><td><span class="chip ${f[2]==='高'?'blue':f[2]==='无需修复'?'green':''}">${f[2]}</span></td><td class="num">${f[3]}</td><td class="num">${f[4]}</td><td><span class="kwh-cell"><span class="bar" aria-hidden="true"><span style="width:${f[5]/max*100}%"></span></span><span class="mono">约 ${f[5].toFixed(2)} 度</span></span></td><td class="num">${(f[5]/hours(f[3])).toFixed(2)}</td><td class="num">${f[8]?f[8]+'%':'—'}</td><td>${f[6]}</td><td class="mono" style="font-size:11px;color:var(--muted)">${f[7]}</td></tr>`).join('')}</tbody>`}
+
+function renderAll(){renderStats();renderMachines();renderLegend();renderChart();renderEnergy();renderFilms()}
+
+// ---- estimation parameters dialog ----
+let lastFocus=null;
+const effOptions=[[0,'不计'],[85,'85 %'],[88,'88 %'],[90,'90 %'],[92,'92 %'],[94,'94 %']];
+function paramForm(){$('#param-list').innerHTML=machines.map(m=>`<fieldset class="param" data-m="${m.id}"><legend><span class="swatch" style="background:${m.color};margin:0" aria-hidden="true"></span>${esc(m.name)} <small>${esc(m.hw)}</small></legend><div class="param-grid">
+  <div class="field"><label for="base-${m.id}">其他功耗基线</label><div class="unit-input"><input id="base-${m.id}" type="number" inputmode="numeric" min="0" max="500" value="${m.base}" data-k="base"><span>W</span></div></div>
+  <div class="field"><label for="eff-${m.id}">电源效率</label><select id="eff-${m.id}" data-k="eff">${effOptions.map(([v,l])=>`<option value="${v}" ${m.eff===v?'selected':''}>${l}</option>`).join('')}</select><span class="hint">基线按插座校准时选「不计」</span></div>
+  <div class="field"><label for="src-${m.id}">CPU 功耗来源</label><select id="src-${m.id}" data-k="cpuSrc"><option value="measured" ${m.cpuSrc==='measured'?'selected':''}>实测</option><option value="estimate" ${m.cpuSrc==='estimate'?'selected':''}>按占用估算</option><option value="none" ${m.cpuSrc==='none'?'selected':''}>无</option></select></div>
+  <div class="field"><label for="tdp-${m.id}">CPU TDP</label><div class="unit-input"><input id="tdp-${m.id}" type="number" inputmode="numeric" min="5" max="400" value="${m.tdp}" data-k="tdp" ${m.cpuSrc==='estimate'?'':'disabled'} aria-describedby="tdp-hint-${m.id}"><span>W</span></div><span class="hint" id="tdp-hint-${m.id}">仅「按占用估算」时使用</span></div>
+  </div><p class="src">GPU：${esc(m.gpuSrc)} · CPU 当前：${esc(m.cpuNote)} · 当前读数 GPU ${m.gpu??'—'} W · CPU ${m.cpu} W</p></fieldset>`).join('');
+  $('#calib-machine').innerHTML=machines.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join('');$('#calib-plug').value='';calib()}
+function readForm(){return machines.map(m=>{const f=$(`[data-m="${m.id}"]`);return {m,base:Math.max(0,Math.round(Number($('[data-k=base]',f).value)||0)),eff:Number($('[data-k=eff]',f).value),cpuSrc:$('[data-k=cpuSrc]',f).value,tdp:Number($('[data-k=tdp]',f).value)||m.tdp}})}
+function calib(){const m=machines.find(x=>x.id===$('#calib-machine').value),plug=Number($('#calib-plug').value),f=$(`[data-m="${m.id}"]`),eff=Number($('[data-k=eff]',f).value)||100,cpu=$('[data-k=cpuSrc]',f).value==='none'?0:m.cpu;
+  const ok=plug>0;$('#calib-apply').disabled=!ok;if(!ok){$('#calib-out').textContent='';return}
+  const b=Math.round(plug*eff/100-(m.gpu||0)-cpu);$('#calib-out').textContent=b>=0?`建议其他基线：${plug} × ${eff}% − GPU ${m.gpu||0} − CPU ${cpu} = ${b} W`:`插座读数低于当前 GPU + CPU 估算，请在机器空闲时重新读数。`;$('#calib-apply').disabled=b<0;$('#calib-apply').dataset.value=b}
+function openParams(){lastFocus=document.activeElement;paramForm();const d=$('#params');d.showModal();$('#params-title').focus()}
+$('#open-params').addEventListener('click',openParams);
+$('#params').addEventListener('click',e=>{if(e.target.closest('[data-close]'))$('#params').close()});
+$('#params').addEventListener('close',()=>{if(lastFocus&&document.contains(lastFocus))lastFocus.focus()});
+$('#params').addEventListener('change',e=>{if(e.target.dataset.k==='cpuSrc'){const tdp=$(`[data-k=tdp]`,e.target.closest('.param'));tdp.disabled=e.target.value!=='estimate'}calib()});
+$('#params').addEventListener('input',e=>{if(e.target.id==='calib-plug'||e.target.dataset.k)calib()});
+$('#calib-apply').addEventListener('click',()=>{const id=$('#calib-machine').value,inp=$(`#base-${id}`);inp.value=$('#calib-apply').dataset.value;inp.focus();toast(`已填入 ${machines.find(m=>m.id===id).name} 的其他基线，保存后生效。`)});
+$('#params-save').addEventListener('click',()=>{readForm().forEach(({m,base,eff,cpuSrc,tdp})=>{m.base=base;m.eff=eff;m.cpuSrc=cpuSrc;m.tdp=tdp;m.w[N-1]=live(m).total});$('#params').close();renderAll();toast('估算参数已保存，实时功耗已按新参数估算（演示）。')});
+
+// ---- page controls ----
+let toastTimer;function toast(msg){clearTimeout(toastTimer);const t=$('#toast');t.textContent=msg;t.classList.add('show');toastTimer=setTimeout(()=>t.classList.remove('show'),4800)}
+document.querySelectorAll('[data-range]').forEach(b=>b.addEventListener('click',()=>{state.range=b.dataset.range;state.hover=null;document.querySelectorAll('[data-range]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));hideTip();renderChart();renderEnergy()}));
+$('#legend').addEventListener('click',e=>{const b=e.target.closest('[data-series]');if(!b)return;const id=b.dataset.series;
+  if(!state.hidden.has(id)&&state.hidden.size===machines.length-1){toast('至少保留一台机器。');return}
+  state.hidden.has(id)?state.hidden.delete(id):state.hidden.add(id);b.setAttribute('aria-pressed',String(!state.hidden.has(id)));renderChart()});
+$('#chart').addEventListener('keydown',e=>{const c=$('#chart')._ctx;if(!c)return;let i=state.hover??c.n-1;
+  const k={ArrowRight:1,ArrowLeft:-1}[e.key];if(k)i=Math.max(0,Math.min(c.n-1,(state.hover===null?c.n-1:i)+k*(e.shiftKey?10:1)));else if(e.key==='Home')i=0;else if(e.key==='End')i=c.n-1;else if(e.key==='Escape'){hideTip();return}else return;
+  e.preventDefault();showTip(i,true)});
+$('#chart').addEventListener('focus',()=>showTip(state.hover??$('#chart')._ctx.n-1,true));
+$('#chart').addEventListener('blur',hideTip);
+document.querySelectorAll('[data-stub]').forEach(b=>b.addEventListener('click',()=>toast(`「${b.dataset.stub}」保持现有页面；此预览只包含功耗页。`)));
+let rt;window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(renderChart,120)});
+renderAll();
+</script>
+</body>
+</html>
