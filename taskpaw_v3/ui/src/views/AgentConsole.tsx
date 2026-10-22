@@ -16,6 +16,7 @@ import { MonitorSelector } from "../components/MonitorSelector";
 import { MonitorWizard } from "./MonitorWizard";
 import { Settings } from "./Settings";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
+import { WorkerMonitor } from "../components/WorkerMonitor";
 import { PowerPage } from "../components/power/PowerPage";
 
 // HH:MM:SS in 24h, from a react-query dataUpdatedAt epoch (ms). Empty until the
@@ -48,6 +49,8 @@ export function AgentConsole() {
   const [dialog, setDialog] = useState<null | { mode: "add" } | { mode: "edit"; name: string }>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"monitors" | "media" | "power" | "logs" | "settings">("monitors");
+  const workflow = (config.data as { workflow?: { role?: string } } | undefined)?.workflow;
+  const isWorker = workflow?.role === "worker";
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["agentStatus"] });
@@ -70,7 +73,7 @@ export function AgentConsole() {
       {/* scrollable: five tabs never widen the console past a 390 px window (PWR-3) */}
       <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons={false} sx={{ minHeight: 0 }}>
         <Tab value="monitors" label={t("agent.monitors")} />
-        <Tab value="media" label={t("media.tab")} />
+        <Tab value="media" label={t(isWorker ? "media.workerTab" : "media.tab")} />
         {/* PWR-3: every machine's estimated power, a top-level tab like 媒体处理中心 */}
         <Tab value="power" label={t("power.tab")} />
         <Tab value="logs" label={t("logs.title")} />
@@ -84,7 +87,8 @@ export function AgentConsole() {
       {tab === "settings" ? (
         <Settings role="agent" />
       ) : tab === "media" ? (
-        <MediaWorkspace onOpenPower={() => setTab("power")} />
+        // P2-3 §6: a worker shows its own 媒体处理 monitor, never the controller's workspace
+        isWorker ? <WorkerMonitor /> : <MediaWorkspace onOpenPower={() => setTab("power")} />
       ) : tab === "power" ? (
         <PowerPage onOpenMedia={() => setTab("media")} />
       ) : tab === "logs" ? (

@@ -12,7 +12,7 @@ Miko lookup (`rt.lookup`), else the input (precedence final > lookup > input).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import timezone
 from pathlib import Path, PurePosixPath
@@ -321,6 +321,15 @@ def _steps(
                     params=detail.get("params"),
                     timing=detail.get("timing"),
                 )
+            if mine and running.get("machine"):  # P2-3 R15: a worker runs it
+                step.update(
+                    machine=running["machine"],
+                    attempt_id=running.get("attempt_id"),
+                    phase=running.get("phase"),
+                    started_at=running.get("started_at"),
+                )
+                if running.get("transfer"):  # 「回传 x/y GB · rate」
+                    step["note"] = running["transfer"]
             steps.append(step)
         elif value in _RETRYABLE:
             step = _step(name, "failed", why)
@@ -505,22 +514,44 @@ def revisions(film: m.BoardFilm) -> dict[str, Any]:
 def film_rows(
     films: tuple[m.BoardFilm, ...],
     waiting: dict[str, str],
-    current: dict[str, Any] | None = None,
+    currents: Mapping[str, dict[str, Any]] | None = None,
     download: dict[str, Any] | None = None,
     labels: dict[str, Label] | None = None,
     facts: dict[str, Facts] | None = None,
 ) -> list[dict[str, Any]]:
+    """P2-3 R15: `currents` maps a film to its running stage — the
+    controller's own and each worker's (`FleetLive.currents`). A film being
+    fetched before its claim shows the download as its waiting note."""
+    currents = currents or {}
+    waiting = dict(waiting)
+    for film_id, value in currents.items():
+        if value.get("fetching") and value.get("transfer"):
+            waiting[film_id] = value["transfer"]
     return [
         film_row(
             film,
             waiting,
-            current=current,
+            current=_running_current(currents.get(film.film_id)),
             download=download,
             label=(labels or {}).get(film.film_id),
             facts=(facts or {}).get(film.film_id),
         )
         for film in films
     ]
+
+
+def _running_current(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    return None if value is None or value.get("fetching") else value
+
+
+def merged_currents(
+    local: dict[str, Any] | None, remote: Mapping[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """R15: the controller's running stage and the workers' (local wins)."""
+    merged = dict(remote)
+    if local and local.get("film_id"):
+        merged[str(local["film_id"])] = local
+    return merged
 
 
 def _lookup(rt: LocalRuntime, film: m.BoardFilm) -> Any:

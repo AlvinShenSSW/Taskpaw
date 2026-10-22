@@ -950,10 +950,40 @@ class WorkerHost:
             **self._monitor(),
         }
 
+    def summary(self) -> dict[str, Any]:
+        """R16 `/status.workflow_worker`: no secret, no path, no film name."""
+        with self._lock:
+            routes = len(self.routes)
+            seen = self.last_heartbeat
+        dispatcher = self.dispatcher
+        current = dispatcher.current() if dispatcher else None
+        connected = (
+            self.state == "running"
+            and seen is not None
+            and (datetime.now(timezone.utc) - seen).total_seconds() < 60
+        )
+        return {
+            "state": self.state,
+            "reason": self.reason,
+            "connected": connected,
+            "routes": routes,
+            "current": None
+            if current is None
+            else {
+                "film_id": current["film_id"],
+                "stage": current["stage"],
+                "phase": current["phase"],
+            },
+            "paused": self.local_paused,
+        }
+
     def _monitor(self) -> dict[str, Any]:
         """§6: films, the running step, transfers, staging and the GPU hold."""
         dispatcher = self.dispatcher
-        staging: dict[str, Any] = {"used": None, "cap": self.settings.staging_cap_gb}
+        staging: dict[str, Any] = {  # bytes, as the dispatcher's staging reports
+            "used": None,
+            "cap": self.settings.staging_cap_gb * 10**9,
+        }
         if dispatcher is not None:
             try:
                 staging = {
@@ -964,7 +994,7 @@ class WorkerHost:
                 pass
         return {
             "films": dispatcher.films() if dispatcher else [],
-            "current": dispatcher.current() if dispatcher else None,
+            "current": _monitor_current(dispatcher.current() if dispatcher else None),
             "transfers": dispatcher.transfers() if dispatcher else [],
             "dispatch_reason": dispatcher.reason if dispatcher else None,
             "staging": staging,
@@ -1001,3 +1031,32 @@ def _gpu_lease() -> Any:
     from taskpaw_v3.core import gpu_lease
 
     return gpu_lease
+
+
+_STEP_KEYS = ("console", "params", "timing")  # as the board puts them on the step
+
+
+def _monitor_current(current: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The running stage for the worker's 媒体处理 tab, with its step shaped
+    like the board's running 修复 step, so the console reuses the same
+    LtxProgress, 本片参数 and 用时 cards (§6)."""
+    if current is None:
+        return None
+    ltx = current.get("ltx") if isinstance(current.get("ltx"), dict) else None
+    detail = ltx or {}
+    started = datetime.now(timezone.utc).timestamp() - float(current["elapsed_s"])
+    step = {
+        "key": current["stage"],
+        "state": "running",
+        "note": None,
+        "progress": current.get("progress") or None,
+        "ltx": None
+        if ltx is None
+        else {k: v for k, v in ltx.items() if k not in _STEP_KEYS},
+        "current_file": detail.get("current_file"),
+        "started_at": datetime.fromtimestamp(started, timezone.utc).isoformat(),
+        "console": detail.get("console"),
+        "params": detail.get("params"),
+        "timing": detail.get("timing"),
+    }
+    return {**current, "step": step, "started_at": step["started_at"]}

@@ -184,7 +184,24 @@ export type WorkerConsole = {
   state: string; reason: string; role: "controller" | "worker"; controller: string | null;
   worker_id?: string | null; credential: "valid" | "revoked" | null; staging_dir: string | null; staging_cap_gb: number;
   last_heartbeat?: string | null; reconciled?: boolean; paused?: boolean;
+  // P2-3 §6: the 媒体处理 tab of a worker
+  controller_paused?: boolean; pending?: boolean; films?: WorkerFilm[]; current?: WorkerCurrent | null;
+  transfers?: WorkerTransfer[]; dispatch_reason?: string | null;
+  staging?: { used: number | null; cap: number }; gpu?: { name: string | null; vram_mib: number | null; hold: string };
 };
+// P2-3: a film routed to this worker (position 0 当前, 1 预取) and its envelope's stage statuses.
+export interface WorkerFilm {
+  film: string; rev: number; name: string; position: number;
+  state: "queued" | "fetching" | "staged" | "running" | "settling" | "uploading" | "finishing";
+  stages: Record<string, string | null>;
+}
+export interface WorkerTransfer { film: string; dir: "down" | "up"; done: number; total: number; rate: number }
+// The running stage; `step` is shaped like the board's running 修复 step (LtxProgress, 本片参数, 用时).
+export interface WorkerCurrent {
+  film_id: string; stage: "restore" | "asr"; attempt_id: string; phase: "running" | "settling" | "uploading" | "finishing";
+  progress: string; elapsed_s: number; uses_gpu: boolean; step: WorkflowStep; started_at: string;
+  power?: LivePower | null; energy?: Record<string, unknown> | null;
+}
 
 export interface MonitorMutationResult {
   ok: boolean;
@@ -311,6 +328,9 @@ export interface WorkflowStep {
   started_at?: string | null; console?: string | null; params?: RestoreParams | null;
   // U1e: the running restore's phase times so far (the whole film)
   timing?: RestoreTiming | null;
+  // P2-3 R15: a stage running on a remote worker — its 设备 and attempt (停止并重新排队)
+  machine?: { id: string; name: string } | null; attempt_id?: string | null;
+  phase?: "running" | "settling" | "uploading" | "finishing" | null;
 }
 // U1c: the effective Jasna launch of the running video, read from its argv (paths cut to names).
 export interface RestoreParams {
@@ -739,6 +759,12 @@ export const api = {
   workflowWorker: () => get<WorkerConsole>("agent", "/control/workflow/worker"),
   workflowJoin: (code: string, staging_dir: string) =>
     send<WorkerConsole>("agent", "POST", "/control/workflow/worker/join", { code, staging_dir }),
+  // P2-3 R12: 暂停领取 / 恢复领取 on the worker's own console
+  workflowWorkerPause: (paused: boolean) =>
+    send<{ paused: boolean }>("agent", "POST", "/control/workflow/worker/pause", { paused }),
+  // P2-3 R9: 停止并重新排队 of a running remote restore or ASR
+  workflowRequeue: (filmId: string, attemptId: string) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/requeue`, { attempt_id: attemptId }),
   posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
   // U1b: the full landscape jacket (final fanart > thumb > input fanart > thumb > image attachment)
   coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,

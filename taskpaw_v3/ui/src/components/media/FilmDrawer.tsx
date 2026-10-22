@@ -2,9 +2,10 @@ import CloseIcon from "@mui/icons-material/Close";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import { Drawer } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type FilmDetail, type PlanEntry } from "../../api";
+import { api, type FilmDetail, type PlanEntry, type WorkflowStep } from "../../api";
 import { LtxDownload } from "../LtxDownload";
 import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
 import { predictFromRates } from "../power/powerModel";
@@ -13,6 +14,7 @@ import {
   machineLabel, STATUS_META, stageName, stepDurations, tierLong, type WorkItem,
 } from "./mediaModel";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
+import { ModalHead, ModalShell } from "./ReviewDialog";
 import { RestoreLivePanel } from "./RestoreLivePanel";
 import { TimingBlock } from "./TimingParts";
 import { errorText, MEDIA_FILMS_KEY, mediaFilmKey, useIntakeReasons, useWorkspace } from "./workspace";
@@ -109,6 +111,8 @@ function DrawerBody({ film, item, status, plan }: {
   const actors = film.actors.length ? film.actors : plan?.actors ?? [];
   const restore = restoreStep(film);
   const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
+  // P2-3 R15: a restore or ASR running on a worker (its 设备, and 停止并重新排队)
+  const remote = (film.steps ?? []).find((s) => s.state === "running" && (s.key === "restore" || s.key === "asr") && s.machine) ?? null;
   const download = restore?.download ?? null;
   const timing = readFilmTiming(film.timing);
   const changed = film.cleanup.kept.some((k) => k.status === "blocked_changed" || k.status === "blocked_identity");
@@ -139,7 +143,8 @@ function DrawerBody({ film, item, status, plan }: {
   ) : film.plan ? (
     <>
       <dt>画质</dt><dd>{tierLong(film.plan.ltx_model)}</dd>
-      <dt>设备</dt><dd>{machineLabel(ws.data.plans.data?.choices.machines.find((m) => m.id === film.plan?.machine), "本机")}</dd>
+      <dt>设备</dt><dd>{remote?.machine ? remote.machine.name
+        : machineLabel(ws.data.plans.data?.choices.machines.find((m) => m.id === film.plan?.machine), "本机")}</dd>
     </>
   ) : (
     <><dt>画质</dt><dd>待安排</dd><dt>设备</dt><dd>待安排</dd></>
@@ -162,6 +167,7 @@ function DrawerBody({ film, item, status, plan }: {
       </div>
       <div className="detail-steps"><StepLine steps={film.steps} title={title} durations={stepDurations(timing)} /></div>
       <LivePowerRow power={film.live_power} />
+      {remote && <RemoteStep filmId={film.film_id} step={remote} />}
       {running ? (
         <div>
           <RestoreLivePanel step={running} />
@@ -237,5 +243,53 @@ export function EvidenceFold({ film }: { film: FilmDetail }) {
         </dl>
       )}
     </details>
+  );
+}
+
+// P2-3 (#294) R9: a restore or ASR running on a worker — its 设备 and 停止并重新排队 (OD3), which
+// the worker carries out at its next heartbeat: the Job stops, the attempt ends as a free retry and
+// the film is routed again (a pinned one to the same worker).
+function RemoteStep({ filmId, step }: { filmId: string; step: WorkflowStep }) {
+  const ws = useWorkspace();
+  const qc = useQueryClient();
+  const [asking, setAsking] = useState(false);
+  const requeue = useMutation({
+    mutationFn: () => {
+      if (ws.readOnly || !step.attempt_id) throw new Error("只读监控");
+      return api.workflowRequeue(filmId, step.attempt_id);
+    },
+    onSuccess: () => {
+      setAsking(false);
+      ws.toast("已请求停止；设备停止任务后重新排队。");
+      void qc.invalidateQueries({ queryKey: mediaFilmKey(filmId) });
+    },
+    onError: (e) => ws.toast(errorText(e)),
+  });
+  const name = step.machine?.name ?? "";
+  const stage = stageName(step.key);
+  return (
+    <section className="panel spacer-top" aria-label="设备" data-testid="remote-step">
+      <dl className="facts">
+        <dt>设备</dt><dd>{name} · {stage}{step.phase === "uploading" || step.phase === "finishing" ? " · 回传中" : ""}</dd>
+      </dl>
+      {!ws.readOnly && step.attempt_id && (
+        <div className="actions spacer-top">
+          <button type="button" className="btn ghost" onClick={() => setAsking(true)}>停止并重新排队</button>
+        </div>
+      )}
+      <ModalShell open={asking} onClose={() => setAsking(false)} titleId="mw-requeue-title">
+        <ModalHead id="mw-requeue-title" title="停止并重新排队" subtitle={`${name} 上的${stage}`} onClose={() => setAsking(false)} />
+        <div className="modal-body">
+          <Notice tone="amber" icon={WarningAmberIcon}>该设备会停止本次{stage}，已运行的部分不保留；影片随后重新排队，不计入失败次数。</Notice>
+        </div>
+        <div className="modal-foot">
+          <p>设备确认停止前，影片仍显示在运行。</p>
+          <div className="actions">
+            <button type="button" className="btn ghost" onClick={() => setAsking(false)}>取消</button>
+            <button type="button" className="btn danger" disabled={requeue.isPending} onClick={() => requeue.mutate()}>确认停止</button>
+          </div>
+        </div>
+      </ModalShell>
+    </section>
   );
 }

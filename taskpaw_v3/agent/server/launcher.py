@@ -359,6 +359,10 @@ def run_agent(
                 # the retained today / week / month Wh, kept while sampling is off
                 "energy": sampler.energy(),
             }
+            if config.workflow.role == "worker":  # P2-3 R16
+                status["workflow_worker"] = (
+                    worker_host.summary() if worker_host is not None else None
+                )
             if config.workflow.enabled:
                 status["workflow"] = (
                     workflow_host.events.snapshot()

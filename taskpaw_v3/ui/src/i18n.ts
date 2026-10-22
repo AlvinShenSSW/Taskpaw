@@ -419,6 +419,7 @@ const en = {
   power: { tab: "Power" },
   media: {
     tab: "Media Center",
+    workerTab: "Media processing",
     groups: { confirm: "Awaiting confirmation", active: "In progress", attention: "Needs attention",
       archiving: "Confirmed, archiving and cleanup", done: "Done" },
     empty: "No films yet.", unavailable: "Media workflow is not running: {{reason}}",
@@ -870,6 +871,7 @@ const zh: typeof en = {
   power: { tab: "功耗" },
   media: {
     tab: "媒体处理中心",
+    workerTab: "媒体处理",
     groups: { confirm: "待确认入库", active: "处理中", attention: "需处理", archiving: "已确认待归档与清理", done: "已完成" },
     empty: "还没有影片。", unavailable: "媒体流水线未运行：{{reason}}",
     failed: "无法读取媒体流水线，请重试。",

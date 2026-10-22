@@ -137,10 +137,11 @@ def films(
         facts = board.row_facts(rt, films)
         # PW13: the history apart from the display board's limit
         history = rt.store.energy_history(rt.operator)
+        currents = board.merged_currents(current, remote_currents(host, rt))
     rows = board.film_rows(
         films,
         dict(dispatch.get("waiting") or {}),
-        current,
+        currents,
         status.get("ltx_download"),
         facts=facts,
     )
@@ -186,16 +187,34 @@ def film(
     status = host.status()
     dispatch = dict(status.get("dispatch") or {})
     with _mapped():
+        rt = runtime(host)
+        currents = board.merged_currents(
+            dispatch.get("current"), remote_currents(host, rt)
+        )
+        waiting = dict(dispatch.get("waiting") or {})
+        mine = currents.get(film_id)
+        if mine and mine.get("fetching") and mine.get("transfer"):
+            waiting[film_id] = mine["transfer"]
         detail = board.film_detail(
-            runtime(host),
+            rt,
             film_id,
-            dict(dispatch.get("waiting") or {}),
-            dispatch.get("current"),
+            waiting,
+            None if mine is None or mine.get("fetching") else mine,
             status.get("ltx_download"),
         )
     if detail is None:
         raise HTTPException(status_code=404, detail="未知影片")
     return detail
+
+
+def remote_currents(host: Any, rt: LocalRuntime) -> dict[str, dict[str, Any]]:
+    """P2-3 R15: the workers' running stages from their heartbeats, each with
+    its machine's name (none while remote workers are off)."""
+    fleet = getattr(host, "fleet", None)
+    if fleet is None:
+        return {}
+    names = {w.worker_id: w.name for w in rt.store.list_workers(rt.operator)}
+    return dict(fleet.currents(rt.clock.now(), names))
 
 
 def plans(

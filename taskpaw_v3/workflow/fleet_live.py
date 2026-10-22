@@ -26,6 +26,8 @@ LiveState = Literal["online", "lost", "waiting"]
 _Short = Annotated[str, Field(strict=True, min_length=1, max_length=128)]
 _Bytes = Annotated[int, Field(strict=True, ge=0, le=10**16)]
 _Number = Annotated[float, Field(ge=0, le=10**6, allow_inf_nan=False)]
+# bytes per second: 10G is 1.25e9 (a bound of 1e6 refused every real rate)
+_Rate = Annotated[float, Field(ge=0, le=10**12, allow_inf_nan=False)]
 
 
 class GpuLive(m.Model):
@@ -53,7 +55,7 @@ class TransferLive(m.Model):
     dir: Literal["down", "up"]
     done: _Bytes
     total: _Bytes
-    rate: _Number
+    rate: _Rate  # bytes per second
 
 
 class CurrentLive(m.Model):
@@ -216,7 +218,7 @@ def _transfer_current(
     note = transfer_note(item)
     return {
         "film_id": item.film,
-        "stage": "restore",
+        "stage": None,  # nothing claimed yet
         "attempt_id": None,
         "progress": note,
         "transfer": note,

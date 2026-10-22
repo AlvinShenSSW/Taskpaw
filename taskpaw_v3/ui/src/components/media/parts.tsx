@@ -290,7 +290,11 @@ export function StepLine({ steps, title, durations }: {
         if (i === cur) {
           return (
             <li key={s.key} className={failed ? "failed" : "current"} aria-current="step" data-step={s.key}>
-              {STEP_LABEL[s.key]}{failed && <span className="sr-only">（失败）</span>}
+              {s.machine ? (
+                // P2-3 R15: the stage runs on a worker — its 设备 under the step
+                <span className="step-label">{STEP_LABEL[s.key]}<span className="step-time"><span className="sr-only">设备 </span>{s.machine.name}</span></span>
+              ) : STEP_LABEL[s.key]}
+              {failed && <span className="sr-only">（失败）</span>}
             </li>
           );
         }
