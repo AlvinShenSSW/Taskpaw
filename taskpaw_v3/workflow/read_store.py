@@ -1,6 +1,7 @@
 """Scoped workflow views never expose credential or pairing digests."""
 
 import json
+from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -516,6 +517,15 @@ class ReadCommands(WorkflowCore):
                 f"WHERE r.kind='archive' {receipted[0]} ORDER BY r.rowid",
                 receipted[1],
             ).fetchall()
+            # U1e: every attempt's start of the stages 全程 and 排队等待 begin at
+            firsts = self._conn.execute(
+                "SELECT s.film_id,s.stage,json_extract(x.body_json,'$.started_at') "
+                "FROM films f JOIN stages s ON s.film_id=f.film_id "
+                "AND s.input_revision=f.current_input_revision "
+                "AND s.stage IN ('restore','asr','translate') "
+                f"JOIN attempts x ON x.job_id=s.job_id {where[0]}",
+                where[1],
+            ).fetchall()
             # the largest probe of each current input (V3 §7 resolution)
             probes = self._conn.execute(
                 "SELECT f.film_id,max(json_extract(p.value,'$.width')),"
@@ -533,6 +543,13 @@ class ReadCommands(WorkflowCore):
         package_films = {row["package_id"]: row["films"] for row in counts}
         receipt_ids = {row[0]: row[1] for row in receipts}  # newest wins
         sizes = {row[0]: (row[1] or 0, row[2] or 0) for row in probes}
+        first: dict[tuple[str, str], datetime] = {}
+        for film_id_, stage_, begun in firsts:
+            if not begun:
+                continue
+            at = parse_time(begun)
+            if (film_id_, stage_) not in first or at < first[(film_id_, stage_)]:
+                first[(film_id_, stage_)] = at
         films: dict[str, dict[str, Any]] = {}
         for row in rows:
             film = films.setdefault(
@@ -573,6 +590,7 @@ class ReadCommands(WorkflowCore):
                         status=row["status"],
                         note=_attempt_note(row["attempt_json"]),
                         reason=row["reason"],
+                        first_started_at=first.get((row["film_id"], row["stage"])),
                         **_attempt_times(row["attempt_json"]),
                     )
                 )

@@ -192,7 +192,7 @@ describe("contract: 用时 (U1e)", () => {
     const drawer = await screen.findByRole("dialog", { name: "影片详情" });
     const card = await within(drawer).findByTestId("ltx-timing");
     expect(within(drawer).getByTestId("ltx-progress")).toBeInTheDocument();
-    expect(card).toHaveTextContent("LTX 合计用时 0:12:12");
+    expect(card).toHaveTextContent("LTX 合计用时 0:11:24");
     expect(card).toHaveTextContent("至今");
     expect(cell(card, "scan")).toBe("scan · 扫描0:01:35");
     expect(cell(card, "encode")).toBe("encode · 编码0:09:49");
@@ -202,7 +202,7 @@ describe("contract: 用时 (U1e)", () => {
     // nothing has finished yet: only the queue wait
     const timing = within(drawer).getByTestId("film-timing");
     expect(within(timing).getByText("排队等待")).toBeInTheDocument();
-    expect(within(timing).queryByText("修复→翻译合计")).toBeNull();
+    expect(within(timing).queryByText("全程")).toBeNull();
   });
 
   it("a finished film: 用时 per stage, the 修复 breakdown, the LTX stage times and 修复→翻译", async () => {
@@ -215,13 +215,13 @@ describe("contract: 用时 (U1e)", () => {
     const block = await within(drawer).findByTestId("film-timing");
     const rows = [...block.querySelectorAll("dl.facts > dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]);
     expect(rows).toEqual([
-      ["修复", "1:30:20扫描马赛克 0:05:12 · BasicVSR++ 0:18:25 · LTX 0:49:11"],
+      ["修复", "1:30:20扫描马赛克 0:05:12 · BasicVSR++ 0:18:25 · LTX 0:48:22"],
       ["识别", "0:10:10"], ["翻译", "0:20:30"], ["回传", "0:00:45"], ["整理", "0:01:35"],
-      ["修复→翻译合计", "2:03:00"],
-      ["排队等待", "0:30:00确认安排到开始修复，不计入合计"],
+      ["全程", "2:03:00修复→翻译，从首次开始修复到翻译完成（含失败重试与等待）"],
+      ["排队等待", "0:30:00确认安排到首次开始修复，不计入全程"],
     ]);
     const ltx = within(block).getByTestId("ltx-timing");
-    expect(ltx).toHaveTextContent("LTX 合计用时 0:49:11");
+    expect(ltx).toHaveTextContent("LTX 合计用时 0:48:22");
     expect(ltx).toHaveTextContent("2 段 LTX");
     expect([...ltx.querySelectorAll("[data-timing]")].map((el) => el.getAttribute("data-timing")))
       .toEqual(["scan", "encode", "denoise", "compose", "speed_test"]);  // Jasna's order, not the stored one
@@ -229,6 +229,9 @@ describe("contract: 用时 (U1e)", () => {
     // the step line: each finished step's time under its label
     const line = within(drawer).getByRole("list", { name: /生命周期/ });
     expect(line.querySelector('[data-step="restore"] .step-time')).toHaveTextContent("1:30:20");
+    expect(line.querySelector('[data-step="restore"] .step-time .sr-only')).toHaveTextContent("用时");
+    expect(line.querySelector('[data-step="restore"] .step-time[aria-label]')).toBeNull();
+    expect(ltx).toHaveTextContent("不含测速");
     expect(line.querySelector('[data-step="plan"] .step-time')).toBeNull();
   });
 

@@ -44,11 +44,11 @@ const FIELDS = [
   "kept_ja", "paused", "reason", "detail", "step", "elapsed", "reconstructed", "holder", "index", "total",
   "mode", "profile", "output", "exit_code", "tail", "at_stop", "engine", "model", "lines", "resumed", "from", "to",
   "kind", "count", "minutes", "by_model", "srt", "no_speech", "level", "title", "message", "since_cap",
-  // U1e: the 媒体处理中心's stage rows and a film's 修复→翻译 summary (seconds, shown as clocks)
-  "stage", "run", "restore", "ltx", "asr", "translate",
+  // U1e: the 媒体处理中心's stage rows and a film's 全程 summary (seconds, shown as clocks)
+  "stage", "run", "restore", "ltx", "speed_test", "asr", "translate",
 ] as const;
 const COUNTS = new Set(["queued", "done", "failed", "skipped", "kept_ja", "paused", "lines", "resumed", "count"]);
-const CLOCKS = new Set(["run", "restore", "ltx", "asr", "translate"]);
+const CLOCKS = new Set(["run", "restore", "ltx", "speed_test", "asr", "translate"]);
 
 // 「1:35:30」: a film's stage time in the summary sentence.
 function clockText(value: number): string {

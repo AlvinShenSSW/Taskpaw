@@ -28,7 +28,7 @@ const catalog: [string, string, string][] = [
   ["subs.skipped", "skipped", "跳过"], ["subs.failed", "failed", "失败"], ["subs.skipped_bulk", "skipped", "跳过"],
   ["event.mirrored", "Alert", "提醒"], ["event.suppressed", "suppressed", "省略"],
   ["workflow.stage.succeeded", "finished in", "完成，耗时"], ["workflow.stage.failed", "failed", "失败"],
-  ["workflow.film.translated", "restored and translated", "修复→翻译完成"],
+  ["workflow.film.translated", "total", "全程"],
 ];
 
 // Exact data shapes from the producer call sites, without invented fallback keys.
@@ -56,8 +56,8 @@ const producerData: Record<string, Record<string, unknown>> = {
   "workflow.stage.succeeded": { stage: "asr", duration: 612.3 },
   "workflow.stage.failed": { stage: "restore", duration: 5, detail: "Jasna LTX 失败（退出码 3）" },
   "workflow.film.translated": {
-    run: 5730, restore: 3600, ltx: 2400, asr: 600, translate: 1230,
-    text: "ABF-394 修复→翻译完成，全程 1:35:30（修复 1:00:00，其中 LTX 0:40:00；识别 0:10:00；翻译 0:20:30）",
+    run: 5730, restore: 3600, ltx: 2340, speed_test: 60, asr: 600, translate: 1230,
+    text: "ABF-394 全程 1:35:30（修复→翻译；修复 1:00:00，其中 LTX 0:39:00；识别 0:10:00；翻译 0:20:30）",
   },
 };
 const reasonCodes = [
@@ -150,12 +150,13 @@ describe("log sentences", () => {
     const summary = { ...entry(undefined, "workflow.film.translated", producerData["workflow.film.translated"]),
       task: "媒体处理中心", task_type: "workflow", film: "ABF-394" };
     expect(renderLogSentence(summary, i18n.t)).toBe(
-      "ABF-394 修复→翻译完成，全程 1:35:30（修复 1:00:00，其中 LTX 0:40:00；识别 0:10:00；翻译 0:20:30）");
+      "ABF-394 全程 1:35:30（修复→翻译；修复 1:00:00，其中 LTX 0:39:00；识别 0:10:00；翻译 0:20:30）");
     expect(logDetails(summary, i18n.t)).toEqual(expect.arrayContaining([
-      ["修复→翻译全程", "1:35:30"], ["修复", "1:00:00"], ["LTX", "0:40:00"], ["识别", "0:10:00"], ["翻译", "0:20:30"],
+      ["全程（修复→翻译）", "1:35:30"], ["修复", "1:00:00"], ["LTX（四阶段）", "0:39:00"], ["LTX 测速", "0:01:00"],
+      ["识别", "0:10:00"], ["翻译", "0:20:30"],
     ]));
     const noLtx = { ...summary, data: { run: 1200, restore: null, ltx: null, asr: 600, translate: 600 } };
-    expect(renderLogSentence(noLtx, i18n.t)).toBe("ABF-394 修复→翻译完成，全程 0:20:00（修复 —；识别 0:10:00；翻译 0:10:00）");
+    expect(renderLogSentence(noLtx, i18n.t)).toBe("ABF-394 全程 0:20:00（修复→翻译；修复 —；识别 0:10:00；翻译 0:10:00）");
     const stage = { ...summary, id: "20260926-8", kind: "workflow.stage.succeeded", data: { stage: "asr", duration: 612.3 } };
     expect(renderLogSentence(stage, i18n.t)).toBe("语音识别完成，耗时 10 分");
     const failed = { ...summary, kind: "workflow.stage.failed", severity: "warn" as const,

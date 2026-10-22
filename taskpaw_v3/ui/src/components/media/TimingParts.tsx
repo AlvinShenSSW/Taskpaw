@@ -1,5 +1,5 @@
 // U1e: how long a film took. 「LTX 合计用时」 reads like the LtxProgress metrics (shared progress
-// parts); 「用时」 lists every finished stage, the 修复 breakdown and 修复→翻译.
+// parts); 「用时」 lists every finished stage, the 修复 breakdown and 全程.
 import { Box, Typography } from "@mui/material";
 import type { FilmTiming, RestoreTiming } from "../../api";
 import { DATA, ProgressFrame } from "../progressParts";
@@ -32,7 +32,7 @@ export function LtxTimingCard({ timing, live = false }: { timing: RestoreTiming 
         {timing.speed_test > 0 && <TimeCell label="测速" value={timing.speed_test} testId="speed_test" />}
       </Box>
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", px: { xs: 2, sm: 3 }, pb: 2 }}>
-        Taskpaw 看到每个阶段为当前阶段的时间，累计所有 LTX 段与分卷；合计含测速。
+        Taskpaw 看到每个阶段为当前阶段的时间，累计所有 LTX 段与分卷；合计只含四个阶段，不含测速（测速单列）。
       </Typography>
     </ProgressFrame>
   );
@@ -61,10 +61,10 @@ export function TimingBlock({ timing }: { timing: FilmTiming | null }) {
           </dd>,
         ])}
         {timing.total_restore_to_translate !== null && (
-          <><dt>修复→翻译合计</dt><dd><strong className="mono t-green">{fmtDuration(timing.total_restore_to_translate)}</strong></dd></>
+          <><dt title="从首次开始修复到翻译完成">全程</dt><dd><strong className="mono t-green">{fmtDuration(timing.total_restore_to_translate)}</strong><span className="muted small timing-sub">修复→翻译，从首次开始修复到翻译完成（含失败重试与等待）</span></dd></>
         )}
         {timing.queue_wait !== null && (
-          <><dt>排队等待</dt><dd><span className="mono">{fmtDuration(timing.queue_wait)}</span><span className="muted small timing-sub">确认安排到开始修复，不计入合计</span></dd></>
+          <><dt>排队等待</dt><dd><span className="mono">{fmtDuration(timing.queue_wait)}</span><span className="muted small timing-sub">确认安排到首次开始修复，不计入全程</span></dd></>
         )}
       </dl>
       {hasLtxTime(b) && <div className="spacer-top"><LtxTimingCard timing={b} /></div>}

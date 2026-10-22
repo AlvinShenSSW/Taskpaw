@@ -819,9 +819,10 @@ class RestoreExecutor:
         state: dict = {}
         tail: deque[str] = deque(maxlen=_TAIL_LINES)
         volume = label.strip() or source.name
-        context.progress(
-            progress_text(label, state), ltx={"current_file": volume, "params": params}
-        )
+        opening: dict[str, Any] = {"current_file": volume, "params": params}
+        if earlier is not None:  # IR06: the card keeps the earlier volumes' times
+            opening["timing"] = timing_json(earlier)
+        context.progress(progress_text(label, state), ltx=opening)
         console = ""
         last_emit = -math.inf
         held = False  # a console line the throttle dropped, not yet on the step
@@ -864,19 +865,22 @@ class RestoreExecutor:
 
         def flush_held() -> None:
             """IR03: a dropped line must still reach the step when the child then
-            goes quiet; lives only while the child runs."""
+            goes quiet; U1e: while a Jasna phase is running the step's times are
+            republished about once a second even if the child prints nothing.
+            One thread for both; lives only while the child runs."""
             while True:
                 with lock:
                     wait = (
-                        CONSOLE_INTERVAL_S - (time.monotonic() - last_emit)
-                        if held
-                        else CONSOLE_INTERVAL_S
+                        CONSOLE_INTERVAL_S
+                        if last_emit == -math.inf
+                        else CONSOLE_INTERVAL_S - (time.monotonic() - last_emit)
                     )
                 if stop_flush.wait(max(wait, 0.05)):
                     return
                 with lock:
                     now = time.monotonic()
-                    if held and now - last_emit >= CONSOLE_INTERVAL_S:
+                    ticking = timer.current is not None
+                    if (held or ticking) and now - last_emit >= CONSOLE_INTERVAL_S:
                         publish(now)
 
         child = context.processes.launch(argv, cwd=str(workdir), on_line=on_line)

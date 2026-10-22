@@ -224,7 +224,7 @@ export interface FilmRow {
   timing?: FilmTiming | null;
 }
 // U1e: the seconds Taskpaw saw each Jasna phase as the current one, over every LTX run and volume.
-// `ltx` is the four restore stages (`ltx_stages`, by name) plus the speed test.
+// `ltx` is the four restore stages (`ltx_stages`, by name) only; `speed_test` is counted apart.
 export interface RestoreTiming {
   scan: number; basicvsr: number; ltx: number; speed_test: number;
   ltx_stages: Record<string, number>; ltx_runs: number; wall: number;

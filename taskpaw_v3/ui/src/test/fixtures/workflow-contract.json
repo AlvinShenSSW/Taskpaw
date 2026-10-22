@@ -61,7 +61,7 @@
         "timing": {
           "scan": 312.4,
           "basicvsr": 0.0,
-          "ltx": 732.1,
+          "ltx": 683.9,
           "speed_test": 48.2,
           "ltx_stages": {
             "scan": 95.3,
@@ -194,7 +194,7 @@
           "restore_breakdown": {
             "scan": 312.4,
             "basicvsr": 1105.0,
-            "ltx": 2950.6,
+            "ltx": 2902.4,
             "speed_test": 48.2,
             "ltx_stages": {
               "compose": 651.0,
@@ -316,7 +316,7 @@
           "restore_breakdown": {
             "scan": 312.4,
             "basicvsr": 1105.0,
-            "ltx": 2950.6,
+            "ltx": 2902.4,
             "speed_test": 48.2,
             "ltx_stages": {
               "compose": 651.0,
@@ -436,7 +436,7 @@
             "timing": {
               "scan": 312.4,
               "basicvsr": 0.0,
-              "ltx": 732.1,
+              "ltx": 683.9,
               "speed_test": 48.2,
               "ltx_stages": {
                 "scan": 95.3,
@@ -1131,7 +1131,7 @@
         "restore_breakdown": {
           "scan": 312.4,
           "basicvsr": 1105.0,
-          "ltx": 2950.6,
+          "ltx": 2902.4,
           "speed_test": 48.2,
           "ltx_stages": {
             "compose": 651.0,
@@ -1337,7 +1337,7 @@
         "restore_breakdown": {
           "scan": 312.4,
           "basicvsr": 1105.0,
-          "ltx": 2950.6,
+          "ltx": 2902.4,
           "speed_test": 48.2,
           "ltx_stages": {
             "compose": 651.0,
@@ -1541,7 +1541,7 @@
           "timing": {
             "scan": 312.4,
             "basicvsr": 0.0,
-            "ltx": 732.1,
+            "ltx": 683.9,
             "speed_test": 48.2,
             "ltx_stages": {
               "scan": 95.3,

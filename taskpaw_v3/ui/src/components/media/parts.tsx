@@ -274,7 +274,7 @@ export function StepLine({ steps, title, durations }: {
     const seconds = done ? durations?.[key] : undefined;
     if (seconds === undefined) return STEP_LABEL[key];
     return (
-      <span className="step-label">{STEP_LABEL[key]}<span className="step-time" aria-label={`用时 ${fmtDuration(seconds)}`}>{fmtDuration(seconds)}</span></span>
+      <span className="step-label">{STEP_LABEL[key]}<span className="step-time"><span className="sr-only">用时 </span>{fmtDuration(seconds)}</span></span>
     );
   };
   return (

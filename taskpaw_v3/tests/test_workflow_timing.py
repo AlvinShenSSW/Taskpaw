@@ -83,7 +83,7 @@ def test_ltx_stage_times_accumulate_over_every_run_with_the_speed_test_apart():
         "denoise": 33.0,
         "compose": 44.0,
     }
-    assert value.ltx == 110.0 + 20.0  # the four stages plus the speed test
+    assert value.ltx == 110.0  # the four stages only (IR03)
     assert value.ltx_runs == 2
     assert value.wall == 260.0
 
@@ -96,6 +96,40 @@ def test_a_live_snapshot_counts_the_current_phase_up_to_now():
     assert live.wall == 40.5 and live.ltx_runs == 1
     # the snapshot never closes the phase
     assert feed.timer.snapshot(150.0).ltx_stages == {"encode": 40.0}
+
+
+def test_a_phase_ends_when_its_bar_reaches_100_percent():
+    """IR02: model loading / muxing / copying between spans is nobody's time."""
+    feed = Feed(0.0)
+    feed.line(ltx(2, "encode"), 10.0)
+    feed.line(ltx(2, "encode", percent=100), 20.0)  # 10 s of encode
+    feed.line(ltx(2, "encode", percent=100), 25.0)  # a repeated final redraw
+    assert feed.timer.snapshot(60.0).ltx_stages == {"encode": 10.0}  # not running
+    feed.line(ltx(3, "denoise"), 70.0)  # the 50 s gap is nobody's
+    feed.line(ltx(3, "denoise", percent=100), 80.0)
+    value = feed.timer.snapshot(90.0)
+    assert value.ltx_stages == {"encode": 10.0, "denoise": 10.0}
+    assert value.ltx == 20.0 and value.ltx_runs == 1  # a redraw is no new run
+    assert value.wall == 90.0
+
+
+def test_a_bar_that_counts_to_its_total_is_complete_without_a_percent():
+    feed = Feed(0.0)
+    feed.line(SCAN, 1.0)
+    line = "Mosaic scan: |          | 5000/5000 [04:00<00:00, 15.00sample/s]"
+    feed.line(line, 11.0)
+    assert feed.timer.snapshot(50.0).scan == 10.0
+    full = "LTX 1/4 scan: | | 300/300 [00:27<00:25,  5.62frame/s]"
+    feed.line(ltx(1, "scan"), 60.0)
+    feed.line(full, 62.0)
+    assert feed.timer.snapshot(99.0).ltx_stages == {"scan": 2.0}
+
+
+def test_a_complete_basicvsr_bar_stops_billing():
+    feed = Feed(0.0)
+    feed.line(BASIC, 5.0)
+    feed.line(BASIC.replace("15%", "100%"), 15.0)
+    assert feed.timer.snapshot(500.0).basicvsr == 10.0
 
 
 def test_a_new_run_starts_when_a_stage_does_not_follow_a_lower_one():
@@ -156,7 +190,9 @@ def board_film(
     restore_timing: m.RestoreTiming | None = None,
     confirmed: float | None = -30.0,
     backfilled: bool = False,
+    first: dict[str, float] | None = None,
 ) -> m.BoardFilm:
+    first = first or {}
     statuses = statuses or {}
     return m.BoardFilm(
         film_id=identity(),
@@ -171,6 +207,7 @@ def board_film(
                 ),
                 started_at=at(times[stage][0]) if stage in times else None,
                 ended_at=at(times[stage][1]) if stage in times else None,
+                first_started_at=at(first[stage]) if stage in first else None,
                 timing=restore_timing if stage == "restore" else None,
             )
             for stage in board.STAGE_ORDER
@@ -189,7 +226,7 @@ def board_film(
 BREAKDOWN = m.RestoreTiming(
     scan=300.0,
     basicvsr=600.0,
-    ltx=2400.0,
+    ltx=2340.0,
     speed_test=60.0,
     ltx_stages={"scan": 60.0, "encode": 600.0, "denoise": 1200.0, "compose": 480.0},
     ltx_runs=2,
@@ -221,9 +258,23 @@ def test_film_timing_reads_each_succeeded_attempt_and_the_whole_run():
     assert value["total_restore_to_translate"] == 95.5 * 60
     assert value["queue_wait"] == 1800.0  # plan confirmed 30 min before restore
     breakdown = value["restore_breakdown"]
-    assert breakdown["ltx"] == 2400.0 and breakdown["ltx_runs"] == 2
+    assert breakdown["ltx"] == 2340.0 and breakdown["ltx_runs"] == 2
     assert breakdown["ltx_stages"]["denoise"] == 1200.0
     assert "schema_version" not in breakdown
+
+
+def test_a_failed_first_attempt_belongs_to_the_total_not_to_the_queue_wait():
+    """IR01: restore fails after 10 min, then succeeds; 全程 and 排队等待 both
+    start at the first attempt, each stage keeps its succeeded attempt's time."""
+    value = tm.film_timing(
+        board_film(
+            {"restore": (20, 80), "asr": (81, 91), "translate": (92, 112)},
+            first={"restore": 0.0},
+        )
+    )
+    assert value["queue_wait"] == 1800.0  # plan confirmed 30 min before attempt 1
+    assert value["total_restore_to_translate"] == 112 * 60  # from attempt 1
+    assert value["stages"]["restore"] == 3600.0  # the succeeded attempt only
 
 
 def test_film_timing_without_translate_has_no_total_and_running_stages_no_time():
@@ -261,7 +312,7 @@ def test_film_rows_carry_the_timing():
     film = board_film({"restore": (0, 60)}, restore_timing=BREAKDOWN)
     row = board.film_row(film, {})
     assert row["timing"]["stages"]["restore"] == 3600.0
-    assert row["timing"]["restore_breakdown"]["ltx"] == 2400.0
+    assert row["timing"]["restore_breakdown"]["ltx"] == 2340.0
 
 
 def test_the_running_restore_step_carries_the_live_timing():
@@ -335,11 +386,12 @@ def test_the_translated_summary_states_the_whole_run():
     assert row["data"] == {
         "run": 5730.0,
         "restore": 3600.0,
-        "ltx": 2400.0,
+        "ltx": 2340.0,  # the four stages; the 60 s speed test is its own field
+        "speed_test": 60.0,
         "asr": 600.0,
         "translate": 1230.0,
-        "text": "ABF-394 修复→翻译完成，全程 1:35:30"
-        "（修复 1:00:00，其中 LTX 0:40:00；识别 0:10:00；翻译 0:20:30）",
+        "text": "ABF-394 全程 1:35:30"
+        "（修复→翻译；修复 1:00:00，其中 LTX 0:39:00；识别 0:10:00；翻译 0:20:30）",
     }
 
 
@@ -350,10 +402,7 @@ def test_a_summary_without_ltx_leaves_that_part_out():
         )
     )
     text = tm.summary_text("ABF-1", value)
-    assert (
-        text
-        == "ABF-1 修复→翻译完成，全程 0:20:00（修复 —；识别 0:10:00；翻译 0:10:00）"
-    )
+    assert text == "ABF-1 全程 0:20:00（修复→翻译；修复 —；识别 0:10:00；翻译 0:10:00）"
 
 
 def test_a_failing_log_never_breaks_the_caller():
@@ -428,9 +477,7 @@ def test_the_restore_keeps_its_phase_times_per_video_and_for_the_film(
         assert value is not None and value.ltx_runs == 2
         assert set(value.ltx_stages) == {"scan", "encode", "denoise", "compose"}
         assert value.scan > 0 and value.basicvsr > 0 and value.speed_test > 0
-        assert value.ltx == pytest.approx(
-            sum(value.ltx_stages.values()) + value.speed_test
-        )
+        assert value.ltx == pytest.approx(sum(value.ltx_stages.values()))
         assert value.wall >= value.ltx + value.scan + value.basicvsr
     film_total = run.outcome.timing
     assert film_total == tm.merge(*per_video)
@@ -439,6 +486,25 @@ def test_the_restore_keeps_its_phase_times_per_video_and_for_the_film(
     live = [s["timing"] for s in run.ltx if "timing" in s]
     assert live and live[-1]["ltx_runs"] == 4
     assert live[-1]["ltx"] >= per_video[0].ltx
+    # IR06: the second volume's start already carries the first one's times
+    starts = [s for s in run.ltx if "console" not in s]
+    assert len(starts) == 2 and "timing" not in starts[0]
+    assert starts[1]["timing"]["ltx_runs"] == 2
+    assert starts[1]["timing"]["ltx"] == pytest.approx(per_video[0].ltx)
+
+
+def test_the_live_timing_ticks_while_jasna_is_silent(rt, tools):
+    """IR (Codex P2): one encode header, then a quiet but alive child; the
+    flusher republishes the growing times about once a second."""
+    from taskpaw_v3.tests.workflow_exec_helpers import File, add_film, run_direct, video
+
+    tools.set_jasna(progress=[ltx(2, "encode")], linger=3.0)
+    film = add_film(rt, [File("ABC-123.mkv", video())])
+    run = run_direct(rt, film, "restore")
+    assert run.outcome.ok
+    totals = [s["timing"]["ltx"] for s in run.ltx if "timing" in s]
+    assert len(totals) >= 3 and totals == sorted(totals)
+    assert totals[-1] - totals[0] >= 1.0  # grew while the child was silent
 
 
 def test_an_older_stage_result_without_timing_still_loads():
@@ -479,6 +545,7 @@ def test_the_board_reads_the_restore_timing_from_its_success_evidence(
     restore = next(s for s in row.stages if s.stage == "restore")
     assert restore.timing == timing
     assert restore.started_at == attempt.started_at
+    assert restore.first_started_at == attempt.started_at  # its only attempt
     assert restore.ended_at == attempt.ended_at
     value = board.film_row(row, {})["timing"]
     assert value["restore_breakdown"]["ltx_runs"] == 2
@@ -510,7 +577,7 @@ def test_the_pipeline_logs_each_stage_and_the_whole_run(rt, tools, ticking):
     assert {r["film"] for r in rec.rows} == {"ABC-123"}
     assert {r["task"] for r in rec.rows} == {"媒体处理中心"}
     summary = rec.rows[-1]["data"]
-    assert summary["text"].startswith("ABC-123 修复→翻译完成，全程 ")
+    assert summary["text"].startswith("ABC-123 全程 ")
     assert "其中 LTX" in summary["text"]
     assert summary["ltx"] is not None and summary["ltx"] > 0
     assert summary["run"] >= summary["translate"]

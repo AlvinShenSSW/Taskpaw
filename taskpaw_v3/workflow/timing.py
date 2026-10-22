@@ -52,18 +52,47 @@ def phase_of(state: dict) -> str | None:
     return None
 
 
+def _bar_of(state: dict) -> dict:
+    snapshot = state.get("ltx_progress")
+    if isinstance(snapshot, dict):
+        return snapshot
+    scan = state.get("scan_progress")
+    return scan if isinstance(scan, dict) else state
+
+
+def _number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _complete(state: dict) -> bool:
+    """The state's bar is at 100%: its percent, or its counter at its total."""
+    bar = _bar_of(state)
+    percent = _number(bar.get("percent"))
+    if percent is not None and percent >= 100:
+        return True
+    current, total = _number(bar.get("current")), _number(bar.get("total"))
+    return current is not None and total is not None and total > 0 and current >= total
+
+
 def _round(value: float) -> float:
     return round(max(0.0, value), 1)
 
 
 class PhaseTimer:
     """One Jasna child's phase times. A phase runs from its first line until
-    another phase begins, a state names none, or the child ends (`close`)."""
+    another phase begins, a state names none, its bar reaches 100% (the model
+    loading, muxing and copying after it are nobody's time), or the child ends
+    (`close`)."""
 
     def __init__(self, start: float) -> None:
         self.start = start
         self.end: float | None = None
         self.current: str | None = None
+        self._last: str | None = None  # the phase of the last state observed
         self.since = start
         self.totals: dict[str, float] = {}
         self.runs = 0
@@ -71,10 +100,14 @@ class PhaseTimer:
 
     def observe(self, state: dict, now: float) -> None:
         phase = phase_of(state)
-        if phase == self.current:
+        done = phase is not None and _complete(state)
+        if phase == self._last:
+            if done:  # the bar's last redraw: its phase ends here
+                self._close(now)
             return
+        self._last = phase
         self._close(now)
-        self.current, self.since = phase, now
+        self.current, self.since = (None if done else phase), now
         stage = _ltx_stage(state)
         if stage is None:
             self._stage_index = None
@@ -114,7 +147,7 @@ class PhaseTimer:
         return m.RestoreTiming(
             scan=_round(totals.get("scan", 0.0)),
             basicvsr=_round(totals.get("basicvsr", 0.0)),
-            ltx=_round(sum(stages.values()) + speed),
+            ltx=_round(sum(stages.values())),
             speed_test=_round(speed),
             ltx_stages={name: _round(value) for name, value in stages.items()},
             ltx_runs=self.runs,
@@ -153,11 +186,22 @@ def timing_json(timing: m.RestoreTiming | None) -> dict[str, Any] | None:
 
 
 # ── a film's stage durations (E2) ──────────────────────────────────────
+def _first_start(
+    stage: m.BoardStage | None, span: tuple[datetime, datetime] | None
+) -> datetime | None:
+    """When the stage's first attempt of this revision began."""
+    if stage is not None and stage.first_started_at is not None:
+        return stage.first_started_at
+    if stage is not None and stage.started_at is not None:
+        return stage.started_at
+    return span[0] if span is not None else None
+
+
 def film_timing(film: m.BoardFilm) -> dict[str, Any]:
     """`timing` of a film row: each succeeded stage's attempt duration, the
-    restore's phase breakdown, 修复→翻译 (the first of restore / asr /
-    translate attempts to the translate attempt's end) and the queue wait
-    (plan confirmed → restore attempt start)."""
+    restore's phase breakdown, 全程 (the first attempt of restore / asr /
+    translate, failed ones included, to the translate attempt's end) and the
+    queue wait (plan confirmed → the restore's first attempt start)."""
     stages: dict[str, m.BoardStage] = {stage.stage: stage for stage in film.stages}
     durations: dict[str, float] = {}
     spans: dict[str, tuple[datetime, datetime]] = {}
@@ -170,19 +214,23 @@ def film_timing(film: m.BoardFilm) -> dict[str, Any]:
             spans[stage.stage] = (stage.started_at, stage.ended_at)
             seconds = (stage.ended_at - stage.started_at).total_seconds()
             durations[stage.stage] = _round(seconds)
-    starts = [spans[name][0] for name in _STAGE_SPAN if name in spans]
+    starts = [
+        begun
+        for name in _STAGE_SPAN
+        if (begun := _first_start(stages.get(name), spans.get(name))) is not None
+    ]
     total = None
     if "translate" in spans and starts:
         total = _round((spans["translate"][1] - min(starts)).total_seconds())
     restore = stages.get("restore")
+    began = _first_start(restore, spans.get("restore"))
     wait = None
     if (
-        restore is not None
-        and restore.started_at is not None
+        began is not None
         and film.plan_confirmed_at is not None
         and not film.plan_backfilled
     ):
-        seconds = (restore.started_at - film.plan_confirmed_at).total_seconds()
+        seconds = (began - film.plan_confirmed_at).total_seconds()
         wait = _round(seconds) if seconds >= 0 else None
     breakdown = (
         restore.timing if restore is not None and "restore" in durations else None
@@ -204,15 +252,16 @@ def clock(seconds: float | None) -> str:
 
 
 def summary_text(film: str, timing: dict[str, Any]) -> str:
-    """「{film} 修复→翻译完成，全程 h:mm:ss（修复 …，其中 LTX …；识别 …；翻译 …）」."""
+    """「{film} 全程 h:mm:ss（修复→翻译；修复 …，其中 LTX …；识别 …；翻译 …）」 —
+    LTX is the four stages only (the speed test is counted apart)."""
     stages = timing.get("stages") or {}
     breakdown = timing.get("restore_breakdown") or {}
     restore = f"修复 {clock(stages.get('restore'))}"
     if breakdown.get("ltx"):
         restore += f"，其中 LTX {clock(breakdown['ltx'])}"
     return (
-        f"{film} 修复→翻译完成，全程 {clock(timing.get('total_restore_to_translate'))}"
-        f"（{restore}；识别 {clock(stages.get('asr'))}；"
+        f"{film} 全程 {clock(timing.get('total_restore_to_translate'))}"
+        f"（修复→翻译；{restore}；识别 {clock(stages.get('asr'))}；"
         f"翻译 {clock(stages.get('translate'))}）"
     )
 
@@ -284,6 +333,7 @@ class WorkflowLog:
                 "run": timing.get("total_restore_to_translate"),
                 "restore": stages.get("restore"),
                 "ltx": breakdown.get("ltx") or None,
+                "speed_test": breakdown.get("speed_test") or None,
                 "asr": stages.get("asr"),
                 "translate": stages.get("translate"),
                 "text": summary_text(film, timing),

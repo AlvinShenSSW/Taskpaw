@@ -91,7 +91,7 @@ function FilmCard({ item }: { item: WorkItem }) {
       <div className="card-foot">
         <span>
           {item.kind === "package" ? "INBOX" : isRestoring(item.status) ? "本机" : "INBOX"}
-          {run !== null && <span className="mono run-total" title="修复开始到翻译结束"> · 全程 {fmtHoursMinutes(run)}</span>}
+          {run !== null && <span className="mono run-total" title="从首次开始修复到翻译完成"> · 全程 {fmtHoursMinutes(run)}</span>}
         </span>
         {item.kind === "film" ? (
           <button type="button" className="btn ghost small" aria-label={`查看 ${title} 详情`} onClick={() => ws.openDetail(item.id)}>查看详情</button>

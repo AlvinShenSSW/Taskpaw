@@ -139,7 +139,7 @@ class ContractHost(Host):
 LIVE_TIMING = timing_json(
     m.RestoreTiming(
         scan=312.4,
-        ltx=732.1,
+        ltx=683.9,  # the four stages only (95.3 + 588.6); 测速 is apart
         speed_test=48.2,
         ltx_stages={"scan": 95.3, "encode": 588.6},
         ltx_runs=1,

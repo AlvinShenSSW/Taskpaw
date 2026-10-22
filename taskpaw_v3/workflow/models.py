@@ -292,8 +292,9 @@ LTX_STAGE_NAMES = 8  # Jasna has four; anything beyond this bound is not a stage
 class RestoreTiming(Model):
     """U1e: the wall-clock seconds Taskpaw saw each Jasna phase as the current
     one while restoring (`timing.PhaseTimer`), summed over every LTX run and
-    volume. `ltx` is the restore-mode stages (`ltx_stages`, by name) plus the
-    speed test; `wall` is how long the Jasna children ran."""
+    volume. `ltx` is the four restore-mode stages (`ltx_stages`, by name) only;
+    the speed test (`speed_test`) is counted apart. `wall` is how long the Jasna
+    children ran."""
 
     scan: Seconds = 0.0
     basicvsr: Seconds = 0.0
@@ -1676,9 +1677,12 @@ class BoardStage(Model):
     status: StageStatus
     note: Text | None = None
     reason: Text | None = None
-    # U1e: the current attempt's times and a restore's phase timing
+    # U1e: the current attempt's times and a restore's phase timing;
+    # `first_started_at`: the earliest start among this revision's attempts of
+    # the stage, so a failed attempt's time still counts toward 全程
     started_at: UtcTime | None = None
     ended_at: UtcTime | None = None
+    first_started_at: UtcTime | None = None
     timing: RestoreTiming | None = None
 
 
