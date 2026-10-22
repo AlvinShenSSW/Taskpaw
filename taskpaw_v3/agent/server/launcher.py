@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from taskpaw_v3 import __version__
+from taskpaw_v3.core import power
 from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.control import bootstrap_control, revoke_control, strip_control_env
@@ -109,6 +110,7 @@ def run_agent(
     set_llm_settings(llm_settings_from_config(config))
     set_llm_chain(llm_chain_from_config(config), failover=config.llm_failover)
     set_data_dir(config_path.parent if config_path is not None else None)
+    power.set_power_settings(config.power)  # PWR-1: admin edits replace it live
 
     # Seamless updates/restarts: if OUR OWN previous agent backend is still holding
     # these ports (common right after installing a new version), terminate that
@@ -149,6 +151,7 @@ def run_agent(
 
     supervisor = None
     workflow_host = None
+    power_sampler: Optional[power.PowerSampler] = None
     servers: list[uvicorn.Server] = []
     threads: list[threading.Thread] = []
     task_log = None
@@ -169,6 +172,13 @@ def run_agent(
             if supervisor is not None:
                 supervisor.stop()
         finally:
+            if power_sampler is not None:
+                try:
+                    power_sampler.stop()  # flushes the open 15-minute bucket
+                except Exception:
+                    log.error("Could not stop the power sampler")
+                if power.get_sampler() is power_sampler:
+                    power.set_sampler(None)
             try:
                 for server in servers:
                     server.should_exit = True
@@ -245,6 +255,24 @@ def run_agent(
         # Live add/remove/update/enable/disable, persisted to config_path (#57).
         admin = MonitorAdmin(config, supervisor, registry, config_path)
 
+        # PWR-1 (#287, PW01): one agent-level power sampler, built here so the
+        # routes can read it and started after supervisor.start(). Its activity
+        # is the GPU lease holder (a manual task's monitor type, or the
+        # workflow's running stage) and otherwise the workflow's non-GPU stage.
+        # `power.enabled` gates every tick, so it applies live; the Hub never
+        # samples, so a machine is never counted twice.
+        def _monitor_type(instance_id: str) -> Optional[str]:
+            type_of = getattr(supervisor, "type_of", None)
+            return type_of(instance_id) if callable(type_of) else None
+
+        sampler = power_sampler = power.PowerSampler(
+            power.get_power_settings,
+            activity=power.activity_source(
+                _monitor_type, lambda: getattr(workflow_host, "dispatcher", None)
+            ),
+            data_dir=config_path.parent if config_path is not None else None,
+        )
+
         def _status_provider() -> dict:
             import platform
 
@@ -265,6 +293,8 @@ def run_agent(
                 "os": platform.platform(),
                 "version": __version__,
                 "monitors": monitors,
+                # PWR-1: the live estimate (null while sampling is off)
+                "power": sampler.live(),
             }
 
         net = uvicorn.Server(
@@ -275,6 +305,7 @@ def run_agent(
                     _status_provider,
                     films_provider=supervisor.film_page,
                     run_films_provider=supervisor.run_films,
+                    power_history=sampler.history,
                 ),
                 log_level="warning",
             )
@@ -295,6 +326,7 @@ def run_agent(
                     prompt_responder=supervisor.respond_prompt,
                     # late-bound: the host starts after announce_ready (T06-P1)
                     workflow_provider=lambda: workflow_host,
+                    power_view=lambda range_: power.power_view(sampler, range_),
                 ),
                 log_level="warning",
             )
@@ -328,6 +360,8 @@ def run_agent(
         startup.checkpoint()
         supervisor.start()
         runtime_started = True
+        power.set_sampler(sampler)
+        sampler.start()
         startup.checkpoint()
         for thread in threads:
             startup.checkpoint()

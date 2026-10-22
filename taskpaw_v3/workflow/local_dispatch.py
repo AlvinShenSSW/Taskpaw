@@ -241,6 +241,13 @@ class LocalDispatcher:
         self._thread.join(timeout=timeout)
         return not self._thread.is_alive()
 
+    def current_stage(self) -> tuple[str, str] | None:
+        """(film_id, stage) of the running stage, else None. A pure read for
+        the power sampler's activity and owner (PWR-1 PW03/PW04)."""
+        with self._lock:
+            running = self._running
+            return None if running is None else (running.job.film_id, running.job.stage)
+
     def status(self) -> DispatchStatus:
         with self._lock:
             current: dict[str, Any] | None = None

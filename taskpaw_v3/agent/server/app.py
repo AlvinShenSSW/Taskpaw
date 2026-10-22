@@ -1,8 +1,9 @@
 """V3 agent FastAPI apps.
 
 Two surfaces, two ports (design §3.2):
-- **network app** (`/ping /status /events`): Bearer-gated read API the Hub polls;
-  bound to the LAN nic. This is the ONLY thing exposed off-box.
+- **network app** (`/ping /status /events /power/history`): Bearer-gated,
+  GET-only read API the Hub polls; bound to the LAN nic. This is the ONLY thing
+  exposed off-box.
 - **control app** (`/control/*`): start/stop, config — bound to loopback only,
   for the local UI client. Never exposed to the network.
 
@@ -126,6 +127,22 @@ def _register_film_routes(
         return result
 
 
+POWER_RANGES = ("24h", "7d", "30d")
+
+
+def _power_response(provider: Optional[Callable[[str], dict]], range_: str):
+    """PWR-1: one of the fixed ranges, else 400; 404 when this agent does not
+    sample power."""
+    if range_ not in POWER_RANGES:
+        return JSONResponse({"error": "invalid range"}, status_code=400)
+    if provider is None:
+        return JSONResponse({"error": "no power data"}, status_code=404)
+    try:
+        return provider(range_)
+    except ValueError:
+        return JSONResponse({"error": "invalid range"}, status_code=400)
+
+
 def create_network_app(
     config: AgentConfig,
     queue: EventQueue,
@@ -135,6 +152,7 @@ def create_network_app(
     run_films_provider: Optional[
         Callable[[str, object, object, object], Optional[dict]]
     ] = None,
+    power_history: Optional[Callable[[str], dict]] = None,
 ) -> FastAPI:
     app = FastAPI(title="TaskPaw Agent", docs_url=None, redoc_url=None)
 
@@ -197,6 +215,14 @@ def create_network_app(
                 status_code=409,
             )
 
+    @app.get("/power/history")
+    def power_history_route(request: Request, range: str = "24h"):
+        # PWR-1 (#287): read-only and bounded (at most 168 points per series);
+        # auth before the range is even looked at.
+        if not _auth(request):
+            return _unauthorized()
+        return _power_response(power_history, range)
+
     _register_validation_handler(app, "/monitors", _auth)
     _register_film_routes(app, "/monitors", films_provider, run_films_provider, _auth)
     return app
@@ -218,6 +244,7 @@ def create_control_app(
     control_active: Callable[[], bool],
     prompt_responder: Optional[Callable[[str, str, bool], bool]] = None,
     workflow_provider: Optional[Callable[[], Optional["WorkflowHostLike"]]] = None,
+    power_view: Optional[Callable[[str], dict]] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API).
@@ -282,6 +309,12 @@ def create_control_app(
             "server_id": config.server_id,
             "monitors": {},
         }
+
+    @app.get("/control/power")
+    def control_power(range: str = "24h"):
+        # PWR-1 (#287): the console's live estimate + the network route's
+        # history, read from loopback (PWR-3 builds the 功耗 tab on it).
+        return _power_response(power_view, range)
 
     @app.get("/control/config")
     def get_config() -> dict:

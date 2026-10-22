@@ -1123,8 +1123,8 @@ def test_handle_llm_test_dispatches(tmp_path, monkeypatch):
 
 def test_live_and_non_live_config_partition():
     # #178/#192: exactly the token + the LLM fields (three per slot + the
-    # failover switch) are live; the rest (the restart-required baseline) is
-    # unchanged.
+    # failover switch) and the power settings (PWR-1, read per sampler tick)
+    # are live; the rest (the restart-required baseline) is unchanged.
     assert set(MonitorAdmin._LIVE_CONFIG) <= set(MonitorAdmin._EDITABLE_CONFIG)
     assert set(MonitorAdmin._LIVE_CONFIG) == {
         "api_token",
@@ -1141,6 +1141,7 @@ def test_live_and_non_live_config_partition():
         "llm_fallback2_api_key",
         "llm_fallback2_thinking_off",
         "llm_failover",
+        "power",
     }
     assert MonitorAdmin._NON_LIVE_CONFIG == (
         "machine",
