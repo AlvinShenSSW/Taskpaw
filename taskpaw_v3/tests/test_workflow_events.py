@@ -48,9 +48,11 @@ def film(**changes):
 
 def host_for(monkeypatch, films, *, current=None, waiting=None):
     calls = []
+    energy_flags = []
 
-    def film_board(_auth, done_limit=20, *, film_id=None):
+    def film_board(_auth, done_limit=20, *, film_id=None, energies=True):
         calls.append(done_limit)
+        energy_flags.append(energies)
         return tuple(f for f in films if film_id is None or f.film_id == film_id)
 
     rt = SimpleNamespace(
@@ -65,6 +67,7 @@ def host_for(monkeypatch, films, *, current=None, waiting=None):
         runtime=rt,
         status=lambda: {"dispatch": {"current": current, "waiting": waiting or {}}},
     )
+    host.energy_flags = energy_flags
     return host, calls
 
 
@@ -265,6 +268,7 @@ def test_first_observation_does_not_replay_old_done_films(observer, monkeypatch,
     assert not sink.path.exists()
     sink.observe(host)
     assert calls[0] is None
+    assert host.energy_flags == [False]  # the observer never reads energy (IR02)
     assert len(queue) == 1
     assert queue.recent()[0]["monitor"] == "other-monitor"
     assert sink.snapshot()["counts"]["done"] == 251

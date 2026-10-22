@@ -19,6 +19,20 @@ const PEER_ADDRESS = /^(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]+|[0-9a-fA-F:]+)(:\d{1,5
 const text = (v: number | null | undefined) => (v == null ? "" : String(v));
 const num = (v: string) => (v.trim() === "" ? null : Number(v));
 
+// The CPU watts under the settings being edited (not the saved model's live.cpu_w): none → 0, else
+// idle + (tdp − idle) × the live utilisation, with the platform defaults for a blank field. An agent
+// that reports no utilisation falls back to its own live CPU reading.
+function candidateCpuW(
+  source: "estimate" | "none", tdp: number | null, idle: number | null,
+  defaults: { tdp: number; idle: number }, live: LivePower | null,
+): number {
+  if (source === "none") return 0;
+  if (typeof live?.cpu_pct !== "number") return live?.cpu_w ?? 0;
+  const t = tdp != null && Number.isFinite(tdp) ? tdp : defaults.tdp;
+  const i = Math.min(idle != null && Number.isFinite(idle) ? idle : defaults.idle, t);
+  return i + (t - i) * (Math.min(100, Math.max(0, live.cpu_pct)) / 100);
+}
+
 export function PowerParams({ open, onClose, settings, live, machineName, os, onSaved }: {
   open: boolean; onClose: () => void; settings: PowerSettings | undefined; live: LivePower | null;
   machineName: string; os: string | undefined; onSaved: (text: string) => void;
@@ -51,7 +65,7 @@ function ParamsBody({ onClose, settings, live, machineName, os, onSaved }: {
   const otherRef = useRef<HTMLInputElement>(null);
 
   const gpu = live?.gpu_w ?? 0;
-  const cpu = cpuSource === "none" ? 0 : live?.cpu_w ?? 0;
+  const cpu = candidateCpuW(cpuSource, num(tdp), num(idle), defaults, live);
   const effPct = eff ? Math.round(Number(eff) * 100) : 100;
   const plugW = Number(plug);
   const suggested = plugW > 0 && live ? Math.round((plugW * effPct) / 100 - gpu - cpu) : null;

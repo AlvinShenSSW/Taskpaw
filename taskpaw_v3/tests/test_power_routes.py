@@ -177,6 +177,7 @@ def test_power_view_combines_live_and_history():
     )
     view = power.power_view(s, "30d")
     assert view["power"] is None  # nothing sampled yet
+    assert view["energy"] is None  # nothing retained either
     assert view["history"]["range"] == "30d"
     with pytest.raises(ValueError):
         power.power_view(s, "bad")
@@ -295,6 +296,9 @@ class _FakeSampler:
     def live(self):
         return {"w": 42.0, "estimated": True}
 
+    def energy(self):
+        return {"today_wh": 5.0, "week_wh": 6.0, "month_wh": 7.0}
+
     def history(self, rng):
         return {"range": rng}
 
@@ -409,9 +413,12 @@ def test_launcher_starts_the_sampler_after_the_supervisor(monkeypatch, tmp_path)
         assert sampler.activity() == ("idle", power.NO_OWNER)
         status = kwargs["control"]["status_provider"]()
         assert status["power"] == {"w": 42.0, "estimated": True}
+        # the retained totals travel apart from the live reading
+        assert status["energy"] == {"today_wh": 5.0, "week_wh": 6.0, "month_wh": 7.0}
         assert kwargs["network"]["power_history"]("7d") == {"range": "7d"}
         view = kwargs["control"]["power_view"]("30d")
         assert view["power"] == {"w": 42.0, "estimated": True}
+        assert view["energy"]["week_wh"] == 6.0
         assert view["history"] == {"range": "30d"}
         assert view["peers"] == []  # PWR-3: none configured
     finally:

@@ -409,11 +409,14 @@ class ReadCommands(WorkflowCore):
         done_limit: int | None = 20,
         *,
         film_id: str | None = None,
+        energies: bool = True,
     ) -> tuple[BoardFilm, ...]:
         """Every film's current-revision stages for the 媒体入库 page (T06-P1 D03, N01).
 
         Oldest film first. `done_limit` keeps only the newest fully finished
-        films (both cleanups succeeded); `film_id` reads one film.
+        films (both cleanups succeeded); `film_id` reads one film. `energies`
+        False skips the attempt-evidence scan behind each stage's energy (a
+        caller that never shows energy, e.g. the notification observer).
 
         Three linear reads merged here (IR01): films with their current stages,
         every archive operation once, and the current contexts' unrevoked
@@ -527,7 +530,7 @@ class ReadCommands(WorkflowCore):
                 f"JOIN attempts x ON x.job_id=s.job_id {where[0]}",
                 where[1],
             ).fetchall()
-            energies = self._attempt_energies(where)
+            spent = self._attempt_energies(where) if energies else {}
             sizes, durations = self._probe_sizes(where)
         used = {row["approval_id"] for row in archives if row["approval_id"]}
         open_films = {row["film_id"] for row in archives if row["open"]}
@@ -585,12 +588,10 @@ class ReadCommands(WorkflowCore):
                         reason=row["reason"],
                         first_started_at=first.get((row["film_id"], row["stage"])),
                         attempt_energy=tuple(
-                            v
-                            for _, v in energies.get((row["film_id"], row["stage"]), ())
+                            v for _, v in spent.get((row["film_id"], row["stage"]), ())
                         ),
                         attempt_ids=tuple(
-                            i
-                            for i, _ in energies.get((row["film_id"], row["stage"]), ())
+                            i for i, _ in spent.get((row["film_id"], row["stage"]), ())
                         ),
                         **_attempt_times(row["attempt_json"]),
                     )

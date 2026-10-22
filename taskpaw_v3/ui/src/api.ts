@@ -238,6 +238,8 @@ export interface FilmEnergy {
 // PWR-1 `/status.power`: one machine's live estimate (W) and its calendar energy (Wh).
 export interface LivePower {
   w: number; gpu_w: number | null; cpu_w: number | null; other_w: number | null; estimated: true;
+  // the CPU utilisation (%) behind cpu_w: the calibration recomputes the CPU share for edited settings
+  cpu_pct?: number | null;
   today_wh: number | null; week_wh: number | null; month_wh: number | null; activity: string | null;
 }
 // PWR-2 集群功耗: this machine plus the 功耗 tab's fresh peers.
@@ -389,7 +391,8 @@ export interface PowerPeerRow {
   energy?: PeerEnergy | null; energy_stale?: boolean; duplicate_of?: string | null;
 }
 export interface PowerView {
-  power: LivePower | null; history: PowerHistory; machine?: { name: string; os: string }; peers?: PowerPeerRow[];
+  // `energy`: this machine's retained today / week / month Wh, present while `power` is null (sampling off)
+  power: LivePower | null; energy?: PeerEnergy | null; history: PowerHistory; machine?: { name: string; os: string }; peers?: PowerPeerRow[];
 }
 export interface PowerPeerSetting { name: string; address: string }
 export interface PowerSettings {

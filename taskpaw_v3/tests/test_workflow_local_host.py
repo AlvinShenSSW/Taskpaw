@@ -894,3 +894,20 @@ def test_stop_is_unconfirmed_while_the_ticker_runs_the_retry_callback(
     release.set()
     host.stop(timeout=10)
     assert host.state == "stopped" and closed == [1]
+
+
+def test_stop_gives_the_event_observer_a_floor_when_the_deadline_is_spent(tmp_path):
+    """IR04: an already-spent deadline must not make the observer's join
+    zero-length, which would report a spurious unconfirmed stop."""
+    from types import SimpleNamespace
+
+    from taskpaw_v3.workflow.local_host import LocalWorkflowHost
+
+    host = LocalWorkflowHost(WorkflowSettings(enabled=True), tmp_path)
+    timeouts: list[float] = []
+    host.events = SimpleNamespace(  # type: ignore[assignment]
+        stop=lambda timeout: timeouts.append(timeout) or True
+    )
+    host.stop(timeout=0)
+    assert timeouts and timeouts[0] >= 1.0
+    assert host.state == "stopped"

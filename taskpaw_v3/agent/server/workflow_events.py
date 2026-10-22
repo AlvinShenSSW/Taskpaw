@@ -128,7 +128,9 @@ class WorkflowEvents:
                 "warn",
             )
         elif job.stage == "translate":
-            films = rt.store.film_board(rt.operator, film_id=job.film_id)
+            films = rt.store.film_board(
+                rt.operator, film_id=job.film_id, energies=False
+            )
             if films and films[0].input_revision == job.input_revision:
                 self._translated(films[0], name)
 
@@ -149,7 +151,7 @@ class WorkflowEvents:
             rt = host.runtime
             status = host.status()
             dispatch = status.get("dispatch") or {}
-            films = rt.store.film_board(rt.operator, done_limit=None)
+            films = rt.store.film_board(rt.operator, done_limit=None, energies=False)
             facts = board.row_facts(rt, films)
             rows = board.film_rows(
                 films, dict(dispatch.get("waiting") or {}), facts=facts

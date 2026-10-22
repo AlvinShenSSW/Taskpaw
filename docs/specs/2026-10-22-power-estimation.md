@@ -104,7 +104,7 @@
   - Only the sampler thread writes, one INSERT per closed bucket. Routes read an in-memory window. No hourly or daily rollups; aggregates are computed when read.
   - Settings use `_EDITABLE_CONFIG` / `_LIVE_CONFIG` (no new control routes).
   - The calibration helper follows the preview: one chosen machine, `其他基线 = 插座读数 × 效率 − GPU − CPU`, computed in the browser.
-- **PW08.** The Hub-dashboard variant is deferred until the Mac decision (#286 vs T07). A Mac running only the Hub has no row in P0, and the tab says so.
+- **PW08.** The Hub-dashboard variant is deferred until the Mac decision (#286 vs T07). A Mac running only the Hub has no row in P0, and the tab says so. The Hub's read-only 媒体处理 view shows the agent's power fields display-only (the agent's own cluster, including its peers), while the 功耗 tab remains Agent-console only.
 - **PW09. CPU sampling.**
   - CPU utilisation via `psutil.cpu_percent(interval=None)` on the sampler's own thread; the first reading is dropped.
   - CPU energy uses rectangles over the window average; GPU energy uses the trapezoid rule.

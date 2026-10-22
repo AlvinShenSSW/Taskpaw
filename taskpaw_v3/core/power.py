@@ -462,8 +462,8 @@ class PowerSampler:
         self._buckets: dict[int, _Bucket] = {}  # closed, by start
         self._open: Optional[_Bucket] = None
         self._prev: Optional[tuple[float, Optional[float]]] = None  # (mono, gpu W)
-        # latest (estimate, activity, cpu reading had a window behind it)
-        self._now: Optional[tuple[Estimate, str, bool]] = None
+        # latest (estimate, activity, cpu reading had a window behind it, cpu %)
+        self._now: Optional[tuple[Estimate, str, bool, Optional[float]]] = None
         self._seq = 0
         self._epochs = 0
         self._counters: dict[str, _Counter] = {}
@@ -617,7 +617,7 @@ class PowerSampler:
             self._seq += 1
             prev, self._prev = self._prev, (now, gpu_w)
             # the first CPU reading after a (re)start has no window behind it
-            self._now = (est, activity, prev is not None)
+            self._now = (est, activity, prev is not None, cpu_pct)
             dt = now - prev[0] if prev is not None else 0.0
             if prev is not None and 0 < dt <= GAP_SECONDS:
                 h = dt / 3600.0
@@ -779,33 +779,55 @@ class PowerSampler:
             out[self._open.start] = merged
         return list(out.values())
 
+    def _calendar(self, buckets: list[_Bucket], wall: float) -> dict[str, float]:
+        """Today / week / month Wh over `buckets` at wall-clock `wall`."""
+        starts = calendar_starts(wall, self._tz)
+        # a bucket from a wall clock that has since stepped back is not now
+        open_end = int(wall // BUCKET_SECONDS) * BUCKET_SECONDS + BUCKET_SECONDS
+        return {
+            key: _r(sum(b.wh for b in buckets if since <= b.start < open_end))
+            for key, since in starts.items()
+        }
+
     def live(self) -> Optional[dict[str, Any]]:
         """`/status.power`: the latest estimate plus today / week / month Wh;
         None while sampling is off or before the first sample."""
         wall = self._wall()
-        starts = calendar_starts(wall, self._tz)
         with self._lock:
             if self._now is None:
                 return None
-            est, activity, cpu_ok = self._now
+            est, activity, cpu_ok, cpu_pct = self._now
             buckets = self._all_buckets()
-        # a bucket from a wall clock that has since stepped back is not now
-        open_end = int(wall // BUCKET_SECONDS) * BUCKET_SECONDS + BUCKET_SECONDS
-        totals = {
-            key: sum(b.wh for b in buckets if since <= b.start < open_end)
-            for key, since in starts.items()
-        }
+        totals = self._calendar(buckets, wall)
         return {
             "w": round(est.w if cpu_ok else est.w - est.cpu_w, 1),
             "gpu_w": None if est.gpu_w is None else round(est.gpu_w, 1),
             "cpu_w": round(est.cpu_w, 1) if cpu_ok else None,
+            # the utilisation behind cpu_w: the console's calibration recomputes
+            # the CPU share for the settings being edited
+            "cpu_pct": None
+            if not cpu_ok or cpu_pct is None
+            else round(min(100.0, max(0.0, cpu_pct)), 1),
             "other_w": round(est.other_w, 1),
             "estimated": True,
-            "today_wh": _r(totals["today"]),
-            "week_wh": _r(totals["week"]),
-            "month_wh": _r(totals["month"]),
+            "today_wh": totals["today"],
+            "week_wh": totals["week"],
+            "month_wh": totals["month"],
             "activity": activity,
         }
+
+    def energy(self) -> Optional[dict[str, float]]:
+        """`/status.energy`: the retained today / week / month Wh, apart from
+        the live reading (PWR-3 follow-up): sampling off leaves `live()` None
+        while the energy already recorded still counts. None when nothing is
+        retained."""
+        wall = self._wall()
+        with self._lock:
+            buckets = self._all_buckets()
+        if not buckets:
+            return None
+        totals = self._calendar(buckets, wall)
+        return {f"{key}_wh": totals[key] for key in ("today", "week", "month")}
 
     def history(self, range_: str = "24h") -> dict[str, Any]:
         """Bounded series for `GET /power/history`: at most 168 points, each
@@ -862,7 +884,7 @@ def power_view(sampler: PowerSampler, range_: str = "24h") -> dict[str, Any]:
     """The console's `GET /control/power`: live estimate + the same history
     as the network route."""
     history = sampler.history(range_)  # raises ValueError on a bad range first
-    return {"power": sampler.live(), "history": history}
+    return {"power": sampler.live(), "energy": sampler.energy(), "history": history}
 
 
 # ── process-wide holders (set by the launcher) ──────────────────────────────

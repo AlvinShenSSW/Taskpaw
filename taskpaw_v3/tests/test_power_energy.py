@@ -671,3 +671,53 @@ def test_a_running_attempt_still_counts_beside_the_resolved_ones():
     value = en.film_energy(f, current)
     assert value["stages"]["restore"]["wh"] == pytest.approx(10.0)
     assert value["stages"]["restore"]["running"] is False
+
+
+# ── IR01 payload budget / IR02 the observer's lighter board ────────────────
+def test_the_network_films_snapshot_stays_inside_its_payload_budget(monkeypatch):
+    """200 unfinished films, every local stage with energy, stay well under
+    the 1 MiB network cap (a done row sheds per-stage detail when it must)."""
+    import json
+    from types import SimpleNamespace
+
+    from taskpaw_v3.agent.server import workflow_reads as reads
+    from taskpaw_v3.core.config import WorkflowSettings
+    from taskpaw_v3.workflow import planning
+
+    spent = {name: (energy(12.5), energy(3.0)) for name in en.STAGES}
+    films = tuple(film(spent=spent) for _ in range(200))
+    rt = SimpleNamespace(
+        operator=object(),
+        gpu=None,
+        store=SimpleNamespace(
+            film_board=lambda *_a, **_k: films,
+            list_intake_board=lambda _a: (),
+            energy_history=lambda _a: (),
+        ),
+    )
+    monkeypatch.setattr(board, "row_facts", lambda *_a: {})
+    monkeypatch.setattr(planning, "max_output", lambda _rt: "4k")
+    host = SimpleNamespace(
+        state="running", reason="", runtime=rt, status=lambda: {"dispatch": {}}
+    )
+    body = reads.films(WorkflowSettings(), lambda: host)
+    assert all(row["energy"] is not None for row in body["films"])
+    size = len(json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode())
+    assert size < 768 * 1024, size
+
+
+def test_film_board_without_energies_skips_the_evidence_scan(rt, monkeypatch):
+    film_id = add_film(rt)
+    rig = Rig(rt)
+    rt.executors["restore"] = Ticking("restore", rig)
+    assert rig.dispatcher.run_once() is True
+    (full,) = rt.store.film_board(rt.operator, film_id=film_id)
+    assert any(s.attempt_energy for s in full.stages)
+
+    def scanned(*_a, **_k):
+        raise AssertionError("the evidence scan ran")
+
+    monkeypatch.setattr(type(rt.store), "_attempt_energies", scanned)
+    (light,) = rt.store.film_board(rt.operator, film_id=film_id, energies=False)
+    assert all(not s.attempt_energy and not s.attempt_ids for s in light.stages)
+    assert board.film_row(light, {})["energy"] is None

@@ -319,6 +319,8 @@ def run_agent(
                 "monitors": monitors,
                 # PWR-1: the live estimate (null while sampling is off)
                 "power": sampler.live(),
+                # the retained today / week / month Wh, kept while sampling is off
+                "energy": sampler.energy(),
             }
             if config.workflow.enabled:
                 status["workflow"] = (

@@ -402,7 +402,9 @@ class LocalWorkflowHost:
                 log.exception("media workflow intake stop failed")
                 confirmed = False
         if self.events is not None:
-            confirmed &= self.events.stop(timeout=max(0.0, deadline - time.monotonic()))
+            # a small floor: a deadline the earlier steps spent must not make the
+            # observer's join zero-length (a spurious unconfirmed stop)
+            confirmed &= self.events.stop(timeout=max(1.0, deadline - time.monotonic()))
         if not confirmed:
             log.error("media workflow stop unconfirmed; store left open")
             self.state = "stop_unconfirmed"

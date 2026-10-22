@@ -374,6 +374,7 @@ def test_live_status_field_shape():
         "w",
         "gpu_w",
         "cpu_w",
+        "cpu_pct",
         "other_w",
         "estimated",
         "today_wh",
@@ -385,6 +386,7 @@ def test_live_status_field_shape():
     assert live["activity"] == "restore"
     assert live["gpu_w"] == 120.0
     assert live["cpu_w"] == pytest.approx(37.5)
+    assert live["cpu_pct"] == 50.0  # the utilisation behind it (calibration)
     assert live["other_w"] == 35.0
     assert live["w"] == pytest.approx(192.5)
     assert live["today_wh"] > 0
@@ -396,7 +398,7 @@ def test_live_cpu_is_none_until_the_baseline_has_a_window():
     s = sampler(clock, r)
     s.tick()  # the first reading has no window behind it
     first = s.live()
-    assert first["cpu_w"] is None
+    assert first["cpu_w"] is None and first["cpu_pct"] is None
     assert first["gpu_w"] == 120.0
     assert first["w"] == pytest.approx(120.0 + first["other_w"])  # CPU omitted
     run_ticks(s, clock, 1)
@@ -1035,3 +1037,32 @@ def test_default_gpu_reader_uses_the_shared_sample(monkeypatch):
 def test_process_holders_default_to_none_and_defaults():
     assert power.get_sampler() is None
     assert power.get_power_settings() == PowerSettings()
+
+
+# ── retained energy apart from the live reading ─────────────────────────────
+def test_retained_energy_counts_while_sampling_is_off(tmp_path):
+    seed_db(tmp_path, [(T0 - 900, 2.0), (T0 - 1800, 3.0)])
+    clock = Clock()
+    s = sampler(
+        clock, Readers(gpu=[10.0]), cfg=settings(enabled=False), data_dir=tmp_path
+    )
+    s.tick()
+    assert s.live() is None  # no live reading ...
+    assert s.energy() == {  # ... but the recorded energy still totals
+        "today_wh": pytest.approx(5.0),
+        "week_wh": pytest.approx(5.0),
+        "month_wh": pytest.approx(5.0),
+    }
+    view = power.power_view(s)
+    assert view["power"] is None and view["energy"]["today_wh"] == pytest.approx(5.0)
+    s.stop()
+
+
+def test_energy_agrees_with_live_and_is_none_when_nothing_is_retained():
+    clock = Clock()
+    s = sampler(clock, Readers(gpu=[120.0], cpu=[0.0]))
+    assert s.energy() is None
+    s.tick()
+    run_ticks(s, clock, 2)
+    live, energy = s.live(), s.energy()
+    assert energy == {k: live[k] for k in ("today_wh", "week_wh", "month_wh")}

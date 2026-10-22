@@ -417,6 +417,9 @@ def test_a_peer_is_stale_when_it_stops_answering():
 
 # ── the cluster's live power (媒体处理中心 集群功耗) ────────────────────────
 class _LocalSampler:
+    def energy(self):
+        return {"today_wh": 4550.0, "week_wh": 20400.0, "month_wh": 114000.0}
+
     def live(self):
         return {
             "w": 286.0,
@@ -1088,3 +1091,43 @@ def test_a_peer_without_power_support_is_not_asked_for_history():
     f, fetch, _clock = fleet([GPU02], {"/status": {"machine": "old"}})
     f.refresh_once()
     assert [u for u, _ in fetch.calls if "history" in u] == []
+
+
+# ── retained energy of a peer whose sampling is off ─────────────────────────
+RETAINED = {"today_wh": 700.0, "week_wh": 3100.0, "month_wh": 9800.0}
+
+
+def test_an_off_peer_still_reports_its_retained_energy():
+    answers = {"/status": {"power": None, "energy": RETAINED}, "range=": HISTORY}
+    f, _fetch, _clock = wall_fleet([GPU02], answers, Wall())
+    f.refresh_once()
+    (row,) = f.snapshot()
+    assert row["state"] == "off" and row["power"] is None
+    assert row["energy"] == RETAINED
+    assert row["energy_stale"] is False  # it answered just now
+
+
+def test_a_garbled_peer_energy_is_ignored():
+    answers = {
+        "/status": {"power": None, "energy": {"today_wh": "x", "week_wh": True}},
+        "range=": HISTORY,
+    }
+    f, _fetch, _clock = wall_fleet([GPU02], answers, Wall())
+    f.refresh_once()
+    assert f.snapshot()[0]["energy"] is None
+
+
+def test_cluster_today_counts_this_machines_retained_energy_with_sampling_off():
+    class Off(_LocalSampler):
+        def live(self):
+            return None
+
+    power.set_sampler(Off())  # type: ignore[arg-type]
+    answers = {"/status": {"power": LIVE}, "range=": HISTORY}
+    f, _fetch, _clock = wall_fleet([GPU02], answers, Wall())
+    f.refresh_once()
+    power_fleet.set_fleet(f)
+    value = power_fleet.cluster_power()
+    assert value["machines"] == 1 and value["w"] == 172.0
+    assert value["today_wh"] == pytest.approx(4550.0 + 1920.0)
+    assert "today_partial" not in value

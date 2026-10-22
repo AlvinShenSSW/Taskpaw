@@ -341,6 +341,18 @@ def _live(value: Any) -> Optional[dict[str, Any]]:
     return out
 
 
+def _energy(value: Any) -> Optional[dict[str, Optional[float]]]:
+    """A peer's `/status.energy` (its retained today / week / month Wh, sent
+    even while its sampling is off), kept to the known numeric fields."""
+    if not isinstance(value, dict):
+        return None
+    out = {
+        f"{period}_wh": _num(value.get(f"{period}_wh"))
+        for period in ("today", "week", "month")
+    }
+    return out if any(v is not None for v in out.values()) else None
+
+
 def _series(value: Any, size: int) -> bool:
     """A list of `size` finite numbers or nulls."""
     return (
@@ -645,10 +657,14 @@ class PowerFleet:
         with self._lock:
             entry = self._entry(peer)
             entry.update(seen)
-            if live is not None:  # the periods the figures belong to
+            # the periods the figures belong to: the live reading's, or, with
+            # the peer's sampling off, the retained energy it still reports
+            reported = live if live is not None else _energy(status.get("energy"))
+            entry["energy_fresh"] = reported is not None
+            if reported is not None:
                 kept = dict(entry["energy"])
                 for period in ("today", "week", "month"):
-                    wh = live.get(f"{period}_wh")
+                    wh = reported.get(f"{period}_wh")
                     if wh is not None:
                         kept[period] = (starts[period], wh)
                 entry["energy"] = kept
@@ -759,7 +775,13 @@ class PowerFleet:
                     "power": None if first else entry.get("power"),
                     "energy": energy,
                     "energy_stale": energy is not None
-                    and not (state == "ok" and not stale),
+                    and not (
+                        (
+                            state == "ok"
+                            or (state == "off" and entry.get("energy_fresh"))
+                        )
+                        and not stale
+                    ),
                     "history": None if first else entry["history"].get(range_),
                     "age_s": None if age is None else round(age, 1),
                     "stale": stale,
@@ -790,6 +812,7 @@ def cluster_power() -> Optional[dict[str, Any]]:
     from taskpaw_v3.core import power
 
     parts: list[dict[str, Any]] = []
+    local_wh = 0.0  # this machine's retained energy while its sampling is off
     sampler = power.get_sampler()
     if sampler is not None:
         try:
@@ -799,6 +822,13 @@ def cluster_power() -> Optional[dict[str, Any]]:
             local = None
         if local is not None:
             parts.append(local)
+        else:  # sampling off: the energy already recorded still counts
+            try:
+                retained = sampler.energy()
+            except Exception:
+                log.exception("local retained energy unavailable")
+                retained = None
+            local_wh = _num((retained or {}).get("today_wh")) or 0.0
     fleet = get_fleet()
     peers = fleet.snapshot() if fleet is not None else []
     fresh = [p for p in peers if p["state"] == "ok" and p["power"] and not p["stale"]]
@@ -816,7 +846,7 @@ def cluster_power() -> Optional[dict[str, Any]]:
     def total(key: str) -> float:
         return round(sum(_num(p.get(key)) or 0.0 for p in parts), 1)
 
-    today = sum(_num(p.get("today_wh")) or 0.0 for p in parts) + sum(kept)
+    today = sum(_num(p.get("today_wh")) or 0.0 for p in parts) + sum(kept) + local_wh
     result: dict[str, Any] = {
         "w": total("w"),
         "gpu_w": total("gpu_w"),

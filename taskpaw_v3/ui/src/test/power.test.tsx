@@ -212,6 +212,21 @@ describe("功耗 tab", () => {
     expect(open).toHaveBeenCalled();
   });
 
+  it("this machine's retained energy still counts in the totals while its sampling is off", async () => {
+    const view = (range: "24h" | "7d" | "30d") => ({
+      ...powerView(range), power: null, energy: { today_wh: 1200, week_wh: 8000, month_wh: 30000 },
+    });
+    vi.spyOn(api, "power").mockImplementation(async (range) => view(range));
+    vi.spyOn(api, "workflowFilms").mockResolvedValue(FILMS);
+    vi.spyOn(api, "config").mockResolvedValue({ monitors: [], power: POWER_SETTINGS } as unknown as AgentConfigView);
+    wrap(<PowerPage />);
+    const energy = await screen.findByTestId("stat-energy");
+    // 1.20 (this machine, retained) + 1.92 + 0.83 (the live peers)
+    expect(energy).toHaveTextContent(`${fmtKwhShort(1200 + 1920 + 830)}度 · 今日`);
+    expect(energy).toHaveTextContent(`本周约 ${fmtKwhShort(8000 + 9630 + 4180)} 度`);
+    expect(machinesOf(view("24h"), undefined)[0].energy).toEqual({ today_wh: 1200, week_wh: 8000, month_wh: 30000 });
+  });
+
   it("says when this machine does not estimate power", async () => {
     vi.spyOn(api, "power").mockRejectedValue(new HttpError("/control/power → 404", 404));
     vi.spyOn(api, "workflowFilms").mockResolvedValue(FILMS);
@@ -281,6 +296,22 @@ describe("估算参数", () => {
     expect(within(dialog).getByLabelText("其他功耗基线")).toHaveValue(64);
     fireEvent.change(within(dialog).getByLabelText("插座读数"), { target: { value: "100" } });
     expect(within(dialog).getByText(/插座读数低于当前 GPU \+ CPU 估算/)).toBeInTheDocument();
+  });
+
+  it("calibrates with the CPU settings being edited, not the saved model's live CPU watts", async () => {
+    // saved model idle 10 / tdp 65; at 40 % utilisation the live CPU is 32 W
+    const live = { w: 300, gpu_w: 100, cpu_w: 32, cpu_pct: 40, other_w: 30, estimated: true } as LivePower;
+    wrap(<PowerParams open onClose={() => {}} settings={{ ...POWER_SETTINGS, tdp_w: 65, idle_w: 10 }} live={live}
+      machineName="HOME-PC" os="Windows" onSaved={() => {}} />);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("CPU 空闲功耗"), { target: { value: "30" } });
+    fireEvent.change(within(dialog).getByLabelText("插座读数"), { target: { value: "320" } });
+    // candidate CPU = 30 + (65 − 30) × 40 % = 44 W; baseline = 320 − 100 − 44 = 176 (so GPU + CPU + other = the plug)
+    expect(within(dialog).getByText("建议其他基线：320 × 100% − GPU 100 − CPU 44 = 176 W")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "填入基线" }));
+    expect(within(dialog).getByLabelText("其他功耗基线")).toHaveValue(176);
+    fireEvent.change(within(dialog).getByLabelText("CPU 功耗来源"), { target: { value: "none" } });
+    expect(within(dialog).getByText("建议其他基线：320 × 100% − GPU 100 − CPU 0 = 220 W")).toBeInTheDocument();
   });
 
   it("adds and removes peers by name and address", async () => {

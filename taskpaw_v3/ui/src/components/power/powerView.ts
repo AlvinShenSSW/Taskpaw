@@ -79,7 +79,8 @@ export function machinesOf(day: PowerView | undefined, ranged: PowerView | undef
     id: "local", name: day.machine?.name || "本机", local: true, state: day.power ? "ok" : "off", stale: false,
     color: machineColor(0), hw: ["本机 Agent", day.machine?.os].filter(Boolean).join(" · "),
     live: day.power, day: day.history, hist: ranged?.history ?? null,
-    energy: day.power ? energyOf(day.power) : null, energyStale: false,
+    // the retained totals count with sampling off (power null); the live figures are the same numbers when on
+    energy: day.power ? energyOf(day.power) : day.energy ?? null, energyStale: false,
   };
   const peers = (day.peers ?? []).map((p, i) => peerMachine(p, ranged?.peers?.find((r) => r.name === p.name), i + 1));
   return [local, ...peers];
