@@ -7,7 +7,9 @@ fetches the work copies into `<staging>/work/<relative_path>.part`, hashing
 while writing (the prefix is re-hashed on resume), checks size and sha256
 against the envelope and renames atomically; a mismatch deletes the part and
 fetches the file once more. `upload_file()` streams one output from the
-controller's received offset and re-sends it whole after a mismatch.
+controller's received offset and re-sends it whole after a mismatch; only the
+controller's `done` is success (IR2). `GET`/`POST outputs` may re-hash a large
+part on the controller, so they get a long timeout (IR3).
 """
 
 from __future__ import annotations
@@ -31,11 +33,17 @@ from .staging import Staging, StagingError
 
 PREFIX = "/worker/v1"
 TIMEOUT_SECONDS = 30.0
+VERIFY_TIMEOUT_SECONDS = 1800.0  # outputs: the controller may hash 40 GB (IR3)
 CHUNK = 4 << 20
 BACKOFF_CAP_SECONDS = 30.0  # R8
 _PATH = TypeAdapter(m.RelativePath)
 _ID = TypeAdapter(m.Id)
 _TRANSIENT = frozenset({0, 429, 500, 502, 503, 504, 507})
+# a PUT that ended without `done`: GET outputs says where to go on
+_RESUMABLE = frozenset(
+    {"unreachable", "offset_mismatch", "prefix_unverified", "hash_mismatch"}
+    | {"commit_pending", "busy"}
+)
 
 
 class ApiError(Exception):
@@ -68,7 +76,7 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 def backoff(
     attempt: int, *, base: float = 1.0, cap: float = BACKOFF_CAP_SECONDS
 ) -> float:
-    return min(cap, base * (2 ** max(0, attempt)))
+    return min(cap, base * (2 ** min(max(0, attempt), 32)))  # CX1: no overflow
 
 
 def host_text(host: str) -> str:
@@ -86,20 +94,18 @@ class WorkerClient:
         credential: tuple[str, SecretStr] | None = None,
         *,
         timeout: float = TIMEOUT_SECONDS,
+        verify_timeout: float = VERIFY_TIMEOUT_SECONDS,
     ) -> None:
         self.host, self.port = host, port
         self.base = f"http://{host_text(host)}:{port}{PREFIX}"
         self._credential = credential
-        self.timeout = timeout
+        self.timeout, self.verify_timeout = timeout, verify_timeout
         self._opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), NoRedirectHandler()
         )
 
     def __repr__(self) -> str:
         return f"WorkerClient({self.base!r})"
-
-    def with_credential(self, credential: tuple[str, SecretStr]) -> WorkerClient:
-        return WorkerClient(self.host, self.port, credential, timeout=self.timeout)
 
     # ── plumbing ─────────────────────────────────────────────────────────
     def _headers(self, auth: bool) -> dict[str, str]:
@@ -134,11 +140,19 @@ class WorkerClient:
             raise ApiError(0, "unreachable") from None
 
     def call(
-        self, method: str, path: str, body: Any = None, *, auth: bool = True
+        self,
+        method: str,
+        path: str,
+        body: Any = None,
+        *,
+        auth: bool = True,
+        timeout: float | None = None,
     ) -> Any:
         data = None if body is None else json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"} if data is not None else {}
-        with self.open(method, path, data=data, headers=headers, auth=auth) as reply:
+        with self.open(
+            method, path, data=data, headers=headers, auth=auth, timeout=timeout
+        ) as reply:
             try:
                 return json.loads(reply.read() or b"null")
             except (OSError, ValueError):
@@ -182,10 +196,18 @@ class WorkerClient:
     def plan_outputs(
         self, attempt_id: str, files: list[Mapping[str, Any]]
     ) -> dict[str, Any]:
-        return self.call("POST", f"/attempts/{attempt_id}/outputs", list(files))
+        return self.call(
+            "POST",
+            f"/attempts/{attempt_id}/outputs",
+            list(files),
+            timeout=self.verify_timeout,
+        )
 
     def outputs(self, attempt_id: str) -> dict[str, Any]:
-        return self.call("GET", f"/attempts/{attempt_id}/outputs")
+        """The plan's state; the controller settles and re-hashes parts first."""
+        return self.call(
+            "GET", f"/attempts/{attempt_id}/outputs", timeout=self.verify_timeout
+        )
 
     # ── download (R12) ───────────────────────────────────────────────────
     def download_film(
@@ -260,6 +282,8 @@ class WorkerClient:
                                 on_progress(before + offset, total)
                         stream.flush()
                         os.fsync(stream.fileno())
+            if size == 0:
+                part.touch()  # CX5: an empty work copy has nothing to fetch
             if offset == size and digest.hexdigest() == sha:
                 os.replace(part, final)
                 return
@@ -277,17 +301,22 @@ class WorkerClient:
         sha256: str,
         attempts: int = 3,
     ) -> dict[str, Any]:
-        """One output from the controller's received offset to the end."""
-        entry = next(
-            (f for f in self.outputs(attempt_id)["files"] if f["path"] == path), None
-        )
-        if entry is None:
-            raise ApiError(404, "not_found")
-        if entry["done"]:
-            return entry
-        received = int(entry["received"])
+        """One output from the controller's received offset to the end.
+
+        Success is the controller's `done` only: a file fully received but not
+        committed is 503 `commit_pending` (transient), never done (IR2). After
+        any cut, refusal or reset the next offset comes from GET outputs, which
+        also reads the real refusal when the server answered before reading
+        the body (IR12) and rebuilds the hash state of a part (IR3)."""
+        entry = self._entry(attempt_id, path)
         url = f"/attempts/{attempt_id}/files/{quote(path, safe='/')}"
+        last: ApiError | None = None
         for _ in range(attempts):
+            if entry["done"]:
+                return entry
+            received = int(entry["received"])
+            if received >= size:  # GET just tried the commit again
+                raise ApiError(503, "commit_pending")
             headers = {
                 "Content-Range": f"bytes {received}-{size - 1}/{size}",
                 "Content-Length": str(size - received),
@@ -297,18 +326,26 @@ class WorkerClient:
                 with self.open(
                     "PUT", url, data=_blocks(local, received), headers=headers
                 ) as reply:
-                    return json.loads(reply.read())
+                    result = json.loads(reply.read())
+                if isinstance(result, dict) and result.get("done") is True:
+                    return result
+                last = ApiError(0, "unreachable")
             except ApiError as exc:
-                if exc.code == "offset_mismatch" and "received" in exc.body:
-                    received = int(exc.body["received"])
-                    if received >= size:
-                        return {"path": path, "received": size, "done": True}
-                    continue
-                if exc.code == "hash_mismatch":
-                    received = 0  # S1: a whole-file mismatch re-sends it all
-                    continue
-                raise
-        raise ApiError(422, "hash_mismatch")
+                if exc.code not in _RESUMABLE:
+                    raise
+                last = exc  # S1: after a hash_mismatch the plan says received 0
+            entry = self._entry(attempt_id, path)
+        if entry["done"]:
+            return entry
+        raise last or ApiError(0, "unreachable")
+
+    def _entry(self, attempt_id: str, path: str) -> dict[str, Any]:
+        entry = next(
+            (f for f in self.outputs(attempt_id)["files"] if f["path"] == path), None
+        )
+        if entry is None:
+            raise ApiError(404, "not_found")
+        return dict(entry)
 
 
 def _api_error(exc: urllib.error.HTTPError) -> ApiError:
@@ -386,34 +423,10 @@ def _blocks(path: Path, offset: int) -> Iterator[bytes]:
             yield chunk
 
 
-def retrying(
-    call: Callable[[], Any],
-    stop: threading.Event,
-    *,
-    sleep: Callable[[float], bool] | None = None,
-) -> Any:
-    """`call` until it succeeds or a non-transient error; backoff capped at
-    30 s (R8). None when `stop` is set first."""
-    wait = sleep or stop.wait
-    attempt = 0
-    while not stop.is_set():
-        try:
-            return call()
-        except ApiError as exc:
-            if not exc.transient:
-                raise
-            delay = exc.retry_after if exc.retry_after else backoff(attempt)
-            attempt += 1
-            if wait(min(BACKOFF_CAP_SECONDS, delay)):
-                return None
-    return None
-
-
 __all__ = [
     "ApiError",
     "NoRedirectHandler",
     "StagingError",
     "WorkerClient",
     "backoff",
-    "retrying",
 ]

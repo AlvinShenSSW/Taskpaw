@@ -253,12 +253,18 @@ def _gone(worker: m.RoutingWorker) -> bool:
 
 
 def remote_workers(
-    workers: Iterable[m.RoutingWorker | m.WorkerRecord], controller_id: str
+    workers: Iterable[m.RoutingWorker | m.WorkerRecord],
+    controller_id: str,
+    *,
+    enabled: bool,
 ) -> tuple[str, ...]:
-    """OD1/IR5: the names of the configured remote workers — every worker but
-    the controller that is verified and not revoked (a retired one is never
-    verified). The single predicate of the pass and the controller's dispatcher:
-    while it is empty the controller runs every stage itself (phase 1)."""
+    """OD1/IR5: the names of the configured remote workers — with
+    `workflow.remote_workers` on (`enabled`, P2-2 IR1), every worker but the
+    controller that is verified and not revoked (a retired one is never
+    verified). The single predicate of the pass, the controller's dispatcher
+    and 设备: while it is empty the controller runs every stage itself."""
+    if not enabled:
+        return ()
     return tuple(
         worker.name
         for worker in workers
@@ -363,10 +369,12 @@ def schedule(
     controller_free_bytes: int | None = None,
     gpu_stages: GpuStages | None = None,
     live_since: datetime | None = None,
+    remote_enabled: bool = False,
 ) -> SchedulePass:
     """`live_since`: when the live state started (the controller's start); a
-    worker not heard from since raises no 设备失联 in the first 60 s (IR12, C14)."""
-    if not remote_workers(snapshot.workers, controller_id):
+    worker not heard from since raises no 设备失联 in the first 60 s (IR12, C14).
+    `remote_enabled`: the `workflow.remote_workers` setting (P2-2 IR1)."""
+    if not remote_workers(snapshot.workers, controller_id, enabled=remote_enabled):
         # IR1: single machine; the controller's dispatcher runs every stage
         return SchedulePass((), (), {}, {})
     rates = Rates(snapshot.samples)

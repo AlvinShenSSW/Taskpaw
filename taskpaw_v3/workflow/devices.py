@@ -171,7 +171,24 @@ def approve(
             ),
         ),
     )
-    return set_admission(rt, worker_id, worker.version + 1, "enabled")
+    return _enable(rt, worker_id)
+
+
+def _enable(rt: LocalRuntime, worker_id: str) -> m.WorkerRecord:
+    """IR9: approval's second write, idempotent and re-read on a lost CAS, so
+    a write between the two never leaves a verified worker disabled."""
+    for _ in range(3):
+        worker = rt.store.get_worker(rt.operator, worker_id).worker
+        if worker.enrollment_state != "verified" or worker.admission_state == "revoked":
+            raise m.WorkflowError("precondition_failed")
+        if worker.workflow_participation and worker.admission_state == "enabled":
+            return worker
+        try:
+            return set_admission(rt, worker_id, worker.version, "enabled")
+        except m.WorkflowError as exc:
+            if exc.code != "cas_conflict":
+                raise
+    raise m.WorkflowError("cas_conflict")
 
 
 def set_admission(
@@ -198,8 +215,14 @@ def set_admission(
     return rt.store.get_worker(rt.operator, worker_id).worker
 
 
-def revoke(rt: LocalRuntime, worker_id: str, expected_version: int) -> None:
-    """撤销: the credential stops working; open assignments become unknown."""
+def revoke(
+    rt: LocalRuntime,
+    worker_id: str,
+    expected_version: int,
+    fleet: FleetLive | None = None,
+) -> None:
+    """撤销: the credential stops working; open assignments become unknown and
+    the worker leaves the live state at once (IR14)."""
     _worker(rt, worker_id, expected_version)
     rt.store.revoke_worker(
         rt.operator,
@@ -208,6 +231,8 @@ def revoke(rt: LocalRuntime, worker_id: str, expected_version: int) -> None:
             worker_id=worker_id, expected_version=expected_version, reason="撤销"
         ),
     )
+    if fleet is not None:
+        fleet.forget(worker_id)
 
 
 def retire(rt: LocalRuntime, worker_id: str, expected_version: int) -> None:
@@ -285,7 +310,7 @@ def device_view(
     workers = op.list_workers(rt.operator)
     routing = {w.worker_id: w for w in op.routing_workers(rt.operator)}
     controller = rt.identity.worker_id
-    remote = s.remote_workers(workers, controller)
+    remote = s.remote_workers(workers, controller, enabled=remote_workers)
     unresolved: dict[str, int] = {}
     for open_ in op.list_open_assignments(rt.operator):
         key = open_.assignment.worker_id or ""
@@ -319,10 +344,10 @@ def device_view(
                 "enrollment_state": worker.enrollment_state,
                 "admission_state": worker.admission_state,
                 "participation": worker.workflow_participation,
-                "heartbeat": {
+                "heartbeat": {  # IR14: no 失联 while remote work is off
                     "state": fleet.state(worker.worker_id, now)
-                    if fleet is not None
-                    else "lost",
+                    if fleet is not None and remote_workers
+                    else "off",
                     "age_s": round((now - entry.last_seen).total_seconds())
                     if entry is not None
                     else None,

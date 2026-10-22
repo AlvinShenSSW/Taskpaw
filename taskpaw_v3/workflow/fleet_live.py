@@ -87,6 +87,11 @@ class FleetLive:
         with self._lock:
             self._entries[worker_id] = LiveEntry(beat, now)
 
+    def forget(self, worker_id: str) -> None:
+        """A revoked worker leaves the live state at once (IR14)."""
+        with self._lock:
+            self._entries.pop(worker_id, None)
+
     def entry(self, worker_id: str) -> LiveEntry | None:
         with self._lock:
             return self._entries.get(worker_id)

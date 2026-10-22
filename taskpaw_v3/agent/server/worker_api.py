@@ -14,6 +14,7 @@ a late-bound provider and answers 503 `controller_starting` until it runs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ PREFIX = "/worker/v1"
 JSON_CAP = 1 << 20  # 1 MiB
 HEARTBEAT_CAP = 64 << 10  # 64 KiB
 CREDENTIAL_LIFETIME = timedelta(days=3650)  # long-lived, like the local runtime's
+IDLE_SECONDS = 120.0  # IR4: a stream without progress this long is dropped
 
 # store error code → HTTP status (the body keeps the code only)
 _STATUS = {
@@ -161,15 +163,28 @@ class OutputFile(_Strict):
 
 
 class _ReleasingFile(FileResponse):
-    """A ranged work-copy stream whose download slot frees when it ends (R17)."""
+    """A ranged work-copy stream whose download slot frees when it ends (R17),
+    also when the worker stops reading for `idle` seconds (IR4): a dead
+    connection never holds the slot."""
 
-    def __init__(self, *args: Any, on_close: Callable[[], None], **kw: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        on_close: Callable[[], None],
+        idle: float = IDLE_SECONDS,
+        **kw: Any,
+    ) -> None:
         super().__init__(*args, **kw)
-        self._on_close = on_close
+        self._on_close, self._idle = on_close, idle
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async def guarded(message: Message) -> None:
+            await asyncio.wait_for(send(message), self._idle)
+
         try:
-            await super().__call__(scope, receive, send)
+            await super().__call__(scope, receive, guarded)
+        except asyncio.TimeoutError:  # py3.10: not the builtin
+            log.warning("a work-copy download stalled; its stream was dropped")
         finally:
             self._on_close()
 
@@ -208,7 +223,9 @@ def _running(provider: HostProvider) -> tuple[ControllerHost, LocalRuntime, Flee
     return host, host.runtime, host.fleet
 
 
-def create_worker_app(provider: HostProvider) -> FastAPI:
+def create_worker_app(
+    provider: HostProvider, *, idle_seconds: float = IDLE_SECONDS
+) -> FastAPI:
     from taskpaw_v3.workflow.auth import (
         authenticate,
         authenticate_pairing,
@@ -459,6 +476,7 @@ def create_worker_app(provider: HostProvider) -> FastAPI:
             media_type="application/octet-stream",
             headers={"X-Sha256": copy.sha256, "X-Size": str(copy.size_bytes)},
             on_close=lambda: transfers.release(c.worker_id, "down"),
+            idle=idle_seconds,
         )
 
     @app.post(f"{PREFIX}/attempts/{{attempt_id}}/outputs")
@@ -493,8 +511,21 @@ def create_worker_app(provider: HostProvider) -> FastAPI:
                 transfers.open_upload, attempt_id, path, offset, total
             )
             try:
-                got, buffer = 0, bytearray()
-                async for chunk in request.stream():
+                got, buffer, more = 0, bytearray(), True
+                while more:
+                    try:  # IR4: a body without progress frees the slot
+                        message = await asyncio.wait_for(
+                            request.receive(), idle_seconds
+                        )
+                    except asyncio.TimeoutError:  # py3.10: not the builtin
+                        log.warning("an upload stalled; its stream was dropped")
+                        more = False
+                        break
+                    if message["type"] == "http.disconnect":
+                        more = False  # IR11: keep what arrived, no 500
+                        break
+                    chunk = message.get("body", b"")
+                    more = message.get("more_body", False)
                     got += len(chunk)
                     if got > expected:
                         await run_in_threadpool(upload.truncate)

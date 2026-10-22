@@ -193,7 +193,19 @@ describe("设备 v1", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await waitFor(() => expect(within(card("旧卡")).getByRole("button", { name: "退休" })).toBeEnabled());
     fireEvent.click(within(card("旧卡")).getByRole("button", { name: "退休" }));
+    const retire = await screen.findByRole("dialog", { name: "退休 旧卡" });
+    expect(calls.retire).not.toHaveBeenCalled();
+    fireEvent.click(within(retire).getByRole("button", { name: "确认退休" }));
     await waitFor(() => expect(calls.retire).toHaveBeenCalledWith("revoked", 3));
+  });
+
+  it("offers 启用 for a verified worker left disabled", async () => {
+    const calls = mockApi({ ...VIEW, workers: [device({ worker_id: "off", name: "停用卡", admission_state: "disabled",
+      eligibility: "未启用", eligible: false })] });
+    await openDevices();
+    expect(card("停用卡")).toHaveTextContent("未启用");
+    fireEvent.click(within(card("停用卡")).getByRole("button", { name: "启用" }));
+    await waitFor(() => expect(calls.admission).toHaveBeenCalledWith("off", 3, "enabled"));
   });
 
   it("explains a controller without remote workers and disables 添加设备", async () => {
@@ -201,6 +213,22 @@ describe("设备 v1", () => {
     await openDevices();
     expect(screen.getByRole("button", { name: "添加设备" })).toBeDisabled();
     expect(screen.getByText(/未开启远程设备/)).toBeInTheDocument();
+  });
+
+  it("shows 远程未启用 and only 撤销 for workers while remote work is off", async () => {
+    mockApi({ ...VIEW, remote_workers: false, controller: { name: "本机", stages: ["修复", "识别", "翻译"] }, workers: [
+      device({ worker_id: "a", name: "5070 Ti", heartbeat: { state: "off", age_s: null } }),
+      device({ worker_id: "b", name: "5060 Ti-2", enrollment_state: "pending_validation", admission_state: "disabled",
+        heartbeat: { state: "off", age_s: null } }),
+    ] });
+    await openDevices();
+    const enabled = card("5070 Ti");
+    expect(enabled).toHaveTextContent("远程未启用");
+    expect(enabled).not.toHaveTextContent("失联");
+    expect(within(enabled).queryByRole("button", { name: "停领" })).toBeNull();
+    expect(within(enabled).queryByRole("button", { name: "重新配对" })).toBeNull();
+    expect(within(enabled).getByRole("button", { name: "撤销" })).toBeInTheDocument();
+    expect(within(card("5060 Ti-2")).queryByRole("button", { name: "核验并启用" })).toBeNull();
   });
 
   it("keeps 44 px controls and a single column at 390 px", async () => {

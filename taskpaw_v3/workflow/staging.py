@@ -97,8 +97,10 @@ class Staging:
         return self._free(self.root)
 
     def admit(self, source_bytes: int, present: int = 0) -> None:
-        """Refuse a download the disk rules do not allow (空间不足); bytes of
-        this film already staged count as used once only."""
+        """Refuse a download the disk rules do not allow (空间不足). Bytes of
+        this film already staged (`present`) are part of its need, not extra:
+        they count once against the cap and are no longer needed from the free
+        space (IR16)."""
         needed = need(source_bytes)
-        if not admits(self.used() - present, needed, self.cap, self.free()):
+        if not admits(self.used() - present, needed, self.cap, self.free() + present):
             raise StagingError("空间不足")

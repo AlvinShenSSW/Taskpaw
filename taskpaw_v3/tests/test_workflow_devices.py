@@ -20,11 +20,13 @@ from taskpaw_v3.tests.worker_api_helpers import (
     beat,
     client,
     enrol,
+    join,
     new_secret,
     pair_body,
     probe,
 )
 from taskpaw_v3.tests.workflow_route_helpers import Remote, claim_remote, route
+from taskpaw_v3.workflow import models as m
 
 BASE = "/control/workflow/devices"
 SELF = "/worker/v1/self"
@@ -226,3 +228,81 @@ def test_ipv6_controller_hosts_are_bracketed(host):
     ctl = control(host, bind="fd00::20")
     code = ctl.post(BASE, json={"name": "x", "address": "fd00::31"}).json()["code"]
     assert code.startswith("TP1:[fd00::20]:5682:")
+
+
+def test_with_remote_workers_off_approval_and_admission_are_refused(host, api, rt):
+    """IR1: the flag gates every command that would hand the GPU stages to a
+    worker; IR14: no worker reads 失联 while remote work is off."""
+    joined, boot = enrol(api, rt)
+    api.post("/worker/v1/heartbeat", json=beat(boot), headers=joined.headers)
+    api.post("/worker/v1/capabilities", json=probe("changed"), headers=joined.headers)
+    off = control(host, remote=False)
+    row = _row(off, joined.worker_id)
+    assert row["heartbeat"]["state"] == "off"
+    assert off.get(BASE).json()["controller"]["stages"] == ["修复", "识别", "翻译"]
+    approve = off.post(
+        f"{BASE}/{joined.worker_id}/approve",
+        json={"expected_version": row["version"], "restore": True, "asr": True},
+    )
+    assert approve.status_code == 409
+    admission = off.post(
+        f"{BASE}/{joined.worker_id}/admission",
+        json={"expected_version": row["version"], "state": "enabled"},
+    )
+    assert admission.status_code == 409
+    revoke = off.post(  # cleaning up stays possible
+        f"{BASE}/{joined.worker_id}/revoke", json={"expected_version": row["version"]}
+    )
+    assert revoke.status_code == 200
+
+
+def test_a_revoked_worker_leaves_the_live_state_at_once(ctl, api, rt, host):
+    """IR14: 撤销 drops the worker's FleetLive entry immediately."""
+    joined, boot = enrol(api, rt)
+    api.post("/worker/v1/heartbeat", json=beat(boot), headers=joined.headers)
+    row = _row(ctl, joined.worker_id)
+    assert row["heartbeat"]["state"] == "online"
+    revoked = ctl.post(
+        f"{BASE}/{joined.worker_id}/revoke", json={"expected_version": row["version"]}
+    )
+    assert revoked.status_code == 200
+    assert host.fleet.entry(joined.worker_id) is None
+    assert joined.worker_id not in host.fleet.snapshot()
+
+
+def test_approval_survives_a_write_between_its_two_steps(ctl, api, rt, monkeypatch):
+    """IR9: a write that lands between the approved revision and the enabling
+    update must not leave a verified worker disabled (no button would show)."""
+    joined = join(api, rt)
+    api.post(
+        "/worker/v1/capabilities", json=probe(joined.worker_id), headers=joined.headers
+    )
+    original = rt.store.record_capabilities
+
+    def racing(*args, **kw):
+        result = original(*args, **kw)
+        worker = rt.store.get_worker(rt.operator, joined.worker_id).worker
+        rt.store.update_worker(  # e.g. an address edit: the version moves on
+            rt.operator,
+            rt.meta(),
+            m.WorkerUpdate(
+                worker_id=worker.worker_id,
+                expected_version=worker.version,
+                address=worker.address,
+                port=worker.port,
+                network_revision=worker.network_revision,
+                workflow_participation=worker.workflow_participation,
+                admission_state=worker.admission_state,
+            ),
+        )
+        return result
+
+    monkeypatch.setattr(rt.store, "record_capabilities", racing)
+    row = _row(ctl, joined.worker_id)
+    response = ctl.post(
+        f"{BASE}/{joined.worker_id}/approve",
+        json={"expected_version": row["version"], "restore": True, "asr": True},
+    )
+    assert response.status_code == 200, response.text
+    row = _row(ctl, joined.worker_id)
+    assert (row["enrollment_state"], row["admission_state"]) == ("verified", "enabled")

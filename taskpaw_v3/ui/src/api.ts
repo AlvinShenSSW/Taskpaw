@@ -168,7 +168,7 @@ export type DeviceRow = {
   enrollment_state: "pending_pairing" | "pending_validation" | "verified" | "retired";
   admission_state: "disabled" | "enabled" | "draining" | "revoked";
   participation: boolean;
-  heartbeat: { state: "online" | "lost" | "waiting"; age_s: number | null };
+  heartbeat: { state: "online" | "lost" | "waiting" | "off"; age_s: number | null };
   gpu: { name: string | null; vram_mib: number | null; used_mib: number | null; util: number | null; power_w: number | null; hold: string } | null;
   disk: { free: number; staging_used: number; cap: number } | null;
   tiers_ready: string[]; asr_ready: boolean; agent_version: string | null; version_ok: boolean | null;

@@ -3,13 +3,17 @@
 `WorkerHost` starts after the agent is ready, is stoppable and joins its
 thread (constitution §4, S-7). 加入 takes the code `TP1:<host>:<port>:
 <pairing_id>:<ticket>` from the controller's 设备 page; the worker chooses its
-own credential and writes `worker-identity.json` **before** sending the pair
-request, so a lost reply is recovered through `GET /self` (R3). The probe is
-posted only when identity, VRAM or the proposed profiles differ from the
-controller's record (R4): a worker's own post de-verifies it. The boot is
-re-posted with the same id until reconciled (R6, C6), then heartbeats run
-every 5 s with a route and 15 s idle, backing off up to 30 s while the
-controller is unreachable (R7, R8). P2-2 runs no stage and claims nothing.
+own credential and writes it (`worker-identity.pending.json`) **before**
+sending the pair request, so a lost reply is recovered through `GET /self`
+(R3); a working identity is replaced only once the new pairing succeeded
+(IR7). The probe is posted only when identity, VRAM or the proposed profiles
+differ from the controller's record (R4): a worker's own post de-verifies it.
+It is re-run every 60 s for the tier and ASR readiness, and at every beat
+while the GPU cannot be read (CX4, IR8). The boot is re-posted with the same
+id until reconciled (R6, C6) while heartbeats run — every 5 s with a route,
+15 s idle, backing off up to 30 s while the controller is unreachable (R7, R8,
+IR6). An ordinary error is shown, backed off and retried; only a revoked
+credential or `stop()` ends the loop (IR8). P2-2 runs no stage, claims nothing.
 
 The identity file holds the secret like the local identity file (home LAN,
 single user, P0); it is written atomically and never logged, and `repr`
@@ -20,9 +24,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import secrets
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
@@ -43,8 +49,10 @@ from .worker_client import ApiError, WorkerClient, backoff
 log = logging.getLogger("taskpaw.workflow.remote_worker")
 
 IDENTITY_NAME = "worker-identity.json"
+PENDING_NAME = "worker-identity.pending.json"  # IR7: a pairing not yet confirmed
 ACTIVE_SECONDS = 5.0  # with an open route (R7)
 IDLE_SECONDS = 15.0
+PROBE_SECONDS = 60.0  # CX4: tier and ASR readiness follow the disk
 TIERS = ("standard", "good", "high")
 _TICKET = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 
@@ -281,11 +289,16 @@ class WorkerHost:
         active_seconds: float = ACTIVE_SECONDS,
         idle_seconds: float = IDLE_SECONDS,
         backoff_base: float = 1.0,
+        probe_seconds: float = PROBE_SECONDS,
     ) -> None:
         from taskpaw_v3 import __version__
 
         self.settings, self.data_dir = settings, data_dir
         self.identity_path = data_dir / IDENTITY_NAME
+        self.pending_path = data_dir / PENDING_NAME
+        self.probe_seconds = probe_seconds
+        self._probe_due = 0.0  # monotonic; 0: probe at the next beat
+        self._join_lock = threading.Lock()  # IR7: one join at a time
         self._probe, self._gpu_live = probe, gpu_live
         self._client_factory = client_factory
         self.version = version or __version__
@@ -359,12 +372,23 @@ class WorkerHost:
             raise JoinError(str(exc)) from None
         except OSError:
             raise JoinError("无法创建暂存目录") from None
+        with self._join_lock:
+            return self._join(parsed, root)
+
+    def _join(self, parsed: PairingCode, root: Path) -> dict[str, Any]:
         if not self.stop():
             raise JoinError("工作流仍在停止，请稍后再试")
+        old = self.identity or WorkerIdentity.load(self.identity_path)
         # the same code again after a lost reply reuses its unconfirmed
         # credential, so /self can prove the pairing (R3)
-        old = WorkerIdentity.load(self.identity_path)
-        same = old if old is not None and old.pairing_id == parsed.pairing_id else None
+        same = next(
+            (
+                found
+                for found in (WorkerIdentity.load(self.pending_path), old)
+                if found is not None and found.pairing_id == parsed.pairing_id
+            ),
+            None,
+        )
         identity = WorkerIdentity(
             controller_host=parsed.host,
             controller_port=parsed.port,
@@ -375,9 +399,11 @@ class WorkerHost:
             ticket=parsed.ticket,
         )
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        identity.save(self.identity_path)  # before sending (R3)
-        self.identity, self.state, self.reason = identity, "joining", "正在配对"
-        client = self._client()
+        identity.save(self.pending_path)  # before sending (R3); `old` stays (IR7)
+        self.state, self.reason = "joining", "正在配对"
+        client = self._client_factory(
+            identity.controller_host, identity.controller_port, identity.credential
+        )
         try:
             reply = client.pair(
                 identity.pairing_id,
@@ -385,16 +411,30 @@ class WorkerHost:
                 identity.credential_id,
                 identity.secret,
             )
-            worker_id = reply["worker_id"]
+            worker_id = str(reply["worker_id"])
         except ApiError as exc:
-            worker_id = self._recover(client, exc)
+            try:
+                worker_id = self._recover(client, exc)
+            except JoinError:
+                self._resume(old)
+                raise
         identity.worker_id, identity.ticket = worker_id, None
-        identity.save(self.identity_path)
-        self.worker_id = worker_id
+        identity.save(self.pending_path)
+        os.replace(self.pending_path, self.identity_path)  # IR7: only now
+        self.identity, self.worker_id = identity, worker_id
+        self.reconciled = False
         self.state, self.reason = "connecting", "正在连接主控"
         log.info("joined the media workflow as worker %s", worker_id)
         self._spawn()
         return self.status()
+
+    def _resume(self, old: WorkerIdentity | None) -> None:
+        """IR7: a failed re-join leaves the working identity running."""
+        if old is None or not old.worker_id:
+            return
+        self.identity, self.worker_id = old, old.worker_id
+        self.state, self.reason = "connecting", "正在连接主控"
+        self._spawn()
 
     def _recover(self, client: WorkerClient, exc: ApiError) -> str:
         """A lost or refused pair reply: a 200 from /self means paired (R3)."""
@@ -437,71 +477,110 @@ class WorkerHost:
         self._stop.set()
 
     def _run(self) -> None:
-        try:
-            client = self._client()
+        """IR8: only `stop()` or a revoked credential ends the loop; any other
+        error is shown, logged, backed off and the session starts again."""
+        client = self._client()
+        failures = 0
+        while not self._stop.is_set():
+            try:
+                self._session(client)
+                return
+            except ApiError as exc:
+                reason = f"主控拒绝了请求（{exc.code}），正在重试"
+            except (StagingError, OSError):
+                reason = "暂存目录不可用，正在重试"
+            except Exception:
+                log.exception("media workflow worker loop failed; retrying")
+                reason = "工作流出错（见日志），正在重试"
+            log.warning("media workflow worker: %s", reason)
+            self.state, self.reason = "failed", reason
+            failures += 1
+            if self._wait(backoff(failures - 1, base=self.backoff_base)):
+                return
+
+    def _session(self, client: WorkerClient) -> None:
+        me = self._retry(client.self_view)
+        if me is None:
+            return
+        self.worker_id = me["worker"]["worker_id"]
+        staging = self.staging()
+        self._refresh(client, staging, me["worker"])
+        if self._boot_once(client) is None:
+            return
+        failures = 0
+        while not self._stop.is_set():
+            try:
+                reply = client.heartbeat(self._beat(staging))
+            except ApiError as exc:
+                if exc.status == 401:
+                    self._revoked()
+                    return
+                if exc.transient:
+                    self.state, self.reason = "connecting", "无法连接主控，正在重试"
+                elif exc.status in (413, 422):  # IR15: say what was refused
+                    self.state = "failed"
+                    self.reason = f"主控拒绝了心跳（{exc.code}），正在重试"
+                else:
+                    raise
+                failures += 1
+                if self._wait(backoff(failures - 1, base=self.backoff_base)):
+                    return
+                continue
+            failures = 0
+            self._apply(reply)
+            if reply.get("reconcile_needed") or not self.reconciled:
+                if self._boot_once(client) is None:  # IR6: beats go on meanwhile
+                    return
+            if self._wait(self.active if self.routes else self.idle):
+                return
+            if time.monotonic() >= self._probe_due:
+                self._refresh(client, staging)
+
+    def _refresh(
+        self,
+        client: WorkerClient,
+        staging: Staging,
+        record: Mapping[str, Any] | None = None,
+    ) -> None:
+        """R4/CX4: probe again; post it only when it differs from the
+        controller's record. Without a GPU reading, retry at the next beat."""
+        probe = self._probe(self.settings, staging)
+        if probe is None:
+            self._probe_body, self._probe_due = {}, 0.0
+            return
+        self._probe_due = time.monotonic() + self.probe_seconds
+        self._tiers, self._asr_ready = probe.tiers_ready, probe.asr_ready
+        if record is None:
             me = self._retry(client.self_view)
             if me is None:
                 return
-            self.worker_id = me["worker"]["worker_id"]
-            staging = self.staging()
-            probe = self._probe(self.settings, staging)
-            if probe is not None:
-                self._probe_body = probe.body
-                self._tiers, self._asr_ready = probe.tiers_ready, probe.asr_ready
-                if probe_changed(probe.body, me["worker"]):
-                    if self._retry(lambda: client.capabilities(probe.body)) is None:
-                        return
-            else:
-                self.reason = "无法读取本机 GPU（nvidia-smi）"
-            if not self._boot(client):
+            record = me["worker"]
+        if probe_changed(probe.body, record):
+            if self._retry(lambda: client.capabilities(probe.body)) is None:
                 return
-            failures = 0
-            while not self._stop.is_set():
-                try:
-                    reply = client.heartbeat(self._beat(staging))
-                except ApiError as exc:
-                    if exc.status == 401:
-                        self._revoked()
-                        return
-                    if not exc.transient and exc.status != 422:
-                        raise
-                    self.state, self.reason = "connecting", "无法连接主控，正在重试"
-                    failures += 1
-                    if self._wait(backoff(failures - 1, base=self.backoff_base)):
-                        return
-                    continue
-                failures = 0
-                self._apply(reply)
-                if reply.get("reconcile_needed") and not self._boot(client):
-                    return
-                if self._wait(self.active if self.routes else self.idle):
-                    return
-        except Exception:
-            log.exception("media workflow worker loop failed")
-            self.state, self.reason = "failed", "工作流出错（见日志）"
+        self._probe_body = probe.body
 
-    def _boot(self, client: WorkerClient) -> bool:
-        """R6: the same boot id until the reply says reconciled (C6)."""
-        attempt = 0
-        while not self._stop.is_set():
-            reply = self._retry(lambda: client.boot(self.boot_id))
-            if reply is None:
-                return False
-            if reply.get("reconciled"):
-                self.reconciled = True
-                return True
-            self.reason = "等待对账"
-            attempt += 1
-            if self._wait(backoff(attempt, base=self.backoff_base)):
-                return False
-        return False
+    def _boot_once(self, client: WorkerClient) -> bool | None:
+        """R6: post the same boot id; True once reconciled (C6), None when the
+        loop must end. Unreconciled, the next beat posts it again (IR6)."""
+        reply = self._retry(lambda: client.boot(self.boot_id))
+        if reply is None:
+            return None
+        self.reconciled = bool(reply.get("reconciled"))
+        return self.reconciled
 
     def _apply(self, reply: Mapping[str, Any]) -> None:
         with self._lock:
             self.routes = list(reply.get("routes") or [])
             self.paused = bool(reply.get("paused"))
             self.last_heartbeat = datetime.now(timezone.utc)
-        self.state, self.reason = "running", "在线"
+        if not self.reconciled:
+            reason = "等待对账"
+        elif not self._probe_body:
+            reason = "无法读取本机 GPU（nvidia-smi），正在重试"
+        else:
+            reason = "在线"
+        self.state, self.reason = "running", reason
 
     def _beat(self, staging: Staging) -> dict[str, Any]:
         live = dict(self._gpu_live())

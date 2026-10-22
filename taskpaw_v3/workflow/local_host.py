@@ -33,7 +33,7 @@ from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
 from .lookup import MetadataLookup
 from .timing import TaskLogSink, WorkflowLog
-from .transfer import Transfers
+from .transfer import Transfers, live_attempts
 
 ExecutorFactory = Callable[[LocalRuntime], Sequence[StageExecutor]]
 LookupFactory = Callable[[LocalRuntime], MetadataLookup]
@@ -354,6 +354,8 @@ class LocalWorkflowHost:
                 finalizer=self.finalizer,
                 workflow_log=self.workflow_log,
                 on_resolved=self.events.resolved if self.events is not None else None,
+                remote_enabled=self.settings.remote_workers
+                and self.settings.role == "controller",
             )
             if self._stopping.is_set():
                 return
@@ -366,7 +368,8 @@ class LocalWorkflowHost:
 
                 # R9: the restart grace counts from here (IR12, C14)
                 self.fleet = FleetLive(rt.clock.now(), __version__)
-                self.transfers = Transfers(rt.work_dir)
+                self.transfers = Transfers(rt.work_dir, live=lambda: live_attempts(rt))
+                self.transfers.sweep()  # IR5: settled attempts' plans go
             self.state, self.reason = "running", rt.reason
             if self.events is not None and not self._stopping.is_set():
                 self.events.start(self)

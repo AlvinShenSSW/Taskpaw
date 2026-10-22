@@ -62,9 +62,11 @@ def run_pass(
     executors: Mapping[ComputeStage, StageExecutor],
     controller_free_bytes: int | None = None,
     retry: bool = True,
+    remote_enabled: bool = False,
 ) -> PassOutcome:
     """`executors`: the controller's own, so the pass decides which stages
-    need a GPU worker by the dispatcher's rule (IR3)."""
+    need a GPU worker by the dispatcher's rule (IR3). `remote_enabled`: the
+    `workflow.remote_workers` setting (P2-2 IR1)."""
     snapshot = store.routing_snapshot(operator)
     planned = schedule(
         snapshot,
@@ -73,6 +75,7 @@ def run_pass(
         controller_id=controller_id,
         controller_free_bytes=controller_free_bytes,
         gpu_stages=gpu_stages(store, operator, snapshot, executors),
+        remote_enabled=remote_enabled,
     )
     withdrawn = []
     lost = False
@@ -107,6 +110,7 @@ def run_pass(
             executors=executors,
             controller_free_bytes=controller_free_bytes,
             retry=False,
+            remote_enabled=remote_enabled,
         )
         return PassOutcome(again.planned, again.routed, (*withdrawn, *again.withdrawn))
     routed = []

@@ -160,6 +160,7 @@ class Fleet:
             live=self.live(),
             now=self.clock.now(),
             executors=rt.executors,
+            remote_enabled=True,
         )
         for decision in outcome.routed:
             pin = rt.store.get_pin(
@@ -539,6 +540,7 @@ def pass_once(rt, clock, live):
         live=live,
         now=clock.now(),
         executors=rt.executors,
+        remote_enabled=True,
     )
 
 

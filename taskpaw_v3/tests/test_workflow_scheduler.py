@@ -134,6 +134,7 @@ def run(films, workers, *, routes=(), samples=(), now=NOW, older=(), **kw):
         samples=tuple(samples),
     )
     kw.setdefault("live", live(workers))
+    kw.setdefault("remote_enabled", True)
     return s.schedule(snapshot, now=now, controller_id=CONTROLLER, **kw)
 
 
@@ -484,8 +485,13 @@ def test_retired_revoked_and_unpaired_workers_configure_no_remote():
     ]
     result = run([film()], ws)
     assert result == s.SchedulePass((), (), {}, {})
-    assert s.remote_workers(ws, CONTROLLER) == ()
-    assert s.remote_workers([*ws, fleet()[3]], CONTROLLER) == ("5070 Ti",)
+    assert s.remote_workers(ws, CONTROLLER, enabled=True) == ()
+    assert s.remote_workers([*ws, fleet()[3]], CONTROLLER, enabled=True) == ("5070 Ti",)
+    # IR1: `workflow.remote_workers: false` is no remote at all
+    assert s.remote_workers([*ws, fleet()[3]], CONTROLLER, enabled=False) == ()
+    assert run([film()], fleet(), remote_enabled=False) == s.SchedulePass(
+        (), (), {}, {}
+    )
 
 
 # ── which films are candidates ───────────────────────────────────────────

@@ -14,7 +14,8 @@ import { errorText, useWorkspace } from "./workspace";
 
 // 设备 v1 (P2-2 #293, contract §5): 本机 and the enrolled GPU workers with their enrollment,
 // heartbeat, GPU, disk, tier readiness, version and eligibility; add, 核验并启用, 停领/恢复,
-// 重新配对, 撤销 and 退休. Every command carries the row's version (CAS).
+// 重新配对, 撤销 and 退休 (both confirmed). Every command carries the row's version (CAS). With
+// workflow.remote_workers off only 撤销 and 退休 remain (the controller refuses the rest).
 const DEVICES_KEY = ["workflowDevices"];
 const RESTORE_MIN_VRAM_MIB = 15360;
 const TIER_LABEL: Record<string, string> = { standard: "标准", good: "良好", high: "高" };
@@ -33,6 +34,7 @@ function enrollment(row: DeviceRow): [string, ChipTone] {
 }
 
 function heartbeat(row: DeviceRow): [string, ChipTone] {
+  if (row.heartbeat.state === "off") return ["远程未启用", "neutral"];
   if (row.heartbeat.state === "online") return [`在线 ${row.heartbeat.age_s ?? 0}s 前`, "green"];
   if (row.heartbeat.state === "waiting") return ["等待心跳", "amber"];
   return ["失联", "red"];
@@ -61,6 +63,7 @@ export function DevicesPage() {
   const [code, setCode] = useState<{ name: string; value: PairingCode } | null>(null);
   const [approving, setApproving] = useState<DeviceRow | null>(null);
   const [revoking, setRevoking] = useState<DeviceRow | null>(null);
+  const [retiring, setRetiring] = useState<DeviceRow | null>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: DEVICES_KEY });
   const act = useMutation({
     mutationFn: (run: () => Promise<unknown>) => run(),
@@ -105,12 +108,12 @@ export function DevicesPage() {
             </div>
           </article>
           {data.workers.map((row) => (
-            <WorkerCard key={row.worker_id} row={row} busy={act.isPending || repair.isPending}
+            <WorkerCard key={row.worker_id} row={row} remote={data.remote_workers} busy={act.isPending || repair.isPending}
               onApprove={() => setApproving(row)}
               onAdmission={(state) => act.mutate(() => api.workflowDeviceAdmission(row.worker_id, row.version, state))}
               onRepair={() => repair.mutate(row)}
               onRevoke={() => setRevoking(row)}
-              onRetire={() => act.mutate(() => api.workflowRetireDevice(row.worker_id, row.version))} />
+              onRetire={() => setRetiring(row)} />
           ))}
           {data.workers.length === 0 && data.remote_workers && (
             <div className="panel empty"><h2>还没有远程设备</h2><p>点「添加设备」，再在工作机的设置里粘贴配对码。</p></div>
@@ -124,17 +127,20 @@ export function DevicesPage() {
         onApproved={() => { setApproving(null); refresh(); }} />
       <RevokeDialog row={revoking} onClose={() => setRevoking(null)}
         onConfirm={(row) => { setRevoking(null); act.mutate(() => api.workflowRevokeDevice(row.worker_id, row.version)); }} />
+      <RetireDialog row={retiring} onClose={() => setRetiring(null)}
+        onConfirm={(row) => { setRetiring(null); act.mutate(() => api.workflowRetireDevice(row.worker_id, row.version)); }} />
     </>
   );
 }
 
-function WorkerCard({ row, busy, onApprove, onAdmission, onRepair, onRevoke, onRetire }: {
-  row: DeviceRow; busy: boolean; onApprove: () => void; onAdmission: (s: "enabled" | "draining") => void;
+function WorkerCard({ row, remote, busy, onApprove, onAdmission, onRepair, onRevoke, onRetire }: {
+  row: DeviceRow; remote: boolean; busy: boolean; onApprove: () => void; onAdmission: (s: "enabled" | "draining") => void;
   onRepair: () => void; onRevoke: () => void; onRetire: () => void;
 }) {
   const [state, stateTone] = enrollment(row);
   const [beat, beatTone] = heartbeat(row);
   const revoked = row.admission_state === "revoked";
+  const live = remote && !revoked; // remote work off: the controller refuses all but 撤销/退休
   const version = row.agent_version ? `${row.agent_version}${row.version_ok === false ? " · 版本不一致" : ""}` : "—";
   return (
     <article className="panel device-card" aria-label={row.name} data-worker={row.worker_id}>
@@ -154,16 +160,19 @@ function WorkerCard({ row, busy, onApprove, onAdmission, onRepair, onRevoke, onR
         {row.unresolved > 0 && <><dt>未结束任务</dt><dd>{row.unresolved}</dd></>}
       </dl>
       <div className="device-actions">
-        {!revoked && row.enrollment_state === "pending_validation" && row.probe && (
+        {live && row.enrollment_state === "pending_validation" && row.probe && (
           <button type="button" className="btn primary" disabled={busy} onClick={onApprove}>核验并启用</button>
         )}
-        {!revoked && row.admission_state === "enabled" && (
+        {live && row.enrollment_state === "verified" && row.admission_state === "disabled" && (
+          <button type="button" className="btn primary" disabled={busy} onClick={() => onAdmission("enabled")}>启用</button>
+        )}
+        {live && row.admission_state === "enabled" && (
           <button type="button" className="btn" disabled={busy} onClick={() => onAdmission("draining")}>停领</button>
         )}
-        {!revoked && row.admission_state === "draining" && (
+        {live && row.admission_state === "draining" && (
           <button type="button" className="btn" disabled={busy} onClick={() => onAdmission("enabled")}>恢复</button>
         )}
-        {!revoked && <button type="button" className="btn ghost" disabled={busy} onClick={onRepair}>重新配对</button>}
+        {live && <button type="button" className="btn ghost" disabled={busy} onClick={onRepair}>重新配对</button>}
         {!revoked && <button type="button" className="btn danger" disabled={busy} onClick={onRevoke}>撤销</button>}
         {revoked && row.can_retire && <button type="button" className="btn danger" disabled={busy} onClick={onRetire}>退休</button>}
         {revoked && !row.can_retire && <p className="small muted">仍有 {row.unresolved} 个未结束的任务，结束后才能退休。</p>}
@@ -329,6 +338,28 @@ function RevokeDialog({ row, onClose, onConfirm }: { row: DeviceRow | null; onCl
             <div className="actions">
               <button type="button" className="btn ghost" onClick={onClose}>取消</button>
               <button type="button" className="btn danger" onClick={() => onConfirm(row)}>确认撤销</button>
+            </div>
+          </div>
+        </>
+      )}
+    </ModalShell>
+  );
+}
+
+function RetireDialog({ row, onClose, onConfirm }: { row: DeviceRow | null; onClose: () => void; onConfirm: (row: DeviceRow) => void }) {
+  return (
+    <ModalShell open={row !== null} onClose={onClose} titleId="mw-retire-title">
+      {row && (
+        <>
+          <ModalHead id="mw-retire-title" title={`退休 ${row.name}`} subtitle="设备从列表中移除，记录保留" onClose={onClose} />
+          <div className="modal-body">
+            <Notice tone="amber" icon={WarningAmberIcon}>退休不可撤回；要再次使用这台设备，需要重新添加。</Notice>
+          </div>
+          <div className="modal-foot">
+            <p>只有已撤销且没有未结束任务的设备可以退休。</p>
+            <div className="actions">
+              <button type="button" className="btn ghost" onClick={onClose}>取消</button>
+              <button type="button" className="btn danger" onClick={() => onConfirm(row)}>确认退休</button>
             </div>
           </div>
         </>

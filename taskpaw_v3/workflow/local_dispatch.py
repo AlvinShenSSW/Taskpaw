@@ -187,8 +187,11 @@ class LocalDispatcher:
             [LocalRuntime, m.PendingComputeJob, str, ExecOutcome], None
         ]
         | None = None,
+        remote_enabled: bool = False,
     ) -> None:
         self.runtime, self.lease = runtime, lease
+        # P2-2 IR1: `workflow.remote_workers`; off, every stage runs here
+        self.remote_enabled = remote_enabled
         # PWR-2: the agent's power sampler, read late (it starts after the host)
         self.power = power or power_estimate.get_sampler
         self.workflow_log = workflow_log or WorkflowLog(None)  # U1e: 日志 rows
@@ -469,7 +472,9 @@ class LocalDispatcher:
                     continue
                 if remote is None:
                     remote = remote_workers(
-                        rt.store.list_workers(rt.operator), rt.identity.worker_id
+                        rt.store.list_workers(rt.operator),
+                        rt.identity.worker_id,
+                        enabled=self.remote_enabled,
                     )
                 if (
                     remote

@@ -10,10 +10,12 @@ hygiene, revoke and shutdown.
 from __future__ import annotations
 
 import json
+import logging
 import random
 import threading
 import time
 import urllib.request
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -26,7 +28,14 @@ from taskpaw_v3.agent.server.worker_api import create_worker_app
 from taskpaw_v3.core.config import AgentConfig, WorkflowSettings
 from taskpaw_v3.core.net import claim_port
 from taskpaw_v3.tests.test_workflow_local_dispatch import runtime
-from taskpaw_v3.tests.test_workflow_transfer import OUTPUT, VIDEO, Free, real_film, sha
+from taskpaw_v3.tests.test_workflow_transfer import (
+    OUTPUT,
+    VIDEO,
+    Free,
+    real_film,
+    sha,
+    transfers,
+)
 from taskpaw_v3.tests.worker_api_helpers import (
     VERSION,
     Host,
@@ -34,11 +43,19 @@ from taskpaw_v3.tests.worker_api_helpers import (
     probe,
     profiles,
 )
-from taskpaw_v3.tests.workflow_route_helpers import Remote, claim_remote, route
+from taskpaw_v3.tests.workflow_route_helpers import (
+    Remote,
+    boot,
+    claim_remote,
+    resolve_open,
+    route,
+)
 from taskpaw_v3.workflow import devices
 from taskpaw_v3.workflow import staging as st
+from taskpaw_v3.workflow import transfer as tr
 from taskpaw_v3.workflow.remote_worker import (
     IDENTITY_NAME,
+    PENDING_NAME,
     JoinError,
     Probe,
     WorkerHost,
@@ -46,21 +63,26 @@ from taskpaw_v3.workflow.remote_worker import (
     parse_code,
     probe_changed,
 )
-from taskpaw_v3.workflow.transfer import Transfers
-from taskpaw_v3.workflow.worker_client import ApiError, WorkerClient
+from taskpaw_v3.workflow.transfer import EMPTY_SHA256
+from taskpaw_v3.workflow.worker_client import ApiError, WorkerClient, backoff
 
 TICKET = "A" * 43
 PAIRING = "00000000-0000-4000-8000-000000000001"
 
 
 # ── the loopback controller ─────────────────────────────────────────────
+IDLE = 1.0  # the test server drops a stream after 1 s without progress (IR4)
+
+
 class Server:
     def __init__(self, host: Host) -> None:
         self.sock = claim_port("127.0.0.1", 0, "test worker API")
         self.port = self.sock.getsockname()[1]
         self.server = uvicorn.Server(
             uvicorn.Config(
-                create_worker_app(lambda: host), log_level="warning", access_log=False
+                create_worker_app(lambda: host, idle_seconds=IDLE),
+                log_level="warning",
+                access_log=False,
             )
         )
         self.thread = threading.Thread(
@@ -100,7 +122,7 @@ def free():
 
 @pytest.fixture
 def host(rt, free):
-    return Host(rt, transfers=Transfers(rt.work_dir, free_bytes=free))
+    return Host(rt, transfers=transfers(rt, free))
 
 
 @pytest.fixture
@@ -283,7 +305,9 @@ def test_the_same_code_after_an_unreachable_reply_reuses_the_credential(
     first = worker_host(tmp_path, client_factory=Blind)
     with pytest.raises(JoinError):
         first.join(issued["code"], str(tmp_path / "staging"))
-    stored = WorkerIdentity.load(tmp_path / "worker" / IDENTITY_NAME)
+    # IR7: the unconfirmed credential waits beside the (absent) identity
+    assert not (tmp_path / "worker" / IDENTITY_NAME).exists()
+    stored = WorkerIdentity.load(tmp_path / "worker" / PENDING_NAME)
     assert stored is not None and stored.worker_id is None
     second = worker_host(tmp_path)
     try:
@@ -537,7 +561,7 @@ def test_upload_resumes_across_a_controller_restart(enrolled, rt, host, free, tm
         urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
             request, timeout=10
         )
-    host.transfers = Transfers(rt.work_dir, free_bytes=free)
+    host.transfers = transfers(rt, free)
     assert client.outputs(a)["files"][0]["received"] == 12345
     done = client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
     assert done["done"] is True and (rt.work_dir / path).read_bytes() == OUTPUT
@@ -655,3 +679,436 @@ def test_a_worker_agent_starts_the_worker_host_and_joins_it_on_shutdown(
         shutdown.shutdown()
         assert shutdown.stopped.wait(30)
     assert host._stop.is_set()
+
+
+# ── review fixes: the client (IR2, IR3, IR4, IR11, IR12, IR16, CX1, CX5) ──
+def _attempt(enrolled, rt, tmp_path):
+    client, _, film_id, _, worker_id, worker = enrolled
+    resource = rt.store.get_worker(
+        rt.operator, worker_id
+    ).worker.physical_binding.resource_id
+    ident = WorkerIdentity.load(tmp_path / "worker" / IDENTITY_NAME)
+    from taskpaw_v3.workflow.auth import authenticate
+
+    auth = authenticate(rt.store, ident.credential_id, ident.secret)
+    remote = Remote(worker_id, "5060 Ti-1", auth, worker.boot_id, resource)
+    claimed, command = claim_remote(rt, remote, film_id, "restore")
+    a = command.attempt_id
+    path = f"{a}/movie.mp4"
+    local = tmp_path / "out.mp4"
+    local.write_bytes(OUTPUT)
+    client.plan_outputs(a, [{"path": path, "size": len(OUTPUT), "sha256": sha(OUTPUT)}])
+    return client, remote, claimed, a, path, local
+
+
+def test_backoff_never_overflows():
+    assert backoff(1024) == 30.0 and backoff(10**9, base=0.02) == 30.0  # CX1
+
+
+def test_an_empty_work_copy_is_staged(enrolled):
+    """CX5: nothing to fetch, still renamed into place."""
+    client, staging, film_id, _, _, _ = enrolled
+    envelope = {
+        "film": film_id,
+        "rev": 1,
+        "workcopy": [
+            {
+                "item_id": "00000000-0000-4000-8000-0000000000e1",
+                "relative_path": "intake/x/empty.srt",
+                "size": 0,
+                "sha256": EMPTY_SHA256,
+            }
+        ],
+    }
+    [path] = client.download_film(envelope, staging)
+    assert path.read_bytes() == b"" and not path.with_name("empty.srt.part").exists()
+
+
+def test_already_staged_bytes_are_not_needed_twice(tmp_path, monkeypatch):
+    """IR16: 90 GB of a 100 GB film is staged; the rest fits the free space."""
+    gb = 10**9
+    staging = st.Staging(tmp_path, 500, free_bytes=lambda p: 250 * gb)
+    monkeypatch.setattr(staging, "used", lambda: 90 * gb)
+    staging.admit(100 * gb, 90 * gb)
+    with pytest.raises(st.StagingError):
+        staging.admit(100 * gb, 0)
+
+
+def test_a_received_but_uncommitted_upload_is_not_done(
+    enrolled, rt, tmp_path, monkeypatch
+):
+    """IR2: a refused rename is `commit_pending` (transient), never success;
+    the next call commits it."""
+    client, _, _, a, path, local = _attempt(enrolled, rt, tmp_path)
+    replace = tr.os.replace
+
+    def refusing(src, dst):
+        if str(src).endswith(".part"):
+            raise PermissionError(13, "in use")
+        return replace(src, dst)
+
+    monkeypatch.setattr(tr.os, "replace", refusing)
+    with pytest.raises(ApiError) as exc:
+        client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
+    assert exc.value.code == "commit_pending" and exc.value.transient
+    with pytest.raises(ApiError) as again:  # all received, still not committed
+        client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
+    assert again.value.code == "commit_pending"
+    assert not (rt.work_dir / path).exists()
+    monkeypatch.setattr(tr.os, "replace", replace)
+    done = client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
+    assert done["done"] is True and (rt.work_dir / path).read_bytes() == OUTPUT
+
+
+def test_a_refusal_before_the_body_is_read_surfaces_its_code(enrolled, rt, tmp_path):
+    """IR12: the server refused and reset the stream; GET outputs reads why."""
+    client, remote, claimed, a, path, local = _attempt(enrolled, rt, tmp_path)
+
+    class Reset(WorkerClient):
+        def open(self, method, path, **kw):
+            if method == "PUT":
+                boot(rt, remote, "00000000-0000-4000-8000-0000000000b2")
+                resolve_open(rt, claimed.assignment_id, "failed")
+                raise ApiError(0, "unreachable")  # the reset hid the 409
+            return super().open(method, path, **kw)
+
+    reset = Reset("127.0.0.1", client.port, client._credential, timeout=10)
+    with pytest.raises(ApiError) as exc:
+        reset.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
+    assert exc.value.code == "stale_attempt"
+
+
+def _cut(client, a, path, raw, total):
+    """A first stream cut short: the server keeps what arrived."""
+    request = urllib.request.Request(
+        f"{client.base}/attempts/{a}/files/{urllib.request.quote(path)}",
+        data=raw,
+        method="PUT",
+        headers={
+            **client._headers(True),
+            "Content-Range": f"bytes 0-{total - 1}/{total}",
+        },
+    )
+    with pytest.raises(urllib.error.HTTPError):
+        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(
+            request, timeout=10
+        )
+
+
+def test_a_large_prefix_resumes_after_a_real_restart_without_a_put_timeout(
+    enrolled, rt, free, server, tmp_path, monkeypatch
+):
+    """IR3/IR18: a new app instance on the same dirs, a prefix whose re-hash
+    takes longer than the client's socket timeout. GET outputs (long
+    timeout) rebuilds the hash; the PUT streams at once."""
+    client, _, _, a, path, local = _attempt(enrolled, rt, tmp_path)
+    _cut(client, a, path, OUTPUT[:150_000], len(OUTPUT))
+    server.stop()
+    restarted = Server(Host(rt, transfers=transfers(rt, free)))
+    real = tr.hash_prefix
+    calls = []
+
+    def slow(part, size):
+        calls.append(size)
+        time.sleep(1.5)  # a 40 GB prefix
+        return real(part, size)
+
+    monkeypatch.setattr(tr, "hash_prefix", slow)
+    try:
+        quick = WorkerClient(
+            "127.0.0.1",
+            restarted.port,
+            client._credential,
+            timeout=0.5,
+            verify_timeout=30,
+        )
+        done = quick.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
+        assert done["done"] is True and (rt.work_dir / path).read_bytes() == OUTPUT
+        assert calls == [150_000]  # once, in GET outputs
+    finally:
+        restarted.stop()
+
+
+def _raw_put(port, client, a, path, total, first):
+    import socket
+
+    sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    head = (
+        f"PUT {PREFIX}/attempts/{a}/files/{urllib.request.quote(path)} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1\r\n"
+        f"Authorization: {client._headers(True)['Authorization']}\r\n"
+        f"Content-Range: bytes 0-{total - 1}/{total}\r\n"
+        f"Content-Length: {total}\r\n"
+        "Content-Type: application/octet-stream\r\n\r\n"
+    )
+    sock.sendall(head.encode() + first)
+    return sock
+
+
+PREFIX = "/worker/v1"
+
+
+class _Errors(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.ERROR)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def test_a_client_disconnect_keeps_its_bytes_and_logs_no_error(
+    enrolled, rt, host, server, tmp_path
+):
+    """IR11: a worker that vanishes mid-PUT: no 500, no traceback, and every
+    byte already received is kept for the resume."""
+    client, _, _, a, path, local = _attempt(enrolled, rt, tmp_path)
+    errors = _Errors()
+    for name in ("uvicorn.error", "taskpaw"):
+        logging.getLogger(name).addHandler(errors)
+    try:
+        sock = _raw_put(server.port, client, a, path, len(OUTPUT), OUTPUT[:50_000])
+        time.sleep(0.2)
+        sock.close()
+        until(lambda: not host.transfers._streams)
+        assert client.outputs(a)["files"][0]["received"] == 50_000
+    finally:
+        for name in ("uvicorn.error", "taskpaw"):
+            logging.getLogger(name).removeHandler(errors)
+    assert errors.records == []
+    done = client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
+    assert done["done"] is True
+
+
+def test_a_stalled_upload_frees_its_slot_and_a_concurrent_put_is_429(
+    enrolled, rt, host, server, tmp_path
+):
+    """IR4/IR18: a second PUT while the first streams is 429; a stream with no
+    progress for the idle time is dropped, keeping what arrived."""
+    client, _, _, a, path, local = _attempt(enrolled, rt, tmp_path)
+    sock = _raw_put(server.port, client, a, path, len(OUTPUT), OUTPUT[:1000])
+    try:
+        until(lambda: host.transfers._streams)
+        with pytest.raises(ApiError) as exc:
+            client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
+        assert exc.value.code == "busy" and exc.value.status == 429
+        until(lambda: not host.transfers._streams, timeout=IDLE * 5)
+        assert client.outputs(a)["files"][0]["received"] == 1000
+        done = client.upload_file(a, path, local, size=len(OUTPUT), sha256=sha(OUTPUT))
+        assert done["done"] is True and (rt.work_dir / path).read_bytes() == OUTPUT
+    finally:
+        sock.close()
+
+
+def test_a_stalled_download_frees_its_slot(tmp_path):
+    """IR4: a worker that stops reading never holds the download slot."""
+    import asyncio
+
+    from taskpaw_v3.agent.server.worker_api import _ReleasingFile
+
+    data = tmp_path / "x.bin"
+    data.write_bytes(b"x" * 100)
+    closed = []
+
+    async def run():
+        never = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                await never.wait()
+
+        async def receive():
+            await never.wait()
+
+        scope = {"type": "http", "method": "GET", "headers": [], "path": "/"}
+        response = _ReleasingFile(data, on_close=lambda: closed.append(1), idle=0.1)
+        await response(scope, receive, send)
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+    assert closed == [1]
+
+
+def test_re_join_with_an_expired_code_keeps_the_working_identity(
+    tmp_path, rt, host, server, clock
+):
+    """IR7: the old identity stays until the new pairing succeeds."""
+    issued = code_for(rt, server)
+    worker = worker_host(tmp_path)
+    try:
+        worker.join(issued["code"], str(tmp_path / "staging"))
+        until(lambda: worker.state == "running")
+        before = (tmp_path / "worker" / IDENTITY_NAME).read_bytes()
+        again = devices.repair(
+            rt,
+            issued["worker_id"],
+            row(rt, host, issued["worker_id"])["version"],
+            host="127.0.0.1",
+            port=server.port,
+        )
+        clock.advance(timedelta(minutes=16))
+        with pytest.raises(JoinError):
+            worker.join(again["code"], str(tmp_path / "staging"))
+        assert (tmp_path / "worker" / IDENTITY_NAME).read_bytes() == before
+        until(lambda: worker.state == "running")
+        assert worker.status()["worker_id"] == issued["worker_id"]
+    finally:
+        assert worker.stop()
+
+
+# ── review fixes: the worker loop (IR6, IR8, IR15, CX4) ──────────────────
+WORKER = "00000000-0000-4000-8000-000000000003"
+
+
+class FakeController:
+    """A scripted controller for the loop: each method pops a scripted reply
+    or error, then repeats its default."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.beats: list[dict] = []
+        self.record: dict = {"worker_id": WORKER, "capability": None}
+        self.script: dict[str, list] = {}
+
+    def __call__(self, host, port, credential, **kw):
+        return self
+
+    def _next(self, name, default):
+        self.calls.append(name)
+        queue = self.script.get(name) or []
+        value = queue.pop(0) if queue else default
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def self_view(self):
+        return self._next("self", {"worker": self.record})
+
+    def capabilities(self, body):
+        reply = self._next("capabilities", {"revision": 1, "status": "applied"})
+        self.record = {
+            "worker_id": WORKER,
+            "capability": {"probed": dict(body)},
+        }
+        return reply
+
+    def boot(self, boot_id):
+        return self._next("boot", {"status": "reconciled", "reconciled": True})
+
+    def heartbeat(self, beat):
+        self.beats.append(beat)
+        return self._next("heartbeat", {"routes": [], "reconcile_needed": False})
+
+
+def reasons(worker) -> list[str]:
+    """The reason shown at each wait: every back-off and every beat."""
+    seen: list[str] = []
+    wait = worker._wait
+
+    def recording(seconds):
+        seen.append(worker.reason)
+        return wait(seconds)
+
+    worker._wait = recording
+    return seen
+
+
+def loop_worker(tmp_path, fake, probe=None, **kw):
+    ident = WorkerIdentity(
+        controller_host="127.0.0.1",
+        controller_port=1,
+        pairing_id=PAIRING,
+        credential_id="00000000-0000-4000-8000-000000000002",
+        secret=SecretStr("s" * 43),
+        staging_dir=str(tmp_path / "staging"),
+        worker_id=WORKER,
+    )
+    (tmp_path / "worker").mkdir(exist_ok=True)
+    ident.save(tmp_path / "worker" / IDENTITY_NAME)
+    return worker_host(tmp_path, probe=probe, client_factory=fake, **kw)
+
+
+def test_heartbeats_run_while_the_boot_waits_for_reconcile(tmp_path):
+    """IR6: 等待对账 is a state of a live worker, not a loop without beats."""
+    fake = FakeController()
+    waiting = {"status": "unreconciled", "reconciled": False}
+    fake.script["boot"] = [waiting, waiting, waiting]
+    fake.script["heartbeat"] = [{"routes": [], "reconcile_needed": True}] * 3
+    worker = loop_worker(tmp_path, fake)
+    seen = reasons(worker)
+    try:
+        worker.start()
+        until(lambda: worker.reconciled)
+        boots = [i for i, name in enumerate(fake.calls) if name == "boot"]
+        assert fake.calls.index("heartbeat") < boots[3]  # beats before reconcile
+        assert "等待对账" in seen
+        until(lambda: worker.reason == "在线")
+    finally:
+        assert worker.stop()
+
+
+def test_ordinary_errors_never_end_the_loop(tmp_path, monkeypatch):
+    """IR8: staging trouble, a refused probe post and a missing GPU reading
+    are reported, backed off and retried."""
+    fake = FakeController()
+    fake.script["capabilities"] = [ApiError(409, "cas_conflict")]
+    readings = [None]
+
+    def flaky_probe(settings, staging):
+        if readings:
+            return readings.pop()
+        return Probe(probe("fake"), ("standard",), True)
+
+    worker = loop_worker(tmp_path, fake, probe=flaky_probe)
+    real = worker.staging
+    failures = [st.StagingError("暂存目录必须是完整路径"), OSError("gone")]
+
+    def staging():
+        if failures:
+            raise failures.pop(0)
+        return real()
+
+    monkeypatch.setattr(worker, "staging", staging)
+    seen = reasons(worker)
+    try:
+        worker.start()
+        until(lambda: fake.record["capability"] is not None and fake.beats)
+        assert any("暂存目录不可用" in reason for reason in seen)
+        assert any("主控拒绝" in reason for reason in seen)
+        assert any("GPU" in reason for reason in seen)
+        assert fake.calls.count("capabilities") == 2
+        until(lambda: worker.state == "running")
+    finally:
+        assert worker.stop()
+
+
+def test_a_refused_heartbeat_shows_its_reason(tmp_path):
+    """IR15: a 422 is not 「无法连接主控」."""
+    fake = FakeController()
+    fake.script["heartbeat"] = [ApiError(422, "invalid_request")] * 50
+    worker = loop_worker(tmp_path, fake)
+    try:
+        worker.start()
+        until(lambda: "invalid_request" in worker.reason)
+        assert "心跳" in worker.reason
+    finally:
+        assert worker.stop()
+
+
+def test_readiness_is_refreshed_without_reposting_an_unchanged_probe(tmp_path):
+    """CX4: tiers and ASR readiness follow the disk; the probe is posted
+    again only when it changed (R4)."""
+    fake = FakeController()
+    tiers = [("standard",)]
+
+    def growing(settings, staging):
+        return Probe(probe("fake"), tiers[-1], True)
+
+    worker = loop_worker(tmp_path, fake, probe=growing, probe_seconds=0.1)
+    try:
+        worker.start()
+        until(lambda: fake.beats and fake.beats[-1]["tiers_ready"] == ["standard"])
+        tiers.append(("standard", "good", "high"))
+        until(lambda: fake.beats[-1]["tiers_ready"] == ["standard", "good", "high"])
+        assert fake.calls.count("capabilities") == 1
+    finally:
+        assert worker.stop()

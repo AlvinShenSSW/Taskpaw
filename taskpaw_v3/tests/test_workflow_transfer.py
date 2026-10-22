@@ -34,6 +34,7 @@ from taskpaw_v3.tests.workflow_route_helpers import (
     route,
 )
 from taskpaw_v3.workflow import models as m
+from taskpaw_v3.workflow import transfer as tr
 from taskpaw_v3.workflow.stage_results import (
     FileRef,
     RestoreFacts,
@@ -42,8 +43,10 @@ from taskpaw_v3.workflow.stage_results import (
 )
 from taskpaw_v3.workflow.transfer import (
     CONTROLLER_RESERVE_BYTES,
+    PlanFile,
     TransferError,
     Transfers,
+    live_attempts,
     validate_finish_refs,
 )
 
@@ -80,9 +83,14 @@ def free():
     return Free()
 
 
+def transfers(rt, free) -> Transfers:
+    """The controller's `Transfers` as the host builds it (IR5: store-backed)."""
+    return Transfers(rt.work_dir, free_bytes=free, live=lambda: live_attempts(rt))
+
+
 @pytest.fixture
 def host(rt, free):
-    return Host(rt, transfers=Transfers(rt.work_dir, free_bytes=free))
+    return Host(rt, transfers=transfers(rt, free))
 
 
 @pytest.fixture
@@ -486,9 +494,12 @@ def test_a_controller_restart_mid_upload_keeps_offsets_and_rebuilds_the_hash(
         [{"path": path, "size": len(OUTPUT), "sha256": sha(OUTPUT)}],
     )
     put(api, joined, attempt, path, OUTPUT[:77_777], 0, len(OUTPUT))
-    host.transfers = Transfers(rt.work_dir, free_bytes=free)  # a new process
+    host.transfers = transfers(rt, free)  # a new process: no hash state yet
+    cold = put(api, joined, attempt, path, OUTPUT[77_777:], 77_777, len(OUTPUT))
+    assert cold.status_code == 409  # IR3: a PUT never re-hashes a prefix
+    assert cold.json() == {"code": "prefix_unverified", "received": 77_777}
     view = api.get(f"{P}/attempts/{attempt}/outputs", headers=joined.headers).json()
-    assert view["files"][0]["received"] == 77_777
+    assert view["files"][0]["received"] == 77_777  # GET rebuilt the hash
     done = put(api, joined, attempt, path, OUTPUT[77_777:], 77_777, len(OUTPUT))
     assert done.status_code == 200 and (rt.work_dir / path).read_bytes() == OUTPUT
 
@@ -749,3 +760,184 @@ def test_finish_refs_accept_both_kinds_and_refuse_changes(tmp_path):
     assert refused(raw) == "unverified_output"
     out.write_bytes(OUTPUT + b"x")
     assert refused(raw) == "unverified_output"
+
+
+# ── review fixes (IR2, IR3, IR5, IR13) ──────────────────────────────────
+def _one(api, joined, attempt, raw=OUTPUT, name="a.mp4"):
+    path = f"{attempt}/{name}"
+    planned = plan(
+        api, joined, attempt, [{"path": path, "size": len(raw), "sha256": sha(raw)}]
+    )
+    assert planned.status_code == 200, planned.text
+    return path
+
+
+def _view(api, joined, attempt):
+    response = api.get(f"{P}/attempts/{attempt}/outputs", headers=joined.headers)
+    assert response.status_code == 200, response.text
+    return response.json()["files"][0]
+
+
+def test_a_complete_uncommitted_part_is_committed_on_get(
+    api, rt, host, free, world, attempt
+):
+    """IR2: every byte arrived but the rename never ran (a crash)."""
+    joined = world[0]
+    path = _one(api, joined, attempt)
+    part = host.transfers.part_path(attempt, path)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(OUTPUT)
+    host.transfers = transfers(rt, free)  # and a restart
+    entry = _view(api, joined, attempt)
+    assert (entry["done"], entry["received"]) == (True, len(OUTPUT))
+    assert (rt.work_dir / path).read_bytes() == OUTPUT and not part.exists()
+
+
+def test_a_complete_part_with_a_wrong_hash_is_reset_on_get(api, host, world, attempt):
+    joined = world[0]
+    path = _one(api, joined, attempt)
+    part = host.transfers.part_path(attempt, path)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    part.write_bytes(bytes(len(OUTPUT)))
+    entry = _view(api, joined, attempt)
+    assert (entry["done"], entry["received"], entry["mismatches"]) == (False, 0, 1)
+    assert put(api, joined, attempt, path, OUTPUT, 0, len(OUTPUT)).status_code == 200
+
+
+def test_a_failed_commit_is_retried_by_the_next_request(
+    api, rt, world, attempt, monkeypatch
+):
+    """IR2: `os.replace` refused (a Windows sharing violation) leaves a
+    verified part, answered 503 `commit_pending`; the next GET commits it."""
+    joined = world[0]
+    path = _one(api, joined, attempt)
+    replace = os.replace
+
+    def refusing(src, dst):
+        if str(src).endswith(".part"):
+            raise PermissionError(13, "in use")
+        return replace(src, dst)
+
+    monkeypatch.setattr(tr.os, "replace", refusing)
+    refused = put(api, joined, attempt, path, OUTPUT, 0, len(OUTPUT))
+    assert refused.status_code == 503 and refused.json() == {"code": "commit_pending"}
+    assert refused.headers["retry-after"] == "5"
+    entry = _view(api, joined, attempt)
+    assert (entry["done"], entry["received"]) == (False, len(OUTPUT))
+    again = put(api, joined, attempt, path, OUTPUT, 0, len(OUTPUT))
+    assert again.json() == {"code": "offset_mismatch", "received": len(OUTPUT)}
+    monkeypatch.setattr(tr.os, "replace", replace)
+    calls = []
+    monkeypatch.setattr(tr, "hash_prefix", lambda *a: calls.append(a))
+    entry = _view(api, joined, attempt)
+    assert entry["done"] is True and calls == []  # verified once, not re-hashed
+    assert (rt.work_dir / path).read_bytes() == OUTPUT
+
+
+def test_a_resumed_put_reuses_the_hash_state_of_the_cut_stream(
+    api, rt, world, attempt, monkeypatch
+):
+    """IR3: the prefix hash survives in memory; the resumed PUT streams at
+    once and never re-reads the prefix."""
+    joined = world[0]
+    path = _one(api, joined, attempt)
+    cut = put(api, joined, attempt, path, OUTPUT[:150_000], 0, len(OUTPUT))
+    assert cut.status_code == 409
+    calls = []
+    monkeypatch.setattr(tr, "hash_prefix", lambda *a: calls.append(a))
+    done = put(api, joined, attempt, path, OUTPUT[150_000:], 150_000, len(OUTPUT))
+    assert done.status_code == 200 and calls == []
+    assert (rt.work_dir / path).read_bytes() == OUTPUT
+
+
+def test_an_oversize_body_keeps_the_hash_state_at_its_offset(api, world, attempt):
+    joined = world[0]
+    path = _one(api, joined, attempt)
+    put(api, joined, attempt, path, OUTPUT[:100], 0, len(OUTPUT))
+
+    def stream():
+        yield OUTPUT[100:150]
+        yield OUTPUT[150:] + b"overflow"
+
+    response = api.put(
+        f"{P}/attempts/{attempt}/files/{path}",
+        content=stream(),
+        headers={
+            **joined.headers,
+            "Content-Range": f"bytes 100-{len(OUTPUT) - 1}/{len(OUTPUT)}",
+        },
+    )
+    assert response.status_code == 413
+    done = put(api, joined, attempt, path, OUTPUT[100:], 100, len(OUTPUT))
+    assert done.status_code == 200, done.text
+
+
+def test_plans_of_settled_attempts_are_swept_and_stop_counting(
+    api, rt, free, world, attempt
+):
+    """IR5: a resolved, superseded or unknown attempt's plan and parts are
+    deleted and no longer reserve disk."""
+    joined, remote, film_id, _ = world
+    size = 10 * GB
+    free.value = CONTROLLER_RESERVE_BYTES + size + 2 * GB
+    big = [{"path": f"{attempt}/a.mp4", "size": size, "sha256": "a" * 64}]
+    assert plan(api, joined, attempt, big).status_code == 200
+    put(api, joined, attempt, big[0]["path"], b"x" * 1000, 0, size)
+    stray = rt.work_dir / ".incoming" / str(uuid.uuid4())
+    stray.mkdir(parents=True)
+    (stray / "plan.json").write_text("{}", encoding="utf-8")
+    boot(rt, remote, boot_id())  # isolated to `unknown`, then resolved
+    resolve_open(
+        rt,
+        next(
+            o.assignment.assignment_id
+            for o in rt.store.list_open_assignments(rt.operator)
+            if o.assignment.attempt_id == attempt
+        ),
+        "failed",
+    )
+    other, _ = real_film(rt)
+    second_joined, second_boot = enrol(api, rt, "5060 Ti-2")
+    route(rt, other, second_joined.worker_id)
+    worker = rt.store.get_worker(rt.operator, second_joined.worker_id).worker
+    second = Remote(
+        second_joined.worker_id,
+        "5060 Ti-2",
+        second_joined.auth(rt),
+        second_boot,
+        worker.physical_binding.resource_id,
+    )
+    b = claim_remote(rt, second, other, "restore")[1].attempt_id
+    again = [{"path": f"{b}/a.mp4", "size": size, "sha256": "a" * 64}]
+    assert plan(api, second_joined, b, again).status_code == 200  # a is gone
+    assert not (rt.work_dir / ".incoming" / attempt).exists()
+    assert not stray.exists()
+    assert (rt.work_dir / ".incoming" / b / "plan.json").is_file()
+
+
+def test_the_sweep_runs_at_start(rt, free, world, attempt):
+    stray = rt.work_dir / ".incoming" / str(uuid.uuid4())
+    stray.mkdir(parents=True)
+    kept = rt.work_dir / ".incoming" / attempt
+    kept.mkdir(parents=True)
+    transfers(rt, free).sweep()
+    assert kept.is_dir() and not stray.exists()
+
+
+def test_a_part_name_cannot_shadow_a_folder(api, world, attempt):
+    """IR13: `x`'s part is `x.part`, so `x.part/` cannot be a folder too."""
+    joined = world[0]
+    body = [
+        {"path": p, "size": 1, "sha256": sha(b"x")}
+        for p in (f"{attempt}/x", f"{attempt}/X.part/y.srt")
+    ]
+    response = plan(api, joined, attempt, body)
+    assert response.status_code == 422 and response.json() == {"code": "invalid_plan"}
+
+
+def test_unit_plans_count_only_live_attempts(tmp_path):
+    a = str(uuid.uuid4())
+    t = Transfers(tmp_path, free_bytes=lambda p: 10**15, live=lambda: {a})
+    t.put_plan(a, [PlanFile(f"{a}/x.mp4", 10, "a" * 64)])
+    assert len(t._plans(frozenset({a}))) == 1
+    assert t._plans(frozenset()) == []

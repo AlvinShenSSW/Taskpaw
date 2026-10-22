@@ -875,6 +875,7 @@ def run_pass(rt, clock, workers):
         },
         now=clock.now(),
         executors=rt.executors,
+        remote_enabled=True,
     )
 
 

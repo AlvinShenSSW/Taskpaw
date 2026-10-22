@@ -351,6 +351,7 @@ def register_workflow_routes(
     def workflow_approve_device(worker_id: str, body: ApproveBody) -> dict[str, bool]:
         from taskpaw_v3.workflow import devices
 
+        _remote_on()  # IR1: approving hands the GPU stages to the worker
         _device(
             lambda rt, _fleet: devices.approve(
                 rt,
@@ -368,6 +369,7 @@ def register_workflow_routes(
     ) -> dict[str, bool]:
         from taskpaw_v3.workflow import devices
 
+        _remote_on()
         _device(
             lambda rt, _fleet: devices.set_admission(
                 rt, worker_id, body.expected_version, body.state
@@ -379,7 +381,11 @@ def register_workflow_routes(
     def workflow_revoke_device(worker_id: str, body: VersionBody) -> dict[str, bool]:
         from taskpaw_v3.workflow import devices
 
-        _device(lambda rt, _fleet: devices.revoke(rt, worker_id, body.expected_version))
+        _device(
+            lambda rt, fleet: devices.revoke(
+                rt, worker_id, body.expected_version, fleet
+            )
+        )
         return {"ok": True}
 
     @app.post("/control/workflow/devices/{worker_id}/retire")
