@@ -9,13 +9,13 @@ probe here — a reachable agent running this monitor is itself the liveness pro
 
 from __future__ import annotations
 
-import subprocess
-import sys
+import subprocess  # noqa: F401  (tests fake nvidia-smi via hm.subprocess.run)
 import time
 from typing import Optional
 
 from pydantic import Field
 
+from taskpaw_v3.core.gpu_sample import gpu_sample
 from taskpaw_v3.monitors.base import (
     BaseMonitorConfig,
     EventEmitter,
@@ -43,42 +43,16 @@ class HostMetricsConfig(BaseMonitorConfig):
 
 
 def read_gpu() -> Optional[dict]:
-    """Windows GPU utilization + VRAM via nvidia-smi (V2 method): util%, and
-    memory used/total (MB) summed across GPUs. None when unavailable (non-Windows,
-    no nvidia-smi, or no NVIDIA GPU)."""
-    if sys.platform != "win32":
+    """Windows GPU utilization + VRAM via nvidia-smi (V2 method): util% (avg),
+    and memory used/total (MB) summed across GPUs. None when unavailable
+    (non-Windows, no nvidia-smi, or no NVIDIA GPU).
+
+    Delegates to the shared, 4 s cached `gpu_sample()` (PWR-1 PW02), which also
+    reads power for the power sampler; this contract is unchanged."""
+    sample = gpu_sample()
+    if sample is None:
         return None
-    try:
-        out = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=utilization.gpu,memory.used,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if out.returncode != 0 or not out.stdout.strip():
-            return None
-        utils, used, total = [], 0.0, 0.0
-        for line in out.stdout.strip().splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 3:
-                continue
-            utils.append(float(parts[0]))
-            used += float(parts[1])
-            total += float(parts[2])
-        if not utils:
-            return None
-        return {
-            "util_pct": round(sum(utils) / len(utils), 1),  # avg utilization
-            "mem_used_mb": round(used),  # summed VRAM
-            "mem_total_mb": round(total),
-        }
-    except Exception:
-        return None
+    return {k: sample[k] for k in ("util_pct", "mem_used_mb", "mem_total_mb")}
 
 
 class HostMetricsInstance(MonitorInstance):
