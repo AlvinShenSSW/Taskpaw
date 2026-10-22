@@ -45,11 +45,10 @@ def _live(
     not already among the stage's `resolved` attempts: a route takes the
     host's status before it reads the records, so an attempt that resolved in
     between is counted once, from its evidence (Codex PWR-2/3 r2)."""
-    if not current or current.get("film_id") != film_id:
+    if not _active(film_id, stage, current, resolved):
         return None
-    if current.get("stage") != stage or not isinstance(current.get("energy"), dict):
-        return None
-    if current.get("attempt_id") in resolved:
+    assert current is not None
+    if not isinstance(current.get("energy"), dict):
         return None
     try:
         return m.AttemptEnergy.model_validate(current["energy"])
@@ -57,8 +56,26 @@ def _live(
         return None
 
 
+def _active(
+    film_id: str,
+    stage: str,
+    current: dict[str, Any] | None,
+    resolved: Sequence[str] = (),
+) -> bool:
+    """This film's stage is running now, whether or not its energy can be read
+    (sampling off or a gap leaves it unknown, never finished — Codex r5)."""
+    return bool(
+        current
+        and current.get("film_id") == film_id
+        and current.get("stage") == stage
+        and current.get("attempt_id") not in resolved
+    )
+
+
 def _stage(
-    values: Sequence[m.AttemptEnergy | None], live: m.AttemptEnergy | None
+    values: Sequence[m.AttemptEnergy | None],
+    live: m.AttemptEnergy | None,
+    active: bool = False,
 ) -> dict[str, Any]:
     parts = [v for v in values if v is not None] + ([live] if live else [])
     wh = sum(p.wh for p in parts)
@@ -74,8 +91,8 @@ def _stage(
         "peak_w": max(peaks) if peaks else None,
         "machine": LOCAL,
         "attempts": len(values) + (1 if live else 0),
-        "partial": any(v is None for v in values),
-        "running": live is not None,
+        "partial": any(v is None for v in values) or (active and live is None),
+        "running": active,
     }
 
 
@@ -90,11 +107,12 @@ def film_energy(
     for stage in film.stages:
         if stage.stage not in STAGES:
             continue
+        active = _active(film.film_id, stage.stage, current, stage.attempt_ids)
         live = _live(film.film_id, stage.stage, current, stage.attempt_ids)
-        if not stage.attempt_energy and live is None:
+        if not stage.attempt_energy and not active:
             continue
         known += sum(1 for v in stage.attempt_energy if v is not None) + bool(live)
-        stages[stage.stage] = _stage(stage.attempt_energy, live)
+        stages[stage.stage] = _stage(stage.attempt_energy, live, active)
     if known == 0:
         return None
     return {

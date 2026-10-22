@@ -525,6 +525,20 @@ def test_the_running_attempt_adds_its_energy_so_far():
     assert board.live_power(film(), current) is None
 
 
+def test_an_active_stage_without_a_live_reading_stays_running_and_partial():
+    """Codex r5: sampling off or a gap while a later stage runs must not turn
+    the film into a finished, complete energy record."""
+    row = film(spent={"restore": (energy(100.0),)}, statuses={"scrape": "running"})
+    current = {"film_id": row.film_id, "stage": "scrape", "uses_gpu": False}
+    value = en.film_energy(row, current)  # no `energy` in current: unknown
+    assert value["running"] is True and value["partial"] is True
+    assert value["stages"]["scrape"]["running"] is True
+    assert value["stages"]["scrape"]["partial"] is True
+    assert value["total_wh"] == pytest.approx(100.0)
+    # the same film once nothing runs any more is complete again
+    assert en.film_energy(row)["running"] is False
+
+
 def test_rates_take_the_median_of_the_newest_ten_films_per_group():
     films = [whole(100.0 * (i + 1), done_at=i) for i in range(12)]  # 2 h films
     (rate,) = en.rates(films)
