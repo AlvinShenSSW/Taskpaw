@@ -2,10 +2,9 @@ import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api } from "../../api";
 import { itemActors, itemNumber, itemResolution, itemTitle, reviewLine, type StatusKey } from "./mediaModel";
 import { Chip, EmptyState, Icon, ItemCover, Notice, PageTitle, StatusChip } from "./parts";
-import { mediaFilmKey, useWorkspace } from "./workspace";
+import { useWorkspace } from "./workspace";
 
 type Filter = "all" | "ready" | "blocked";
 
@@ -19,12 +18,12 @@ export function ReviewPage() {
       <PageTitle title="待确认" />
       <Notice icon={VerifiedUserIcon}>入库不会覆盖或删除已有片库。来源暂时无法清理时会保留，并显示“已入库 · 待清理”。</Notice>
       <div className="toolbar">
-        <div className="filters" role="group" aria-label="按核对状态筛选">
+        {!ws.readOnly && <div className="filters" role="group" aria-label="按核对状态筛选">
           {([["all", "全部待确认"], ["ready", "可核对入库"], ["blocked", "需要先处理"]] as Array<[Filter, string]>).map(([v, l]) => (
             <button key={v} type="button" className="filter-pill" aria-pressed={filter === v} onClick={() => setFilter(v)}>{l}</button>
           ))}
-        </div>
-        <span className="small muted">{items.length} 部影片 · 每次单独确认</span>
+        </div>}
+        <span className="small muted">{items.length} 部影片{!ws.readOnly && " · 每次单独确认"}</span>
       </div>
       {items.length ? (
         <div className="review-grid">
@@ -41,11 +40,13 @@ export function ReviewPage() {
                   <div className="film-title"><h3>{itemTitle(item)}</h3>{itemResolution(item) && <Chip>{itemResolution(item)}</Chip>}</div>
                   <p>{[itemNumber(item), actor].filter(Boolean).join(" · ")}</p>
                   <div className="chips"><StatusChip status={item.status} /></div>
-                  <div className="keyline"><Icon of={FolderOpenIcon} /><span className="wrap">{target ?? "尚未选定目标"}</span></div>
-                  <ReviewLine filmId={item.id} status={item.status} candidates={candidates?.length ?? null} />
+                  {!ws.readOnly && <>
+                    <div className="keyline"><Icon of={FolderOpenIcon} /><span className="wrap">{target ?? "尚未选定目标"}</span></div>
+                    <ReviewLine filmId={item.id} status={item.status} candidates={candidates?.length ?? null} />
+                  </>}
                   <div className="actions">
                     <button type="button" className={`btn small${item.status === "ready" ? " primary" : ""}`}
-                      onClick={() => ws.openReview(item.id)}>{item.status === "ready" ? "图文核对入库" : "查看并处理"}</button>
+                      onClick={() => ws.readOnly ? ws.openDetail(item.id) : ws.openReview(item.id)}>{ws.readOnly ? "查看详情" : item.status === "ready" ? "图文核对入库" : "查看并处理"}</button>
                   </div>
                 </div>
               </article>
@@ -61,8 +62,9 @@ export function ReviewPage() {
 
 // 「最终成品包 {n} 个文件 · Miko 已完成」 needs the final package, which only the detail has.
 function ReviewLine({ filmId, status, candidates }: { filmId: string; status: StatusKey; candidates: number | null }) {
+  const ws = useWorkspace();
   const detail = useQuery({
-    queryKey: mediaFilmKey(filmId), queryFn: () => api.workflowFilm(filmId), enabled: status === "ready", staleTime: 30000,
+    queryKey: ws.filmKey(filmId), queryFn: () => ws.readFilm(filmId), enabled: status === "ready", staleTime: 30000,
   });
   return <p>{reviewLine(status, detail.data?.files.length ?? null, candidates)}</p>;
 }

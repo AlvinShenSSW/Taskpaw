@@ -96,6 +96,27 @@ Manage agents anytime: `list-servers`, `enable-server --id N`,
 
 ---
 
+### Media workflow monitoring and event ownership
+
+The Mac Hub is a read-only media progress monitor. Its **媒体处理** tab shows the
+workflow of the enabled Windows Agent that answers `/workflow/films`, using the
+same polling token as other Agent reads. Workflow routes and images require the
+Agent's existing Bearer `api_token`; disabled workflows answer 404. Operate the
+workflow from the Windows Agent's **媒体处理中心** console. The Mac view cannot
+enqueue, confirm, retry, pause, download models or open remote folders.
+
+**The Mac Hub must be the only consumer of each Agent's `/events` queue.** An
+acknowledgement removes those events for every reader. Do not attach another Hub
+or diagnostic script that consumes `/events`. A future Windows controller Hub
+must read `/status` and `/workflow/*` only and must not poll `/events`. Cursor
+lineage checks protect pairing and restart continuity; they do not provide
+separate queues for multiple consumers.
+
+Workflow events share the existing Agent event queue and Hub outbox. OpenClaw
+messages use the `TaskPaw 媒体 | ` prefix, and `status.md` includes a **媒体处理**
+section. Workflow notification markers survive ordinary Agent restarts; this
+does not add durable payload storage to the Agent's in-memory event queue.
+
 ## Existing V2 Hub queue
 
 Before starting V3 against an existing Hub DB, stop the old Hub and perform a

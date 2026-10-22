@@ -13,7 +13,7 @@ export type ChipTone = "neutral" | "green" | "blue" | "amber" | "red";
 export type StatusKey =
   | "pending" | "receiving" | "postprocess_error" | "inbox" | "restore" | "encode" | "denoise" | "asr" | "translate"
   | "return" | "scrape" | "match" | "waiting" | "checking" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
-  | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopping" | "failed" | "intake_attention";
+  | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopping" | "failed" | "intake_attention" | "awaiting_confirmation";
 
 export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   pending: ["待处理", "amber"],
@@ -35,6 +35,8 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   // Not in the V3 vocabulary: a film waiting for 确认入库 whose target preflight has not answered
   // yet (not polled now, or still loading); never 「待确认」 before the check (IR05).
   checking: ["检查中", "blue"],
+  // The Hub observes the controller's group only; it does not run a target preflight.
+  awaiting_confirmation: ["待确认", "amber"],
   ready: ["待确认", "amber"],
   multi: ["多个目标候选", "amber"],
   nomatch: ["暂无演员匹配", "amber"],
@@ -55,7 +57,7 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   intake_attention: ["收件需要处理", "amber"],
 };
 
-export const REVIEW_STATES: StatusKey[] = ["checking", "ready", "multi", "nomatch", "offline", "permission", "duplicate"];
+export const REVIEW_STATES: StatusKey[] = ["awaiting_confirmation", "checking", "ready", "multi", "nomatch", "offline", "permission", "duplicate"];
 export const EXCEPTION_STATES: StatusKey[] = [
   "postprocess_error", "offline", "permission", "duplicate", "unknown", "cleanup", "stopping", "failed", "intake_attention",
 ];
@@ -363,11 +365,12 @@ export type WorkItem =
   | { kind: "film"; id: string; row: FilmRow; status: StatusKey }
   | { kind: "package"; id: string; pkg: PackageRow; status: StatusKey };
 
-export function workItems(data: WorkflowFilms | undefined, preflights: Record<string, TargetPreflight | null>): WorkItem[] {
+export function workItems(data: WorkflowFilms | undefined, preflights: Record<string, TargetPreflight | null>, readOnly = false): WorkItem[] {
   if (!data) return [];
   return [
     ...(data.films ?? []).map((row): WorkItem =>
-      ({ kind: "film", id: row.film_id, row, status: filmStatus(row, preflights[row.film_id]) })),
+      ({ kind: "film", id: row.film_id, row,
+        status: readOnly && row.group === "confirm" ? "awaiting_confirmation" : filmStatus(row, preflights[row.film_id]) })),
     ...(data.packages ?? []).map((pkg): WorkItem =>
       ({ kind: "package", id: `pkg:${pkg.package_id}`, pkg, status: packageStatus(pkg) })),
   ];
