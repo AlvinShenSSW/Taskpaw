@@ -52,8 +52,11 @@ log = logging.getLogger("taskpaw.workflow.remote_worker")
 IDENTITY_NAME = "worker-identity.json"
 PENDING_NAME = "worker-identity.pending.json"  # IR7: a pairing not yet confirmed
 UNSAVED_REASON = "身份文件未保存，重试中"
+PENDING_REASON = "新的配对待确认"  # CX13: a pending pairing not yet settled
 ACTIVE_SECONDS = 5.0  # with an open route (R7)
 IDLE_SECONDS = 15.0
+PENDING_SECONDS = 60.0  # CX13: how often an unsettled pairing is checked again
+PENDING_TIMEOUT = 5.0  # CX13: one check never holds the loop longer
 PROBE_SECONDS = 60.0  # CX4: tier and ASR readiness follow the disk
 TIERS = ("standard", "good", "high")
 _TICKET = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
@@ -298,13 +301,15 @@ class WorkerHost:
         idle_seconds: float = IDLE_SECONDS,
         backoff_base: float = 1.0,
         probe_seconds: float = PROBE_SECONDS,
+        pending_seconds: float = PENDING_SECONDS,
     ) -> None:
         from taskpaw_v3 import __version__
 
         self.settings, self.data_dir = settings, data_dir
         self.identity_path = data_dir / IDENTITY_NAME
         self.pending_path = data_dir / PENDING_NAME
-        self.probe_seconds = probe_seconds
+        self.probe_seconds, self.pending_seconds = probe_seconds, pending_seconds
+        self._pending_due = 0.0  # monotonic; the next check of an unsettled pairing
         self._probe_due = 0.0  # monotonic; 0: probe at the next beat
         self._join_lock = threading.Lock()  # IR7: one join at a time
         self._closed = False  # CX10: set by stop(); nothing spawns after it
@@ -434,6 +439,7 @@ class WorkerHost:
             raise JoinError("无法写入身份文件") from None
         if not self._halt(30.0):
             raise JoinError("工作流仍在停止，请稍后再试")
+        self._pending_check = None  # CX13: this join's pending file supersedes it
         self.state, self.reason = "joining", "正在配对"
         client = self._client_factory(
             identity.controller_host, identity.controller_port, identity.credential
@@ -544,8 +550,10 @@ class WorkerHost:
         failures = 0
         while not self._stop.is_set():
             try:
-                self._session(client)
-                return
+                if not self._session(client):
+                    return
+                client, failures = self._client(), 0  # CX13: a pending pairing won
+                continue
             except ApiError as exc:
                 reason = f"主控拒绝了请求（{exc.code}），正在重试"
             except (StagingError, OSError):
@@ -560,34 +568,48 @@ class WorkerHost:
                 return
 
     def _settle_pending(self) -> None:
-        """A pending identity found at start (a pair whose save failed, or a
-        lost reply): /self 200 promotes it, 401 drops it and keeps the
-        current identity; while the controller is unreachable it waits."""
-        pending, self._pending_check = self._pending_check, None
+        """A pending identity found at start (a pair whose save failed, a lost
+        reply, or a re-join to a controller that was unreachable). One bounded
+        check: 200 promotes it, 401 drops it. Unreachable (or any other
+        answer) starts the saved identity at once and the session checks again
+        (CX13); with no saved identity it retries with backoff."""
+        pending = self._pending_check
         if pending is None:
             return
-        client = self._client_factory(
-            pending.controller_host, pending.controller_port, pending.credential
-        )
         attempt = 0
-        while not self._stop.is_set():
-            try:
-                me = client.self_view()
-            except ApiError as exc:
-                if exc.transient:
-                    self.reason = "无法连接主控，正在重试"
-                    attempt += 1
-                    if self._wait(backoff(attempt - 1, base=self.backoff_base)):
-                        return
-                    continue
-                if exc.status == 401:
-                    self._drop_pending(pending)
+        while self._check_pending(pending) == "unsettled":
+            if self.identity is not None:
+                self._pending_due = time.monotonic() + self.pending_seconds
                 return
-            pending.worker_id, pending.ticket = me["worker"]["worker_id"], None
-            self.identity, self.worker_id = pending, pending.worker_id
-            self._unsaved = True
-            self._promote()
-            return
+            self.reason = "无法连接主控，正在重试"
+            attempt += 1
+            if self._wait(backoff(attempt - 1, base=self.backoff_base)):
+                return
+
+    def _check_pending(self, pending: WorkerIdentity) -> str:
+        """One `/self` with the pending credential: "promoted", "dropped" or
+        "unsettled" (unreachable or any other answer; it stays pending)."""
+        client = self._client_factory(
+            pending.controller_host,
+            pending.controller_port,
+            pending.credential,
+            timeout=PENDING_TIMEOUT,
+        )
+        try:
+            me = client.self_view()
+        except ApiError as exc:
+            if exc.status != 401:
+                return "unsettled"
+            self._pending_check = None
+            self._drop_pending(pending)
+            return "dropped"
+        pending.worker_id, pending.ticket = me["worker"]["worker_id"], None
+        self._pending_check = None
+        self.identity, self.worker_id = pending, pending.worker_id
+        self._unsaved = True
+        self.reconciled, self._probe_due = False, 0.0
+        self._promote()
+        return "promoted"
 
     def _drop_pending(self, checked: WorkerIdentity) -> None:
         current = WorkerIdentity.load(self.pending_path)
@@ -598,15 +620,16 @@ class WorkerHost:
         except OSError:
             log.warning("cannot remove a refused pending worker identity")
 
-    def _session(self, client: WorkerClient) -> None:
+    def _session(self, client: WorkerClient) -> bool:
+        """True when a pending pairing was confirmed: run again on it."""
         me = self._retry(client.self_view)
         if me is None:
-            return
+            return False
         self.worker_id = me["worker"]["worker_id"]
         staging = self.staging()
         self._refresh(client, staging, me["worker"])
         if self._boot_once(client) is None:
-            return
+            return False
         failures = 0
         while not self._stop.is_set():
             try:
@@ -614,7 +637,7 @@ class WorkerHost:
             except ApiError as exc:
                 if exc.status == 401:
                     self._revoked()
-                    return
+                    return False
                 if exc.transient:
                     self.state, self.reason = "connecting", "无法连接主控，正在重试"
                 elif exc.status in (413, 422):  # IR15: say what was refused
@@ -624,18 +647,30 @@ class WorkerHost:
                     raise
                 failures += 1
                 if self._wait(backoff(failures - 1, base=self.backoff_base)):
-                    return
+                    return False
                 continue
             failures = 0
             self._promote()
+            if self._recheck_pending():
+                return True
             self._apply(reply)
             if reply.get("reconcile_needed") or not self.reconciled:
                 if self._boot_once(client) is None:  # IR6: beats go on meanwhile
-                    return
+                    return False
             if self._wait(self.active if self.routes else self.idle):
-                return
+                return False
             if time.monotonic() >= self._probe_due:
                 self._refresh(client, staging)
+        return False
+
+    def _recheck_pending(self) -> bool:
+        """CX13: an unsettled pairing is checked again once due, in the beat
+        loop; True when it was confirmed and the worker must switch to it."""
+        pending = self._pending_check
+        if pending is None or time.monotonic() < self._pending_due:
+            return False
+        self._pending_due = time.monotonic() + self.pending_seconds
+        return self._check_pending(pending) == "promoted"
 
     def _refresh(
         self,
@@ -678,6 +713,8 @@ class WorkerHost:
             self.last_heartbeat = datetime.now(timezone.utc)
         if self._unsaved:
             reason = UNSAVED_REASON
+        elif self._pending_check is not None:
+            reason = PENDING_REASON
         elif not self.reconciled:
             reason = "等待对账"
         elif not self._probe_body:
@@ -736,6 +773,7 @@ class WorkerHost:
             "reconciled": self.reconciled,
             "routes": routes,
             "paused": self.paused,
+            "pending": self._pending_check is not None,
         }
 
 

@@ -1611,3 +1611,117 @@ def test_a_restart_drops_a_pending_identity_the_controller_refuses(
         assert second.status()["worker_id"] == issued["worker_id"]
     finally:
         assert second.stop()
+
+
+# ── Codex round 5 (CX13) ────────────────────────────────────────────────
+class Gate:
+    """A client factory whose pending controller is unreachable until opened."""
+
+    def __init__(self, pending_id: str) -> None:
+        self.pending_id, self.up = pending_id, threading.Event()
+        self.calls = 0
+
+    def __call__(self, host, port, credential=None, **kw):
+        client = WorkerClient(host, port, credential, **kw)
+        if credential is None or credential[0] != self.pending_id or self.up.is_set():
+            return client
+        self.calls += 1
+
+        def down():
+            raise ApiError(0, "unreachable")
+
+        client.self_view = down  # type: ignore[method-assign]
+        return client
+
+
+def _saved_and_pending(tmp_path, rt, server, *, refused=False):
+    """The working identity of device 1 saved; a pending one for device 2 (or
+    a credential the controller refuses). Returns both worker ids."""
+    one = code_for(rt, server, "one")
+    first = worker_host(tmp_path)
+    first.join(one["code"], str(tmp_path / "staging"))
+    until(lambda: first.state == "running")
+    assert first.stop()
+    data = tmp_path / "worker"
+    if refused:
+        WorkerIdentity(
+            controller_host="127.0.0.1",
+            controller_port=server.port,
+            pairing_id=PAIRING,
+            credential_id="00000000-0000-4000-8000-0000000000fe",
+            secret=SecretStr("y" * 43),
+            staging_dir=str(tmp_path / "staging"),
+            ticket=SecretStr(TICKET),
+        ).save(data / PENDING_NAME)
+        return one["worker_id"], None
+    two = code_for(rt, server, "two")
+    other = worker_host(tmp_path / "second")
+    other.join(two["code"], str(tmp_path / "staging2"))
+    until(lambda: other.state == "running")
+    assert other.stop()
+    (data / PENDING_NAME).write_bytes(
+        (tmp_path / "second" / "worker" / IDENTITY_NAME).read_bytes()
+    )
+    return one["worker_id"], two["worker_id"]
+
+
+def test_an_unreachable_pending_controller_never_blocks_the_saved_identity(
+    tmp_path, rt, host, server
+):
+    """CX13: the single start-up check fails; the saved identity is online
+    within a tick and the status says a pairing is waiting."""
+    saved, pending = _saved_and_pending(tmp_path, rt, server)
+    pend = WorkerIdentity.load(tmp_path / "worker" / PENDING_NAME)
+    assert pend is not None
+    gate = Gate(pend.credential_id)
+    worker = worker_host(tmp_path, client_factory=gate, pending_seconds=3600)
+    worker.start()
+    try:
+        until(lambda: worker.state == "running" and worker.reason == "新的配对待确认")
+        status = worker.status()
+        assert status["worker_id"] == saved and status["pending"] is True
+        assert (tmp_path / "worker" / PENDING_NAME).exists() and gate.calls == 1
+    finally:
+        assert worker.stop()
+
+
+def test_a_later_confirmation_of_the_pending_identity_switches_to_it(
+    tmp_path, rt, host, server
+):
+    saved, pending = _saved_and_pending(tmp_path, rt, server)
+    pend = WorkerIdentity.load(tmp_path / "worker" / PENDING_NAME)
+    assert pend is not None
+    gate = Gate(pend.credential_id)
+    worker = worker_host(tmp_path, client_factory=gate, pending_seconds=0.05)
+    worker.start()
+    try:
+        until(lambda: worker.state == "running" and worker.status()["pending"])
+        assert worker.status()["worker_id"] == saved
+        gate.up.set()
+        until(lambda: worker.status()["worker_id"] == pending)
+        until(lambda: worker.state == "running" and worker.reason == "在线")
+        loaded = WorkerIdentity.load(tmp_path / "worker" / IDENTITY_NAME)
+        assert loaded is not None and loaded.worker_id == pending
+        assert not (tmp_path / "worker" / PENDING_NAME).exists()
+        assert worker.status()["pending"] is False
+    finally:
+        assert worker.stop()
+
+
+def test_a_later_refusal_of_the_pending_identity_drops_it(tmp_path, rt, host, server):
+    saved, _ = _saved_and_pending(tmp_path, rt, server, refused=True)
+    kept = (tmp_path / "worker" / IDENTITY_NAME).read_bytes()
+    pend = WorkerIdentity.load(tmp_path / "worker" / PENDING_NAME)
+    assert pend is not None
+    gate = Gate(pend.credential_id)
+    worker = worker_host(tmp_path, client_factory=gate, pending_seconds=0.05)
+    worker.start()
+    try:
+        until(lambda: worker.state == "running" and worker.status()["pending"])
+        gate.up.set()
+        until(lambda: not (tmp_path / "worker" / PENDING_NAME).exists())
+        until(lambda: worker.reason == "在线" and not worker.status()["pending"])
+        assert worker.status()["worker_id"] == saved
+        assert (tmp_path / "worker" / IDENTITY_NAME).read_bytes() == kept
+    finally:
+        assert worker.stop()
