@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -224,13 +224,119 @@ def test_archive_cleanup_results_are_distinct_and_deduped(observer, monkeypatch)
     sink.observe(host)
     assert any("已入库 · 待清理" in e["message"] for e in queue.recent())
     finished = archived.model_copy(
-        update={"stages": board_film({s: (0, 1) for s in board.STAGE_ORDER}).stages}
+        update={
+            "stages": tuple(
+                stage.model_copy(update={"ended_at": datetime.now(timezone.utc)})
+                if stage.stage in ("cleanup_input", "cleanup_workcopy")
+                else stage
+                for stage in board_film({s: (0, 1) for s in board.STAGE_ORDER}).stages
+            )
+        }
     )
     films[:] = [finished]
     sink.observe(host)
     sink.observe(host)
     assert sum("已入库 · 清理完成" in e["message"] for e in queue.recent()) == 1
     assert sum("已入库 · 待清理" in e["message"] for e in queue.recent()) == 1
+
+
+def test_first_observation_does_not_replay_old_done_films(observer, monkeypatch):
+    sink, queue = observer
+    queue.add("other-monitor", "current activity")
+    old = board_film({s: (0, 1) for s in board.STAGE_ORDER})
+    films = [
+        old.model_copy(update={"film_id": str(uuid4()), "input_revision": 1})
+        for _ in range(251)
+    ]
+    host, calls = host_for(monkeypatch, films)
+    assert not sink.path.exists()
+    sink.observe(host)
+    assert calls[0] is None
+    assert len(queue) == 1
+    assert queue.recent()[0]["monitor"] == "other-monitor"
+    assert sink.snapshot()["counts"]["done"] == 251
+    assert sink.snapshot()["completed_at"] == []
+    restarted = events.WorkflowEvents(queue, sink.path)
+    restarted.observe(host)
+    assert len(queue) == 1
+
+
+@pytest.mark.parametrize(
+    ("hours_ago", "expected"), [(1, 2), (48, 2), (49, 0), (None, 0)]
+)
+def test_done_recovery_uses_the_existing_summary_window(
+    observer, monkeypatch, hours_ago, expected
+):
+    sink, queue = observer
+    now = datetime(2026, 10, 22, 12, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr(events, "datetime", Clock)
+    finished = board_film({s: (0, 1) for s in board.STAGE_ORDER})
+    ended = now - timedelta(hours=hours_ago) if hours_ago is not None else None
+    finished = finished.model_copy(
+        update={
+            "input_revision": 1,
+            "stages": tuple(
+                stage.model_copy(update={"ended_at": ended})
+                if stage.stage in ("cleanup_input", "cleanup_workcopy")
+                else stage
+                for stage in finished.stages
+            ),
+        }
+    )
+    host, _ = host_for(monkeypatch, [finished])
+    sink.observe(host)
+    events.WorkflowEvents(queue, sink.path).observe(host)
+    assert len(queue) == expected
+    if expected:
+        assert {row["data"]["kind"] for row in queue.recent()} == {
+            "workflow.film.translated",
+            "workflow.film.completed",
+        }
+        assert sink.snapshot()["completed_at"] == [ended.isoformat()]
+    else:
+        assert sink.snapshot()["completed_at"] == []
+
+
+def test_old_actionable_films_and_immediate_translated_still_notify(
+    observer, monkeypatch
+):
+    sink, queue = observer
+    pending = film(planned=False)
+    confirm = board_film({s: (0, 1) for s in board.STAGE_ORDER[:6]}).model_copy(
+        update={"input_revision": 1}
+    )
+    attention = film(stages=board_film({}, statuses={"restore": "failed"}).stages)
+    cleanup = board_film({s: (0, 1) for s in board.STAGE_ORDER[:7]}).model_copy(
+        update={"input_revision": 1}
+    )
+    completed = board_film({s: (0, 1) for s in board.STAGE_ORDER}).model_copy(
+        update={"input_revision": 1}
+    )
+    host, _ = host_for(monkeypatch, [pending, confirm, attention, cleanup, completed])
+    sink.observe(host)
+    required = {
+        (pending.film_id, "workflow.film.needs_planning"),
+        (confirm.film_id, "workflow.film.needs_confirmation"),
+        (attention.film_id, "workflow.stage.failed:restore"),
+        (cleanup.film_id, "workflow.film.pending_cleanup"),
+    }
+    observed = {(r["data"]["film_id"], r["data"]["kind"]) for r in queue.recent()}
+    assert required <= observed
+    assert all(film_id != completed.film_id for film_id, _kind in observed)
+    job = SimpleNamespace(
+        film_id=completed.film_id, input_revision=1, stage="translate"
+    )
+    sink.resolved(host.runtime, job, "Film", ExecOutcome.succeeded())
+    immediate = queue.recent()[-1]
+    assert immediate["data"]["film_id"] == completed.film_id
+    assert immediate["data"]["kind"] == "workflow.film.translated"
+    assert immediate["message"] == summary_text("Film", film_timing(completed))
 
 
 def test_summary_reads_all_completed_films_and_clears_on_error(observer, monkeypatch):

@@ -78,6 +78,12 @@ exactly-once delivery across a process crash between queue and marker writes:
 EventQueue already persists the counter rather than the payload. Replacing that
 contract with another outbox is outside this task.
 
+First deployment must not replay the entire completed library as new work.
+For fully finished films, recover notifications only within the existing
+two-day cleanup-completion window used by the summary below. Older actionable
+states (including pending cleanup) and immediate dispatcher outcomes remain
+eligible. This uses existing timestamps without a first-run baseline or new state.
+
 A compact additive `workflow` summary in /status supplies group counts, current
 progress and recent completion timestamps to the existing Hub poller; no second
 Hub polling service or database schema is added. The observer reads film_board

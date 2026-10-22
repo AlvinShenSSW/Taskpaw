@@ -162,20 +162,24 @@ class WorkflowEvents:
                 if any(row["group"] == "planning" for row in rows)
                 else {}
             )
-            for film, row in zip(films, rows):
-                self._observe_film(film, row, plans.get(film.film_id))
             now = datetime.now(timezone.utc)
             completed = []
             for film, row in zip(films, rows):
-                if row["group"] != "done":
-                    continue
-                ends = [
-                    s.ended_at
-                    for s in film.stages
-                    if s.stage in _CLEANUPS and s.ended_at is not None
-                ]
-                if len(ends) == 2 and now - timedelta(days=2) <= max(ends) <= now:
+                if row["group"] == "done":
+                    ends = [
+                        s.ended_at
+                        for s in film.stages
+                        if s.stage in _CLEANUPS and s.ended_at is not None
+                    ]
+                    # Recover recent outcomes, not the whole archive on first
+                    # deployment. Unfinished films remain actionable at any age.
+                    if (
+                        len(ends) != 2
+                        or not now - timedelta(days=2) <= max(ends) <= now
+                    ):
+                        continue
                     completed.append(max(ends).isoformat())
+                self._observe_film(film, row, plans.get(film.film_id))
             current = dispatch.get("current")
             summary = {
                 "counts": board.counts(rows, packages),
