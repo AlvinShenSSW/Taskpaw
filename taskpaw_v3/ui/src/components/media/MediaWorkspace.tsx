@@ -15,6 +15,7 @@ import { Dialog, GlobalStyles, Snackbar, useMediaQuery } from "@mui/material";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { POWER_CSS } from "../power/powerStyles";
 import { api as requests, type HubServer } from "../../api";
+import { DevicesPage } from "./DevicesPage";
 import { ExceptionsPage } from "./ExceptionsPage";
 import { ExplainDialog, type Explain } from "./ExplainDialog";
 import { FilmDrawer } from "./FilmDrawer";
@@ -32,22 +33,22 @@ import {
   errorText, focusOnMount, isPaused, mediaFilmKey, mediaSourceKey, useMediaData, WorkspaceContext, type MediaData, type PageKey, type WorkspaceApi,
 } from "./workspace";
 
-// The ten pages of the workspace, in rail order (build spec §1 + U1 V2). The last four are
-// later pages, marked 「后续」 (operator decision 3).
+// The ten pages of the workspace, in rail order (build spec §1 + U1 V2). The last three are
+// later pages, marked 「后续」 (operator decision 3); 设备 is live since P2-2.
 const PAGES: Array<{ key: PageKey; label: string; icon: SvgIconComponent; later?: boolean }> = [
   { key: "overview", label: "概览", icon: GridViewIcon },
   { key: "pending", label: "待处理", icon: PlaylistAddCheckIcon },
   { key: "queue", label: "影片队列", icon: MovieIcon },
   { key: "review", label: "待确认", icon: FactCheckIcon },
   { key: "exceptions", label: "异常", icon: WarningAmberIcon },
-  { key: "devices", label: "设备", icon: DesktopWindowsIcon, later: true },
+  { key: "devices", label: "设备", icon: DesktopWindowsIcon },
   { key: "local", label: "本机", icon: ComputerIcon },
   { key: "libraries", label: "片库与规则", icon: FolderOpenIcon, later: true },
   { key: "bridge", label: "Mac 信息桥", icon: LanIcon, later: true },
   { key: "settings", label: "设置 / 迁移", icon: TuneIcon, later: true },
 ];
 const PREFLIGHT_PAGES = new Set<PageKey>(["overview", "review", "exceptions"]);
-const LIVE_PAGES = new Set<PageKey>(["overview", "pending", "queue", "review", "exceptions", "local"]);
+const LIVE_PAGES = new Set<PageKey>(["overview", "pending", "queue", "review", "exceptions", "devices", "local"]);
 const NAV_BACKDROP = { sx: { backgroundColor: "#030812CC" } };
 
 function badge(key: PageKey, data: MediaData): number | null {
@@ -136,13 +137,14 @@ function MediaWorkspaceContent({ readOnly = false, server, onOpenPower }: Props)
   const gpuFilm = films?.current;
 
   let body: ReactNode;
-  if (!LIVE_PAGES.has(page)) body = <LaterPage page={page as "devices" | "libraries" | "bridge" | "settings"} />;
+  if (!LIVE_PAGES.has(page)) body = <LaterPage page={page as "libraries" | "bridge" | "settings"} />;
   else if (data.films.isLoading) body = <div className="panel empty"><p>正在读取媒体流水线…</p></div>;
   else if (data.films.error || !films) body = <Notice tone="red" icon={WarningAmberIcon}>无法读取媒体流水线，请重试。{data.films.error ? `（${errorText(data.films.error)}）` : ""}</Notice>;
   else if (!running) body = <Notice icon={WarningAmberIcon}>媒体流水线未运行：{films.reason || films.state}</Notice>;
   else {
     body = page === "overview" ? <OverviewPage /> : page === "pending" ? <PendingPage /> : page === "queue" ? <QueuePage />
-      : page === "review" ? <ReviewPage /> : page === "exceptions" ? <ExceptionsPage /> : <LocalPage />;
+      : page === "review" ? <ReviewPage /> : page === "exceptions" ? <ExceptionsPage />
+        : page === "devices" ? <DevicesPage /> : <LocalPage />;
   }
 
   return (

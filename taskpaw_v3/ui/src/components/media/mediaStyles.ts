@@ -238,6 +238,16 @@ export const MEDIA_CSS = `
 .mw .device-name{display:flex;gap:12px}
 .mw .device-name .device-icon{width:43px;height:43px}
 .mw .device-name p{color:var(--muted);font-size:11px;margin-top:4px}
+.mw .device-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:18px}
+.mw .device-list .facts{margin-top:4px}
+.mw .field{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
+.mw .field .input{width:100%;font-size:13px}
+.mw .code-box{padding:14px;border:1px solid #3b4d66;border-radius:8px;background:#0d1728;font-size:13px;overflow-wrap:anywhere;user-select:all}
+.mw .switch-row{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.mw .switch{display:inline-flex;align-items:center;gap:10px;min-height:44px;font-size:13px;cursor:pointer}
+.mw .switch input{width:20px;height:20px;accent-color:var(--green)}
+.mw .probe-table .changed td:first-of-type{color:var(--amber)}
+.mw .probe-table .chip{margin-left:8px}
 .mw .metric-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .mw .metric-grid label{font-size:10px;color:var(--muted);display:block}
 .mw .metric-grid strong{display:block;font:500 20px/1.8 var(--mono);white-space:nowrap}

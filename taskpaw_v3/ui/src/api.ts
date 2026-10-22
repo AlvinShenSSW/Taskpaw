@@ -157,6 +157,35 @@ export type AgentConfigView = {
   llm_failover?: boolean;
 } & Record<string, unknown>;
 
+// P2-2 (#293): 设备 v1 and the worker console, both on the loopback control API.
+export type DeviceProfile = {
+  stage: "restore" | "asr" | "translate"; tool: string; tool_version: string; model: string; model_version: string;
+  profile: string; max_width: number; max_height: number;
+};
+export type DeviceProbe = { gpu_model: string; vram_mib: number; free_disk_bytes: number; profiles: DeviceProfile[] };
+export type DeviceRow = {
+  worker_id: string; version: number; name: string; address: string; port: number;
+  enrollment_state: "pending_pairing" | "pending_validation" | "verified" | "retired";
+  admission_state: "disabled" | "enabled" | "draining" | "revoked";
+  participation: boolean;
+  heartbeat: { state: "online" | "lost" | "waiting"; age_s: number | null };
+  gpu: { name: string | null; vram_mib: number | null; used_mib: number | null; util: number | null; power_w: number | null; hold: string } | null;
+  disk: { free: number; staging_used: number; cap: number } | null;
+  tiers_ready: string[]; asr_ready: boolean; agent_version: string | null; version_ok: boolean | null;
+  boot_reconciled: boolean; eligibility: string; eligible: boolean;
+  probe: DeviceProbe | null; approved: { probe: DeviceProbe | null; profiles: DeviceProfile[] } | null;
+  restore_allowed: boolean; unresolved: number; can_retire: boolean;
+};
+export type DevicesView = {
+  remote_workers: boolean; server_time: string; controller: { name: string; stages: string[] }; workers: DeviceRow[];
+};
+export type PairingCode = { worker_id: string; code: string; expires_at: string };
+export type WorkerConsole = {
+  state: string; reason: string; role: "controller" | "worker"; controller: string | null;
+  worker_id?: string | null; credential: "valid" | "revoked" | null; staging_dir: string | null; staging_cap_gb: number;
+  last_heartbeat?: string | null; reconciled?: boolean; paused?: boolean;
+};
+
 export interface MonitorMutationResult {
   ok: boolean;
   name: string;
@@ -693,6 +722,23 @@ export const api = {
   // H2 R2: open a current INBOX package folder (204 | 404 missing | 501 unsupported platform).
   workflowOpenPackage: (packageId: string) =>
     send<void>("agent", "POST", `/control/workflow/packages/${seg(packageId)}/open`),
+  // P2-2: 设备 (every command carries the worker's `expected_version`) and the worker console.
+  workflowDevices: () => get<DevicesView>("agent", "/control/workflow/devices"),
+  workflowAddDevice: (name: string, address: string) =>
+    send<PairingCode>("agent", "POST", "/control/workflow/devices", { name, address }),
+  workflowRepairDevice: (id: string, expected_version: number) =>
+    send<PairingCode>("agent", "POST", `/control/workflow/devices/${seg(id)}/pairing`, { expected_version }),
+  workflowApproveDevice: (id: string, expected_version: number, restore: boolean, asr: boolean) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/approve`, { expected_version, restore, asr }),
+  workflowDeviceAdmission: (id: string, expected_version: number, state: "enabled" | "draining") =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/admission`, { expected_version, state }),
+  workflowRevokeDevice: (id: string, expected_version: number) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/revoke`, { expected_version }),
+  workflowRetireDevice: (id: string, expected_version: number) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/retire`, { expected_version }),
+  workflowWorker: () => get<WorkerConsole>("agent", "/control/workflow/worker"),
+  workflowJoin: (code: string, staging_dir: string) =>
+    send<WorkerConsole>("agent", "POST", "/control/workflow/worker/join", { code, staging_dir }),
   posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
   // U1b: the full landscape jacket (final fanart > thumb > input fanart > thumb > image attachment)
   coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,

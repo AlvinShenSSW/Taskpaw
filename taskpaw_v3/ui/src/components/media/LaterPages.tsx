@@ -5,10 +5,9 @@ import { api } from "../../api";
 import { EmptyState, Icon, Notice, PageTitle } from "./parts";
 import { useWorkspace } from "./workspace";
 
-// 设备 / 片库与规则 / Mac 信息桥 / 设置 / 迁移 (§4.6): stay in the rail marked 「后续」.
+// 片库与规则 / Mac 信息桥 / 设置 / 迁移 (§4.6): stay in the rail marked 「后续」.
 const LATER = "此功能将在多机工作流阶段提供";
 const PURPOSE = {
-  devices: ["设备", "多台计算设备的注册、准入、排空与安全退休，与 Hub「管理」共用一份注册表。"],
   libraries: ["片库与规则", "NAS 库根与演员索引的映射向导。"],
   bridge: ["Mac 信息桥", "Mac 上只读的状态、事件与有界脱敏日志，不参与派单。"],
   settings: ["设置 / 迁移", "收件结构、设备角色、目录边界与迁移预检向导。"],

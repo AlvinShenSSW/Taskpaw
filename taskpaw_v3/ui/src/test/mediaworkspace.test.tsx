@@ -46,6 +46,9 @@ function mockApi() {
   vi.spyOn(api, "image").mockResolvedValue("data:image/png;base64,");
   vi.spyOn(api, "agentStatus").mockResolvedValue({ machine: "HOME-PC", monitors: {} });
   vi.spyOn(api, "config").mockResolvedValue({ monitors: [], workflow: { inbox_root: "D:\\TODO" } });
+  vi.spyOn(api, "workflowDevices").mockResolvedValue({
+    remote_workers: false, server_time: "2026-10-23T08:00:00Z", controller: { name: "本机", stages: ["修复", "识别", "翻译"] }, workers: [],
+  });
   return {
     confirmPlans: vi.spyOn(api, "workflowConfirmPlans").mockImplementation(async (plans: PlanChoice[]) =>
       ({ results: plans.map((p) => ({ film_id: p.film_id, ok: true, error: null, message: null })) })),
@@ -74,7 +77,8 @@ describe("MediaWorkspace shell", () => {
       ["overview", "pending", "queue", "review", "exceptions", "devices", "local", "libraries", "bridge", "settings"]);
     expect(items[1]).toHaveTextContent("待处理3");
     expect(items[4]).toHaveTextContent("异常6");
-    for (const i of [5, 7, 8, 9]) expect(items[i]).toHaveTextContent("后续");
+    for (const i of [7, 8, 9]) expect(items[i]).toHaveTextContent("后续");
+    expect(items[5]).not.toHaveTextContent("后续");  // 设备 is live since P2-2
     for (const i of [0, 2, 6]) expect(items[i].querySelector(".nav-count")).toBeNull();
     expect(items[0]).toHaveAttribute("aria-current", "page");
     expect(screen.getByText("TaskPaw / 媒体处理中心 / 概览")).toBeInTheDocument();
