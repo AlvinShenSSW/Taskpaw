@@ -832,14 +832,6 @@ class HardwareDeclaration(Model):
     vram_mib: Revision
 
 
-class HardwareProbe(HardwareDeclaration):
-    evidence: EvidenceRef
-    device_identity: Text
-    gpu_identity: Text
-    free_disk_bytes: Count
-    model_ready: bool
-
-
 class ProfileCapability(Model):
     profile_id: Text
     profile_revision: Revision
@@ -850,6 +842,24 @@ class ProfileCapability(Model):
     allowed_stages: tuple[Literal["restore", "asr", "translate"], ...]
     max_width: Revision
     max_height: Revision
+
+
+class HardwareProbe(HardwareDeclaration):
+    evidence: EvidenceRef
+    device_identity: Text
+    gpu_identity: Text
+    free_disk_bytes: Count
+    model_ready: bool
+    # P2-2 (#293): a remote worker's proposed profiles (its executors' tools);
+    # the operator approves a subset. Absent from older rows and local probes.
+    profiles: tuple[ProfileCapability, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def _historical_wire(self, handler: SerializerFunctionWrapHandler) -> dict:
+        payload = handler(self)
+        if not self.profiles:
+            payload.pop("profiles", None)
+        return payload
 
 
 class ApprovedCapability(Model):
@@ -1765,6 +1775,13 @@ class FilmView(Model):
 class WorkerView(Model):
     worker: WorkerRecord
     assignments: tuple[AssignmentRecord, ...]
+
+
+class WorkerSelf(Model):
+    """A remote worker's own record as its credential reads it (P2-2 `GET /self`)."""
+
+    worker: WorkerRecord
+    boot_reconciled: bool
 
 
 class WorkflowApproval(Model):

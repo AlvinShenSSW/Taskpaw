@@ -31,6 +31,7 @@ from .models import (
     WorkerRegistration,
     WorkerRetirement,
     WorkerRevocation,
+    WorkerSelf,
     WorkerUpdate,
     WorkerView,
     WorkflowError,
@@ -647,6 +648,20 @@ class WorkerCommands(ReadCommands):
                     AssignmentRecord.model_validate_json(row[0]) for row in rows
                 ),
             )
+
+    def authenticated_worker(self, auth: AuthProof) -> WorkerSelf:
+        """The calling compute worker's own record and whether its current boot
+        is reconciled; any other principal is forbidden (P2-2 worker API)."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "compute_worker" or not principal["worker_id"]:
+                raise WorkflowError("forbidden")
+            worker = self._worker(principal["worker_id"])
+            row = self._conn.execute(
+                "SELECT reconciled FROM worker_boots WHERE worker_id=? AND boot_id=?",
+                (worker.worker_id, worker.boot_id),
+            ).fetchone()
+            return WorkerSelf(worker=worker, boot_reconciled=bool(row and row[0]))
 
     def grant_component(
         self, auth: AuthProof, meta: CommandMeta, command: ComponentGrant

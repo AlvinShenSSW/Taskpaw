@@ -45,6 +45,20 @@ class WorkflowSettings(BaseModel):
     mdcx_profile: Optional[str] = None  # the user's Miko config.json
     # F02-P1: where Filmpaw keeps its library (workflow-endpoint.json); default %APPDATA%\Filmpaw.
     filmpaw_data_dir: Optional[str] = None
+    # P2-2 (#293): this machine's part in the multi-machine workflow. A
+    # controller serves the worker API on `worker_api_port` only while
+    # `remote_workers` is on; a worker runs restore/ASR for its controller.
+    role: Literal["controller", "worker"] = "controller"
+    remote_workers: bool = False
+    worker_api_port: int = 5682
+    # worker only: local staging (UNC, network and relative paths are refused)
+    staging_dir: Optional[str] = None
+    staging_cap_gb: int = Field(500, ge=1, le=100_000)
+
+    @field_validator("worker_api_port")
+    @classmethod
+    def _worker_api_port(cls, value: int) -> int:
+        return _valid_port(value)
 
     @field_validator("ltx_gpu", mode="before")
     @classmethod

@@ -58,7 +58,7 @@ _ROUTED: tuple[m.RoutedStage, ...] = ("restore", "asr")
 
 @dataclass(frozen=True)
 class WorkerLive:
-    """A worker's heartbeat state on the controller's clock (produced in P2-2)."""
+    """A worker's heartbeat state on the controller's clock (`fleet_live`, P2-2)."""
 
     last_seen: datetime
     paused: bool = False
@@ -362,7 +362,10 @@ def schedule(
     controller_id: str,
     controller_free_bytes: int | None = None,
     gpu_stages: GpuStages | None = None,
+    live_since: datetime | None = None,
 ) -> SchedulePass:
+    """`live_since`: when the live state started (the controller's start); a
+    worker not heard from since raises no 设备失联 in the first 60 s (IR12, C14)."""
     if not remote_workers(snapshot.workers, controller_id):
         # IR1: single machine; the controller's dispatcher runs every stage
         return SchedulePass((), (), {}, {})
@@ -414,12 +417,17 @@ def schedule(
     remaining = [route for route in routes if route.route_id not in gone]
     open_films = {(route.film_id, route.input_revision) for route in remaining}
 
-    # 2. attention: a film on a lost worker (OD2/V2)
+    # 2. attention: a film on a lost worker (OD2/V2); one not heard from since
+    # the controller started is still 等待心跳 inside the grace window (IR12)
+    grace = (
+        live_since is not None and (now - live_since).total_seconds() < OFFLINE_SECONDS
+    )
     attention = {
         route.film_id: LOST
         for route in remaining
         if route.worker_id != controller_id
         and not _online(live.get(route.worker_id), now)
+        and not (grace and route.worker_id not in live)
     }
 
     # 3. the pass state: queue length, busy time and staging per worker; an
