@@ -363,8 +363,8 @@ def _read_json(reply: Any, *, default: bytes = b"") -> Any:
 def _api_error(exc: urllib.error.HTTPError) -> ApiError:
     try:
         body = json.loads(exc.read() or b"{}")
-    except (OSError, ValueError):
-        body = {}
+    except (http.client.HTTPException, OSError, ValueError):
+        body = {}  # CX12: a cut error body keeps the status (and its class)
     if not isinstance(body, dict):
         body = {}
     retry = exc.headers.get("Retry-After") if exc.headers else None

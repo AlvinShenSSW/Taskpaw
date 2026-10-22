@@ -1443,3 +1443,64 @@ def test_a_shutdown_during_a_join_leaves_no_worker_running(
     assert not (tmp_path / "worker" / PENDING_NAME).exists() or expires
     with pytest.raises(JoinError):  # closed for good
         worker.join(code, str(tmp_path / "staging"))
+
+
+# ── Codex round 4 (CX11, CX12) ──────────────────────────────────────────
+def test_a_re_join_that_cannot_write_its_identity_leaves_the_worker_running(
+    tmp_path, rt, host, server, monkeypatch
+):
+    """CX11: a disk error while writing the pending identity is a JoinError,
+    not a 500, and the working loop and identity are untouched."""
+    issued = code_for(rt, server)
+    worker = worker_host(tmp_path)
+    try:
+        worker.join(issued["code"], str(tmp_path / "staging"))
+        until(lambda: worker.state == "running")
+        before = (tmp_path / "worker" / IDENTITY_NAME).read_bytes()
+        again = devices.repair(
+            rt,
+            issued["worker_id"],
+            row(rt, host, issued["worker_id"])["version"],
+            host="127.0.0.1",
+            port=server.port,
+        )
+
+        def full(self, path):
+            raise OSError(28, "No space left on device")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(WorkerIdentity, "save", full)
+            with pytest.raises(JoinError, match="无法写入身份文件"):
+                worker.join(again["code"], str(tmp_path / "staging"))
+        assert (tmp_path / "worker" / IDENTITY_NAME).read_bytes() == before
+        assert any(
+            t.name == "workflow-worker" and t.is_alive() for t in threading.enumerate()
+        )
+        until(lambda: worker.state == "running")
+        assert worker.status()["worker_id"] == issued["worker_id"]
+        # the same code still joins once the disk is back
+        assert (
+            worker.join(again["code"], str(tmp_path / "staging"))["worker_id"]
+            == (issued["worker_id"])
+        )
+    finally:
+        assert worker.stop()
+
+
+@pytest.mark.parametrize(
+    ("status", "transient"),
+    [("503 Service Unavailable", True), ("401 Unauthorized", False)],
+)
+def test_an_error_reply_with_a_cut_body_is_still_an_api_error(status, transient):
+    """CX12: a truncated error body (IncompleteRead) keeps the HTTP status."""
+    body = b'{"code": "busy", "detail": "x"}'
+    cut = CutServer([(status, {"Content-Length": str(len(body))}, body, 8)])
+    try:
+        client = WorkerClient("127.0.0.1", cut.port, timeout=5)
+        with pytest.raises(ApiError) as exc:
+            client.call("GET", "/self", auth=False)
+        assert exc.value.status == int(status[:3])
+        assert exc.value.transient is transient
+        assert exc.value.code == "http_error"
+    finally:
+        cut.stop()

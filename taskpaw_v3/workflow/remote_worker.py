@@ -400,30 +400,36 @@ class WorkerHost:
     def _join(self, parsed: PairingCode, root: Path) -> dict[str, Any]:
         if self._closed:
             raise JoinError("工作流已停止")
+        # CX11: everything that can fail on disk runs before the loop is
+        # stopped, so a refused write leaves the working worker untouched
+        try:
+            old = self.identity or WorkerIdentity.load(self.identity_path)
+            # the same code again after a lost reply reuses its unconfirmed
+            # credential, so /self can prove the pairing (R3)
+            same = next(
+                (
+                    found
+                    for found in (WorkerIdentity.load(self.pending_path), old)
+                    if found is not None and found.pairing_id == parsed.pairing_id
+                ),
+                None,
+            )
+            identity = WorkerIdentity(
+                controller_host=parsed.host,
+                controller_port=parsed.port,
+                pairing_id=parsed.pairing_id,
+                credential_id=same.credential_id if same else str(uuid.uuid4()),
+                secret=same.secret if same else SecretStr(secrets.token_urlsafe(32)),
+                staging_dir=str(root),
+                ticket=parsed.ticket,
+            )
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            identity.save(self.pending_path)  # before sending (R3); `old` stays (IR7)
+        except OSError:
+            log.exception("cannot write the pending worker identity")
+            raise JoinError("无法写入身份文件") from None
         if not self._halt(30.0):
             raise JoinError("工作流仍在停止，请稍后再试")
-        old = self.identity or WorkerIdentity.load(self.identity_path)
-        # the same code again after a lost reply reuses its unconfirmed
-        # credential, so /self can prove the pairing (R3)
-        same = next(
-            (
-                found
-                for found in (WorkerIdentity.load(self.pending_path), old)
-                if found is not None and found.pairing_id == parsed.pairing_id
-            ),
-            None,
-        )
-        identity = WorkerIdentity(
-            controller_host=parsed.host,
-            controller_port=parsed.port,
-            pairing_id=parsed.pairing_id,
-            credential_id=same.credential_id if same else str(uuid.uuid4()),
-            secret=same.secret if same else SecretStr(secrets.token_urlsafe(32)),
-            staging_dir=str(root),
-            ticket=parsed.ticket,
-        )
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        identity.save(self.pending_path)  # before sending (R3); `old` stays (IR7)
         self.state, self.reason = "joining", "正在配对"
         client = self._client_factory(
             identity.controller_host, identity.controller_port, identity.credential
