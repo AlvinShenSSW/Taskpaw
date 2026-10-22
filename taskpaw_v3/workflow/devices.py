@@ -131,7 +131,11 @@ def approve(
     if restore and probe.vram_mib < s.RESTORE_MIN_VRAM_MIB:  # OD5
         raise m.WorkflowError("precondition_failed")
     stages = {stage for stage, on in (("restore", restore), ("asr", asr)) if on}
-    profiles = tuple(p for p in probe.profiles if set(p.allowed_stages) <= stages)
+    profiles = tuple(
+        p
+        for p in probe.profiles
+        if p.allowed_stages and set(p.allowed_stages) <= stages
+    )
     if not profiles:
         raise m.WorkflowError("precondition_failed")
     revision, now = cap.revision + 1, rt.clock.now()

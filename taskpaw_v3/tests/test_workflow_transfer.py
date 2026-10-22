@@ -522,6 +522,7 @@ def test_a_commit_interrupted_before_its_record_is_settled(
         "{a}/CON.srt",
         "{a}/nul",
         "{a}/stage-result.json",
+        "{a}/Stage-Result.JSON",
         "other/x.mp4",
         "{a}",
         "{a}/x.mp4 ",
@@ -634,6 +635,20 @@ def test_a_resolved_foreign_or_unknown_attempt(api, rt, world):
     stale = plan(api, joined, a, files)
     assert stale.status_code == 409 and stale.json() == {"code": "stale_attempt"}
     assert put(api, joined, a, files[0]["path"], SUBS, 0, len(SUBS)).status_code == 409
+
+
+def test_a_file_that_is_also_a_folder_or_a_case_twin_is_refused(api, world, attempt):
+    joined = world[0]
+    sha_x = sha(b"x")
+    for files in (
+        [f"{attempt}/x", f"{attempt}/x/y.srt"],
+        [f"{attempt}/a.srt", f"{attempt}/A.SRT"],
+    ):
+        body = [{"path": p, "size": 1, "sha256": sha_x} for p in files]
+        response = plan(api, joined, attempt, body)
+        assert response.status_code == 422 and response.json() == {
+            "code": "invalid_plan"
+        }
 
 
 def test_an_empty_output_is_complete_at_once(api, rt, world, attempt):

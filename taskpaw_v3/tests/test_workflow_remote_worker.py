@@ -595,6 +595,15 @@ def test_join_through_the_console(tmp_path, rt, host, server):
             json={"code": code_for(rt, server)["code"], "staging_dir": "relative"},
         )
         assert relative.status_code == 422
+        secret_code = "TP1:" + "x" * 2000
+        for body in (
+            {"code": secret_code, "staging_dir": "D:/S"},
+            {"code": 5},
+            [1],
+            None,
+        ):
+            refused = ctl.post("/control/workflow/worker/join", json=body)
+            assert refused.status_code == 422 and "xxxx" not in refused.text
         issued = code_for(rt, server, "second")
         joined = ctl.post(
             "/control/workflow/worker/join",

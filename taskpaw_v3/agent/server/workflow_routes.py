@@ -14,9 +14,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from starlette.concurrency import run_in_threadpool
 
 from taskpaw_v3.core.config import WorkflowSettings
 
@@ -86,14 +87,6 @@ class ApproveBody(VersionBody):
 
 class AdmissionBody(VersionBody):
     state: Literal["enabled", "draining"]
-
-
-class JoinBody(BaseModel):
-    """加入 on a worker: the controller's pairing code and the staging dir."""
-
-    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    code: str = Field(min_length=1, max_length=1024)
-    staging_dir: str = Field(min_length=1, max_length=1024)
 
 
 class LtxDownloadBody(BaseModel):
@@ -422,17 +415,32 @@ def register_workflow_routes(
         return {**host.status(), "role": "worker"}
 
     @app.post("/control/workflow/worker/join")
-    def workflow_worker_join(body: JoinBody) -> dict[str, Any]:
-        """加入 / 重新加入: the code is never logged nor echoed back."""
+    async def workflow_worker_join(request: Request) -> dict[str, Any]:
+        """加入 / 重新加入 with `{code, staging_dir}`: parsed by hand so that no
+        validation error ever echoes the code back."""
         from taskpaw_v3.workflow.remote_worker import JoinError
 
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        code = body.get("code") if isinstance(body, dict) else None
+        staging = body.get("staging_dir") if isinstance(body, dict) else None
+        if (
+            not isinstance(code, str)
+            or not isinstance(staging, str)
+            or not 0 < len(code) <= 1024
+            or not 0 < len(staging) <= 1024
+        ):
+            raise HTTPException(status_code=422, detail="请填写配对码与暂存目录")
         host = worker_provider() if worker_provider is not None else None
         if host is None or settings.role != "worker":
             raise HTTPException(status_code=409, detail=_worker_off()["reason"])
         try:
-            return {**host.join(body.code, body.staging_dir), "role": "worker"}
+            joined = await run_in_threadpool(host.join, code, staging)
         except JoinError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
+        return {**joined, "role": "worker"}
 
     @app.post("/control/workflow/packages/{package_id}/open", status_code=204)
     def workflow_open_package(package_id: str) -> Response:

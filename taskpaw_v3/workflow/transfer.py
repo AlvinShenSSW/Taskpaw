@@ -205,8 +205,10 @@ class Transfers:
             value = _PATH.validate_python(path)
         except ValidationError:
             raise TransferError(422, "invalid_path") from None
-        if not value.startswith(f"{attempt_id}/") or value == (
-            f"{attempt_id}/{RESULT_NAME}"
+        # NTFS is case-insensitive: no spelling of the ledger is an output
+        if (
+            not value.startswith(f"{attempt_id}/")
+            or value.casefold() == f"{attempt_id}/{RESULT_NAME}".casefold()
         ):
             raise TransferError(422, "invalid_path")
         root = (self.work_dir / attempt_id).resolve()
@@ -274,8 +276,17 @@ class Transfers:
         if not files or len(files) > MAX_PLAN_FILES:
             raise TransferError(422, "invalid_plan")
         paths = [self.check_path(attempt_id, f.path) for f in files]
-        if len({p.casefold() for p in paths}) != len(paths) or any(
-            f.size < 0 or not re.fullmatch(r"[0-9a-f]{64}", f.sha256) for f in files
+        folded = {p.casefold() for p in paths}
+        if (
+            len(folded) != len(paths)
+            or any(  # a file cannot also be another file's folder
+                "/".join(p.split("/")[:end]) in folded
+                for p in folded
+                for end in range(2, p.count("/") + 1)
+            )
+            or any(
+                f.size < 0 or not re.fullmatch(r"[0-9a-f]{64}", f.sha256) for f in files
+            )
         ):
             raise TransferError(422, "invalid_plan")
         wanted = [{"path": f.path, "size": f.size, "sha256": f.sha256} for f in files]
@@ -307,6 +318,7 @@ class Transfers:
                 if other.name != attempt_id
             )
             remainder = self._outstanding(attempt_id, plan)
+            self.work_dir.mkdir(parents=True, exist_ok=True)
             free = self._free(self.work_dir)
             if free - others - remainder < CONTROLLER_RESERVE_BYTES:
                 raise TransferError(507, "controller_disk_full")
