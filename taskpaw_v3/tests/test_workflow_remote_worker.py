@@ -1504,3 +1504,110 @@ def test_an_error_reply_with_a_cut_body_is_still_an_api_error(status, transient)
         assert exc.value.code == "http_error"
     finally:
         cut.stop()
+
+
+# ── identity promotion after a successful pair (CX11 follow-up) ─────────
+def _break_promotion(monkeypatch, kind):
+    """Make saving the confirmed identity fail (`save`) or its rename onto
+    the identity file fail (`replace`) until `heal()` is called."""
+    import os
+
+    from taskpaw_v3.workflow import remote_worker as rw
+
+    broken = threading.Event()
+    broken.set()
+    save, replace = WorkerIdentity.save, os.replace
+
+    def failing_save(self, path):
+        if broken.is_set() and kind == "save" and self.worker_id:
+            raise OSError(28, "No space left on device")
+        return save(self, path)
+
+    def failing_replace(src, dst):
+        if broken.is_set() and kind == "replace" and Path(dst).name == IDENTITY_NAME:
+            raise PermissionError(13, "Access is denied")
+        return replace(src, dst)
+
+    monkeypatch.setattr(WorkerIdentity, "save", failing_save)
+    monkeypatch.setattr(rw.os, "replace", failing_replace)
+    return lambda: broken.clear()
+
+
+@pytest.mark.parametrize("kind", ["save", "replace"])
+def test_a_failed_identity_save_after_a_good_pair_keeps_the_worker_running(
+    tmp_path, rt, host, server, monkeypatch, kind
+):
+    """The pair stands (the old credential is gone): no raw exception, the
+    worker runs on the in-memory identity and promotes it on a later beat."""
+    issued = code_for(rt, server)
+    worker = worker_host(tmp_path)
+    heal = _break_promotion(monkeypatch, kind)
+    identity = tmp_path / "worker" / IDENTITY_NAME
+    try:
+        status = worker.join(issued["code"], str(tmp_path / "staging"))
+        assert status["worker_id"] == issued["worker_id"]
+        until(lambda: worker.state == "running")
+        until(lambda: "身份文件未保存" in worker.reason)
+        assert not identity.exists()
+        heal()
+        until(lambda: identity.exists() and worker.reason == "在线")
+        loaded = WorkerIdentity.load(identity)
+        assert loaded is not None and loaded.worker_id == issued["worker_id"]
+        assert loaded.ticket is None
+        assert not (tmp_path / "worker" / PENDING_NAME).exists()
+    finally:
+        assert worker.stop()
+
+
+@pytest.mark.parametrize("kind", ["save", "replace"])
+def test_a_restart_promotes_a_pending_identity_the_controller_accepts(
+    tmp_path, rt, host, server, monkeypatch, kind
+):
+    issued = code_for(rt, server)
+    first = worker_host(tmp_path)
+    heal = _break_promotion(monkeypatch, kind)
+    try:
+        first.join(issued["code"], str(tmp_path / "staging"))
+        until(lambda: "身份文件未保存" in first.reason)
+    finally:
+        assert first.stop()
+    heal()
+    identity = tmp_path / "worker" / IDENTITY_NAME
+    assert not identity.exists()
+    second = worker_host(tmp_path)
+    second.start()
+    try:
+        until(lambda: identity.exists() and second.state == "running")
+        assert second.status()["worker_id"] == issued["worker_id"]
+        assert not (tmp_path / "worker" / PENDING_NAME).exists()
+    finally:
+        assert second.stop()
+
+
+def test_a_restart_drops_a_pending_identity_the_controller_refuses(
+    tmp_path, rt, host, server
+):
+    issued = code_for(rt, server)
+    first = worker_host(tmp_path)
+    first.join(issued["code"], str(tmp_path / "staging"))
+    until(lambda: first.state == "running")
+    assert first.stop()
+    kept = (tmp_path / "worker" / IDENTITY_NAME).read_bytes()
+    WorkerIdentity(
+        controller_host="127.0.0.1",
+        controller_port=server.port,
+        pairing_id=PAIRING,
+        credential_id="00000000-0000-4000-8000-0000000000ff",
+        secret=SecretStr("x" * 43),
+        staging_dir=str(tmp_path / "staging"),
+        ticket=SecretStr(TICKET),
+    ).save(tmp_path / "worker" / PENDING_NAME)
+    second = worker_host(tmp_path)
+    second.start()
+    try:
+        until(lambda: not (tmp_path / "worker" / PENDING_NAME).exists())
+        until(lambda: second.state == "running")
+        assert (tmp_path / "worker" / IDENTITY_NAME).read_bytes() == kept
+        assert second.status()["worker_id"] == issued["worker_id"]
+    finally:
+        assert second.stop()

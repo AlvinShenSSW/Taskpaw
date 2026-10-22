@@ -51,6 +51,7 @@ log = logging.getLogger("taskpaw.workflow.remote_worker")
 
 IDENTITY_NAME = "worker-identity.json"
 PENDING_NAME = "worker-identity.pending.json"  # IR7: a pairing not yet confirmed
+UNSAVED_REASON = "身份文件未保存，重试中"
 ACTIVE_SECONDS = 5.0  # with an open route (R7)
 IDLE_SECONDS = 15.0
 PROBE_SECONDS = 60.0  # CX4: tier and ASR readiness follow the disk
@@ -318,6 +319,8 @@ class WorkerHost:
         self.boot_id = str(uuid.uuid4())  # one per process start (R6)
         self.state, self.reason = "unjoined", "尚未加入媒体工作流"
         self.identity: WorkerIdentity | None = None
+        self._unsaved = False  # a paired identity not yet in the identity file
+        self._pending_check: WorkerIdentity | None = None  # found at start()
         self.worker_id: str | None = None
         self.routes: list[dict[str, Any]] = []
         self.paused = False
@@ -334,9 +337,10 @@ class WorkerHost:
     # ── lifecycle ────────────────────────────────────────────────────────
     def start(self) -> None:
         self.identity = WorkerIdentity.load(self.identity_path)
-        if self.identity is None:
+        self._pending_check = WorkerIdentity.load(self.pending_path)
+        if self.identity is None and self._pending_check is None:
             return
-        self.worker_id = self.identity.worker_id
+        self.worker_id = self.identity.worker_id if self.identity else None
         self._spawn()
 
     def _spawn(self) -> None:
@@ -449,16 +453,35 @@ class WorkerHost:
                 self._resume(old)
                 raise
         identity.worker_id, identity.ticket = worker_id, None
-        identity.save(self.pending_path)
-        os.replace(self.pending_path, self.identity_path)  # IR7: only now
+        # the old credential is gone on the controller: from here the worker
+        # runs on this identity even if the file cannot be written yet
+        self._pending_check = None
         self.identity, self.worker_id = identity, worker_id
+        self._unsaved = True
         self.reconciled = False
         self.state, self.reason = "connecting", "正在连接主控"
+        self._promote()  # IR7: only now; a failure is retried at each beat
         log.info("joined the media workflow as worker %s", worker_id)
         if self._closed:  # CX10: the pairing stands; nothing starts after stop()
             self.state, self.reason = "stopped", "已停止"
         self._spawn()
         return self.status()
+
+    def _promote(self) -> bool:
+        """Write the paired identity and rename it over the identity file;
+        False (shown, retried at the next beat) when the disk refuses."""
+        identity = self.identity
+        if not self._unsaved or identity is None:
+            return True
+        try:
+            identity.save(self.pending_path)
+            os.replace(self.pending_path, self.identity_path)
+        except OSError:
+            log.warning("cannot save the worker identity; retrying at the next beat")
+            self.reason = UNSAVED_REASON
+            return False
+        self._unsaved = False
+        return True
 
     def _resume(self, old: WorkerIdentity | None) -> None:
         """IR7: a failed re-join leaves the working identity running."""
@@ -514,6 +537,9 @@ class WorkerHost:
     def _run(self) -> None:
         """IR8: only `stop()` or a revoked credential ends the loop; any other
         error is shown, logged, backed off and the session starts again."""
+        self._settle_pending()
+        if self.identity is None or self._stop.is_set():
+            return
         client = self._client()
         failures = 0
         while not self._stop.is_set():
@@ -532,6 +558,45 @@ class WorkerHost:
             failures += 1
             if self._wait(backoff(failures - 1, base=self.backoff_base)):
                 return
+
+    def _settle_pending(self) -> None:
+        """A pending identity found at start (a pair whose save failed, or a
+        lost reply): /self 200 promotes it, 401 drops it and keeps the
+        current identity; while the controller is unreachable it waits."""
+        pending, self._pending_check = self._pending_check, None
+        if pending is None:
+            return
+        client = self._client_factory(
+            pending.controller_host, pending.controller_port, pending.credential
+        )
+        attempt = 0
+        while not self._stop.is_set():
+            try:
+                me = client.self_view()
+            except ApiError as exc:
+                if exc.transient:
+                    self.reason = "无法连接主控，正在重试"
+                    attempt += 1
+                    if self._wait(backoff(attempt - 1, base=self.backoff_base)):
+                        return
+                    continue
+                if exc.status == 401:
+                    self._drop_pending(pending)
+                return
+            pending.worker_id, pending.ticket = me["worker"]["worker_id"], None
+            self.identity, self.worker_id = pending, pending.worker_id
+            self._unsaved = True
+            self._promote()
+            return
+
+    def _drop_pending(self, checked: WorkerIdentity) -> None:
+        current = WorkerIdentity.load(self.pending_path)
+        if current is not None and current.credential_id != checked.credential_id:
+            return  # a join wrote a newer one meanwhile
+        try:
+            self.pending_path.unlink(missing_ok=True)
+        except OSError:
+            log.warning("cannot remove a refused pending worker identity")
 
     def _session(self, client: WorkerClient) -> None:
         me = self._retry(client.self_view)
@@ -562,6 +627,7 @@ class WorkerHost:
                     return
                 continue
             failures = 0
+            self._promote()
             self._apply(reply)
             if reply.get("reconcile_needed") or not self.reconciled:
                 if self._boot_once(client) is None:  # IR6: beats go on meanwhile
@@ -610,7 +676,9 @@ class WorkerHost:
             self.routes = list(reply.get("routes") or [])
             self.paused = bool(reply.get("paused"))
             self.last_heartbeat = datetime.now(timezone.utc)
-        if not self.reconciled:
+        if self._unsaved:
+            reason = UNSAVED_REASON
+        elif not self.reconciled:
             reason = "等待对账"
         elif not self._probe_body:
             reason = "无法读取本机 GPU（nvidia-smi），正在重试"
