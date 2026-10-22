@@ -37,6 +37,7 @@ function ExceptionCard({ item }: { item: WorkItem }) {
   const [title, desc, label, action] = exceptionInfo(item, reasons);
   const run = useMutation({
     mutationFn: async () => {
+      if (ws.readOnly) throw new Error("只读监控");
       if (item.kind === "package") return api.workflowOpenPackage(item.pkg.package_id);
       const stage = action === "retry-scrape" ? "scrape" : item.row.retry_stage || item.row.stage || "";
       return api.workflowRetry(item.id, stage);
@@ -51,6 +52,7 @@ function ExceptionCard({ item }: { item: WorkItem }) {
     onError: (e) => ws.toast(errorText(e)),
   });
   const onAction = () => {
+    if (ws.readOnly) return;
     if (action === "review") ws.openReview(item.id);
     else if (action === "reconcile" || action === "cleanup") ws.openExplain(action, item.id);
     else run.mutate();
@@ -67,7 +69,7 @@ function ExceptionCard({ item }: { item: WorkItem }) {
         </div>
       </div>
       <div className="actions">
-        {action !== "none" && <button type="button" className="btn small" disabled={run.isPending} onClick={onAction}>{label}</button>}
+        {!ws.readOnly && action !== "none" && <button type="button" className="btn small" disabled={run.isPending} onClick={onAction}>{label}</button>}
         {item.kind === "film" && (
           <button type="button" className="btn ghost small" onClick={() => ws.openDetail(item.id)}>查看详情</button>
         )}

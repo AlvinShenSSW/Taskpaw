@@ -810,7 +810,9 @@ class HubStore:
                     if active:
                         payload = canonical(
                             {
-                                "text": f"TaskPaw Event | {server['name']}: {ev.get('message', 'Unknown event')}"
+                                "text": f"TaskPaw 媒体 | {ev.get('message', 'Unknown event')}"
+                                if ev.get("monitor") == "media-workflow"
+                                else f"TaskPaw Event | {server['name']}: {ev.get('message', 'Unknown event')}"
                             }
                         )
                         self._conn.execute(

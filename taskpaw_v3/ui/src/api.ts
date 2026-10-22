@@ -516,10 +516,10 @@ async function send<T>(
 
 // Authenticated image fetch → data: URL (T06 D01): control routes need the bearer
 // token and the packaged CSP only allows `img-src 'self' data:`.
-async function image(path: string): Promise<string> {
-  const { baseUrl, controlToken } = cfg("agent");
+async function image(path: string, role: "agent" | "hub" = "agent"): Promise<string> {
+  const { baseUrl, controlToken } = cfg(role);
   const res = await fetch(`${baseUrl}${path}`, { headers: { Authorization: `Bearer ${controlToken}` } });
-  checkUnauthorized("agent", res);
+  checkUnauthorized(role, res);
   if (!res.ok) throw new HttpError(`${path} → ${res.status}`, res.status);
   const blob = await res.blob();
   return new Promise<string>((resolve, reject) => {
@@ -592,6 +592,11 @@ export const api = {
   hubSetPollingToken: (polling_token: string) =>
     send<{ ok: boolean }>("hub", "PATCH", "/config", { polling_token }),
   // Media workflow (T06-P1 §8): local control API only; paths are resolved by film id.
+  hubWorkflowFilms: (serverId: number) => get<WorkflowFilms>("hub", `/servers/${serverId}/workflow/films`),
+  hubWorkflowFilm: (serverId: number, filmId: string) => get<FilmDetail>("hub", `/servers/${serverId}/workflow/films/${seg(filmId)}`),
+  hubWorkflowPlans: (serverId: number) => get<WorkflowPlans>("hub", `/servers/${serverId}/workflow/plans`),
+  hubWorkflowImagePath: (serverId: number, filmId: string, kind: "poster" | "cover") =>
+    `/servers/${serverId}/workflow/films/${seg(filmId)}/${kind}`,
   workflowFilms: () => get<WorkflowFilms>("agent", "/control/workflow/films"),
   workflowFilm: (filmId: string) => get<FilmDetail>("agent", `/control/workflow/films/${seg(filmId)}`),
   performers: (query: string) =>

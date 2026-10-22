@@ -4,7 +4,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import CloseIcon from "@mui/icons-material/Close";
 import { CircularProgress, Dialog } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { useRef, useState, type ReactNode, type SyntheticEvent } from "react";
+import { useContext, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { api, type StepKey, type WorkflowStep } from "../../api";
 import {
   currentStep, fmtDuration, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL,
@@ -12,6 +12,7 @@ import {
   stageLine, type ChipTone, type RestoreLive, type StatusKey, type WorkItem,
 } from "./mediaModel";
 import { useNow } from "./useNow";
+import { mediaSourceKey, WorkspaceContext } from "./workspace";
 
 export function Icon({ of: C }: { of: SvgIconComponent }) {
   return <C className="icon" aria-hidden />;
@@ -67,9 +68,12 @@ export function Cover({ filmId, hasPoster, source, hasCover = false, coverSource
   filmId: string | null; hasPoster: boolean; source?: string | null;
   hasCover?: boolean; coverSource?: string | null; size?: CoverSize; label: string;
 }) {
+  // Cover also has standalone Agent callers outside the workspace.
+  const serverId = useContext(WorkspaceContext)?.server?.id;
   const poster = useQuery({
-    queryKey: ["mediaPoster", filmId, source ?? null],
-    queryFn: () => api.image(api.posterPath(filmId as string)),
+    queryKey: mediaSourceKey(["mediaPoster", filmId, source ?? null], serverId),
+    queryFn: () => serverId === undefined ? api.image(api.posterPath(filmId as string))
+      : api.image(api.hubWorkflowImagePath(serverId, filmId as string, "poster"), "hub"),
     enabled: hasPoster && filmId !== null, staleTime: Infinity, retry: false,
   });
   const [landscape, setLandscape] = useState(false);
@@ -111,9 +115,11 @@ function CoverLightbox({ open, onClose, onExited, filmId, hasCover, coverSource,
   open: boolean; onClose: () => void; onExited: () => void; filmId: string; hasCover: boolean;
   coverSource: string | null; poster: string; label: string;
 }) {
+  const serverId = useContext(WorkspaceContext)?.server?.id;
   const full = useQuery({
-    queryKey: ["mediaCover", filmId, coverSource],
-    queryFn: () => api.image(api.coverPath(filmId)),
+    queryKey: mediaSourceKey(["mediaCover", filmId, coverSource], serverId),
+    queryFn: () => serverId === undefined ? api.image(api.coverPath(filmId))
+      : api.image(api.hubWorkflowImagePath(serverId, filmId, "cover"), "hub"),
     enabled: open && hasCover, staleTime: Infinity, retry: false,
     gcTime: COVER_GC_MS,  // an opened jacket is megabytes: do not keep it for the card's lifetime
   });

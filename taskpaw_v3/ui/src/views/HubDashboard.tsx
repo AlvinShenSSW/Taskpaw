@@ -2,7 +2,7 @@ import {
   Alert, Box, Card, CardContent, Chip, Divider, LinearProgress, MenuItem,
   Stack, Tab, Tabs, TextField, Typography,
 } from "@mui/material";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type HubServer, type MonitorSnapshot } from "../api";
@@ -17,6 +17,8 @@ import { Settings } from "./Settings";
 import { ServiceIcon } from "../components/ServiceIcon";
 import { compareSemver, hubFilmKind } from "./hubDashboard.helpers";
 import { requestFailed } from "../components/requestEvidence";
+import { MediaWorkspace } from "../components/media/MediaWorkspace";
+import { MEDIA_FILMS_KEY, mediaSourceKey } from "../components/media/workspace";
 
 // ── fleet health (design pages/hub-dashboard.md "Fleet health") ──────────────
 // Derived from #96's per-server `online` + `snapshot` (NOT `acks`, which is an
@@ -79,7 +81,7 @@ export function HubDashboard() {
     refetchInterval: 5000, // #95: auto-refresh like the agent console.
   });
   const { data, error, isLoading } = status;
-  const [tab, setTab] = useState<"fleet" | "manage" | "events" | "settings">("fleet");
+  const [tab, setTab] = useState<"fleet" | "manage" | "events" | "settings" | "media">("fleet");
   const [level, setLevel] = useState<string>("");
   const [serverFilter, setServerFilter] = useState<string>(""); // "" = all servers
   // Aggregated durable history from all polled agents; only poll while open.
@@ -115,14 +117,17 @@ export function HubDashboard() {
 
   return (
     <Stack spacing={1.5}>
-      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ minHeight: 0 }}>
+      <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons="auto" sx={{ minHeight: 0 }}>
         <Tab value="fleet" label={t("hub.fleet")} />
         <Tab value="manage" label={t("hub.manage")} />
         <Tab value="events" label={t("hub.events")} />
         <Tab value="settings" label={t("settings.title")} />
+        <Tab value="media" label="媒体处理" />
       </Tabs>
 
-      {tab === "settings" ? (
+      {tab === "media" ? (
+        <HubMediaWorkspace servers={servers} loading={isLoading} />
+      ) : tab === "settings" ? (
         <Settings role="hub" />
       ) : tab === "manage" ? (
         // Managing agents is separate from observing (design: 4 tabs). Like
@@ -210,6 +215,23 @@ export function HubDashboard() {
       )}
     </Stack>
   );
+}
+
+// Phase 1 has one workflow controller. Discover it through the existing registered Agents;
+// this component only lives while the media tab is open and shares its film query with the view.
+function HubMediaWorkspace({ servers, loading }: { servers: HubServer[]; loading: boolean }) {
+  const enabled = servers.filter(s => s.enabled);
+  const probes = useQueries({ queries: enabled.map(server => ({
+    queryKey: mediaSourceKey(MEDIA_FILMS_KEY, server.id),
+    queryFn: () => api.hubWorkflowFilms(server.id), refetchInterval: 5000, retry: false,
+  })) });
+  const index = probes.findIndex(probe => probe.isSuccess && probe.data);
+  if (index >= 0) return <MediaWorkspace readOnly server={enabled[index]} />;
+  return <Stack spacing={1.5}>
+    <Alert severity="info">只读监控 · 操作请在主控电脑上进行</Alert>
+    <Typography color="text.secondary">{loading || probes.some(probe => probe.isPending)
+      ? "正在查找媒体工作流主控…" : "没有可用的媒体工作流主控。"}</Typography>
+  </Stack>;
 }
 
 // Labelled health tally (dot + word + count — never color alone, a11y §1).

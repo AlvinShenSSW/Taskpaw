@@ -3,6 +3,7 @@ import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../api";
 import { EmptyState, Icon, Notice, PageTitle } from "./parts";
+import { useWorkspace } from "./workspace";
 
 // 设备 / 片库与规则 / Mac 信息桥 / 设置 / 迁移 (§4.6): stay in the rail marked 「后续」.
 const LATER = "此功能将在多机工作流阶段提供";
@@ -22,11 +23,12 @@ const RULES: Array<[string, string]> = [
 ];
 
 export function LaterPage({ page }: { page: LaterKey }) {
+  const ws = useWorkspace();
   const [title, purpose] = PURPOSE[page];
   return (
     <>
       <PageTitle title={title} />
-      {page === "settings" && <SettingsFacts />}
+      {page === "settings" && !ws.readOnly && <SettingsFacts />}
       <EmptyState title={LATER} description={purpose} />
       {page === "libraries" && (
         <section className="panel spacer-top" aria-labelledby="rules-title">
