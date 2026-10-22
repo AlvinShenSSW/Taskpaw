@@ -652,33 +652,23 @@ def test_counters_survive_a_restart(tmp_path):
     s3.stop()
 
 
-def test_retention_drops_buckets_older_than_35_days(tmp_path):
+def test_retention_keeps_only_the_newest_max_buckets(tmp_path):
     db = tmp_path / "power.db"
-    clock = Clock()
+    base = int(T0) - 2 * 86400
+    # two more than the cap, all in the past, oldest first
+    seed_db(tmp_path, [(base - i * 900, 1.0) for i in range(power.MAX_BUCKETS + 2)])
+    oldest = base - (power.MAX_BUCKETS + 1) * 900
+    clock = Clock(wall=T0 + 890)
     s = sampler(clock, Readers(gpu=[10.0]), data_dir=tmp_path)
     s.tick()
-    s.stop()
-    con = sqlite3.connect(str(db))
-    old = int(T0) - 36 * 86400
-    keep = int(T0) - 34 * 86400
-    for start in (old, keep):
-        con.execute(
-            "INSERT INTO power_buckets VALUES (?, 900, 1, 1, 1, 0, 0, 0, 3, 0)",
-            (start,),
-        )
-    con.commit()
-    con.close()
-    s2 = sampler(clock, Readers(gpu=[10.0]), data_dir=tmp_path)
-    s2.tick()
-    assert s2.history("30d")["totals"]["wh"] == 0  # 34 days ago is outside 30d
-    run_ticks(s2, clock, 1)  # energy in the 10:00 bucket
-    assert old in [row[0] for row in rows(db)]
-    clock.advance(900)  # a gap, then energy in the next bucket closes 10:00
-    s2.tick()
-    run_ticks(s2, clock, 1)
+    assert len(s._buckets) == power.MAX_BUCKETS  # load keeps the newest only
+    assert oldest not in s._buckets
+    run_ticks(s, clock, 4)  # crosses 10:15: the 10:00 bucket closes
     starts = [row[0] for row in rows(db)]
-    assert old not in starts and keep in starts
-    s2.stop()
+    assert len(starts) == power.MAX_BUCKETS
+    assert oldest not in starts and base in starts and int(T0) in starts
+    assert len(s._buckets) == power.MAX_BUCKETS
+    s.stop()
 
 
 def test_no_data_dir_keeps_everything_in_memory(tmp_path, monkeypatch):
@@ -823,7 +813,7 @@ def test_future_buckets_are_not_in_today_week_month(tmp_path):
     s.stop()
 
 
-def test_forward_clock_jump_does_not_prune_history(tmp_path, caplog):
+def test_forward_clock_jump_never_prunes_history(tmp_path):
     keep = int(T0) - 34 * 86400
     seed_db(tmp_path, [(keep, 1.0)])
     clock = Clock()
@@ -831,23 +821,36 @@ def test_forward_clock_jump_does_not_prune_history(tmp_path, caplog):
     s.tick()
     run_ticks(s, clock, 1)
     clock.wall_t += 400 * 86400  # the RTC jumps a year ahead
-    with caplog.at_level(logging.WARNING, logger="taskpaw.power"):
-        run_ticks(s, clock, 1)  # closes the old bucket under the new time
+    run_ticks(s, clock, 540)  # three more closures, each future-dated
     assert keep in [row[0] for row in rows(tmp_path / "power.db")]
     assert keep in s._buckets
-    jumps = [r for r in caplog.records if "clock" in r.getMessage().lower()]
-    assert len(jumps) == 1  # logged once
     s.stop()
 
 
-def test_normal_operation_still_prunes_old_buckets(tmp_path):
-    old = int(T0) - 36 * 86400
-    seed_db(tmp_path, [(old, 1.0)])
+def test_normal_operation_never_exceeds_max_buckets(tmp_path):
+    base = int(T0) - 86400
+    seed_db(tmp_path, [(base - i * 900, 1.0) for i in range(power.MAX_BUCKETS)])
     clock = Clock(wall=T0 + 890)
     s = sampler(clock, Readers(gpu=[10.0]), data_dir=tmp_path)
     s.tick()
-    run_ticks(s, clock, 4)  # crosses 10:15 normally
-    assert old not in [row[0] for row in rows(tmp_path / "power.db")]
+    run_ticks(s, clock, 540)  # a few closures on top of a full history
+    assert len(rows(tmp_path / "power.db")) == power.MAX_BUCKETS
+    assert len(s._buckets) == power.MAX_BUCKETS
+    s.stop()
+
+
+def test_history_and_live_agree_after_a_backward_clock_step(tmp_path):
+    # a bucket later than now (the clock stepped back) is in neither total,
+    # even where the 7d step boundary rounds past the current interval
+    seed_db(tmp_path, [(T0 - 900, 1.0), (T0 + 1800, 50.0)])
+    clock = Clock()
+    s = sampler(clock, Readers(gpu=[None]), data_dir=tmp_path)
+    s.settings_holder["cfg"] = settings(other_w=0, idle_w=0, tdp_w=0)
+    s.tick()
+    hist = s.history("7d")
+    assert hist["totals"]["wh"] == pytest.approx(1.0)
+    assert hist["totals"]["wh"] == pytest.approx(s.live()["today_wh"])
+    assert sum(hist["covered_s"]) == pytest.approx(900)
     s.stop()
 
 

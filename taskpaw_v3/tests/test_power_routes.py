@@ -340,6 +340,7 @@ def _run_agent(monkeypatch, cfg, tmp_path=None):
 
     import taskpaw_v3.monitors.runtime as runtime
     from taskpaw_v3.agent.server import app, launcher
+    from taskpaw_v3.core import control
     from taskpaw_v3.core.lifecycle import GracefulShutdown
 
     order: list[str] = []
@@ -377,6 +378,15 @@ def _run_agent(monkeypatch, cfg, tmp_path=None):
     monkeypatch.setattr(uvicorn, "Config", lambda *a, **k: None)
     monkeypatch.setattr(launcher, "announce_ready", lambda *a, **k: None)
     monkeypatch.setattr(power, "PowerSampler", OrderedSampler)
+    # an in-memory session: the real bootstrap needs a directory that passes
+    # the credential ACL checks, which a temp dir does not everywhere
+    original_bootstrap = control.bootstrap_control
+
+    def bootstrap(role, base_url, _config_path):
+        return original_bootstrap(role, base_url, None)
+
+    monkeypatch.setattr(launcher, "bootstrap_control", bootstrap)
+    monkeypatch.setattr(control, "bootstrap_control", bootstrap)
     shutdown = GracefulShutdown()
     monkeypatch.setattr(shutdown, "install_signal_handlers", lambda: None)
     config_path = None if tmp_path is None else tmp_path / "agent.yaml"

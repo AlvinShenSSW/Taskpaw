@@ -64,6 +64,9 @@ SAMPLE_SECONDS = 5.0
 GAP_SECONDS = 15.0
 BUCKET_SECONDS = 900
 RETENTION_SECONDS = 35 * 86400
+# Retention is a count, never a wall-clock comparison: a bad RTC must not
+# be able to expire real history.
+MAX_BUCKETS = RETENTION_SECONDS // BUCKET_SECONDS
 OWNER_IDLE_SECONDS = 48 * 3600  # an owner counter unused this long is dropped
 PEAK_SAMPLES = 17280  # per owner: 24 h of 5 s samples for the peak W
 # range → (points, seconds per point); at most 168 points per series
@@ -76,7 +79,6 @@ _DESKTOP = (65.0, 10.0, 35.0)  # tdp, idle, other (W)
 _PLATFORM_DEFAULTS = {"darwin": (20.0, 3.0, 5.0)}
 _MANUAL_ACTIVITY = {"jasna": "restore", "avsubs": "asr", "lada": "restore"}
 BUSY_GPU_PCT = 30.0  # GPU utilisation with no lease holder: an untracked job
-JUMP_SLACK_SECONDS = 3600  # wall clock this far past the newest bucket: a jump
 _GPU_STAGE_ACTIVITY = {"restore": "restore", "asr": "asr", "translate": "translate"}
 
 RunId = gpu_lease.RunId
@@ -351,10 +353,12 @@ class _Store:
         conn.execute(_SCHEMA)
         return conn
 
-    def load(self, since: float) -> list[_Bucket]:
+    def load(self) -> list[_Bucket]:
+        """The newest MAX_BUCKETS buckets, oldest first."""
         rows = self.conn.execute(
-            f"SELECT {_COLUMNS} FROM power_buckets WHERE start >= ? ORDER BY start",
-            (int(since),),
+            f"SELECT {_COLUMNS} FROM (SELECT * FROM power_buckets "
+            "ORDER BY start DESC LIMIT ?) ORDER BY start",
+            (MAX_BUCKETS,),
         ).fetchall()
         out = []
         for row in rows:
@@ -363,7 +367,7 @@ class _Store:
             out.append(b)
         return out
 
-    def upsert(self, b: _Bucket, prune_before: Optional[float] = None) -> None:
+    def upsert(self, b: _Bucket, prune: bool = False) -> None:
         self.conn.execute(
             _UPSERT,
             (
@@ -375,9 +379,11 @@ class _Store:
                 *(b.act[k] for k in ACTIVITIES),
             ),
         )
-        if prune_before is not None:
+        if prune:  # keep the newest MAX_BUCKETS rows by start
             self.conn.execute(
-                "DELETE FROM power_buckets WHERE start < ?", (int(prune_before),)
+                "DELETE FROM power_buckets WHERE start NOT IN "
+                "(SELECT start FROM power_buckets ORDER BY start DESC LIMIT ?)",
+                (MAX_BUCKETS,),
             )
         self.conn.commit()
 
@@ -454,8 +460,6 @@ class PowerSampler:
         self._prev: Optional[tuple[float, Optional[float]]] = None  # (mono, gpu W)
         # latest (estimate, activity, cpu reading had a window behind it)
         self._now: Optional[tuple[Estimate, str, bool]] = None
-        self._cutoff: Optional[float] = None  # retention cutoff of the last close
-        self._jump_logged = False
         self._seq = 0
         self._epochs = 0
         self._counters: dict[str, _Counter] = {}
@@ -526,7 +530,7 @@ class PowerSampler:
             return None
         store = _Store(path)
         try:
-            loaded = store.load(self._wall() - RETENTION_SECONDS)
+            loaded = store.load()
         except sqlite3.Error as exc:
             store.close()
             self._quarantine(path, exc)
@@ -604,7 +608,6 @@ class PowerSampler:
         now, wall = self._clock(), self._wall()
         est = estimate(model, gpu_w, cpu_pct)
         closed: Optional[_Bucket] = None
-        cutoff: Optional[float] = None
         with self._lock:
             self.ticks += 1
             self._seq += 1
@@ -619,10 +622,9 @@ class PowerSampler:
                 other_wh = _wall_share(model, gpu_wh, cpu_wh, model.other_w * h)
                 closed = self._add(wall, dt, gpu_wh, cpu_wh, other_wh, activity)
                 self._count(owner, now, dt, gpu_wh, cpu_wh, other_wh, est.w)
-                cutoff = self._cutoff
         if closed is not None:
             try:
-                store.upsert(closed, prune_before=cutoff)
+                store.upsert(closed, prune=True)
             except sqlite3.Error:
                 log.warning("power bucket could not be saved")
 
@@ -641,7 +643,7 @@ class PowerSampler:
         if self._open is not None and self._open.start != start:
             closed, self._open = self._open, None
             self._keep(closed)
-            self._prune(wall)
+            self._prune()
         if self._open is None:
             self._open = _Bucket(start)
         b = self._open
@@ -661,24 +663,10 @@ class PowerSampler:
         else:
             kept.merge(b)
 
-    def _prune(self, wall: float) -> None:
-        """Drop expired buckets and idle counters. A wall clock that has jumped
-        ahead of the newest bucket (a bad RTC, an NTP step) would expire the
-        whole history, so then nothing is pruned (and nothing in the store)."""
-        newest = max(self._buckets, default=None)
-        if newest is not None and wall - newest > BUCKET_SECONDS + JUMP_SLACK_SECONDS:
-            self._cutoff = None
-            if not self._jump_logged:
-                self._jump_logged = True
-                log.warning(
-                    "wall clock is %d s ahead of the newest power bucket; "
-                    "not pruning history",
-                    int(wall - newest),
-                )
-        else:
-            self._cutoff = wall - RETENTION_SECONDS
-            for start in [s for s in self._buckets if s < self._cutoff]:
-                del self._buckets[start]
+    def _prune(self) -> None:
+        """Keep the newest MAX_BUCKETS buckets and drop idle counters."""
+        for start in sorted(self._buckets)[: max(0, len(self._buckets) - MAX_BUCKETS)]:
+            del self._buckets[start]
         idle = self._clock() - OWNER_IDLE_SECONDS
         for owner in [o for o, c in self._counters.items() if c.last < idle]:
             del self._counters[owner]
@@ -809,7 +797,11 @@ class PowerSampler:
         end = math.ceil((open_end + offset) / step) * step - offset
         first = end - points * step
         with self._lock:
-            buckets = [b for b in self._all_buckets() if first <= b.start < end]
+            # a bucket later than now (the clock stepped back) is not history;
+            # `end` only aligns the chart
+            buckets = [
+                b for b in self._all_buckets() if first <= b.start < min(end, open_end)
+            ]
         covered = [0.0] * points
         gpu, cpu, other = [0.0] * points, [0.0] * points, [0.0] * points
         acts = {k: [0.0] * points for k in ACTIVITIES}
