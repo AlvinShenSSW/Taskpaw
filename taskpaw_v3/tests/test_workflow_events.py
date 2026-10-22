@@ -15,7 +15,7 @@ from taskpaw_v3.core.config import WorkflowSettings
 from taskpaw_v3.core.protocol import EventQueue
 from taskpaw_v3.hub.server.status_md import render_status_md
 from taskpaw_v3.monitors.plugins.jasna_progress import parse_jasna_progress_line
-from taskpaw_v3.tests.test_workflow_timing import Recorder, board_film
+from taskpaw_v3.tests.test_workflow_timing import T0, Recorder, board_film
 from taskpaw_v3.workflow import board, planning
 from taskpaw_v3.workflow.executors import ExecOutcome
 from taskpaw_v3.workflow.local_dispatch import LocalDispatcher
@@ -27,6 +27,19 @@ from taskpaw_v3.workflow.timing import WorkflowLog, film_timing, summary_text
 def observer(tmp_path):
     queue = EventQueue("windows")
     return events.WorkflowEvents(queue, tmp_path / "workflow-events.json"), queue
+
+
+@pytest.fixture
+def later(monkeypatch):
+    """The fixture films' cleanup ends (T0) are older than the two-day window
+    whatever today's date is."""
+
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return T0 + timedelta(days=3)
+
+    monkeypatch.setattr(events, "datetime", Later)
 
 
 def film(**changes):
@@ -240,7 +253,7 @@ def test_archive_cleanup_results_are_distinct_and_deduped(observer, monkeypatch)
     assert sum("已入库 · 待清理" in e["message"] for e in queue.recent()) == 1
 
 
-def test_first_observation_does_not_replay_old_done_films(observer, monkeypatch):
+def test_first_observation_does_not_replay_old_done_films(observer, monkeypatch, later):
     sink, queue = observer
     queue.add("other-monitor", "current activity")
     old = board_film({s: (0, 1) for s in board.STAGE_ORDER})
@@ -304,7 +317,7 @@ def test_done_recovery_uses_the_existing_summary_window(
 
 
 def test_old_actionable_films_and_immediate_translated_still_notify(
-    observer, monkeypatch
+    observer, monkeypatch, later
 ):
     sink, queue = observer
     pending = film(planned=False)
@@ -403,7 +416,7 @@ def test_real_restore_progress_reaches_hub_status(
 
 
 def test_summary_drops_old_completions_and_snapshot_is_independent(
-    observer, monkeypatch
+    observer, monkeypatch, later
 ):
     sink, _queue = observer
     old = board_film({s: (0, 1) for s in board.STAGE_ORDER}).model_copy(
