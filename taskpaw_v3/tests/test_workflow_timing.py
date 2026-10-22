@@ -113,6 +113,20 @@ def test_a_phase_ends_when_its_bar_reaches_100_percent():
     assert value.wall == 90.0
 
 
+def test_every_speed_test_stage_is_timed_after_an_earlier_one_completes():
+    """Codex r2: the speed test's stages share one bucket, but each of them
+    starts its own timing after the one before it reached 100%."""
+    feed = Feed(0.0)
+    feed.line(ltx(1, "scan", speed=True), 10.0)
+    feed.line(ltx(1, "scan", speed=True, percent=100), 20.0)  # 10 s
+    feed.line(ltx(1, "scan", speed=True, percent=100), 21.0)  # a final redraw
+    feed.line(ltx(2, "encode", speed=True), 30.0)
+    feed.line(ltx(2, "encode", speed=True, percent=100), 50.0)  # 20 s
+    value = feed.timer.snapshot(60.0)
+    assert value.speed_test == 30.0
+    assert value.ltx == 0.0 and value.ltx_stages == {}
+
+
 def test_a_bar_that_counts_to_its_total_is_complete_without_a_percent():
     feed = Feed(0.0)
     feed.line(SCAN, 1.0)

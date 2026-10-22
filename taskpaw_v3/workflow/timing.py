@@ -52,6 +52,16 @@ def phase_of(state: dict) -> str | None:
     return None
 
 
+def _segment_of(state: dict, phase: str | None) -> tuple[str | None, int | None]:
+    """What a phase change means: the phase, plus the stage index of a speed
+    test (its four stages share one bucket but each is its own bar)."""
+    snapshot = state.get("ltx_progress")
+    if phase == SPEED_TEST and isinstance(snapshot, dict):
+        index = snapshot.get("stage_index")
+        return phase, index if isinstance(index, int) else None
+    return phase, None
+
+
 def _bar_of(state: dict) -> dict:
     snapshot = state.get("ltx_progress")
     if isinstance(snapshot, dict):
@@ -92,7 +102,8 @@ class PhaseTimer:
         self.start = start
         self.end: float | None = None
         self.current: str | None = None
-        self._last: str | None = None  # the phase of the last state observed
+        # the segment (phase, speed-test stage) of the last state observed
+        self._last: tuple[str | None, int | None] = (None, None)
         self.since = start
         self.totals: dict[str, float] = {}
         self.runs = 0
@@ -101,11 +112,12 @@ class PhaseTimer:
     def observe(self, state: dict, now: float) -> None:
         phase = phase_of(state)
         done = phase is not None and _complete(state)
-        if phase == self._last:
+        segment = _segment_of(state, phase)
+        if segment == self._last:
             if done:  # the bar's last redraw: its phase ends here
                 self._close(now)
             return
-        self._last = phase
+        self._last = segment
         self._close(now)
         self.current, self.since = (None if done else phase), now
         stage = _ltx_stage(state)
