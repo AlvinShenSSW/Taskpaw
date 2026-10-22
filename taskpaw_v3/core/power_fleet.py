@@ -118,6 +118,9 @@ class PeerError(Exception):
         self.code = code
 
 
+_CLOCK_SLACK = time.get_clock_info("monotonic").resolution
+
+
 class _Watch:
     """Shuts the request's socket down at the absolute deadline (Codex r3).
 
@@ -163,7 +166,11 @@ class _Watch:
         if not connected:
             return False
         reason = getattr(exc, "reason", exc)
-        return isinstance(reason, TimeoutError) or time.monotonic() >= deadline
+        # One clock tick of slack: CPython < 3.13 on Windows reads monotonic
+        # from GetTickCount64 (15.6 ms ticks), so a failure raised right at the
+        # deadline can still read a tick before it.
+        late = time.monotonic() + _CLOCK_SLACK >= deadline
+        return isinstance(reason, TimeoutError) or late
 
     @staticmethod
     def _kill(sock: Any) -> None:

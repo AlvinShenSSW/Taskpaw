@@ -1055,10 +1055,30 @@ def test_the_socket_timeout_winning_the_race_is_still_a_timeout(monkeypatch):
         peer_.close()
 
 
+class _CoarseClock:
+    """`time` with CPython < 3.13 Windows' monotonic: GetTickCount64, 15.6 ms ticks."""
+
+    TICK = 1 / 64
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    def monotonic(self) -> float:
+        return (time.monotonic() // self.TICK) * self.TICK
+
+
+@pytest.mark.parametrize("coarse", [False, True], ids=["fine", "coarse"])
 @pytest.mark.parametrize("raised", [TimeoutError("timed out"), OSError("reset")])
-def test_a_failure_after_connect_at_the_deadline_is_a_timeout(monkeypatch, raised):
+def test_a_failure_after_connect_at_the_deadline_is_a_timeout(
+    monkeypatch, raised, coarse
+):
     # Same ordering with a fake connection: connected, no timer, the failure
     # surfaces at (or past) the attempt deadline, wrapped as urllib wraps it.
+    # With a coarse clock the post-sleep reading can still be a tick before
+    # the deadline (windows-latest py3.12 CI): still a timeout.
+    if coarse:
+        monkeypatch.setattr(power_fleet, "time", _CoarseClock())
+        monkeypatch.setattr(power_fleet, "_CLOCK_SLACK", _CoarseClock.TICK)
     watch_box: list[Any] = []
     real_watch = power_fleet._Watch
 
