@@ -105,6 +105,7 @@ class RouteCommands(FilmCommands):
             statuses = self._compute_statuses(command.film_id, command.input_revision)
             if all(status in _FINISHED for status in statuses.values()):
                 raise WorkflowError("precondition_failed")
+            self._require_source_admissible(film)  # CX7: the claim's own check
             worker = self._worker(command.worker_id)
             if (
                 not worker.workflow_participation
@@ -442,6 +443,9 @@ class RouteCommands(FilmCommands):
         films = []
         for row in rows:
             film_id, revision = row["film_id"], row["revision"]
+            admissible = not row["current"] or self._source_admissible(
+                self._film_row(film_id)
+            )
             stage = statuses.get((film_id, revision), {})
             claim = claims.get((film_id, revision))
             width, height, duration = probes.get((film_id, revision), (0, 0, None))
@@ -470,6 +474,7 @@ class RouteCommands(FilmCommands):
                         max_height=int(height),
                         duration_ms=int(duration) if duration else None,
                         source_bytes=int(sizes.get((film_id, revision)) or 0),
+                        source_admissible=admissible,
                     ),
                 )
             )

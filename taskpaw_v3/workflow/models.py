@@ -1684,6 +1684,9 @@ class RoutingFilm(Model):
     max_height: Count = 0
     duration_ms: Count | None = None
     source_bytes: Count = 0
+    # CX7: the claim's own source check (dirty, rescan, disabled root) passes;
+    # an inadmissible film is neither routed nor held by an unclaimed route
+    source_admissible: bool = True
 
 
 class RateSample(Model):

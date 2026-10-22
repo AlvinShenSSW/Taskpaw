@@ -110,6 +110,15 @@ class FilmCommands(WorkerCommands):
         ):
             raise WorkflowError("source_not_admissible")
 
+    def _source_admissible(self, film: sqlite3.Row) -> bool:
+        """`_require_source_admissible` as a fact, for reads that must agree
+        with the claim (P2-1 CX7)."""
+        try:
+            self._require_source_admissible(film)
+        except WorkflowError:
+            return False
+        return True
+
     def _require_plan(self, job: sqlite3.Row) -> None:
         """U1 P1': a restore is claimed only under its revision's confirmed plan."""
         if (

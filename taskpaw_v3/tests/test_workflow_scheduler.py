@@ -623,3 +623,59 @@ def test_the_pass_is_deterministic():
     films = [film(i, size=UHD if i % 3 == 0 else FHD) for i in range(9)]
     first, second = run(films, ws), run(list(reversed(films)), list(reversed(ws)))
     assert first == second
+
+
+# ── CX7: a film whose intake source is no longer admissible ──────────────
+def test_a_film_with_a_changed_source_is_not_routed_and_says_why():
+    ws = fleet()
+    changed, fine = film(source_admissible=False), film(1)
+    result = run([changed, fine], ws)
+    assert routed(result) == {fine.film_id: routed(result)[fine.film_id]}
+    assert result.waiting[changed.film_id] == s.SOURCE_CHANGED
+
+
+def test_films_with_a_changed_source_do_not_take_route_slots():
+    w = fleet()[0]
+    bad = [film(i, source_admissible=False) for i in range(3)]
+    fine = [film(10 + i) for i in range(2)]
+    result = run([*bad, *fine], [w])
+    assert routed(result).keys() == {f.film_id for f in fine}
+    assert {f.film_id for f in bad} <= set(result.waiting)
+
+
+def test_an_unclaimed_route_of_a_changed_source_is_withdrawn():
+    ws = fleet()
+    remote = film(source_admissible=False)
+    local = film(1, source_admissible=False)
+    routes = [open_route(remote, ws[0]), open_route(local, ws[1], kind="local")]
+    routes[1] = routes[1].model_copy(update={"worker_id": CONTROLLER})
+    result = run([remote, local], ws, routes=routes)
+    assert {(x.route_id, x.reason) for x in result.withdrawals} == {
+        (r.route_id, s.SOURCE_CHANGED) for r in routes
+    }
+    assert result.routes == ()
+    assert {remote.film_id, local.film_id} <= set(result.waiting)
+
+
+def test_a_claimed_route_survives_a_changed_source():
+    ws = fleet()
+    f = film(
+        restore="running",
+        source_admissible=False,
+        claimed_by=ws[0].worker_id,
+        claimed_stage="restore",
+        claimed_at=NOW,
+    )
+    result = run([f], ws, routes=[open_route(f, ws[0])])
+    assert result == s.SchedulePass((), (), {}, {})
+
+
+def test_a_film_is_routed_again_once_its_source_is_admissible():
+    ws = fleet()
+    f = film(source_admissible=False)
+    route = open_route(f, ws[0])
+    assert run([f], ws, routes=[route]).withdrawals
+    back = f.model_copy(update={"source_admissible": True})
+    assert run([back], ws, routes=[route]).withdrawals == ()
+    result = run([back], ws)
+    assert back.film_id in routed(result) and back.film_id not in result.waiting

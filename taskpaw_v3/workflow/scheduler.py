@@ -48,6 +48,7 @@ NO_DEVICE = "没有可用的设备"
 PIN_GONE = "指定设备不可用"
 HAND_OVER = "转派 GPU 设备"
 REVOKED = "已撤销"
+SOURCE_CHANGED = "片源变化，等待重新扫描"  # CX7: the claim would refuse the source
 
 _FINISHED = ("succeeded", "skipped")
 # (stage, GPU model, resolution class); ASR is not keyed on resolution
@@ -391,7 +392,9 @@ def schedule(
             continue  # claimed: only its worker or 判定已停止 settles it
         stages = routed_stages(film, gpu_stages)
         reason = None
-        if route.worker_id == controller_id:
+        if not film.source_admissible:  # CX7: it could never be claimed
+            reason = SOURCE_CHANGED
+        elif route.worker_id == controller_id:
             if route.kind == "local" and _ready_to_route(film, stages):
                 hand_over[film.film_id] = route
         elif stages and film.pin_worker_id != route.worker_id:
@@ -442,13 +445,17 @@ def schedule(
             outputs += film.source_bytes * OUTPUT_FACTOR
 
     # 4. candidates: 4K first, then confirm time (§4.3)
+    ready = [
+        film
+        for film in snapshot.films
+        if (film.film_id, film.input_revision) not in open_films
+        and _ready_to_route(film, routed_stages(film, gpu_stages))
+    ]
+    waiting: dict[str, str] = {
+        film.film_id: SOURCE_CHANGED for film in ready if not film.source_admissible
+    }
     candidates = sorted(
-        (
-            film
-            for film in snapshot.films
-            if (film.film_id, film.input_revision) not in open_films
-            and _ready_to_route(film, routed_stages(film, gpu_stages))
-        ),
+        (film for film in ready if film.source_admissible),
         key=lambda f: (
             _class(f) != "4K",
             f.confirmed_at or f.created_at,
@@ -456,7 +463,6 @@ def schedule(
         ),
     )
     decisions: list[RouteDecision] = []
-    waiting: dict[str, str] = {}
     disk_full = False
     for film in candidates:
         stages = routed_stages(film, gpu_stages)

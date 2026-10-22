@@ -31,7 +31,7 @@ from taskpaw_v3.tests.workflow_route_helpers import (
     swap_gpu,
 )
 from taskpaw_v3.workflow import models as m
-from taskpaw_v3.workflow import schema
+from taskpaw_v3.workflow import routing, scheduler, schema
 from taskpaw_v3.workflow.auth import require_role
 from taskpaw_v3.workflow.executors import (
     ASR_DONE,
@@ -818,3 +818,99 @@ def test_a_modified_route_table_is_rejected(tmp_path):
         conn.execute("DROP INDEX one_open_route_per_film")
     with pytest.raises(schema.SchemaError, match="invalid_schema"):
         schema.connect_existing(path)
+
+
+# ── CX7: the store's own source admissibility gates routing ──────────────
+@pytest.fixture
+def changed(rt, monkeypatch):
+    """Film ids whose intake source is not admissible: the one predicate the
+    claim uses (`_require_source_admissible`) refuses them."""
+    ids: set[str] = set()
+    real = rt.store._require_source_admissible
+
+    def guard(row):
+        if row["film_id"] in ids:
+            raise m.WorkflowError("source_not_admissible")
+        real(row)
+
+    monkeypatch.setattr(rt.store, "_require_source_admissible", guard)
+    return ids
+
+
+def snapshot_film(rt, film_id):
+    return next(
+        f for f in rt.store.routing_snapshot(rt.operator).films if f.film_id == film_id
+    )
+
+
+def test_route_film_refuses_an_inadmissible_source_until_it_recovers(rt, changed):
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    changed.add(film)
+    with pytest.raises(m.WorkflowError, match="source_not_admissible"):
+        route(rt, film, w.worker_id)
+    assert open_route(rt, film) is None
+    changed.clear()
+    route(rt, film, w.worker_id)
+    assert open_route(rt, film) is not None
+
+
+def test_the_snapshot_flags_an_inadmissible_source_and_recovers(rt, changed):
+    film = auto_film(rt)
+    assert snapshot_film(rt, film).source_admissible is True
+    changed.add(film)
+    assert snapshot_film(rt, film).source_admissible is False
+    changed.clear()
+    assert snapshot_film(rt, film).source_admissible is True
+
+
+def run_pass(rt, clock, workers):
+    return routing.run_pass(
+        rt.store,
+        rt.operator,
+        rt.meta,
+        controller_id=rt.identity.worker_id,
+        live={
+            w.worker_id: scheduler.WorkerLive(last_seen=clock.now()) for w in workers
+        },
+        now=clock.now(),
+        executors=rt.executors,
+    )
+
+
+def test_a_pass_releases_an_unclaimed_route_of_a_changed_source(rt, clock, changed):
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    assert [d.film_id for d in run_pass(rt, clock, [w]).routed] == [film]
+    changed.add(film)
+    outcome = run_pass(rt, clock, [w])
+    assert [x.reason for x in outcome.withdrawn] == [scheduler.SOURCE_CHANGED]
+    assert outcome.routed == ()
+    assert outcome.planned.waiting[film] == scheduler.SOURCE_CHANGED
+    assert open_route(rt, film) is None
+    again = run_pass(rt, clock, [w])  # stays released, keeps saying why
+    assert (again.routed, again.withdrawn) == ((), ())
+    assert again.planned.waiting[film] == scheduler.SOURCE_CHANGED
+    changed.clear()
+    assert [d.film_id for d in run_pass(rt, clock, [w]).routed] == [film]
+
+
+def test_a_pass_keeps_a_claimed_route_of_a_changed_source(rt, clock, changed):
+    w = enrol_remote(rt, "5060 Ti-1")
+    film = auto_film(rt)
+    run_pass(rt, clock, [w])
+    claim_remote(rt, w, film, "restore")
+    changed.add(film)
+    outcome = run_pass(rt, clock, [w])
+    assert (outcome.routed, outcome.withdrawn) == ((), ())
+    assert open_route(rt, film).worker_id == w.worker_id
+
+
+def test_changed_sources_cannot_exhaust_a_workers_route_slots(rt, clock, changed):
+    w = enrol_remote(rt, "5060 Ti-1")
+    bad = [auto_film(rt) for _ in range(3)]
+    changed.update(bad)
+    fine = [auto_film(rt) for _ in range(2)]
+    outcome = run_pass(rt, clock, [w])
+    assert {d.film_id for d in outcome.routed} == set(fine)
+    assert all(outcome.planned.waiting[f] == scheduler.SOURCE_CHANGED for f in bad)
