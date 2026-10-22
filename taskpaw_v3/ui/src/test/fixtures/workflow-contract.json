@@ -8,6 +8,7 @@
       "stage": "restore",
       "progress": "修复 · 阶段 2/4 encode · 52% · 剩余 12:12",
       "started_at": "2026-10-21T08:00:00Z",
+      "uses_gpu": true,
       "ltx": {
         "ltx_progress": {
           "mode": "restore",
@@ -70,6 +71,26 @@
           "ltx_runs": 1,
           "wall": 1102.7
         }
+      },
+      "energy": {
+        "wh": 812.5,
+        "gpu_wh": 600.0,
+        "cpu_wh": 150.0,
+        "other_wh": 62.5,
+        "seconds": 10800.0,
+        "avg_w": 270.8,
+        "peak_w": 301.0
+      },
+      "power": {
+        "w": 286.0,
+        "gpu_w": 210.0,
+        "cpu_w": 46.0,
+        "other_w": 30.0,
+        "estimated": true,
+        "today_wh": 8400.0,
+        "week_wh": 50400.0,
+        "month_wh": 291000.0,
+        "activity": "restore"
       }
     },
     "intake": {
@@ -207,7 +228,82 @@
           },
           "total_restore_to_translate": 7380.0,
           "queue_wait": 1800.0
-        }
+        },
+        "duration_ms": 120000,
+        "energy": {
+          "stages": {
+            "restore": {
+              "wh": 812.5,
+              "gpu_wh": 600.0,
+              "cpu_wh": 150.0,
+              "other_wh": 62.5,
+              "seconds": 10800.0,
+              "avg_w": 270.8,
+              "peak_w": 301.0,
+              "machine": "local",
+              "attempts": 1,
+              "partial": false,
+              "running": false
+            },
+            "asr": {
+              "wh": 812.5,
+              "gpu_wh": 600.0,
+              "cpu_wh": 150.0,
+              "other_wh": 62.5,
+              "seconds": 10800.0,
+              "avg_w": 270.8,
+              "peak_w": 301.0,
+              "machine": "local",
+              "attempts": 1,
+              "partial": false,
+              "running": false
+            },
+            "translate": {
+              "wh": 812.5,
+              "gpu_wh": 600.0,
+              "cpu_wh": 150.0,
+              "other_wh": 62.5,
+              "seconds": 10800.0,
+              "avg_w": 270.8,
+              "peak_w": 301.0,
+              "machine": "local",
+              "attempts": 1,
+              "partial": false,
+              "running": false
+            },
+            "return": {
+              "wh": 812.5,
+              "gpu_wh": 600.0,
+              "cpu_wh": 150.0,
+              "other_wh": 62.5,
+              "seconds": 10800.0,
+              "avg_w": 270.8,
+              "peak_w": 301.0,
+              "machine": "local",
+              "attempts": 1,
+              "partial": false,
+              "running": false
+            },
+            "scrape": {
+              "wh": 812.5,
+              "gpu_wh": 600.0,
+              "cpu_wh": 150.0,
+              "other_wh": 62.5,
+              "seconds": 10800.0,
+              "avg_w": 270.8,
+              "peak_w": 301.0,
+              "machine": "local",
+              "attempts": 1,
+              "partial": false,
+              "running": false
+            }
+          },
+          "total_wh": 4062.5,
+          "partial": false,
+          "running": false,
+          "estimated": true
+        },
+        "live_power": null
       },
       {
         "film_id": "film-failed",
@@ -329,7 +425,56 @@
           },
           "total_restore_to_translate": null,
           "queue_wait": 1800.0
-        }
+        },
+        "duration_ms": 120000,
+        "energy": {
+          "stages": {
+            "restore": {
+              "wh": 812.5,
+              "gpu_wh": 600.0,
+              "cpu_wh": 150.0,
+              "other_wh": 62.5,
+              "seconds": 10800.0,
+              "avg_w": 270.8,
+              "peak_w": 301.0,
+              "machine": "local",
+              "attempts": 1,
+              "partial": false,
+              "running": false
+            },
+            "asr": {
+              "wh": 812.5,
+              "gpu_wh": 600.0,
+              "cpu_wh": 150.0,
+              "other_wh": 62.5,
+              "seconds": 10800.0,
+              "avg_w": 270.8,
+              "peak_w": 301.0,
+              "machine": "local",
+              "attempts": 1,
+              "partial": false,
+              "running": false
+            },
+            "translate": {
+              "wh": 812.5,
+              "gpu_wh": 600.0,
+              "cpu_wh": 150.0,
+              "other_wh": 62.5,
+              "seconds": 10800.0,
+              "avg_w": 270.8,
+              "peak_w": 301.0,
+              "machine": "local",
+              "attempts": 1,
+              "partial": false,
+              "running": false
+            }
+          },
+          "total_wh": 2437.5,
+          "partial": false,
+          "running": false,
+          "estimated": true
+        },
+        "live_power": null
       },
       {
         "film_id": "film-restoring",
@@ -500,6 +645,39 @@
           "restore_breakdown": null,
           "total_restore_to_translate": null,
           "queue_wait": 1800.0
+        },
+        "duration_ms": 120000,
+        "energy": {
+          "stages": {
+            "restore": {
+              "wh": 812.5,
+              "gpu_wh": 600.0,
+              "cpu_wh": 150.0,
+              "other_wh": 62.5,
+              "seconds": 10800.0,
+              "avg_w": 270.8,
+              "peak_w": 301.0,
+              "machine": "local",
+              "attempts": 1,
+              "partial": false,
+              "running": true
+            }
+          },
+          "total_wh": 812.5,
+          "partial": false,
+          "running": true,
+          "estimated": true
+        },
+        "live_power": {
+          "w": 286.0,
+          "gpu_w": 210.0,
+          "cpu_w": 46.0,
+          "other_w": 30.0,
+          "estimated": true,
+          "today_wh": 8400.0,
+          "week_wh": 50400.0,
+          "month_wh": 291000.0,
+          "activity": "restore"
         }
       },
       {
@@ -606,7 +784,10 @@
           "restore_breakdown": null,
           "total_restore_to_translate": null,
           "queue_wait": null
-        }
+        },
+        "duration_ms": 120000,
+        "energy": null,
+        "live_power": null
       },
       {
         "film_id": "film-planning-unknown",
@@ -709,7 +890,10 @@
           "restore_breakdown": null,
           "total_restore_to_translate": null,
           "queue_wait": null
-        }
+        },
+        "duration_ms": 120000,
+        "energy": null,
+        "live_power": null
       }
     ],
     "packages": [
@@ -896,7 +1080,26 @@
       "name": "NVIDIA GeForce RTX 5060",
       "vram_mib": 8151,
       "max_output": "1080p"
-    }
+    },
+    "power": {
+      "w": 286.0,
+      "gpu_w": 210.0,
+      "cpu_w": 46.0,
+      "other_w": 30.0,
+      "today_wh": 8400.0,
+      "machines": 1,
+      "peers": 0,
+      "estimated": true
+    },
+    "energy_rates": [
+      {
+        "machine": "worker-local",
+        "resolution": "1080p",
+        "tier": "standard",
+        "films": 1,
+        "wh_per_hour": null
+      }
+    ]
   },
   "film": {
     "film-review": {
@@ -1145,6 +1348,81 @@
         "total_restore_to_translate": 7380.0,
         "queue_wait": 1800.0
       },
+      "duration_ms": 120000,
+      "energy": {
+        "stages": {
+          "restore": {
+            "wh": 812.5,
+            "gpu_wh": 600.0,
+            "cpu_wh": 150.0,
+            "other_wh": 62.5,
+            "seconds": 10800.0,
+            "avg_w": 270.8,
+            "peak_w": 301.0,
+            "machine": "local",
+            "attempts": 1,
+            "partial": false,
+            "running": false
+          },
+          "asr": {
+            "wh": 812.5,
+            "gpu_wh": 600.0,
+            "cpu_wh": 150.0,
+            "other_wh": 62.5,
+            "seconds": 10800.0,
+            "avg_w": 270.8,
+            "peak_w": 301.0,
+            "machine": "local",
+            "attempts": 1,
+            "partial": false,
+            "running": false
+          },
+          "translate": {
+            "wh": 812.5,
+            "gpu_wh": 600.0,
+            "cpu_wh": 150.0,
+            "other_wh": 62.5,
+            "seconds": 10800.0,
+            "avg_w": 270.8,
+            "peak_w": 301.0,
+            "machine": "local",
+            "attempts": 1,
+            "partial": false,
+            "running": false
+          },
+          "return": {
+            "wh": 812.5,
+            "gpu_wh": 600.0,
+            "cpu_wh": 150.0,
+            "other_wh": 62.5,
+            "seconds": 10800.0,
+            "avg_w": 270.8,
+            "peak_w": 301.0,
+            "machine": "local",
+            "attempts": 1,
+            "partial": false,
+            "running": false
+          },
+          "scrape": {
+            "wh": 812.5,
+            "gpu_wh": 600.0,
+            "cpu_wh": 150.0,
+            "other_wh": 62.5,
+            "seconds": 10800.0,
+            "avg_w": 270.8,
+            "peak_w": 301.0,
+            "machine": "local",
+            "attempts": 1,
+            "partial": false,
+            "running": false
+          }
+        },
+        "total_wh": 4062.5,
+        "partial": false,
+        "running": false,
+        "estimated": true
+      },
+      "live_power": null,
       "archive": {
         "status": "pending",
         "error": null,
@@ -1351,6 +1629,55 @@
         "total_restore_to_translate": null,
         "queue_wait": 1800.0
       },
+      "duration_ms": 120000,
+      "energy": {
+        "stages": {
+          "restore": {
+            "wh": 812.5,
+            "gpu_wh": 600.0,
+            "cpu_wh": 150.0,
+            "other_wh": 62.5,
+            "seconds": 10800.0,
+            "avg_w": 270.8,
+            "peak_w": 301.0,
+            "machine": "local",
+            "attempts": 1,
+            "partial": false,
+            "running": false
+          },
+          "asr": {
+            "wh": 812.5,
+            "gpu_wh": 600.0,
+            "cpu_wh": 150.0,
+            "other_wh": 62.5,
+            "seconds": 10800.0,
+            "avg_w": 270.8,
+            "peak_w": 301.0,
+            "machine": "local",
+            "attempts": 1,
+            "partial": false,
+            "running": false
+          },
+          "translate": {
+            "wh": 812.5,
+            "gpu_wh": 600.0,
+            "cpu_wh": 150.0,
+            "other_wh": 62.5,
+            "seconds": 10800.0,
+            "avg_w": 270.8,
+            "peak_w": 301.0,
+            "machine": "local",
+            "attempts": 1,
+            "partial": false,
+            "running": false
+          }
+        },
+        "total_wh": 2437.5,
+        "partial": false,
+        "running": false,
+        "estimated": true
+      },
+      "live_power": null,
       "archive": {
         "status": "pending",
         "error": null,
@@ -1606,6 +1933,39 @@
         "total_restore_to_translate": null,
         "queue_wait": 1800.0
       },
+      "duration_ms": 120000,
+      "energy": {
+        "stages": {
+          "restore": {
+            "wh": 812.5,
+            "gpu_wh": 600.0,
+            "cpu_wh": 150.0,
+            "other_wh": 62.5,
+            "seconds": 10800.0,
+            "avg_w": 270.8,
+            "peak_w": 301.0,
+            "machine": "local",
+            "attempts": 1,
+            "partial": false,
+            "running": true
+          }
+        },
+        "total_wh": 812.5,
+        "partial": false,
+        "running": true,
+        "estimated": true
+      },
+      "live_power": {
+        "w": 286.0,
+        "gpu_w": 210.0,
+        "cpu_w": 46.0,
+        "other_w": 30.0,
+        "estimated": true,
+        "today_wh": 8400.0,
+        "week_wh": 50400.0,
+        "month_wh": 291000.0,
+        "activity": "restore"
+      },
       "archive": {
         "status": "pending",
         "error": null,
@@ -1799,6 +2159,9 @@
         "total_restore_to_translate": null,
         "queue_wait": null
       },
+      "duration_ms": 120000,
+      "energy": null,
+      "live_power": null,
       "archive": {
         "status": "pending",
         "error": null,
@@ -1986,6 +2349,9 @@
         "total_restore_to_translate": null,
         "queue_wait": null
       },
+      "duration_ms": 120000,
+      "energy": null,
+      "live_power": null,
       "archive": {
         "status": "pending",
         "error": null,
@@ -2045,6 +2411,22 @@
           "ltx_reason": "默认",
           "machine": "worker-local",
           "machine_reason": "NVIDIA GeForce RTX 5060 8 GB"
+        },
+        "prediction": {
+          "machine": "worker-local",
+          "resolution": "1080p",
+          "min_films": 3,
+          "films": {
+            "standard": 1,
+            "good": 0,
+            "high": 0,
+            "none": 0
+          },
+          "estimated": true,
+          "standard": null,
+          "good": null,
+          "high": null,
+          "none": null
         }
       },
       {
@@ -2086,6 +2468,22 @@
           "ltx_reason": "默认",
           "machine": "worker-local",
           "machine_reason": "NVIDIA GeForce RTX 5060 8 GB"
+        },
+        "prediction": {
+          "machine": "worker-local",
+          "resolution": "1080p",
+          "min_films": 3,
+          "films": {
+            "standard": 1,
+            "good": 0,
+            "high": 0,
+            "none": 0
+          },
+          "estimated": true,
+          "standard": null,
+          "good": null,
+          "high": null,
+          "none": null
         }
       }
     ],

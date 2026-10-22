@@ -18,6 +18,7 @@ from datetime import timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
+from . import energy as en
 from . import intake_models as im
 from . import models as m
 from .auth import STAGE_ROLES
@@ -474,7 +475,19 @@ def film_row(
         "steps": _steps(film, place, waiting, kept or {}, current, download),
         # U1e: each finished stage's time, the restore breakdown and 修复→翻译
         "timing": film_timing(film),
+        # PWR-2: the estimated energy per stage and in all, and the summed
+        # probe duration (度 / 片长小时)
+        "duration_ms": film.duration_ms,
+        "energy": en.film_energy(film, current),
+        "live_power": live_power(film, current),
     }
+
+
+def live_power(film: m.BoardFilm, current: dict[str, Any] | None) -> Any:
+    """PW12: the machine's live estimate, only on the GPU-owning running film."""
+    if not current or current.get("film_id") != film.film_id:
+        return None
+    return current.get("power") if current.get("uses_gpu") else None
 
 
 def revisions(film: m.BoardFilm) -> dict[str, Any]:
@@ -1003,6 +1016,9 @@ def film_detail(
         ],
         "steps": row["steps"],
         "timing": row["timing"],
+        "duration_ms": row["duration_ms"],
+        "energy": row["energy"],
+        "live_power": row["live_power"],
         "archive": {
             "status": wf.archive_status,
             "error": film.archive_error,

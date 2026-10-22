@@ -559,6 +559,10 @@ def test_the_running_stage_reports_text_ltx_detail_and_the_film_name(rt):
         "stage": "restore",
         "progress": "修复 第 1/2 卷 · 阶段 2/4 encode",
         "ltx": {"ltx_stage": "2/4 encode", "current_file": "第 1/2 卷"},
+        # PWR-2: no power sampler in this test
+        "uses_gpu": True,
+        "energy": None,
+        "power": None,
     }
     assert second["progress"] == "修复 第 2/2 卷" and "ltx" not in second
     assert reporting.blocking == ["影片工作流：movie"]

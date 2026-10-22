@@ -183,7 +183,14 @@ def register_workflow_routes(
             "counts": board.counts([], []),
             "dispatch": None,
             "gpu": None,
+            "power": _cluster_power(),
+            "energy_rates": [],
         }
+
+    def _cluster_power() -> dict[str, Any] | None:
+        from taskpaw_v3.core import power_fleet
+
+        return power_fleet.cluster_power()
 
     def _dispatcher(host: WorkflowHostLike) -> Any:
         dispatcher = getattr(host, "dispatcher", None)
@@ -199,6 +206,7 @@ def register_workflow_routes(
         if host.state != "running" or host.runtime is None:
             return _empty(host.state, host.reason)
         from taskpaw_v3.workflow import board
+        from taskpaw_v3.workflow import energy as en
         from taskpaw_v3.workflow.planning import max_output
 
         status = host.status()
@@ -242,6 +250,10 @@ def register_workflow_routes(
             }
             if gpu is not None
             else None,
+            # PWR-2: the cluster's live estimate (this machine plus the 功耗
+            # tab's peers) and the history behind 预计耗电 / 每片能耗
+            "power": _cluster_power(),
+            "energy_rates": en.rates(films),
         }
 
     @app.get("/control/workflow/films/{film_id}")

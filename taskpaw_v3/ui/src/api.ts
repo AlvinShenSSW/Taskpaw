@@ -222,6 +222,35 @@ export interface FilmRow {
   resolution: Resolution | null; plan: FilmPlan | null; receipt_id: string | null; revisions: FilmRevisions;
   // U1e: each finished stage's time, the restore breakdown and 修复→翻译
   timing?: FilmTiming | null;
+  // PWR-2: the summed probe duration, the estimated energy and, on the GPU-owning running film only,
+  // this machine's live estimate (PW12)
+  duration_ms?: number | null; energy?: FilmEnergy | null; live_power?: LivePower | null;
+}
+// PWR-2: a stage's estimated energy over the current revision's attempts (failed ones included);
+// `partial`: an attempt was cut off without a value (「部分」); `running`: the attempt so far.
+export interface EnergyStage {
+  wh: number; gpu_wh: number; cpu_wh: number; other_wh: number; seconds: number;
+  avg_w: number | null; peak_w: number | null; machine: string; attempts: number; partial: boolean; running: boolean;
+}
+export interface FilmEnergy {
+  stages: Partial<Record<string, EnergyStage>>; total_wh: number; partial: boolean; running: boolean; estimated: true;
+}
+// PWR-1 `/status.power`: one machine's live estimate (W) and its calendar energy (Wh).
+export interface LivePower {
+  w: number; gpu_w: number | null; cpu_w: number | null; other_w: number | null; estimated: true;
+  today_wh: number | null; week_wh: number | null; month_wh: number | null; activity: string | null;
+}
+// PWR-2 集群功耗: this machine plus the 功耗 tab's fresh peers.
+export interface ClusterPower {
+  w: number; gpu_w: number; cpu_w: number; other_w: number; today_wh: number; machines: number; peers: number; estimated: true;
+}
+// PWR-2 PW13: median Wh per film-hour per machine × resolution × tier (null below 3 films).
+export interface EnergyRate {
+  machine: string; resolution: Resolution; tier: LtxTier | "none"; films: number; wh_per_hour: number | null;
+}
+export interface PlanPrediction {
+  machine: string; resolution: Resolution | null; min_films: number; films: Record<LtxTier | "none", number>;
+  standard: number | null; good: number | null; high: number | null; none: number | null; estimated: true;
 }
 // U1e: the seconds Taskpaw saw each Jasna phase as the current one, over every LTX run and volume.
 // `ltx` is the four restore stages (`ltx_stages`, by name) only; `speed_test` is counted apart.
@@ -268,6 +297,7 @@ export interface PackageRow {
 export interface WorkflowIntake { package_id: string; phase: string; bytes_completed: number; total: number }
 export interface WorkflowCurrent {
   film_id: string; film: string; stage: string; progress: unknown; ltx?: Record<string, unknown>;
+  uses_gpu?: boolean; energy?: Record<string, unknown> | null; power?: LivePower | null;
 }
 export interface WorkflowDispatch {
   state: "idle" | "running" | "paused" | "stopping_unconfirmed"; reason: string; paused: boolean;
@@ -284,6 +314,8 @@ export interface WorkflowFilms {
   films: FilmRow[]; packages: PackageRow[]; counts: WorkflowCounts;
   // null without a host (dispatch) or without a probed GPU
   dispatch: WorkflowDispatch | null; gpu: WorkflowGpu | null;
+  // PWR-2: the cluster's live estimate and the history behind 预计耗电 / 每片能耗
+  power?: ClusterPower | null; energy_rates?: EnergyRate[];
 }
 export interface FilmDetail {
   film_id: string; name: string; number: string | null; title: string | null; actors: string[];
@@ -298,6 +330,7 @@ export interface FilmDetail {
   cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
   resolution: Resolution | null; receipt_id: string | null; revisions: FilmRevisions; plan: FilmPlan | null;
   timing?: FilmTiming | null;
+  duration_ms?: number | null; energy?: FilmEnergy | null; live_power?: LivePower | null;
   // null when Miko is not configured
   lookup: PlanLookup | null;
 }
@@ -331,6 +364,30 @@ export interface PlanEntry {
   width: number | null; height: number | null; duration_ms: number | null; size_bytes: number | null;
   video_count: number; item_count: number; needs_gpu: boolean; created_at: string;
   lookup: PlanLookup | null; recommendation: PlanRecommendation;
+  // PWR-2 PW13: 预计耗电 on the recommended machine (Wh per tier; null = 历史不足)
+  prediction?: PlanPrediction | null;
+}
+// PWR-1/3: the 功耗 tab. A machine's bounded history (at most 168 points; `avg_w` null = a gap).
+export type PowerRange = "24h" | "7d" | "30d";
+export type PowerActivity = "restore" | "asr" | "translate" | "idle" | "other";
+export interface PowerHistory {
+  range: PowerRange; step_s: number; estimated: true; t: number[]; covered_s: number[]; avg_w: Array<number | null>;
+  wh: number[]; gpu_wh: number[]; cpu_wh: number[]; other_wh: number[];
+  activity_wh: Record<PowerActivity, number[]>; totals: { wh: number; activity_wh: Record<PowerActivity, number> };
+}
+// PW06: `state` ok | off (sampling off) | no_power (an older TaskPaw) | pending | unreachable | unauthorized
+// | invalid_address | invalid | timeout | too_large | http_error | not_found.
+export interface PowerPeerRow {
+  name: string; address: string; state: string; error: string | null; machine: string | null; version: string | null;
+  os: string | null; power: LivePower | null; history: PowerHistory | null; age_s: number | null; stale: boolean;
+}
+export interface PowerView {
+  power: LivePower | null; history: PowerHistory; machine?: { name: string; os: string }; peers?: PowerPeerRow[];
+}
+export interface PowerPeerSetting { name: string; address: string }
+export interface PowerSettings {
+  enabled: boolean; tdp_w: number | null; idle_w: number | null; other_w: number | null;
+  psu_efficiency: number | null; cpu_source: "estimate" | "none"; peers: PowerPeerSetting[];
 }
 export interface PlanMachine { id: string; name: string; gpu: string | null; vram_mib: number | null; reason: string }
 export interface WorkflowPlans {
@@ -592,6 +649,7 @@ export const api = {
   hubSetPollingToken: (polling_token: string) =>
     send<{ ok: boolean }>("hub", "PATCH", "/config", { polling_token }),
   // Media workflow (T06-P1 §8): local control API only; paths are resolved by film id.
+  power: (range: PowerRange) => get<PowerView>("agent", `/control/power?range=${range}`),
   workflowFilms: () => get<WorkflowFilms>("agent", "/control/workflow/films"),
   workflowFilm: (filmId: string) => get<FilmDetail>("agent", `/control/workflow/films/${seg(filmId)}`),
   performers: (query: string) =>

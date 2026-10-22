@@ -11,6 +11,7 @@ from .models import (
     ApprovalRecord,
     ArchiveOperation,
     AssignmentRecord,
+    AttemptEnergy,
     AttemptRecord,
     BoardFilm,
     BoardStage,
@@ -526,10 +527,24 @@ class ReadCommands(WorkflowCore):
                 f"JOIN attempts x ON x.job_id=s.job_id {where[0]}",
                 where[1],
             ).fetchall()
-            # the largest probe of each current input (V3 §7 resolution)
+            # PWR-2: every resolved attempt's evidence of the local stages, oldest
+            # first; the film's energy is their sum (PW05)
+            spent = self._conn.execute(
+                "SELECT s.film_id,s.stage,json_extract(x.body_json,'$.evidence') "
+                "FROM films f JOIN stages s ON s.film_id=f.film_id "
+                "AND s.input_revision=f.current_input_revision "
+                "AND s.stage IN ('restore','asr','translate','return','scrape') "
+                "JOIN attempts x ON x.job_id=s.job_id "
+                f"AND json_extract(x.body_json,'$.ended_at') IS NOT NULL {where[0]} "
+                "ORDER BY x.rowid",
+                where[1],
+            ).fetchall()
+            # the largest probe of each current input (V3 §7 resolution) and,
+            # PWR-2, the summed probe duration
             probes = self._conn.execute(
                 "SELECT f.film_id,max(json_extract(p.value,'$.width')),"
-                "max(json_extract(p.value,'$.height')) FROM films f "
+                "max(json_extract(p.value,'$.height')),"
+                "sum(json_extract(p.value,'$.duration_ms')) FROM films f "
                 "JOIN manifests im ON im.film_id=f.film_id AND im.kind='input' "
                 "AND im.revision=f.current_input_revision,"
                 "json_each(im.body_json,'$.readiness.media_probes') p "
@@ -543,6 +558,10 @@ class ReadCommands(WorkflowCore):
         package_films = {row["package_id"]: row["films"] for row in counts}
         receipt_ids = {row[0]: row[1] for row in receipts}  # newest wins
         sizes = {row[0]: (row[1] or 0, row[2] or 0) for row in probes}
+        durations = {row[0]: row[3] for row in probes}
+        energies: dict[tuple[str, str], list[AttemptEnergy | None]] = {}
+        for film_id_, stage_, evidence_ in spent:
+            energies.setdefault((film_id_, stage_), []).append(_energy(evidence_))
         first: dict[tuple[str, str], datetime] = {}
         for film_id_, stage_, begun in firsts:
             if not begun:
@@ -581,6 +600,7 @@ class ReadCommands(WorkflowCore):
                     "final_hash": row["final_hash"],
                     "max_width": sizes.get(row["film_id"], (0, 0))[0],
                     "max_height": sizes.get(row["film_id"], (0, 0))[1],
+                    "duration_ms": _duration(durations.get(row["film_id"])),
                 },
             )
             if row["stage"] is not None:
@@ -591,6 +611,9 @@ class ReadCommands(WorkflowCore):
                         note=_attempt_note(row["attempt_json"]),
                         reason=row["reason"],
                         first_started_at=first.get((row["film_id"], row["stage"])),
+                        attempt_energy=tuple(
+                            energies.get((row["film_id"], row["stage"]), ())
+                        ),
                         **_attempt_times(row["attempt_json"]),
                     )
                 )
@@ -686,6 +709,30 @@ def _timing(value: Any) -> RestoreTiming | None:
         return RestoreTiming.model_validate(value)
     except ValueError:
         return None
+
+
+def _energy(evidence: str | None) -> AttemptEnergy | None:
+    """PWR-2: `evidence[-1].summary.energy` of a resolved attempt; None when
+    it has none (a crash, no sampler) or it no longer validates."""
+    if not evidence:
+        return None
+    try:
+        items = json.loads(evidence)
+        value = (items[-1].get("summary") or {}).get("energy") if items else None
+        return AttemptEnergy.model_validate(value) if value else None
+    except (ValueError, TypeError, AttributeError, IndexError):
+        return None
+
+
+def _duration(value: Any) -> int | None:
+    """A summed probe duration in whole ms; None without one."""
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _attempt_note(body: str | None) -> str | None:

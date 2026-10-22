@@ -6,6 +6,8 @@ import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type FilmDetail, type PlanEntry } from "../../api";
 import { LtxDownload } from "../LtxDownload";
+import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
+import { predictFromRates } from "../power/powerModel";
 import {
   CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
   machineLabel, STATUS_META, stageName, stepDurations, tierLong, type WorkItem,
@@ -107,6 +109,21 @@ function DrawerBody({ film, item, status, plan }: {
   const subtitle = film.marks.chinese_subtitles ? "字幕：已验证的非空中文字幕。"
     : final ? "本片无语音，不宣称已完成中文字幕。" : "字幕成果待后处理核对。";
   const receipt = film.receipt_id ?? (film.archive.status === "succeeded" ? "已入库" : null);
+  // PWR-2: the 能耗 block, or 待处理's prediction on the recommended machine and tier
+  const gpuName = ws.data.films.data?.gpu?.name;
+  const machine = gpuName ? `本机 · ${gpuName}` : "本机";
+  const energy = film.energy ?? null;
+  const predicted = energy?.running
+    ? predictFromRates(ws.data.films.data?.energy_rates, film.plan?.machine, film.resolution,
+      film.plan ? film.plan.ltx_model ?? "none" : "standard", film.duration_ms)
+    : null;
+  const energyBlock = status === "pending"
+    ? plan?.prediction && (
+      <PredictBlock filmId={film.film_id} prediction={plan.prediction} tier={plan.recommendation.ltx_model}
+        needsGpu={plan.needs_gpu} machine={machineLabel(ws.data.plans.data?.choices.machines.find((m) => m.id === plan.recommendation.machine))} />
+    )
+    : energy && <EnergyBlock filmId={film.film_id} energy={energy} machine={machine} predicted={predicted}
+      runSeconds={timing?.total_restore_to_translate ?? null} />;
   const plannedFacts = status === "pending" ? (
     <>
       <dt>画质</dt><dd>待安排{plan && <span className="muted"> · 推荐 {plan.needs_gpu ? tierLong(plan.recommendation.ltx_model) : "无需修复"}</span>}</dd>
@@ -137,6 +154,7 @@ function DrawerBody({ film, item, status, plan }: {
         </div>
       </div>
       <div className="detail-steps"><StepLine steps={film.steps} title={title} durations={stepDurations(timing)} /></div>
+      <LivePowerRow power={film.live_power} />
       {running ? (
         <div>
           <RestoreLivePanel step={running} />
@@ -151,6 +169,7 @@ function DrawerBody({ film, item, status, plan }: {
             : [STATUS_META[status][0], item?.kind === "film" ? item.row.note : film.note].filter(Boolean).join("：")}
         </Notice>
       )}
+      {energyBlock || null}
       <TimingBlock timing={timing} />
       <section className="panel final-panel spacer-top">
         <h3>{final ? "本次 Miko 最终成品" : "Miko 完整后处理"}</h3>

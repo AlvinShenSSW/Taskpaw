@@ -84,6 +84,8 @@ export interface WorkspaceApi {
   openReview: (filmId: string) => void;
   openExplain: (kind: "reconcile" | "cleanup", filmId: string) => void;
   toast: (message: string) => void;
+  // PWR-2: 「功耗详情」 switches the console to the 功耗 tab (absent where there is none)
+  openPower?: () => void;
 }
 
 export const WorkspaceContext = createContext<WorkspaceApi | null>(null);

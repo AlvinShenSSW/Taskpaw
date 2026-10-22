@@ -11,12 +11,13 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from taskpaw_v3.core import gpu_lease
+from taskpaw_v3.core import power as power_estimate
 from taskpaw_v3.core.generation import next_generation
 
 from . import board
@@ -73,6 +74,8 @@ class _Running:
     started_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    # PWR-2 (PW04): the film's power counter at the claim; None without a sampler
+    energy_start: Any = None
 
 
 class ComponentStep(Protocol):
@@ -173,8 +176,11 @@ class LocalDispatcher:
         off_reasons: dict[str, str] | None = None,
         finalizer: Finalizer | None = None,
         workflow_log: WorkflowLog | None = None,
+        power: Callable[[], Any] | None = None,
     ) -> None:
         self.runtime, self.lease = runtime, lease
+        # PWR-2: the agent's power sampler, read late (it starts after the host)
+        self.power = power or power_estimate.get_sampler
         self.workflow_log = workflow_log or WorkflowLog(None)  # U1e: 日志 rows
         self.finalizer = finalizer
         self.return_step, self.scrape_step = return_step, scrape_step
@@ -259,6 +265,8 @@ class LocalDispatcher:
                     "stage": running.job.stage,
                     "progress": running.progress,
                     "started_at": running.started_at,
+                    # PWR-2: whether the stage owns the GPU (and so the machine)
+                    "uses_gpu": running.uses_gpu,
                 }
                 if running.ltx is not None:
                     current["ltx"] = running.ltx
@@ -274,7 +282,66 @@ class LocalDispatcher:
             waiting = dict(self._waiting)
             if self.finalizer is not None:
                 waiting.update(self.finalizer.waiting)
-            return DispatchStatus(state, self._reason, current, waiting, self.paused)
+        if current is not None and running is not None:
+            # PWR-2, read outside the dispatch lock (the sampler reads
+            # `current_stage` under its own): the energy so far and, only on
+            # the GPU-owning stage, the machine's live estimate (PW12)
+            current["energy"] = self._energy_dict(running)
+            current["power"] = self._live_power() if running.uses_gpu else None
+        return DispatchStatus(state, self._reason, current, waiting, self.paused)
+
+    # ── power (PWR-2) ───────────────────────────────────────────────────
+    def _sampler(self) -> Any:
+        try:
+            return self.power()
+        except Exception:
+            log.exception("workflow power sampler unavailable")
+            return None
+
+    def _energy_reading(self, film_id: str) -> Any:
+        """The film's counter at the claim; None without a sampler."""
+        sampler = self._sampler()
+        if sampler is None:
+            return None
+        try:
+            return sampler.reading(film_id)
+        except Exception:
+            log.exception("workflow power reading failed")
+            return None
+
+    def _energy(self, running: _Running) -> m.AttemptEnergy | None:
+        """The film's energy from the claim to now; None when there is no
+        value (no sampler, sampling off or restarted, another counter)."""
+        start = running.energy_start
+        sampler = self._sampler() if start is not None else None
+        if sampler is None:
+            return None
+        try:
+            delta = sampler.energy_between(start, sampler.reading(start.owner))
+            if delta is None:
+                return None
+            return m.AttemptEnergy.model_validate(delta.to_dict())
+        except Exception:
+            log.exception("workflow attempt energy unavailable")
+            return None
+
+    def _energy_dict(self, running: _Running) -> dict[str, Any] | None:
+        energy = self._energy(running)
+        if energy is None:
+            return None
+        value = energy.model_dump(mode="json")
+        value.pop("schema_version", None)
+        return value
+
+    def _live_power(self) -> dict[str, Any] | None:
+        sampler = self._sampler()
+        if sampler is None:
+            return None
+        try:
+            return sampler.live()
+        except Exception:
+            log.exception("workflow live power unavailable")
+            return None
 
     def reconcile_retries(self) -> None:
         """R3: make retries a crash lost between resolution and requeue."""
@@ -519,6 +586,7 @@ class LocalDispatcher:
             rt.write_attempt(replace(attempt, children=tuple(children)))
 
         running = _Running(job, attempt, assignment_id, owner, None, uses_gpu, name)
+        running.energy_start = self._energy_reading(job.film_id)
         with self._lock:
             self._running = running
         self._end_admission()  # the claim is visible as running: admission is over
@@ -639,6 +707,7 @@ class LocalDispatcher:
                             outcome.message or None,
                             payload_digest=outcome.result_digest,
                             timing=outcome.timing,
+                            energy=self._energy(running),  # PWR-2, every attempt
                         ),
                     ),
                     outcome="succeeded" if outcome.ok else "failed",
@@ -755,6 +824,7 @@ class LocalDispatcher:
             False,
             self._name(job, manifest),
         )
+        running.energy_start = self._energy_reading(job.film_id)
         with self._lock:
             self._running = running
         self._end_admission()  # the claim is visible as running: admission is over

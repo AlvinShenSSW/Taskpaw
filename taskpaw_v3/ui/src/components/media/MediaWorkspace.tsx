@@ -13,6 +13,7 @@ import TuneIcon from "@mui/icons-material/Tune";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { Dialog, GlobalStyles, Snackbar, useMediaQuery } from "@mui/material";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { POWER_CSS } from "../power/powerStyles";
 import { ExceptionsPage } from "./ExceptionsPage";
 import { ExplainDialog, type Explain } from "./ExplainDialog";
 import { FilmDrawer } from "./FilmDrawer";
@@ -74,8 +75,9 @@ function NavList({ page, data, onPick, label }: { page: PageKey; data: MediaData
 }
 
 // 「媒体处理中心」 (build spec V3 + U1). Phase 1 mounts it as the AgentConsole tab; it does not
-// depend on the console, so the Hub can mount the same component later.
-export function MediaWorkspace() {
+// depend on the console, so the Hub can mount the same component later. `onOpenPower` (PWR-2): the
+// 集群功耗 card's 「功耗详情」 link, given by a host that has the 功耗 tab.
+export function MediaWorkspace({ onOpenPower }: { onOpenPower?: () => void } = {}) {
   const narrow = useMediaQuery("(max-width:900px)");
   const [page, setPage] = useState<PageKey>("overview");
   const [queueStage, setQueueStage] = useState<StageFilter>("all");
@@ -112,7 +114,8 @@ export function MediaWorkspace() {
     openReview: (id) => { setDrawer(null); setExplain(null); setReview(id); },
     openExplain: (kind, id) => { setDrawer(null); setReview(null); setExplain({ kind, filmId: id }); },
     toast: (text) => setToast({ text, key: Date.now() }),
-  }), [data, navigate, queueStage]);
+    openPower: onOpenPower,
+  }), [data, navigate, queueStage, onOpenPower]);
 
   const current = PAGES.find((p) => p.key === page) ?? PAGES[0];
   const films = data.films.data;
@@ -133,6 +136,7 @@ export function MediaWorkspace() {
   return (
     <WorkspaceContext.Provider value={api}>
       <GlobalStyles styles={MEDIA_CSS} />
+      <GlobalStyles styles={POWER_CSS} />
       <div className="mw mw-root" data-testid="media-workspace">
         <a className="skip-link" href="#mw-main" onClick={(e) => { e.preventDefault(); mainRef.current?.focus(); }}>跳至主要内容</a>
         <div className="scope-banner">

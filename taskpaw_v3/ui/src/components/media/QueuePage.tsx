@@ -3,6 +3,7 @@ import SearchIcon from "@mui/icons-material/Search";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../../api";
+import { fmtKwhShort } from "../power/powerModel";
 import {
   fmtBytes, fmtHoursMinutes, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, readFilmTiming,
   STAGE_OPTIONS, stepDurations, type StageFilter, type WorkItem,
@@ -66,6 +67,7 @@ function FilmCard({ item }: { item: WorkItem }) {
   const meta = [itemNumber(item), itemResolution(item)].filter(Boolean).join(" · ");
   const timing = item.kind === "film" ? readFilmTiming(item.row.timing) : null;  // U1e
   const run = timing?.total_restore_to_translate ?? null;
+  const energy = item.kind === "film" ? item.row.energy ?? null : null;  // PWR-2
   return (
     <article className="panel film-card" data-film={item.id}>
       <div className="top">
@@ -92,6 +94,9 @@ function FilmCard({ item }: { item: WorkItem }) {
         <span>
           {item.kind === "package" ? "INBOX" : isRestoring(item.status) ? "本机" : "INBOX"}
           {run !== null && <span className="mono run-total" title="从首次开始修复到翻译完成"> · 全程 {fmtHoursMinutes(run)}</span>}
+          {run !== null && energy && !energy.running && (
+            <span className="pw-foot" title="能耗为估算"> · <strong>约 {fmtKwhShort(energy.total_wh)} 度</strong>{energy.partial ? "（部分）" : ""}</span>
+          )}
         </span>
         {item.kind === "film" ? (
           <button type="button" className="btn ghost small" aria-label={`查看 ${title} 详情`} onClick={() => ws.openDetail(item.id)}>查看详情</button>

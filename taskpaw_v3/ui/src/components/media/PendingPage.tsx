@@ -3,6 +3,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api, HttpError, PLAN_BATCH_MAX, type LtxTier, type PlanChoice, type PlanEntry, type PlanMachine, type PlanResult } from "../../api";
+import { PredictLine } from "../power/PowerParts";
 import { fmtBytes, fmtDurationMs, machineLabel, TIER_ORDER, TIER_SHORT, tierLong } from "./mediaModel";
 import { Chip, Cover, EmptyState, Icon, Notice, PageTitle } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, MEDIA_PLANS_KEY, useWorkspace } from "./workspace";
@@ -250,7 +251,8 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onCh
         {e.needs_gpu ? (
           <div className="plan-field">
             <span className="plan-label" id={`tier-label-${id}`}>画质</span>
-            <div className="seg" role="radiogroup" aria-labelledby={`tier-label-${id}`} aria-describedby={`tier-reason-${id}`}>
+            <div className="seg" role="radiogroup" aria-labelledby={`tier-label-${id}`}
+              aria-describedby={e.prediction ? `tier-reason-${id} pw-predict-${id}` : `tier-reason-${id}`}>
               {TIER_ORDER.map((t) => {
                 const on = choice.tier === t;
                 return (
@@ -263,9 +265,13 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, onCh
               })}
             </div>
             <p className="plan-reason" id={`tier-reason-${id}`}>{rec.ltx_reason}</p>
+            <PredictLine prediction={e.prediction} tier={choice.tier} needsGpu id={`pw-predict-${id}`} />
           </div>
         ) : (
-          <div className="plan-field"><span className="plan-label">画质</span><Chip tone="green">无需修复</Chip></div>
+          <div className="plan-field">
+            <span className="plan-label">画质</span><Chip tone="green">无需修复</Chip>
+            <PredictLine prediction={e.prediction} tier={null} needsGpu={false} id={`pw-predict-${id}`} />
+          </div>
         )}
         <div className="plan-field">
           <label className="plan-label" htmlFor={`machine-${id}`}>设备</label>

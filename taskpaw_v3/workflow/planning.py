@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import board
+from . import energy as en
 from . import models as m
 from .exec_restore import needs_restore
 from .local_gpu import FULL_HD, max_resolution
@@ -139,6 +140,7 @@ def plan_list(rt: LocalRuntime) -> dict[str, Any]:
     history = _history(rt, films)
     default = default_tier(rt)
     gpu_name, vram = _gpu(rt)
+    rates = en.rates(films.values())  # PWR-2 PW13: 预计耗电 from this history
     entries = []
     for item in unplanned:
         film = films.get(item.film_id)
@@ -194,6 +196,9 @@ def plan_list(rt: LocalRuntime) -> dict[str, Any]:
                     "machine": rec.machine,
                     "machine_reason": rec.machine_reason,
                 },
+                "prediction": en.predict(
+                    rates, rec.machine, totals["resolution"], totals["duration_ms"]
+                ),
             }
         )
     return {"plans": entries, "default_tier": default, "choices": choices(rt)}

@@ -19,6 +19,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from taskpaw_v3.core import power
 from taskpaw_v3.monitors.plugins import jasna
 from taskpaw_v3.monitors.plugins.jasna_progress import (
     console_text,
@@ -94,6 +95,8 @@ class FailingTranslate(ret.FakeTranslate):
 class HeldRestore(ret.FakeRestore):
     """Reports the LTX encode line as exec_restore does, then holds the stage."""
 
+    uses_gpu = True  # as the real restore: the GPU-owning row (PWR-2 PW12)
+
     def __init__(self, rt):
         super().__init__(rt)
         self.started = threading.Event()
@@ -133,6 +136,40 @@ class ContractHost(Host):
                 "paused": d.paused,
             },
         }
+
+
+class ContractSampler:
+    """PWR-2: a power sampler with fixed figures, so every attempt's energy,
+    the running stage's energy so far and the live estimate are stable."""
+
+    LIVE = {
+        "w": 286.0,
+        "gpu_w": 210.0,
+        "cpu_w": 46.0,
+        "other_w": 30.0,
+        "estimated": True,
+        "today_wh": 8400.0,
+        "week_wh": 50400.0,
+        "month_wh": 291000.0,
+        "activity": "restore",
+    }
+
+    def reading(self, owner: str) -> Any:
+        return power.OwnerReading(owner, 1, 1, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    def energy_between(self, start: Any, end: Any) -> power.EnergyDelta:
+        return power.EnergyDelta(
+            wh=812.5,
+            gpu_wh=600.0,
+            cpu_wh=150.0,
+            other_wh=62.5,
+            seconds=10800.0,
+            avg_w=270.8,
+            peak_w=301.0,
+        )
+
+    def live(self) -> dict[str, Any]:
+        return dict(self.LIVE)
 
 
 # U1e: the live phase times of the held restore (first span, LTX encode)
@@ -214,6 +251,7 @@ def ok(response) -> Any:
 
 
 def build(tmp_path: Path) -> dict[str, Any]:
+    power.set_sampler(ContractSampler())  # type: ignore[arg-type]  # PWR-2
     world = World(tmp_path)  # 待确认: Miko's final package, one candidate
     rt = world.rt
     try:
@@ -321,3 +359,18 @@ def test_the_fixture_covers_every_page_the_ui_tests():
     assert data["target"]["missing"]["error_code"] == "missing"
     assert data["target"]["offline"]["error_code"] == "offline"
     assert len(data["target"]["candidates"]["candidates"]["items"]) == 1
+    # PWR-2: energy per film, live W on the GPU-owning row only, the cluster
+    # power, the history rates and every 待处理 entry's prediction
+    rows = {row["film_id"]: row for row in data["films"]["films"]}
+    assert rows["film-review"]["energy"]["total_wh"] > 0
+    assert rows["film-restoring"]["live_power"]["w"] == ContractSampler.LIVE["w"]
+    assert rows["film-restoring"]["energy"]["running"] is True
+    assert all(
+        row["live_power"] is None
+        for film_id, row in rows.items()
+        if film_id != "film-restoring"
+    )
+    assert data["films"]["power"]["w"] == ContractSampler.LIVE["w"]
+    assert data["films"]["energy_rates"]
+    assert all("prediction" in e for e in data["plans"]["plans"])
+    assert data["film"]["film-review"]["energy"] == rows["film-review"]["energy"]
