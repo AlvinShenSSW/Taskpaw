@@ -105,7 +105,8 @@ function PowerBody({ machines, range, rows, rates, workflowOff, onOpenMedia, say
   const gpuMachines = online.filter((m) => m.live?.gpu_w != null);
   const jasna = sumSplits(gpuMachines.map((m) => splitOf(m.live)));
   const working = gpuMachines.filter((m) => m.live?.activity === "restore" || m.live?.activity === "asr").length;
-  const cal = (key: "today_wh" | "week_wh" | "month_wh") => online.reduce((a, m) => a + (m.live?.[key] ?? 0), 0);
+  const cal = (key: "today_wh" | "week_wh" | "month_wh") => machines.reduce((a, m) => a + (m.energy?.[key] ?? 0), 0);
+  const lagging = machines.filter((m) => m.energy && m.energyStale).length;
   const done = completedFilms(rows);
   const whole = done.filter((r) => !r.energy?.partial);
   const perFilm = whole.length ? whole.reduce((a, r) => a + (r.energy?.total_wh ?? 0), 0) / whole.length : null;
@@ -126,6 +127,7 @@ function PowerBody({ machines, range, rows, rates, workflowOff, onOpenMedia, say
           <strong>{fmtKwhShort(cal("today_wh"))}<em>度 · 今日</em></strong>
           <div className="note">本周约 <span className="mono">{fmtKwhShort(cal("week_wh"))}</span> 度 · 本月约 <span className="mono">{fmtKwhShort(cal("month_wh"))}</span> 度</div>
           <div className="note">今日 00:00 起 · 本周自周一 · 本月自 {monthStart.getMonth() + 1}/1</div>
+          {lagging > 0 && <div className="note">含 {lagging} 台数据过期机器的最近读数（可能偏低）</div>}
         </div>
         <div className="panel stat" data-testid="stat-jasna">
           <div className="label">Jasna 集群实时 <Est /><Icon of={MemoryIcon} /></div>
@@ -214,7 +216,9 @@ function MachineRow({ m }: { m: Machine }) {
         ) : <span className="none">{stateText}</span>}
       </div>
       <div className="m-spark"><Sparkline values={m.day?.avg_w ?? []} color={m.color} name={m.name} /></div>
-      <div className="m-today"><span className="k">今日</span><strong>{m.live ? fmtKwh(m.live.today_wh) : "—"}<small>度</small></strong></div>
+      <div className="m-today"><span className="k">今日</span>
+        <strong>{m.live ? fmtKwh(m.live.today_wh) : m.energy?.today_wh != null ? fmtKwh(m.energy.today_wh) : "—"}<small>度</small></strong>
+        {!m.live && m.energy?.today_wh != null && m.energyStale && <small>数据过期</small>}</div>
     </li>
   );
 }
@@ -222,7 +226,8 @@ function MachineRow({ m }: { m: Machine }) {
 function EnergyTable({ machines, range }: { machines: Machine[]; range: PowerRange }) {
   const cols: Array<["today_wh" | "week_wh" | "month_wh", string]> = [["today_wh", "今日"], ["week_wh", "本周"], ["month_wh", "本月"]];
   const [sel, selLabel] = CALENDAR[range];
-  const value = (m: Machine, k: (typeof cols)[number][0]) => m.live?.[k] ?? null;
+  const value = (m: Machine, k: (typeof cols)[number][0]) => m.energy?.[k] ?? null;
+  const lagging = machines.some((m) => m.energy && m.energyStale);
   const total = (k: (typeof cols)[number][0]) => machines.reduce((a, m) => a + (value(m, k) ?? 0), 0);
   const selTotal = total(sel);
   return (
@@ -240,7 +245,7 @@ function EnergyTable({ machines, range }: { machines: Machine[]; range: PowerRan
               const share = selTotal > 0 ? (value(m, sel) ?? 0) / selTotal : 0;
               return (
                 <tr key={m.id}>
-                  <th scope="row"><span className="ename"><span className="swatch" style={{ background: m.color }} aria-hidden="true" />{m.name}</span></th>
+                  <th scope="row"><span className="ename"><span className="swatch" style={{ background: m.color }} aria-hidden="true" />{m.name}</span>{m.energy && m.energyStale && <> <Chip tone="amber">数据过期</Chip></>}</th>
                   {cols.map(([k]) => <td key={k} className={`num${k === sel ? " sel" : ""}`}>{fmtKwhCell(value(m, k))}</td>)}
                   <td><span className="share"><span className="bar" aria-hidden="true"><span style={{ width: `${share * 100}%` }} /></span><span className="mono">{Math.round(share * 100)}%</span></span></td>
                 </tr>
@@ -248,7 +253,7 @@ function EnergyTable({ machines, range }: { machines: Machine[]; range: PowerRan
             })}
           </tbody>
           <tfoot><tr>
-            <td>合计（估算）</td>
+            <td>合计（估算）{lagging ? " · 含过期数据" : ""}</td>
             {cols.map(([k]) => <td key={k} className={`num${k === sel ? " sel" : ""}`}>{fmtKwhCell(total(k))}</td>)}
             <td className="num">100%</td>
           </tr></tfoot>

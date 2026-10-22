@@ -243,6 +243,7 @@ export interface LivePower {
 // PWR-2 集群功耗: this machine plus the 功耗 tab's fresh peers.
 export interface ClusterPower {
   w: number; gpu_w: number; cpu_w: number; other_w: number; today_wh: number; machines: number; peers: number; estimated: true;
+  today_partial?: true;  // today_wh includes a peer's last reading (not answering now)
 }
 // PWR-2 PW13: median Wh per film-hour per machine × resolution × tier (null below 3 films).
 export interface EnergyRate {
@@ -378,9 +379,14 @@ export interface PowerHistory {
 // PW06: `state` ok | off (sampling off) | no_power (an older TaskPaw) | pending | unreachable | unauthorized
 // | invalid_address | invalid | timeout | too_large | http_error | not_found | self (this agent's own address:
 // listed, never summed twice — IR06).
+// `energy`: the last today / week / month Wh the peer reported while that period still runs (null once it
+// rolled over); `energy_stale` when the peer is not answering now. `duplicate`: the same machine as the
+// earlier peer `duplicate_of` — listed, never summed.
+export interface PeerEnergy { today_wh: number | null; week_wh: number | null; month_wh: number | null }
 export interface PowerPeerRow {
   name: string; address: string; state: string; error: string | null; machine: string | null; version: string | null;
   os: string | null; power: LivePower | null; history: PowerHistory | null; age_s: number | null; stale: boolean;
+  energy?: PeerEnergy | null; energy_stale?: boolean; duplicate_of?: string | null;
 }
 export interface PowerView {
   power: LivePower | null; history: PowerHistory; machine?: { name: string; os: string }; peers?: PowerPeerRow[];

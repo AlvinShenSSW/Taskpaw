@@ -1,5 +1,5 @@
 // PWR-3: the 功耗 tab's pure view model — machines from the control view, chart series, ranges.
-import type { LivePower, PowerHistory, PowerPeerRow, PowerRange, PowerView } from "../../api";
+import type { LivePower, PeerEnergy, PowerHistory, PowerPeerRow, PowerRange, PowerView } from "../../api";
 import { machineColor } from "./powerModel";
 
 export interface ChartSeries { id: string; name: string; color: string; values: Array<number | null> }
@@ -29,6 +29,8 @@ export function peakOf(series: ChartSeries[], n: number): number {
 export interface Machine {
   id: string; name: string; hw: string; local: boolean; state: string; stale: boolean; color: string;
   live: LivePower | null; day: PowerHistory | null; hist: PowerHistory | null;
+  // the period energy that counts in the totals: live, or a peer's last reading while its period lasts
+  energy?: PeerEnergy | null; energyStale?: boolean; duplicateOf?: string | null;
 }
 
 const STATE_TEXT: Record<string, [string, "green" | "amber" | "red" | "neutral"]> = {
@@ -41,7 +43,8 @@ const STATE_TEXT: Record<string, [string, "green" | "amber" | "red" | "neutral"]
   invalid_address: ["地址无效或为公网地址", "red"],
   self: ["就是本机，不重复计入", "amber"],
 };
-export function stateChip(m: Pick<Machine, "state" | "stale">): [string, "green" | "amber" | "red" | "neutral"] {
+export function stateChip(m: Pick<Machine, "state" | "stale" | "duplicateOf">): [string, "green" | "amber" | "red" | "neutral"] {
+  if (m.state === "duplicate") return [`与 ${m.duplicateOf ?? "另一项"} 是同一台机器，不重复计入`, "amber"];
   if (m.state === "ok" && m.stale) return ["数据过期", "amber"];
   return STATE_TEXT[m.state] ?? ["离线", "red"];
 }
@@ -54,11 +57,19 @@ function sane(h: PowerHistory | null | undefined): PowerHistory | null {
   return h;
 }
 
+const energyOf = (p: Pick<LivePower, "today_wh" | "week_wh" | "month_wh">): PeerEnergy =>
+  ({ today_wh: p.today_wh, week_wh: p.week_wh, month_wh: p.month_wh });
+
 function peerMachine(p: PowerPeerRow, ranged: PowerPeerRow | undefined, i: number): Machine {
+  const fresh = p.state === "ok" && !p.stale;
+  const counted = p.state !== "duplicate" && p.state !== "self";
   return {
+    duplicateOf: p.duplicate_of ?? null,
+    energy: counted ? (p.energy ?? (fresh && p.power ? energyOf(p.power) : null)) : null,
+    energyStale: p.energy_stale ?? !fresh,
     id: `peer:${p.name}`, name: p.name, local: false, state: p.state, stale: p.stale, color: machineColor(i),
     hw: [p.address, p.version ? `TaskPaw ${p.version}` : null].filter(Boolean).join(" · "),
-    live: p.state === "ok" && !p.stale ? p.power : null, day: sane(p.history), hist: sane(ranged?.history),
+    live: fresh ? p.power : null, day: sane(p.history), hist: sane(ranged?.history),
   };
 }
 
@@ -68,6 +79,7 @@ export function machinesOf(day: PowerView | undefined, ranged: PowerView | undef
     id: "local", name: day.machine?.name || "本机", local: true, state: day.power ? "ok" : "off", stale: false,
     color: machineColor(0), hw: ["本机 Agent", day.machine?.os].filter(Boolean).join(" · "),
     live: day.power, day: day.history, hist: ranged?.history ?? null,
+    energy: day.power ? energyOf(day.power) : null, energyStale: false,
   };
   const peers = (day.peers ?? []).map((p, i) => peerMachine(p, ranged?.peers?.find((r) => r.name === p.name), i + 1));
   return [local, ...peers];

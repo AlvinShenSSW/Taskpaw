@@ -10,6 +10,7 @@ access in these tests goes only to a fake server on 127.0.0.1.
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -759,3 +760,289 @@ def test_a_long_failing_history_keeps_the_five_minute_cap():
     entry = f._cache[("GPU-02", "192.168.1.20")]
     assert entry["history_fails"]["24h"] == 2001
     assert entry["history_due"]["24h"] == now + power_fleet.HISTORY_RETRY_MAX
+
+
+# ── Codex r3: offline peers' period energy, absolute deadline, duplicates ───
+class Wall:
+    def __init__(self, now=1_800_000_000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def wall_fleet(peers, answers, wall, **kw):
+    clock = Clock()
+    fetch = Peers(answers)
+    value = PowerFleet(
+        lambda: [SimpleNamespace(**p) for p in peers],
+        lambda: TOKEN,
+        fetch=fetch,
+        clock=clock,
+        wall=wall,
+        **kw,
+    )
+    return value, fetch, clock
+
+
+DAY = 86400.0
+
+
+def test_an_offline_peers_period_energy_is_kept_until_the_period_rolls_over():
+    wall = Wall()
+    answers = {"/status": {"power": LIVE}, "range=": HISTORY}
+    f, _fetch, _clock = wall_fleet([GPU02], answers, wall)
+    f.refresh_once()
+    (row,) = f.snapshot()
+    assert row["energy"] == {
+        "today_wh": 1920.0,
+        "week_wh": 9630.0,
+        "month_wh": 54900.0,
+    }
+    assert row["energy_stale"] is False
+    answers["/status"] = "unreachable"
+    f.refresh_once()
+    (row,) = f.snapshot()
+    assert row["power"] is None  # live W stays excluded
+    assert row["energy"]["today_wh"] == 1920.0 and row["energy_stale"] is True
+    wall.now += DAY  # the next day: today is over, the week and month are not
+    (row,) = f.snapshot()
+    assert row["energy"] == {
+        "today_wh": None,
+        "week_wh": 9630.0,
+        "month_wh": 54900.0,
+    }
+    wall.now += 4 * DAY  # a new week
+    assert f.snapshot()[0]["energy"] == {
+        "today_wh": None,
+        "week_wh": None,
+        "month_wh": 54900.0,
+    }
+    wall.now += 20 * DAY  # a new month
+    assert f.snapshot()[0]["energy"] == {
+        "today_wh": None,
+        "week_wh": None,
+        "month_wh": None,
+    }
+
+
+def test_a_silent_or_off_peer_keeps_its_energy_marked_stale():
+    wall = Wall()
+    answers = {"/status": {"power": LIVE}, "range=": HISTORY}
+    f, _fetch, clock = wall_fleet([GPU02], answers, wall)
+    f.refresh_once()
+    clock.now += power_fleet.STALE_SECONDS + 1  # still "ok", but silent
+    (row,) = f.snapshot()
+    assert row["stale"] is True and row["energy_stale"] is True
+    assert row["energy"]["today_wh"] == 1920.0
+    answers["/status"] = {"power": None}  # sampling turned off meanwhile
+    f.refresh_once()
+    (row,) = f.snapshot()
+    assert row["state"] == "off" and row["energy"]["week_wh"] == 9630.0
+    assert row["energy_stale"] is True
+
+
+def test_a_peer_never_seen_or_this_agent_has_no_energy():
+    f, _fetch, _clock = fleet([GPU02], {"/status": "unreachable"})
+    f.refresh_once()
+    assert f.snapshot()[0]["energy"] is None
+    own = Peers({"/status": {"machine": "HOME-PC", "server_id": "s", "power": LIVE}})
+    g = PowerFleet(
+        lambda: [SimpleNamespace(**GPU02)],
+        lambda: TOKEN,
+        fetch=own,
+        clock=Clock(),
+        own=lambda: ("s", "HOME-PC"),
+    )
+    g.refresh_once()
+    assert g.snapshot()[0]["energy"] is None
+
+
+def test_cluster_today_keeps_an_offline_peers_energy_marked_partial():
+    power.set_sampler(_LocalSampler())  # type: ignore[arg-type]
+    answers = {"/status": {"power": LIVE}, "range=": HISTORY}
+    f, _fetch, _clock = wall_fleet([GPU02], answers, Wall())
+    f.refresh_once()
+    power_fleet.set_fleet(f)
+    assert "today_partial" not in power_fleet.cluster_power()
+    answers["/status"] = "unreachable"
+    f.refresh_once()
+    value = power_fleet.cluster_power()
+    assert value["w"] == 286.0 and value["machines"] == 1  # live W excluded
+    assert value["today_wh"] == pytest.approx(4550.0 + 1920.0)
+    assert value["today_partial"] is True
+
+
+class TricklePeer:
+    """A TCP server that answers one request slowly: a header line every
+    `gap` seconds (or, with `body`, a complete header then one body byte)."""
+
+    def __init__(self, gap=0.02, body=False, lifetime=4.0):
+        self.gap, self.body, self.lifetime = gap, body, lifetime
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.requests = 0
+        self.closing = False
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while not self.closing:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.requests += 1
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        try:
+            conn.settimeout(2.0)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += conn.recv(4096)
+            if self.body:
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+            else:
+                conn.sendall(b"HTTP/1.1 200 OK\r\n")
+            end = time.monotonic() + self.lifetime
+            while time.monotonic() < end and not self.closing:
+                conn.sendall(b"a" if self.body else b"X-Pad: a\r\n")
+                time.sleep(self.gap)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def close(self):
+        self.closing = True
+        self.sock.close()
+
+
+@pytest.fixture
+def trickle():
+    made = []
+
+    def make(**kw):
+        value = TricklePeer(**kw)
+        made.append(value)
+        return value
+
+    yield make
+    for value in made:
+        value.close()
+
+
+@pytest.mark.parametrize("body", [False, True])
+def test_a_trickling_peer_cannot_outlive_the_request_deadline(trickle, body):
+    peer_ = trickle(body=body)
+    started = time.monotonic()
+    with pytest.raises(PeerError) as caught:
+        fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=0.05)
+    assert time.monotonic() - started < 0.4
+    assert caught.value.code == "timeout"
+
+
+def test_stop_does_not_wait_on_a_trickling_peer_beyond_its_budget(trickle):
+    peer_ = trickle()
+    f = PowerFleet(
+        lambda: [SimpleNamespace(name="slow", address=f"127.0.0.1:{peer_.port}")],
+        lambda: TOKEN,
+        fetch=lambda u, t: fetch_json(u, t, timeout=0.2),
+        interval=0.05,
+    )
+    f.start()
+    assert wait_until(lambda: peer_.requests >= 1)
+    started = time.monotonic()
+    assert f.stop(2.0) is True
+    assert time.monotonic() - started < 1.0
+
+
+def test_two_aliases_of_one_machine_are_counted_once():
+    status = {"machine": "GPU-02", "server_id": "g2", "power": LIVE}
+    alias = {"name": "GPU-02 (wifi)", "address": "192.168.1.21"}
+    f, fetch, _clock = wall_fleet(
+        [GPU02, alias], {"/status": status, "range=": HISTORY}, Wall()
+    )
+    f.refresh_once()
+    first, second = f.snapshot()
+    assert first["state"] == "ok" and first["duplicate_of"] is None
+    assert second["state"] == "duplicate" and second["duplicate_of"] == "GPU-02"
+    assert second["power"] is None and second["energy"] is None
+    assert second["history"] is None
+    power_fleet.set_fleet(f)
+    power.set_sampler(_LocalSampler())  # type: ignore[arg-type]
+    value = power_fleet.cluster_power()
+    assert value["machines"] == 2  # this machine and one GPU-02
+    assert value["w"] == pytest.approx(458.0)
+    assert value["today_wh"] == pytest.approx(6470.0)
+
+
+def test_the_first_configured_entry_wins_whatever_answers_first():
+    status = {"machine": "GPU-02", "power": LIVE}  # no server_id: the name
+    alias = {"name": "alias", "address": "192.168.1.21"}
+    for order in ([GPU02, alias], [alias, GPU02]):
+        f, _fetch, _clock = wall_fleet(
+            order, {"/status": status, "range=": HISTORY}, Wall()
+        )
+        f.refresh_once()
+        rows = f.snapshot()
+        assert [r["state"] for r in rows] == ["ok", "duplicate"]
+        assert rows[1]["duplicate_of"] == rows[0]["name"]
+
+
+def test_different_machines_are_not_duplicates():
+    other = {"name": "GPU-03", "address": "192.168.1.30"}
+    f, _fetch, _clock = fleet(
+        [GPU02, other], {"/status": {"power": LIVE}, "range=": HISTORY}
+    )
+    f.refresh_once()
+    # no identity reported at all: never merged by guesswork
+    assert [r["state"] for r in f.snapshot()] == ["ok", "ok"]
+    answers = Peers(
+        {
+            "192.168.1.20": {"machine": "SAME", "server_id": "a", "power": LIVE},
+            "192.168.1.30": {"machine": "SAME", "server_id": "b", "power": LIVE},
+            "range=": HISTORY,
+        }
+    )
+    g = PowerFleet(
+        lambda: [SimpleNamespace(**GPU02), SimpleNamespace(**other)],
+        lambda: TOKEN,
+        fetch=answers,
+        clock=Clock(),
+    )
+    g.refresh_once()
+    assert [r["state"] for r in g.snapshot()] == ["ok", "ok"]  # two server ids
+
+
+def test_history_is_read_from_a_peer_that_reports_no_live_power():
+    answers = {"/status": {"machine": "GPU-02", "power": None}, "range=": HISTORY}
+    f, fetch, clock = fleet([GPU02], answers)
+    f.refresh_once()
+    (row,) = f.snapshot("7d")
+    assert row["state"] == "off" and row["power"] is None
+    assert row["history"] == HISTORY
+    assert len([u for u, _ in fetch.calls if "history" in u]) == 3
+    clock.now += 60
+    f.refresh_once()
+    assert len([u for u, _ in fetch.calls if "history" in u]) == 6
+
+
+def test_an_off_peer_without_the_history_endpoint_backs_off():
+    f, fetch, clock = fleet(
+        [GPU02], {"/status": {"power": None}, "range=": "not_found"}
+    )
+    for _ in range(121):  # ten minutes of 5 s cycles
+        f.refresh_once()
+        clock.now += 5
+    probes = [u for u, _ in fetch.calls if "range=24h" in u]
+    assert len(probes) == 4  # 60 s, 120 s, 240 s, then at most 5 minutes apart
+    assert f.snapshot()[0]["state"] == "off"  # still reports no live power
+
+
+def test_a_peer_without_power_support_is_not_asked_for_history():
+    f, fetch, _clock = fleet([GPU02], {"/status": {"machine": "old"}})
+    f.refresh_once()
+    assert [u for u, _ in fetch.calls if "history" in u] == []

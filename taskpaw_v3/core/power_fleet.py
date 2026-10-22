@@ -16,9 +16,16 @@ is an estimate (估算).
   (peers in parallel) and, apart from it, each history range every minute
   (a failing one backs off up to 5 min), so the cache is never older than
   10 s while peers answer. Routes return the cache and never wait on a peer.
+  The request deadline is absolute: a watchdog shuts the socket down at it, so a
+  peer trickling its headers or body cannot hold a worker past `timeout`.
   A history must be equal-length `t` / `avg_w` lists of at most 168 numbers
   or nulls, else it is unavailable (IR05). A peer that is this agent (its
-  `server_id`, else machine name) is listed as `self` and not summed (IR06).
+  `server_id`, else machine name) is listed as `self` and not summed (IR06);
+  a later entry for a machine already listed above it is `duplicate` (same).
+- **Energy.** The last today / week / month Wh a peer reported is kept with
+  the calendar period it belongs to; while that period lasts it stays in the
+  totals, marked stale when the peer is not answering, and is dropped when
+  the period rolls over. Live W is never kept.
 - A peer without power support answers `/status` without `power` (or 404 on
   the history): 「无功耗数据（需升级 TaskPaw）」. A Mac running only the Hub
   has no agent and so no row in P0 (PW08).
@@ -26,6 +33,7 @@ is an estimate (估算).
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import logging
@@ -41,7 +49,7 @@ from typing import Any, Callable, Optional
 
 from taskpaw_v3.core.http import NoRedirectHandler
 from taskpaw_v3.core.net import bind_is_global, bind_is_wildcard
-from taskpaw_v3.core.power import ACTIVITIES
+from taskpaw_v3.core.power import ACTIVITIES, calendar_starts
 
 log = logging.getLogger("taskpaw.power.fleet")
 
@@ -110,14 +118,65 @@ class PeerError(Exception):
         self.code = code
 
 
-def _build_opener() -> urllib.request.OpenerDirector:
+class _Watch:
+    """Shuts the request's socket down at the absolute deadline (Codex r3).
+
+    A socket timeout only bounds one `recv`; a peer sending a byte now and
+    then would keep header parsing or the body going forever."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sock: Any = None
+        self.fired = False
+        self.connected = False  # a connect that fails first is just unreachable
+
+    def track(self, sock: Any) -> None:
+        with self._lock:
+            self._sock = sock
+            self.connected = True
+            fired = self.fired
+        if fired:
+            self._kill(sock)
+
+    def fire(self) -> None:
+        with self._lock:
+            self.fired = True
+            sock = self._sock
+        if sock is not None:
+            self._kill(sock)
+
+    @property
+    def cut(self) -> bool:
+        return self.fired and self.connected
+
+    @staticmethod
+    def _kill(sock: Any) -> None:
+        for action in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
+            try:
+                action()
+            except OSError:
+                pass
+
+
+def _build_opener(watch: Optional[_Watch] = None) -> urllib.request.OpenerDirector:
     # The empty ProxyHandler keeps a LAN request away from http_proxy.
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}), NoRedirectHandler()
-    )
+    handlers: list[Any] = [urllib.request.ProxyHandler({})]
+    if watch is not None:
+        watched = watch
+
+        class Connection(http.client.HTTPConnection):
+            def connect(self) -> None:
+                super().connect()
+                watched.track(self.sock)
+
+        class Handler(urllib.request.HTTPHandler):
+            def http_open(self, req: urllib.request.Request) -> Any:
+                return self.do_open(Connection, req)
+
+        handlers.append(Handler())
+    return urllib.request.build_opener(*handlers, NoRedirectHandler())
 
 
-_OPENER = _build_opener()
 _getaddrinfo = socket.getaddrinfo  # replaced in tests
 
 
@@ -194,22 +253,33 @@ def fetch_json(
         url = urllib.parse.urlunsplit(parts._replace(netloc=f"{shown}:{port}"))
     left = max(0.05, deadline - time.monotonic())
     request = urllib.request.Request(url, headers=headers, method="GET")
+    watch = _Watch()
+    timer = threading.Timer(left, watch.fire)
+    timer.daemon = True
+    timer.start()
     try:
-        resp = (opener or _OPENER).open(request, timeout=left)
-    except urllib.error.HTTPError as exc:
-        exc.close()
-        if exc.code in (401, 403):
-            raise PeerError("unauthorized") from None
-        if exc.code == 404:
-            raise PeerError("not_found") from None
-        raise PeerError("http_error") from None
-    except (urllib.error.URLError, OSError, socket.timeout):
-        raise PeerError("unreachable") from None
-    try:
-        with resp:
-            body = _read_capped(resp, deadline)
-    except (OSError, socket.timeout):
-        raise PeerError("unreachable") from None
+        try:
+            resp = (opener or _build_opener(watch)).open(request, timeout=left)
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            if watch.cut:
+                raise PeerError("timeout") from None
+            if exc.code in (401, 403):
+                raise PeerError("unauthorized") from None
+            if exc.code == 404:
+                raise PeerError("not_found") from None
+            raise PeerError("http_error") from None
+        except (urllib.error.URLError, http.client.HTTPException, OSError):
+            raise PeerError("timeout" if watch.cut else "unreachable") from None
+        try:
+            with resp:
+                body = _read_capped(resp, deadline)
+        except (http.client.HTTPException, OSError, ValueError):
+            raise PeerError("timeout" if watch.cut else "unreachable") from None
+        if watch.cut:  # the socket was cut: what was read is not the answer
+            raise PeerError("timeout")
+    finally:
+        timer.cancel()
     try:
         return json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -296,11 +366,48 @@ def _new_entry(name: str, address: str) -> dict[str, Any]:
     return {
         "name": name,
         "address": address,
+        "server_id": None,
+        "energy": {},  # period → (the period's start, Wh) last reported
         "history": {},  # range → the last valid history (or None)
         "history_due": {},  # range → monotonic time of the next fetch
         "history_fails": {},  # range → failures in a row (the backoff)
         "history_missing": False,  # the peer answered 404: an older TaskPaw
     }
+
+
+def _duplicates(
+    peers: list[tuple[str, str]], entries: dict[tuple[str, str], dict[str, Any]]
+) -> dict[tuple[str, str], str]:
+    """Peers that are a machine already listed above them (Codex r3), by the
+    identity they reported: `server_id` when both have one, else the machine
+    name. The first configured entry stays; a peer that never answered, or
+    reports no identity, is never merged by guesswork. → {peer: first's name}."""
+    kept: list[tuple[str, Optional[str], Optional[str]]] = []
+    out: dict[tuple[str, str], str] = {}
+    for key in peers:
+        entry = entries.get(key) or {}
+        if entry.get("state") in (None, "self", "invalid_address"):
+            continue
+        sid, machine = entry.get("server_id"), entry.get("machine")
+        if not sid and not machine:
+            continue
+        first = next(
+            (
+                name
+                for name, kept_sid, kept_machine in kept
+                if (
+                    sid == kept_sid
+                    if sid and kept_sid
+                    else bool(machine) and machine == kept_machine
+                )
+            ),
+            None,
+        )
+        if first is None:
+            kept.append((key[0], sid, machine))
+        else:
+            out[key] = first
+    return out
 
 
 class PowerFleet:
@@ -495,6 +602,7 @@ class PowerFleet:
             return []
         seen = dict(
             machine=_text(status.get("machine")),
+            server_id=_text(status.get("server_id")),
             version=_text(status.get("version"), 32),
             os=_text(status.get("os")),
             checked_at=self._wall(),
@@ -502,20 +610,31 @@ class PowerFleet:
             error=None,
         )
         if self._is_self(status):
-            self._update(peer, **seen, state="self", power=None, history={})
+            self._update(peer, **seen, state="self", power=None, history={}, energy={})
             return []
         live = _live(status.get("power")) if "power" in status else None
+        starts = calendar_starts(self._wall())
+        configured = self._configured()
         with self._lock:
             entry = self._entry(peer)
             entry.update(seen)
+            if live is not None:  # the periods the figures belong to
+                kept = dict(entry["energy"])
+                for period in ("today", "week", "month"):
+                    wh = live.get(f"{period}_wh")
+                    if wh is not None:
+                        kept[period] = (starts[period], wh)
+                entry["energy"] = kept
             if "power" not in status or (live is not None and entry["history_missing"]):
                 entry.update(state="no_power", power=None)
             else:
                 entry.update(state="ok" if live is not None else "off", power=live)
-            # a peer that answered 404 is probed again at the backoff cadence
-            # (Codex r2): once it has the history (upgraded) the flag clears
-            probe = entry["state"] == "ok" or (
-                live is not None and entry["history_missing"]
+            # any peer with power support serves its retained history, live
+            # power or not (Codex r3); one that answered 404 is probed again at
+            # the backoff cadence (r2): once it has the history the flag clears.
+            # An alias of a machine listed above is not read twice.
+            probe = "power" in status and peer not in _duplicates(
+                configured, self._cache
             )
             due = [
                 r
@@ -554,7 +673,9 @@ class PowerFleet:
                 entry["history_due"][range_] = self._clock() + self._history_every
                 return
             if code == "not_found":  # an older TaskPaw without the history
-                entry.update(history_missing=True, state="no_power", power=None)
+                entry["history_missing"] = True
+                if entry.get("power") is not None:
+                    entry.update(state="no_power", power=None)
             elif code == "invalid":
                 entry["history"][range_] = None  # never draw what failed to validate
             fails[range_] = fails.get(range_, 0) + 1
@@ -566,31 +687,55 @@ class PowerFleet:
 
     # ── reads ───────────────────────────────────────────────────────────
     def snapshot(self, range_: str = "24h") -> list[dict[str, Any]]:
-        """Every configured peer as last seen: state, live estimate and the
-        range's history (None before the first answer)."""
+        """Every configured peer as last seen: state, live estimate, the
+        range's history (None before the first answer) and the last known
+        today / week / month Wh still inside their period (`energy`, stale
+        when the peer is not answering). A peer that is a machine listed above
+        it is `duplicate` and carries nothing to sum."""
         peers = self._configured()
         now = self._clock()
+        starts = calendar_starts(self._wall())
         with self._lock:
             cached = {key: dict(self._cache.get(key) or {}) for key in peers}
             for entry in cached.values():
                 entry["history"] = dict(entry.get("history") or {})
+            duplicates = _duplicates(peers, self._cache)
         out = []
-        for (name, address), entry in cached.items():
+        for key, entry in cached.items():
+            name, address = key
             seen = entry.get("checked_mono")
             age = None if seen is None else max(0.0, now - seen)
+            stale = age is None or age > STALE_SECONDS
+            first = duplicates.get(key)
+            state = "duplicate" if first else entry.get("state", "pending")
+            kept = {} if first or state == "self" else entry.get("energy") or {}
+            energy = None
+            if kept:
+                energy = {
+                    f"{period}_wh": (
+                        kept[period][1]
+                        if period in kept and kept[period][0] == starts[period]
+                        else None
+                    )
+                    for period in ("today", "week", "month")
+                }
             out.append(
                 {
                     "name": name,
                     "address": address,
-                    "state": entry.get("state", "pending"),
+                    "state": state,
+                    "duplicate_of": first,
                     "error": entry.get("error"),
                     "machine": entry.get("machine"),
                     "version": entry.get("version"),
                     "os": entry.get("os"),
-                    "power": entry.get("power"),
-                    "history": entry["history"].get(range_),
+                    "power": None if first else entry.get("power"),
+                    "energy": energy,
+                    "energy_stale": energy is not None
+                    and not (state == "ok" and not stale),
+                    "history": None if first else entry["history"].get(range_),
                     "age_s": None if age is None else round(age, 1),
-                    "stale": age is None or age > STALE_SECONDS,
+                    "stale": stale,
                 }
             )
         return out
@@ -629,27 +774,35 @@ def cluster_power() -> Optional[dict[str, Any]]:
             parts.append(local)
     fleet = get_fleet()
     peers = fleet.snapshot() if fleet is not None else []
-    parts += [
-        p["power"]
-        for p in peers
-        if p["state"] == "ok" and p["power"] and not p["stale"]
-    ]
+    fresh = [p for p in peers if p["state"] == "ok" and p["power"] and not p["stale"]]
+    parts += [p["power"] for p in fresh]
     if not parts:
         return None
+    # a peer not answering keeps today's energy it reported (Codex r3); its
+    # live W is not summed
+    kept = [
+        _num((p["energy"] or {}).get("today_wh")) or 0.0
+        for p in peers
+        if p not in fresh and p["energy"]
+    ]
 
     def total(key: str) -> float:
         return round(sum(_num(p.get(key)) or 0.0 for p in parts), 1)
 
-    return {
+    today = sum(_num(p.get("today_wh")) or 0.0 for p in parts) + sum(kept)
+    result: dict[str, Any] = {
         "w": total("w"),
         "gpu_w": total("gpu_w"),
         "cpu_w": total("cpu_w"),
         "other_w": total("other_w"),
-        "today_wh": round(sum(_num(p.get("today_wh")) or 0.0 for p in parts), 3),
+        "today_wh": round(today, 3),
         "machines": len(parts),
         "peers": len(peers),
         "estimated": True,
     }
+    if any(kept):
+        result["today_partial"] = True
+    return result
 
 
 def _reset_for_tests() -> None:

@@ -131,6 +131,52 @@ describe("功耗 tab", () => {
     expect(screen.getAllByText("GPU-02").length).toBeGreaterThan(0);
   });
 
+  it("an offline peer's energy for the running period stays in the totals, marked 数据过期 (Codex r3)", async () => {
+    const view = (range: "24h" | "7d" | "30d") => {
+      const v = powerView(range);
+      const energy = { today_wh: 1920, week_wh: 9630, month_wh: 54900 };
+      return {
+        ...v,
+        peers: (v.peers ?? []).map((p) => (p.name === "GPU-02"
+          ? { ...p, state: "unreachable", power: null, energy, energy_stale: true } : p)),
+      };
+    };
+    vi.spyOn(api, "power").mockImplementation(async (range) => view(range));
+    vi.spyOn(api, "workflowFilms").mockResolvedValue(FILMS);
+    vi.spyOn(api, "config").mockResolvedValue({ monitors: [], power: POWER_SETTINGS } as unknown as AgentConfigView);
+    wrap(<PowerPage />);
+    const all = await screen.findByTestId("stat-all");
+    expect(all).toHaveTextContent("347W · 2 台");  // live W excludes the offline peer
+    const energy = screen.getByTestId("stat-energy");
+    expect(energy).toHaveTextContent(`${fmtKwhShort(4550 + 1920 + 830)}度 · 今日`);
+    expect(energy).toHaveTextContent(`本周约 ${fmtKwhShort(20400 + 9630 + 4180)} 度`);
+    expect(energy).toHaveTextContent("含 1 台数据过期机器的最近读数");
+    const row = screen.getByRole("row", { name: /GPU-02/ });
+    expect(row).toHaveTextContent("数据过期");
+    expect(row).toHaveTextContent("1.92");
+    const foot = document.querySelector("tfoot") as HTMLElement;
+    expect(foot).toHaveTextContent("含过期数据");
+    expect(foot).toHaveTextContent("7.30");  // 4.55 + 1.92 + 0.83
+  });
+
+  it("an alias of the same machine is listed and not counted (Codex r3)", async () => {
+    const view = (range: "24h" | "7d" | "30d") => {
+      const v = powerView(range);
+      const alias = { ...v.peers![0], name: "GPU-02 (wifi)", state: "duplicate", duplicate_of: "GPU-02", power: null,
+        energy: null, history: null };
+      return { ...v, peers: [...v.peers!, alias] };
+    };
+    vi.spyOn(api, "power").mockImplementation(async (range) => view(range));
+    vi.spyOn(api, "workflowFilms").mockResolvedValue(FILMS);
+    vi.spyOn(api, "config").mockResolvedValue({ monitors: [], power: POWER_SETTINGS } as unknown as AgentConfigView);
+    wrap(<PowerPage />);
+    const all = await screen.findByTestId("stat-all");
+    expect(all).toHaveTextContent("519W · 3 台");
+    const dup = document.querySelector('[data-machine="peer:GPU-02 (wifi)"]') as HTMLElement;
+    expect(dup).toHaveTextContent("与 GPU-02 是同一台机器，不重复计入");
+    expect(screen.getByTestId("stat-energy")).toHaveTextContent(`${fmtKwhShort(4550 + 1920 + 830)}度 · 今日`);
+  });
+
   it("lists each finished film's energy from the media workflow", async () => {
     mockApi();
     const open = vi.fn();
@@ -255,6 +301,7 @@ describe("power view model", () => {
     expect(stateChip({ state: "ok", stale: true })[0]).toBe("数据过期");
     expect(stateChip({ state: "no_power", stale: false })[0]).toBe("无功耗数据（需升级 TaskPaw）");
     expect(stateChip({ state: "self", stale: false })[0]).toBe("就是本机，不重复计入");
+    expect(stateChip({ state: "duplicate", stale: false, duplicateOf: "GPU-02" })[0]).toBe("与 GPU-02 是同一台机器，不重复计入");
   });
 
   it("aggregates by timestamp only: an unmatched peer point is a gap, never shifted by index", () => {
