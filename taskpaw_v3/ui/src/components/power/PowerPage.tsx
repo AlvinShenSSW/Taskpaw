@@ -36,7 +36,7 @@ function completedFilms(rows: FilmRow[] | undefined): FilmRow[] {
     .slice(-8).reverse();
 }
 
-export function PowerPage({ onOpenMedia }: { onOpenMedia?: () => void } = {}) {
+export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () => void; onOpenSettings?: () => void } = {}) {
   const [range, setRange] = useState<PowerRange>("24h");
   const [params, setParams] = useState(false);
   const [toast, setToast] = useState<{ text: string; key: number } | null>(null);
@@ -55,7 +55,11 @@ export function PowerPage({ onOpenMedia }: { onOpenMedia?: () => void } = {}) {
   if (day.isLoading) body = <div className="panel empty"><p>正在读取功耗估算…</p></div>;
   else if (day.error) {
     body = day.error instanceof HttpError && day.error.status === 404
-      ? <Notice tone="amber" icon={WarningAmberIcon}>本机没有运行功耗估算（agent.yaml 中 power.enabled 关闭，或这版 TaskPaw 不支持）。</Notice>
+      ? <Notice tone="amber" icon={WarningAmberIcon}>
+        功耗估算已关闭（{onOpenSettings
+          ? <button type="button" className="link-btn" onClick={onOpenSettings}>设置 → 功耗与主机监控</button>
+          : "设置 → 功耗与主机监控"}）
+      </Notice>
       : <Notice tone="red" icon={WarningAmberIcon}>无法读取功耗估算，请重试。</Notice>;
   } else {
     body = <PowerBody machines={machines} range={range} rows={films.data?.state === "running" ? films.data.films : undefined}

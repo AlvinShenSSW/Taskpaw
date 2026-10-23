@@ -530,6 +530,38 @@ export interface WorkflowSettingsState {
   miko?: "complete" | "partial" | "off";
 }
 export type WorkflowSettingsPatch = { role: WorkflowRole } & Partial<Omit<WorkflowSettingsView, "enabled" | "role">>;
+// #299: the first-run wizard, 网络与访问, detection, 立即重启 and the Hub's settings.
+export type SetupRole = "agent" | "controller" | "worker";
+export type SetupStep = "role" | "network" | "controller" | "worker_fields" | "worker_join" | "done";
+export interface SetupState { status: "absent" | "pending" | "done"; step: SetupStep | null; role: SetupRole | null }
+export interface NetworkAddress { ip: string; nic: string; primary: boolean }
+export interface NetworkView {
+  lan_access: boolean; bind_host: string; bind_port: number; control_port: number;
+  addresses: NetworkAddress[]; address_changed_from: string | null; running_bind_host?: string;
+  token_set: boolean; api_token_hint: string | null;
+  firewall: { platform: "windows" | "macos" | "other"; rule: "present" | "absent" | "unknown"; profile: "private" | "public" | "domain" | null };
+}
+export type FirewallResult = "added" | "declined" | "failed" | "unsupported";
+export interface ToolFound { found: boolean; path: string | null; source: "saved" | "monitor" | "default" | "path" | "bundled" | null; version: string | null }
+export interface MikoFound { status: "complete" | "partial" | "off"; root: string | null; python: string | null; profile: string | null }
+export interface GpuFound { name: string; vram_mib: number; driver: string | null; power_limit_w: number | null; worker_ok: boolean }
+export interface Detection {
+  gpu: GpuFound | null;
+  tools: { ffprobe: ToolFound; jasna: ToolFound; whisperjav: ToolFound; miko: MikoFound };
+  suggested: { inbox: string | null; data_dir: string | null; staging: string | null };
+}
+export interface DirectoryFacts { exists: boolean | null; free_bytes: number | null; volume: string; local: boolean }
+export interface RestartState { required: boolean; fields: string[]; blocked: string | null; available: boolean }
+export interface HubSettingsValues {
+  openclaw_enabled: boolean; openclaw_url: string; openclaw_token: string; polling_token: string;
+  polling_token_hint: string | null; poll_interval: number; write_status_md: boolean; status_md_path: string | null;
+  status_md_default: string; status_log_retention_days: number; lan_access: boolean; bind_host: string; api_token: string;
+}
+export interface HubSettingsState {
+  saved: HubSettingsValues; running: HubSettingsValues; restart_required: boolean; fields: string[];
+  addresses: NetworkAddress[]; restart_available: boolean;
+}
+export type OpenclawTest = { ok: true; at: string; elapsed_s: number } | { ok: false; error: "unreachable" | "token" | "timeout" | "http"; status?: number };
 // `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
 export interface PlanResult { film_id: string; ok: boolean; error: string | null; message: string | null }
 const seg = (id: string | number) => encodeURIComponent(String(id));
@@ -537,7 +569,7 @@ const seg = (id: string | number) => encodeURIComponent(String(id));
 export type ControlRole = "agent" | "hub";
 declare global {
   interface Window {
-    __TASKPAW__?: { baseUrl?: string; controlToken?: string; role?: ControlRole; bootId?: string };
+    __TASKPAW__?: { baseUrl?: string; controlToken?: string; role?: ControlRole; bootId?: string; restart?: boolean };
   }
 }
 const DEFAULT_PORT = { agent: 5681, hub: 5691 } as const;
@@ -565,6 +597,8 @@ export function canonicalControlBase(base: string): boolean {
   } catch { return false; }
 }
 function validToken(token: string): boolean { return /^[\x21-\x7e]{1,1024}$/.test(token); }
+// #299 §3: the shell supervises exit 75 only when it says so; the boot the window was built for.
+let injectedBoot: { role: ControlRole; bootId: string; restart: boolean } | null = null;
 function consumeInjection() {
   const injected = window.__TASKPAW__;
   if (!injected || consumedInjection === injected) return;
@@ -574,10 +608,14 @@ function consumeInjection() {
     && typeof injected.controlToken === "string" && validToken(injected.controlToken)
     && /^[0-9a-f]{32}$/.test(injected.bootId ?? "")) {
     credentials[injected.role] = { baseUrl: injected.baseUrl, controlToken: injected.controlToken, verified: true };
+    injectedBoot = { role: injected.role, bootId: injected.bootId as string, restart: injected.restart === true };
   }
 }
+export function restartSupported(role: ControlRole): boolean { consumeInjection(); return injectedBoot?.role === role && injectedBoot.restart; }
+export function controlBootId(role: ControlRole): string | null { consumeInjection(); return injectedBoot?.role === role ? injectedBoot.bootId : null; }
 export function hasControlCredential(role: ControlRole): boolean { consumeInjection(); return credentials[role]?.verified === true; }
 export function clearControlCredentials(role?: ControlRole) {
+  if (!role || injectedBoot?.role === role) injectedBoot = null;
   if (role) delete credentials[role];
   else { delete credentials.agent; delete credentials.hub; roleBases.agent = "http://127.0.0.1:5681"; roleBases.hub = "http://127.0.0.1:5691"; }
   if (!role || window.__TASKPAW__?.role === role) {
@@ -861,6 +899,23 @@ export const api = {
   // 「创建此目录」: a local absolute folder (422 `fields.path` otherwise)
   workflowCreateDir: (path: string) =>
     send<{ ok: boolean; created: boolean }>("agent", "POST", "/control/workflow/settings/directory", { path }),
+  // #299: first-run wizard (§6), 网络与访问 (R4–R6), detection (§5), 立即重启 (§3)
+  setup: () => get<SetupState>("agent", "/control/setup"),
+  setupStep: (step: SetupStep, role: SetupRole) => send<SetupState>("agent", "PUT", "/control/setup", { step, role }),
+  setupComplete: () => send<SetupState>("agent", "POST", "/control/setup/complete"),
+  network: () => get<NetworkView>("agent", "/control/network"),
+  networkToken: (action: "generate" | "reveal") => send<{ token: string }>("agent", "POST", "/control/network/token", { action }),
+  networkFirewall: () => send<{ result: FirewallResult }>("agent", "POST", "/control/network/firewall"),
+  workflowDetect: (refresh = false) => get<Detection>("agent", `/control/workflow/detect${refresh ? "?refresh=1" : ""}`),
+  inspectDirectory: (path: string) =>
+    send<DirectoryFacts>("agent", "POST", "/control/workflow/settings/directory/inspect", { path }),
+  restartState: () => get<RestartState>("agent", "/control/restart"),
+  restart: (role: ControlRole, boot_id: string) =>
+    send<{ restarting: boolean }>(role, "POST", role === "agent" ? "/control/restart" : "/restart", { boot_id }),
+  hubSettings: () => get<HubSettingsState>("hub", "/config/settings"),
+  hubSaveSettings: (patch: Partial<Record<keyof HubSettingsValues, unknown>>) =>
+    send<{ ok: boolean; restart_required: boolean; fields: string[] }>("hub", "PUT", "/config/settings", patch),
+  hubOpenclawTest: (url: string, token: string) => send<OpenclawTest>("hub", "POST", "/config/openclaw/test", { url, token }),
   posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
   // U1b: the full landscape jacket (final fanart > thumb > input fanart > thumb > image attachment)
   coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,

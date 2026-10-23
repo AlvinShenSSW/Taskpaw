@@ -14,7 +14,7 @@ import { LtxDownload } from "../components/LtxDownload";
 import { TaskLog, TaskLogRows } from "../components/TaskLog";
 import { MonitorSelector } from "../components/MonitorSelector";
 import { MonitorWizard } from "./MonitorWizard";
-import { Settings } from "./Settings";
+import { Settings, type SettingsSection } from "./Settings";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
 import { WORKFLOW_SETTINGS_ID } from "../components/WorkflowSettings";
 import { WorkerMonitor } from "../components/WorkerMonitor";
@@ -50,12 +50,14 @@ export function AgentConsole() {
   const [dialog, setDialog] = useState<null | { mode: "add" } | { mode: "edit"; name: string }>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"monitors" | "media" | "power" | "logs" | "settings">("monitors");
+  const [section, setSection] = useState<SettingsSection>("general");
   const workflow = (config.data as { workflow?: { role?: string } } | undefined)?.workflow;
   const isWorker = workflow?.role === "worker";
 
   // P2-4: 设备's 「主控设置」 — the 设置 tab, scrolled to its 媒体工作流 section
   const openWorkflowSettings = () => {
     setTab("settings");
+    setSection("workflow");
     requestAnimationFrame(() => document.getElementById(WORKFLOW_SETTINGS_ID)?.scrollIntoView({ block: "start" }));
   };
 
@@ -78,7 +80,7 @@ export function AgentConsole() {
   return (
     <Stack spacing={1.5}>
       {/* scrollable: five tabs never widen the console past a 390 px window (PWR-3) */}
-      <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" scrollButtons={false} sx={{ minHeight: 0 }}>
+      <Tabs value={tab} onChange={(_, v) => { setTab(v); if (v === "settings") setSection("general"); }} variant="scrollable" scrollButtons={false} sx={{ minHeight: 0 }}>
         <Tab value="monitors" label={t("agent.monitors")} />
         <Tab value="media" label={t(isWorker ? "media.workerTab" : "media.tab")} />
         {/* PWR-3: every machine's estimated power, a top-level tab like 媒体处理中心 */}
@@ -92,12 +94,12 @@ export function AgentConsole() {
       )}
 
       {tab === "settings" ? (
-        <Settings role="agent" />
+        <Settings role="agent" section={section} />
       ) : tab === "media" ? (
         // P2-3 §6: a worker shows its own 媒体处理 monitor, never the controller's workspace
         isWorker ? <WorkerMonitor /> : <MediaWorkspace onOpenPower={() => setTab("power")} onOpenSettings={openWorkflowSettings} />
       ) : tab === "power" ? (
-        <PowerPage onOpenMedia={() => setTab("media")} />
+        <PowerPage onOpenMedia={() => setTab("media")} onOpenSettings={() => { setTab("settings"); setSection("power"); }} />
       ) : tab === "logs" ? (
         <TaskLog tasks={names} />
       ) : status.isLoading ? (

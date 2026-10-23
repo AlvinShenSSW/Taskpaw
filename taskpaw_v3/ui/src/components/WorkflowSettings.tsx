@@ -7,6 +7,9 @@ import {
   api, HttpError, type WorkflowRole, type WorkflowSettingsPatch, type WorkflowSettingsState, type WorkflowSettingsView,
 } from "../api";
 import { inTauri, pickPath } from "./nativePicker";
+import { RestartBanner } from "./RestartBanner";
+import { DirFacts, ToolRow } from "./setupParts";
+import { foundCount, mikoLine, toolLine, useDetect } from "./setupModel";
 import { WorkerJoinSection } from "./WorkerJoin";
 
 // P2-4 (#295) R13–R16, the confirmed preview 设置 · 媒体工作流: this machine's part in the media
@@ -203,6 +206,40 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
         } : undefined} />
     );
   };
+  // #299 R13: 重新检测 and one row per tool — what detection found, 使用 (fill the field) and 更改
+  const detect = useDetect();
+  const tools = detect.data?.tools;
+  const toolRow = (k: string, name: string, kind: "ffprobe" | "jasna" | "whisperjav") => {
+    const found = tools?.[kind];
+    const current = String(form[k] ?? "").trim();
+    return (
+      <ToolRow key={k} name={name} line={found ? toolLine(found) : "正在检测…"} path={found?.path ?? (current || null)}
+        onUse={found?.found && found.path && found.path !== current && !(kind === "ffprobe" && found.source === "path" && !current)
+          ? () => set(k, found.path ?? "") : undefined}
+        onChange={inTauri() ? () => void pick(k, name, false) : undefined} />
+    );
+  };
+  const detection = (kinds: Array<"ffprobe" | "jasna" | "whisperjav" | "miko">) => (
+    <Stack spacing={0}>
+      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+        <Typography variant="subtitle2" component="h3">工具自动检测</Typography>
+        {foundCount(detect.data, kinds) && <Typography variant="body2" color="text.secondary">{foundCount(detect.data, kinds)}</Typography>}
+        <Button size="small" sx={{ minHeight: 44 }} disabled={detect.isFetching} onClick={() => void detect.refresh()}>重新检测</Button>
+      </Stack>
+      {kinds.includes("ffprobe") && toolRow("ffprobe_path", "ffprobe", "ffprobe")}
+      {kinds.includes("jasna") && toolRow("jasna_exe_path", "Jasna", "jasna")}
+      {kinds.includes("whisperjav") && toolRow("whisperjav_exe_path", "WhisperJAV", "whisperjav")}
+      {kinds.includes("miko") && tools && (
+        <ToolRow name="Miko 引擎" line={mikoLine(tools.miko)} path={tools.miko.root}
+          extra={[tools.miko.python && `Python ${tools.miko.python}`, tools.miko.profile && `配置 ${tools.miko.profile}`].filter(Boolean) as string[]}
+          onUse={tools.miko.status === "complete" && (tools.miko.root !== form.mdcx_root || tools.miko.python !== form.mdcx_python
+            || tools.miko.profile !== form.mdcx_profile) ? () => {
+            set("mdcx_root", tools.miko.root ?? ""); set("mdcx_python", tools.miko.python ?? ""); set("mdcx_profile", tools.miko.profile ?? "");
+          } : undefined} />
+      )}
+      {detect.isError && <Typography variant="body2" color="text.secondary">无法自动检测，请手动填写路径。</Typography>}
+    </Stack>
+  );
   const inbox = String(form.inbox_root ?? "").trim();
   const inboxMissing = Boolean(inbox) && (errors.inbox_root === MISSING_DIR || found("inbox_root") === "missing") && made === null;
   const miko = mikoText(state, unchanged);
@@ -226,7 +263,7 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
   const asrTool = text("whisperjav_exe_path", "WhisperJAV", "whisperjav.exe 的完整路径；留空则本机不跑识别");
   return (
     <Stack spacing={2}>
-      {restart && <Alert severity="info" role="status">{SAVED}{pendingFields.length ? `（${pendingFields.join("、")}）` : ""}</Alert>}
+      {restart && <RestartBanner role="agent" text={`${SAVED}${pendingFields.length ? `（${pendingFields.join("、")}）` : ""}`} />}
       <TextField select size="small" label="本机角色" value={role} onChange={(e) => set("role", e.target.value)}
         helperText={errors.role ?? "选「不参与」即关闭媒体工作流；切换角色需要重启生效。"} error={Boolean(errors.role)}
         sx={{ maxWidth: 360 }}>
@@ -253,8 +290,11 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
                 onClick={() => createDir.mutate(inbox)}>创建此目录</Button>
             </Stack>
           )}
+          {inbox && <DirFacts path={inbox} />}
           {text("data_dir", "工作目录", "队列、记录与工作副本；留空用默认位置")}
+          {String(form.data_dir ?? "").trim() && <DirFacts path={String(form.data_dir)} sameDriveAs={inbox} />}
           <Typography variant="subtitle2" component="h3">工具与工作机</Typography>
+          {detection(form.remote_workers ? ["ffprobe", "whisperjav", "miko"] : ["ffprobe", "jasna", "whisperjav", "miko"])}
           {text("ffprobe_path", "ffprobe",
             state.ffprobe_detected && !String(form.ffprobe_path).trim() ? `在 PATH 找到 · ${state.ffprobe_detected}` : "ffprobe.exe 的完整路径",
             state.ffprobe_detected ?? undefined)}
@@ -278,8 +318,10 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
       )}
       {role === "worker" && (
         <>
+          {detection(["jasna"])}
           {restoreTools}
           {text("staging_dir", "暂存目录", "本机磁盘上的目录（不能是网络路径）")}
+          {String(form.staging_dir ?? "").trim() && <DirFacts path={String(form.staging_dir)} />}
           {number("staging_cap_gb", "暂存上限（GB）")}
           {text("data_dir", "工作目录", "配对与记录；留空用默认位置")}
           {running !== "worker" && <Typography variant="body2" color="text.secondary">保存并重启后，在这里粘贴主控的配对码加入。</Typography>}

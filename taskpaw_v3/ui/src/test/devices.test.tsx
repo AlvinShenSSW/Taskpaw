@@ -297,7 +297,7 @@ describe("worker console", () => {
     const join = vi.spyOn(api, "workflowJoin").mockResolvedValue({
       ...unjoined, state: "connecting", reason: "正在连接主控", controller: "192.168.1.20:5682", worker_id: "w1", credential: "valid",
     });
-    wrap(<Settings role="agent" />);
+    wrap(<Settings role="agent" section="workflow" />);
     const joinCard = (await screen.findByText("加入主控")).closest(".MuiCard-root") as HTMLElement;
     expect(screen.getByText(/状态：未加入/)).toBeInTheDocument();
     expect(within(joinCard).getByLabelText("暂存目录")).toHaveValue("E:\\Staging");

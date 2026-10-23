@@ -12,7 +12,7 @@ import i18n, { currentLang } from "../i18n";
 // queries are scoped.
 const card = (title: RegExp) =>
   screen.getByText(title).closest(".MuiCard-root") as HTMLElement;
-const AGENT_CARD = /^(Agent configuration|Agent 配置)$/;
+const AGENT_CARD = /^(This machine|本机)$/;
 const LLM_CARD = /^LLM API$/;
 
 // Field / action labels shared by the primary and both fallback LLM cards (#178/#190).
@@ -46,18 +46,13 @@ describe("Settings config save", () => {
       </ThemeProvider>,
     );
 
-    // Wait for the form to seed from the mocked config, then set a token + save.
-    // T-U0 (#178): scoped to the agent-config card — the LLM card has its own
-    // password field and Save button.
-    await waitFor(() =>
-      expect(card(AGENT_CARD).querySelector('input[type="password"]')).not.toBeNull(),
-    );
+    // #299: 通用 keeps the machine name (the address, ports and token moved to 网络与访问).
+    await waitFor(() => expect(within(card(AGENT_CARD)).getByRole("textbox")).toHaveValue("m"));
     const agentCard = card(AGENT_CARD);
-    const token = agentCard.querySelector('input[type="password"]') as HTMLInputElement;
-    fireEvent.change(token, { target: { value: "new-token" } });
+    fireEvent.change(within(agentCard).getByRole("textbox"), { target: { value: "BlackGoldPig" } });
     fireEvent.click(within(agentCard).getByRole("button", { name: /Save|保存/ }));
 
-    await waitFor(() => expect(updateSpy).toHaveBeenCalled());
+    await waitFor(() => expect(updateSpy).toHaveBeenCalledWith({ machine: "BlackGoldPig" }));
     await waitFor(() =>
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["agentConfig"] }),
     );
@@ -71,7 +66,7 @@ describe("Settings config save", () => {
     render(
       <ThemeProvider theme={theme}>
         <QueryClientProvider client={new QueryClient()}>
-          <Settings role="agent" />
+          <Settings role="agent" section="about" />
         </QueryClientProvider>
       </ThemeProvider>,
     );
@@ -316,7 +311,7 @@ describe("Settings fallback models + failover (#190/#192)", () => {
     expect(fb1.getByText(/refuses|拒绝/)).toBeInTheDocument();
     // No stored key value is ever echoed into a field (write-only keys).
     const secrets = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="password"]'));
-    expect(secrets.length).toBeGreaterThanOrEqual(4); // api_token + three LLM keys
+    expect(secrets.length).toBeGreaterThanOrEqual(3); // three LLM keys (the token is in 网络与访问)
     for (const input of secrets) expect(input.value).toBe("");
   });
 
