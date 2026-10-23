@@ -708,8 +708,20 @@ class PowerFleet:
         with self._lock:
             if self._stop.is_set() or job in self._pending:
                 return None
+
+            def run() -> Any:
+                try:
+                    return fn(*args)
+                finally:
+                    # the slot frees before the future resolves, so a caller
+                    # that waited on it (`refresh_once`) can submit the same
+                    # job at once; a done-callback runs after the waiter wakes
+                    with self._lock:
+                        if self._pending.get(job) is not None:
+                            del self._pending[job]
+
             try:
-                future = pool.submit(fn, *args)
+                future = pool.submit(run)
             except RuntimeError:  # shut down meanwhile
                 return None
             self._pending[job] = future

@@ -829,6 +829,10 @@ def test_requeue_is_a_free_retry_routed_again(world):
     world.join()
     film = routed_film(world)
     until(lambda: world.status(film, "restore") == "running", LONG)
+    # the fake reads its config when the process starts, which on a loaded
+    # runner is long after the stage is `running`: wait until the first Jasna
+    # has recorded its run (it read `sleep`) before the retry's config is set
+    until(lambda: world.jasna_runs() == 1, LONG)
     attempt = world.stage(film, "restore").attempt_id
     world.tools.set_jasna()  # the retry's launch reads this; the first sleeps on
     world.host.requeue(film, attempt)  # 停止并重新排队

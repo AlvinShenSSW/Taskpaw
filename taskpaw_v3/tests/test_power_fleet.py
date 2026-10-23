@@ -845,6 +845,27 @@ def wall_fleet(peers, answers, wall, **kw):
 DAY = 86400.0
 
 
+def test_a_waited_refresh_leaves_no_job_in_flight():
+    """CI (macOS): a refresh that returns once its futures resolve must have
+    freed their slots, or the next call skips the peer and keeps its old live
+    reading. A slow release makes the order deterministic: a release done
+    after the future resolves would still be pending when the call returns."""
+
+    class SlowRelease(dict):
+        def __delitem__(self, key):
+            time.sleep(0.05)
+            super().__delitem__(key)
+
+    answers = {"/status": {"power": LIVE}, "range=": HISTORY}
+    f, _fetch, _clock = fleet([GPU02], answers)
+    f._pending = SlowRelease()
+    f.refresh_once()
+    assert dict(f._pending) == {}
+    answers["/status"] = "unreachable"
+    f.refresh_once()  # not skipped as "still in flight"
+    assert f.snapshot()[0]["power"] is None
+
+
 def test_an_offline_peers_period_energy_is_kept_until_the_period_rolls_over():
     wall = Wall()
     answers = {"/status": {"power": LIVE}, "range=": HISTORY}
