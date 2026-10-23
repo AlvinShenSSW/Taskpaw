@@ -146,7 +146,7 @@ class FleetLive:
         self, now: datetime, names: Mapping[str, str]
     ) -> dict[str, dict[str, Any]]:
         """R15: each online worker's running stage as the board's `current`
-        (`started_at` = now − `elapsed_s`, C14), with its machine and the
+        (`started_at` = last heartbeat − `elapsed_s`, C14), with its machine and the
         transfer of that film as the step note."""
         with self._lock:
             entries = dict(self._entries)
@@ -163,7 +163,9 @@ class FleetLive:
             if current is None:
                 continue
             value = current.model_dump(mode="json", exclude={"elapsed_s", "phase"})
-            started = now - timedelta(seconds=current.elapsed_s)
+            started = entry.last_seen - timedelta(
+                seconds=current.elapsed_s
+            )  # at ingest
             transfer = next(
                 (t for t in beat.transfers if t.film == current.film_id), None
             )

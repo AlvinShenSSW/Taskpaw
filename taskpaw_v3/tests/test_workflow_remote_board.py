@@ -197,3 +197,13 @@ def test_status_carries_the_worker_summary(monkeypatch, tmp_path):
     finally:
         shutdown.shutdown()
         assert shutdown.stopped.wait(30)
+
+
+def test_cx12_the_start_time_is_fixed_at_ingest_not_at_each_read():
+    row_film = film({**done_through("intake"), "restore": "running"})
+    worker = identity()
+    fleet = fleet_with(worker, remote(row_film.film_id))  # beat at NOW
+    first = fleet.currents(NOW, {})[row_film.film_id]["started_at"]
+    later = fleet.currents(NOW + timedelta(seconds=30), {})[row_film.film_id]
+    assert later["started_at"] == first
+    assert first == (NOW - timedelta(seconds=600)).isoformat()

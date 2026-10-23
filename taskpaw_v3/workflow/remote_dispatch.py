@@ -706,7 +706,17 @@ class RemoteDispatcher:
             return
         root = self.staging.work_dir
         kept = []
+        # CX11: a path another staged or downloading revision lists (a folder
+        # cover shared by one intake package) stays until its last holder goes
+        shared = {
+            relative
+            for key, other in self.index.entries().items()
+            if key != f"{film}/{rev}" and isinstance(other, dict)
+            for relative in other.get("paths", [])
+        }
         for relative in self.index.begin_release(film, rev):
+            if relative in shared:
+                continue
             for path in (root / relative, root / f"{relative}.part"):
                 try:
                     path.unlink()

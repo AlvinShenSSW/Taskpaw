@@ -1370,6 +1370,39 @@ def test_cx8_an_active_fetch_is_never_released(tmp_path):
     assert not part.exists() and d.staged() == []
 
 
+def test_cx11_a_file_shared_by_two_films_outlives_the_first_release(tmp_path):
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    first, second = client.add(), client.add()
+    own = {
+        f: client.envelope(f, 1)["workcopy"][0]["relative_path"]
+        for f in (first, second)
+    }
+    shared = "package/cover.jpg"  # one intake package, one folder cover
+    root = staging.work_dir
+    for rel in (*own.values(), shared):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(b"x")
+    d.index.mark(first, 1, [own[first], shared], True)
+    d.index.mark(second, 1, [own[second], shared], True)  # staged
+    _observe(d, [], release=[{"film": first, "rev": 1}])
+    assert not (root / own[first]).exists() and (root / shared).exists()
+    # the second film is being downloaded: its `.part` is not another's to take
+    part = root / f"{shared}.part"
+    (root / shared).unlink()
+    part.write_bytes(b"xx")
+    d.index.mark(first, 1, [own[first], shared], True)
+    d.index.mark(second, 1, [own[second], shared], False)
+    d._fetching = f"{second}/1"
+    _observe(d, [], release=[{"film": first, "rev": 1}])
+    assert part.exists()
+    d._fetching = None
+    _observe(d, [], release=[{"film": second, "rev": 1}])  # the last holder
+    assert not part.exists() and not (root / own[second]).exists()
+    assert d.index.entries() == {}
+
+
 class _Reading:
     def __init__(self, owner: str) -> None:
         self.owner = owner
