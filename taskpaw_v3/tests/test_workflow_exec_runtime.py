@@ -230,10 +230,20 @@ def test_a_restart_re_records_the_controllers_translate_profile(tmp_path):
         second.close()
 
 
-def test_a_4k_film_restored_remotely_translates_on_the_8gb_controller(tmp_path):
+class _AudioOnly(SyntheticExecutor):
+    """ASR as WhisperJAV: it reads audio only, so 4K on 8 GB (OD7 R8)."""
+
+    def max_resolution(self, vram_mib: int) -> tuple[int, int]:
+        return UHD
+
+
+def test_a_4k_film_restored_remotely_transcribes_and_translates_on_the_8gb_controller(
+    tmp_path,
+):
     rt = LocalRuntime(tmp_path / "wf", [], gpu=lambda: GPU_8GB, machine=lambda: "m")
     rt.executors = {
-        **{e.stage: e for e in executors()[:2]},
+        "restore": executors()[0],
+        "asr": _AudioOnly("asr"),
         "translate": translate(rt),
     }
     rt.open()
@@ -243,10 +253,11 @@ def test_a_4k_film_restored_remotely_translates_on_the_8gb_controller(tmp_path):
         remote = enrol_remote(rt, "5070 Ti", gpu=GPU_16, limit=UHD)
         film = add_film(rt, width=3840, height=2160)
         route(rt, film, remote.worker_id)
-        for name in ("restore", "asr"):
-            resolve_remote(rt, remote, claim_remote(rt, remote, film, name))
+        resolve_remote(rt, remote, claim_remote(rt, remote, film, "restore"))
         d = LocalDispatcher(rt, lease=GpuLease(), poll=0.05, remote_enabled=True)
-        assert d.run_once() is True  # claimed: no 「没有可接 4K 的设备」
+        assert d.run_once() is True  # ASR here: no 「没有可接 4K 的设备」
+        assert stage(rt, film, "asr").status == "succeeded"
+        assert d.run_once() is True
         assert stage(rt, film, "translate").attempt_id is not None
         assert d.status().waiting.get(film) != ld.NO_4K_DEVICE
     finally:

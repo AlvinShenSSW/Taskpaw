@@ -602,9 +602,9 @@ class FilmCommands(WorkerCommands):
                 route = self._open_route(job["film_id"], job["input_revision"])
                 if route is None or route["worker_id"] != command.worker_id:
                     raise WorkflowError("route_required")
-                if job["stage"] in _CONTROLLER_ONLY and (
-                    route["kind"] != "local" or route["worker_id"] != self.controller_id
-                ):  # OD7 R5: e.g. an older worker build claiming ASR
+                if job["stage"] in _CONTROLLER_ONLY and route["kind"] != "local":
+                    # OD7 R5: only the controller opens `local` routes (C10);
+                    # e.g. an older worker build claiming ASR on its route
                     raise WorkflowError("route_required")
             elif (
                 command.worker_id is not None

@@ -195,6 +195,7 @@ class Sim:
             return
         film_id = mine[0].film_id
         restore, asr = job(rt, film_id, "restore"), job(rt, film_id, "asr")
+        # an older worker build would try ASR too: OD7 R5 refuses it
         name = (
             "restore"
             if restore.status == "pending"
@@ -206,7 +207,8 @@ class Sim:
             return
         try:
             claim_remote(rt, remote, film_id, name)
-        except m.WorkflowError:
+        except m.WorkflowError as exc:
+            assert name == "restore" or exc.code == "route_required"
             return
 
     def finish(self) -> None:
@@ -335,16 +337,16 @@ class Sim:
             # a pin to a device holds its route there (改派 to 自动 keeps one)
             if value.kind != "local" and pin is not None and pin.worker_id:
                 assert pin.worker_id == value.worker_id
-            if value.worker_id == self.small:  # OD5: 8 GB never restores
-                assert job(rt, value.film_id, "restore").status in FINISHED
+            assert value.worker_id != self.small  # OD5/OD7: 8 GB takes nothing
         assert all(count <= s.MAX_OPEN_ROUTES for count in per_worker.values())
         jobs: dict[str, int] = {}
         for item in self.open_assignments():
             jobs[item.assignment.job_id] = jobs.get(item.assignment.job_id, 0) + 1
-            if item.stage in ("restore", "asr"):  # OD1: never the controller
+            if item.stage == "restore":  # OD1: never the controller
                 assert item.assignment.worker_id != rt.identity.worker_id
-            if item.assignment.worker_id == self.small:
-                assert item.stage != "restore"
+            if item.stage == "asr":  # OD7: never a worker
+                assert item.assignment.worker_id in (None, rt.identity.worker_id)
+            assert item.assignment.worker_id != self.small
         assert all(count == 1 for count in jobs.values())
 
     def step(self) -> None:

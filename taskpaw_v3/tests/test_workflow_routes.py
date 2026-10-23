@@ -311,8 +311,9 @@ def test_repin_withdraws_an_unclaimed_route_but_keeps_a_matching_one(rt):
 def test_the_route_closes_after_restore_and_asr_is_the_controllers(rt):
     """OD7 R4/R5: the worker's route closes once its restore is done (the
     slot is free); ASR and translate are the controller's, on its own
-    implicit route, closed when done."""
-    w = enrol_remote(rt, "5060 Ti-1")
+    implicit route, closed when done. (The worker was approved for ASR
+    before the upgrade.)"""
+    w = enrol_remote(rt, "5060 Ti-1", stages=("restore", "asr"))
     film = auto_film(rt)
     route(rt, film, w.worker_id)
     resolve_remote(rt, w, claim_remote(rt, w, film, "restore"))
@@ -645,10 +646,7 @@ def test_routing_snapshot_reads_films_routes_workers_and_samples(rt):
         GPU_16[1],
         True,
     )
-    assert {(p.stage, p.max_width) for p in remote.profiles} == {
-        ("restore", 3840),
-        ("asr", 3840),
-    }
+    assert {(p.stage, p.max_width) for p in remote.profiles} == {("restore", 3840)}
     (sample,) = snap.samples
     assert (sample.stage, sample.worker_id, sample.tier) == (
         "restore",
@@ -682,7 +680,7 @@ def test_rate_samples_skip_reuse_only_and_mixed_attempts(rt, monkeypatch):
     }
     names = {}
     for name, (restore_note, wall, asr_note) in cases.items():
-        w = enrol_remote(rt, name, gpu=GPU_16)
+        w = enrol_remote(rt, name, gpu=GPU_16, stages=("restore", "asr"))
         names[w.worker_id] = name
         film = auto_film(rt)
         route(rt, film, w.worker_id)

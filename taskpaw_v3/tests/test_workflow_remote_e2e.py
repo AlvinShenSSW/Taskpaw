@@ -231,7 +231,9 @@ class World:
 
     # ── workers ──
     def executors(self, runtime):
-        return [self.tools.restore(runtime), self.tools.asr(runtime)]
+        """The worker's (OD7 R9): restore only. A migration test replaces it
+        with an older build's restore and ASR."""
+        return [self.tools.restore(runtime)]
 
     def probe(self, settings, staging):
         unbound = cast(Any, None)
@@ -694,6 +696,10 @@ def test_case_7_a_lost_finish_reply_then_a_worker_restart_is_collected(
     assert (staging / "attempts" / f"{restore.attempt_id}.json").exists()
     worker = world.restart_worker(worker)  # … and the worker restarts
     wait_status(world, film, "asr", "succeeded")
+    # OD7: the controller transcribes (a restart of its own may interrupt
+    # an ASR run: a free retry, still here)
+    asr = world.attempts(film, "asr")
+    assert {a.worker_id for a in asr} == {world.rt.identity.worker_id}
     until(lambda: not list((staging / "attempts").glob("*.json")), LONG)
     assert not (staging / "work" / restore.attempt_id).exists()
     assert sent.count(restore.attempt_id) == 1  # collected, never resent
@@ -717,6 +723,10 @@ def test_case_8_a_lost_finish_reply_across_a_controller_restart(world, monkeypat
     film = routed_film(world)
     wait_status(world, film, "asr", "succeeded")
     assert gone.is_set() and len(world.attempts(film, "restore")) == 1
+    # OD7: the controller transcribes (a restart of its own may interrupt
+    # an ASR run: a free retry, still here)
+    asr = world.attempts(film, "asr")
+    assert {a.worker_id for a in asr} == {world.rt.identity.worker_id}
     world.invariants()
 
 

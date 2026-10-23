@@ -72,9 +72,12 @@ class SpyLease(GpuLease):
         return super().try_acquire(run, poll_interval, label)
 
 
-def remote_restored(rt, name="5060 Ti-1"):
+OLD_APPROVAL = ("restore", "asr")  # a worker approved before the upgrade
+
+
+def remote_restored(rt, name="5060 Ti-1", **kw):
     """A film whose restore a worker ran on its auto route."""
-    w = enrol_remote(rt, name)
+    w = enrol_remote(rt, name, **kw)
     film_id = add_film(rt)
     route(rt, film_id, w.worker_id)
     resolve_remote(rt, w, claim_remote(rt, w, film_id, "restore"))
@@ -168,7 +171,7 @@ def test_r4_the_controllers_local_route_still_covers_asr_and_translate(rt):
 
 # ── R5: an ASR claim needs the controller's own local route ──────────────
 def test_r5_a_worker_cannot_claim_asr_on_its_route(rt):
-    w, film_id = remote_restored(rt)
+    w, film_id = remote_restored(rt, stages=OLD_APPROVAL)
     route(rt, film_id, w.worker_id)  # an old controller left one open
     with pytest.raises(m.WorkflowError) as refused:
         claim_remote(rt, w, film_id, "asr")
@@ -181,7 +184,7 @@ def test_r5_an_asr_claimed_before_the_upgrade_finishes_and_closes_its_route(
 ):
     """§3.1: an in-flight worker ASR is never cancelled; on resolve its route
     closes (restore finished → 完成) and the controller takes the next stage."""
-    w, film_id = remote_restored(rt)
+    w, film_id = remote_restored(rt, stages=OLD_APPROVAL)
     route(rt, film_id, w.worker_id)  # the old build kept it open for ASR
     with monkeypatch.context() as old:  # the controller before the upgrade
         old.setattr(film_store, "_CONTROLLER_ONLY", frozenset())

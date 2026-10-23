@@ -59,11 +59,13 @@ def enrol_remote(
     name: str,
     *,
     gpu: tuple[str, int] = GPU_16,
-    stages: tuple[str, ...] = ("restore", "asr"),
+    stages: tuple[str, ...] = ("restore",),
     limit: tuple[int, int] = UHD,
     address: str = "192.0.2.30",
 ) -> Remote:
-    """Register, pair, probe, approve, enable and boot one remote worker."""
+    """Register, pair, probe, approve, enable and boot one remote worker.
+    OD7 (#298): approved for restore only; `stages=("restore", "asr")` is a
+    worker approved before the upgrade."""
     store, op, now = rt.store, rt.operator, rt.clock.now()
     worker_id, device_id = identity(), identity()
     store.register_worker(
