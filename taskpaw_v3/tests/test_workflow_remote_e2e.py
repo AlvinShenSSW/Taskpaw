@@ -170,7 +170,7 @@ class World:
             tools_rt["rt"] = rt
             return [
                 SyntheticExecutor("restore"),  # needs a GPU: routed to a worker
-                SyntheticExecutor("asr"),
+                self.tools.asr(rt),  # OD7: the controller transcribes (fake WhisperJAV)
                 ret.FakeTranslate(rt),
             ]
 
@@ -432,17 +432,21 @@ def wait_status(world: World, film: str, name: str, *states: str) -> None:
 
 
 # ── §7: the fake-worker end to end ──────────────────────────────────────
-def test_a_film_restores_and_transcribes_remotely_and_reaches_confirm(world):
+def test_a_film_restores_remotely_transcribes_here_and_reaches_confirm(world):
+    """OD7 §5: restore on the worker → upload → ASR on the controller →
+    translate → return → scrape → 待确认."""
     worker = world.join()
     film = routed_film(world)
     wait_status(world, film, "scrape", "succeeded")
     row = world.row(film)
     assert row["can_confirm"] is True  # 待确认
-    # restore and ASR ran on the worker, translate/return/scrape here
+    # restore ran on the worker; ASR, translate, return and scrape here
     (restore,) = world.attempts(film, "restore")
     (asr,) = world.attempts(film, "asr")
     worker_id = world.issued["w1"]["worker_id"]
-    assert restore.worker_id == asr.worker_id == worker_id
+    assert restore.worker_id == worker_id
+    assert asr.worker_id == world.rt.identity.worker_id
+    assert len(world.tools.runs(world.tools.whisper_exe)) == 1
     (translate,) = world.attempts(film, "translate")
     assert translate.worker_id == world.rt.identity.worker_id
     assert world.jasna_runs() == 1
@@ -893,7 +897,7 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
 
     OD1 correction: while the re-paired worker is not yet 核验 (the verified
     set is empty) the controller's own dispatcher stays running and still
-    never claims the retried restore/ASR: the film waits for a GPU device
+    never claims the retried restore: the film waits for a GPU device
     and completes on the worker after the re-approval, which is retried on a
     version conflict with the new session's own writes."""
     release = world.hold_jasna()
@@ -940,8 +944,11 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
     first, second = world.attempts(film, "restore")
     assert {e.kind for e in first.evidence} == {"exec_failed:cancelled"}
     assert second.status == "succeeded" and world.jasna_runs() == 2
-    for name in ("restore", "asr"):  # never one on the controller's GPU
-        assert {a.worker_id for a in world.attempts(film, name)} == {worker_id}
+    # never a restore on the controller's GPU; OD7: ASR is the controller's
+    assert {a.worker_id for a in world.attempts(film, "restore")} == {worker_id}
+    assert {a.worker_id for a in world.attempts(film, "asr")} == {
+        world.rt.identity.worker_id
+    }
     world.invariants()
 
 

@@ -1,9 +1,9 @@
 """P2-1 (#292): the controller's stages next to remote workers.
 
-(C1, translate built without WhisperJAV, is in test_workflow_pipeline_e2e.) OD1: once a remote worker
-is configured the controller's own GPU takes no restore or ASR; C12: a stage
-that needs no GPU still runs on the controller. Without remote workers every
-stage runs locally, as in phase 1.
+(C1, translate built without WhisperJAV, is in test_workflow_pipeline_e2e.) OD7: once a remote worker
+is configured the controller's own GPU takes no restore but runs ASR; C12: a
+restore that needs no GPU still runs on the controller. Without remote workers
+every stage runs locally, as in phase 1.
 """
 
 from __future__ import annotations
@@ -60,26 +60,28 @@ def test_with_a_remote_worker_the_controller_takes_no_gpu_stage(rt):
 
 
 def test_a_stage_needing_no_gpu_still_runs_on_the_controller(rt):
-    """C12: an all-reused restore needs no GPU; the ASR after it does."""
+    """C12: an all-reused restore needs no GPU; OD7: the ASR after it is the
+    controller's too, on the same local route."""
     rt.executors["restore"] = SyntheticExecutor("restore", uses_gpu=False)
     enrol_remote(rt, "5060 Ti-1")
     film = add_film(rt)
     d = dispatcher(rt)
     assert d.run_once() is True
     assert stage(rt, film, "restore").status == "succeeded"
-    assert d.run_once() is False
-    assert d.status().waiting == {film: WAIT}
+    assert d.run_once() is True
+    assert stage(rt, film, "asr").status == "succeeded"
     local = rt.store.film_route(rt.operator, film, 1)
     assert (local.worker_id, local.kind) == (rt.identity.worker_id, "local")
 
 
-def test_the_controller_translates_after_remote_restore_and_asr(rt):
+def test_the_controller_transcribes_and_translates_after_a_remote_restore(rt):
     w = enrol_remote(rt, "5060 Ti-1")
     film = add_film(rt)
-    route(rt, film, w.worker_id, kind="local")  # any open route to the worker
+    route(rt, film, w.worker_id)
     resolve_remote(rt, w, claim_remote(rt, w, film, "restore"))
-    resolve_remote(rt, w, claim_remote(rt, w, film, "asr"))
     d = dispatcher(rt)
+    assert d.run_once() is True
+    assert stage(rt, film, "asr").status == "succeeded"
     assert d.run_once() is True
     assert stage(rt, film, "translate").status == "succeeded"
 
@@ -106,18 +108,19 @@ def test_the_controller_takes_over_an_unclaimed_route_for_a_local_stage(rt):
 
 
 def test_a_claimed_remote_route_is_never_taken_over(rt):
+    """The controller's ASR waits while the worker's restore owner is not
+    settled (its route stays open, claimed), then runs."""
     w = enrol_remote(rt, "5060 Ti-1")
     film = add_film(rt)
-    route(rt, film, w.worker_id, kind="local")
-    resolve_remote(rt, w, claim_remote(rt, w, film, "restore"))
-    claimed = claim_remote(rt, w, film, "asr")
-    finish_remote(rt, w, claimed)  # ASR succeeded; its owner is not settled yet
+    route(rt, film, w.worker_id)
+    claimed = claim_remote(rt, w, film, "restore")
+    finish_remote(rt, w, claimed)  # restore succeeded; its owner is not settled
     d = dispatcher(rt)
     assert d.run_once() is False
     assert d.status().waiting == {film: "已派往 5060 Ti-1"}
     resolve_remote(rt, w, claimed)  # settles the owner and closes the route
     assert d.run_once() is True
-    assert stage(rt, film, "translate").status == "succeeded"
+    assert stage(rt, film, "asr").status == "succeeded"
 
 
 def test_in_remote_mode_the_controller_never_takes_a_gpu_stage(rt):
@@ -156,7 +159,7 @@ def test_in_remote_mode_the_controller_never_takes_a_gpu_stage(rt):
 
 def test_the_pass_and_the_dispatcher_agree_on_a_reuse_only_restore(rt):
     """IR3: one GPU-need rule for both. The controller runs the all-reused
-    restore; the pass routes only the ASR after it, handing the route over."""
+    restore and (OD7) the ASR after it; the pass routes nothing."""
     rt.executors["restore"] = SyntheticExecutor("restore", uses_gpu=False)
     w = enrol_remote(rt, "5060 Ti-1")
     film = add_film(rt)
@@ -178,9 +181,10 @@ def test_the_pass_and_the_dispatcher_agree_on_a_reuse_only_restore(rt):
     assert d.run_once() is True
     assert stage(rt, film, "restore").status == "succeeded"
     outcome = run_pass()
-    assert [(r.film_id, r.worker_id) for r in outcome.routed] == [(film, w.worker_id)]
-    assert [x.reason for x in outcome.withdrawn] == [HAND_OVER]
-    assert claim_remote(rt, w, film, "asr")[0].status == "running"
+    assert (outcome.routed, outcome.withdrawn) == ((), ())
+    assert HAND_OVER not in [x.reason for x in outcome.withdrawn]
+    assert d.run_once() is True
+    assert stage(rt, film, "asr").status == "succeeded"
 
 
 def test_turning_remote_workers_off_runs_restore_and_asr_locally_again(rt):

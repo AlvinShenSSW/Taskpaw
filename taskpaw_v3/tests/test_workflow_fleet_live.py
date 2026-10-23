@@ -89,7 +89,7 @@ def test_snapshot_feeds_the_scheduler():
     live = fleet_live.snapshot()["w1"]
     assert live.last_seen == now and live.paused is True
     assert live.tiers_ready == frozenset({"standard", "good"})
-    assert live.asr_ready is True and live.version_ok is True
+    assert live.version_ok is True and not hasattr(live, "asr_ready")  # OD7
     assert (live.free_bytes, live.staging_cap_bytes) == (900 * 10**9, 500 * 10**9)
     entry = fleet_live.entry("w1")
     assert entry is not None and entry.beat.gpu.power_w == 21.5

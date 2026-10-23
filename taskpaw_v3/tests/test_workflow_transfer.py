@@ -255,6 +255,9 @@ def test_the_envelope_carries_a_succeeded_stages_ledger(api, rt, world):
             outcome="succeeded",
         ),
     )
+    # OD7 R4: the route closed with the restore; an in-flight ASR claimed
+    # before the upgrade still holds one, which the envelope serves
+    route(rt, film_id, remote.worker_id)
     body = api.get(f"{P}/films/{film_id}/1", headers=joined.headers).json()
     ledger = body["ledgers"]["restore"]
     assert ledger["attempt_id"] == command.attempt_id

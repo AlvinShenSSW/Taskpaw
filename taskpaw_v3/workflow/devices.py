@@ -336,7 +336,8 @@ def _probe(probe: m.HardwareProbe | None) -> dict[str, Any] | None:
 
 
 def _synthetic_film(now: datetime) -> m.RoutingFilm:
-    """A planned 1080p film with restore and ASR pending: the row's reason."""
+    """A planned 1080p standard-tier film with its restore pending: the row's
+    reason (OD7: a worker without any tier model can restore nothing)."""
     return m.RoutingFilm(
         film_id=str(uuid.UUID(int=0)),
         input_revision=1,
@@ -344,7 +345,7 @@ def _synthetic_film(now: datetime) -> m.RoutingFilm:
         created_at=now,
         planned=True,
         confirmed_at=now,
-        ltx_model=None,
+        ltx_model="standard",
         pin_worker_id=None,
         pin_version=0,
         restore="pending",

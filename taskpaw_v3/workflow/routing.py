@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("taskpaw.workflow.routing")
 
-_GPU_STAGES: tuple[ComputeStage, ...] = ("restore", "asr")
+_GPU_STAGES: tuple[ComputeStage, ...] = ("restore",)  # OD7 R2: ASR stays local
 # Codes of a decision overtaken between the snapshot and its command.
 _RACED = frozenset(
     {
@@ -158,7 +158,7 @@ def gpu_stages(
     snapshot: m.RoutingSnapshot,
     executors: Mapping[ComputeStage, StageExecutor],
 ) -> dict[tuple[str, int], frozenset[str]]:
-    """Per film revision, its restore and ASR that need a GPU worker:
+    """Per film revision, its restore that needs a GPU worker (OD7):
     `needs_gpu`, the controller's dispatcher's own rule, over that revision's
     input manifest (IR3); an open route's older revision too (CX5)."""
     result: dict[tuple[str, int], frozenset[str]] = {}

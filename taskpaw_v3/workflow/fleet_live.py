@@ -209,7 +209,6 @@ class FleetLive:
                 last_seen=entry.last_seen,
                 paused=entry.beat.paused,
                 tiers_ready=frozenset(entry.beat.tiers_ready),
-                asr_ready=entry.beat.asr_ready,
                 free_bytes=entry.beat.disk.free,
                 staging_cap_bytes=entry.beat.disk.cap,
                 version_ok=self.version_ok(entry.beat),

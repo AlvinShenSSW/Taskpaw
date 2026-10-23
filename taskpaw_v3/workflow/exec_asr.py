@@ -33,7 +33,7 @@ from .exec_common import (
     write_text_atomic,
 )
 from .executors import ASR_DONE, ComputeStage, ExecOutcome, ExecRuntime, JobContext
-from .local_gpu import max_resolution
+from .local_gpu import UHD
 from .stage_results import (
     FileRef,
     StageResult,
@@ -111,7 +111,8 @@ class AsrExecutor:
         )
 
     def max_resolution(self, vram_mib: int) -> tuple[int, int]:
-        return max_resolution(vram_mib)
+        """OD7 R8: WhisperJAV reads the audio only, so any card takes 4K."""
+        return UHD
 
     def needs_gpu(self, manifest: m.InputManifest) -> bool:
         """False when no video will run WhisperJAV (all reused, or the stage

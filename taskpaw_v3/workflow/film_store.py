@@ -60,7 +60,10 @@ _FINISHED = ("succeeded", "skipped")
 # P2-1 R6: the stages a route serves. The controller's own `local` route runs
 # the whole compute chain; any other route ends with the GPU stages.
 _ROUTE_STAGES = {"local": ("restore", "asr", "translate")}
-_GPU_STAGES = ("restore", "asr")
+# OD7 (#298 R4): a worker's (auto/pinned) route closes once its restore is done
+_GPU_STAGES = ("restore",)
+# OD7 R5: stages only the controller claims, on its own local route
+_CONTROLLER_ONLY = frozenset({"asr"})
 
 
 def native_identity_key(identity: NativeIdentity | None) -> str | None:
@@ -598,6 +601,10 @@ class FilmCommands(WorkerCommands):
                 # P2-1 C10: only the worker the film revision is routed to
                 route = self._open_route(job["film_id"], job["input_revision"])
                 if route is None or route["worker_id"] != command.worker_id:
+                    raise WorkflowError("route_required")
+                if job["stage"] in _CONTROLLER_ONLY and (
+                    route["kind"] != "local" or route["worker_id"] != self.controller_id
+                ):  # OD7 R5: e.g. an older worker build claiming ASR
                     raise WorkflowError("route_required")
             elif (
                 command.worker_id is not None

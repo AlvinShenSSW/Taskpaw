@@ -308,22 +308,28 @@ def test_repin_withdraws_an_unclaimed_route_but_keeps_a_matching_one(rt):
     claim_remote(rt, w2, film, "restore")
 
 
-def test_asr_stays_on_the_route_and_the_route_closes_after_the_gpu_stages(rt):
+def test_the_route_closes_after_restore_and_asr_is_the_controllers(rt):
+    """OD7 R4/R5: the worker's route closes once its restore is done (the
+    slot is free); ASR and translate are the controller's, on its own
+    implicit route, closed when done."""
     w = enrol_remote(rt, "5060 Ti-1")
     film = auto_film(rt)
     route(rt, film, w.worker_id)
     resolve_remote(rt, w, claim_remote(rt, w, film, "restore"))
-    assert open_route(rt, film).worker_id == w.worker_id  # between restore and ASR
-    resolve_remote(rt, w, claim_remote(rt, w, film, "asr"))
-    assert open_route(rt, film) is None  # restore and ASR done: the slot is free
+    assert open_route(rt, film) is None
     (done,) = rt.store.list_routes(rt.operator, open_only=False)
     assert done.close_reason == "完成"
-    # translate is the controller's: its own implicit route, closed when done
+    route(rt, film, w.worker_id)
+    with pytest.raises(m.WorkflowError, match="route_required"):
+        claim_remote(rt, w, film, "asr")
     d = dispatcher(rt)
+    assert d.run_once() is True  # 转本机: the worker's unclaimed route goes
+    assert stage(rt, film, "asr").status == "succeeded"
     assert d.run_once() is True
     assert stage(rt, film, "translate").status == "succeeded"
     routes = rt.store.list_routes(rt.operator, open_only=False)
     assert [(r.kind, r.state) for r in routes] == [
+        ("auto", "closed"),
         ("auto", "closed"),
         ("local", "closed"),
     ]
@@ -632,8 +638,7 @@ def test_routing_snapshot_reads_films_routes_workers_and_samples(rt):
     )
     assert entry.pin_worker_id is None and entry.pin_version == 1
     assert entry.source_bytes > 0 and entry.claimed_by is None
-    (r,) = snap.routes
-    assert (r.film_id, r.worker_id) == (film, w.worker_id)
+    assert snap.routes == ()  # OD7 R4: closed once the restore succeeded
     remote = next(x for x in snap.workers if x.worker_id == w.worker_id)
     assert (remote.gpu_model, remote.vram_mib, remote.boot_reconciled) == (
         GPU_16[0],
@@ -653,10 +658,13 @@ def test_routing_snapshot_reads_films_routes_workers_and_samples(rt):
     assert sample.wall_seconds == 1800.0
 
 
-def test_rate_samples_skip_reuse_only_and_mixed_attempts(rt):
+def test_rate_samples_skip_reuse_only_and_mixed_attempts(rt, monkeypatch):
     """CX3: a sample is GPU throughput only when the tool ran on every volume.
     The evidence says how many volumes ran but not their durations, so a mixed
-    attempt is left out too."""
+    attempt is left out too. (Worker ASR as before OD7: in-flight work.)"""
+    from taskpaw_v3.workflow import film_store
+
+    monkeypatch.setattr(film_store, "_CONTROLLER_ONLY", frozenset())
     timing = m.RestoreTiming(wall=1800.0)
     full, reused = (
         RESTORE_DONE.format(applied=1, reused=0),
@@ -680,6 +688,7 @@ def test_rate_samples_skip_reuse_only_and_mixed_attempts(rt):
         route(rt, film, w.worker_id)
         claimed = claim_remote(rt, w, film, "restore")
         resolve_remote(rt, w, claimed, note=restore_note, timing=wall)
+        route(rt, film, w.worker_id)  # the pre-OD7 route stayed open for ASR
         resolve_remote(rt, w, claim_remote(rt, w, film, "asr"), note=asr_note)
     samples = {
         (s.stage, names[s.worker_id])

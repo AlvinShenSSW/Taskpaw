@@ -40,7 +40,7 @@ from taskpaw_v3.workflow import routing
 from taskpaw_v3.workflow import scheduler as s
 from taskpaw_v3.workflow.executors import ExecOutcome, JobContext, SyntheticExecutor
 from taskpaw_v3.workflow.local_dispatch import should_retry
-from taskpaw_v3.workflow.local_gpu import FULL_HD
+from taskpaw_v3.workflow.local_gpu import FULL_HD, UHD
 
 START = datetime(2026, 10, 22, 8, 0, tzinfo=timezone.utc)
 FINISHED = ("succeeded", "skipped")
@@ -65,6 +65,10 @@ class InstantExecutor(SyntheticExecutor):
         if self.stage == "restore" and manifest.film_id in self.reuse:
             return False
         return self.uses_gpu
+
+    def max_resolution(self, vram_mib: int) -> tuple[int, int]:
+        # OD7 R8: like WhisperJAV, ASR reads audio only (4K on the 8 GB card)
+        return UHD if self.stage == "asr" else super().max_resolution(vram_mib)
 
     def run(self, context: JobContext) -> ExecOutcome:
         return ExecOutcome.succeeded()
@@ -193,6 +197,7 @@ class Fleet:
                 job(rt, value.film_id, "restore"),
                 job(rt, value.film_id, "asr"),
             )
+            # an older build would try ASR too: OD7 R5 refuses it
             name = (
                 "restore"
                 if restore.status == "pending"
@@ -204,7 +209,8 @@ class Fleet:
                 continue
             try:
                 claim_remote(rt, remote, value.film_id, name)
-            except m.WorkflowError:
+            except m.WorkflowError as exc:
+                assert name == "restore" or exc.code == "route_required"
                 continue
             return
 
@@ -402,6 +408,12 @@ class Fleet:
                 "WHERE r.state='open' AND r.worker_id=? "
                 "AND s.status NOT IN ('succeeded','skipped')",
                 (self.small,),
+            ).fetchall()
+            # OD7: ASR is the controller's alone, on its own local route
+            assert not conn.execute(
+                "SELECT 1 FROM attempts a JOIN stages s ON s.job_id=a.job_id "
+                "WHERE s.stage='asr' AND a.worker_id!=?",
+                (rt.identity.worker_id,),
             ).fetchall()
             # IR3: a restore that needs no GPU is the controller's, never routed
             reuse = sorted(self.reuse)

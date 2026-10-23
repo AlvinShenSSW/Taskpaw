@@ -45,16 +45,19 @@ NO_HISTORY = "无历史，按排队先后"
 CONTROLLER_DISK = "主控磁盘空间不足"
 QUEUE_FULL = "设备队列已满"
 NO_DEVICE = "没有可用的设备"
-NO_GPU = "无需 GPU，本机完成"  # P2-4 §9 CX2: every volume reused
+NO_GPU = "无需修复，本机完成"  # P2-4 §9 CX2 / OD7 R7: no restore for a worker
 PIN_GONE = "指定设备不可用"
 HAND_OVER = "转派 GPU 设备"
 REVOKED = "已撤销"
+ASR_LOCAL = "识别转本机"  # OD7 R12: an unclaimed worker route with nothing left
+NO_RESTORE = "显存不足，不参与修复"  # OD5: < 16 GB takes no stage (OD7)
 SOURCE_CHANGED = "片源变化，等待重新扫描"  # CX7: the claim would refuse the source
 
 _FINISHED = ("succeeded", "skipped")
 # (stage, GPU model, resolution class); ASR is not keyed on resolution
 _Key = tuple[str, str | None, str | None]
-_ROUTED: tuple[m.RoutedStage, ...] = ("restore", "asr")
+# OD7 (#298 R2): GPU workers restore only; ASR runs on the controller
+_ROUTED: tuple[m.RoutedStage, ...] = ("restore",)
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,6 @@ class WorkerLive:
     last_seen: datetime
     paused: bool = False
     tiers_ready: frozenset[str] = frozenset(TIER_LABELS)
-    asr_ready: bool = True
     free_bytes: int = 2_000 * GB
     staging_cap_bytes: int = STAGING_CAP_BYTES
     version_ok: bool = True
@@ -116,14 +118,15 @@ def staging_need(film: m.RoutingFilm) -> float:
     return film.source_bytes * (1 + OUTPUT_FACTOR) + STAGING_EXTRA_BYTES
 
 
-# per (film id, input revision): its restore and ASR that need a GPU worker
+# per (film id, input revision): its restore that needs a GPU worker (OD7)
 GpuStages = Mapping[tuple[str, int], frozenset[str]]
 
 
 def routed_stages(
     film: m.RoutingFilm, gpu_stages: GpuStages | None
 ) -> tuple[m.RoutedStage, ...]:
-    """The film revision's unfinished restore and ASR that need a GPU worker."""
+    """The film revision's unfinished restore that needs a GPU worker (OD7:
+    ASR is the controller's)."""
     needs = (
         gpu_stages.get((film.film_id, film.input_revision), frozenset(_ROUTED))
         if gpu_stages is not None
@@ -140,9 +143,7 @@ def _ready_to_route(film: m.RoutingFilm, stages: tuple[str, ...]) -> bool:
     """The first routed stage can be claimed next (its predecessor finished)."""
     if not stages or not film.planned or film.claimed_by is not None:
         return False
-    if stages[0] == "restore":
-        return film.restore == "pending"
-    return film.restore in _FINISHED and film.asr == "pending"
+    return stages[0] == "restore" and film.restore == "pending"
 
 
 # ── prediction (S6) ─────────────────────────────────────────────────────
@@ -320,20 +321,14 @@ def eligibility(
         return "版本不一致"
     if not worker.boot_reconciled:
         return "等待对账"
-    too_big = "显存不足 4K" if _class(film) == "4K" else "分辨率超出设备上限"
+    if worker.vram_mib < RESTORE_MIN_VRAM_MIB:  # OD5/OD7: eligible for nothing
+        return NO_RESTORE
     if "restore" in stages:
-        if worker.vram_mib < RESTORE_MIN_VRAM_MIB:
-            return "显存不足，不参与修复"
         if not _fits(worker, "restore", film):
-            return too_big
+            return "显存不足 4K" if _class(film) == "4K" else "分辨率超出设备上限"
         tier = film.ltx_model
         if tier is not None and tier not in live.tiers_ready:
             return f"缺少{TIER_LABELS.get(tier, tier)}画质模型"
-    if "asr" in stages:
-        if not _fits(worker, "asr", film):
-            return too_big
-        if not live.asr_ready:
-            return "识别未就绪"
     if queued_need is not None:
         need = queued_need + staging_need(film)  # IR11/CX1: the queue's staging too
         if (
@@ -447,7 +442,9 @@ def _pass_state(
         elif route.worker_id == controller_id:
             if route.kind == "local" and _ready_to_route(film, stages):
                 hand_over[film.film_id] = route
-        elif stages and film.pin_worker_id != route.worker_id:
+        elif not stages:  # OD7 R12: restore done, the rest is the controller's
+            reason = ASR_LOCAL
+        elif film.pin_worker_id != route.worker_id:
             # an auto route; a film pinned to this worker never moves (§4.3)
             worker = workers.get(route.worker_id)
             worker_live = live.get(route.worker_id)

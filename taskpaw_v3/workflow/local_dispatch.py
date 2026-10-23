@@ -7,8 +7,9 @@ Jasna / subtitle tasks (C5).
 
 P2-1 (#292): a compute claim needs an open route to this worker, which the
 dispatcher opens itself (kind `local`) right before it claims (C10). In
-remote mode the controller's GPU takes no stage that needs it, whatever
-workers are verified (OD1); stages that need no GPU still run here (C12).
+remote mode the controller's GPU takes no restore that needs it, whatever
+workers are verified (OD1); ASR runs here under the shared `gpu_lease`
+(OD7, #298), as do stages that need no GPU (C12).
 """
 
 from __future__ import annotations
@@ -59,9 +60,10 @@ POLL_SECONDS = 5.0
 STOP_SETTLE_SECONDS = 30.0
 RENEW_SECONDS = 3600.0
 NO_4K_DEVICE = "没有可接 4K 的设备"
-REMOTE_GPU = "等待 GPU 设备"  # OD1: a remote worker restores and transcribes
+REMOTE_GPU = "等待 GPU 设备"  # OD7: a remote worker restores
 NO_GPU_DEVICE = "没有可用的 GPU 设备"  # ... and none is verified right now
-REMOTE_STAGES = frozenset({"restore", "asr"})  # translate is always the controller's
+# OD7 (#298 R2): only restore goes to a GPU worker; ASR and translate run here
+REMOTE_STAGES = frozenset({"restore"})
 LOCAL_ROUTE = "本机"
 TAKE_OVER = "转本机"
 
@@ -538,7 +540,7 @@ class LocalDispatcher:
                     remote is not None
                     and job.stage in REMOTE_STAGES
                     and needs_gpu(executor, manifest)
-                ):  # OD1: never on this GPU; IR5: name who will run it, if any
+                ):  # OD7: restore never on this GPU; IR5: name who runs it
                     who = "、".join(remote[:3]) or NO_GPU_DEVICE
                     waiting[job.film_id] = f"{REMOTE_GPU}：{who}"
                     continue

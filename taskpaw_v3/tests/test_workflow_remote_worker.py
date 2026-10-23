@@ -1362,7 +1362,8 @@ def test_a_download_cut_by_an_early_eof_keeps_its_part_and_resumes(tmp_path):
 
 def test_a_missing_gpu_reading_withdraws_readiness(tmp_path, rt, host, server):
     """CX8: after a good probe, losing the GPU reading clears the advertised
-    tiers and ASR; 设备 shows the worker ineligible until a probe returns."""
+    tiers; 设备 shows the worker ineligible until a probe returns (OD7: its
+    synthetic film needs the standard tier)."""
     readings = [True]
 
     def flaky(settings, staging):
@@ -1382,9 +1383,7 @@ def test_a_missing_gpu_reading_withdraws_readiness(tmp_path, rt, host, server):
         until(lambda: row(rt, host, issued["worker_id"])["eligible"])
         readings.append(False)
         shown = until(
-            lambda: (
-                (r := row(rt, host, issued["worker_id"]))["asr_ready"] is False and r
-            )
+            lambda: (r := row(rt, host, issued["worker_id"]))["tiers_ready"] == [] and r
         )
         assert shown["tiers_ready"] == [] and shown["eligible"] is False
         assert shown["eligibility"] != "可接单"

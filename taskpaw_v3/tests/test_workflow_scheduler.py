@@ -142,8 +142,8 @@ def routed(result):
     return {r.film_id: r.worker_id for r in result.routes}
 
 
-# ── OD5: 8 GB cards never restore ────────────────────────────────────────
-def test_an_8gb_card_never_takes_restore_but_takes_asr():
+# ── OD5/OD7: 8 GB cards take nothing; ASR is the controller's ────────────
+def test_an_8gb_card_takes_nothing_and_asr_is_never_routed():
     ws = fleet()
     small = ws[4]
     films = [film(i) for i in range(10)]
@@ -153,7 +153,7 @@ def test_an_8gb_card_never_takes_restore_but_takes_asr():
     asr_only = film(20, restore="succeeded")
     queued = [open_route(f, ws[i]) for i, f in enumerate(films[:4])]
     result = run([asr_only, *films[:4]], ws, routes=queued)
-    assert routed(result) == {asr_only.film_id: small.worker_id}
+    assert routed(result) == {}  # OD7: the controller transcribes it
 
 
 def test_a_restore_pinned_to_an_8gb_card_waits_with_the_reason():
@@ -398,7 +398,6 @@ def test_a_worker_without_any_heartbeat_is_offline():
         ({}, {"version_ok": False}, "版本不一致"),
         ({"boot_reconciled": False}, {}, "等待对账"),
         ({}, {"tiers_ready": frozenset({"standard"})}, "缺少高画质模型"),
-        ({}, {"asr_ready": False}, "识别未就绪"),
         ({}, {"free_bytes": 80 * GB}, "空间不足"),
     ],
 )
@@ -503,13 +502,14 @@ def test_only_films_with_a_pending_gpu_stage_are_candidates():
     failed = film(1, restore="failed")
     unplanned = film(2, planned=False)
     no_gpu = film(3)
-    asr_wait = film(4, restore="succeeded", asr="pending")
+    asr_wait = film(4, restore="succeeded", asr="pending")  # OD7: local
+    ready = film(5)
     result = run(
-        [done, failed, unplanned, no_gpu, asr_wait],
+        [done, failed, unplanned, no_gpu, asr_wait, ready],
         ws,
         gpu_stages={(no_gpu.film_id, 1): frozenset()},
     )
-    assert set(routed(result)) == {asr_wait.film_id}
+    assert set(routed(result)) == {ready.film_id}
 
 
 def controller_worker():
@@ -527,22 +527,28 @@ def controller_worker():
 
 
 def test_the_controllers_unclaimed_local_route_is_handed_over_for_gpu_work():
-    """C12: the controller ran a no-GPU restore; its ASR needs a GPU worker."""
+    """C12: the controller's unclaimed local route of a film whose restore
+    needs a GPU worker (opened before remote mode) is handed over. OD7: a
+    restored film's local route stays — its ASR is the controller's."""
     ws = fleet()
     controller = controller_worker()
-    f = film(restore="succeeded")
+    f = film()
     local = open_route(f, controller, kind="local")
     result = run([f], [controller, *ws], routes=[local])
     assert [w.route_id for w in result.withdrawals] == [local.route_id]
     assert routed(result)[f.film_id] in {w.worker_id for w in ws}
     assert CONTROLLER not in routed(result).values()
+    restored = film(restore="succeeded")
+    kept = open_route(restored, controller, kind="local")
+    result = run([restored], [controller, *ws], routes=[kept])
+    assert (result.withdrawals, result.routes) == ((), ())
 
 
 def test_a_single_machine_pass_never_touches_the_local_route():
     """IR1/OD1: with remote workers off the pass decides nothing; with them
     on and none enrolled the local route stays put and the film waits."""
     controller = controller_worker()
-    f = film(restore="succeeded")
+    f = film()
     local = open_route(f, controller, kind="local")
     off = run([f], [controller], routes=[local], remote_enabled=False)
     assert off == s.SchedulePass((), (), {}, {})
@@ -554,7 +560,7 @@ def test_a_single_machine_pass_never_touches_the_local_route():
 def test_the_local_route_is_handed_over_only_when_the_film_is_routed():
     """IR1: no eligible worker with a free slot keeps the controller's route."""
     controller, w = controller_worker(), worker("5060 Ti-1")
-    f = film(restore="succeeded")
+    f = film()
     local = open_route(f, controller, kind="local")
     gone = {"5060 Ti-1": {"last_seen": NOW - timedelta(minutes=5)}}
     offline = run([f], [controller, w], routes=[local], live=live([w], **gone))

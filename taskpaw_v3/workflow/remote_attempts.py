@@ -34,7 +34,8 @@ if TYPE_CHECKING:
 log = logging.getLogger("taskpaw.workflow.remote")
 
 ATTESTED = "operator_attested_stopped"  # 判定已停止 (P2-1 R7)
-REMOTE_STAGES = ("restore", "asr")
+REMOTE_STAGES = ("restore", "asr")  # 停止并重新排队 of in-flight work (§3.1)
+ROUTED_STAGES = ("restore",)  # OD7: all a worker's staged copy is for
 _FINISHED = ("succeeded", "skipped")
 Verdict = Literal["interrupted", "finish", "held"]
 Resolved = Callable[[m.PendingComputeJob, ExecOutcome], None]
@@ -446,7 +447,7 @@ def _done_or_stale(rt: LocalRuntime, film_id: str, rev: int) -> bool:
     return all(
         s.status in _FINISHED
         for s in view.stages
-        if s.stage in REMOTE_STAGES and s.input_revision == rev
+        if s.stage in ROUTED_STAGES and s.input_revision == rev
     )
 
 

@@ -14,8 +14,8 @@ body, no `busy` — means the machine is up. The IR4 guard
 the attest, `retry_if_due` (a cancelled stage is a free retry) and the caller
 wakes the scheduler and the dispatcher, so the film is routed again.
 
-**改派 (C2, IR8).** A new pin for an unclaimed planned film whose restore or
-ASR is unfinished. 自动 for a film whose route sits on a 失联 worker (`lost`;
+**改派 (C2, IR8).** A new pin for an unclaimed planned film whose restore is
+unfinished (OD7: only restore is routed). 自动 for a film whose route sits on a 失联 worker (`lost`;
 one still in the start grace is `waiting` and keeps it, §9 IR7) also
 withdraws that route (control layer only, OD2). The store checks "no
 unresolved compute assignment" in the pin's own transaction and withdraws
@@ -286,7 +286,7 @@ def reassign(
         s
         for s in view.stages
         if s.input_revision == input_revision
-        and s.stage in ("restore", "asr")
+        and s.stage == "restore"  # OD7: only restore is routed
         and s.status not in _FINISHED
     ]
     if pin is None or not unfinished:
@@ -334,6 +334,8 @@ def reassign_options(
         return []
     found = gpu_stages(rt.store, op, snapshot, rt.executors)
     stages = sc.routed_stages(film, found)
+    if not stages:  # OD7 R6: nothing left to route, no choice to offer
+        return []
     live = fleet.snapshot() if fleet is not None else {}
     now = rt.clock.now()
     # §9 CX31: `reassign` withdraws the film's route for a different worker (or
@@ -405,7 +407,7 @@ def reassign_options(
         reason = sc.eligibility(
             worker,
             film,
-            stages or ("asr",),
+            stages,
             live.get(worker.worker_id),
             now,
             queued_need=None,
@@ -427,12 +429,9 @@ def reassign_options(
 
 
 def can_reassign(film: m.BoardFilm, claimed: bool) -> bool:
-    """R7: an unclaimed planned film whose restore or ASR is unfinished."""
+    """R7: an unclaimed planned film whose restore is unfinished (OD7)."""
     return (
         film.planned
         and not claimed
-        and any(
-            s.stage in ("restore", "asr") and s.status not in _FINISHED
-            for s in film.stages
-        )
+        and any(s.stage == "restore" and s.status not in _FINISHED for s in film.stages)
     )
