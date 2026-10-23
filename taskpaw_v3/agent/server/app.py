@@ -323,6 +323,7 @@ def create_control_app(
         worker_provider=worker_provider,
     )
 
+    from taskpaw_v3.agent.server.detect import register_detect_routes
     from taskpaw_v3.agent.server.first_run import register_setup_routes
     from taskpaw_v3.agent.server.network_routes import register_network_routes
 
@@ -330,6 +331,12 @@ def create_control_app(
         app, admin, address_changed_from=address_changed_from
     )
 
+    register_detect_routes(  # #299 §5: tools, GPU and directories
+        app,
+        admin,
+        admin.config_dir if admin is not None else None,
+        lambda: admin.desired_workflow() if admin is not None else config.workflow,
+    )
     register_setup_routes(  # #299 R2/§6: the first-run wizard's step
         app,
         admin.config_path if admin is not None else None,
