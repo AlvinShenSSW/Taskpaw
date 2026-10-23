@@ -6,9 +6,9 @@ settled. GPU stages share the agent's process-wide `gpu_lease` with manual
 Jasna / subtitle tasks (C5).
 
 P2-1 (#292): a compute claim needs an open route to this worker, which the
-dispatcher opens itself (kind `local`) right before it claims (C10). Once a
-remote worker is configured the controller's GPU takes no stage that needs it
-(OD1); stages that need no GPU still run here (C12).
+dispatcher opens itself (kind `local`) right before it claims (C10). In
+remote mode the controller's GPU takes no stage that needs it, whatever
+workers are verified (OD1); stages that need no GPU still run here (C12).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from .executors import (
 )
 from .local_runtime import AttemptFile, LocalRuntime, _new_id
 from .owned_process import OwnedJob
-from .scheduler import remote_workers
+from .scheduler import remote_mode
 from .timing import WorkflowLog, film_timing
 
 if TYPE_CHECKING:
@@ -59,6 +59,7 @@ STOP_SETTLE_SECONDS = 30.0
 RENEW_SECONDS = 3600.0
 NO_4K_DEVICE = "没有可接 4K 的设备"
 REMOTE_GPU = "等待 GPU 设备"  # OD1: a remote worker restores and transcribes
+NO_GPU_DEVICE = "没有可用的 GPU 设备"  # ... and none is verified right now
 REMOTE_STAGES = frozenset({"restore", "asr"})  # translate is always the controller's
 LOCAL_ROUTE = "本机"
 TAKE_OVER = "转本机"
@@ -500,6 +501,7 @@ class LocalDispatcher:
         vram = rt.gpu.vram_mib if rt.gpu else 0
         gpu_waited = False
         remote: tuple[str, ...] | None = None  # read once, at the first compute job
+        remote_read = False
         for job in jobs:
             if self.paused:  # a pause arrived while admission was blocked
                 return self._paused_exit()
@@ -522,18 +524,22 @@ class LocalDispatcher:
                         rt.reason if rt.gpu is None else "没有可用的执行器"
                     )
                     continue
-                if remote is None:
-                    remote = remote_workers(
-                        rt.store.list_workers(rt.operator),
-                        rt.identity.worker_id,
-                        enabled=self.remote_enabled,
+                if not remote_read:
+                    remote, remote_read = (
+                        remote_mode(
+                            rt.store.list_workers(rt.operator),
+                            rt.identity.worker_id,
+                            enabled=self.remote_enabled,
+                        ),
+                        True,
                     )
                 if (
-                    remote
+                    remote is not None
                     and job.stage in REMOTE_STAGES
                     and needs_gpu(executor, manifest)
-                ):  # OD1: never on this GPU; IR5: name who will run it
-                    waiting[job.film_id] = f"{REMOTE_GPU}：{'、'.join(remote[:3])}"
+                ):  # OD1: never on this GPU; IR5: name who will run it, if any
+                    who = "、".join(remote[:3]) or NO_GPU_DEVICE
+                    waiting[job.film_id] = f"{REMOTE_GPU}：{who}"
                     continue
                 if not fits(manifest, executor.max_resolution(vram)):
                     waiting[job.film_id] = NO_4K_DEVICE
@@ -570,7 +576,7 @@ class LocalDispatcher:
         Without one the controller opens its own (`local`). Another worker's
         route is taken over only while unclaimed: the dispatcher reaches here
         only for a stage it runs itself (translate, a stage that needs no GPU,
-        or any stage when no remote worker is configured)."""
+        or any stage outside remote mode)."""
         rt = self.runtime
         own = rt.identity.worker_id
         try:

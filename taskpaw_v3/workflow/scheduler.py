@@ -252,19 +252,21 @@ def _gone(worker: m.RoutingWorker) -> bool:
     return worker.enrollment_state == "retired" or worker.admission_state == "revoked"
 
 
-def remote_workers(
+def remote_mode(
     workers: Iterable[m.RoutingWorker | m.WorkerRecord],
     controller_id: str,
     *,
     enabled: bool,
-) -> tuple[str, ...]:
-    """OD1/IR5: the names of the configured remote workers — with
-    `workflow.remote_workers` on (`enabled`, P2-2 IR1), every worker but the
-    controller that is verified and not revoked (a retired one is never
-    verified). The single predicate of the pass, the controller's dispatcher
-    and 设备: while it is empty the controller runs every stage itself."""
+) -> tuple[str, ...] | None:
+    """OD1 (correction): None is single-machine mode (`workflow.remote_workers`
+    off, P2-2 IR1: every stage runs on the controller, phase 1). Otherwise
+    remote mode, whatever the workers' state: the controller's GPU takes no
+    stage, and the result names the workers that can run one — every worker
+    but the controller that is verified and not revoked (IR5; a retired one
+    is never verified), possibly none. The single predicate of the pass, the
+    controller's dispatcher and 设备."""
     if not enabled:
-        return ()
+        return None
     return tuple(
         worker.name
         for worker in workers
@@ -374,7 +376,7 @@ def schedule(
     """`live_since`: when the live state started (the controller's start); a
     worker not heard from since raises no 设备失联 in the first 60 s (IR12, C14).
     `remote_enabled`: the `workflow.remote_workers` setting (P2-2 IR1)."""
-    if not remote_workers(snapshot.workers, controller_id, enabled=remote_enabled):
+    if remote_mode(snapshot.workers, controller_id, enabled=remote_enabled) is None:
         # IR1: single machine; the controller's dispatcher runs every stage
         return SchedulePass((), (), {}, {})
     rates = Rates(snapshot.samples)

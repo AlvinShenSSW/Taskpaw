@@ -37,6 +37,7 @@ from taskpaw_v3.workflow import board, devices, local_host, routing, transfer
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.executors import SyntheticExecutor
 from taskpaw_v3.workflow.keep_awake import KeepAwake
+from taskpaw_v3.workflow.local_dispatch import NO_GPU_DEVICE, REMOTE_GPU
 from taskpaw_v3.workflow.local_gpu import LocalGpu
 from taskpaw_v3.workflow.local_runtime import LocalRuntime
 from taskpaw_v3.workflow.remote_dispatch import AttemptState
@@ -841,11 +842,11 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
     identity runs; a new dispatcher with a new boot id finishes the attempt
     `cancelled`, a free retry that runs again on the same worker.
 
-    §11 CX11: the controller's own dispatcher is paused for the window in
-    which the re-paired worker is not yet 核验 (the verified set is empty, so
-    the controller would run the retry itself, as designed, with this test's
-    ledger-less synthetic restore) and the approval is retried on a version
-    conflict with the new session's own writes."""
+    OD1 correction: while the re-paired worker is not yet 核验 (the verified
+    set is empty) the controller's own dispatcher stays running and still
+    never claims the retried restore/ASR: the film waits for a GPU device
+    and completes on the worker after the re-approval, which is retried on a
+    version conflict with the new session's own writes."""
     release = world.hold_jasna()
     worker = world.join()
     film = routed_film(world)
@@ -854,7 +855,6 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
     assert old is not None
     worker_id = world.issued["w1"]["worker_id"]
     controller = world.dispatcher
-    controller.set_paused(True)  # nothing runs on the controller meanwhile
     record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
     code = devices.repair(
         world.rt, worker_id, record.version, host="127.0.0.1", port=world.server.port
@@ -864,6 +864,14 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
     assert old.halted and not any(t.is_alive() for t in old._threads)
     assert worker.boot_id != boot
     release.touch()  # the retry's Jasna runs straight through
+    # the worker is not 核验 yet: the controller's GPU still takes nothing
+    until(
+        lambda: (
+            controller.status().waiting.get(film) == f"{REMOTE_GPU}：{NO_GPU_DEVICE}"
+        ),
+        LONG,
+    )
+    assert world.status(film, "restore") == "pending"
 
     def approved() -> bool:
         record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
@@ -878,12 +886,13 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
         return True
 
     until(approved, LONG)
-    controller.set_paused(False)
     world.wake()
     wait_status(world, film, "asr", "succeeded")
     first, second = world.attempts(film, "restore")
     assert {e.kind for e in first.evidence} == {"exec_failed:cancelled"}
     assert second.status == "succeeded" and world.jasna_runs() == 2
+    for name in ("restore", "asr"):  # never one on the controller's GPU
+        assert {a.worker_id for a in world.attempts(film, name)} == {worker_id}
     world.invariants()
 
 

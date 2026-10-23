@@ -475,20 +475,22 @@ def test_the_controller_disk_gate_stops_every_later_route_in_the_pass():
     }
 
 
-def test_retired_revoked_and_unpaired_workers_configure_no_remote():
-    """IR1/IR5: without a verified, unrevoked remote worker the pass decides
-    nothing; the controller runs every stage itself (phase 1)."""
+def test_remote_mode_is_the_setting_and_verified_names_are_who_can_run():
+    """OD1 correction: with `remote_workers` on the pass runs whatever the
+    verified set is (the controller never takes a GPU stage, so a film waits
+    for a device); off, the pass decides nothing (phase 1)."""
     ws = [
         fleet()[0].model_copy(update={"admission_state": "revoked"}),
         fleet()[1].model_copy(update={"enrollment_state": "retired"}),
         fleet()[2].model_copy(update={"enrollment_state": "pending_pairing"}),
     ]
-    result = run([film()], ws)
-    assert result == s.SchedulePass((), (), {}, {})
-    assert s.remote_workers(ws, CONTROLLER, enabled=True) == ()
-    assert s.remote_workers([*ws, fleet()[3]], CONTROLLER, enabled=True) == ("5070 Ti",)
-    # IR1: `workflow.remote_workers: false` is no remote at all
-    assert s.remote_workers([*ws, fleet()[3]], CONTROLLER, enabled=False) == ()
+    waiting_film = film()
+    result = run([waiting_film], ws)
+    assert result.routes == () and set(result.waiting) == {waiting_film.film_id}
+    assert s.remote_mode(ws, CONTROLLER, enabled=True) == ()
+    assert s.remote_mode([*ws, fleet()[3]], CONTROLLER, enabled=True) == ("5070 Ti",)
+    # IR1: `workflow.remote_workers: false` is not remote mode at all
+    assert s.remote_mode([*ws, fleet()[3]], CONTROLLER, enabled=False) is None
     assert run([film()], fleet(), remote_enabled=False) == s.SchedulePass(
         (), (), {}, {}
     )
@@ -537,12 +539,16 @@ def test_the_controllers_unclaimed_local_route_is_handed_over_for_gpu_work():
 
 
 def test_a_single_machine_pass_never_touches_the_local_route():
-    """IR1: only the controller is enrolled; its local route stays put."""
+    """IR1/OD1: with remote workers off the pass decides nothing; with them
+    on and none enrolled the local route stays put and the film waits."""
     controller = controller_worker()
     f = film(restore="succeeded")
     local = open_route(f, controller, kind="local")
-    result = run([f], [controller], routes=[local])
-    assert result == s.SchedulePass((), (), {}, {})
+    off = run([f], [controller], routes=[local], remote_enabled=False)
+    assert off == s.SchedulePass((), (), {}, {})
+    on = run([f], [controller], routes=[local])
+    assert (on.routes, on.withdrawals) == ((), ())
+    assert on.waiting == {f.film_id: f"等待设备：{s.NO_DEVICE}"}
 
 
 def test_the_local_route_is_handed_over_only_when_the_film_is_routed():

@@ -29,7 +29,7 @@ from taskpaw_v3.tests.workflow_route_helpers import (
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow import routing
 from taskpaw_v3.workflow.executors import SyntheticExecutor
-from taskpaw_v3.workflow.local_dispatch import REMOTE_GPU
+from taskpaw_v3.workflow.local_dispatch import NO_GPU_DEVICE, REMOTE_GPU
 from taskpaw_v3.workflow.scheduler import HAND_OVER, WorkerLive
 
 WAIT = f"{REMOTE_GPU}：5060 Ti-1"  # IR5: the wait names the remote worker
@@ -120,9 +120,10 @@ def test_a_claimed_remote_route_is_never_taken_over(rt):
     assert stage(rt, film, "translate").status == "succeeded"
 
 
-def test_only_a_verified_unrevoked_remote_keeps_the_controller_off_the_gpu(rt):
-    """IR5: a worker still waiting for its pairing, or a revoked one, is no
-    configured remote, so the controller's GPU never halts for it."""
+def test_in_remote_mode_the_controller_never_takes_a_gpu_stage(rt):
+    """OD1 correction: the controller's GPU takes no restore/ASR whatever the
+    verified set is. A worker still waiting for its pairing counts for
+    nothing and a revoked one leaves none; the film waits and says why."""
     rt.store.register_worker(
         rt.operator,
         rt.meta(),
@@ -147,8 +148,10 @@ def test_only_a_verified_unrevoked_remote_keeps_the_controller_off_the_gpu(rt):
             worker_id=w.worker_id, expected_version=worker.version, reason="撤销"
         ),
     )
-    assert [d.run_once() for _ in range(4)] == [True, True, True, False]
-    assert stage(rt, film, "translate").status == "succeeded"
+    for _ in range(3):  # no verified worker left: still no local GPU stage
+        assert d.run_once() is False
+        assert d.status().waiting == {film: f"{REMOTE_GPU}：{NO_GPU_DEVICE}"}
+        assert stage(rt, film, "restore").status == "pending"
 
 
 def test_the_pass_and_the_dispatcher_agree_on_a_reuse_only_restore(rt):
@@ -181,9 +184,9 @@ def test_the_pass_and_the_dispatcher_agree_on_a_reuse_only_restore(rt):
 
 
 def test_turning_remote_workers_off_runs_restore_and_asr_locally_again(rt):
-    """IR1: the single predicate is the setting and a verified, unrevoked
-    remote; with `remote_workers: false` an approved worker no longer keeps
-    the controller off its GPU, and the pass routes nothing."""
+    """IR1/OD1: the single predicate is the setting (remote mode); with
+    `remote_workers: false` an approved worker no longer keeps the controller
+    off its GPU, and the pass routes nothing."""
     w = enrol_remote(rt, "5060 Ti-1")
     film = add_film(rt)
     on = dispatcher(rt)

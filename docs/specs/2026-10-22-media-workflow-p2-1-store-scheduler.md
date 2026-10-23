@@ -21,7 +21,7 @@ worker enrolled, a phase-1 single-machine controller behaves exactly as before.
 | R6 | Routes close by themselves: a new input revision closes the old revision's unclaimed open route (a claimed one closes when its assignment resolves, IR6); a finished route closes in the resolving transaction (a `local` route once restore, asr and translate are all finished; any other route once restore and asr are); a route one of whose stages failed or blocked closes too, so its retry is routed again (IR2). | C9 |
 | R7 | `attest_stopped` (operator, 判定已停止) resolves an unresolved compute assignment and its resource owner as failed `cancelled` with operator attestation evidence, without owner-stopped evidence, and closes the film's open route to that worker. | §3.8, D4 |
 | R8 | The controller's executors are built from the fixed compute stage set; translate is built whenever it is a local stage, independent of `whisperjav_exe_path`. | C1 |
-| R9 | When any remote worker is configured (verified and not revoked, IR5), the controller claims no stage that needs the GPU (OD1); stages that need no GPU stay local (C12). With no remote worker, every stage runs locally exactly as in phase 1, and the scheduler pass decides nothing (IR1). | OD1, C12 |
+| R9 | **OD1 correction:** when `workflow.remote_workers` is on (remote mode), the controller claims no stage that needs the GPU, whatever the verified set is (a worker re-pairing, pending validation or revoked does not hand the GPU stage back); stages that need no GPU stay local (C12). With `remote_workers` off, every stage runs locally exactly as in phase 1, and the scheduler pass decides nothing (IR1). | OD1, C12 |
 | R10 | `taskpaw_v3/workflow/scheduler.py` is pure over a store snapshot plus live worker state and a clock value. Eligibility, prediction, ordering and re-assignment follow §2 below. | §4, S3–S6, OD2, OD5 |
 | R11 | The chosen route's human-readable reason (the device finish times it beat) is persisted on the route row. | V1 |
 | R12 | A film routed to a worker that is 失联 yields an attention reason 「设备失联」; nothing moves automatically. | OD2, V2 |
@@ -164,10 +164,13 @@ codes: `route_required`, `route_exists`, `route_claimed`.
 
 - `pipeline.default_executors` iterates the fixed compute stage set: restore when
   `jasna_exe_path`, asr when `whisperjav_exe_path`, translate always (R8).
-- `LocalDispatcher` per admission reads whether a remote worker is configured with
-  `scheduler.remote_workers`, the same predicate the pass uses (IR1/IR5): any worker other than
-  its own that is `verified` and not `revoked` (a retired one is never verified). A worker
-  still pairing, or revoked, does not count, so it never halts the controller's GPU work.
+- `LocalDispatcher` per admission reads `scheduler.remote_mode`, the same predicate the pass and
+  设备 use (IR1/IR5/OD1): `None` when `workflow.remote_workers` is off (single machine), else
+  the names of the workers other than its own that are `verified` and not `revoked` (a retired
+  one is never verified), possibly none. **OD1 correction:** the first P2-1 predicate was
+  "remote configured = the setting and a verified, non-revoked remote exists", which handed
+  restore/ASR back to the controller's 8 GB GPU while the only worker was re-pairing or revoked.
+  Remote mode is now the setting alone; the verified names only say who can run a stage.
 - Whether a stage needs the GPU is `executors.needs_gpu(executor, manifest)` for both the
   dispatcher and the pass (`routing.run_pass` computes `gpu_stages` with it from the
   controller's executors, IR3).
@@ -175,10 +178,11 @@ codes: `route_required`, `route_exists`, `route_claimed`.
   - no open route → `route_film(kind=local, reason 本机)`;
   - an open route to itself → claim;
   - an open route to another worker → if the controller will run this stage (translate, a stage
-    that needs no GPU, or no remote worker is configured) and the route is unclaimed, withdraw it
+    that needs no GPU, or remote mode is off) and the route is unclaimed, withdraw it
     (reason 转本机) and route to itself; otherwise wait (「已派往 {name}」).
-- With a remote worker configured, a restore/asr that needs the GPU waits with
-  「等待 GPU 设备：<up to three remote names>」 (IR5) and is never claimed locally; one that needs no GPU runs locally (C12). Translate is always the
+- In remote mode, a restore/asr that needs the GPU waits with
+  「等待 GPU 设备：<up to three verified remote names>」 (IR5), or 「等待 GPU 设备：没有可用的 GPU 设备」
+  while none is verified (OD1 correction), and is never claimed locally; one that needs no GPU runs locally (C12). Translate is always the
   controller's, whatever its executor's GPU flag.
 - With no remote worker every reason, order and outcome of phase 1 is unchanged; the only new
   persisted facts are the controller's own route rows (and their audit rows).
@@ -272,8 +276,9 @@ attention 「设备失联」 (OD2/V2).
   the GPU owner, closes the route, keeps a proven success, is a free retry, rejects stale or
   component assignments; idempotent replays.
 - **Runtime:** translate executor without WhisperJAV; phase-1 dispatcher suite unchanged; with a
-  remote worker configured the controller never claims a GPU-needing restore/asr but runs
-  translate and no-GPU stages, and takes over an unclaimed foreign route only for those.
+  remote mode on the controller never claims a GPU-needing restore/asr (also with no verified
+  worker: it waits 「没有可用的 GPU 设备」) but runs translate and no-GPU stages, and takes over an
+  unclaimed foreign route only for those.
 - **Scheduler (fake clock, 5 workers: 4 × 16 GB + 1 × 8 GB):** 8 GB never routed restore (OD5)
   but takes ASR-only films; ≤ 1 open route per film; pinned respected and never moved; 4K first;
   energy tie-break inside the window; no-history FIFO onto the least loaded; 失联 yields
@@ -295,6 +300,10 @@ board machine rows, route reasons in `waiting` and the drawer, per-machine energ
 16 GB (P2-5). `local_stages` stays a fixed rule, not a setting.
 
 ## 8. Review dispositions (IR = internal review, CX = Codex outer gate)
+
+OD1 correction (P2-3 phase): IR1/IR5's predicate is now `scheduler.remote_mode` (the setting;
+the verified set only names who can run a stage); the pass runs in remote mode even with no
+verified worker, and the controller's GPU takes no stage then (see R9, §4).
 
 Fixed in P2-1: IR1/IR5 (one `remote_workers` predicate; a single machine decides nothing;
 hand-over only when routed), IR2 (a failed/blocked route closes), IR3 (`needs_gpu` shared),

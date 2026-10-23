@@ -2,7 +2,7 @@
 
 Date 2026-10-22 · Base: `afk/claude-p2-271` after P2-1 (#292) · Parent: [phase 2](2026-10-22-media-workflow-phase2-multi-machine.md). §13/§14 (OD1–OD6) override the earlier sections of that design. Home LAN, single user, smallest complete design.
 
-P2-2 adds the controller's worker API, enrollment, live state, both transfer directions and 设备 v1. It runs **no** remote stage: there is no claim, finish or renew endpoint yet (P2-3). With `remote_workers: false` (the default), nothing changes — also after workers were approved: the single "remote configured" predicate is `remote_workers and <a verified, non-revoked remote exists>`, used by the dispatcher, the routing pass and 设备 alike, so turning the flag off puts restore/ASR back on the controller (IR1).
+P2-2 adds the controller's worker API, enrollment, live state, both transfer directions and 设备 v1. It runs **no** remote stage: there is no claim, finish or renew endpoint yet (P2-3). With `remote_workers: false` (the default), nothing changes — also after workers were approved: the single predicate `scheduler.remote_mode` (remote mode = the `remote_workers` setting; OD1 correction: not "a verified remote exists") is used by the dispatcher, the routing pass and 设备 alike, so turning the flag off puts restore/ASR back on the controller (IR1).
 
 ## 1. Requirements
 

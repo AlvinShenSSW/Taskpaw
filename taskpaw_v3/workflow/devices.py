@@ -311,7 +311,7 @@ def device_view(
     workers = op.list_workers(rt.operator)
     routing = {w.worker_id: w for w in op.routing_workers(rt.operator)}
     controller = rt.identity.worker_id
-    remote = s.remote_workers(workers, controller, enabled=remote_workers)
+    remote = s.remote_mode(workers, controller, enabled=remote_workers)
     unresolved: dict[str, int] = {}
     for open_ in op.list_open_assignments(rt.operator):
         key = open_.assignment.worker_id or ""
@@ -384,7 +384,7 @@ def device_view(
         )
     order = tuple(STAGE_LABELS)
     executors = [stage for stage in order if stage in rt.executors]
-    local_stages = ["translate"] if remote else executors
+    local_stages = executors if remote is None else ["translate"]
     return {
         "remote_workers": remote_workers,
         "server_time": iso(now),
