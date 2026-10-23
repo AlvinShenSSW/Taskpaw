@@ -689,10 +689,12 @@ def test_the_network_films_snapshot_stays_inside_its_payload_budget(monkeypatch)
     rt = SimpleNamespace(
         operator=object(),
         gpu=None,
+        identity=SimpleNamespace(worker_id="controller"),  # P2-4 board_inputs
         store=SimpleNamespace(
             film_board=lambda *_a, **_k: films,
             list_intake_board=lambda _a: (),
             energy_history=lambda _a: (),
+            list_workers=lambda _a: (),
         ),
     )
     monkeypatch.setattr(board, "row_facts", lambda *_a: {})

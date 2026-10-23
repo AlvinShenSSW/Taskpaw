@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("taskpaw.workflow.events")
 POLL_SECONDS = 5.0
 INSTANCE = "media-workflow"
+MAX_CURRENTS = 4  # P2-4 R12: the summary's running films, one per machine
 _CLEANUPS: tuple[m.Stage, ...] = ("cleanup_input", "cleanup_workcopy")
 
 
@@ -188,11 +189,18 @@ class WorkflowEvents:
                     ):
                         continue
                     completed.append(max(ends).isoformat())
-                self._observe_film(film, row, plans.get(film.film_id))
+                self._observe_film(
+                    film,
+                    row,
+                    plans.get(film.film_id),
+                    remote=getattr(host, "fleet", None) is not None,
+                )
             current = dispatch.get("current")
             summary = {
                 "counts": board.counts(rows, packages),
                 "current": _current(current),
+                # R12: every running film with its machine (the Mac shows it)
+                "currents": _currents(inputs.currents, rows),
                 "completed_at": completed,
             }
             with self._summary_lock:
@@ -203,7 +211,14 @@ class WorkflowEvents:
             self._clear()
             log.warning("workflow observation failed: %s", type(exc).__name__)
 
-    def _observe_film(self, film: m.BoardFilm, row: dict, plan: dict | None) -> None:
+    def _observe_film(
+        self,
+        film: m.BoardFilm,
+        row: dict,
+        plan: dict | None,
+        *,
+        remote: bool = False,
+    ) -> None:
         revision = film.input_revision
         if revision is None:
             return
@@ -213,12 +228,23 @@ class WorkflowEvents:
         if row["group"] == "planning":
             tier = (plan or {}).get("recommendation", {}).get("ltx_model")
             recommendation = TIER_LABELS.get(tier, "无需修复") if tier else "无需修复"
+            machine = "自动" if remote else "本机"  # R4: remote mode routes it
             self.emit(
                 film.film_id,
                 revision,
                 "workflow.film.needs_planning",
-                f"{name} 待安排：推荐 {recommendation} · 本机",
+                f"{name} 待安排：推荐 {recommendation} · {machine}",
             )
+        if row.get("attention_kind") == board.DEVICE_LOST:
+            worker = ((row.get("route") or {}).get("machine") or {}).get("id")
+            if worker:  # R4: once per film, revision and worker (OD2)
+                self.emit(
+                    film.film_id,
+                    revision,
+                    f"workflow.film.device_lost:{worker}",
+                    f"{name} {row.get('note') or '设备失联'}",
+                    "warn",
+                )
         elif row["group"] == "confirm" and not (archive and archive.status == "failed"):
             actors = row.get("actors") or []
             candidate = f"：候选 {'、'.join(actors)}" if actors else ""
@@ -292,6 +318,27 @@ class WorkflowEvents:
             self._thread.join(timeout=timeout)
             return not self._thread.is_alive()
         return True
+
+
+def _currents(
+    currents: dict[str, dict[str, Any]], rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """R12: up to four running films, the controller's first: name, stage,
+    progress and the machine (`本机` or the worker's name)."""
+    names = {row["film_id"]: row["name"] for row in rows}
+    found = []
+    for film_id, value in currents.items():
+        machine = value.get("machine") or value.get("device") or {}
+        item = _current(value) or {}
+        item.update(
+            film=value.get("film") or names.get(film_id) or "",
+            stage=value.get("stage") or ("fetch" if value.get("fetching") else None),
+            progress=value.get("progress") or None,
+            machine=str(machine.get("name") or ""),
+        )
+        found.append((0 if value.get("device") else 1, item["machine"], item))
+    found.sort(key=lambda entry: (entry[0], entry[1]))
+    return [item for _local, _machine, item in found[:MAX_CURRENTS]]
 
 
 def _current(value: Any) -> dict[str, Any] | None:
