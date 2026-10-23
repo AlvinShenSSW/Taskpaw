@@ -61,7 +61,7 @@ from .executors import (
     ExecRuntime,
     JobContext,
 )
-from .local_gpu import FULL_HD, LocalGpu, max_resolution
+from .local_gpu import LocalGpu, max_resolution
 from .owned_process import OwnedJob
 from .stage_results import (
     FileRef,
@@ -77,7 +77,6 @@ from .timing import PhaseTimer, merge, timing_json
 
 PROFILE_ID = "workflow-restore-ltx"
 MODEL = "ltx"  # the record's model for every tier (U1 U05)
-TIER: jasna.Tier = "1080p"  # T04-P1 runs on the controller's 8 GB card only
 DURATION_SLACK_MS = 2000
 DURATION_SLACK_SHARE = 0.02
 LTX_WORK_DIRNAME = ".jasna-work"
@@ -290,6 +289,15 @@ def _int(value: str | None) -> int | None:
         return None
 
 
+def video_tier(probe: m.MediaProbe | None) -> jasna.Tier:
+    """P2-5 R2: the Jasna tier of one video, by Jasna's own pixel rule on its
+    probed size; an unknown size restores as "1080p"."""
+    width, height = getattr(probe, "width", None), getattr(probe, "height", None)
+    if not width or not height:
+        return "1080p"
+    return jasna.tier_for(width, height)
+
+
 def launch_params(
     argv: Sequence[str],
     *,
@@ -299,6 +307,7 @@ def launch_params(
     gpu: LocalGpu | None,
     preset: str,
     preset_auto: bool = False,
+    tier: jasna.Tier = "1080p",
 ) -> dict[str, Any]:
     """U1c: what Jasna was launched with for this video, read from its argv
     (the effective values after the GPU check, never the configured ones), and
@@ -343,7 +352,7 @@ def launch_params(
         "detection_model": _flag(argv, "--detection-model"),
         "clip_size": _int(_flag(argv, "--max-clip-size")),
         "temporal_overlap": _int(_flag(argv, "--temporal-overlap")),
-        "tier": TIER,
+        "tier": tier,
         "source_width": probe.width if probe is not None else None,
         "source_height": probe.height if probe is not None else None,
         "gpu": gpu.name if gpu is not None else None,
@@ -495,7 +504,6 @@ class RestoreExecutor:
             profile=PROFILE_ID,
             settings={
                 "gpu": self.gpu_id,
-                "tier": TIER,
                 "exe": self.jasna_exe,
                 "jasna": cfg.model_dump(mode="json"),
                 "duration_slack": [DURATION_SLACK_MS, DURATION_SLACK_SHARE],
@@ -503,8 +511,8 @@ class RestoreExecutor:
         )
 
     def max_resolution(self, vram_mib: int) -> tuple[int, int]:
-        # Phase 1 runs only the 1080p LTX tier, whatever the card (T04-P1 scope).
-        return min(max_resolution(vram_mib), FULL_HD)
+        # P2-5 R1: the card's true max (4K from 16 GB); the tier is chosen per video
+        return max_resolution(vram_mib)
 
     def needs_gpu(self, manifest: m.InputManifest) -> bool:
         """False only when every main video already is a restore result (D19)."""
@@ -797,12 +805,13 @@ class RestoreExecutor:
         ltx_work = workdir / LTX_WORK_DIRNAME
         ltx_work.mkdir(parents=True, exist_ok=True)
         staging.unlink(missing_ok=True)
+        tier = video_tier(probe)  # P2-5 R2: this video's, from its probed size
         jasna_argv = jasna.build_argv(
             cfg,
             str(exe),
             source,
             staging,
-            TIER,
+            tier,
             False,
             False,
             ltx_work,
@@ -819,6 +828,7 @@ class RestoreExecutor:
             gpu=self.runtime.gpu,
             preset=self.gpu_id,
             preset_auto=self.preset_auto,
+            tier=tier,
         )
         lock = threading.Lock()
         state: dict = {}

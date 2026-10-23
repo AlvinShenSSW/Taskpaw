@@ -419,7 +419,39 @@ def test_a_4k_film_needs_a_4k_profile():
         }
     )
     f = film(size=UHD, pin=w.worker_id)
-    assert run([f], [narrow]).waiting[f.film_id] == "等待 5060 Ti-1：显存不足 4K"
+    assert run([f], [narrow]).waiting[f.film_id] == "等待 5060 Ti-1：4K 需重新核验"
+
+
+def at(w, limit):
+    return w.model_copy(
+        update={
+            "profiles": tuple(
+                m.RoutingProfile(stage=p.stage, max_width=limit[0], max_height=limit[1])
+                for p in w.profiles
+            )
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "vram, approved, size, reason",
+    [
+        (16311, UHD, UHD, None),  # P2-5 R3: a re-verified 16 GB takes 4K
+        (16311, UHD, FHD, None),
+        (16311, FHD, UHD, "4K 需重新核验"),  # approved before 4K: re-核验 first
+        (16311, FHD, FHD, None),  # ... and keeps taking 1080p meanwhile
+        (15360, FHD, UHD, "4K 需重新核验"),  # the 16 GB class boundary
+        (8151, FHD, FHD, s.NO_RESTORE),  # OD5 wins whatever the profile
+        (8151, FHD, UHD, s.NO_RESTORE),
+        (8151, UHD, UHD, s.NO_RESTORE),
+    ],
+)
+def test_4k_eligibility_follows_the_approved_profile_and_vram(
+    vram, approved, size, reason
+):
+    w = at(worker("w", vram=vram), approved)
+    f = film(size=size)
+    assert s.eligibility(w, f, ("restore",), live([w])[w.worker_id], NOW) == reason
 
 
 def test_the_staging_cap_counts_the_workers_open_routes():

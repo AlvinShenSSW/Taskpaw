@@ -789,8 +789,8 @@ fn init_script(descriptor: &Descriptor, debug: bool, restart: bool) -> String {
 
 /// Set when the app is quitting: a supervisor never respawns after it.
 static EXITING: AtomicBool = AtomicBool::new(false);
-/// #299 Codex r5 CX10: serializes a restart's check-EXITING + spawn + install
-/// with the quit path's set-EXITING + take-and-kill, so a quit can never finish
+/// #299 Codex r5 CX10, #296 CX14: serializes a restart's release + check-EXITING
+/// + spawn + install with the quit path's set-EXITING + take-and-kill, so a quit can never finish
 /// (the process exits right after it) while a fresh backend child exists but is
 /// not yet in `Backend` — that child would be orphaned.
 static LIFECYCLE: Mutex<()> = Mutex::new(());
@@ -801,6 +801,31 @@ fn begin_exit(lock: &'static Mutex<()>, flag: &AtomicBool) -> MutexGuard<'static
     let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     flag.store(true, SeqCst);
     guard
+}
+
+/// #296 CX14: take `lock` into `slot` (unless the slot already holds it), then
+/// run the release. The caller keeps the guard in `slot` until the new child is
+/// installed, so one respawn's release→spawn→install is one critical section
+/// against `begin_exit`.
+fn release_under_lifecycle(
+    slot: &mut Option<MutexGuard<'static, ()>>,
+    lock: &'static Mutex<()>,
+    release: impl FnOnce(),
+) {
+    if slot.is_none() {
+        *slot = Some(lock.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+    release();
+}
+
+/// The guard `spawn` holds: the one `release_old` left in `slot`, else a fresh
+/// lock — never a second lock while holding the first (that would deadlock).
+fn lifecycle_guard(
+    slot: &mut Option<MutexGuard<'static, ()>>,
+    lock: &'static Mutex<()>,
+) -> MutexGuard<'static, ()> {
+    slot.take()
+        .unwrap_or_else(|| lock.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Set while the `main` window is being replaced after a planned restart.
@@ -954,7 +979,8 @@ struct ShellRespawn {
     app: tauri::AppHandle,
     command: (String, Vec<String>),
     stdout: Option<std::process::ChildStdout>,
-    /// Held from `spawn` until the child is installed (or the restart fails).
+    /// Held from `release_old` until the child is installed (or the restart
+    /// fails): one respawn is one critical section against the quit path.
     lifecycle: Option<MutexGuard<'static, ()>>,
 }
 
@@ -963,29 +989,34 @@ impl restart_supervisor::Respawn for ShellRespawn {
     type Ready = Descriptor;
 
     fn release_old(&mut self) {
-        // The exited leader leaves the owned state; any straggler of its tree
-        // dies with it: the Unix group is killed, the Windows Job is closed.
-        let old = self
-            .app
-            .state::<Backend>()
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        if let Some(mut old) = old {
-            #[cfg(unix)]
-            signal_group(&old, libc::SIGKILL);
-            let _ = old.wait();
-        }
-        #[cfg(windows)]
-        if let Some(state) = self.app.try_state::<JobHandle>() {
-            let job = state.0.lock().unwrap_or_else(|e| e.into_inner()).take();
-            drop(job);
-        }
+        // #296 CX14: under LIFECYCLE, held on into `spawn` and `install`, so a
+        // quit either kills the old backend itself first or waits for this.
+        let app = &self.app;
+        release_under_lifecycle(&mut self.lifecycle, &LIFECYCLE, || {
+            // The exited leader leaves the owned state; any straggler of its
+            // tree dies with it: the Unix group is killed, the Windows Job is
+            // closed.
+            let old = app
+                .state::<Backend>()
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some(mut old) = old {
+                #[cfg(unix)]
+                signal_group(&old, libc::SIGKILL);
+                let _ = old.wait();
+            }
+            #[cfg(windows)]
+            if let Some(state) = app.try_state::<JobHandle>() {
+                let job = state.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+                drop(job);
+            }
+        });
     }
 
     fn spawn(&mut self) -> Result<Child, String> {
-        let guard = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = lifecycle_guard(&mut self.lifecycle, &LIFECYCLE);
         if EXITING.load(SeqCst) {
             return Err(String::new());
         }
@@ -1289,6 +1320,56 @@ mod tests {
         drop(respawn);
         rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         quitter.join().unwrap();
+        assert!(FLAG.load(SeqCst));
+    }
+
+    /// #296 CX14: `release_old` runs under the lifecycle lock and keeps it until
+    /// the new child is installed, so a quit can neither flag EXITING in the
+    /// middle of a release nor between the release and the spawn; `spawn` takes
+    /// the lock the release already holds instead of waiting for itself.
+    #[test]
+    fn begin_exit_waits_for_an_inflight_release_old() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::sync::{mpsc, Mutex};
+        use std::time::Duration;
+        static LOCK: Mutex<()> = Mutex::new(());
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let (released_tx, released_rx) = mpsc::channel();
+        let (install_tx, install_rx) = mpsc::channel::<()>();
+        let respawn = std::thread::spawn(move || {
+            let mut slot = None;
+            super::release_under_lifecycle(&mut slot, &LOCK, || {
+                started_tx.send(()).unwrap();
+                go_rx.recv().unwrap(); // the old tree is still being killed
+            });
+            released_tx.send(()).unwrap();
+            install_rx.recv().unwrap(); // the new child is not installed yet
+            // spawn() must reuse the held lock, never lock a second time
+            let held = super::lifecycle_guard(&mut slot, &LOCK);
+            assert!(slot.is_none());
+            drop(held); // install
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let quitter = std::thread::spawn(move || {
+            let _guard = super::begin_exit(&LOCK, &FLAG);
+            done_tx.send(()).unwrap();
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(300)).is_err());
+        assert!(!FLAG.load(SeqCst), "EXITING set while release_old is in flight");
+        go_tx.send(()).unwrap();
+        released_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "quit slipped in between release_old and the install"
+        );
+        assert!(!FLAG.load(SeqCst));
+        install_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        quitter.join().unwrap();
+        respawn.join().unwrap();
         assert!(FLAG.load(SeqCst));
     }
 

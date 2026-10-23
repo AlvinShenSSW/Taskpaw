@@ -21,6 +21,7 @@ from statistics import median
 from typing import Literal
 
 from . import models as m
+from .local_gpu import FOUR_K_VRAM_MIB
 from .plan import TIER_LABELS
 
 GB = 10**9
@@ -325,7 +326,13 @@ def eligibility(
         return NO_RESTORE
     if "restore" in stages:
         if not _fits(worker, "restore", film):
-            return "显存不足 4K" if _class(film) == "4K" else "分辨率超出设备上限"
+            if _class(film) != "4K":
+                return "分辨率超出设备上限"
+            # P2-5 R3: a 16 GB card approved at 1080p can take 4K once 核验
+            # records it; a card that truly cannot keeps 「显存不足 4K」
+            return (
+                "4K 需重新核验" if worker.vram_mib >= FOUR_K_VRAM_MIB else "显存不足 4K"
+            )
         tier = film.ltx_model
         if tier is not None and tier not in live.tiers_ready:
             return f"缺少{TIER_LABELS.get(tier, tier)}画质模型"

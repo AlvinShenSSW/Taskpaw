@@ -1403,6 +1403,38 @@ def test_the_config_fingerprint_is_part_of_the_probe_comparison():
     assert probe_changed(body, old)
 
 
+@pytest.mark.parametrize(
+    "vram, limit",
+    [(16311, (3840, 2160)), (15360, (3840, 2160)), (8151, (1920, 1080))],
+)
+def test_probe_body_proposes_the_cards_true_restore_max(vram, limit):
+    """P2-5 R1: no phase-1 1080p cap on a 16 GB card; an 8 GB card stays 1080p."""
+    from types import SimpleNamespace
+
+    from taskpaw_v3.workflow.exec_restore import RestoreExecutor
+    from taskpaw_v3.workflow.local_gpu import LocalGpu
+    from taskpaw_v3.workflow.remote_worker import probe_body
+
+    executor = RestoreExecutor(None, "jasna.exe", "5060ti-16")  # type: ignore[arg-type]
+    body = probe_body(
+        [executor],
+        LocalGpu("NVIDIA GeForce RTX 5060 Ti", "GPU-x", vram),
+        SimpleNamespace(free=lambda: 10**12),  # type: ignore[arg-type]
+    )
+    (profile,) = body["profiles"]
+    assert (profile["max_width"], profile["max_height"]) == limit
+
+
+def test_a_higher_proposed_max_alone_needs_a_new_verification():
+    """P2-5 R3: a record approved at 1080p and a probe that now proposes 4K (the
+    same digest) differ in profiles, so the worker posts it and 核验 is due."""
+    old = probe("w", config_digest="a" * 64)
+    record = {"capability": {"probed": {**old, "revision": 1}}}
+    assert not probe_changed(old, record)
+    grown = dict(old, profiles=profiles(limit=(3840, 2160)))
+    assert probe_changed(grown, record)
+
+
 def test_a_stored_probe_without_a_fingerprint_is_reposted_once(tmp_path):
     """CX9: after an upgrade the worker posts once, then stays quiet."""
     fake = FakeController()

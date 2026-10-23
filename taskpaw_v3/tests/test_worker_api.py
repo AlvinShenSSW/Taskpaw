@@ -31,6 +31,7 @@ from taskpaw_v3.tests.worker_api_helpers import (
     new_secret,
     pair_body,
     probe,
+    profiles,
     version,
 )
 from taskpaw_v3.tests.workflow_route_helpers import route
@@ -312,6 +313,34 @@ def test_probe_then_approval_then_a_changed_probe_needs_a_new_approval(api, rt):
     assert [p.allowed_stages for p in worker.capability.approved.profiles] == [
         ("restore",)
     ]
+
+
+def test_a_higher_max_alone_drops_an_approved_worker_back_to_validation(api, rt):
+    """P2-5 R3: approved at 1080p, then the same worker proposes 4K (nothing else
+    changed): the existing re-probe path de-verifies it, so 4K needs 核验 again."""
+    joined = join(api, rt)
+    api.post(
+        f"{PREFIX}/capabilities",
+        json=probe(profiles=profiles(("restore",))),
+        headers=joined.headers,
+    )
+    devices.approve(rt, joined.worker_id, version(rt, joined.worker_id), restore=True)
+    old = rt.store.last_approval(rt.operator, joined.worker_id)
+    assert old is not None and old[0].profiles[0].max_height == 1080
+    api.post(
+        f"{PREFIX}/capabilities",
+        json=probe(profiles=profiles(("restore",), limit=(3840, 2160))),
+        headers=joined.headers,
+    )
+    worker = rt.store.get_worker(rt.operator, joined.worker_id).worker
+    assert (worker.enrollment_state, worker.admission_state) == (
+        "pending_validation",
+        "disabled",
+    )
+    assert worker.capability.approved is None
+    devices.approve(rt, joined.worker_id, worker.version, restore=True)
+    now = rt.store.get_worker(rt.operator, joined.worker_id).worker
+    assert now.capability.approved.profiles[0].max_height == 2160
 
 
 def test_an_approved_section_from_a_worker_is_403(api, rt):

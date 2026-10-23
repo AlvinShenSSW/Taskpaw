@@ -879,6 +879,37 @@ def test_current_profile_limits_resolution_even_with_operator_enabled_worker(h):
     assert rows(h, "attempts") == []
 
 
+@pytest.mark.parametrize(
+    "limit, size, ok",
+    [
+        ((3840, 2160), (3840, 2160), True),  # P2-5 R3: a re-verified profile takes 4K
+        ((3840, 2160), (1920, 1080), True),
+        ((1920, 1080), (1920, 1080), True),
+        ((1920, 1080), (3840, 2160), False),  # approved at 1080p: the claim refuses
+    ],
+)
+def test_the_claim_rechecks_every_probe_against_the_approved_max(h, limit, size, ok):
+    film_id, _, _, auth = film(h, intake=False)
+
+    def probed(data):
+        data["readiness"]["media_probes"][0].update(width=size[0], height=size[1])
+
+    manifest = input_manifest(film_id, change=probed)
+    h.store.put_input_manifest(
+        auth,
+        h.meta(),
+        m.InputManifestPut(film_id=film_id, expected_version=1, manifest=manifest),
+    )
+    worker, worker_auth = compute_worker(h, max_width=limit[0], max_height=limit[1])
+    if ok:
+        claim_compute(h, film_id, worker, worker_auth)
+        assert len(rows(h, "attempts")) == 1
+    else:
+        with pytest.raises(m.WorkflowError, match="precondition_failed"):
+            claim_compute(h, film_id, worker, worker_auth)
+        assert rows(h, "attempts") == []
+
+
 def test_gpu_failure_without_stop_is_unknown_and_expiry_keeps_owner(h):
     film_id, _, _, _ = film(h)
     worker, auth = compute_worker(h)

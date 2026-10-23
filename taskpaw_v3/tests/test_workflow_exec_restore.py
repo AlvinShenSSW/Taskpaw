@@ -923,3 +923,95 @@ def test_an_explicit_preset_is_not_marked_automatic(rt, tools):
     params = run.ltx[0]["params"]
     assert (params["preset"], params["preset_auto"]) == ("5060-8", False)
     assert params["preset_label"] == "RTX 5060 · 8 GB"
+
+
+# ── P2-5 (#296): 4K on 16 GB cards, the tier chosen per video ──────────────
+@pytest.mark.parametrize(
+    "vram, limit",
+    [(16311, (3840, 2160)), (15360, (3840, 2160)), (15359, (1920, 1080))],
+)
+def test_the_executor_advertises_the_cards_true_max(rt, vram, limit):
+    assert rt.executors["restore"].max_resolution(vram) == limit
+
+
+@pytest.fixture
+def rt16(tmp_path, tools):
+    value = runtime(tmp_path / "wf16", tools, gpu_id="5060ti-16")
+    try:
+        yield value
+    finally:
+        value.close()
+
+
+@pytest.mark.parametrize(
+    "size, tier, clip",
+    [((3840, 2160), "4k", "90"), ((1920, 1080), "1080p", "180")],
+)
+def test_each_video_launches_with_the_tier_of_its_probed_size(
+    rt16, tools, size, tier, clip
+):
+    """5060ti-16 standard preset: clip 180 at 1080p, 90 at 4K (LTX on both)."""
+    film = single(rt16, "movie.mkv", video(*size))
+    run = run_direct(rt16, film, "restore")
+    assert run.outcome.ok
+    (argv,) = tools.runs(tools.jasna_exe)
+    assert argv[argv.index("--max-clip-size") + 1] == clip
+    assert argv[argv.index("--restoration-model-name") + 1] == "ltx"
+    params = run.ltx[0]["params"]
+    assert params["tier"] == tier
+    assert params["clip_size"] == int(clip)
+    assert (params["source_width"], params["source_height"]) == size
+
+
+def test_a_mixed_film_launches_each_volume_with_its_own_tier(rt16, tools):
+    film = add_film(
+        rt16,
+        [
+            File("a.mkv", video(1920, 1080), volume=1),
+            File("b.mkv", video(3840, 2160), volume=2),
+        ],
+    )
+    run = run_direct(rt16, film, "restore")
+    assert run.outcome.ok
+    first, second = tools.runs(tools.jasna_exe)
+    clips = [a[a.index("--max-clip-size") + 1] for a in (first, second)]
+    assert clips == ["180", "90"]
+    tiers = {s["params"]["tier"] for s in run.ltx}
+    assert tiers == {"1080p", "4k"}
+
+
+@pytest.mark.parametrize(
+    "width, height, tier",
+    [
+        (3840, 2160, "4k"),
+        (2560, 1440, "4k"),  # > 1.5x 1080p pixels
+        (1920, 1080, "1080p"),
+        (1280, 720, "1080p"),
+        (None, None, "1080p"),  # no probe size: 1080p, as before
+        (3840, None, "1080p"),
+    ],
+)
+def test_the_tier_follows_the_jasna_rule_and_unknown_is_1080p(width, height, tier):
+    probe = SimpleNamespace(width=width, height=height)
+    assert exec_restore.video_tier(probe) == tier
+    assert exec_restore.video_tier(None) == "1080p"
+
+
+def test_the_claims_settings_carry_no_tier_but_the_4k_fields_stay_in_the_digest(
+    rt, monkeypatch
+):
+    seen = []
+    real = exec_restore.tool_versions
+
+    def spy(**kw):
+        seen.append(kw["settings"])
+        return real(**kw)
+
+    monkeypatch.setattr(exec_restore, "tool_versions", spy)
+    executor = RestoreExecutor(rt, "jasna.exe", "5060ti-16")
+    base = executor.tools()
+    assert "tier" not in seen[0]
+    assert seen[0]["jasna"]["ltx_4k"] is True
+    off = RestoreExecutor(rt, "jasna.exe", "5060ti-16")
+    off.cfg = off.cfg.model_copy(update={"ltx_4k": False})
+    assert off.tools().config_digest != base.config_digest
