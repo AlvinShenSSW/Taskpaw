@@ -255,7 +255,13 @@ def test_rows_carry_the_frozen_shape():
         "duration_ms",
         "energy",
         "live_power",
+        # P2-4 R2/R3: remote mode's route, pin, actions and 设备失联
+        "attention_kind",
+        "route",
+        "pin",
+        "actions",
     }
+    assert (row["route"], row["pin"], row["actions"]) == (None, None, None)
     assert (row["has_poster"], row["poster_source"]) == (False, None)
     assert (row["has_cover"], row["cover_source"]) == (False, None)
     assert row["created_at"] == "2026-10-20T00:00:00Z"

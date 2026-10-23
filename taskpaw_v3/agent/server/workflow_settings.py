@@ -361,6 +361,10 @@ def register_workflow_settings(
                 status_code=422,
                 content={"detail": "设置有误", "fields": {"role": "设置有误"}},
             )
+        except OSError:  # nothing was committed (the backup goes first)
+            return JSONResponse(
+                status_code=500, content={"detail": "保存失败：无法写入 agent.yaml"}
+            )
         return {
             "ok": True,
             "restart_required": result["restart_required"],

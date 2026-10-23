@@ -160,7 +160,7 @@ def test_snapshot_size_is_bounded(monkeypatch, client, world, resource):
             board, "film_rows", lambda *args, **kw: [dict(large, group="active")]
         )
     elif resource == "plans":
-        monkeypatch.setattr(planning, "plan_list", lambda *args: large)
+        monkeypatch.setattr(planning, "plan_list", lambda *args, **kw: large)
     else:
         monkeypatch.setattr(board, "film_detail", lambda *args, **kw: large)
     path = f"films/{world.film}" if resource == "detail" else resource

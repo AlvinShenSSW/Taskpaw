@@ -390,8 +390,17 @@ def _route(
 
 
 def _pin(rt: LocalRuntime, film: Any, names: dict[str, str]) -> dict[str, Any] | None:
-    """R2: the plan's mutable machine choice (None = 自动)."""
-    if not film.planned or film.input_revision is None:
+    """R2: the plan's mutable machine choice (None = 自动), while its restore
+    or ASR is unfinished (the observer reads every film every 5 s)."""
+    if (
+        not film.planned
+        or film.input_revision is None
+        or all(
+            s.status in ("succeeded", "skipped")
+            for s in film.stages
+            if s.stage in ("restore", "asr")
+        )
+    ):
         return None
     pin = rt.store.get_pin(rt.operator, film.film_id, film.input_revision)
     if pin is None:

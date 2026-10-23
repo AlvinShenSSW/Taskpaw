@@ -409,3 +409,20 @@ def test_the_task_log_and_logs_never_hold_the_file(tmp_path, tools, caplog):
     rows = get_task_log().query(limit=20)
     text = repr(rows)
     assert LLM_KEY not in text and tools["inbox_root"] not in text
+
+
+def test_a_failed_save_answers_500_and_leaves_the_file(tmp_path, tools, monkeypatch):
+    import taskpaw_v3.agent.server.admin as admin_mod
+
+    world = World(tmp_path)
+    before = world.path.read_bytes()
+
+    def boom(*_a, **_k):
+        raise OSError(str(world.path))  # a path, never echoed
+
+    monkeypatch.setattr(admin_mod, "save_yaml", boom)
+    response = world.put({"role": "controller", **tools})
+    assert response.status_code == 500
+    assert str(world.path) not in response.text
+    assert world.path.read_bytes() == before
+    assert world.get().json()["saved"]["role"] == "off"  # nothing committed
