@@ -8,6 +8,7 @@ import { useTranslation } from "react-i18next";
 import { type LlmKeySource, type LlmSlot, api } from "../api";
 import { Logo } from "../components/Logo";
 import { WorkflowSettingsSection } from "../components/WorkflowSettings";
+import { HubSettings } from "../components/HubSettings";
 import { NetworkAccess } from "../components/NetworkAccess";
 import { RESTART_KEY, restartText } from "../components/setupModel";
 import { RestartBanner } from "../components/RestartBanner";
@@ -30,6 +31,7 @@ export function Settings({ role, section: initial = "general" }: { role: "agent"
     return (
       <Stack spacing={2} sx={{ maxWidth: 720 }}>
         <Typography variant="overline" color="text.secondary">{t("settings.title")}</Typography>
+        <HubSettings />
         <LanguageCard />
         <AboutCard />
       </Stack>

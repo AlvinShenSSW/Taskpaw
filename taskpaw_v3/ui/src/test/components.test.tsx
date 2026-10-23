@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { act, render, screen } from "@testing-library/react";
 import { EventLog } from "../components/EventLog";
@@ -58,7 +59,8 @@ describe("MonitorMetrics", () => {
 
 describe("Settings · About", () => {
   it("shows the product name and author 304", () => {
-    render(<Settings role="hub" />); // hub: no agent-config network fetch
+    // #299: the Hub section reads /config/settings; About renders whatever it answers
+    render(<QueryClientProvider client={new QueryClient()}><Settings role="hub" /></QueryClientProvider>);
     // "TaskPaw" + "304" each appear more than once (heading/blurb, author/copyright).
     expect(screen.getAllByText(/TaskPaw/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/304/).length).toBeGreaterThan(0);
