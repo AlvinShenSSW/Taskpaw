@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from taskpaw_v3.core.power_fleet import StatusQuiet
+
 from . import models as m
 from . import scheduler as sc
 from .executors import failed_kind
@@ -46,17 +48,6 @@ _UP = {
     "busy": "工作机报告任务仍在运行",
     "no_busy": "/status 有应答，机器仍在运行",
 }
-
-
-@dataclass(frozen=True)
-class StatusQuiet:
-    """The status channel of one worker address: how long `/status` has
-    continuously been dead or idle (None: it answered as up at the last
-    read), how old that read is, and, when up, the answer's code."""
-
-    quiet_s: float | None
-    checked_s: float | None
-    state: str | None = None
 
 
 class StatusChannel(Protocol):

@@ -29,6 +29,14 @@ is an estimate (估算).
 - A peer without power support answers `/status` without `power` (or 404 on
   the history): 「无功耗数据（需升级 TaskPaw）」. A Mac running only the Hub
   has no agent and so no row in P0 (PW08).
+- **P2-4 (#295) R11.** The controller's enrolled workers join as automatic
+  peers (`merge_peers`, `source: "workflow"`); a configured peer at the same
+  address wins. Still GET `/status` and `/power/history` only.
+- **P2-4 R8 (C4).** Every `/status` read is also 判定已停止's status channel:
+  unreachable, timeout or `workflow_worker.busy == false` keep a peer quiet;
+  any other answer (401, 404, an invalid body, no `busy`) means the machine
+  is up. `quiet(address)` says how long it has been quiet without a break
+  (a gap of more than `STALE_SECONDS` between reads restarts it).
 """
 
 from __future__ import annotations
@@ -45,7 +53,8 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
-from typing import Any, Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Optional
 
 from taskpaw_v3.core.http import NoRedirectHandler
 from taskpaw_v3.core.net import bind_is_global, bind_is_wildcard
@@ -107,6 +116,49 @@ def peer_url(address: str, path: str) -> str:
     except ValueError:
         shown = host
     return f"http://{shown}:{port}{path}"
+
+
+# ── automatic peers (P2-4 R11) ──────────────────────────────────────────────
+@dataclass(frozen=True)
+class AutoPeer:
+    """A peer of the 功耗 tab: configured (`config`) or a workflow worker."""
+
+    name: str
+    address: str
+    source: str = "workflow"
+
+
+def _key(address: str) -> Optional[tuple[str, int]]:
+    try:
+        host, port = parse_address(address)
+    except ValueError:
+        return None
+    return host.lower(), port
+
+
+def merge_peers(configured: Iterable[Any], workflow: Iterable[Any]) -> list[AutoPeer]:
+    """The configured peers, then each workflow worker at an address no
+    earlier peer has (a configured peer wins; deduplicated by host:port)."""
+    merged = [AutoPeer(str(p.name), str(p.address), "config") for p in configured]
+    seen = {_key(p.address) for p in merged}
+    for peer in workflow:
+        key = _key(str(peer.address))
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        merged.append(AutoPeer(str(peer.name), str(peer.address), "workflow"))
+    return merged
+
+
+@dataclass(frozen=True)
+class StatusQuiet:
+    """判定已停止's status channel for one address: how long `/status` has
+    been dead or idle without a break (None: it answered as up at the last
+    read), how old the last read is, and, when up, its answer's code."""
+
+    quiet_s: Optional[float]
+    checked_s: Optional[float]
+    state: Optional[str] = None
 
 
 # ── one bounded GET ─────────────────────────────────────────────────────────
@@ -512,6 +564,7 @@ class PowerFleet:
         self._statuses = ThreadPoolExecutor(STATUS_WORKERS, "power-peer")
         self._histories = ThreadPoolExecutor(HISTORY_WORKERS, "power-peer-history")
         self._pending: dict[tuple[Any, ...], Future[Any]] = {}  # in flight, by job
+        self._sources: dict[tuple[str, str], str] = {}  # config | workflow (R11)
 
     # ── lifecycle ───────────────────────────────────────────────────────
     def start(self) -> None:
@@ -555,7 +608,50 @@ class PowerFleet:
         except Exception:
             log.exception("power peers unavailable")
             return []
-        return [(str(p.name), str(p.address)) for p in peers]
+        found = [(str(p.name), str(p.address)) for p in peers]
+        with self._lock:
+            self._sources = {
+                key: str(getattr(p, "source", "config")) for key, p in zip(found, peers)
+            }
+        return found
+
+    # ── the status channel (P2-4 R8, C4) ────────────────────────────────
+    def _status_seen(self, peer: tuple[str, str], state: Optional[str]) -> None:
+        """One `/status` read: `state` None is quiet (dead or idle), else
+        the code of an answer that shows the machine up."""
+        now = self._clock()
+        with self._lock:
+            entry = self._entry(peer)
+            last = entry.get("status_mono")
+            if state is not None:
+                entry["quiet_since"] = None
+            elif (
+                entry.get("quiet_since") is None
+                or last is None
+                or now - last > STALE_SECONDS
+            ):
+                entry["quiet_since"] = now
+            entry["status_mono"] = now
+            entry["status_state"] = state
+
+    def quiet(self, address: str) -> Optional[StatusQuiet]:
+        """The status channel of the peer at `address` (host[:port]); None
+        when no listed peer is there or it was never read."""
+        key = _key(address)
+        if key is None:
+            return None
+        now = self._clock()
+        with self._lock:
+            for (_name, peer_address), entry in self._cache.items():
+                if _key(peer_address) != key or entry.get("status_mono") is None:
+                    continue
+                since = entry.get("quiet_since")
+                return StatusQuiet(
+                    quiet_s=None if since is None else max(0.0, now - since),
+                    checked_s=max(0.0, now - entry["status_mono"]),
+                    state=entry.get("status_state"),
+                )
+        return None
 
     def _submit(
         self,
@@ -651,6 +747,10 @@ class PowerFleet:
         try:
             status = self._fetch(url, token)
         except PeerError as exc:
+            # C4: only a dead channel is quiet; any HTTP answer is a live machine
+            self._status_seen(
+                peer, None if exc.code in ("unreachable", "timeout") else exc.code
+            )
             # the last live figure is not shown as current; the histories
             # already read stay (they are history)
             self._update(
@@ -662,6 +762,7 @@ class PowerFleet:
             )
             return []
         if not isinstance(status, dict):
+            self._status_seen(peer, "invalid")
             self._update(
                 peer,
                 state="invalid",
@@ -670,6 +771,11 @@ class PowerFleet:
                 power=None,
             )
             return []
+        worker = status.get("workflow_worker")
+        busy = worker.get("busy") if isinstance(worker, dict) else None
+        self._status_seen(
+            peer, None if busy is False else "busy" if busy is True else "no_busy"
+        )
         seen = dict(
             machine=_text(status.get("machine")),
             server_id=_text(status.get("server_id")),
@@ -797,6 +903,8 @@ class PowerFleet:
                 {
                     "name": name,
                     "address": address,
+                    # P2-4 R11: 工作机 · 自动加入 (`workflow`) or configured
+                    "source": self._sources.get(key, "config"),
                     "state": state,
                     "duplicate_of": first,
                     "error": entry.get("error"),

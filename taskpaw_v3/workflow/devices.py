@@ -247,6 +247,34 @@ def retire(rt: LocalRuntime, worker_id: str, expected_version: int) -> None:
     )
 
 
+# ── automatic power peers (P2-4 R11) ────────────────────────────────────
+def power_peers(host: Any) -> list[Any]:
+    """The controller's enrolled workers as 功耗 peers (`host:port` of their
+    5680 agent). Retired and revoked workers are dropped, except a revoked
+    one that still holds an unresolved assignment: 判定已停止's status
+    channel reads its `/status` (C4)."""
+    from taskpaw_v3.core.power_fleet import AutoPeer
+
+    from . import operator_actions as ops
+
+    rt = getattr(host, "runtime", None)
+    if host is None or getattr(host, "state", None) != "running" or rt is None:
+        return []
+    holding = {
+        o.assignment.worker_id for o in rt.store.list_open_assignments(rt.operator)
+    }
+    peers = []
+    for worker in rt.store.list_workers(rt.operator):
+        if worker.worker_id == rt.identity.worker_id:
+            continue
+        if worker.enrollment_state == "retired" or (
+            worker.admission_state == "revoked" and worker.worker_id not in holding
+        ):
+            continue
+        peers.append(AutoPeer(worker.name, ops.worker_address(worker)))
+    return peers
+
+
 # ── the read ────────────────────────────────────────────────────────────
 def _profiles(profiles: tuple[m.ProfileCapability, ...]) -> list[dict[str, Any]]:
     return [

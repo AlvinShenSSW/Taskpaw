@@ -315,10 +315,19 @@ def run_agent(
             ),
             data_dir=config_path.parent if config_path is not None else None,
         )
+
         # PWR-3 (#289, PW06): the 功耗 tab's peers, refreshed in the background
         # with this agent's own (live) api_token; routes read only the cache.
+        def _peers() -> list:
+            # P2-4 R11: the controller's enrolled workers join automatically
+            from taskpaw_v3.workflow.devices import power_peers
+
+            return power_fleet.merge_peers(
+                power.get_power_settings().peers, power_peers(workflow_host)
+            )
+
         peers = fleet = power_fleet.PowerFleet(
-            lambda: power.get_power_settings().peers,
+            _peers,
             lambda: config.api_token,
             # IR06: this agent's own address entered as a peer is not summed twice
             own=lambda: (config.server_id, config.machine),

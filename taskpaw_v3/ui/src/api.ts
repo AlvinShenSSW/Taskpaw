@@ -475,6 +475,8 @@ export interface PowerPeerRow {
   name: string; address: string; state: string; error: string | null; machine: string | null; version: string | null;
   os: string | null; power: LivePower | null; history: PowerHistory | null; age_s: number | null; stale: boolean;
   energy?: PeerEnergy | null; energy_stale?: boolean; duplicate_of?: string | null;
+  // P2-4 R11: `workflow` = an enrolled GPU worker that joined automatically (工作机 · 自动加入)
+  source?: "config" | "workflow";
 }
 export interface PowerView {
   // `energy`: this machine's retained today / week / month Wh, present while `power` is null (sampling off)
