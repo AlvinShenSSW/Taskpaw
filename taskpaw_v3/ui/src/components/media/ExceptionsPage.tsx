@@ -2,7 +2,7 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../../api";
-import { exceptionInfo, itemNumber, itemResolution, itemTitle, type WorkItem } from "./mediaModel";
+import { exceptionInfo, isRemoteRow, itemNumber, itemResolution, itemTitle, machineOf, type WorkItem } from "./mediaModel";
 import { EmptyState, Icon, PageTitle, StatusChip } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, mediaFilmKey, useIntakeReasons, useWorkspace } from "./workspace";
 
@@ -53,11 +53,14 @@ function ExceptionCard({ item }: { item: WorkItem }) {
   });
   const onAction = () => {
     if (ws.readOnly) return;
-    if (action === "review") ws.openReview(item.id);
+    if (action === "detail") ws.openDetail(item.id);
+    else if (action === "review") ws.openReview(item.id);
     else if (action === "reconcile" || action === "cleanup") ws.openExplain(action, item.id);
     else run.mutate();
   };
-  const sub = [itemNumber(item), itemResolution(item)].filter(Boolean).join(" · ");
+  // P2-4 V1: the machine of a remote-mode film (its route, 「待派发」 or 本机)
+  const machine = item.kind === "film" && isRemoteRow(item.row) ? machineOf(item.row) : null;
+  const sub = [itemNumber(item), itemResolution(item), machine].filter(Boolean).join(" · ");
   return (
     <article className="panel exception-card" data-exception={item.id}>
       <div className="summary">
@@ -69,7 +72,8 @@ function ExceptionCard({ item }: { item: WorkItem }) {
         </div>
       </div>
       <div className="actions">
-        {!ws.readOnly && action !== "none" && <button type="button" className="btn small" disabled={run.isPending} onClick={onAction}>{label}</button>}
+        {!ws.readOnly && action !== "none" && <button type="button" className="btn small" disabled={run.isPending} onClick={onAction}
+          aria-label={action === "detail" ? `${label} ${itemTitle(item)}` : undefined}>{label}</button>}
         {item.kind === "film" && (
           <button type="button" className="btn ghost small" onClick={() => ws.openDetail(item.id)}>查看详情</button>
         )}

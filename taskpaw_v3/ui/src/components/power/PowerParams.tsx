@@ -6,8 +6,8 @@ import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import { Dialog } from "@mui/material";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
-import { api, type LivePower, type PowerPeerSetting, type PowerSettings } from "../../api";
-import { Icon, Notice } from "../media/parts";
+import { api, type LivePower, type PowerPeerRow, type PowerPeerSetting, type PowerSettings } from "../../api";
+import { Chip, Icon, Notice } from "../media/parts";
 import { focusOnMount } from "../media/workspace";
 import { fmtW } from "./powerModel";
 import { platformDefaults } from "./powerView";
@@ -33,21 +33,23 @@ function candidateCpuW(
   return i + (t - i) * (Math.min(100, Math.max(0, live.cpu_pct)) / 100);
 }
 
-export function PowerParams({ open, onClose, settings, live, machineName, os, onSaved }: {
+// `autoPeers` (P2-4 R11): enrolled GPU workers listed by themselves — shown, never removable here.
+export function PowerParams({ open, onClose, settings, live, machineName, os, onSaved, autoPeers = [] }: {
   open: boolean; onClose: () => void; settings: PowerSettings | undefined; live: LivePower | null;
-  machineName: string; os: string | undefined; onSaved: (text: string) => void;
+  machineName: string; os: string | undefined; onSaved: (text: string) => void; autoPeers?: PowerPeerRow[];
 }) {
   return (
     <Dialog open={open} onClose={onClose} maxWidth={false} disableAutoFocus slotProps={{ backdrop: BACKDROP }}
       PaperProps={{ className: "mw mw-modal", sx: { backgroundImage: "none" }, "aria-labelledby": "pw-params-title" } as object}>
-      {open && <ParamsBody onClose={onClose} settings={settings} live={live} machineName={machineName} os={os} onSaved={onSaved} />}
+      {open && <ParamsBody onClose={onClose} settings={settings} live={live} machineName={machineName} os={os} onSaved={onSaved}
+        autoPeers={autoPeers} />}
     </Dialog>
   );
 }
 
-function ParamsBody({ onClose, settings, live, machineName, os, onSaved }: {
+function ParamsBody({ onClose, settings, live, machineName, os, onSaved, autoPeers }: {
   onClose: () => void; settings: PowerSettings | undefined; live: LivePower | null;
-  machineName: string; os: string | undefined; onSaved: (text: string) => void;
+  machineName: string; os: string | undefined; onSaved: (text: string) => void; autoPeers: PowerPeerRow[];
 }) {
   const qc = useQueryClient();
   const defaults = platformDefaults(os);
@@ -187,13 +189,19 @@ function ParamsBody({ onClose, settings, live, machineName, os, onSaved }: {
         </section>
         <fieldset className="param spacer-top">
           <legend>其他机器 <small>名称 + 地址；使用本机的 API Token 只读对方的 /status 与 /power/history</small></legend>
-          {peers.length > 0 ? (
+          {peers.length + autoPeers.length > 0 ? (
             <ul className="peer-list" aria-label="其他机器">
               {peers.map((p) => (
                 <li key={p.name} className="peer-row">
                   <span>{p.name}</span><span className="mono">{p.address}</span>
                   <button type="button" className="btn ghost small" aria-label={`移除 ${p.name}`}
                     onClick={() => setPeers(peers.filter((x) => x.name !== p.name))}>移除</button>
+                </li>
+              ))}
+              {autoPeers.filter((a) => !peers.some((p) => p.name === a.name)).map((p) => (
+                <li key={`auto:${p.name}`} className="peer-row" data-auto-peer={p.name}>
+                  <span>{p.name}</span><span className="mono">{p.address}</span>
+                  <Chip tone="blue">工作机 · 自动加入</Chip>
                 </li>
               ))}
             </ul>

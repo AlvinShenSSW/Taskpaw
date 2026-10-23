@@ -91,7 +91,8 @@ export function PowerPage({ onOpenMedia }: { onOpenMedia?: () => void } = {}) {
         </Snackbar>
       </div>
       <PowerParams open={params} onClose={() => setParams(false)} settings={settings} live={day.data?.power ?? null}
-        machineName={day.data?.machine?.name || "本机"} os={day.data?.machine?.os} onSaved={say} />
+        machineName={day.data?.machine?.name || "本机"} os={day.data?.machine?.os} onSaved={say}
+        autoPeers={(day.data?.peers ?? []).filter((p) => p.source === "workflow")} />
     </>
   );
 }
@@ -201,7 +202,7 @@ function MachineRow({ m }: { m: Machine }) {
           <h3>{m.name}</h3>
           <div className="hw">{m.hw}</div>
           <div className="chips">
-            <Chip tone={m.local ? "green" : "neutral"}>{m.local ? "本机" : "对端"}</Chip>
+            <Chip tone={m.local ? "green" : m.auto ? "blue" : "neutral"}>{m.local ? "本机" : m.auto ? "工作机 · 自动加入" : "对端"}</Chip>
             <Chip tone={tone}>{tone === "green" && <span className="dot" aria-hidden="true" />}{stateText}</Chip>
           </div>
         </div>

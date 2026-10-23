@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { type LlmKeySource, type LlmSlot, api } from "../api";
 import { Logo } from "../components/Logo";
-import { WorkerJoinSection } from "../components/WorkerJoin";
+import { WorkflowSettingsSection } from "../components/WorkflowSettings";
 import { LANGS, type Lang, currentLang, setLang } from "../i18n";
 
 // Settings tab (#79 Language + About, #43 agent config). Config editing shows for
@@ -36,8 +36,8 @@ export function Settings({ role }: { role: "agent" | "hub" }) {
       {/* Agent config (#43) — agent role only */}
       {role === "agent" && <ConfigSection />}
 
-      {/* P2-2: 媒体工作流 on a worker (workflow.role: worker) */}
-      {role === "agent" && <WorkerSection />}
+      {/* P2-4: 设置 · 媒体工作流 (role + fields; 加入 while the running role is a worker) */}
+      {role === "agent" && <WorkflowSettingsSection />}
 
       {/* Agent-level LLM API (#178) + two optional fallbacks and the failover
           switch (#190/#192) — agent role only */}
@@ -75,12 +75,6 @@ type Form = {
   machine: string; bind_host: string; bind_port: string;
   control_host: string; control_port: string; api_token: string;
 };
-
-function WorkerSection() {
-  const config = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
-  const workflow = (config.data?.workflow ?? {}) as Record<string, unknown>;
-  return workflow.role === "worker" ? <WorkerJoinSection /> : null;
-}
 
 function ConfigSection() {
   const { t } = useTranslation();

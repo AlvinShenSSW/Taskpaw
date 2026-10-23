@@ -13,12 +13,13 @@ import { api, type ClusterPower } from "../../api";
 import { Bolt, Est, SplitBar, SplitLegend } from "../power/PowerParts";
 import { fmtKwhShort, fmtW, splitOf } from "../power/powerModel";
 import {
-  ACTIVE_STATES, fmtVram, gpuLabel, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, outputLimit,
-  REVIEW_STATES,
+  ACTIVE_STATES, fmtVram, gpuLabel, isRemoteRow, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, machineOf, matchesStage,
+  outputLimit, REVIEW_STATES,
   type StageFilter,
   type WorkItem,
 } from "./mediaModel";
 import { Chip, Icon, ItemCover, Notice, PageTitle, StageBlock, StatusChip } from "./parts";
+import { LostRow } from "./RemoteParts";
 import { errorText, isPaused, MEDIA_FILMS_KEY, useWorkspace } from "./workspace";
 
 // 概览 (§4.1 + U1 V3): heading actions, the paused notice, four stats, the flow strip, the
@@ -47,6 +48,10 @@ export function OverviewPage() {
   const waiting = data.films.data?.counts.waiting_for_you ?? pending + review;
   const gpu = data.films.data?.gpu;
   const cluster = data.films.data?.power ?? null;  // PWR-2: this machine plus the 功耗 tab's peers
+  // P2-4 R1/R3: remote mode's 设备失联 films and the films waiting for a machine, with the pass's reason
+  const remote = items.some((i) => i.kind === "film" && isRemoteRow(i.row));
+  const lost = items.filter((i) => i.status === "device_lost");
+  const waitingRows = remote ? items.filter((i) => i.kind === "film" && i.status === "inbox") : [];
   const flow: Array<[string, number, StageFilter | "pending", boolean]> = [
     ["收件", count((i) => i.status === "inbox" || i.status === "receiving"), "inbox", false],
     ["待处理", pending, "pending", true],
@@ -107,6 +112,15 @@ export function OverviewPage() {
       </div>
       <div className="two-col">
         <div className="stack">
+          {lost.length > 0 && (
+            <section className="panel lost-panel" aria-labelledby="ov-lost">
+              <div className="panel-head">
+                <div><h2 id="ov-lost">设备失联 · {lost.length}</h2><p>派单保留，不自动改派；后台持续重连</p></div>
+                <Chip tone="red">{lost.length} 部</Chip>
+              </div>
+              <div className="film-list">{lost.map((item) => <LostRow key={item.id} item={item} />)}</div>
+            </section>
+          )}
           <section className="panel" aria-labelledby="ov-active">
             <div className="panel-head">
               <div><h2 id="ov-active">正在处理</h2><p>当前阶段与设备 · 不合成影片总体百分比</p></div>
@@ -120,6 +134,20 @@ export function OverviewPage() {
               <div className="queue-summary"><span>另有 {data.active.length - 4} 部正在处理</span></div>
             )}
           </section>
+          {waitingRows.length > 0 && (
+            <section className="panel" aria-labelledby="ov-waiting">
+              <div className="panel-head">
+                <div><h2 id="ov-waiting">等待 · {waitingRows.length}</h2><p>等待派发或排队中的影片与原因</p></div>
+                <button type="button" className="link-btn" onClick={() => ws.navigate("queue", { stage: "inbox" })}>全部<Icon of={ArrowForwardIcon} /></button>
+              </div>
+              <div className="film-list">
+                {waitingRows.slice(0, 4).map((item) => <FilmRowView key={item.id} item={item} />)}
+              </div>
+              {waitingRows.length > 4 && (
+                <div className="queue-summary"><span>另有 {waitingRows.length - 4} 部等待</span></div>
+              )}
+            </section>
+          )}
           <section className="panel" aria-labelledby="ov-rule">
             <div className="panel-head">
               <div><h2 id="ov-rule">安全抵达之后，再清理来源</h2><p>正式片库永不作为清理目标</p></div>
@@ -212,7 +240,9 @@ export function FilmRowView({ item }: { item: WorkItem }) {
         <div className="film-title"><h3>{title}</h3>{itemResolution(item) && <Chip>{itemResolution(item)}</Chip>}</div>
         <div className="meta">
           {itemNumber(item) && <span className="mono">{itemNumber(item)}</span>}
-          <span>{REVIEW_STATES.includes(item.status) ? "主控编排" : "本机"}</span>
+          {item.kind === "film" && isRemoteRow(item.row) && !REVIEW_STATES.includes(item.status)
+            ? <span className="machine-name" data-testid="film-machine">{machineOf(item.row)}</span>
+            : <span>{REVIEW_STATES.includes(item.status) ? "主控编排" : "本机"}</span>}
           {active && (
             <span className="pw-chip" data-testid="row-power" title={live ? "本机整机功耗 · 估算" : "只有占用 GPU 的影片显示整机功耗"}>
               <Bolt />{live ? `${fmtW(live.w)} W` : "—"}

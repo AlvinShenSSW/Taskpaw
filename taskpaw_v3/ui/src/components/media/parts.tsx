@@ -39,10 +39,11 @@ export function Notice({ tone, icon, children, id }: {
 }
 
 // The compact title row of every page (operator decision 7): page name, actions on the right.
-export function PageTitle({ title, actions }: { title: string; actions?: ReactNode }) {
+// `summary`: one short count line beside the title (「工作机 4 · 可领取 2」), never a slogan.
+export function PageTitle({ title, actions, summary }: { title: string; actions?: ReactNode; summary?: string | null }) {
   return (
     <div className="page-title">
-      <h1>{title}</h1>
+      <div className="page-title-main"><h1>{title}</h1>{summary && <p className="page-sub">{summary}</p>}</div>
       {actions && <div className="actions">{actions}</div>}
     </div>
   );

@@ -10,6 +10,7 @@ import { Settings } from "../views/Settings";
 import { theme } from "../theme";
 import { setLang } from "../i18n";
 import { FILMS_RESPONSE, PLANS } from "./fixtures/mediaWorkspace";
+import { settingsState } from "./fixtures/multiMachine";
 
 // P2-2 (#293) 设备 v1 and the worker console: every row state and dialog of contract §5.
 const wrap = (ui: ReactNode) => {
@@ -106,11 +107,16 @@ describe("设备 v1", () => {
     mockApi();
     await openDevices();
     const online = card("5070 Ti");
-    expect(online).toHaveTextContent("已启用");
-    expect(online).toHaveTextContent("在线 4s 前");
-    expect(online).toHaveTextContent("NVIDIA GeForce RTX 5060 Ti · 16 GB · 3% · 22W");
+    expect(online).not.toHaveTextContent("已启用");  // a plainly enabled worker shows its heartbeat
+    expect(online).toHaveTextContent("在线");
+    expect(online).toHaveTextContent("心跳 4 秒前");
+    expect(online).toHaveTextContent("v3.9.19");
+    expect(online).toHaveTextContent("NVIDIA GeForce RTX 5060 Ti · 16 GB · 3% · 22 W · 显存 0.9 GB");
     expect(online).toHaveTextContent("可用 900 GB · 暂存 40 GB / 500 GB");
-    expect(online).toHaveTextContent("标准✓ 良好✓ 高✗ · 识别✓");
+    expect(within(online).getByText("高").closest(".chip")).not.toHaveClass("green");
+    expect(within(online).getByText("标准").closest(".chip")).toHaveClass("green");
+    expect(online).toHaveTextContent("（缺模型）");
+    expect(online).not.toHaveTextContent("识别");  // OD7: no worker ASR chip
     expect(online).toHaveTextContent("可接单");
     expect(within(online).getByRole("button", { name: "停领" })).toBeInTheDocument();
     expect(within(online).queryByRole("button", { name: "核验并启用" })).toBeNull();
@@ -119,7 +125,10 @@ describe("设备 v1", () => {
     expect(card("5060 Ti-2")).toHaveTextContent("待核验");
     expect(within(card("5060 Ti-3")).getByRole("button", { name: "恢复" })).toBeInTheDocument();
     const lost = card("5060 Ti-4");
-    expect(lost).toHaveTextContent("失联");
+    expect(lost).toHaveTextContent("失联 1 分钟");
+    expect(lost).toHaveTextContent("后台重连中");
+    expect(lost).toHaveTextContent("GPU（最后上报）");
+    expect(lost).toHaveTextContent("未知（失联）");
     expect(lost).toHaveTextContent("3.9.18 · 版本不一致");
     expect(lost).toHaveTextContent("离线");
     expect(within(card("旧卡")).getByRole("button", { name: "退休" })).toBeInTheDocument();
@@ -192,6 +201,11 @@ describe("设备 v1", () => {
     await waitFor(() => expect(calls.admission).toHaveBeenCalledWith("online", 3, "draining"));
     fireEvent.click(within(card("5060 Ti-3")).getByRole("button", { name: "恢复" }));
     await waitFor(() => expect(calls.admission).toHaveBeenCalledWith("draining", 3, "enabled"));
+    expect(within(card("5070 Ti")).queryByRole("button", { name: "撤销" })).toBeNull();  // in 详情
+    const more = within(card("5070 Ti")).getByRole("button", { name: "详情" });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(more);
+    expect(more).toHaveAttribute("aria-expanded", "true");
     fireEvent.click(within(card("5070 Ti")).getByRole("button", { name: "重新配对" }));
     expect(await screen.findByRole("dialog", { name: "5070 Ti 的配对码" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "完成" }));
@@ -237,6 +251,7 @@ describe("设备 v1", () => {
     expect(enabled).toHaveTextContent("远程未启用");
     expect(enabled).not.toHaveTextContent("失联");
     expect(within(enabled).queryByRole("button", { name: "停领" })).toBeNull();
+    fireEvent.click(within(enabled).getByRole("button", { name: "详情" }));
     expect(within(enabled).queryByRole("button", { name: "重新配对" })).toBeNull();
     expect(within(enabled).getByRole("button", { name: "撤销" })).toBeInTheDocument();
     expect(within(card("5060 Ti-2")).queryByRole("button", { name: "核验并启用" })).toBeNull();
@@ -268,14 +283,15 @@ describe("worker console", () => {
 
   it("shows only on a worker and joins with the code and staging dir", async () => {
     vi.spyOn(api, "config").mockResolvedValue({ monitors: [], workflow: { role: "worker" } } as never);
+    vi.spyOn(api, "workflowSettings").mockResolvedValue(settingsState("worker"));
     vi.spyOn(api, "workflowWorker").mockResolvedValue(unjoined);
     const join = vi.spyOn(api, "workflowJoin").mockResolvedValue({
       ...unjoined, state: "connecting", reason: "正在连接主控", controller: "192.168.1.20:5682", worker_id: "w1", credential: "valid",
     });
     wrap(<Settings role="agent" />);
-    expect(await screen.findByText("媒体工作流")).toBeInTheDocument();
+    const joinCard = (await screen.findByText("加入主控")).closest(".MuiCard-root") as HTMLElement;
     expect(screen.getByText(/状态：未加入/)).toBeInTheDocument();
-    expect(screen.getByLabelText("暂存目录")).toHaveValue("E:\\Staging");
+    expect(within(joinCard).getByLabelText("暂存目录")).toHaveValue("E:\\Staging");
     fireEvent.change(screen.getByLabelText("配对码"), { target: { value: " TP1:code " } });
     fireEvent.click(screen.getByRole("button", { name: "加入" }));
     await waitFor(() => expect(join).toHaveBeenCalledWith("TP1:code", "E:\\Staging"));
@@ -298,10 +314,12 @@ describe("worker console", () => {
 
   it("is absent on a controller", async () => {
     vi.spyOn(api, "config").mockResolvedValue({ monitors: [], workflow: { role: "controller" } } as never);
+    vi.spyOn(api, "workflowSettings").mockResolvedValue(settingsState("controller"));
     const worker = vi.spyOn(api, "workflowWorker");
     wrap(<Settings role="agent" />);
     await screen.findAllByText(/LLM API/);
-    expect(screen.queryByText("媒体工作流")).toBeNull();
+    expect(await screen.findByText("媒体工作流")).toBeInTheDocument();
+    expect(screen.queryByText("加入主控")).toBeNull();
     expect(worker).not.toHaveBeenCalled();
   });
 });

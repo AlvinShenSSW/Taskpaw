@@ -10,9 +10,10 @@ import { LtxDownload } from "../LtxDownload";
 import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
 import { predictFromRates } from "../power/powerModel";
 import {
-  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
+  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
   machineLabel, STATUS_META, stageName, stepDurations, tierLong, type WorkItem,
 } from "./mediaModel";
+import { DeviceSection } from "./RemoteParts";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
 import { ModalHead, ModalShell } from "./ReviewDialog";
 import { RestoreLivePanel } from "./RestoreLivePanel";
@@ -65,7 +66,7 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     if (REVIEW_STATES.includes(status)) {
       return <button type="button" className="btn primary" onClick={() => ws.openReview(filmId)}>查看并确认入库</button>;
     }
-    if (EXCEPTION_STATES.includes(status) && item && exceptionInfo(item, reasons)[3] !== "none") {
+    if (EXCEPTION_STATES.includes(status) && item && !["none", "detail"].includes(exceptionInfo(item, reasons)[3])) {
       const [, , label, action] = exceptionInfo(item, reasons);
       const onClick = () => {
         if (action === "review") ws.openReview(filmId);
@@ -113,6 +114,10 @@ function DrawerBody({ film, item, status, plan }: {
   const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
   // P2-3 R15: a restore or ASR running on a worker (its 设备, and 停止并重新排队)
   const remote = (film.steps ?? []).find((s) => s.state === "running" && (s.key === "restore" || s.key === "asr") && s.machine) ?? null;
+  // P2-4 §4: remote mode's 设备 line (route, 失联, 改派, 判定已停止)
+  const multi = isRemoteRow(film);
+  const routed = film.route ? (film.route.live === "local" ? "本机" : film.route.machine.name)
+    : film.pin ? (film.pin.worker_id === null ? "自动" : film.pin.name) : null;
   const download = restore?.download ?? null;
   const timing = readFilmTiming(film.timing);
   const changed = film.cleanup.kept.some((k) => k.status === "blocked_changed" || k.status === "blocked_identity");
@@ -143,7 +148,7 @@ function DrawerBody({ film, item, status, plan }: {
   ) : film.plan ? (
     <>
       <dt>画质</dt><dd>{tierLong(film.plan.ltx_model)}</dd>
-      <dt>设备</dt><dd>{remote?.machine ? remote.machine.name
+      <dt>设备</dt><dd>{remote?.machine ? remote.machine.name : multi ? routed ?? "待派发"
         : machineLabel(ws.data.plans.data?.choices.machines.find((m) => m.id === film.plan?.machine), "本机")}</dd>
     </>
   ) : (
@@ -167,7 +172,8 @@ function DrawerBody({ film, item, status, plan }: {
       </div>
       <div className="detail-steps"><StepLine steps={film.steps} title={title} durations={stepDurations(timing)} /></div>
       <LivePowerRow power={film.live_power} />
-      {remote && <RemoteStep filmId={film.film_id} step={remote} />}
+      {multi && <DeviceSection film={film} />}
+      {remote && <RemoteStep filmId={film.film_id} step={remote} bare={multi} />}
       {running ? (
         <div>
           <RestoreLivePanel step={running} />
@@ -249,7 +255,8 @@ export function EvidenceFold({ film }: { film: FilmDetail }) {
 // P2-3 (#294) R9: a restore or ASR running on a worker — its 设备 and 停止并重新排队 (OD3), which
 // the worker carries out at its next heartbeat: the Job stops, the attempt ends as a free retry and
 // the film is routed again (a pinned one to the same worker).
-function RemoteStep({ filmId, step }: { filmId: string; step: WorkflowStep }) {
+// `bare`: the 设备 line above already names the machine (remote mode, P2-4), so only the action shows.
+function RemoteStep({ filmId, step, bare = false }: { filmId: string; step: WorkflowStep; bare?: boolean }) {
   const ws = useWorkspace();
   const qc = useQueryClient();
   const [asking, setAsking] = useState(false);
@@ -270,13 +277,16 @@ function RemoteStep({ filmId, step }: { filmId: string; step: WorkflowStep }) {
   // P2-3 §11 CX5: once the worker uploads or finishes, the stage settled ok and its finished GPU
   // work is delivered, never discarded — no stop is offered (the controller refuses one too).
   const stoppable = !step.phase || step.phase === "running" || step.phase === "settling";
+  if (bare && (ws.readOnly || !step.attempt_id || !stoppable)) return null;
   return (
-    <section className="panel spacer-top" aria-label="设备" data-testid="remote-step">
-      <dl className="facts">
-        <dt>设备</dt><dd>{name} · {stage}{step.phase === "uploading" || step.phase === "finishing" ? " · 回传中" : ""}</dd>
-      </dl>
+    <section className={bare ? "spacer-top" : "panel spacer-top"} aria-label={bare ? `${name} 上的${stage}` : "设备"} data-testid="remote-step">
+      {!bare && (
+        <dl className="facts">
+          <dt>设备</dt><dd>{name} · {stage}{step.phase === "uploading" || step.phase === "finishing" ? " · 回传中" : ""}</dd>
+        </dl>
+      )}
       {!ws.readOnly && step.attempt_id && stoppable && (
-        <div className="actions spacer-top">
+        <div className={bare ? "actions" : "actions spacer-top"}>
           <button type="button" className="btn ghost" onClick={() => setAsking(true)}>停止并重新排队</button>
         </div>
       )}

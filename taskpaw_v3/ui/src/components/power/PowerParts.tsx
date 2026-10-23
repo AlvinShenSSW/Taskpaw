@@ -94,10 +94,11 @@ export function EnergyBlock({ filmId, energy, machine, predicted, runSeconds }: 
   const max = Math.max(...rows.map(([key]) => energy.stages[key]?.wh ?? 0), 0.0001);
   const share = restoreShare(energy);
   const done = !energy.running;
+  const multi = Object.values(energy.stages).some((s) => s?.devices?.some((d) => d.name !== "本机"));
   return (
     <section className="panel energy-panel spacer-top" aria-labelledby={tid} data-testid="film-energy">
       <div className="energy-head">
-        <div><h3 id={tid}>能耗</h3><p>估算 · 每阶段 = 其运行期间本机的估算耗电</p></div>
+        <div><h3 id={tid}>能耗</h3><p>估算 · 每阶段 = 其运行期间{multi ? "所在机器" : "本机"}的估算耗电</p></div>
         <div className="energy-total">
           <span className="lab">{done ? "本片约" : "已用约"}</span><strong>{fmtKwh(energy.total_wh)}</strong><span className="u">度</span>
           <span className="sub">
@@ -131,7 +132,8 @@ export function EnergyBlock({ filmId, energy, machine, predicted, runSeconds }: 
                 <span>用时 <span className="mono">{clock(s.seconds)}</span></span>
                 <span>平均 <span className="mono">{fmtW(s.avg_w)} W</span></span>
                 <span>峰值 <span className="mono">{fmtW(s.peak_w)} W</span></span>
-                <span>{machine}</span>
+                {/* P2-4 R10: the machines the stage's attempts ran on */}
+                <span data-testid="energy-devices">{s.devices?.length ? s.devices.map((d) => (d.name === "本机" ? machine : d.name)).join("、") : machine}</span>
               </span>
               <span className="share" aria-hidden="true"><span style={{ width: `${(s.wh / max) * 100}%` }} /></span>
             </li>

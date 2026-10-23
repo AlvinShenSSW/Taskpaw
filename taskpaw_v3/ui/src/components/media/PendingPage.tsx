@@ -2,9 +2,11 @@ import CheckIcon from "@mui/icons-material/Check";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { api, HttpError, PLAN_BATCH_MAX, type LtxTier, type PlanChoice, type PlanEntry, type PlanMachine, type PlanResult } from "../../api";
+import {
+  api, HttpError, PLAN_BATCH_MAX, type LtxTier, type PlanChoice, type PlanEntry, type PlanMachine, type PlanResult, type PlanRouting,
+} from "../../api";
 import { PredictLine } from "../power/PowerParts";
-import { fmtBytes, fmtDurationMs, machineLabel, TIER_ORDER, TIER_SHORT, tierLong } from "./mediaModel";
+import { clockText, energyText, fmtBytes, fmtDurationMs, machineLabel, TIER_ORDER, TIER_SHORT, tierLong } from "./mediaModel";
 import { Chip, Cover, EmptyState, Icon, Notice, PageTitle } from "./parts";
 import { errorText, MEDIA_FILMS_KEY, MEDIA_PLANS_KEY, useWorkspace } from "./workspace";
 
@@ -15,7 +17,25 @@ type Filter = "all" | "gpu" | "nogpu";
 type Choice = { tier: LtxTier | null; machine: string | null };
 
 const recommendedChoice = (e: PlanEntry): Choice => ({ tier: e.needs_gpu ? e.recommendation.ltx_model : null, machine: e.recommendation.machine });
-const complete = (e: PlanEntry) => e.recommendation.machine !== "" && (!e.needs_gpu || e.recommendation.ltx_model !== null);
+const complete = (e: PlanEntry) => e.recommendation.machine !== "" && (!e.needs_gpu || e.recommendation.ltx_model !== null)
+  && !blocked4k(e);
+
+// P2-4 R5: remote mode's options for one tier (`routing[tier]`, "none" = 无需修复).
+const tierKey = (e: PlanEntry, tier: LtxTier | null) => (e.needs_gpu ? tier ?? e.recommendation.ltx_model ?? "standard" : "none");
+const routingOf = (e: PlanEntry, tier: LtxTier | null): PlanRouting | null => e.routing?.[tierKey(e, tier)] ?? null;
+// 自动's line: 「预计 21:40 在 5070 Ti 完成 · 约 0.9 度」, 「无需 GPU，本机完成」 or why it would wait.
+const autoText = (r: PlanRouting) => ("machine" in r.auto ? r.auto.text : r.auto.text ?? r.auto.waiting ?? "");
+// A device's finish (with its name for the reason line) or why it is greyed out.
+function deviceLine(d: PlanRouting["devices"][number], now: number, withName: boolean): string {
+  if (d.reason) return d.reason;
+  const finish = d.finish_at ? `预计 ${clockText(d.finish_at, now)}${withName ? ` 在 ${d.name}` : ""} 完成` : null;
+  return [finish, energyText(d.energy_wh)].filter(Boolean).join(" · ");
+}
+// P2-4 risk 5: 4K is greyed on every worker until P2-5, so such a film stays on 待处理.
+function blocked4k(e: PlanEntry): boolean {
+  if (!e.routing || !e.needs_gpu || e.resolution !== "4K") return false;
+  return Object.values(e.routing).every((r) => !("machine" in r.auto) && r.devices.every((d) => d.reason));
+}
 const entryTitle = (e: PlanEntry) => e.title || e.name;
 const planKey = (e: Pick<PlanEntry, "film_id" | "input_revision">) => `${e.film_id}:${e.input_revision}`;
 
@@ -78,6 +98,8 @@ export function PendingPage() {
   const batchEligible = (e: PlanEntry) => complete(e) && !isStale(e) && unchanged(e);
   const eligible = items.filter(batchEligible);
   const machines = plans.data?.choices.machines ?? [];
+  const remote = Boolean(plans.data?.remote);
+  const held = remote ? items.filter(blocked4k).length : 0;
 
   // `quiet`: the batch reports once for every film (confirmAll), not a toast per failure.
   const after = (sent: PlanEntry[], results: PlanResult[] | null, failure?: unknown, quiet = false) => {
@@ -185,6 +207,8 @@ export function PendingPage() {
             <button key={v} type="button" className="filter-pill" aria-pressed={filter === v} onClick={() => setFilter(v)}>{l}</button>
           ))}
           <Chip>{items.length} 部影片</Chip>
+          {remote && <Chip tone="green">{eligible.length} 部可按推荐派发</Chip>}
+          {held > 0 && <Chip tone="amber">{held} 部 4K 暂留</Chip>}
         </div>
       </div>
       {plans.isLoading ? (
@@ -225,10 +249,27 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
   const title = entryTitle(e);
   const rec = e.recommendation;
   const workers = machines.length ? machines.map((m) => ({ id: m.id, label: machineLabel(m) })) : rec.machine === null ? [] : [{ id: rec.machine, label: "本机" }];
-  const options = rec.machine === null ? [{ id: "", label: "自动（推荐）" }, ...workers] : workers;
+  // P2-4 R5: with `routing` the options are the tier's — 自动 first, then every device with its finish
+  // or greyed out with its reason; without it (a single machine) the select is unchanged.
+  const routing = routingOf(e, choice.tier);
+  const now = Date.now();
+  const held = blocked4k(e);
+  const options: Array<{ id: string; label: string; disabled?: boolean }> = routing ? [
+    { id: "", label: autoText(routing) ? `自动（推荐）· ${autoText(routing)}` : "自动（推荐）" },
+    ...routing.devices.map((d) => ({ id: d.id, label: `${d.name} · ${deviceLine(d, now, false) || "可领取"}`, disabled: Boolean(d.reason) })),
+  ] : rec.machine === null ? [{ id: "", label: "自动（推荐）" }, ...workers] : workers;
+  const device = routing?.devices.find((d) => d.id === choice.machine);
   // The recommended machine shows the recommendation's reason (a 4K film: 「本机修复输出上限 1080p」).
-  const machineReason = choice.machine === rec.machine ? rec.machine_reason : machines.find((m) => m.id === choice.machine)?.reason ?? "";
-  const ready = choice.machine !== "" && (!e.needs_gpu || choice.tier !== null);
+  const machineReason = held ? "4K 暂不派发到工作机（后续版本开放），先留在待处理"
+    : routing ? (choice.machine === null ? autoText(routing) : device ? deviceLine(device, now, true) : "该机器当前不可选")
+      : choice.machine === rec.machine ? rec.machine_reason : machines.find((m) => m.id === choice.machine)?.reason ?? "";
+  const ready = choice.machine !== "" && (!e.needs_gpu || choice.tier !== null) && !held
+    && (!routing || choice.machine === null || (device !== undefined && !device.reason));
+  // A tier on which the chosen device is greyed out goes back to 自动.
+  const pickTier = (tier: LtxTier) => {
+    const next = routingOf(e, tier)?.devices.find((d) => d.id === choice.machine);
+    onChoice({ tier, machine: routing && choice.machine !== null && (!next || next.reason) ? null : choice.machine });
+  };
   const idLine = [e.number || (e.title ? e.name : null), e.actors.join("、")].filter(Boolean).join(" · ");
   const onKey = (ev: KeyboardEvent<HTMLButtonElement>, tier: LtxTier) => {
     const step = ({ ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 } as Record<string, number>)[ev.key];
@@ -239,7 +280,7 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
     else if (ev.key === "End") next = TIER_ORDER.length - 1;
     else return;
     ev.preventDefault();
-    onChoice({ ...choice, tier: TIER_ORDER[next] });
+    pickTier(TIER_ORDER[next]);
     (ev.currentTarget.parentElement?.querySelector(`[data-tier="${TIER_ORDER[next]}"]`) as HTMLElement | null)?.focus();
   };
   return (
@@ -269,8 +310,8 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
                 const on = choice.tier === t;
                 return (
                   <button key={t} type="button" className="seg-opt" role="radio" aria-checked={on} data-tier={t}
-                    tabIndex={on || (choice.tier === null && t === TIER_ORDER[0]) ? 0 : -1}
-                    onClick={() => onChoice({ ...choice, tier: t })} onKeyDown={(ev) => onKey(ev, t)}>
+                    tabIndex={on || (choice.tier === null && t === TIER_ORDER[0]) ? 0 : -1} disabled={held}
+                    onClick={() => pickTier(t)} onKeyDown={(ev) => onKey(ev, t)}>
                     {TIER_SHORT[t]}{rec.ltx_model === t && <span className="rec-tag">推荐</span>}
                   </button>
                 );
@@ -286,14 +327,20 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
           </div>
         )}
         <div className="plan-field">
-          {readOnly ? <><span className="plan-label">设备</span><Chip>推荐 {machineName(machines, rec.machine)}</Chip></> : <>
-          <label className="plan-label" htmlFor={`machine-${id}`}>设备</label>
-          <select id={`machine-${id}`} value={choice.machine ?? ""} aria-describedby={`machine-reason-${id}`}
-            onChange={(ev) => onChoice({ ...choice, machine: ev.target.value || null })}>
-            {options.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-          </select>
+          {readOnly ? <><span className="plan-label">{routing ? "机器" : "设备"}</span><Chip>推荐 {machineName(machines, rec.machine)}</Chip></> : <>
+          <label className="plan-label" htmlFor={`machine-${id}`}>{routing ? "机器" : "设备"}</label>
+          {held ? (
+            <select id={`machine-${id}`} value="" disabled aria-describedby={`machine-reason-${id}`}>
+              <option value="">暂无可用机器 · 4K 全部不可选</option>
+            </select>
+          ) : (
+            <select id={`machine-${id}`} value={choice.machine ?? ""} aria-describedby={`machine-reason-${id}`}
+              onChange={(ev) => onChoice({ ...choice, machine: ev.target.value || null })}>
+              {options.map((m) => <option key={m.id} value={m.id} disabled={m.disabled}>{m.label}</option>)}
+            </select>
+          )}
           </>}
-          <p className="plan-reason" id={`machine-reason-${id}`}>{machineReason}</p>
+          <p className={`plan-reason${held ? " t-amber" : ""}`} id={`machine-reason-${id}`}>{machineReason}</p>
         </div>
       </div>
       <div className="pending-foot">

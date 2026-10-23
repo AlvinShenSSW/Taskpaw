@@ -24,12 +24,13 @@ const TARGET_BLOCK: Record<TargetErrorCode, string> = {
   duplicate: "目标已有同名影片包，不能覆盖；请打开文件夹核对。",
 };
 
-export function ModalShell({ open, onClose, titleId, children }: {
-  open: boolean; onClose: () => void; titleId: string; children: ReactNode;
+// `role`: "alertdialog" for a confirmation that cannot be undone (P2-4 判定已停止).
+export function ModalShell({ open, onClose, titleId, children, role }: {
+  open: boolean; onClose: () => void; titleId: string; children: ReactNode; role?: "dialog" | "alertdialog";
 }) {
   return (
     <Dialog open={open} onClose={onClose} disableAutoFocus scroll="paper" slotProps={{ backdrop: BACKDROP }}
-      PaperProps={{ className: "mw mw-modal", sx: { backgroundImage: "none" }, "aria-labelledby": titleId } as object}>
+      PaperProps={{ className: "mw mw-modal", sx: { backgroundImage: "none" }, "aria-labelledby": titleId, ...(role ? { role } : {}) } as object}>
       {children}
     </Dialog>
   );

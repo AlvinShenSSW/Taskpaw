@@ -5,8 +5,8 @@ import { useState } from "react";
 import { api } from "../../api";
 import { fmtKwhShort } from "../power/powerModel";
 import {
-  fmtBytes, fmtHoursMinutes, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, matchesStage, readFilmTiming,
-  STAGE_OPTIONS, stepDurations, type StageFilter, type WorkItem,
+  fmtBytes, fmtHoursMinutes, isRemoteRow, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, machineOf, matchesStage,
+  readFilmTiming, STAGE_OPTIONS, stepDurations, type StageFilter, type WorkItem,
 } from "./mediaModel";
 import { Chip, EmptyState, Icon, ItemCover, PageTitle, StageBlock, StatusChip, StepLine } from "./parts";
 import { errorText, useWorkspace } from "./workspace";
@@ -95,7 +95,9 @@ function FilmCard({ item }: { item: WorkItem }) {
       <StepLine steps={item.kind === "film" ? item.row.steps : item.pkg.steps} title={title} durations={stepDurations(timing)} />
       <div className="card-foot">
         <span>
-          {item.kind === "package" ? "INBOX" : isRestoring(item.status) ? "本机" : "INBOX"}
+          {item.kind === "package" ? "INBOX" : isRemoteRow(item.row)
+            ? <span className="machine-name" data-testid="film-machine">{machineOf(item.row)}</span>
+            : isRestoring(item.status) ? "本机" : "INBOX"}
           {run !== null && <span className="mono run-total" title="从首次开始修复到翻译完成"> · 全程 {fmtHoursMinutes(run)}</span>}
           {run !== null && energy && !energy.running && (
             <span className="pw-foot" title="能耗为估算"> · <strong>约 {fmtKwhShort(energy.total_wh)} 度</strong>{energy.partial ? "（部分）" : ""}</span>

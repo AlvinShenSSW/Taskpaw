@@ -175,7 +175,13 @@ export type DeviceRow = {
   boot_reconciled: boolean; eligibility: string; eligible: boolean;
   probe: DeviceProbe | null; approved: { probe: DeviceProbe | null; profiles: DeviceProfile[] } | null;
   restore_allowed: boolean; unresolved: number; can_retire: boolean;
+  // P2-4 §2: the row's unresolved compute assignments (判定已停止) and its open routes (排队)
+  assignments?: DeviceAssignment[]; route_depth?: number;
 };
+export interface DeviceAssignment {
+  assignment_id: string; version: number; film_id: string; film_name: string; stage: string; state: string;
+  stop: FilmStopAction | null;
+}
 export type DevicesView = {
   remote_workers: boolean; server_time: string; controller: { name: string; stages: string[] }; workers: DeviceRow[];
 };
@@ -496,6 +502,23 @@ export interface WorkflowPlans {
   remote?: boolean;
 }
 export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string | null }
+// P2-4 R13–R16: 设置 · 媒体工作流 (agent.yaml `workflow`; no token or key lives in it).
+export type WorkflowRole = "off" | "controller" | "worker";
+export interface WorkflowSettingsView {
+  enabled: boolean; role: WorkflowRole;
+  inbox_root: string | null; data_dir: string | null; ffprobe_path: string | null;
+  jasna_exe_path: string | null; whisperjav_exe_path: string | null; ltx_gpu: string;
+  mdcx_python: string | null; mdcx_root: string | null; mdcx_profile: string | null; filmpaw_data_dir: string | null;
+  remote_workers: boolean; worker_api_port: number; staging_dir: string | null; staging_cap_gb: number;
+}
+export interface WorkflowSettingsState {
+  saved: WorkflowSettingsView; running: WorkflowSettingsView; restart_required: boolean;
+  busy: { films: number; remote: number; unknown: boolean };
+  presets: Array<{ id: string; label: string }>;
+  // what an empty ffprobe field uses (null: not on PATH)
+  ffprobe_detected: string | null;
+}
+export type WorkflowSettingsPatch = { role: WorkflowRole } & Partial<Omit<WorkflowSettingsView, "enabled" | "role">>;
 // `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
 export interface PlanResult { film_id: string; ok: boolean; error: string | null; message: string | null }
 const seg = (id: string | number) => encodeURIComponent(String(id));
@@ -588,7 +611,9 @@ export const PLAN_BATCH_MAX = 500;
 
 export class HttpError extends Error {
   // `code`: the backend's error code when the body names one (a 409's `cas_conflict` = a changed revision)
-  constructor(message: string, public readonly status: number, public readonly code?: string) { super(message); }
+  // `fields`: a 422's per-field messages (P2-4 设置 · 媒体工作流), never echoing a value
+  constructor(message: string, public readonly status: number, public readonly code?: string,
+    public readonly fields?: Record<string, string>) { super(message); }
 }
 
 async function get<T>(role: "agent" | "hub", path: string): Promise<T> {
@@ -635,7 +660,7 @@ async function hubFilmGet(path: string): Promise<unknown> {
 // admin's ValueError message → 400) so the UI can show why an edit was rejected.
 async function send<T>(
   role: "agent" | "hub",
-  method: "POST" | "DELETE" | "PATCH",
+  method: "POST" | "DELETE" | "PATCH" | "PUT",
   path: string,
   body?: unknown,
 ): Promise<T> {
@@ -659,14 +684,18 @@ async function send<T>(
   if (!res.ok) {
     let detail = `${path} → ${res.status}`;
     let code: string | undefined;
+    let fields: Record<string, string> | undefined;
     try {
-      const j = monitor ? payload as { detail?: unknown; code?: unknown } : await res.json();
+      const j = monitor ? payload as { detail?: unknown; code?: unknown; fields?: unknown } : await res.json();
       if (j?.detail) detail = String(j.detail);
       if (typeof j?.code === "string") code = j.code;
+      if (j?.fields && typeof j.fields === "object" && !Array.isArray(j.fields)) {
+        fields = Object.fromEntries(Object.entries(j.fields as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+      }
     } catch {
       /* non-JSON error body */
     }
-    throw new HttpError(detail, res.status, code);
+    throw new HttpError(detail, res.status, code, fields);
   }
   if (res.status === 204) return undefined as T;
   return monitor ? payload as T : res.json() as Promise<T>;
@@ -807,6 +836,16 @@ export const api = {
   // P2-3 R9: 停止并重新排队 of a running remote restore or ASR
   workflowRequeue: (filmId: string, attemptId: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/requeue`, { attempt_id: attemptId }),
+  // P2-4 R7: 改派 (null = 自动) — 409 `route_claimed` 「已开始处理」 when a claim won
+  workflowPin: (filmId: string, input_revision: number, expected_version: number, worker_id: string | null) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/pin`, { input_revision, expected_version, worker_id }),
+  // P2-4 R8: 判定已停止 of one unresolved remote assignment (C4: both channels dead for 5 min)
+  workflowAttest: (filmId: string, assignment_id: string, expected_version: number) =>
+    send<Record<string, unknown>>("agent", "POST", `/control/workflow/films/${seg(filmId)}/attest-stopped`, { assignment_id, expected_version }),
+  // P2-4 R13–R16: 设置 · 媒体工作流
+  workflowSettings: () => get<WorkflowSettingsState>("agent", "/control/workflow/settings"),
+  workflowSaveSettings: (patch: WorkflowSettingsPatch) =>
+    send<{ ok: boolean; restart_required: boolean; message?: string }>("agent", "PUT", "/control/workflow/settings", patch),
   posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
   // U1b: the full landscape jacket (final fanart > thumb > input fanart > thumb > image attachment)
   coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,

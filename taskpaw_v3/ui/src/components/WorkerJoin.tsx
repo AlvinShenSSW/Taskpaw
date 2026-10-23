@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api, type WorkerConsole } from "../api";
 
-// P2-2 (#293): the worker console's 「媒体工作流」 section in 设置 (role=worker only): 加入 with
+// P2-2 (#293): the worker console's 加入主控 card under 设置 · 媒体工作流 (running role worker only): 加入 with
 // the controller's pairing code and a local staging dir, the connection and credential state,
 // and 重新加入. The code is sent once and never shown back.
 const WORKER_KEY = ["workflowWorker"];
@@ -35,7 +35,7 @@ export function WorkerJoinSection() {
   return (
     <Card>
       <CardContent>
-        <Typography variant="subtitle1" sx={{ mb: 1 }}>媒体工作流</Typography>
+        <Typography variant="subtitle1" sx={{ mb: 1 }}>加入主控</Typography>
         <Stack spacing={0.5} sx={{ mb: 2 }}>
           <Typography variant="body2">状态：{STATE_TEXT[w.state] ?? w.state}{w.reason ? ` · ${w.reason}` : ""}</Typography>
           <Typography variant="body2">主控：{w.controller ?? "—"}</Typography>
