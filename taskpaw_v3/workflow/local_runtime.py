@@ -32,6 +32,7 @@ from .local_clock import MonotonicWallClock, read_high_water
 from .local_gpu import FULL_HD, UHD, LocalGpu, machine_identity, query_gpu
 from .owned_process import own_identity, process_alive
 from .store import WorkflowStore
+from .store_core import parse_time
 
 if TYPE_CHECKING:
     from .lookup import MetadataLookup
@@ -130,7 +131,7 @@ class LocalIdentity:
 
     @property
     def created(self) -> datetime:
-        return datetime.fromisoformat(self.created_at)
+        return parse_time(self.created_at)  # 'Z' too, on Python 3.10
 
 
 @dataclass(frozen=True)

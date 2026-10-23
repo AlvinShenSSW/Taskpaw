@@ -110,12 +110,14 @@ DEVICE_LOST = "device_lost"
 @dataclass(frozen=True)
 class RowExtra:
     """P2-4 R2/R3: what remote mode adds to a film's row (`reads.board_inputs`):
-    its open route, its pin, and the 失联 worker's name when the route's
-    worker stopped answering (an attention state; nothing moves, OD2)."""
+    its open route, its pin, and the 失联 worker `{id, name}` when the
+    route's worker stopped answering (an attention state; nothing moves,
+    OD2) — from `scheduler.lost_films`, so a route left on an older input
+    revision names it too (§9 CX27)."""
 
     route: dict[str, Any] | None = None
     pin: dict[str, Any] | None = None
-    lost: str | None = None
+    lost: dict[str, str] | None = None
     # R2: {can_reassign, stop} — 改派 and 判定已停止 (`operator_actions`)
     actions: dict[str, Any] | None = None
 
@@ -472,7 +474,7 @@ def film_row(
     if extra is not None and extra.lost is not None and place["group"] == "active":
         place = {**place, "group": "attention"}  # R3: 设备失联, OD2
         attention_kind = DEVICE_LOST
-        note = LOST_NOTE.format(name=extra.lost)
+        note = LOST_NOTE.format(name=extra.lost["name"])
     if facts is None:
         facts = Facts(
             number=(label or (None, None))[0],
@@ -505,6 +507,8 @@ def film_row(
         # P2-4 R2: the open route and the pin (null in single-machine mode)
         "route": extra.route if extra is not None else None,
         "pin": extra.pin if extra is not None else None,
+        # §9 CX27: the 失联 worker {id, name}, whatever revision its route has
+        "lost_worker": extra.lost if extra is not None else None,
         "actions": extra.actions if extra is not None else None,
         "can_confirm": place["can_confirm"],
         "can_retry": place["retry_stage"] is not None,

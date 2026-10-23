@@ -175,6 +175,16 @@ describe("board: machine column, routing reasons and 设备失联 (R1–R3)", ()
     expect(machineOf(at("f", "attention", "restore", "failed"))).toBe("待派发");
   });
 
+  it("CX34 (OD7): ASR runs on the controller — 本机 for ASR, 待派发 only while the restore is unfinished", () => {
+    const at = (key: Parameters<typeof steps>[0], state: Parameters<typeof steps>[1]) =>
+      row({ film_id: `${key}-${state}`, group: "active", stage: key, status: "pending", steps: steps(key, state), actions: actions() });
+    expect(machineOf(at("asr", "waiting"))).toBe("本机");
+    expect(machineOf(at("asr", "running"))).toBe("本机");
+    expect(machineOf(at("translate", "waiting"))).toBe("本机");
+    expect(machineOf(at("restore", "waiting"))).toBe("待派发");
+    expect(machineOf(at("restore", "running"))).toBe("待派发");
+  });
+
   it("概览 lists the 设备失联 film with its note, last heartbeat and 处理 → the drawer", async () => {
     mockApi();
     wrap(<MediaWorkspace />);

@@ -236,7 +236,8 @@ class WorkflowEvents:
                 f"{name} 待安排：推荐 {recommendation} · {machine}",
             )
         if row.get("attention_kind") == board.DEVICE_LOST:
-            worker = ((row.get("route") or {}).get("machine") or {}).get("id")
+            # §9 CX27: the lost worker itself, even on an older revision's route
+            worker = (row.get("lost_worker") or {}).get("id")
             if worker:  # R4: once per film, revision and worker (OD2)
                 self.emit(
                     film.film_id,

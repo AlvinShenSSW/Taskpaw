@@ -37,6 +37,7 @@ from taskpaw_v3.workflow import scheduler as s
 from taskpaw_v3.workflow.fleet_live import FleetLive, Heartbeat
 from taskpaw_v3.workflow.local_dispatch import should_retry
 from taskpaw_v3.workflow.remote_dispatch import AttemptState
+from taskpaw_v3.workflow.store_core import parse_time
 
 TOKEN = "control-token"
 DEAD = timedelta(seconds=301)
@@ -606,9 +607,17 @@ def test_reassign_options_carry_the_preview_finish_and_energy(world):
 
 
 def same_instant(a: str, b: str) -> bool:
-    """The test clock is real time: two reads differ by milliseconds."""
-    parse = datetime.fromisoformat
-    return abs(parse(a) - parse(b)) < timedelta(seconds=1)
+    """The test clock is real time: two reads differ by milliseconds. The
+    board's `iso` ends in 'Z', which `datetime.fromisoformat` refuses before
+    Python 3.11: `parse_time` reads both forms."""
+    return abs(parse_time(a) - parse_time(b)) < timedelta(seconds=1)
+
+
+def test_same_instant_reads_the_boards_z_suffix_on_every_python():
+    """CI run 39939505823 (py3.10): the estimates are 'Z' timestamps."""
+    assert same_instant("2026-10-23T10:44:35.092288Z", "2026-10-23T10:44:35.082875Z")
+    assert same_instant("2026-10-23T10:44:35Z", "2026-10-23T10:44:35+00:00")
+    assert not same_instant("2026-10-23T10:44:35Z", "2026-10-23T10:44:37Z")
 
 
 def test_reassign_options_do_not_count_the_films_own_route(world):
@@ -648,6 +657,46 @@ def test_reassign_auto_shows_the_healthy_route_worker_it_keeps(world):
     kept = {o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)}
     assert kept["自动"]["machine"] == {"id": small.worker_id, "name": "5060"}
     assert same_instant(kept["5070 Ti"]["finish_at"], fresh["5070 Ti"]["finish_at"])
+
+
+def test_cx33_reassign_keeps_the_films_confirm_time_and_route_position(world):
+    """P2-4 §9 CX33 (#298 R1): the 改派 preview keeps the film's own
+    `confirmed_at` (a film confirmed later never takes its slot), and a kept
+    route's estimate counts only the routes ahead of it on its worker."""
+    only = enrol_remote(world.rt, "5070 Ti")
+    world.beat(only)
+    first = add_film(world.rt)
+    route(world.rt, first, only.worker_id)
+    film_id = add_film(world.rt)
+    world.clock.advance(timedelta(minutes=5))
+    later = add_film(world.rt)
+    world.beat(only)
+    options = {
+        o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)
+    }
+    assert options["5070 Ti"]["finish_at"] is not None
+    assert options["自动"]["machine"] == {"id": only.worker_id, "name": "5070 Ti"}
+    route(world.rt, film_id, only.worker_id)
+    kept = {o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)}
+    snap = world.rt.store.routing_snapshot(world.rt.operator)
+    queued = s.queued_finish(
+        snap,
+        film_id,
+        now=world.rt.clock.now(),
+        gpu_stages=routing.gpu_stages(
+            world.rt.store, world.rt.operator, snap, world.rt.executors
+        ),
+    )
+    assert queued is not None
+    assert kept["自动"]["machine"] == {"id": only.worker_id, "name": "5070 Ti"}
+    assert same_instant(kept["自动"]["finish_at"], s_iso(queued[0]))
+    route(world.rt, later, only.worker_id)  # behind it: never counted
+    again = {o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)}
+    assert same_instant(again["自动"]["finish_at"], kept["自动"]["finish_at"])
+
+
+def s_iso(value: datetime) -> str:
+    return value.isoformat()
 
 
 def test_the_stop_action_names_the_status_address_and_its_outcome(world):

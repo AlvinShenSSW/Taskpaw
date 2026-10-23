@@ -288,6 +288,8 @@ export interface ReassignOption {
 export interface FilmRemote {
   attention_kind?: "device_lost" | null; route?: FilmRouteInfo | null; pin?: FilmPin | null;
   actions?: FilmActions | null;
+  // #298 (§9 CX27): the 失联 worker, also when its route is on an older input revision
+  lost_worker?: { id: string; name: string } | null;
 }
 export interface FilmRow extends FilmRemote {
   film_id: string; name: string; group: FilmGroup; stage: string | null; status: string | null;

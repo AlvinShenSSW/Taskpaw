@@ -260,8 +260,11 @@ def test_rows_carry_the_frozen_shape():
         "route",
         "pin",
         "actions",
+        # #298 R1 (§9 CX27): the 失联 worker {id, name}
+        "lost_worker",
     }
     assert (row["route"], row["pin"], row["actions"]) == (None, None, None)
+    assert row["lost_worker"] is None
     assert (row["has_poster"], row["poster_source"]) == (False, None)
     assert (row["has_cover"], row["cover_source"]) == (False, None)
     assert row["created_at"] == "2026-10-20T00:00:00Z"

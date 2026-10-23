@@ -595,6 +595,18 @@ def _devices(
     return tuple(found)
 
 
+def _disk_full(
+    controller_free_bytes: int | None, outputs: float, output: float
+) -> bool:
+    """C8/IR10: the controller cannot hold the open routes' outputs, this
+    film's and the reserve. The one rule of the pass and `preview`'s
+    fallback (P2-4 §9 CX28)."""
+    return (
+        controller_free_bytes is not None
+        and outputs + output + CONTROLLER_RESERVE_BYTES > controller_free_bytes
+    )
+
+
 def _route_films(
     state: _PassState,
     snapshot: m.RoutingSnapshot,
@@ -636,10 +648,7 @@ def _route_films(
         if mine is not None:
             mine.devices = _devices(state, film, stages, live, now)
         output = film.source_bytes * OUTPUT_FACTOR if "restore" in stages else 0.0
-        disk_full = disk_full or (
-            controller_free_bytes is not None
-            and outputs + output + CONTROLLER_RESERVE_BYTES > controller_free_bytes
-        )
+        disk_full = disk_full or _disk_full(controller_free_bytes, outputs, output)
         if disk_full:  # C8/IR10: the gate stops every new route of the pass
             waiting[film.film_id] = CONTROLLER_DISK
             if mine is not None:
@@ -700,6 +709,7 @@ def _route_films(
         busy[worker.worker_id] += _cost(rates, worker, film, stages, now)[0]
         needs[worker.worker_id] += staging_need(film)
         outputs += output
+    state.outputs = outputs  # the fallback of `preview` gates on the same total
     return decisions, waiting
 
 
@@ -753,12 +763,15 @@ def preview(
     controller_free_bytes: int | None = None,
     gpu_stages: GpuStages | None = None,
     live_since: datetime | None = None,
+    keep_confirmed: bool = False,
 ) -> dict[str | None, Preview]:
     """P2-4 R5, pure: per tier, the film as if confirmed now with 自动, run
     through the pass's own state and candidate order. {} for a film the
     snapshot does not hold (no GPU work left). A film whose pending restore
     and ASR need no GPU (every volume reused) gets no device and the reason
-    `NO_GPU`, with neither `machine` nor `waiting` (§9 CX2). Advisory: 预计."""
+    `NO_GPU`, with neither `machine` nor `waiting` (§9 CX2). Advisory: 预计.
+    `keep_confirmed`: 改派 keeps the film's own confirm time, so its place in
+    the candidate order (§9 CX33)."""
     base = next((f for f in snapshot.films if f.film_id == film_id), None)
     if base is None:
         return {}
@@ -767,7 +780,7 @@ def preview(
         film = base.model_copy(
             update={
                 "planned": True,
-                "confirmed_at": now,
+                "confirmed_at": (base.confirmed_at or now) if keep_confirmed else now,
                 "ltx_model": tier,
                 "pin_worker_id": None,
                 "pin_version": base.pin_version or 1,
@@ -806,6 +819,12 @@ def preview(
                 result[tier] = Preview(None, None, None, NO_GPU, None, ())
                 continue
             probe.devices = _devices(state, film, stages, live, now)
+            output = film.source_bytes * OUTPUT_FACTOR if "restore" in stages else 0.0
+            if _disk_full(controller_free_bytes, state.outputs, output):  # CX28
+                result[tier] = Preview(
+                    None, None, None, None, CONTROLLER_DISK, probe.devices
+                )
+                continue
             found = _options(
                 state.rates,
                 film,
@@ -832,6 +851,51 @@ def preview(
             devices=probe.devices,
         )
     return result
+
+
+def queued_finish(
+    snapshot: m.RoutingSnapshot,
+    film_id: str,
+    *,
+    now: datetime,
+    gpu_stages: GpuStages | None = None,
+) -> tuple[datetime, float | None] | None:
+    """P2-4 §9 CX33: the finish and energy of the film's open current-revision
+    route where it stands — the routes ahead of it on its worker (routing
+    order) plus its own cost; a route behind it never counts. None without
+    such a route. Advisory: 预计."""
+    film = next((f for f in snapshot.films if f.film_id == film_id), None)
+    if film is None:
+        return None
+    routes = sorted(snapshot.routes, key=lambda r: (r.routed_at, r.route_id))
+    mine = next(
+        (
+            r
+            for r in routes
+            if r.film_id == film_id and r.input_revision == film.input_revision
+        ),
+        None,
+    )
+    worker = next(
+        (w for w in snapshot.workers if mine and w.worker_id == mine.worker_id), None
+    )
+    if mine is None or worker is None:
+        return None
+    rates = Rates(snapshot.samples)
+    facts = {
+        (f.film_id, f.input_revision): f
+        for f in (*snapshot.older_revisions, *snapshot.films)
+    }
+    total = 0.0
+    for route in routes[: routes.index(mine)]:
+        ahead = facts.get((route.film_id, route.input_revision))
+        if route.worker_id == worker.worker_id and ahead is not None:
+            total += _cost(rates, worker, ahead, routed_stages(ahead, gpu_stages), now)[
+                0
+            ]
+    stages = routed_stages(film, gpu_stages)
+    total += _cost(rates, worker, film, stages, now)[0]
+    return now + timedelta(seconds=total), rates.energy_wh(stages, worker, film)
 
 
 def _measure(

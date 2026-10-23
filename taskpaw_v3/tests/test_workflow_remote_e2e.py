@@ -590,9 +590,15 @@ def test_case_4_the_worker_runs_on_while_the_controller_restarts(world):
     film = routed_film(world)
     until(lambda: world.jasna_runs() == 1, LONG)  # Jasna is running
     world.restart_controller()
-    # the restart came while the restore still ran
+    # the restart came while the restore was still the worker's, unresolved;
+    # a slow runner may already have it settling or finishing (CI 39939505823)
     assert world.status(film, "restore") == "running"
-    assert (worker.dispatcher.current() or {}).get("phase") == "running"
+    assert (worker.dispatcher.current() or {}).get("phase") in {
+        "running",
+        "settling",
+        "uploading",
+        "finishing",
+    }
     release.touch()
     wait_status(world, film, "restore", "succeeded")
     assert len(world.attempts(film, "restore")) == 1 and world.jasna_runs() == 1

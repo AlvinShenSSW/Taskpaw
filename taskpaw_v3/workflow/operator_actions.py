@@ -348,11 +348,12 @@ def reassign_options(
         ),
         None,
     )
+    full = snapshot
     if current is not None:
         snapshot = snapshot.model_copy(
             update={"routes": tuple(r for r in snapshot.routes if r is not current)}
         )
-    seen = sc.preview(
+    seen = sc.preview(  # §9 CX33: at the film's own place in the confirm order
         snapshot,
         film_id,
         (film.ltx_model,),
@@ -361,6 +362,7 @@ def reassign_options(
         controller_id=rt.identity.worker_id,
         gpu_stages=found,
         live_since=fleet.started_at if fleet is not None else None,
+        keep_confirmed=True,
     ).get(film.ltx_model)
     names = {w.worker_id: w.name for w in snapshot.workers}
     by_id = {d.worker_id: d for d in seen.devices} if seen is not None else {}
@@ -377,10 +379,10 @@ def reassign_options(
         and not (fleet is not None and fleet.state(current.worker_id, now) == "lost")
     )
     if kept and current is not None:
-        own = by_id.get(current.worker_id)
+        # §9 CX33: where the route stands — only the routes ahead of it count
+        queued = sc.queued_finish(full, film_id, now=now, gpu_stages=found)
         machine = current.worker_id
-        finish = own.finish_at if own is not None else None
-        energy = own.energy_wh if own is not None else None
+        finish, energy = queued if queued is not None else (None, None)
     options: list[dict[str, Any]] = [
         {
             "worker_id": None,

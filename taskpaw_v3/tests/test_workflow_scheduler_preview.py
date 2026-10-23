@@ -304,3 +304,79 @@ def test_preview_of_a_changed_source_waits_like_the_pass():
         assert view[tier].waiting == planned.waiting[target.film_id], tier
         assert view[tier].machine is None and view[tier].finish_at is None
         assert view[tier].reason is None
+
+
+def test_cx28_the_fallback_of_a_film_not_routable_yet_keeps_the_disk_gate():
+    """P2-4 §9 CX28 (#298 R1): a film the pass would not route now (it
+    holds its own route) previews through the fallback, which applies the
+    controller-disk gate by the same helper as the pass (`_disk_full`)."""
+    ws = fleet()[:2]
+    target = film()
+    routes = [open_route(target, ws[0])]
+    roomy = s.preview(
+        snapshot([target], ws, routes=routes),
+        target.film_id,
+        ("standard",),
+        live=live(ws),
+        now=NOW,
+        controller_id=CONTROLLER,
+    )["standard"]
+    assert roomy.machine is not None and roomy.waiting is None
+    full = s.preview(
+        snapshot([target], ws, routes=routes),
+        target.film_id,
+        ("standard",),
+        live=live(ws),
+        now=NOW,
+        controller_id=CONTROLLER,
+        controller_free_bytes=10 * s.GB,
+    )["standard"]
+    assert full.machine is None and full.waiting == s.CONTROLLER_DISK
+    assert s._disk_full(10 * s.GB, 0.0, 0.0)
+    assert not s._disk_full(None, 10**15, 10**15)
+
+
+def test_cx33_queued_finish_counts_only_the_routes_ahead_on_that_worker():
+    """P2-4 §9 CX33 (#298 R1): a kept route's estimate is the work queued
+    ahead of it on its worker plus its own — a route behind it never counts."""
+    w = fleet()[0]
+    ahead, target, behind = film(0), film(1), film(2)
+    first = open_route(ahead, w, minutes=30)
+    mine = open_route(target, w, minutes=20)
+    last = open_route(behind, w, minutes=10)
+    alone = snapshot([target], [w], routes=[mine])
+    both = snapshot([ahead, target], [w], routes=[first, mine])
+    three = snapshot([ahead, target, behind], [w], routes=[first, mine, last])
+    solo = s.queued_finish(alone, target.film_id, now=NOW)
+    queued = s.queued_finish(both, target.film_id, now=NOW)
+    assert solo is not None and queued is not None
+    assert queued[0] > solo[0]
+    assert s.queued_finish(three, target.film_id, now=NOW) == queued
+    assert s.queued_finish(snapshot([target], [w]), target.film_id, now=NOW) is None
+
+
+def test_cx33_preview_can_keep_the_films_confirm_time():
+    """CX33: 改派 previews the film at its own place in the confirm order."""
+    w = fleet()[0]
+    occupied = film(0)
+    target, later = film(10), film(20)
+    shot = snapshot([occupied, target, later], [w], routes=[open_route(occupied, w)])
+    now_view = s.preview(
+        shot,
+        target.film_id,
+        ("standard",),
+        live=live([w]),
+        now=NOW,
+        controller_id=CONTROLLER,
+    )["standard"]
+    assert now_view.machine is None  # confirmed "now": the later film goes first
+    kept = s.preview(
+        shot,
+        target.film_id,
+        ("standard",),
+        live=live([w]),
+        now=NOW,
+        controller_id=CONTROLLER,
+        keep_confirmed=True,
+    )["standard"]
+    assert kept.machine == w.worker_id and kept.finish_at is not None

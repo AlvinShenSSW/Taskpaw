@@ -44,6 +44,7 @@ from .executors import (
 from .local_runtime import AttemptFile, LocalRuntime, _new_id
 from .owned_process import OwnedJob
 from .scheduler import remote_mode
+from .store_core import parse_time
 from .timing import WorkflowLog, film_timing
 
 if TYPE_CHECKING:
@@ -854,7 +855,7 @@ class LocalDispatcher:
             return
         try:
             job, name = running.job, running.name or running.job.film_id
-            started = datetime.fromisoformat(running.started_at)
+            started = parse_time(running.started_at)
             duration = (datetime.now(timezone.utc) - started).total_seconds()
             self.workflow_log.stage(
                 name, job.stage, ok=outcome.ok, duration=duration, note=outcome.message

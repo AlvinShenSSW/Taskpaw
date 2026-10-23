@@ -85,6 +85,37 @@ def test_a_device_lost_row_raises_no_stage_attention_event(world, sink):  # noqa
     ]
 
 
+def test_cx27_a_lost_assignment_on_an_older_revision_notifies_once(world, sink):  # noqa: F811
+    """P2-4 §9 CX27 (#298 R1): the claim left on revision 1 has no
+    current-revision route, yet the row names the lost worker
+    (`lost_worker`, from `scheduler.lost_films`) and the observer raises
+    `device_lost:<worker>` once."""
+    from taskpaw_v3.tests.test_workflow_board_inputs import rows
+    from taskpaw_v3.tests.test_workflow_local_dispatch import plan_film
+    from taskpaw_v3.tests.test_workflow_plans import new_revision
+
+    observer, queue = sink
+    rt = world.rt
+    w1 = enrol_remote(rt, "5070 Ti")
+    film_id = add_film(rt)
+    route(rt, film_id, w1.worker_id)
+    claim_remote(rt, w1, film_id, "restore")
+    online(world, w1)
+    new_revision(rt, film_id)
+    plan_film(rt, film_id, revision=2)
+    world.clock.advance(timedelta(seconds=61))
+    host = Host(rt, world.fleet)
+    row = rows(host)[film_id]
+    assert row["route"] is None  # no current-revision route
+    assert row["attention_kind"] == "device_lost"
+    assert row["lost_worker"] == {"id": w1.worker_id, "name": "5070 Ti"}
+    observer.observe(host)
+    observer.observe(host)
+    assert [k for k, _l, _m in kinds(queue)] == [
+        f"workflow.film.device_lost:{w1.worker_id}"
+    ]
+
+
 def test_the_planning_notice_reads_auto_in_remote_mode(world, sink):  # noqa: F811
     observer, queue = sink
     add_film(world.rt, plan=False)

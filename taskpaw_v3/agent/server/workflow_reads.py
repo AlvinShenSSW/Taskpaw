@@ -352,7 +352,10 @@ def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInpu
                     mine.get(film.film_id), position, names, fleet, now, controller
                 ),
                 pin=_pin(rt, film, names),
-                lost=names.get(lost[film.film_id], "")
+                lost={
+                    "id": lost[film.film_id],
+                    "name": names.get(lost[film.film_id], ""),
+                }
                 if film.film_id in lost
                 else None,
                 actions=actions,
