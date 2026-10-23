@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -1686,20 +1687,13 @@ def test_cx18_an_unreadable_attempts_folder_sweeps_no_work_folder(
 ):
     """§9 CX18: the orphan sweep names its known attempts from the folder; a
     folder that cannot be listed names nothing, so nothing is swept."""
-    import os
-
     client = Scripted.__new__(Scripted)
     d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
     client.__init__(staging)
     attempt = _held_attempt(staging, ident())
     (staging.work_dir / attempt).mkdir(parents=True)
-    real = os.scandir
-
-    def denied(path="."):
-        if os.fspath(path) == os.fspath(d.attempt_dir):
-            raise PermissionError("denied")
-        return real(path)
-
+    target = os.fspath(d.attempt_dir)
+    denied = _path_shim(os.scandir, lambda path: path == target)
     real_glob = Path.glob
 
     def swallowed(self, pattern, *args, **kw):  # `Path.glob` hides the error
@@ -1813,17 +1807,66 @@ def test_cx22_an_unreadable_attempts_folder_keeps_a_held_attempt_alive(
     d.booted({"reconciled": False, "attempts": {held: "held"}, "keep": []})
     assert d.lease.holder() == d.run_id
     monkeypatch.setattr(rd, "process_alive", lambda identity: False)
-    real = os.scandir
-
-    def denied(path="."):
-        if os.fspath(path) == os.fspath(d.attempt_dir):
-            raise PermissionError("denied")
-        return real(path)
-
-    monkeypatch.setattr(os, "scandir", denied)
+    target = os.fspath(d.attempt_dir)
+    monkeypatch.setattr(
+        os, "scandir", _path_shim(os.scandir, lambda path: path == target)
+    )
     assert d.stop(0.2) is False
     assert d.lease.holder() == d.run_id
     assert (staging.root / "attempts" / f"{held}.json").exists()
+
+
+def _path_shim(real: Any, deny: Any) -> Any:
+    """A filesystem shim that refuses (PermissionError) only a path argument
+    `deny(os.fspath(path))` names and hands everything else to `real`
+    unchanged — on POSIX `shutil.rmtree` walks by file descriptor and calls
+    `os.scandir(fd)` with an int (`_rmtree_safe_fd`), which must reach the
+    real function."""
+
+    def shim(path: Any = ".") -> Any:
+        if isinstance(path, (str, bytes, os.PathLike)) and deny(os.fspath(path)):
+            raise PermissionError("denied")
+        return real(path)
+
+    return shim
+
+
+def test_the_path_shim_forwards_a_file_descriptor_to_the_real_function(tmp_path):
+    seen: list[Any] = []
+
+    def real(path: Any = ".") -> str:
+        seen.append(path)
+        return "real"
+
+    shim = _path_shim(real, lambda path: True)
+    assert shim(7) == "real" and seen == [7]  # an fd is never denied
+    with pytest.raises(PermissionError):
+        shim(tmp_path)
+    assert seen == [7]
+    other = _path_shim(real, lambda path: path == os.fspath(tmp_path / "x"))
+    assert other(tmp_path) == "real" and seen == [7, tmp_path]
+
+
+@pytest.mark.skipif(
+    os.scandir not in os.supports_fd, reason="os.scandir takes no fd here"
+)
+def test_rmtree_by_file_descriptor_passes_through_the_shim(tmp_path, monkeypatch):
+    """The POSIX path CI hit: rmtree's fd walk through the patched scandir."""
+    import shutil
+
+    denied = tmp_path / "attempts"
+    denied.mkdir()
+    victim = tmp_path / "work" / "a" / "b"
+    victim.mkdir(parents=True)
+    (victim / "f.bin").write_bytes(b"x")
+    target = os.fspath(denied)
+    monkeypatch.setattr(
+        os, "scandir", _path_shim(os.scandir, lambda path: path == target)
+    )
+    shutil.rmtree(tmp_path / "work")
+    assert not (tmp_path / "work").exists()
+    with pytest.raises(PermissionError):
+        os.scandir(denied)
 
 
 _MODES = ("readable", "unreadable-file", "unreadable-dir", "transient")
@@ -1839,7 +1882,6 @@ def test_no_operation_deletes_or_idles_what_its_inventory_could_not_read(
     time — under random boot / busy / stop / GC / recovery / delivery steps.
     No step deletes a record or a work folder an inventory of that step
     could not read, and busy is never false while any entry exists."""
-    import os
     import random
 
     from taskpaw_v3.workflow import remote_dispatch as rd
@@ -1874,17 +1916,17 @@ def test_no_operation_deletes_or_idles_what_its_inventory_could_not_read(
                 raise PermissionError("denied")
         return real_read(self, *args, **kw)
 
-    def scandir(path="."):
-        if os.fspath(path) == os.fspath(attempts) and any(
+    def unlistable(path: Any) -> bool:
+        if path != os.fspath(attempts) or not any(
             modes[a] == "unreadable-dir" and (attempts / f"{a}.json").exists()
             for a in modes
         ):
-            failed.update(a for a in modes if (attempts / f"{a}.json").exists())
-            raise PermissionError("denied")
-        return real_scandir(path)
+            return False
+        failed.update(a for a in modes if (attempts / f"{a}.json").exists())
+        return True
 
     monkeypatch.setattr(Path, "read_text", read_text)
-    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(os, "scandir", _path_shim(real_scandir, unlistable))
 
     class Answers:
         def attempt(self, attempt_id):
