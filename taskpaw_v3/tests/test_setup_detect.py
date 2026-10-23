@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -371,9 +372,37 @@ def test_run_probe_reads_at_most_4kb_into_memory(monkeypatch):
             raise AssertionError("unbounded read")
 
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: Proc())
+    monkeypatch.setattr(detect, "_kill_tree", lambda *a, **k: None)  # fake pid
     out = detect.run_probe(["x"], 5)
     assert out == "y" * 4096
     assert all(isinstance(s, int) and 0 < s <= 65536 for s in stream.sizes)
+
+
+def test_run_probe_returns_within_the_timeout_when_a_descendant_holds_stdout():
+    """#299 Codex r2 CX6: the probe exits at once but a descendant keeps the
+    inherited stdout open for 6 s. The caller must not block on that pipe:
+    the tree is killed and the probe returns within timeout + a margin."""
+    code = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(6)'])\n"
+        "print('ok', flush=True)\n"
+    )
+    started = time.monotonic()
+    out = detect.run_probe([sys.executable, "-c", code], 0.5)
+    assert time.monotonic() - started <= 0.5 + 1.5
+    assert out is None or out.strip() == "ok"
+
+
+def test_run_probe_kills_the_whole_tree_on_timeout():
+    """A hung probe with a child holding stdout: also bounded by the timeout."""
+    code = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(6)'])\n"
+        "time.sleep(30)\n"
+    )
+    started = time.monotonic()
+    assert detect.run_probe([sys.executable, "-c", code], 0.5) is None
+    assert time.monotonic() - started <= 0.5 + 1.5
 
 
 def test_run_probe_closes_stdin(tmp_path):
@@ -470,6 +499,7 @@ def test_no_probe_inherits_a_console_window(monkeypatch):
         return Done()
 
     monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(detect, "_kill_tree", lambda *a, **k: None)  # fake pid
     assert detect.run_probe(["x"], 1) == "yy"
     assert seen["stdin"] is subprocess.DEVNULL
     if sys.platform == "win32":

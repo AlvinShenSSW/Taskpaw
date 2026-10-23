@@ -6,8 +6,9 @@ each tool (ffprobe, Jasna, WhisperJAV, Miko) and suggested directories;
 directory (POST keeps the path out of access logs).
 
 Every probe runs a fixed argv with no window, stdin closed and a timeout
-(the process tree is killed on a timeout — on macOS/Linux its whole process
-group, before the leader is reaped), keeps at most 4 KB (the rest is drained
+(the whole process tree — a Job object on Windows, the process group on
+macOS/Linux — is killed on a timeout and again after the probe exits, so a
+descendant holding stdout never stalls the caller), keeps at most 4 KB (the rest is drained
 in bounded reads) and parses it by regex; nothing it prints is logged. ffprobe (`-version`) and nvidia-smi
 are the only programs ever executed: Jasna's version comes from its PE
 file-version resource, WhisperJAV and Miko are only looked for. The media
@@ -53,15 +54,66 @@ SUGGESTED = {
     "staging": "TaskpawStaging",
 }
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+_NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+_EOF_GRACE = (
+    0.25  # how long a finished probe's pipe may stay open before its tree is killed
+)
 _FFPROBE_VERSION = re.compile(r"ffprobe version n?(\d+(?:\.\d+){0,3})")
 
 Runner = Callable[[list[str], float], Optional[str]]
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
-    """Kill the probe and its children. POSIX (`start_new_session`): the
-    whole process group, while the unreaped leader still pins its id
-    (review IR6: no PID-reuse window)."""
+def _make_job(proc: subprocess.Popen) -> Any:
+    """Windows: a Job object holding the probe (and so every descendant it
+    spawns), so the whole tree can be terminated even after the parent has
+    exited. None where unavailable; `_kill_tree` then falls back to psutil."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel.AssignProcessToJobObject.restype = wintypes.BOOL
+        job = kernel.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        handle = getattr(proc, "_handle", None)
+        if handle is None or not kernel.AssignProcessToJobObject(job, int(handle)):
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle(job)
+            return None
+        return job
+    except Exception:
+        return None
+
+
+def _close_job(job: Any, terminate: bool) -> None:
+    if not job or sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        if terminate:
+            kernel.TerminateJobObject(job, 1)
+        kernel.CloseHandle(job)
+    except Exception:
+        pass
+
+
+def _kill_tree(proc: subprocess.Popen, job: Any = None) -> None:
+    """Kill the probe and everything it spawned. POSIX (`start_new_session`):
+    the whole process group (review IR6: while the unreaped leader still pins
+    its id on a timeout; after a normal exit the group id stays reserved while
+    any descendant lives). Windows: the Job object, plus psutil's children as
+    a fallback. Never raises."""
     if sys.platform != "win32":
         import signal
 
@@ -69,6 +121,8 @@ def _kill_tree(proc: subprocess.Popen) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
             pass
+    else:
+        _close_job(job, terminate=True)
     try:
         import psutil
 
@@ -101,11 +155,15 @@ def _drain(stream: Any, kept: bytearray) -> None:
 
 def run_probe(argv: list[str], timeout: float) -> Optional[str]:
     """Run one fixed probe; its first 4 KB of stdout, or None. Review IR12:
-    the output is drained on a thread in bounded reads, so a chatty or
-    stuck probe never grows memory and the timeout always holds."""
+    the output is drained on a daemon thread in bounded reads, so a chatty or
+    stuck probe never grows memory. Codex r2 CX6: the probe runs in its own
+    process group (POSIX) / Job object (Windows) and the whole tree is killed
+    on a timeout *and* after the probe exits, so a descendant holding the
+    inherited stdout cannot stall the caller; the caller never closes the pipe
+    while the reader may be blocked in it (a stuck reader is abandoned)."""
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
-        kwargs["creationflags"] = _NO_WINDOW
+        kwargs["creationflags"] = _NO_WINDOW | _NEW_GROUP
     else:
         kwargs["start_new_session"] = True
     try:
@@ -118,6 +176,7 @@ def run_probe(argv: list[str], timeout: float) -> Optional[str]:
         )
     except OSError:
         return None
+    job = _make_job(proc)
     kept = bytearray()
     reader = threading.Thread(
         target=_drain, args=(proc.stdout, kept), name="taskpaw-probe", daemon=True
@@ -126,15 +185,17 @@ def run_probe(argv: list[str], timeout: float) -> Optional[str]:
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _kill_tree(proc)
+        _kill_tree(proc, job)
         try:
-            proc.wait(timeout=2)
+            proc.wait(timeout=1)
         except (subprocess.TimeoutExpired, OSError):
             pass
-        reader.join(2)
+        reader.join(0.5)  # abandoned (never closed) if still blocked
         return None
-    reader.join(2)  # EOF follows the exit (a grandchild may hold the pipe)
-    if proc.stdout is not None:
+    reader.join(_EOF_GRACE)  # EOF follows the exit unless a descendant holds the pipe
+    _kill_tree(proc, job)  # descendants die with the probe
+    reader.join(1)
+    if not reader.is_alive() and proc.stdout is not None:
         try:
             proc.stdout.close()
         except OSError:

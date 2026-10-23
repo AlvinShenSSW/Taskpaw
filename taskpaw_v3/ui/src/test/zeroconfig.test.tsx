@@ -107,6 +107,27 @@ describe("网络与访问 (R4–R6)", () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith({ lan_access: true, bind_host: "10.0.0.5", bind_port: 5680, control_port: 5681 }));
   });
 
+  it("a saved replacement token replaces the cached one (Codex r2 CX5)", async () => {
+    const view = vi.spyOn(api, "network").mockResolvedValue(network({ lan_access: true, bind_host: "10.0.0.5", token_set: true, api_token_hint: "7Q2f" }));
+    const token = vi.spyOn(api, "networkToken").mockImplementation(async () => ({ token: "tp_SavedSavedSavedSaved7Q2f" }));
+    const save = vi.spyOn(api, "updateConfig").mockResolvedValue({ ok: true, restart_required: false });
+    wrap(<NetworkAccess />);
+    const field = await screen.findByLabelText("访问令牌");
+    fireEvent.click(screen.getByRole("button", { name: "显示" }));
+    await waitFor(() => expect(field).toHaveValue("tp_SavedSavedSavedSaved7Q2f")); // the old token is now cached
+    fireEvent.click(screen.getByRole("button", { name: "粘贴主控的访问令牌" }));
+    fireEvent.change(await screen.findByLabelText("访问令牌"), { target: { value: "tp_ReplacementReplacementReplace9Zz" } });
+    view.mockResolvedValue(network({ lan_access: true, bind_host: "10.0.0.5", token_set: true, api_token_hint: "e9Zz" }));
+    token.mockImplementation(async () => ({ token: "tp_ReplacementReplacementReplace9Zz" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ api_token: "tp_ReplacementReplacementReplace9Zz" })));
+    await waitFor(() => expect(screen.getByLabelText("访问令牌")).toHaveValue("tp_••••••e9Zz"));
+    token.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "显示" }));
+    await waitFor(() => expect(screen.getByLabelText("访问令牌")).toHaveValue("tp_ReplacementReplacementReplace9Zz"));
+    expect(token).toHaveBeenCalledWith("reveal"); // fetched again, not the obsolete cached value
+  });
+
   it("a machine other than the 主控 pastes the home token (review IR2)", async () => {
     vi.spyOn(api, "network").mockResolvedValue(network());
     const gen = vi.spyOn(api, "networkToken").mockResolvedValue({ token: "tp_Generated0Generated0Generated012" });

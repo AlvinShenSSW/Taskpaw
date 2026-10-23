@@ -39,7 +39,7 @@ export function NetworkAccess({ forceLan = false, wizard = false, tokenMode = "g
   const view = useQuery({ queryKey: NETWORK_KEY, queryFn: api.network, retry: false });
   if (view.isLoading) return <Typography variant="body2" color="text.secondary">正在读取网络设置…</Typography>;
   if (view.error || !view.data) return <Alert severity="error">无法读取网络设置</Alert>;
-  return <NetworkForm key={JSON.stringify([view.data.lan_access, view.data.bind_host, view.data.bind_port, view.data.token_set])}
+  return <NetworkForm key={JSON.stringify([view.data.lan_access, view.data.bind_host, view.data.bind_port, view.data.token_set, view.data.api_token_hint])}
     view={view.data} forceLan={forceLan} wizard={wizard} tokenMode={tokenMode} submitLabel={submitLabel} onSaved={onSaved} back={back} />;
 }
 
@@ -108,6 +108,8 @@ function NetworkForm({ view, forceLan, wizard, tokenMode, submitLabel, onSaved, 
       return api.updateConfig(patch);
     },
     onSuccess: () => {
+      // CX5: the saved token replaces the cached one — 显示 / 复制 must fetch it again
+      setToken(null); setShown(false);
       setFresh(false); setErrors({}); setPasted(""); setPasting(false);
       qc.invalidateQueries({ queryKey: NETWORK_KEY });
       qc.invalidateQueries({ queryKey: RESTART_KEY });
