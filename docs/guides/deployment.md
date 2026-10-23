@@ -35,7 +35,139 @@ Commands below assume that environment is active (or prefixed with `uv run`).
 
 ---
 
-## One-click setup (recommended)
+## 多机媒体工作流部署
+
+The media workflow (EPIC #271, phase 2) runs on several machines at home. With the
+packaged app you edit **no** yaml file: the first-run wizard writes everything, and
+the two settings that need a restart end with a 立即重启 button. Everything below
+is for one user on a trusted home LAN.
+
+### Roles
+
+| Role | Machine | Runs |
+|------|---------|------|
+| 媒体主控 (controller) | Windows only | 媒体处理中心, the INBOX watcher, local ASR (WhisperJAV), translate, Miko scrape and Filmpaw ingest. It dispatches restore and never restores itself (OD1, OD7). Any GPU works, e.g. the RTX 5060 8 GB. |
+| GPU 工作机 (worker) | Windows only, GPU of **16 GB or more** | Jasna restore, 1080p and 4K, and nothing else (OD7). A card under 16 GB never restores (OD5): the wizard disables the card with 「本机显卡不足 16 GB」. |
+| Mac Hub | macOS | Only the Hub: the read-only 媒体处理 tab, notifications, and the **single** consumer of each Agent's `/events` (see the section below). The Mac is never a controller or a worker: those wizard cards read 「仅支持 Windows」. |
+
+Windows is the only controller and worker platform. The reference fleet is one 5060
+8 GB controller plus four 16 GB workers (3 × 5060 Ti, 1 × 5070 Ti).
+
+### Ports and firewall
+
+| Port | What | Reachable from | Firewall rule the wizard creates |
+|------|------|----------------|----------------------------------|
+| 5680 | Agent read API (`/status`, `/workflow/*`) | LAN: the Hub, the controller (power and status of a worker) | The rule 「TaskPaw Agent」: inbound, **private profile only**, scoped to the TaskPaw backend program, with port 5680. Added on every Windows machine with 局域网访问 on. |
+| 5681 | Agent control API (the app's own UI) | loopback only | None. Never opened. |
+| 5682 | Worker API (`/worker/v1`: pairing, heartbeat, claim, transfer) | LAN: workers → controller | Controller only, and only while 允许 GPU 工作机接入 is on. The same 「TaskPaw Agent」 rule gains port 5682 (5680 + 5682). Workers listen on 5680 only. |
+| 5690 | Hub read API | LAN | None: the wizard is Windows-only and the Hub runs on the Mac. macOS asks once to allow incoming connections; click 允许. |
+| 5691 | Hub control API | loopback only | None. Never opened. |
+
+The rule is added by **one** UAC prompt on 完成, under the TaskPaw publisher. If you
+answer 「否」 nothing breaks: 设置 → 网络与访问 then offers 添加入站规则 to retry. If
+the machine's network is marked Public the wizard warns: switch it to Private, as
+the rule does not apply to Public.
+
+### Zero-config steps per role
+
+Install the packaged TaskPaw app, open it, and the wizard 「首次启动 · 选择角色」
+opens by itself. No file is edited on any machine. **Set up the controller first**:
+the workers need its 访问令牌 and its 配对码.
+
+**媒体主控 (Windows)**
+
+1. 角色: pick 媒体主控. The card shows the detected GPU.
+2. 网络与访问: 局域网访问 is forced on. The 访问令牌 (the one token for the whole
+   house) is generated for you. 复制 it; you paste it on every other machine.
+   (生成新令牌 is only for the very first machine; 重新生成 makes every other
+   TaskPaw and the Hub need the new token.)
+3. The controller step: INBOX and 工作目录 are suggested on the fixed drive with the
+   most free space, and ffprobe, Jasna, WhisperJAV and Miko are detected. Turn on
+   **允许 GPU 工作机接入** (under 高级 the 工作机接口端口 stays 5682).
+4. 完成: review the rows (修改 returns to a step), accept the UAC prompt, then
+   立即重启 TaskPaw.
+
+**GPU 工作机 (Windows, 16 GB or more)**
+
+1. 角色: pick GPU 工作机.
+2. 网络与访问: click 粘贴主控的访问令牌 and paste the controller's token.
+3. The worker step shows the GPU, VRAM, driver and power limit. Set 暂存目录 and
+   暂存上限. Click 「保存并启动工作机（约 10 秒）」; the window restarts and resumes at
+   加入主控 (leave the page open until then).
+4. 加入主控: paste the 配对码 made on the controller (next section). Wait for
+   「已加入主控」, then 下一步 → 完成 (UAC prompt, 立即重启 if offered).
+
+**Mac Hub**
+
+The Hub has no wizard. Open the app on the Mac, register the controller as a polled
+server (its LAN address, port 5680, polled with the same 访问令牌), then pick it in
+设置 → 主控连接 (选择主控 / 更换主控). Keep the Mac the only `/events` consumer.
+
+### Pairing and 核验并启用
+
+1. On the controller: 媒体处理中心 → 设备 → 添加设备. Enter a name and the worker's
+   address, then 生成配对码. The code is valid for 15 minutes and works once.
+2. Paste it on the worker (step 4 above). If it fails with 「配对码无效、已使用或已过期」,
+   generate a new one (重新配对 on an enrolled worker does the same).
+3. The worker appears on 设备 as 待核验. Open 核验并启用, compare the probe with the
+   last one, leave 修复 on and confirm. Only after this does the controller send
+   it films. A worker can be paused with 停领 and resumed with 恢复.
+
+### 4K needs a re-核验 after this update
+
+Before this update a worker advertised at most 1080p, so every worker you already
+approved holds a **1080p** profile. A 16 GB worker now probes 3840×2160, and 4K
+films go only to a worker whose approved profile says so.
+
+1. Update **every** machine to the same build first (see 版本不一致 below).
+2. On each 16 GB worker the device page shows 待核验 again (the proposed max is
+   above the approved max). Click 核验并启用 once per worker.
+3. Until then the worker keeps taking 1080p films, and a 4K film waits in 待处理
+   with 「4K 需重新核验」. 「显存不足 4K」 means the worker truly cannot take 4K.
+
+A card under 16 GB is refused before any profile check and cannot be approved.
+
+### Operations
+
+- **失联 (OD2).** A worker that stops answering shows 失联 N 分钟, and its films show
+  设备失联 with 「后台重连中」. Nothing is moved automatically. Open the film:
+  - 改派 moves a film that has **not started** to another machine or to 自动 (the
+    new machine downloads the source again).
+  - A film that already started needs 判定已停止 first. It is offered only after both
+    channels have been dead for 5 minutes, and you confirm the machine is really off
+    or the task stopped. The stage counts as a free retry and anything the worker
+    sends later is discarded. If the machine is still running, wait for it instead.
+- **Stop one film (OD3).** The only per-film stop is 停止并重新排队 in the film
+  drawer: the worker kills the Jasna process tree at its next heartbeat and the
+  film goes back to 待处理 without counting as a failure.
+- **Tool or capability change (OD4).** A new Jasna, a changed GPU preset or
+  model, or any capability change puts the worker back to 待核验: click 核验并启用
+  again. The same applies to a 4K change.
+- **Changing a setting that needs a restart** shows a banner: 稍后 or 立即重启. It
+  refuses while a local Jasna or ASR run holds the GPU.
+
+### Troubleshooting
+
+- **401 or 令牌不一致.** The 访问令牌 differs between machines. Copy it from the
+  controller's 设置 → 网络与访问 and use 粘贴主控的访问令牌 on the other machines;
+  re-register or edit the Hub's polled server with the same token. A bad 配对码 also
+  answers 401, by design: generate a fresh one.
+- **The controller or a worker changed address (DHCP).** On start the app rebinds to
+  the new address in the same /24 subnet and shows 「本机地址已从 A 变为 B…」 in 设置 →
+  网络与访问. The other machines do not follow: update the Hub's server address and
+  the worker's 配对 (重新配对 if it cannot reach the controller). Best fix: reserve a
+  fixed address in your router.
+- **版本不一致.** A worker whose app version or protocol differs from the
+  controller's takes no film. Install the same build on all Windows machines
+  (and the Mac Hub), restart them, and the state clears.
+
+> **Legacy / manual path.** The yaml-based steps from here on (hand-written
+> `agent.yaml` and `hub.yaml`, bootstrap scripts) still work and are kept for
+> developer machines. For the media workflow use the wizard above.
+
+---
+
+## One-click setup (developer scripts, legacy)
 
 Don't hand-type the steps — use the wrappers in `scripts/`, which install deps,
 scaffold the config, register agents, and start the service:
