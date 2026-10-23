@@ -227,10 +227,24 @@ def test_miko_complete_partial_off(tmp_path):
         "python": python,
         "profile": None,
     }
-    profile = touch(tmp_path / "appdata" / "com.mdcx.desktop" / "config.json")
-    assert d.miko(WorkflowSettings(), config_dir)["status"] == "complete"
-    assert d.miko(WorkflowSettings(), config_dir)["profile"] == profile
+    # a saved profile is a plain file check, so it holds on every OS
+    saved = touch(tmp_path / "saved" / "config.json")
+    found = d.miko(WorkflowSettings(mdcx_profile=saved), config_dir)
+    assert found["status"] == "complete" and found["profile"] == saved
     assert detector(tmp_path / "none").miko(WorkflowSettings(), None)["status"] == "off"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows tool locations")
+def test_miko_default_profile_is_under_appdata(tmp_path):
+    """The default profile is an ntpath join (the controller is Windows-only),
+    so only a Windows host can create the file it names."""
+    config_dir = tmp_path / "cfg"
+    root = config_dir / "engines" / "MDCX304"
+    touch(root / "mdcx" / "cmd" / "postprocess_one.py")
+    touch(root / ".venv" / "Scripts" / "python.exe")
+    profile = touch(tmp_path / "appdata" / "com.mdcx.desktop" / "config.json")
+    found = detector(tmp_path).miko(WorkflowSettings(), config_dir)
+    assert found["status"] == "complete" and found["profile"] == profile
 
 
 def test_nothing_is_detected_or_suggested_off_windows(tmp_path):

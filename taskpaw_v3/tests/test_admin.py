@@ -3174,3 +3174,53 @@ def test_i216_r1_folder_update_timeout_never_resumes_retired_owner(tmp_path):
     finally:
         edge_release.set()
         sup.stop(1)
+
+
+def test_a_restart_granted_while_an_update_validates_refuses_the_commit(tmp_path):
+    """#299 Codex r3 CX7: the reservation was taken before the restart; the
+    commit rechecks `_restarting` under the mutation lock, so nothing is
+    persisted or applied after the 202."""
+    import threading
+
+    path = tmp_path / "agent.yaml"
+    cfg = _agent_config(
+        monitors=[{"type_id": "fake", "config": {"name": "m1", "poll_interval": 10}}]
+    )
+    from taskpaw_v3.core.config import save_yaml
+
+    save_yaml(cfg, path)
+    before = path.read_bytes()
+    sup = build_supervisor(_registry(), cfg.monitors, EventQueue("m"), "m")
+    adm = MonitorAdmin(cfg, sup, _registry(), path)
+    entered, release = threading.Event(), threading.Event()
+    original = adm._validated_config
+
+    def gated(spec):
+        entered.set()
+        assert release.wait(5)
+        return original(spec)
+
+    adm._validated_config = gated
+    outcome = []
+
+    def run():
+        try:
+            outcome.append(adm.update("m1", {"poll_interval": 20}))
+        except ValueError as exc:
+            outcome.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        with adm._settings_admission():
+            adm.begin_restart()
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert isinstance(outcome[0], ValueError) and str(outcome[0]) == "restarting"
+    assert path.read_bytes() == before
+    assert adm._config.monitors[0]["config"]["poll_interval"] == 10
+    assert adm._owners == {}
+    sup.stop(1)

@@ -180,6 +180,16 @@ class MonitorAdmin:
         finally:
             self._mutation.release()
 
+    def _try_save_admission(self) -> bool:
+        """Non-blocking `_mutation` for a stop's persist step; refused (and
+        released) once a restart is granted (#299 Codex r3 CX7)."""
+        if not self._mutation.acquire(blocking=False):
+            return False
+        if self._restarting:
+            self._mutation.release()
+            return False
+        return True
+
     @property
     def restarting(self) -> bool:
         return self._restarting
@@ -188,6 +198,11 @@ class MonitorAdmin:
         """#299 review IR5: called under `_settings_admission` by the granted
         restart; every later save, monitor change and restart is refused."""
         self._restarting = True
+        # #299 Codex r3 CX7: reservations taken before the grant are cancelled;
+        # their commit step also rechecks the flag under `_mutation`.
+        with self._lock:
+            for owner in self._owners.values():
+                owner.cancel.set()
 
     def _candidate(
         self,
@@ -453,6 +468,8 @@ class MonitorAdmin:
             if not self._mutation.acquire(timeout=1):
                 return self._busy(iid, "add")
             try:
+                if self._restarting:  # #299 Codex r3 CX7: granted meanwhile
+                    raise ValueError("restarting")
                 with self._lock:
                     # Validation precedes admission: recheck eligibility against
                     # the latest commit, including a same-name overlapping Add.
@@ -510,6 +527,8 @@ class MonitorAdmin:
             if not self._mutation.acquire(timeout=1):
                 return self._busy(iid, "remove")
             try:
+                if self._restarting:  # #299 Codex r3 CX7: granted meanwhile
+                    raise ValueError("restarting")
                 with self._lock:
                     remaining = [
                         copy.deepcopy(m)
@@ -602,7 +621,7 @@ class MonitorAdmin:
         # No save/log/validator precedes the stop signal above.
         with self._lock:
             save = self._stop_saves.get(iid)
-        if save is None and self._mutation.acquire(blocking=False):
+        if save is None and self._try_save_admission():
             save = _Reservation(
                 iid,
                 "stop",
@@ -785,6 +804,8 @@ class MonitorAdmin:
             else:
                 validate()
             with self._lock:
+                if self._restarting:  # #299 Codex r3 CX7: granted while validating
+                    raise ValueError("restarting")
                 if op.cancel.is_set() or op.revision != self._revision:
                     op.stage = "validation_cancelled"
                     return self._result(
@@ -811,6 +832,8 @@ class MonitorAdmin:
             ):
                 return self._busy(iid, operation)
             try:
+                if self._restarting:  # #299 Codex r3 CX7: granted meanwhile
+                    raise ValueError("restarting")
                 with self._lock:
                     if (
                         op.cancel.is_set()
