@@ -390,6 +390,13 @@ def _get_json(
             raise PeerError(
                 "timeout" if watch.expired(exc, deadline) else "unreachable"
             ) from None
+        if watch.cut:
+            # §9 CX26: the watch shut the socket down before the response
+            # was handed back, so the header block was cut: http.client
+            # reads end-of-file there as the end of the headers (Linux),
+            # where Windows raises. Not an answer, on either platform.
+            resp.close()
+            raise PeerError("timeout")
         try:
             with resp:
                 body = _read_capped(resp, deadline)

@@ -676,6 +676,58 @@ def _pair(directory: Path, staging: str, *, pending: bool = False) -> None:
     ).save(directory / (PENDING_NAME if pending else IDENTITY_NAME))
 
 
+def test_a_partial_put_on_a_paired_worker_keeps_the_identity_staging_dir(tmp_path):
+    """§9 CX24 (Codex r8): the identity's staging directory differs from the
+    one agent.yaml holds (chosen at 加入); a save that does not touch staging
+    — omitted or repeating the YAML value — is not a change. Only an explicit
+    move to another directory is refused."""
+    yaml_dir = str(tmp_path / "staging-yaml")
+    chosen = str(tmp_path / "staging-chosen")
+    _pair(tmp_path / "workflow", chosen)
+    world = World(tmp_path, enabled=True, role="worker", staging_dir=yaml_dir)
+    before = world.path.read_bytes()
+    other = world.put({"role": "off", "staging_dir": str(tmp_path / "staging-x")})
+    assert other.status_code == 422, other.text
+    assert other.json()["fields"]["staging_dir"] == STAGING_PAIRED
+    assert world.path.read_bytes() == before
+    off = world.put({"role": "off"})
+    assert off.status_code == 200, off.text
+    again = world.put({"role": "off", "staging_dir": yaml_dir})
+    assert again.status_code == 200, again.text
+    chose = world.put({"role": "worker", "staging_dir": chosen})
+    assert chose.status_code == 200, chose.text
+
+
+def test_save_yaml_backups_and_temp_files_are_gitignored(tmp_path):
+    """§9 CX23 (Codex r8): `agent.yaml.bak` and the `.tmp` of every atomic
+    write hold the same secrets as the file itself."""
+    import shutil
+    import subprocess
+
+    root = Path(__file__).resolve().parents[2]
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shutil.copy(root / ".gitignore", repo / ".gitignore")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    names = [
+        "agent.yaml",
+        "agent.yaml.bak",
+        "agent.yaml.tmp",
+        "hub.yaml",
+        "hub.yaml.bak",
+        "hub.yaml.tmp",
+    ]
+    for name in names:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", name], cwd=repo, check=False
+        )
+        assert result.returncode == 0, name
+    tracked = subprocess.run(
+        ["git", "check-ignore", "-q", "agent.example.yaml"], cwd=repo, check=False
+    )
+    assert tracked.returncode == 1
+
+
 @pytest.mark.parametrize("pending", [False, True])
 def test_a_paired_staging_dir_holds_for_every_role_across_saves(tmp_path, pending):
     """§9 CX16 (Codex r5): the guard compares with the identity's staging

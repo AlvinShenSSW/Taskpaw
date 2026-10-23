@@ -19,7 +19,7 @@ import threading
 import uuid
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 from urllib.parse import quote
 
 import pytest
@@ -143,6 +143,7 @@ class World:
         )
         self.host: local_host.LocalWorkflowHost | None = None
         self.down = False
+        self.restarts = 0  # completed restarts: a read waits one out
         self.start_controller()
         self.server = Server(self)  # the app reads `state`, `runtime`, … below
         self.workers: list[WorkerHost] = []
@@ -193,7 +194,27 @@ class World:
         assert old is not None
         old.stop()
         self.start_controller()
+        self.restarts += 1
         self.down = False
+
+    def read(self, fn: Callable[[LocalRuntime], Any]) -> Any:
+        """Read the running controller's store. A restart that begins after
+        `rt` was taken closes that store (`authority_unavailable`): the read
+        then waits for the restart to finish, by its counter, and runs on the
+        new runtime. Any other failure, or no restart, is the test's failure."""
+        while True:
+            seen = self.restarts
+            try:
+                return fn(self.rt)
+            except (m.WorkflowError, RuntimeError) as exc:
+                # a store closed under the reader, or a stopped runtime
+                # that has none any more
+                if str(exc) not in {
+                    "authority_unavailable",
+                    "workflow runtime has no store yet",
+                }:
+                    raise
+                until(lambda: self.restarts != seen and not self.down, LONG)
 
     @property
     def rt(self) -> LocalRuntime:
@@ -272,18 +293,17 @@ class World:
 
     # ── reads ──
     def stage(self, film: str, name: str) -> m.StageRecord:
-        return next(
-            s
-            for s in self.rt.store.get_film(self.rt.operator, film).stages
-            if s.stage == name
-        )
+        stages = self.read(lambda rt: rt.store.get_film(rt.operator, film).stages)
+        return next(s for s in stages if s.stage == name)
 
     def status(self, film: str, name: str) -> str:
         return self.stage(film, name).status
 
     def attempts(self, film: str, name: str) -> list[m.AttemptRecord]:
         job = self.stage(film, name).job_id
-        return list(self.rt.store.list_attempts(self.rt.operator, job))
+        return list(
+            self.read(lambda rt: list(rt.store.list_attempts(rt.operator, job)))
+        )
 
     def jasna_runs(self) -> int:
         return len(self.tools.runs(self.tools.jasna_exe))
@@ -298,7 +318,7 @@ class World:
 
     def invariants(self) -> None:
         """≤ 1 unresolved assignment per job, ≤ 1 unresolved GPU owner."""
-        open_ = self.rt.store.list_open_assignments(self.rt.operator)
+        open_ = self.read(lambda rt: rt.store.list_open_assignments(rt.operator))
         jobs = [o.assignment.job_id for o in open_]
         assert len(jobs) == len(set(jobs))
         gpus = [o.assignment.resource_id for o in open_ if o.assignment.resource_id]
@@ -528,6 +548,25 @@ def test_case_2_a_lost_claim_reply_replays_to_one_assignment(world, monkeypatch)
     assert lost.is_set()
     assert len(world.attempts(film, "restore")) == 1 and world.jasna_runs() == 1
     world.invariants()
+
+
+@pytest.mark.parametrize("held_store", [False, True])
+def test_a_read_that_meets_a_restart_waits_for_the_new_runtime(world, held_store):
+    """§9 CX25 (CI run 39911578055): a reader that took `rt` just before a
+    restart found its store closed (`authority_unavailable`) — a test race,
+    not a product fault: the old host closing its store is the restart."""
+    seen: list[LocalRuntime] = []
+
+    def once(rt: LocalRuntime) -> Any:
+        seen.append(rt)
+        store = rt.store if held_store else None  # CI: the store already in hand
+        if len(seen) == 1:
+            world.restart_controller()  # the restart lands after `rt` was taken
+        return (store or rt.store).list_open_assignments(rt.operator)
+
+    assert not world.read(once)
+    assert len(seen) == 2 and seen[0] is not seen[1]
+    assert world.restarts == 1
 
 
 def test_case_3_a_worker_restart_without_a_ledger_is_a_free_retry(world):

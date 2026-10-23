@@ -991,16 +991,27 @@ def trickle():
         value.close()
 
 
-@pytest.mark.parametrize("body", [False, True])
-def test_a_trickling_peer_cannot_outlive_the_request_deadline(trickle, body):
+@pytest.mark.parametrize(
+    ("body", "timeout"),
+    [
+        # a header block that never ends: tight, the deadline cuts it
+        (False, 0.05),
+        # a complete status line and headers, then a trickling body: the
+        # deadline leaves room for the (loopback) headers to arrive first,
+        # so the runner's timing cannot decide the outcome
+        (True, 0.6),
+    ],
+)
+def test_a_trickling_peer_cannot_outlive_the_request_deadline(trickle, body, timeout):
     peer_ = trickle(body=body)
     started = time.monotonic()
     with pytest.raises(PeerError) as caught:
-        fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=0.05)
-    assert time.monotonic() - started < 0.4
+        fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=timeout)
+    assert time.monotonic() - started < timeout + 0.4
     assert caught.value.code == "timeout"
     # §9 CX19: a complete status line and headers are an answer; a header
-    # block that never ends is not
+    # block that never ends is not — on every platform (§9 CX26: http.client
+    # reads the cut socket's end-of-file as the end of the headers on Linux)
     assert caught.value.answered is body
 
 
@@ -1216,6 +1227,44 @@ def test_a_failure_after_connect_at_the_deadline_is_a_timeout(
     with pytest.raises(PeerError) as caught:
         fetch_json("http://127.0.0.1:9/status", TOKEN, timeout=0.05, opener=Opener())
     assert caught.value.code == "timeout"
+
+
+def test_a_cut_during_the_headers_is_not_an_answer_whatever_the_platform(monkeypatch):
+    """§9 CX26 (CI run 39911578055): on Linux the cut socket reads as the end
+    of the header block, so `open` hands back a response whose body is empty;
+    the watch having fired first, that is a timeout without an answer."""
+    watch_box: list[Any] = []
+    real_watch = power_fleet._Watch
+
+    def make_watch():
+        watch_box.append(real_watch())
+        return watch_box[0]
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def read(self, _n=-1):
+            return b""
+
+        def close(self):
+            pass
+
+    class Opener:
+        def open(self, request, timeout):
+            watch_box[0].track(socket.socket())  # connected
+            watch_box[0].fire()  # the deadline cuts the socket mid-headers
+            return Response()
+
+    monkeypatch.setattr(power_fleet, "_Watch", make_watch)
+    monkeypatch.setattr(power_fleet, "_Timer", _NeverFires)
+    with pytest.raises(PeerError) as caught:
+        fetch_json("http://127.0.0.1:9/status", TOKEN, timeout=0.05, opener=Opener())
+    assert caught.value.code == "timeout"
+    assert caught.value.answered is False
 
 
 def test_a_refused_connect_is_still_unreachable(monkeypatch):

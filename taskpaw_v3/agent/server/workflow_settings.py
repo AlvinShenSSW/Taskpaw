@@ -301,6 +301,23 @@ def _moved(new: str | None, old: str | None) -> bool:
     return not _same_path(Path(new), Path(old))
 
 
+def _effective_staging(
+    new: WorkflowSettings, old: WorkflowSettings, state: Retained, explicit: bool
+) -> WorkflowSettings:
+    """§9 CX24: a paired worker's staging directory lives in its identity, so
+    a save that omits the field (or repeats the saved agent.yaml value, which
+    the identity may have left behind) means the paired directory. Only an
+    explicit change to a different directory is refused."""
+    roots = state.paired
+    if not roots or any(_moved(root, roots[0]) for root in roots):
+        return new
+    if explicit and _moved(new.staging_dir, old.staging_dir):
+        return new
+    if not _moved(new.staging_dir, roots[0]):
+        return new
+    return new.model_copy(update={"staging_dir": roots[0]})
+
+
 # ── the retained state: THE baseline of every guard (§9 CX15/CX16) ─────
 @dataclass
 class Retained:
@@ -564,6 +581,7 @@ def register_workflow_settings(
             def check(validated: AgentConfig, old: WorkflowSettings) -> None:
                 new, running = validated.workflow, config.workflow
                 state = retained((old, running, new), running, config_dir, worker())
+                new = _effective_staging(new, old, state, "staging_dir" in fields)
                 validate(new, old, validated, config_dir, running, state)
                 refuse_busy(new, state, config_dir)
 
