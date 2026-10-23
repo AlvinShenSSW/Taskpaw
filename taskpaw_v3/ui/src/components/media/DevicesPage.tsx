@@ -510,7 +510,7 @@ function RepairDialog({ row, onClose, onConfirm }: { row: DeviceRow | null; onCl
         <>
           <ModalHead id="mw-repair-title" title={`重新配对 ${row.name}`} subtitle="生成新的一次性配对码" onClose={onClose} />
           <div className="modal-body">
-            <Notice tone="amber" icon={WarningAmberIcon}>重新配对后旧凭据立即失效，工作机需用新配对码重新加入</Notice>
+            <Notice tone="amber" icon={WarningAmberIcon}>将生成新的配对码；工作机用新码重新加入后，旧凭据才会失效。需要立即停用请用 撤销。</Notice>
           </div>
           <div className="modal-foot">
             <p>已在运行的任务不受影响。</p>

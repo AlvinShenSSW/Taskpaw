@@ -336,6 +336,22 @@ def reassign_options(
     stages = sc.routed_stages(film, found)
     live = fleet.snapshot() if fleet is not None else {}
     now = rt.clock.now()
+    # §9 CX31: `reassign` withdraws the film's route for a different worker (or
+    # a 失联 one under 自动) and keeps it otherwise — so the previews are built
+    # without that route (it must not count as queued work of its own); an
+    # option that keeps the route reports the route worker's own estimate
+    current = next(
+        (
+            r
+            for r in snapshot.routes
+            if r.film_id == film_id and r.input_revision == film.input_revision
+        ),
+        None,
+    )
+    if current is not None:
+        snapshot = snapshot.model_copy(
+            update={"routes": tuple(r for r in snapshot.routes if r is not current)}
+        )
     seen = sc.preview(
         snapshot,
         film_id,
@@ -353,6 +369,18 @@ def reassign_options(
         return {"finish_at": iso(finish) if finish else None, "energy_wh": energy}
 
     machine = seen.machine if seen is not None else None
+    finish = seen.finish_at if seen is not None else None
+    energy = seen.energy_wh if seen is not None else None
+    kept = (  # 自动 keeps a route unless its worker is 失联 (IR7/IR8)
+        current is not None
+        and current.worker_id != rt.identity.worker_id
+        and not (fleet is not None and fleet.state(current.worker_id, now) == "lost")
+    )
+    if kept and current is not None:
+        own = by_id.get(current.worker_id)
+        machine = current.worker_id
+        finish = own.finish_at if own is not None else None
+        energy = own.energy_wh if own is not None else None
     options: list[dict[str, Any]] = [
         {
             "worker_id": None,
@@ -362,10 +390,7 @@ def reassign_options(
             "machine": {"id": machine, "name": names.get(machine, "")}
             if machine is not None
             else None,
-            **estimate(
-                seen.finish_at if seen is not None else None,
-                seen.energy_wh if seen is not None else None,
-            ),
+            **estimate(finish, energy),
         }
     ]
     for worker in snapshot.workers:

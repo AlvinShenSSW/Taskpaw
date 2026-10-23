@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -603,6 +603,51 @@ def test_reassign_options_carry_the_preview_finish_and_energy(world):
     assert "energy_wh" in options["5070 Ti"]
     assert options["5060"]["reason"] is not None
     assert options["5060"]["finish_at"] is None and options["5060"]["energy_wh"] is None
+
+
+def same_instant(a: str, b: str) -> bool:
+    """The test clock is real time: two reads differ by milliseconds."""
+    parse = datetime.fromisoformat
+    return abs(parse(a) - parse(b)) < timedelta(seconds=1)
+
+
+def test_reassign_options_do_not_count_the_films_own_route(world):
+    """§9 CX31: the film's open route is not queued work of its own — one
+    worker's estimate is the same with or without the route (no doubling)."""
+    only = enrol_remote(world.rt, "5070 Ti")
+    world.beat(only)
+    film_id = add_film(world.rt)
+
+    def read():
+        return {
+            o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)
+        }
+
+    before = read()
+    assert before["5070 Ti"]["finish_at"] is not None
+    route(world.rt, film_id, only.worker_id)
+    after = read()
+    assert same_instant(after["5070 Ti"]["finish_at"], before["5070 Ti"]["finish_at"])
+    assert after["5070 Ti"]["energy_wh"] == before["5070 Ti"]["energy_wh"]
+    assert after["自动"]["machine"] == {"id": only.worker_id, "name": "5070 Ti"}
+    assert same_instant(after["自动"]["finish_at"], before["5070 Ti"]["finish_at"])
+
+
+def test_reassign_auto_shows_the_healthy_route_worker_it_keeps(world):
+    """§9 CX31: 自动 keeps a healthy route, so it names that worker, not the
+    device a fresh pass would pick; a different worker is estimated as the
+    withdrawn-and-rerouted film."""
+    fast = enrol_remote(world.rt, "5070 Ti")
+    small = enrol_remote(world.rt, "5060", gpu=("NVIDIA GeForce RTX 5060", 8151))
+    world.beat(fast)
+    world.beat(small)
+    film_id = add_film(world.rt)
+    fresh = {o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)}
+    assert fresh["自动"]["machine"]["id"] == fast.worker_id
+    route(world.rt, film_id, small.worker_id)
+    kept = {o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)}
+    assert kept["自动"]["machine"] == {"id": small.worker_id, "name": "5060"}
+    assert same_instant(kept["5070 Ti"]["finish_at"], fresh["5070 Ti"]["finish_at"])
 
 
 def test_the_stop_action_names_the_status_address_and_its_outcome(world):

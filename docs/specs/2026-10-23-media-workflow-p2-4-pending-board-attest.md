@@ -202,3 +202,12 @@ Base `0a0b126`. Fixtures and tmp folders only; the UI contract fixture is unchan
 | IR8 | 判定已停止 opened with the focus on the title. | **Fixed.** The initial focus is on 取消. | `a claimed lost film: … 判定已停止 shows both channels and confirms` |
 | IR9 | Disabled 全部按推荐确认 / 确认改派 / 保存 gave no reason. | **Fixed.** Each names it (aria-describedby; a tooltip on 全部按推荐确认, visible text in the dialog and the form). | `IR9: a disabled 全部按推荐确认 says why`, `CX29/IR9 …`, `loading, then the 主控 fields …` |
 | — | Cheap adds. | 本机 on 设备 links 「主控设置」 → 设置 · 媒体工作流 (`onOpenSettings`, the console's 设置 tab scrolled to the section; absent on the Mac). `reassign_options` carry `finish_at` / `energy_wh` (and 自动's `machine`) from `scheduler.preview` for the choices that can take the film, shown as 待处理's select does. `actions.stop` carries `address` and `status_state` — `StatusQuiet.outcome`, how the last `/status` read ended (`timeout`, `unreachable`, `idle`, or the up code) — shown as 「192.168.1.34:5680 · 超时」. | `test_reassign_options_carry_the_preview_finish_and_energy`, `test_the_stop_action_names_the_status_address_and_its_outcome`, `test_quiet_names_the_last_reads_outcome` (5), `本机's 「主控设置」 …`, `no 「主控设置」 without a host link` |
+
+### P2-4 UI review round 2 (commit 10) — Codex CX31–CX32
+
+Base `713e392`. Fixtures and tmp folders only.
+
+| # | Finding | Disposition | Test |
+|---|---|---|---|
+| CX31 | `reassign_options` previewed a snapshot that still held the film's own route, so `scheduler.preview` counted it as queued work: a doubled duration, or 自动 naming worker B while `reassign` keeps A's healthy route. | **Fixed.** The previews are built without the film's current-revision route (`reassign` withdraws it for a different worker, or for 自动 off a 失联 worker). A choice that keeps the route — 自动 with a healthy route, or the same worker — reports the route worker's own estimate and 自动's `machine` is that worker; a 失联 route or none leaves 自动 on the fresh pass's pick. | `test_reassign_options_do_not_count_the_films_own_route`, `test_reassign_auto_shows_the_healthy_route_worker_it_keeps` |
+| CX32 | The 重新配对 confirm said the old credential is invalidated at once, but revocation happens only when the worker redeems the new code. | **Fixed.** 「将生成新的配对码；工作机用新码重新加入后，旧凭据才会失效。需要立即停用请用 撤销。」 | `drains, re-pairs, revokes after confirmation …` (devices.test) |

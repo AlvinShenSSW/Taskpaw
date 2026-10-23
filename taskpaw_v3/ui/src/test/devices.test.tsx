@@ -209,7 +209,7 @@ describe("设备 v1", () => {
     // IR2: 重新配对 voids the old credential, so it asks first (停领 above stays immediate: 恢复 undoes it)
     fireEvent.click(within(card("5070 Ti")).getByRole("button", { name: "重新配对" }));
     const repair = await screen.findByRole("dialog", { name: "重新配对 5070 Ti" });
-    expect(repair).toHaveTextContent("重新配对后旧凭据立即失效，工作机需用新配对码重新加入");
+    expect(repair).toHaveTextContent("将生成新的配对码；工作机用新码重新加入后，旧凭据才会失效。需要立即停用请用 撤销。");
     expect(calls.repair).not.toHaveBeenCalled();
     fireEvent.click(within(repair).getByRole("button", { name: "取消" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
