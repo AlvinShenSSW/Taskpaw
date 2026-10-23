@@ -22,6 +22,14 @@ const SECTIONS: Array<[SettingsSection, string]> = [
   ["general", "通用"], ["network", "网络与访问"], ["workflow", "媒体工作流"], ["power", "功耗与主机监控"], ["about", "关于"],
 ];
 
+// CX12: the household token is generated on the 主控 only; every other saved role (incl. LAN off)
+// pastes it, exactly as the wizard does — a self-generated token would 401 against the Hub.
+function SavedRoleNetwork() {
+  const workflow = useQuery({ queryKey: ["workflowSettings"], queryFn: api.workflowSettings, retry: false });
+  if (workflow.isLoading) return null; // never mount with the wrong mode: generating is a one-shot on entering
+  return <NetworkAccess tokenMode={workflow.data?.saved.role === "controller" ? "generate" : "paste"} />;
+}
+
 export function Settings({ role, section: initial = "general" }: { role: "agent" | "hub"; section?: SettingsSection }) {
   const { t } = useTranslation();
   const [section, setSection] = useState<SettingsSection>(initial);
@@ -51,7 +59,7 @@ export function Settings({ role, section: initial = "general" }: { role: "agent"
     <Card><CardContent>
       <Typography variant="subtitle1" component="h2" sx={{ mb: 1.5 }}>网络与访问</Typography>
       <PendingRestart />
-      <NetworkAccess />
+      <SavedRoleNetwork />
     </CardContent></Card>
   ) : section === "workflow" ? (
     // P2-4: 设置 · 媒体工作流 (role + fields; 加入 while the running role is a worker)

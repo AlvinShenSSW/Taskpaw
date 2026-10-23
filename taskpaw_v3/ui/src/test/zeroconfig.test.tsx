@@ -291,6 +291,30 @@ function settingsState(): WorkflowSettingsState {
   };
 }
 
+describe("设置 · 网络与访问 token mode (Codex r5 CX12)", () => {
+  async function openNetwork(role: "off" | "worker" | "controller") {
+    vi.spyOn(api, "network").mockResolvedValue(network());
+    const base = settingsState();
+    vi.spyOn(api, "workflowSettings").mockResolvedValue({ ...base, saved: { ...base.saved, role }, running: { ...base.running, role } });
+    const gen = vi.spyOn(api, "networkToken").mockResolvedValue({ token: "tp_Generated0Generated0Generated012" });
+    wrap(<Settings role="agent" section="network" />);
+    return gen;
+  }
+
+  it.each(["off", "worker"] as const)("a %s machine pastes the household token and never generates its own", async (role) => {
+    const gen = await openNetwork(role);
+    const field = await screen.findByLabelText("访问令牌");
+    expect(field).not.toHaveAttribute("readonly");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(gen).not.toHaveBeenCalled();
+  });
+
+  it("the controller generates the household token", async () => {
+    const gen = await openNetwork("controller");
+    await waitFor(() => expect(gen).toHaveBeenCalledWith("generate"));
+  });
+});
+
 describe("媒体工作流 off Windows (§12 operator decision)", () => {
   it("offers only 不参与 with the Windows-only note", async () => {
     vi.spyOn(api, "workflowSettings").mockResolvedValue({

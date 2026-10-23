@@ -23,7 +23,7 @@ mod windows_dialog;
 use control_credentials::{CredentialError, Descriptor, Ready};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
@@ -789,6 +789,20 @@ fn init_script(descriptor: &Descriptor, debug: bool, restart: bool) -> String {
 
 /// Set when the app is quitting: a supervisor never respawns after it.
 static EXITING: AtomicBool = AtomicBool::new(false);
+/// #299 Codex r5 CX10: serializes a restart's check-EXITING + spawn + install
+/// with the quit path's set-EXITING + take-and-kill, so a quit can never finish
+/// (the process exits right after it) while a fresh backend child exists but is
+/// not yet in `Backend` — that child would be orphaned.
+static LIFECYCLE: Mutex<()> = Mutex::new(());
+
+/// Mark the app as quitting, serialized with `lock`'s holders (an in-flight
+/// respawn finishes installing its child first, so the caller's kill reaches it).
+fn begin_exit(lock: &'static Mutex<()>, flag: &AtomicBool) -> MutexGuard<'static, ()> {
+    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    flag.store(true, SeqCst);
+    guard
+}
+
 /// Set while the `main` window is being replaced after a planned restart.
 static REBUILDING: AtomicBool = AtomicBool::new(false);
 
@@ -940,6 +954,8 @@ struct ShellRespawn {
     app: tauri::AppHandle,
     command: (String, Vec<String>),
     stdout: Option<std::process::ChildStdout>,
+    /// Held from `spawn` until the child is installed (or the restart fails).
+    lifecycle: Option<MutexGuard<'static, ()>>,
 }
 
 impl restart_supervisor::Respawn for ShellRespawn {
@@ -969,12 +985,14 @@ impl restart_supervisor::Respawn for ShellRespawn {
     }
 
     fn spawn(&mut self) -> Result<Child, String> {
+        let guard = LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner());
         if EXITING.load(SeqCst) {
             return Err(String::new());
         }
         let mut child = spawn_backend(Some(self.command.clone()))
             .ok_or_else(|| format!("TaskPaw 重启后端失败。\n{}", backend_log_hint()))?;
         self.stdout = child.stdout.take();
+        self.lifecycle = Some(guard);
         Ok(child)
     }
 
@@ -984,6 +1002,7 @@ impl restart_supervisor::Respawn for ShellRespawn {
             let Some(job) = jobobj::assign(child) else {
                 let _ = child.kill();
                 let _ = child.wait();
+                self.lifecycle = None;
                 return Err("重启后无法取得 Agent 进程树所有权，已停止启动。".into());
             };
             *self
@@ -1001,14 +1020,15 @@ impl restart_supervisor::Respawn for ShellRespawn {
     fn install(&mut self, mut child: Child) {
         if EXITING.load(SeqCst) {
             terminate_child(&mut child);
-            return;
+        } else {
+            *self
+                .app
+                .state::<Backend>()
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(child);
         }
-        *self
-            .app
-            .state::<Backend>()
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(child);
+        self.lifecycle = None;
     }
 
     fn ready(&mut self) -> Result<Descriptor, String> {
@@ -1079,6 +1099,7 @@ fn supervise_backend(app: tauri::AppHandle, command: (String, Vec<String>)) {
         app: app.clone(),
         command,
         stdout: None,
+        lifecycle: None,
     };
     restart_supervisor::supervise(
         poll,
@@ -1238,7 +1259,7 @@ fn main() {
                     api.prevent_exit();
                     return;
                 }
-                EXITING.store(true, SeqCst);
+                let _quit = begin_exit(&LIFECYCLE, &EXITING);
                 kill_backend(app);
             }
         });
@@ -1246,6 +1267,31 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// #299 Codex r5 CX10: quitting waits for an in-flight respawn (holding the
+    /// lifecycle lock) before it flags EXITING, so the fresh child is installed
+    /// — and then killed by the quit path — rather than orphaned.
+    #[test]
+    fn begin_exit_waits_for_an_inflight_respawn() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::sync::{mpsc, Mutex};
+        static LOCK: Mutex<()> = Mutex::new(());
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let respawn = LOCK.lock().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let quitter = std::thread::spawn(move || {
+            let _guard = super::begin_exit(&LOCK, &FLAG);
+            tx.send(()).unwrap();
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .is_err());
+        assert!(!FLAG.load(SeqCst), "EXITING set while a respawn is in flight");
+        drop(respawn);
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        quitter.join().unwrap();
+        assert!(FLAG.load(SeqCst));
+    }
+
     /// #299 review IR6: an exit is seen without reaping the child.
     #[cfg(unix)]
     #[test]

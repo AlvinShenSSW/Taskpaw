@@ -175,8 +175,9 @@ def healed_bind_host(
     local: Optional[Callable[[str], Optional[bool]]] = None,
 ) -> Optional[str]:
     """R5: the address to use instead of a LAN `bind_host` this machine no
-    longer has (DHCP gave it another): the default route's source address,
-    only when it is a LAN address on a real adapter (review IR1). None: keep
+    longer has (DHCP gave it another): the default route's source address
+    (only a LAN address on a real adapter, review IR1) unless another candidate
+    shares the old address's /24 (CX11). None: keep
     it (LAN off, loopback, still local, unknown, or no routed LAN address yet
     — e.g. Wi-Fi not up, only a virtual adapter). A wildcard or public bind
     is never healed — the exposure guard refuses it."""
@@ -184,7 +185,26 @@ def healed_bind_host(
         return None
     found = (addresses or local_addresses)()
     routed = next((a.ip for a in found if a.routed), None)
-    return routed if routed and routed != bind_host else None
+    if routed is None:
+        return None
+    # CX11: a full-tunnel VPN can own the default route under a name the
+    # blacklist misses; stay on the saved address's /24 when we can.
+    same = _same_subnet(found, bind_host)
+    pick = same or routed
+    return pick if pick != bind_host else None
+
+
+def _same_subnet(found: list[Address], old: str) -> Optional[str]:
+    """The first candidate in `old`'s /24 (the interface table carries no
+    netmask), preferring the primary one."""
+    try:
+        net = ipaddress.ip_network(f"{old.strip().strip('[]')}/24", strict=False)
+    except ValueError:
+        return None
+    for a in found:
+        if ipaddress.ip_address(a.ip) in net:
+            return a.ip
+    return None
 
 
 def stale_bind(

@@ -173,7 +173,8 @@ def test_a_heal_needs_the_default_routes_lan_address(monkeypatch, source):
     route goes out a virtual adapter) nothing moves — not even to another
     real address that is not the routed one."""
     monkeypatch.setattr(lan, "_route_source", lambda: source)
-    expected = "10.0.0.7" if source == "10.0.0.7" else None
+    # CX11: a routed address elsewhere yields to the saved address's subnet
+    expected = "192.168.1.20" if source == "10.0.0.7" else None
     assert lan.healed_bind_host(True, "192.168.1.99") == expected
 
 
@@ -203,6 +204,34 @@ def test_no_routed_lan_address_keeps_the_saved_bind_unsaved(
     assert not (tmp_path / "agent.yaml.bak").exists()
     warned = [r for r in caplog.records if "kept, not saved" in r.getMessage()]
     assert len(warned) == 1 and SAVED_TOKEN not in caplog.text
+
+
+@pytest.mark.parametrize("wg_first", [True, False])
+def test_a_heal_prefers_the_saved_addresss_subnet_over_a_vpn_route(wg_first):
+    """#299 Codex r5 CX11: a full-tunnel VPN (WireGuard 10.8.0.2) can be the
+    default route and its name misses the blacklist; the heal stays on the
+    home subnet of the address that went away."""
+    table = {"WireGuard": ["10.8.0.2"], "Ethernet": ["192.168.1.35"]}
+    if not wg_first:
+        table = dict(reversed(list(table.items())))
+    found = lan.local_addresses(lambda: table, lambda: "10.8.0.2")
+    assert [a.ip for a in found if a.routed] == ["10.8.0.2"]
+    assert (
+        lan.healed_bind_host(
+            True, "192.168.1.20", addresses=lambda: found, local=lambda h: False
+        )
+        == "192.168.1.35"
+    )
+    # no home-subnet candidate: the existing routed choice stands
+    only_vpn = lan.local_addresses(
+        lambda: {"WireGuard": ["10.8.0.2"]}, lambda: "10.8.0.2"
+    )
+    assert (
+        lan.healed_bind_host(
+            True, "192.168.1.20", addresses=lambda: only_vpn, local=lambda h: False
+        )
+        == "10.8.0.2"
+    )
 
 
 def test_an_unknown_interface_table_never_heals():
