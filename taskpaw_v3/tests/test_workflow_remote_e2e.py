@@ -311,6 +311,17 @@ class World:
         }
         lines = [
             f"stages {stages}",
+            "attempts "
+            + str(
+                {
+                    s.stage: [
+                        (a.status, sorted((e.kind, e.summary.note) for e in a.evidence))
+                        for a in self.rt.store.list_attempts(self.rt.operator, s.job_id)
+                    ]
+                    for s in self.rt.store.get_film(self.rt.operator, film).stages
+                    if s.job_id
+                }
+            ),
             f"route {self.rt.store.film_route(self.rt.operator, film, 1)}",
         ]
         assert self.host is not None
@@ -828,7 +839,13 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
     """§11 CX3 + IR1: 重新配对 while a stage runs. The old session's
     dispatcher is quiesced (its Job stopped and settled) before the new
     identity runs; a new dispatcher with a new boot id finishes the attempt
-    `cancelled`, a free retry that runs again on the same worker."""
+    `cancelled`, a free retry that runs again on the same worker.
+
+    §11 CX11: the controller's own dispatcher is paused for the window in
+    which the re-paired worker is not yet 核验 (the verified set is empty, so
+    the controller would run the retry itself, as designed, with this test's
+    ledger-less synthetic restore) and the approval is retried on a version
+    conflict with the new session's own writes."""
     release = world.hold_jasna()
     worker = world.join()
     film = routed_film(world)
@@ -836,6 +853,8 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
     old, boot = worker.dispatcher, worker.boot_id
     assert old is not None
     worker_id = world.issued["w1"]["worker_id"]
+    controller = world.dispatcher
+    controller.set_paused(True)  # nothing runs on the controller meanwhile
     record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
     code = devices.repair(
         world.rt, worker_id, record.version, host="127.0.0.1", port=world.server.port
@@ -845,12 +864,23 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
     assert old.halted and not any(t.is_alive() for t in old._threads)
     assert worker.boot_id != boot
     release.touch()  # the retry's Jasna runs straight through
-    record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
-    if record.enrollment_state != "verified":
-        devices.approve(world.rt, worker_id, record.version, restore=True, asr=True)
+
+    def approved() -> bool:
+        record = world.rt.store.get_worker(world.rt.operator, worker_id).worker
+        if record.enrollment_state == "verified":
+            return True
+        try:
+            devices.approve(world.rt, worker_id, record.version, restore=True, asr=True)
+        except m.WorkflowError as exc:  # the session's own write / not probed yet
+            if exc.code in {"cas_conflict", "precondition_failed"}:
+                return False
+            raise
+        return True
+
+    until(approved, LONG)
+    controller.set_paused(False)
     world.wake()
     wait_status(world, film, "asr", "succeeded")
-    first, second = world.attempts(film, "restore")
     first, second = world.attempts(film, "restore")
     assert {e.kind for e in first.evidence} == {"exec_failed:cancelled"}
     assert second.status == "succeeded" and world.jasna_runs() == 2

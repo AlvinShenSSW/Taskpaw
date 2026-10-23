@@ -24,6 +24,7 @@ from taskpaw_v3.tests.test_workflow_remote_worker import (
     until,
 )
 from taskpaw_v3.tests.worker_api_helpers import VERSION, beat
+from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow.executors import ExecOutcome, SyntheticExecutor
 from taskpaw_v3.workflow.fleet_live import FleetLive, Heartbeat
 from taskpaw_v3.workflow.keep_awake import (
@@ -31,6 +32,7 @@ from taskpaw_v3.workflow.keep_awake import (
     ES_SYSTEM_REQUIRED,
     KeepAwake,
 )
+from taskpaw_v3.workflow.local_dispatch import run_stage
 from taskpaw_v3.workflow.remote_dispatch import RemoteDispatcher, WorkerRuntime
 from taskpaw_v3.workflow.routing import RoutingThread
 from taskpaw_v3.workflow.stage_results import StageResultError
@@ -1453,3 +1455,47 @@ def test_cx10_a_pause_during_the_envelope_read_admits_no_claim(tmp_path):
         proceed.set()
         executor.release.set()
         assert d.stop(10)
+
+
+@pytest.mark.parametrize("error_class", ["needs_attention", "permission", "transient"])
+def test_cx11_a_stop_is_a_free_retry_whatever_the_child_reported(tmp_path, error_class):
+    """§11 CX11: a stage stopped because its session ended resolves
+    `cancelled` (a free retry) even when the executor already failed with
+    another class by the time the stop was seen."""
+    stopped = threading.Event()
+
+    class ExitsAsStopped:
+        stage = "restore"
+        uses_gpu = True
+
+        def run(self, context):
+            context.cancel.set()  # the stop lands, then the child's own exit
+            stopped.set()
+            return ExecOutcome.failed(error_class, "child exit 3")
+
+    client = Scripted.__new__(Scripted)
+    staging = Staging(tmp_path / "staging", 500, free_bytes=lambda p: 2_000 * GB)
+    client.__init__(staging)
+    envelope = client.envelope(client.add(), 1)
+    job = m.PendingComputeJob(
+        job_id=envelope["stages"]["restore"]["job_id"],
+        film_id=envelope["film"],
+        display_name="x",
+        stage="restore",
+        input_revision=1,
+        version=1,
+        film_created_at=datetime.now(timezone.utc),
+        ltx_model=None,
+    )
+    result = run_stage(
+        ExitsAsStopped(),  # type: ignore[arg-type]
+        job,
+        m.InputManifest.model_validate(envelope["manifest"]),
+        tmp_path / "work",
+        threading.Event(),
+        on_launch=lambda identity: None,
+        progress=lambda text, ltx=None: None,
+        stop_settle=5.0,
+    )
+    assert stopped.is_set()
+    assert result.outcome.error_class == "cancelled" and result.settled
