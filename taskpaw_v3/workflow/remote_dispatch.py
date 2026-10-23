@@ -141,16 +141,69 @@ class AttemptState:
     finish_sent: bool = False
 
     @classmethod
-    def load(cls, path: Path) -> AttemptState | None:
+    def load(cls, path: Path) -> AttemptState:
+        """Raises on any read or parse failure. P2-4 §9 CX20: only
+        `AttemptInventory.scan` reads a record, and it classifies the error."""
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("not an attempt record")
+        return cls(**data)
+
+
+@dataclass(frozen=True)
+class AttemptInventory:
+    """P2-4 §9 CX20–CX22: THE view of an attempts folder — one listing and
+    one read per entry — so each decision (the boot report, busy, the held
+    check at stop, GC, recovery, delivery) reads one consistent snapshot and
+    nothing else lists or reads the folder. `unreadable`: entries that exist
+    but did not read or parse (by their report id); `dir_unreadable`: the
+    folder could not be listed, so nothing in it is known. A missing folder
+    is empty. Unknown is never stopped: an unknown attempt is held and busy,
+    and nothing is deleted on an inventory that is not `complete`."""
+
+    states: dict[str, AttemptState] = field(default_factory=dict)
+    unreadable: frozenset[str] = frozenset()
+    dir_unreadable: bool = False
+
+    @classmethod
+    def scan(cls, attempt_dir: Path) -> AttemptInventory:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return cls(**data)
+            with os.scandir(attempt_dir) as entries:
+                names = sorted(e.name for e in entries if e.name != REFUSED_DIR)
         except FileNotFoundError:
-            return None
-        except (OSError, ValueError, TypeError):
-            # P2-4 §9 CX13: never dropped — the file stays on disk (busy)
-            log.warning("unreadable worker attempt file %s kept", path.name)
-            return None
+            return cls()
+        except OSError:
+            return cls(dir_unreadable=True)
+        states: dict[str, AttemptState] = {}
+        unreadable: set[str] = set()
+        for name in names:
+            stem = name[: -len(".json")] if name.endswith(".json") else ""
+            state: AttemptState | None = None
+            if stem:
+                try:
+                    state = AttemptState.load(attempt_dir / name)
+                except FileNotFoundError:
+                    continue  # gone since the listing: no record any more
+                except (OSError, ValueError, TypeError):
+                    state = None
+            if state is None or state.attempt_id != stem:
+                unreadable.add(_report_id(name))
+            else:
+                states[stem] = state
+        return cls(states, frozenset(unreadable))
+
+    @property
+    def complete(self) -> bool:
+        """Every entry was read: only then may anything be deleted."""
+        return not self.dir_unreadable and not self.unreadable
+
+    @property
+    def empty(self) -> bool:
+        return self.complete and not self.states
+
+    def unknown(self, attempt_id: str) -> bool:
+        """Its record may be there but could not be read: held, alive."""
+        return self.dir_unreadable or attempt_id in self.unreadable
 
 
 class StagedIndex:
@@ -253,31 +306,48 @@ def _report_id(name: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"taskpaw-attempt:{name}"))
 
 
-def attempts_on_disk(staging_root: Path) -> bool:
-    """P2-4 §9 CX1: an entry in the attempts folder — work a restarted
-    worker has not settled with the controller yet (its children may live).
-    §9 CX10/CX13: conservative — any entry counts, parsable or not (only the
-    `refused/` archive of attempts the controller resolved does not); only a
-    missing folder is idle, any other read error is unknown, which is busy."""
-    try:
-        with os.scandir(staging_root / ATTEMPTS_DIR) as entries:
-            return any(entry.name != REFUSED_DIR for entry in entries)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-
-
-def worker_busy(staging_root: Path | None, dispatcher: RemoteDispatcher | None) -> bool:
+def worker_busy(
+    roots: Path | Iterable[Path | None] | None,
+    dispatcher: RemoteDispatcher | None,
+) -> bool:
     """P2-4 R9, §9 CX13: THE worker-busy rule — `/status`, the settings guard
     and keep-awake all read this. Busy while the dispatcher holds a run, an
     unsettled Job, an attempt to deliver or a held child, or while the
-    attempts folder holds anything (`attempts_on_disk`, conservative)."""
+    attempts folder of any staging folder the worker may be using (`roots`
+    and the dispatcher's own, §9 CX21) holds anything: a record, an entry
+    that does not read, or a folder that cannot be listed (unknown is busy;
+    only the `refused/` archive and a missing folder are idle)."""
+    if dispatcher is not None and dispatcher.holds_work():
+        return True
+    listed = [roots] if roots is None or isinstance(roots, Path) else list(roots)
     if dispatcher is not None:
-        if dispatcher.holds_work():
-            return True
-        staging_root = dispatcher.staging.root
-    return staging_root is not None and attempts_on_disk(staging_root)
+        listed.append(dispatcher.staging.root)
+    return any(
+        not AttemptInventory.scan(root / ATTEMPTS_DIR).empty
+        for root in _distinct(listed)
+    )
+
+
+def _distinct(roots: Iterable[Path | None]) -> list[Path]:
+    """The staging folders, each once (by filesystem identity when it can be
+    read, else by its normalized path — a duplicate is only checked twice)."""
+    seen: set[object] = set()
+    kept = []
+    for root in roots:
+        if root is None:
+            continue
+        key: object = os.path.normcase(os.path.abspath(root))
+        try:
+            st = os.stat(root)
+        except OSError:
+            pass
+        else:
+            if st.st_ino:
+                key = (st.st_dev, st.st_ino)
+        if key not in seen:
+            seen.add(key)
+            kept.append(root)
+    return kept
 
 
 # ── the dispatcher ──────────────────────────────────────────────────────
@@ -318,6 +388,9 @@ class RemoteDispatcher:
         self._asr_ready = False
         self._hold = "none"
         self._held: set[str] = set()  # boot: a child of an earlier boot runs
+        # §9 CX20: resolved attempts whose records were not collected because
+        # their inventory was not complete; collected by the next full sweep
+        self._resolved: set[str] = set()
         self._deliver: list[str] = []  # attempts to upload/finish (boot: finish)
         self._cancelled: set[str] = set()
         self._active: _Active | None = None
@@ -378,16 +451,18 @@ class RemoteDispatcher:
 
     def _held_alive(self) -> bool:
         """§11 CX13: a child of an earlier boot (a `held` verdict) still runs.
-        P2-4 §9 CX18: a held record that cannot be read is unknown, which is
-        alive; only a record that is gone, or read with its children dead,
-        is not."""
+        P2-4 §9 CX18/CX22: a held record that cannot be read, or held in a
+        folder that cannot be listed, is unknown, which is alive; only a
+        record that is gone, or read with its children dead, is not."""
         with self._lock:
             held = list(self._held)
-        unreadable = self._unreadable_ids()
+        if not held:
+            return False
+        inventory = self._inventory()
         for attempt_id in held:
-            if attempt_id in unreadable:
+            if inventory.unknown(attempt_id):
                 return True
-            state = AttemptState.load(self._path(attempt_id))
+            state = inventory.states.get(attempt_id)
             if state is not None and any(process_alive(c) for c in state.children):
                 return True
         return False
@@ -462,7 +537,7 @@ class RemoteDispatcher:
 
     def holds_work(self) -> bool:
         """In memory: a run, an unsettled Job, an attempt to deliver or a
-        held child (the disk half is `attempts_on_disk`)."""
+        held child (the disk half is `worker_busy`'s inventories)."""
         with self._lock:
             return bool(
                 self._active is not None
@@ -564,33 +639,18 @@ class RemoteDispatcher:
         return rows
 
     # ── boot (R8, §5) ─────────────────────────────────────────────────────
-    def _states(self) -> list[AttemptState]:
-        states = []
-        for path in sorted(self.attempt_dir.glob("*.json")):
-            state = AttemptState.load(path)
-            if state is not None:
-                states.append(state)
-        return states
+    def _inventory(self) -> AttemptInventory:
+        """§9 CX20: the one way this dispatcher reads its attempts folder."""
+        return AttemptInventory.scan(self.attempt_dir)
 
-    def _unreadable(self) -> list[str]:
-        """§9 CX13: attempts-folder entries that are no loadable attempt."""
-        try:
-            with os.scandir(self.attempt_dir) as entries:
-                names = [e.name for e in entries if e.name != REFUSED_DIR]
-        except FileNotFoundError:
-            return []
-        except OSError:
-            return [ATTEMPTS_DIR]
-        return sorted(
-            name
-            for name in names
-            if not name.endswith(".json")
-            or AttemptState.load(self.attempt_dir / name) is None
-        )
-
-    def _unreadable_ids(self) -> set[str]:
-        """§9 CX18: the boot report ids of the entries `_unreadable` names."""
-        return {_report_id(name) for name in self._unreadable()}
+    def _gc(self, attempt_id: str, inventory: AttemptInventory) -> None:
+        """§9 CX20: a resolved attempt is collected only on a complete
+        inventory; otherwise the next complete sweep collects it."""
+        if inventory.complete:
+            self._collect(attempt_id)
+        else:
+            with self._lock:
+                self._resolved.add(attempt_id)
 
     def _path(self, attempt_id: str) -> Path:
         return self.attempt_dir / f"{attempt_id}.json"
@@ -620,26 +680,29 @@ class RemoteDispatcher:
         rest go to the boot. Once every file was answered, work folders no
         attempt file names are swept; an error leaves everything (unknown).
         P2-4 §9 CX13: a file that does not parse is logged and kept (busy
-        until the operator resolves it), and named in `notice`."""
-        unreadable = self._unreadable()
-        if unreadable:
+        until the operator resolves it), and named in `notice`. §9 CX20: one
+        inventory; nothing is deleted while it is not complete."""
+        inventory = self._inventory()
+        if not inventory.complete:
             log.error(
                 "worker attempt files kept unread in %s: %s",
                 ATTEMPTS_DIR,
-                ", ".join(unreadable),
+                "the folder"
+                if inventory.dir_unreadable
+                else ", ".join(sorted(inventory.unreadable)),
             )
             self.notice = UNREADABLE_ATTEMPTS
-        for state in self._states():
+        for state in inventory.states.values():
             try:
                 found = client.attempt(state.attempt_id)
             except ApiError as exc:
                 if exc.status == 404:
-                    self._collect(state.attempt_id)
+                    self._gc(state.attempt_id, inventory)
                     continue
                 raise
             if found.get("state") == "resolved":
-                self._collect(state.attempt_id)
-        self._sweep_orphans()
+                self._gc(state.attempt_id, inventory)
+        self._sweep_orphans(inventory)
         return True
 
     def _sweep_due(self) -> None:
@@ -650,20 +713,25 @@ class RemoteDispatcher:
             self._swept = now
             self._sweep_orphans()
 
-    def _sweep_orphans(self) -> None:
+    def _sweep_orphans(self, inventory: AttemptInventory | None = None) -> None:
         """§11 IR5: `work/<uuid>/` folders no attempt file (or the active
         attempt) names; work copies (`copies/…`) are never touched. Skipped
-        while a tick runs: a claim it makes meanwhile is never swept."""
+        while a tick runs: a claim it makes meanwhile is never swept. §9
+        CX18/CX20: on an inventory that is not complete (an entry may name
+        any folder) nothing is swept; a complete one also collects the
+        resolved attempts an incomplete one deferred."""
         if not self._tick_lock.acquire(blocking=False):
             return
         try:
-            try:  # §9 CX18: an unreadable folder names nothing — sweep nothing
-                with os.scandir(self.attempt_dir) as entries:
-                    known = {e.name.split(".")[0] for e in entries}
-            except FileNotFoundError:
-                known = set()
-            except OSError:
+            if inventory is None:
+                inventory = self._inventory()
+            if not inventory.complete:
                 return
+            with self._lock:
+                resolved = sorted(self._resolved)
+            for attempt_id in resolved:
+                self._collect(attempt_id)
+            known = set(inventory.states) - set(resolved)
             with self._lock:
                 if self._active is not None:
                     known.add(self._active.state.attempt_id)
@@ -689,12 +757,18 @@ class RemoteDispatcher:
         an unreadable folder) is reported too, as `unreadable` with its
         children unknown (alive), so the controller holds the boot instead
         of settling an unreported assignment as interrupted. The read is
-        tried again at every report (each boot re-post)."""
+        tried again at every report (each boot re-post). §9 CX20: one
+        inventory, one read per entry — a read that fails once is reported
+        unreadable, never left out because a second read worked."""
         values = []
+        inventory = self._inventory()
+        unknown = sorted(inventory.unreadable)
+        if inventory.dir_unreadable:  # an unknown inventory: the boot holds
+            unknown = [_report_id(ATTEMPTS_DIR)]
         # every file, the one being delivered included: a re-post that left
         # it out would let the controller settle it as interrupted and run
         # the stage again (the controller ignores this boot's own claims)
-        for state in self._states():
+        for state in inventory.states.values():
             ledger = self.staging.work_dir / state.attempt_id / RESULT_NAME
             settled = state.settled
             values.append(
@@ -710,10 +784,10 @@ class RemoteDispatcher:
                     "unreadable": False,
                 }
             )
-        for name in self._unreadable():
+        for attempt_id in unknown:
             values.append(
                 {
-                    "attempt_id": _report_id(name),
+                    "attempt_id": attempt_id,
                     "assignment_id": None,
                     "children_alive": True,  # unknown is never stopped
                     "ledger": False,
@@ -744,20 +818,20 @@ class RemoteDispatcher:
         """The boot reply: interrupted attempts are collected, held ones wait,
         `finish` ones are delivered without a re-run; staged sources missing
         from `keep` go (nothing while an attempt is unknown: those are kept).
-        P2-4 §9 CX18: a record that cannot be read now is never collected,
-        whatever the verdict: it is held."""
+        P2-4 §9 CX18/CX20: a record that cannot be read now (or sits in a
+        folder that cannot be listed) is never collected, whatever the
+        verdict: it is held; on an incomplete inventory nothing is deleted
+        (an interrupted record is collected by the next complete sweep)."""
         verdicts = dict(reply.get("attempts") or {})
         held, deliver = set(), []
-        unreadable = self._unreadable_ids()
+        inventory = self._inventory()
         for attempt_id, verdict in verdicts.items():
-            if verdict == "held" or (
-                verdict == "interrupted" and attempt_id in unreadable
-            ):
+            if verdict == "held" or inventory.unknown(attempt_id):
                 held.add(attempt_id)
             elif verdict == "interrupted":
-                self._collect(attempt_id)
+                self._gc(attempt_id, inventory)
             elif verdict == "finish":
-                state = AttemptState.load(self._path(attempt_id))
+                state = inventory.states.get(attempt_id)
                 if state is not None:
                     self._prepare_finish(state)
                     deliver.append(attempt_id)
@@ -765,7 +839,7 @@ class RemoteDispatcher:
         # says (finish is idempotent by state; a stale one answers 409)
         with self._lock:
             active = self._active.state.attempt_id if self._active else None
-        for state in self._states():
+        for state in inventory.states.values():
             if (
                 state.settled is not None
                 and verdicts.get(state.attempt_id) not in ("interrupted", "held")
@@ -780,7 +854,8 @@ class RemoteDispatcher:
                     self._deliver.append(attempt_id)
             self._reconciled = bool(reply.get("reconciled"))
         if held:  # §11 CX2: the GPU stays reserved until they are gone
-            self._acquire(UNREADABLE_ATTEMPTS if held & unreadable else HELD)
+            unknown = any(inventory.unknown(a) for a in held)
+            self._acquire(UNREADABLE_ATTEMPTS if unknown else HELD)
         if "keep" in reply:
             keep = {(str(k["film"]), int(k["rev"])) for k in reply.get("keep") or []}
             for entry in list(self.index.entries().values()):
@@ -823,6 +898,7 @@ class RemoteDispatcher:
         with self._lock:
             self._cancelled.discard(attempt_id)
             self._held.discard(attempt_id)
+            self._resolved.discard(attempt_id)
             self._unsaved.pop(attempt_id, None)
             self._started.pop(attempt_id, None)
 
@@ -836,7 +912,10 @@ class RemoteDispatcher:
             active = self._active
         if active is not None and active.state.film_id == film:
             return
-        if any(s.film_id == film and s.rev == rev for s in self._states()):
+        inventory = self._inventory()  # §9 CX20: unknown may be of this film
+        if not inventory.complete or any(
+            s.film_id == film and s.rev == rev for s in inventory.states.values()
+        ):
             return
         root = self.staging.work_dir
         kept = []
@@ -1247,7 +1326,13 @@ class RemoteDispatcher:
                 return False
             with self._lock:
                 self._unsaved.pop(attempt_id, None)
-        state = unsaved or AttemptState.load(self._path(attempt_id))
+        state = unsaved
+        if state is None:
+            inventory = self._inventory()
+            state = inventory.states.get(attempt_id)
+            if state is None and inventory.unknown(attempt_id):
+                self.reason = UNREADABLE_ATTEMPTS  # §9 CX20: kept, tried again
+                return False
         if state is None or state.settled is None:
             with self._lock:
                 self._deliver = [a for a in self._deliver if a != attempt_id]

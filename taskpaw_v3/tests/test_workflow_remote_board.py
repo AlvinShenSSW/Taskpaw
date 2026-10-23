@@ -187,21 +187,27 @@ def test_an_unreadable_attempts_dir_is_busy_and_a_missing_one_is_idle(
     means no attempts, any other read error means unknown, which is busy."""
     import os
 
-    from taskpaw_v3.workflow import remote_dispatch
-    from taskpaw_v3.workflow.remote_dispatch import ATTEMPTS_DIR, attempts_on_disk
+    from taskpaw_v3.workflow.remote_dispatch import (
+        ATTEMPTS_DIR,
+        AttemptInventory,
+        worker_busy,
+    )
 
-    assert attempts_on_disk(tmp_path) is False  # no folder yet
+    assert worker_busy(tmp_path, None) is False  # no folder yet
     attempts = tmp_path / ATTEMPTS_DIR
     attempts.mkdir()
-    assert attempts_on_disk(tmp_path) is False  # empty
+    assert worker_busy(tmp_path, None) is False  # empty
+    assert AttemptInventory.scan(attempts).empty
     (attempts / "a.json").write_text("{}", encoding="utf-8")
-    assert attempts_on_disk(tmp_path) is True
+    assert worker_busy(tmp_path, None) is True
+    assert AttemptInventory.scan(attempts).unreadable  # parses, no attempt
 
     def denied(_path):
         raise PermissionError("denied")
 
     monkeypatch.setattr(os, "scandir", denied)
-    assert remote_dispatch.attempts_on_disk(tmp_path) is True
+    assert AttemptInventory.scan(attempts).dir_unreadable is True
+    assert worker_busy(tmp_path, None) is True
 
 
 def test_a_corrupt_attempt_file_keeps_a_dispatcher_busy_and_recovery_keeps_it(
@@ -341,3 +347,54 @@ def test_cx12_the_start_time_is_fixed_at_ingest_not_at_each_read():
     later = fleet.currents(NOW + timedelta(seconds=30), {})[row_film.film_id]
     assert later["started_at"] == first
     assert first == (NOW - timedelta(seconds=600)).isoformat()
+
+
+def test_cx21_work_under_a_pending_identitys_staging_dir_is_busy(tmp_path):
+    """§9 CX21 (Codex): a worker whose only identity is a pending pairing
+    (its controller unreachable) and with no `staging_dir` in its settings
+    still has the attempt files of that identity's staging folder — work
+    whose children may live. `/status` busy covers every staging folder the
+    worker may be using, so 判定已停止 never reads it as quiet."""
+    from pydantic import SecretStr
+
+    from taskpaw_v3.tests.test_workflow_remote_worker import (
+        PAIRING,
+        TICKET,
+        until,
+        worker_host,
+    )
+    from taskpaw_v3.workflow.remote_dispatch import ATTEMPTS_DIR
+    from taskpaw_v3.workflow.remote_worker import PENDING_NAME, WorkerIdentity
+    from taskpaw_v3.workflow.worker_client import ApiError
+
+    class Unreachable:
+        def __getattr__(self, _name):
+            def call(*_a, **_k):
+                raise ApiError(0, "unreachable")
+
+            return call
+
+    staging = tmp_path / "pending-staging"
+    (tmp_path / "worker").mkdir()
+    WorkerIdentity(
+        controller_host="127.0.0.1",
+        controller_port=1,
+        pairing_id=PAIRING,
+        credential_id="00000000-0000-4000-8000-0000000000ff",
+        secret=SecretStr("x" * 43),
+        staging_dir=str(staging),
+        ticket=SecretStr(TICKET),
+    ).save(tmp_path / "worker" / PENDING_NAME)
+    worker = worker_host(tmp_path, client_factory=lambda *_a, **_k: Unreachable())
+    assert worker.settings.staging_dir is None
+    try:
+        worker.start()
+        until(lambda: worker.status()["pending"])
+        assert worker.identity is None and worker.dispatcher is None
+        assert worker.summary()["busy"] is False  # nothing on disk yet
+        attempts = staging / ATTEMPTS_DIR
+        attempts.mkdir(parents=True)
+        (attempts / f"{identity()}.json").write_text("{}", encoding="utf-8")
+        assert worker.summary()["busy"] is True
+    finally:
+        assert worker.stop()

@@ -1065,10 +1065,14 @@ class WorkerHost:
     def _busy(self, dispatcher: RemoteDispatcher | None) -> bool:
         """§9 CX1/CX13: the one `worker_busy` rule; before a dispatcher exists
         (no controller reached since a restart) the attempts folder on disk
-        decides alone — unsettled work whose children may still run."""
-        ident = self.identity
-        root = ident.staging_dir if ident else self.settings.staging_dir
-        return worker_busy(Path(root) if root else None, dispatcher)
+        decides alone — unsettled work whose children may still run. §9
+        CX21: over every staging folder the worker may be using — the
+        settings', the current identity's and the pending pairing's."""
+        roots = [self.settings.staging_dir]
+        for ident in (self.identity, self._pending_check):
+            if ident is not None:
+                roots.append(ident.staging_dir)
+        return worker_busy([Path(root) for root in roots if root], dispatcher)
 
     def _monitor(self) -> dict[str, Any]:
         """§6: films, the running step, transfers, staging and the GPU hold."""

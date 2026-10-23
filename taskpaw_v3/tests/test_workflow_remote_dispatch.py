@@ -1711,3 +1711,217 @@ def test_cx18_an_unreadable_attempts_folder_sweeps_no_work_folder(
     monkeypatch.setattr(Path, "glob", swallowed)
     d._sweep_orphans()
     assert (staging.work_dir / attempt).exists()
+
+
+# ── root cause (P2-4 §9 CX20–CX22): one attempt inventory ────────────────
+def _boot_reports(reports):
+    from taskpaw_v3.workflow import remote_attempts as ra
+
+    return [
+        ra.AttemptReport(
+            r["attempt_id"],
+            r["children_alive"],
+            r["ledger"],
+            r["outputs_intact"],
+            r["outcome"],
+            unreadable=r["unreadable"],
+        )
+        for r in reports
+    ]
+
+
+def _settle(attempts, reports):
+    """`settle_boot` over open assignments of an earlier boot (`attempts`)."""
+    from types import SimpleNamespace
+
+    from taskpaw_v3.workflow import remote_attempts as ra
+
+    worker, old_boot, new_boot = (ident() for _ in range(3))
+    resolved: list[str] = []
+    open_ = [
+        SimpleNamespace(
+            assignment=SimpleNamespace(worker_id=worker, boot_id=old_boot, attempt_id=a)
+        )
+        for a in attempts
+    ]
+    rt = SimpleNamespace(
+        operator=None,
+        store=SimpleNamespace(list_open_assignments=lambda op: open_),
+        resolve_interrupted=lambda a: resolved.append(a.attempt_id),
+    )
+    return ra.settle_boot(rt, worker, new_boot, _boot_reports(reports)), resolved
+
+
+def test_cx20_a_read_failing_once_then_working_is_still_reported(tmp_path, monkeypatch):
+    """§9 CX20 (Codex): the boot report read each record twice (once for the
+    states, once for the unreadable names); a read failing in the first pass
+    and working in the second dropped the record from the report, and the
+    controller settled its assignment as interrupted. One read per entry:
+    it is reported unreadable, nothing is deleted, nothing is interrupted."""
+    from taskpaw_v3.workflow import remote_dispatch as rd
+
+    monkeypatch.setattr(rd, "process_alive", lambda identity: False)
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    flaky = _held_attempt(staging, client.add())
+    record = staging.root / "attempts" / f"{flaky}.json"
+    (staging.work_dir / flaky).mkdir(parents=True)
+    reads = {"n": 0}
+    real = Path.read_text
+
+    def read_text(self, *args, **kw):
+        if self == record:
+            reads["n"] += 1
+            if reads["n"] == 1:
+                raise PermissionError("denied once")
+        return real(self, *args, **kw)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    reports = d.reports()
+    assert [r["attempt_id"] for r in reports] == [flaky]
+    assert reports[0]["unreadable"] is True
+    assert reports[0]["children_alive"] is True  # unknown is never stopped
+    verdicts, resolved = _settle([flaky], reports)
+    assert verdicts == {flaky: "held"} and resolved == []
+    reads["n"] = 0  # the booted pass fails its one read again
+    d.booted({"reconciled": False, "attempts": {flaky: "interrupted"}, "keep": []})
+    assert record.exists() and (staging.work_dir / flaky).exists()
+    assert d.lease.blocking_label() == rd.UNREADABLE_ATTEMPTS
+    reads["n"] = 0  # and the stop's one read fails again
+    assert d.stop(0.2) is False  # held and unknown: unconfirmed
+    assert d.lease.holder() == d.run_id
+
+
+def test_cx22_an_unreadable_attempts_folder_keeps_a_held_attempt_alive(
+    tmp_path, monkeypatch
+):
+    """§9 CX22 (Codex): a held attempt whose folder can no longer be listed
+    is unknown, which is alive — `stop()` is unconfirmed and the GPU lease
+    stays reserved (the old check read the record by path and, its children
+    gone, released the GPU while the folder said nothing)."""
+    import os
+
+    from taskpaw_v3.workflow import remote_dispatch as rd
+
+    monkeypatch.setattr(rd, "process_alive", lambda identity: False)
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    held = _held_attempt(staging, client.add())
+    monkeypatch.setattr(rd, "process_alive", lambda identity: True)
+    d.booted({"reconciled": False, "attempts": {held: "held"}, "keep": []})
+    assert d.lease.holder() == d.run_id
+    monkeypatch.setattr(rd, "process_alive", lambda identity: False)
+    real = os.scandir
+
+    def denied(path="."):
+        if os.fspath(path) == os.fspath(d.attempt_dir):
+            raise PermissionError("denied")
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    assert d.stop(0.2) is False
+    assert d.lease.holder() == d.run_id
+    assert (staging.root / "attempts" / f"{held}.json").exists()
+
+
+_MODES = ("readable", "unreadable-file", "unreadable-dir", "transient")
+_OPS = ("boot", "busy", "stop", "sweep", "recover", "deliver")
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_no_operation_deletes_or_idles_what_its_inventory_could_not_read(
+    tmp_path, monkeypatch, seed
+):
+    """§9 CX20–CX22, property style: random entries — readable, a file that
+    never reads, a folder that cannot be listed, a read failing every other
+    time — under random boot / busy / stop / GC / recovery / delivery steps.
+    No step deletes a record or a work folder an inventory of that step
+    could not read, and busy is never false while any entry exists."""
+    import os
+    import random
+
+    from taskpaw_v3.workflow import remote_dispatch as rd
+    from taskpaw_v3.workflow.remote_dispatch import worker_busy
+
+    rng = random.Random(seed)
+    monkeypatch.setattr(rd, "process_alive", lambda identity: False)
+    monkeypatch.setattr(rd, "SWEEP_SECONDS", 0.0)
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    attempts = staging.root / "attempts"
+    modes: dict[str, str] = {}
+    for _ in range(rng.randint(1, 4)):
+        attempt = _held_attempt(staging, client.add())
+        (staging.work_dir / attempt).mkdir(parents=True)
+        modes[attempt] = rng.choice(_MODES)
+    paths = {attempts / f"{a}.json": a for a in modes}
+    failed: set[str] = set()
+    counts: dict[str, int] = {}
+    real_read, real_scandir = Path.read_text, os.scandir
+
+    def read_text(self, *args, **kw):
+        attempt = paths.get(self)
+        if attempt is not None:
+            counts[attempt] = counts.get(attempt, 0) + 1
+            mode = modes[attempt]
+            if mode == "unreadable-file" or (
+                mode == "transient" and counts[attempt] % 2 == 1
+            ):
+                failed.add(attempt)
+                raise PermissionError("denied")
+        return real_read(self, *args, **kw)
+
+    def scandir(path="."):
+        if os.fspath(path) == os.fspath(attempts) and any(
+            modes[a] == "unreadable-dir" and (attempts / f"{a}.json").exists()
+            for a in modes
+        ):
+            failed.update(a for a in modes if (attempts / f"{a}.json").exists())
+            raise PermissionError("denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(os, "scandir", scandir)
+
+    class Answers:
+        def attempt(self, attempt_id):
+            if rng.random() < 0.5:
+                raise ApiError(404, "not_found")
+            return {"state": rng.choice(("resolved", "active"))}
+
+    for _ in range(12):
+        op = rng.choice(_OPS)
+        failed.clear()
+        before = {a for a in modes if (attempts / f"{a}.json").exists()}
+        if op == "boot":
+            reports = d.reports()
+            verdicts, _resolved = _settle(sorted(modes), reports)
+            for attempt in modes:  # a stale or mistaken verdict, now and then
+                if rng.random() < 0.3:
+                    verdicts[attempt] = rng.choice(("held", "interrupted", "finish"))
+            failed.clear()  # the reply is a decision on its own inventory
+            d.booted({"reconciled": False, "attempts": verdicts, "keep": []})
+        elif op == "busy":
+            assert worker_busy(staging.root, None) is bool(before)
+            assert worker_busy(staging.root, d) is True or not before
+        elif op == "stop":
+            d.stop(0.2)
+        elif op == "sweep":
+            d._sweep_orphans()
+        elif op == "recover":
+            d.recover(Answers())
+        else:
+            with d._lock:
+                pending = list(d._deliver)
+            if pending:
+                d._deliver_one(pending[0])
+        for attempt in failed & before:
+            assert (attempts / f"{attempt}.json").exists(), (op, modes[attempt])
+            assert (staging.work_dir / attempt).exists(), (op, modes[attempt])
+        left = any((attempts / f"{a}.json").exists() for a in modes)
+        if left:
+            assert worker_busy(staging.root, None) is True
+            assert d.claimed() is True
