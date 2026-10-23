@@ -439,8 +439,11 @@ def at(w, limit):
         (16311, UHD, UHD, None),  # P2-5 R3: a re-verified 16 GB takes 4K
         (16311, UHD, FHD, None),
         (16311, FHD, UHD, "4K 需重新核验"),  # approved before 4K: re-核验 first
-        (16311, FHD, FHD, None),  # eligibility rule in isolation: a verified 1080p profile
+        (16311, FHD, FHD, None),  # the rule alone: a verified 1080p profile
         (15360, FHD, UHD, "4K 需重新核验"),  # the 16 GB class boundary
+        # Codex r2: beyond UHD no re-核验 helps (the probe caps at 3840×2160)
+        (16311, UHD, (4096, 2160), "分辨率超出设备上限"),
+        (16311, FHD, (7680, 4320), "分辨率超出设备上限"),
         (8151, FHD, FHD, s.NO_RESTORE),  # OD5 wins whatever the profile
         (8151, FHD, UHD, s.NO_RESTORE),
         (8151, UHD, UHD, s.NO_RESTORE),

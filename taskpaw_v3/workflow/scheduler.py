@@ -21,7 +21,7 @@ from statistics import median
 from typing import Literal
 
 from . import models as m
-from .local_gpu import FOUR_K_VRAM_MIB
+from .local_gpu import FOUR_K_VRAM_MIB, max_resolution
 from .plan import TIER_LABELS
 
 GB = 10**9
@@ -326,7 +326,11 @@ def eligibility(
         return NO_RESTORE
     if "restore" in stages:
         if not _fits(worker, "restore", film):
-            if _class(film) != "4K":
+            card_w, card_h = max_resolution(worker.vram_mib)
+            if _class(film) != "4K" or (
+                film.max_width > card_w or film.max_height > card_h
+            ):
+                # Codex r2: re-核验 cannot lift a profile past what the card probes
                 return "分辨率超出设备上限"
             # P2-5 R3: a 16 GB card approved at 1080p can take 4K once 核验
             # records it; a card that truly cannot keeps 「显存不足 4K」
