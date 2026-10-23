@@ -322,6 +322,14 @@ def create_control_app(
         worker_provider=worker_provider,
     )
 
+    from taskpaw_v3.agent.server.first_run import register_setup_routes
+
+    register_setup_routes(  # #299 R2/§6: the first-run wizard's step
+        app,
+        admin.config_path if admin is not None else None,
+        lambda: admin.desired_workflow() if admin is not None else config.workflow,
+    )
+
     @app.get("/control/status")
     def control_status() -> dict:
         # The agent console reads status from the loopback control API.

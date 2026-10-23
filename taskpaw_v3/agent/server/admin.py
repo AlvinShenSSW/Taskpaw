@@ -977,6 +977,11 @@ class MonitorAdmin:
         return view
 
     @property
+    def config_path(self) -> Optional[Path]:
+        """agent.yaml itself (#299: the first-run marker sits beside it)."""
+        return self._path
+
+    @property
     def config_dir(self) -> Optional[Path]:
         """agent.yaml's folder: the workflow's default data directory's parent."""
         return self._path.parent if self._path is not None else None

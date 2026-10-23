@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yaml
 
+from taskpaw_v3.agent.server import first_run
 from taskpaw_v3.agent.server.launcher import run_agent
 from taskpaw_v3.core.config import AgentConfig, load_yaml
 from taskpaw_v3.core.startup import emit_startup_error, startup_code
@@ -33,6 +34,7 @@ def default_config_path() -> Path:
 def _main() -> int:
     logging.basicConfig(level=logging.INFO)
     path = default_config_path()
+    scaffolded = False
     if not path.exists():
         # Self-initialize a default config so a fresh install / first run "just
         # works" (host_metrics baseline on loopback) instead of exiting and
@@ -51,6 +53,7 @@ def _main() -> int:
             )
             emit_startup_error("config_unwritable")
             return 1
+        scaffolded = True
         logging.getLogger("taskpaw.agent").info(
             "created default agent config at %s", path
         )
@@ -64,6 +67,16 @@ def _main() -> int:
         return 1
     # Persist the monotonic event-id counter next to the config.
     state_path = path.with_name("agent.state.json")
+    # #299 R1: a fresh install starts the wizard and needs no confirmation
+    # dialog for its first event lineage (only with the marker written here).
+    if scaffolded:
+        try:
+            first_run.write_pending(path, config.server_id)
+        except OSError:
+            logging.getLogger("taskpaw.agent").warning(
+                "could not write the first-run marker"
+            )
+    first_run.maybe_initialize(path, state_path, config.server_id)
     # Pass the config path so the control API can persist add/remove/enable (#57).
     try:
         run_agent(config, state_path=state_path, config_path=path, block=True)
