@@ -211,3 +211,10 @@ Base `713e392`. Fixtures and tmp folders only.
 |---|---|---|---|
 | CX31 | `reassign_options` previewed a snapshot that still held the film's own route, so `scheduler.preview` counted it as queued work: a doubled duration, or 自动 naming worker B while `reassign` keeps A's healthy route. | **Fixed.** The previews are built without the film's current-revision route (`reassign` withdraws it for a different worker, or for 自动 off a 失联 worker). A choice that keeps the route — 自动 with a healthy route, or the same worker — reports the route worker's own estimate and 自动's `machine` is that worker; a 失联 route or none leaves 自动 on the fresh pass's pick. | `test_reassign_options_do_not_count_the_films_own_route`, `test_reassign_auto_shows_the_healthy_route_worker_it_keeps` |
 | CX32 | The 重新配对 confirm said the old credential is invalidated at once, but revocation happens only when the worker redeems the new code. | **Fixed.** 「将生成新的配对码；工作机用新码重新加入后，旧凭据才会失效。需要立即停用请用 撤销。」 | `drains, re-pairs, revokes after confirmation …` (devices.test) |
+
+### UI Codex r3 — carried into #298 (no P1)
+
+| Id | Finding | Disposition |
+|---|---|---|
+| CX33 | `operator_actions.py:355-360` — the reassign preview resets the film's `confirmed_at` to now, so later-confirmed films can take its slot and the estimate goes null. | Estimate-only (advisory 预计); #298 rewrites the preview for controller-local ASR — keep the film's original `confirmed_at` and route position there, with a regression test. |
+| CX34 | `mediaModel.ts:568-569` — a restored film still needing ASR shows 「本机」 although ASR is routed to workers today. | Becomes correct by design in #298 (OD7: ASR runs on the controller). #298 adds the test that 「本机」 is shown for ASR and 「待派发」 only for unfinished restore. |
