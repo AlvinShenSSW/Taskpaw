@@ -61,6 +61,7 @@ def enrol_remote(
     gpu: tuple[str, int] = GPU_16,
     stages: tuple[str, ...] = ("restore", "asr"),
     limit: tuple[int, int] = UHD,
+    address: str = "192.0.2.30",
 ) -> Remote:
     """Register, pair, probe, approve, enable and boot one remote worker."""
     store, op, now = rt.store, rt.operator, rt.clock.now()
@@ -72,7 +73,7 @@ def enrol_remote(
             worker_id=worker_id,
             device_id=device_id,
             name=name,
-            address="192.0.2.30",
+            address=address,
             port=5682,
         ),
     )
