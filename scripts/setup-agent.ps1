@@ -39,9 +39,8 @@ if ($LASTEXITCODE -ne 0) { throw "Agent bootstrap failed (exit code $LASTEXITCOD
 
 Write-Host ""
 Write-Host "ACTION NEEDED before the agent is useful:"
-Write-Host "  1. Edit $cfgDir\agent.yaml -> set server_id/machine and bind_host = this box's LAN IP"
-Write-Host "  2. Replace its 'monitors: []' with the contents of $cfgDir\monitors.yaml"
-Write-Host "  3. On the Mac Hub:  python -m taskpaw_v3.hub add-server --name <this box> --ip <that LAN IP>"
+Write-Host "  Open TaskPaw -> Settings to finish setup: network & access, media workflow, monitors."
+Write-Host "  No config file needs editing. (Monitors from $cfgDir\monitors.yaml can be added in the console.)"
 Write-Host ""
 Read-Host "Press Enter to start the agent now (Ctrl-C later to stop)"
 

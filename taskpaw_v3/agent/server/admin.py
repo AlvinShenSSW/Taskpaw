@@ -1138,7 +1138,8 @@ class MonitorAdmin:
             # (and the live token) ONLY if the write succeeds, so a failed save
             # leaves config + disk untouched — atomic (Codex #43 r7).
             new_desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
-            self._save(new_desired, backup=workflow)
+            # P2-4 R15 / #299 R16: a workflow or network save keeps agent.yaml.bak
+            self._save(new_desired, backup=workflow or network)
             get_task_log().record(
                 "",
                 "operator.update",

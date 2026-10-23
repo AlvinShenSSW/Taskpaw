@@ -182,6 +182,8 @@ def test_lan_on_saves_the_address_and_token_and_needs_a_restart(tmp_path):
     assert res.status_code == 200 and res.json()["restart_required"] is True
     saved = world.saved()
     assert saved["lan_access"] is True and saved["bind_host"] == "192.168.1.20"
+    # R16: a network save keeps the previous file as agent.yaml.bak
+    assert (tmp_path / "agent.yaml.bak").is_file()
     assert world.probes == [("192.168.1.20", 5680)]
     # the masked round trip keeps the token
     view = world.client.get("/control/config", headers=world.h).json()

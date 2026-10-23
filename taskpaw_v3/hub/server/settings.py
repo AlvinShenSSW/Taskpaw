@@ -280,6 +280,18 @@ class HubSettings:
                 )
             except (ValidationError, ValueError):
                 raise Refused({"bind_host": "地址不可用"}) from None
+            # #299 §10.1: a read-API address that cannot start would leave no UI
+            if not bind_is_loopback(validated.bind_host) and (
+                validated.bind_host,
+                validated.bind_port,
+            ) != (self.running.bind_host, self.running.bind_port):
+                from taskpaw_v3.core import lan
+
+                why = lan.probe_bind(validated.bind_host, validated.bind_port)
+                if why:
+                    raise Refused(
+                        {"bind_host" if why == lan.NOT_LOCAL else "bind_port": why}
+                    )
             writes = {
                 key: _encode(key, getattr(validated, key))
                 for key in changes

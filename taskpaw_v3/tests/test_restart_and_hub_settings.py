@@ -323,11 +323,16 @@ def test_hub_settings_refuse_per_field_and_write_nothing(store, tmp_path, body, 
     assert "bad\ntoken" not in res.text
 
 
-def test_hub_lan_read_api_switch_picks_the_primary_address(store, tmp_path):
+def test_hub_lan_read_api_switch_picks_the_primary_address(
+    store, tmp_path, monkeypatch
+):
+    probes = []
+    monkeypatch.setattr(lan, "probe_bind", lambda h, p: probes.append((h, p)))
     hub = Hub(store, tmp_path)
     res = hub.put({"lan_access": True, "api_token": "tp_HubReadApiTokenHubReadApi0001"})
     assert res.status_code == 200 and "bind_host" in res.json()["fields"]
     assert store.get_config("bind_host") == "192.168.1.30"
+    assert probes == [("192.168.1.30", 5690)]
     hub.put({"lan_access": False})
     assert store.get_config("bind_host") == "127.0.0.1"
 
@@ -465,3 +470,12 @@ def test_the_hub_view_format(store, tmp_path):
     }
     assert view["saved"]["status_md_default"].endswith("status.md")
     assert re.fullmatch(r"\d+", str(view["saved"]["poll_interval"]))
+
+
+def test_a_hub_address_that_cannot_bind_is_refused(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(lan, "probe_bind", lambda h, p: lan.NOT_LOCAL)
+    hub = Hub(store, tmp_path)
+    res = hub.put({"lan_access": True, "api_token": "tp_HubReadApiTokenHubReadApi0001"})
+    assert res.status_code == 422
+    assert res.json()["fields"] == {"bind_host": "此地址不属于本机"}
+    assert hub_settings.stored_overrides(store) == {}
