@@ -263,6 +263,35 @@ class HubSettings:
             "controller_server_id": controller_server_id(self.store),
         }
 
+    def bind_controller(self, ip: str, port: int) -> dict[str, Any]:
+        """#299 Codex r4: 更换主控 names the server row for that address the
+        controller (an existing one, else a new one) — it never edits the polled
+        row, whose event cursor and acks belong to the old agent. Address edits
+        stay with PATCH /servers/{id} for the same agent."""
+        with self.admission():
+            match = next(
+                (
+                    s
+                    for s in self.store.list_servers()
+                    if s["ip"].lower() == ip.lower() and s["port"] == port
+                ),
+                None,
+            )
+            if match is None:
+                names = {s["name"] for s in self.store.list_servers()}
+                name, n = "主控", 1
+                while name in names:
+                    n += 1
+                    name = f"主控 {n}"
+                sid = self.store.add_server(name, ip, port)
+            else:
+                sid = match["id"]
+                if not match["enabled"]:
+                    self.store.set_server_enabled(sid, True)
+            self.store.set_config(CONTROLLER_KEY, str(sid))
+            log.info("hub controller bound to server %s", sid)
+            return {"ok": True, "id": sid, "created": match is None}
+
     def update(self, patch: Any) -> dict[str, Any]:
         if not isinstance(patch, dict):
             raise Refused({"settings": "格式不正确"})

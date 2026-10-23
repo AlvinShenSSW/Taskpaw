@@ -580,11 +580,32 @@ def create_hub_control_app(
         log.info("hub: removed agent id=%s (#124)", sid)
         return {"ok": True}
 
-    from taskpaw_v3.hub.server.settings import HubSettings, register_hub_settings
+    from taskpaw_v3.hub.server.settings import (
+        BUSY_SAVE,
+        RESTARTING,
+        HubSettings,
+        register_hub_settings,
+    )
 
     # #299 R14/R15: 设置 (overrides in the store; hub.yaml is never rewritten)
     settings = HubSettings(yaml_config or config, config, store)
     app.state.hub_settings = settings
+
+    @app.put("/config/controller")
+    def replace_controller(request: Request, body: dict):
+        # #299 Codex r4: 更换主控 selects or creates the server row for the
+        # address and names it the controller — the old row keeps its cursor/acks
+        ip = _valid_ip(body.get("ip"))
+        port = _valid_port(body.get("port", 5680))
+        try:
+            return settings.bind_controller(ip, port)
+        except ValueError as exc:  # operation_busy / restarting
+            if str(exc) == "restarting":
+                return JSONResponse(status_code=409, content=RESTARTING)
+            return JSONResponse(
+                status_code=409, content={"detail": BUSY_SAVE, "code": "operation_busy"}
+            )
+
     register_hub_settings(app, settings, boot_id=boot_id, on_restart=on_restart)
 
     @app.patch("/config")

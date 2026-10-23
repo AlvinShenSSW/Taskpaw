@@ -602,3 +602,77 @@ def test_a_hub_address_that_cannot_bind_is_refused(store, tmp_path, monkeypatch)
     assert res.status_code == 422
     assert res.json()["fields"] == {"bind_host": "此地址不属于本机"}
     assert hub_settings.stored_overrides(store) == {}
+
+
+def _cursor(agent: str, stream: str, next_id: int = 2) -> dict:
+    return {
+        "event_cursor": {
+            "version": 1,
+            "durable": True,
+            "server_id": agent,
+            "stream_id": stream * 32,
+            "boot_id": "b" * 32,
+            "resume_floor": 0,
+            "offered_highwater": next_id - 1,
+            "next_event_id": next_id,
+        }
+    }
+
+
+def test_replacing_the_controller_binds_a_separate_server_row(store, tmp_path):
+    """#299 Codex r4: 更换主控 to another machine must not overwrite the polled
+    row (its event cursor and acks belong to the old agent — the poller would
+    pause with state_identity_changed). It selects/creates the row for that
+    address and names it the controller; the old row keeps its state."""
+    old = store.add_server("主控", "192.168.1.20", 5680)
+    hub = Hub(store, tmp_path)
+    hub.put({"controller_server_id": old})
+    poller = hub.service.poller
+    poller._admit_cursor(store.get_server(old), _cursor("old-agent", "a"))
+    old_binding = store.get_event_cursor(old)
+    assert old_binding["state"] == "bound" and store.read_acks() == {old: -1}
+
+    res = hub.client.put(
+        "/config/controller", json={"ip": "192.168.1.21", "port": 5680}
+    )
+    assert res.status_code == 200 and res.json()["created"] is True
+    new = res.json()["id"]
+    assert new != old and hub.get()["controller_server_id"] == new
+    assert store.get_server(old)["ip"] == "192.168.1.20"  # the old agent is untouched
+    assert store.get_event_cursor(old) == old_binding
+    assert store.read_acks() == {old: -1}
+    assert store.get_event_cursor(new)["state"] == "fresh"
+    # the poller admits the new controller's own stream
+    poller._admit_cursor(store.get_server(new), _cursor("new-agent", "c"))
+    assert store.get_event_cursor(new)["state"] == "bound"
+    assert store.get_event_cursor(old) == old_binding
+
+    # replacing again with a known address selects its row, creating nothing
+    res = hub.client.put(
+        "/config/controller", json={"ip": "192.168.1.20", "port": "5680"}
+    )
+    assert res.status_code == 200 and res.json() == {
+        **res.json(),
+        "id": old,
+        "created": False,
+    }
+    assert hub.get()["controller_server_id"] == old
+    assert len(store.list_servers()) == 2
+
+
+def test_replacing_the_controller_refuses_bad_addresses_and_a_granted_restart(
+    store, tmp_path
+):
+    hub = Hub(store, tmp_path)
+    for body in (
+        {"ip": "http://x", "port": 5680},
+        {"ip": "", "port": 5680},
+        {"ip": "10.0.0.2", "port": 0},
+    ):
+        assert hub.client.put("/config/controller", json=body).status_code == 400
+    assert store.list_servers() == []
+    hub.service  # noqa: B018 - the service exists; the restart gate is on the settings
+    hub.client.app.state.hub_settings.restarting = True
+    res = hub.client.put("/config/controller", json={"ip": "10.0.0.2", "port": 5680})
+    assert res.status_code == 409 and res.json()["code"] == "restarting"
+    assert store.list_servers() == []

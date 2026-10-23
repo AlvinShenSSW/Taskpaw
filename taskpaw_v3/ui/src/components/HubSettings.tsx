@@ -192,12 +192,8 @@ function ControllerConnection({ hint, tokenSet, controllerId }: { hint: string |
   });
   const save = useMutation({
     mutationFn: async () => {
-      const p = Number(port);
-      if (server) await api.hubUpdateServer(server.id, { ip: ip.trim(), port: p });
-      else {
-        const added = await api.hubAddServer({ name: "主控", ip: ip.trim(), port: p });
-        await api.hubSaveSettings({ controller_server_id: added.id });
-      }
+      // the address's own server row — the polled row keeps its event cursor/acks (Codex r4)
+      await api.hubReplaceController(ip.trim(), Number(port));
       if (token.trim()) await api.hubSaveSettings({ polling_token: token.trim() });
     },
     onSuccess: () => {

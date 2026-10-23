@@ -830,6 +830,9 @@ export const api = {
     send<HubServer & { ok: boolean }>("hub", "POST", "/servers", s),
   hubUpdateServer: (id: number, patch: { name?: string; ip?: string; port?: number; enabled?: boolean }) =>
     send<HubServer & { ok: boolean }>("hub", "PATCH", `/servers/${id}`, patch),
+  // #299 Codex r4: 更换主控 selects/creates the server row for the address and names it the 主控
+  hubReplaceController: (ip: string, port: number) =>
+    send<{ ok: boolean; id: number; created: boolean }>("hub", "PUT", "/config/controller", { ip, port }),
   hubRemoveServer: (id: number) => send<{ ok: boolean }>("hub", "DELETE", `/servers/${id}`),
   hubSetPollingToken: (polling_token: string) =>
     send<{ ok: boolean }>("hub", "PATCH", "/config", { polling_token }),
