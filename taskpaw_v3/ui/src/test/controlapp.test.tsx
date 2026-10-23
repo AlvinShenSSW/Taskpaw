@@ -20,7 +20,9 @@ describe("App credential expiry", () => {
     expect(hasControlCredential("agent")).toBe(false);
     await waitFor(() => expect(qc.getQueryCache().getAll()).toHaveLength(0));
     await new Promise(done => setTimeout(done, 40));
-    expect(fetch).toHaveBeenCalledTimes(1);
+    // #299: the first-run check (/control/setup) runs beside the status query; neither is retried
+    const paths = vi.mocked(fetch).mock.calls.map(c => new URL(String(c[0])).pathname);
+    expect(paths.sort()).toEqual(["/control/setup", "/control/status"]);
   });
   it("does not retry or replay an expired mutation", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => Promise.resolve(new Response("{}", { status: url.includes("/stop?") ? 401 : 200 }))));
