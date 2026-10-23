@@ -391,20 +391,59 @@ def test_a_starting_controller_refuses_the_switch(tmp_path, tools):
     assert response.status_code == 409 and response.json()["code"] == "workflow_busy"
 
 
+def _worker(routes: int, busy: bool):
+    """The worker host as the settings guard reads it: `summary()` (§9 CX6)."""
+    return SimpleNamespace(summary=lambda: {"routes": routes, "busy": busy})
+
+
+def test_a_restarted_worker_with_unsettled_attempts_is_busy_without_a_controller(
+    tmp_path,
+):
+    """§9 CX6 (Codex r2): after a restart with the controller unreachable there
+    is no dispatcher and no route, but an attempt file on the staging disk is
+    unsettled work: the real host reads busy, so the role and directories
+    stay put until it settles."""
+    from taskpaw_v3.core.config import WorkflowSettings
+    from taskpaw_v3.workflow.remote_dispatch import ATTEMPTS_DIR
+    from taskpaw_v3.workflow.remote_worker import WorkerHost
+
+    staging = tmp_path / "staging"
+    (staging / ATTEMPTS_DIR).mkdir(parents=True)
+    attempt = staging / ATTEMPTS_DIR / "a1.json"
+    attempt.write_text("{}", encoding="utf-8")
+    settings = WorkflowSettings(enabled=True, role="worker", staging_dir=str(staging))
+    world = World(tmp_path, enabled=True, role="worker", staging_dir=str(staging))
+    world.worker = WorkerHost(settings, tmp_path / "workflow")
+    assert world.worker.dispatcher is None
+    before = world.path.read_bytes()
+    for body in (
+        {"role": "off"},
+        {"role": "worker", "staging_dir": str(tmp_path / "staging-2")},
+        {
+            "role": "worker",
+            "staging_dir": str(staging),
+            "data_dir": str(tmp_path / "x"),
+        },
+    ):
+        response = world.put(body)
+        assert response.status_code == 409, body
+        assert response.json()["code"] == "workflow_busy"
+        assert world.path.read_bytes() == before
+    attempt.unlink()  # settled
+    assert world.put({"role": "off"}).status_code == 200
+
+
 def test_a_worker_with_routes_or_a_claim_cannot_leave(tmp_path):
     staging = str(tmp_path / "staging")
     world = World(tmp_path, enabled=True, role="worker", staging_dir=staging)
-    dispatcher = SimpleNamespace(claimed=lambda: False)
-    world.worker = SimpleNamespace(routes=[{"film": "f"}], dispatcher=dispatcher)
+    world.worker = _worker(routes=1, busy=False)
     before = world.path.read_bytes()
     response = world.put({"role": "off"})
     assert response.status_code == 409 and response.json()["code"] == "workflow_busy"
     assert world.path.read_bytes() == before
-    world.worker = SimpleNamespace(
-        routes=[], dispatcher=SimpleNamespace(claimed=lambda: True)
-    )
+    world.worker = _worker(routes=0, busy=True)
     assert world.put({"role": "off"}).status_code == 409
-    world.worker = SimpleNamespace(routes=[], dispatcher=None)
+    world.worker = _worker(routes=0, busy=False)
     assert world.put({"role": "off"}).status_code == 200
 
 
@@ -413,9 +452,7 @@ def test_a_busy_worker_cannot_move_its_staging_or_data_dir(tmp_path):
     claims and held children as leaving the role does."""
     staging = str(tmp_path / "staging")
     world = World(tmp_path, enabled=True, role="worker", staging_dir=staging)
-    world.worker = SimpleNamespace(
-        routes=[], dispatcher=SimpleNamespace(claimed=lambda: True)
-    )
+    world.worker = _worker(routes=0, busy=True)
     before = world.path.read_bytes()
     for change in (
         {"staging_dir": str(tmp_path / "staging-2")},
@@ -427,7 +464,7 @@ def test_a_busy_worker_cannot_move_its_staging_or_data_dir(tmp_path):
         assert world.path.read_bytes() == before
     same = world.put({"role": "worker", "staging_dir": staging, "staging_cap_gb": 300})
     assert same.status_code == 200, same.text
-    world.worker = SimpleNamespace(routes=[], dispatcher=None)  # idle: it may move
+    world.worker = _worker(routes=0, busy=False)  # idle: it may move
     moved = world.put({"role": "worker", "staging_dir": str(tmp_path / "staging-2")})
     assert moved.status_code == 200, moved.text
 
@@ -477,6 +514,72 @@ def test_a_paired_workers_data_dir_cannot_move(tmp_path):
         )
         assert response.status_code == 422, role
         assert response.json()["fields"]["data_dir"] == "工作目录已有工作机配对"
+
+
+def test_a_paired_workers_staging_dir_cannot_change_but_an_unpaired_one_can(tmp_path):
+    """§9 CX8 (Codex r2): a paired worker's staging directory lives in
+    `worker-identity.json` (chosen at 加入), so saving a new one to agent.yaml
+    would change nothing: refused with a field error. Unpaired: allowed."""
+    from taskpaw_v3.workflow.remote_worker import IDENTITY_NAME
+
+    staging = str(tmp_path / "staging")
+    world = World(tmp_path, enabled=True, role="worker", staging_dir=staging)
+    other = str(tmp_path / "staging-2")
+    paired = tmp_path / "workflow"  # the default, beside agent.yaml
+    paired.mkdir()
+    (paired / IDENTITY_NAME).write_text("{}", encoding="utf-8")
+    before = world.path.read_bytes()
+    response = world.put({"role": "worker", "staging_dir": other})
+    assert response.status_code == 422, response.text
+    assert (
+        response.json()["fields"]["staging_dir"]
+        == "已配对的工作机改暂存目录需要重新加入"
+    )
+    assert world.path.read_bytes() == before
+    same = world.put({"role": "worker", "staging_dir": staging, "staging_cap_gb": 300})
+    assert same.status_code == 200, same.text
+    (paired / IDENTITY_NAME).unlink()  # not paired (any more)
+    moved = world.put({"role": "worker", "staging_dir": other})
+    assert moved.status_code == 200, moved.text
+
+
+def test_a_data_dir_differing_only_by_case_follows_the_filesystem(
+    tmp_path, tools, monkeypatch
+):
+    """§9 CX9 (Codex r2): `normcase` decides, not a blanket casefold. On a
+    case-sensitive filesystem `Data` and `data` are two directories (moving
+    from a held one is refused); with Windows semantics they are the same."""
+    import ntpath
+
+    old = tmp_path / "Data"
+    old.mkdir()
+    (old / "workflow.db").write_bytes(b"store")
+    world = World(tmp_path, enabled=True, **tools, data_dir=str(old))
+    target = str(tmp_path / "dAtA")
+    # not present on a case-sensitive disk; present-and-same on a case-insensitive one:
+    monkeypatch.setattr(os.path, "normcase", lambda p: os.fspath(p))  # POSIX semantics
+    real_samefile = os.path.samefile
+    monkeypatch.setattr(os.path, "samefile", lambda a, b: False)
+    refused = world.put({"role": "controller", "data_dir": target})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["fields"]["data_dir"] == "工作目录已有媒体数据"
+    monkeypatch.setattr(os.path, "samefile", real_samefile)
+    monkeypatch.setattr(os.path, "normcase", ntpath.normcase)  # Windows semantics
+    same = world.put({"role": "controller", "data_dir": target})
+    assert same.status_code == 200, same.text
+
+
+def test_same_path_uses_the_filesystem_when_both_exist(tmp_path, monkeypatch):
+    from taskpaw_v3.agent.server import workflow_settings as ws
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    assert not ws._same_path(a, b)
+    monkeypatch.setattr(os.path, "samefile", lambda x, y: True)
+    assert ws._same_path(a, b)  # both exist: the filesystem says one directory
+    assert not ws._same_path(a, tmp_path / "missing")  # one missing: names decide
+    assert ws._same_path(a, tmp_path / "x" / ".." / "a")  # normalised names
 
 
 def test_the_worker_port_cannot_change_under_paired_workers(tmp_path, tools):

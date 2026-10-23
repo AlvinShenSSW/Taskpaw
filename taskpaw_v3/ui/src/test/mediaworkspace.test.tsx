@@ -271,6 +271,41 @@ describe("待处理", () => {
     expect(c.getByRole("button", { name: "确认入队" })).toBeEnabled();
   });
 
+  it("remote mode: a null recommended machine is 自动（推荐）, the first option, and confirms as null (Codex r2 CX5)", async () => {
+    const m = mockApi();
+    const auto = { ltx_model: "standard" as const, ltx_reason: "默认", machine: null, machine_reason: "自动（推荐）" };
+    vi.spyOn(api, "workflowPlans").mockResolvedValue({
+      ...PLANS, remote: true,
+      plans: PLANS.plans.map((p) => ({ ...p, recommendation: { ...auto, ltx_model: p.needs_gpu ? "standard" : null } })),
+      choices: { ...PLANS.choices, machines: [
+        { id: "w-a", name: "工作机甲", gpu: "RTX 5070 Ti", vram_mib: 16303, reason: "RTX 5070 Ti 16 GB" },
+        { id: "w-b", name: "工作机乙", gpu: null, vram_mib: null, reason: "" }] },
+    });
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    await waitFor(() => expect(card("abf-422")).toBeTruthy());
+    const c = within(card("abf-422"));
+    const select = c.getByLabelText("设备") as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["自动（推荐）", "工作机甲 · RTX 5070 Ti 16 GB", "工作机乙"]);
+    expect(select.value).toBe("");
+    expect(c.getByText("自动（推荐）", { selector: "p" })).toBeInTheDocument();
+    expect(c.getByRole("button", { name: "确认入队" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "全部按推荐确认" })).toBeEnabled();
+    fireEvent.click(c.getByRole("button", { name: "确认入队" }));
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalledWith(
+      [{ film_id: "abf-422", input_revision: 1, ltx_model: "standard", machine: null }]));
+    // picking a worker pins it; the batch then skips the changed film and sends the rest as 自动
+    fireEvent.change(within(card("abf-421")).getByLabelText("设备"), { target: { value: "w-b" } });
+    m.confirmPlans.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "全部按推荐确认" }));
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalledWith([
+      { film_id: "abf-423", input_revision: 1, ltx_model: null, machine: null }]));
+    m.confirmPlans.mockClear();
+    fireEvent.click(within(card("abf-421")).getByRole("button", { name: "确认入队" }));
+    await waitFor(() => expect(m.confirmPlans).toHaveBeenCalledWith(
+      [{ film_id: "abf-421", input_revision: 1, ltx_model: "standard", machine: "w-b" }]));
+  });
+
   it("shows the empty state", async () => {
     mockApi();
     vi.spyOn(api, "workflowPlans").mockResolvedValue({ plans: [], default_tier: "standard", choices: { tiers: [], machines: [] } });

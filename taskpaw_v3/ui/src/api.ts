@@ -432,7 +432,7 @@ export interface PlanLookup {
   studio: string | null; release: string | null; runtime_min: number | null; has_poster: boolean;
   error_class: string | null; message: string | null; can_requery: boolean;
 }
-export interface PlanRecommendation { ltx_model: LtxTier | null; ltx_reason: string; machine: string; machine_reason: string }
+export interface PlanRecommendation { ltx_model: LtxTier | null; ltx_reason: string; machine: string | null; machine_reason: string }
 export interface PlanEntry {
   film_id: string; input_revision: number; revision_changed: boolean; name: string;
   title: string | null; number: string | null; actors: string[];
@@ -495,7 +495,7 @@ export interface WorkflowPlans {
   // P2-4 R5: remote mode (the select starts with 自动; a null machine is 自动)
   remote?: boolean;
 }
-export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string }
+export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string | null }
 // `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
 export interface PlanResult { film_id: string; ok: boolean; error: string | null; message: string | null }
 const seg = (id: string | number) => encodeURIComponent(String(id));

@@ -19,6 +19,7 @@ a save racing another answers 409 (IR12).
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -38,6 +39,7 @@ STORE_NAME = "workflow.db"  # `LocalRuntime.db_path`
 HELD_STORE = "工作目录已有媒体数据"
 HELD_PAIRING = "工作目录已有工作机配对"
 PORT_PAIRED = "已有工作机配对在此端口，改端口需先让它们重新配对"
+STAGING_PAIRED = "已配对的工作机改暂存目录需要重新加入"
 OPERATION_BUSY = "正在保存其他设置，请稍后再试"
 STARTING = "媒体流水线正在启动，请稍后再试"
 PATHS = (
@@ -191,6 +193,13 @@ def validate(
         held = _data_dir_held(new, (old, running), config_dir)
         if held:
             errors["data_dir"] = held
+    if (
+        role == "worker"
+        and "staging_dir" not in errors
+        and _moved(new.staging_dir, old.staging_dir)
+        and _paired(old, running, config_dir)
+    ):
+        errors["staging_dir"] = STAGING_PAIRED
     if errors:
         raise Refused(422, "设置有误", fields=errors)
 
@@ -248,7 +257,7 @@ def _data_dir_held(
         if reference is None:
             continue
         before = default_data_dir(reference, config_dir)
-        if before is None or (after is not None and _key(after) == _key(before)):
+        if before is None or (after is not None and _same_path(after, before)):
             continue
         if (before / STORE_NAME).exists():
             return HELD_STORE
@@ -257,14 +266,43 @@ def _data_dir_held(
     return None
 
 
-def _key(path: Path) -> str:
-    return str(path.expanduser().absolute()).rstrip("\\/").casefold()
+def _paired(
+    old: WorkflowSettings, running: WorkflowSettings | None, config_dir: Path | None
+) -> bool:
+    """§9 CX8: a worker's pairing (`worker-identity.json`) sits in a data
+    directory the saved or the running settings name; its staging directory
+    was chosen at 加入 and lives there, not in agent.yaml."""
+    from taskpaw_v3.workflow.remote_worker import IDENTITY_NAME
+
+    for settings in (old, running):
+        directory = default_data_dir(settings, config_dir) if settings else None
+        if directory is not None and (directory / IDENTITY_NAME).exists():
+            return True
+    return False
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    """§9 CX9: filesystem identity when both exist (`samefile`); otherwise
+    the names, normalised by the platform (`normcase` folds case only on
+    Windows, so `Data` and `data` stay two directories on a case-sensitive
+    filesystem)."""
+    a, b = a.expanduser(), b.expanduser()
+    try:
+        if a.exists() and b.exists():
+            return os.path.samefile(a, b)
+    except OSError:
+        pass
+
+    def name(path: Path) -> str:
+        return os.path.normcase(os.path.abspath(path)).rstrip("\\/")
+
+    return name(a) == name(b)
 
 
 def _moved(new: str | None, old: str | None) -> bool:
     if not new or not old:
         return bool(new) != bool(old)
-    return _key(Path(new)) != _key(Path(old))
+    return not _same_path(Path(new), Path(old))
 
 
 # ── what a switch would strand (R16) ────────────────────────────────────
@@ -315,13 +353,14 @@ def paired_workers(host: Any) -> int:
 
 
 def worker_busy(host: Any) -> bool:
-    """A worker's routes, a claim or held children (`claimed` covers them)."""
+    """A worker's routes, a claim or held children. §9 CX6: the host's own
+    disk-aware `summary()["busy"]`, so a worker restarted with the controller
+    unreachable (no dispatcher, no routes) still reads busy while attempt
+    files on its staging disk are unsettled."""
     if host is None:
         return False
-    dispatcher = getattr(host, "dispatcher", None)
-    return bool(getattr(host, "routes", None)) or bool(
-        dispatcher is not None and dispatcher.claimed()
-    )
+    summary = host.summary()
+    return bool(summary.get("routes")) or bool(summary.get("busy"))
 
 
 def refuse_busy(

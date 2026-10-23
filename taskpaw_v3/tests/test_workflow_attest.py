@@ -355,6 +355,42 @@ def test_a_successful_attest_retries_wakes_and_re_routes(world):
     }
 
 
+def test_an_unresolved_assignment_on_an_older_revision_can_be_attested(world):
+    """§9 CX7 (Codex r2): a new input revision leaves the old revision's
+    remote claim open (its worker is busy). The attest validates that exact
+    assignment and its own revision: it resolves, frees the GPU and closes the
+    old route, and never retries the obsolete revision's stage."""
+    from taskpaw_v3.tests.test_workflow_films import input_manifest
+
+    remote, film_id = claimed_film(world)
+    old = world.assignment(film_id)
+    old_job = old.job_id
+    _, auth = world.rt.grant_intake_adapter()
+    view = world.rt.store.get_film(world.rt.operator, film_id)
+    world.rt.store.put_input_manifest(
+        auth,
+        world.rt.meta(),
+        m.InputManifestPut(
+            film_id=film_id,
+            expected_version=view.film.version,
+            manifest=input_manifest(film_id, revision=2),
+        ),
+    )
+    store, op = world.rt.store, world.rt.operator
+    assert store.get_film(op, film_id).film.current_input_revision == 2
+    assert store.film_route(op, film_id, 1) is not None  # kept while the claim runs
+    world.clock.advance(DEAD)
+    world.status(remote, 400.0)
+    response = world.attest(film_id, old)
+    assert response.status_code == 200, response.text
+    assert not [
+        o for o in store.list_open_assignments(op) if o.assignment.job_id == old_job
+    ]
+    assert store.film_route(op, film_id, 1) is None  # closed with the claim
+    assert store.get_stage(op, old_job).status == "failed"  # not retried
+    assert world.dispatcher.wakes == 1
+
+
 def test_a_film_pinned_to_the_dead_worker_waits_until_reassigned(world):
     remote = enrol_remote(world.rt, "5060 Ti-1")
     other = enrol_remote(world.rt, "5070 Ti")

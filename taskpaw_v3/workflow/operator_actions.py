@@ -165,9 +165,11 @@ def attest(
     assignment_id: str,
     expected_version: int,
 ) -> dict[str, Any]:
-    """判定已停止 of the film's current, unresolved remote compute
-    assignment; ActionRefused (`stale_attempt`, `cas_conflict`,
-    `still_alive`, `recently_renewed`) otherwise."""
+    """判定已停止 of one of the film's unresolved remote compute assignments
+    (§9 CX7: validated with its own revision and attempt, so a claim left on
+    an older input revision can be settled too); ActionRefused
+    (`stale_attempt`, `cas_conflict`, `still_alive`, `recently_renewed`)
+    otherwise."""
     op = rt.operator
     item = next(
         (
@@ -184,7 +186,6 @@ def attest(
         or stage is None
         or item.stage not in _COMPUTE
         or stage.film_id != film_id
-        or stage.input_revision != view.film.current_input_revision
         or stage.attempt_id != item.assignment.attempt_id
     ):
         raise ActionRefused("stale_attempt", "任务已变化，请刷新后重试")
@@ -233,7 +234,10 @@ def attest(
                 "recently_renewed", "该任务 5 分钟内仍有续约，请稍后再判定"
             ) from None
         raise
-    retry_if_due(rt, assignment.job_id)  # a cancelled stage is a free retry
+    # §9 CX7: a cancelled stage of the current revision is a free retry; an
+    # older revision's claim is only settled (assignment, GPU owner, route)
+    if stage.input_revision == view.film.current_input_revision:
+        retry_if_due(rt, assignment.job_id)
     return {"ok": True, "status": result.status}
 
 

@@ -11,10 +11,11 @@ import { errorText, MEDIA_FILMS_KEY, MEDIA_PLANS_KEY, useWorkspace } from "./wor
 const STALE_TEXT = "收件内容已更新，请重新查看后确认";
 
 type Filter = "all" | "gpu" | "nogpu";
-type Choice = { tier: LtxTier | null; machine: string };
+// `machine` null = 自动（推荐）: remote mode lets the controller pick the worker.
+type Choice = { tier: LtxTier | null; machine: string | null };
 
 const recommendedChoice = (e: PlanEntry): Choice => ({ tier: e.needs_gpu ? e.recommendation.ltx_model : null, machine: e.recommendation.machine });
-const complete = (e: PlanEntry) => Boolean(e.recommendation.machine) && (!e.needs_gpu || e.recommendation.ltx_model !== null);
+const complete = (e: PlanEntry) => e.recommendation.machine !== "" && (!e.needs_gpu || e.recommendation.ltx_model !== null);
 const entryTitle = (e: PlanEntry) => e.title || e.name;
 const planKey = (e: Pick<PlanEntry, "film_id" | "input_revision">) => `${e.film_id}:${e.input_revision}`;
 
@@ -209,7 +210,8 @@ export function PendingPage() {
   );
 }
 
-function machineName(machines: PlanMachine[], id: string): string {
+function machineName(machines: PlanMachine[], id: string | null): string {
+  if (id === null) return "自动";
   return machines.find((x) => x.id === id)?.name ?? "本机";
 }
 
@@ -222,10 +224,11 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
   const tid = `pt-${id}`;
   const title = entryTitle(e);
   const rec = e.recommendation;
-  const options = machines.length ? machines.map((m) => ({ id: m.id, label: machineLabel(m) })) : [{ id: rec.machine, label: "本机" }];
+  const workers = machines.length ? machines.map((m) => ({ id: m.id, label: machineLabel(m) })) : rec.machine === null ? [] : [{ id: rec.machine, label: "本机" }];
+  const options = rec.machine === null ? [{ id: "", label: "自动（推荐）" }, ...workers] : workers;
   // The recommended machine shows the recommendation's reason (a 4K film: 「本机修复输出上限 1080p」).
   const machineReason = choice.machine === rec.machine ? rec.machine_reason : machines.find((m) => m.id === choice.machine)?.reason ?? "";
-  const ready = Boolean(choice.machine) && (!e.needs_gpu || choice.tier !== null);
+  const ready = choice.machine !== "" && (!e.needs_gpu || choice.tier !== null);
   const idLine = [e.number || (e.title ? e.name : null), e.actors.join("、")].filter(Boolean).join(" · ");
   const onKey = (ev: KeyboardEvent<HTMLButtonElement>, tier: LtxTier) => {
     const step = ({ ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 } as Record<string, number>)[ev.key];
@@ -285,8 +288,8 @@ function PendingCard({ entry: e, choice, machines, stale, busy, lookupBusy, read
         <div className="plan-field">
           {readOnly ? <><span className="plan-label">设备</span><Chip>推荐 {machineName(machines, rec.machine)}</Chip></> : <>
           <label className="plan-label" htmlFor={`machine-${id}`}>设备</label>
-          <select id={`machine-${id}`} value={choice.machine} aria-describedby={`machine-reason-${id}`}
-            onChange={(ev) => onChoice({ ...choice, machine: ev.target.value })}>
+          <select id={`machine-${id}`} value={choice.machine ?? ""} aria-describedby={`machine-reason-${id}`}
+            onChange={(ev) => onChoice({ ...choice, machine: ev.target.value || null })}>
             {options.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
           </>}
