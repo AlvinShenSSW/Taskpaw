@@ -46,8 +46,8 @@ from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow import operator_actions as ops
 from taskpaw_v3.workflow import scheduler as s
 from taskpaw_v3.workflow.exec_asr import AsrExecutor
-from taskpaw_v3.workflow.executors import ExecRuntime
-from taskpaw_v3.workflow.local_dispatch import REMOTE_GPU, REMOTE_STAGES
+from taskpaw_v3.workflow.executors import ExecRuntime, SyntheticExecutor
+from taskpaw_v3.workflow.local_dispatch import NO_4K_DEVICE, REMOTE_GPU, REMOTE_STAGES
 from taskpaw_v3.workflow.local_gpu import UHD
 
 
@@ -412,3 +412,93 @@ def test_the_pass_routes_restore_only_and_never_withdraws_a_claim(seed):
             keep_confirmed=True,
         )[f.ltx_model]
         assert view.machine == decision.worker_id
+
+
+# ── M1 / M5: audio-only ASR changes phase 1 too ──────────────────────────
+class _Uhd(SyntheticExecutor):
+    """The synthetic stand-in of `AsrExecutor`: reads no video (R8)."""
+
+    def max_resolution(self, vram_mib: int) -> tuple[int, int]:
+        return UHD
+
+
+def _uhd_asr_runtime(path):
+    return runtime(
+        path,
+        execs=[
+            SyntheticExecutor("restore", "pass"),
+            _Uhd("asr", "pass"),
+            SyntheticExecutor("translate", "pass"),
+        ],
+    )
+
+
+def test_m1_a_4k_film_with_restore_done_gets_asr_on_the_8gb_controller(tmp_path):
+    """R8 also changes phase 1 (intended): before OD7 the 8 GB controller
+    answered NO_4K_DEVICE for the ASR of any 4K film; now it transcribes the
+    audio. Restore of a 4K film still waits for a device that fits (P2-5)."""
+    small = _uhd_asr_runtime(tmp_path / "wf")
+    try:
+        w = enrol_remote(small, "5060 Ti-1")
+        film_id = add_film(small, width=3840, height=2160)
+        route(small, film_id, w.worker_id)
+        resolve_remote(small, w, claim_remote(small, w, film_id, "restore"))
+        d = local_dispatcher(small)  # remote_workers off: phase-1 predicate
+        assert d.run_once() is True
+        assert stage(small, film_id, "asr").status == "succeeded"
+        assert d.status().waiting == {}
+    finally:
+        small.close()
+
+
+def test_m1_restore_of_a_4k_film_still_waits_on_the_8gb_controller(tmp_path):
+    small = _uhd_asr_runtime(tmp_path / "wf")
+    try:
+        film_id = add_film(small, width=3840, height=2160)
+        d = local_dispatcher(small)
+        assert d.run_once() is False
+        assert d.status().waiting == {film_id: NO_4K_DEVICE}
+        assert stage(small, film_id, "restore").status == "pending"
+    finally:
+        small.close()
+
+
+def test_m5_the_claim_check_accepts_a_4k_asr_after_the_profile_rerecord(tmp_path):
+    """The store's width check (`_check_worker_claim`) reads the approved
+    profile: the controller's ASR profile is UHD after the re-record at start,
+    so its claim on a 4K manifest is not refused."""
+    small = _uhd_asr_runtime(tmp_path / "wf")
+    try:
+        cap = small.worker().capability
+        assert cap is not None and cap.approved is not None
+        widths = {
+            p.allowed_stages: (p.max_width, p.max_height) for p in cap.approved.profiles
+        }
+        assert widths[("asr",)] == UHD
+        assert widths[("restore",)] == (1920, 1080)  # the 8 GB card's restore
+        w = enrol_remote(small, "5060 Ti-1")
+        film_id = add_film(small, width=3840, height=2160)
+        route(small, film_id, w.worker_id)
+        resolve_remote(small, w, claim_remote(small, w, film_id, "restore"))
+        d = local_dispatcher(small, remote_enabled=True)
+        assert d.run_once() is True  # claims through the same check
+        attempt = small.store.list_attempts(
+            small.operator, stage(small, film_id, "asr").job_id
+        )[0]
+        assert attempt.worker_id == small.identity.worker_id
+    finally:
+        small.close()
+
+
+def test_a_local_route_is_refused_for_any_worker_but_the_controller(rt):
+    """Hardening: `kind='local'` bypasses the pin checks and serves ASR, so
+    only `LocalDispatcher._ensure_route` (the controller's own worker) opens
+    one; a GPU worker is never given one."""
+    w = enrol_remote(rt, "5060 Ti-1")
+    film_id = add_film(rt)
+    with pytest.raises(m.WorkflowError) as refused:
+        route(rt, film_id, w.worker_id, kind="local")
+    assert refused.value.code == "precondition_failed"
+    assert routes_of(rt, film_id) == []
+    route(rt, film_id, rt.identity.worker_id, kind="local")
+    assert routes_of(rt, film_id) == [(rt.identity.worker_id, "local", "open", None)]

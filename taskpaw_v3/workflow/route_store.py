@@ -116,6 +116,10 @@ class RouteCommands(FilmCommands):
                 or worker.admission_state != "enabled"
             ):
                 raise WorkflowError("precondition_failed")
+            if command.kind == "local" and command.worker_id != self.controller_id:
+                # hardening: only the controller's own worker gets a local
+                # route (no pin check, serves ASR) — `LocalDispatcher._ensure_route`
+                raise WorkflowError("precondition_failed")
             if command.kind != "local":
                 pin = self._pin_row(command.film_id, command.input_revision)
                 if pin is None:  # IR13: the scheduler routes planned films only

@@ -1,6 +1,6 @@
 # P2-OD7 (#298): ASR on the controller, GPU workers restore only (frozen contract)
 
-Date 2026-10-23 · Base `afk/claude-p2-271` 6d65b7d · Parent: [phase-2 design](2026-10-22-media-workflow-phase2-multi-machine.md) §14 OD7 (replaces OD1/OD6 for ASR). P2-1…P2-4 stay binding except where this contract changes them. Home LAN, single user, smallest complete change. **No schema change.** `remote_workers: false` (phase 1) behaves exactly as before. UI preview confirmed by the operator (#298 issue link).
+Date 2026-10-23 · Base `afk/claude-p2-271` 6d65b7d · Parent: [phase-2 design](2026-10-22-media-workflow-phase2-multi-machine.md) §14 OD7 (replaces OD1/OD6 for ASR). P2-1…P2-4 stay binding except where this contract changes them. Home LAN, single user, smallest complete change. **No schema change.** `remote_workers: false` (phase 1) behaves as before, except R8 (ASR of a 4K film no longer waits for a 16 GB card). UI preview confirmed by the operator (#298 issue link).
 
 ## 1. Requirements
 
@@ -13,15 +13,15 @@ Date 2026-10-23 · Base `afk/claude-p2-271` 6d65b7d · Parent: [phase-2 design](
 | R5 | **Store enforcement.** An `asr` claim needs the open route to be the controller's own (`kind='local'`), else 409 `route_required`. Already-claimed assignments untouched. | OD7 |
 | R6 | **Eligibility** drops the ASR rule and `WorkerLive.asr_ready`; worker checks are restore-only; < 16 GB is eligible for nothing (「显存不足，不参与修复」). `can_reassign`, `_pin`, `set_pin` "unfinished" checks look at restore only; `reassign_options` → `[]` when no stage is routed. | OD7, OD5 |
 | R7 | **Preview.** A film with no routed stage left has no device option; 自动 reads `NO_GPU` = 「无需修复，本机完成」; the worker-ASR fallback is removed. | CX28, P2-4 R5 |
-| R8 | **`AsrExecutor.max_resolution` → UHD** (WhisperJAV reads audio only), so a 4K film restored on a worker is transcribed on the 8 GB controller; the controller re-records its approved profiles at restart (as P2-3 R4). | OD7 |
-| R9 | **Workers build only the restore executor** (`worker_executors`); no WhisperJAV needed; `Probe.asr_ready` removed; no `asr_ready` sent; `RemoteDispatcher.STAGES = ("restore",)`. The settle/finish/delivery path for an ASR attempt stays for in-flight work. | OD7 |
+| R8 | **`AsrExecutor.max_resolution` → UHD** (WhisperJAV reads audio only), so a 4K film restored on a worker is transcribed on the 8 GB controller; the controller re-records its approved profiles at restart (as P2-3 R4). **Phase 1 changes too (intended):** a 4K film whose restore is done or skipped now gets its ASR on a < 16 GB controller instead of waiting `NO_4K_DEVICE`; a 4K restore still waits for a device that fits. | OD7, §9 M1 |
+| R9 | **Workers build only the restore executor** (`worker_executors`); no WhisperJAV needed; `Probe.asr_ready` removed; the beat sends a constant `asr_ready: false` for one release (§2); `RemoteDispatcher.STAGES = ("restore",)`. The settle/finish/delivery path for an ASR attempt stays for in-flight work. | OD7 |
 | R10 | **设备.** `approve(restore)` loses `asr`; `precondition_failed` when no restore profile. Rows drop `asr_ready`. Synthetic eligibility checks `("restore",)`. In remote mode the controller row lists `识别、翻译` (识别 only when an ASR executor exists). | OD7 |
 | R11 | **Settings.** 主控 always shows WhisperJAV; Jasna only while 允许 GPU 工作机接入 is off; note 「开启后修复交给 GPU 工作机，识别仍在本机」. GPU 工作机 drops WhisperJAV (not shown/validated; existing yaml value kept). Remote mode, no ASR executor → ASR waits 「本机未配置 WhisperJAV」. | OD7, P2-4 R13 |
 | R12 | **Upgrade migration** per §3. | OD7 |
 
 ## 2. Payloads (additive unless noted)
 
-- Heartbeat `asr_ready` optional, default False, **ignored** (kept: `extra="forbid"` would reject an older worker). `CurrentLive.stage` keeps `"asr"`.
+- Heartbeat `asr_ready` optional on the controller, default False, **ignored**. The worker keeps **sending `"asr_ready": false` for one release**: a worker upgraded before its controller would otherwise be refused by the old `Heartbeat` (required field, `extra="forbid"`, 422) and show 失联 instead of 版本不一致 (§9 IR P2-1). `CurrentLive.stage` keeps `"asr"`.
 - Envelope unchanged (`stages.asr` informational).
 - **Removed:** 设备 row `asr_ready`; approve body `asr`; `Probe.asr_ready`; `WorkerLive.asr_ready`.
 - **Added:** row `lost_worker`.
@@ -58,7 +58,7 @@ ASR from the work copy in parallel with remote restore; 4K (P2-5); zero-config (
 
 1. Every worker needs one re-核验 after upgrade (release note; 设备 shows 待核验).
 2. The 5060 becomes the ASR bottleneck behind manual tasks (visible 「等待 GPU：…」).
-3. Mixed versions: heartbeat compatible; store guard R5 is the authority.
+3. Mixed versions: the worker still sends `asr_ready: false` (one release), so an older controller accepts its beat and 版本不一致 shows; the store guard R5 is the authority.
 4. 4K ASR on 8 GB relies on WhisperJAV being audio-only — verify on the real machine.
 5. 预计 covers restore + transfer only.
 
@@ -68,3 +68,16 @@ ASR from the work copy in parallel with remote restore; 4K (P2-5); zero-config (
 
 ### Code facts behind the contract
 `film_store.py` `_ROUTE_STAGES`/`_GPU_STAGES` decide route close; `scheduler.py` `_ROUTED` + `asr_ready` rule; preview fallback skipping the disk gate (CX28); `operator_actions.py` `stages or ("asr",)`; `local_dispatch.py` `REMOTE_STAGES` + OD1 gate, `_ensure_route` already takes over an unclaimed worker route (转本机); `fleet_live.Heartbeat` requires `asr_ready` under `extra="forbid"`; `record_capabilities` sets `pending_validation` and isolates no assignment; `local_gpu.max_resolution` is FULL_HD under 16 GB (would block 4K ASR); `remote_dispatch` delivery doesn't need the executor.
+
+## 9. Review dispositions
+
+| # | Finding | Disposition | Test |
+|---|---|---|---|
+| IR P2-1 | The worker stopped sending `asr_ready`; an older controller's `Heartbeat` requires it under `extra="forbid"` → 422 → 失联 | Fixed: `WorkerHost._beat` sends `"asr_ready": false` for one release; the new controller ignores the value (§2, §7.3) | `test_r9_the_worker_beat_is_accepted_by_the_pre_od7_controller` |
+| CX35 + M2 | 设备-wide eligibility used a synthetic standard-tier film, so a good/high-only worker read ineligible | Fixed: the film carries no tier; the worker is eligible when any tier is ready, and reads 「缺少修复模型」 only when none is; the matrix keeps per-tier `tiers_ready` | `test_cx35_eligibility_is_any_tier_ready_not_the_standard_tier` |
+| CX36 + M4 | Path-format validation ran on fields hidden for the role (worker WhisperJAV, remote-mode Jasna) → 422 on a field the operator cannot see | Fixed: `validate` skips `_unused(new)` fields (format and existence); the saved value stays | `test_a_hidden_field_with_a_malformed_saved_path_does_not_block_the_save` |
+| M1 | R8 also changes phase 1 (a 4K film's ASR no longer waits `NO_4K_DEVICE` on a < 16 GB controller) | Accepted as intended (audio-only ASR); stated in R8 and the header | `test_m1_a_4k_film_with_restore_done_gets_asr_on_the_8gb_controller`, `test_m1_restore_of_a_4k_film_still_waits_on_the_8gb_controller` |
+| M3 | A previously ASR-approved 8 GB worker stayed 待核验 forever (approve refuses < 16 GB) | Fixed: its state and 资格 read 「显存不足，不参与修复」, no 核验并启用 button, not counted in 待核验 | `test_m3_a_previously_approved_card_that_now_probes_8gb_reads_no_restore`, vitest `shows 显存不足，不参与修复 (not 待核验) …` |
+| M5 | No test that the controller's 4K ASR claim passes the store's width check | Test added (profile re-recorded UHD at start) | `test_m5_the_claim_check_accepts_a_4k_asr_after_the_profile_rerecord` |
+| M6 | 改派's option for the film's own worker used the preview with the route removed (end of queue) while 自动 used `queued_finish` | Fixed: that option (route kept) uses `queued_finish` too | `test_m6_the_option_for_the_films_own_worker_uses_its_queue_place` |
+| Hardening | `route_film` accepted `kind='local'` for any worker | Fixed: refused (`precondition_failed`) unless the worker is the store's `controller_id` (the caller is `LocalDispatcher._ensure_route`) | `test_a_local_route_is_refused_for_any_worker_but_the_controller` |

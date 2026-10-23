@@ -182,15 +182,14 @@ describe("设备 v1", () => {
     expect(within(dialog).queryByText("已变化")).toBeNull();
   });
 
-  it("disables 修复 under 16 GB with the reason, and with it 核验并启用 (OD7: nothing else)", async () => {
+  it("shows 显存不足，不参与修复 (not 待核验) for a card under 16 GB, with no 核验并启用 (M3)", async () => {
     const calls = mockApi();
     await openDevices();
-    fireEvent.click(within(card("5060")).getByRole("button", { name: "核验并启用" }));
-    const dialog = await screen.findByRole("dialog", { name: "核验并启用 · 5060" });
-    expect(within(dialog).getByRole("switch", { name: "修复" })).toBeDisabled();
-    expect(dialog).toHaveTextContent("显存不足，不参与修复");
-    expect(dialog).toHaveTextContent("首次核验");
-    expect(within(dialog).getByRole("button", { name: "核验并启用" })).toBeDisabled();
+    const small = card("5060");
+    expect(small).toHaveTextContent("显存不足，不参与修复");
+    expect(small).not.toHaveTextContent("待核验");
+    expect(within(small).queryByRole("button", { name: "核验并启用" })).toBeNull();
+    expect(screen.getByText(/待核验 1 · 失联/)).toBeInTheDocument();  // 5060 Ti-2 only: the 8 GB card is not waiting
     expect(calls.approve).not.toHaveBeenCalled();
   });
 

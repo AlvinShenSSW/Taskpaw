@@ -43,6 +43,7 @@ CODE_PREFIX = "TP1"
 STAGE_LABELS = {"restore": "修复", "asr": "识别", "translate": "翻译"}
 NO_RESTORE = "显存不足，不参与修复"
 READY = "可接单"
+NO_TIER_MODEL = "缺少修复模型"  # CX35: no LTX tier model is ready on the worker
 
 
 def iso(value: datetime) -> str:
@@ -337,8 +338,9 @@ def _probe(probe: m.HardwareProbe | None) -> dict[str, Any] | None:
 
 
 def _synthetic_film(now: datetime) -> m.RoutingFilm:
-    """A planned 1080p standard-tier film with its restore pending: the row's
-    reason (OD7: a worker without any tier model can restore nothing)."""
+    """A planned 1080p film with its restore pending and no tier chosen: the
+    row's device-wide reason. "Any tier ready" is checked by the caller (a
+    standard-tier film would make a good/high-only worker read ineligible)."""
     return m.RoutingFilm(
         film_id=str(uuid.UUID(int=0)),
         input_revision=1,
@@ -346,7 +348,7 @@ def _synthetic_film(now: datetime) -> m.RoutingFilm:
         created_at=now,
         planned=True,
         confirmed_at=now,
-        ltx_model="standard",
+        ltx_model=None,
         pin_worker_id=None,
         pin_version=0,
         restore="pending",
@@ -432,13 +434,18 @@ def device_view(
         entry = fleet.entry(worker.worker_id) if fleet is not None else None
         beat = entry.beat if entry is not None else None
         approval = op.last_approval(rt.operator, worker.worker_id)
+        worker_live = live.get(worker.worker_id)
         reason = s.eligibility(  # OD7 R10: restore is all a worker takes
-            routing[worker.worker_id],
-            film,
-            ("restore",),
-            live.get(worker.worker_id),
-            now,
+            routing[worker.worker_id], film, ("restore",), worker_live, now
         )
+        if reason is None and not (worker_live and worker_live.tiers_ready):
+            reason = NO_TIER_MODEL  # any tier ready is enough (CX35)
+        if (
+            reason == "未核验"
+            and probe is not None
+            and probe.vram_mib < s.RESTORE_MIN_VRAM_MIB
+        ):
+            reason = s.NO_RESTORE  # M3: 核验 cannot help an 8 GB card
         rows.append(
             {
                 "worker_id": worker.worker_id,

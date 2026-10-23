@@ -1,8 +1,8 @@
 """#298 (P2-OD7) R9/R10: GPU workers build restore only; 设备 approves restore.
 
 A worker builds only the restore executor (no WhisperJAV), proposes and
-advertises restore only and sends no `asr_ready`; an older worker's beat with
-`asr_ready` is still accepted and ignored. 核验 approves restore profiles
+advertises restore only and still sends `asr_ready: false` (an older controller
+requires it); the new controller ignores the value. 核验 approves restore profiles
 only, refuses a worker without one, and the 设备 rows carry no `asr_ready`.
 In remote mode the controller row lists 识别、翻译 (识别 only with an ASR
 executor)."""
@@ -25,6 +25,7 @@ from taskpaw_v3.tests.test_workflow_devices import rt as rt  # noqa: F401
 from taskpaw_v3.tests.worker_api_helpers import (
     VERSION,
     beat,
+    enrol,
     join,
     probe,
     version,
@@ -65,7 +66,7 @@ def test_r9_the_probe_and_the_dispatcher_know_no_asr_readiness():
     )
 
 
-def test_r9_a_new_worker_beat_has_no_asr_ready_and_an_old_one_is_accepted():
+def test_r9_a_beat_without_asr_ready_and_one_with_it_are_both_accepted():
     start = datetime.now(timezone.utc)
     woken: list[int] = []
     fleet = FleetLive(start, VERSION, on_change=lambda: woken.append(1))
@@ -84,7 +85,11 @@ def test_r9_a_new_worker_beat_has_no_asr_ready_and_an_old_one_is_accepted():
     assert Heartbeat.model_validate(new).asr_ready is False  # the default
 
 
-def test_r9_the_worker_heartbeat_sends_no_asr_ready(tmp_path):
+def test_r9_the_worker_beat_is_accepted_by_the_pre_od7_controller(tmp_path):
+    """IR P2-1: a worker upgraded before its controller must show 版本不一致,
+    not 失联. The pre-OD7 `Heartbeat` required `asr_ready` under
+    `extra="forbid"`; the new beat keeps sending `false`, the new controller
+    ignores it."""
     host = remote_worker.WorkerHost(
         WorkflowSettings(enabled=True, role="worker"),
         tmp_path,
@@ -101,9 +106,27 @@ def test_r9_the_worker_heartbeat_sends_no_asr_ready(tmp_path):
         def used(self):
             return 0
 
+    class PreOd7Heartbeat(Heartbeat):  # asr_ready required, extra=forbid
+        asr_ready: bool
+
     body = host._beat(Staging())  # type: ignore[arg-type]
-    assert "asr_ready" not in body
-    Heartbeat.model_validate(body | {"gpu": {**body["gpu"], "name": "x"}})
+    assert body["asr_ready"] is False
+    body = body | {"gpu": {**body["gpu"], "name": "x"}}
+    PreOd7Heartbeat.model_validate(body)
+    without = {k: v for k, v in body.items() if k != "asr_ready"}
+    with pytest.raises(ValueError):
+        PreOd7Heartbeat.model_validate(without)  # why it must be sent
+    # the new controller ignores the value: never a routing change
+    start = datetime.now(timezone.utc)
+    woken: list[int] = []
+    fleet = FleetLive(start, VERSION, on_change=lambda: woken.append(1))
+    fleet.observe("w", Heartbeat.model_validate(body), start)
+    fleet.observe(
+        "w",
+        Heartbeat.model_validate(body | {"asr_ready": True}),
+        start + timedelta(seconds=5),
+    )
+    assert len(woken) == 1
 
 
 # ── R10: 设备 approves restore only ──────────────────────────────────────
@@ -187,3 +210,40 @@ def test_r10_the_controller_row_lists_asr_and_translate_in_remote_mode(host, rt)
     assert control(host).get(BASE).json()["controller"]["stages"] == ["翻译"]
     off = control(host, remote=False).get(BASE).json()["controller"]["stages"]
     assert off == ["修复", "翻译"]
+
+
+def test_cx35_eligibility_is_any_tier_ready_not_the_standard_tier(ctl, api, rt):  # noqa: F811
+    """A worker with only the good/high models is eligible; with no tier
+    model it reads 缺少修复模型 (the matrix keeps the per-tier readiness)."""
+    joined, boot = enrol(api, rt)
+
+    def row_after(tiers: list[str]):
+        api.post(
+            "/worker/v1/heartbeat",
+            json=beat(boot, tiers_ready=tiers),
+            headers=joined.headers,
+        )
+        return _row(ctl, joined.worker_id)
+
+    only_high = row_after(["good", "high"])
+    assert only_high["tiers_ready"] == ["good", "high"]
+    assert only_high["eligible"] is True and only_high["eligibility"] == "可接单"
+    none = row_after([])
+    assert none["tiers_ready"] == []
+    assert none["eligible"] is False and none["eligibility"] == "缺少修复模型"
+
+
+def test_m3_a_previously_approved_card_that_now_probes_8gb_reads_no_restore(
+    ctl, api, rt
+):  # noqa: F811
+    """Approve refuses < 16 GB, so 待核验 would never end: the row says why."""
+    joined, _boot = enrol(api, rt)
+    api.post(
+        "/worker/v1/capabilities",
+        json=probe(joined.worker_id, vram=8151),
+        headers=joined.headers,
+    )
+    row = _row(ctl, joined.worker_id)
+    assert row["enrollment_state"] == "pending_validation"
+    assert row["restore_allowed"] is False and row["eligible"] is False
+    assert row["eligibility"] == "显存不足，不参与修复"

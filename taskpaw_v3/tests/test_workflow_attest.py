@@ -695,6 +695,37 @@ def test_cx33_reassign_keeps_the_films_confirm_time_and_route_position(world):
     assert same_instant(again["自动"]["finish_at"], kept["自动"]["finish_at"])
 
 
+def test_m6_the_option_for_the_films_own_worker_uses_its_queue_place(world):
+    """#298 review M6: 改派 to the worker the film is routed to keeps the
+    route, so its estimate is `queued_finish` like 自动's — not the end of the
+    queue a withdrawn-and-rerouted film would get."""
+    only = enrol_remote(world.rt, "5070 Ti")
+    world.beat(only)
+    film_id = add_film(world.rt)
+    route(world.rt, film_id, only.worker_id)
+    world.clock.advance(timedelta(minutes=5))
+    behind = add_film(world.rt)
+    route(world.rt, behind, only.worker_id)
+    world.beat(only)
+    options = {
+        o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)
+    }
+    snap = world.rt.store.routing_snapshot(world.rt.operator)
+    queued = s.queued_finish(
+        snap,
+        film_id,
+        now=world.rt.clock.now(),
+        gpu_stages=routing.gpu_stages(
+            world.rt.store, world.rt.operator, snap, world.rt.executors
+        ),
+    )
+    assert queued is not None
+    own = options["5070 Ti"]
+    assert same_instant(own["finish_at"], s_iso(queued[0]))
+    assert own["energy_wh"] == queued[1]
+    assert same_instant(own["finish_at"], options["自动"]["finish_at"])
+
+
 def s_iso(value: datetime) -> str:
     return value.isoformat()
 

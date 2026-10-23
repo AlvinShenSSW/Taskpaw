@@ -32,9 +32,13 @@ const gbDisk = (n: number | null | undefined) => {
 };
 
 // The enrollment / admission state; null for a plainly enabled worker (its heartbeat says the rest).
+// A card under 16 GB cannot be 核验ed (OD5): say so instead of 待核验 forever.
+const tooSmall = (row: DeviceRow) => row.enrollment_state === "pending_validation" && !!row.probe && !row.restore_allowed;
+
 function enrollment(row: DeviceRow): [string, ChipTone] | null {
   if (row.admission_state === "revoked") return ["已撤销", "red"];
   if (row.enrollment_state === "pending_pairing") return ["待配对", "amber"];
+  if (tooSmall(row)) return ["显存不足，不参与修复", "amber"];
   if (row.enrollment_state === "pending_validation") return ["待核验", "amber"];
   if (row.admission_state === "draining") return ["停领", "amber"];
   if (row.admission_state === "enabled") return null;
@@ -118,7 +122,7 @@ export function DevicesPage() {
   const workers = data?.workers ?? [];
   const summary = data?.remote_workers ? [
     `工作机 ${workers.length}`, `可领取 ${workers.filter((w) => w.eligible).length}`,
-    `待核验 ${workers.filter((w) => w.enrollment_state === "pending_validation").length}`,
+    `待核验 ${workers.filter((w) => w.enrollment_state === "pending_validation" && !tooSmall(w)).length}`,
     `失联 ${workers.filter((w) => w.heartbeat.state === "lost").length}`,
   ].join(" · ") : null;
   const progressOf = (filmId: string) => {
@@ -252,7 +256,7 @@ function WorkerCard({ row, remote, serverTime, busy, progressOf, onApprove, onAd
             <dd>
               {current
                 ? [current.film_name, `${stageName(current.stage)}${progressOf(current.film_id) ? ` ${progressOf(current.film_id)}` : ""}`].join(" · ")
-                : row.eligible ? "空闲 · 可领取" : pending ? "核验前不领取" : "—"}
+                : row.eligible ? "空闲 · 可领取" : pending ? (tooSmall(row) ? "不参与修复" : "核验前不领取") : "—"}
               {(row.route_depth !== undefined) && <span className="muted"> · 排队 {queued}</span>}
             </dd>
           </>
@@ -280,7 +284,7 @@ function WorkerCard({ row, remote, serverTime, busy, progressOf, onApprove, onAd
         </section>
       )}
       <div className="device-actions">
-        {live && pending && row.probe && (
+        {live && pending && row.probe && !tooSmall(row) && (
           <button type="button" className="btn primary" disabled={busy} onClick={onApprove}>核验并启用</button>
         )}
         {live && row.enrollment_state === "verified" && row.admission_state === "disabled" && (

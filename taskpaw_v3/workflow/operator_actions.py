@@ -380,9 +380,13 @@ def reassign_options(
         and current.worker_id != rt.identity.worker_id
         and not (fleet is not None and fleet.state(current.worker_id, now) == "lost")
     )
+    # §9 CX33: where the route stands — only the routes ahead of it count
+    queued = (
+        sc.queued_finish(full, film_id, now=now, gpu_stages=found)
+        if current is not None
+        else None
+    )
     if kept and current is not None:
-        # §9 CX33: where the route stands — only the routes ahead of it count
-        queued = sc.queued_finish(full, film_id, now=now, gpu_stages=found)
         machine = current.worker_id
         finish, energy = queued if queued is not None else (None, None)
     options: list[dict[str, Any]] = [
@@ -413,16 +417,25 @@ def reassign_options(
             queued_need=None,
         )
         device = by_id.get(worker.worker_id) if reason is None else None
+        if (  # M6: pinning to the route's own worker keeps the route (as 自动)
+            reason is None
+            and queued is not None
+            and current is not None
+            and current.worker_id == worker.worker_id
+        ):
+            figures = estimate(*queued)
+        else:
+            figures = estimate(
+                device.finish_at if device is not None else None,
+                device.energy_wh if device is not None else None,
+            )
         options.append(
             {
                 "worker_id": worker.worker_id,
                 "name": worker.name,
                 "reason": reason,
                 "current": film.pin_worker_id == worker.worker_id,
-                **estimate(
-                    device.finish_at if device is not None else None,
-                    device.energy_wh if device is not None else None,
-                ),
+                **figures,
             }
         )
     return options

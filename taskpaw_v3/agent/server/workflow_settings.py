@@ -258,9 +258,10 @@ def validate(
     the data directory, the paired staging directory and the pairing port."""
     role = role_of(new)
     errors: dict[str, str] = {}
+    hidden = _unused(new)  # CX36: not shown for the role, so not checked either
     for name in PATHS:
         raw = getattr(new, name)
-        if raw and (why := _path_error(raw)):
+        if name not in hidden and raw and (why := _path_error(raw)):
             errors[name] = why
     if role != "off":
         _validate_role(new, config, errors)

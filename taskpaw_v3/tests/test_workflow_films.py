@@ -680,7 +680,8 @@ def ensure_route(h, film_id, worker_id, revision):
     route = h.store.film_route(h.operator, film_id, revision)
     if route is not None:
         return
-    try:
+    controller, h.store.controller_id = h.store.controller_id, worker_id
+    try:  # the store opens `local` routes for its controller only (OD7 hardening)
         h.store.route_film(
             h.operator,
             h.meta(),
@@ -697,6 +698,8 @@ def ensure_route(h, film_id, worker_id, revision):
     except m.WorkflowError as exc:  # e.g. a disabled worker: the claim says why
         if exc.code not in ("precondition_failed", "route_claimed"):
             raise
+    finally:
+        h.store.controller_id = controller
 
 
 def claim_compute(h, film_id, worker, auth, *, name="restore"):

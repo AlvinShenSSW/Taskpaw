@@ -92,3 +92,33 @@ def test_a_remote_controller_without_whisperjav_says_why_asr_waits(tmp_path):
         assert stage(rt, film_id, "asr").status == "pending"
     finally:
         rt.close()
+
+
+def test_a_hidden_field_with_a_malformed_saved_path_does_not_block_the_save(
+    tmp_path, tools
+):
+    """CX36/M4: format checks skip the fields the role hides, as the
+    existence checks do; the saved value stays untouched."""
+    network = r"\nas\tools\whisperjav.exe"
+    worker = World(tmp_path, enabled=True, role="worker", whisperjav_exe_path=network)
+    ok = worker.put(
+        {
+            "role": "worker",
+            "staging_dir": str(tmp_path / "staging"),
+            "jasna_exe_path": tools["jasna_exe_path"],
+        }
+    )
+    assert ok.status_code == 200, ok.text
+    assert worker.saved()["workflow"]["whisperjav_exe_path"] == network
+    relative = "tools/jasna.exe"
+    (tmp_path / "c").mkdir()
+    remote = World(
+        tmp_path / "c", enabled=True, **{**tools, "jasna_exe_path": relative}
+    )
+    ok = remote.put({"role": "controller", "remote_workers": True})
+    assert ok.status_code == 200, ok.text
+    assert remote.saved()["workflow"]["jasna_exe_path"] == relative
+    # a shown field is still format-checked
+    shown = remote.put({"role": "controller", "remote_workers": False})
+    assert shown.status_code == 422
+    assert shown.json()["fields"]["jasna_exe_path"] == "必须是完整路径"
