@@ -153,7 +153,8 @@ function MachineSection() {
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ["agentConfig"] });
       qc.invalidateQueries({ queryKey: RESTART_KEY });
-      setMsg({ kind: "ok", text: res.restart_required ? restartText(["machine"]) : t("settings.saved") });
+      // a rename that waits for a restart is shown by <PendingRestart> (it survives a remount)
+      setMsg(res.restart_required ? null : { kind: "ok", text: t("settings.saved") });
     },
     onError: (e) => setMsg({ kind: "err", text: e instanceof Error ? e.message : String(e) }),
   });
@@ -162,6 +163,7 @@ function MachineSection() {
       <CardContent>
         <Typography variant="subtitle1" sx={{ mb: 0.5 }}>{t("settings.config")}</Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>{t("settings.configHint")}</Typography>
+        <PendingRestart only={["machine"]} />
         {cfg.isLoading || machine === null ? (
           <Typography variant="body2" color="text.secondary">{t("common.loading")}</Typography>
         ) : (

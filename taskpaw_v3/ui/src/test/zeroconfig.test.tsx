@@ -271,6 +271,24 @@ describe("设置 sections (R12)", () => {
     delete (window as { matchMedia?: unknown }).matchMedia;
   });
 
+  it("a machine-name change offers the pending restart and keeps it across a remount (Codex r6 CX13)", async () => {
+    inShell();
+    let pending = false;
+    vi.spyOn(api, "config").mockResolvedValue({ monitors: [], machine: "m" } as never);
+    vi.spyOn(api, "restartState").mockImplementation(async () => (
+      { required: pending, fields: pending ? ["machine"] : [], blocked: null, available: true }));
+    vi.spyOn(api, "updateConfig").mockImplementation(async () => { pending = true; return { ok: true, restart_required: true }; });
+    const first = wrap(<Settings role="agent" />);
+    fireEvent.change(await screen.findByLabelText(/机器名称|Machine name/), { target: { value: "renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("已保存，重启 TaskPaw 后生效（机器名称）");
+    expect(screen.getByRole("button", { name: "立即重启" })).toBeInTheDocument();
+    first.unmount();
+    wrap(<Settings role="agent" />);
+    expect(await screen.findByRole("status")).toHaveTextContent("已保存，重启 TaskPaw 后生效（机器名称）");
+    expect(screen.getByRole("button", { name: "立即重启" })).toBeInTheDocument();
+  });
+
   it("no visible copy names a config file", async () => {
     vi.spyOn(api, "config").mockResolvedValue({ monitors: [], machine: "m" } as never);
     wrap(<Settings role="agent" />);
