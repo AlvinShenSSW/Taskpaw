@@ -148,6 +148,32 @@ def test_the_summary_names_each_running_films_machine(world, sink):  # noqa: F81
     assert text.count("· 5060 Ti-") == 3
 
 
+def test_one_current_per_machine_prefetch_never_displaces_another(world, sink):  # noqa: F811
+    """§9 CX12: three workers each run a film and prefetch another; the
+    summary names each machine once, by its running stage."""
+    observer, _queue = sink
+    rt = world.rt
+    remotes = [enrol_remote(rt, f"5060 Ti-{i}") for i in range(3)]
+    for remote in remotes:
+        running, fetching = add_film(rt), add_film(rt)
+        current = {
+            "film_id": running,
+            "stage": "restore",
+            "attempt_id": identity(),
+            "phase": "running",
+            "progress": "LTX 2/4 encode 52%",
+            "elapsed_s": 60.0,
+        }
+        transfers = [
+            {"film": fetching, "dir": "down", "done": 1, "total": 4, "rate": 0.0}
+        ]
+        online(world, remote, current=current, transfers=transfers)
+    observer.observe(Host(rt, world.fleet))
+    currents = observer.snapshot()["currents"]
+    assert sorted(c["machine"] for c in currents) == [r.name for r in remotes]
+    assert all(c["stage"] == "restore" for c in currents)
+
+
 def test_status_md_falls_back_to_current_without_currents():
     workflow = {
         "counts": {},

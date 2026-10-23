@@ -613,6 +613,51 @@ def test_the_worker_port_can_change_with_no_paired_worker(tmp_path, tools):
         rt.close()
 
 
+def test_the_worker_port_stays_guarded_after_a_disable_and_restart(tmp_path, tools):
+    """§9 CX11: the guard reads the pairings the store retains, not only the
+    running host, so turning 主控 off, restarting and turning it back on with
+    a new port cannot orphan the enrolled workers."""
+    rt = runtime(tmp_path / "wf")
+    try:
+        enrol_remote(rt, "5070 Ti")
+    finally:
+        rt.close()
+    # the restarted agent runs with the role off: no host, the store on disk
+    world = World(
+        tmp_path,
+        enabled=False,
+        remote_workers=True,
+        data_dir=str(tmp_path / "wf"),
+        **tools,
+    )
+    assert world.host is None
+    before = world.path.read_bytes()
+    response = world.put({"role": "controller", "worker_api_port": 5691})
+    assert response.status_code == 422, response.text
+    assert response.json()["fields"]["worker_api_port"] == (
+        "已有工作机配对在此端口，改端口需先让它们重新配对"
+    )
+    assert world.path.read_bytes() == before
+    same = world.put({"role": "controller", "worker_api_port": 5682})
+    assert same.status_code == 200, same.text
+
+
+def test_the_port_is_free_to_change_when_the_retained_store_pairs_nobody(
+    tmp_path, tools
+):
+    rt = runtime(tmp_path / "wf")
+    rt.close()  # only the controller's own record
+    world = World(
+        tmp_path,
+        enabled=False,
+        remote_workers=True,
+        data_dir=str(tmp_path / "wf"),
+        **tools,
+    )
+    response = world.put({"role": "controller", "worker_api_port": 5691})
+    assert response.status_code == 200, response.text
+
+
 def test_an_empty_ffprobe_is_fine_when_it_is_on_the_path(tmp_path, tools, monkeypatch):
     """§9 IR6: zero-config — the pipeline finds ffprobe on PATH by itself."""
     from taskpaw_v3.agent.server import workflow_settings as ws

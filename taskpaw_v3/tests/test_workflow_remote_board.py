@@ -180,6 +180,30 @@ def test_a_restarted_worker_with_attempt_files_is_busy_before_any_controller(
         assert worker.stop()
 
 
+def test_an_unreadable_attempts_dir_is_busy_and_a_missing_one_is_idle(
+    tmp_path, monkeypatch
+):
+    """§9 CX10: `Path.glob` swallows PermissionError; only a missing folder
+    means no attempts, any other read error means unknown, which is busy."""
+    import os
+
+    from taskpaw_v3.workflow import remote_dispatch
+    from taskpaw_v3.workflow.remote_dispatch import ATTEMPTS_DIR, attempts_on_disk
+
+    assert attempts_on_disk(tmp_path) is False  # no folder yet
+    attempts = tmp_path / ATTEMPTS_DIR
+    attempts.mkdir()
+    assert attempts_on_disk(tmp_path) is False  # empty
+    (attempts / "a.json").write_text("{}", encoding="utf-8")
+    assert attempts_on_disk(tmp_path) is True
+
+    def denied(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(os, "scandir", denied)
+    assert remote_dispatch.attempts_on_disk(tmp_path) is True
+
+
 def test_status_carries_the_worker_summary(monkeypatch, tmp_path):
     from taskpaw_v3.agent.server import launcher
     from taskpaw_v3.tests.test_worker_api import _agent_config

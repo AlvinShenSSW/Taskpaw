@@ -352,6 +352,44 @@ def paired_workers(host: Any) -> int:
     )
 
 
+def retained_pairings(
+    settings: tuple[WorkflowSettings, ...], config_dir: Path | None
+) -> bool:
+    """§9 CX11: enrolled, non-retired GPU workers in a workflow store on disk
+    (the controller's own record excluded), whatever role runs now — turning
+    主控 off keeps the store and its pairings. A store that cannot be read
+    counts as paired (unknown is not idle)."""
+    import json
+    import sqlite3
+
+    for reference in settings:
+        directory = default_data_dir(reference, config_dir)
+        if directory is None or not (directory / STORE_NAME).exists():
+            continue
+        try:
+            controller = json.loads(
+                (directory / "local-identity.json").read_text(encoding="utf-8")
+            ).get("worker_id", "")
+        except (OSError, ValueError, AttributeError):
+            controller = ""
+        uri = f"{(directory / STORE_NAME).resolve().as_uri()}?mode=ro"
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=5)
+            try:
+                (count,) = conn.execute(
+                    "SELECT COUNT(*) FROM workers"
+                    " WHERE enrollment_state != 'retired' AND worker_id != ?",
+                    (controller,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return True
+        if count:
+            return True
+    return False
+
+
 def worker_busy(host: Any) -> bool:
     """A worker's routes, a claim or held children. §9 CX6: the host's own
     disk-aware `summary()["busy"]`, so a worker restarted with the controller
@@ -374,13 +412,17 @@ def refuse_busy(
     off while films are in flight, a new worker API port under paired
     workers (§9 IR4), or a busy worker leaving its role or moving its staging
     or data directory (§9 IR3)."""
+    if (
+        role_of(new) == "controller"
+        and new.worker_api_port != running.worker_api_port
+        and (
+            paired_workers(controller())
+            if role_of(running) == "controller"
+            else retained_pairings((running, new), config_dir)
+        )
+    ):
+        raise Refused(422, "设置有误", fields={"worker_api_port": PORT_PAIRED})
     if role_of(running) == "controller":
-        if (
-            role_of(new) == "controller"
-            and new.worker_api_port != running.worker_api_port
-            and paired_workers(controller())
-        ):
-            raise Refused(422, "设置有误", fields={"worker_api_port": PORT_PAIRED})
         leaving = role_of(new) != "controller" or (
             running.remote_workers and not new.remote_workers
         )

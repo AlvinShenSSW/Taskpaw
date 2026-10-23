@@ -323,10 +323,12 @@ class WorkflowEvents:
 def _currents(
     currents: dict[str, dict[str, Any]], rows: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """R12: up to four running films, the controller's first: name, stage,
-    progress and the machine (`本机` or the worker's name)."""
+    """R12: up to four machines, the controller's first, each with one film:
+    name, stage, progress and the machine (`本机` or the worker's name). §9
+    CX12: a machine's running stage wins over its prefetch, and the limit
+    counts machines, so a prefetch never displaces another machine."""
     names = {row["film_id"]: row["name"] for row in rows}
-    found = []
+    best: dict[str, tuple[bool, dict[str, Any], int]] = {}
     for film_id, value in currents.items():
         machine = value.get("machine") or value.get("device") or {}
         item = _current(value) or {}
@@ -336,8 +338,14 @@ def _currents(
             progress=value.get("progress") or None,
             machine=str(machine.get("name") or ""),
         )
-        found.append((0 if value.get("device") else 1, item["machine"], item))
-    found.sort(key=lambda entry: (entry[0], entry[1]))
+        key = str(machine.get("id") or item["machine"] or film_id)
+        fetching = bool(value.get("fetching"))
+        if key not in best or (best[key][0] and not fetching):
+            best[key] = (fetching, item, 0 if value.get("device") else 1)
+    found = sorted(
+        ((local, item["machine"], item) for _f, item, local in best.values()),
+        key=lambda entry: (entry[0], entry[1]),
+    )
     return [item for _local, _machine, item in found[:MAX_CURRENTS]]
 
 

@@ -244,9 +244,13 @@ class Transfer:
 def attempts_on_disk(staging_root: Path) -> bool:
     """P2-4 §9 CX1: an attempt file under the staging folder — work a
     restarted worker has not settled with the controller yet (its children
-    may live). True when the folder cannot be read (unknown is not idle)."""
+    may live). §9 CX10: only a missing folder is idle; any other read error
+    (`Path.glob` would swallow it) is unknown, and unknown is not idle."""
     try:
-        return any((staging_root / ATTEMPTS_DIR).glob("*.json"))
+        with os.scandir(staging_root / ATTEMPTS_DIR) as entries:
+            return any(entry.name.endswith(".json") for entry in entries)
+    except FileNotFoundError:
+        return False
     except OSError:
         return True
 
