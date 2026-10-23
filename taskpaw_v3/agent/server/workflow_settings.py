@@ -296,6 +296,8 @@ def _validate_role(
             errors[name] = "目录不存在"
     for name in _FILES:
         raw = getattr(new, name)
+        if name in _unused(new):  # OD7 R11: hidden for the role, kept as saved
+            continue
         if raw and name not in errors and not Path(raw).is_file():
             errors[name] = "文件不存在"
     port = new.worker_api_port
@@ -315,6 +317,18 @@ def _validate_role(
                 validate_dir(new.staging_dir)
             except StagingError as exc:
                 errors["staging_dir"] = str(exc)
+
+
+def _unused(new: WorkflowSettings) -> tuple[str, ...]:
+    """OD7 (#298 R11): tools the role does not run, so neither shown nor
+    validated (their saved value stays in agent.yaml): a GPU worker has no
+    WhisperJAV; a controller with GPU workers has no Jasna (ASR stays local)."""
+    role = role_of(new)
+    if role == "worker":
+        return ("whisperjav_exe_path",)
+    if role == "controller" and new.remote_workers:
+        return ("jasna_exe_path",)
+    return ()
 
 
 def _data_dir_held(

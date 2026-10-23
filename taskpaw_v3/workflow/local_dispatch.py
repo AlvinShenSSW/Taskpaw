@@ -62,6 +62,7 @@ RENEW_SECONDS = 3600.0
 NO_4K_DEVICE = "没有可接 4K 的设备"
 REMOTE_GPU = "等待 GPU 设备"  # OD7: a remote worker restores
 NO_GPU_DEVICE = "没有可用的 GPU 设备"  # ... and none is verified right now
+NO_ASR = "本机未配置 WhisperJAV"  # OD7 R11: remote mode, no ASR executor here
 # OD7 (#298 R2): only restore goes to a GPU worker; ASR and translate run here
 REMOTE_STAGES = frozenset({"restore"})
 LOCAL_ROUTE = "本机"
@@ -522,11 +523,6 @@ class LocalDispatcher:
                 ran = self._execute_step(job, manifest, step, auth)
             else:  # only compute stages are listed besides the component steps
                 executor = rt.executors.get(cast(ComputeStage, job.stage))
-                if executor is None or rt.gpu is None:
-                    waiting[job.film_id] = (
-                        rt.reason if rt.gpu is None else "没有可用的执行器"
-                    )
-                    continue
                 if not remote_read:
                     remote, remote_read = (
                         remote_mode(
@@ -536,6 +532,14 @@ class LocalDispatcher:
                         ),
                         True,
                     )
+                if executor is None and job.stage == "asr" and remote is not None:
+                    waiting[job.film_id] = NO_ASR  # OD7: only this machine transcribes
+                    continue
+                if executor is None or rt.gpu is None:
+                    waiting[job.film_id] = (
+                        rt.reason if rt.gpu is None else "没有可用的执行器"
+                    )
+                    continue
                 if (
                     remote is not None
                     and job.stage in REMOTE_STAGES
