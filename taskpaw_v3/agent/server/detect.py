@@ -6,17 +6,22 @@ each tool (ffprobe, Jasna, WhisperJAV, Miko) and suggested directories;
 directory (POST keeps the path out of access logs).
 
 Every probe runs a fixed argv with no window, stdin closed and a timeout
-(the process tree is killed on a timeout), reads at most 4 KB and parses it
-by regex; nothing it prints is logged. ffprobe (`-version`) and nvidia-smi
+(the process tree is killed on a timeout — on macOS/Linux its whole process
+group, before the leader is reaped), keeps at most 4 KB (the rest is drained
+in bounded reads) and parses it by regex; nothing it prints is logged. ffprobe (`-version`) and nvidia-smi
 are the only programs ever executed: Jasna's version comes from its PE
-file-version resource, WhisperJAV and Miko are only looked for. A network
-path (UNC, a mapped network drive) is never touched. Everything the probes
+file-version resource, WhisperJAV and Miko are only looked for. The media
+workflow runs only on Windows (#299 §12 operator decision): off Windows
+nothing is probed and nothing is suggested. A network
+path (UNC, a mapped network drive) is never touched — PATH lookups skip
+network directories too (`local_which`). Everything the probes
 read — the file tree, PATH, the environment, the runner — is injectable so
 tests use fake trees and fake runners only.
 """
 
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 import shutil
@@ -25,7 +30,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 from fastapi import FastAPI, Request
@@ -36,6 +41,7 @@ if TYPE_CHECKING:
     from taskpaw_v3.core.config import WorkflowSettings
 
 OUTPUT_LIMIT = 4096
+_CHUNK = 65536
 FFPROBE_TIMEOUT = 3.0
 GPU_TIMEOUT = 5.0
 CACHE_TTL = 60.0
@@ -53,6 +59,16 @@ Runner = Callable[[list[str], float], Optional[str]]
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the probe and its children. POSIX (`start_new_session`): the
+    whole process group, while the unreaped leader still pins its id
+    (review IR6: no PID-reuse window)."""
+    if sys.platform != "win32":
+        import signal
+
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
     try:
         import psutil
 
@@ -69,8 +85,24 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
+def _drain(stream: Any, kept: bytearray) -> None:
+    """Read `stream` to its end in bounded chunks; keep the first 4 KB."""
+    try:
+        while True:
+            chunk = stream.read(_CHUNK)
+            if not chunk:
+                return
+            room = OUTPUT_LIMIT - len(kept)
+            if room > 0:
+                kept.extend(chunk[:room])
+    except (OSError, ValueError):
+        return
+
+
 def run_probe(argv: list[str], timeout: float) -> Optional[str]:
-    """Run one fixed probe; its first 4 KB of stdout, or None."""
+    """Run one fixed probe; its first 4 KB of stdout, or None. Review IR12:
+    the output is drained on a thread in bounded reads, so a chatty or
+    stuck probe never grows memory and the timeout always holds."""
     kwargs: dict[str, Any] = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = _NO_WINDOW
@@ -86,18 +118,30 @@ def run_probe(argv: list[str], timeout: float) -> Optional[str]:
         )
     except OSError:
         return None
+    kept = bytearray()
+    reader = threading.Thread(
+        target=_drain, args=(proc.stdout, kept), name="taskpaw-probe", daemon=True
+    )
+    reader.start()
     try:
-        out, _ = proc.communicate(timeout=timeout)
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
         try:
-            proc.communicate(timeout=2)
-        except (subprocess.TimeoutExpired, OSError, ValueError):
+            proc.wait(timeout=2)
+        except (subprocess.TimeoutExpired, OSError):
             pass
+        reader.join(2)
         return None
+    reader.join(2)  # EOF follows the exit (a grandchild may hold the pipe)
+    if proc.stdout is not None:
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
     if proc.returncode != 0:
         return None
-    return out[:OUTPUT_LIMIT].decode("utf-8", "replace")
+    return bytes(kept[:OUTPUT_LIMIT]).decode("utf-8", "replace")
 
 
 def pe_version(path: str) -> Optional[str]:
@@ -159,6 +203,35 @@ def is_network(path: str) -> bool:
     return False
 
 
+def local_which(
+    command: str,
+    env: Mapping[str, str],
+    network: Callable[[str], bool] = is_network,
+    platform: Optional[str] = None,
+) -> Optional[str]:
+    """`shutil.which` over the local PATH entries only (review CX3/IR12): a
+    UNC or mapped-drive directory is skipped, never listed or stat'ed; the
+    current directory is never searched."""
+    platform = sys.platform if platform is None else platform
+    raw = env.get("PATH") or env.get("Path") or ""
+    names = [command]
+    if platform == "win32" and not os.path.splitext(command)[1]:
+        exts = (env.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";")
+        names = [command + ext.lower() for ext in exts if ext] + [command]
+    for folder in raw.split(os.pathsep):
+        folder = folder.strip().strip('"')
+        if not folder or network(folder) or not os.path.isabs(folder):
+            continue
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    return path
+            except OSError:
+                continue
+    return None
+
+
 def fixed_drives() -> list[tuple[str, int]]:
     """(root, free bytes) of each fixed local drive (Windows)."""
     if sys.platform != "win32":
@@ -182,17 +255,18 @@ def fixed_drives() -> list[tuple[str, int]]:
 
 
 def default_candidates(env: Mapping[str, str], platform: str) -> dict[str, list[str]]:
-    """The fixed install locations §5 looks in (after saved and monitor paths)."""
+    """The fixed install locations §5 looks in (after saved and monitor paths).
+    Windows-only paths: built with ntpath, so the values match on every OS."""
     if platform != "win32":
         return {"jasna": [], "whisperjav": []}
     programs = env.get("ProgramFiles") or r"C:\Program Files"
     local = env.get("LOCALAPPDATA") or ""
-    jasna = [r"C:\Jasna\jasna.exe", os.path.join(programs, "Jasna", "jasna.exe")]
+    jasna = [r"C:\Jasna\jasna.exe", ntpath.join(programs, "Jasna", "jasna.exe")]
     whisper = [r"C:\WhisperJAV\Scripts\whisperjav.exe"]
     if local:
-        jasna.append(os.path.join(local, "Programs", "Jasna", "jasna.exe"))
+        jasna.append(ntpath.join(local, "Programs", "Jasna", "jasna.exe"))
         whisper.append(
-            os.path.join(local, "Programs", "WhisperJAV", "Scripts", "whisperjav.exe")
+            ntpath.join(local, "Programs", "WhisperJAV", "Scripts", "whisperjav.exe")
         )
     return {"jasna": jasna, "whisperjav": whisper}
 
@@ -203,20 +277,22 @@ class Detector:
 
     platform: str = field(default_factory=lambda: sys.platform)
     env: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
-    home: Path = field(default_factory=Path.home)
-    which: Callable[[str], Optional[str]] = shutil.which
+    # None: `local_which` over this detector's env (network PATH dirs skipped)
+    which: Optional[Callable[[str], Optional[str]]] = None
     run: Runner = run_probe
     version_of: Callable[[str], Optional[str]] = pe_version
     network: Callable[[str], bool] = is_network
     drives: Callable[[], list[tuple[str, int]]] = fixed_drives
     candidates: Optional[dict[str, list[str]]] = None
+    # None: the real file check (tests check Windows paths on any OS with a set)
+    is_file: Optional[Callable[[str], bool]] = None
 
     # ── file checks that never touch a network path ──────────────────────
     def _file(self, path: Optional[str]) -> bool:
         if not path or self.network(path):
             return False
         try:
-            return Path(path).is_file()
+            return self.is_file(path) if self.is_file else Path(path).is_file()
         except OSError:
             return False
 
@@ -228,6 +304,11 @@ class Detector:
         except OSError:
             return False
 
+    def _which(self, command: str) -> Optional[str]:
+        if self.which is not None:
+            return self.which(command)
+        return local_which(command, self.env, self.network, self.platform)
+
     def _first(
         self, options: list[tuple[Optional[str], str]]
     ) -> tuple[Optional[str], Optional[str]]:
@@ -237,18 +318,22 @@ class Detector:
         return None, None
 
     # ── tools ────────────────────────────────────────────────────────────
-    def ffprobe(self, settings: "WorkflowSettings") -> dict[str, Any]:
+    def ffprobe(
+        self, settings: "WorkflowSettings", whisperjav: Optional[str] = None
+    ) -> dict[str, Any]:
+        """saved → PATH → the bundled copy of `whisperjav` (review CX2: the
+        one detection found in this pass) or else of the saved one."""
         from taskpaw_v3.monitors.subs.ffmpeg import bundled_ffmpeg_dir
 
         bundled = None
-        whisper = settings.whisperjav_exe_path
+        whisper = whisperjav or settings.whisperjav_exe_path
         if whisper and self.platform == "win32":
             folder = bundled_ffmpeg_dir(whisper)
-            bundled = os.path.join(folder, "ffprobe.exe") if folder else None
+            bundled = ntpath.join(folder, "ffprobe.exe") if folder else None
         path, source = self._first(
             [
                 (settings.ffprobe_path, "saved"),
-                (self.which("ffprobe"), "path"),
+                (self._which("ffprobe"), "path"),
                 (bundled, "bundled"),
             ]
         )
@@ -289,7 +374,7 @@ class Detector:
                 (saved, "saved"),
                 *self._monitor_paths(monitors, key),
                 *[(path, "default") for path in fixed],
-                (self.which(command), "path"),
+                (self._which(command), "path"),
             ]
         )
 
@@ -351,29 +436,14 @@ class Detector:
         )
         python: Optional[str] = None
         if root is not None:
-            venv = (
-                root / ".venv" / "Scripts" / "python.exe"
-                if self.platform == "win32"
-                else root / ".venv" / "bin" / "python"
-            )
+            venv = root / ".venv" / "Scripts" / "python.exe"
             python = str(venv) if self._file(str(venv)) else None
         if settings.mdcx_python and self._file(settings.mdcx_python):
             python = settings.mdcx_python
-        if self.platform == "win32":
-            appdata = self.env.get("APPDATA") or ""
-            default_profile = (
-                os.path.join(appdata, "com.mdcx.desktop", "config.json")
-                if appdata
-                else None
-            )
-        else:
-            default_profile = str(
-                self.home
-                / "Library"
-                / "Application Support"
-                / "com.mdcx.desktop"
-                / "config.json"
-            )
+        appdata = self.env.get("APPDATA") or ""
+        default_profile = (
+            ntpath.join(appdata, "com.mdcx.desktop", "config.json") if appdata else None
+        )
         profile, _ = self._first(
             [(settings.mdcx_profile, "saved"), (default_profile, "default")]
         )
@@ -423,16 +493,13 @@ class Detector:
 
     # ── directories ──────────────────────────────────────────────────────
     def suggested(self) -> dict[str, Optional[str]]:
-        """§5: the fixed local drive with the most free space (macOS: home)."""
-        if self.platform == "win32":
-            drives = self.drives()
-            if not drives:
-                return {key: None for key in SUGGESTED}
-            root = max(drives, key=lambda d: d[1])[0]
-            base: Path = Path(root)
-        else:
-            base = self.home
-        return {key: str(base / name) for key, name in SUGGESTED.items()}
+        """§5: the fixed local drive with the most free space, joined as a
+        Windows path on every OS (Windows only: nothing elsewhere)."""
+        drives = self.drives() if self.platform == "win32" else []
+        if not drives:
+            return {key: None for key in SUGGESTED}
+        root = PureWindowsPath(max(drives, key=lambda d: d[1])[0])
+        return {key: str(root / name) for key, name in SUGGESTED.items()}
 
     def detect(
         self,
@@ -440,12 +507,30 @@ class Detector:
         monitors: list[dict],
         config_dir: Optional[Path],
     ) -> dict[str, Any]:
+        if self.platform != "win32":  # #299 §12 OD: the media workflow is Windows-only
+            missing = {"found": False, "path": None, "source": None, "version": None}
+            return {
+                "gpu": None,
+                "tools": {
+                    "ffprobe": dict(missing),
+                    "jasna": dict(missing),
+                    "whisperjav": dict(missing),
+                    "miko": {
+                        "status": "off",
+                        "root": None,
+                        "python": None,
+                        "profile": None,
+                    },
+                },
+                "suggested": self.suggested(),
+            }
+        whisperjav = self.whisperjav(settings, monitors)
         return {
             "gpu": self.gpu(),
             "tools": {
-                "ffprobe": self.ffprobe(settings),
+                "ffprobe": self.ffprobe(settings, whisperjav["path"]),
                 "jasna": self.jasna(settings, monitors),
-                "whisperjav": self.whisperjav(settings, monitors),
+                "whisperjav": whisperjav,
                 "miko": self.miko(settings, config_dir),
             },
             "suggested": self.suggested(),

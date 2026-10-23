@@ -146,6 +146,8 @@ class MonitorAdmin:
         self._path = config_path
         self._lock = threading.RLock()  # memory only; no plugin or storage calls
         self._mutation = threading.Lock()
+        # #299 review IR5: set (under _mutation) once a restart is granted
+        self._restarting = False
         self._timeout = operation_timeout
         self._revision = 0
         self._sequence = 0
@@ -172,9 +174,20 @@ class MonitorAdmin:
         if not self._mutation.acquire(timeout=1):
             raise ValueError("operation_busy")
         try:
+            if self._restarting:
+                raise ValueError("restarting")
             yield
         finally:
             self._mutation.release()
+
+    @property
+    def restarting(self) -> bool:
+        return self._restarting
+
+    def begin_restart(self) -> None:
+        """#299 review IR5: called under `_settings_admission` by the granted
+        restart; every later save, monitor change and restart is refused."""
+        self._restarting = True
 
     def _candidate(
         self,
@@ -307,6 +320,8 @@ class MonitorAdmin:
         self, iid: str, operation: str, spec: dict, deadline: float
     ) -> _Reservation | None:
         self._refresh_stops()
+        if self._restarting:  # #299 review IR5
+            return None
         with self._lock:
             self._prune_validation()
             if iid in self._owners or iid in self._stop_saves or iid in self._stopping:

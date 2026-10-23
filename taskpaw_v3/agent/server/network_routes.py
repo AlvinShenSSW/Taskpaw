@@ -61,13 +61,22 @@ def firewall_ports(bind_port: int, workflow: Any) -> list[int]:
 
 
 def heal_on_startup(config: AgentConfig, config_path: Optional[Path]) -> Optional[str]:
-    """R5: a LAN `bind_host` this machine no longer has moves to the primary
-    private address before any socket is claimed; saved with a backup. The
-    old address is returned for the 网络与访问 notice."""
+    """R5: a LAN `bind_host` this machine no longer has moves to the default
+    route's LAN address before any socket is claimed; saved with a backup.
+    The old address is returned for the 网络与访问 notice. Review IR1: with
+    no routed LAN address yet (Wi-Fi / DHCP not up, only a virtual or VPN
+    adapter) nothing moves and nothing is saved — the saved address is kept
+    for this run (its bind then fails with the startup dialog, and the next
+    start heals once the network is up)."""
     if config_path is None:
         return None
     new = lan.healed_bind_host(config.lan_access, config.bind_host)
     if new is None:
+        if lan.stale_bind(config.lan_access, config.bind_host):
+            log.warning(
+                "the saved LAN address is not on this machine and no LAN "
+                "address has a default route yet; it is kept, not saved"
+            )
         return None
     old = config.bind_host
     config.bind_host = new
@@ -109,7 +118,9 @@ def register_network_routes(
             "running_bind_host": admin.running().bind_host,
             "token_set": bool(token.strip()),
             "api_token_hint": token_hint(token),
-            "firewall": firewall.status(ports()),
+            "firewall": firewall.status(
+                ports(), bind_host=str(admin.desired("bind_host") or "")
+            ),
         }
 
     @app.post("/control/network/token")

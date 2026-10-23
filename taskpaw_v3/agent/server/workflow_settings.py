@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -52,6 +53,9 @@ OPERATION_BUSY = "正在保存其他设置，请稍后再试"
 UNKNOWN = "无法确认是否有影片在处理，暂不允许切换"  # §9 CX15/CX16
 WORKER_BUSY = "本机还有派来的影片或进行中的任务，请先暂停领取并等待完成"
 NEEDS_LAN = "需要先开启局域网访问"  # #299 R16
+WINDOWS_ONLY = (
+    "媒体工作流仅支持 Windows"  # #299 §12 OD: 主控 / GPU 工作机 are Windows-only
+)
 STORE_TIMEOUT = 2.0  # seconds: the guard looks at the store, never waits on it
 PATHS = (
     "inbox_root",
@@ -114,6 +118,12 @@ def presets() -> list[dict[str, str]]:
     ]
 
 
+def media_supported() -> bool:
+    """#299 §12 operator decision: 媒体主控 and GPU 工作机 run only on Windows
+    (the Mac runs the Hub and, at most, a plain monitoring agent)."""
+    return sys.platform == "win32"
+
+
 def detect_ffprobe() -> str | None:
     """§9 IR6: the ffprobe the pipeline finds by itself when the field is
     empty (`local_host`, `exec_restore`: `shutil.which`)."""
@@ -149,6 +159,36 @@ def miko_status(found: dict[str, str | None]) -> str:
     if all(state == "ok" for state in states):
         return "complete"
     return "off" if all(state is None for state in states) else "partial"
+
+
+CREATABLE = ("inbox_root", "data_dir", "staging_dir")
+
+
+def parse_create_dirs(body: Any, fields: dict[str, Any]) -> tuple[str, ...]:
+    """#299 review IR10: `create_dirs` — the step's suggested folders, made
+    only after its save validated. Each must be a directory field this body
+    sets; 422 `{create_dirs}` otherwise."""
+    raw = body.get("create_dirs", []) if isinstance(body, dict) else []
+    if (
+        not isinstance(raw, list)
+        or len(set(map(str, raw))) != len(raw)
+        or any(
+            not isinstance(name, str) or name not in CREATABLE or not fields.get(name)
+            for name in raw
+        )
+    ):
+        raise Refused(422, "设置有误", fields={"create_dirs": "格式不正确"})
+    return tuple(raw)
+
+
+def create_dirs(new: WorkflowSettings, names: tuple[str, ...]) -> None:
+    """Make each named directory of the validated settings (422 per field)."""
+    for name in names:
+        try:
+            create_dir({"path": getattr(new, name)})
+        except Refused as exc:
+            why = (exc.fields or {}).get("path", NO_DIR)
+            raise Refused(422, "设置有误", fields={name: why}) from None
 
 
 def create_dir(body: Any) -> dict[str, Any]:
@@ -253,10 +293,12 @@ def validate(
     config_dir: Path | None,
     running: WorkflowSettings,
     state: Retained,
+    creating: tuple[str, ...] = (),
 ) -> None:
     """R14: the fields the new role uses, each with its own message; then
     the retained state's field holds, whatever the role (§9 CX3/CX14/CX16):
-    the data directory, the paired staging directory and the pairing port."""
+    the data directory, the paired staging directory and the pairing port.
+    `creating`: directories made after this passes (not required to exist)."""
     role = role_of(new)
     errors: dict[str, str] = {}
     hidden = _unused(new)  # CX36: not shown for the role, so not checked either
@@ -265,7 +307,7 @@ def validate(
         if name not in hidden and raw and (why := _path_error(raw)):
             errors[name] = why
     if role != "off":
-        _validate_role(new, config, errors)
+        _validate_role(new, config, errors, creating)
     if "data_dir" not in errors:
         held = _data_dir_held(new, (old, running), config_dir)
         if held:
@@ -281,7 +323,10 @@ def validate(
 
 
 def _validate_role(
-    new: WorkflowSettings, config: AgentConfig, errors: dict[str, str]
+    new: WorkflowSettings,
+    config: AgentConfig,
+    errors: dict[str, str],
+    creating: tuple[str, ...] = (),
 ) -> None:
     from taskpaw_v3.workflow.staging import StagingError, validate_dir
 
@@ -294,7 +339,12 @@ def _validate_role(
             errors.setdefault(name, "请填写")
     for name in _DIRS:
         raw = getattr(new, name)
-        if raw and name not in errors and not Path(raw).is_dir():
+        if (
+            raw
+            and name not in errors
+            and name not in creating
+            and not Path(raw).is_dir()
+        ):
             errors[name] = "目录不存在"
     for name in _FILES:
         raw = getattr(new, name)
@@ -654,6 +704,8 @@ def register_workflow_settings(
             # UI review IR3: the saved paths found or missing; Miko 三项齐全
             "paths": found,
             "miko": miko_status(found),
+            # #299 §12 OD: off Windows only 不参与 is offered
+            "media_supported": media_supported(),
         }
 
     @app.post("/control/workflow/settings/directory")
@@ -681,14 +733,23 @@ def register_workflow_settings(
         except ValueError:
             body = None
         try:
-            _role, fields = parse(body)
+            plain = (
+                {k: v for k, v in body.items() if k != "create_dirs"}
+                if isinstance(body, dict)
+                else body
+            )
+            role, fields = parse(plain)
+            if role != "off" and not media_supported():
+                raise Refused(422, "设置有误", fields={"role": WINDOWS_ONLY})
+            creating = parse_create_dirs(body, fields)
 
             def check(validated: AgentConfig, old: WorkflowSettings) -> None:
                 new, running = validated.workflow, config.workflow
                 state = retained((old, running, new), running, config_dir, worker())
                 new = _effective_staging(new, old, state, "staging_dir" in fields)
-                validate(new, old, validated, config_dir, running, state)
+                validate(new, old, validated, config_dir, running, state, creating)
                 refuse_busy(new, state, config_dir)
+                create_dirs(new, creating)  # IR10: only once all of it passed
 
             result = await run_in_threadpool(
                 admin.update_config, {"workflow": fields}, workflow_check=check
@@ -701,6 +762,10 @@ def register_workflow_settings(
                     status_code=409,
                     content={"detail": OPERATION_BUSY, "code": "operation_busy"},
                 )
+            if str(exc) == "restarting":  # #299 review IR5
+                from taskpaw_v3.agent.server.restart_routes import RESTARTING
+
+                return JSONResponse(status_code=409, content=RESTARTING)
             return JSONResponse(
                 status_code=422,
                 content={"detail": "设置有误", "fields": {"role": "设置有误"}},

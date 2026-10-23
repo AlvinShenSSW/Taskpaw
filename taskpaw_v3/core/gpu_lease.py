@@ -68,6 +68,8 @@ class GpuLease:
         # Insertion order = registration order; an update keeps the position.
         self._waiters: dict[RunId, _Waiter] = {}
         self._reserved: Optional[tuple[RunId, float]] = None  # (run, deadline)
+        # #299 review IR5: a granted restart admits nothing new
+        self._closed = False
 
     # ── internals (called with _lock held) ──────────────────────────────
     def _prune(self, now: float) -> None:
@@ -95,6 +97,8 @@ class GpuLease:
             if self._holder == run:
                 self._label = label
                 return True
+            if self._closed:
+                return False
             if self._holder is None and (
                 self._reserved is None or self._reserved[0] == run
             ):
@@ -131,6 +135,17 @@ class GpuLease:
     def holder(self) -> Optional[RunId]:
         with self._lock:
             return self._holder
+
+    def close_if_idle(self) -> bool:
+        """#299 review IR5: no holder → closed for good (the process is
+        restarting; waiters are dropped). A holder → False, nothing changes."""
+        with self._lock:
+            if self._holder is not None:
+                return False
+            self._closed = True
+            self._waiters.clear()
+            self._reserved = None
+            return True
 
     def blocking_label(self) -> str:
         with self._lock:
@@ -170,6 +185,10 @@ def withdraw(run: RunId) -> None:
 
 def holder() -> Optional[RunId]:
     return _LEASE.holder()
+
+
+def close_if_idle() -> bool:
+    return _LEASE.close_if_idle()
 
 
 def blocking_label() -> str:

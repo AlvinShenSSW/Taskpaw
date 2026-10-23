@@ -79,9 +79,19 @@ def _guard_bind_exposure(config: HubConfig) -> None:
 
 
 class HubService:
-    def __init__(self, config: HubConfig, store: HubStore) -> None:
+    def __init__(
+        self,
+        config: HubConfig,
+        store: HubStore,
+        *,
+        yaml_config: HubConfig | None = None,
+    ) -> None:
+        from taskpaw_v3.hub.server.settings import live_openclaw_url
+
         self.config = config
         self.store = store
+        # #299 review CX4: an invalid live override falls back to hub.yaml
+        yaml_url = (yaml_config or config).openclaw_url
         self._event_cursor_lease: FileLease | None = None
         self.poller = Poller(
             store=store,
@@ -97,7 +107,7 @@ class HubService:
             get_polling_token=lambda: store.get_config(
                 "polling_token", config.polling_token
             ),
-            get_url=lambda: store.get_config("openclaw_url", config.openclaw_url),
+            get_url=lambda: live_openclaw_url(store, yaml_url),
             # Seed a restarted Hub's status.md as ONLINE only for agents whose last
             # success is within ~2 polls; older successes render OFFLINE (#38).
             seed_fresh_seconds=max(2 * config.poll_interval, 60),
@@ -416,13 +426,15 @@ def _register_read_routes(
         }
 
 
-def create_hub_app(config: HubConfig, store: HubStore) -> tuple[FastAPI, HubService]:
+def create_hub_app(
+    config: HubConfig, store: HubStore, *, yaml_config: HubConfig | None = None
+) -> tuple[FastAPI, HubService]:
     """Network read API, retaining its independent Bearer and polling contract."""
     from taskpaw_v3.core.cors import add_ui_cors
 
     app = FastAPI(title="TaskPaw Hub", docs_url=None, redoc_url=None)
     add_ui_cors(app)
-    service = HubService(config, store)
+    service = HubService(config, store, yaml_config=yaml_config)
 
     def authorize(request: Request) -> bool:
         return token_ok(config.api_token, request.headers.get("Authorization"))
@@ -720,7 +732,7 @@ def run_hub(
                 "set an api_token to require a Bearer token or to bind a LAN address.",
                 config.bind_host,
             )
-        app, service = create_hub_app(config, store)
+        app, service = create_hub_app(config, store, yaml_config=yaml_config)
         service._event_cursor_lease = lease
         control = create_hub_control_app(
             config,

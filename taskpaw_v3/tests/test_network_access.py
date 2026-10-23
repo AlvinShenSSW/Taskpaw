@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,10 @@ SAVED_TOKEN = "tp_SavedTokenSavedTokenSaved1234"
 NICS = {
     "以太网": ["192.168.1.20", "fe80::1"],
     "Loopback": ["127.0.0.1", "::1"],
-    "vEthernet": ["169.254.3.4", "172.20.0.1"],
+    "vEthernet (WSL)": ["169.254.3.4", "172.20.0.1"],
+    "VirtualBox Host-Only Network": ["192.168.56.1"],
+    "Tailscale": ["100.101.1.2"],
+    "Wi-Fi 2": ["10.0.0.7"],
     "WAN": ["8.8.8.8"],
 }
 
@@ -95,10 +99,12 @@ def test_only_private_ipv4_addresses_are_listed_primary_first():
     found = lan.local_addresses()
     assert [a.view() for a in found] == [
         {"ip": "192.168.1.20", "nic": "以太网", "primary": True},
-        {"ip": "172.20.0.1", "nic": "vEthernet", "primary": False},
+        {"ip": "10.0.0.7", "nic": "Wi-Fi 2", "primary": False},
     ]
+    assert [a.routed for a in found] == [True, False]
     other = lan.local_addresses(route_source=lambda: None)
     assert other[0].primary and other[0].ip == "192.168.1.20"
+    assert not any(a.routed for a in other)  # no default route: nothing routed
     assert lan.local_addresses(interfaces=lambda: {}) == []
 
     def broken():
@@ -131,6 +137,72 @@ def test_is_local_knows_loopback_and_interfaces_and_says_unknown():
 )
 def test_healed_bind_host(lan_on, host, expected):
     assert lan.healed_bind_host(lan_on, host) == expected
+
+
+@pytest.mark.parametrize(
+    "nic,ip",
+    [
+        ("vEthernet (WSL)", "172.20.0.1"),
+        ("vEthernet (Default Switch)", "172.28.16.1"),
+        ("Hyper-V Virtual Ethernet Adapter", "172.16.5.1"),
+        ("VirtualBox Host-Only Network", "192.168.56.1"),
+        ("VMware Network Adapter VMnet8", "192.168.200.1"),
+        ("Tailscale", "100.101.1.2"),
+        ("ZeroTier One [8056c2e21c]", "10.147.17.5"),
+        ("以太网 3", "100.64.0.9"),  # the shared range, whatever the name
+    ],
+)
+def test_virtual_and_vpn_adapters_are_never_lan_addresses(nic, ip):
+    """#299 review IR1: never listed, never routed, never a heal target."""
+    table = {nic: [ip]}
+    assert lan.local_addresses(interfaces=lambda: table, route_source=lambda: ip) == []
+    assert (
+        lan.healed_bind_host(
+            True,
+            "192.168.1.99",
+            addresses=lambda: lan.local_addresses(lambda: table, lambda: ip),
+            local=lambda h: False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("source", [None, "192.168.56.1", "10.0.0.7"])
+def test_a_heal_needs_the_default_routes_lan_address(monkeypatch, source):
+    """#299 review IR1: before Wi-Fi/DHCP is up (no default route, or the
+    route goes out a virtual adapter) nothing moves — not even to another
+    real address that is not the routed one."""
+    monkeypatch.setattr(lan, "_route_source", lambda: source)
+    expected = "10.0.0.7" if source == "10.0.0.7" else None
+    assert lan.healed_bind_host(True, "192.168.1.99") == expected
+
+
+def test_no_routed_lan_address_keeps_the_saved_bind_unsaved(
+    tmp_path, monkeypatch, caplog
+):
+    """#299 review IR1: kept for this run, logged once, never written."""
+    monkeypatch.setattr(lan, "_route_source", lambda: None)
+    path = tmp_path / "agent.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "server_id": "s",
+                "machine": "m",
+                "bind_host": "192.168.1.99",
+                "api_token": SAVED_TOKEN,
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+    config = load_yaml(AgentConfig, path)
+    with caplog.at_level(logging.WARNING, logger="taskpaw.agent.network"):
+        assert network_routes.heal_on_startup(config, path) is None
+    assert config.bind_host == "192.168.1.99"
+    assert path.read_bytes() == before
+    assert not (tmp_path / "agent.yaml.bak").exists()
+    warned = [r for r in caplog.records if "kept, not saved" in r.getMessage()]
+    assert len(warned) == 1 and SAVED_TOKEN not in caplog.text
 
 
 def test_an_unknown_interface_table_never_heals():
@@ -408,6 +480,7 @@ def test_the_route_accepts_only_its_fixed_argv():
     assert ran == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows firewall")
 def test_the_route_runs_the_two_fixed_netsh_lines():
     ran: list[str] = []
 
@@ -502,6 +575,93 @@ def test_request_allow_maps_every_outcome():
     assert len(calls) == n  # nothing launched
 
 
+def test_request_allow_is_bounded_overall_and_one_at_a_time():
+    """#299 review IR3: ShellExecuteExW runs on a worker thread; the request
+    answers `timeout` when the whole thing (UAC prompt included) is not done
+    in time, and a second request meanwhile answers `pending` (no second
+    prompt). Event-driven: the fake launcher waits on a gate."""
+    import threading
+
+    gate, entered = threading.Event(), threading.Event()
+    calls = []
+
+    def blocked(file, params, timeout):
+        calls.append(timeout)
+        entered.set()
+        gate.wait(10)
+        return 0
+
+    kw = dict(frozen=True, platform="win32", executable="taskpaw-backend.exe")
+    assert firewall.request_allow([5680], launch=blocked, timeout=0, **kw) == "timeout"
+    assert entered.wait(10)
+    assert firewall.request_allow([5680], launch=blocked, **kw) == "pending"
+    assert calls == [0]  # never a second UAC prompt
+    gate.set()
+    assert firewall._LAST.wait(10)  # the worker finished and freed the slot
+    assert firewall.request_allow([5680], launch=lambda *a: 0, **kw) == "added"
+
+
+def test_the_uac_prompt_is_owned_by_the_foreground_taskpaw_window():
+    """#299 review IR3: the windowless backend hands ShellExecuteExW the
+    shell's foreground window, so Windows shows the prompt in front; any
+    other app's window (or none) → no owner."""
+    family = lambda: {4100, 4000}  # noqa: E731 — the parent shell and its parent
+    assert (
+        firewall.owner_window(
+            foreground=lambda: 0x1234, pid_of=lambda h: 4100, family=family
+        )
+        == 0x1234
+    )
+    assert (
+        firewall.owner_window(
+            foreground=lambda: 0x1234, pid_of=lambda h: 999, family=family
+        )
+        is None
+    )
+    assert (
+        firewall.owner_window(
+            foreground=lambda: 0, pid_of=lambda h: 4100, family=family
+        )
+        is None
+    )
+
+    def broken():
+        raise OSError
+
+    assert firewall.owner_window(foreground=broken, family=family) is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows firewall")
+def test_status_reads_utf8_and_the_profile_of_the_bind_hosts_nic(monkeypatch):
+    """#299 review IR7: the fixed script forces UTF-8 output and asks for
+    the connection profile of the adapter that owns bind_host (validated as
+    an IPv4 literal — anything else is never put into the script)."""
+    monkeypatch.undo()
+    firewall._CACHE.clear()
+    scripts = []
+
+    def run(argv, timeout):
+        scripts.append(argv[4])
+        return '{"rule":false,"ports":[],"program":"","profile":"Private"}'
+
+    kw = dict(run=run, platform="win32", frozen=True, executable="b.exe")
+    firewall.status([5680], bind_host="192.168.1.20", **kw)
+    assert scripts[-1].startswith("[Console]::OutputEncoding=[Text.Encoding]::UTF8;")
+    assert "Get-NetIPAddress -IPAddress '192.168.1.20'" in scripts[-1]
+    assert "-InterfaceIndex" in scripts[-1]
+    firewall.status([5680], bind_host="192.168.1.20", **kw)
+    assert len(scripts) == 1  # cached per address
+    firewall.status([5680], bind_host="10.0.0.7", **kw)
+    assert len(scripts) == 2 and "'10.0.0.7'" in scripts[-1]
+    for hostile in ("1.2.3.4';Remove-Item x;'", "127.0.0.1", "fe80::1", "", None):
+        firewall._CACHE.clear()
+        firewall.status([5680], bind_host=hostile, **kw)
+        assert (
+            "Get-NetIPAddress" not in scripts[-1] and "Remove-Item" not in scripts[-1]
+        )
+    firewall._CACHE.clear()
+
+
 def test_the_firewall_route_asks_for_the_saved_ports(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(
@@ -517,6 +677,7 @@ def test_the_firewall_route_asks_for_the_saved_ports(tmp_path, monkeypatch):
     assert res.json() == {"result": "declined"} and seen == [[5680, 5682]]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows firewall")
 def test_status_reads_the_rule_once_per_30_seconds(monkeypatch):
     monkeypatch.undo()  # the real status(), with a fake runner and clock
     firewall._CACHE.clear()

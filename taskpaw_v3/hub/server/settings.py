@@ -60,6 +60,7 @@ MASK = "***"
 HINT_MIN = 16
 _MISSING = "\x00missing"
 BUSY_SAVE = "正在保存其他设置，请稍后再试"
+RESTARTING = {"detail": "正在重启", "code": "restarting"}
 
 
 def _encode(key: str, value: Any) -> str:
@@ -112,6 +113,32 @@ def effective_hub_config(config: HubConfig, store: "HubStore") -> HubConfig:
             data[key] = getattr(config, key)
         merged = HubConfig(**data)
     return merged
+
+
+def live_openclaw_url(store: "HubStore", fallback: str) -> str:
+    """#299 D4 / review CX4: the poller's per-delivery address — the store
+    override validated like `effective_hub_config` does, else hub.yaml's."""
+    raw = store.get_config("openclaw_url", _MISSING)
+    if raw == _MISSING:
+        return fallback
+    try:
+        return _check_url(raw)
+    except ValueError:
+        return fallback
+
+
+CONTROLLER_KEY = "controller_server_id"
+NO_SUCH_SERVER = "未找到这台设备"
+
+
+def controller_server_id(store: "HubStore") -> Optional[int]:
+    """#299 review IR2: the agent the operator chose as 主控 (None: not
+    chosen, or that server was removed) — never an implicit first server."""
+    raw = store.get_config(CONTROLLER_KEY, "")
+    if not raw.isdigit():
+        return None
+    sid = int(raw)
+    return sid if store.get_server(sid) is not None else None
 
 
 def token_hint(token: str) -> Optional[str]:
@@ -202,12 +229,15 @@ class HubSettings:
         self.running = running
         self.store = store
         self._lock = threading.Lock()
+        self.restarting = False  # #299 review IR5: set by a granted restart
 
     @contextmanager
     def admission(self):
         if not self._lock.acquire(timeout=1):
             raise ValueError("operation_busy")
         try:
+            if self.restarting:
+                raise ValueError("restarting")
             yield
         finally:
             self._lock.release()
@@ -230,6 +260,7 @@ class HubSettings:
             "restart_required": bool(fields),
             "fields": fields,
             "addresses": [a.view() for a in lan.local_addresses()],
+            "controller_server_id": controller_server_id(self.store),
         }
 
     def update(self, patch: Any) -> dict[str, Any]:
@@ -240,7 +271,21 @@ class HubSettings:
             data = saved.model_dump()
             errors: dict[str, str] = {}
             changes: dict[str, Any] = {}
+            controller: Any = _MISSING
             for key, value in patch.items():
+                if key == CONTROLLER_KEY:  # live, outside HubConfig
+                    if value is None:
+                        controller = ""
+                    elif (
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value > 0
+                        and self.store.get_server(value) is not None
+                    ):
+                        controller = str(value)
+                    else:
+                        errors[key] = NO_SUCH_SERVER
+                    continue
                 if key not in OVERRIDES:
                     errors[str(key)[:64]] = "未知字段"
                     continue
@@ -280,11 +325,13 @@ class HubSettings:
                 )
             except (ValidationError, ValueError):
                 raise Refused({"bind_host": "地址不可用"}) from None
-            # #299 §10.1: a read-API address that cannot start would leave no UI
-            if not bind_is_loopback(validated.bind_host) and (
-                validated.bind_host,
-                validated.bind_port,
-            ) != (self.running.bind_host, self.running.bind_port):
+            # #299 §10.1 / review CX1: every changed read-API address (also a
+            # switch back to loopback) is bound once — one that cannot start
+            # would leave no UI
+            if (validated.bind_host, validated.bind_port) != (
+                self.running.bind_host,
+                self.running.bind_port,
+            ):
                 from taskpaw_v3.core import lan
 
                 why = lan.probe_bind(validated.bind_host, validated.bind_port)
@@ -297,6 +344,8 @@ class HubSettings:
                 for key in changes
                 if getattr(validated, key) != getattr(saved, key)
             }
+            if controller != _MISSING:
+                writes[CONTROLLER_KEY] = controller
             if writes:
                 self.store.set_configs(writes)
             log.info("hub settings saved: %s", ", ".join(sorted(writes)) or "none")
@@ -373,7 +422,9 @@ def register_hub_settings(
             return settings.update(body)
         except Refused as exc:
             return refusal(exc.fields)
-        except ValueError:  # operation_busy
+        except ValueError as exc:  # operation_busy / restarting
+            if str(exc) == "restarting":
+                return JSONResponse(status_code=409, content=RESTARTING)
             return JSONResponse(
                 status_code=409, content={"detail": BUSY_SAVE, "code": "operation_busy"}
             )
@@ -426,8 +477,10 @@ def register_hub_settings(
             )
         try:
             with settings.admission():
-                pass
-        except ValueError:
+                settings.restarting = True
+        except ValueError as exc:
+            if str(exc) == "restarting":
+                return JSONResponse(status_code=409, content=RESTARTING)
             return JSONResponse(
                 status_code=409, content={"detail": BUSY_SAVE, "code": "operation_busy"}
             )

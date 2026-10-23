@@ -1099,6 +1099,62 @@ def test_miko_is_complete_only_with_all_three_present(tmp_path):
     assert complete.get().json()["miko"] == "partial"
 
 
+def test_suggested_directories_are_created_only_after_the_save_validates(
+    tmp_path, tools
+):
+    """#299 review IR10: the wizard names the suggested folders in
+    `create_dirs`; they are made only once everything else in the step
+    validated (a refused save leaves no folder behind)."""
+    world = World(tmp_path)
+    inbox = tmp_path / "Suggested" / "TaskpawInbox"
+    work = tmp_path / "Suggested" / "TaskpawWork"
+    body = {
+        "role": "controller",
+        **tools,
+        "inbox_root": str(inbox),
+        "data_dir": str(work),
+        "create_dirs": ["inbox_root", "data_dir"],
+    }
+    bad = world.put({**body, "worker_api_port": 5680})  # = the network port
+    assert bad.status_code == 422
+    assert set(bad.json()["fields"]) == {"worker_api_port"}
+    assert not inbox.exists() and not work.exists()
+    missing = world.put({k: v for k, v in body.items() if k != "create_dirs"})
+    assert missing.json()["fields"] == {"inbox_root": "目录不存在"}
+    assert not inbox.exists()
+    ok = world.put(body)
+    assert ok.status_code == 200, ok.text
+    assert inbox.is_dir() and work.is_dir()
+    assert world.saved()["workflow"]["inbox_root"] == str(inbox)
+
+
+def test_a_media_role_off_windows_is_refused(tmp_path, tools, monkeypatch):
+    """#299 §12 operator decision: 主控 / GPU 工作机 are Windows-only; 不参与
+    is always allowed. Nothing is written."""
+    from taskpaw_v3.agent.server import workflow_settings as ws
+
+    monkeypatch.setattr(ws, "media_supported", lambda: False)
+    world = World(tmp_path)
+    before = world.path.read_bytes()
+    for role in ("controller", "worker"):
+        res = world.put({"role": role, **tools})
+        assert res.status_code == 422
+        assert res.json()["fields"] == {"role": "媒体工作流仅支持 Windows"}
+    assert world.path.read_bytes() == before
+    assert world.get().json()["media_supported"] is False
+    assert world.put({"role": "off"}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "create",
+    [["monitors"], ["staging_dir"], "inbox_root", [5], ["inbox_root", "inbox_root"]],
+)
+def test_create_dirs_names_only_directory_fields_of_the_body(tmp_path, tools, create):
+    world = World(tmp_path)
+    res = world.put({"role": "controller", **tools, "create_dirs": create})
+    assert res.status_code == 422 and set(res.json()["fields"]) == {"create_dirs"}
+
+
 def test_create_directory_makes_a_missing_local_folder(tmp_path):
     world = World(tmp_path)
     target = tmp_path / "new" / "INBOX"

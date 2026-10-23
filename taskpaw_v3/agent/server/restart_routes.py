@@ -8,6 +8,10 @@ the settings admission lock and refuses while another save holds it
 or while a GPU worker holds dispatched work (`restart_busy`). Remote work,
 queued films and crash-safe stages never block. Success answers 202; after
 the reply the service stops gracefully and exits with `restart.EXIT_CODE`.
+Review IR5: the grant is made under the admission lock — the GPU lease is
+closed in the same step as its busy check and the admin is marked
+restarting, so every later save, monitor change, GPU admission and a second
+POST is refused (409 `restarting` 「正在重启」).
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ if TYPE_CHECKING:
 
 BUSY_WORKER = "本机正在处理主控派来的影片"
 BUSY_SAVE = "正在保存其他设置，请稍后再试"
+RESTARTING = {"detail": "正在重启", "code": "restarting"}
 
 
 def pending_fields(admin: "MonitorAdmin") -> list[str]:
@@ -100,7 +105,13 @@ def register_restart_routes(
         try:
             with admin._settings_admission():
                 why = blocked_reason(worker_provider)
-        except ValueError:
+                if why is None and not gpu_lease.close_if_idle():
+                    why = blocked_reason(worker_provider) or "GPU 任务"
+                if why is None:
+                    admin.begin_restart()
+        except ValueError as exc:
+            if str(exc) == "restarting":
+                return JSONResponse(status_code=409, content=RESTARTING)
             return JSONResponse(
                 status_code=409,
                 content={"detail": BUSY_SAVE, "code": "operation_busy"},

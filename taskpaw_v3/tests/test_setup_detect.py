@@ -4,6 +4,7 @@ no network path is touched and this host's disks never decide a test."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -44,7 +45,6 @@ def touch(path: Path) -> str:
 def detector(tmp_path, runner=None, **kw):
     kw.setdefault("platform", "win32")
     kw.setdefault("env", {"APPDATA": str(tmp_path / "appdata")})
-    kw.setdefault("home", tmp_path / "home")
     kw.setdefault("which", lambda name: None)
     kw.setdefault("network", lambda path: path.startswith("\\\\"))
     kw.setdefault("drives", lambda: [])
@@ -71,13 +71,67 @@ def test_ffprobe_prefers_the_saved_path_then_path_then_bundled(tmp_path):
     assert found["source"] == "path" and found["path"] == on_path
 
 
+# WhisperJAV's bundled ffprobe is a Windows-only path: checked on every OS as
+# pure ntpath values against a fake file set (never this host's disks)
+WJ_EXE = r"D:\Apps\WhisperJAV\Scripts\whisperjav.exe"
+WJ_FFPROBE = r"D:\Apps\WhisperJAV\Library\bin\ffprobe.exe"
+
+
 def test_ffprobe_falls_back_to_whisperjavs_bundled_folder(tmp_path):
-    whisper = tmp_path / "WhisperJAV" / "Scripts" / "whisperjav.exe"
-    bundled = touch(tmp_path / "WhisperJAV" / "Library" / "bin" / "ffprobe.exe")
-    d = detector(tmp_path)
-    found = d.ffprobe(WorkflowSettings(whisperjav_exe_path=str(whisper)))
-    assert found["source"] == "bundled" and Path(found["path"]) == Path(bundled)
+    d = detector(tmp_path, is_file={WJ_FFPROBE}.__contains__)
+    found = d.ffprobe(WorkflowSettings(whisperjav_exe_path=WJ_EXE))
+    assert found["source"] == "bundled" and found["path"] == WJ_FFPROBE
     assert found["version"] is None  # the fake runner printed nothing
+
+
+def test_ffprobe_uses_the_whisperjav_found_in_the_same_pass(tmp_path):
+    """#299 review CX2: nothing saved yet (first run) — the WhisperJAV that
+    detection just found brings its bundled ffprobe along."""
+    d = detector(
+        tmp_path,
+        candidates={"jasna": [], "whisperjav": [WJ_EXE]},
+        is_file={WJ_EXE, WJ_FFPROBE}.__contains__,
+    )
+    found = d.detect(WorkflowSettings(), [], None)["tools"]
+    assert found["whisperjav"]["path"] == WJ_EXE  # found, not saved
+    assert found["ffprobe"]["source"] == "bundled"
+    assert found["ffprobe"]["path"] == WJ_FFPROBE
+
+
+def _exe(folder: Path, name: str) -> str:
+    path = folder / (name + (".exe" if sys.platform == "win32" else ""))
+    touch(path)
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_path_lookups_skip_network_directories(tmp_path):
+    """#299 review CX3/IR12: a UNC or mapped-drive PATH entry is never
+    searched (no network access while detecting); local entries are."""
+    share, local = tmp_path / "share", tmp_path / "local"
+    _exe(share, "jasna")
+    on_share_only = _exe(share, "ffprobe")
+    env = {"PATH": os.pathsep.join([str(share), "", str(local)]), "PATHEXT": ".EXE"}
+    network = lambda p: Path(p) == share  # noqa: E731
+    assert detect.local_which("ffprobe", env, network) is None
+    assert on_share_only  # it exists, but on the share
+    mine = _exe(local, "jasna")
+    assert detect.local_which("jasna", env, network) == mine
+    d = detect.Detector(
+        run=Runner(),
+        platform=sys.platform,
+        env=env,
+        network=network,
+        candidates={"jasna": [], "whisperjav": []},
+        version_of=lambda p: None,
+    )
+    assert d.jasna(WorkflowSettings(), []) == {
+        "found": True,
+        "path": mine,
+        "source": "path",
+        "version": None,
+    }
+    assert d.ffprobe(WorkflowSettings())["found"] is False
 
 
 def test_ffprobe_missing(tmp_path):
@@ -143,6 +197,7 @@ def test_network_paths_are_never_probed(tmp_path):
     assert unc in seen
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows tool locations")
 def test_default_candidates_follow_the_contract():
     env = {"ProgramFiles": r"C:\PF", "LOCALAPPDATA": r"C:\Users\u\AppData\Local"}
     found = detect.default_candidates(env, "win32")
@@ -175,16 +230,28 @@ def test_miko_complete_partial_off(tmp_path):
     assert d.miko(WorkflowSettings(), config_dir)["status"] == "complete"
     assert d.miko(WorkflowSettings(), config_dir)["profile"] == profile
     assert detector(tmp_path / "none").miko(WorkflowSettings(), None)["status"] == "off"
-    mac = detector(tmp_path, platform="darwin", home=tmp_path / "mac")
-    touch(
-        tmp_path
-        / "mac"
-        / "Library"
-        / "Application Support"
-        / "com.mdcx.desktop"
-        / "config.json"
+
+
+def test_nothing_is_detected_or_suggested_off_windows(tmp_path):
+    """#299 §12 operator decision: the media workflow is Windows-only — on
+    macOS nothing is probed (no runner call) and nothing is suggested."""
+    runner = Runner({"nvidia-smi": GPU_LINE})
+    whisper = touch(tmp_path / "whisperjav")
+    mac = detector(
+        tmp_path,
+        runner,
+        platform="darwin",
+        which=lambda n: whisper,
+        candidates={"jasna": [], "whisperjav": [whisper]},
+        drives=lambda: [("D:\\", 900)],
     )
-    assert mac.miko(WorkflowSettings(), None)["status"] == "partial"
+    found = mac.detect(WorkflowSettings(whisperjav_exe_path=whisper), [], tmp_path)
+    assert found["gpu"] is None and runner.calls == []
+    assert not any(
+        found["tools"][k]["found"] for k in ("ffprobe", "jasna", "whisperjav")
+    )
+    assert found["tools"]["miko"]["status"] == "off"
+    assert set(found["suggested"].values()) == {None}
 
 
 # ── GPU ─────────────────────────────────────────────────────────────────
@@ -216,6 +283,7 @@ def test_gpu_reads_name_vram_driver_and_power_limit(tmp_path):
 
 
 # ── suggestions and directory facts ─────────────────────────────────────
+@pytest.mark.skipif(sys.platform != "win32", reason="drive-letter suggestions")
 def test_suggestions_pick_the_fixed_drive_with_most_space(tmp_path):
     d = detector(tmp_path, drives=lambda: [("C:\\", 10), ("D:\\", 900), ("E:\\", 50)])
     assert d.suggested() == {
@@ -228,8 +296,8 @@ def test_suggestions_pick_the_fixed_drive_with_most_space(tmp_path):
         "data_dir": None,
         "staging": None,
     }
-    mac = detector(tmp_path, platform="darwin", home=Path("/Users/u"))
-    assert mac.suggested()["inbox"] == str(Path("/Users/u") / "TaskpawInbox")
+    mac = detector(tmp_path, platform="darwin", drives=lambda: [("D:\\", 9)])
+    assert set(mac.suggested().values()) == {None}  # §12 OD: Windows only
 
 
 def test_inspect_directory(tmp_path):
@@ -266,6 +334,46 @@ def test_run_probe_reads_4kb_and_kills_on_timeout(tmp_path):
     assert detect.run_probe([str(tmp_path / "missing.exe")], 1) is None
     slow = [sys.executable, "-c", "import time; time.sleep(30)"]
     assert detect.run_probe(slow, 0.5) is None
+
+
+class _Endless:
+    """A stdout that never ends on its own: 64 KB chunks, sizes recorded."""
+
+    def __init__(self, total: int):
+        self.left, self.sizes = total, []
+
+    def read(self, size=-1):
+        self.sizes.append(size)
+        if self.left <= 0:
+            return b""
+        n = min(self.left, 65536 if size is None or size < 0 else size)
+        self.left -= n
+        return b"y" * n
+
+    def close(self):
+        pass
+
+
+def test_run_probe_reads_at_most_4kb_into_memory(monkeypatch):
+    """#299 review IR12: a chatty probe is drained in bounded reads and only
+    the first 4 KB are kept (never a whole-output `communicate`)."""
+    stream = _Endless(8 * 1024 * 1024)
+
+    class Proc:
+        pid = 4242
+        returncode = 0
+        stdout = stream
+
+        def wait(self, timeout=None):
+            return 0
+
+        def communicate(self, *a, **k):
+            raise AssertionError("unbounded read")
+
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: Proc())
+    out = detect.run_probe(["x"], 5)
+    assert out == "y" * 4096
+    assert all(isinstance(s, int) and 0 < s <= 65536 for s in stream.sizes)
 
 
 def test_run_probe_closes_stdin(tmp_path):
@@ -350,17 +458,19 @@ def test_no_probe_inherits_a_console_window(monkeypatch):
     seen = {}
 
     class Done:
+        pid = 4243
         returncode = 0
+        stdout = _Endless(2)
 
-        def communicate(self, timeout):
-            return b"ok", b""
+        def wait(self, timeout=None):
+            return 0
 
     def popen(argv, **kwargs):
         seen.update(kwargs)
         return Done()
 
     monkeypatch.setattr(subprocess, "Popen", popen)
-    assert detect.run_probe(["x"], 1) == "ok"
+    assert detect.run_probe(["x"], 1) == "yy"
     assert seen["stdin"] is subprocess.DEVNULL
     if sys.platform == "win32":
         assert seen["creationflags"] & 0x08000000

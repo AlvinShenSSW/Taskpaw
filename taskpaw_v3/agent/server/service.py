@@ -69,7 +69,9 @@ def _main() -> int:
     # Persist the monotonic event-id counter next to the config.
     state_path = path.with_name("agent.state.json")
     # #299 R1: a fresh install starts the wizard and needs no confirmation
-    # dialog for its first event lineage (only with the marker written here).
+    # dialog for its first event lineage — only in the run that scaffolded
+    # agent.yaml and wrote the marker (review IR4: a pending marker alone,
+    # e.g. after a crash, keeps the dialog).
     if scaffolded:
         try:
             first_run.write_pending(path, config.server_id)
@@ -77,7 +79,8 @@ def _main() -> int:
             logging.getLogger("taskpaw.agent").warning(
                 "could not write the first-run marker"
             )
-    first_run.maybe_initialize(path, state_path, config.server_id)
+        else:
+            first_run.maybe_initialize(path, state_path, config.server_id)
     # Pass the config path so the control API can persist add/remove/enable (#57).
     try:
         run_agent(config, state_path=state_path, config_path=path, block=True)

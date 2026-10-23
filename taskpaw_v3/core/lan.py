@@ -2,10 +2,14 @@
 startup self-heal of a stale `bind_host`.
 
 Addresses come from psutil (no network traffic): IPv4, private, not loopback
-or link-local, on an interface that is up. The primary one is the address the
-routing table picks for an outside destination (a UDP `connect`, which sends
-nothing); without a route the first address is primary. Every reader is a
-module function so tests replace it — no test depends on this host's NICs.
+or link-local, on an interface that is up and is not a virtual or VPN adapter
+(WSL / Hyper-V vEthernet, VirtualBox, VMware, Tailscale, ZeroTier; and never
+the 100.64.0.0/10 shared range). The primary one is the address the routing
+table picks for an outside destination (a UDP `connect`, which sends nothing);
+without a route the first address is primary but not `routed`. The self-heal
+moves a bind only to a `routed` address, so a heal that runs before Wi-Fi or
+DHCP is up never lands on a virtual adapter. Every reader is a module function
+so tests replace it — no test depends on this host's NICs.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 import errno
 import ipaddress
 import logging
+import re
 import socket
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -31,6 +36,12 @@ log = logging.getLogger("taskpaw.lan")
 NOT_LOCAL = "此地址不属于本机"
 IN_USE = "端口已被占用"
 UNAVAILABLE = "端口不可用"
+# #299 review IR1: adapters a home LAN address never lives on
+VIRTUAL_NIC = re.compile(
+    r"vethernet|wsl|hyper-v|virtualbox|vmware|vmnet|tailscale|zerotier",
+    re.IGNORECASE,
+)
+SHARED_RANGE = ipaddress.ip_network("100.64.0.0/10")  # CGNAT / Tailscale
 
 
 @dataclass(frozen=True)
@@ -38,6 +49,8 @@ class Address:
     ip: str
     nic: str
     primary: bool = False
+    # the default route's source address (a heal may move the bind here)
+    routed: bool = False
 
     def view(self) -> dict:
         return {"ip": self.ip, "nic": self.nic, "primary": self.primary}
@@ -78,25 +91,35 @@ def _private_v4(ip: str) -> bool:
         and value.is_private
         and not value.is_loopback
         and not value.is_link_local
+        and value not in SHARED_RANGE
     )
+
+
+def lan_candidate(ip: str, nic: str) -> bool:
+    """A private IPv4 address on a real (not virtual / VPN) adapter."""
+    return _private_v4(ip) and not VIRTUAL_NIC.search(nic or "")
 
 
 def local_addresses(
     interfaces: Optional[Callable[[], dict[str, list[str]]]] = None,
     route_source: Optional[Callable[[], Optional[str]]] = None,
 ) -> list[Address]:
-    """This machine's private IPv4 addresses, the primary one first."""
+    """This machine's private IPv4 LAN addresses, the primary one first."""
     try:
         table = (interfaces or _interfaces)()
     except Exception:  # psutil failure: nothing is known
         log.warning("could not list the network interfaces")
         return []
-    pairs = [(ip, nic) for nic, ips in table.items() for ip in ips if _private_v4(ip)]
-    source = (route_source or _route_source)()
-    primary = next((ip for ip, _ in pairs if ip == source), None)
-    if primary is None and pairs:
-        primary = pairs[0][0]
-    out = [Address(ip, nic, ip == primary) for ip, nic in pairs]
+    pairs = [
+        (ip, nic) for nic, ips in table.items() for ip in ips if lan_candidate(ip, nic)
+    ]
+    try:
+        source = (route_source or _route_source)()
+    except Exception:
+        source = None
+    routed = next((ip for ip, _ in pairs if ip == source), None)
+    primary = routed if routed is not None else (pairs[0][0] if pairs else None)
+    out = [Address(ip, nic, ip == primary, ip == routed) for ip, nic in pairs]
     out.sort(key=lambda a: not a.primary)
     return out
 
@@ -152,15 +175,26 @@ def healed_bind_host(
     local: Optional[Callable[[str], Optional[bool]]] = None,
 ) -> Optional[str]:
     """R5: the address to use instead of a LAN `bind_host` this machine no
-    longer has (DHCP gave it another): the primary private address. None:
-    keep it (LAN off, loopback, still local, unknown, nothing to move to).
-    A wildcard or public bind is never healed — the exposure guard refuses it."""
-    if not lan_access or bind_is_loopback(bind_host):
-        return None
-    if bind_is_wildcard(bind_host) or bind_is_global(bind_host):
-        return None
-    if (local or is_local)(bind_host) is not False:
+    longer has (DHCP gave it another): the default route's source address,
+    only when it is a LAN address on a real adapter (review IR1). None: keep
+    it (LAN off, loopback, still local, unknown, or no routed LAN address yet
+    — e.g. Wi-Fi not up, only a virtual adapter). A wildcard or public bind
+    is never healed — the exposure guard refuses it."""
+    if not stale_bind(lan_access, bind_host, local):
         return None
     found = (addresses or local_addresses)()
-    primary = next((a.ip for a in found if a.primary), None)
-    return primary if primary and primary != bind_host else None
+    routed = next((a.ip for a in found if a.routed), None)
+    return routed if routed and routed != bind_host else None
+
+
+def stale_bind(
+    lan_access: bool,
+    bind_host: str,
+    local: Optional[Callable[[str], Optional[bool]]] = None,
+) -> bool:
+    """A LAN `bind_host` this machine is known not to have (any more)."""
+    if not lan_access or bind_is_loopback(bind_host):
+        return False
+    if bind_is_wildcard(bind_host) or bind_is_global(bind_host):
+        return False
+    return (local or is_local)(bind_host) is False

@@ -486,6 +486,10 @@ def create_control_app(
                         },
                         status_code=409,
                     )
+                if str(e) == "restarting":  # #299 review IR5
+                    from taskpaw_v3.agent.server.restart_routes import RESTARTING
+
+                    return JSONResponse(RESTARTING, status_code=409)
                 raise HTTPException(status_code=400, detail=str(e))
             except KeyError as e:  # not registered in the supervisor
                 raise HTTPException(status_code=404, detail=str(e))

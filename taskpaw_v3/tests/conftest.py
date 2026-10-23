@@ -82,6 +82,16 @@ def _power_isolation(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _media_workflow_everywhere(monkeypatch):
+    """#299 §12 OD: the media workflow is Windows-only in the product; its
+    settings tests exercise the rules on every CI OS. The refusal off Windows
+    has its own test (it patches this back)."""
+    from taskpaw_v3.agent.server import workflow_settings
+
+    monkeypatch.setattr(workflow_settings, "media_supported", lambda: True)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_bitrate_probe(monkeypatch):
     """#285: `match_source_bitrate` is on by default, so every managed Jasna
     launch would run ffprobe for the source bitrate — against the fake

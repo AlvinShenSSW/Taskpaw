@@ -81,13 +81,21 @@ def test_a_crash_after_the_scaffold_keeps_the_confirmation(home, monkeypatch, ca
     assert not home.with_name("agent.state.json").exists()
 
 
-def test_a_crash_after_the_marker_initializes_on_the_next_start(home, monkeypatch):
+def test_a_pending_marker_from_an_earlier_run_keeps_the_confirmation(
+    home, monkeypatch, capsys
+):
+    """#299 review IR4: only the run that scaffolded agent.yaml initializes
+    silently — a pending marker alone (a crash after it, or a marker copied
+    next to an existing config) keeps the dialog."""
     home.parent.mkdir(parents=True)
     save_yaml(AgentConfig(server_id="fresh-1", machine="m"), home)
     first_run.write_pending(home, "fresh-1")
-    calls = _run_records(monkeypatch)
-    assert service.main() == 0
-    assert calls[0]["record"].server_id == "fresh-1"
+    before = {p.name: p.read_bytes() for p in home.parent.iterdir() if p.is_file()}
+    _run_records(monkeypatch)
+    assert service.main() == 1
+    assert json.loads(capsys.readouterr().out)["code"] == "initialization_required"
+    after = {p.name: p.read_bytes() for p in home.parent.iterdir() if p.is_file()}
+    assert after == before  # nothing initialized; the wizard still resumes
 
 
 @pytest.mark.parametrize("case", ["done", "mismatch", "fault", "primary", "anchor"])

@@ -35,10 +35,12 @@ POLL_TOKEN = "tp_PollingTokenPollingToken7Q2f"
 @pytest.fixture(autouse=True)
 def clean_restart(monkeypatch):
     restart._reset_for_tests()
+    gpu_lease._reset_for_tests()  # a granted restart closes the process lease
     monkeypatch.setattr(lan, "_interfaces", lambda: {"eth": ["192.168.1.30"]})
     monkeypatch.setattr(lan, "_route_source", lambda: "192.168.1.30")
     yield
     restart._reset_for_tests()
+    gpu_lease._reset_for_tests()
 
 
 # ── the agent ───────────────────────────────────────────────────────────
@@ -125,6 +127,41 @@ def test_a_gpu_task_or_a_busy_worker_blocks_the_restart(tmp_path):
     res = worker.post()
     assert res.status_code == 409 and "主控派来的影片" in res.json()["detail"]
     assert agent.restarts == 0 and worker.restarts == 0
+
+
+def test_a_granted_restart_refuses_saves_gpu_admissions_and_a_second_restart(
+    tmp_path,
+):
+    """#299 review IR5: the flag is set under the admission lock, so nothing
+    new starts between the 202 and the exit."""
+    agent = Agent(tmp_path)
+    assert agent.post().status_code == 202
+    restarting = {"detail": "正在重启", "code": "restarting"}
+    second = agent.post()
+    assert second.status_code == 409 and second.json() == restarting
+    res = agent.client.patch("/control/config", json={"machine": "x"}, headers=agent.h)
+    assert res.status_code == 409 and res.json() == restarting
+    res = agent.client.put(
+        "/control/workflow/settings", json={"role": "off"}, headers=agent.h
+    )
+    assert res.status_code == 409 and res.json() == restarting
+    assert not gpu_lease.try_acquire(("jasna", 1), 1.0, "x")
+    assert gpu_lease.holder() is None and gpu_lease.waiters() == []
+    # a monitor add/remove/edit reserves first: refused (409 busy) too
+    assert agent.admin._reserve("late", "add", {}, 0.0) is None
+    assert agent.restarts == 1
+    assert yaml.safe_load(agent.path.read_text(encoding="utf-8"))["machine"] == "m"
+
+
+def test_a_lease_held_when_the_restart_is_asked_keeps_it_open(tmp_path):
+    """The busy check and the close are one step: a holder refuses the restart
+    and the lease stays usable."""
+    agent = Agent(tmp_path)
+    assert gpu_lease.try_acquire(("jasna", 1), 1.0, "x")
+    assert agent.post().status_code == 409
+    gpu_lease.release(("jasna", 1))
+    assert gpu_lease.try_acquire(("avsubs", 1), 1.0, "y")
+    gpu_lease.release(("avsubs", 1))
 
 
 def test_a_concurrent_save_blocks_the_restart(tmp_path):
@@ -233,7 +270,7 @@ class Hub:
         )
         self.store = store
         self.running = hub_settings.effective_hub_config(self.yaml, store)
-        _app, self.service = create_hub_app(self.running, store)
+        _app, self.service = create_hub_app(self.running, store, yaml_config=self.yaml)
         self.restarts = 0
 
         def on_restart():
@@ -337,6 +374,79 @@ def test_hub_lan_read_api_switch_picks_the_primary_address(
     assert store.get_config("bind_host") == "127.0.0.1"
 
 
+def test_every_changed_hub_read_address_is_probed_even_loopback(
+    store, tmp_path, monkeypatch
+):
+    """#299 review CX1: switching the read API back to loopback binds
+    127.0.0.1:port once before it is saved — a port taken there would leave
+    the Hub unable to start."""
+    probes = []
+    monkeypatch.setattr(
+        lan,
+        "probe_bind",
+        lambda h, p: (
+            probes.append((h, p)) or (lan.IN_USE if h == "127.0.0.1" else None)
+        ),
+    )
+    lan_yaml = HubConfig(
+        self_monitor=False,
+        data_dir=str(tmp_path / "hubdata"),
+        lan_access=True,
+        bind_host="192.168.1.30",
+        api_token="tp_HubReadApiTokenHubReadApi0001",
+    )
+    hub = Hub(store, tmp_path, lan_yaml)
+    res = hub.put({"lan_access": False})
+    assert res.status_code == 422 and res.json()["fields"] == {
+        "bind_port": "端口已被占用"
+    }
+    assert probes == [("127.0.0.1", 5690)]
+    assert hub_settings.stored_overrides(store) == {}
+    probes.clear()
+    assert hub.put({"lan_access": True}).status_code == 200  # the running address
+    assert probes == []
+
+
+def test_the_live_openclaw_url_falls_back_to_hub_yaml(store, tmp_path):
+    """#299 review CX4: the poller's getter validates like startup does — an
+    invalid override (a hand edit) means the hub.yaml address, not the raw
+    value and not an older override."""
+    yaml_cfg = HubConfig(
+        self_monitor=False,
+        data_dir=str(tmp_path / "hubdata"),
+        openclaw_url="http://127.0.0.1:18789/hooks/wake",
+    )
+    store.set_config("openclaw_url", "http://192.168.1.9:18789/hooks/wake")
+    hub = Hub(store, tmp_path, yaml_cfg)
+    assert hub.service.poller.get_url() == "http://192.168.1.9:18789/hooks/wake"
+    for bad in ("file:///etc/passwd", "", "http://user:pw@x/y", "not a url"):
+        store.set_config("openclaw_url", bad)
+        assert hub.service.poller.get_url() == "http://127.0.0.1:18789/hooks/wake"
+    store.set_config("openclaw_url", "http://192.168.1.10:1/x")
+    assert hub.service.poller.get_url() == "http://192.168.1.10:1/x"
+
+
+def test_the_hub_names_its_controller_explicitly(store, tmp_path):
+    """#299 review IR2: 主控连接 is the server the operator chose — never an
+    implicit servers[0]; a live setting; a removed server is no controller."""
+    first = store.add_server("NAS-agent", "192.168.1.5", 5680)
+    second = store.add_server("BlackGoldPig", "192.168.1.20", 5680)
+    hub = Hub(store, tmp_path)
+    assert hub.get()["controller_server_id"] is None
+    res = hub.put({"controller_server_id": second})
+    assert res.status_code == 200 and res.json()["restart_required"] is False
+    assert hub.get()["controller_server_id"] == second
+    for bad in (999, "2", True, 0):
+        res = hub.put({"controller_server_id": bad})
+        assert res.status_code == 422 and "controller_server_id" in res.json()["fields"]
+    assert hub.get()["controller_server_id"] == second
+    store.remove_server(second)
+    assert hub.get()["controller_server_id"] is None
+    hub.put({"controller_server_id": first})
+    assert hub.put({"controller_server_id": None}).status_code == 200
+    assert hub.get()["controller_server_id"] is None
+
+
 def test_hub_yaml_is_never_rewritten(store, tmp_path):
     path = tmp_path / "hub.yaml"
     path.write_text("machine: hub\nself_monitor: false\n", encoding="utf-8")
@@ -373,6 +483,19 @@ def test_a_concurrent_hub_save_answers_409(store, tmp_path):
     assert hub.restarts == 1
     res = hub.client.post("/restart", json={"boot_id": "x"})
     assert res.json()["code"] == "stale_boot"
+
+
+def test_a_granted_hub_restart_refuses_later_saves_and_restarts(store, tmp_path):
+    """#299 review IR5 on the Hub: 409 「正在重启」 after the 202."""
+    hub = Hub(store, tmp_path)
+    assert hub.client.post("/restart", json={"boot_id": BOOT}).status_code == 202
+    restarting = {"detail": "正在重启", "code": "restarting"}
+    again = hub.client.post("/restart", json={"boot_id": BOOT})
+    assert again.status_code == 409 and again.json() == restarting
+    res = hub.put({"poll_interval": 15})
+    assert res.status_code == 409 and res.json() == restarting
+    assert store.get_config("poll_interval", "unset") == "unset"
+    assert hub.restarts == 1
 
 
 def test_the_hub_service_exits_75_after_a_planned_restart(tmp_path, monkeypatch):
