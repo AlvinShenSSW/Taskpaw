@@ -891,7 +891,13 @@ def test_in_flight_work_completes_while_paused(world):
     assert world.status(film, "restore") == "running"  # paused mid-run
     release.touch()
     wait_status(world, film, "restore", "succeeded")  # the run goes on
-    assert world.attempts(film, "asr") == []  # but nothing new is claimed
+    # pause means this worker claims nothing NEW: its one restore attempt is
+    # the only one, and any ASR attempt is the controller's (OD7: ASR runs on
+    # the controller, which may legitimately start it once the restore lands)
+    (restore,) = world.attempts(film, "restore")
+    assert restore.worker_id == worker_id
+    controller_id = world.rt.identity.worker_id
+    assert {a.worker_id for a in world.attempts(film, "asr")} <= {controller_id}
     worker.set_paused(False)
     world.wake()
     wait_status(world, film, "asr", "succeeded")
