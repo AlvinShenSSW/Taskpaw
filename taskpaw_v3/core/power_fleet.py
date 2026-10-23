@@ -36,7 +36,11 @@ is an estimate (估算).
   unreachable, timeout or `workflow_worker.busy == false` keep a peer quiet;
   any other answer (401, 404, an invalid body, no `busy`) means the machine
   is up. `quiet(address)` says how long it has been quiet without a break
-  (a gap of more than `STALE_SECONDS` between reads restarts it).
+  (a gap of more than `STALE_SECONDS` between reads restarts it), and whether
+  the peer ever answered since this process started (§9 IR2: a channel that
+  never connected may be a wrong address, not a machine that is off).
+- **§9 IR10.** A peer source that raises (the workflow store busy) keeps the
+  last good list, so configured peers and their quiet time survive it.
 """
 
 from __future__ import annotations
@@ -154,11 +158,13 @@ def merge_peers(configured: Iterable[Any], workflow: Iterable[Any]) -> list[Auto
 class StatusQuiet:
     """判定已停止's status channel for one address: how long `/status` has
     been dead or idle without a break (None: it answered as up at the last
-    read), how old the last read is, and, when up, its answer's code."""
+    read), how old the last read is, when up its answer's code, and whether
+    any read since this process started got an HTTP answer (§9 IR2)."""
 
     quiet_s: Optional[float]
     checked_s: Optional[float]
     state: Optional[str] = None
+    answered: bool = False
 
 
 # ── one bounded GET ─────────────────────────────────────────────────────────
@@ -565,6 +571,7 @@ class PowerFleet:
         self._histories = ThreadPoolExecutor(HISTORY_WORKERS, "power-peer-history")
         self._pending: dict[tuple[Any, ...], Future[Any]] = {}  # in flight, by job
         self._sources: dict[tuple[str, str], str] = {}  # config | workflow (R11)
+        self._last_peers: list[tuple[str, str]] = []  # §9 IR10: the last good list
 
     # ── lifecycle ───────────────────────────────────────────────────────
     def start(self) -> None:
@@ -605,23 +612,30 @@ class PowerFleet:
     def _configured(self) -> list[tuple[str, str]]:
         try:
             peers = list(self._peers() or ())
-        except Exception:
+        except Exception:  # §9 IR10: keep the last good list and its cache
             log.exception("power peers unavailable")
-            return []
+            with self._lock:
+                return list(self._last_peers)
         found = [(str(p.name), str(p.address)) for p in peers]
         with self._lock:
             self._sources = {
                 key: str(getattr(p, "source", "config")) for key, p in zip(found, peers)
             }
+            self._last_peers = list(found)
         return found
 
     # ── the status channel (P2-4 R8, C4) ────────────────────────────────
-    def _status_seen(self, peer: tuple[str, str], state: Optional[str]) -> None:
+    def _status_seen(
+        self, peer: tuple[str, str], state: Optional[str], *, answered: bool
+    ) -> None:
         """One `/status` read: `state` None is quiet (dead or idle), else
-        the code of an answer that shows the machine up."""
+        the code of an answer that shows the machine up; `answered`: an HTTP
+        answer came back (anything but unreachable/timeout)."""
         now = self._clock()
         with self._lock:
             entry = self._entry(peer)
+            if answered:
+                entry["answered"] = True
             last = entry.get("status_mono")
             if state is not None:
                 entry["quiet_since"] = None
@@ -650,6 +664,7 @@ class PowerFleet:
                     quiet_s=None if since is None else max(0.0, now - since),
                     checked_s=max(0.0, now - entry["status_mono"]),
                     state=entry.get("status_state"),
+                    answered=bool(entry.get("answered")),
                 )
         return None
 
@@ -748,9 +763,8 @@ class PowerFleet:
             status = self._fetch(url, token)
         except PeerError as exc:
             # C4: only a dead channel is quiet; any HTTP answer is a live machine
-            self._status_seen(
-                peer, None if exc.code in ("unreachable", "timeout") else exc.code
-            )
+            dead = exc.code in ("unreachable", "timeout")
+            self._status_seen(peer, None if dead else exc.code, answered=not dead)
             # the last live figure is not shown as current; the histories
             # already read stay (they are history)
             self._update(
@@ -762,7 +776,7 @@ class PowerFleet:
             )
             return []
         if not isinstance(status, dict):
-            self._status_seen(peer, "invalid")
+            self._status_seen(peer, "invalid", answered=True)
             self._update(
                 peer,
                 state="invalid",
@@ -774,7 +788,9 @@ class PowerFleet:
         worker = status.get("workflow_worker")
         busy = worker.get("busy") if isinstance(worker, dict) else None
         self._status_seen(
-            peer, None if busy is False else "busy" if busy is True else "no_busy"
+            peer,
+            None if busy is False else "busy" if busy is True else "no_busy",
+            answered=True,
         )
         seen = dict(
             machine=_text(status.get("machine")),

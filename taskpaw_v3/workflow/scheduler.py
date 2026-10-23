@@ -45,6 +45,7 @@ NO_HISTORY = "无历史，按排队先后"
 CONTROLLER_DISK = "主控磁盘空间不足"
 QUEUE_FULL = "设备队列已满"
 NO_DEVICE = "没有可用的设备"
+NO_GPU = "无需 GPU，本机完成"  # P2-4 §9 CX2: every volume reused
 PIN_GONE = "指定设备不可用"
 HAND_OVER = "转派 GPU 设备"
 REVOKED = "已撤销"
@@ -217,6 +218,8 @@ class Rates:
         self, stages: tuple[str, ...], worker: m.RoutingWorker, film: m.RoutingFilm
     ) -> float | None:
         """§4.2: the first routed stage's estimate × its median W, else unknown."""
+        if not stages:  # P2-4 §9 CX2: no GPU stage left
+            return None
         stage = stages[0]
         power = self.watts.get((stage, worker.gpu_model or ""))
         if power is None:
@@ -751,7 +754,9 @@ def preview(
 ) -> dict[str | None, Preview]:
     """P2-4 R5, pure: per tier, the film as if confirmed now with 自动, run
     through the pass's own state and candidate order. {} for a film the
-    snapshot does not hold (no GPU work left). Advisory: 预计."""
+    snapshot does not hold (no GPU work left). A film whose pending restore
+    and ASR need no GPU (every volume reused) gets no device and the reason
+    `NO_GPU`, with neither `machine` nor `waiting` (§9 CX2). Advisory: 预计."""
     base = next((f for f in snapshot.films if f.film_id == film_id), None)
     if base is None:
         return {}
@@ -793,6 +798,9 @@ def preview(
         )
         if probe.found is None:  # not routable yet (a C12 local restore first)
             stages = routed_stages(film, gpu_stages)
+            if not stages:  # §9 CX2: nothing needs a GPU — no device option
+                result[tier] = Preview(None, None, None, NO_GPU, None, ())
+                continue
             probe.devices = _devices(state, film, stages, live, now)
             found = _options(
                 state.rates,

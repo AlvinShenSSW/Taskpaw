@@ -47,6 +47,7 @@ CANCELLED_KIND = "exec_failed:cancelled"
 _FINISHED = ("succeeded", "skipped")
 _TERMINAL = ("succeeded", "failed", "blocked")
 QUIET_SECONDS = 300.0  # IR4: 判定已停止 needs this long without a renewal
+WITHDRAWN_LOST = "改派：设备失联"  # P2-4 R7: 自动 off a 失联 worker
 _RESTORE_DONE = re.compile(
     re.escape(RESTORE_DONE)
     .replace(r"\{applied\}", r"(\d+)")
@@ -181,9 +182,12 @@ class RouteCommands(FilmCommands):
     ) -> CommandResult:
         """改派: a new pin; an unclaimed open route elsewhere is withdrawn with it.
 
-        改派 to 自动 keeps any route (a healthy route needs no move, IR8). A kept
-        route's version moves, so a scheduler withdrawal decided before this
-        改派 loses its CAS (CX2). The controller means 自动 (IR9)."""
+        改派 to 自动 keeps any route (a healthy route needs no move, IR8)
+        unless the command names it in `withdraw_route_id` (a 失联 worker's).
+        A kept route's version moves, so a scheduler withdrawal decided before
+        this 改派 loses its CAS (CX2). The controller means 自动 (IR9). P2-4
+        §9 CX4: a claimed film is never re-pinned — the unresolved compute
+        assignment is checked here, in the pin's own transaction."""
 
         def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
             film = self._film_row(command.film_id)
@@ -198,15 +202,21 @@ class RouteCommands(FilmCommands):
             if command.worker_id is not None and not self._verified(command.worker_id):
                 raise WorkflowError("precondition_failed")
             target = self._pin_target(command.worker_id)
+            if self._compute_claim(command.film_id, command.input_revision):
+                raise WorkflowError("route_claimed")
             route = self._open_route(command.film_id, command.input_revision)
             if (
                 route is not None
                 and target is not None
                 and route["worker_id"] != target
             ):
-                if self._compute_claim(command.film_id, command.input_revision):
-                    raise WorkflowError("route_claimed")
                 self._close_route(route, now, "改派")
+            elif (
+                route is not None
+                and target is None
+                and route["route_id"] == command.withdraw_route_id
+            ):
+                self._close_route(route, now, WITHDRAWN_LOST)
             elif route is not None:
                 self._touch_route(route)
             changed = self._conn.execute(

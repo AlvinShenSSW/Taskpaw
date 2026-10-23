@@ -93,6 +93,15 @@ def tools(tmp_path):
     return _tools(tmp_path)
 
 
+@pytest.fixture(autouse=True)
+def no_ffprobe_on_path(monkeypatch):
+    """The host's PATH never decides a test: no ffprobe is found unless a
+    test says so (§9 IR6)."""
+    from taskpaw_v3.agent.server import workflow_settings as ws
+
+    monkeypatch.setattr(ws, "detect_ffprobe", lambda: None)
+
+
 # ── save_yaml (R15) ─────────────────────────────────────────────────────
 def test_save_yaml_keeps_unknown_keys_and_backs_up_the_previous_bytes(tmp_path):
     path = tmp_path / "agent.yaml"
@@ -397,6 +406,137 @@ def test_a_worker_with_routes_or_a_claim_cannot_leave(tmp_path):
     assert world.put({"role": "off"}).status_code == 409
     world.worker = SimpleNamespace(routes=[], dispatcher=None)
     assert world.put({"role": "off"}).status_code == 200
+
+
+def test_a_busy_worker_cannot_move_its_staging_or_data_dir(tmp_path):
+    """§9 IR3: moving the staging or the data directory strands the routes,
+    claims and held children as leaving the role does."""
+    staging = str(tmp_path / "staging")
+    world = World(tmp_path, enabled=True, role="worker", staging_dir=staging)
+    world.worker = SimpleNamespace(
+        routes=[], dispatcher=SimpleNamespace(claimed=lambda: True)
+    )
+    before = world.path.read_bytes()
+    for change in (
+        {"staging_dir": str(tmp_path / "staging-2")},
+        {"data_dir": str(tmp_path / "wf-2")},
+    ):
+        response = world.put({"role": "worker", "staging_dir": staging, **change})
+        assert response.status_code == 409, change
+        assert response.json()["code"] == "workflow_busy"
+        assert world.path.read_bytes() == before
+    same = world.put({"role": "worker", "staging_dir": staging, "staging_cap_gb": 300})
+    assert same.status_code == 200, same.text
+    world.worker = SimpleNamespace(routes=[], dispatcher=None)  # idle: it may move
+    moved = world.put({"role": "worker", "staging_dir": str(tmp_path / "staging-2")})
+    assert moved.status_code == 200, moved.text
+
+
+def test_the_data_dir_guard_applies_to_every_role(tmp_path, tools):
+    """§9 CX3: turning the workflow off does not let its data directory move
+    away from the store either."""
+    old = tmp_path / "wf-old"
+    old.mkdir()
+    (old / "workflow.db").write_bytes(b"store")
+    world = World(tmp_path, enabled=True, **tools, data_dir=str(old))
+    response = world.put({"role": "off", "data_dir": str(tmp_path / "wf-new")})
+    assert response.status_code == 422
+    assert response.json()["fields"]["data_dir"] == "工作目录已有媒体数据"
+
+
+def test_the_data_dir_guard_compares_with_the_running_directory(tmp_path, tools):
+    """§9 CX3: a store the running process created after an earlier save
+    still holds the directory, whatever the saved value says."""
+    world = World(tmp_path, enabled=True, **tools)  # running: the default dir
+    other = str(tmp_path / "wf-b")
+    assert world.put({"role": "controller", "data_dir": other}).status_code == 200
+    default = tmp_path / "workflow"
+    default.mkdir()
+    (default / "workflow.db").write_bytes(b"store")  # the running store
+    for target in (str(tmp_path / "wf-c"), other):
+        response = world.put({"role": "controller", "data_dir": target})
+        assert response.status_code == 422, target
+        assert response.json()["fields"]["data_dir"] == "工作目录已有媒体数据"
+    back = world.put({"role": "controller", "data_dir": None})
+    assert back.status_code == 200, back.text
+
+
+def test_a_paired_workers_data_dir_cannot_move(tmp_path):
+    """§9 IR5: the worker's data directory holds `worker-identity.json`;
+    moving it would unpair the worker."""
+    from taskpaw_v3.workflow.remote_worker import IDENTITY_NAME
+
+    staging = str(tmp_path / "staging")
+    paired = tmp_path / "workflow"  # the default, beside agent.yaml
+    paired.mkdir()
+    (paired / IDENTITY_NAME).write_text("{}", encoding="utf-8")
+    world = World(tmp_path, enabled=True, role="worker", staging_dir=staging)
+    for role in ("worker", "off"):
+        response = world.put(
+            {"role": role, "staging_dir": staging, "data_dir": str(tmp_path / "x")}
+        )
+        assert response.status_code == 422, role
+        assert response.json()["fields"]["data_dir"] == "工作目录已有工作机配对"
+
+
+def test_the_worker_port_cannot_change_under_paired_workers(tmp_path, tools):
+    """§9 IR4: enrolled workers reach the controller at the running port."""
+    world = World(tmp_path, enabled=True, remote_workers=True, **tools)
+    rt = runtime(tmp_path / "wf")
+    try:
+        world.host = _running_host(rt)
+        enrol_remote(rt, "5070 Ti")
+        unchanged = world.put({"role": "controller", "worker_api_port": 5682})
+        assert unchanged.status_code == 200, unchanged.text
+        before = world.path.read_bytes()
+        response = world.put({"role": "controller", "worker_api_port": 5691})
+        assert response.status_code == 422
+        assert response.json()["fields"]["worker_api_port"] == (
+            "已有工作机配对在此端口，改端口需先让它们重新配对"
+        )
+        assert world.path.read_bytes() == before
+    finally:
+        rt.close()
+
+
+def test_the_worker_port_can_change_with_no_paired_worker(tmp_path, tools):
+    world = World(tmp_path, enabled=True, remote_workers=True, **tools)
+    rt = runtime(tmp_path / "wf")
+    try:
+        world.host = _running_host(rt)
+        response = world.put({"role": "controller", "worker_api_port": 5690})
+        assert response.status_code == 200, response.text
+    finally:
+        rt.close()
+
+
+def test_an_empty_ffprobe_is_fine_when_it_is_on_the_path(tmp_path, tools, monkeypatch):
+    """§9 IR6: zero-config — the pipeline finds ffprobe on PATH by itself."""
+    from taskpaw_v3.agent.server import workflow_settings as ws
+
+    found = str(tmp_path / "bin" / "ffprobe.exe")
+    monkeypatch.setattr(ws, "detect_ffprobe", lambda: found)
+    world = World(tmp_path)
+    response = world.put({"role": "controller", **tools, "ffprobe_path": None})
+    assert response.status_code == 200, response.text
+    assert world.saved()["workflow"]["ffprobe_path"] is None
+    assert world.get().json()["ffprobe_detected"] == found
+
+
+def test_a_concurrent_save_answers_409_not_a_field_error(tmp_path, tools, monkeypatch):
+    """§9 IR12: the admission lock is held by another save."""
+    world = World(tmp_path)
+
+    def busy(*_a, **_k):
+        raise ValueError("operation_busy")
+
+    monkeypatch.setattr(world.admin, "update_config", busy)
+    response = world.put({"role": "controller", **tools})
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "正在保存其他设置，请稍后再试",
+        "code": "operation_busy",
+    }
 
 
 def test_the_task_log_and_logs_never_hold_the_file(tmp_path, tools, caplog):

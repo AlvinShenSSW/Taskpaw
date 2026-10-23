@@ -241,6 +241,16 @@ class Transfer:
     rate: float = 0.0
 
 
+def attempts_on_disk(staging_root: Path) -> bool:
+    """P2-4 §9 CX1: an attempt file under the staging folder — work a
+    restarted worker has not settled with the controller yet (its children
+    may live). True when the folder cannot be read (unknown is not idle)."""
+    try:
+        return any((staging_root / ATTEMPTS_DIR).glob("*.json"))
+    except OSError:
+        return True
+
+
 # ── the dispatcher ──────────────────────────────────────────────────────
 class RemoteDispatcher:
     def __init__(
@@ -425,12 +435,11 @@ class RemoteDispatcher:
         return any(self._states())
 
     def busy(self) -> bool:
-        """P2-4 R9: a run, an unsettled Job or a held child is alive — the
-        machine may still be working (the 判定已停止 status channel)."""
-        with self._lock:
-            if self._active is not None or self._unsettled is not None:
-                return True
-        return self._held_alive()
+        """P2-4 R9: the machine may still be working or holds a result the
+        controller waits for (the 判定已停止 status channel). §9 IR1: the
+        `claimed` rule — a run, an unsettled Job, an attempt to deliver, a
+        held child, or any attempt file recovery has not settled."""
+        return self.claimed()
 
     def current_stage(self) -> tuple[str, str] | None:
         """(film_id, stage) of the running stage, for the power sampler (R14)."""

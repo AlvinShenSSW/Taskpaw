@@ -65,15 +65,19 @@ class Channel:
         if worker is None:
             return None
         since = self.sim.dead_since[worker]
-        if since is None:  # up: busy or idle, it answers
-            return StatusQuiet(quiet_s=None, checked_s=2.0, state="busy")
+        # up: busy or idle, it answers; a split machine (§9: its heartbeat
+        # died, its 5680 agent still answers busy) answers too
+        if since is None or worker in self.sim.split:
+            return StatusQuiet(quiet_s=None, checked_s=2.0, state="busy", answered=True)
         dead = (self.sim.clock.now() - since).total_seconds()
-        return StatusQuiet(quiet_s=dead, checked_s=2.0)
+        return StatusQuiet(quiet_s=dead, checked_s=2.0, answered=True)
 
 
 class Sim:
-    def __init__(self, tmp_path, seed: int) -> None:
+    def __init__(self, tmp_path, seed: int, split: float = 0.0) -> None:
         self.rnd = random.Random(seed)
+        self.split_share = split  # how often a death keeps /status answering
+        self.split: set[str] = set()
         self.clock = FakeClock()
         self.rt = rt = runtime(tmp_path / "wf", clock=self.clock.now)
         self.remotes = [  # one machine per address (the status channel's key)
@@ -219,8 +223,11 @@ class Sim:
         remote = self.rnd.choice(self.remotes)
         if self.dead_since[remote.worker_id] is None:
             self.dead_since[remote.worker_id] = self.now()  # 失联
+            if self.rnd.random() < self.split_share:
+                self.split.add(remote.worker_id)  # /status still answers busy
         else:
             self.dead_since[remote.worker_id] = None  # back: it beats again
+            self.split.discard(remote.worker_id)
 
     def reassign(self) -> None:
         rt = self.rt
@@ -257,6 +264,7 @@ class Sim:
         now = self.now()
         expected = (
             since is not None
+            and worker_id not in self.split  # C4: both channels, never one
             and (now - since).total_seconds() >= 300
             and (now - assignment.renewed_at).total_seconds() >= 300
         )
@@ -394,5 +402,42 @@ def test_the_simulation_does_reach_an_allowed_attest(tmp_path):
         sim.attest()
         assert sim.attests == 1
         sim.check()
+    finally:
+        sim.rt.close()
+
+
+@pytest.mark.parametrize("seed", [4, 5, 6])
+def test_split_channels_never_allow_an_attest(tmp_path, seed):
+    """§9: the heartbeat and the status channel disagree (half the deaths
+    keep /status answering busy), so a regression to one channel is caught."""
+    sim = Sim(tmp_path, seed, split=0.5)
+    try:
+        for _ in range(120):
+            sim.step()
+            sim.check()
+    finally:
+        sim.rt.close()
+
+
+def test_a_split_machine_is_refused_and_a_dead_one_allowed(tmp_path):
+    """§9: the same 5-minute death, once with /status still busy."""
+    sim = Sim(tmp_path, 7)
+    try:
+        for _ in range(20):
+            if sim.open_assignments():
+                break
+            sim.confirm()
+            sim.run_pass()
+            sim.claim()
+        (item,) = sim.open_assignments()[:1]
+        worker = item.assignment.worker_id
+        sim.dead_since[worker] = sim.now()
+        sim.split.add(worker)
+        sim.tick(400)
+        sim.attest()
+        assert sim.attests == 0  # heartbeat dead, /status busy: refused
+        sim.split.discard(worker)
+        sim.attest()
+        assert sim.attests == 1
     finally:
         sim.rt.close()

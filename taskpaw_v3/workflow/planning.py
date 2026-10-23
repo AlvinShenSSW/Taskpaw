@@ -130,7 +130,9 @@ def routing_view(
     「预计 21:40 在 5070 Ti 完成 · 约 0.9 度」, or why it would wait) and each
     device's own finish or eligibility reason (预计: advisory)."""
     auto: dict[str, Any]
-    if preview.machine is None or preview.finish_at is None:
+    if preview.machine is None and preview.waiting is None and preview.reason:
+        auto = {"waiting": None, "text": preview.reason}  # §9 CX2: 无需 GPU
+    elif preview.machine is None or preview.finish_at is None:
         auto = {"waiting": preview.waiting}
     else:
         name = names.get(preview.machine, "")

@@ -252,13 +252,16 @@ def power_peers(host: Any) -> list[Any]:
     """The controller's enrolled workers as 功耗 peers (`host:port` of their
     5680 agent). Retired and revoked workers are dropped, except a revoked
     one that still holds an unresolved assignment: 判定已停止's status
-    channel reads its `/status` (C4)."""
+    channel reads its `/status` (C4). Only with 允许 GPU 工作机接入 (§9
+    IR11: a phase-1 controller's peers are unchanged)."""
     from taskpaw_v3.core.power_fleet import AutoPeer
 
     from . import operator_actions as ops
 
     rt = getattr(host, "runtime", None)
     if host is None or getattr(host, "state", None) != "running" or rt is None:
+        return []
+    if not getattr(getattr(host, "settings", None), "remote_workers", False):
         return []
     holding = {
         o.assignment.worker_id for o in rt.store.list_open_assignments(rt.operator)

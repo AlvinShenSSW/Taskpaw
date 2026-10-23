@@ -8,10 +8,18 @@ Chinese, never echoing a value), refuses a switch that would strand work, and
 saves through `MonitorAdmin.update_config` (a backup, unknown keys kept). Every
 change applies after a restart: port 5682, the provider closures, the file
 lease and keep-awake belong to the running process.
+
+§9 review fixes: the data directory guard runs for every role and compares
+with the running directory as well as the saved one, and a worker's paired
+directory (`worker-identity.json`) is held too (CX3/IR5); a busy worker cannot
+move its staging or data directory (IR3); the worker API port cannot change
+under paired workers (IR4); an empty ffprobe is fine when PATH has one (IR6);
+a save racing another answers 409 (IR12).
 """
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -27,6 +35,11 @@ if TYPE_CHECKING:
 Role = Literal["off", "controller", "worker"]
 SAVED = "已保存，重启 TaskPaw 后生效"
 STORE_NAME = "workflow.db"  # `LocalRuntime.db_path`
+HELD_STORE = "工作目录已有媒体数据"
+HELD_PAIRING = "工作目录已有工作机配对"
+PORT_PAIRED = "已有工作机配对在此端口，改端口需先让它们重新配对"
+OPERATION_BUSY = "正在保存其他设置，请稍后再试"
+STARTING = "媒体流水线正在启动，请稍后再试"
 PATHS = (
     "inbox_root",
     "data_dir",
@@ -86,6 +99,12 @@ def presets() -> list[dict[str, str]]:
         {"id": str(gpu["id"]), "label": str(gpu["label"])}
         for gpu in preset_catalogue()["gpus"]
     ]
+
+
+def detect_ffprobe() -> str | None:
+    """§9 IR6: the ffprobe the pipeline finds by itself when the field is
+    empty (`local_host`, `exec_restore`: `shutil.which`)."""
+    return shutil.which("ffprobe")
 
 
 def default_data_dir(
@@ -156,21 +175,35 @@ def validate(
     old: WorkflowSettings,
     config: AgentConfig,
     config_dir: Path | None,
+    running: WorkflowSettings | None = None,
 ) -> None:
-    """R14: the fields the new role uses, each with its own message."""
-    from taskpaw_v3.workflow.staging import StagingError, validate_dir
-
+    """R14: the fields the new role uses, each with its own message; the
+    data directory guard for every role (§9 CX3)."""
     role = role_of(new)
     errors: dict[str, str] = {}
     for name in PATHS:
         raw = getattr(new, name)
         if raw and (why := _path_error(raw)):
             errors[name] = why
-    if role == "off":
-        if errors:
-            raise Refused(422, "设置有误", fields=errors)
-        return
-    needed = ("inbox_root", "ffprobe_path") if role == "controller" else ()
+    if role != "off":
+        _validate_role(new, config, errors)
+    if "data_dir" not in errors:
+        held = _data_dir_held(new, (old, running), config_dir)
+        if held:
+            errors["data_dir"] = held
+    if errors:
+        raise Refused(422, "设置有误", fields=errors)
+
+
+def _validate_role(
+    new: WorkflowSettings, config: AgentConfig, errors: dict[str, str]
+) -> None:
+    from taskpaw_v3.workflow.staging import StagingError, validate_dir
+
+    role = role_of(new)
+    needed: tuple[str, ...] = ()
+    if role == "controller":  # §9 IR6: ffprobe on PATH needs no entry
+        needed = ("inbox_root",) if detect_ffprobe() else ("inbox_root", "ffprobe_path")
     for name in needed:
         if not getattr(new, name):
             errors.setdefault(name, "请填写")
@@ -199,21 +232,39 @@ def validate(
                 validate_dir(new.staging_dir)
             except StagingError as exc:
                 errors["staging_dir"] = str(exc)
-    if "data_dir" not in errors:
-        before = default_data_dir(old, config_dir)
-        after = default_data_dir(new, config_dir)
-        if (
-            before is not None
-            and (before / STORE_NAME).exists()
-            and (after is None or _key(after) != _key(before))
-        ):
-            errors["data_dir"] = "工作目录已有媒体数据"
-    if errors:
-        raise Refused(422, "设置有误", fields=errors)
+
+
+def _data_dir_held(
+    new: WorkflowSettings,
+    references: tuple[WorkflowSettings | None, ...],
+    config_dir: Path | None,
+) -> str | None:
+    """§9 CX3/IR5: the data directory cannot leave one (saved or running)
+    that holds a workflow store or a worker's pairing."""
+    from taskpaw_v3.workflow.remote_worker import IDENTITY_NAME, PENDING_NAME
+
+    after = default_data_dir(new, config_dir)
+    for reference in references:
+        if reference is None:
+            continue
+        before = default_data_dir(reference, config_dir)
+        if before is None or (after is not None and _key(after) == _key(before)):
+            continue
+        if (before / STORE_NAME).exists():
+            return HELD_STORE
+        if (before / IDENTITY_NAME).exists() or (before / PENDING_NAME).exists():
+            return HELD_PAIRING
+    return None
 
 
 def _key(path: Path) -> str:
     return str(path.expanduser().absolute()).rstrip("\\/").casefold()
+
+
+def _moved(new: str | None, old: str | None) -> bool:
+    if not new or not old:
+        return bool(new) != bool(old)
+    return _key(Path(new)) != _key(Path(old))
 
 
 # ── what a switch would strand (R16) ────────────────────────────────────
@@ -225,7 +276,7 @@ def controller_busy(host: Any) -> tuple[int, int]:
         return 0, 0  # nothing runs: nothing is stranded
     rt = getattr(host, "runtime", None)
     if state == "starting" or rt is None:
-        raise Refused(409, "媒体流水线正在启动，请稍后再试", code="workflow_busy")
+        raise Refused(409, STARTING, code="workflow_busy")
     store, op = rt.store, rt.operator
     controller = rt.identity.worker_id
     films: set[str] = set()
@@ -247,6 +298,22 @@ def controller_busy(host: Any) -> tuple[int, int]:
     return len(films), len(remote)
 
 
+def paired_workers(host: Any) -> int:
+    """§9 IR4: enrolled, non-retired GPU workers (the controller excluded)."""
+    state = getattr(host, "state", None)
+    if host is None or state not in ("starting", "running"):
+        return 0
+    rt = getattr(host, "runtime", None)
+    if state == "starting" or rt is None:
+        raise Refused(409, STARTING, code="workflow_busy")
+    controller = rt.identity.worker_id
+    return sum(
+        1
+        for worker in rt.store.list_workers(rt.operator)
+        if worker.worker_id != controller and worker.enrollment_state != "retired"
+    )
+
+
 def worker_busy(host: Any) -> bool:
     """A worker's routes, a claim or held children (`claimed` covers them)."""
     if host is None:
@@ -262,10 +329,19 @@ def refuse_busy(
     running: WorkflowSettings,
     controller: Callable[[], Any],
     worker: Callable[[], Any],
+    config_dir: Path | None = None,
 ) -> None:
     """R16, against what runs now: leaving 主控 or turning 允许 GPU 工作机接入
-    off while films are in flight, or leaving a busy worker role."""
+    off while films are in flight, a new worker API port under paired
+    workers (§9 IR4), or a busy worker leaving its role or moving its staging
+    or data directory (§9 IR3)."""
     if role_of(running) == "controller":
+        if (
+            role_of(new) == "controller"
+            and new.worker_api_port != running.worker_api_port
+            and paired_workers(controller())
+        ):
+            raise Refused(422, "设置有误", fields={"worker_api_port": PORT_PAIRED})
         leaving = role_of(new) != "controller" or (
             running.remote_workers and not new.remote_workers
         )
@@ -278,8 +354,15 @@ def refuse_busy(
                     "请先暂停派发并等待完成",
                     code="workflow_busy",
                 )
-    elif role_of(running) == "worker" and role_of(new) != "worker":
-        if worker_busy(worker()):
+    elif role_of(running) == "worker":
+        before = default_data_dir(running, config_dir)
+        after = default_data_dir(new, config_dir)
+        moving = (
+            role_of(new) != "worker"
+            or _moved(new.staging_dir, running.staging_dir)
+            or _moved(str(after) if after else None, str(before) if before else None)
+        )
+        if moving and worker_busy(worker()):
             raise Refused(
                 409,
                 "本机还有派来的影片或进行中的任务，请先暂停领取并等待完成",
@@ -327,6 +410,8 @@ def register_workflow_settings(
             "restart_required": current != config.workflow,
             "busy": busy(),
             "presets": presets(),
+            # §9 IR6: what an empty ffprobe field uses (None: not on PATH)
+            "ffprobe_detected": detect_ffprobe(),
         }
 
     @app.put("/control/workflow/settings")
@@ -343,8 +428,16 @@ def register_workflow_settings(
             _role, fields = parse(body)
 
             def check(validated: AgentConfig, old: WorkflowSettings) -> None:
-                validate(validated.workflow, old, validated, config_dir)
-                refuse_busy(validated.workflow, config.workflow, controller, worker)
+                validate(
+                    validated.workflow, old, validated, config_dir, config.workflow
+                )
+                refuse_busy(
+                    validated.workflow,
+                    config.workflow,
+                    controller,
+                    worker,
+                    config_dir,
+                )
 
             result = await run_in_threadpool(
                 admin.update_config, {"workflow": fields}, workflow_check=check
@@ -356,7 +449,12 @@ def register_workflow_settings(
             if exc.fields:
                 content["fields"] = exc.fields
             return JSONResponse(status_code=exc.status, content=content)
-        except ValueError:  # the merged config failed the model (never echoed)
+        except ValueError as exc:  # the merged config failed the model (never echoed)
+            if str(exc) == "operation_busy":  # §9 IR12: another save holds the lock
+                return JSONResponse(
+                    status_code=409,
+                    content={"detail": OPERATION_BUSY, "code": "operation_busy"},
+                )
             return JSONResponse(
                 status_code=422,
                 content={"detail": "设置有误", "fields": {"role": "设置有误"}},

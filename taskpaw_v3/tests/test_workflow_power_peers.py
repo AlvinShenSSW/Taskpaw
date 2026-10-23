@@ -123,13 +123,22 @@ def test_enrolled_workers_become_peers_but_revoked_and_retired_go(tmp_path):
             devices.revoke(rt, remote.worker_id, worker.version)
         worker = rt.store.get_worker(rt.operator, retired.worker_id).worker
         devices.retire(rt, retired.worker_id, worker.version)
-        host = SimpleNamespace(state="running", runtime=rt)
+        on = SimpleNamespace(remote_workers=True)
+        host = SimpleNamespace(state="running", runtime=rt, settings=on)
         peers = devices.power_peers(host)
         assert {p.name for p in peers} == {"5060 Ti-1", "5060 Ti-2"}
         # a revoked worker still holding work stays: 判定已停止 reads its /status
         assert all(p.address == "192.0.2.30:5682" for p in peers)
         assert kept.worker_id
         assert devices.power_peers(None) == []
+        # §9 IR11: only with 允许 GPU 工作机接入 (phase 1 is unchanged)
+        off = SimpleNamespace(remote_workers=False)
+        assert (
+            devices.power_peers(
+                SimpleNamespace(state="running", runtime=rt, settings=off)
+            )
+            == []
+        )
         assert (
             devices.power_peers(SimpleNamespace(state="starting", runtime=None)) == []
         )
@@ -208,3 +217,51 @@ def test_quiet_finds_the_peer_by_address_and_knows_no_other(channel):
     assert channel.fleet.quiet("192.0.2.31") is not None  # the default port
     assert channel.fleet.quiet("192.0.2.99:5680") is None
     assert channel.fleet.quiet("not an address") is None
+
+
+def test_a_peer_list_that_fails_keeps_the_last_good_one(channel, caplog):
+    """§9 IR10: a failing peer source (the store busy) keeps the configured
+    peers and the status channel's quiet time instead of dropping them."""
+    peers = [pf.AutoPeer("5070 Ti", ADDRESS)]
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("store busy")
+        return peers
+
+    fleet = pf.PowerFleet(
+        flaky,
+        lambda: "token",
+        fetch=channel.fetch,
+        clock=channel.clock,
+        wall=lambda: 1_790_000_000.0,
+    )
+    try:
+        channel.fetch.answers[URL] = "unreachable"
+        fleet.refresh_once()
+        channel.clock.value += 5.0
+        fleet.refresh_once()  # the source raises from here on
+        channel.clock.value += 5.0
+        fleet.refresh_once()
+        state = fleet.quiet(ADDRESS)
+        assert state is not None and state.quiet_s == pytest.approx(10.0)
+        assert [row["name"] for row in fleet.snapshot("24h")] == ["5070 Ti"]
+        assert "power peers unavailable" in caplog.text
+    finally:
+        fleet.stop()
+
+
+def test_the_status_channel_remembers_whether_it_ever_answered(channel):
+    """§9 IR2: reads that only ever failed (unreachable or timeout) since the
+    controller started are not a dead machine: `answered` is False until
+    the first HTTP answer, and stays True after it."""
+    read(channel, "unreachable")
+    read(channel, "timeout")
+    assert channel.fleet.quiet(ADDRESS).answered is False
+    read(channel, {"workflow_worker": {"busy": False}})
+    assert channel.fleet.quiet(ADDRESS).answered is True
+    read(channel, "unreachable")
+    state = channel.fleet.quiet(ADDRESS)
+    assert state.answered is True and state.quiet_s is not None

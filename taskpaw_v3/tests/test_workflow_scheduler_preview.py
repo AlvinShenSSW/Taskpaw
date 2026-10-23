@@ -255,3 +255,26 @@ def test_preview_with_unchanged_state_equals_the_next_pass(tmp_path):
         assert decided[target] == view.machine
     finally:
         rt.close()
+
+
+def test_preview_of_a_film_that_needs_no_gpu_names_no_device():
+    """§9 CX2: restore and ASR still pending but every volume is reused (no
+    GPU stage left): no device option and no crash, 「无需 GPU，本机完成」."""
+    from taskpaw_v3.workflow import planning
+
+    ws = fleet()
+    target = unplanned()
+    view = s.preview(
+        snapshot([target], ws),
+        target.film_id,
+        ("standard",),
+        live=live(ws),
+        now=NOW,
+        controller_id=CONTROLLER,
+        gpu_stages={(target.film_id, target.input_revision): frozenset()},
+    )["standard"]
+    assert view.machine is None and view.waiting is None
+    assert view.reason == s.NO_GPU == "无需 GPU，本机完成"
+    assert view.devices == ()
+    shown = planning.routing_view(view, {}, NOW)
+    assert shown == {"auto": {"waiting": None, "text": s.NO_GPU}, "devices": []}

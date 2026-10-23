@@ -149,6 +149,37 @@ def test_the_worker_summary_has_no_secret(tmp_path):
         assert worker.stop()
 
 
+def test_a_restarted_worker_with_attempt_files_is_busy_before_any_controller(
+    tmp_path,
+):
+    """§9 CX1: no controller reachable after a restart, so no dispatcher was
+    built; an attempt file recovery has not settled (its children may live)
+    keeps `busy` true — 判定已停止 must not read the machine as quiet."""
+    from taskpaw_v3.tests.test_workflow_remote_worker import loop_worker, until
+    from taskpaw_v3.workflow.remote_dispatch import ATTEMPTS_DIR
+    from taskpaw_v3.workflow.worker_client import ApiError
+
+    class Unreachable:
+        def __getattr__(self, _name):
+            def call(*_a, **_k):
+                raise ApiError(0, "unreachable")
+
+            return call
+
+    worker = loop_worker(tmp_path, lambda *_a, **_k: Unreachable())
+    try:
+        worker.start()
+        until(lambda: "重试" in worker.reason)
+        assert worker.dispatcher is None
+        assert worker.summary()["busy"] is False  # nothing on disk
+        attempts = tmp_path / "staging" / ATTEMPTS_DIR
+        attempts.mkdir(parents=True)
+        (attempts / f"{identity()}.json").write_text("{}", encoding="utf-8")
+        assert worker.summary()["busy"] is True
+    finally:
+        assert worker.stop()
+
+
 def test_status_carries_the_worker_summary(monkeypatch, tmp_path):
     from taskpaw_v3.agent.server import launcher
     from taskpaw_v3.tests.test_worker_api import _agent_config

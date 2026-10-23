@@ -1636,12 +1636,15 @@ class RouteWithdraw(VersionedCommand):
 
 
 class PinSet(VersionedCommand):
-    """改派: change a plan's pin; `expected_version` is the pin's."""
+    """改派: change a plan's pin; `expected_version` is the pin's.
+    `withdraw_route_id`: the film's open route on a 失联 worker, withdrawn in
+    the same transaction when it is still the open route (P2-4 §9 CX4)."""
 
     film_id: Id
     input_revision: Revision
     worker_id: Id | None
     reason: Text
+    withdraw_route_id: Id | None = None
 
 
 class StoppedAttestation(VersionedCommand):

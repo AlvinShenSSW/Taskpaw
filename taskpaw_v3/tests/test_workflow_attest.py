@@ -9,6 +9,8 @@ tested with the power peers."""
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -34,6 +36,7 @@ from taskpaw_v3.workflow import operator_actions as ops
 from taskpaw_v3.workflow import scheduler as s
 from taskpaw_v3.workflow.fleet_live import FleetLive, Heartbeat
 from taskpaw_v3.workflow.local_dispatch import should_retry
+from taskpaw_v3.workflow.remote_dispatch import AttemptState
 
 TOKEN = "control-token"
 DEAD = timedelta(seconds=301)
@@ -114,9 +117,9 @@ class World:
         worker = self.rt.store.get_worker(self.rt.operator, remote.worker_id).worker
         return ops.worker_address(worker)
 
-    def status(self, remote, quiet_s, checked_s=5.0, state=None) -> None:
+    def status(self, remote, quiet_s, checked_s=5.0, state=None, answered=True):
         self.channel.states[self.address(remote)] = ops.StatusQuiet(
-            quiet_s=quiet_s, checked_s=checked_s, state=state
+            quiet_s=quiet_s, checked_s=checked_s, state=state, answered=answered
         )
 
     def assignment(self, film_id) -> m.AssignmentRecord:
@@ -224,6 +227,51 @@ def test_a_status_401_names_the_token(world):
     world.status(remote, None, 3.0, "unauthorized")
     body = world.attest(film_id).json()
     assert "401" in body["detail"] and "令牌" in body["detail"]
+
+
+def test_a_status_channel_that_never_answered_is_not_dead(world):
+    """§9 IR2: unreachable since the controller started may be a wrong
+    address or port, not a machine that is off."""
+    remote, film_id = claimed_film(world)
+    world.clock.advance(DEAD)
+    world.status(remote, 400.0, answered=False)
+    response = world.attest(film_id)
+    assert response.status_code == 409
+    assert response.json()["code"] == "still_alive"
+    assert response.json()["detail"] == "状态通道从未连通"
+    world.status(remote, 400.0)  # it answered once, then went dark
+    assert world.attest(film_id).status_code == 200
+
+
+def test_the_status_read_must_be_ten_seconds_fresh(world):
+    """§9 IR9: `FRESH_SECONDS` is 10 (the cache refreshes every 5 s)."""
+    assert ops.FRESH_SECONDS == 10.0
+    remote, film_id = claimed_film(world)
+    world.clock.advance(DEAD)
+    world.status(remote, 400.0, checked_s=15.0)
+    response = world.attest(film_id)
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith("状态通道")
+    world.status(remote, 400.0, checked_s=9.0)
+    assert world.attest(film_id).status_code == 200
+
+
+@pytest.mark.parametrize("dead", ["heartbeat", "status"])
+def test_one_dead_channel_never_allows_an_attest(world, dead):
+    """§9 test quality: the channels disagree — only one is dead for 5 min."""
+    remote, film_id = claimed_film(world)
+    if dead == "heartbeat":
+        world.clock.advance(DEAD)
+        world.status(remote, None, state="busy")  # /status still says busy
+    else:
+        world.clock.advance(DEAD)
+        world.beat(remote)  # heartbeats go on
+        world.status(remote, 400.0)
+    response = world.attest(film_id)
+    assert response.status_code == 409
+    assert response.json()["code"] == "still_alive"
+    channel = "状态通道" if dead == "heartbeat" else "心跳通道"
+    assert response.json()["detail"].startswith(channel)
 
 
 def test_ir4_a_recent_renewal_refuses_even_with_dead_channels(world):
@@ -430,22 +478,43 @@ def test_reassign_is_refused_once_claimed_and_never_to_the_controller(world):
     assert stale.json()["code"] == "cas_conflict"
 
 
-def test_a_claim_racing_the_withdrawal_answers_route_claimed(world, monkeypatch):
+@pytest.mark.parametrize("target", ["auto", "same", "other"])
+def test_a_claim_racing_the_reassign_answers_route_claimed(world, monkeypatch, target):
+    """§9 CX4/IR8: the claim lands between 改派's reads and its write; the
+    store refuses the pin in the same transaction, so nothing changes."""
     w1 = enrol_remote(world.rt, "5060 Ti-1")
+    w2 = enrol_remote(world.rt, "5070 Ti")
     film_id = add_film(world.rt)
-    route(world.rt, film_id, w1.worker_id)  # w1 never beat: not online
+    route(world.rt, film_id, w1.worker_id)  # w1 never beat: 失联
+    worker = {"auto": None, "same": w1.worker_id, "other": w2.worker_id}[target]
+    before = world.rt.store.get_pin(world.rt.operator, film_id, 1)
     real = world.rt.store.set_pin
 
     def racing(*args, **kw):
-        result = real(*args, **kw)
         claim_remote(world.rt, w1, film_id, "restore")  # the worker claims now
-        return result
+        return real(*args, **kw)
 
     monkeypatch.setattr(world.rt.store, "set_pin", racing)
-    response = pin(world, film_id, None)
+    response = pin(world, film_id, worker)
     assert response.status_code == 409
-    assert response.json()["code"] == "route_claimed"
-    assert response.json()["detail"] == "已开始处理"
+    assert response.json() == {"detail": "已开始处理", "code": "route_claimed"}
+    after = world.rt.store.get_pin(world.rt.operator, film_id, 1)
+    assert (after.worker_id, after.version) == (before.worker_id, before.version)
+    kept = world.rt.store.film_route(world.rt.operator, film_id, 1)
+    assert kept is not None and kept.worker_id == w1.worker_id
+
+
+def test_auto_keeps_a_route_of_a_worker_still_in_its_start_grace(world):
+    """§9 IR7: right after the controller starts, a worker not heard from yet
+    is `waiting`, not 失联: 自动 must not withdraw its route."""
+    w1 = enrol_remote(world.rt, "5060 Ti-1")
+    film_id = add_film(world.rt)
+    route(world.rt, film_id, w1.worker_id)
+    world.host.fleet = FleetLive(world.rt.clock.now(), VERSION)  # just started
+    assert world.host.fleet.state(w1.worker_id, world.rt.clock.now()) == "waiting"
+    assert pin(world, film_id, None).status_code == 200
+    kept = world.rt.store.film_route(world.rt.operator, film_id, 1)
+    assert kept is not None and kept.worker_id == w1.worker_id
 
 
 # ── row actions, reassign options and 设备 (R2, §2) ──────────────────────
@@ -648,4 +717,22 @@ def test_the_worker_dispatcher_is_busy_while_a_run_or_a_held_child_lives(tmp_pat
     assert d.busy() is True
     d._unsettled = None
     d._held = {"a1"}
-    assert d.busy() is False  # no attempt file: no child recorded
+    assert d.busy() is True  # §9 IR1: held until a boot reply settles it
+    d._held = set()
+    d._deliver = ["a2"]  # a settled result not delivered yet
+    assert d.busy() is True
+    d._deliver = []
+    assert d.busy() is False
+    d.attempt_dir.mkdir(parents=True, exist_ok=True)
+    state = AttemptState(
+        attempt_id=identity(),
+        film_id=identity(),
+        rev=1,
+        stage="restore",
+        request={},
+        settled={"ok": True},
+    )
+    (d.attempt_dir / f"{state.attempt_id}.json").write_text(
+        json.dumps(asdict(state)), encoding="utf-8"
+    )
+    assert d.busy() is True  # an attempt file is work the controller awaits

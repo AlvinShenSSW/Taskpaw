@@ -6,16 +6,21 @@ heartbeat on 5682 (`FleetLive.silent_for`; a revoked worker's tombstone keeps
 its last one, a worker never heard from counts from the controller's start),
 and (b) the 5680 `/status` read kept failing (unreachable/timeout) or kept
 answering `workflow_worker.busy == false`, last checked within
-`FRESH_SECONDS` (`StatusChannel`, `PowerFleet.quiet`). Any other answer — a
-401, 404, an invalid body, no `busy` — means the machine is up. The IR4 guard
+`FRESH_SECONDS` (`StatusChannel`, `PowerFleet.quiet`), and it answered at
+least once since the controller started (§9 IR2: a channel that never
+connected may be a wrong address). Any other answer — a 401, 404, an invalid
+body, no `busy` — means the machine is up. The IR4 guard
 (no renewal for five minutes) still applies; the store checks it again. After
 the attest, `retry_if_due` (a cancelled stage is a free retry) and the caller
 wakes the scheduler and the dispatcher, so the film is routed again.
 
 **改派 (C2, IR8).** A new pin for an unclaimed planned film whose restore or
-ASR is unfinished. 自动 for a film whose route sits on a worker that is not
-online also withdraws that route (control layer only, OD2). A claim racing
-the request answers `route_claimed` (「已开始处理」).
+ASR is unfinished. 自动 for a film whose route sits on a 失联 worker (`lost`;
+one still in the start grace is `waiting` and keeps it, §9 IR7) also
+withdraws that route (control layer only, OD2). The store checks "no
+unresolved compute assignment" in the pin's own transaction and withdraws
+the route in it (§9 CX4), so a claim racing the request answers
+`route_claimed` (「已开始处理」) and changes nothing.
 """
 
 from __future__ import annotations
@@ -32,15 +37,16 @@ from . import scheduler as sc
 from .executors import failed_kind
 from .local_dispatch import retry_if_due
 from .route_store import QUIET_SECONDS
+from .route_store import WITHDRAWN_LOST as WITHDRAWN_LOST  # re-exported
 
 if TYPE_CHECKING:
     from .fleet_live import FleetLive
     from .local_runtime import LocalRuntime
 
-FRESH_SECONDS = 30.0  # C4: the /status cache must be this fresh
+FRESH_SECONDS = 10.0  # C4: the /status cache (read every 5 s) is this fresh
 ATTESTED = "operator_attested_stopped"
 ATTEST_TEXT = "我确认该机器已关机或任务已停止"
-WITHDRAWN_LOST = "改派：设备失联"
+NEVER_ANSWERED = "状态通道从未连通"
 _FINISHED = ("succeeded", "skipped")
 _COMPUTE = ("restore", "asr", "translate")
 _UP = {
@@ -114,6 +120,8 @@ def stop_check(
             quiet.state or "", f"/status 有应答（{quiet.state}），机器仍在运行"
         )
         return refused("still_alive", f"状态通道：{text}")
+    if not quiet.answered:  # §9 IR2: never connected is not dead
+        return refused("still_alive", NEVER_ANSWERED)
     if quiet.quiet_s < QUIET_SECONDS:
         return refused("still_alive", f"状态通道：仅 {status_s} 秒无响应")
     renewed = (now - assignment.renewed_at).total_seconds()
@@ -277,6 +285,14 @@ def reassign(
     if _claim(rt, film_id, input_revision) is not None:
         raise m.WorkflowError("route_claimed")
     route = rt.store.film_route(op, film_id, input_revision)
+    lost = (  # §9 IR7: only 失联; a worker in its start grace keeps its route
+        worker_id is None
+        and route is not None
+        and route.worker_id != rt.identity.worker_id
+        and fleet is not None
+        and fleet.state(route.worker_id, rt.clock.now()) == "lost"
+    )
+    # §9 CX4: the store re-checks the claim and withdraws in one transaction
     rt.store.set_pin(
         op,
         rt.meta(),
@@ -286,26 +302,9 @@ def reassign(
             worker_id=worker_id,
             expected_version=expected_version,
             reason="改派",
+            withdraw_route_id=route.route_id if lost and route is not None else None,
         ),
     )
-    now = rt.clock.now()
-    if (
-        worker_id is None
-        and route is not None
-        and route.worker_id != rt.identity.worker_id
-        and (fleet is None or fleet.state(route.worker_id, now) != "online")
-    ):
-        fresh = rt.store.film_route(op, film_id, input_revision)
-        if fresh is not None and fresh.route_id == route.route_id:
-            rt.store.withdraw_route(  # route_claimed when a claim raced it
-                op,
-                rt.meta(),
-                m.RouteWithdraw(
-                    route_id=fresh.route_id,
-                    expected_version=fresh.version,
-                    reason=WITHDRAWN_LOST,
-                ),
-            )
     return {"ok": True}
 
 

@@ -453,7 +453,8 @@ export interface PlanRoutingDevice {
 }
 export interface PlanRouting {
   auto: { machine: { id: string; name: string }; finish_at: string; energy_wh: number | null; text: string }
-    | { waiting: string | null };
+    // P2-4 §9 CX2: waiting null + text 「无需 GPU，本机完成」 when no GPU stage is left
+    | { waiting: string | null; text?: string };
   devices: PlanRoutingDevice[];
 }
 // PWR-1/3: the 功耗 tab. A machine's bounded history (at most 168 points; `avg_w` null = a gap).

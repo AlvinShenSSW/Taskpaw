@@ -48,7 +48,13 @@ from .executors import ExecRuntime, StageExecutor
 from .fleet_live import PROTOCOL
 from .keep_awake import KeepAwake
 from .local_gpu import LocalGpu
-from .remote_dispatch import HELD, UNSETTLED, RemoteDispatcher, WorkerRuntime
+from .remote_dispatch import (
+    HELD,
+    UNSETTLED,
+    RemoteDispatcher,
+    WorkerRuntime,
+    attempts_on_disk,
+)
 from .staging import Staging, StagingError, validate_dir
 from .worker_client import ApiError, WorkerClient, backoff
 
@@ -1041,8 +1047,18 @@ class WorkerHost:
             },
             "paused": self.local_paused,
             # P2-4 R9: the controller's 判定已停止 reads this on /status
-            "busy": bool(dispatcher is not None and dispatcher.busy()),
+            "busy": self._busy(dispatcher),
         }
+
+    def _busy(self, dispatcher: RemoteDispatcher | None) -> bool:
+        """§9 CX1: before a dispatcher exists (no controller reached since a
+        restart) the attempt files on disk decide: any one is unsettled work
+        whose children may still run, so the machine reads as busy."""
+        if dispatcher is not None:
+            return dispatcher.busy()
+        ident = self.identity
+        root = ident.staging_dir if ident else self.settings.staging_dir
+        return attempts_on_disk(Path(root)) if root else False
 
     def _monitor(self) -> dict[str, Any]:
         """§6: films, the running step, transfers, staging and the GPU hold."""
