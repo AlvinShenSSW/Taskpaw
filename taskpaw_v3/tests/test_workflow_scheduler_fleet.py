@@ -12,7 +12,10 @@ After every step the ledger holds the invariants of §4.4 and OD5.
 
 from __future__ import annotations
 
+import os
 import random
+import threading
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -44,6 +47,35 @@ from taskpaw_v3.workflow.local_gpu import FULL_HD, UHD
 
 START = datetime(2026, 10, 22, 8, 0, tzinfo=timezone.utc)
 FINISHED = ("succeeded", "skipped")
+# A restore-only worker's ASR claim is refused by the first guard it meets: an
+# unreconciled boot (owner_unresolved), its restore-only approval or draining
+# (precondition_failed), or OD7 R5's route check (route_required). `check`
+# asserts no worker ever holds an ASR attempt, whichever guard refused it.
+ASR_REFUSED = ("owner_unresolved", "precondition_failed", "route_required")
+
+
+def seed_ids(monkeypatch: pytest.MonkeyPatch, seed: int) -> None:
+    """Every uuid4 of this thread (store ids and the helpers' alike) comes from
+    the seed. Under the fake clock most rows tie on their timestamps and are
+    ordered by id, so random ids would make each run a different sequence."""
+    rnd = random.Random(f"fleet-ids-{seed}")
+    owner = threading.get_ident()
+
+    class SeededOs:
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        @staticmethod
+        def urandom(size: int) -> bytes:
+            if threading.get_ident() != owner:
+                return os.urandom(size)  # a stray thread never shifts the stream
+            return rnd.randbytes(size)
+
+    monkeypatch.setattr(uuid, "os", SeededOs())  # uuid4 reads `os.urandom`
+    state = rnd.getstate()
+    first = uuid.uuid4()
+    rnd.setstate(state)
+    assert uuid.uuid4() == first, "uuid4 no longer draws from os.urandom"
 
 
 class FakeClock:
@@ -197,7 +229,7 @@ class Fleet:
                 job(rt, value.film_id, "restore"),
                 job(rt, value.film_id, "asr"),
             )
-            # an older build would try ASR too: OD7 R5 refuses it
+            # an older build would try ASR too: it is refused (ASR_REFUSED)
             name = (
                 "restore"
                 if restore.status == "pending"
@@ -210,7 +242,7 @@ class Fleet:
             try:
                 claim_remote(rt, remote, value.film_id, name)
             except m.WorkflowError as exc:
-                assert name == "restore" or exc.code == "route_required"
+                assert name == "restore" or exc.code in ASR_REFUSED, exc.code
                 continue
             return
 
@@ -511,7 +543,8 @@ class Fleet:
 
 
 @pytest.mark.parametrize("seed", range(10))
-def test_random_fleet_sequences_never_double_run(tmp_path, seed):
+def test_random_fleet_sequences_never_double_run(tmp_path, monkeypatch, seed):
+    seed_ids(monkeypatch, seed)
     fleet = Fleet(tmp_path, seed)
     try:
         for _ in range(200):
