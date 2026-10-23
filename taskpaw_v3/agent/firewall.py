@@ -143,6 +143,8 @@ Launcher = Callable[[str, str, float], Optional[int]]
 def _shell_execute_runas(file: str, params: str, timeout: float) -> Optional[int]:
     """Start `file params` elevated and hidden; its exit code, None on a
     timeout. Raises `Declined` on ERROR_CANCELLED, OSError otherwise."""
+    if sys.platform != "win32":
+        raise OSError("ShellExecuteExW is Windows only")
     import ctypes
     from ctypes import wintypes
 
