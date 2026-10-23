@@ -22,7 +22,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, ValidationError
 
@@ -161,10 +161,13 @@ class MonitorAdmin:
                 }
             )
 
-    def _save(self, desired: dict) -> None:
+    def _save(self, desired: dict, *, backup: bool = False) -> None:
         candidate = self._candidate(self._config.monitors, desired)
         if self._path is not None:
-            save_yaml(candidate, self._path)
+            if backup:  # P2-4 R15: agent.yaml.bak holds the previous bytes
+                save_yaml(candidate, self._path, backup=True)
+            else:
+                save_yaml(candidate, self._path)
         with self._lock:
             self._config.monitors = copy.deepcopy(candidate.monitors)
             self._revision += 1
@@ -907,6 +910,9 @@ class MonitorAdmin:
         "llm_fallback2_thinking_off",
         "llm_failover",
         "power",
+        # P2-4 R15: 设置 · 媒体工作流; never live (5682, the provider closures,
+        # the file lease and keep-awake are bound at startup)
+        "workflow",
     )
     # Live-safe editable fields: api_token is read per request (token_ok) and the
     # LLM settings are read by monitors at call time through the process-wide
@@ -970,14 +976,38 @@ class MonitorAdmin:
                     spec["config"] = self._reg.get(type_id).migrate_config(raw)
         return view
 
-    def update_config(self, patch: dict) -> dict[str, Any]:
+    @property
+    def config_dir(self) -> Optional[Path]:
+        """agent.yaml's folder: the workflow's default data directory's parent."""
+        return self._path.parent if self._path is not None else None
+
+    def desired_workflow(self) -> Any:
+        """The saved (pending) `workflow` section (P2-4 设置 · 媒体工作流)."""
+        with self._lock:
+            return self._desired["workflow"]
+
+    def update_config(
+        self,
+        patch: dict,
+        *,
+        workflow_check: Optional[Callable[[AgentConfig, Any], None]] = None,
+    ) -> dict[str, Any]:
         """Edit top-level agent config (machine/ports/token) from the Settings UI
         (#43). Validates the merged result and persists agent.yaml atomically. Only
         api_token is live (read per request); machine/ports/host/host_metrics are
         bound at startup, so they persist for the next restart and the call returns
-        restart_required while they differ from the running config."""
+        restart_required while they differ from the running config.
+
+        P2-4 R15: `workflow` is accepted only with `workflow_check` (the
+        设置 · 媒体工作流 route's validation and busy refusal, run under the
+        admission lock before anything is written); it merges partially like
+        `power` and is saved with a backup."""
         if not isinstance(patch, dict):
             raise ValueError("config patch must be an object")
+        if "workflow" in patch and (
+            workflow_check is None or not isinstance(patch["workflow"], dict)
+        ):
+            raise ValueError("workflow is edited in 设置 · 媒体工作流")
         with self._settings_admission():
             p = dict(patch)
             # The GET masks the token as "***"; an unchanged/blank token in the
@@ -999,6 +1029,12 @@ class MonitorAdmin:
             # PWR-1: a partial `power` object edits only the fields it names.
             if isinstance(p.get("power"), dict):
                 p["power"] = {**self._desired["power"].model_dump(), **p["power"]}
+            workflow = "workflow" in p
+            if workflow:
+                p["workflow"] = {
+                    **self._desired["workflow"].model_dump(),
+                    **p["workflow"],
+                }
             # Merge over the DESIRED scalars (so a pending edit isn't lost by a
             # later save) on top of the running config's monitors (always current).
             editables = {
@@ -1020,6 +1056,8 @@ class MonitorAdmin:
             guard_bind_exposure(
                 validated.bind_host, validated.api_token, label="network API"
             )
+            if workflow and workflow_check is not None:  # refusals write nothing
+                workflow_check(validated, self._desired["workflow"])
             # A restart is needed if any non-live DESIRED field differs from what
             # the agent is actually RUNNING (the still-at-boot _config) — this
             # stays True across saves until the agent restarts (Codex #43).
@@ -1031,7 +1069,7 @@ class MonitorAdmin:
             # (and the live token) ONLY if the write succeeds, so a failed save
             # leaves config + disk untouched — atomic (Codex #43 r7).
             new_desired = {f: getattr(validated, f) for f in self._EDITABLE_CONFIG}
-            self._save(new_desired)
+            self._save(new_desired, backup=workflow)
             get_task_log().record(
                 "",
                 "operator.update",

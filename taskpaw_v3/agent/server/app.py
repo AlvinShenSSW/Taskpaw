@@ -312,6 +312,17 @@ def create_control_app(
         worker_provider=worker_provider,
     )
 
+    from taskpaw_v3.agent.server.workflow_settings import register_workflow_settings
+
+    register_workflow_settings(  # P2-4 R13: 设置 · 媒体工作流
+        app,
+        config,
+        admin,
+        config_dir=admin.config_dir if admin is not None else None,
+        workflow_provider=workflow_provider,
+        worker_provider=worker_provider,
+    )
+
     @app.get("/control/status")
     def control_status() -> dict:
         # The agent console reads status from the loopback control API.

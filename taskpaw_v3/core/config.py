@@ -7,6 +7,8 @@ and testable.
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -324,18 +326,12 @@ def load_yaml(model: type[BaseModel], path: Path) -> BaseModel:
     return model(**data)
 
 
-def save_yaml(cfg: BaseModel, path: Path) -> None:
-    """Atomically persist a config model to YAML (tmp + fsync + replace)."""
-    import logging
-    import os
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    text = yaml.safe_dump(cfg.model_dump(), sort_keys=False, allow_unicode=True)
+def _write_atomic(path: Path, data: bytes) -> None:
+    """tmp + fsync + replace; the tmp never outlives a failure."""
+    tmp = path.with_name(path.name + ".tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
+        with open(tmp, "wb") as f:
+            f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -347,3 +343,32 @@ def save_yaml(cfg: BaseModel, path: Path) -> None:
             logging.getLogger("taskpaw.config").warning(
                 "config_temporary_cleanup_failed"
             )
+
+
+def save_yaml(cfg: BaseModel, path: Path, *, backup: bool = False) -> None:
+    """Atomically persist a config model to YAML (tmp + fsync + replace).
+
+    P2-4 R15: top-level keys the file holds that the model does not know (a
+    newer build's) are kept. `backup` first writes the file's previous bytes
+    to `<name>.bak` (tmp then replace), so a failed save leaves both files
+    whole. The file's content is never logged."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = cfg.model_dump()
+    try:
+        previous: Optional[bytes] = path.read_bytes()
+    except FileNotFoundError:
+        previous = None
+    if previous is not None:
+        try:
+            old = yaml.safe_load(previous.decode("utf-8"))
+        except (UnicodeDecodeError, yaml.YAMLError):
+            old = None
+        if isinstance(old, dict):
+            for key, value in old.items():
+                if isinstance(key, str) and key not in data:
+                    data[key] = value
+    text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    if backup and previous is not None:
+        _write_atomic(path.with_name(path.name + ".bak"), previous)
+    _write_atomic(path, text.encode("utf-8"))

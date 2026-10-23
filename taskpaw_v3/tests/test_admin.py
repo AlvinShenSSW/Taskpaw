@@ -1150,6 +1150,7 @@ def test_live_and_non_live_config_partition():
         "control_host",
         "control_port",
         "host_metrics",
+        "workflow",  # P2-4 R15: 设置 · 媒体工作流, applied after a restart
     )
 
 
