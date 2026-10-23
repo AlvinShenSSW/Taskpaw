@@ -139,7 +139,9 @@ def test_the_worker_summary_has_no_secret(tmp_path):
             "routes",
             "current",
             "paused",
+            "busy",  # P2-4 R9
         }
+        assert summary["busy"] is False
         assert summary["connected"] is True and summary["routes"] == 0
         assert summary["current"] is None and summary["paused"] is False
         assert "s" * 43 not in str(summary)

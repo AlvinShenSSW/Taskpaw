@@ -1040,6 +1040,8 @@ class WorkerHost:
                 "phase": current["phase"],
             },
             "paused": self.local_paused,
+            # P2-4 R9: the controller's 判定已停止 reads this on /status
+            "busy": bool(dispatcher is not None and dispatcher.busy()),
         }
 
     def _monitor(self) -> dict[str, Any]:

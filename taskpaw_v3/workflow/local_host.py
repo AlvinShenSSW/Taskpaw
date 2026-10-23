@@ -294,6 +294,10 @@ class LocalWorkflowHost:
         self.scheduler: Any = None  # P2-3 R13: the routing pass's thread
         # P2-4 R1: the last pass's decision; its waiting reasons reach the board
         self.last_pass: Any = None
+        # the controller's free disk for the C8 gate (tests inject a figure)
+        self.free_bytes: Callable[[], int | None] | None = None
+        # C4's /status channel; None: the agent's power peers (P2-4 R8)
+        self.status_channel: Callable[[], Any] | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
         # H3 M1/D02: one LTX model download; the session needs serialized calls
@@ -488,31 +492,50 @@ class LocalWorkflowHost:
             self.events.resolved(rt, job, name, outcome)
         self._wake_scheduler()
 
+    def _controller_free(self, rt: LocalRuntime) -> int | None:
+        if self.free_bytes is not None:
+            return self.free_bytes()
+        from .transfer import disk_free
+
+        try:
+            return disk_free(rt.work_dir)
+        except OSError:
+            return None
+
+    def pass_inputs(self) -> dict[str, Any] | None:
+        """The routing pass's live inputs (P2-4: 待处理's preview reads the
+        same ones); None while remote workers are off."""
+        rt, fleet = self.runtime, self.fleet
+        if rt is None or fleet is None:
+            return None
+        return {
+            "live": fleet.snapshot(),
+            "now": rt.clock.now(),
+            "controller_id": rt.identity.worker_id,
+            "controller_free_bytes": self._controller_free(rt),
+            "live_since": fleet.started_at,
+        }
+
     def _route_pass(self) -> None:
         """One `routing.run_pass` over the live fleet; a routed or withdrawn
         film wakes the controller's dispatcher (a hand-over or a local
         route)."""
-        rt, fleet = self.runtime, self.fleet
-        if rt is None or fleet is None:
+        rt, inputs = self.runtime, self.pass_inputs()
+        if rt is None or inputs is None:
             return
         from .routing import run_pass
-        from .transfer import disk_free
 
-        try:
-            free: int | None = disk_free(rt.work_dir)
-        except OSError:
-            free = None
         outcome = run_pass(
             rt.store,
             rt.operator,
             rt.meta,
-            controller_id=rt.identity.worker_id,
-            live=fleet.snapshot(),
-            now=rt.clock.now(),
+            live=inputs["live"],
+            now=inputs["now"],
+            controller_id=inputs["controller_id"],
             executors=rt.executors,
-            controller_free_bytes=free,
+            controller_free_bytes=inputs["controller_free_bytes"],
             remote_enabled=True,
-            live_since=fleet.started_at,
+            live_since=inputs["live_since"],
         )
         self.last_pass = outcome.planned
         if (outcome.routed or outcome.withdrawn) and self.dispatcher is not None:

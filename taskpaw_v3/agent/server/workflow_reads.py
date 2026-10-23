@@ -26,6 +26,8 @@ _CONFLICTS = {
     "precondition_failed": "当前状态不允许此操作",
     # P2-3 §11 CX5: 停止并重新排队 after the worker's stage settled ok
     "already_settled": "修复已完成，正在回传",
+    # P2-4 R7: 改派 lost its race with the worker's claim
+    "route_claimed": "已开始处理",
 }
 
 
@@ -205,6 +207,12 @@ def film(
         )
     if detail is None:
         raise HTTPException(status_code=404, detail="未知影片")
+    fleet = getattr(host, "fleet", None)
+    if fleet is not None:  # P2-4 §2: the 改派 dialog's choices
+        from taskpaw_v3.workflow import operator_actions as ops
+
+        with _mapped():
+            detail["reassign_options"] = ops.reassign_options(rt, fleet, film_id)
     return detail
 
 
@@ -226,13 +234,43 @@ class BoardInputs:
     names: dict[str, str] = field(default_factory=dict)
 
 
-def claimed_films(rt: LocalRuntime) -> set[str]:
-    """Films with an unresolved compute assignment (a claimed route, C9)."""
-    films = set()
+def claimed_films(rt: LocalRuntime) -> dict[str, Any]:
+    """Film → its unresolved compute assignment (a claimed route, C9)."""
+    films: dict[str, Any] = {}
     for item in rt.store.list_open_assignments(rt.operator):
         if item.stage in ("restore", "asr", "translate"):
-            films.add(rt.store.get_stage(rt.operator, item.assignment.job_id).film_id)
+            film_id = rt.store.get_stage(rt.operator, item.assignment.job_id).film_id
+            films.setdefault(film_id, item)
     return films
+
+
+def status_channel(host: Any) -> Any:
+    """C4's 5680 `/status` channel: the host's own (tests) or the agent's
+    power peers (`PowerFleet.quiet`)."""
+    from taskpaw_v3.core import power_fleet
+
+    channel = getattr(host, "status_channel", None)
+    if callable(channel):
+        return channel()
+    return power_fleet.get_fleet()
+
+
+def pass_inputs(host: Any, rt: LocalRuntime) -> dict[str, Any] | None:
+    """The routing pass's live inputs for 待处理's preview (remote mode)."""
+    own = getattr(host, "pass_inputs", None)
+    if callable(own):
+        value: dict[str, Any] | None = own()
+        return value
+    fleet = getattr(host, "fleet", None)
+    if fleet is None:
+        return None
+    return {
+        "live": fleet.snapshot(),
+        "now": rt.clock.now(),
+        "controller_id": rt.identity.worker_id,
+        "controller_free_bytes": None,
+        "live_since": fleet.started_at,
+    }
 
 
 def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInputs:
@@ -243,12 +281,14 @@ def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInpu
     shows itself, never 等待 GPU 设备. Remote mode adds routes, pins and the
     设备失联 state (`scheduler.lost_films`)."""
     from taskpaw_v3.workflow import board
+    from taskpaw_v3.workflow import operator_actions as ops
     from taskpaw_v3.workflow import scheduler as sc
 
     status = host.status()
     dispatch = status.get("dispatch") or {}
     controller = rt.identity.worker_id
-    names = {w.worker_id: w.name for w in rt.store.list_workers(rt.operator)}
+    records = {w.worker_id: w for w in rt.store.list_workers(rt.operator)}
+    names = {worker_id: w.name for worker_id, w in records.items()}
     names[controller] = LOCAL_NAME
     fleet = getattr(host, "fleet", None)
     local = dispatch.get("current")
@@ -291,7 +331,22 @@ def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInpu
         for film_id, why in dict(getattr(last, "waiting", None) or {}).items():
             if film_id not in mine and film_id not in claimed:
                 waiting[film_id] = why
+        channel = status_channel(host)
         for film in films:
+            claim = claimed.get(film.film_id)
+            actions = {
+                "can_reassign": ops.can_reassign(film, claim is not None),
+                "stop": None
+                if claim is None
+                else ops.stop_action(
+                    rt,
+                    claim,
+                    records.get(claim.assignment.worker_id or ""),
+                    fleet=fleet,
+                    channel=channel,
+                    now=now,
+                ),
+            }
             extras[film.film_id] = board.RowExtra(
                 route=_route(
                     mine.get(film.film_id), position, names, fleet, now, controller
@@ -300,6 +355,7 @@ def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInpu
                 lost=names.get(lost[film.film_id], "")
                 if film.film_id in lost
                 else None,
+                actions=actions,
             )
     for film_id, value in currents.items():
         if value.get("fetching") and value.get("transfer"):
@@ -354,7 +410,8 @@ def plans(
 
     host = require_host(settings, provider)
     with _mapped():
-        return plan_list(runtime(host))
+        rt = runtime(host)
+        return plan_list(rt, remote=pass_inputs(host, rt))
 
 
 def image_path(

@@ -255,6 +255,8 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "attention_kind",
         "route",
         "pin",
+        "actions",
+        "reassign_options",
     }
     steps = {s["key"]: s["state"] for s in data["steps"]}
     assert (steps["scrape"], steps["confirm"], steps["archive"]) == (

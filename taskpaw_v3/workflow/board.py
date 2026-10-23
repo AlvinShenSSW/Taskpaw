@@ -116,6 +116,8 @@ class RowExtra:
     route: dict[str, Any] | None = None
     pin: dict[str, Any] | None = None
     lost: str | None = None
+    # R2: {can_reassign, stop} — 改派 and 判定已停止 (`operator_actions`)
+    actions: dict[str, Any] | None = None
 
 
 class Looked(Protocol):
@@ -503,6 +505,7 @@ def film_row(
         # P2-4 R2: the open route and the pin (null in single-machine mode)
         "route": extra.route if extra is not None else None,
         "pin": extra.pin if extra is not None else None,
+        "actions": extra.actions if extra is not None else None,
         "can_confirm": place["can_confirm"],
         "can_retry": place["retry_stage"] is not None,
         "retry_stage": place["retry_stage"],
@@ -1071,6 +1074,9 @@ def film_detail(
         "attention_kind": row["attention_kind"],
         "route": row["route"],
         "pin": row["pin"],
+        "actions": row["actions"],
+        # §2: the 改派 dialog's choices (remote mode, `reads.film`)
+        "reassign_options": None,
         "can_confirm": row["can_confirm"],
         "can_retry": row["can_retry"],
         "retry_stage": row["retry_stage"],

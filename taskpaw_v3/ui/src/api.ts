@@ -265,8 +265,17 @@ export interface FilmRouteInfo {
   position: number; live: "online" | "lost" | "waiting" | "local"; silent_s: number | null;
 }
 export interface FilmPin { worker_id: string | null; name: string; version: number }
+// R2/R8: 改派 for an unclaimed planned film; 判定已停止 of an unresolved remote assignment, allowed only
+// when both channels (heartbeat, /status) have been dead for 5 min (C4), else `reason` says which is alive.
+export interface FilmStopAction {
+  assignment_id: string; expected_version: number; stage: string; worker: { id: string; name: string };
+  allowed: boolean; reason: string | null; heartbeat_silent_s: number | null; status_quiet_s: number | null;
+}
+export interface FilmActions { can_reassign: boolean; stop: FilmStopAction | null }
+export interface ReassignOption { worker_id: string | null; name: string; reason: string | null; current: boolean }
 export interface FilmRemote {
   attention_kind?: "device_lost" | null; route?: FilmRouteInfo | null; pin?: FilmPin | null;
+  actions?: FilmActions | null;
 }
 export interface FilmRow extends FilmRemote {
   film_id: string; name: string; group: FilmGroup; stage: string | null; status: string | null;
@@ -399,6 +408,8 @@ export interface FilmDetail extends FilmRemote {
   duration_ms?: number | null; energy?: FilmEnergy | null; live_power?: LivePower | null;
   // null when Miko is not configured
   lookup: PlanLookup | null;
+  // P2-4 §2: the 改派 dialog's choices (remote mode only)
+  reassign_options?: ReassignOption[] | null;
 }
 export interface Performer {
   id: number | string; name: string; source_label: string | null; unc_path: string | null;
@@ -432,6 +443,18 @@ export interface PlanEntry {
   lookup: PlanLookup | null; recommendation: PlanRecommendation;
   // PWR-2 PW13: 预计耗电 on the recommended machine (Wh per tier; null = 历史不足)
   prediction?: PlanPrediction | null;
+  // P2-4 R5 (remote mode; null on a single machine): per tier ("none" = 无需修复), 自动's predicted
+  // device or why it would wait, and every device's own finish or eligibility reason (预计).
+  routing?: Record<string, PlanRouting> | null;
+}
+export interface PlanRoutingDevice {
+  id: string; name: string; gpu: string | null; vram_mib: number | null;
+  finish_at: string | null; energy_wh: number | null; reason: string | null;
+}
+export interface PlanRouting {
+  auto: { machine: { id: string; name: string }; finish_at: string; energy_wh: number | null; text: string }
+    | { waiting: string | null };
+  devices: PlanRoutingDevice[];
 }
 // PWR-1/3: the 功耗 tab. A machine's bounded history (at most 168 points; `avg_w` null = a gap).
 export type PowerRange = "24h" | "7d" | "30d";
@@ -466,6 +489,8 @@ export interface PlanMachine { id: string; name: string; gpu: string | null; vra
 export interface WorkflowPlans {
   plans: PlanEntry[]; default_tier: LtxTier;
   choices: { tiers: Array<{ value: LtxTier; label: string }>; machines: PlanMachine[] };
+  // P2-4 R5: remote mode (the select starts with 自动; a null machine is 自动)
+  remote?: boolean;
 }
 export interface PlanChoice { film_id: string; input_revision: number; ltx_model: LtxTier | null; machine: string }
 // `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.

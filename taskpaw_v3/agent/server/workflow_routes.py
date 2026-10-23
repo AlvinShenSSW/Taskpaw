@@ -52,7 +52,8 @@ class PlanItem(BaseModel):
     film_id: str = Field(min_length=1, max_length=256)
     input_revision: int = Field(gt=0, strict=True)
     ltx_model: Optional[Literal["standard", "good", "high"]]
-    machine: str = Field(min_length=1, max_length=256)
+    # P2-4 R6: null = 自动
+    machine: Optional[str] = Field(..., min_length=1, max_length=256)
 
 
 class PlansBody(BaseModel):
@@ -94,6 +95,23 @@ class RequeueBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     attempt_id: str = Field(min_length=1, max_length=64)
+
+
+class PinBody(BaseModel):
+    """改派 (P2-4 R7): the plan's new pin; null = 自动."""
+
+    model_config = ConfigDict(extra="forbid")
+    input_revision: int = Field(gt=0, strict=True)
+    expected_version: int = Field(gt=0, strict=True)
+    worker_id: Optional[str] = Field(..., min_length=1, max_length=64)
+
+
+class AttestBody(BaseModel):
+    """判定已停止 (P2-4 R8) of one unresolved remote assignment."""
+
+    model_config = ConfigDict(extra="forbid")
+    assignment_id: str = Field(min_length=1, max_length=64)
+    expected_version: int = Field(gt=0, strict=True)
 
 
 class LtxDownloadBody(BaseModel):
@@ -183,7 +201,9 @@ def register_workflow_routes(
         host = _host()
         with _mapped():
             results = confirm_plans(
-                _runtime(host), [item.model_dump() for item in body.plans]
+                _runtime(host),
+                [item.model_dump() for item in body.plans],
+                remote=getattr(host, "fleet", None) is not None,
             )
         dispatcher = getattr(host, "dispatcher", None)
         if dispatcher is not None and any(r["ok"] for r in results):
@@ -276,6 +296,60 @@ def register_workflow_routes(
             requeue(film_id, body.attempt_id)
         return {"ok": True}
 
+    def _remote_host() -> WorkflowHostLike:
+        host = _host()
+        if not settings.remote_workers or getattr(host, "fleet", None) is None:
+            raise HTTPException(
+                status_code=409, detail="未开启远程设备（workflow.remote_workers）"
+            )
+        return host
+
+    def _wake(host: Any) -> None:
+        for name in ("scheduler", "dispatcher"):
+            target = getattr(host, name, None)
+            if target is not None:
+                target.wake()
+
+    @app.post("/control/workflow/films/{film_id}/pin")
+    def workflow_pin(film_id: str, body: PinBody) -> dict[str, bool]:
+        """改派 (R7): 409 `route_claimed` 「已开始处理」 when a claim won."""
+        from taskpaw_v3.workflow import operator_actions as ops
+
+        host = _remote_host()
+        with _mapped():
+            ops.reassign(
+                _runtime(host),
+                fleet=getattr(host, "fleet", None),
+                film_id=film_id,
+                input_revision=body.input_revision,
+                expected_version=body.expected_version,
+                worker_id=body.worker_id,
+            )
+        _wake(host)
+        return {"ok": True}
+
+    @app.post("/control/workflow/films/{film_id}/attest-stopped")
+    def workflow_attest(film_id: str, body: AttestBody) -> dict[str, Any]:
+        """判定已停止 (R8, C4): both channels dead for 5 min, then a free
+        retry and a new routing pass."""
+        from taskpaw_v3.workflow import operator_actions as ops
+
+        host = _remote_host()
+        with _mapped():
+            try:
+                result = ops.attest(
+                    _runtime(host),
+                    fleet=getattr(host, "fleet", None),
+                    channel=reads.status_channel(host),
+                    film_id=film_id,
+                    assignment_id=body.assignment_id,
+                    expected_version=body.expected_version,
+                )
+            except ops.ActionRefused as exc:
+                raise CodedConflict(exc.detail, exc.code) from None
+        _wake(host)
+        return result
+
     @app.post("/control/workflow/ltx-download")
     def workflow_ltx_download(body: LtxDownloadBody) -> dict[str, bool]:
         """下载模型 (H3 M1): the session's own handshake refuses a stale or a
@@ -332,9 +406,10 @@ def register_workflow_routes(
     def workflow_devices() -> dict[str, Any]:
         from taskpaw_v3.workflow import devices
 
+        channel = reads.status_channel(_host())
         return _device(
             lambda rt, fleet: devices.device_view(
-                rt, fleet, remote_workers=settings.remote_workers
+                rt, fleet, remote_workers=settings.remote_workers, channel=channel
             )
         )
 

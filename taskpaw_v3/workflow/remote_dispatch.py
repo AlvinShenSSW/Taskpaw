@@ -424,6 +424,14 @@ class RemoteDispatcher:
                 return True
         return any(self._states())
 
+    def busy(self) -> bool:
+        """P2-4 R9: a run, an unsettled Job or a held child is alive — the
+        machine may still be working (the 判定已停止 status channel)."""
+        with self._lock:
+            if self._active is not None or self._unsettled is not None:
+                return True
+        return self._held_alive()
+
     def current_stage(self) -> tuple[str, str] | None:
         """(film_id, stage) of the running stage, for the power sampler (R14)."""
         with self._lock:

@@ -111,11 +111,15 @@ class FleetLive:
         self.on_change = on_change
         self._lock = threading.Lock()
         self._entries: dict[str, LiveEntry] = {}
+        # P2-4 R8: a forgotten (revoked) worker's last heartbeat time, so the
+        # 判定已停止 heartbeat channel still measures its silence (C4)
+        self._tombstones: dict[str, datetime] = {}
 
     def observe(self, worker_id: str, beat: Heartbeat, now: datetime) -> None:
         with self._lock:
             old = self._entries.get(worker_id)
             self._entries[worker_id] = LiveEntry(beat, now)
+            self._tombstones.pop(worker_id, None)
         if self.on_change is not None and _changed(old, beat, now):
             try:
                 self.on_change()
@@ -123,15 +127,24 @@ class FleetLive:
                 pass
 
     def forget(self, worker_id: str) -> None:
-        """A revoked worker leaves the live state at once (IR14)."""
+        """A revoked worker leaves the live state at once (IR14); its last
+        heartbeat time stays as a tombstone for `silent_for` (P2-4 R8)."""
         with self._lock:
-            self._entries.pop(worker_id, None)
+            entry = self._entries.pop(worker_id, None)
+            if entry is not None:
+                self._tombstones[worker_id] = entry.last_seen
 
     def silent_for(self, worker_id: str, now: datetime) -> float:
-        """Seconds without a heartbeat on the controller's clock; a worker
-        never heard from counts from the controller's start (C14)."""
-        entry = self.entry(worker_id)
-        since = entry.last_seen if entry is not None else self.started_at
+        """Seconds without a heartbeat on the controller's clock: since its
+        last one (a forgotten worker's tombstone included); a worker never
+        heard from counts from the controller's start (C14)."""
+        with self._lock:
+            entry = self._entries.get(worker_id)
+            since = (
+                entry.last_seen
+                if entry is not None
+                else self._tombstones.get(worker_id, self.started_at)
+            )
         return max(0.0, (now - since).total_seconds())
 
     def entry(self, worker_id: str) -> LiveEntry | None:

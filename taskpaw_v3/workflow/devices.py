@@ -299,16 +299,61 @@ def _synthetic_film(now: datetime) -> m.RoutingFilm:
     )
 
 
+def _assignments(
+    rt: LocalRuntime,
+    worker: m.WorkerRecord,
+    pending: list[m.OpenAssignment],
+    fleet: FleetLive | None,
+    channel: Any,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """P2-4 §2: the worker's unresolved compute assignments, each with its
+    判定已停止 state (`operator_actions.stop_action`)."""
+    from . import board
+    from . import operator_actions as ops
+
+    found = []
+    for item in pending:
+        if item.assignment.worker_id != worker.worker_id:
+            continue
+        film_id = rt.store.get_stage(rt.operator, item.assignment.job_id).film_id
+        found.append(
+            {
+                "assignment_id": item.assignment.assignment_id,
+                "version": item.assignment.version,
+                "film_id": film_id,
+                "film_name": board.name_of(rt, film_id) or "",
+                "stage": item.stage,
+                "state": item.assignment.status,
+                "stop": ops.stop_action(
+                    rt, item, worker, fleet=fleet, channel=channel, now=now
+                ),
+            }
+        )
+    return found
+
+
 def device_view(
     rt: LocalRuntime,
     fleet: FleetLive | None,
     *,
     remote_workers: bool,
+    channel: Any = None,
 ) -> dict[str, Any]:
-    """本机 and every enrolled, not retired worker (设备 v1)."""
+    """本机 and every enrolled, not retired worker (设备 v1). P2-4: each
+    row's unresolved assignments and open routes (`route_depth`); `channel`
+    is 判定已停止's `/status` channel."""
     now = rt.clock.now()
     op = rt.store
     workers = op.list_workers(rt.operator)
+    pending = [
+        o
+        for o in op.list_open_assignments(rt.operator)
+        if o.stage in ("restore", "asr", "translate")
+    ]
+    depth: dict[str, int] = {}
+    for item in op.list_routes(rt.operator):
+        depth[item.worker_id] = depth.get(item.worker_id, 0) + 1
     routing = {w.worker_id: w for w in op.routing_workers(rt.operator)}
     controller = rt.identity.worker_id
     remote = s.remote_mode(workers, controller, enabled=remote_workers)
@@ -378,6 +423,8 @@ def device_view(
                 "restore_allowed": probe is not None
                 and probe.vram_mib >= s.RESTORE_MIN_VRAM_MIB,
                 "unresolved": unresolved.get(worker.worker_id, 0),
+                "assignments": _assignments(rt, worker, pending, fleet, channel, now),
+                "route_depth": depth.get(worker.worker_id, 0),
                 "can_retire": worker.admission_state == "revoked"
                 and not unresolved.get(worker.worker_id, 0),
             }

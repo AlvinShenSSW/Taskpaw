@@ -136,6 +136,7 @@
         "note": "等待确认入库",
         "route": null,
         "pin": null,
+        "actions": null,
         "can_confirm": true,
         "can_retry": false,
         "retry_stage": null,
@@ -359,6 +360,7 @@
         "note": "LLM 超时：翻译服务 120 秒没有响应",
         "route": null,
         "pin": null,
+        "actions": null,
         "can_confirm": false,
         "can_retry": true,
         "retry_stage": "translate",
@@ -551,6 +553,7 @@
         "note": null,
         "route": null,
         "pin": null,
+        "actions": null,
         "can_confirm": false,
         "can_retry": false,
         "retry_stage": null,
@@ -764,6 +767,7 @@
         "note": null,
         "route": null,
         "pin": null,
+        "actions": null,
         "can_confirm": false,
         "can_retry": false,
         "retry_stage": null,
@@ -873,6 +877,7 @@
         "note": null,
         "route": null,
         "pin": null,
+        "actions": null,
         "can_confirm": false,
         "can_retry": false,
         "retry_stage": null,
@@ -1267,6 +1272,8 @@
       "attention_kind": null,
       "route": null,
       "pin": null,
+      "actions": null,
+      "reassign_options": null,
       "can_confirm": true,
       "can_retry": false,
       "retry_stage": null,
@@ -1574,6 +1581,8 @@
       "attention_kind": null,
       "route": null,
       "pin": null,
+      "actions": null,
+      "reassign_options": null,
       "can_confirm": false,
       "can_retry": true,
       "retry_stage": "translate",
@@ -1850,6 +1859,8 @@
       "attention_kind": null,
       "route": null,
       "pin": null,
+      "actions": null,
+      "reassign_options": null,
       "can_confirm": false,
       "can_retry": false,
       "retry_stage": null,
@@ -2150,6 +2161,8 @@
       "attention_kind": null,
       "route": null,
       "pin": null,
+      "actions": null,
+      "reassign_options": null,
       "can_confirm": false,
       "can_retry": false,
       "retry_stage": null,
@@ -2343,6 +2356,8 @@
       "attention_kind": null,
       "route": null,
       "pin": null,
+      "actions": null,
+      "reassign_options": null,
       "can_confirm": false,
       "can_retry": false,
       "retry_stage": null,
@@ -2531,6 +2546,7 @@
           "machine": "worker-local",
           "machine_reason": "NVIDIA GeForce RTX 5060 8 GB"
         },
+        "routing": null,
         "prediction": {
           "machine": "worker-local",
           "resolution": "1080p",
@@ -2588,6 +2604,7 @@
           "machine": "worker-local",
           "machine_reason": "NVIDIA GeForce RTX 5060 8 GB"
         },
+        "routing": null,
         "prediction": {
           "machine": "worker-local",
           "resolution": "1080p",
@@ -2631,7 +2648,8 @@
           "reason": "NVIDIA GeForce RTX 5060 8 GB"
         }
       ]
-    }
+    },
+    "remote": false
   },
   "target": {
     "candidates": {
