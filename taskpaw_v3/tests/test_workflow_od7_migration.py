@@ -255,13 +255,14 @@ def test_an_old_worker_claiming_asr_gets_route_required_and_drops_it(
     worker = world.join()
     worker_id = world.issued["w1"]["worker_id"]
     approve_as_before(world, worker_id)
+    # the controller takes no ASR until its restart (暂停派发 would pause the
+    # worker too): no ASR executor here before the restore can finish
+    world.rt.executors.pop("asr")
     film = routed_film(world)
     wait_status(world, film, "restore", "succeeded")
     host = world.host
     assert host is not None and host.scheduler is not None
     assert host.scheduler.stop()  # nothing withdraws the route below
-    # and the controller takes nothing (暂停派发 would pause the worker too)
-    world.rt.executors.pop("asr")
     route(world.rt, film, worker_id)  # as an old controller left it
     asr_job = world.stage(film, "asr").job_id
     until(lambda: (asr_job, 409, "route_required") in refused, LONG)
