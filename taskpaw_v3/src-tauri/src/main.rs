@@ -545,28 +545,44 @@ fn signal_group(child: &Child, sig: libc::c_int) {
 /// by normal exit (kill_backend) and the Drop safety net so both honor the same
 /// graceful contract (Kimi).
 fn terminate_child(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return; // already gone
-    }
+    // #299 review IR6 (Unix): the leader is watched without being reaped, so
+    // the final group SIGKILL (stragglers too) can never hit a reused id.
     #[cfg(unix)]
-    signal_group(child, libc::SIGTERM);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => {
+    {
+        use restart_supervisor::Poll;
+        let mut state = peek_child(child);
+        if state == Poll::Running {
+            signal_group(child, libc::SIGTERM);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while state == Poll::Running && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(100));
+                state = peek_child(child);
             }
-            _ => break,
         }
+        if state != Poll::Gone {
+            signal_group(child, libc::SIGKILL);
+        }
+        let _ = child.wait();
     }
-    // Force-kill the whole group (Unix) / the process (Windows; the Job Object
-    // reaps the rest of the tree).
-    #[cfg(unix)]
-    signal_group(child, libc::SIGKILL);
     #[cfg(not(unix))]
-    let _ = child.kill();
-    let _ = child.wait();
+    {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return; // already gone
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => break,
+            }
+        }
+        // Force-kill the process (the Job Object reaps the rest of the tree).
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 fn kill_backend(app: &tauri::AppHandle) {
@@ -785,14 +801,22 @@ fn build_main_window(
     descriptor: &Descriptor,
     has_backend: bool,
     supervised: bool,
+    geometry: Option<restart_supervisor::Geometry>,
 ) -> tauri::Result<()> {
-    let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
         .title("TaskPaw")
         .inner_size(1100.0, 720.0)
-        .min_inner_size(720.0, 480.0)
+        .min_inner_size(restart_supervisor::MIN_WIDTH, restart_supervisor::MIN_HEIGHT)
         .initialization_script(init_script(descriptor, cfg!(debug_assertions), supervised))
-        .on_navigation(|url| trusted_ui_navigation(url, cfg!(debug_assertions)))
-        .build()?;
+        .on_navigation(|url| trusted_ui_navigation(url, cfg!(debug_assertions)));
+    // #299 review IR9: a rebuilt window opens where the old one was
+    if let Some(g) = geometry {
+        builder = builder.inner_size(g.width, g.height).maximized(g.maximized);
+        if let Some((x, y)) = g.position {
+            builder = builder.position(x, y);
+        }
+    }
+    let win = builder.build()?;
     // Closing the window kills the backend; warn first so the operator
     // doesn't accidentally stop background monitoring — and, for a Hub,
     // aggregation + OpenClaw notifications (#52). Only when a backend was
@@ -836,6 +860,79 @@ fn build_main_window(
         });
     }
     Ok(())
+}
+
+/// #299 review IR6: one look at the owned child. Unix: `waitid(WNOWAIT)`
+/// reports an exit without reaping, so `release_old` kills the old process
+/// group while the zombie leader still pins its id (no PID-reuse window),
+/// then reaps it. Windows: `try_wait` (the Job owns the tree).
+fn peek_child(child: &mut Child) -> restart_supervisor::Poll {
+    use restart_supervisor::Poll;
+    #[cfg(unix)]
+    {
+        // SAFETY: a zeroed siginfo_t is a valid out-parameter for waitid.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+        // SAFETY: `info` outlives the call; the pid is our own child.
+        let rc = unsafe {
+            libc::waitid(libc::P_PID, child.id() as libc::id_t, &mut info, flags)
+        };
+        if rc != 0 {
+            return match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EINTR) => Poll::Running,
+                _ => Poll::Gone,
+            };
+        }
+        let (pid, status) = siginfo_pid_status(&info);
+        if pid == 0 {
+            return Poll::Running;
+        }
+        if info.si_code == libc::CLD_EXITED {
+            Poll::Exited(Some(status))
+        } else {
+            Poll::Exited(None)
+        }
+    }
+    #[cfg(not(unix))]
+    match child.try_wait() {
+        Ok(None) => Poll::Running,
+        Ok(Some(status)) => Poll::Exited(status.code()),
+        Err(_) => Poll::Gone,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn siginfo_pid_status(info: &libc::siginfo_t) -> (libc::pid_t, libc::c_int) {
+    (info.si_pid, info.si_status)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn siginfo_pid_status(info: &libc::siginfo_t) -> (libc::pid_t, libc::c_int) {
+    // SAFETY: waitid filled a SIGCHLD siginfo, whose union holds pid/status.
+    unsafe { (info.si_pid(), info.si_status()) }
+}
+
+/// The `main` window's current place, read on the main thread (review IR9).
+fn current_geometry(app: &tauri::AppHandle) -> Option<restart_supervisor::Geometry> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let read = app.clone();
+    app.run_on_main_thread(move || {
+        let found = read.get_webview_window("main").and_then(|w| {
+            let size = w.inner_size().ok()?;
+            let position = w.outer_position().ok().map(|p| (p.x, p.y));
+            let scale = w.scale_factor().unwrap_or(1.0);
+            let maximized = w.is_maximized().unwrap_or(false);
+            Some(restart_supervisor::logical_geometry(
+                (size.width, size.height),
+                position,
+                scale,
+                maximized,
+            ))
+        });
+        let _ = tx.send(found);
+    })
+    .ok()?;
+    rx.recv_timeout(Duration::from_secs(5)).ok().flatten()
 }
 
 /// The real restart steps on the shell's owned backend state (#299 §3).
@@ -933,6 +1030,7 @@ impl restart_supervisor::Respawn for ShellRespawn {
         REBUILDING.store(true, SeqCst);
         let app = self.app.clone();
         let result = (|| {
+            let geometry = current_geometry(&app);
             let destroy = app.clone();
             app.run_on_main_thread(move || {
                 if let Some(w) = destroy.get_webview_window("main") {
@@ -951,7 +1049,8 @@ impl restart_supervisor::Respawn for ShellRespawn {
             let (tx, rx) = std::sync::mpsc::channel();
             let build = app.clone();
             app.run_on_main_thread(move || {
-                let _ = tx.send(build_main_window(&build, &descriptor, true, true).is_ok());
+                let built = build_main_window(&build, &descriptor, true, true, geometry);
+                let _ = tx.send(built.is_ok());
             })
             .map_err(|_| failed())?;
             match rx.recv_timeout(Duration::from_secs(10)) {
@@ -973,11 +1072,7 @@ fn supervise_backend(app: tauri::AppHandle, command: (String, Vec<String>)) {
         let mut guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_mut() {
             None => Poll::Gone,
-            Some(child) => match child.try_wait() {
-                Ok(None) => Poll::Running,
-                Ok(Some(status)) => Poll::Exited(status.code()),
-                Err(_) => Poll::Gone,
-            },
+            Some(child) => peek_child(child),
         }
     };
     let mut respawn = ShellRespawn {
@@ -1118,7 +1213,7 @@ fn main() {
             // (the validated base_url) BEFORE the page loads, only on the
             // loopback-served origin.
             let supervised = has_backend && !attach;
-            build_main_window(app.handle(), &descriptor, has_backend, supervised)?;
+            build_main_window(app.handle(), &descriptor, has_backend, supervised, None)?;
             // #299 §3: exit 75 = a planned restart the UI asked for.
             if supervised {
                 if let Some(command) = command.clone() {
@@ -1151,6 +1246,29 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    /// #299 review IR6: an exit is seen without reaping the child.
+    #[cfg(unix)]
+    #[test]
+    fn peek_reports_an_exit_without_reaping_the_child() {
+        use super::restart_supervisor::Poll;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 75"])
+            .spawn()
+            .expect("sh");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let seen = loop {
+            match super::peek_child(&mut child) {
+                Poll::Running if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20))
+                }
+                other => break other,
+            }
+        };
+        assert_eq!(seen, Poll::Exited(Some(75)));
+        assert_eq!(super::peek_child(&mut child), Poll::Exited(Some(75)));
+        assert_eq!(child.wait().expect("reap").code(), Some(75));
+    }
+
     use super::{
         applescript_escape, backend_log_hint, close_confirm_text, loopback_base,
         roll_log_if_oversized,

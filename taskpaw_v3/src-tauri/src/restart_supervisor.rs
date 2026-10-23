@@ -5,9 +5,12 @@
 //! respawns the same command: the old Job is dropped first (Windows: any
 //! straggler of the old tree dies), the new child gets its own Job, its
 //! readiness line is read (30 s), its control descriptor is loaded and the
-//! `main` window is rebuilt with the new init script. A failure on that path
-//! ends in the existing fatal startup dialog. Any other exit keeps today's
-//! behaviour: the watcher just stops.
+//! `main` window is rebuilt with the new init script, at the old window's size,
+//! position and maximized state (review IR9). A failure on that path ends in
+//! the existing fatal startup dialog. Any other exit keeps today's behaviour:
+//! the watcher just stops. On Unix the watcher looks at the child without
+//! reaping it (review IR6), so the old process group is killed while its
+//! exited leader still pins the group id.
 //!
 //! The decisions are pure and generic so they are unit-tested with a fake
 //! child and a fake spawner; `main.rs` supplies the real ones.
@@ -16,6 +19,34 @@ use std::time::Duration;
 
 pub const RESTART_EXIT_CODE: i32 = 75;
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
+pub const MIN_WIDTH: f64 = 720.0;
+pub const MIN_HEIGHT: f64 = 480.0;
+
+/// The old `main` window's place, in logical pixels (review IR9).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Geometry {
+    pub width: f64,
+    pub height: f64,
+    pub position: Option<(f64, f64)>,
+    pub maximized: bool,
+}
+
+/// Physical inner size / outer position at `scale` → the logical geometry the
+/// window builder takes (never below the minimum size).
+pub fn logical_geometry(
+    size: (u32, u32),
+    position: Option<(i32, i32)>,
+    scale: f64,
+    maximized: bool,
+) -> Geometry {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    Geometry {
+        width: (f64::from(size.0) / scale).max(MIN_WIDTH),
+        height: (f64::from(size.1) / scale).max(MIN_HEIGHT),
+        position: position.map(|(x, y)| (f64::from(x) / scale, f64::from(y) / scale)),
+        maximized,
+    }
+}
 
 /// One look at the owned child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +225,22 @@ mod tests {
         let (fatal, _) = run(&[Poll::Exited(Some(75))], &mut fake);
         assert_eq!(fatal.len(), 1);
         assert_eq!(fake.log, ["release_old", "spawn 1", "adopt 1"]);
+    }
+
+    #[test]
+    fn the_rebuilt_window_keeps_size_position_and_maximized() {
+        // review IR9: physical pixels at 200 % become logical ones
+        let g = logical_geometry((2200, 1440), Some((300, 150)), 2.0, true);
+        assert_eq!(
+            g,
+            Geometry { width: 1100.0, height: 720.0, position: Some((150.0, 75.0)), maximized: true }
+        );
+        // never below the minimum size; a bad scale factor counts as 1
+        let g = logical_geometry((100, 100), None, 0.0, false);
+        assert_eq!(g, Geometry { width: 720.0, height: 480.0, position: None, maximized: false });
+        let g = logical_geometry((1500, 900), Some((-1200, 40)), f64::NAN, false);
+        assert_eq!(g.position, Some((-1200.0, 40.0)));
+        assert_eq!((g.width, g.height), (1500.0, 900.0));
     }
 
     #[test]
