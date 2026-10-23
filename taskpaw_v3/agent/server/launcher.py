@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from taskpaw_v3 import __version__
-from taskpaw_v3.core import power, power_fleet
+from taskpaw_v3.core import power, power_fleet, restart
 from taskpaw_v3.core.auth import auth_disabled
 from taskpaw_v3.core.config import AgentConfig
 from taskpaw_v3.core.control import bootstrap_control, revoke_control, strip_control_env
@@ -420,6 +420,9 @@ def run_agent(
                     power_view=_power_view,
                     worker_provider=lambda: worker_host,
                     address_changed_from=address_changed_from,
+                    boot_id=session.boot_id,
+                    # #299 §3: 立即重启 — a graceful stop, then exit 75
+                    on_restart=lambda: restart.request(shutdown.shutdown),
                 ),
                 log_level="warning",
             )

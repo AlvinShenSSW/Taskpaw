@@ -253,6 +253,8 @@ def create_control_app(
     power_view: Optional[Callable[[str], dict]] = None,
     worker_provider: Optional[Callable[[], Any]] = None,
     address_changed_from: Optional[str] = None,
+    boot_id: Optional[str] = None,
+    on_restart: Optional[Callable[[], None]] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API).
@@ -326,6 +328,7 @@ def create_control_app(
     from taskpaw_v3.agent.server.detect import register_detect_routes
     from taskpaw_v3.agent.server.first_run import register_setup_routes
     from taskpaw_v3.agent.server.network_routes import register_network_routes
+    from taskpaw_v3.agent.server.restart_routes import register_restart_routes
 
     register_network_routes(  # #299 R4–R6: 网络与访问
         app, admin, address_changed_from=address_changed_from
@@ -336,6 +339,13 @@ def create_control_app(
         admin,
         admin.config_dir if admin is not None else None,
         lambda: admin.desired_workflow() if admin is not None else config.workflow,
+    )
+    register_restart_routes(  # #299 §3/R11: 立即重启
+        app,
+        admin,
+        boot_id=boot_id,
+        on_restart=on_restart,
+        worker_provider=worker_provider,
     )
     register_setup_routes(  # #299 R2/§6: the first-run wizard's step
         app,

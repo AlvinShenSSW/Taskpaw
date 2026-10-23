@@ -15,6 +15,7 @@ import yaml
 
 from taskpaw_v3.agent.server import first_run
 from taskpaw_v3.agent.server.launcher import run_agent
+from taskpaw_v3.core import restart
 from taskpaw_v3.core.config import AgentConfig, load_yaml
 from taskpaw_v3.core.startup import emit_startup_error, startup_code
 from taskpaw_v3.core.state import StateError
@@ -102,7 +103,8 @@ def _main() -> int:
         print(f"Agent startup failed: {code}.", file=sys.stderr)
         emit_startup_error(code)
         return 1
-    return 0
+    # #299 §3: a planned restart asks the desktop shell to start us again
+    return restart.exit_code(0)
 
 
 def main() -> int:

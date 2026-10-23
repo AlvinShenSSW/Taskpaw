@@ -287,6 +287,8 @@ class HubConfig(BaseModel):
     machine: str = "hub"
     bind_host: str = "127.0.0.1"
     bind_port: int = 5690
+    # #299 R14: 局域网只读接口 (derived from bind_host for an older hub.yaml)
+    lan_access: bool = False
     # Local management is a separate, authenticated loopback surface.
     control_host: str = "127.0.0.1"
     control_port: int = 5691
@@ -307,8 +309,15 @@ class HubConfig(BaseModel):
     data_dir: str = "~/.taskpaw-hub"
     # Write status.md each poll (OpenClaw compat). Disable if not consumed.
     write_status_md: bool = True
+    # #299 R14: where status.md goes; null = `<data_dir>/status.md`
+    status_md_path: Optional[str] = None
     # Drop status_log rows older than this many days (bounded history). 0 = keep all.
     status_log_retention_days: int = Field(7, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lan_from_bind(cls, data: Any) -> Any:
+        return _derive_lan_access(data)
 
     @field_validator("bind_host")
     @classmethod

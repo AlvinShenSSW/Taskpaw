@@ -325,6 +325,20 @@ class HubStore:
             ).fetchone()
             return row[0] if row else default
 
+    def set_configs(self, values: dict[str, str]) -> None:
+        """#299 R15: several overrides in one transaction (all or none)."""
+        with self._lock:
+            try:
+                self._conn.executemany(
+                    "INSERT INTO config(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    list(values.items()),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def set_config(self, key: str, value: str) -> None:
         with self._lock:
             try:

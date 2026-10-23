@@ -97,6 +97,7 @@ class HubService:
             get_polling_token=lambda: store.get_config(
                 "polling_token", config.polling_token
             ),
+            get_url=lambda: store.get_config("openclaw_url", config.openclaw_url),
             # Seed a restarted Hub's status.md as ONLINE only for agents whose last
             # success is within ~2 polls; older successes render OFFLINE (#38).
             seed_fresh_seconds=max(2 * config.poll_interval, 60),
@@ -170,7 +171,11 @@ class HubService:
 
             from taskpaw_v3.hub.server.status_md import write_status_md
 
-            path = Path(self.config.data_dir).expanduser() / "status.md"
+            path = (
+                Path(self.config.status_md_path).expanduser()
+                if self.config.status_md_path
+                else Path(self.config.data_dir).expanduser() / "status.md"
+            )
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             # From the poller's in-memory snapshot (current reachability + last
             # good status), like V2 — status_log holds only successful polls.
@@ -433,6 +438,9 @@ def create_hub_control_app(
     *,
     control_token: str,
     control_active: Callable[[], bool],
+    yaml_config: HubConfig | None = None,
+    boot_id: str | None = None,
+    on_restart: Callable[[], None] | None = None,
 ) -> FastAPI:
     """Local dashboard API, sharing the network app's single service and store."""
     from taskpaw_v3.core.control import add_control_guard
@@ -560,6 +568,13 @@ def create_hub_control_app(
         log.info("hub: removed agent id=%s (#124)", sid)
         return {"ok": True}
 
+    from taskpaw_v3.hub.server.settings import HubSettings, register_hub_settings
+
+    # #299 R14/R15: 设置 (overrides in the store; hub.yaml is never rewritten)
+    settings = HubSettings(yaml_config or config, config, store)
+    app.state.hub_settings = settings
+    register_hub_settings(app, settings, boot_id=boot_id, on_restart=on_restart)
+
     @app.patch("/config")
     def update_config(request: Request, body: dict):
         if "polling_token" in body:
@@ -596,9 +611,11 @@ def run_hub(
     block: bool = True,
     *,
     config_path: Path | None = None,
+    yaml_config: HubConfig | None = None,
 ) -> GracefulShutdown:
     import uvicorn
 
+    from taskpaw_v3.core import restart
     from taskpaw_v3.core.control import (
         bootstrap_control,
         revoke_control,
@@ -711,6 +728,10 @@ def run_hub(
             service,
             control_token=session.token,
             control_active=session.is_active,
+            yaml_config=yaml_config,
+            boot_id=session.boot_id,
+            # #299 §3: 立即重启 — a graceful stop, then exit 75 for the shell
+            on_restart=lambda: restart.request(shutdown.shutdown),
         )
         servers.extend(
             uvicorn.Server(uvicorn.Config(surface, log_level="warning"))
