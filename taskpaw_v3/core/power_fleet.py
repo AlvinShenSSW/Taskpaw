@@ -35,7 +35,9 @@ is an estimate (估算).
 - **P2-4 R8 (C4).** Every `/status` read is also 判定已停止's status channel:
   unreachable, timeout or `workflow_worker.busy == false` keep a peer quiet;
   any other answer (401, 404, an invalid body, no `busy`) means the machine
-  is up. `quiet(address)` says how long it has been quiet without a break
+  is up — §9 CX19: so does any request whose status line and headers
+  arrived, even when its body then stalled or broke (`PeerError.answered`).
+  `quiet(address)` says how long it has been quiet without a break
   (a gap of more than `STALE_SECONDS` between reads restarts it), and whether
   the peer ever answered since this process started (§9 IR2: a channel that
   never connected may be a wrong address, not a machine that is off).
@@ -169,11 +171,14 @@ class StatusQuiet:
 
 # ── one bounded GET ─────────────────────────────────────────────────────────
 class PeerError(Exception):
-    """A peer request failed; `code` names why, never the peer's own text."""
+    """A peer request failed; `code` names why, never the peer's own text.
+    `answered` (P2-4 §9 CX19): an HTTP response (status line and headers)
+    came back before it failed — the machine is up, whatever its body did."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, answered: bool = False):
         super().__init__(code)
         self.code = code
+        self.answered = answered
 
 
 _CLOCK_SLACK = time.get_clock_info("monotonic").resolution
@@ -345,7 +350,7 @@ def fetch_json(
         try:
             return _get_json(target, sent, attempt, opener)
         except PeerError as exc:
-            if exc.code not in ("unreachable", "timeout"):
+            if exc.answered or exc.code not in ("unreachable", "timeout"):
                 raise
             last = exc
         if time.monotonic() >= deadline:
@@ -359,7 +364,10 @@ def _get_json(
     deadline: float,
     opener: Optional[urllib.request.OpenerDirector],
 ) -> Any:
-    """One GET at one address, inside this attempt's `deadline` (never past the request's)."""
+    """One GET at one address, inside this attempt's `deadline` (never past the request's).
+
+    §9 CX19: every failure after the status line and headers arrived (a
+    non-2xx, a stalled, truncated or invalid body) is `answered`."""
     left = max(0.05, deadline - time.monotonic())
     request = urllib.request.Request(url, headers=headers, method="GET")
     watch = _Watch()
@@ -372,12 +380,12 @@ def _get_json(
         except urllib.error.HTTPError as exc:
             exc.close()
             if watch.expired(exc, deadline):
-                raise PeerError("timeout") from None
+                raise PeerError("timeout", answered=True) from None
             if exc.code in (401, 403):
-                raise PeerError("unauthorized") from None
+                raise PeerError("unauthorized", answered=True) from None
             if exc.code == 404:
-                raise PeerError("not_found") from None
-            raise PeerError("http_error") from None
+                raise PeerError("not_found", answered=True) from None
+            raise PeerError("http_error", answered=True) from None
         except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
             raise PeerError(
                 "timeout" if watch.expired(exc, deadline) else "unreachable"
@@ -385,18 +393,21 @@ def _get_json(
         try:
             with resp:
                 body = _read_capped(resp, deadline)
+        except PeerError as exc:  # the deadline or the cap, mid-body
+            raise PeerError(exc.code, answered=True) from None
         except (http.client.HTTPException, OSError, ValueError) as exc:
             raise PeerError(
-                "timeout" if watch.expired(exc, deadline) else "unreachable"
+                "timeout" if watch.expired(exc, deadline) else "unreachable",
+                answered=True,
             ) from None
         if watch.cut:  # the socket was cut: what was read is not the answer
-            raise PeerError("timeout")
+            raise PeerError("timeout", answered=True)
     finally:
         timer.cancel()
     try:
         return json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        raise PeerError("invalid") from None
+        raise PeerError("invalid", answered=True) from None
 
 
 # ── the cache ───────────────────────────────────────────────────────────────
@@ -762,8 +773,9 @@ class PowerFleet:
         try:
             status = self._fetch(url, token)
         except PeerError as exc:
-            # C4: only a dead channel is quiet; any HTTP answer is a live machine
-            dead = exc.code in ("unreachable", "timeout")
+            # C4: only a dead channel is quiet; any HTTP answer is a live
+            # machine — §9 CX19: a response whose body then failed included
+            dead = not exc.answered and exc.code in ("unreachable", "timeout")
             self._status_seen(peer, None if dead else exc.code, answered=not dead)
             # the last live figure is not shown as current; the histories
             # already read stay (they are history)

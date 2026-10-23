@@ -999,6 +999,115 @@ def test_a_trickling_peer_cannot_outlive_the_request_deadline(trickle, body):
         fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=0.05)
     assert time.monotonic() - started < 0.4
     assert caught.value.code == "timeout"
+    # §9 CX19: a complete status line and headers are an answer; a header
+    # block that never ends is not
+    assert caught.value.answered is body
+
+
+class _HalfAnswer:
+    """§9 CX19: sends `head` (status line and headers) and `body`, then
+    either holds the connection open (`stall`) or closes it."""
+
+    def __init__(self, head: bytes, body: bytes = b"", stall: bool = False):
+        self.head, self.body, self.stall = head, body, stall
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        self.closing = threading.Event()
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while not self.closing.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    def _serve(self, conn):
+        try:
+            conn.settimeout(2.0)
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += conn.recv(4096)
+            conn.sendall(self.head + self.body)
+            if self.stall:
+                self.closing.wait(4.0)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def close(self):
+        self.closing.set()
+        self.sock.close()
+
+
+@pytest.mark.parametrize(
+    ("head", "body", "stall"),
+    [
+        # headers, then the body never comes
+        (b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n", b"", True),
+        # 200 with a truncated body, then the connection closes
+        (b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n", b'{"work', False),
+        # a non-2xx whose body stalls
+        (b"HTTP/1.1 500 Oops\r\nContent-Length: 1000\r\n\r\n", b"", True),
+    ],
+    ids=["stalled-body", "truncated-body", "non-2xx-stalled"],
+)
+def test_a_response_whose_body_fails_still_counts_as_answered(head, body, stall):
+    """§9 CX19 (Codex r6): once the status line and headers arrived, the
+    machine answered, whatever happens to the body."""
+    peer_ = _HalfAnswer(head, body, stall)
+    try:
+        with pytest.raises(PeerError) as caught:
+            fetch_json(f"http://127.0.0.1:{peer_.port}/status", TOKEN, timeout=0.3)
+        assert caught.value.answered is True
+    finally:
+        peer_.close()
+
+
+def test_no_response_at_all_is_not_answered():
+    """§9 CX19: a refused connect and a silent connection never answered."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]  # closed again: nothing listens there
+    with pytest.raises(PeerError) as caught:
+        fetch_json(f"http://127.0.0.1:{port}/status", TOKEN, timeout=0.3)
+    assert caught.value.answered is False
+    silent = SilentPeer()
+    try:
+        with pytest.raises(PeerError) as caught:
+            fetch_json(f"http://127.0.0.1:{silent.port}/status", TOKEN, timeout=0.1)
+        assert caught.value.code == "timeout" and caught.value.answered is False
+    finally:
+        silent.close()
+
+
+def test_an_answered_stall_resets_the_status_channel_quiet_time():
+    """§9 CX19: through the real fetch, a `/status` whose headers arrive but
+    whose body stalls keeps the machine up (never quiet)."""
+    peer_ = _HalfAnswer(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n", b"", True)
+    clock = {"t": 1000.0}
+    address = f"127.0.0.1:{peer_.port}"
+    f = PowerFleet(
+        lambda: [SimpleNamespace(name="w", address=address)],
+        lambda: TOKEN,
+        fetch=lambda u, t: fetch_json(u, t, timeout=0.2),
+        clock=lambda: clock["t"],
+        wall=lambda: 1_790_000_000.0,
+    )
+    try:
+        for _ in range(3):
+            f.refresh_once()
+            clock["t"] += 5.0
+        state = f.quiet(address)
+        assert state is not None and state.answered is True
+        assert state.quiet_s is None  # it answered: not quiet
+    finally:
+        f.stop()
+        peer_.close()
 
 
 class SilentPeer:

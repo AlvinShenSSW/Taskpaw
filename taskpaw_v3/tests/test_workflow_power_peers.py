@@ -45,6 +45,8 @@ class Fetch:
             if url.startswith(prefix):
                 if isinstance(answer, str):
                     raise pf.PeerError(answer)
+                if isinstance(answer, pf.PeerError):
+                    raise answer
                 return answer
         raise pf.PeerError("unreachable")
 
@@ -197,6 +199,20 @@ def test_any_other_answer_means_the_machine_is_up(channel, answer, code):
     read(channel, answer)
     state = channel.fleet.quiet(ADDRESS)
     assert state.quiet_s is None and state.state == code
+
+
+@pytest.mark.parametrize("code", ["timeout", "unreachable"])
+def test_an_answered_request_whose_body_failed_is_not_quiet(channel, code):
+    """§9 CX19 (Codex r6): a response arrived (status line and headers) but
+    the body stalled or broke: the status channel is alive, never quiet."""
+    for _ in range(10):
+        read(channel, "unreachable")
+    channel.fetch.answers[URL] = pf.PeerError(code, answered=True)
+    for _ in range(61):
+        channel.fleet.refresh_once()
+        channel.clock.value += 5.0
+    state = channel.fleet.quiet(ADDRESS)
+    assert state.quiet_s is None and state.answered is True
 
 
 def test_quiet_restarts_after_an_answer_or_a_gap(channel):

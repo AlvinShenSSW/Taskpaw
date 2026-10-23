@@ -347,6 +347,7 @@ class AttemptReport:
     ledger: bool
     outputs_intact: bool
     outcome: str | None = None
+    unreadable: bool = False  # P2-4 §9 CX18: a record the worker cannot read
 
 
 def settle_boot(
@@ -360,8 +361,12 @@ def settle_boot(
     outcome, stays unknown for the worker's finish (`finish`); anything else
     (not reported, children gone, nothing to show) is resolved failed
     `interrupted`, a free retry. A lost reply is never proof of a stop: only
-    the worker's own report of its dead children is."""
+    the worker's own report of its dead children is. P2-4 §9 CX18: while
+    the worker reports any record it cannot read, nothing is interrupted
+    (that record may be any of them): the rest is `held` too."""
+    reports = list(reports)
     by_attempt = {r.attempt_id: r for r in reports}
+    blind = any(r.unreadable for r in reports)
     verdicts: dict[str, Verdict] = {}
     for open_ in rt.store.list_open_assignments(rt.operator):
         assignment = open_.assignment
@@ -374,6 +379,8 @@ def settle_boot(
             (report.ledger and report.outputs_intact) or report.outcome
         ):
             verdicts[assignment.attempt_id] = "finish"
+        elif blind:
+            verdicts[assignment.attempt_id] = "held"
         else:
             rt.resolve_interrupted(assignment)
             verdicts[assignment.attempt_id] = "interrupted"

@@ -204,6 +204,7 @@ class AttemptReportBody(_Strict):
     ledger: bool
     outputs_intact: bool
     outcome: Literal["succeeded", "failed"] | None = None
+    unreadable: bool = False  # P2-4 §9 CX18: held, never interrupted
 
 
 class BootBody(_Strict):
@@ -469,6 +470,7 @@ def create_worker_app(
                         a.ledger,
                         a.outputs_intact,
                         a.outcome,
+                        unreadable=a.unreadable,
                     )
                     for a in body.attempts
                 ],

@@ -922,3 +922,97 @@ def test_a_revoked_worker_joined_again_in_the_same_process(world):
     until(lambda: not (staging / "attempts" / f"{attempt}.json").exists(), LONG)
     assert not (staging / "work" / attempt).exists()
     world.invariants()
+
+
+# ── Codex round 6 (P2-4 §9 CX18) ────────────────────────────────────────
+def test_cx18_settle_boot_never_interrupts_while_a_record_is_unreadable():
+    """§9 CX18 (Codex r6): the controller side. An assignment the worker did
+    not report is interrupted only when every record was read; a report of
+    any unreadable record holds it (the record may be that assignment's)."""
+    from types import SimpleNamespace
+
+    from taskpaw_v3.workflow import remote_attempts as ra
+
+    worker, old_boot, new_boot = (str(uuid.uuid4()) for _ in range(3))
+    first, second, other = (str(uuid.uuid4()) for _ in range(3))
+    resolved: list[str] = []
+
+    def rt_of(*attempts: str) -> Any:
+        open_ = [
+            SimpleNamespace(
+                assignment=SimpleNamespace(
+                    worker_id=worker, boot_id=old_boot, attempt_id=a
+                )
+            )
+            for a in attempts
+        ]
+        return SimpleNamespace(
+            operator=None,
+            store=SimpleNamespace(list_open_assignments=lambda op: open_),
+            resolve_interrupted=lambda a: resolved.append(a.attempt_id),
+        )
+
+    stopped = ra.AttemptReport(second, False, False, False, None)
+    unreadable = ra.AttemptReport(other, True, False, False, None, unreadable=True)
+    verdicts = ra.settle_boot(
+        rt_of(first, second), worker, new_boot, [stopped, unreadable]
+    )
+    assert verdicts == {first: "held", second: "held"} and resolved == []
+    # its own record unreadable: held as well
+    own = ra.AttemptReport(first, True, False, False, None, unreadable=True)
+    assert ra.settle_boot(rt_of(first), worker, new_boot, [own]) == {first: "held"}
+    assert resolved == []
+    # every record read: the unreported and the stopped are interrupted
+    verdicts = ra.settle_boot(rt_of(first, second), worker, new_boot, [stopped])
+    assert verdicts == {first: "interrupted", second: "interrupted"}
+    assert resolved == [first, second]
+
+
+def test_cx18_an_unreadable_record_after_a_restart_is_held_not_interrupted(
+    world, monkeypatch
+):
+    """§9 CX18 end to end: the worker restarts while its attempt file raises
+    PermissionError. The assignment stays unresolved (no free retry), the
+    boot stays unreconciled and nothing is deleted while the read fails; once
+    it reads again the boot settles it as before (a free retry)."""
+    world.tools.set_jasna(mode="fail")  # no ledger
+    worker = world.join()
+    reached = _block(world, worker)
+    film = routed_film(world)
+    assert reached.wait(LONG)
+    (open_,) = world.rt.store.list_open_assignments(world.rt.operator)
+    attempt = open_.assignment.attempt_id
+    staging = world.tmp / "w1" / "staging"
+    record = staging / "attempts" / f"{attempt}.json"
+    assert record.exists()
+    real = Path.read_text
+    blocked = {"on": True}
+
+    def read_text(self: Path, *args: Any, **kw: Any) -> str:
+        if blocked["on"] and self == record:
+            raise PermissionError("denied")
+        return real(self, *args, **kw)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    boots: list[list[dict[str, Any]]] = []
+    real_boot = WorkerClient.boot
+
+    def boot(self, boot_id, attempts=None):
+        boots.append(list(attempts or []))
+        return real_boot(self, boot_id, attempts)
+
+    monkeypatch.setattr(WorkerClient, "boot", boot)
+    world.tools.set_jasna()  # a retry would succeed
+    worker = world.restart_worker(worker)
+    until(lambda: len(boots) >= 3, LONG)  # re-posted while unreconciled
+    assert any(r.get("unreadable") for r in boots[-1])
+    open_now = world.rt.store.list_open_assignments(world.rt.operator)
+    assert [o.assignment.attempt_id for o in open_now] == [attempt]
+    assert record.exists() and not worker.reconciled
+    assert len(world.attempts(film, "restore")) == 1 and world.jasna_runs() == 1
+    blocked["on"] = False  # readable again: settled as a free retry
+    wait_status(world, film, "restore", "succeeded")
+    first, second = world.attempts(film, "restore")
+    assert {e.kind for e in first.evidence} == {"exec_interrupted"}
+    assert second.status == "succeeded"
+    world.invariants()

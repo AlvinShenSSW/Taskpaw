@@ -243,6 +243,16 @@ class Transfer:
     rate: float = 0.0
 
 
+def _report_id(name: str) -> str:
+    """§9 CX18: the boot report id of an unreadable attempts-folder entry —
+    its file name when that is an attempt id, else a stable id derived from
+    the name (a valid boot body either way)."""
+    stem = name[: -len(".json")] if name.endswith(".json") else None
+    if stem is not None and _is_uuid(stem):
+        return stem
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"taskpaw-attempt:{name}"))
+
+
 def attempts_on_disk(staging_root: Path) -> bool:
     """P2-4 §9 CX1: an entry in the attempts folder — work a restarted
     worker has not settled with the controller yet (its children may live).
@@ -367,10 +377,16 @@ class RemoteDispatcher:
         return True
 
     def _held_alive(self) -> bool:
-        """§11 CX13: a child of an earlier boot (a `held` verdict) still runs."""
+        """§11 CX13: a child of an earlier boot (a `held` verdict) still runs.
+        P2-4 §9 CX18: a held record that cannot be read is unknown, which is
+        alive; only a record that is gone, or read with its children dead,
+        is not."""
         with self._lock:
             held = list(self._held)
+        unreadable = self._unreadable_ids()
         for attempt_id in held:
+            if attempt_id in unreadable:
+                return True
             state = AttemptState.load(self._path(attempt_id))
             if state is not None and any(process_alive(c) for c in state.children):
                 return True
@@ -572,6 +588,10 @@ class RemoteDispatcher:
             or AttemptState.load(self.attempt_dir / name) is None
         )
 
+    def _unreadable_ids(self) -> set[str]:
+        """§9 CX18: the boot report ids of the entries `_unreadable` names."""
+        return {_report_id(name) for name in self._unreadable()}
+
     def _path(self, attempt_id: str) -> Path:
         return self.attempt_dir / f"{attempt_id}.json"
 
@@ -637,7 +657,13 @@ class RemoteDispatcher:
         if not self._tick_lock.acquire(blocking=False):
             return
         try:
-            known = {p.name.split(".")[0] for p in self.attempt_dir.glob("*")}
+            try:  # §9 CX18: an unreadable folder names nothing — sweep nothing
+                with os.scandir(self.attempt_dir) as entries:
+                    known = {e.name.split(".")[0] for e in entries}
+            except FileNotFoundError:
+                known = set()
+            except OSError:
+                return
             with self._lock:
                 if self._active is not None:
                     known.add(self._active.state.attempt_id)
@@ -658,7 +684,12 @@ class RemoteDispatcher:
             self._tick_lock.release()
 
     def reports(self) -> list[dict[str, Any]]:
-        """§5: each local attempt file as found now."""
+        """§5: each local attempt file as found now. P2-4 §9 CX18: an entry
+        that cannot be read (a file raising on read, one that does not parse,
+        an unreadable folder) is reported too, as `unreadable` with its
+        children unknown (alive), so the controller holds the boot instead
+        of settling an unreported assignment as interrupted. The read is
+        tried again at every report (each boot re-post)."""
         values = []
         # every file, the one being delivered included: a re-post that left
         # it out would let the controller settle it as interrupted and run
@@ -676,6 +707,19 @@ class RemoteDispatcher:
                     "outcome": None
                     if settled is None
                     else ("succeeded" if settled.get("ok") else "failed"),
+                    "unreadable": False,
+                }
+            )
+        for name in self._unreadable():
+            values.append(
+                {
+                    "attempt_id": _report_id(name),
+                    "assignment_id": None,
+                    "children_alive": True,  # unknown is never stopped
+                    "ledger": False,
+                    "outputs_intact": False,
+                    "outcome": None,
+                    "unreadable": True,
                 }
             )
         return values
@@ -699,14 +743,19 @@ class RemoteDispatcher:
     def booted(self, reply: Mapping[str, Any]) -> None:
         """The boot reply: interrupted attempts are collected, held ones wait,
         `finish` ones are delivered without a re-run; staged sources missing
-        from `keep` go (nothing while an attempt is unknown: those are kept)."""
+        from `keep` go (nothing while an attempt is unknown: those are kept).
+        P2-4 §9 CX18: a record that cannot be read now is never collected,
+        whatever the verdict: it is held."""
         verdicts = dict(reply.get("attempts") or {})
         held, deliver = set(), []
+        unreadable = self._unreadable_ids()
         for attempt_id, verdict in verdicts.items():
-            if verdict == "interrupted":
-                self._collect(attempt_id)
-            elif verdict == "held":
+            if verdict == "held" or (
+                verdict == "interrupted" and attempt_id in unreadable
+            ):
                 held.add(attempt_id)
+            elif verdict == "interrupted":
+                self._collect(attempt_id)
             elif verdict == "finish":
                 state = AttemptState.load(self._path(attempt_id))
                 if state is not None:
@@ -731,7 +780,7 @@ class RemoteDispatcher:
                     self._deliver.append(attempt_id)
             self._reconciled = bool(reply.get("reconciled"))
         if held:  # §11 CX2: the GPU stays reserved until they are gone
-            self._acquire(HELD)
+            self._acquire(UNREADABLE_ATTEMPTS if held & unreadable else HELD)
         if "keep" in reply:
             keep = {(str(k["film"]), int(k["rev"])) for k in reply.get("keep") or []}
             for entry in list(self.index.entries().values()):

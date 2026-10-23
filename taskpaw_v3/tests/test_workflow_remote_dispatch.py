@@ -1598,3 +1598,116 @@ def test_cx14_a_deletion_that_failed_is_retried_by_the_periodic_sweep(
         assert (staging.work_dir / live).exists()
     finally:
         assert d.stop(10)
+
+
+# ── Codex round 6 (P2-4 §9 CX18) ────────────────────────────────────────
+def _deny_reads(monkeypatch, *paths):
+    """Reading these attempt files raises PermissionError (antivirus, an
+    ACL); every other read is real. Returns a function that lifts it."""
+    denied = {Path(p) for p in paths}
+    real = Path.read_text
+
+    def read_text(self, *args, **kw):
+        if self in denied:
+            raise PermissionError("denied")
+        return real(self, *args, **kw)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    return denied.clear
+
+
+def test_cx18_an_unreadable_attempt_record_is_reported_held_and_kept(
+    tmp_path, monkeypatch
+):
+    """§9 CX18 (Codex r6): after a restart an attempt file that raises on
+    read is reported to the boot as an explicit unknown entry by its file
+    name, never left out (which the controller would settle as interrupted);
+    a held verdict keeps the file and its work folder, reserves the GPU and
+    keeps the shutdown unconfirmed; the read is retried at every report."""
+    from taskpaw_v3.workflow import remote_dispatch as rd
+
+    monkeypatch.setattr(rd, "process_alive", lambda identity: False)
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    readable = _held_attempt(staging, client.add())
+    locked = _held_attempt(staging, client.add())
+    path = staging.root / "attempts" / f"{locked}.json"
+    (staging.work_dir / locked).mkdir(parents=True)
+    lift = _deny_reads(monkeypatch, path)
+
+    reports = {r["attempt_id"]: r for r in d.reports()}
+    assert set(reports) == {readable, locked}
+    assert reports[locked]["unreadable"] is True
+    assert reports[locked]["children_alive"] is True  # unknown is never stopped
+    assert reports[readable]["unreadable"] is False
+
+    d.booted({"reconciled": False, "attempts": {locked: "held"}, "keep": []})
+    assert path.exists() and (staging.work_dir / locked).exists()
+    assert d.lease.holder() == d.run_id
+    assert d.lease.blocking_label() == rd.UNREADABLE_ATTEMPTS
+    # a stale or mistaken verdict never deletes a record it cannot read
+    d.booted({"reconciled": False, "attempts": {locked: "interrupted"}, "keep": []})
+    assert path.exists() and (staging.work_dir / locked).exists()
+    d.booted({"reconciled": False, "attempts": {locked: "held"}, "keep": []})
+    assert d.stop(0.2) is False  # its children are unknown: not confirmed
+    assert d.lease.holder() == d.run_id
+
+    lift()  # the read works again: an ordinary report next time
+    again = {r["attempt_id"]: r for r in d.reports()}
+    assert again[locked]["unreadable"] is False
+    assert again[locked]["children_alive"] is False
+
+
+def test_cx18_an_unreadable_entry_without_an_attempt_name_is_still_reported(
+    tmp_path,
+):
+    """§9 CX18: a corrupt file or one whose name is no attempt id is still
+    reported (a stable id derived from its name), so the boot holds."""
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    attempts = staging.root / "attempts"
+    attempts.mkdir(parents=True, exist_ok=True)
+    corrupt = ident()
+    (attempts / f"{corrupt}.json").write_text("{not json", encoding="utf-8")
+    (attempts / "junk.tmp").write_bytes(b"x")
+    reports = d.reports()
+    assert all(r["unreadable"] for r in reports) and len(reports) == 2
+    ids = {r["attempt_id"] for r in reports}
+    assert corrupt in ids
+    for value in ids:
+        assert str(uuid.UUID(value)) == value  # a valid boot body
+    assert ids == {r["attempt_id"] for r in d.reports()}  # stable
+
+
+def test_cx18_an_unreadable_attempts_folder_sweeps_no_work_folder(
+    tmp_path, monkeypatch
+):
+    """§9 CX18: the orphan sweep names its known attempts from the folder; a
+    folder that cannot be listed names nothing, so nothing is swept."""
+    import os
+
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    attempt = _held_attempt(staging, ident())
+    (staging.work_dir / attempt).mkdir(parents=True)
+    real = os.scandir
+
+    def denied(path="."):
+        if os.fspath(path) == os.fspath(d.attempt_dir):
+            raise PermissionError("denied")
+        return real(path)
+
+    real_glob = Path.glob
+
+    def swallowed(self, pattern, *args, **kw):  # `Path.glob` hides the error
+        if self == d.attempt_dir:
+            return iter(())
+        return real_glob(self, pattern, *args, **kw)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    monkeypatch.setattr(Path, "glob", swallowed)
+    d._sweep_orphans()
+    assert (staging.work_dir / attempt).exists()
