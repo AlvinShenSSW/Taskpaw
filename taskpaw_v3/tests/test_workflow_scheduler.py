@@ -439,7 +439,7 @@ def at(w, limit):
         (16311, UHD, UHD, None),  # P2-5 R3: a re-verified 16 GB takes 4K
         (16311, UHD, FHD, None),
         (16311, FHD, UHD, "4K 需重新核验"),  # approved before 4K: re-核验 first
-        (16311, FHD, FHD, None),  # ... and keeps taking 1080p meanwhile
+        (16311, FHD, FHD, None),  # eligibility rule in isolation: a verified 1080p profile
         (15360, FHD, UHD, "4K 需重新核验"),  # the 16 GB class boundary
         (8151, FHD, FHD, s.NO_RESTORE),  # OD5 wins whatever the profile
         (8151, FHD, UHD, s.NO_RESTORE),

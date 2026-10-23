@@ -38,8 +38,8 @@ export function routing1080(tier: "standard" | "good" | "high"): PlanRouting {
   };
 }
 const routing4k: PlanRouting = {
-  auto: { waiting: "等待设备：显存不足 4K" },
-  devices: [W.ti70, W.ti1, W.ti2].map((w) => device(w, { reason: "显存不足 4K" })).concat(device(W.ti3, { reason: "离线" })),
+  auto: { waiting: "等待设备：4K 需重新核验" },
+  devices: [W.ti70, W.ti1, W.ti2].map((w) => device(w, { reason: "4K 需重新核验" })).concat(device(W.ti3, { reason: "离线" })),
 };
 const noGpu: PlanRouting = { auto: { waiting: null, text: "无需修复，本机完成" }, devices: [] };
 

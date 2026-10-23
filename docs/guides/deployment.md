@@ -122,8 +122,12 @@ films go only to a worker whose approved profile says so.
 1. Update **every** machine to the same build first (see 版本不一致 below).
 2. On each 16 GB worker the device page shows 待核验 again (the proposed max is
    above the approved max). Click 核验并启用 once per worker.
-3. Until then the worker keeps taking 1080p films, and a 4K film waits in 待处理
-   with 「4K 需重新核验」. 「显存不足 4K」 means the worker truly cannot take 4K.
+3. After the update every worker re-posts its probe with the 4K max, and the controller
+   de-verifies it: **every** worker shows 待核验 and takes **no** film, 1080p included,
+   until you click 核验并启用. Films wait in 待处理 with 「未核验」. Re-核验 each worker once
+   after updating and work resumes, including 4K on 16 GB cards. 「4K 需重新核验」 shows only
+   briefly, before the worker has re-posted its probe. 「显存不足 4K」 means the worker truly
+   cannot take 4K.
 
 A card under 16 GB is refused before any profile check and cannot be approved.
 
