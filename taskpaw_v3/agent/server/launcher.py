@@ -110,6 +110,11 @@ def run_agent(
 
     from .app import create_control_app, create_network_app
 
+    # #299 R5: a LAN bind_host DHCP took away moves to the primary private
+    # address (saved with a backup) before the guard and any socket claim.
+    from .network_routes import heal_on_startup
+
+    address_changed_from = heal_on_startup(config, config_path)
     # Refuse an unsafe network exposure at startup too — not just from the UI guard
     # — so a hand-edited agent.yaml / bootstrap can't bind wildcard/public/non-
     # loopback-without-token unguarded (#114/Kimi). Raised BEFORE any socket claim.
@@ -414,6 +419,7 @@ def run_agent(
                     workflow_provider=lambda: workflow_host,
                     power_view=_power_view,
                     worker_provider=lambda: worker_host,
+                    address_changed_from=address_changed_from,
                 ),
                 log_level="warning",
             )

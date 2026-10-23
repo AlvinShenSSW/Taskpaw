@@ -252,6 +252,7 @@ def create_control_app(
     workflow_provider: Optional[Callable[[], Optional["WorkflowHostLike"]]] = None,
     power_view: Optional[Callable[[str], dict]] = None,
     worker_provider: Optional[Callable[[], Any]] = None,
+    address_changed_from: Optional[str] = None,
 ) -> FastAPI:
     """Loopback-only control API for the local UI (agent console). CORS is opened
     for the desktop UI origins here (NOT on the network API).
@@ -323,6 +324,11 @@ def create_control_app(
     )
 
     from taskpaw_v3.agent.server.first_run import register_setup_routes
+    from taskpaw_v3.agent.server.network_routes import register_network_routes
+
+    register_network_routes(  # #299 R4–R6: 网络与访问
+        app, admin, address_changed_from=address_changed_from
+    )
 
     register_setup_routes(  # #299 R2/§6: the first-run wizard's step
         app,
@@ -442,6 +448,7 @@ def create_control_app(
     # live-applied. Loopback-only (this whole app binds control_host). Mounted
     # only when an admin is wired (the headless/interactive launcher provides it).
     if admin is not None:
+        from taskpaw_v3.agent.server.admin import ConfigRefused
 
         def _guard(fn, *a):
             try:
@@ -449,7 +456,19 @@ def create_control_app(
                 if isinstance(result, dict) and result.get("outcome") == "busy":
                     return JSONResponse(result, status_code=409)
                 return result
+            except ConfigRefused as e:  # #299 R16: per field, no value echoed
+                return JSONResponse(
+                    {"detail": str(e), "fields": e.fields}, status_code=422
+                )
             except ValueError as e:  # unknown type / dup / invalid config
+                if str(e) == "operation_busy":
+                    return JSONResponse(
+                        {
+                            "detail": "正在保存其他设置，请稍后再试",
+                            "code": "operation_busy",
+                        },
+                        status_code=409,
+                    )
                 raise HTTPException(status_code=400, detail=str(e))
             except KeyError as e:  # not registered in the supervisor
                 raise HTTPException(status_code=404, detail=str(e))

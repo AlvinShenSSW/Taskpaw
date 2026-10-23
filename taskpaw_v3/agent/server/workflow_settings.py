@@ -51,6 +51,7 @@ STAGING_PAIRED = "已配对的工作机改暂存目录需要重新加入"
 OPERATION_BUSY = "正在保存其他设置，请稍后再试"
 UNKNOWN = "无法确认是否有影片在处理，暂不允许切换"  # §9 CX15/CX16
 WORKER_BUSY = "本机还有派来的影片或进行中的任务，请先暂停领取并等待完成"
+NEEDS_LAN = "需要先开启局域网访问"  # #299 R16
 STORE_TIMEOUT = 2.0  # seconds: the guard looks at the store, never waits on it
 PATHS = (
     "inbox_root",
@@ -301,6 +302,14 @@ def _validate_role(
             continue
         if raw and name not in errors and not Path(raw).is_file():
             errors[name] = "文件不存在"
+    # #299 R16: GPU workers reach this machine (or it reaches its 主控) on the LAN
+    from taskpaw_v3.core.net import bind_is_loopback
+
+    if bind_is_loopback(config.bind_host):
+        if role == "worker":
+            errors.setdefault("role", NEEDS_LAN)
+        elif new.remote_workers:
+            errors.setdefault("remote_workers", NEEDS_LAN)
     port = new.worker_api_port
     if not 1 <= port <= 65535:
         errors["worker_api_port"] = "端口须在 1–65535 之间"
@@ -698,7 +707,7 @@ def register_workflow_settings(
             )
         except OSError:  # nothing was committed (the backup goes first)
             return JSONResponse(
-                status_code=500, content={"detail": "保存失败：无法写入 agent.yaml"}
+                status_code=500, content={"detail": "保存失败：无法写入设置文件"}
             )
         return {
             "ok": True,

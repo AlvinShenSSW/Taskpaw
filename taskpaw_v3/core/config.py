@@ -134,6 +134,19 @@ class PowerSettings(BaseModel):
         return self
 
 
+def _derive_lan_access(data: Any) -> Any:
+    """#299: a config without `lan_access` (written before the switch) has
+    LAN access exactly when its bind_host is not loopback."""
+    if not isinstance(data, dict) or "lan_access" in data:
+        return data
+    from taskpaw_v3.core.net import bind_is_loopback
+
+    host = data.get("bind_host", "127.0.0.1")
+    if not isinstance(host, str):
+        return data
+    return {**data, "lan_access": not bind_is_loopback(host)}
+
+
 class AgentConfig(BaseModel):
     """A V3 agent's local config (`agent.yaml`)."""
 
@@ -151,6 +164,10 @@ class AgentConfig(BaseModel):
     # (constitution §2: no public/WAN exposure — never default to 0.0.0.0).
     bind_host: str = "127.0.0.1"
     bind_port: int = 5680
+    # #299 R4: 允许局域网访问. On: `bind_host` is a LAN address of this machine
+    # (self-healed at startup, R5); off: loopback. An agent.yaml written before
+    # the switch existed gets it from its bind_host (`_lan_from_bind`).
+    lan_access: bool = False
     # Local control API (start/stop, edit config) — loopback only.
     control_host: str = "127.0.0.1"
     control_port: int = 5681
@@ -188,6 +205,11 @@ class AgentConfig(BaseModel):
     # Failover (#192 §4, 「主模型不可用时改用备用模型」): while a model is
     # unavailable its lines go to the next one; off → they wait for the first.
     llm_failover: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lan_from_bind(cls, data: Any) -> Any:
+        return _derive_lan_access(data)
 
     @field_validator(
         "llm_thinking_off",

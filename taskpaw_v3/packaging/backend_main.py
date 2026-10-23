@@ -55,6 +55,12 @@ def main(argv: list[str] | None = None) -> int:
         from taskpaw_v3.agent.state import main as state_main
 
         return state_main(argv[1:], desktop_config=default_config_path())
+    if role == "agent-firewall":
+        # #299 §4: started elevated by the agent (one UAC prompt); fixed argv
+        # `allow --ports P[,P]`, frozen Windows builds only, fixed netsh lines.
+        from taskpaw_v3.agent.firewall import route_main
+
+        return route_main(argv[1:])
     if role == "hub-cursor":
         from taskpaw_v3.hub.__main__ import main as cursor_main
 

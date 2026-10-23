@@ -76,6 +76,14 @@ TIERS = ("standard", "good", "high")
 _TICKET = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 
 
+# #299 R9: what each failed 加入 says (the code itself is never echoed)
+MALFORMED = "配对码格式不对，应以 TP1: 开头"
+REFUSED_CODE = (
+    "配对码无效、已使用或已过期（15 分钟内有效，只能用一次）。"
+    "请在主控 设备 → 添加设备 重新生成，再粘贴一次。"
+)
+
+
 class JoinError(ValueError):
     """加入 refused; the message is UI text and never echoes the code."""
 
@@ -100,7 +108,7 @@ class PairingCode:
 def parse_code(code: str) -> PairingCode:
     """`TP1:<host>:<port>:<pairing_id>:<ticket>`, an IPv6 host in brackets.
     A wildcard or a public (global) host is refused."""
-    bad = JoinError("配对码无效")
+    bad = JoinError(MALFORMED)
     value = (code or "").strip()
     if not value.startswith("TP1:"):
         raise bad
@@ -644,7 +652,7 @@ class WorkerHost:
         if exc.status == 0:
             raise JoinError("无法连接主控，请检查地址与网络") from None
         if exc.status == 401:
-            raise JoinError("配对码无效、已使用或已过期") from None
+            raise JoinError(REFUSED_CODE) from None
         raise JoinError("主控拒绝了加入（设备已撤销或已退休）") from None
 
     # ── the loop ─────────────────────────────────────────────────────────

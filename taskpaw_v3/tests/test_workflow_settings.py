@@ -49,6 +49,9 @@ def _write_config(path: Path, **workflow) -> None:
         "server_id": "s",
         "machine": "m",
         "host_metrics": False,
+        # #299 R16: GPU workers need LAN access (a LAN bind needs a token)
+        "bind_host": "192.168.1.5",
+        "api_token": "tp_lan-access-fixture-token-0001",
         "llm_api_key": LLM_KEY,
         "power": {"peers": [{"name": "Mac", "address": "192.168.1.20"}]},
         "monitors": [{"type_id": "fake", "name": "keep-me", "config": {}}],

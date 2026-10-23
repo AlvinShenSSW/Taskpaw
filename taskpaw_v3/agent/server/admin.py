@@ -71,7 +71,41 @@ def _validation_summary(e: ValidationError) -> str:
 
 # Shared network-exposure guard (#114) — single source of truth used by the agent
 # UI (here), the agent startup, and the Hub, so the rules can't drift.
-from taskpaw_v3.core.net import guard_bind_exposure  # noqa: E402
+from taskpaw_v3.core.net import (  # noqa: E402
+    bind_is_global,
+    bind_is_loopback,
+    bind_is_wildcard,
+    guard_bind_exposure,
+)
+
+NEEDS_TOKEN = "开启局域网访问需要访问令牌"
+NEEDS_LAN_FOR_WORKERS = "GPU 工作机接入需要局域网访问"
+PICK_ADDRESS = "请选择本机地址"
+
+
+class ConfigRefused(ValueError):
+    """#299 R16: a refused config save, per field, never echoing a value."""
+
+    def __init__(self, fields: dict[str, str]) -> None:
+        super().__init__("设置有误")
+        self.fields = fields
+
+
+def _default_bind_probe(host: str, port: int) -> Optional[str]:
+    from taskpaw_v3.core.lan import probe_bind
+
+    return probe_bind(host, port)
+
+
+def workflow_needs_lan(workflow: Any) -> bool:
+    """A GPU worker, or a 主控 that lets GPU workers in, needs a LAN bind."""
+    return bool(
+        workflow.enabled
+        and (
+            workflow.role == "worker"
+            or (workflow.role == "controller" and workflow.remote_workers)
+        )
+    )
 
 
 @dataclass
@@ -102,8 +136,11 @@ class MonitorAdmin:
         config_path: Optional[Path] = None,
         *,
         operation_timeout: float = 10.0,
+        bind_probe: Optional[Callable[[str, int], Optional[str]]] = None,
     ) -> None:
         self._config = config
+        # #299 R4: a changed host:port is test-bound before it is saved
+        self._bind_probe = bind_probe or _default_bind_probe
         self._sup = supervisor
         self._reg = registry
         self._path = config_path
@@ -890,6 +927,7 @@ class MonitorAdmin:
     # and NOT server_id, the stable identity used for Hub grouping).
     _EDITABLE_CONFIG = (
         "machine",
+        "lan_access",  # #299 R4: 允许局域网访问 (bind_host follows it)
         "bind_host",
         "bind_port",
         "control_host",
@@ -986,6 +1024,16 @@ class MonitorAdmin:
         """agent.yaml's folder: the workflow's default data directory's parent."""
         return self._path.parent if self._path is not None else None
 
+    def desired(self, name: str) -> Any:
+        """One saved (pending) editable setting (#299 网络与访问); the caller
+        must never log or echo a secret it reads here."""
+        with self._lock:
+            return self._desired[name]
+
+    def running(self) -> AgentConfig:
+        """The config this process runs (boot values for non-live fields)."""
+        return self._config
+
     def desired_workflow(self) -> Any:
         """The saved (pending) `workflow` section (P2-4 设置 · 媒体工作流)."""
         with self._lock:
@@ -1034,6 +1082,18 @@ class MonitorAdmin:
             # PWR-1: a partial `power` object edits only the fields it names.
             if isinstance(p.get("power"), dict):
                 p["power"] = {**self._desired["power"].model_dump(), **p["power"]}
+            # #299 R4: 允许局域网访问 drives bind_host — off means loopback;
+            # an older client sending only bind_host gets the matching switch
+            network = bool(
+                {"lan_access", "bind_host", "bind_port", "control_port"} & set(p)
+            )
+            if "lan_access" in p:
+                if not isinstance(p["lan_access"], bool):
+                    raise ConfigRefused({"lan_access": "格式不正确"})
+                if not p["lan_access"]:
+                    p["bind_host"] = "127.0.0.1"
+            elif isinstance(p.get("bind_host"), str):
+                p["lan_access"] = not bind_is_loopback(p["bind_host"])
             workflow = "workflow" in p
             if workflow:
                 p["workflow"] = {
@@ -1058,6 +1118,8 @@ class MonitorAdmin:
             # still loopback) — not a brittle exact-string set (Codex #43 r3).
             # Shared guard (wildcard / public / non-loopback-without-token), the
             # single source used by the agent startup and the Hub too (#114/Kimi).
+            if network:
+                self._check_network(validated)
             guard_bind_exposure(
                 validated.bind_host, validated.api_token, label="network API"
             )
@@ -1070,6 +1132,8 @@ class MonitorAdmin:
                 getattr(validated, f) != getattr(self._config, f)
                 for f in self._NON_LIVE_CONFIG
             )
+            if network:
+                self._probe_network(validated)
             # Persist the candidate desired scalars FIRST; commit to self._desired
             # (and the live token) ONLY if the write succeeds, so a failed save
             # leaves config + disk untouched — atomic (Codex #43 r7).
@@ -1102,6 +1166,47 @@ class MonitorAdmin:
             )
             set_power_settings(validated.power)  # the sampler's next tick (PW07)
             return {"ok": True, "restart_required": restart_required}
+
+    @staticmethod
+    def _check_network(validated: AgentConfig) -> None:
+        """#299 R4/R16: per-field refusals before the shared exposure guard."""
+        host, errors = validated.bind_host, {}
+        if validated.lan_access and bind_is_loopback(host):
+            errors["bind_host"] = PICK_ADDRESS
+        elif bind_is_wildcard(host):
+            errors["bind_host"] = "不能监听所有网卡，请选择一个本机地址"
+        elif bind_is_global(host):
+            errors["bind_host"] = "不能使用公网地址"
+        elif not bind_is_loopback(host) and not validated.api_token.strip():
+            errors["api_token"] = NEEDS_TOKEN
+        if bind_is_loopback(host) and workflow_needs_lan(validated.workflow):
+            errors["lan_access"] = NEEDS_LAN_FOR_WORKERS
+        if errors:
+            raise ConfigRefused(errors)
+
+    def _probe_network(self, validated: AgentConfig) -> None:
+        """#299 R4: bind a changed address/port once before saving it — a
+        setting that cannot start would leave no UI to fix it."""
+        from taskpaw_v3.core.lan import NOT_LOCAL
+
+        errors: dict[str, str] = {}
+        running = self._config
+        if (validated.bind_host, validated.bind_port) != (
+            running.bind_host,
+            running.bind_port,
+        ):
+            why = self._bind_probe(validated.bind_host, validated.bind_port)
+            if why:
+                errors["bind_host" if why == NOT_LOCAL else "bind_port"] = why
+        if (validated.control_host, validated.control_port) != (
+            running.control_host,
+            running.control_port,
+        ):
+            why = self._bind_probe(validated.control_host, validated.control_port)
+            if why:
+                errors["control_port"] = why
+        if errors:
+            raise ConfigRefused(errors)
 
     def llm_test(self, candidate: dict, slot: str = "primary") -> dict[str, Any]:
         """Settings "Test connection" (#178) for one provider slot (#190: primary,
