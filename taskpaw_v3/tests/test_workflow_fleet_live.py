@@ -39,7 +39,6 @@ def beat(**kw) -> Heartbeat:
         },
         disk={"free": 900 * 10**9, "staging_used": 40 * 10**9, "cap": 500 * 10**9},
         tiers_ready=["standard", "good"],
-        asr_ready=True,
         staged=[],
         current=None,
         transfers=[],

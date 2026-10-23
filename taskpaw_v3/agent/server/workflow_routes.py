@@ -82,8 +82,7 @@ class VersionBody(BaseModel):
 
 
 class ApproveBody(VersionBody):
-    restore: StrictBool
-    asr: StrictBool
+    restore: StrictBool  # OD7 (#298 R10): restore only, no `asr`
 
 
 class AdmissionBody(VersionBody):
@@ -455,7 +454,6 @@ def register_workflow_routes(
                 worker_id,
                 body.expected_version,
                 restore=body.restore,
-                asr=body.asr,
             )
         )
         return {"ok": True}

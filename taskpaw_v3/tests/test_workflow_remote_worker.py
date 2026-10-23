@@ -136,7 +136,7 @@ def server(host):
 
 def fake_probe(vram=16311, worker="fake"):
     def run(settings, staging):
-        return Probe(probe(worker, vram=vram), ("standard", "good"), True)
+        return Probe(probe(worker, vram=vram), ("standard", "good"))
 
     return run
 
@@ -199,7 +199,7 @@ def test_a_fake_worker_pairs_probes_is_approved_boots_and_shows_online(
             == "pending_validation"
         )
         version = row(rt, host, issued["worker_id"])["version"]
-        devices.approve(rt, issued["worker_id"], version, restore=True, asr=True)
+        devices.approve(rt, issued["worker_id"], version, restore=True)
         until(
             lambda: row(rt, host, issued["worker_id"])["heartbeat"]["state"] == "online"
         )
@@ -257,7 +257,6 @@ def test_a_changed_probe_is_posted_and_needs_a_new_approval(tmp_path, rt, host, 
         issued["worker_id"],
         row(rt, host, issued["worker_id"])["version"],
         restore=True,
-        asr=True,
     )
     assert worker.stop()
     changed = worker_host(tmp_path, probe=fake_probe(vram=16303, worker="other"))
@@ -471,7 +470,6 @@ def enrolled(tmp_path, rt, host, server):
         issued["worker_id"],
         row(rt, host, issued["worker_id"])["version"],
         restore=True,
-        asr=True,
     )
     worker.stop()
     until(lambda: rt.store.get_worker(rt.operator, issued["worker_id"]).worker.boot_id)
@@ -1161,7 +1159,7 @@ def test_ordinary_errors_never_end_the_loop(tmp_path, monkeypatch):
     def flaky_probe(settings, staging):
         if readings:
             return readings.pop()
-        return Probe(probe("fake"), ("standard",), True)
+        return Probe(probe("fake"), ("standard",))
 
     worker = loop_worker(tmp_path, fake, probe=flaky_probe)
     real = worker.staging
@@ -1206,7 +1204,7 @@ def test_readiness_is_refreshed_without_reposting_an_unchanged_probe(tmp_path):
     tiers = [("standard",)]
 
     def growing(settings, staging):
-        return Probe(probe("fake"), tiers[-1], True)
+        return Probe(probe("fake"), tiers[-1])
 
     worker = loop_worker(tmp_path, fake, probe=growing, probe_seconds=0.1)
     try:
@@ -1368,7 +1366,7 @@ def test_a_missing_gpu_reading_withdraws_readiness(tmp_path, rt, host, server):
 
     def flaky(settings, staging):
         if readings[-1]:
-            return Probe(probe("fake"), ("standard", "good"), True)
+            return Probe(probe("fake"), ("standard", "good"))
         return None
 
     issued = code_for(rt, server)
@@ -1379,7 +1377,7 @@ def test_a_missing_gpu_reading_withdraws_readiness(tmp_path, rt, host, server):
         worker.join(issued["code"], str(tmp_path / "staging"))
         until(lambda: worker.state == "running")
         version = row(rt, host, issued["worker_id"])["version"]
-        devices.approve(rt, issued["worker_id"], version, restore=True, asr=True)
+        devices.approve(rt, issued["worker_id"], version, restore=True)
         until(lambda: row(rt, host, issued["worker_id"])["eligible"])
         readings.append(False)
         shown = until(
@@ -1415,7 +1413,7 @@ def test_a_stored_probe_without_a_fingerprint_is_reposted_once(tmp_path):
     digest = ["a" * 64]
 
     def run(settings, staging):
-        return Probe(probe("fake", config_digest=digest[0]), ("standard",), True)
+        return Probe(probe("fake", config_digest=digest[0]), ("standard",))
 
     worker = loop_worker(tmp_path, fake, probe=run, probe_seconds=0.05)
     try:
@@ -1430,7 +1428,9 @@ def test_a_stored_probe_without_a_fingerprint_is_reposted_once(tmp_path):
 
 
 def test_the_default_probe_fingerprints_the_executor_settings(tmp_path, monkeypatch):
-    """CX9: another WhisperJAV path is another fingerprint."""
+    """CX9: another Jasna path is another fingerprint. OD7 (#298 R9): the
+    worker builds no ASR, so a WhisperJAV path left in its yaml changes
+    nothing."""
     from types import SimpleNamespace
 
     from taskpaw_v3.workflow import local_gpu
@@ -1441,15 +1441,19 @@ def test_the_default_probe_fingerprints_the_executor_settings(tmp_path, monkeypa
     monkeypatch.setattr(local_gpu, "machine_identity", lambda: "device-x")
     staging = SimpleNamespace(free=lambda: 10**12)
 
-    def digest(exe):
+    def digest(exe, whisper="w.exe"):
         settings = WorkflowSettings(
-            enabled=True, role="worker", whisperjav_exe_path=str(tmp_path / exe)
+            enabled=True,
+            role="worker",
+            jasna_exe_path=str(tmp_path / exe),
+            whisperjav_exe_path=str(tmp_path / whisper),
         )
         return default_probe(settings, staging).body["config_digest"]
 
     first = digest("a.exe")
     assert len(first) == 64 and digest("a.exe") == first
     assert digest("b.exe") != first
+    assert digest("a.exe", whisper="other.exe") == first
 
 
 def test_the_approve_dialog_data_carries_the_fingerprints(tmp_path, rt, host, server):
@@ -1457,17 +1461,17 @@ def test_the_approve_dialog_data_carries_the_fingerprints(tmp_path, rt, host, se
     issued = code_for(rt, server)
     first = worker_host(
         tmp_path,
-        probe=lambda s, g: Probe(probe("fake", config_digest="a" * 64), (), True),
+        probe=lambda s, g: Probe(probe("fake", config_digest="a" * 64), ()),
     )
     first.join(issued["code"], str(tmp_path / "staging"))
     until(lambda: first.state == "running")
     shown = row(rt, host, issued["worker_id"])
     assert shown["probe"]["config_digest"] == "a" * 64
-    devices.approve(rt, issued["worker_id"], shown["version"], restore=True, asr=True)
+    devices.approve(rt, issued["worker_id"], shown["version"], restore=True)
     assert first.stop()
     second = worker_host(
         tmp_path,
-        probe=lambda s, g: Probe(probe("fake", config_digest="b" * 64), (), True),
+        probe=lambda s, g: Probe(probe("fake", config_digest="b" * 64), ()),
     )
     try:
         second.start()

@@ -192,11 +192,10 @@ def _now_text() -> str:
 @dataclass(frozen=True)
 class Probe:
     """What the worker proposes (`body`, the controller's `ProbeBody`) and
-    what it can run now (heartbeat `tiers_ready`, `asr_ready`)."""
+    what it can run now (heartbeat `tiers_ready`). OD7: restore only."""
 
     body: Mapping[str, Any]
     tiers_ready: tuple[str, ...]
-    asr_ready: bool
 
 
 ProbeFn = Callable[[WorkflowSettings, Staging], "Probe | None"]
@@ -206,10 +205,10 @@ ExecutorFactory = Callable[[WorkerRuntime], Sequence[StageExecutor]]
 def worker_executors(
     settings: WorkflowSettings, runtime: ExecRuntime, gpu: LocalGpu | None
 ) -> list[StageExecutor]:
-    """The worker's restore and ASR executors from its tool settings — the
-    same for the probe (profiles) and the dispatcher (runs), so a claim's
-    tools always match the approved profile."""
-    from .exec_asr import AsrExecutor
+    """The worker's restore executor from its tool settings — the same for
+    the probe (profiles) and the dispatcher (runs), so a claim's tools always
+    match the approved profile. OD7 (#298 R9): a GPU worker restores only;
+    a WhisperJAV path left in its agent.yaml is neither built nor checked."""
     from .exec_restore import RestoreExecutor, resolve_gpu_preset
 
     executors: list[StageExecutor] = []
@@ -228,11 +227,6 @@ def worker_executors(
             )
         except ValueError:
             log.warning("worker restore: invalid Jasna settings")
-    if settings.whisperjav_exe_path:
-        try:
-            executors.append(AsrExecutor(runtime, settings.whisperjav_exe_path))
-        except ValueError:
-            log.warning("worker ASR: invalid WhisperJAV settings")
     return executors
 
 
@@ -279,8 +273,8 @@ def probe_body(
 
 
 def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
-    """GPU and identity, free disk, and the restore/ASR executors' profiles;
-    the executors are built only for `tools()` and `max_resolution()`."""
+    """GPU and identity, free disk, and the restore executor's profile; the
+    executor is built only for `tools()` and `max_resolution()`."""
     from taskpaw_v3.monitors.plugins import jasna
 
     from .exec_restore import RestoreExecutor
@@ -299,11 +293,7 @@ def default_probe(settings: WorkflowSettings, staging: Staging) -> Probe | None:
         tiers = tuple(
             tier for tier in TIERS if not jasna.ltx_missing_files(folder, tier, fast)
         )
-    asr_ready = (
-        any(e.stage == "asr" for e in executors)
-        and Path(settings.whisperjav_exe_path or "").is_file()
-    )
-    return Probe(probe_body(executors, gpu, staging), tiers, asr_ready)
+    return Probe(probe_body(executors, gpu, staging), tiers)
 
 
 def probe_changed(probe: Mapping[str, Any], record: Mapping[str, Any]) -> bool:
@@ -429,7 +419,6 @@ class WorkerHost:
         self.reconciled = False
         self._probe_body: Mapping[str, Any] = {}
         self._tiers: tuple[str, ...] = ()
-        self._asr_ready = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -487,7 +476,6 @@ class WorkerHost:
                 {"routes": self.routes, "paused": self.paused},
                 reconciled=self.reconciled,
                 tiers=self._tiers,
-                asr_ready=self._asr_ready,
                 hold=self._hold,
                 paused=self.local_paused,
             )
@@ -859,10 +847,10 @@ class WorkerHost:
         probe = self._probe(self.settings, staging)
         if probe is None:
             self._probe_body, self._probe_due = {}, 0.0
-            self._tiers, self._asr_ready = (), False  # CX8: nothing is ready
+            self._tiers = ()  # CX8: nothing is ready
             return
         self._probe_due = time.monotonic() + self.probe_seconds
-        self._tiers, self._asr_ready = probe.tiers_ready, probe.asr_ready
+        self._tiers = probe.tiers_ready
         self._probe_gpu = _gpu_of(probe.body)
         self._bind_gpu()
         if record is None:
@@ -960,7 +948,6 @@ class WorkerHost:
                 reply,
                 reconciled=self.reconciled,
                 tiers=self._tiers,
-                asr_ready=self._asr_ready,
                 hold=self._hold,
                 paused=self.local_paused,
             )
@@ -999,8 +986,7 @@ class WorkerHost:
                 "staging_used": staging.used(),
                 "cap": staging.cap,
             },
-            "tiers_ready": list(self._tiers),
-            "asr_ready": self._asr_ready,
+            "tiers_ready": list(self._tiers),  # OD7: no asr_ready (R9)
             "staged": dispatcher.staged() if dispatcher else [],
             "current": dispatcher.current() if dispatcher else None,
             "transfers": dispatcher.transfers() if dispatcher else [],

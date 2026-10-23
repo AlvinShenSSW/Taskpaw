@@ -114,15 +114,16 @@ def test_add_pair_approve_and_show_online(ctl, api, rt, clock):
     assert row["enrollment_state"] == "pending_validation"
     assert row["probe"]["vram_mib"] == 16311 and row["restore_allowed"] is True
     assert {p["stage"] for p in row["probe"]["profiles"]} == {"restore", "asr"}
+    # OD7 R10: an older build's ASR profile is shown but never approved
     assert row["approved"] is None
     stale = ctl.post(
         f"{BASE}/{worker_id}/approve",
-        json={"expected_version": row["version"] - 1, "restore": True, "asr": True},
+        json={"expected_version": row["version"] - 1, "restore": True},
     )
     assert stale.status_code == 409
     ok = ctl.post(
         f"{BASE}/{worker_id}/approve",
-        json={"expected_version": row["version"], "restore": True, "asr": True},
+        json={"expected_version": row["version"], "restore": True},
     )
     assert ok.status_code == 200
     boot = "00000000-0000-4000-8000-0000000000bb"
@@ -138,11 +139,14 @@ def test_add_pair_approve_and_show_online(ctl, api, rt, clock):
     assert row["tiers_ready"] == ["standard", "good", "high"]
     assert row["eligibility"] == "可接单" and row["eligible"] is True
     assert row["approved"]["probe"]["vram_mib"] == 16311
-    assert ctl.get(BASE).json()["controller"]["stages"] == ["翻译"]
+    assert {p["stage"] for p in row["approved"]["profiles"]} == {"restore"}
+    # OD7 R10: the controller transcribes and translates in remote mode
+    assert ctl.get(BASE).json()["controller"]["stages"] == ["识别", "翻译"]
 
 
-def test_an_8_gb_worker_is_offered_asr_only(ctl, api, rt):
-    joined, boot = enrol(api, rt, "5060", restore=False)
+def test_an_8_gb_worker_is_offered_nothing(ctl, api, rt):
+    """OD5/OD7: under 16 GB a worker takes no stage at all."""
+    joined = join(api, rt, "5060")
     api.post(
         "/worker/v1/capabilities",
         json=probe(joined.worker_id, vram=8151),
@@ -150,11 +154,12 @@ def test_an_8_gb_worker_is_offered_asr_only(ctl, api, rt):
     )
     row = _row(ctl, joined.worker_id)
     assert row["restore_allowed"] is False
-    refused = ctl.post(
-        f"{BASE}/{joined.worker_id}/approve",
-        json={"expected_version": row["version"], "restore": True, "asr": True},
-    )
-    assert refused.status_code == 409
+    for restore in (True, False):
+        refused = ctl.post(
+            f"{BASE}/{joined.worker_id}/approve",
+            json={"expected_version": row["version"], "restore": restore},
+        )
+        assert refused.status_code == 409
 
 
 def test_drain_resume_revoke_and_retire(ctl, api, rt):
@@ -214,7 +219,7 @@ def test_the_controller_row_has_no_actions(ctl, rt):
     for name in ("approve", "admission", "revoke", "retire", "pairing"):
         response = ctl.post(
             f"{BASE}/{me}/{name}",
-            json={"expected_version": version, "restore": True, "asr": True}
+            json={"expected_version": version, "restore": True}
             if name == "approve"
             else {"expected_version": version, "state": "enabled"}
             if name == "admission"
@@ -242,7 +247,7 @@ def test_with_remote_workers_off_approval_and_admission_are_refused(host, api, r
     assert off.get(BASE).json()["controller"]["stages"] == ["修复", "识别", "翻译"]
     approve = off.post(
         f"{BASE}/{joined.worker_id}/approve",
-        json={"expected_version": row["version"], "restore": True, "asr": True},
+        json={"expected_version": row["version"], "restore": True},
     )
     assert approve.status_code == 409
     admission = off.post(
@@ -301,7 +306,7 @@ def test_approval_survives_a_write_between_its_two_steps(ctl, api, rt, monkeypat
     row = _row(ctl, joined.worker_id)
     response = ctl.post(
         f"{BASE}/{joined.worker_id}/approve",
-        json={"expected_version": row["version"], "restore": True, "asr": True},
+        json={"expected_version": row["version"], "restore": True},
     )
     assert response.status_code == 200, response.text
     row = _row(ctl, joined.worker_id)

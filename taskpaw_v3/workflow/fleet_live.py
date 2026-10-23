@@ -86,7 +86,9 @@ class Heartbeat(m.Model):
     gpu: GpuLive
     disk: DiskLive
     tiers_ready: tuple[m.LtxTier, ...] = Field(max_length=3)
-    asr_ready: bool
+    # OD7 (#298 §2): ignored; kept optional so an older worker's beat (which
+    # sends it) is not refused under `extra="forbid"`
+    asr_ready: bool = False
     staged: tuple[StagedFilm, ...] = Field(default=(), max_length=64)
     current: CurrentLive | None = None  # P2-3: the running stage, typed
     transfers: tuple[TransferLive, ...] = Field(default=(), max_length=8)
@@ -260,7 +262,6 @@ def _routing_facts(beat: Heartbeat) -> tuple[object, ...]:
     return (
         beat.paused,
         frozenset(beat.tiers_ready),
-        beat.asr_ready,
         beat.version,
         beat.protocol,
         frozenset((s.film, s.rev, s.incomplete) for s in beat.staged),

@@ -236,7 +236,7 @@ class World:
     def probe(self, settings, staging):
         unbound = cast(Any, None)
         body = probe_body(self.executors(unbound), WORKER_GPU, staging)
-        return Probe(body, ("standard", "good", "high"), True)
+        return Probe(body, ("standard", "good", "high"))
 
     def worker(self, name: str = "w1", **kw: Any) -> WorkerHost:
         data = self.tmp / name
@@ -270,9 +270,7 @@ class World:
         worker.join(issued["code"], str(self.tmp / name / "staging"))
         until(lambda: worker.state == "running", LONG)
         version = self.rt.store.get_worker(self.rt.operator, issued["worker_id"]).worker
-        devices.approve(
-            self.rt, issued["worker_id"], version.version, restore=True, asr=True
-        )
+        devices.approve(self.rt, issued["worker_id"], version.version, restore=True)
         self.issued[name] = issued
         until(lambda: worker.reconciled, LONG)
         return worker
@@ -931,7 +929,7 @@ def test_a_worker_re_paired_mid_run_stops_its_job_and_retries(world):
         if record.enrollment_state == "verified":
             return True
         try:
-            devices.approve(world.rt, worker_id, record.version, restore=True, asr=True)
+            devices.approve(world.rt, worker_id, record.version, restore=True)
         except m.WorkflowError as exc:  # the session's own write / not probed yet
             if exc.code in {"cas_conflict", "precondition_failed"}:
                 return False

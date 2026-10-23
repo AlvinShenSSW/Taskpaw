@@ -4,7 +4,8 @@
 the code `TP1:<host>:<port>:<pairing_id>:<ticket>` is returned once and never
 logged. 核验并启用 approves a subset of the worker's own proposed profiles as a
 new capability revision that reuses its probe (OD4); restore needs a 16 GB
-class card (OD5). Every command carries the worker's `expected_version`.
+class card (OD5), and restore is all a GPU worker is approved for (OD7, #298
+R10). Every command carries the worker's `expected_version`.
 
 P2-4 §9 CX14: every pairing code records its worker API port beside the store
 (`pairing-port.json`); the settings guard holds the port there while the store
@@ -142,9 +143,10 @@ def approve(
     expected_version: int,
     *,
     restore: bool,
-    asr: bool,
 ) -> m.WorkerRecord:
-    """核验并启用: the chosen stages of the worker's probe, then enabled (R5)."""
+    """核验并启用: the worker's restore profiles, then enabled (R5). OD7 R10:
+    an ASR profile an older build proposes is never approved; no restore
+    profile (or `restore` off, or under 16 GB) is `precondition_failed`."""
     worker = _worker(rt, worker_id, expected_version)
     cap = worker.capability
     probe = cap.probed if cap else None
@@ -155,13 +157,12 @@ def approve(
         or worker.enrollment_state == "pending_pairing"
     ):
         raise m.WorkflowError("precondition_failed")
-    if restore and probe.vram_mib < s.RESTORE_MIN_VRAM_MIB:  # OD5
+    if not restore or probe.vram_mib < s.RESTORE_MIN_VRAM_MIB:  # OD5
         raise m.WorkflowError("precondition_failed")
-    stages = {stage for stage, on in (("restore", restore), ("asr", asr)) if on}
     profiles = tuple(
         p
         for p in probe.profiles
-        if p.allowed_stages and set(p.allowed_stages) <= stages
+        if p.allowed_stages and set(p.allowed_stages) <= {"restore"}
     )
     if not profiles:
         raise m.WorkflowError("precondition_failed")
@@ -431,13 +432,12 @@ def device_view(
         entry = fleet.entry(worker.worker_id) if fleet is not None else None
         beat = entry.beat if entry is not None else None
         approval = op.last_approval(rt.operator, worker.worker_id)
-        stages: tuple[str, ...] = (
-            ("restore", "asr")
-            if probe is not None and probe.vram_mib >= s.RESTORE_MIN_VRAM_MIB
-            else ("asr",)
-        )
-        reason = s.eligibility(
-            routing[worker.worker_id], film, stages, live.get(worker.worker_id), now
+        reason = s.eligibility(  # OD7 R10: restore is all a worker takes
+            routing[worker.worker_id],
+            film,
+            ("restore",),
+            live.get(worker.worker_id),
+            now,
         )
         rows.append(
             {
@@ -464,7 +464,6 @@ def device_view(
                 if beat is not None
                 else None,
                 "tiers_ready": list(beat.tiers_ready) if beat is not None else [],
-                "asr_ready": beat.asr_ready if beat is not None else False,
                 "agent_version": beat.version if beat is not None else None,
                 "version_ok": fleet.version_ok(beat)
                 if fleet is not None and beat is not None
@@ -490,7 +489,11 @@ def device_view(
         )
     order = tuple(STAGE_LABELS)
     executors = [stage for stage in order if stage in rt.executors]
-    local_stages = executors if remote is None else ["translate"]
+    # OD7 R10: in remote mode the controller transcribes (with an ASR
+    # executor) and translates; restore is the workers'
+    local_stages = (
+        executors if remote is None else [x for x in executors if x != "restore"]
+    )
     return {
         "remote_workers": remote_workers,
         "server_time": iso(now),

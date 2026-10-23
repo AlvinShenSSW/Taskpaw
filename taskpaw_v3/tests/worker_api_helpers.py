@@ -166,8 +166,7 @@ def beat(boot: str, **kw: Any) -> dict[str, Any]:
             "hold": "none",
         },
         "disk": {"free": 900 * 10**9, "staging_used": 0, "cap": 500 * 10**9},
-        "tiers_ready": ["standard", "good", "high"],
-        "asr_ready": True,
+        "tiers_ready": ["standard", "good", "high"],  # OD7: no asr_ready
         "staged": [],
         "current": None,
         "transfers": [],
@@ -186,7 +185,6 @@ def enrol(
     name: str = "5060 Ti-1",
     *,
     restore: bool = True,
-    asr: bool = True,
     boot: str | None = None,
 ) -> tuple[Joined, str]:
     """Pair, probe, 核验并启用 and boot one remote worker over the API."""
@@ -200,7 +198,6 @@ def enrol(
         joined.worker_id,
         version(rt, joined.worker_id),
         restore=restore,
-        asr=asr,
     )
     boot = boot or boot_id()
     booted = api.post("/worker/v1/boot", json={"boot_id": boot}, headers=joined.headers)

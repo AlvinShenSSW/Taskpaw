@@ -246,7 +246,6 @@ def _observe(d, routes, **kw):
         },
         reconciled=kw.pop("reconciled", True),
         tiers=("standard",),
-        asr_ready=True,
         hold=kw.pop("hold", "none"),
         paused=kw.pop("paused", False),
     )
@@ -631,15 +630,14 @@ def test_a_fleet_change_wakes_the_pass_and_a_same_beat_does_not():
     for change in (
         {"paused": True},
         {"tiers_ready": ["standard"]},
-        {"asr_ready": False},
         {"version": "0.0.1"},
         {"staged": [{"film": ident(), "rev": 1}]},
     ):
         fleet.observe("w", Heartbeat.model_validate(beat(boot, **change)), now)
         fleet.observe("w", plain, now)
-    assert len(woken) == 1 + 10
+    assert len(woken) == 1 + 8
     fleet.observe("w", plain, now + timedelta(seconds=120))  # back from 失联
-    assert len(woken) == 12
+    assert len(woken) == 10
 
 
 def test_the_controller_host_stops_its_routing_thread(tmp_path):

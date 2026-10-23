@@ -289,14 +289,12 @@ def test_probe_then_approval_then_a_changed_probe_needs_a_new_approval(api, rt):
     me = api.get(f"{PREFIX}/self", headers=joined.headers).json()["worker"]
     assert me["capability"]["probed"]["profiles"][0]["allowed_stages"] == ["restore"]
     assert me["capability"]["approved"] is None
-    devices.approve(
-        rt, joined.worker_id, version(rt, joined.worker_id), restore=True, asr=True
-    )
+    devices.approve(rt, joined.worker_id, version(rt, joined.worker_id), restore=True)
     worker = rt.store.get_worker(rt.operator, joined.worker_id).worker
     assert (worker.enrollment_state, worker.admission_state) == ("verified", "enabled")
     assert worker.capability.revision == 2
     assert worker.capability.approved.probe_revision == 1
-    assert len(worker.capability.approved.profiles) == 2
+    assert len(worker.capability.approved.profiles) == 1  # OD7: restore only
     # a changed tool profile: a new probe drops the worker back to 待核验
     changed = probe(profiles=[dict(p, tool_version="2") for p in probe()["profiles"]])
     api.post(f"{PREFIX}/capabilities", json=changed, headers=joined.headers)
@@ -307,10 +305,13 @@ def test_probe_then_approval_then_a_changed_probe_needs_a_new_approval(api, rt):
     )
     last = rt.store.last_approval(rt.operator, joined.worker_id)
     assert last is not None and last[1].revision == 1
-    devices.approve(rt, joined.worker_id, worker.version, restore=False, asr=True)
+    devices.approve(rt, joined.worker_id, worker.version, restore=True)
     worker = rt.store.get_worker(rt.operator, joined.worker_id).worker
     assert worker.enrollment_state == "verified"
-    assert [p.allowed_stages for p in worker.capability.approved.profiles] == [("asr",)]
+    # OD7 R10: an older build's ASR profile is never approved
+    assert [p.allowed_stages for p in worker.capability.approved.profiles] == [
+        ("restore",)
+    ]
 
 
 def test_an_approved_section_from_a_worker_is_403(api, rt):
@@ -326,12 +327,14 @@ def test_restore_is_never_approved_under_16_gb(api, rt):
     api.post(f"{PREFIX}/capabilities", json=probe(vram=8151), headers=joined.headers)
     with pytest.raises(m.WorkflowError) as exc:
         devices.approve(
-            rt, joined.worker_id, version(rt, joined.worker_id), restore=True, asr=True
+            rt, joined.worker_id, version(rt, joined.worker_id), restore=True
         )
     assert exc.value.code == "precondition_failed"
-    devices.approve(
-        rt, joined.worker_id, version(rt, joined.worker_id), restore=False, asr=True
-    )
+    with pytest.raises(m.WorkflowError) as exc:  # OD7: nothing else to approve
+        devices.approve(
+            rt, joined.worker_id, version(rt, joined.worker_id), restore=False
+        )
+    assert exc.value.code == "precondition_failed"
 
 
 # ── R6: boot until reconciled ───────────────────────────────────────────

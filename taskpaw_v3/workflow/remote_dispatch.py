@@ -55,7 +55,10 @@ INDEX_NAME = "routes.json"
 POLL_SECONDS = 5.0
 STOP_SETTLE_SECONDS = 30.0
 MAX_MISMATCHES = 3  # §3.5: three whole-file mismatches need the operator
-STAGES = ("restore", "asr")
+# OD7 (#298 R9): a GPU worker claims restore only; an ASR attempt claimed
+# before the upgrade still settles, uploads and finishes (delivery needs no
+# executor)
+STAGES = ("restore",)
 SAVE_TRIES = 5  # a file held by antivirus / the indexer for a moment (H1-2)
 SAVE_PAUSE = 0.05
 _FINISHED = ("succeeded", "skipped")
@@ -385,7 +388,6 @@ class RemoteDispatcher:
         self._reconciled = False
         self._paused = False
         self._tiers: tuple[str, ...] = ()
-        self._asr_ready = False
         self._hold = "none"
         self._held: set[str] = set()  # boot: a child of an earlier boot runs
         # §9 CX20: resolved attempts whose records were not collected because
@@ -498,7 +500,6 @@ class RemoteDispatcher:
         *,
         reconciled: bool,
         tiers: Iterable[str],
-        asr_ready: bool,
         hold: str,
         paused: bool,
     ) -> None:
@@ -510,7 +511,7 @@ class RemoteDispatcher:
             )
             self._reconciled = reconciled
             self._paused = paused or bool(reply.get("paused"))
-            self._tiers, self._asr_ready = tuple(tiers), asr_ready
+            self._tiers = tuple(tiers)
             self._hold = hold
             active = self._active
         for attempt_id in reply.get("cancel") or []:
@@ -1080,7 +1081,7 @@ class RemoteDispatcher:
         with self._lock:
             routes, reconciled = list(self._routes), self._reconciled
             paused, hold, held = self._paused, self._hold, set(self._held)
-            tiers, asr_ready = self._tiers, self._asr_ready
+            tiers = self._tiers
         if not routes:
             self.reason = "idle"
             return None
@@ -1119,9 +1120,6 @@ class RemoteDispatcher:
             return None
         if stage == "restore" and envelope.get("ltx_model") not in (*tiers, None):
             self.reason = "缺少画质模型"
-            return None
-        if stage == "asr" and not asr_ready:
-            self.reason = "识别未就绪"
             return None
         return envelope, stage
 
