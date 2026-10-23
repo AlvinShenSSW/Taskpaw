@@ -204,6 +204,83 @@ def test_an_unreadable_attempts_dir_is_busy_and_a_missing_one_is_idle(
     assert remote_dispatch.attempts_on_disk(tmp_path) is True
 
 
+def test_a_corrupt_attempt_file_keeps_a_dispatcher_busy_and_recovery_keeps_it(
+    tmp_path,
+):
+    """§9 CX13 (Codex r4): with a dispatcher present, an attempt file that
+    does not parse is still unsettled work — busy, never silently dropped by
+    recovery: logged, kept on disk and named to the operator."""
+    from taskpaw_v3.tests.test_workflow_remote_dispatch import _dispatcher
+    from taskpaw_v3.workflow.remote_dispatch import UNREADABLE_ATTEMPTS, worker_busy
+    from taskpaw_v3.workflow.worker_client import ApiError
+
+    d, staging = _dispatcher(tmp_path, lambda: None, None)
+    d.attempt_dir.mkdir(parents=True, exist_ok=True)
+    corrupt = d.attempt_dir / f"{identity()}.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    assert d.claimed() is True
+    assert worker_busy(staging.root, d) is True
+
+    class Unknown:
+        def attempt(self, _attempt_id):
+            raise ApiError(404, "not_found")
+
+    assert d.recover(Unknown())
+    assert corrupt.exists()  # kept until the operator resolves it
+    assert d.notice == UNREADABLE_ATTEMPTS == "有无法读取的任务记录"
+    assert worker_busy(staging.root, d) is True
+    corrupt.unlink()  # the operator removed it
+    assert worker_busy(staging.root, d) is False
+
+
+def test_an_unreadable_attempts_dir_keeps_a_dispatcher_busy(tmp_path, monkeypatch):
+    """§9 CX13: the dispatcher's own view never hides an unreadable folder."""
+    import os
+
+    from taskpaw_v3.tests.test_workflow_remote_dispatch import _dispatcher
+    from taskpaw_v3.workflow.remote_dispatch import worker_busy
+
+    d, staging = _dispatcher(tmp_path, lambda: None, None)
+    d.attempt_dir.mkdir(parents=True, exist_ok=True)
+    assert worker_busy(staging.root, d) is False
+    real = os.scandir
+
+    def denied(path="."):
+        if os.fspath(path) == os.fspath(d.attempt_dir):
+            raise PermissionError("denied")
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    assert d.claimed() is True
+    assert worker_busy(staging.root, d) is True
+
+
+def test_status_and_the_settings_guard_read_one_busy_rule(tmp_path):
+    """§9 CX13: `/status` (`summary()["busy"]`) and the settings guard agree
+    with a dispatcher present and a corrupt attempt file on disk."""
+    from taskpaw_v3.core.config import WorkflowSettings
+    from taskpaw_v3.tests.test_workflow_remote_dispatch import _dispatcher
+    from taskpaw_v3.tests.test_workflow_settings import World
+    from taskpaw_v3.workflow.remote_worker import WorkerHost
+
+    d, staging = _dispatcher(tmp_path, lambda: None, None)
+    d.attempt_dir.mkdir(parents=True, exist_ok=True)
+    corrupt = d.attempt_dir / f"{identity()}.json"
+    corrupt.write_text("{}", encoding="utf-8")  # parses, but is no attempt
+    settings = WorkflowSettings(
+        enabled=True, role="worker", staging_dir=str(staging.root)
+    )
+    world = World(tmp_path, enabled=True, role="worker", staging_dir=str(staging.root))
+    world.worker = WorkerHost(settings, tmp_path / "workflow")
+    world.worker.dispatcher = d
+    assert world.worker.summary()["busy"] is True
+    response = world.put({"role": "off"})
+    assert response.status_code == 409 and response.json()["code"] == "workflow_busy"
+    corrupt.unlink()
+    assert world.worker.summary()["busy"] is False
+    assert world.put({"role": "off"}).status_code == 200
+
+
 def test_status_carries_the_worker_summary(monkeypatch, tmp_path):
     from taskpaw_v3.agent.server import launcher
     from taskpaw_v3.tests.test_worker_api import _agent_config

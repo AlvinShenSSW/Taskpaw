@@ -5,20 +5,28 @@ the code `TP1:<host>:<port>:<pairing_id>:<ticket>` is returned once and never
 logged. 核验并启用 approves a subset of the worker's own proposed profiles as a
 new capability revision that reuses its probe (OD4); restore needs a 16 GB
 class card (OD5). Every command carries the worker's `expected_version`.
+
+P2-4 §9 CX14: every pairing code records its worker API port beside the store
+(`pairing-port.json`); the settings guard holds the port there while the store
+pairs any non-retired worker.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import json
+import logging
 import secrets
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import SecretStr
 
 from taskpaw_v3.core.power_fleet import parse_address
+from taskpaw_v3.core.state import atomic_json
 
 from . import models as m
 from . import scheduler as s
@@ -26,7 +34,10 @@ from .auth import digest_secret
 from .fleet_live import FleetLive
 from .local_runtime import _RESOURCE_NS, LocalRuntime
 
+log = logging.getLogger("taskpaw.workflow.devices")
+
 PAIRING_SECONDS = 15 * 60
+PAIRING_PORT_NAME = "pairing-port.json"  # §9 CX14: beside `workflow.db`
 CODE_PREFIX = "TP1"
 STAGE_LABELS = {"restore": "修复", "asr": "识别", "translate": "翻译"}
 NO_RESTORE = "显存不足，不参与修复"
@@ -54,9 +65,25 @@ def _worker(rt: LocalRuntime, worker_id: str, expected_version: int) -> m.Worker
     return worker
 
 
+def pairing_port(data_dir: Path) -> int | None:
+    """§9 CX14: the worker API port the store's pairing codes named; None
+    when never recorded (a store paired before this record) or unreadable."""
+    try:
+        value = json.loads((data_dir / PAIRING_PORT_NAME).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        log.warning("unreadable %s ignored", PAIRING_PORT_NAME)
+        return None
+    port = value.get("port") if isinstance(value, dict) else None
+    return port if isinstance(port, int) and 1 <= port <= 65535 else None
+
+
 def _issue(
     rt: LocalRuntime, worker: m.WorkerRecord, host: str, port: int
 ) -> dict[str, Any]:
+    # §9 CX14: recorded before the code exists, so no pairing is unrecorded
+    atomic_json(rt.data_dir / PAIRING_PORT_NAME, {"port": port})
     pairing_id, ticket = str(uuid.uuid4()), secrets.token_urlsafe(32)
     expires = rt.clock.now() + timedelta(seconds=PAIRING_SECONDS)
     rt.store.issue_pairing(

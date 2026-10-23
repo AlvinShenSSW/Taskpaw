@@ -583,8 +583,15 @@ def test_same_path_uses_the_filesystem_when_both_exist(tmp_path, monkeypatch):
 
 
 def test_the_worker_port_cannot_change_under_paired_workers(tmp_path, tools):
-    """§9 IR4: enrolled workers reach the controller at the running port."""
-    world = World(tmp_path, enabled=True, remote_workers=True, **tools)
+    """§9 IR4: enrolled workers reach the controller at the running port
+    (the running host's store is in the running data directory)."""
+    world = World(
+        tmp_path,
+        enabled=True,
+        remote_workers=True,
+        data_dir=str(tmp_path / "wf"),
+        **tools,
+    )
     rt = runtime(tmp_path / "wf")
     try:
         world.host = _running_host(rt)
@@ -656,6 +663,84 @@ def test_the_port_is_free_to_change_when_the_retained_store_pairs_nobody(
     )
     response = world.put({"role": "controller", "worker_api_port": 5691})
     assert response.status_code == 200, response.text
+
+
+PORT_PAIRED = "已有工作机配对在此端口，改端口需先让它们重新配对"
+
+
+def _paired_store(directory: Path, port: int) -> None:
+    """A workflow store with one device added (paired) at `port`."""
+    from taskpaw_v3.workflow import devices
+
+    rt = runtime(directory)
+    try:
+        devices.add_device(rt, "5070 Ti", "192.0.2.30", host="192.0.2.1", port=port)
+    finally:
+        rt.close()
+
+
+def test_an_off_role_save_cannot_move_the_port_away_from_the_pairings(tmp_path, tools):
+    """§9 CX14 (Codex r4): the baseline is the port the pairings were made on,
+    not the running or saved config — an off-role save with a new port is
+    refused, whatever role it asks for."""
+    data = tmp_path / "wf"
+    _paired_store(data, 5682)
+    world = World(
+        tmp_path, enabled=True, remote_workers=True, data_dir=str(data), **tools
+    )
+    before = world.path.read_bytes()
+    for body in (
+        {"role": "off", "data_dir": str(data), "worker_api_port": 5691},
+        {
+            "role": "worker",
+            "data_dir": str(data),
+            "worker_api_port": 5691,
+            "staging_dir": str(tmp_path / "staging"),
+        },
+    ):
+        response = world.put(body)
+        assert response.status_code == 422, body
+        assert response.json()["fields"]["worker_api_port"] == PORT_PAIRED
+        assert world.path.read_bytes() == before
+    same = world.put({"role": "off", "data_dir": str(data)})
+    assert same.status_code == 200, same.text
+
+
+def test_a_controller_save_is_refused_when_the_running_port_left_the_pairings(
+    tmp_path, tools
+):
+    """§9 CX14: the running port already differs from the pairings' (an
+    earlier bypass, a hand edit): a 主控 save keeping it is refused; returning
+    to the pairing port works."""
+    data = tmp_path / "wf"
+    _paired_store(data, 5682)
+    world = World(
+        tmp_path,
+        enabled=False,
+        remote_workers=True,
+        data_dir=str(data),
+        worker_api_port=5691,
+        **tools,
+    )
+    response = world.put({"role": "controller", "worker_api_port": 5691})
+    assert response.status_code == 422, response.text
+    assert response.json()["fields"]["worker_api_port"] == PORT_PAIRED
+    back = world.put({"role": "controller", "worker_api_port": 5682})
+    assert back.status_code == 200, back.text
+
+
+def test_with_no_pairings_any_role_may_change_the_port(tmp_path, tools):
+    data = tmp_path / "wf"
+    runtime(data).close()  # only the controller's own record
+    world = World(
+        tmp_path, enabled=True, remote_workers=True, data_dir=str(data), **tools
+    )
+    for body in (
+        {"role": "off", "data_dir": str(data), "worker_api_port": 5691},
+        {"role": "controller", "worker_api_port": 5692},
+    ):
+        response = world.put(body)
+        assert response.status_code == 200, response.text
 
 
 def test_an_empty_ffprobe_is_fine_when_it_is_on_the_path(tmp_path, tools, monkeypatch):

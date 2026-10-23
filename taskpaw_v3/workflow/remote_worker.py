@@ -53,7 +53,7 @@ from .remote_dispatch import (
     UNSETTLED,
     RemoteDispatcher,
     WorkerRuntime,
-    attempts_on_disk,
+    worker_busy,
 )
 from .staging import Staging, StagingError, validate_dir
 from .worker_client import ApiError, WorkerClient, backoff
@@ -1051,14 +1051,12 @@ class WorkerHost:
         }
 
     def _busy(self, dispatcher: RemoteDispatcher | None) -> bool:
-        """§9 CX1: before a dispatcher exists (no controller reached since a
-        restart) the attempt files on disk decide: any one is unsettled work
-        whose children may still run, so the machine reads as busy."""
-        if dispatcher is not None:
-            return dispatcher.busy()
+        """§9 CX1/CX13: the one `worker_busy` rule; before a dispatcher exists
+        (no controller reached since a restart) the attempts folder on disk
+        decides alone — unsettled work whose children may still run."""
         ident = self.identity
         root = ident.staging_dir if ident else self.settings.staging_dir
-        return attempts_on_disk(Path(root)) if root else False
+        return worker_busy(Path(root) if root else None, dispatcher)
 
     def _monitor(self) -> dict[str, Any]:
         """§6: films, the running step, transfers, staging and the GPU hold."""

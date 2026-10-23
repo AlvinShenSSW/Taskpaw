@@ -13,8 +13,9 @@ lease and keep-awake belong to the running process.
 with the running directory as well as the saved one, and a worker's paired
 directory (`worker-identity.json`) is held too (CX3/IR5); a busy worker cannot
 move its staging or data directory (IR3); the worker API port cannot change
-under paired workers (IR4); an empty ffprobe is fine when PATH has one (IR6);
-a save racing another answers 409 (IR12).
+under paired workers (IR4) — held at the port the pairings were made on,
+whatever role a save asks for (CX14); an empty ffprobe is fine when PATH has
+one (IR6); a save racing another answers 409 (IR12).
 """
 
 from __future__ import annotations
@@ -336,58 +337,54 @@ def controller_busy(host: Any) -> tuple[int, int]:
     return len(films), len(remote)
 
 
-def paired_workers(host: Any) -> int:
-    """§9 IR4: enrolled, non-retired GPU workers (the controller excluded)."""
-    state = getattr(host, "state", None)
-    if host is None or state not in ("starting", "running"):
-        return 0
-    rt = getattr(host, "runtime", None)
-    if state == "starting" or rt is None:
-        raise Refused(409, STARTING, code="workflow_busy")
-    controller = rt.identity.worker_id
-    return sum(
-        1
-        for worker in rt.store.list_workers(rt.operator)
-        if worker.worker_id != controller and worker.enrollment_state != "retired"
-    )
-
-
-def retained_pairings(
-    settings: tuple[WorkflowSettings, ...], config_dir: Path | None
-) -> bool:
-    """§9 CX11: enrolled, non-retired GPU workers in a workflow store on disk
-    (the controller's own record excluded), whatever role runs now — turning
-    主控 off keeps the store and its pairings. A store that cannot be read
-    counts as paired (unknown is not idle)."""
+def _store_pairs(directory: Path) -> bool:
+    """§9 CX11: enrolled, non-retired GPU workers in the workflow store in
+    `directory` (the controller's own record excluded). A store that cannot
+    be read counts as paired (unknown is not idle)."""
     import json
     import sqlite3
 
+    try:
+        controller = json.loads(
+            (directory / "local-identity.json").read_text(encoding="utf-8")
+        ).get("worker_id", "")
+    except (OSError, ValueError, AttributeError):
+        controller = ""
+    uri = f"{(directory / STORE_NAME).resolve().as_uri()}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        try:
+            (count,) = conn.execute(
+                "SELECT COUNT(*) FROM workers"
+                " WHERE enrollment_state != 'retired' AND worker_id != ?",
+                (controller,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return True
+    return bool(count)
+
+
+def pairing_ports(
+    settings: tuple[WorkflowSettings, ...], config_dir: Path | None, fallback: int
+) -> set[int]:
+    """§9 CX11/CX14: the worker API port each retained store's pairings were
+    made on (`pairing-port.json`, written with every pairing code), for every
+    data directory named whose store pairs a non-retired worker — whatever
+    role runs or is asked for: the running or saved config is never the
+    baseline. A store paired before that record falls back to `fallback`
+    (the running port)."""
+    from taskpaw_v3.workflow.devices import pairing_port
+
+    ports: set[int] = set()
     for reference in settings:
         directory = default_data_dir(reference, config_dir)
         if directory is None or not (directory / STORE_NAME).exists():
             continue
-        try:
-            controller = json.loads(
-                (directory / "local-identity.json").read_text(encoding="utf-8")
-            ).get("worker_id", "")
-        except (OSError, ValueError, AttributeError):
-            controller = ""
-        uri = f"{(directory / STORE_NAME).resolve().as_uri()}?mode=ro"
-        try:
-            conn = sqlite3.connect(uri, uri=True, timeout=5)
-            try:
-                (count,) = conn.execute(
-                    "SELECT COUNT(*) FROM workers"
-                    " WHERE enrollment_state != 'retired' AND worker_id != ?",
-                    (controller,),
-                ).fetchone()
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            return True
-        if count:
-            return True
-    return False
+        if _store_pairs(directory):
+            ports.add(pairing_port(directory) or fallback)
+    return ports
 
 
 def worker_busy(host: Any) -> bool:
@@ -409,18 +406,11 @@ def refuse_busy(
     config_dir: Path | None = None,
 ) -> None:
     """R16, against what runs now: leaving 主控 or turning 允许 GPU 工作机接入
-    off while films are in flight, a new worker API port under paired
-    workers (§9 IR4), or a busy worker leaving its role or moving its staging
-    or data directory (§9 IR3)."""
-    if (
-        role_of(new) == "controller"
-        and new.worker_api_port != running.worker_api_port
-        and (
-            paired_workers(controller())
-            if role_of(running) == "controller"
-            else retained_pairings((running, new), config_dir)
-        )
-    ):
+    off while films are in flight, a worker API port other than the one the
+    retained pairings were made on (§9 IR4/CX14, any role), or a busy worker
+    leaving its role or moving its staging or data directory (§9 IR3)."""
+    ports = pairing_ports((running, new), config_dir, running.worker_api_port)
+    if any(port != new.worker_api_port for port in ports):
         raise Refused(422, "设置有误", fields={"worker_api_port": PORT_PAIRED})
     if role_of(running) == "controller":
         leaving = role_of(new) != "controller" or (

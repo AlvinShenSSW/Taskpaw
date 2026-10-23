@@ -62,6 +62,7 @@ _FINISHED = ("succeeded", "skipped")
 UNSETTLED = "停止未确认：任务进程仍在运行"
 UNKNOWN_GPU = "GPU 有未知占用"
 HELD = "上次的任务进程仍在运行"  # §11 CX2: the GPU lease's holder label
+UNREADABLE_ATTEMPTS = "有无法读取的任务记录"  # P2-4 §9 CX13: kept, still busy
 SWEEP_SECONDS = 60.0  # §11 CX14: orphan work folders are swept this often
 REFUSED_DIR = "refused"  # §11 IR3: attempt files the controller refused
 MESSAGE_CAP = 2000  # §11 IR3: the finish model's `message` limit
@@ -146,8 +147,9 @@ class AttemptState:
             return cls(**data)
         except FileNotFoundError:
             return None
-        except (ValueError, TypeError):
-            log.warning("unreadable worker attempt file %s ignored", path.name)
+        except (OSError, ValueError, TypeError):
+            # P2-4 §9 CX13: never dropped — the file stays on disk (busy)
+            log.warning("unreadable worker attempt file %s kept", path.name)
             return None
 
 
@@ -242,17 +244,30 @@ class Transfer:
 
 
 def attempts_on_disk(staging_root: Path) -> bool:
-    """P2-4 §9 CX1: an attempt file under the staging folder — work a
-    restarted worker has not settled with the controller yet (its children
-    may live). §9 CX10: only a missing folder is idle; any other read error
-    (`Path.glob` would swallow it) is unknown, and unknown is not idle."""
+    """P2-4 §9 CX1: an entry in the attempts folder — work a restarted
+    worker has not settled with the controller yet (its children may live).
+    §9 CX10/CX13: conservative — any entry counts, parsable or not (only the
+    `refused/` archive of attempts the controller resolved does not); only a
+    missing folder is idle, any other read error is unknown, which is busy."""
     try:
         with os.scandir(staging_root / ATTEMPTS_DIR) as entries:
-            return any(entry.name.endswith(".json") for entry in entries)
+            return any(entry.name != REFUSED_DIR for entry in entries)
     except FileNotFoundError:
         return False
     except OSError:
         return True
+
+
+def worker_busy(staging_root: Path | None, dispatcher: RemoteDispatcher | None) -> bool:
+    """P2-4 R9, §9 CX13: THE worker-busy rule — `/status`, the settings guard
+    and keep-awake all read this. Busy while the dispatcher holds a run, an
+    unsettled Job, an attempt to deliver or a held child, or while the
+    attempts folder holds anything (`attempts_on_disk`, conservative)."""
+    if dispatcher is not None:
+        if dispatcher.holds_work():
+            return True
+        staging_root = dispatcher.staging.root
+    return staging_root is not None and attempts_on_disk(staging_root)
 
 
 # ── the dispatcher ──────────────────────────────────────────────────────
@@ -429,21 +444,20 @@ class RemoteDispatcher:
             active.cancel.set()
         log.info("worker attempt %s cancelled by the controller", attempt_id)
 
-    def claimed(self) -> bool:
-        """An unresolved claim is held (keep-awake, R11)."""
+    def holds_work(self) -> bool:
+        """In memory: a run, an unsettled Job, an attempt to deliver or a
+        held child (the disk half is `attempts_on_disk`)."""
         with self._lock:
-            if self._active is not None or self._unsettled is not None:
-                return True
-            if self._deliver or self._held:
-                return True
-        return any(self._states())
+            return bool(
+                self._active is not None
+                or self._unsettled is not None
+                or self._deliver
+                or self._held
+            )
 
-    def busy(self) -> bool:
-        """P2-4 R9: the machine may still be working or holds a result the
-        controller waits for (the 判定已停止 status channel). §9 IR1: the
-        `claimed` rule — a run, an unsettled Job, an attempt to deliver, a
-        held child, or any attempt file recovery has not settled."""
-        return self.claimed()
+    def claimed(self) -> bool:
+        """An unresolved claim is held (keep-awake, R11): `worker_busy`."""
+        return worker_busy(self.staging.root, self)
 
     def current_stage(self) -> tuple[str, str] | None:
         """(film_id, stage) of the running stage, for the power sampler (R14)."""
@@ -542,6 +556,22 @@ class RemoteDispatcher:
                 states.append(state)
         return states
 
+    def _unreadable(self) -> list[str]:
+        """§9 CX13: attempts-folder entries that are no loadable attempt."""
+        try:
+            with os.scandir(self.attempt_dir) as entries:
+                names = [e.name for e in entries if e.name != REFUSED_DIR]
+        except FileNotFoundError:
+            return []
+        except OSError:
+            return [ATTEMPTS_DIR]
+        return sorted(
+            name
+            for name in names
+            if not name.endswith(".json")
+            or AttemptState.load(self.attempt_dir / name) is None
+        )
+
     def _path(self, attempt_id: str) -> Path:
         return self.attempt_dir / f"{attempt_id}.json"
 
@@ -568,7 +598,17 @@ class RemoteDispatcher:
         not know (404: the claim never landed) or has resolved (the finish
         reply was lost) is collected, its work folder included (§11 IR5). The
         rest go to the boot. Once every file was answered, work folders no
-        attempt file names are swept; an error leaves everything (unknown)."""
+        attempt file names are swept; an error leaves everything (unknown).
+        P2-4 §9 CX13: a file that does not parse is logged and kept (busy
+        until the operator resolves it), and named in `notice`."""
+        unreadable = self._unreadable()
+        if unreadable:
+            log.error(
+                "worker attempt files kept unread in %s: %s",
+                ATTEMPTS_DIR,
+                ", ".join(unreadable),
+            )
+            self.notice = UNREADABLE_ATTEMPTS
         for state in self._states():
             try:
                 found = client.attempt(state.attempt_id)

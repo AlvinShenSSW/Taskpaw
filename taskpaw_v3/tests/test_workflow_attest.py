@@ -745,20 +745,20 @@ def test_the_worker_dispatcher_is_busy_while_a_run_or_a_held_child_lives(tmp_pat
     from taskpaw_v3.tests.test_workflow_remote_dispatch import _dispatcher
 
     d, _ = _dispatcher(tmp_path, lambda: None, None)
-    assert d.busy() is False
+    assert d.claimed() is False
     d._active = object()
-    assert d.busy() is True
+    assert d.claimed() is True
     d._active = None
     d._unsettled = (object(), None, None)
-    assert d.busy() is True
+    assert d.claimed() is True
     d._unsettled = None
     d._held = {"a1"}
-    assert d.busy() is True  # §9 IR1: held until a boot reply settles it
+    assert d.claimed() is True  # §9 IR1: held until a boot reply settles it
     d._held = set()
     d._deliver = ["a2"]  # a settled result not delivered yet
-    assert d.busy() is True
+    assert d.claimed() is True
     d._deliver = []
-    assert d.busy() is False
+    assert d.claimed() is False
     d.attempt_dir.mkdir(parents=True, exist_ok=True)
     state = AttemptState(
         attempt_id=identity(),
@@ -771,4 +771,4 @@ def test_the_worker_dispatcher_is_busy_while_a_run_or_a_held_child_lives(tmp_pat
     (d.attempt_dir / f"{state.attempt_id}.json").write_text(
         json.dumps(asdict(state)), encoding="utf-8"
     )
-    assert d.busy() is True  # an attempt file is work the controller awaits
+    assert d.claimed() is True  # an attempt file is work the controller awaits
