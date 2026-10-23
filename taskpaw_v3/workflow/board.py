@@ -103,6 +103,19 @@ Label = tuple[str | None, str | None]
 # What an NFO summary says: title, actors, number.
 Summary = tuple[str | None, tuple[str, ...], str | None]
 GROUPS = ("planning", "active", "attention", "confirm", "archiving", "done")
+LOST_NOTE = "设备失联：{name} · 后台重连中"  # P2-4 R3 (OD2)
+DEVICE_LOST = "device_lost"
+
+
+@dataclass(frozen=True)
+class RowExtra:
+    """P2-4 R2/R3: what remote mode adds to a film's row (`reads.board_inputs`):
+    its open route, its pin, and the 失联 worker's name when the route's
+    worker stopped answering (an attention state; nothing moves, OD2)."""
+
+    route: dict[str, Any] | None = None
+    pin: dict[str, Any] | None = None
+    lost: str | None = None
 
 
 class Looked(Protocol):
@@ -430,6 +443,8 @@ def film_row(
     download: dict[str, Any] | None = None,
     label: Label | None = None,
     facts: Facts | None = None,
+    extra: RowExtra | None = None,
+    names: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """One FilmRow of `GET /control/workflow/films` (§8) with its steps (H2 R5).
 
@@ -440,6 +455,8 @@ def film_row(
     `label`: the input's NFO number and video stem (`input_labels`, H3 D06).
     `facts`: title / number / actors by precedence (`row_facts`, U1); it names
     the film in place of `label`.
+    `extra`: the route, pin and 失联 state of remote mode (P2-4); `names`:
+    worker id → name for the energy's devices (R10).
     """
     place = _place(film)
     stage = next((s for s in film.stages if s.stage == place["stage"]), None)
@@ -449,6 +466,11 @@ def film_row(
         if place["group"] == "archiving"
         else _note(film, stage, waiting, kept or {})
     )
+    attention_kind = None
+    if extra is not None and extra.lost is not None and place["group"] == "active":
+        place = {**place, "group": "attention"}  # R3: 设备失联, OD2
+        attention_kind = DEVICE_LOST
+        note = LOST_NOTE.format(name=extra.lost)
     if facts is None:
         facts = Facts(
             number=(label or (None, None))[0],
@@ -474,9 +496,13 @@ def film_row(
         "receipt_id": film.receipt_id,
         "revisions": revisions(film),
         "group": place["group"],
+        "attention_kind": attention_kind,
         "stage": stage.stage if stage else None,
         "status": stage.status if stage else None,
         "note": note,
+        # P2-4 R2: the open route and the pin (null in single-machine mode)
+        "route": extra.route if extra is not None else None,
+        "pin": extra.pin if extra is not None else None,
         "can_confirm": place["can_confirm"],
         "can_retry": place["retry_stage"] is not None,
         "retry_stage": place["retry_stage"],
@@ -487,7 +513,7 @@ def film_row(
         # PWR-2: the estimated energy per stage and in all, and the summed
         # probe duration (度 / 片长小时)
         "duration_ms": film.duration_ms,
-        "energy": en.film_energy(film, current),
+        "energy": en.film_energy(film, current, names),
         "live_power": live_power(film, current),
     }
 
@@ -518,10 +544,13 @@ def film_rows(
     download: dict[str, Any] | None = None,
     labels: dict[str, Label] | None = None,
     facts: dict[str, Facts] | None = None,
+    extras: Mapping[str, RowExtra] | None = None,
+    names: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """P2-3 R15: `currents` maps a film to its running stage — the
     controller's own and each worker's (`FleetLive.currents`). A film being
-    fetched before its claim shows the download as its waiting note."""
+    fetched before its claim shows the download as its waiting note.
+    P2-4: `extras` per film and the workers' `names` (`reads.board_inputs`)."""
     currents = currents or {}
     waiting = dict(waiting)
     for film_id, value in currents.items():
@@ -535,6 +564,8 @@ def film_rows(
             download=download,
             label=(labels or {}).get(film.film_id),
             facts=(facts or {}).get(film.film_id),
+            extra=(extras or {}).get(film.film_id),
+            names=names,
         )
         for film in films
     ]
@@ -967,6 +998,8 @@ def film_detail(
     waiting: dict[str, str],
     current: dict[str, Any] | None = None,
     download: dict[str, Any] | None = None,
+    extra: RowExtra | None = None,
+    names: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """`GET /control/workflow/films/{film_id}` (§8); None for an unknown film.
 
@@ -993,7 +1026,9 @@ def film_detail(
         for item in manifest.items
     }
     kept = _kept(wf, paths)
-    row = film_row(film, waiting, kept, current, download, facts=facts)
+    row = film_row(
+        film, waiting, kept, current, download, facts=facts, extra=extra, names=names
+    )
     return {
         "film_id": film_id,
         "name": row["name"],
@@ -1033,6 +1068,9 @@ def film_detail(
         "has_cover": facts.cover_source is not None,
         "cover_source": facts.cover_source,
         "group": row["group"],
+        "attention_kind": row["attention_kind"],
+        "route": row["route"],
+        "pin": row["pin"],
         "can_confirm": row["can_confirm"],
         "can_retry": row["can_retry"],
         "retry_stage": row["retry_stage"],

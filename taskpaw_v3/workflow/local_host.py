@@ -292,6 +292,8 @@ class LocalWorkflowHost:
         # P2-3 R9: attempts stopped with 停止并重新排队, until they resolve
         self.cancels: set[str] = set()
         self.scheduler: Any = None  # P2-3 R13: the routing pass's thread
+        # P2-4 R1: the last pass's decision; its waiting reasons reach the board
+        self.last_pass: Any = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
         # H3 M1/D02: one LTX model download; the session needs serialized calls
@@ -512,6 +514,7 @@ class LocalWorkflowHost:
             remote_enabled=True,
             live_since=fleet.started_at,
         )
+        self.last_pass = outcome.planned
         if (outcome.routed or outcome.withdrawn) and self.dispatcher is not None:
             self.dispatcher.wake()
 

@@ -588,10 +588,22 @@ class ReadCommands(WorkflowCore):
                         reason=row["reason"],
                         first_started_at=first.get((row["film_id"], row["stage"])),
                         attempt_energy=tuple(
-                            v for _, v in spent.get((row["film_id"], row["stage"]), ())
+                            v
+                            for _, v, _w in spent.get(
+                                (row["film_id"], row["stage"]), ()
+                            )
                         ),
                         attempt_ids=tuple(
-                            i for i, _ in spent.get((row["film_id"], row["stage"]), ())
+                            i
+                            for i, _, _w in spent.get(
+                                (row["film_id"], row["stage"]), ()
+                            )
+                        ),
+                        worker_ids=tuple(
+                            w
+                            for _, _v, w in spent.get(
+                                (row["film_id"], row["stage"]), ()
+                            )
                         ),
                         **_attempt_times(row["attempt_json"]),
                     )
@@ -600,12 +612,13 @@ class ReadCommands(WorkflowCore):
 
     def _attempt_energies(
         self, where: tuple[str, tuple[Any, ...]]
-    ) -> dict[tuple[str, str], list[tuple[str, AttemptEnergy | None]]]:
-        """PWR-2: every resolved attempt's (id, energy) of the local stages per
-        (film, stage), oldest first; the film's energy is their sum (PW05)."""
+    ) -> dict[tuple[str, str], list[tuple[str, AttemptEnergy | None, str | None]]]:
+        """PWR-2: every resolved attempt's (id, energy, worker) of the local
+        stages per (film, stage), oldest first; the film's energy is their sum
+        (PW05). P2-4 R10: the worker names the stage's machines."""
         spent = self._conn.execute(
             "SELECT s.film_id,s.stage,json_extract(x.body_json,'$.evidence'),"
-            "x.attempt_id "
+            "x.attempt_id,x.worker_id "
             "FROM films f JOIN stages s ON s.film_id=f.film_id "
             "AND s.input_revision=f.current_input_revision "
             "AND s.stage IN ('restore','asr','translate','return','scrape') "
@@ -614,10 +627,12 @@ class ReadCommands(WorkflowCore):
             "ORDER BY x.rowid",
             where[1],
         ).fetchall()
-        energies: dict[tuple[str, str], list[tuple[str, AttemptEnergy | None]]] = {}
-        for film_id_, stage_, evidence_, attempt_id_ in spent:
+        energies: dict[
+            tuple[str, str], list[tuple[str, AttemptEnergy | None, str | None]]
+        ] = {}
+        for film_id_, stage_, evidence_, attempt_id_, worker_id_ in spent:
             energies.setdefault((film_id_, stage_), []).append(
-                (attempt_id_, _energy(evidence_))
+                (attempt_id_, _energy(evidence_), worker_id_)
             )
         return energies
 
@@ -705,10 +720,13 @@ class ReadCommands(WorkflowCore):
                     status=row["status"],
                     ended_at=parse_time(ended) if ended else None,
                     attempt_energy=tuple(
-                        v for _, v in energies.get((film_id, row["stage"]), ())
+                        v for _, v, _w in energies.get((film_id, row["stage"]), ())
                     ),
                     attempt_ids=tuple(
-                        i for i, _ in energies.get((film_id, row["stage"]), ())
+                        i for i, _, _w in energies.get((film_id, row["stage"]), ())
+                    ),
+                    worker_ids=tuple(
+                        w for _, _v, w in energies.get((film_id, row["stage"]), ())
                     ),
                 )
             )

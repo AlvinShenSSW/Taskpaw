@@ -127,6 +127,13 @@ class FleetLive:
         with self._lock:
             self._entries.pop(worker_id, None)
 
+    def silent_for(self, worker_id: str, now: datetime) -> float:
+        """Seconds without a heartbeat on the controller's clock; a worker
+        never heard from counts from the controller's start (C14)."""
+        entry = self.entry(worker_id)
+        since = entry.last_seen if entry is not None else self.started_at
+        return max(0.0, (now - since).total_seconds())
+
     def entry(self, worker_id: str) -> LiveEntry | None:
         with self._lock:
             return self._entries.get(worker_id)

@@ -1890,6 +1890,9 @@ class BoardStage(Model):
     # the same attempts' ids, in the same order: the running attempt's live
     # figure is added only when its id is not among them (Codex PWR-2/3 r2)
     attempt_ids: tuple[str, ...] = ()
+    # P2-4 R10: the same attempts' workers, in the same order (the machines
+    # its energy ran on); None for an attempt with no worker
+    worker_ids: tuple[str | None, ...] = ()
 
 
 class BoardFilm(Model):

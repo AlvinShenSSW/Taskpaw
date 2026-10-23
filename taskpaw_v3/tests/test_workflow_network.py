@@ -162,7 +162,7 @@ def test_snapshot_size_is_bounded(monkeypatch, client, world, resource):
     elif resource == "plans":
         monkeypatch.setattr(planning, "plan_list", lambda *args: large)
     else:
-        monkeypatch.setattr(board, "film_detail", lambda *args: large)
+        monkeypatch.setattr(board, "film_detail", lambda *args, **kw: large)
     path = f"films/{world.film}" if resource == "detail" else resource
     response = client.get(f"/workflow/{path}")
     assert response.status_code == 413

@@ -57,7 +57,13 @@ def host_for(monkeypatch, films, *, current=None, waiting=None):
 
     rt = SimpleNamespace(
         operator=object(),
-        store=SimpleNamespace(film_board=film_board, list_intake_board=lambda _a: ()),
+        # P2-4: `reads.board_inputs` names the machines (none here)
+        identity=SimpleNamespace(worker_id="controller"),
+        store=SimpleNamespace(
+            film_board=film_board,
+            list_intake_board=lambda _a: (),
+            list_workers=lambda _a: (),
+        ),
     )
     monkeypatch.setattr(board, "input_labels", lambda *_a: {})
     monkeypatch.setattr(board, "row_facts", lambda *_a: {})

@@ -148,13 +148,20 @@ class WorkflowEvents:
             if host.state != "running" or host.runtime is None:
                 self._clear()
                 return
+            from taskpaw_v3.agent.server.workflow_reads import board_inputs
+
             rt = host.runtime
-            status = host.status()
-            dispatch = status.get("dispatch") or {}
             films = rt.store.film_board(rt.operator, done_limit=None, energies=False)
+            inputs = board_inputs(host, rt, films)  # P2-4 R1: as the board
+            status = inputs.status
+            dispatch = status.get("dispatch") or {}
             facts = board.row_facts(rt, films)
             rows = board.film_rows(
-                films, dict(dispatch.get("waiting") or {}), facts=facts
+                films,
+                inputs.waiting,
+                facts=facts,
+                extras=inputs.extras,
+                names=inputs.names,
             )
             packages = board.package_rows(
                 rt.store.list_intake_board(rt.operator), status.get("intake")
@@ -221,7 +228,7 @@ class WorkflowEvents:
                 "workflow.film.needs_confirmation",
                 f"{name} 待确认入库{candidate}",
             )
-        if row["group"] == "attention":
+        if row["group"] == "attention" and row.get("attention_kind") is None:
             stage = row.get("stage")
             state = row.get("status")
             kind = "failed" if state == "failed" else "needs_attention"

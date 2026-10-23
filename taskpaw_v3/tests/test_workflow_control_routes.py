@@ -251,6 +251,10 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "duration_ms",
         "energy",
         "live_power",
+        # P2-4 R2/R3: remote mode's route, pin and 设备失联 (null here)
+        "attention_kind",
+        "route",
+        "pin",
     }
     steps = {s["key"]: s["state"] for s in data["steps"]}
     assert (steps["scrape"], steps["confirm"], steps["archive"]) == (

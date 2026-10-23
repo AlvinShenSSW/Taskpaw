@@ -258,7 +258,17 @@ export interface FilmPlan { ltx_model: LtxTier | null; machine: string }
 // U1 §7.2: the current input and final manifests, so the 图文确认 dialog can see a change.
 export interface ManifestRevision { revision: number; hash: string }
 export interface FilmRevisions { input: ManifestRevision | null; final: ManifestRevision | null }
-export interface FilmRow {
+// P2-4 R2/R3 (remote mode; null on a single machine): the film's open route, its plan's mutable
+// machine choice (null worker = 自动) and the 设备失联 attention state.
+export interface FilmRouteInfo {
+  machine: { id: string; name: string }; kind: "auto" | "pinned" | "local"; reason: string; routed_at: string;
+  position: number; live: "online" | "lost" | "waiting" | "local"; silent_s: number | null;
+}
+export interface FilmPin { worker_id: string | null; name: string; version: number }
+export interface FilmRemote {
+  attention_kind?: "device_lost" | null; route?: FilmRouteInfo | null; pin?: FilmPin | null;
+}
+export interface FilmRow extends FilmRemote {
   film_id: string; name: string; group: FilmGroup; stage: string | null; status: string | null;
   note: string | null; can_confirm: boolean; can_retry: boolean; retry_stage: string | null;
   created_at: string | null; steps: WorkflowStep[];
@@ -279,6 +289,8 @@ export interface FilmRow {
 export interface EnergyStage {
   wh: number; gpu_wh: number; cpu_wh: number; other_wh: number; seconds: number;
   avg_w: number | null; peak_w: number | null; machine: string; attempts: number; partial: boolean; running: boolean;
+  // P2-4 R10: the machines the stage's attempts ran on
+  devices?: Array<{ id: string; name: string }>;
 }
 export interface FilmEnergy {
   stages: Partial<Record<string, EnergyStage>>; total_wh: number; partial: boolean; running: boolean; estimated: true;
@@ -371,7 +383,7 @@ export interface WorkflowFilms {
   // PWR-2: the cluster's live estimate and the history behind 预计耗电 / 每片能耗
   power?: ClusterPower | null; energy_rates?: EnergyRate[];
 }
-export interface FilmDetail {
+export interface FilmDetail extends FilmRemote {
   film_id: string; name: string; number: string | null; title: string | null; actors: string[];
   marks: { restored: boolean; chinese_subtitles: boolean; uhd: boolean };
   files: Array<{ role: string; path: string; size: number | null; volume: number | string | null }>;
