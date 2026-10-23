@@ -206,8 +206,18 @@ describe("设备 v1", () => {
     expect(more).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(more);
     expect(more).toHaveAttribute("aria-expanded", "true");
+    // IR2: 重新配对 voids the old credential, so it asks first (停领 above stays immediate: 恢复 undoes it)
     fireEvent.click(within(card("5070 Ti")).getByRole("button", { name: "重新配对" }));
+    const repair = await screen.findByRole("dialog", { name: "重新配对 5070 Ti" });
+    expect(repair).toHaveTextContent("重新配对后旧凭据立即失效，工作机需用新配对码重新加入");
+    expect(calls.repair).not.toHaveBeenCalled();
+    fireEvent.click(within(repair).getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(calls.repair).not.toHaveBeenCalled();
+    fireEvent.click(within(card("5070 Ti")).getByRole("button", { name: "重新配对" }));
+    fireEvent.click(within(await screen.findByRole("dialog", { name: "重新配对 5070 Ti" })).getByRole("button", { name: "确认重新配对" }));
     expect(await screen.findByRole("dialog", { name: "5070 Ti 的配对码" })).toBeInTheDocument();
+    expect(calls.repair).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "完成" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     fireEvent.click(within(card("5070 Ti")).getByRole("button", { name: "撤销" }));

@@ -215,6 +215,22 @@ def test_an_answered_request_whose_body_failed_is_not_quiet(channel, code):
     assert state.quiet_s is None and state.answered is True
 
 
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [
+        ("unreachable", "unreachable"),
+        ("timeout", "timeout"),
+        ({"workflow_worker": {"busy": False}}, "idle"),
+        ({"workflow_worker": {"busy": True}}, "busy"),
+        ("unauthorized", "unauthorized"),
+    ],
+)
+def test_quiet_names_the_last_reads_outcome(channel, answer, outcome):
+    """P2-4 UI review: the 判定已停止 dialog names how the last read ended."""
+    read(channel, answer)
+    assert channel.fleet.quiet(ADDRESS).outcome == outcome
+
+
 def test_quiet_restarts_after_an_answer_or_a_gap(channel):
     for _ in range(10):
         read(channel, "unreachable")

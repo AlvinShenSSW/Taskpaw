@@ -583,6 +583,55 @@ def test_rows_offer_reassign_and_stop_with_both_channel_ages(world):
     assert detail["actions"]["can_reassign"] is True
 
 
+def test_reassign_options_carry_the_preview_finish_and_energy(world):
+    """P2-4 UI review: the 改派 dialog shows 自动's device, finish and energy
+    and each eligible device's own, from `scheduler.preview` (预计)."""
+    fast = enrol_remote(world.rt, "5070 Ti")
+    small = enrol_remote(world.rt, "5060", gpu=("NVIDIA GeForce RTX 5060", 8151))
+    world.beat(fast)
+    world.beat(small)
+    film_id = add_film(world.rt)
+    options = {
+        o["name"]: o for o in ops.reassign_options(world.rt, world.fleet, film_id)
+    }
+    auto = options["自动"]
+    assert auto["machine"] == {"id": fast.worker_id, "name": "5070 Ti"}
+    assert auto["finish_at"] is not None and auto["finish_at"].endswith("Z")
+    assert "energy_wh" in auto
+    assert options["5070 Ti"]["reason"] is None
+    assert options["5070 Ti"]["finish_at"] is not None
+    assert "energy_wh" in options["5070 Ti"]
+    assert options["5060"]["reason"] is not None
+    assert options["5060"]["finish_at"] is None and options["5060"]["energy_wh"] is None
+
+
+def test_the_stop_action_names_the_status_address_and_its_outcome(world):
+    """P2-4 UI review: the 判定已停止 dialog shows 「192.168.x.x:5680 · 超时」."""
+    remote, film_id = claimed_film(world)
+    item = next(iter(world.rt.store.list_open_assignments(world.rt.operator)))
+    worker = world.rt.store.get_worker(world.rt.operator, remote.worker_id).worker
+
+    def action():
+        return ops.stop_action(
+            world.rt,
+            item,
+            worker,
+            fleet=world.fleet,
+            channel=world.channel,
+            now=world.rt.clock.now(),
+        )
+
+    unread = action()
+    assert unread is not None
+    assert unread["address"] == world.address(remote)
+    assert unread["status_state"] is None  # never read
+    world.channel.states[world.address(remote)] = ops.StatusQuiet(
+        quiet_s=360.0, checked_s=5.0, answered=True, outcome="timeout"
+    )
+    read = action()
+    assert read is not None and read["status_state"] == "timeout"
+
+
 def test_devices_list_unresolved_assignments_and_route_depth(world):
     remote, film_id = claimed_film(world)
     second = add_film(world.rt)

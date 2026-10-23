@@ -1,11 +1,12 @@
 import {
-  Alert, Button, Card, CardContent, FormControlLabel, MenuItem, Stack, Switch, TextField, Typography,
+  Alert, Button, Card, CardContent, FormControlLabel, InputAdornment, MenuItem, Stack, Switch, TextField, Typography,
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import {
   api, HttpError, type WorkflowRole, type WorkflowSettingsPatch, type WorkflowSettingsState, type WorkflowSettingsView,
 } from "../api";
+import { inTauri, pickPath } from "./nativePicker";
 import { WorkerJoinSection } from "./WorkerJoin";
 
 // P2-4 (#295) R13–R16, the confirmed preview 设置 · 媒体工作流: this machine's part in the media
@@ -15,10 +16,18 @@ import { WorkerJoinSection } from "./WorkerJoin";
 // backend's reason and a way to drain (暂停派发 / 暂停领取). 加入 shows while the running role is a worker.
 const WORKFLOW_SETTINGS_KEY = ["workflowSettings"];
 const SAVED = "已保存，重启 TaskPaw 后生效";
+// the section's anchor: 设备's 「主控设置」 scrolls here
+export const WORKFLOW_SETTINGS_ID = "settings-workflow";
 
 const ROLES: Array<[WorkflowRole, string]> = [
   ["controller", "媒体主控"], ["worker", "GPU 工作机"], ["off", "不参与（普通 Agent，仅监控）"],
 ];
+// IR5: a refused switch names its target (「未切换到 GPU 工作机：…」)
+const ROLE_SHORT: Record<WorkflowRole, string> = { controller: "媒体主控", worker: "GPU 工作机", off: "不参与" };
+// IR3: the native picker per path field — a folder (选择) or a tool's file (更改)
+const DIR_FIELDS = ["inbox_root", "data_dir", "staging_dir", "mdcx_root", "filmpaw_data_dir"];
+const FILE_FIELDS = ["ffprobe_path", "jasna_exe_path", "whisperjav_exe_path", "mdcx_python", "mdcx_profile"];
+const MISSING_DIR = "目录不存在";
 
 type Form = Record<string, string | boolean>;
 const TEXT_FIELDS = [
@@ -39,6 +48,8 @@ const LABELS: Record<string, string> = {
   staging_dir: "暂存目录", staging_cap_gb: "暂存上限",
 };
 const MIKO = ["mdcx_python", "mdcx_root", "mdcx_profile", "filmpaw_data_dir"];
+// 刮削 needs all three (backend `miko_status`)
+const MIKO_THREE = ["mdcx_python", "mdcx_root", "mdcx_profile"] as const;
 
 function formOf(v: WorkflowSettingsView): Form {
   const form: Form = { role: v.role, remote_workers: v.remote_workers };
@@ -77,7 +88,7 @@ export function WorkflowSettingsSection() {
   const data = settings.data;
   return (
     <>
-      <Card>
+      <Card id={WORKFLOW_SETTINGS_ID}>
         <CardContent>
           <Typography variant="subtitle1" component="h2" sx={{ mb: 0.5 }}>媒体工作流</Typography>
           {settings.isLoading ? (
@@ -95,6 +106,15 @@ export function WorkflowSettingsSection() {
   );
 }
 
+// The Miko summary of the saved fields: 三项齐全, 未配置, or which of the three is missing.
+function mikoText(state: WorkflowSettingsState, unchanged: (k: string) => boolean): string | null {
+  if (!state.miko || !MIKO_THREE.every(unchanged)) return null;
+  if (state.miko === "complete") return "三项齐全";
+  if (state.miko === "off") return "未配置";
+  const gone = MIKO_THREE.filter((k) => state.paths?.[k] !== "ok").map((k) => LABELS[k]);
+  return `缺少 ${gone.join("、")}`;
+}
+
 function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSaved: () => void }) {
   const [form, setForm] = useState<Form>(() => formOf(state.saved));
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -102,14 +122,30 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
   const [failure, setFailure] = useState<string | null>(null);
   const [savedNow, setSavedNow] = useState(false);
   const [drained, setDrained] = useState<string | null>(null);
+  const [made, setMade] = useState<string | null>(null);
   const role = form.role as WorkflowRole;
   const running = state.running.role;
   const save = useMutation({
     mutationFn: (patch: WorkflowSettingsPatch) => api.workflowSaveSettings(patch),
     onSuccess: (res) => { setSavedNow(Boolean(res.restart_required)); onSaved(); },
-    onError: (e) => {
+    onError: (e, patch) => {
       if (e instanceof HttpError && e.fields && Object.keys(e.fields).length) setErrors(e.fields);
-      else if (e instanceof HttpError && e.code === "workflow_busy") setRefused({ text: e.message, drain: !/无法确认/.test(e.message) });
+      else if (e instanceof HttpError && e.code === "workflow_busy") {
+        const prefix = patch.role !== state.saved.role ? `未切换到 ${ROLE_SHORT[patch.role]}` : "未保存";
+        setRefused({ text: `${prefix}：${e.message}`, drain: !/无法确认/.test(e.message) });
+      } else setFailure(e instanceof Error ? e.message : String(e));
+    },
+  });
+  // IR3: 「创建此目录」 for a missing INBOX (the backend validates it as the field)
+  const createDir = useMutation({
+    mutationFn: (path: string) => api.workflowCreateDir(path),
+    onSuccess: () => {
+      setErrors((p) => { if (!("inbox_root" in p)) return p; const n = { ...p }; delete n.inbox_root; return n; });
+      setMade("已创建 INBOX 目录");
+      onSaved();
+    },
+    onError: (e) => {
+      if (e instanceof HttpError && e.fields?.path) setErrors((p) => ({ ...p, inbox_root: e.fields?.path ?? "" }));
       else setFailure(e instanceof Error ? e.message : String(e));
     },
   });
@@ -120,6 +156,7 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
     onError: (e) => setFailure(e instanceof Error ? e.message : String(e)),
   });
   const set = (k: string, v: string | boolean) => {
+    if (k === "inbox_root") setMade(null);
     setForm((p) => ({ ...p, [k]: v }));
     setErrors((p) => { if (!(k in p)) return p; const n = { ...p }; delete n[k]; return n; });
   };
@@ -137,11 +174,37 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
   // which saved fields wait for the restart (「已保存，重启 TaskPaw 后生效（INBOX 目录、工作机接口端口）」)
   const pendingFields = (Object.keys(LABELS) as Array<keyof WorkflowSettingsView>)
     .filter((k) => state.saved[k] !== state.running[k]).map((k) => LABELS[k]);
-  const text = (k: string, label: string, helper?: ReactNode, placeholder?: string) => (
-    <TextField size="small" label={label} value={String(form[k] ?? "")} onChange={(e) => set(k, e.target.value)}
-      error={Boolean(errors[k])} helperText={errors[k] ?? helper} placeholder={placeholder}
-      inputProps={{ spellCheck: false, "aria-invalid": Boolean(errors[k]) }} fullWidth />
-  );
+  // IR3: what the backend found at a saved path (stale once the field is edited)
+  const unchanged = (k: string) => String(form[k] ?? "").trim() === String(state.saved[k as keyof WorkflowSettingsView] ?? "");
+  const found = (k: string) => (unchanged(k) ? state.paths?.[k as keyof WorkflowSettingsView] ?? null : null);
+  const pick = async (k: string, label: string, directory: boolean) => {
+    const picked = await pickPath(directory, `${directory ? "选择" : "更改"} ${label}`);
+    if (picked !== null) set(k, picked);
+  };
+  const text = (k: string, label: string, helper?: ReactNode, placeholder?: string) => {
+    const directory = DIR_FIELDS.includes(k);
+    const picker = inTauri() && (directory || FILE_FIELDS.includes(k));
+    const status = found(k);
+    const missing = status === "missing" && FILE_FIELDS.includes(k) ? "文件不存在"
+      : status === "missing" && directory && k !== "inbox_root" ? MISSING_DIR : null;
+    const shown = errors[k] ?? missing ?? (status === "ok" && FILE_FIELDS.includes(k) ? "已找到" : helper);
+    return (
+      <TextField size="small" label={label} value={String(form[k] ?? "")} onChange={(e) => set(k, e.target.value)}
+        error={Boolean(errors[k]) || missing !== null} helperText={shown} placeholder={placeholder}
+        inputProps={{ spellCheck: false, "aria-invalid": Boolean(errors[k]) }} fullWidth
+        InputProps={picker ? {
+          endAdornment: (
+            <InputAdornment position="end">
+              <Button size="small" sx={{ minHeight: 44, my: -0.5 }} aria-label={`${directory ? "选择" : "更改"} ${label}`}
+                onClick={() => void pick(k, label, directory)}>{directory ? "选择" : "更改"}</Button>
+            </InputAdornment>
+          ),
+        } : undefined} />
+    );
+  };
+  const inbox = String(form.inbox_root ?? "").trim();
+  const inboxMissing = Boolean(inbox) && (errors.inbox_root === MISSING_DIR || found("inbox_root") === "missing") && made === null;
+  const miko = mikoText(state, unchanged);
   const number = (k: string, label: string, helper?: string) => (
     <TextField size="small" label={label} value={String(form[k] ?? "")} onChange={(e) => set(k, e.target.value)}
       error={Boolean(errors[k])} helperText={errors[k] ?? helper} inputProps={{ inputMode: "numeric", "aria-invalid": Boolean(errors[k]) }}
@@ -172,14 +235,21 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
             {running === "worker" ? "暂停领取" : "暂停派发"}
           </Button>
         ) : undefined}>
-          未保存：{refused.text}
+          {refused.text}
         </Alert>
       )}
       {drained && <Alert severity="success">{drained}</Alert>}
       {role === "controller" && (
         <>
           <Typography variant="subtitle2" component="h3">目录</Typography>
-          {text("inbox_root", "INBOX 目录", "未刮削的原样下载放在这里")}
+          {text("inbox_root", "INBOX 目录", made ?? "未刮削的原样下载放在这里")}
+          {inboxMissing && (
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mt: "-4px !important" }}>
+              <Typography variant="body2" color="warning.main">INBOX 目录不存在</Typography>
+              <Button size="small" variant="outlined" sx={{ minHeight: 44 }} disabled={createDir.isPending}
+                onClick={() => createDir.mutate(inbox)}>创建此目录</Button>
+            </Stack>
+          )}
           {text("data_dir", "工作目录", "队列、记录与工作副本；留空用默认位置")}
           <Typography variant="subtitle2" component="h3">工具与工作机</Typography>
           {text("ffprobe_path", "ffprobe",
@@ -190,7 +260,9 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
           <Typography variant="body2" color="text.secondary" sx={{ mt: "-8px !important" }}>开启后本机不跑修复和识别</Typography>
           {form.remote_workers ? number("worker_api_port", "工作机接口端口") : tools}
           <details open={MIKO.some((k) => errors[k]) || undefined}>
-            <summary style={{ cursor: "pointer", minHeight: 44, display: "flex", alignItems: "center" }}>Miko 与 Filmpaw（可选）</summary>
+            <summary style={{ cursor: "pointer", minHeight: 44, display: "flex", alignItems: "center" }}>
+              Miko 与 Filmpaw（可选）{miko && <span style={{ opacity: 0.7 }}>&nbsp;· {miko}</span>}
+            </summary>
             <Stack spacing={2} sx={{ mt: 1 }}>
               {text("mdcx_python", "Miko Python", "MDCX304 环境的 python.exe；三项齐全才启用刮削")}
               {text("mdcx_root", "Miko 目录")}
@@ -215,11 +287,15 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
         </Alert>
       )}
       {failure && <Alert severity="error">{failure}</Alert>}
-      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-        <Button variant="contained" sx={{ minHeight: 44 }} disabled={save.isPending || !dirty} onClick={submit}>
+      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap alignItems="center">
+        <Button variant="contained" sx={{ minHeight: 44 }} disabled={save.isPending || !dirty} onClick={submit}
+          aria-describedby={!dirty ? "mw-settings-save-why" : undefined}>
           {save.isPending ? "正在保存…" : "保存"}
         </Button>
-        <Button variant="outlined" color="inherit" sx={{ minHeight: 44 }} disabled={save.isPending || !dirty} onClick={reset}>撤销更改</Button>
+        <Button variant="outlined" color="inherit" sx={{ minHeight: 44 }} disabled={save.isPending || !dirty} onClick={reset}
+          aria-describedby={!dirty ? "mw-settings-save-why" : undefined}>撤销更改</Button>
+        {/* IR9: why 保存 is disabled */}
+        {!dirty && <Typography variant="body2" color="text.secondary" id="mw-settings-save-why">没有更改</Typography>}
       </Stack>
     </Stack>
   );

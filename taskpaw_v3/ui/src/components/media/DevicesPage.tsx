@@ -92,6 +92,7 @@ export function DevicesPage() {
   const [approving, setApproving] = useState<DeviceRow | null>(null);
   const [revoking, setRevoking] = useState<DeviceRow | null>(null);
   const [retiring, setRetiring] = useState<DeviceRow | null>(null);
+  const [repairing, setRepairing] = useState<DeviceRow | null>(null);
   const [attesting, setAttesting] = useState<DeviceAssignment | null>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: DEVICES_KEY });
   const act = useMutation({
@@ -143,7 +144,12 @@ export function DevicesPage() {
                 <span className="device-icon"><Icon of={ComputerIcon} /></span>
                 <div><h3>{data.controller.name}</h3><p>主控 · 运行 {data.controller.stages.join("、") || "—"}</p></div>
               </div>
-              <div className="chips"><Chip tone="green">在线</Chip>{data.controller.stages.map((s) => <Chip key={s} tone="blue">{s}</Chip>)}</div>
+              <div className="device-state">
+                <div className="chips"><Chip tone="green">在线</Chip>{data.controller.stages.map((s) => <Chip key={s} tone="blue">{s}</Chip>)}</div>
+                {ws.openSettings && (
+                  <button type="button" className="btn ghost small" onClick={ws.openSettings}>主控设置</button>
+                )}
+              </div>
             </div>
             {data.remote_workers && !data.controller.stages.includes("修复") && (
               <p className="small muted">修复交给 GPU 工作机；本机负责{data.controller.stages.join("、") || "其余步骤"}与刮削入库。</p>
@@ -154,7 +160,7 @@ export function DevicesPage() {
               busy={act.isPending || repair.isPending} progressOf={progressOf}
               onApprove={() => setApproving(row)}
               onAdmission={(state) => act.mutate(() => api.workflowDeviceAdmission(row.worker_id, row.version, state))}
-              onRepair={() => repair.mutate(row)}
+              onRepair={() => setRepairing(row)}
               onRevoke={() => setRevoking(row)}
               onRetire={() => setRetiring(row)}
               onAttest={(a) => setAttesting(a)} />
@@ -171,6 +177,8 @@ export function DevicesPage() {
         onApproved={() => { setApproving(null); refresh(); }} />
       <RevokeDialog row={revoking} onClose={() => setRevoking(null)}
         onConfirm={(row) => { setRevoking(null); act.mutate(() => api.workflowRevokeDevice(row.worker_id, row.version)); }} />
+      <RepairDialog row={repairing} onClose={() => setRepairing(null)}
+        onConfirm={(row) => { setRepairing(null); repair.mutate(row); }} />
       <RetireDialog row={retiring} onClose={() => setRetiring(null)}
         onConfirm={(row) => { setRetiring(null); act.mutate(() => api.workflowRetireDevice(row.worker_id, row.version)); }} />
       {attesting?.stop && (
@@ -486,6 +494,29 @@ function RevokeDialog({ row, onClose, onConfirm }: { row: DeviceRow | null; onCl
             <div className="actions">
               <button type="button" className="btn ghost" onClick={onClose}>取消</button>
               <button type="button" className="btn danger" onClick={() => onConfirm(row)}>确认撤销</button>
+            </div>
+          </div>
+        </>
+      )}
+    </ModalShell>
+  );
+}
+
+// IR2: 重新配对 voids the worker's credential at once, so it asks first. 停领 stays immediate: 恢复 undoes it.
+function RepairDialog({ row, onClose, onConfirm }: { row: DeviceRow | null; onClose: () => void; onConfirm: (row: DeviceRow) => void }) {
+  return (
+    <ModalShell open={row !== null} onClose={onClose} titleId="mw-repair-title">
+      {row && (
+        <>
+          <ModalHead id="mw-repair-title" title={`重新配对 ${row.name}`} subtitle="生成新的一次性配对码" onClose={onClose} />
+          <div className="modal-body">
+            <Notice tone="amber" icon={WarningAmberIcon}>重新配对后旧凭据立即失效，工作机需用新配对码重新加入</Notice>
+          </div>
+          <div className="modal-foot">
+            <p>已在运行的任务不受影响。</p>
+            <div className="actions">
+              <button type="button" className="btn ghost" onClick={onClose}>取消</button>
+              <button type="button" className="btn primary" onClick={() => onConfirm(row)}>确认重新配对</button>
             </div>
           </div>
         </>

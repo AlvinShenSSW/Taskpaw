@@ -11,7 +11,7 @@ import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
 import { predictFromRates } from "../power/powerModel";
 import {
   CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
-  machineLabel, STATUS_META, stageName, stepDurations, tierLong, type WorkItem,
+  machineLabel, STATUS_META, stageName, stepDurations, tierLong, unroutedMachine, type WorkItem,
 } from "./mediaModel";
 import { DeviceSection } from "./RemoteParts";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
@@ -116,8 +116,10 @@ function DrawerBody({ film, item, status, plan }: {
   const remote = (film.steps ?? []).find((s) => s.state === "running" && (s.key === "restore" || s.key === "asr") && s.machine) ?? null;
   // P2-4 §4: remote mode's 设备 line (route, 失联, 改派, 判定已停止)
   const multi = isRemoteRow(film);
+  // §9 CX30: with no route, the pin only while the restore waits for a device; then 本机, none once done
+  const unrouted = unroutedMachine(film);
   const routed = film.route ? (film.route.live === "local" ? "本机" : film.route.machine.name)
-    : film.pin ? (film.pin.worker_id === null ? "自动" : film.pin.name) : null;
+    : unrouted === "待派发" && film.pin ? (film.pin.worker_id === null ? "自动" : film.pin.name) : unrouted;
   const download = restore?.download ?? null;
   const timing = readFilmTiming(film.timing);
   const changed = film.cleanup.kept.some((k) => k.status === "blocked_changed" || k.status === "blocked_identity");
@@ -148,8 +150,10 @@ function DrawerBody({ film, item, status, plan }: {
   ) : film.plan ? (
     <>
       <dt>画质</dt><dd>{tierLong(film.plan.ltx_model)}</dd>
-      <dt>设备</dt><dd>{remote?.machine ? remote.machine.name : multi ? routed ?? "待派发"
-        : machineLabel(ws.data.plans.data?.choices.machines.find((m) => m.id === film.plan?.machine), "本机")}</dd>
+      {(!multi || remote?.machine || routed !== null) && (
+        <><dt>设备</dt><dd>{remote?.machine ? remote.machine.name : multi ? routed
+          : machineLabel(ws.data.plans.data?.choices.machines.find((m) => m.id === film.plan?.machine), "本机")}</dd></>
+      )}
     </>
   ) : (
     <><dt>画质</dt><dd>待安排</dd><dt>设备</dt><dd>待安排</dd></>

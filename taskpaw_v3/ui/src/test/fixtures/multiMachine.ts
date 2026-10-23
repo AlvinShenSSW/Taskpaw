@@ -64,9 +64,9 @@ const route = (w: { id: string; name: string }, over: Partial<FilmRouteInfo> = {
 });
 export const STOP: FilmStopAction = {
   assignment_id: "as-lost", expected_version: 4, stage: "restore", worker: W.ti3, allowed: true, reason: null,
-  heartbeat_silent_s: 420, status_quiet_s: 360,
+  heartbeat_silent_s: 420, status_quiet_s: 360, address: "192.168.1.34:5680", status_state: "timeout",
 };
-const actions = (over: Partial<FilmActions> = {}): FilmActions => ({ can_reassign: false, stop: null, ...over });
+export const actions = (over: Partial<FilmActions> = {}): FilmActions => ({ can_reassign: false, stop: null, ...over });
 const LTX41 = { ltx_progress: { mode: "restore", stage_index: 2, stage_total: 4, stage_name: "encode", percent: 41, percent_text: "41",
   current: "41", total: "100", rate_value: "2.31", rate_unit: "s/step" } };
 

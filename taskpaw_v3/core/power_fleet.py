@@ -161,12 +161,15 @@ class StatusQuiet:
     """判定已停止's status channel for one address: how long `/status` has
     been dead or idle without a break (None: it answered as up at the last
     read), how old the last read is, when up its answer's code, and whether
-    any read since this process started got an HTTP answer (§9 IR2)."""
+    any read since this process started got an HTTP answer (§9 IR2).
+    `outcome`: how the last read ended, for the 判定已停止 dialog — `timeout`,
+    `unreachable`, `idle` (busy false) or the up answer's code."""
 
     quiet_s: Optional[float]
     checked_s: Optional[float]
     state: Optional[str] = None
     answered: bool = False
+    outcome: Optional[str] = None
 
 
 # ── one bounded GET ─────────────────────────────────────────────────────────
@@ -644,11 +647,17 @@ class PowerFleet:
 
     # ── the status channel (P2-4 R8, C4) ────────────────────────────────
     def _status_seen(
-        self, peer: tuple[str, str], state: Optional[str], *, answered: bool
+        self,
+        peer: tuple[str, str],
+        state: Optional[str],
+        *,
+        answered: bool,
+        outcome: Optional[str] = None,
     ) -> None:
         """One `/status` read: `state` None is quiet (dead or idle), else
         the code of an answer that shows the machine up; `answered`: an HTTP
-        answer came back (anything but unreachable/timeout)."""
+        answer came back (anything but unreachable/timeout); `outcome`: how a
+        quiet read ended (`timeout`, `unreachable`, `idle`)."""
         now = self._clock()
         with self._lock:
             entry = self._entry(peer)
@@ -665,6 +674,7 @@ class PowerFleet:
                 entry["quiet_since"] = now
             entry["status_mono"] = now
             entry["status_state"] = state
+            entry["status_outcome"] = state if state is not None else outcome
 
     def quiet(self, address: str) -> Optional[StatusQuiet]:
         """The status channel of the peer at `address` (host[:port]); None
@@ -683,6 +693,7 @@ class PowerFleet:
                     checked_s=max(0.0, now - entry["status_mono"]),
                     state=entry.get("status_state"),
                     answered=bool(entry.get("answered")),
+                    outcome=entry.get("status_outcome"),
                 )
         return None
 
@@ -783,7 +794,12 @@ class PowerFleet:
             # C4: only a dead channel is quiet; any HTTP answer is a live
             # machine — §9 CX19: a response whose body then failed included
             dead = not exc.answered and exc.code in ("unreachable", "timeout")
-            self._status_seen(peer, None if dead else exc.code, answered=not dead)
+            self._status_seen(
+                peer,
+                None if dead else exc.code,
+                answered=not dead,
+                outcome=exc.code,
+            )
             # the last live figure is not shown as current; the histories
             # already read stay (they are history)
             self._update(
@@ -810,6 +826,7 @@ class PowerFleet:
             peer,
             None if busy is False else "busy" if busy is True else "no_busy",
             answered=True,
+            outcome="idle",
         )
         seen = dict(
             machine=_text(status.get("machine")),

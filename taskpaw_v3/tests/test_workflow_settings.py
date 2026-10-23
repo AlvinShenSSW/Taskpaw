@@ -1051,3 +1051,104 @@ def test_a_failed_save_answers_500_and_leaves_the_file(tmp_path, tools, monkeypa
     assert str(world.path) not in response.text
     assert world.path.read_bytes() == before
     assert world.get().json()["saved"]["role"] == "off"  # nothing committed
+
+
+# ── the saved paths' status and 创建此目录 (P2-4 UI review IR3) ──────────
+DIR_URL = f"{URL}/directory"
+
+
+def post_dir(world: World, body):
+    return world.client.post(
+        DIR_URL, json=body, headers={"Authorization": f"Bearer {TOKEN}"}
+    )
+
+
+def test_get_reports_each_saved_path_found_or_missing(tmp_path, tools):
+    gone = str(tmp_path / "gone")
+    world = World(
+        tmp_path, enabled=True, role="controller", **{**tools, "inbox_root": gone}
+    )
+    body = world.get().json()
+    assert body["paths"]["inbox_root"] == "missing"
+    assert body["paths"]["jasna_exe_path"] == "ok"
+    assert body["paths"]["ffprobe_path"] == "ok"
+    assert body["paths"]["mdcx_python"] is None  # not set
+    assert body["miko"] == "off"
+
+
+def test_miko_is_complete_only_with_all_three_present(tmp_path):
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"x")
+    root = tmp_path / "mdcx"
+    root.mkdir()
+    profile = root / "config.json"
+    profile.write_text("{}", encoding="utf-8")
+    partial = World(tmp_path, mdcx_python=str(python), mdcx_root=str(root))
+    assert partial.get().json()["miko"] == "partial"
+    complete = World(
+        tmp_path,
+        mdcx_python=str(python),
+        mdcx_root=str(root),
+        mdcx_profile=str(profile),
+    )
+    assert complete.get().json()["miko"] == "complete"
+    profile.unlink()
+    assert complete.get().json()["miko"] == "partial"
+
+
+def test_create_directory_makes_a_missing_local_folder(tmp_path):
+    world = World(tmp_path)
+    target = tmp_path / "new" / "INBOX"
+    response = post_dir(world, {"path": f"  {target}  "})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "created": True}
+    assert target.is_dir()
+    again = post_dir(world, {"path": str(target)})
+    assert again.json() == {"ok": True, "created": False}
+
+
+@pytest.mark.parametrize(
+    ("raw", "why"),
+    [
+        (r"\\nas-a\share\INBOX", "不能是网络路径"),
+        ("//nas-a/share/INBOX", "不能是网络路径"),
+        (r"relative\INBOX", "必须是完整路径"),
+        ("", "请填写"),
+        (None, "格式不正确"),
+        (5, "格式不正确"),
+    ],
+)
+def test_create_directory_refuses_what_the_inbox_field_refuses(tmp_path, raw, why):
+    world = World(tmp_path)
+    response = post_dir(world, {"path": raw})
+    assert response.status_code == 422
+    assert response.json()["fields"] == {"path": why}
+
+
+def test_create_directory_refuses_dot_dot_and_a_file_in_the_way(tmp_path):
+    world = World(tmp_path)
+    up = post_dir(world, {"path": str(tmp_path / "a" / ".." / "b")})
+    assert up.status_code == 422 and up.json()["fields"] == {"path": "不能包含 .."}
+    assert not (tmp_path / "b").exists()
+    blocker = tmp_path / "taken"
+    blocker.write_bytes(b"x")
+    taken = post_dir(world, {"path": str(blocker)})
+    assert taken.status_code == 422
+    assert taken.json()["fields"] == {"path": "已有同名文件"}
+    assert str(blocker) not in taken.text
+
+
+def test_create_directory_answers_a_failed_mkdir_without_the_path(
+    tmp_path, monkeypatch
+):
+    world = World(tmp_path)
+    target = tmp_path / "denied"
+
+    def denied(self, *_a, **_k):
+        raise PermissionError(str(self))
+
+    monkeypatch.setattr(Path, "mkdir", denied)
+    response = post_dir(world, {"path": str(target)})
+    assert response.status_code == 422
+    assert response.json()["fields"] == {"path": "无法创建目录"}
+    assert str(target) not in response.text

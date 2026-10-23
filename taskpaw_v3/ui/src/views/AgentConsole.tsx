@@ -16,6 +16,7 @@ import { MonitorSelector } from "../components/MonitorSelector";
 import { MonitorWizard } from "./MonitorWizard";
 import { Settings } from "./Settings";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
+import { WORKFLOW_SETTINGS_ID } from "../components/WorkflowSettings";
 import { WorkerMonitor } from "../components/WorkerMonitor";
 import { PowerPage } from "../components/power/PowerPage";
 
@@ -51,6 +52,12 @@ export function AgentConsole() {
   const [tab, setTab] = useState<"monitors" | "media" | "power" | "logs" | "settings">("monitors");
   const workflow = (config.data as { workflow?: { role?: string } } | undefined)?.workflow;
   const isWorker = workflow?.role === "worker";
+
+  // P2-4: 设备's 「主控设置」 — the 设置 tab, scrolled to its 媒体工作流 section
+  const openWorkflowSettings = () => {
+    setTab("settings");
+    requestAnimationFrame(() => document.getElementById(WORKFLOW_SETTINGS_ID)?.scrollIntoView({ block: "start" }));
+  };
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["agentStatus"] });
@@ -88,7 +95,7 @@ export function AgentConsole() {
         <Settings role="agent" />
       ) : tab === "media" ? (
         // P2-3 §6: a worker shows its own 媒体处理 monitor, never the controller's workspace
-        isWorker ? <WorkerMonitor /> : <MediaWorkspace onOpenPower={() => setTab("power")} />
+        isWorker ? <WorkerMonitor /> : <MediaWorkspace onOpenPower={() => setTab("power")} onOpenSettings={openWorkflowSettings} />
       ) : tab === "power" ? (
         <PowerPage onOpenMedia={() => setTab("media")} />
       ) : tab === "logs" ? (

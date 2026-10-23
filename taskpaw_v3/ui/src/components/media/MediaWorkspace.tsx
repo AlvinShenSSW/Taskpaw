@@ -78,17 +78,18 @@ function NavList({ page, data, onPick, label }: { page: PageKey; data: MediaData
 
 // 「媒体处理中心」 (build spec V3 + U1). Phase 1 mounts it as the AgentConsole tab; it does not
 // depend on the console, so the Hub can mount the same component later. `onOpenPower` (PWR-2): the
-// 集群功耗 card's 「功耗详情」 link, given by a host that has the 功耗 tab (the Agent console only).
+// 集群功耗 card's 「功耗详情」 link, given by a host that has the 功耗 tab (the Agent console only);
+// `onOpenSettings` (P2-4): 设备's 「主控设置」 → 设置 · 媒体工作流, likewise.
 type Props =
-  | { readOnly?: false; server?: never; onOpenPower?: () => void }
-  | { readOnly: true; server: HubServer; onOpenPower?: never };
+  | { readOnly?: false; server?: never; onOpenPower?: () => void; onOpenSettings?: () => void }
+  | { readOnly: true; server: HubServer; onOpenPower?: never; onOpenSettings?: never };
 
 export function MediaWorkspace(props: Props = {}) {
   // Source changes close old drawers/lightboxes and reset navigation to the new source.
   return <MediaWorkspaceContent key={props.server?.id ?? "agent"} {...props} />;
 }
 
-function MediaWorkspaceContent({ readOnly = false, server, onOpenPower }: Props) {
+function MediaWorkspaceContent({ readOnly = false, server, onOpenPower, onOpenSettings }: Props) {
   const narrow = useMediaQuery("(max-width:900px)");
   const [page, setPage] = useState<PageKey>("overview");
   const [queueStage, setQueueStage] = useState<StageFilter>("all");
@@ -128,7 +129,8 @@ function MediaWorkspaceContent({ readOnly = false, server, onOpenPower }: Props)
     openExplain: (kind, id) => { setDrawer(null); setReview(null); setExplain({ kind, filmId: id }); },
     toast: (text) => setToast({ text, key: Date.now() }),
     openPower: readOnly ? undefined : onOpenPower,
-  }), [data, navigate, queueStage, readOnly, server, onOpenPower]);
+    openSettings: readOnly ? undefined : onOpenSettings,
+  }), [data, navigate, queueStage, readOnly, server, onOpenPower, onOpenSettings]);
 
   const current = PAGES.find((p) => p.key === page) ?? PAGES[0];
   const films = data.films.data;

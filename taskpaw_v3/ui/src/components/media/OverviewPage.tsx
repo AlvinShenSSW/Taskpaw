@@ -241,7 +241,7 @@ export function FilmRowView({ item }: { item: WorkItem }) {
         <div className="meta">
           {itemNumber(item) && <span className="mono">{itemNumber(item)}</span>}
           {item.kind === "film" && isRemoteRow(item.row) && !REVIEW_STATES.includes(item.status)
-            ? <span className="machine-name" data-testid="film-machine">{machineOf(item.row)}</span>
+            ? machineOf(item.row) !== null && <span className="machine-name" data-testid="film-machine">{machineOf(item.row)}</span>
             : <span>{REVIEW_STATES.includes(item.status) ? "主控编排" : "本机"}</span>}
           {active && (
             <span className="pw-chip" data-testid="row-power" title={live ? "本机整机功耗 · 估算" : "只有占用 GPU 的影片显示整机功耗"}>

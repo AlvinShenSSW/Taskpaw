@@ -119,6 +119,69 @@ def detect_ffprobe() -> str | None:
     return shutil.which("ffprobe")
 
 
+MIKO = ("mdcx_python", "mdcx_root", "mdcx_profile")
+NO_DIR = "无法创建目录"
+FILE_IN_THE_WAY = "已有同名文件"
+
+
+def path_status(settings: WorkflowSettings) -> dict[str, str | None]:
+    """P2-4 UI review IR3: each saved directory and tool — `ok`, `missing`, or
+    None when unset (or a path the field refuses: never touched)."""
+    found: dict[str, str | None] = {}
+    for name in (*_DIRS, *_FILES):
+        raw = getattr(settings, name)
+        if not raw or _path_error(raw):
+            found[name] = None
+            continue
+        path = Path(raw)
+        try:
+            ok = path.is_dir() if name in _DIRS else path.is_file()
+        except OSError:
+            ok = False
+        found[name] = "ok" if ok else "missing"
+    return found
+
+
+def miko_status(found: dict[str, str | None]) -> str:
+    """刮削 runs only with all three Miko fields: `complete`, `partial`, `off`."""
+    states = [found[name] for name in MIKO]
+    if all(state == "ok" for state in states):
+        return "complete"
+    return "off" if all(state is None for state in states) else "partial"
+
+
+def create_dir(body: Any) -> dict[str, Any]:
+    """`{path}` → the directory made (with its parents); validated as the
+    INBOX field (absolute, local, no ..); 422 `{fields: {path}}` otherwise,
+    never echoing the path."""
+    raw = body.get("path") if isinstance(body, dict) else None
+    if not isinstance(raw, str):
+        raise Refused(422, "设置有误", fields={"path": "格式不正确"})
+    text = raw.strip()
+    why = "请填写" if not text else _path_error(text)
+    if why:
+        raise Refused(422, "设置有误", fields={"path": why})
+    path = Path(text)
+    if path.is_dir():
+        return {"ok": True, "created": False}
+    if path.exists():
+        raise Refused(422, "设置有误", fields={"path": FILE_IN_THE_WAY})
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise Refused(422, "设置有误", fields={"path": NO_DIR}) from None
+    return {"ok": True, "created": True}
+
+
+def _refusal(exc: Refused) -> JSONResponse:
+    content: dict[str, Any] = {"detail": exc.detail}
+    if exc.code:
+        content["code"] = exc.code
+    if exc.fields:
+        content["fields"] = exc.fields
+    return JSONResponse(status_code=exc.status, content=content)
+
+
 def default_data_dir(
     settings: WorkflowSettings, config_dir: Path | None
 ) -> Path | None:
@@ -555,6 +618,7 @@ def register_workflow_settings(
     @app.get("/control/workflow/settings")
     def workflow_settings() -> dict[str, Any]:
         current = saved()
+        found = path_status(current)
         return {
             "saved": view(current),
             "running": view(config.workflow),
@@ -563,7 +627,24 @@ def register_workflow_settings(
             "presets": presets(),
             # §9 IR6: what an empty ffprobe field uses (None: not on PATH)
             "ffprobe_detected": detect_ffprobe(),
+            # UI review IR3: the saved paths found or missing; Miko 三项齐全
+            "paths": found,
+            "miko": miko_status(found),
         }
+
+    @app.post("/control/workflow/settings/directory")
+    async def workflow_settings_directory(request: Request) -> Any:
+        """UI review IR3: 「创建此目录」 for a missing INBOX (loopback only)."""
+        from starlette.concurrency import run_in_threadpool
+
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        try:
+            return await run_in_threadpool(create_dir, body)
+        except Refused as exc:
+            return _refusal(exc)
 
     @app.put("/control/workflow/settings")
     async def workflow_settings_put(request: Request) -> Any:
@@ -589,12 +670,7 @@ def register_workflow_settings(
                 admin.update_config, {"workflow": fields}, workflow_check=check
             )
         except Refused as exc:
-            content: dict[str, Any] = {"detail": exc.detail}
-            if exc.code:
-                content["code"] = exc.code
-            if exc.fields:
-                content["fields"] = exc.fields
-            return JSONResponse(status_code=exc.status, content=content)
+            return _refusal(exc)
         except ValueError as exc:  # the merged config failed the model (never echoed)
             if str(exc) == "operation_busy":  # §9 IR12: another save holds the lock
                 return JSONResponse(

@@ -96,7 +96,7 @@ function FilmCard({ item }: { item: WorkItem }) {
       <div className="card-foot">
         <span>
           {item.kind === "package" ? "INBOX" : isRemoteRow(item.row)
-            ? <span className="machine-name" data-testid="film-machine">{machineOf(item.row)}</span>
+            ? machineOf(item.row) !== null && <span className="machine-name" data-testid="film-machine">{machineOf(item.row)}</span>
             : isRestoring(item.status) ? "本机" : "INBOX"}
           {run !== null && <span className="mono run-total" title="从首次开始修复到翻译完成"> · 全程 {fmtHoursMinutes(run)}</span>}
           {run !== null && energy && !energy.running && (

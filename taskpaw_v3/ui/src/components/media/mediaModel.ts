@@ -1,7 +1,7 @@
 // 媒体处理中心 V3: the status vocabulary (build spec §3) and how a backend row maps onto it.
 // Pure functions only; the components and tests share them.
 import type {
-  FilmRouteInfo, FilmRow, FilmTiming, LtxTier, PackageRow, RestoreParams, RestoreTiming, StepKey, TargetPreflight, WorkflowFilms,
+  FilmGroup, FilmRouteInfo, FilmRow, FilmTiming, LtxTier, PackageRow, RestoreParams, RestoreTiming, StepKey, TargetPreflight, WorkflowFilms,
   WorkflowStep,
 } from "../../api";
 import { LTX_STAGES, plainText, readLtxProgress, record, type LtxSnapshot } from "../ltxProgress.helpers";
@@ -561,14 +561,21 @@ export const CLEANUP_STATE: Record<string, string> = {
 // Remote mode: the board sends `actions` on every film (null on a single machine).
 export const isRemoteRow = (row: { actions?: unknown }) => row.actions !== undefined && row.actions !== null;
 
+// A remote-mode film with no open route and no remote stage (§9 CX30): 「待派发」 only while its GPU work
+// (the restore) is unfinished, 本机 for the controller's own stages afterwards, null once it is done.
+export function unroutedMachine(film: { group: FilmGroup; steps?: WorkflowStep[] | null }): "待派发" | "本机" | null {
+  if (film.group === "done") return null;
+  const restore = (film.steps ?? []).find((s) => s.key === "restore");
+  return restore && restore.state !== "done" ? "待派发" : "本机";
+}
+
 // The machine column (V1): the open route's device (「本机」 for the controller's own), the worker a
-// running stage reports, 「待派发」 for an unrouted restore, else 本机 (the controller runs the rest).
-export function machineOf(row: FilmRow): string {
+// running stage reports, else `unroutedMachine` (null: a finished film shows none).
+export function machineOf(row: FilmRow): string | null {
   if (row.route) return row.route.live === "local" ? "本机" : row.route.machine.name || "工作机";
   const running = (row.steps ?? []).find((s) => s.state === "running" && s.machine);
   if (running?.machine) return running.machine.name;
-  if (row.group === "active" && row.stage === "restore" && row.status !== "running") return "待派发";
-  return "本机";
+  return unroutedMachine(row);
 }
 
 // 「7 分钟」: a silence in whole minutes (under a minute: seconds).

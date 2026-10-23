@@ -100,6 +100,11 @@ export function PendingPage() {
   const machines = plans.data?.choices.machines ?? [];
   const remote = Boolean(plans.data?.remote);
   const held = remote ? items.filter(blocked4k).length : 0;
+  // IR9: why 全部按推荐确认 is disabled
+  const batchWhy = eligible.length > 0 ? null
+    : items.length === 0 ? "没有待处理的影片"
+      : held === items.length ? "暂无可用机器 · 4K 全部不可选"
+        : "没有可按推荐确认的影片：已调整、需重新查看或缺少选择的请单独确认";
 
   // `quiet`: the batch reports once for every film (confirmAll), not a toast per failure.
   const after = (sent: PlanEntry[], results: PlanResult[] | null, failure?: unknown, quiet = false) => {
@@ -196,10 +201,14 @@ export function PendingPage() {
   return (
     <>
       <PageTitle title="待处理" actions={!ws.readOnly &&
-        <button type="button" className="btn ghost" disabled={eligible.length === 0 || confirm.isPending}
-          onClick={() => void confirmAll()}>
-          <Icon of={CheckIcon} />全部按推荐确认
-        </button>
+        <>
+          <button type="button" className="btn ghost" disabled={eligible.length === 0 || confirm.isPending}
+            title={batchWhy ?? undefined} aria-describedby={batchWhy ? "mw-batch-why" : undefined}
+            onClick={() => void confirmAll()}>
+            <Icon of={CheckIcon} />全部按推荐确认
+          </button>
+          {batchWhy && <span className="sr-only" id="mw-batch-why">{batchWhy}</span>}
+        </>
       } />
       <div className="toolbar pending-toolbar">
         <div className="filters" role="group" aria-label="按是否需要修复筛选">

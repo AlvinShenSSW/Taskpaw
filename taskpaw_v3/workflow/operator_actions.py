@@ -75,6 +75,7 @@ class StopCheck:
     reason: str | None
     heartbeat_silent_s: int | None
     status_quiet_s: int | None
+    status_state: str | None = None  # how the last /status read ended
 
 
 def worker_address(worker: m.WorkerRecord) -> str:
@@ -102,9 +103,10 @@ def stop_check(
     quiet = channel.quiet(worker_address(worker)) if channel is not None else None
     heard = None if silent is None else round(silent)
     status_s = None if quiet is None or quiet.quiet_s is None else round(quiet.quiet_s)
+    outcome = quiet.outcome if quiet is not None else None
 
     def refused(code: str, reason: str) -> StopCheck:
-        return StopCheck(False, code, reason, heard, status_s)
+        return StopCheck(False, code, reason, heard, status_s, outcome)
 
     if silent is None:
         return refused("still_alive", "心跳通道：未开启远程设备")
@@ -127,7 +129,7 @@ def stop_check(
     renewed = (now - assignment.renewed_at).total_seconds()
     if renewed < QUIET_SECONDS:
         return refused("recently_renewed", "该任务 5 分钟内仍有续约，请稍后再判定")
-    return StopCheck(True, None, None, heard, status_s)
+    return StopCheck(True, None, None, heard, status_s, outcome)
 
 
 def stop_action(
@@ -153,6 +155,9 @@ def stop_action(
         "reason": check.reason,
         "heartbeat_silent_s": check.heartbeat_silent_s,
         "status_quiet_s": check.status_quiet_s,
+        # the dialog's 「192.168.1.34:5680 · 超时」: the status channel read
+        "address": worker_address(worker),
+        "status_state": check.status_state,
     }
 
 
@@ -316,7 +321,10 @@ def reassign_options(
     rt: LocalRuntime, fleet: FleetLive | None, film_id: str
 ) -> list[dict[str, Any]]:
     """The drawer's 改派 choices: 自动, then each verified worker with the
-    reason it could not take the film now (None: it can)."""
+    reason it could not take the film now (None: it can). Each choice that
+    can take it carries `scheduler.preview`'s finish and energy (预计,
+    advisory); 自动 also names the device the next pass would pick."""
+    from .board import iso
     from .routing import gpu_stages
 
     op = rt.operator
@@ -324,15 +332,40 @@ def reassign_options(
     film = next((f for f in snapshot.films if f.film_id == film_id), None)
     if film is None or not film.planned:
         return []
-    stages = sc.routed_stages(film, gpu_stages(rt.store, op, snapshot, rt.executors))
+    found = gpu_stages(rt.store, op, snapshot, rt.executors)
+    stages = sc.routed_stages(film, found)
     live = fleet.snapshot() if fleet is not None else {}
     now = rt.clock.now()
+    seen = sc.preview(
+        snapshot,
+        film_id,
+        (film.ltx_model,),
+        live=live,
+        now=now,
+        controller_id=rt.identity.worker_id,
+        gpu_stages=found,
+        live_since=fleet.started_at if fleet is not None else None,
+    ).get(film.ltx_model)
+    names = {w.worker_id: w.name for w in snapshot.workers}
+    by_id = {d.worker_id: d for d in seen.devices} if seen is not None else {}
+
+    def estimate(finish: datetime | None, energy: float | None) -> dict[str, Any]:
+        return {"finish_at": iso(finish) if finish else None, "energy_wh": energy}
+
+    machine = seen.machine if seen is not None else None
     options: list[dict[str, Any]] = [
         {
             "worker_id": None,
             "name": "自动",
             "reason": None,
             "current": film.pin_worker_id is None,
+            "machine": {"id": machine, "name": names.get(machine, "")}
+            if machine is not None
+            else None,
+            **estimate(
+                seen.finish_at if seen is not None else None,
+                seen.energy_wh if seen is not None else None,
+            ),
         }
     ]
     for worker in snapshot.workers:
@@ -342,19 +375,25 @@ def reassign_options(
             or worker.admission_state == "revoked"
         ):
             continue
+        reason = sc.eligibility(
+            worker,
+            film,
+            stages or ("asr",),
+            live.get(worker.worker_id),
+            now,
+            queued_need=None,
+        )
+        device = by_id.get(worker.worker_id) if reason is None else None
         options.append(
             {
                 "worker_id": worker.worker_id,
                 "name": worker.name,
-                "reason": sc.eligibility(
-                    worker,
-                    film,
-                    stages or ("asr",),
-                    live.get(worker.worker_id),
-                    now,
-                    queued_need=None,
-                ),
+                "reason": reason,
                 "current": film.pin_worker_id == worker.worker_id,
+                **estimate(
+                    device.finish_at if device is not None else None,
+                    device.energy_wh if device is not None else None,
+                ),
             }
         )
     return options

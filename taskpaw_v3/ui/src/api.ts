@@ -276,9 +276,15 @@ export interface FilmPin { worker_id: string | null; name: string; version: numb
 export interface FilmStopAction {
   assignment_id: string; expected_version: number; stage: string; worker: { id: string; name: string };
   allowed: boolean; reason: string | null; heartbeat_silent_s: number | null; status_quiet_s: number | null;
+  // the status channel's address (`host:port`) and how its last read ended (timeout / unreachable / idle / …)
+  address?: string; status_state?: string | null;
 }
 export interface FilmActions { can_reassign: boolean; stop: FilmStopAction | null }
-export interface ReassignOption { worker_id: string | null; name: string; reason: string | null; current: boolean }
+export interface ReassignOption {
+  worker_id: string | null; name: string; reason: string | null; current: boolean;
+  // 预计 (scheduler.preview): the finish and energy when it can take the film; 自动 names its device
+  finish_at?: string | null; energy_wh?: number | null; machine?: { id: string; name: string } | null;
+}
 export interface FilmRemote {
   attention_kind?: "device_lost" | null; route?: FilmRouteInfo | null; pin?: FilmPin | null;
   actions?: FilmActions | null;
@@ -517,6 +523,9 @@ export interface WorkflowSettingsState {
   presets: Array<{ id: string; label: string }>;
   // what an empty ffprobe field uses (null: not on PATH)
   ffprobe_detected: string | null;
+  // each saved directory / tool found or missing (null: unset), and whether Miko's three fields are complete
+  paths?: Partial<Record<keyof WorkflowSettingsView, "ok" | "missing" | null>>;
+  miko?: "complete" | "partial" | "off";
 }
 export type WorkflowSettingsPatch = { role: WorkflowRole } & Partial<Omit<WorkflowSettingsView, "enabled" | "role">>;
 // `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
@@ -846,6 +855,9 @@ export const api = {
   workflowSettings: () => get<WorkflowSettingsState>("agent", "/control/workflow/settings"),
   workflowSaveSettings: (patch: WorkflowSettingsPatch) =>
     send<{ ok: boolean; restart_required: boolean; message?: string }>("agent", "PUT", "/control/workflow/settings", patch),
+  // 「创建此目录」: a local absolute folder (422 `fields.path` otherwise)
+  workflowCreateDir: (path: string) =>
+    send<{ ok: boolean; created: boolean }>("agent", "POST", "/control/workflow/settings/directory", { path }),
   posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,
   // U1b: the full landscape jacket (final fanart > thumb > input fanart > thumb > image attachment)
   coverPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/cover`,

@@ -1,18 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The native picker (#71) of 设置 · 媒体工作流, inside the Tauri shell only.
+const dialog = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { api, HttpError, type AgentConfigView, type FilmDetail, type HubServer, type PlanChoice } from "../api";
+import { api, HttpError, type AgentConfigView, type FilmDetail, type FilmRow, type HubServer, type PlanChoice } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
 import { machineOf } from "../components/media/mediaModel";
 import { PowerPage } from "../components/power/PowerPage";
 import { WorkflowSettingsSection } from "../components/WorkflowSettings";
 import { theme } from "../theme";
 import { setLang } from "../i18n";
-import { detail, FILMS_RESPONSE, PLANS } from "./fixtures/mediaWorkspace";
+import { detail, FILMS_RESPONSE, PLANS, row, steps } from "./fixtures/mediaWorkspace";
 import {
-  FINISH_TEXT, lostDetail, reassignDetail, REMOTE_DEVICES, REMOTE_FILMS, REMOTE_PLANS, REMOTE_ROWS, settingsState, settingsView, STOP, W,
+  actions, FINISH, FINISH_TEXT, lostDetail, reassignDetail, REMOTE_DEVICES, REMOTE_FILMS, REMOTE_PLANS, REMOTE_ROWS, settingsState,
+  settingsView, STOP, W,
 } from "./fixtures/multiMachine";
 import { POWER_SETTINGS, powerView } from "./fixtures/power";
 
@@ -105,6 +110,18 @@ describe("待处理 machine select (R5/R6)", () => {
     expect(sent.every((p) => p.machine === null)).toBe(true);
   });
 
+  it("IR9: a disabled 全部按推荐确认 says why", async () => {
+    mockApi();
+    vi.spyOn(api, "workflowPlans").mockResolvedValue({ ...REMOTE_PLANS, plans: REMOTE_PLANS.plans.filter((p) => p.film_id === "qlx-1") });
+    wrap(<MediaWorkspace />);
+    await go("待处理");
+    await waitFor(() => expect(pendingCard("qlx-1")).toBeTruthy());
+    const all = screen.getByRole("button", { name: "全部按推荐确认" });
+    expect(all).toBeDisabled();
+    expect(all).toHaveAccessibleDescription("暂无可用机器 · 4K 全部不可选");
+    expect(all).toHaveAttribute("title", "暂无可用机器 · 4K 全部不可选");
+  });
+
   it("4K: every option greyed out, the tier and the confirm disabled, with the reason", async () => {
     mockApi();
     wrap(<MediaWorkspace />);
@@ -144,6 +161,18 @@ describe("待处理 machine select (R5/R6)", () => {
 describe("board: machine column, routing reasons and 设备失联 (R1–R3)", () => {
   it("machineOf: the route, 本机, the running stage's worker, 待派发", () => {
     expect(REMOTE_ROWS.map(machineOf)).toEqual(["5060 Ti-3", "5070 Ti", "本机", "待派发", "5070 Ti"]);
+  });
+
+  it("CX30: after the GPU work, 本机 for the controller's stages and none once done — never 待派发", () => {
+    const at = (film_id: string, group: FilmRow["group"], key: Parameters<typeof steps>[0], state: Parameters<typeof steps>[1]) =>
+      row({ film_id, group, stage: key, status: state === "done" ? "succeeded" : "running", steps: steps(key, state), actions: actions() });
+    expect(machineOf(at("w", "active", "restore", "waiting"))).toBe("待派发");
+    expect(machineOf(at("a", "active", "asr", "running"))).toBe("本机");
+    expect(machineOf(at("s", "active", "scrape", "running"))).toBe("本机");
+    expect(machineOf(at("c", "confirm", "confirm", "waiting"))).toBe("本机");
+    expect(machineOf(at("d", "done", "done", "done"))).toBeNull();
+    // a failed restore waits for a device again
+    expect(machineOf(at("f", "attention", "restore", "failed"))).toBe("待派发");
   });
 
   it("概览 lists the 设备失联 film with its note, last heartbeat and 处理 → the drawer", async () => {
@@ -211,22 +240,97 @@ describe("drawer: 设备, 改派 and 判定已停止 (R7/R8)", () => {
       ["自动（推荐） · 当前", false], ["5070 Ti", false], ["5060 Ti-1", false],
       ["5060 Ti-2 · 缺少高画质模型", true], ["5060 Ti-3 · 离线", true],
     ]);
-    expect(within(dialog).getByRole("button", { name: "确认改派" })).toBeDisabled();  // unchanged
     fireEvent.change(select, { target: { value: W.ti70.id } });
+    // IR4: the old worker releases its staging once the film is routed elsewhere (P2-3 R10)
+    expect(within(dialog).getByText("还没开始修复，可以直接改派：新机器重新下载源文件；5060 Ti-3 恢复后会自动清理它的暂存。"))
+      .toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "确认改派" }));
     await waitFor(() => expect(m.pin).toHaveBeenCalledWith("mist-18", 1, 5, W.ti70.id));
   });
 
-  it("a claim that won the race answers 「已开始处理」 and nothing else changes", async () => {
+  it("CX29: the current 自动 on a 失联 worker's route can be confirmed again — 重新自动派单 (null)", async () => {
     const m = mockApi();
-    m.pin.mockRejectedValue(new HttpError("已开始处理", 409, "route_claimed"));
     const line = await openDrawer("mist-18");
     fireEvent.click(line.getByRole("button", { name: "改派" }));
     const dialog = await screen.findByRole("dialog", { name: "改派 山海一页" });
+    expect((within(dialog).getByLabelText("改派到") as HTMLSelectElement).value).toBe("");
+    expect(within(dialog).queryByRole("button", { name: "确认改派" })).toBeNull();
+    const again = within(dialog).getByRole("button", { name: "重新自动派单" });
+    expect(again).toBeEnabled();
+    expect(dialog).toHaveTextContent("5060 Ti-3 恢复后会自动清理它的暂存");
+    fireEvent.click(again);
+    await waitFor(() => expect(m.pin).toHaveBeenCalledWith("mist-18", 1, 5, null));
+    expect(await screen.findByText("山海一页 已重新自动派单")).toBeInTheDocument();
+  });
+
+  it("CX29/IR9: the current 自动 on a healthy route stays disabled and says why; estimates per choice", async () => {
+    mockApi(REMOTE_FILMS, () => reassignDetail({
+      route: { ...reassignDetail().route!, machine: W.ti70, live: "online", silent_s: 2 },
+      reassign_options: [
+        { worker_id: null, name: "自动", reason: null, current: true, machine: W.ti70, finish_at: FINISH.ti70, energy_wh: 900 },
+        { worker_id: W.ti70.id, name: "5070 Ti", reason: null, current: false, finish_at: FINISH.ti70, energy_wh: 900 },
+        { worker_id: W.ti2.id, name: "5060 Ti-2", reason: "缺少高画质模型", current: false, finish_at: null, energy_wh: null },
+      ],
+    }));
+    const line = await openDrawer("mist-18");
+    fireEvent.click(line.getByRole("button", { name: "改派" }));
+    const dialog = await screen.findByRole("dialog", { name: "改派 山海一页" });
+    expect(optionTexts(within(dialog).getByLabelText("改派到") as HTMLSelectElement)).toEqual([
+      [`自动（推荐） · 预计 ${FINISH_TEXT.ti70} 在 5070 Ti 完成 · 约 0.9 度 · 当前`, false],
+      [`5070 Ti · 预计 ${FINISH_TEXT.ti70} 完成 · 约 0.9 度`, false],
+      ["5060 Ti-2 · 缺少高画质模型", true],
+    ]);
+    const confirm = within(dialog).getByRole("button", { name: "确认改派" });
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAccessibleDescription("与当前派单相同");
+    // 自动 keeps a healthy route (IR8): no cleanup is promised
+    expect(within(dialog).getByText("还没开始修复，可以直接改派：新机器重新下载源文件。")).toBeInTheDocument();
+  });
+
+  it("IR1: a claim that won the race closes the dialog, refreshes the film and says 判定已停止 comes first", async () => {
+    const m = mockApi();
+    m.pin.mockRejectedValue(new HttpError("已开始处理", 409, "route_claimed"));
+    const line = await openDrawer("mist-18");
+    const film = vi.mocked(api.workflowFilm);
+    const films = vi.mocked(api.workflowFilms);
+    fireEvent.click(line.getByRole("button", { name: "改派" }));
+    const dialog = await screen.findByRole("dialog", { name: "改派 山海一页" });
     fireEvent.change(within(dialog).getByLabelText("改派到"), { target: { value: W.ti1.id } });
+    const [filmCalls, filmsCalls] = [film.mock.calls.length, films.mock.calls.length];
     fireEvent.click(within(dialog).getByRole("button", { name: "确认改派" }));
-    expect(await screen.findByText("已开始处理")).toBeInTheDocument();
-    expect(screen.getByRole("dialog", { name: "改派 山海一页" })).toBeInTheDocument();
+    expect(await screen.findByText("已开始处理，需先判定已停止")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "改派 山海一页" })).toBeNull());
+    await waitFor(() => expect(film.mock.calls.length).toBeGreaterThan(filmCalls));
+    await waitFor(() => expect(films.mock.calls.length).toBeGreaterThan(filmsCalls));
+  });
+
+  it("CX30: the drawer of a film past its GPU work shows 本机; a done film has no 设备 line", async () => {
+    const past = (over: Partial<FilmDetail>) => () => reassignDetail({ route: null, note: null, actions: actions(), ...over });
+    mockApi(REMOTE_FILMS, past({ group: "active", steps: steps("scrape", "running") }));
+    const line = await openDrawer("mist-18");
+    expect(line.getByText("本机")).toBeInTheDocument();
+    const drawer = screen.getByRole("dialog", { name: "影片详情" });
+    expect(drawer).not.toHaveTextContent("待派发");
+    expect(within(drawer).getAllByText("本机").length).toBeGreaterThan(0);
+  });
+
+  it("CX30: a film in 确认入库 shows 本机, a done one shows none", async () => {
+    mockApi(REMOTE_FILMS, (id) => reassignDetail({ film_id: id, route: null, note: null, actions: actions(),
+      ...(id === "mist-18" ? { group: "done" as const, steps: steps("done", "done") } : { group: "confirm" as const, steps: steps("confirm", "waiting") }) }));
+    wrap(<MediaWorkspace />);
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    await go("影片队列");
+    fireEvent.click(within(document.querySelector('[data-film="far-3"]') as HTMLElement).getByRole("button", { name: /^查看/ }));
+    let drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    expect(await within(drawer).findByTestId("device-line")).toHaveTextContent("本机");
+    expect(drawer).not.toHaveTextContent("待派发");
+    fireEvent.click(within(drawer).getByRole("button", { name: "关闭对话框" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "影片详情" })).toBeNull());
+    fireEvent.click(within(document.querySelector('[data-film="mist-18"]') as HTMLElement).getByRole("button", { name: /^查看/ }));
+    drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    await within(drawer).findByRole("heading", { name: "山海一页" });
+    expect(within(drawer).queryByTestId("device-line")).toBeNull();
+    expect(drawer).not.toHaveTextContent("待派发");
   });
 
   it("a claimed lost film: 改派 disabled with its reason; 判定已停止 shows both channels and confirms", async () => {
@@ -240,7 +344,9 @@ describe("drawer: 设备, 改派 and 判定已停止 (R7/R8)", () => {
     expect(dialog).toHaveTextContent("浮光之间 · 修复 41%");
     expect(dialog).toHaveTextContent("两个通道都联系不上这台机器");
     expect(dialog).toHaveTextContent("已中断 7 分钟");
-    expect(dialog).toHaveTextContent("无响应 6 分钟");
+    expect(dialog).toHaveTextContent("无响应 6 分钟 · 192.168.1.34:5680 · 超时");
+    // IR8: the safe choice has the initial focus
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus());
     expect(dialog).toHaveTextContent("本阶段按取消计（免费重试），影片将重新派单，该机器之后交回的结果会被丢弃。");
     expect(within(dialog).getByRole("button", { name: "取消" })).toBeInTheDocument();
     const go = within(dialog).getByRole("button", { name: "我确认该机器已关机或任务已停止" });
@@ -303,6 +409,26 @@ describe("设备 (§4)", () => {
     const matrix = within(card).getByRole("region", { name: "5070 Ti 领取资格" });
     const rows = within(matrix).getAllByRole("row").map((r) => r.textContent);
     expect(rows).toEqual(["分辨率标准良好高", "1080p可领取可领取可领取", "4K暂不派发暂不派发暂不派发"]);
+  });
+
+  it("本机's 「主控设置」 opens 设置 · 媒体工作流 where the host offers it", async () => {
+    mockApi();
+    const open = vi.fn();
+    wrap(<MediaWorkspace onOpenSettings={open} />);
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    await go("设备");
+    const local = await screen.findByRole("article", { name: "本机" });
+    fireEvent.click(within(local).getByRole("button", { name: "主控设置" }));
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it("no 「主控设置」 without a host link", async () => {
+    mockApi();
+    wrap(<MediaWorkspace />);
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    await go("设备");
+    const local = await screen.findByRole("article", { name: "本机" });
+    expect(within(local).queryByRole("button", { name: "主控设置" })).toBeNull();
   });
 
   it("no agent.yaml notice: remote work off points to 设置 · 媒体工作流", async () => {
@@ -378,6 +504,7 @@ describe("设置 · 媒体工作流 (R13–R16)", () => {
     expect(screen.getByLabelText("工作机接口端口")).toHaveValue("5682");
     expect(screen.queryByLabelText("暂存目录")).toBeNull();
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();  // nothing changed
+    expect(screen.getByRole("button", { name: "保存" })).toHaveAccessibleDescription("没有更改");  // IR9
     // a 主控 without GPU workers runs its own tools
     fireEvent.click(screen.getByRole("switch", { name: "允许 GPU 工作机接入" }));
     expect(screen.getByLabelText("Jasna")).toHaveValue("C:\\Jasna\\jasna.exe");
@@ -432,7 +559,8 @@ describe("设置 · 媒体工作流 (R13–R16)", () => {
     expect(await screen.findByRole("button", { name: "正在保存…" })).toBeDisabled();
     fail(new HttpError("还有 3 部影片在处理中（2 部在 GPU 工作机上），请先暂停派发并等待完成", 409, "workflow_busy"));
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("未保存：还有 3 部影片在处理中（2 部在 GPU 工作机上），请先暂停派发并等待完成");
+    // IR5: the refusal names the role it did not switch to
+    expect(alert).toHaveTextContent("未切换到 GPU 工作机：还有 3 部影片在处理中（2 部在 GPU 工作机上），请先暂停派发并等待完成");
     fireEvent.click(within(alert).getByRole("button", { name: "暂停派发" }));
     await waitFor(() => expect(pause).toHaveBeenCalledWith(true));
     expect(await screen.findByText("已暂停派发；在途影片继续，完成后再保存。")).toBeInTheDocument();
@@ -444,6 +572,56 @@ describe("设置 · 媒体工作流 (R13–R16)", () => {
     wrap(<WorkflowSettingsSection />);
     expect(await screen.findByRole("status")).toHaveTextContent("已保存，重启 TaskPaw 后生效（INBOX 目录）");
     expect(screen.queryByRole("button", { name: /重启/ })).toBeNull();
+  });
+
+  it("IR3: a missing INBOX offers 「创建此目录」; the tools and Miko show what was found", async () => {
+    vi.spyOn(api, "workflowSettings").mockResolvedValue(settingsState("controller", {
+      saved: settingsView("controller", { remote_workers: false, mdcx_python: "C:\\mdcx\\python.exe" }),
+      running: settingsView("controller", { remote_workers: false, mdcx_python: "C:\\mdcx\\python.exe" }),
+      paths: { inbox_root: "missing", jasna_exe_path: "ok", mdcx_python: "ok", mdcx_root: null, mdcx_profile: null },
+      miko: "partial",
+    }));
+    const create = vi.spyOn(api, "workflowCreateDir").mockResolvedValue({ ok: true, created: true });
+    wrap(<WorkflowSettingsSection />);
+    await screen.findByLabelText("INBOX 目录");
+    expect(screen.getByText("INBOX 目录不存在")).toBeInTheDocument();
+    expect(screen.getByLabelText("Jasna")).toHaveAccessibleDescription("已找到");
+    expect(screen.getByText(/缺少 Miko 目录、Miko 配置/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "创建此目录" }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith("E:\\TODO"));
+    expect(await screen.findByText("已创建 INBOX 目录")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "创建此目录" })).toBeNull();
+  });
+
+  it("IR3: 「创建此目录」 after a 422 「目录不存在」, and the backend's refusal on the field", async () => {
+    vi.spyOn(api, "workflowSettings").mockResolvedValue(settingsState("controller"));
+    vi.spyOn(api, "workflowSaveSettings").mockRejectedValue(new HttpError("设置有误", 422, undefined, { inbox_root: "目录不存在" }));
+    vi.spyOn(api, "workflowCreateDir").mockRejectedValue(new HttpError("设置有误", 422, undefined, { path: "无法创建目录" }));
+    wrap(<WorkflowSettingsSection />);
+    fireEvent.change(await screen.findByLabelText("INBOX 目录"), { target: { value: "Z:\\INBOX" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建此目录" }));
+    expect(await screen.findByText("无法创建目录")).toBeInTheDocument();
+    expect(screen.getByLabelText("INBOX 目录")).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("IR3: 选择 / 更改 open the native picker inside the shell only", async () => {
+    vi.spyOn(api, "workflowSettings").mockResolvedValue(settingsState("controller", {
+      saved: settingsView("controller", { remote_workers: false }), running: settingsView("controller", { remote_workers: false }) }));
+    const first = wrap(<WorkflowSettingsSection />);
+    await screen.findByLabelText("INBOX 目录");
+    expect(screen.queryByRole("button", { name: "选择 INBOX 目录" })).toBeNull();  // a browser has no native dialog
+    first.unmount();
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    dialog.open.mockResolvedValueOnce("F:\\INBOX").mockResolvedValueOnce("D:\\Jasna\\jasna.exe");
+    wrap(<WorkflowSettingsSection />);
+    await screen.findByLabelText("INBOX 目录");
+    fireEvent.click(screen.getByRole("button", { name: "选择 INBOX 目录" }));
+    await waitFor(() => expect(screen.getByLabelText("INBOX 目录")).toHaveValue("F:\\INBOX"));
+    expect(dialog.open).toHaveBeenLastCalledWith(expect.objectContaining({ directory: true, multiple: false }));
+    fireEvent.click(screen.getByRole("button", { name: "更改 Jasna" }));
+    await waitFor(() => expect(screen.getByLabelText("Jasna")).toHaveValue("D:\\Jasna\\jasna.exe"));
+    expect(dialog.open).toHaveBeenLastCalledWith(expect.objectContaining({ directory: false }));
   });
 
   it("加入 shows only while the running role is GPU 工作机", async () => {
