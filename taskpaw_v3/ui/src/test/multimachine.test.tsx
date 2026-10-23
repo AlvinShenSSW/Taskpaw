@@ -136,13 +136,13 @@ describe("待处理 machine select (R5/R6)", () => {
     expect(c.getByRole("button", { name: "确认入队" })).toBeDisabled();
   });
 
-  it("a film needing no GPU reads 「无需 GPU，本机完成」 with no device option", async () => {
+  it("a film needing no GPU reads 「无需修复，本机完成」 with no device option", async () => {
     mockApi();
     wrap(<MediaWorkspace />);
     await go("待处理");
     await waitFor(() => expect(pendingCard("pap-3")).toBeTruthy());
     const select = within(pendingCard("pap-3")).getByLabelText("机器") as HTMLSelectElement;
-    expect(optionTexts(select)).toEqual([["自动（推荐）· 无需 GPU，本机完成", false]]);
+    expect(optionTexts(select)).toEqual([["自动（推荐）· 无需修复，本机完成", false]]);
   });
 
   it("a single machine keeps its select unchanged (no 机器 label, no 自动)", async () => {
@@ -510,8 +510,11 @@ describe("设置 · 媒体工作流 (R13–R16)", () => {
     expect(roleSelect()).toHaveTextContent("媒体主控");
     expect(screen.getByText("在 PATH 找到 · C:\\ffmpeg\\bin\\ffprobe.exe")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "允许 GPU 工作机接入" })).toBeChecked();
-    expect(screen.getByText("开启后本机不跑修复和识别")).toBeInTheDocument();
+    expect(screen.getByText("开启后修复交给 GPU 工作机，识别仍在本机")).toBeInTheDocument();
     expect(screen.getByLabelText("工作机接口端口")).toHaveValue("5682");
+    // OD7 R11: the 主控 always transcribes; its Jasna only without GPU workers
+    expect(screen.getByLabelText("WhisperJAV")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Jasna")).toBeNull();
     expect(screen.queryByLabelText("暂存目录")).toBeNull();
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();  // nothing changed
     expect(screen.getByRole("button", { name: "保存" })).toHaveAccessibleDescription("没有更改");  // IR9
@@ -519,6 +522,7 @@ describe("设置 · 媒体工作流 (R13–R16)", () => {
     fireEvent.click(screen.getByRole("switch", { name: "允许 GPU 工作机接入" }));
     expect(screen.getByLabelText("Jasna")).toHaveValue("C:\\Jasna\\jasna.exe");
     expect(screen.getByRole("combobox", { name: /^LTX 显卡预设/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("WhisperJAV")).toBeInTheDocument();
   });
 
   it("GPU 工作机 fields, 不参与 has none; a save sends only the role and the changed fields", async () => {
@@ -530,6 +534,9 @@ describe("设置 · 媒体工作流 (R13–R16)", () => {
     expect(screen.getByLabelText("暂存目录")).toBeInTheDocument();
     expect(screen.getByLabelText("暂存上限（GB）")).toHaveValue("500");
     expect(screen.queryByLabelText("INBOX 目录")).toBeNull();
+    // OD7 R11: a GPU 工作机 restores only — Jasna, no WhisperJAV
+    expect(screen.getByLabelText("Jasna")).toBeInTheDocument();
+    expect(screen.queryByLabelText("WhisperJAV")).toBeNull();
     fireEvent.change(screen.getByLabelText("暂存目录"), { target: { value: " E:\\Staging " } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(save).toHaveBeenCalledWith({ role: "worker", staging_dir: "E:\\Staging" }));

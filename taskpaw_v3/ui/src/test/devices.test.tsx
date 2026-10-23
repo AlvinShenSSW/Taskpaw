@@ -31,7 +31,7 @@ function device(over: Partial<DeviceRow> = {}): DeviceRow {
     heartbeat: { state: "online", age_s: 4 },
     gpu: { name: "NVIDIA GeForce RTX 5060 Ti", vram_mib: 16311, used_mib: 900, util: 3, power_w: 21.5, hold: "none" },
     disk: { free: 900e9, staging_used: 40e9, cap: 500e9 },
-    tiers_ready: ["standard", "good"], asr_ready: true, agent_version: "3.9.19", version_ok: true,
+    tiers_ready: ["standard", "good"], agent_version: "3.9.19", version_ok: true,
     boot_reconciled: true, eligibility: "可接单", eligible: true,
     probe: PROBE, approved: { probe: PROBE, profiles: PROFILES },
     restore_allowed: true, unresolved: 0, can_retire: false, ...over,
@@ -41,7 +41,7 @@ function device(over: Partial<DeviceRow> = {}): DeviceRow {
 const ROWS: DeviceRow[] = [
   device({ worker_id: "online", name: "5070 Ti" }),
   device({ worker_id: "pairing", name: "新设备", enrollment_state: "pending_pairing", admission_state: "disabled",
-    heartbeat: { state: "waiting", age_s: null }, gpu: null, disk: null, tiers_ready: [], asr_ready: false,
+    heartbeat: { state: "waiting", age_s: null }, gpu: null, disk: null, tiers_ready: [],
     agent_version: null, version_ok: null, probe: null, approved: null, eligibility: "未核验", eligible: false }),
   device({ worker_id: "validate", name: "5060 Ti-2", enrollment_state: "pending_validation", admission_state: "disabled",
     eligibility: "未核验", eligible: false,
@@ -157,7 +157,7 @@ describe("设备 v1", () => {
     expect(await within(code).findByText("已复制")).toBeInTheDocument();
   });
 
-  it("核验并启用 compares the probe with the last approval and sends the switches", async () => {
+  it("核验并启用 compares the probe with the last approval and approves restore only (OD7)", async () => {
     const calls = mockApi();
     await openDevices();
     fireEvent.click(within(card("5060 Ti-2")).getByRole("button", { name: "核验并启用" }));
@@ -165,10 +165,10 @@ describe("设备 v1", () => {
     const changed = within(dialog).getAllByText("已变化");
     expect(changed).toHaveLength(1);
     expect(changed[0].closest("tr")).toHaveTextContent("修复");
-    expect(dialog).toHaveTextContent("启用后，修复与识别交给远程设备");
-    fireEvent.click(within(dialog).getByRole("switch", { name: "识别" }));
+    expect(dialog).toHaveTextContent("启用后修复交给这台 GPU 工作机；识别、翻译和入库仍在主控");
+    expect(within(dialog).queryByRole("switch", { name: "识别" })).toBeNull();  // OD7: no worker ASR
     fireEvent.click(within(dialog).getByRole("button", { name: "核验并启用" }));
-    await waitFor(() => expect(calls.approve).toHaveBeenCalledWith("validate", 3, true, false));
+    await waitFor(() => expect(calls.approve).toHaveBeenCalledWith("validate", 3, true));
   });
 
   it("核验并启用 shows 配置变更 when only the config fingerprint differs", async () => {
@@ -182,7 +182,7 @@ describe("设备 v1", () => {
     expect(within(dialog).queryByText("已变化")).toBeNull();
   });
 
-  it("disables 修复 under 16 GB with the reason", async () => {
+  it("disables 修复 under 16 GB with the reason, and with it 核验并启用 (OD7: nothing else)", async () => {
     const calls = mockApi();
     await openDevices();
     fireEvent.click(within(card("5060")).getByRole("button", { name: "核验并启用" }));
@@ -190,8 +190,8 @@ describe("设备 v1", () => {
     expect(within(dialog).getByRole("switch", { name: "修复" })).toBeDisabled();
     expect(dialog).toHaveTextContent("显存不足，不参与修复");
     expect(dialog).toHaveTextContent("首次核验");
-    fireEvent.click(within(dialog).getByRole("button", { name: "核验并启用" }));
-    await waitFor(() => expect(calls.approve).toHaveBeenCalledWith("small", 3, false, true));
+    expect(within(dialog).getByRole("button", { name: "核验并启用" })).toBeDisabled();
+    expect(calls.approve).not.toHaveBeenCalled();
   });
 
   it("drains, re-pairs, revokes after confirmation and retires with the row version", async () => {

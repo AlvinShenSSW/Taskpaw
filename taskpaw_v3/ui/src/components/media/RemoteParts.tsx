@@ -114,8 +114,6 @@ function ReassignPane({ film, current, onClose }: { film: FilmDetail; current: s
   const remote = route && route.live !== "local" ? route : null;
   const moves = Boolean(remote && chosen && (reroute || (chosen.worker_id !== null && chosen.worker_id !== remote.machine.id)));
   const cleanup = moves && remote ? `；${remote.machine.name}${remote.live === "lost" ? " 恢复后" : " "}会自动清理它的暂存` : "";
-  const restore = (film.steps ?? []).find((s) => s.key === "restore");
-  const stage = restore && restore.state !== "done" ? "修复" : "识别";
   const save = useMutation({
     mutationFn: () => {
       if (ws.readOnly || !film.pin || !film.revisions.input || !chosen) throw new Error("只读监控");
@@ -152,7 +150,7 @@ function ReassignPane({ film, current, onClose }: { film: FilmDetail; current: s
             ))}
           </select>
         </div>
-        <p className="small muted" id="mw-reassign-note">还没开始{stage}，可以直接改派：新机器重新下载源文件{cleanup}。</p>
+        <p className="small muted" id="mw-reassign-note">还没开始修复，可以直接改派：新机器重新下载源文件{cleanup}。</p>
       </div>
       <div className="modal-foot">
         <p>改派只改这部影片的派单；已在运行的任务不受影响。</p>

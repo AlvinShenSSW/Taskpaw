@@ -1,29 +1,26 @@
 // P2-3 (#294) §6: the worker's 媒体处理 tab — its step line and the copy of its states.
 import type { WorkerCurrent, WorkerFilm, WorkerTransfer } from "../../api";
 
-export type WorkerStepKey = "fetch" | "restore" | "upload_restore" | "asr" | "upload_asr";
+export type WorkerStepKey = "fetch" | "restore" | "upload_restore";
 export type WorkerStepState = "done" | "current" | "pending";
 export interface WorkerStep { key: WorkerStepKey; label: string; state: WorkerStepState }
 
-const LABEL: Record<WorkerStepKey, string> = {
-  fetch: "下载", restore: "修复", upload_restore: "回传", asr: "识别", upload_asr: "回传",
-};
+const LABEL: Record<WorkerStepKey, string> = { fetch: "下载", restore: "修复", upload_restore: "回传" };
 const DONE = ["succeeded", "skipped"];
 const UPLOADING = ["uploading", "finishing"];
 
-// 下载 → 修复 → 回传 → 识别 → 回传: from the envelope's stage statuses and the running phase.
+// 下载 → 修复 → 回传 (OD7: a GPU worker restores only; 识别 runs on the controller), from the
+// envelope's stage statuses and the running phase. An ASR claimed before the upgrade still finishes
+// here (its card names 识别): the line shows only its 回传 while it uploads.
 export function workerSteps(film: WorkerFilm, current: WorkerCurrent | null | undefined): WorkerStep[] {
   const mine = current && current.film_id === film.film ? current : null;
   const restoreDone = DONE.includes(film.stages.restore ?? "");
-  const asrDone = DONE.includes(film.stages.asr ?? "");
   const now: WorkerStepKey | null = film.state === "fetching" || film.state === "queued" ? "fetch"
-    : mine ? (mine.stage === "restore"
-      ? (UPLOADING.includes(mine.phase) ? "upload_restore" : "restore")
-      : (UPLOADING.includes(mine.phase) ? "upload_asr" : "asr"))
+    : mine ? (UPLOADING.includes(mine.phase) ? "upload_restore" : mine.stage === "restore" ? "restore" : null)
     : null;
   const done: Record<WorkerStepKey, boolean> = {
     fetch: film.state !== "fetching" && film.state !== "queued",
-    restore: restoreDone, upload_restore: restoreDone, asr: asrDone, upload_asr: asrDone,
+    restore: restoreDone, upload_restore: restoreDone,
   };
   return (Object.keys(LABEL) as WorkerStepKey[]).map((key) => ({
     key, label: LABEL[key], state: key === now ? "current" : done[key] ? "done" : "pending",

@@ -171,7 +171,7 @@ export type DeviceRow = {
   heartbeat: { state: "online" | "lost" | "waiting" | "off"; age_s: number | null };
   gpu: { name: string | null; vram_mib: number | null; used_mib: number | null; util: number | null; power_w: number | null; hold: string } | null;
   disk: { free: number; staging_used: number; cap: number } | null;
-  tiers_ready: string[]; asr_ready: boolean; agent_version: string | null; version_ok: boolean | null;
+  tiers_ready: string[]; agent_version: string | null; version_ok: boolean | null;  // OD7: no asr_ready
   boot_reconciled: boolean; eligibility: string; eligible: boolean;
   probe: DeviceProbe | null; approved: { probe: DeviceProbe | null; profiles: DeviceProfile[] } | null;
   restore_allowed: boolean; unresolved: number; can_retire: boolean;
@@ -467,7 +467,7 @@ export interface PlanRoutingDevice {
 }
 export interface PlanRouting {
   auto: { machine: { id: string; name: string }; finish_at: string; energy_wh: number | null; text: string }
-    // P2-4 §9 CX2: waiting null + text 「无需 GPU，本机完成」 when no GPU stage is left
+    // P2-4 §9 CX2 / OD7 R7: waiting null + text 「无需修复，本机完成」 when no restore needs a worker
     | { waiting: string | null; text?: string };
   devices: PlanRoutingDevice[];
 }
@@ -830,8 +830,9 @@ export const api = {
     send<PairingCode>("agent", "POST", "/control/workflow/devices", { name, address }),
   workflowRepairDevice: (id: string, expected_version: number) =>
     send<PairingCode>("agent", "POST", `/control/workflow/devices/${seg(id)}/pairing`, { expected_version }),
-  workflowApproveDevice: (id: string, expected_version: number, restore: boolean, asr: boolean) =>
-    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/approve`, { expected_version, restore, asr }),
+  // OD7 (#298 R10): a GPU worker is approved for restore only
+  workflowApproveDevice: (id: string, expected_version: number, restore: boolean) =>
+    send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/approve`, { expected_version, restore }),
   workflowDeviceAdmission: (id: string, expected_version: number, state: "enabled" | "draining") =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/devices/${seg(id)}/admission`, { expected_version, state }),
   workflowRevokeDevice: (id: string, expected_version: number) =>

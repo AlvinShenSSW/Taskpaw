@@ -442,9 +442,9 @@ function ApprovePane({ row, onClose, onApproved }: { row: DeviceRow; onClose: ()
   const offers = new Set(probe.profiles.map((p) => p.stage));
   const restoreOk = row.restore_allowed && probe.vram_mib >= RESTORE_MIN_VRAM_MIB && offers.has("restore");
   const [restore, setRestore] = useState(restoreOk);
-  const [asr, setAsr] = useState(offers.has("asr"));
+  // OD7 (#298 §4): a GPU worker restores only; 识别 stays on the controller
   const approve = useMutation({
-    mutationFn: () => api.workflowApproveDevice(row.worker_id, row.version, restore && restoreOk, asr),
+    mutationFn: () => api.workflowApproveDevice(row.worker_id, row.version, restore && restoreOk),
     onSuccess: () => onApproved(),
   });
   return (
@@ -459,20 +459,14 @@ function ApprovePane({ row, onClose, onApproved }: { row: DeviceRow; onClose: ()
           </label>
           {!restoreOk && <span className="small amber">{row.restore_allowed ? "未提供修复工具" : "显存不足，不参与修复"}</span>}
         </div>
-        <div className="switch-row">
-          <label className="switch">
-            <input type="checkbox" role="switch" checked={asr} disabled={!offers.has("asr")}
-              onChange={(e) => setAsr(e.target.checked)} />识别
-          </label>
-        </div>
-        <Notice tone="amber" icon={WarningAmberIcon}>启用后，修复与识别交给远程设备，主控只做翻译等其余步骤。</Notice>
+        <Notice tone="amber" icon={WarningAmberIcon}>启用后修复交给这台 GPU 工作机；识别、翻译和入库仍在主控</Notice>
         {approve.error && <Notice tone="red" icon={WarningAmberIcon}>{errorText(approve.error)}</Notice>}
       </div>
       <div className="modal-foot">
         <p>工具、配置或模型变化后需要再次核验。</p>
         <div className="actions">
           <button type="button" className="btn ghost" onClick={onClose}>取消</button>
-          <button type="button" className="btn primary" disabled={approve.isPending || (!(restore && restoreOk) && !asr)}
+          <button type="button" className="btn primary" disabled={approve.isPending || !(restore && restoreOk)}
             onClick={() => approve.mutate()}>核验并启用</button>
         </div>
       </div>

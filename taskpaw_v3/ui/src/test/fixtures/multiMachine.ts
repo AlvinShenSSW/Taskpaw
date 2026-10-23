@@ -39,7 +39,7 @@ const routing4k: PlanRouting = {
   auto: { waiting: "等待设备：显存不足 4K" },
   devices: [W.ti70, W.ti1, W.ti2].map((w) => device(w, { reason: "显存不足 4K" })).concat(device(W.ti3, { reason: "离线" })),
 };
-const noGpu: PlanRouting = { auto: { waiting: null, text: "无需 GPU，本机完成" }, devices: [] };
+const noGpu: PlanRouting = { auto: { waiting: null, text: "无需修复，本机完成" }, devices: [] };
 
 const AUTO = { machine: null, machine_reason: "自动（推荐）" };
 export const REMOTE_PLANS: WorkflowPlans = {
@@ -131,7 +131,7 @@ const devRow = (over: Partial<DeviceRow> & { worker_id: string; name: string }):
   version: 3, address: "192.168.1.31", port: 5682, enrollment_state: "verified", admission_state: "enabled", participation: true,
   heartbeat: { state: "online", age_s: 2 },
   gpu: { name: "RTX 5070 Ti", vram_mib: 16303, used_mib: 14438, util: 98, power_w: 268, hold: "none" },
-  disk: { free: 2.6e12, staging_used: 212e9, cap: 500e9 }, tiers_ready: ["standard", "good", "high"], asr_ready: true,
+  disk: { free: 2.6e12, staging_used: 212e9, cap: 500e9 }, tiers_ready: ["standard", "good", "high"],
   agent_version: "3.9.20", version_ok: true, boot_reconciled: true, eligibility: "可接单", eligible: true,
   probe: null, approved: null, restore_allowed: true, unresolved: 0, can_retire: false, assignments: [], route_depth: 0,
   ...over,

@@ -57,7 +57,7 @@ describe("worker 媒体处理 monitor", () => {
     expect(within(first).getByText("当前")).toBeInTheDocument();
     expect(within(screen.getByRole("listitem", { name: "ABF-402" })).getByText("预取")).toBeInTheDocument();
     const line = within(first).getByRole("list", { name: "ABF-401 步骤" });
-    expect(within(line).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["下载 ✓", "修复", "回传", "识别", "回传"]);
+    expect(within(line).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["下载 ✓", "修复", "回传"]);
     expect(within(line).getAllByRole("listitem")[1]).toHaveAttribute("aria-current", "step");
     // the controller's own LtxProgress, 本片参数 and 用时 cards, not a copy
     expect(screen.getByTestId("ltx-progress")).toBeInTheDocument();
@@ -96,11 +96,12 @@ describe("worker 媒体处理 monitor", () => {
     expect(screen.getByText("等待对账", { selector: "dd" })).toBeInTheDocument();
     const film = running().films![0];
     const uploading = { ...running().current!, phase: "uploading" as const };
-    expect(workerSteps(film, uploading).map((s) => s.state)).toEqual(["done", "done", "current", "pending", "pending"]
-      .map((v, i) => (i === 1 ? "pending" : v)));
+    expect(workerSteps(film, uploading).map((s) => s.state)).toEqual(["done", "pending", "current"]);
+    // OD7: 下载 → 修复 → 回传 only; an ASR claimed before the upgrade adds no step of its own
     const asr = { ...film, stages: { restore: "succeeded", asr: "running" } };
     expect(workerSteps(asr, { ...uploading, stage: "asr", phase: "running" }).map((s) => s.state))
-      .toEqual(["done", "done", "done", "current", "pending"]);
+      .toEqual(["done", "done", "done"]);
+    expect(workerSteps(asr, { ...uploading, stage: "asr" }).map((s) => s.state)).toEqual(["done", "done", "current"]);
   });
 
   it("shows a refused result that needs the operator (§11 IR3)", async () => {

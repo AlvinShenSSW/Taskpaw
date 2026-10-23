@@ -40,7 +40,8 @@ const CONTROLLER_FIELDS = [
   "inbox_root", "data_dir", "ffprobe_path", "remote_workers", "worker_api_port", "jasna_exe_path", "whisperjav_exe_path",
   "ltx_gpu", "mdcx_python", "mdcx_root", "mdcx_profile", "filmpaw_data_dir",
 ];
-const WORKER_FIELDS = ["data_dir", "jasna_exe_path", "whisperjav_exe_path", "ltx_gpu", "staging_dir", "staging_cap_gb"];
+// OD7 (#298 R11): a GPU worker restores only — no WhisperJAV (its saved value stays as is)
+const WORKER_FIELDS = ["data_dir", "jasna_exe_path", "ltx_gpu", "staging_dir", "staging_cap_gb"];
 const LABELS: Record<string, string> = {
   role: "本机角色", inbox_root: "INBOX 目录", data_dir: "工作目录", ffprobe_path: "ffprobe", remote_workers: "允许 GPU 工作机接入",
   worker_api_port: "工作机接口端口", jasna_exe_path: "Jasna", whisperjav_exe_path: "WhisperJAV", ltx_gpu: "LTX 显卡预设",
@@ -210,10 +211,11 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
       error={Boolean(errors[k])} helperText={errors[k] ?? helper} inputProps={{ inputMode: "numeric", "aria-invalid": Boolean(errors[k]) }}
       sx={{ maxWidth: 220 }} />
   );
-  const tools = (
+  // OD7 (#298 R11): restore (Jasna + LTX preset) runs here only without GPU workers, or on a GPU
+  // worker; ASR (WhisperJAV) always runs on the controller
+  const restoreTools = (
     <>
       {text("jasna_exe_path", "Jasna", "jasna.exe 的完整路径；留空则本机不跑修复")}
-      {text("whisperjav_exe_path", "WhisperJAV", "whisperjav.exe 的完整路径；留空则本机不跑识别")}
       <TextField select size="small" label="LTX 显卡预设" value={String(form.ltx_gpu || "auto")}
         onChange={(e) => set("ltx_gpu", e.target.value)} error={Boolean(errors.ltx_gpu)}
         helperText={errors.ltx_gpu ?? "自动按本机显卡选择"} sx={{ maxWidth: 360 }}>
@@ -221,6 +223,7 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
       </TextField>
     </>
   );
+  const asrTool = text("whisperjav_exe_path", "WhisperJAV", "whisperjav.exe 的完整路径；留空则本机不跑识别");
   return (
     <Stack spacing={2}>
       {restart && <Alert severity="info" role="status">{SAVED}{pendingFields.length ? `（${pendingFields.join("、")}）` : ""}</Alert>}
@@ -257,8 +260,9 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
             state.ffprobe_detected ?? undefined)}
           <FormControlLabel label="允许 GPU 工作机接入"
             control={<Switch checked={Boolean(form.remote_workers)} inputProps={{ role: "switch" }} onChange={(e) => set("remote_workers", e.target.checked)} />} />
-          <Typography variant="body2" color="text.secondary" sx={{ mt: "-8px !important" }}>开启后本机不跑修复和识别</Typography>
-          {form.remote_workers ? number("worker_api_port", "工作机接口端口") : tools}
+          <Typography variant="body2" color="text.secondary" sx={{ mt: "-8px !important" }}>开启后修复交给 GPU 工作机，识别仍在本机</Typography>
+          {form.remote_workers ? number("worker_api_port", "工作机接口端口") : restoreTools}
+          {asrTool}
           <details open={MIKO.some((k) => errors[k]) || undefined}>
             <summary style={{ cursor: "pointer", minHeight: 44, display: "flex", alignItems: "center" }}>
               Miko 与 Filmpaw（可选）{miko && <span style={{ opacity: 0.7 }}>&nbsp;· {miko}</span>}
@@ -274,7 +278,7 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
       )}
       {role === "worker" && (
         <>
-          {tools}
+          {restoreTools}
           {text("staging_dir", "暂存目录", "本机磁盘上的目录（不能是网络路径）")}
           {number("staging_cap_gb", "暂存上限（GB）")}
           {text("data_dir", "工作目录", "配对与记录；留空用默认位置")}

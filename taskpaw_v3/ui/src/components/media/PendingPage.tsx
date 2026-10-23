@@ -23,7 +23,7 @@ const complete = (e: PlanEntry) => e.recommendation.machine !== "" && (!e.needs_
 // P2-4 R5: remote mode's options for one tier (`routing[tier]`, "none" = 无需修复).
 const tierKey = (e: PlanEntry, tier: LtxTier | null) => (e.needs_gpu ? tier ?? e.recommendation.ltx_model ?? "standard" : "none");
 const routingOf = (e: PlanEntry, tier: LtxTier | null): PlanRouting | null => e.routing?.[tierKey(e, tier)] ?? null;
-// 自动's line: 「预计 21:40 在 5070 Ti 完成 · 约 0.9 度」, 「无需 GPU，本机完成」 or why it would wait.
+// 自动's line: 「预计 21:40 在 5070 Ti 完成 · 约 0.9 度」, 「无需修复，本机完成」 or why it would wait.
 const autoText = (r: PlanRouting) => ("machine" in r.auto ? r.auto.text : r.auto.text ?? r.auto.waiting ?? "");
 // A device's finish (with its name for the reason line) or why it is greyed out.
 function deviceLine(d: PlanRouting["devices"][number], now: number, withName: boolean): string {
