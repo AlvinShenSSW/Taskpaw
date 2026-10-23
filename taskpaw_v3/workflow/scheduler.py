@@ -361,24 +361,58 @@ class _Option:
     known: bool
 
 
-# ── the pass ────────────────────────────────────────────────────────────
-def schedule(
+def lost_films(
+    routes: Iterable[m.FilmRoute],
+    *,
+    live: Mapping[str, WorkerLive],
+    now: datetime,
+    controller_id: str,
+    live_since: datetime | None = None,
+) -> dict[str, str]:
+    """P2-4 R3 (OD2/V2): film id → the worker of its open route that is 失联.
+    A worker not heard from since the controller started is still 等待心跳
+    inside the 60 s grace (IR12, C14). The one rule of the pass's attention,
+    the board's 设备失联 and the #286 observer."""
+    grace = (
+        live_since is not None and (now - live_since).total_seconds() < OFFLINE_SECONDS
+    )
+    return {
+        route.film_id: route.worker_id
+        for route in routes
+        if route.worker_id != controller_id
+        and not _online(live.get(route.worker_id), now)
+        and not (grace and route.worker_id not in live)
+    }
+
+
+@dataclass
+class _PassState:
+    """What the pass decides on: steps 1–3 of `schedule` (P2-4 `preview`
+    reads the same state, so its 自动 is the pass's own choice)."""
+
+    rates: Rates
+    films: dict[str, m.RoutingFilm]
+    workers: dict[str, m.RoutingWorker]
+    targets: list[m.RoutingWorker]
+    withdrawals: list[Withdrawal]
+    hand_over: dict[str, m.FilmRoute]
+    remaining: list[m.FilmRoute]
+    attention: dict[str, str]
+    counts: dict[str, int]
+    busy: dict[str, float]
+    needs: dict[str, float]
+    outputs: float
+
+
+def _pass_state(
     snapshot: m.RoutingSnapshot,
     *,
     live: Mapping[str, WorkerLive],
     now: datetime,
     controller_id: str,
-    controller_free_bytes: int | None = None,
-    gpu_stages: GpuStages | None = None,
-    live_since: datetime | None = None,
-    remote_enabled: bool = False,
-) -> SchedulePass:
-    """`live_since`: when the live state started (the controller's start); a
-    worker not heard from since raises no 设备失联 in the first 60 s (IR12, C14).
-    `remote_enabled`: the `workflow.remote_workers` setting (P2-2 IR1)."""
-    if remote_mode(snapshot.workers, controller_id, enabled=remote_enabled) is None:
-        # IR1: single machine; the controller's dispatcher runs every stage
-        return SchedulePass((), (), {}, {})
+    gpu_stages: GpuStages | None,
+    live_since: datetime | None,
+) -> _PassState:
     rates = Rates(snapshot.samples)
     films = {film.film_id: film for film in snapshot.films}
     facts = {  # CX5: every open route is accounted with its own revision
@@ -425,19 +459,17 @@ def schedule(
             )
     gone = {w.route_id for w in withdrawals} | {r.route_id for r in hand_over.values()}
     remaining = [route for route in routes if route.route_id not in gone]
-    open_films = {(route.film_id, route.input_revision) for route in remaining}
 
-    # 2. attention: a film on a lost worker (OD2/V2); one not heard from since
-    # the controller started is still 等待心跳 inside the grace window (IR12)
-    grace = (
-        live_since is not None and (now - live_since).total_seconds() < OFFLINE_SECONDS
-    )
+    # 2. attention: a film on a lost worker (OD2/V2, `lost_films`)
     attention = {
-        route.film_id: LOST
-        for route in remaining
-        if route.worker_id != controller_id
-        and not _online(live.get(route.worker_id), now)
-        and not (grace and route.worker_id not in live)
+        film_id: LOST
+        for film_id in lost_films(
+            remaining,
+            live=live,
+            now=now,
+            controller_id=controller_id,
+            live_since=live_since,
+        )
     }
 
     # 3. the pass state: queue length, busy time and staging per worker; an
@@ -461,8 +493,117 @@ def schedule(
         needs[route.worker_id] += staging_need(film)
         if "restore" in stages:
             outputs += film.source_bytes * OUTPUT_FACTOR
+    return _PassState(
+        rates,
+        films,
+        workers,
+        targets,
+        withdrawals,
+        hand_over,
+        remaining,
+        attention,
+        counts,
+        busy,
+        needs,
+        outputs,
+    )
 
-    # 4. candidates: 4K first, then confirm time (§4.3)
+
+@dataclass(frozen=True)
+class DevicePreview:
+    """One device of 待处理's select: its finish, or why it cannot take it."""
+
+    worker_id: str
+    name: str
+    gpu_model: str | None
+    vram_mib: int
+    finish_at: datetime | None
+    energy_wh: float | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class Preview:
+    """P2-4 R5: 自动 for one film and tier — the device the next pass would
+    route it to (`machine`) with its finish, energy and reason, or why it
+    would wait (`waiting`) — and every device's own option."""
+
+    machine: str | None
+    finish_at: datetime | None
+    energy_wh: float | None
+    reason: str | None
+    waiting: str | None
+    devices: tuple[DevicePreview, ...]
+
+
+_Found = tuple["_Option | None", "str | None", "list[_Option]"]
+
+
+@dataclass
+class _Probe:
+    """The film `preview` follows through the candidate loop."""
+
+    film_id: str
+    found: _Found | None = None
+    devices: tuple[DevicePreview, ...] = ()
+
+
+def _devices(
+    state: _PassState,
+    film: m.RoutingFilm,
+    stages: tuple[str, ...],
+    live: Mapping[str, WorkerLive],
+    now: datetime,
+) -> tuple[DevicePreview, ...]:
+    found = []
+    for worker in state.targets:
+        reason = eligibility(
+            worker,
+            film,
+            stages,
+            live.get(worker.worker_id),
+            now,
+            queued_need=state.needs[worker.worker_id],
+        )
+        if reason == REVOKED:
+            continue
+        if reason is None and state.counts[worker.worker_id] >= MAX_OPEN_ROUTES:
+            reason = QUEUE_FULL
+        option = (
+            None
+            if reason is not None
+            else _measure(
+                state.rates, film, stages, worker, now, state.counts, state.busy
+            )
+        )
+        found.append(
+            DevicePreview(
+                worker_id=worker.worker_id,
+                name=worker.name,
+                gpu_model=worker.gpu_model,
+                vram_mib=worker.vram_mib,
+                finish_at=None
+                if option is None
+                else now + timedelta(seconds=option.finish),
+                energy_wh=None if option is None else option.energy,
+                reason=reason,
+            )
+        )
+    return tuple(found)
+
+
+def _route_films(
+    state: _PassState,
+    snapshot: m.RoutingSnapshot,
+    *,
+    live: Mapping[str, WorkerLive],
+    now: datetime,
+    controller_free_bytes: int | None,
+    gpu_stages: GpuStages | None,
+    probe: _Probe | None = None,
+) -> tuple[list[RouteDecision], dict[str, str]]:
+    """Step 4: the candidates, 4K first, then confirm time (§4.3)."""
+    open_films = {(route.film_id, route.input_revision) for route in state.remaining}
     ready = [
         film
         for film in snapshot.films
@@ -480,10 +621,15 @@ def schedule(
             f.film_id,
         ),
     )
+    rates, counts, busy, needs = state.rates, state.counts, state.busy, state.needs
     decisions: list[RouteDecision] = []
     disk_full = False
+    outputs = state.outputs
     for film in candidates:
         stages = routed_stages(film, gpu_stages)
+        mine = probe if probe is not None and probe.film_id == film.film_id else None
+        if mine is not None:
+            mine.devices = _devices(state, film, stages, live, now)
         output = film.source_bytes * OUTPUT_FACTOR if "restore" in stages else 0.0
         disk_full = disk_full or (
             controller_free_bytes is not None
@@ -491,30 +637,46 @@ def schedule(
         )
         if disk_full:  # C8/IR10: the gate stops every new route of the pass
             waiting[film.film_id] = CONTROLLER_DISK
+            if mine is not None:
+                mine.found = (None, CONTROLLER_DISK, [])
             continue
         pin = film.pin_worker_id
         if pin is not None:
             choice = _pinned(
-                rates, film, stages, workers.get(pin), live, now, counts, needs, busy
+                rates,
+                film,
+                stages,
+                state.workers.get(pin),
+                live,
+                now,
+                counts,
+                needs,
+                busy,
             )
             if isinstance(choice, str):
                 waiting[film.film_id] = choice
+                if mine is not None:
+                    mine.found = (None, choice, [])
                 continue
             options = [choice]
         else:
             found = _options(
-                rates, film, stages, targets, live, now, counts, needs, busy
+                rates, film, stages, state.targets, live, now, counts, needs, busy
             )
             if isinstance(found, str):
                 waiting[film.film_id] = found
+                if mine is not None:
+                    mine.found = (None, found, [])
                 continue
             options = found
         best = _choose(options)
+        if mine is not None:
+            mine.found = (best, None, options)
         worker = best.worker
         kind: Literal["auto", "pinned"] = "pinned" if pin is not None else "auto"
-        local = hand_over.get(film.film_id)
+        local = state.hand_over.get(film.film_id)
         if local is not None:  # C12: routed now, so the local route goes first
-            withdrawals.append(
+            state.withdrawals.append(
                 Withdrawal(local.route_id, local.version, film.film_id, HAND_OVER)
             )
         decisions.append(
@@ -533,7 +695,131 @@ def schedule(
         busy[worker.worker_id] += _cost(rates, worker, film, stages, now)[0]
         needs[worker.worker_id] += staging_need(film)
         outputs += output
-    return SchedulePass(tuple(decisions), tuple(withdrawals), waiting, attention)
+    return decisions, waiting
+
+
+# ── the pass ────────────────────────────────────────────────────────────
+def schedule(
+    snapshot: m.RoutingSnapshot,
+    *,
+    live: Mapping[str, WorkerLive],
+    now: datetime,
+    controller_id: str,
+    controller_free_bytes: int | None = None,
+    gpu_stages: GpuStages | None = None,
+    live_since: datetime | None = None,
+    remote_enabled: bool = False,
+) -> SchedulePass:
+    """`live_since`: when the live state started (the controller's start); a
+    worker not heard from since raises no 设备失联 in the first 60 s (IR12, C14).
+    `remote_enabled`: the `workflow.remote_workers` setting (P2-2 IR1)."""
+    if remote_mode(snapshot.workers, controller_id, enabled=remote_enabled) is None:
+        # IR1: single machine; the controller's dispatcher runs every stage
+        return SchedulePass((), (), {}, {})
+    state = _pass_state(
+        snapshot,
+        live=live,
+        now=now,
+        controller_id=controller_id,
+        gpu_stages=gpu_stages,
+        live_since=live_since,
+    )
+    decisions, waiting = _route_films(
+        state,
+        snapshot,
+        live=live,
+        now=now,
+        controller_free_bytes=controller_free_bytes,
+        gpu_stages=gpu_stages,
+    )
+    return SchedulePass(
+        tuple(decisions), tuple(state.withdrawals), waiting, state.attention
+    )
+
+
+def preview(
+    snapshot: m.RoutingSnapshot,
+    film_id: str,
+    tiers: Iterable[str | None],
+    *,
+    live: Mapping[str, WorkerLive],
+    now: datetime,
+    controller_id: str,
+    controller_free_bytes: int | None = None,
+    gpu_stages: GpuStages | None = None,
+    live_since: datetime | None = None,
+) -> dict[str | None, Preview]:
+    """P2-4 R5, pure: per tier, the film as if confirmed now with 自动, run
+    through the pass's own state and candidate order. {} for a film the
+    snapshot does not hold (no GPU work left). Advisory: 预计."""
+    base = next((f for f in snapshot.films if f.film_id == film_id), None)
+    if base is None:
+        return {}
+    result: dict[str | None, Preview] = {}
+    for tier in tiers:
+        film = base.model_copy(
+            update={
+                "planned": True,
+                "confirmed_at": now,
+                "ltx_model": tier,
+                "pin_worker_id": None,
+                "pin_version": base.pin_version or 1,
+            }
+        )
+        hypothetical = snapshot.model_copy(
+            update={
+                "films": tuple(
+                    film if f.film_id == film_id else f for f in snapshot.films
+                )
+            }
+        )
+        state = _pass_state(
+            hypothetical,
+            live=live,
+            now=now,
+            controller_id=controller_id,
+            gpu_stages=gpu_stages,
+            live_since=live_since,
+        )
+        probe = _Probe(film_id)
+        _route_films(
+            state,
+            hypothetical,
+            live=live,
+            now=now,
+            controller_free_bytes=controller_free_bytes,
+            gpu_stages=gpu_stages,
+            probe=probe,
+        )
+        if probe.found is None:  # not routable yet (a C12 local restore first)
+            stages = routed_stages(film, gpu_stages)
+            probe.devices = _devices(state, film, stages, live, now)
+            found = _options(
+                state.rates,
+                film,
+                stages,
+                state.targets,
+                live,
+                now,
+                state.counts,
+                state.needs,
+                state.busy,
+            )
+            probe.found = (
+                (None, found, [])
+                if isinstance(found, str)
+                else (_choose(found), None, found)
+            )
+        best, why, options = probe.found
+        result[tier] = Preview(
+            machine=best.worker.worker_id if best else None,
+            finish_at=now + timedelta(seconds=best.finish) if best else None,
+            energy_wh=best.energy if best else None,
+            reason=_reason("auto", best, options) if best else None,
+            waiting=why,
+            devices=probe.devices,
+        )
+    return result
 
 
 def _measure(
