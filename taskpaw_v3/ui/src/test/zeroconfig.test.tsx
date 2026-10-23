@@ -10,7 +10,7 @@ import { theme } from "../theme";
 import { Settings } from "../views/Settings";
 import { NetworkAccess } from "../components/NetworkAccess";
 import { RestartBanner } from "../components/RestartBanner";
-import { RESTART_WAIT_MS } from "../components/setupModel";
+import { FIREWALL_TASKBAR_MS, RESTART_WAIT_MS, tokenProblem } from "../components/setupModel";
 import { WorkflowSettingsSection } from "../components/WorkflowSettings";
 
 const BOOT = "0123456789abcdef0123456789abcdef";
@@ -28,7 +28,7 @@ beforeEach(() => { vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeErr
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("RestartBanner (R11, §3)", () => {
-  it("restarts through the shell, then waits and says it failed after 45 s", async () => {
+  it("restarts through the shell, then waits and says it failed after the wait", async () => {
     inShell();
     const restart = vi.spyOn(api, "restart").mockResolvedValue({ restarting: true });
     wrap(<RestartBanner role="agent" text="已保存，重启 TaskPaw 后生效（本机地址）" />);
@@ -37,8 +37,19 @@ describe("RestartBanner (R11, §3)", () => {
     fireEvent.click(screen.getByRole("button", { name: "立即重启" }));
     await waitFor(() => expect(restart).toHaveBeenCalledWith("agent", BOOT));
     expect(await screen.findByText("正在重启 TaskPaw…")).toBeInTheDocument();
-    act(() => { vi.advanceTimersByTime(RESTART_WAIT_MS); });
+    // review IR11: a labelled modal dialog that takes the focus
+    const dialog = screen.getByRole("alertdialog", { name: "正在重启 TaskPaw…" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    await waitFor(() => expect(dialog).toHaveFocus());
+    act(() => { vi.advanceTimersByTime(RESTART_WAIT_MS - 1000); });
+    expect(screen.getByText("正在重启 TaskPaw…")).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(1000); });
     expect(await screen.findByText("重启失败，请退出并重新打开 TaskPaw")).toBeInTheDocument();
+  });
+
+  it("waits longer than the old shutdown budget plus readiness (review IR8)", () => {
+    // the shell may wait 5 s (graceful stop) + 30 s (readiness) + the window rebuild
+    expect(RESTART_WAIT_MS).toBeGreaterThanOrEqual(75_000);
   });
 
   it("shows a busy refusal and offers no button outside the shell", async () => {
@@ -65,7 +76,7 @@ describe("网络与访问 (R4–R6)", () => {
     const gen = vi.spyOn(api, "networkToken").mockResolvedValue({ token: "tp_Generated0Generated0Generated012" });
     const save = vi.spyOn(api, "updateConfig").mockResolvedValue({ ok: true, restart_required: true });
     const saved = vi.fn();
-    wrap(<NetworkAccess forceLan wizard submitLabel="下一步：主控设置" onSaved={saved} />);
+    wrap(<NetworkAccess forceLan wizard tokenMode="generate" submitLabel="下一步：主控设置" onSaved={saved} />);
     await waitFor(() => expect(gen).toHaveBeenCalledWith("generate"));
     expect(await screen.findByText("已自动生成")).toBeInTheDocument();
     expect(screen.getByRole("switch")).toBeChecked();
@@ -91,9 +102,94 @@ describe("网络与访问 (R4–R6)", () => {
     await waitFor(() => expect(field).toHaveValue("tp_SavedSavedSavedSaved7Q2f"));
     expect(token).toHaveBeenCalledWith("reveal");
     fireEvent.click(screen.getByRole("button", { name: "重新生成" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("重新生成后，已配对的设备需要重新配对。");
+    expect(screen.getByRole("alert")).toHaveTextContent("重新生成后，家里其他 TaskPaw 和 Hub 都要换成新令牌。");
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(save).toHaveBeenCalledWith({ lan_access: true, bind_host: "10.0.0.5", bind_port: 5680, control_port: 5681 }));
+  });
+
+  it("a machine other than the 主控 pastes the home token (review IR2)", async () => {
+    vi.spyOn(api, "network").mockResolvedValue(network());
+    const gen = vi.spyOn(api, "networkToken").mockResolvedValue({ token: "tp_Generated0Generated0Generated012" });
+    const save = vi.spyOn(api, "updateConfig").mockResolvedValue({ ok: true, restart_required: true });
+    wrap(<NetworkAccess forceLan wizard tokenMode="paste" submitLabel="下一步：工作机设置" />);
+    const field = await screen.findByLabelText("访问令牌");
+    expect(gen).not.toHaveBeenCalled(); // never a second home token by default
+    expect(field).not.toHaveAttribute("readonly");
+    expect(screen.getByText("家里所有 TaskPaw 用同一个访问令牌：在主控 设置 → 网络与访问 复制")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("配对时会自动带上令牌");
+    fireEvent.click(screen.getByRole("button", { name: "下一步：工作机设置" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("访问令牌：请粘贴主控的访问令牌，或生成新令牌");
+    fireEvent.change(field, { target: { value: "tp_tooShort" } });
+    fireEvent.click(screen.getByRole("button", { name: "下一步：工作机设置" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("访问令牌：令牌格式不对");
+    expect(save).not.toHaveBeenCalled();
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { readText: async () => "  tp_HomeTokenHomeTokenHomeTokenHome12  " } });
+    fireEvent.click(screen.getByRole("button", { name: "粘贴" }));
+    await waitFor(() => expect(field).toHaveValue("tp_HomeTokenHomeTokenHomeTokenHome12"));
+    fireEvent.click(screen.getByRole("button", { name: "下一步：工作机设置" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith({
+      lan_access: true, bind_host: "192.168.1.20", bind_port: 5680, control_port: 5681, api_token: "tp_HomeTokenHomeTokenHomeTokenHome12",
+    }));
+  });
+
+  it("the very first machine may generate instead of pasting", async () => {
+    vi.spyOn(api, "network").mockResolvedValue(network());
+    const gen = vi.spyOn(api, "networkToken").mockResolvedValue({ token: "tp_Generated0Generated0Generated012" });
+    const save = vi.spyOn(api, "updateConfig").mockResolvedValue({ ok: true, restart_required: true });
+    wrap(<NetworkAccess wizard tokenMode="paste" submitLabel="下一步：完成" />);
+    fireEvent.click(await screen.findByRole("button", { name: "生成新令牌" }));
+    await waitFor(() => expect(gen).toHaveBeenCalledWith("generate"));
+    expect(await screen.findByText("已自动生成")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch")); // a plain agent turns LAN on
+    fireEvent.click(screen.getByRole("button", { name: "下一步：完成" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ api_token: "tp_Generated0Generated0Generated012" })));
+  });
+
+  it("a plain agent with LAN off needs no token", async () => {
+    vi.spyOn(api, "network").mockResolvedValue(network());
+    const save = vi.spyOn(api, "updateConfig").mockResolvedValue({ ok: true, restart_required: false });
+    wrap(<NetworkAccess wizard tokenMode="paste" submitLabel="下一步：完成" />);
+    fireEvent.click(await screen.findByRole("button", { name: "下一步：完成" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith({ lan_access: false, bind_port: 5680, control_port: 5681 }));
+  });
+
+  it("设置 can paste a token; it replaces the saved one only on 保存", async () => {
+    vi.spyOn(api, "network").mockResolvedValue(network({ lan_access: true, bind_host: "192.168.1.20", token_set: true, api_token_hint: "7Q2f" }));
+    const save = vi.spyOn(api, "updateConfig").mockResolvedValue({ ok: true, restart_required: false });
+    wrap(<NetworkAccess />);
+    fireEvent.click(await screen.findByRole("button", { name: "粘贴主控的访问令牌" }));
+    const field = screen.getByLabelText("访问令牌");
+    expect(field).toHaveAttribute("type", "password"); // masked
+    fireEvent.change(field, { target: { value: "legacy-home-token-1234" } }); // an existing ≥ 16-char token
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ api_token: "legacy-home-token-1234" })));
+  });
+
+  it("the token rule: tp_ + ≥ 32 base62, or any other ≥ 16-character token", () => {
+    expect(tokenProblem("tp_" + "a".repeat(32))).toBeNull();
+    expect(tokenProblem("tp_" + "Z9".repeat(20))).toBeNull();
+    expect(tokenProblem("legacy-home-token-1234")).toBeNull();
+    expect(tokenProblem("tp_" + "a".repeat(31))).not.toBeNull();
+    expect(tokenProblem("tp_" + "a".repeat(31) + "-")).not.toBeNull();
+    expect(tokenProblem("short-token")).not.toBeNull();
+    expect(tokenProblem("has space in token 1234")).not.toBeNull();
+  });
+
+  it("an elevation still open after 5 s points at the taskbar; a timeout says so (review IR3)", async () => {
+    vi.spyOn(api, "network").mockResolvedValue(network({ lan_access: true, bind_host: "192.168.1.20", token_set: true }));
+    let answer: (v: { result: "timeout" }) => void = () => {};
+    vi.spyOn(api, "networkFirewall").mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    wrap(<NetworkAccess />);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(await screen.findByRole("button", { name: "添加入站规则" }));
+    await screen.findByRole("button", { name: "等待管理员确认…" });
+    expect(screen.queryByText("请在任务栏找到 Windows 管理员确认窗口")).toBeNull();
+    act(() => { vi.advanceTimersByTime(FIREWALL_TASKBAR_MS); });
+    expect(await screen.findByText("请在任务栏找到 Windows 管理员确认窗口")).toBeInTheDocument();
+    act(() => answer({ result: "timeout" }));
+    expect(await screen.findByText(/管理员确认未完成（超时）/)).toBeInTheDocument();
+    expect(screen.queryByText("请在任务栏找到 Windows 管理员确认窗口")).toBeNull();
   });
 
   it("shows per-field refusals, the address change, the firewall retry and the public profile", async () => {
@@ -173,6 +269,20 @@ function settingsState(): WorkflowSettingsState {
     presets: [{ id: "auto", label: "自动" }], ffprobe_detected: null, paths: {}, miko: "off",
   };
 }
+
+describe("媒体工作流 off Windows (§12 operator decision)", () => {
+  it("offers only 不参与 with the Windows-only note", async () => {
+    vi.spyOn(api, "workflowSettings").mockResolvedValue({
+      ...settingsState(), saved: { ...settingsState().saved, enabled: false, role: "off" }, media_supported: false,
+    });
+    vi.spyOn(api, "workflowDetect").mockResolvedValue(DETECTED);
+    wrap(<WorkflowSettingsSection />);
+    expect(await screen.findByText("媒体主控和 GPU 工作机仅支持 Windows；这台电脑只能选「不参与」。")).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByLabelText("本机角色"));
+    const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
+    expect(options).toEqual(["不参与（普通 Agent，仅监控）"]);
+  });
+});
 
 describe("媒体工作流 detection (R13)", () => {
   it("lists each tool, fills a found path, re-detects and shows directory facts", async () => {

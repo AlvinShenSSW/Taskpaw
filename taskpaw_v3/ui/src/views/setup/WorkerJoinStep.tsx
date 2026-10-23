@@ -49,7 +49,7 @@ export function WorkerJoinStep({ advance, go }: StepProps) {
                 {join.isPending ? "正在加入…" : "加入"}
               </Button>
             </Stack>
-            <Typography variant="body2" color="text.secondary">在主控的 设备 → 添加设备 里复制配对码。配对码里已带主控地址和令牌，不用另外填写。</Typography>
+            <Typography variant="body2" color="text.secondary">在主控的 设备 → 添加设备 里复制配对码。配对码里已带主控地址和配对凭据，不用另外填写。</Typography>
             {error && <Alert severity="error" role="alert">{error}</Alert>}
             {worker.error && <Alert severity="warning">工作机尚未启动，请退出并重新打开 TaskPaw</Alert>}
           </>

@@ -54,10 +54,11 @@ function WorkerForm({ state, detection, go }: {
     setBusy(true); setFailure(null); setErrors({});
     try {
       if (!/^\d+$/.test(form.staging_cap_gb.trim())) { setErrors({ staging_cap_gb: "请输入整数" }); return; }
-      if (suggested) await api.workflowCreateDir(form.staging_dir.trim());
       await api.workflowSaveSettings({
         role: "worker", jasna_exe_path: form.jasna_exe_path.trim() || null, ltx_gpu: form.ltx_gpu,
         staging_dir: form.staging_dir.trim() || null, staging_cap_gb: Number(form.staging_cap_gb),
+        // review IR10: the suggested folder is made by the save, only once it validated
+        ...(suggested ? { create_dirs: ["staging_dir" as const] } : {}),
       });
       qc.invalidateQueries({ queryKey: ["workflowSettings"] });
       // resume at 加入主控 after the restart: recorded first, shown by the new window (D1)

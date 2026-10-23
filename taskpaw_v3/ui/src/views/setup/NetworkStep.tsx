@@ -4,7 +4,8 @@ import { HttpError } from "../../api";
 import { NetworkAccess } from "../../components/NetworkAccess";
 import { afterNetwork, type StepProps } from "./model";
 
-// #299 R4 (board Onboard-Network): the LAN switch is forced on for 主控 and GPU 工作机.
+// #299 R4 (board Onboard-Network): the LAN switch is forced on for 主控 and GPU 工作机. Review IR2: the
+// 主控 generates the home token; every other role pastes it (生成新令牌 only for the very first machine).
 const NEXT: Record<string, string> = { controller: "下一步：主控设置", worker: "下一步：工作机设置", agent: "下一步：完成" };
 
 export function NetworkStep({ role, advance, go }: StepProps) {
@@ -13,7 +14,7 @@ export function NetworkStep({ role, advance, go }: StepProps) {
     <Card><CardContent>
       <Stack spacing={2}>
         {error && <Alert severity="warning" role="alert">{error}</Alert>}
-        <NetworkAccess forceLan={role !== "agent"} wizard submitLabel={NEXT[role]}
+        <NetworkAccess forceLan={role !== "agent"} wizard tokenMode={role === "controller" ? "generate" : "paste"} submitLabel={NEXT[role]}
           onSaved={() => {
             setError(null);
             advance(afterNetwork(role), role).catch((e) => setError(e instanceof HttpError || e instanceof Error ? e.message : String(e)));

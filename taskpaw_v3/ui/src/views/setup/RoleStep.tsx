@@ -1,6 +1,6 @@
 import { Alert, Box, Button, Card, CardActionArea, Chip, Stack, Typography } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState, type KeyboardEvent } from "react";
 import { api, HttpError, type SetupRole } from "../../api";
 import { useDetect } from "../../components/setupModel";
 import { gpuShort, ROLE_NAME, type StepProps } from "./model";
@@ -33,6 +33,22 @@ export function RoleStep({ advance, initial }: StepProps & { initial: SetupRole 
   const [error, setError] = useState<string | null>(null);
   const gpu = detect.data?.gpu;
   const workerBlocked = gpu != null && !gpu.worker_ok;
+  // #299 §12 operator decision: 媒体主控 / GPU 工作机 run only on Windows (the Mac: 普通 Agent)
+  const windowsOnly = saved.data?.media_supported === false;
+  const isDisabled = (r: SetupRole) => (r !== "agent" && windowsOnly) || (r === "worker" && workerBlocked);
+  // review IR11: a radiogroup — one tab stop (the chosen card), arrow keys move and choose
+  const cards = useRef<Partial<Record<SetupRole, HTMLElement | null>>>({});
+  const enabled = CARDS.map((c) => c.role).filter((r) => !isDisabled(r));
+  const tabStop = role && enabled.includes(role) ? role : enabled[0];
+  const onKey = (e: KeyboardEvent, from: SetupRole) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (!step || !enabled.length) return;
+    e.preventDefault();
+    const at = enabled.indexOf(from);
+    const to = enabled[((at < 0 ? 0 : at + step) + enabled.length) % enabled.length];
+    setRole(to);
+    cards.current[to]?.focus();
+  };
   const next = async () => {
     if (!role) return;
     setBusy(true); setError(null);
@@ -49,12 +65,13 @@ export function RoleStep({ advance, initial }: StepProps & { initial: SetupRole 
       <Box role="radiogroup" aria-label="这台电脑的角色"
         sx={{ display: "grid", gap: 2, gridTemplateColumns: { xs: "1fr", md: "repeat(3, minmax(0, 1fr))" } }}>
         {CARDS.map((card) => {
-          const disabled = card.role === "worker" && workerBlocked;
+          const disabled = isDisabled(card.role);
           const chosen = role === card.role;
           return (
             <Card key={card.role} variant="outlined" sx={{ borderColor: chosen ? "primary.main" : "divider", opacity: disabled ? 0.6 : 1 }}>
               <CardActionArea disabled={disabled} onClick={() => setRole(card.role)} sx={{ p: 2.5, height: "100%", alignItems: "flex-start" }}
-                role="radio" aria-checked={chosen} aria-disabled={disabled}>
+                role="radio" aria-checked={chosen} aria-disabled={disabled} tabIndex={card.role === tabStop ? 0 : -1}
+                ref={(el: HTMLButtonElement | null) => { cards.current[card.role] = el; }} onKeyDown={(e) => onKey(e, card.role)}>
                 <Stack spacing={1.5}>
                   <Stack direction="row" spacing={1} alignItems="flex-start">
                     <Box aria-hidden sx={{
@@ -72,8 +89,9 @@ export function RoleStep({ advance, initial }: StepProps & { initial: SetupRole 
                     {card.chips.map((c) => <Chip key={c} size="small" variant="outlined" label={c} />)}
                     {card.role === "controller" && gpu && <Chip size="small" variant="outlined" color="success" label={`本机 ${gpuShort(gpu)}`} />}
                   </Stack>
-                  {card.role === "worker" && disabled && <Typography variant="body2" color="warning.main">本机显卡不足 16 GB</Typography>}
-                  {card.role === "worker" && gpu === null && <Typography variant="body2" color="warning.main">未检测到 NVIDIA 显卡</Typography>}
+                  {card.role !== "agent" && windowsOnly && <Typography variant="body2" color="warning.main">仅支持 Windows</Typography>}
+                  {card.role === "worker" && !windowsOnly && disabled && <Typography variant="body2" color="warning.main">本机显卡不足 16 GB</Typography>}
+                  {card.role === "worker" && !windowsOnly && gpu === null && <Typography variant="body2" color="warning.main">未检测到 NVIDIA 显卡</Typography>}
                   <Stack spacing={0.25}>
                     <Typography variant="caption" color="text.secondary">将配置</Typography>
                     {card.will.map((w) => <Typography key={w} variant="body2">· {w}</Typography>)}
@@ -87,7 +105,7 @@ export function RoleStep({ advance, initial }: StepProps & { initial: SetupRole 
       <Typography variant="body2" color="text.secondary">不需要编辑任何配置文件。Mac Hub（只读监控 + OpenClaw 通知）是单独的 macOS 应用，不在这里安装。</Typography>
       {error && <Alert severity="warning" role="alert">{error}</Alert>}
       <Stack direction="row" justifyContent="flex-end">
-        <Button variant="contained" sx={{ minHeight: 44 }} disabled={!role || busy || (role === "worker" && workerBlocked)} onClick={() => void next()}>
+        <Button variant="contained" sx={{ minHeight: 44 }} disabled={!role || busy || isDisabled(role)} onClick={() => void next()}>
           下一步：网络与访问
         </Button>
       </Stack>

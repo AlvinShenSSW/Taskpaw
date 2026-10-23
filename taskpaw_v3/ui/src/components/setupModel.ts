@@ -72,15 +72,45 @@ export function foundCount(d: Detection | undefined, names: Array<keyof Detectio
 export const NETWORK_KEY = ["network"];
 export const RESTART_KEY = ["restartState"];
 export const FIREWALL_DECLINED = "未添加防火墙规则，其他设备可能连不上本机；可在 设置 → 网络与访问 重试";
+export const FIREWALL_TIMEOUT = `管理员确认未完成（超时）。${FIREWALL_DECLINED}`;
+export const FIREWALL_PENDING = "上一次的管理员确认还没有完成，请在任务栏找到 Windows 管理员确认窗口";
+export const FIREWALL_TASKBAR = "请在任务栏找到 Windows 管理员确认窗口";
+export const FIREWALL_TASKBAR_MS = 5_000; // review IR3: the UAC prompt may open behind other windows
 export const MAC_FIREWALL = "首次监听时 macOS 会询问是否允许传入连接，请点“允许”";
 
 export function firewallText(result: FirewallResult): string | null {
   if (result === "added") return "已添加入站规则（仅专用网络）";
   if (result === "unsupported") return null;
+  if (result === "timeout") return FIREWALL_TIMEOUT;
+  if (result === "pending") return FIREWALL_PENDING;
   return FIREWALL_DECLINED;
 }
 
-export const RESTART_WAIT_MS = 45_000;
+/** Review IR3: true once an elevation request has been open for 5 s (the taskbar hint). */
+export function useSlow(pending: boolean, ms = FIREWALL_TASKBAR_MS): boolean {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (!pending) { setSlow(false); return; }
+    const timer = setTimeout(() => setSlow(true), ms);
+    return () => clearTimeout(timer);
+  }, [pending, ms]);
+  return slow;
+}
+
+// #299 review IR2: one home token — the 主控 (or the very first machine) generates it; every other
+// TaskPaw and the Hub paste the same one.
+export const HOME_TOKEN = "家里所有 TaskPaw 用同一个访问令牌：在主控 设置 → 网络与访问 复制";
+const BASE62_TOKEN = /^tp_[0-9A-Za-z]{32,}$/;
+
+/** A pasted token's problem, or null: `tp_` + ≥ 32 base62, or any other ≥ 16-character token. */
+export function tokenProblem(text: string): string | null {
+  const value = text.trim();
+  if (value.startsWith("tp_") ? BASE62_TOKEN.test(value) : value.length >= 16 && !/[\s\p{Cc}]/u.test(value)) return null;
+  return "令牌格式不对：应为 tp_ 开头加至少 32 位字母数字，或至少 16 个字符（不含空格）";
+}
+
+// IR8: ≥ the shell's old-backend stop (5 s) + readiness (30 s) + the window rebuild, with margin
+export const RESTART_WAIT_MS = 75_000;
 export const OUTSIDE = "请退出并重新打开 TaskPaw";
 
 export function useRestart(role: ControlRole) {

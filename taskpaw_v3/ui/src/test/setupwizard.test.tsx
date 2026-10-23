@@ -1,7 +1,7 @@
 // #299 R2, R3, R7–R10, §6: the first-run wizard end to end with a faked backend (boards Main,
 // Onboard-Network, Onboard-Controller, Onboard-Worker, Onboard-Done), including resume at every step.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ThemeProvider } from "@mui/material/styles";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { api, HttpError, type Detection, type SetupState, type WorkflowSettingsState, type WorkflowSettingsView } from "../api";
@@ -74,6 +74,38 @@ describe("选择角色 (R3)", () => {
     expect(screen.getByRole("button", { name: "下一步：网络与访问" })).toBeDisabled();
   });
 
+  it("the role cards are a radiogroup driven by the arrow keys (review IR11)", async () => {
+    wrap({ status: "pending", step: "role", role: null });
+    await screen.findByText("本机显卡不足 16 GB");
+    const agent = screen.getByRole("radio", { name: /^普通 Agent/ });
+    const controller = screen.getByRole("radio", { name: /^媒体主控/ });
+    expect(agent).toHaveAttribute("tabindex", "0"); // roving: one tab stop
+    expect(controller).toHaveAttribute("tabindex", "-1");
+    fireEvent.keyDown(agent, { key: "ArrowRight" });
+    expect(controller).toHaveAttribute("aria-checked", "true");
+    expect(controller).toHaveFocus();
+    fireEvent.keyDown(controller, { key: "ArrowDown" }); // GPU 工作机 is disabled: skipped, wraps around
+    expect(agent).toHaveAttribute("aria-checked", "true");
+    fireEvent.keyDown(agent, { key: "ArrowLeft" });
+    expect(controller).toHaveAttribute("aria-checked", "true");
+    expect(controller).toHaveAttribute("tabindex", "0");
+  });
+
+  it("off Windows only 普通 Agent can be chosen (§12 operator decision)", async () => {
+    saved = { ...settings(), media_supported: false };
+    vi.spyOn(api, "workflowDetect").mockResolvedValue({ ...DETECTED, gpu: null });
+    wrap({ status: "pending", step: "role", role: null });
+    expect(await screen.findAllByText("仅支持 Windows")).toHaveLength(2);
+    expect(screen.getByRole("radio", { name: /^媒体主控/ })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("radio", { name: /^GPU 工作机/ })).toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByText("未检测到 NVIDIA 显卡")).toBeNull();
+    const agent = screen.getByRole("radio", { name: /^普通 Agent/ });
+    fireEvent.keyDown(agent, { key: "ArrowRight" }); // nothing else to move to
+    expect(agent).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(screen.getByRole("button", { name: "下一步：网络与访问" }));
+    await waitFor(() => expect(step).toHaveBeenCalledWith("network", "agent"));
+  });
+
   it("without an NVIDIA card the worker stays selectable with a warning", async () => {
     vi.spyOn(api, "workflowDetect").mockResolvedValue({ ...DETECTED, gpu: null });
     wrap({ status: "pending", step: "role", role: null });
@@ -94,7 +126,7 @@ describe("普通 Agent: role → network → done", () => {
     await waitFor(() => expect(step).toHaveBeenCalledWith("network", "agent"));
     expect(await screen.findByRole("heading", { name: "网络与访问" })).toBeInTheDocument();
     expect(await screen.findByRole("switch")).not.toBeDisabled(); // not forced for a plain agent
-    await screen.findByText("已自动生成");
+    expect(screen.queryByText("已自动生成")).toBeNull(); // review IR2: pastes the home token, LAN off needs none
     fireEvent.click(screen.getByRole("button", { name: "下一步：完成" }));
     await waitFor(() => expect(step).toHaveBeenCalledWith("done", "agent"));
     expect(screen.getAllByText("选择角色").length).toBeGreaterThan(0);
@@ -106,7 +138,7 @@ describe("普通 Agent: role → network → done", () => {
 });
 
 describe("媒体主控: role → network → controller → done", () => {
-  it("prefills from detection, creates the suggested directories, saves and restarts", async () => {
+  it("prefills from detection, creates the suggested directories after the save validates", async () => {
     const create = vi.spyOn(api, "workflowCreateDir").mockResolvedValue({ ok: true, created: true });
     const saveWorkflow = vi.spyOn(api, "workflowSaveSettings").mockImplementation(async (patch) => {
       saved = settings({ ...patch, enabled: true, role: "controller" } as Partial<WorkflowSettingsView>);
@@ -126,8 +158,9 @@ describe("媒体主控: role → network → controller → done", () => {
     fireEvent.click(screen.getByRole("switch"));
     fireEvent.click(screen.getByRole("button", { name: "下一步：完成" }));
     await waitFor(() => expect(saveWorkflow).toHaveBeenCalled());
-    expect(create.mock.calls.map((c) => c[0])).toEqual(["D:\\TaskpawInbox", "D:\\TaskpawWork"]);
+    expect(create).not.toHaveBeenCalled(); // review IR10: the save makes them, after validating
     expect(saveWorkflow.mock.calls[0][0]).toMatchObject({
+      create_dirs: ["inbox_root", "data_dir"],
       role: "controller", inbox_root: "D:\\TaskpawInbox", data_dir: "D:\\TaskpawWork", ffprobe_path: null,
       whisperjav_exe_path: "C:\\WhisperJAV\\Scripts\\whisperjav.exe", remote_workers: true, worker_api_port: 5682,
       mdcx_root: "D:\\Work\\engines\\MDCX304",
@@ -160,6 +193,25 @@ describe("媒体主控: role → network → controller → done", () => {
     expect(await screen.findByText("正在重启 TaskPaw…")).toBeInTheDocument();
   });
 
+  it("a slow UAC prompt points at the taskbar; the done copy names the home token", async () => {
+    saved = settings({ enabled: true, role: "controller", inbox_root: "D:\\TODO", remote_workers: true });
+    vi.spyOn(api, "network").mockResolvedValue(network({ lan_access: true, bind_host: "192.168.1.20", token_set: true, api_token_hint: "7Q2f" }));
+    vi.spyOn(api, "restartState").mockResolvedValue({ required: false, fields: [], blocked: null, available: true });
+    let answer: (v: { result: "timeout" }) => void = () => {};
+    vi.spyOn(api, "networkFirewall").mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    vi.spyOn(api, "setupComplete").mockResolvedValue({ status: "done", step: "done", role: "controller" });
+    wrap({ status: "pending", step: "done", role: "controller" });
+    expect(await screen.findByText(/Hub 和其他 TaskPaw 用同一个访问令牌/)).toBeInTheDocument();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(screen.getByRole("button", { name: "开始使用" }));
+    await screen.findByRole("button", { name: "请稍候…" });
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(await screen.findByText("请在任务栏找到 Windows 管理员确认窗口")).toBeInTheDocument();
+    act(() => answer({ result: "timeout" }));
+    expect(await screen.findByText(/管理员确认未完成（超时）/)).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
   it("修改 goes back to its step without writing", async () => {
     saved = settings({ enabled: true, role: "controller", inbox_root: "D:\\TODO" });
     vi.spyOn(api, "restartState").mockResolvedValue({ required: false, fields: [], blocked: null, available: true });
@@ -174,7 +226,7 @@ describe("媒体主控: role → network → controller → done", () => {
 describe("GPU 工作机: 3a saves and restarts, 3b joins", () => {
   it("saves the fields, records 加入主控 and restarts", async () => {
     vi.spyOn(api, "workflowDetect").mockResolvedValue(WORKER_GPU);
-    vi.spyOn(api, "workflowCreateDir").mockResolvedValue({ ok: true, created: true });
+    const create = vi.spyOn(api, "workflowCreateDir").mockResolvedValue({ ok: true, created: true });
     const saveWorkflow = vi.spyOn(api, "workflowSaveSettings").mockResolvedValue({ ok: true, restart_required: true });
     const restart = vi.spyOn(api, "restart").mockResolvedValue({ restarting: true });
     wrap({ status: "pending", step: "worker_fields", role: "worker" });
@@ -189,7 +241,9 @@ describe("GPU 工作机: 3a saves and restarts, 3b joins", () => {
     await waitFor(() => expect(restart).toHaveBeenCalledWith("agent", BOOT));
     expect(saveWorkflow.mock.calls[0][0]).toEqual({
       role: "worker", jasna_exe_path: "C:\\Jasna\\jasna.exe", ltx_gpu: "auto", staging_dir: "D:\\TaskpawStaging", staging_cap_gb: 500,
+      create_dirs: ["staging_dir"],
     });
+    expect(create).not.toHaveBeenCalled();
     expect(step).toHaveBeenCalledWith("worker_join", "worker");
     expect(step.mock.invocationCallOrder[0]).toBeLessThan(restart.mock.invocationCallOrder[0]);
     expect(await screen.findByText("正在重启 TaskPaw…")).toBeInTheDocument();

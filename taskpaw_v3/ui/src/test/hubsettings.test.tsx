@@ -17,7 +17,10 @@ function values(over: Partial<HubSettingsValues> = {}): HubSettingsValues {
   };
 }
 function state(over: Partial<HubSettingsState> = {}): HubSettingsState {
-  return { saved: values(), running: values(), restart_required: false, fields: [], addresses: [], restart_available: true, ...over };
+  return {
+    saved: values(), running: values(), restart_required: false, fields: [], addresses: [], restart_available: true,
+    controller_server_id: 1, ...over,
+  };
 }
 function wrap() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -28,7 +31,10 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeError("offline"))));
   vi.spyOn(api, "hubStatus").mockResolvedValue({
     machine: "hub", acks: {}, self: {},
-    servers: [{ id: 1, name: "BlackGoldPig", ip: "192.168.1.20", port: 5680, enabled: 1, online: true, last_seen: new Date(Date.now() - 12000).toISOString() }],
+    servers: [
+      { id: 1, name: "BlackGoldPig", ip: "192.168.1.20", port: 5680, enabled: 1, online: true, last_seen: new Date(Date.now() - 12000).toISOString() },
+      { id: 2, name: "NAS-agent", ip: "192.168.1.5", port: 5680, enabled: 1, online: true, last_seen: null },
+    ],
   });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -40,7 +46,8 @@ describe("Hub settings", () => {
     expect(await screen.findByLabelText("地址")).toHaveValue("http://127.0.0.1:18789/hooks/wake");
     expect(screen.getByLabelText("令牌")).toHaveValue("");
     expect(screen.getByLabelText("令牌")).toHaveAttribute("placeholder", "***");
-    expect(screen.getByText("令牌 tp_••••••7Q2f")).toBeInTheDocument();
+    expect(screen.getByText("家庭访问令牌 tp_••••••7Q2f")).toBeInTheDocument();
+    expect(screen.getByText(/Hub 用这一个令牌轮询家里所有 TaskPaw/)).toBeInTheDocument();
     expect(await screen.findByText(/已连接 · 1\d 秒前/)).toBeInTheDocument();
     expect(screen.getByText("地址 192.168.1.20:5680")).toBeInTheDocument();
     expect(screen.getByLabelText("status.md 位置")).toHaveAttribute("placeholder", "~/.taskpaw-hub/status.md");
@@ -85,6 +92,45 @@ describe("Hub settings", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("只读接口令牌：开启局域网只读接口需要访问令牌");
   });
 
+  it("更换主控 edits the chosen server — never an implicit first one (review IR2)", async () => {
+    vi.spyOn(api, "hubSettings").mockResolvedValue(state({ controller_server_id: 2 }));
+    const update = vi.spyOn(api, "hubUpdateServer").mockResolvedValue({ ok: true } as never);
+    vi.spyOn(api, "hubSaveSettings").mockResolvedValue({ ok: true, restart_required: false, fields: [] });
+    wrap();
+    expect(await screen.findByText("地址 192.168.1.5:5680")).toBeInTheDocument();
+    expect(screen.getByText("主控 NAS-agent")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "更换主控" }));
+    fireEvent.change(screen.getByLabelText("主控地址"), { target: { value: "192.168.1.6" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存" }).at(-1)!);
+    await waitFor(() => expect(update).toHaveBeenCalledWith(2, { ip: "192.168.1.6", port: 5680 }));
+  });
+
+  it("with no 主控 chosen it asks which polled TaskPaw is the 主控", async () => {
+    vi.spyOn(api, "hubSettings").mockResolvedValue(state({ controller_server_id: null }));
+    const save = vi.spyOn(api, "hubSaveSettings").mockResolvedValue({ ok: true, restart_required: false, fields: [] });
+    const update = vi.spyOn(api, "hubUpdateServer");
+    wrap();
+    expect(await screen.findByText("还没有选择主控")).toBeInTheDocument();
+    expect(screen.queryByText("地址 192.168.1.20:5680")).toBeNull();
+    fireEvent.mouseDown(await screen.findByLabelText("选择主控"));
+    fireEvent.click(await screen.findByRole("option", { name: "NAS-agent · 192.168.1.5:5680" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith({ controller_server_id: 2 }));
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("添加主控 adds the server and names it the 主控", async () => {
+    vi.spyOn(api, "hubStatus").mockResolvedValue({ machine: "hub", acks: {}, self: {}, servers: [] });
+    vi.spyOn(api, "hubSettings").mockResolvedValue(state({ controller_server_id: null }));
+    const add = vi.spyOn(api, "hubAddServer").mockResolvedValue({ ok: true, id: 7 } as never);
+    const save = vi.spyOn(api, "hubSaveSettings").mockResolvedValue({ ok: true, restart_required: false, fields: [] });
+    wrap();
+    fireEvent.click(await screen.findByRole("button", { name: "添加主控" }));
+    fireEvent.change(screen.getByLabelText("主控地址"), { target: { value: "192.168.1.20" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存" }).at(-1)!);
+    await waitFor(() => expect(add).toHaveBeenCalledWith({ name: "主控", ip: "192.168.1.20", port: 5680 }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith({ controller_server_id: 7 }));
+  });
+
   it("更换主控 updates the server and the polling token", async () => {
     vi.spyOn(api, "hubSettings").mockResolvedValue(state());
     const update = vi.spyOn(api, "hubUpdateServer").mockResolvedValue({ ok: true } as never);
@@ -92,7 +138,7 @@ describe("Hub settings", () => {
     wrap();
     fireEvent.click(await screen.findByRole("button", { name: "更换主控" }));
     fireEvent.change(screen.getByLabelText("主控地址"), { target: { value: "192.168.1.21" } });
-    fireEvent.change(screen.getByLabelText("主控令牌"), { target: { value: "tp_new" } });
+    fireEvent.change(screen.getByLabelText("家庭访问令牌"), { target: { value: "tp_new" } });
     fireEvent.click(screen.getAllByRole("button", { name: "保存" }).at(-1)!);
     await waitFor(() => expect(update).toHaveBeenCalledWith(1, { ip: "192.168.1.21", port: 5680 }));
     expect(save).toHaveBeenCalledWith({ polling_token: "tp_new" });

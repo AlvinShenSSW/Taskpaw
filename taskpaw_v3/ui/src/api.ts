@@ -528,8 +528,12 @@ export interface WorkflowSettingsState {
   // each saved directory / tool found or missing (null: unset), and whether Miko's three fields are complete
   paths?: Partial<Record<keyof WorkflowSettingsView, "ok" | "missing" | null>>;
   miko?: "complete" | "partial" | "off";
+  // #299 §12 operator decision: false off Windows (only 不参与 is offered)
+  media_supported?: boolean;
 }
-export type WorkflowSettingsPatch = { role: WorkflowRole } & Partial<Omit<WorkflowSettingsView, "enabled" | "role">>;
+// #299 review IR10: `create_dirs` names the suggested folders the save makes once it validated
+export type WorkflowSettingsPatch = { role: WorkflowRole } & Partial<Omit<WorkflowSettingsView, "enabled" | "role">>
+  & { create_dirs?: Array<"inbox_root" | "data_dir" | "staging_dir"> };
 // #299: the first-run wizard, 网络与访问, detection, 立即重启 and the Hub's settings.
 export type SetupRole = "agent" | "controller" | "worker";
 export type SetupStep = "role" | "network" | "controller" | "worker_fields" | "worker_join" | "done";
@@ -541,7 +545,7 @@ export interface NetworkView {
   token_set: boolean; api_token_hint: string | null;
   firewall: { platform: "windows" | "macos" | "other"; rule: "present" | "absent" | "unknown"; profile: "private" | "public" | "domain" | null };
 }
-export type FirewallResult = "added" | "declined" | "failed" | "unsupported";
+export type FirewallResult = "added" | "declined" | "failed" | "unsupported" | "timeout" | "pending";
 export interface ToolFound { found: boolean; path: string | null; source: "saved" | "monitor" | "default" | "path" | "bundled" | null; version: string | null }
 export interface MikoFound { status: "complete" | "partial" | "off"; root: string | null; python: string | null; profile: string | null }
 export interface GpuFound { name: string; vram_mib: number; driver: string | null; power_limit_w: number | null; worker_ok: boolean }
@@ -560,6 +564,8 @@ export interface HubSettingsValues {
 export interface HubSettingsState {
   saved: HubSettingsValues; running: HubSettingsValues; restart_required: boolean; fields: string[];
   addresses: NetworkAddress[]; restart_available: boolean;
+  // #299 review IR2: the polled TaskPaw the operator chose as 主控 (null: none chosen)
+  controller_server_id: number | null;
 }
 export type OpenclawTest = { ok: true; at: string; elapsed_s: number } | { ok: false; error: "unreachable" | "token" | "timeout" | "http"; status?: number };
 // `error` is a code (`cas_conflict` = the input revision changed); `message` its Chinese text.
@@ -913,7 +919,7 @@ export const api = {
   restart: (role: ControlRole, boot_id: string) =>
     send<{ restarting: boolean }>(role, "POST", role === "agent" ? "/control/restart" : "/restart", { boot_id }),
   hubSettings: () => get<HubSettingsState>("hub", "/config/settings"),
-  hubSaveSettings: (patch: Partial<Record<keyof HubSettingsValues, unknown>>) =>
+  hubSaveSettings: (patch: Partial<Record<keyof HubSettingsValues | "controller_server_id", unknown>>) =>
     send<{ ok: boolean; restart_required: boolean; fields: string[] }>("hub", "PUT", "/config/settings", patch),
   hubOpenclawTest: (url: string, token: string) => send<OpenclawTest>("hub", "POST", "/config/openclaw/test", { url, token }),
   posterPath: (filmId: string) => `/control/workflow/films/${seg(filmId)}/poster`,

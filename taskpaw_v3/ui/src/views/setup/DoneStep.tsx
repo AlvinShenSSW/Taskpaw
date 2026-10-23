@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { api, type SetupStep } from "../../api";
 import { RestartOverlay } from "../../components/RestartBanner";
-import { firewallText, FIREWALL_DECLINED, MAC_FIREWALL, mikoLine, useDetect, useRestart } from "../../components/setupModel";
+import { FIREWALL_TASKBAR, firewallText, MAC_FIREWALL, mikoLine, useDetect, useRestart, useSlow } from "../../components/setupModel";
 import { gpuShort, ROLE_NAME, SETUP_KEY, type StepProps } from "./model";
 
 // #299 R10 (board Onboard-Done): the saved configuration, each group with 修改 (back to its step), the
@@ -43,6 +43,8 @@ export function DoneStep({ role, go }: StepProps) {
   const [firewall, setFirewall] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [completed, setCompleted] = useState(false);
+  const [asking, setAsking] = useState(false); // review IR3: the UAC prompt is open
+  const slow = useSlow(asking);
   const n = net.data;
   const s = settings.data?.saved;
   const d = detect.data;
@@ -53,8 +55,11 @@ export function DoneStep({ role, go }: StepProps) {
     setBusy(true); setFailure(null);
     try {
       if (needRule && firewall === null) {
-        const r = await api.networkFirewall(); // one UAC prompt; a refusal never blocks
-        setFirewall(firewallText(r.result) ?? "");
+        setAsking(true);
+        try {
+          const r = await api.networkFirewall(); // one UAC prompt; a refusal never blocks
+          setFirewall(firewallText(r.result) ?? "");
+        } finally { setAsking(false); }
       }
       if (!completed) { await api.setupComplete(); setCompleted(true); }
       const state = await api.restartState();
@@ -112,12 +117,13 @@ export function DoneStep({ role, go }: StepProps) {
           <Stack spacing={0.5}>
             <Typography variant="subtitle2" component="h2">重启之后</Typography>
             <Typography variant="body2">1. 开始监视 {s.inbox_root}；复制进去的影片稳定后自动登记。</Typography>
-            <Typography variant="body2">2. 局域网内的 Hub 用地址和令牌即可看到本机。</Typography>
+            <Typography variant="body2">2. 在 Hub 的 设置 → 主控连接 填本机地址；Hub 和其他 TaskPaw 用同一个访问令牌（设置 → 网络与访问 复制）。</Typography>
             {s.remote_workers && <Typography variant="body2">3. 打开 媒体处理中心 → 设备 → 添加设备，复制配对码给每台 GPU 工作机。</Typography>}
             {s.remote_workers && <Typography variant="body2">4. 还没有工作机时，确认后的影片排队等待 GPU 工作机，不会占用本机显卡。</Typography>}
           </Stack>
         )}
-        {firewall && <Alert severity={firewall === FIREWALL_DECLINED ? "warning" : "success"}>{firewall}</Alert>}
+        {slow && <Typography variant="body2" color="warning.main" role="status">{FIREWALL_TASKBAR}</Typography>}
+        {firewall && <Alert severity={firewall.startsWith("已添加") ? "success" : "warning"}>{firewall}</Alert>}
         {(failure || restart.refused) && (
           <Alert severity="warning" role="alert" action={completed ? <Button color="inherit" size="small" onClick={start}>开始使用</Button> : undefined}>
             {failure ?? restart.refused}

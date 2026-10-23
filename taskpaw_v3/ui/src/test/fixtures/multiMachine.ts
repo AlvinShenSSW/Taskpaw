@@ -7,8 +7,10 @@ import type {
 } from "../../api";
 import { counts, detail, FILMS_RESPONSE, plan, PLANS, row, steps } from "./mediaWorkspace";
 
-// The finishes are built from the test's own clock so 「预计 HH:MM」 is today.
-const at = (h: number, m: number) => { const d = new Date(); d.setHours(h, m, 0, 0); return d.toISOString(); };
+// #299 review: a fixed local "now" (the tests pin Date to it), so 「预计 HH:MM」 is today even when
+// the suite runs across midnight — never `new Date()` at import time.
+export const NOW = new Date(2026, 9, 23, 12, 0, 0, 0);
+const at = (h: number, m: number) => { const d = new Date(NOW); d.setHours(h, m, 0, 0); return d.toISOString(); };
 const hm = (iso: string) => { const d = new Date(iso); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
 
 export const W = {

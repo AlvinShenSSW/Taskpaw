@@ -16,7 +16,7 @@ import { theme } from "../theme";
 import { setLang } from "../i18n";
 import { detail, FILMS_RESPONSE, PLANS, row, steps } from "./fixtures/mediaWorkspace";
 import {
-  actions, FINISH, FINISH_TEXT, lostDetail, reassignDetail, REMOTE_DEVICES, REMOTE_FILMS, REMOTE_PLANS, REMOTE_ROWS, settingsState,
+  actions, FINISH, FINISH_TEXT, lostDetail, NOW, reassignDetail, REMOTE_DEVICES, REMOTE_FILMS, REMOTE_PLANS, REMOTE_ROWS, settingsState,
   settingsView, STOP, W,
 } from "./fixtures/multiMachine";
 import { POWER_SETTINGS, powerView } from "./fixtures/power";
@@ -53,8 +53,13 @@ const go = async (label: string) => {
 const pendingCard = (id: string) => document.querySelector(`[data-pending="${id}"]`) as HTMLElement;
 const optionTexts = (s: HTMLSelectElement) => Array.from(s.options).map((o) => [o.textContent, o.disabled]);
 
-beforeEach(() => { setLang("zh-CN"); vi.spyOn(window, "scrollTo").mockImplementation(() => {}); });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+beforeEach(() => {
+  setLang("zh-CN");
+  vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  // the 预计 finishes are on NOW's day: only Date is pinned, timers stay real
+  vi.useFakeTimers({ toFake: ["Date"], now: NOW });
+});
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("待处理 machine select (R5/R6)", () => {
   it("offers 自动（推荐） first with its finish and energy, then each device or its reason, per tier", async () => {

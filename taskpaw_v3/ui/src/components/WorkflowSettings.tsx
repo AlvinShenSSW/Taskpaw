@@ -27,6 +27,7 @@ const ROLES: Array<[WorkflowRole, string]> = [
 ];
 // IR5: a refused switch names its target (「未切换到 GPU 工作机：…」)
 const ROLE_SHORT: Record<WorkflowRole, string> = { controller: "媒体主控", worker: "GPU 工作机", off: "不参与" };
+const WINDOWS_ONLY_NOTE = "媒体主控和 GPU 工作机仅支持 Windows；这台电脑只能选「不参与」。";
 // IR3: the native picker per path field — a folder (选择) or a tool's file (更改)
 const DIR_FIELDS = ["inbox_root", "data_dir", "staging_dir", "mdcx_root", "filmpaw_data_dir"];
 const FILE_FIELDS = ["ffprobe_path", "jasna_exe_path", "whisperjav_exe_path", "mdcx_python", "mdcx_profile"];
@@ -129,6 +130,7 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
   const [made, setMade] = useState<string | null>(null);
   const role = form.role as WorkflowRole;
   const running = state.running.role;
+  const windowsOnly = state.media_supported === false; // §12 OD: 主控 / GPU 工作机 only on Windows
   const save = useMutation({
     mutationFn: (patch: WorkflowSettingsPatch) => api.workflowSaveSettings(patch),
     onSuccess: (res) => { setSavedNow(Boolean(res.restart_required)); onSaved(); },
@@ -265,9 +267,9 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
     <Stack spacing={2}>
       {restart && <RestartBanner role="agent" text={`${SAVED}${pendingFields.length ? `（${pendingFields.join("、")}）` : ""}`} />}
       <TextField select size="small" label="本机角色" value={role} onChange={(e) => set("role", e.target.value)}
-        helperText={errors.role ?? "选「不参与」即关闭媒体工作流；切换角色需要重启生效。"} error={Boolean(errors.role)}
+        helperText={errors.role ?? (windowsOnly ? WINDOWS_ONLY_NOTE : "选「不参与」即关闭媒体工作流；切换角色需要重启生效。")} error={Boolean(errors.role)}
         sx={{ maxWidth: 360 }}>
-        {ROLES.map(([v, l]) => <MenuItem key={v} value={v}>{l}</MenuItem>)}
+        {ROLES.filter(([v]) => !windowsOnly || v === "off" || v === state.saved.role).map(([v, l]) => <MenuItem key={v} value={v}>{l}</MenuItem>)}
       </TextField>
       {refused && (
         <Alert severity="warning" role="alert" action={refused.drain && running !== "off" ? (

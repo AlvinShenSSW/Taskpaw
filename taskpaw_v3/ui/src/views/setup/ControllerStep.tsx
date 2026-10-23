@@ -84,9 +84,8 @@ function ControllerForm({ saved, detection, refresh, fetching, advance, go }: {
   const next = async () => {
     setBusy(true); setFailure(null); setErrors({});
     try {
-      for (const k of ["inbox_root", "data_dir"] as const) {
-        if (isSuggested(k)) await api.workflowCreateDir(form[k].trim()); // §5: a suggested directory is made on save
-      }
+      // §5 / review IR10: a suggested directory is made by the save itself, only once it validated
+      const create = (["inbox_root", "data_dir"] as const).filter((k) => isSuggested(k));
       const port = form.worker_api_port.trim();
       if (!/^\d+$/.test(port)) { setErrors({ worker_api_port: "请输入整数" }); return; }
       const text = (k: keyof Form) => String(form[k]).trim() || null;
@@ -95,6 +94,7 @@ function ControllerForm({ saved, detection, refresh, fetching, advance, go }: {
         whisperjav_exe_path: text("whisperjav_exe_path"), remote_workers: form.remote_workers, worker_api_port: Number(port),
         mdcx_python: text("mdcx_python"), mdcx_root: text("mdcx_root"), mdcx_profile: text("mdcx_profile"),
         ...(form.remote_workers ? {} : { jasna_exe_path: text("jasna_exe_path") }),
+        ...(create.length ? { create_dirs: create } : {}),
       });
       qc.invalidateQueries({ queryKey: ["workflowSettings"] });
       await advance("done", "controller");

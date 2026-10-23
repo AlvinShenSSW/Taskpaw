@@ -5,13 +5,20 @@ import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, HttpError, type NetworkView } from "../api";
-import { FIREWALL_DECLINED, firewallText, MAC_FIREWALL, NETWORK_KEY, RESTART_KEY } from "./setupModel";
+import {
+  FIREWALL_TASKBAR, firewallText, HOME_TOKEN, MAC_FIREWALL, NETWORK_KEY, RESTART_KEY, tokenProblem, useSlow,
+} from "./setupModel";
 
 // #299 R4–R6 (board Onboard-Network): 网络与访问 — one LAN switch (forced on for 主控 / GPU 工作机), the
-// detected address (NIC under 高级), the access token (显示 / 复制 / 重新生成), the ports and the Windows
-// firewall. Saved through PATCH /control/config; a changed host:port is test-bound by the backend
-// (「此地址不属于本机」/「端口已被占用」). Used by 设置 · 网络与访问 and the first-run wizard.
-const REGENERATE_WARN = "已配对的设备需要重新配对";
+// detected address (NIC under 高级), the access token, the ports and the Windows firewall. Saved through
+// PATCH /control/config; a changed host:port is test-bound by the backend (「此地址不属于本机」/「端口已被
+// 占用」). Used by 设置 · 网络与访问 and the first-run wizard.
+// Review IR2: the home has ONE access token (the Hub polls every agent with it, the 主控 polls its workers'
+// /status with its own). `tokenMode="generate"` (主控) makes it on entering; `"paste"` (every other role)
+// asks for the 主控's, with 生成新令牌 for the very first machine. A saved token is shown masked
+// (显示 / 复制 / 重新生成 / 粘贴主控的访问令牌); a pasted one replaces it only on an explicit save.
+const REGENERATE_WARN = "家里其他 TaskPaw 和 Hub 都要换成新令牌";
+const PASTE_NEEDED = "请粘贴主控的访问令牌，或生成新令牌";
 const LABELS: Record<string, string> = {
   lan_access: "局域网访问", bind_host: "本机地址", bind_port: "局域网端口", control_port: "本机控制端口", api_token: "访问令牌",
 };
@@ -24,18 +31,20 @@ function formOf(v: NetworkView, forceLan: boolean): Form {
   return { lan, host: chosen, nic: v.lan_access && chosen !== primary ? chosen : "auto", bind_port: String(v.bind_port), control_port: String(v.control_port) };
 }
 
-export function NetworkAccess({ forceLan = false, wizard = false, submitLabel = "保存", onSaved, back }: {
-  forceLan?: boolean; wizard?: boolean; submitLabel?: string; onSaved?: () => void; back?: ReactNode;
+type TokenMode = "generate" | "paste";
+
+export function NetworkAccess({ forceLan = false, wizard = false, tokenMode = "generate", submitLabel = "保存", onSaved, back }: {
+  forceLan?: boolean; wizard?: boolean; tokenMode?: TokenMode; submitLabel?: string; onSaved?: () => void; back?: ReactNode;
 }) {
   const view = useQuery({ queryKey: NETWORK_KEY, queryFn: api.network, retry: false });
   if (view.isLoading) return <Typography variant="body2" color="text.secondary">正在读取网络设置…</Typography>;
   if (view.error || !view.data) return <Alert severity="error">无法读取网络设置</Alert>;
   return <NetworkForm key={JSON.stringify([view.data.lan_access, view.data.bind_host, view.data.bind_port, view.data.token_set])}
-    view={view.data} forceLan={forceLan} wizard={wizard} submitLabel={submitLabel} onSaved={onSaved} back={back} />;
+    view={view.data} forceLan={forceLan} wizard={wizard} tokenMode={tokenMode} submitLabel={submitLabel} onSaved={onSaved} back={back} />;
 }
 
-function NetworkForm({ view, forceLan, wizard, submitLabel, onSaved, back }: {
-  view: NetworkView; forceLan: boolean; wizard: boolean; submitLabel: string; onSaved?: () => void; back?: ReactNode;
+function NetworkForm({ view, forceLan, wizard, tokenMode, submitLabel, onSaved, back }: {
+  view: NetworkView; forceLan: boolean; wizard: boolean; tokenMode: TokenMode; submitLabel: string; onSaved?: () => void; back?: ReactNode;
 }) {
   const qc = useQueryClient();
   const [form, setForm] = useState<Form>(() => formOf(view, forceLan));
@@ -44,6 +53,9 @@ function NetworkForm({ view, forceLan, wizard, submitLabel, onSaved, back }: {
   const [fresh, setFresh] = useState(false);
   const [shown, setShown] = useState(false);
   const [confirmRegen, setConfirmRegen] = useState(false);
+  // IR2: pasting the home token (the default for every role but 主控 while none is saved)
+  const [pasting, setPasting] = useState(!view.token_set && tokenMode === "paste");
+  const [pasted, setPasted] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [note, setNote] = useState<string | null>(null);
   const [firewall, setFirewall] = useState<string | null>(null);
@@ -51,12 +63,18 @@ function NetworkForm({ view, forceLan, wizard, submitLabel, onSaved, back }: {
 
   const generate = useMutation({
     mutationFn: () => api.networkToken("generate"),
-    onSuccess: (r) => { setToken(r.token); setFresh(true); setConfirmRegen(false); },
+    onSuccess: (r) => { setToken(r.token); setFresh(true); setConfirmRegen(false); setPasting(false); setPasted(""); },
   });
-  // R4: an empty token is generated on entering the step (the save writes it)
+  // R4: the 主控's empty token is generated on entering the step (the save writes it)
   useEffect(() => {
-    if (!view.token_set && !generated.current) { generated.current = true; generate.mutate(); }
-  }, [view.token_set, generate]);
+    if (!view.token_set && tokenMode === "generate" && !generated.current) { generated.current = true; generate.mutate(); }
+  }, [view.token_set, tokenMode, generate]);
+  const pasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard?.readText();
+      if (text) { setPasted(text.trim()); setErrors((p) => { const n = { ...p }; delete n.api_token; return n; }); }
+    } catch { setNote("无法读取剪贴板，请按 Ctrl+V 粘贴"); }
+  };
   const reveal = async (): Promise<string | null> => {
     if (token !== null) return token;
     const r = await api.networkToken("reveal");
@@ -75,16 +93,22 @@ function NetworkForm({ view, forceLan, wizard, submitLabel, onSaved, back }: {
         if (!/^\d+$/.test(form[k].trim()) || n < 1 || n > 65535) errs[k] = "端口须在 1–65535 之间";
       }
       if (form.lan && !form.host) errs.bind_host = "未检测到本机局域网地址";
+      const paste = pasting ? pasted.trim() : "";
+      if (paste) {
+        const problem = tokenProblem(paste);
+        if (problem) errs.api_token = problem;
+      } else if (pasting && form.lan && !view.token_set) errs.api_token = PASTE_NEEDED;
       if (Object.keys(errs).length) throw new HttpError("设置有误", 422, undefined, errs);
       const patch: Record<string, unknown> = {
         lan_access: form.lan, bind_port: Number(form.bind_port), control_port: Number(form.control_port),
       };
       if (form.lan) patch.bind_host = form.host;
-      if (fresh && token) patch.api_token = token;
+      if (paste) patch.api_token = paste; // replaces the saved token only on this explicit save
+      else if (fresh && token) patch.api_token = token;
       return api.updateConfig(patch);
     },
     onSuccess: () => {
-      setFresh(false); setErrors({});
+      setFresh(false); setErrors({}); setPasted(""); setPasting(false);
       qc.invalidateQueries({ queryKey: NETWORK_KEY });
       qc.invalidateQueries({ queryKey: RESTART_KEY });
       qc.invalidateQueries({ queryKey: ["agentConfig"] });
@@ -99,6 +123,7 @@ function NetworkForm({ view, forceLan, wizard, submitLabel, onSaved, back }: {
     mutationFn: api.networkFirewall,
     onSuccess: (r) => { setFirewall(firewallText(r.result)); qc.invalidateQueries({ queryKey: NETWORK_KEY }); },
   });
+  const slowRule = useSlow(addRule.isPending); // IR3: the UAC prompt may sit in the taskbar
 
   const set = (k: keyof Form, v: string | boolean) => {
     setForm((p) => ({ ...p, [k]: v }));
@@ -158,10 +183,11 @@ function NetworkForm({ view, forceLan, wizard, submitLabel, onSaved, back }: {
                 </Button>
               </Stack>
             )}
+          {slowRule && <Typography variant="body2" color="warning.main" role="status">{FIREWALL_TASKBAR}</Typography>}
           {fw.profile === "public" && (
             <Alert severity="warning">当前网络是“公用网络”，入站规则只对专用网络生效；请在 Windows 设置里把这个网络改为“专用”。</Alert>
           )}
-          {firewall && <Alert severity={firewall === FIREWALL_DECLINED ? "warning" : "success"}>{firewall}</Alert>}
+          {firewall && <Alert severity={firewall.startsWith("已添加") ? "success" : "warning"}>{firewall}</Alert>}
         </Stack>
       )}
       {form.lan && fw.platform === "macos" && <Typography variant="body2" color="text.secondary">{MAC_FIREWALL}</Typography>}
@@ -170,25 +196,54 @@ function NetworkForm({ view, forceLan, wizard, submitLabel, onSaved, back }: {
           <Typography variant="subtitle2" component="label" htmlFor="network-token">访问令牌</Typography>
           {fresh && <Chip size="small" label="已自动生成" color="success" variant="outlined" />}
         </Stack>
-        <TextField id="network-token" size="small" value={tokenValue} type={shown ? "text" : "password"} fullWidth
-          placeholder={view.token_set ? "已设置" : "正在生成…"} error={Boolean(errors.api_token)} helperText={errors.api_token}
-          inputProps={{ readOnly: true, spellCheck: false, "aria-label": "访问令牌" }}
-          InputProps={{ endAdornment: (
-            <InputAdornment position="end">
-              <Button size="small" sx={{ minHeight: 44 }} onClick={async () => { await reveal(); setShown((s) => !s); }}>{shown ? "隐藏" : "显示"}</Button>
-            </InputAdornment>
-          ) }} />
-        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-          <Button size="small" variant="outlined" sx={{ minHeight: 44 }} onClick={async () => { const t = await reveal(); if (t) await copy(t); }}>复制</Button>
-          <Button size="small" variant="outlined" color="inherit" sx={{ minHeight: 44 }} disabled={generate.isPending}
-            onClick={() => (view.token_set && !confirmRegen ? setConfirmRegen(true) : generate.mutate())}>
-            {confirmRegen ? "确认重新生成" : "重新生成"}
-          </Button>
-        </Stack>
+        {pasting ? (
+          <>
+            <TextField id="network-token" size="small" value={pasted} type={shown ? "text" : "password"} fullWidth autoComplete="off"
+              placeholder="tp_…" error={Boolean(errors.api_token)} helperText={errors.api_token ?? "粘贴主控的访问令牌"}
+              onChange={(e) => { setPasted(e.target.value); setErrors((p) => { const n = { ...p }; delete n.api_token; return n; }); }}
+              inputProps={{ spellCheck: false, "aria-label": "访问令牌" }}
+              InputProps={{ endAdornment: (
+                <InputAdornment position="end">
+                  <Button size="small" sx={{ minHeight: 44 }} onClick={() => void pasteFromClipboard()}>粘贴</Button>
+                  <Button size="small" sx={{ minHeight: 44 }} onClick={() => setShown((s) => !s)}>{shown ? "隐藏" : "显示"}</Button>
+                </InputAdornment>
+              ) }} />
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              {view.token_set ? (
+                <Button size="small" variant="outlined" color="inherit" sx={{ minHeight: 44 }}
+                  onClick={() => { setPasting(false); setPasted(""); setErrors((p) => { const n = { ...p }; delete n.api_token; return n; }); }}>
+                  保留当前令牌
+                </Button>
+              ) : (
+                <Button size="small" variant="outlined" color="inherit" sx={{ minHeight: 44 }} disabled={generate.isPending}
+                  onClick={() => generate.mutate()}>生成新令牌</Button>
+              )}
+              {!view.token_set && <Typography variant="body2" color="text.secondary" sx={{ alignSelf: "center" }}>家里第一台 TaskPaw 才生成新令牌</Typography>}
+            </Stack>
+          </>
+        ) : (
+          <>
+            <TextField id="network-token" size="small" value={tokenValue} type={shown ? "text" : "password"} fullWidth
+              placeholder={view.token_set ? "已设置" : "正在生成…"} error={Boolean(errors.api_token)} helperText={errors.api_token}
+              inputProps={{ readOnly: true, spellCheck: false, "aria-label": "访问令牌" }}
+              InputProps={{ endAdornment: (
+                <InputAdornment position="end">
+                  <Button size="small" sx={{ minHeight: 44 }} onClick={async () => { await reveal(); setShown((s) => !s); }}>{shown ? "隐藏" : "显示"}</Button>
+                </InputAdornment>
+              ) }} />
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+              <Button size="small" variant="outlined" sx={{ minHeight: 44 }} onClick={async () => { const t = await reveal(); if (t) await copy(t); }}>复制</Button>
+              <Button size="small" variant="outlined" color="inherit" sx={{ minHeight: 44 }} disabled={generate.isPending}
+                onClick={() => (view.token_set && !confirmRegen ? setConfirmRegen(true) : generate.mutate())}>
+                {confirmRegen ? "确认重新生成" : "重新生成"}
+              </Button>
+              <Button size="small" variant="outlined" color="inherit" sx={{ minHeight: 44 }}
+                onClick={() => { setPasting(true); setShown(false); setConfirmRegen(false); }}>粘贴主控的访问令牌</Button>
+            </Stack>
+          </>
+        )}
         {confirmRegen && <Alert severity="warning">重新生成后，{REGENERATE_WARN}。</Alert>}
-        <Typography variant="body2" color="text.secondary">
-          Hub 和工作机配对时会自动带上令牌，不用手抄。重新生成后，{REGENERATE_WARN}。
-        </Typography>
+        <Typography variant="body2" color="text.secondary">{HOME_TOKEN}</Typography>
         {note && <Typography variant="body2" role="status">{note}</Typography>}
       </Stack>
       <details open={Boolean(errors.bind_port || errors.control_port) || undefined}>
@@ -217,7 +272,7 @@ function NetworkForm({ view, forceLan, wizard, submitLabel, onSaved, back }: {
       {errors.form && <Alert severity="error">{errors.form}</Alert>}
       <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
         {back}
-        <Button variant="contained" sx={{ minHeight: 44 }} disabled={save.isPending || (generate.isPending && !view.token_set)}
+        <Button variant="contained" sx={{ minHeight: 44 }} disabled={save.isPending || (generate.isPending && !view.token_set && !pasting)}
           onClick={() => { setErrors({}); save.mutate(); }}>
           {save.isPending ? "正在保存…" : submitLabel}
         </Button>

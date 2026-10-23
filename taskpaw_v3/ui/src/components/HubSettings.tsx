@@ -10,11 +10,13 @@ import { RestartBanner } from "./RestartBanner";
 
 // #299 R14/R15 (board Hub-Settings): the Hub's settings — OpenClaw 启用 / 地址 / 令牌 / 测试发送, 主控连接 (the
 // servers API + polling_token), and 高级: 轮询间隔, status.md (and where), 日志保留天数, 局域网只读接口.
+// Review IR2: 主控连接 is the server the operator chose (`controller_server_id`, never an implicit first
+// server), and `polling_token` is the home's one access token the Hub polls every TaskPaw with.
 // Saved as store overrides (hub.yaml is never rewritten); OpenClaw and the polling token apply at once,
 // the rest after 立即重启. Tokens are write-only: a blank field keeps the saved one.
 const HUB_KEY = ["hubSettings"];
 const LABELS: Record<string, string> = {
-  openclaw_enabled: "OpenClaw 通知", openclaw_url: "OpenClaw 地址", openclaw_token: "OpenClaw 令牌", polling_token: "主控令牌",
+  openclaw_enabled: "OpenClaw 通知", openclaw_url: "OpenClaw 地址", openclaw_token: "OpenClaw 令牌", polling_token: "家庭访问令牌",
   poll_interval: "轮询间隔", write_status_md: "写入 status.md", status_md_path: "status.md 位置",
   status_log_retention_days: "日志保留天数", lan_access: "局域网只读接口", bind_host: "本机地址", api_token: "只读接口令牌",
 };
@@ -134,7 +136,7 @@ function HubForm({ state }: { state: HubSettingsState }) {
         </Stack>
       </CardContent></Card>
 
-      <ControllerConnection hint={saved.polling_token_hint} tokenSet={Boolean(saved.polling_token)} />
+      <ControllerConnection hint={saved.polling_token_hint} tokenSet={Boolean(saved.polling_token)} controllerId={state.controller_server_id ?? null} />
 
       <Card><CardContent>
         <Stack spacing={1.5}>
@@ -169,21 +171,33 @@ function HubForm({ state }: { state: HubSettingsState }) {
   );
 }
 
-// 主控连接 — the first polled agent (the servers API) and the polling token (live).
-function ControllerConnection({ hint, tokenSet }: { hint: string | null; tokenSet: boolean }) {
+const HOME_TOKEN_HUB = "Hub 用这一个令牌轮询家里所有 TaskPaw。家里所有 TaskPaw 用同一个访问令牌：在主控 设置 → 网络与访问 复制";
+
+// 主控连接 — the polled TaskPaw chosen as 主控 (the servers API + `controller_server_id`, both live) and
+// the home access token (`polling_token`, live).
+function ControllerConnection({ hint, tokenSet, controllerId }: { hint: string | null; tokenSet: boolean; controllerId: number | null }) {
   const qc = useQueryClient();
   const status = useQuery({ queryKey: ["hubStatus"], queryFn: api.hubStatus, retry: false, refetchInterval: 15000 });
-  const server = status.data?.servers[0];
+  const servers = status.data?.servers ?? [];
+  const server = controllerId == null ? undefined : servers.find((s) => s.id === controllerId);
   const [editing, setEditing] = useState(false);
   const [ip, setIp] = useState("");
   const [port, setPort] = useState("5680");
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const choose = useMutation({
+    mutationFn: (id: number) => api.hubSaveSettings({ controller_server_id: id }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: HUB_KEY }),
+    onError: (e) => setError(e instanceof Error ? e.message : String(e)),
+  });
   const save = useMutation({
     mutationFn: async () => {
       const p = Number(port);
       if (server) await api.hubUpdateServer(server.id, { ip: ip.trim(), port: p });
-      else await api.hubAddServer({ name: "主控", ip: ip.trim(), port: p });
+      else {
+        const added = await api.hubAddServer({ name: "主控", ip: ip.trim(), port: p });
+        await api.hubSaveSettings({ controller_server_id: added.id });
+      }
       if (token.trim()) await api.hubSaveSettings({ polling_token: token.trim() });
     },
     onSuccess: () => {
@@ -209,13 +223,20 @@ function ControllerConnection({ hint, tokenSet }: { hint: string | null; tokenSe
             <Typography variant="body2">主控 {server.name}</Typography>
             <Typography variant="body2">地址 {server.ip}:{server.port}</Typography>
           </>
-        ) : <Typography variant="body2" color="text.secondary">还没有主控</Typography>}
-        <Typography variant="body2">令牌 {tokenSet ? `tp_••••••${hint ?? ""}` : "未设置"}</Typography>
+        ) : <Typography variant="body2" color="text.secondary">{servers.length ? "还没有选择主控" : "还没有主控"}</Typography>}
+        {!server && servers.length > 0 && !editing && (
+          <TextField select size="small" label="选择主控" value="" sx={{ maxWidth: 360 }} disabled={choose.isPending}
+            onChange={(e) => { setError(null); choose.mutate(Number(e.target.value)); }}>
+            {servers.map((s) => <MenuItem key={s.id} value={s.id}>{`${s.name} · ${s.ip}:${s.port}`}</MenuItem>)}
+          </TextField>
+        )}
+        <Typography variant="body2">家庭访问令牌 {tokenSet ? `tp_••••••${hint ?? ""}` : "未设置"}</Typography>
+        <Typography variant="body2" color="text.secondary">{HOME_TOKEN_HUB}</Typography>
         {editing ? (
           <Stack spacing={1.5} sx={{ pt: 1 }}>
             <TextField size="small" label="主控地址" value={ip} onChange={(e) => setIp(e.target.value)} placeholder="192.168.1.20" />
             <TextField size="small" label="端口" value={port} onChange={(e) => setPort(e.target.value)} sx={{ maxWidth: 160 }} inputProps={{ inputMode: "numeric" }} />
-            <TextField size="small" label="主控令牌" type="password" value={token} onChange={(e) => setToken(e.target.value)}
+            <TextField size="small" label="家庭访问令牌" type="password" value={token} onChange={(e) => setToken(e.target.value)}
               helperText="主控 设置 → 网络与访问 里的访问令牌；留空则保留" autoComplete="off" />
             {error && <Alert severity="error">{error}</Alert>}
             <Stack direction="row" spacing={1}>
