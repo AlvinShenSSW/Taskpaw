@@ -1532,3 +1532,69 @@ def test_cx11_a_stop_is_a_free_retry_whatever_the_child_reported(tmp_path, error
     )
     assert stopped.is_set()
     assert result.outcome.error_class == "cancelled" and result.settled
+
+
+def test_cx13_held_children_keep_the_shutdown_unconfirmed(tmp_path, monkeypatch):
+    from taskpaw_v3.workflow import remote_dispatch as rd
+
+    alive = {"yes": True}
+    monkeypatch.setattr(rd, "process_alive", lambda identity: alive["yes"])
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    attempt = _held_attempt(staging, client.add())
+    d.booted({"reconciled": False, "attempts": {attempt: "held"}, "keep": []})
+    assert d.lease.holder() == d.run_id
+    assert d.stop(0.2) is False  # a child of an earlier boot still runs
+    assert d.reason == rd.HELD and d.reason == "上次的任务进程仍在运行"
+    assert d.lease.holder() == d.run_id  # the reservation stays
+    assert d.halted
+    alive["yes"] = False
+    assert d.stop(0.2) is True  # gone: confirmed, the GPU is free
+    assert d.lease.holder() is None
+
+
+def test_cx14_a_deletion_that_failed_is_retried_by_the_periodic_sweep(
+    tmp_path, monkeypatch
+):
+    from taskpaw_v3.workflow import remote_dispatch as rd
+
+    client = Scripted.__new__(Scripted)
+    d, staging = _dispatcher(tmp_path, lambda: client, Blocking())
+    client.__init__(staging)
+    gone = _held_attempt(staging, ident())  # the controller answers 404
+    (staging.work_dir / gone).mkdir(parents=True)
+    (staging.work_dir / gone / "big.mkv").write_bytes(b"x")
+    live = _held_attempt(staging, ident())  # a file names it: never swept
+    (staging.work_dir / live).mkdir(parents=True)
+    held_open = threading.Event()  # Windows: the output is still open
+    real = rd.shutil.rmtree
+
+    def rmtree(path, *args, **kw):
+        if Path(path).name == gone and not held_open.is_set():
+            return  # ignore_errors=True: it stays behind
+        return real(path, *args, **kw)
+
+    monkeypatch.setattr(rd.shutil, "rmtree", rmtree)
+    monkeypatch.setattr(rd, "SWEEP_SECONDS", 0.0)
+    real_get = client.attempt
+
+    def attempt(attempt_id):
+        if attempt_id == live:
+            return {"state": "active"}
+        return real_get(attempt_id)  # 404
+
+    client.attempt = attempt  # type: ignore[method-assign]
+    assert d.recover(client)
+    assert (staging.work_dir / gone).exists()  # the first deletion failed
+    assert not (staging.root / "attempts" / f"{gone}.json").exists()
+    d.start()
+    try:
+        d.wake()
+        assert (staging.work_dir / gone).exists()  # still held: kept
+        held_open.set()
+        d.wake()
+        until(lambda: not (staging.work_dir / gone).exists())
+        assert (staging.work_dir / live).exists()
+    finally:
+        assert d.stop(10)

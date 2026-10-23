@@ -62,6 +62,7 @@ _FINISHED = ("succeeded", "skipped")
 UNSETTLED = "停止未确认：任务进程仍在运行"
 UNKNOWN_GPU = "GPU 有未知占用"
 HELD = "上次的任务进程仍在运行"  # §11 CX2: the GPU lease's holder label
+SWEEP_SECONDS = 60.0  # §11 CX14: orphan work folders are swept this often
 REFUSED_DIR = "refused"  # §11 IR3: attempt files the controller refused
 MESSAGE_CAP = 2000  # §11 IR3: the finish model's `message` limit
 CURRENT_CAP = 32 << 10  # §11 IR11: `current` within the 64 KiB heartbeat
@@ -291,6 +292,7 @@ class RemoteDispatcher:
         self._unsaved: dict[str, AttemptState] = {}
         self._started: dict[str, float] = {}  # §11 IR8: claim time per attempt
         self._fetching: str | None = None
+        self._swept = clock()  # §11 CX14: the last periodic orphan sweep
         self._transfers: dict[tuple[str, str], Transfer] = {}
         self._envelopes: dict[tuple[str, int], dict[str, Any]] = {}
         self.reason = "idle"
@@ -329,8 +331,21 @@ class RemoteDispatcher:
             max(0.0, deadline - time.monotonic())
         ):
             return False
+        if self._held_alive():  # §11 CX13: they keep the GPU, unconfirmed
+            self.reason = HELD
+            return False
         self._release(force=True)
         return True
+
+    def _held_alive(self) -> bool:
+        """§11 CX13: a child of an earlier boot (a `held` verdict) still runs."""
+        with self._lock:
+            held = list(self._held)
+        for attempt_id in held:
+            state = AttemptState.load(self._path(attempt_id))
+            if state is not None and any(process_alive(c) for c in state.children):
+                return True
+        return False
 
     @property
     def halted(self) -> bool:
@@ -546,6 +561,14 @@ class RemoteDispatcher:
         self._sweep_orphans()
         return True
 
+    def _sweep_due(self) -> None:
+        """§11 CX14: a deletion that failed (Windows: an output still open)
+        left a folder no attempt file names; it is swept again while idle."""
+        now = self._clock()
+        if now - self._swept >= SWEEP_SECONDS:
+            self._swept = now
+            self._sweep_orphans()
+
     def _sweep_orphans(self) -> None:
         """§11 IR5: `work/<uuid>/` folders no attempt file (or the active
         attempt) names; work copies (`copies/…`) are never touched. Skipped
@@ -557,6 +580,7 @@ class RemoteDispatcher:
             with self._lock:
                 if self._active is not None:
                     known.add(self._active.state.attempt_id)
+                known.update(self._unsaved)  # §11 CX6: file not landed yet
             try:
                 folders = list(self.staging.work_dir.iterdir())
             except OSError:
@@ -846,6 +870,7 @@ class RemoteDispatcher:
                 log.exception("worker dispatch tick failed")
                 worked = False
             if not worked and not self._stop.is_set():
+                self._sweep_due()
                 self._wake.wait(self.poll)
                 self._wake.clear()
         if self._unsettled is None:  # a still-running tree keeps the GPU (C4)

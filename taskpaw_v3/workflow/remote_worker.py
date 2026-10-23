@@ -48,7 +48,7 @@ from .executors import ExecRuntime, StageExecutor
 from .fleet_live import PROTOCOL
 from .keep_awake import KeepAwake
 from .local_gpu import LocalGpu
-from .remote_dispatch import UNSETTLED, RemoteDispatcher, WorkerRuntime
+from .remote_dispatch import HELD, UNSETTLED, RemoteDispatcher, WorkerRuntime
 from .staging import Staging, StagingError, validate_dir
 from .worker_client import ApiError, WorkerClient, backoff
 
@@ -739,8 +739,8 @@ class WorkerHost:
                     self._refused.add(current.credential_id)
                     continue
                 reason = f"主控拒绝了请求（{exc.code}），正在重试"
-            except _Busy:
-                reason = f"{UNSETTLED}，正在重试"
+            except _Busy as exc:
+                reason = f"{exc.args[0] if exc.args else UNSETTLED}，正在重试"
             except (StagingError, OSError):
                 reason = "暂存目录不可用，正在重试"
             except Exception:
@@ -889,7 +889,7 @@ class WorkerHost:
         old = self.dispatcher
         if old is not None and (old.halted or self._dispatcher_key != key):
             if not old.stop(self.stop_settle):
-                raise _Busy
+                raise _Busy(HELD if old.reason == HELD else UNSETTLED)
             self.dispatcher = old = None
         if old is None:
             self.boot_id, self.reconciled = str(uuid.uuid4()), False

@@ -1056,15 +1056,22 @@ def test_the_socket_timeout_winning_the_race_is_still_a_timeout(monkeypatch):
 
 
 class _CoarseClock:
-    """`time` with CPython < 3.13 Windows' monotonic: GetTickCount64, 15.6 ms ticks."""
+    """`time` with a driven monotonic clock. With `tick`, it reads like CPython
+    < 3.13 on Windows (GetTickCount64, 15.6 ms ticks): the raw time floored."""
 
     TICK = 1 / 64
+
+    def __init__(self, tick: float = 0.0) -> None:
+        self.tick = tick
+        # part-way into a tick: the floored reading after the deadline lands
+        # a few ms before it, so only the slack makes it a timeout
+        self.raw = 1000.0 + 0.5 * self.TICK
 
     def __getattr__(self, name: str) -> Any:
         return getattr(time, name)
 
     def monotonic(self) -> float:
-        return (time.monotonic() // self.TICK) * self.TICK
+        return (self.raw // self.tick) * self.tick if self.tick else self.raw
 
 
 @pytest.mark.parametrize("coarse", [False, True], ids=["fine", "coarse"])
@@ -1074,10 +1081,13 @@ def test_a_failure_after_connect_at_the_deadline_is_a_timeout(
 ):
     # Same ordering with a fake connection: connected, no timer, the failure
     # surfaces at (or past) the attempt deadline, wrapped as urllib wraps it.
-    # With a coarse clock the post-sleep reading can still be a tick before
+    # The clock is driven, never slept on (a real sleep can wake a little
+    # early on a loaded Windows runner): the attempt's deadline has passed by
+    # construction. With a coarse clock the reading can still be a tick before
     # the deadline (windows-latest py3.12 CI): still a timeout.
+    clock = _CoarseClock(_CoarseClock.TICK if coarse else 0.0)
+    monkeypatch.setattr(power_fleet, "time", clock)
     if coarse:
-        monkeypatch.setattr(power_fleet, "time", _CoarseClock())
         monkeypatch.setattr(power_fleet, "_CLOCK_SLACK", _CoarseClock.TICK)
     watch_box: list[Any] = []
     real_watch = power_fleet._Watch
@@ -1089,7 +1099,7 @@ def test_a_failure_after_connect_at_the_deadline_is_a_timeout(
     class Opener:
         def open(self, request, timeout):
             watch_box[0].track(object())  # the connect succeeded
-            time.sleep(timeout)  # the attempt's deadline passes
+            clock.raw += timeout + 1e-6  # the attempt's deadline passes
             raise urllib.error.URLError(raised)
 
     monkeypatch.setattr(power_fleet, "_Watch", make_watch)
