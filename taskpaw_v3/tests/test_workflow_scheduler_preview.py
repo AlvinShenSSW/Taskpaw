@@ -278,3 +278,29 @@ def test_preview_of_a_film_that_needs_no_gpu_names_no_device():
     assert view.devices == ()
     shown = planning.routing_view(view, {}, NOW)
     assert shown == {"auto": {"waiting": None, "text": s.NO_GPU}, "devices": []}
+
+
+def test_preview_of_a_changed_source_waits_like_the_pass():
+    """§9 CX17 (Codex r5): a film whose source the claim would refuse
+    (`source_admissible` False) previews the pass's own wait,
+    「片源变化，等待重新扫描」, with no machine — never a worker estimate."""
+    ws = fleet()
+    target = unplanned(source_admissible=False)
+    view = s.preview(
+        snapshot([target], ws),
+        target.film_id,
+        ("standard", "high"),
+        live=live(ws),
+        now=NOW,
+        controller_id=CONTROLLER,
+    )
+    confirmed = target.model_copy(
+        update={"planned": True, "confirmed_at": NOW, "ltx_model": "standard"}
+    )
+    planned = run([confirmed], ws)
+    assert planned.routes == ()
+    assert planned.waiting[target.film_id] == s.SOURCE_CHANGED
+    for tier in ("standard", "high"):
+        assert view[tier].waiting == planned.waiting[target.film_id], tier
+        assert view[tier].machine is None and view[tier].finish_at is None
+        assert view[tier].reason is None

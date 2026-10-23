@@ -159,15 +159,27 @@ class WorkerIdentity:
         atomic_json(path, data)
 
     @classmethod
-    def load(cls, path: Path) -> WorkerIdentity | None:
+    def read(cls, path: Path) -> WorkerIdentity | None:
+        """None when absent; `ValueError` when the file is not an identity
+        (an `OSError` other than a missing file propagates). P2-4 §9 CX16:
+        the settings guard reads it strictly — unreadable is not unpaired."""
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        try:
+            data = json.loads(text)
             data["secret"] = SecretStr(data["secret"])
             data["ticket"] = SecretStr(data["ticket"]) if data.get("ticket") else None
             return cls(**data)
-        except FileNotFoundError:
-            return None
-        except (ValueError, KeyError, TypeError):
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ValueError("not a worker identity") from exc
+
+    @classmethod
+    def load(cls, path: Path) -> WorkerIdentity | None:
+        try:
+            return cls.read(path)
+        except ValueError:
             log.warning("unreadable worker identity ignored; join again")
             return None
 

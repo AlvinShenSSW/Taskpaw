@@ -319,7 +319,6 @@ def create_control_app(
         config,
         admin,
         config_dir=admin.config_dir if admin is not None else None,
-        workflow_provider=workflow_provider,
         worker_provider=worker_provider,
     )
 

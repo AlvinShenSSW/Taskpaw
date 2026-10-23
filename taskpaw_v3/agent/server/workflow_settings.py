@@ -15,14 +15,21 @@ directory (`worker-identity.json`) is held too (CX3/IR5); a busy worker cannot
 move its staging or data directory (IR3); the worker API port cannot change
 under paired workers (IR4) — held at the port the pairings were made on,
 whatever role a save asks for (CX14); an empty ffprobe is fine when PATH has
-one (IR6); a save racing another answers 409 (IR12).
+one (IR6); a save racing another answers 409 (IR12). CX15/CX16: every guard
+compares the save with the retained state on disk (`retained`): the workflow
+stores and the worker identities under the saved, running and requested data
+directories, read directly whether or not a host runs; state that cannot be
+read refuses the guarded change (「无法确认是否有影片在处理，暂不允许切换」).
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import sqlite3
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -42,7 +49,9 @@ HELD_PAIRING = "工作目录已有工作机配对"
 PORT_PAIRED = "已有工作机配对在此端口，改端口需先让它们重新配对"
 STAGING_PAIRED = "已配对的工作机改暂存目录需要重新加入"
 OPERATION_BUSY = "正在保存其他设置，请稍后再试"
-STARTING = "媒体流水线正在启动，请稍后再试"
+UNKNOWN = "无法确认是否有影片在处理，暂不允许切换"  # §9 CX15/CX16
+WORKER_BUSY = "本机还有派来的影片或进行中的任务，请先暂停领取并等待完成"
+STORE_TIMEOUT = 2.0  # seconds: the guard looks at the store, never waits on it
 PATHS = (
     "inbox_root",
     "data_dir",
@@ -178,10 +187,12 @@ def validate(
     old: WorkflowSettings,
     config: AgentConfig,
     config_dir: Path | None,
-    running: WorkflowSettings | None = None,
+    running: WorkflowSettings,
+    state: Retained,
 ) -> None:
-    """R14: the fields the new role uses, each with its own message; the
-    data directory guard for every role (§9 CX3)."""
+    """R14: the fields the new role uses, each with its own message; then
+    the retained state's field holds, whatever the role (§9 CX3/CX14/CX16):
+    the data directory, the paired staging directory and the pairing port."""
     role = role_of(new)
     errors: dict[str, str] = {}
     for name in PATHS:
@@ -194,13 +205,12 @@ def validate(
         held = _data_dir_held(new, (old, running), config_dir)
         if held:
             errors["data_dir"] = held
-    if (
-        role == "worker"
-        and "staging_dir" not in errors
-        and _moved(new.staging_dir, old.staging_dir)
-        and _paired(old, running, config_dir)
+    if "staging_dir" not in errors and any(
+        _moved(new.staging_dir, root) for root in state.paired
     ):
         errors["staging_dir"] = STAGING_PAIRED
+    if any(port != new.worker_api_port for port in state.ports):
+        errors.setdefault("worker_api_port", PORT_PAIRED)
     if errors:
         raise Refused(422, "设置有误", fields=errors)
 
@@ -267,21 +277,6 @@ def _data_dir_held(
     return None
 
 
-def _paired(
-    old: WorkflowSettings, running: WorkflowSettings | None, config_dir: Path | None
-) -> bool:
-    """§9 CX8: a worker's pairing (`worker-identity.json`) sits in a data
-    directory the saved or the running settings name; its staging directory
-    was chosen at 加入 and lives there, not in agent.yaml."""
-    from taskpaw_v3.workflow.remote_worker import IDENTITY_NAME
-
-    for settings in (old, running):
-        directory = default_data_dir(settings, config_dir) if settings else None
-        if directory is not None and (directory / IDENTITY_NAME).exists():
-            return True
-    return False
-
-
 def _same_path(a: Path, b: Path) -> bool:
     """§9 CX9: filesystem identity when both exist (`samefile`); otherwise
     the names, normalised by the platform (`normcase` folds case only on
@@ -306,139 +301,209 @@ def _moved(new: str | None, old: str | None) -> bool:
     return not _same_path(Path(new), Path(old))
 
 
-# ── what a switch would strand (R16) ────────────────────────────────────
-def controller_busy(host: Any) -> tuple[int, int]:
-    """(films, of which on a GPU worker) with an unresolved compute
-    assignment, an open route or an open archive operation."""
-    state = getattr(host, "state", None)
-    if host is None or state not in ("starting", "running"):
-        return 0, 0  # nothing runs: nothing is stranded
-    rt = getattr(host, "runtime", None)
-    if state == "starting" or rt is None:
-        raise Refused(409, STARTING, code="workflow_busy")
-    store, op = rt.store, rt.operator
-    controller = rt.identity.worker_id
-    films: set[str] = set()
-    remote: set[str] = set()
-    for item in store.list_open_assignments(op):
-        if item.stage not in _COMPUTE:
-            continue
-        film = store.get_stage(op, item.assignment.job_id).film_id
-        films.add(film)
-        if item.assignment.worker_id not in (None, controller):
-            remote.add(film)
-    for route in store.list_routes(op):
-        films.add(route.film_id)
-        if route.worker_id != controller:
-            remote.add(route.film_id)
-    for film in store.film_board(op, done_limit=None, energies=False):
-        if film.archive_open:
-            films.add(film.film_id)
-    return len(films), len(remote)
+# ── the retained state: THE baseline of every guard (§9 CX15/CX16) ─────
+@dataclass
+class Retained:
+    """What the disk retains under every data directory the saved, running
+    and requested settings name — never the previous agent.yaml value or
+    the requested role, and whether or not a host runs (or failed to start).
+    `store_known` / `worker_known` False: some state could not be read, and
+    unknown is never idle."""
+
+    films: int = 0  # with an unresolved compute assignment, an open route or archive
+    remote: int = 0  # of which on a GPU worker
+    store_known: bool = True
+    ports: set[int] = field(default_factory=set)  # the retained pairings' port
+    paired: list[str] = field(default_factory=list)  # identity staging dirs
+    # a busy worker: (its data directory, its staging directory)
+    busy: list[tuple[Path | None, str | None]] = field(default_factory=list)
+    worker_known: bool = True
 
 
-def _store_pairs(directory: Path) -> bool:
-    """§9 CX11: enrolled, non-retired GPU workers in the workflow store in
-    `directory` (the controller's own record excluded). A store that cannot
-    be read counts as paired (unknown is not idle)."""
-    import json
-    import sqlite3
+def _directories(
+    names: tuple[WorkflowSettings, ...], config_dir: Path | None
+) -> list[Path]:
+    found: list[Path] = []
+    for settings in names:
+        directory = default_data_dir(settings, config_dir)
+        if directory is not None and not any(_same_path(directory, d) for d in found):
+            found.append(directory)
+    return found
 
+
+def _open_store(path: Path) -> sqlite3.Connection:
+    """Read-only, with a short busy timeout: a look, never a wait."""
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    return sqlite3.connect(uri, uri=True, timeout=STORE_TIMEOUT)
+
+
+def _read_store(directory: Path) -> tuple[set[str], set[str], bool]:
+    """(films in flight, of which on a GPU worker, pairs a worker) from the
+    store in `directory`; `sqlite3.Error` when it cannot be read (locked,
+    corrupt, not a workflow store)."""
     try:
         controller = json.loads(
             (directory / "local-identity.json").read_text(encoding="utf-8")
-        ).get("worker_id", "")
+        ).get("worker_id")
     except (OSError, ValueError, AttributeError):
-        controller = ""
-    uri = f"{(directory / STORE_NAME).resolve().as_uri()}?mode=ro"
+        controller = None  # unknown: every worker's work counts as remote
+    compute = ",".join(f"'{stage}'" for stage in _COMPUTE)
+    conn = _open_store(directory / STORE_NAME)
     try:
-        conn = sqlite3.connect(uri, uri=True, timeout=5)
-        try:
-            (count,) = conn.execute(
-                "SELECT COUNT(*) FROM workers"
-                " WHERE enrollment_state != 'retired' AND worker_id != ?",
-                (controller,),
-            ).fetchone()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return True
-    return bool(count)
+        conn.execute("BEGIN")  # one snapshot for every read
+        assignments = conn.execute(
+            "SELECT s.film_id,a.worker_id FROM assignments a"
+            " JOIN stages s ON s.job_id=a.job_id"
+            f" WHERE a.resolved_at IS NULL AND s.stage IN ({compute})"
+        ).fetchall()
+        routes = conn.execute(
+            "SELECT film_id,worker_id,kind FROM film_routes WHERE state='open'"
+        ).fetchall()
+        archives = conn.execute(
+            "SELECT film_id FROM operations"
+            " WHERE kind='archive' AND resolved_at IS NULL"
+        ).fetchall()
+        (pairs,) = conn.execute(
+            "SELECT COUNT(*) FROM workers"
+            " WHERE enrollment_state != 'retired' AND worker_id != ?",
+            (controller or "",),
+        ).fetchone()
+    finally:
+        conn.close()
+    films: set[str] = set()
+    remote: set[str] = set()
+    for film, worker in assignments:
+        films.add(film)
+        if worker is not None and worker != controller:
+            remote.add(film)
+    for film, worker, kind in routes:
+        films.add(film)
+        if kind != "local" and worker != controller:
+            remote.add(film)
+    films.update(film for (film,) in archives)
+    return films, remote, bool(pairs)
 
 
-def pairing_ports(
-    settings: tuple[WorkflowSettings, ...], config_dir: Path | None, fallback: int
-) -> set[int]:
-    """§9 CX11/CX14: the worker API port each retained store's pairings were
-    made on (`pairing-port.json`, written with every pairing code), for every
-    data directory named whose store pairs a non-retired worker — whatever
-    role runs or is asked for: the running or saved config is never the
-    baseline. A store paired before that record falls back to `fallback`
-    (the running port)."""
+def _controller_state(
+    directories: list[Path], running_port: int, state: Retained
+) -> None:
+    """The workflow store under each directory: the films in flight and the
+    port the non-retired workers were paired on (`pairing-port.json`; a store
+    paired before that record falls back to the running port, an unreadable
+    store counts as paired)."""
     from taskpaw_v3.workflow.devices import pairing_port
 
-    ports: set[int] = set()
-    for reference in settings:
-        directory = default_data_dir(reference, config_dir)
-        if directory is None or not (directory / STORE_NAME).exists():
+    films: set[str] = set()
+    remote: set[str] = set()
+    for directory in directories:
+        if not (directory / STORE_NAME).exists():
             continue
-        if _store_pairs(directory):
-            ports.add(pairing_port(directory) or fallback)
-    return ports
+        try:
+            flight, far, pairs = _read_store(directory)
+        except sqlite3.Error:
+            state.store_known, pairs = False, True
+        else:
+            films |= flight
+            remote |= far
+        if pairs:
+            state.ports.add(pairing_port(directory) or running_port)
+    state.films, state.remote = len(films), len(remote)
 
 
-def worker_busy(host: Any) -> bool:
-    """A worker's routes, a claim or held children. §9 CX6: the host's own
-    disk-aware `summary()["busy"]`, so a worker restarted with the controller
-    unreachable (no dispatcher, no routes) still reads busy while attempt
-    files on its staging disk are unsettled."""
+def _worker_state(
+    directories: list[Path],
+    host: Any,
+    running: WorkflowSettings,
+    config_dir: Path | None,
+    state: Retained,
+) -> None:
+    """`worker-identity.json` and its pending file under each directory: the
+    staging directory chosen at 加入, busy by the one conservative
+    `worker_busy` over it; plus a live host's in-memory work (routes, a run,
+    held children) over the staging directory it runs on."""
+    from taskpaw_v3.workflow.remote_dispatch import worker_busy
+    from taskpaw_v3.workflow.remote_worker import (
+        IDENTITY_NAME,
+        PENDING_NAME,
+        WorkerIdentity,
+    )
+
+    for directory in directories:
+        for name in (IDENTITY_NAME, PENDING_NAME):
+            try:
+                identity = WorkerIdentity.read(directory / name)
+            except (OSError, ValueError):
+                state.worker_known = False
+                continue
+            if identity is None:
+                continue
+            root = identity.staging_dir
+            if not isinstance(root, str) or not root:
+                state.worker_known = False
+                continue
+            state.paired.append(root)
+            if worker_busy(Path(root), None):
+                state.busy.append((directory, root))
     if host is None:
-        return False
+        return
     summary = host.summary()
-    return bool(summary.get("routes")) or bool(summary.get("busy"))
+    if summary.get("routes") or summary.get("busy"):
+        ident = getattr(host, "identity", None)
+        settings = getattr(host, "settings", running)
+        live: str | None = (
+            ident.staging_dir if ident is not None else settings.staging_dir
+        )
+        data = getattr(host, "data_dir", None) or default_data_dir(running, config_dir)
+        state.busy.append((data, live))
+
+
+def retained(
+    names: tuple[WorkflowSettings, ...],
+    running: WorkflowSettings,
+    config_dir: Path | None,
+    worker_host: Any = None,
+    *,
+    worker: bool = True,
+) -> Retained:
+    """§9 CX15/CX16: the retained authoritative state every guard compares
+    a save with, read directly (read-only, short timeouts)."""
+    state = Retained()
+    directories = _directories(names, config_dir)
+    _controller_state(directories, running.worker_api_port, state)
+    if worker:
+        _worker_state(directories, worker_host, running, config_dir, state)
+    return state
 
 
 def refuse_busy(
-    new: WorkflowSettings,
-    running: WorkflowSettings,
-    controller: Callable[[], Any],
-    worker: Callable[[], Any],
-    config_dir: Path | None = None,
+    new: WorkflowSettings, state: Retained, config_dir: Path | None
 ) -> None:
-    """R16, against what runs now: leaving 主控 or turning 允许 GPU 工作机接入
-    off while films are in flight, a worker API port other than the one the
-    retained pairings were made on (§9 IR4/CX14, any role), or a busy worker
-    leaving its role or moving its staging or data directory (§9 IR3)."""
-    ports = pairing_ports((running, new), config_dir, running.worker_api_port)
-    if any(port != new.worker_api_port for port in ports):
-        raise Refused(422, "设置有误", fields={"worker_api_port": PORT_PAIRED})
-    if role_of(running) == "controller":
-        leaving = role_of(new) != "controller" or (
-            running.remote_workers and not new.remote_workers
+    """R16 against the retained state: leaving 主控 while any film is in
+    flight, turning 允许 GPU 工作机接入 off while one is on a GPU worker, or a
+    busy worker leaving its role or moving its staging or data directory
+    (§9 IR3). Unknown state refuses the change (「无法确认…」)."""
+    role = role_of(new)
+    if not state.store_known and (role != "controller" or not new.remote_workers):
+        raise Refused(409, UNKNOWN, code="workflow_busy")
+    if (state.films and role != "controller") or (
+        state.remote and not new.remote_workers
+    ):
+        raise Refused(
+            409,
+            f"还有 {state.films} 部影片在处理中（{state.remote} 部在 GPU 工作机上），"
+            "请先暂停派发并等待完成",
+            code="workflow_busy",
         )
-        if leaving:
-            films, remote = controller_busy(controller())
-            if films:
-                raise Refused(
-                    409,
-                    f"还有 {films} 部影片在处理中（{remote} 部在 GPU 工作机上），"
-                    "请先暂停派发并等待完成",
-                    code="workflow_busy",
-                )
-    elif role_of(running) == "worker":
-        before = default_data_dir(running, config_dir)
-        after = default_data_dir(new, config_dir)
-        moving = (
-            role_of(new) != "worker"
-            or _moved(new.staging_dir, running.staging_dir)
-            or _moved(str(after) if after else None, str(before) if before else None)
-        )
-        if moving and worker_busy(worker()):
-            raise Refused(
-                409,
-                "本机还有派来的影片或进行中的任务，请先暂停领取并等待完成",
-                code="workflow_busy",
-            )
+    if not state.worker_known:
+        raise Refused(409, UNKNOWN, code="workflow_busy")
+    after = default_data_dir(new, config_dir)
+    for data, root in state.busy:
+        if (
+            role != "worker"
+            or _moved(new.staging_dir, root)
+            or _moved(str(after) if after else None, str(data) if data else None)
+        ):
+            raise Refused(409, WORKER_BUSY, code="workflow_busy")
 
 
 # ── routes ──────────────────────────────────────────────────────────────
@@ -448,29 +513,27 @@ def register_workflow_settings(
     admin: MonitorAdmin | None,
     *,
     config_dir: Path | None,
-    workflow_provider: Callable[[], Any] | None,
     worker_provider: Callable[[], Any] | None,
 ) -> None:
-    def controller() -> Any:
-        return workflow_provider() if workflow_provider is not None else None
-
     def worker() -> Any:
         return worker_provider() if worker_provider is not None else None
-
-    def busy() -> dict[str, int]:
-        if role_of(config.workflow) != "controller":
-            return {"films": 0, "remote": 0}
-        try:
-            films, remote = controller_busy(controller())
-        except Refused:
-            return {"films": 0, "remote": 0}
-        return {"films": films, "remote": remote}
 
     def saved() -> WorkflowSettings:
         if admin is None:
             return config.workflow
         value = admin.desired_workflow()
         return value if isinstance(value, WorkflowSettings) else config.workflow
+
+    def busy() -> dict[str, Any]:
+        """§9 CX15: what the retained stores hold, whatever the host does."""
+        state = retained(
+            (saved(), config.workflow), config.workflow, config_dir, worker=False
+        )
+        return {
+            "films": state.films,
+            "remote": state.remote,
+            "unknown": not state.store_known,
+        }
 
     @app.get("/control/workflow/settings")
     def workflow_settings() -> dict[str, Any]:
@@ -499,16 +562,10 @@ def register_workflow_settings(
             _role, fields = parse(body)
 
             def check(validated: AgentConfig, old: WorkflowSettings) -> None:
-                validate(
-                    validated.workflow, old, validated, config_dir, config.workflow
-                )
-                refuse_busy(
-                    validated.workflow,
-                    config.workflow,
-                    controller,
-                    worker,
-                    config_dir,
-                )
+                new, running = validated.workflow, config.workflow
+                state = retained((old, running, new), running, config_dir, worker())
+                validate(new, old, validated, config_dir, running, state)
+                refuse_busy(new, state, config_dir)
 
             result = await run_in_threadpool(
                 admin.update_config, {"workflow": fields}, workflow_check=check

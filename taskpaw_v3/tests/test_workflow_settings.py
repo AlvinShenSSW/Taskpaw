@@ -159,7 +159,7 @@ def test_get_shows_saved_running_presets_and_no_secret(tmp_path, tools):
     assert body["running"]["role"] == "controller"
     assert body["saved"]["inbox_root"] == tools["inbox_root"]
     assert body["restart_required"] is False
-    assert body["busy"] == {"films": 0, "remote": 0}
+    assert body["busy"] == {"films": 0, "remote": 0, "unknown": False}
     ids = [p["id"] for p in body["presets"]]
     assert ids[0] == "auto" and "5070ti-16" in ids
     assert LLM_KEY not in response.text and "api_token" not in response.text
@@ -307,7 +307,7 @@ def test_a_field_error_never_echoes_the_value(tmp_path, tools):
 def test_the_data_dir_cannot_move_away_from_a_workflow_store(tmp_path, tools):
     old = tmp_path / "wf-old"
     old.mkdir()
-    (old / "workflow.db").write_bytes(b"store")
+    runtime(old).close()  # an idle store (unreadable is not idle, CX15)
     world = World(tmp_path, enabled=True, **tools, data_dir=str(old))
     response = world.put({"role": "controller", "data_dir": str(tmp_path / "wf-new")})
     assert response.status_code == 422
@@ -332,7 +332,13 @@ def _running_host(rt):
 
 
 def test_leaving_the_controller_is_refused_while_films_are_in_flight(tmp_path, tools):
-    world = World(tmp_path, enabled=True, remote_workers=True, **tools)
+    world = World(
+        tmp_path,
+        enabled=True,
+        remote_workers=True,
+        data_dir=str(tmp_path / "wf"),
+        **tools,
+    )
     rt = runtime(tmp_path / "wf")
     try:
         worker = enrol_remote(rt, "5070 Ti")
@@ -341,7 +347,8 @@ def test_leaving_the_controller_is_refused_while_films_are_in_flight(tmp_path, t
         claim_remote(rt, worker, remote_film, "restore")
         route(rt, local_film, rt.identity.worker_id, kind="local")
         world.host = _running_host(rt)
-        assert world.get().json()["busy"] == {"films": 2, "remote": 1}
+        busy = world.get().json()["busy"]
+        assert busy == {"films": 2, "remote": 1, "unknown": False}
         before = world.path.read_bytes()
         for body in (
             {"role": "off"},
@@ -363,32 +370,136 @@ def test_leaving_the_controller_is_refused_while_films_are_in_flight(tmp_path, t
 
 
 def test_an_open_archive_counts_as_busy(tmp_path, tools):
-    world = World(tmp_path, enabled=True, **tools)
+    import sqlite3
 
-    class Store:
-        def list_open_assignments(self, _op):
-            return ()
-
-        def list_routes(self, _op):
-            return ()
-
-        def film_board(self, _op, done_limit=None, **_kw):
-            return (SimpleNamespace(film_id="f1", archive_open=True),)
-
-    rt = SimpleNamespace(
-        store=Store(), operator=None, identity=SimpleNamespace(worker_id="c")
-    )
-    world.host = SimpleNamespace(state="running", runtime=rt)
+    data = tmp_path / "wf"
+    rt = runtime(data)
+    try:
+        film = add_film(rt)
+        principal = rt.identity.operator_principal_id
+    finally:
+        rt.close()
+    conn = sqlite3.connect(data / "workflow.db")
+    try:  # an archive operation admitted and not yet resolved
+        conn.execute(
+            "INSERT INTO operations (operation_id,film_id,kind,owner_principal_id,"
+            "status,created_at,updated_at,body_json)"
+            " VALUES ('op1',?,'archive',?,'admitted','t','t','{}')",
+            (film, principal),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    world = World(tmp_path, enabled=True, data_dir=str(data), **tools)
     response = world.put({"role": "off"})
     assert response.status_code == 409
     assert response.json()["detail"].startswith("还有 1 部影片在处理中（0 部")
 
 
-def test_a_starting_controller_refuses_the_switch(tmp_path, tools):
-    world = World(tmp_path, enabled=True, **tools)
-    world.host = SimpleNamespace(state="starting", runtime=None)
-    response = world.put({"role": "off"})
-    assert response.status_code == 409 and response.json()["code"] == "workflow_busy"
+UNKNOWN = "无法确认是否有影片在处理，暂不允许切换"
+IN_FLIGHT_1_1 = "还有 1 部影片在处理中（1 部在 GPU 工作机上），请先暂停派发并等待完成"
+
+
+def _store_in_flight(directory: Path) -> None:
+    """A retained store (no host running it) with one film routed to and
+    claimed by a GPU worker: an unresolved remote compute assignment."""
+    rt = runtime(directory)
+    try:
+        worker = enrol_remote(rt, "5070 Ti")
+        film = add_film(rt)
+        route(rt, film, worker.worker_id)
+        claim_remote(rt, worker, film, "restore")
+    finally:
+        rt.close()
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        None,
+        SimpleNamespace(state="failed", runtime=None, reason="boom"),
+        SimpleNamespace(state="starting", runtime=None, reason=""),
+    ],
+)
+def test_the_controller_guard_reads_the_retained_store_whatever_the_host(
+    tmp_path, tools, host
+):
+    """§9 CX15 (Codex r5): a controller that failed to start (or is still
+    starting, or never ran) has no live runtime, but its store retains an
+    unresolved remote assignment: leaving 主控 or turning GPU workers off is
+    refused from the store on disk."""
+    data = tmp_path / "wf"
+    _store_in_flight(data)
+    world = World(
+        tmp_path, enabled=True, remote_workers=True, data_dir=str(data), **tools
+    )
+    world.host = host
+    assert world.get().json()["busy"] == {"films": 1, "remote": 1, "unknown": False}
+    before = world.path.read_bytes()
+    for body in (
+        {"role": "off"},
+        {"role": "controller", "remote_workers": False},
+        {"role": "off", "data_dir": str(data)},
+    ):
+        response = world.put(body)
+        assert response.status_code == 409, body
+        assert response.json() == {"detail": IN_FLIGHT_1_1, "code": "workflow_busy"}
+        assert world.path.read_bytes() == before
+    ok = world.put({"role": "controller", "mdcx_root": str(tmp_path)})
+    assert ok.status_code == 200, ok.text
+
+
+def test_a_store_holding_only_local_work_may_turn_gpu_workers_off(tmp_path, tools):
+    """R16: turning 允许 GPU 工作机接入 off strands only work on a GPU worker;
+    leaving 主控 strands any."""
+    data = tmp_path / "wf"
+    rt = runtime(data)
+    try:
+        film = add_film(rt)
+        route(rt, film, rt.identity.worker_id, kind="local")
+    finally:
+        rt.close()
+    world = World(
+        tmp_path, enabled=True, remote_workers=True, data_dir=str(data), **tools
+    )
+    assert world.put({"role": "off"}).status_code == 409
+    off = world.put({"role": "controller", "remote_workers": False})
+    assert off.status_code == 200, off.text
+
+
+@pytest.mark.parametrize("damage", ["corrupt", "locked"])
+def test_an_unreadable_store_refuses_leaving_the_controller(
+    tmp_path, tools, monkeypatch, damage
+):
+    """§9 CX15: a store that cannot be read is not idle — the guarded change
+    is refused with 「无法确认是否有影片在处理，暂不允许切换」; staying 主控 with
+    GPU workers on strands nothing and is saved."""
+    import sqlite3
+
+    from taskpaw_v3.agent.server import workflow_settings as ws
+
+    data = tmp_path / "wf"
+    runtime(data).close()
+    if damage == "corrupt":
+        (data / "workflow.db").write_bytes(b"not a database" * 64)
+    else:
+
+        def locked(_path):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(ws, "_open_store", locked)
+    world = World(
+        tmp_path, enabled=True, remote_workers=True, data_dir=str(data), **tools
+    )
+    assert world.get().json()["busy"]["unknown"] is True
+    before = world.path.read_bytes()
+    for body in ({"role": "off"}, {"role": "controller", "remote_workers": False}):
+        response = world.put(body)
+        assert response.status_code == 409, body
+        assert response.json() == {"detail": UNKNOWN, "code": "workflow_busy"}
+        assert world.path.read_bytes() == before
+    stay = world.put({"role": "controller", "mdcx_root": str(tmp_path)})
+    assert stay.status_code == 200, stay.text
 
 
 def _worker(routes: int, busy: bool):
@@ -489,7 +600,7 @@ def test_the_data_dir_guard_compares_with_the_running_directory(tmp_path, tools)
     assert world.put({"role": "controller", "data_dir": other}).status_code == 200
     default = tmp_path / "workflow"
     default.mkdir()
-    (default / "workflow.db").write_bytes(b"store")  # the running store
+    runtime(default).close()  # an idle store (unreadable is not idle, CX15)
     for target in (str(tmp_path / "wf-c"), other):
         response = world.put({"role": "controller", "data_dir": target})
         assert response.status_code == 422, target
@@ -526,21 +637,110 @@ def test_a_paired_workers_staging_dir_cannot_change_but_an_unpaired_one_can(tmp_
     world = World(tmp_path, enabled=True, role="worker", staging_dir=staging)
     other = str(tmp_path / "staging-2")
     paired = tmp_path / "workflow"  # the default, beside agent.yaml
-    paired.mkdir()
-    (paired / IDENTITY_NAME).write_text("{}", encoding="utf-8")
+    _pair(paired, staging)
     before = world.path.read_bytes()
     response = world.put({"role": "worker", "staging_dir": other})
     assert response.status_code == 422, response.text
-    assert (
-        response.json()["fields"]["staging_dir"]
-        == "已配对的工作机改暂存目录需要重新加入"
-    )
+    assert response.json()["fields"]["staging_dir"] == STAGING_PAIRED
     assert world.path.read_bytes() == before
     same = world.put({"role": "worker", "staging_dir": staging, "staging_cap_gb": 300})
     assert same.status_code == 200, same.text
     (paired / IDENTITY_NAME).unlink()  # not paired (any more)
     moved = world.put({"role": "worker", "staging_dir": other})
     assert moved.status_code == 200, moved.text
+
+
+STAGING_PAIRED = "已配对的工作机改暂存目录需要重新加入"
+
+
+def _pair(directory: Path, staging: str, *, pending: bool = False) -> None:
+    """A worker identity (fake controller, fake credential) whose staging
+    directory was chosen at 加入; `pending`: a pairing not yet confirmed."""
+    from pydantic import SecretStr
+
+    from taskpaw_v3.workflow.remote_worker import (
+        IDENTITY_NAME,
+        PENDING_NAME,
+        WorkerIdentity,
+    )
+
+    directory.mkdir(parents=True, exist_ok=True)
+    WorkerIdentity(
+        controller_host="192.0.2.1",
+        controller_port=5682,
+        pairing_id="pairing-1",
+        credential_id="credential-1",
+        secret=SecretStr("fake-secret-for-tests"),
+        staging_dir=staging,
+        worker_id="worker-1",
+    ).save(directory / (PENDING_NAME if pending else IDENTITY_NAME))
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_a_paired_staging_dir_holds_for_every_role_across_saves(tmp_path, pending):
+    """§9 CX16 (Codex r5): the guard compares with the identity's staging
+    directory, not the previous agent.yaml value or the requested role — so
+    {role: off, staging B} cannot pass and let a later {role: worker} keep
+    B while the identity still uses A."""
+    a, b = str(tmp_path / "staging-a"), str(tmp_path / "staging-b")
+    _pair(tmp_path / "workflow", a, pending=pending)
+    world = World(tmp_path, enabled=True, role="worker", staging_dir=a)
+    before = world.path.read_bytes()
+    for body in (
+        {"role": "off", "staging_dir": b},
+        {"role": "controller", "staging_dir": b},
+        {"role": "worker", "staging_dir": b},
+        {"role": "off", "staging_dir": None},
+    ):
+        response = world.put(body)
+        assert response.status_code == 422, body
+        assert response.json()["fields"]["staging_dir"] == STAGING_PAIRED
+        assert world.path.read_bytes() == before
+    off = world.put({"role": "off"})  # the staging directory stays A
+    assert off.status_code == 200, off.text
+    back = world.put({"role": "worker"})
+    assert back.status_code == 200, back.text
+    assert world.saved()["workflow"]["staging_dir"] == a
+
+
+def test_a_paired_worker_with_unsettled_attempts_is_busy_with_no_host(tmp_path):
+    """§9 CX15/CX16: a worker that failed to start (no host) still holds the
+    attempts on its paired staging disk: the conservative `worker_busy` over
+    the identity's staging directory refuses leaving the role."""
+    from taskpaw_v3.workflow.remote_dispatch import ATTEMPTS_DIR
+
+    staging = tmp_path / "staging"
+    (staging / ATTEMPTS_DIR).mkdir(parents=True)
+    attempt = staging / ATTEMPTS_DIR / "a1.json"
+    attempt.write_text("{}", encoding="utf-8")
+    _pair(tmp_path / "workflow", str(staging))
+    world = World(tmp_path, enabled=True, role="worker", staging_dir=str(staging))
+    assert world.worker is None
+    response = world.put({"role": "off"})
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "workflow_busy"
+    attempt.unlink()
+    assert world.put({"role": "off"}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "name", ["worker-identity.json", "worker-identity.pending.json"]
+)
+def test_an_unreadable_identity_refuses_the_switch(tmp_path, name):
+    """§9 CX16: an identity that cannot be read hides the paired staging
+    directory and its attempts: unknown is not idle, so the save is refused
+    with 「无法确认是否有影片在处理，暂不允许切换」 until a new 加入 replaces it."""
+    staging = str(tmp_path / "staging")
+    paired = tmp_path / "workflow"
+    paired.mkdir()
+    (paired / name).write_text("{not json", encoding="utf-8")
+    world = World(tmp_path, enabled=True, role="worker", staging_dir=staging)
+    before = world.path.read_bytes()
+    for body in ({"role": "off"}, {"role": "worker", "staging_dir": staging}):
+        response = world.put(body)
+        assert response.status_code == 409, body
+        assert response.json() == {"detail": UNKNOWN, "code": "workflow_busy"}
+        assert world.path.read_bytes() == before
 
 
 def test_a_data_dir_differing_only_by_case_follows_the_filesystem(
@@ -553,7 +753,7 @@ def test_a_data_dir_differing_only_by_case_follows_the_filesystem(
 
     old = tmp_path / "Data"
     old.mkdir()
-    (old / "workflow.db").write_bytes(b"store")
+    runtime(old).close()  # an idle store (unreadable is not idle, CX15)
     world = World(tmp_path, enabled=True, **tools, data_dir=str(old))
     target = str(tmp_path / "dAtA")
     # not present on a case-sensitive disk; present-and-same on a case-insensitive one:

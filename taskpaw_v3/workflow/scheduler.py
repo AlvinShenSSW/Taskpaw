@@ -616,6 +616,8 @@ def _route_films(
     waiting: dict[str, str] = {
         film.film_id: SOURCE_CHANGED for film in ready if not film.source_admissible
     }
+    if probe is not None and waiting.get(probe.film_id) == SOURCE_CHANGED:
+        probe.found = (None, SOURCE_CHANGED, [])  # §9 CX17: the pass's own wait
     candidates = sorted(
         (film for film in ready if film.source_admissible),
         key=lambda f: (
@@ -796,6 +798,8 @@ def preview(
             gpu_stages=gpu_stages,
             probe=probe,
         )
+        if probe.found is None and not film.source_admissible:
+            probe.found = (None, SOURCE_CHANGED, [])  # §9 CX17: never claimable
         if probe.found is None:  # not routable yet (a C12 local restore first)
             stages = routed_stages(film, gpu_stages)
             if not stages:  # §9 CX2: nothing needs a GPU — no device option
