@@ -216,7 +216,9 @@ def film(
         from taskpaw_v3.workflow import operator_actions as ops
 
         with _mapped():
-            detail["reassign_options"] = ops.reassign_options(rt, fleet, film_id)
+            detail["reassign_options"] = ops.reassign_options(
+                rt, fleet, film_id, _held(host)
+            )
     return detail
 
 
@@ -374,6 +376,12 @@ def board_inputs(
     return BoardInputs(status, currents, waiting, extras, names)
 
 
+def _held(host: Any) -> frozenset[str]:
+    """The films the scheduler holds (片源丢失), for the previews."""
+    sources = getattr(host, "sources", None)
+    return sources.ids() if sources is not None else frozenset()
+
+
 def _removal_and_sources(
     host: Any,
     rt: LocalRuntime,
@@ -388,8 +396,7 @@ def _removal_and_sources(
 
     sources = getattr(host, "sources", None)
     lost = sources.lost() if sources is not None else {}
-    claimed = set(claimed_films(rt))
-    routed = {route.film_id for route in rt.store.list_routes(rt.operator)}
+    claimed, routed = ops.busy_films(rt)  # the guarded delete's own reads
     for film in films:
         missing = lost.get(film.film_id)
         if missing is not None:
@@ -466,7 +473,7 @@ def plans(
     host = require_host(settings, provider)
     with _mapped():
         rt = runtime(host)
-        return plan_list(rt, remote=pass_inputs(host, rt))
+        return plan_list(rt, remote=pass_inputs(host, rt), hold=_held(host))
 
 
 def image_path(

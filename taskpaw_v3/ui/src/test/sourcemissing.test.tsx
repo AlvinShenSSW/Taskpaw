@@ -76,7 +76,8 @@ describe("概览", () => {
     const panel = (await screen.findByRole("heading", { name: "片源丢失 · 1" })).closest("section") as HTMLElement;
     expect(within(panel).getByText("ABF-394")).toBeInTheDocument();
     expect(within(panel).getByText("片源丢失", { selector: ".chip" })).toBeInTheDocument();
-    expect(within(panel).getByText(NOTE)).toBeInTheDocument();
+    expect(within(panel).getAllByText(NOTE)).toHaveLength(2); // the panel's subtitle and the row's note
+    expect(panel.querySelector(".panel-head p")).toHaveTextContent(/^INBOX 里的文件已不存在 · 不再派发$/);
     fireEvent.click(within(panel).getByRole("button", { name: "处理 ABF-394" }));
     expect(await screen.findByRole("dialog", { name: "影片详情" })).toBeInTheDocument();
   });
@@ -122,6 +123,27 @@ describe("drawer: 片源丢失", () => {
     const drawer = await screen.findByRole("dialog", { name: "影片详情" });
     fireEvent.click(await within(drawer).findByRole("button", { name: "重新检查" }));
     expect(await screen.findByText("文件仍然不存在。")).toBeInTheDocument();
+  });
+
+  it("重新检查 on an unreachable INBOX says so instead of 文件仍然不存在", async () => {
+    const m = mockApi();
+    m.recheck.mockResolvedValue({ ok: true, unreachable: true, source_missing: { paths: [PATH], found_at: FOUND_AT } });
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "处理 ABF-394" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    fireEvent.click(await within(drawer).findByRole("button", { name: "重新检查" }));
+    expect(await screen.findByText("INBOX 暂时无法访问，稍后再试")).toBeInTheDocument();
+    expect(screen.queryByText("文件仍然不存在。")).toBeNull();
+  });
+
+  it("offers 删除此任务 in the alert only when the film can be removed", async () => {
+    mockApi();
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detailOf(LOST, { can_remove: false }));
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "处理 ABF-394" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    await within(drawer).findByRole("button", { name: "重新检查" });
+    expect(within(drawer).queryByRole("button", { name: "删除此任务" })).toBeNull();
   });
 
   it("删除此任务 asks first, cancel changes nothing, 删除 deletes and closes the drawer", async () => {

@@ -209,19 +209,23 @@ def media_totals(manifest: m.InputManifest) -> dict[str, Any]:
 
 
 def plan_list(
-    rt: LocalRuntime, *, remote: Mapping[str, Any] | None = None
+    rt: LocalRuntime,
+    *,
+    remote: Mapping[str, Any] | None = None,
+    hold: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """`remote`: the routing pass's live inputs (`live`, `now`,
     `controller_id`, `controller_free_bytes`, `live_since`) in remote mode;
     each film then gets `routing[tier]` from `scheduler.preview` and its
-    recommendation names no machine (自动). None: single machine, unchanged."""
+    recommendation names no machine (自动). None: single machine, unchanged.
+    `hold`: films in 片源丢失, previewed as the pass sees them (#304 IR6)."""
     op, lookup = rt.operator, rt.lookup
     snapshot = stages = None
     names: dict[str, str] = {}
     if remote is not None:
         from .routing import gpu_stages
 
-        snapshot = rt.store.routing_snapshot(op)
+        snapshot = rt.store.routing_snapshot(op, hold)
         stages = gpu_stages(rt.store, op, snapshot, rt.executors)
         names = {w.worker_id: w.name for w in snapshot.workers}
     unplanned = rt.store.list_unplanned(op)

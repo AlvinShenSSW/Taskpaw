@@ -538,6 +538,15 @@ class LocalWorkflowHost:
             return
         from .routing import run_pass
 
+        # P3 #304 IR1: the pass looks at the sources itself, whether or not
+        # the dispatcher is paused or busy with a stage
+        hold: frozenset[str] = frozenset()
+        if self.sources is not None:
+            try:
+                hold = self.sources.check_candidates()
+            except Exception:
+                log.exception("source check before the routing pass failed")
+                hold = self.sources.ids()
         outcome = run_pass(
             rt.store,
             rt.operator,
@@ -549,7 +558,7 @@ class LocalWorkflowHost:
             controller_free_bytes=inputs["controller_free_bytes"],
             remote_enabled=True,
             live_since=inputs["live_since"],
-            hold=self.sources.ids() if self.sources is not None else frozenset(),
+            hold=hold,
         )
         self.last_pass = outcome.planned
         if (outcome.routed or outcome.withdrawn) and self.dispatcher is not None:

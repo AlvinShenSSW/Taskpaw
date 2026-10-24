@@ -45,7 +45,7 @@ export function SourceMissingAlert({ film, onRemoved }: { film: FilmDetail; onRe
       return api.workflowRecheckSource(film.film_id);
     },
     onSuccess: (r) => {
-      ws.toast(r.source_missing ? "文件仍然不存在。" : "文件已找回，影片继续排队。");
+      ws.toast(r.unreachable ? "INBOX 暂时无法访问，稍后再试" : r.source_missing ? "文件仍然不存在。" : "文件已找回，影片继续排队。");
       void qc.invalidateQueries({ queryKey: MEDIA_FILMS_KEY });
       void qc.invalidateQueries({ queryKey: mediaFilmKey(film.film_id) });
     },
@@ -66,7 +66,7 @@ export function SourceMissingAlert({ film, onRemoved }: { film: FilmDetail; onRe
           <button type="button" className="btn" disabled={recheck.isPending} onClick={() => recheck.mutate()}>
             <Icon of={RefreshIcon} />重新检查
           </button>
-          <RemoveTask film={film} onRemoved={onRemoved} />
+          {film.can_remove && <RemoveTask film={film} onRemoved={onRemoved} />}
         </div>
       )}
     </Notice>

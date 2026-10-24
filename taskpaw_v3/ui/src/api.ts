@@ -899,9 +899,10 @@ export const api = {
   // P2-3 R9: 停止并重新排队 of a running remote restore or ASR
   workflowRequeue: (filmId: string, attemptId: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/requeue`, { attempt_id: attemptId }),
-  // P3 E2: 重新检查 of a 片源丢失 film; `source_missing` is null once the files are back
+  // P3 E2: 重新检查 of a 片源丢失 film; `source_missing` is null once the files are back; `unreachable`:
+  // the INBOX share could not be reached, so nothing was learned
   workflowRecheckSource: (filmId: string) =>
-    send<{ ok: boolean; source_missing: SourceMissing | null }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/recheck-source`, {}),
+    send<{ ok: boolean; source_missing: SourceMissing | null; unreachable?: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/recheck-source`, {}),
   // P3 E3: 删除此任务 — 409 (coded) while a stage runs or is claimed, or the film was confirmed or archived
   workflowRemove: (filmId: string) =>
     send<{ ok: boolean; leftover: number }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/remove`, {}),

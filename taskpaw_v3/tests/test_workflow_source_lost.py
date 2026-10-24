@@ -632,7 +632,7 @@ def test_recheck_source_runs_at_once_and_lets_a_returned_film_go_on(world, api):
     assert api.row(film_id)["group"] == "attention"  # throttled: still lost
     response = api.post(f"/control/workflow/films/{film_id}/recheck-source")
     assert response.status_code == 200, response.text
-    assert response.json() == {"ok": True, "source_missing": None}
+    assert response.json() == {"ok": True, "unreachable": False, "source_missing": None}
     assert api.row(film_id)["group"] != "attention"
     assert api.dispatcher.wakes >= 1
 

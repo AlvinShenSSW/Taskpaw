@@ -85,6 +85,10 @@ def _passed(evidence: tuple[EvidenceRef, ...]) -> bool:
 
 class FilmCommands(WorkerCommands):
     def _require_source_admissible(self, film: sqlite3.Row) -> None:
+        # P3 #304 CX1: a removed film is gone for good; a route or claim decided
+        # before the delete must not bring it back (nor create its work dirs)
+        if FilmRecord.model_validate_json(film["body_json"]).removed_at is not None:
+            raise WorkflowError("source_not_admissible")
         link = self._conn.execute(
             "SELECT i.*,p.source_generation AS current_generation,p.dirty,p.active_snapshot_id,p.state,"
             "p.root_config_revision,r.config_revision AS current_root_revision,r.enabled,"
@@ -1259,7 +1263,11 @@ class FilmCommands(WorkerCommands):
                     "UNION ALL SELECT 1 FROM film_routes WHERE film_id=? AND state='open' "
                     "UNION ALL SELECT 1 FROM operations WHERE film_id=? "
                     "AND kind IN ('archive','cleanup_input','cleanup_workcopy') "
-                    "UNION ALL SELECT 1 FROM approvals WHERE film_id=? AND revoked_at IS NULL "
+                    # the board's `approval_active`: a live approval of the current
+                    # ready context (an older one can never archive: confirm again)
+                    "UNION ALL SELECT 1 FROM approvals p JOIN films f "
+                    "ON f.film_id=p.film_id AND p.context_revision=f.current_context_revision "
+                    "WHERE p.film_id=? AND p.revoked_at IS NULL AND f.context_state='ready' "
                     "LIMIT 1",
                     (fid, fid, fid, fid, fid),
                 ).fetchone()

@@ -366,6 +366,8 @@ def register_workflow_routes(
         _wake(host)
         return {
             "ok": True,
+            # the share could not be reached: nothing was learned (#304 IR4)
+            "unreachable": sources.unknown(film_id),
             "source_missing": None
             if missing is None
             else {

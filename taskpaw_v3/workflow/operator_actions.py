@@ -321,17 +321,21 @@ def reassign(
 
 
 def reassign_options(
-    rt: LocalRuntime, fleet: FleetLive | None, film_id: str
+    rt: LocalRuntime,
+    fleet: FleetLive | None,
+    film_id: str,
+    hold: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The drawer's 改派 choices: 自动, then each verified worker with the
     reason it could not take the film now (None: it can). Each choice that
     can take it carries `scheduler.preview`'s finish and energy (预计,
-    advisory); 自动 also names the device the next pass would pick."""
+    advisory); 自动 also names the device the next pass would pick. `hold`:
+    films in 片源丢失, which the pass would not route either (#304 IR6)."""
     from .board import iso
     from .routing import gpu_stages
 
     op = rt.operator
-    snapshot = rt.store.routing_snapshot(op)
+    snapshot = rt.store.routing_snapshot(op, hold)
     film = next((f for f in snapshot.films if f.film_id == film_id), None)
     if film is None or not film.planned:
         return []
@@ -477,6 +481,18 @@ def removal_refusal(
     return None
 
 
+def busy_films(rt: LocalRuntime) -> tuple[set[str], set[str]]:
+    """(films with an unresolved assignment of any stage, films with an open
+    route): the two facts `removal_refusal` takes, read the same way by the
+    guarded delete and by the board's `can_remove` (#304 IR5)."""
+    op = rt.operator
+    claimed = {
+        rt.store.get_stage(op, o.assignment.job_id).film_id
+        for o in rt.store.list_open_assignments(op)
+    }
+    return claimed, {r.film_id for r in rt.store.list_routes(op)}
+
+
 def remove_film(
     rt: LocalRuntime,
     *,
@@ -496,12 +512,10 @@ def remove_film(
     film = board.board_film(rt, film_id)
     if film is None:
         raise m.WorkflowError("not_found")
-    claimed = any(
-        rt.store.get_stage(op, o.assignment.job_id).film_id == film_id
-        for o in rt.store.list_open_assignments(op)
+    claimed, routed = busy_films(rt)
+    refusal = removal_refusal(
+        film, claimed=film_id in claimed, routed=film_id in routed
     )
-    routed = any(r.film_id == film_id for r in rt.store.list_routes(op))
-    refusal = removal_refusal(film, claimed=claimed, routed=routed)
     if refusal is not None:
         raise ActionRefused(*refusal)
     name = board.name_of(rt, film_id) or film.display_name

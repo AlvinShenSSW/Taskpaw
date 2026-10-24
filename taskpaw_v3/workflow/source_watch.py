@@ -41,6 +41,10 @@ def started(film: m.BoardFilm) -> bool:
     return any(s.stage != "intake" and s.status not in _PENDING for s in film.stages)
 
 
+class _Unknown(Exception):
+    """The INBOX could not be reached: neither lost nor found."""
+
+
 class SourceWatch:
     def __init__(
         self,
@@ -56,6 +60,7 @@ class SourceWatch:
         self._lock = threading.Lock()
         self._lost: dict[str, dict[str, Any]] = {}
         self._checked: dict[str, float] = {}
+        self._unknown: set[str] = set()  # the last check could not tell
 
     # ── reads ───────────────────────────────────────────────────────────
     def ids(self) -> frozenset[str]:
@@ -72,7 +77,26 @@ class SourceWatch:
             value = self._lost.get(film_id)
             return None if value is None else {**value, "paths": list(value["paths"])}
 
+    def unknown(self, film_id: str) -> bool:
+        """Whether the last check could not tell (the INBOX share was
+        unreachable): the state shown is then the one before it."""
+        with self._lock:
+            return film_id in self._unknown
+
     # ── the check ───────────────────────────────────────────────────────
+    def check_candidates(self) -> frozenset[str]:
+        """The throttled check of every planned film that still waits to
+        restore or transcribe (what the scheduler could route), run by the
+        routing pass itself so it never depends on the dispatcher thread
+        (#304 IR1). Returns the films now in 片源丢失."""
+        if self.inbox is None:
+            return self.ids()
+        snapshot = self.runtime.store.routing_snapshot(self.runtime.operator)
+        for film in snapshot.films:
+            if film.planned and "pending" in (film.restore, film.asr):
+                self.check(film.film_id)
+        return self.ids()
+
     def check(self, film_id: str, *, force: bool = False) -> dict[str, Any] | None:
         """The film's 片源丢失 state after a (throttled) existence check."""
         if self.inbox is None:
@@ -83,10 +107,13 @@ class SourceWatch:
             if not force and last is not None and now - last < self.interval:
                 return self._copy(film_id)
             self._checked[film_id] = now
-        if not self.inbox.is_dir():
-            return self.get(film_id)  # an unreachable share: unknown, not lost
+            self._unknown.discard(film_id)
         try:
             missing = self._missing(film_id)
+        except _Unknown:  # an unreachable share: unknown, not lost
+            with self._lock:
+                self._unknown.add(film_id)
+            return self.get(film_id)
         except Exception:  # a failed check never stops dispatch, nor flags a film
             log.exception("source check of %s failed", film_id)
             return self.get(film_id)
@@ -96,6 +123,7 @@ class SourceWatch:
         with self._lock:
             self._lost.pop(film_id, None)
             self._checked.pop(film_id, None)
+            self._unknown.discard(film_id)
 
     def _copy(self, film_id: str) -> dict[str, Any] | None:
         value = self._lost.get(film_id)
@@ -124,6 +152,8 @@ class SourceWatch:
     def _missing(self, film_id: str) -> list[str] | None:
         rt, inbox = self.runtime, self.inbox
         assert inbox is not None  # `check` returns early without one
+        if not inbox.is_dir():
+            raise _Unknown
         film = board.board_film(rt, film_id)
         if film is None or film.input_revision is None or started(film):
             return None
@@ -139,4 +169,6 @@ class SourceWatch:
                     gone.append(str(path))
             except OSError:
                 continue  # unreadable is unknown, not missing
+        if gone and not inbox.is_dir():  # the share dropped while we looked
+            raise _Unknown
         return gone

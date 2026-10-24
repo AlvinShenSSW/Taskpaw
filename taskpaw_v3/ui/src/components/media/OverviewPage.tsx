@@ -126,7 +126,7 @@ export function OverviewPage() {
           {missing.length > 0 && (
             <section className="panel lost-panel" aria-labelledby="ov-missing">
               <div className="panel-head">
-                <div><h2 id="ov-missing">片源丢失 · {missing.length}</h2><p>INBOX 里的文件已不存在，不再派发</p></div>
+                <div><h2 id="ov-missing">片源丢失 · {missing.length}</h2><p>INBOX 里的文件已不存在 · 不再派发</p></div>
                 <Chip tone="red">{missing.length} 部</Chip>
               </div>
               <div className="film-list">{missing.map((item) => <SourceMissingRow key={item.id} item={item} />)}</div>

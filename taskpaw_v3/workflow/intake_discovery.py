@@ -65,11 +65,18 @@ def _group(
     parent: str | None,
     previous: im.IntakeObservation | None,
     root_config_revision: int,
+    removed: frozenset[str] = frozenset(),
+    reappeared: bool = False,
 ) -> im.PackageGrouping:
     old = previous.grouping if previous else None
+    # #304 IR3: a removed film's id is absent. A package that was missing and
+    # is back is a new drop even when it looks as before; one that never left
+    # keeps its grouping (the film stays deleted until the folder changes).
+    gone = bool(old and removed & {g.film_id for g in old.film_groups})
     if (
         old
         and previous
+        and not (gone and reappeared)
         # A new root configuration (e.g. more allowed attachments) re-groups;
         # film ids still come from the previous keys below (H2 R3, D01).
         and previous.root_config_revision == root_config_revision
@@ -93,7 +100,11 @@ def _group(
             )
             hints.append(parse_nfo_hint(payload, member_id=value.member_id))
     keys = group_keys(members, nfo_hints=tuple(hints))
-    previous_keys = {g.group_key: g.film_id for g in old.film_groups} if old else {}
+    previous_keys = (
+        {g.group_key: g.film_id for g in old.film_groups if g.film_id not in removed}
+        if old
+        else {}
+    )
     grouping = group_package(
         members,
         film_ids=tuple(
@@ -108,7 +119,11 @@ def _group(
     if old:
         # A renamed video has the same held native object/member identity. Match
         # the complete video set only; never infer identity from title alone.
-        identities = {frozenset(g.video_member_ids): g.film_id for g in old.film_groups}
+        identities = {
+            frozenset(g.video_member_ids): g.film_id
+            for g in old.film_groups
+            if g.film_id not in removed
+        }
         changes = {
             g.film_id: identities[frozenset(g.video_member_ids)]
             for g in grouping.film_groups
@@ -152,8 +167,12 @@ def observe_package(
     package_version: int = 0,
     observed_at: datetime,
     trigger: Trigger,
+    removed: frozenset[str] = frozenset(),
+    reappeared: bool = False,
 ) -> im.IntakeObservation:
-    """The caller supplies persisted previous IDs; no database or default path."""
+    """The caller supplies persisted previous IDs; no database or default path.
+    `removed`: previous film ids the operator deleted (never reused);
+    `reappeared`: the previous package was missing and is back."""
     source = HeldPackage(
         Path(config.private_path),
         relative_path,
@@ -177,7 +196,13 @@ def observe_package(
                 compatible = None
             members = _members(source, compatible)
             grouping = _group(
-                source, members, parent, compatible, config.expected_version + 1
+                source,
+                members,
+                parent,
+                compatible,
+                config.expected_version + 1,
+                removed,
+                reappeared,
             )
             source.recheck()
     except IntakeFileError as exc:
