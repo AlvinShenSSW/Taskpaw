@@ -9,7 +9,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api, HttpError, type FilmDetail, type FilmRevisions, type Performer, type TargetErrorCode, type TargetPreflight,
 } from "../../api";
-import { packageNote, runningArchiveStep, type StatusKey } from "./mediaModel";
+import { archiveLive, packageNote, runningArchiveStep, type StatusKey } from "./mediaModel";
 import { ArchiveLivePanel } from "./ArchiveLivePanel";
 import { EvidenceFold } from "./FilmDrawer";
 import { Chip, Cover, Icon, Notice } from "./parts";
@@ -307,7 +307,7 @@ function Receipt({ film, onClose }: { film: FilmDetail; onClose: () => void }) {
             <p>{film.archive.target_path ?? ""}</p>
             {film.receipt_id && <p className="mono">回执 {film.receipt_id}</p>}
           </div>
-        ) : archive ? <ArchiveLivePanel step={archive} /> : (
+        ) : archive && archiveLive(archive) ? <ArchiveLivePanel step={archive} /> : (
           <Notice>后台正在归档并校验；完成后显示入库回执。</Notice>
         )}
         {archived && (

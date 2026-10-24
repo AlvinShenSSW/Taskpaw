@@ -737,13 +737,13 @@ describe("图文确认 review fixes", () => {
     ...pf, performer_id: "1", target_path: STAR_TARGET, absent: true, ...over,
   });
 
-  it.each(["running", "pending"] as const)("the receipt shows archive progress only while the step is %s", async (state) => {
+  it.each([["running", true], ["pending", false], ["running", false]] as const)("the receipt shows archive progress only while the step is %s with progress=%s", async (state, live) => {
     const m = mockApi();
     let after = false;
     vi.spyOn(api, "workflowFilm").mockImplementation(async (id) => (after && id === "abf-406"
       ? detail(id, {
         can_confirm: false, archive: { status: state, error: null, target_path: STAR_TARGET },
-        steps: steps("archive", state, { progress: state === "running" ? {
+        steps: steps("archive", state, { progress: live ? {
           phase: "copying", copied_bytes: 2e9, verified_bytes: 0, total_bytes: 4e9,
           files_done: 0, files_total: 1, items: [{ name: "ABF-406", bytes: 2e9, total: 4e9 }],
           target: STAR_TARGET, started_at: "2026-10-24T08:00:00Z",
@@ -758,7 +758,7 @@ describe("图文确认 review fixes", () => {
     fireEvent.click(ok);
     const receipt = within(await screen.findByRole("dialog", { name: "已确认，等待归档" }));
     const notice = "后台正在归档并校验；完成后显示入库回执。";
-    if (state === "running") {
+    if (live) {
       const panel = within(await receipt.findByRole("region", { name: "归档进度" }));
       expect(panel.getByText("25%")).toBeInTheDocument();
       expect(panel.getByRole("progressbar", { name: "归档进度" })).toHaveAttribute("aria-valuenow", "25");
