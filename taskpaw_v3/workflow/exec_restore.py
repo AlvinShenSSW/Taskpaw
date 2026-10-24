@@ -395,10 +395,17 @@ def probe_video(
     return facts
 
 
-def ffprobe_command(value: str | Sequence[str] | None) -> list[str] | None:
-    """The ffprobe command: a path, an argv prefix, or `ffprobe` on PATH."""
-    if value is None:
-        found = shutil.which("ffprobe")
+def ffprobe_command(
+    value: str | Sequence[str] | None, jasna_exe: str | None = None
+) -> list[str] | None:
+    """The ffprobe command: a path, an argv prefix, or none configured — then
+    Jasna's own copy (`<jasna dir>/tools`), PATH, the Jasna dir (as Jasna does)."""
+    if value is None or value == "":
+        found = (
+            jasna.find_ffprobe(str(Path(jasna_exe).parent))
+            if jasna_exe
+            else shutil.which("ffprobe")
+        )
         return [found] if found else None
     if isinstance(value, str):
         return [value]
@@ -469,13 +476,13 @@ class RestoreExecutor:
         launch_prefix: Sequence[str] = (),
         gpus: GpuQuery = jasna.query_gpus,
     ) -> None:
-        """`ffprobe`: path or command (default: `ffprobe` on PATH).
+        """`ffprobe`: path or command (default: Jasna's own copy, else PATH).
         `launch_prefix` goes before the Jasna argv (tests run a fake tool).
         `preset_auto`: `gpu_id` was picked from the local GPU, not configured."""
         self.runtime, self.jasna_exe, self.gpu_id = runtime, jasna_exe, gpu_id
         self.preset_auto = preset_auto
         self.cfg = workflow_jasna_config(gpu_id)
-        self.ffprobe = ffprobe_command(ffprobe)
+        self.ffprobe = ffprobe_command(ffprobe, jasna_exe)
         self.launch_prefix = tuple(launch_prefix)
         self._gpus = gpus
         # per tier (U1 Codex r2 F1): the model folder, settings and fast flag of

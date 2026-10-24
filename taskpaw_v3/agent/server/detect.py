@@ -380,12 +380,20 @@ class Detector:
 
     # ── tools ────────────────────────────────────────────────────────────
     def ffprobe(
-        self, settings: "WorkflowSettings", whisperjav: Optional[str] = None
+        self,
+        settings: "WorkflowSettings",
+        whisperjav: Optional[str] = None,
+        jasna: Optional[str] = None,
     ) -> dict[str, Any]:
-        """saved → PATH → the bundled copy of `whisperjav` (review CX2: the
+        """saved → PATH → Jasna's own `tools` copy (`jasna` found in this pass,
+        else the saved one) → the bundled copy of `whisperjav` (review CX2: the
         one detection found in this pass) or else of the saved one."""
         from taskpaw_v3.monitors.subs.ffmpeg import bundled_ffmpeg_dir
 
+        jasna_copy = None
+        jasna_exe = jasna or settings.jasna_exe_path
+        if jasna_exe and self.platform == "win32":
+            jasna_copy = ntpath.join(ntpath.dirname(jasna_exe), "tools", "ffprobe.exe")
         bundled = None
         whisper = whisperjav or settings.whisperjav_exe_path
         if whisper and self.platform == "win32":
@@ -395,6 +403,7 @@ class Detector:
             [
                 (settings.ffprobe_path, "saved"),
                 (self._which("ffprobe"), "path"),
+                (jasna_copy, "jasna"),
                 (bundled, "bundled"),
             ]
         )
@@ -586,11 +595,12 @@ class Detector:
                 "suggested": self.suggested(),
             }
         whisperjav = self.whisperjav(settings, monitors)
+        jasna = self.jasna(settings, monitors)
         return {
             "gpu": self.gpu(),
             "tools": {
-                "ffprobe": self.ffprobe(settings, whisperjav["path"]),
-                "jasna": self.jasna(settings, monitors),
+                "ffprobe": self.ffprobe(settings, whisperjav["path"], jasna["path"]),
+                "jasna": jasna,
                 "whisperjav": whisperjav,
                 "miko": self.miko(settings, config_dir),
             },

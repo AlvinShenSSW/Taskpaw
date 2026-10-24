@@ -247,3 +247,42 @@ def test_m3_a_previously_approved_card_that_now_probes_8gb_reads_no_restore(
     assert row["enrollment_state"] == "pending_validation"
     assert row["restore_allowed"] is False and row["eligible"] is False
     assert row["eligibility"] == "显存不足，不参与修复"
+
+
+# ── a worker with no ffprobe setting finds Jasna's own copy ──────────────
+def _jasna_with_tools_ffprobe(tmp_path):
+    jasna = tmp_path / "jasna" / "jasna.exe"
+    probe = tmp_path / "jasna" / "tools" / "ffprobe.exe"
+    probe.parent.mkdir(parents=True)
+    jasna.write_text("", encoding="utf-8")
+    probe.write_text("", encoding="utf-8")
+    return jasna, probe
+
+
+def test_a_worker_without_ffprobe_setting_uses_jasnas_tools_copy(tmp_path, monkeypatch):
+    import shutil
+
+    from taskpaw_v3.tests.test_workflow_local_dispatch import GPU_16GB
+
+    jasna, probe = _jasna_with_tools_ffprobe(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: None)
+    settings = WorkflowSettings(enabled=True, role="worker", jasna_exe_path=str(jasna))
+    (restore,) = remote_worker.worker_executors(settings, None, GPU_16GB)  # type: ignore[arg-type]
+    assert restore.ffprobe == [str(probe)]  # type: ignore[attr-defined]
+
+
+def test_a_saved_ffprobe_setting_still_wins_on_a_worker(tmp_path, monkeypatch):
+    import shutil
+
+    from taskpaw_v3.tests.test_workflow_local_dispatch import GPU_16GB
+
+    jasna, _probe = _jasna_with_tools_ffprobe(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name, *a, **k: None)
+    settings = WorkflowSettings(
+        enabled=True,
+        role="worker",
+        jasna_exe_path=str(jasna),
+        ffprobe_path=str(tmp_path / "mine" / "ffprobe.exe"),
+    )
+    (restore,) = remote_worker.worker_executors(settings, None, GPU_16GB)  # type: ignore[arg-type]
+    assert restore.ffprobe == [str(tmp_path / "mine" / "ffprobe.exe")]  # type: ignore[attr-defined]

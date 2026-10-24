@@ -518,3 +518,34 @@ def test_no_probe_inherits_a_console_window(monkeypatch):
     assert seen["stdin"] is subprocess.DEVNULL
     if sys.platform == "win32":
         assert seen["creationflags"] & 0x08000000
+
+
+JASNA_EXE = r"D:\Apps\Jasna\jasna.exe"
+JASNA_FFPROBE = r"D:\Apps\Jasna\tools\ffprobe.exe"
+
+
+def test_ffprobe_lists_jasnas_tools_copy_after_path(tmp_path):
+    d = detector(tmp_path, is_file={JASNA_FFPROBE}.__contains__)
+    found = d.ffprobe(WorkflowSettings(jasna_exe_path=JASNA_EXE))
+    assert found["source"] == "jasna" and found["path"] == JASNA_FFPROBE
+
+
+def test_ffprobe_on_path_beats_jasnas_tools_copy(tmp_path):
+    d = detector(
+        tmp_path,
+        which=lambda n: r"C:/bin/ffprobe.exe",
+        is_file={JASNA_FFPROBE, r"C:/bin/ffprobe.exe"}.__contains__,
+    )
+    found = d.ffprobe(WorkflowSettings(jasna_exe_path=JASNA_EXE))
+    assert found["source"] == "path"
+
+
+def test_ffprobe_uses_the_jasna_found_in_the_same_pass(tmp_path):
+    d = detector(
+        tmp_path,
+        candidates={"jasna": [JASNA_EXE], "whisperjav": []},
+        is_file={JASNA_EXE, JASNA_FFPROBE}.__contains__,
+    )
+    found = d.detect(WorkflowSettings(), [], None)["tools"]
+    assert found["ffprobe"]["source"] == "jasna"
+    assert found["ffprobe"]["path"] == JASNA_FFPROBE
