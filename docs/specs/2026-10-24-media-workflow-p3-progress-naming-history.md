@@ -1,0 +1,199 @@
+# P3 — progress, 无码 naming, retained history, 成品目录, lost sources (#300–#304)
+
+This is the frozen issue contract for Taskpaw #300, #301, #302, #303 and #304. They are part of EPIC #271.
+
+The operator approved the UI on 2026-10-24 in the preview canvas, on the page 「识别进度与命名」. The relevant boards are:
+
+- Drawer-ASR
+- Naming
+- Drawer-Archive
+- Drawer-History
+- Settings-Output
+- Drawer-SourceMissing
+
+MDCX304 #299 (M03) is the Miko half of #303.
+
+Binding decisions:
+
+- OD1–OD7, and Windows-only for the controller and workers.
+- Home LAN, single user. No over-design.
+- Build the UI from the V3 design baseline and the approved boards, and reuse the existing components (ProgressFrame, ConsoleFold, the RestoreLivePanel patterns).
+
+## 1. Code facts (branch afk/claude-p3-300, based on afk/claude-p2-271)
+
+### ASR (#300)
+
+- `workflow/exec_asr.py:250-256` calls `context.progress(str)` for every WhisperJAV line. It sends no dict.
+- `monitors/subs/progress.py:201-328` contains `AsrProgress`, a tested parser for qwen/decoupled runs:
+  - phases 1–8, scene i/N;
+  - weighted percent, capped at 99;
+  - ETA in phase 5;
+  - `snapshot()` returns phase, phase_n, scene, scenes, percent, eta_s and elapsed_s.
+- The fixture is `tests/test_subs_progress.py RECORDED_RUN`.
+- `Progress` already accepts a dict (`executors.py:77-80`).
+- `board.py:317-347` adds started_at, console and params only for restore or worker runs.
+- `mediaModel.progressText` (`:616`) drops string progress.
+- `StageBlock` (`parts.tsx:265`) shows 「此阶段不提供影片总体百分比」 for ASR.
+
+### Archive (#301)
+
+- The archive step is `finalize.py` `Finalizer`. `_poll` (`:454-457`) reads only `status` and shows 「归档中」.
+- Filmpaw's `GET /api/workflow/archive/{operation_id}` already returns the public task: phase, progress_bytes, total_bytes, verified_bytes, completed_count/total_count and per-item progress_bytes. It saves every 0.2 s (Filmpaw transfer.py).
+- The final package is at `work_dir/<output_relative_path>` (`finalize.py:93`).
+- Cleanup deletes the package items (`:87`, `:607`) and the film's private dirs (`_reclaim_film` `:800-815`).
+
+### History (#302)
+
+- `board.py` `_poster` / `poster_path` / jacket / NFO facts read the final package's files (`:852-887`, `:933-939`). There is no fallback once they are deleted.
+- The store keeps stages, attempts, plan/params, receipts, cleanup results, task-log rows and `film_timing`.
+- `read_store.film_board` shows only the newest 20 finished films (`done_limit=20`, `:409`, `:446-456`). A paging spec already exists: 2026-09-26-198 film-list-paging.
+
+### Naming (#303)
+
+- `monitors/plugins/jasna.py:278-283` and `output_path_for`/`staging_path_for` (`:394`) produce `<stem>-破解.mp4`. `exec_restore.py:759`, `:803` use them.
+- Reuse detection is `exec_restore.py:102-123` (`_RESTORED_SUFFIXES`, `is_restored_name`, `needs_restore`).
+- Subtitles follow the restored stem (`exec_common.output_stems`, `exec_asr.py:274`, `exec_translate.py:204`, `return_step.py:146-161`).
+- In `scrape_step.py:208-236`, each video carries `{file, volume, restored, zh_subtitle}`. `actual_marks` is at `:453-465`.
+- The Miko fake is `tests/workflow_fake_mdcx.py`.
+- Every workflow restore is LTX (`exec_restore.MODEL="ltx"`). The exception is `reused` inputs.
+
+### Lost source (#304)
+
+- No film discard action exists today.
+- `intake_store.settle_abandoned_intake` exists (`:981`). Check whether it covers part of this.
+
+## 2. Requirements
+
+### #300 — ASR live progress (board Drawer-ASR)
+
+**A1.** `exec_asr` feeds each line to `AsrProgress` and publishes a dict on `context.progress`:
+- `{phase, phase_n, phase_label, scene, scenes, percent, eta_s, elapsed_s, console, phases:[{n, label, state, seconds}]}`
+- Throttle it the way restore does (`CONSOLE_INTERVAL_S`).
+- Phase labels:
+  1. 提取音频
+  2. 划分场景
+  3. 语音增强
+  4. 语音分段
+  5. 识别语音
+  6. 生成场景字幕
+  7. 合并字幕
+  8. 过滤与清理
+- A pipeline without the qwen/decoupled tag publishes only elapsed and console.
+
+**A2.** The board gives the running asr step `started_at`, `console` and the progress dict, for local controller runs. A worker-run ASR, if one ever exists, uses the same shape.
+
+**A3.** UI:
+- An `AsrLivePanel` in the film drawer, matching the board:
+  - heartbeat 已用 and 「第 k/8 阶段 · <label>」;
+  - percent and bar;
+  - 预计剩余;
+  - tiles 场景 / 已用 / 预计剩余 / 设备;
+  - the 8-phase list with times;
+  - the 最新输出 fold.
+- The step chip shows 「识别 · NN%」.
+- The overview row shows 「识别 · NN% · 场景 a/b · 约 N 分钟」.
+- Without phases, show only the heartbeat and the console, with no fake percent.
+- Remove the 「此阶段不提供影片总体百分比」 fallback whenever progress exists.
+
+### #301 — 成品目录, archive progress, open folder (boards Drawer-Archive, Settings-Output)
+
+**B1.** A new controller workflow setting `output_dir`, labelled 成品目录:
+- Local fixed disk only; a network path is refused with the existing directory validation.
+- The default is `<data_dir>/成品`.
+- It is offered with 选择 / 打开 / 创建此目录 in 设置 · 媒体工作流 (controller section) and in the wizard's controller step, like INBOX.
+- Changing it while films are waiting for 确认 or 归档 is refused with the existing pause/drain guard pattern.
+
+**B2.** The approved final package lives at `<output_dir>/<final folder name>`, one folder per film. The folder name is the Miko folder name, e.g. `JUR-706-无码-C-4K 标题 演员`.
+- Build it there directly (preferred), or move it there when it is produced, on the same volume.
+- If output_dir is on a different volume from the work dir: copy, verify, then delete the source using the existing exact-delete helpers (C6).
+- The archive manifest, Filmpaw source and cleanup read from the new location.
+- Cleanup deletes it only after archive verification, as today.
+- C10 still holds: the film's private work dirs are reclaimed.
+- A name collision in output_dir gets a ` (2)` suffix and must never overwrite.
+
+**B3.** Archive progress. `_poll` maps the Filmpaw task onto the archive step's progress dict:
+- `{phase: copying|verifying, copied_bytes, verified_bytes, total_bytes, files_done, files_total, items:[{name, bytes, total}], target, started_at}`
+- The UI computes speed and ETA from successive samples on the client.
+- The drawer panel matches Drawer-Archive. The chip and overview show 「归档 · NN%」.
+
+**B4.** Open folder. A control API, loopback only and UI-only, `POST /control/workflow/films/{id}/open-folder` with `{which: "output"|"archive"}`, opens the film's **recorded** folder in Explorer:
+- the output_dir package while the film is waiting for 确认/归档;
+- the archived NAS folder from the Filmpaw receipt after archive.
+- No arbitrary path is accepted.
+- It returns 409 「目录已不存在」 when the folder is gone.
+- The drawer shows 打开成品目录 or 打开归档目录 accordingly. History films included.
+- The archived folder path is persisted with the archive receipt. Add it if it is missing.
+
+### #302 — retained history (board Drawer-History)
+
+**C1.** Before the workcopy cleanup deletes the package, copy into `<data_dir>/retained/<film_id>/`:
+- the poster;
+- the thumb, if present;
+- a small JSON summary from the NFO: title, actors, marks, final folder name, archive path.
+
+`retained/` sits outside every reclaimed dir (C10), and it is never deleted by cleanup. A copy failure is logged and never blocks cleanup.
+
+**C2.** The board falls back to the retained cover and facts when the package files are gone. Finished films therefore keep their cover, title and actors.
+
+**C3.** History drawer for finished films:
+- cover with marks;
+- facts;
+- archive path;
+- 总用时;
+- the 修复耗电 total if available;
+- a per-step table (步骤 / 设备 / 用时 / 结果) built from the store's `film_timing`, receipts and cleanup results;
+- the buttons 本片参数, LTX 用时明细 (existing components) and 打开归档目录 (B4).
+
+**C4.** 已完成 is paged, so every finished film is reachable. Reuse the film-list-paging design (2026-09-26-198) and keep the current page size. The overview count shows the total.
+
+### #303 — LTX is 无码 (board Naming; Miko side is MDCX304 #299)
+
+**D1.** The workflow restore output is `<stem>-无码.mp4`, with staging at `<stem>-无码.tmp.mp4`.
+- The Jasna monitor plugin names a file `-无码` when that file's tier runs with LTX, and `-破解` otherwise.
+- Reuse detection accepts `-破解.mp4`, `-无码.mp4` and `_restored.mp4`.
+- Subtitles follow the stem as today.
+
+**D2.** The scrape request adds a per-video `ltx: bool`. It is true when:
+- restore status is `applied` (the workflow is always LTX); or
+- the input is `reused` and was named `-无码.mp4`.
+
+A `reused` `-破解`/`_restored` input sends `ltx: false`, so it keeps 破解. Update `actual_marks` and the mark verification so that ltx videos expect 无码, not 破解. Update the fake Miko to match MDCX304 #299: 无码 mosaic, `-无码` names, `<name>-poster/-fanart/-thumb.jpg`, `.zh.srt`.
+
+**D3.** The final package and the archive hold only the Chinese subtitle. A `.ja.srt` is never staged into scrape, never in the package and never archived; it stays an intermediate file and is reclaimed with the work dirs. The board and readers accept `<name>-poster.jpg` as well as `poster.jpg`. Multi-volume films (operator, 2026-10-24) get one image set per volume, each named after its own file, e.g. `KAVR-371-8K-cd1-poster.jpg`, plus a `folder.jpg` copy of the first volume's poster. The board uses the first volume's poster, or `folder.jpg`.
+
+### #304 — lost source (board Drawer-SourceMissing)
+
+**E1.** For a film that has not started a stage, check its INBOX source files (the intake manifest paths) before dispatch and on the scheduler tick. Throttle this to at most one check per film per 60 s.
+- When any file is missing, the film enters 片源丢失 with `{paths, found_at}`.
+- It is never dispatched, and nothing is deleted.
+- The board shows the badge and the drawer alert as on the board.
+
+**E2.** 重新检查 re-runs the check at once. If the files are back, the film returns to its previous waiting state.
+
+**E3.** 删除此任务 is shown for a 片源丢失 film. Offer it also for any film that has no running or claimed stage and is not archived, behind the same confirmation.
+- Refuse it while any stage is running or claimed, or while any open worker route/assignment exists.
+- On success it removes the film from the queue and board (a terminal `removed` state is acceptable), and reclaims only the film's private work dirs.
+- It never touches INBOX, output_dir or NAS.
+- It writes a task-log row.
+- The confirmation copy is exactly as on the board.
+
+## 3. Out of scope
+
+- Miko internals (MDCX304 #299).
+- Filmpaw changes. Its progress API already exists. If a field is missing, stop and record it instead.
+- Parallel ASR.
+- Worker-side ASR.
+- Deleting archived NAS films.
+- Bulk delete.
+
+## 4. Verification
+
+- Each child: targeted tests first, red, then green.
+- Backend tests use fakes: no GPU, no real WhisperJAV, Jasna or Filmpaw, and no live data.
+- UI: vitest for the panels and actions.
+- Then ruff, mypy (native, linux, darwin), npm test/lint/tsc -b/build, cargo test if touched, and the full repo pytest from the repo root.
+
+## 5. Dispositions
+
+| ID | Finding | Disposition |
+|---|---|---|
