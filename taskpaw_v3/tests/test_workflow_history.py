@@ -4,6 +4,7 @@
 
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -112,7 +113,7 @@ def test_retained_copy_failure_is_logged_and_does_not_block_cleanup(
     attempted = []
 
     def copy(source, target, *args, **kwargs):
-        if "retained" in target.parts:
+        if "retained" in Path(target).parts:  # copytree passes str
             attempted.append(target)
             raise OSError("fake disk full")
         return real_copy(source, target, *args, **kwargs)

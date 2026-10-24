@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from taskpaw_v3.agent.server import workflow_routes
 from taskpaw_v3.tests.test_workflow_control_routes import (  # noqa: F401
     client,
     host,
@@ -418,7 +419,10 @@ def test_archive_progress_reaches_list_and_detail(
 
 def test_open_recorded_output_and_archived_history(world, host, client, monkeypatch):
     opened = []
-    monkeypatch.setattr(os, "startfile", opened.append, raising=False)
+    # open_folder is Windows-only (D09); replace it so the route runs on every OS
+    monkeypatch.setattr(
+        workflow_routes, "open_folder", lambda path: opened.append(str(path))
+    )
     world.scrape()
     final = board.final_manifest(world.rt, world.film)
     recorded = board.output_dir(world.rt, final)
@@ -442,7 +446,10 @@ def test_open_recorded_output_and_archived_history(world, host, client, monkeypa
 
 def test_settings_open_directory_is_local_and_missing_is_409(tmp_path, monkeypatch):
     opened = []
-    monkeypatch.setattr(os, "startfile", opened.append, raising=False)
+    # open_folder is Windows-only (D09); replace it so the route runs on every OS
+    monkeypatch.setattr(
+        workflow_routes, "open_folder", lambda path: opened.append(str(path))
+    )
     w = SettingsWorld(tmp_path)
     url = "/control/workflow/settings/directory/open"
     headers = {"Authorization": "Bearer control-token"}
