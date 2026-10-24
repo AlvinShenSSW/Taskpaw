@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -28,6 +28,11 @@ _CONFLICTS = {
     "already_settled": "修复已完成，正在回传",
     # P2-4 R7: 改派 lost its race with the worker's claim
     "route_claimed": "已开始处理",
+    # P3 E3 (#304): 删除此任务 refused; the detail is `ActionRefused`'s own
+    "film_running": "有阶段正在运行，不能删除",
+    "film_routed": "已派往设备，请稍后再试",
+    "film_archived": "已确认入库或已入库的影片不能删除",
+    "film_intaking": "正在收录这部片，稍后再删",
 }
 
 
@@ -121,7 +126,7 @@ def runtime(host: WorkflowHostLike) -> LocalRuntime:
 
 
 def films(
-    settings: WorkflowSettings, provider: WorkflowProvider | None
+    settings: WorkflowSettings, provider: WorkflowProvider | None, done_page: int = 1
 ) -> dict[str, Any]:
     host = provider() if provider is not None else None
     if host is None:
@@ -134,7 +139,10 @@ def films(
 
     rt = host.runtime
     with _mapped():
-        films = rt.store.film_board(rt.operator)
+        paging = rt.store.done_paging(rt.operator, done_page)
+        films = rt.store.film_board(
+            rt.operator, done_offset=(paging["page"] - 1) * paging["size"]
+        )
         inputs = board_inputs(host, rt, films)
         packages = rt.store.list_intake_board(rt.operator)
         facts = board.row_facts(rt, films)
@@ -162,7 +170,8 @@ def films(
         "films": rows,
         "packages": package_rows,
         # U1 V' / V3 §7.4: the rail badges, the dispatch state and the card
-        "counts": board.counts(rows, package_rows),
+        "counts": {**board.counts(rows, package_rows), "done": paging["total"]},
+        "done_paging": paging,
         "dispatch": {
             "state": dispatch.get("state", "idle"),
             "reason": dispatch.get("reason", ""),
@@ -212,7 +221,9 @@ def film(
         from taskpaw_v3.workflow import operator_actions as ops
 
         with _mapped():
-            detail["reassign_options"] = ops.reassign_options(rt, fleet, film_id)
+            detail["reassign_options"] = ops.reassign_options(
+                rt, fleet, film_id, _held(host)
+            )
     return detail
 
 
@@ -273,7 +284,9 @@ def pass_inputs(host: Any, rt: LocalRuntime) -> dict[str, Any] | None:
     }
 
 
-def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInputs:
+def board_inputs(
+    host: Any, rt: LocalRuntime, films: Sequence[Any], *, removal: bool = True
+) -> BoardInputs:
     """A film's note, highest first: its transfer, the last routing pass's
     waiting reason, 已派往 X for an open unclaimed route (· 预取 when second
     in line), the controller's dispatcher's reason. A pass reason is left
@@ -297,6 +310,14 @@ def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInpu
         local = {**local, "device": {"id": controller, "name": LOCAL_NAME}}
     remote = dict(fleet.currents(rt.clock.now(), names)) if fleet is not None else {}
     currents = board.merged_currents(local, remote)
+    for film_id, progress in dict(
+        getattr(getattr(host, "finalizer", None), "progress", {})
+    ).items():
+        currents[film_id] = {
+            "film_id": film_id,
+            "stage": "archive",
+            "progress": progress,
+        }
     waiting = dict(dispatch.get("waiting") or {})
     extras: dict[str, Any] = {}
     if fleet is not None:
@@ -360,10 +381,52 @@ def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInpu
                 else None,
                 actions=actions,
             )
+    if removal:  # P3: the observer (#286) needs neither 片源丢失 nor 删除
+        _removal_and_sources(host, rt, films, waiting, extras)
     for film_id, value in currents.items():
         if value.get("fetching") and value.get("transfer"):
             waiting[film_id] = value["transfer"]
     return BoardInputs(status, currents, waiting, extras, names)
+
+
+def _held(host: Any) -> frozenset[str]:
+    """The films the scheduler holds (片源丢失), for the previews."""
+    sources = getattr(host, "sources", None)
+    return sources.ids() if sources is not None else frozenset()
+
+
+def _removal_and_sources(
+    host: Any,
+    rt: LocalRuntime,
+    films: Sequence[Any],
+    waiting: dict[str, str],
+    extras: dict[str, Any],
+) -> None:
+    """P3 E1/E3 (#304), in either mode: a 片源丢失 film's `{paths, found_at}`
+    (its note is the film's waiting reason) and whether 删除此任务 is offered."""
+    from taskpaw_v3.workflow import board
+    from taskpaw_v3.workflow import operator_actions as ops
+
+    sources = getattr(host, "sources", None)
+    lost = sources.lost() if sources is not None else {}
+    claimed, routed = ops.busy_films(rt)  # the guarded delete's own reads
+    for film in films:
+        missing = lost.get(film.film_id)
+        if missing is not None:
+            waiting[film.film_id] = board.SOURCE_NOTE
+        refusal = ops.removal_refusal(
+            rt, film, claimed=film.film_id in claimed, routed=film.film_id in routed
+        )
+        extras[film.film_id] = replace(
+            extras.get(film.film_id) or board.RowExtra(),
+            source_missing=None
+            if missing is None
+            else {
+                "paths": missing["paths"],
+                "found_at": board.iso(missing["found_at"]),
+            },
+            can_remove=refusal is None,
+        )
 
 
 def _route(
@@ -423,7 +486,7 @@ def plans(
     host = require_host(settings, provider)
     with _mapped():
         rt = runtime(host)
-        return plan_list(rt, remote=pass_inputs(host, rt))
+        return plan_list(rt, remote=pass_inputs(host, rt), hold=_held(host))
 
 
 def image_path(

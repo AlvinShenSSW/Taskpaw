@@ -14,7 +14,7 @@ export type StatusKey =
   | "pending" | "receiving" | "postprocess_error" | "inbox" | "restore" | "encode" | "denoise" | "asr" | "translate"
   | "return" | "scrape" | "match" | "waiting" | "checking" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
   | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopping" | "failed" | "intake_attention" | "awaiting_confirmation"
-  | "device_lost";
+  | "device_lost" | "source_missing";
 
 export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   pending: ["待处理", "amber"],
@@ -58,14 +58,16 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   intake_attention: ["收件需要处理", "amber"],
   // P2-4 R3 (OD2): the film's GPU worker stopped sending heartbeats; nothing moves until 处理.
   device_lost: ["设备失联", "red"],
+  // P3 E1 (#304): the INBOX source is gone; the film is never dispatched
+  source_missing: ["片源丢失", "red"],
 };
 
 export const REVIEW_STATES: StatusKey[] = ["awaiting_confirmation", "checking", "ready", "multi", "nomatch", "offline", "permission", "duplicate"];
 export const EXCEPTION_STATES: StatusKey[] = [
   "postprocess_error", "offline", "permission", "duplicate", "unknown", "cleanup", "stopping", "failed", "intake_attention",
-  "device_lost",
+  "device_lost", "source_missing",
 ];
-export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match"];
+export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match", "archiving"];
 
 // ── tiers (U1 V2) ───────────────────────────────────────────────────────
 export const TIER_ORDER: LtxTier[] = ["standard", "good", "high"];
@@ -143,6 +145,43 @@ export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null 
     phase, startedAt: Number.isFinite(started) ? started : null, console, split, scan, basic, ltx, metrics, params,
     timing: readRestoreTiming(step.timing),
   };
+}
+
+// #300: the existing ASR parser's snapshot, passed through by the board.
+interface AsrProgress {
+  phase?: number | null; phase_n?: number; phase_label?: string;
+  scene?: number | null; scenes?: number | null; percent?: number | null; eta_s?: number | null;
+  elapsed_s?: number; console?: string;
+  phases?: Array<{ n: number; label: string; state: "done" | "current" | "pending"; seconds: number | null }>;
+}
+
+interface ArchiveProgress {
+  phase: "copying" | "verifying"; copied_bytes: number; verified_bytes: number; total_bytes: number;
+  files_done: number; files_total: number; items: Array<{ name: string; bytes: number; total: number }>;
+  target: string; started_at: string;
+}
+
+export function archiveLive(step: WorkflowStep | undefined) {
+  if (!step || step.key !== "archive" || step.state !== "running" || !record(step.progress)) return null;
+  const progress = step.progress as unknown as ArchiveProgress;
+  return { ...progress, percent: progress.total_bytes > 0
+    ? Math.min(99, Math.floor((progress.copied_bytes + progress.verified_bytes) / (2 * progress.total_bytes) * 100)) : null };
+}
+
+export const archiveBytes = (bytes: number, total: number) => `${(bytes / 1e9).toFixed(1)} / ${(total / 1e9).toFixed(1)} GB`;
+
+export function asrLive(step: WorkflowStep | undefined) {
+  if (!step || step.key !== "asr" || step.state !== "running") return null;
+  const progress = (record(step.progress) ? step.progress : {}) as AsrProgress;
+  return { ...progress, startedAt: step.started_at ? Date.parse(step.started_at) : null,
+    console: step.console ?? progress.console ?? (typeof step.progress === "string" ? step.progress : null) };
+}
+
+export const asrEta = (seconds: number | null | undefined) => seconds == null ? null : `约 ${Math.ceil(seconds / 60)} 分钟`;
+
+export function asrSummary(live: NonNullable<ReturnType<typeof asrLive>>): string {
+  return ["识别", live.percent == null ? null : `${live.percent}%`,
+    live.scene == null ? null : `场景 ${live.scene}/${live.scenes}`, asrEta(live.eta_s)].filter(Boolean).join(" · ");
 }
 
 // ── 用时 (U1e): how long a film took, read defensively ──────────────────
@@ -341,6 +380,7 @@ export function filmStatus(row: FilmRow, preflight?: TargetPreflight | null): St
     case "archiving": return stage === "archive" && row.status === "unknown" ? "unknown" : "archiving";
     case "attention":
       if (row.attention_kind === "device_lost") return "device_lost";
+      if (row.attention_kind === "source_missing") return "source_missing";
       if (stage === "scrape") return "postprocess_error";
       if (stage.startsWith("cleanup")) return "cleanup";
       if (stage === "intake") return "intake_attention";
@@ -493,6 +533,8 @@ export function exceptionInfo(item: WorkItem, intakeReasons: (pkg: PackageRow) =
     case "stopping": return ["正在确认停止", "等待本机任务确认停止；原始来源和已完成结果保留，确认前不能重试。", "", "none"];
     case "device_lost":
       return ["设备失联", note || "后台重连中；影片不会自动改派。", "处理", "detail"];
+    case "source_missing":
+      return ["片源丢失", note || "INBOX 里的文件已不存在 · 不再派发", "处理", "detail"];
     case "intake_attention":
       return ["收件需要处理", item.kind === "package" ? intakeReasons(item.pkg) : note || "", "打开文件夹", "open-package"];
     default: {
@@ -615,6 +657,10 @@ export const percentOf = (ltx: ReturnType<typeof ltxOf>) => (ltx?.percent !== un
 // The running stage's progress as the board reports it (LTX percent, else a 0–1 fraction or a percent).
 export function progressText(item: WorkItem): string | null {
   if (item.kind !== "film") return null;
+  const archive = archiveLive(item.row.steps?.find((s) => s.key === "archive"));
+  if (archive) return archive.percent == null ? null : `${archive.percent}%`;
+  const asr = asrLive((item.row.steps ?? []).find((s) => s.key === item.row.stage));
+  if (asr) return asr.percent == null ? null : `${asr.percent}%`;
   const ltx = percentOf(ltxOf(item.row));
   if (ltx) return ltx;
   const step = (item.row.steps ?? []).find((s) => s.key === item.row.stage);

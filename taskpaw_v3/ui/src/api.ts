@@ -285,9 +285,13 @@ export interface ReassignOption {
   // 预计 (scheduler.preview): the finish and energy when it can take the film; 自动 names its device
   finish_at?: string | null; energy_wh?: number | null; machine?: { id: string; name: string } | null;
 }
+// P3 E1 (#304): an INBOX source that vanished after intake — the missing paths and when it was found
+export interface SourceMissing { paths: string[]; found_at: string }
 export interface FilmRemote {
-  attention_kind?: "device_lost" | null; route?: FilmRouteInfo | null; pin?: FilmPin | null;
+  attention_kind?: "device_lost" | "source_missing" | null; route?: FilmRouteInfo | null; pin?: FilmPin | null;
   actions?: FilmActions | null;
+  // P3 E1/E3: 片源丢失 {paths, found_at}; whether 删除此任务 is offered (no stage running or claimed, not archived)
+  source_missing?: SourceMissing | null; can_remove?: boolean;
   // #298 (§9 CX27): the 失联 worker, also when its route is on an older input revision
   lost_worker?: { id: string; name: string } | null;
 }
@@ -401,6 +405,7 @@ export interface WorkflowCounts {
 export interface WorkflowFilms {
   state: string; reason: string | null; current: WorkflowCurrent | null; intake: WorkflowIntake | null;
   films: FilmRow[]; packages: PackageRow[]; counts: WorkflowCounts;
+  done_paging?: { total: number; size: number; page: number; pages: number };
   // null without a host (dispatch) or without a probed GPU
   dispatch: WorkflowDispatch | null; gpu: WorkflowGpu | null;
   // PWR-2: the cluster's live estimate and the history behind 预计耗电 / 每片能耗
@@ -419,6 +424,8 @@ export interface FilmDetail extends FilmRemote {
   cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
   resolution: Resolution | null; receipt_id: string | null; revisions: FilmRevisions; plan: FilmPlan | null;
   timing?: FilmTiming | null;
+  history?: { completed_at: string | null; total_seconds: number | null;
+    steps: Array<{ key: string; device: string; seconds: number | null; result: string }> } | null;
   duration_ms?: number | null; energy?: FilmEnergy | null; live_power?: LivePower | null;
   // null when Miko is not configured
   lookup: PlanLookup | null;
@@ -514,12 +521,13 @@ export interface PlanChoice { film_id: string; input_revision: number; ltx_model
 export type WorkflowRole = "off" | "controller" | "worker";
 export interface WorkflowSettingsView {
   enabled: boolean; role: WorkflowRole;
-  inbox_root: string | null; data_dir: string | null; ffprobe_path: string | null;
+  inbox_root: string | null; data_dir: string | null; output_dir?: string | null; ffprobe_path: string | null;
   jasna_exe_path: string | null; whisperjav_exe_path: string | null; ltx_gpu: string;
   mdcx_python: string | null; mdcx_root: string | null; mdcx_profile: string | null; filmpaw_data_dir: string | null;
   remote_workers: boolean; worker_api_port: number; staging_dir: string | null; staging_cap_gb: number;
 }
 export interface WorkflowSettingsState {
+  output_dir_default?: boolean; // derived location; the wizard follows its chosen data_dir
   saved: WorkflowSettingsView; running: WorkflowSettingsView; restart_required: boolean;
   busy: { films: number; remote: number; unknown: boolean };
   presets: Array<{ id: string; label: string }>;
@@ -533,7 +541,7 @@ export interface WorkflowSettingsState {
 }
 // #299 review IR10: `create_dirs` names the suggested folders the save makes once it validated
 export type WorkflowSettingsPatch = { role: WorkflowRole } & Partial<Omit<WorkflowSettingsView, "enabled" | "role">>
-  & { create_dirs?: Array<"inbox_root" | "data_dir" | "staging_dir"> };
+  & { create_dirs?: Array<"inbox_root" | "data_dir" | "output_dir" | "staging_dir"> };
 // #299: the first-run wizard, 网络与访问, detection, 立即重启 and the Hub's settings.
 export type SetupRole = "agent" | "controller" | "worker";
 export type SetupStep = "role" | "network" | "controller" | "worker_fields" | "worker_join" | "done";
@@ -838,12 +846,12 @@ export const api = {
     send<{ ok: boolean }>("hub", "PATCH", "/config", { polling_token }),
   // Media workflow (T06-P1 §8): local control API only; paths are resolved by film id.
   power: (range: PowerRange) => get<PowerView>("agent", `/control/power?range=${range}`),
-  hubWorkflowFilms: (serverId: number) => get<WorkflowFilms>("hub", `/servers/${serverId}/workflow/films`),
+  hubWorkflowFilms: (serverId: number, donePage = 1) => get<WorkflowFilms>("hub", `/servers/${serverId}/workflow/films?done_page=${donePage}`),
   hubWorkflowFilm: (serverId: number, filmId: string) => get<FilmDetail>("hub", `/servers/${serverId}/workflow/films/${seg(filmId)}`),
   hubWorkflowPlans: (serverId: number) => get<WorkflowPlans>("hub", `/servers/${serverId}/workflow/plans`),
   hubWorkflowImagePath: (serverId: number, filmId: string, kind: "poster" | "cover") =>
     `/servers/${serverId}/workflow/films/${seg(filmId)}/${kind}`,
-  workflowFilms: () => get<WorkflowFilms>("agent", "/control/workflow/films"),
+  workflowFilms: (donePage = 1) => get<WorkflowFilms>("agent", `/control/workflow/films?done_page=${donePage}`),
   workflowFilm: (filmId: string) => get<FilmDetail>("agent", `/control/workflow/films/${seg(filmId)}`),
   performers: (query: string) =>
     get<{ items: Performer[] }>("agent", `/control/workflow/performers?${new URLSearchParams({ q: query })}`),
@@ -851,6 +859,8 @@ export const api = {
     send<{ approval_id: string }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/confirm`, { performer_id }),
   workflowRetry: (filmId: string, stage: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/retry`, { stage }),
+  workflowOpenFolder: (filmId: string, which: "output" | "archive") =>
+    send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open-folder`, { which }),
   workflowOpen: (filmId: string, what: "inbox" | "output") =>
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
   // U1: the plan gate (待处理), the archive target preflight, metadata lookup and the global pause.
@@ -895,6 +905,13 @@ export const api = {
   // P2-3 R9: 停止并重新排队 of a running remote restore or ASR
   workflowRequeue: (filmId: string, attemptId: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/requeue`, { attempt_id: attemptId }),
+  // P3 E2: 重新检查 of a 片源丢失 film; `source_missing` is null once the files are back; `unreachable`:
+  // the INBOX share could not be reached, so nothing was learned
+  workflowRecheckSource: (filmId: string) =>
+    send<{ ok: boolean; source_missing: SourceMissing | null; unreachable?: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/recheck-source`, {}),
+  // P3 E3: 删除此任务 — 409 (coded) while a stage runs or is claimed, or the film was confirmed or archived
+  workflowRemove: (filmId: string) =>
+    send<{ ok: boolean; leftover: number }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/remove`, {}),
   // P2-4 R7: 改派 (null = 自动) — 409 `route_claimed` 「已开始处理」 when a claim won
   workflowPin: (filmId: string, input_revision: number, expected_version: number, worker_id: string | null) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/pin`, { input_revision, expected_version, worker_id }),
@@ -906,6 +923,8 @@ export const api = {
   workflowSaveSettings: (patch: WorkflowSettingsPatch) =>
     send<{ ok: boolean; restart_required: boolean; message?: string }>("agent", "PUT", "/control/workflow/settings", patch),
   // 「创建此目录」: a local absolute folder (422 `fields.path` otherwise)
+  workflowOpenDir: (path: string) =>
+    send<void>("agent", "POST", "/control/workflow/settings/directory/open", { path }),
   workflowCreateDir: (path: string) =>
     send<{ ok: boolean; created: boolean }>("agent", "POST", "/control/workflow/settings/directory", { path }),
   // #299: first-run wizard (§6), 网络与访问 (R4–R6), detection (§5), 立即重启 (§3)

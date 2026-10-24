@@ -50,6 +50,7 @@ from .timing import WorkflowLog, film_timing
 
 if TYPE_CHECKING:
     from .finalize import Finalizer
+    from .source_watch import SourceWatch
 
 log = logging.getLogger("taskpaw.workflow.dispatch")
 
@@ -245,8 +246,11 @@ class LocalDispatcher:
         ]
         | None = None,
         remote_enabled: bool = False,
+        sources: SourceWatch | None = None,
     ) -> None:
         self.runtime, self.lease = runtime, lease
+        # P3 E1 (#304): films whose INBOX source vanished are never dispatched
+        self.sources = sources
         # P2-2 IR1: `workflow.remote_workers`; off, every stage runs here
         self.remote_enabled = remote_enabled
         # PWR-2: the agent's power sampler, read late (it starts after the host)
@@ -509,6 +513,8 @@ class LocalDispatcher:
         for job in jobs:
             if self.paused:  # a pause arrived while admission was blocked
                 return self._paused_exit()
+            if self.sources is not None and self.sources.check(job.film_id):
+                continue  # 片源丢失: the board says why; 重新检查 lets it go on
             manifest = rt.store.get_input_manifest(
                 rt.operator, job.film_id, job.input_revision
             )

@@ -140,7 +140,8 @@ def _files(root: Path) -> dict[str, str]:
 
 
 def _scrape_out(world: World) -> Path:
-    return next((world.rt.work_dir / "scrape").rglob(f"{FILM_DIR}.nfo")).parent
+    # #303: Miko names the files after the film (`ABC-123-无码-C.nfo`)
+    return world.rt.output_dir / FILM_DIR
 
 
 def test_one_click_archives_once_and_cleans_both_scopes(world):

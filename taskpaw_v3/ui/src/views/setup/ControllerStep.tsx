@@ -14,22 +14,23 @@ import { type StepProps } from "./model";
 // (each with 更改), 允许 GPU 工作机接入 (OD7 R11: Jasna shows only while it is off) and 高级.
 // Saved through PUT /control/workflow/settings with every P2-4 guard.
 type Form = {
-  inbox_root: string; data_dir: string; ffprobe_path: string; jasna_exe_path: string; whisperjav_exe_path: string;
+  inbox_root: string; data_dir: string; output_dir: string; ffprobe_path: string; jasna_exe_path: string; whisperjav_exe_path: string;
   mdcx_python: string; mdcx_root: string; mdcx_profile: string; remote_workers: boolean; worker_api_port: string;
 };
 const LABELS: Record<string, string> = {
-  inbox_root: "INBOX 目录", data_dir: "工作目录", ffprobe_path: "ffprobe", jasna_exe_path: "Jasna", whisperjav_exe_path: "WhisperJAV",
+  output_dir: "成品目录", inbox_root: "INBOX 目录", data_dir: "工作目录", ffprobe_path: "ffprobe", jasna_exe_path: "Jasna", whisperjav_exe_path: "WhisperJAV",
   mdcx_python: "Miko Python", mdcx_root: "Miko 目录", mdcx_profile: "Miko 配置", remote_workers: "允许 GPU 工作机接入",
   worker_api_port: "工作机接口端口", role: "本机角色",
 };
 
-function formOf(saved: WorkflowSettingsView, d: Detection | undefined): Form {
+function formOf(saved: WorkflowSettingsView, d: Detection | undefined, defaultOutput: boolean): Form {
   const tool = (value: string | null, found?: { found: boolean; path: string | null }) => value ?? (found?.found ? found.path ?? "" : "");
   const miko = d?.tools.miko.status === "complete" ? d.tools.miko : null;
   const ffprobe = d?.tools.ffprobe;
   return {
     inbox_root: saved.inbox_root ?? d?.suggested.inbox ?? "",
     data_dir: saved.data_dir ?? d?.suggested.data_dir ?? "",
+    output_dir: (defaultOutput ? null : saved.output_dir) ?? `${saved.data_dir ?? d?.suggested.data_dir ?? ""}\\成品`,
     // PATH is enough for ffprobe (P2-4 §9 IR6): only another source is written down
     ffprobe_path: saved.ffprobe_path ?? (ffprobe?.found && ffprobe.source !== "path" ? ffprobe.path ?? "" : ""),
     jasna_exe_path: tool(saved.jasna_exe_path, d?.tools.jasna),
@@ -47,25 +48,26 @@ export function ControllerStep({ advance, go }: StepProps) {
   const detect = useDetect();
   if (settings.isLoading || detect.isLoading) return <Typography color="text.secondary">正在检测本机…</Typography>;
   if (!settings.data) return <Alert severity="error">无法读取媒体工作流设置</Alert>;
-  return <ControllerForm saved={settings.data.saved} detection={detect.data} refresh={detect.refresh}
+  return <ControllerForm saved={settings.data.saved} defaultOutput={settings.data.output_dir_default ?? false} detection={detect.data} refresh={detect.refresh}
     fetching={detect.isFetching} advance={advance} go={go} />;
 }
 
-function ControllerForm({ saved, detection, refresh, fetching, advance, go }: {
-  saved: WorkflowSettingsView; detection: Detection | undefined; refresh: () => Promise<void>; fetching: boolean;
+function ControllerForm({ saved, defaultOutput, detection, refresh, fetching, advance, go }: {
+  saved: WorkflowSettingsView; defaultOutput: boolean; detection: Detection | undefined; refresh: () => Promise<void>; fetching: boolean;
   advance: StepProps["advance"]; go: StepProps["go"];
 }) {
   const qc = useQueryClient();
-  const [form, setForm] = useState<Form>(() => formOf(saved, detection));
+  const [form, setForm] = useState<Form>(() => formOf(saved, detection, defaultOutput));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [failure, setFailure] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [made, setMade] = useState<string | null>(null);
   // a later detection fills fields the operator has not touched yet
-  useEffect(() => { if (detection) setForm((p) => ({ ...formOf(saved, detection), ...nonEmpty(p), remote_workers: p.remote_workers })); }, [detection, saved]);
+  useEffect(() => { if (detection) setForm((p) => ({ ...formOf(saved, detection, defaultOutput), ...nonEmpty(p), remote_workers: p.remote_workers })); }, [detection, saved, defaultOutput]);
   const inboxFacts = useDirFacts(form.inbox_root);
+  const outputFacts = useDirFacts(form.output_dir);
   const set = (k: keyof Form, v: string | boolean) => {
-    setForm((p) => ({ ...p, [k]: v }));
+    setForm((p) => ({ ...p, [k]: v, ...(k === "data_dir" && p.output_dir === `${p.data_dir}\\成品` ? { output_dir: `${v}\\成品` } : {}) }));
     setErrors((p) => { const n = { ...p }; delete n[k]; return n; });
   };
   const pick = async (k: keyof Form, label: string, directory: boolean) => {
@@ -73,24 +75,27 @@ function ControllerForm({ saved, detection, refresh, fetching, advance, go }: {
     if (picked !== null) set(k, picked);
   };
   const suggested = detection?.suggested;
-  const isSuggested = (k: "inbox_root" | "data_dir") =>
-    Boolean(form[k].trim()) && form[k].trim() === (k === "inbox_root" ? suggested?.inbox : suggested?.data_dir);
-  const createDir = async (path: string) => {
+  const isSuggested = (k: "inbox_root" | "data_dir" | "output_dir") =>
+    Boolean(form[k].trim()) && form[k].trim() === (k === "inbox_root" ? suggested?.inbox : k === "output_dir" ? `${form.data_dir}\\成品` : suggested?.data_dir);
+  const createDir = async (path: string, key = "inbox_root") => {
     try { await api.workflowCreateDir(path); setMade(path); qc.invalidateQueries({ queryKey: ["dirFacts"] }); } catch (e) {
-      if (e instanceof HttpError && e.fields?.path) setErrors((p) => ({ ...p, inbox_root: e.fields?.path ?? "" }));
+      if (e instanceof HttpError && e.fields?.path) setErrors((p) => ({ ...p, [key]: e.fields?.path ?? "" }));
       else setFailure(e instanceof Error ? e.message : String(e));
     }
+  };
+  const openDir = async (path: string) => {
+    try { await api.workflowOpenDir(path); } catch (e) { setFailure(e instanceof Error ? e.message : String(e)); }
   };
   const next = async () => {
     setBusy(true); setFailure(null); setErrors({});
     try {
       // §5 / review IR10: a suggested directory is made by the save itself, only once it validated
-      const create = (["inbox_root", "data_dir"] as const).filter((k) => isSuggested(k));
+      const create = (["inbox_root", "data_dir", "output_dir"] as const).filter((k) => isSuggested(k));
       const port = form.worker_api_port.trim();
       if (!/^\d+$/.test(port)) { setErrors({ worker_api_port: "请输入整数" }); return; }
       const text = (k: keyof Form) => String(form[k]).trim() || null;
       await api.workflowSaveSettings({
-        role: "controller", inbox_root: text("inbox_root"), data_dir: text("data_dir"), ffprobe_path: text("ffprobe_path"),
+        role: "controller", inbox_root: text("inbox_root"), data_dir: text("data_dir"), output_dir: text("output_dir"), ffprobe_path: text("ffprobe_path"),
         whisperjav_exe_path: text("whisperjav_exe_path"), remote_workers: form.remote_workers, worker_api_port: Number(port),
         mdcx_python: text("mdcx_python"), mdcx_root: text("mdcx_root"), mdcx_profile: text("mdcx_profile"),
         ...(form.remote_workers ? {} : { jasna_exe_path: text("jasna_exe_path") }),
@@ -130,6 +135,14 @@ function ControllerForm({ saved, detection, refresh, fetching, advance, go }: {
         )}
         {field("data_dir", "工作目录（处理中的副本）", true)}
         {form.data_dir.trim() && <DirFacts path={form.data_dir} sameDriveAs={form.inbox_root} />}
+        {field("output_dir", "成品目录", true, "刮削完成、等待确认和归档的影片放在这里，每部一个文件夹（即最终的归档文件夹）；归档校验通过后删除。")}
+        <Stack direction="row" spacing={1}>
+          <Button size="small" sx={{ minHeight: 44 }} aria-label="打开 成品目录" disabled={!form.output_dir.trim()}
+            onClick={() => void openDir(form.output_dir.trim())}>打开</Button>
+          {outputFacts.data?.exists === false && made !== form.output_dir.trim() && <Button size="small" variant="outlined" sx={{ minHeight: 44 }}
+            onClick={() => void createDir(form.output_dir.trim(), "output_dir")}>创建此目录</Button>}
+        </Stack>
+        {form.output_dir.trim() && <DirFacts path={form.output_dir} />}
         <Stack spacing={0}>
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
             <Typography variant="subtitle2" component="h2">工具自动检测</Typography>
@@ -163,7 +176,7 @@ function ControllerForm({ saved, detection, refresh, fetching, advance, go }: {
           </Typography>
           {errors.remote_workers && <Typography variant="body2" color="error">{errors.remote_workers}</Typography>}
         </Stack>
-        <details open={Object.keys(errors).some((k) => k !== "inbox_root" && k !== "data_dir") || undefined}>
+        <details open={Object.keys(errors).some((k) => k !== "inbox_root" && k !== "data_dir" && k !== "output_dir") || undefined}>
           <summary style={{ cursor: "pointer", minHeight: 44, display: "flex", alignItems: "center" }}>
             高级<span style={{ opacity: 0.7 }}>&nbsp;· 端口 {form.worker_api_port} · Filmpaw 默认</span>
           </summary>

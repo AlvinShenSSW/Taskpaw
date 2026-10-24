@@ -383,8 +383,8 @@ class Fleet:
             )
         )
 
-        def racing(auth):
-            snapshot = real(auth)
+        def racing(auth, *hold):
+            snapshot = real(auth, *hold)
             meanwhile()
             return snapshot
 
@@ -633,8 +633,8 @@ def test_a_stale_snapshot_decision_loses_its_cas(tmp_path, monkeypatch):
         )
         real = rt.store.routing_snapshot
 
-        def racing(auth):
-            snapshot = real(auth)
+        def racing(auth, *hold):
+            snapshot = real(auth, *hold)
             route(rt, film, remote.worker_id, reason="并发")  # someone was faster
             return snapshot
 
@@ -673,8 +673,8 @@ def test_a_withdrawal_decided_before_a_repin_loses_its_cas(tmp_path, monkeypatch
         )
         real = rt.store.routing_snapshot
 
-        def racing(auth):
-            snapshot = real(auth)
+        def racing(auth, *hold):
+            snapshot = real(auth, *hold)
             rt.store.set_pin(
                 rt.operator,
                 rt.meta(),
@@ -728,8 +728,8 @@ def test_a_lost_withdrawal_frees_no_slot_for_the_pass(tmp_path, monkeypatch):
         real = rt.store.routing_snapshot
         raced = []
 
-        def racing(auth):
-            snapshot = real(auth)
+        def racing(auth, *hold):
+            snapshot = real(auth, *hold)
             if not raced:
                 raced.append(True)
                 rt.store.set_pin(

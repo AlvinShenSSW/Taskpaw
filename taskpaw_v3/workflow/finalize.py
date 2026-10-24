@@ -21,6 +21,8 @@ from datetime import timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
+from taskpaw_v3.core.state import atomic_json
+
 from . import file_identity
 from . import models as m
 from .filmpaw_client import FilmpawClient, FilmpawRefused, FilmpawUnavailable
@@ -71,6 +73,7 @@ class Finalizer:
     ) -> None:
         self.runtime, self.inbox, self.filmpaw = runtime, inbox, filmpaw
         self.waiting: dict[str, str] = {}
+        self.progress: dict[str, dict[str, Any]] = {}
         # set by the dispatcher: stop between films and between members on shutdown
         self.cancel = threading.Event()
         self.reclaim_dir = runtime.data_dir / "reclaim"
@@ -84,14 +87,14 @@ class Finalizer:
         if (
             member.root_id == rt.identity.work_root_id
         ):  # final items are film-dir relative
-            return rt.work_dir / final.output_relative_path / member.relative_path
+            return rt.final_dir(final) / member.relative_path
         if member.root_id == rt.identity.root_id and self.inbox is not None:
             base = self.inbox / package if package else self.inbox
             return base / member.relative_path
         raise ConfirmError(f"无法定位清理成员的根目录：{member.root_id}")
 
     def _package_dir(self, final: m.FinalManifest) -> Path:
-        return self.runtime.work_dir / final.output_relative_path
+        return self.runtime.final_dir(final)
 
     # ── 图文确认 preflight (V3 §7.3) ─────────────────────────────────────
     def preflight(self, film_id: str, performer_id: str | None) -> dict[str, Any]:
@@ -438,6 +441,7 @@ class Finalizer:
     ) -> bool:
         approval = wf.approval
         if approval is None or approval.approval_id != op.approval_id:
+            self.progress.pop(wf.film_id, None)
             waiting[wf.film_id] = "归档审批已变化"
             return False
         try:
@@ -449,12 +453,40 @@ class Finalizer:
             waiting[wf.film_id] = f"Filmpaw 查询失败：{e.message}"
             return False
         if task is None:  # never accepted: the same operation key is safe to submit
+            self.progress.pop(wf.film_id, None)
             self._submit(wf.film_id, op.operation_id, approval.binding, waiting)
             return True
         status = task.get("status")
         if status in ("queued", "running"):
+            previous = self.progress.get(wf.film_id, {})
+            self.progress[wf.film_id] = {
+                "phase": "verifying"
+                if task.get("phase") in ("verifying", "committing")
+                else "copying",
+                "copied_bytes": task.get("progress_bytes", 0),
+                "verified_bytes": task.get("verified_bytes", 0),
+                "total_bytes": task.get("total_bytes", 0),
+                "files_done": task.get("completed_count", 0),
+                "files_total": task.get("total_count", 0),
+                "items": [
+                    {
+                        "name": item["name"],
+                        "bytes": item["progress_bytes"],
+                        "total": item["size_bytes"],
+                    }
+                    for item in task.get("items", [])
+                ],
+                "target": str(
+                    Path(approval.binding.target.export_identity)
+                    / approval.binding.target.relative_path
+                ),
+                "started_at": task.get("created_at")
+                or previous.get("started_at")
+                or self.runtime.clock.now().isoformat(),
+            }
             waiting[wf.film_id] = "归档中"
             return False
+        self.progress.pop(wf.film_id, None)
         if status == "completed" and task.get("receipt"):
             self._accept(wf, op, approval.binding, task)
             return True
@@ -598,6 +630,8 @@ class Finalizer:
         else:
             operation_id, version = current.operation_id, current.version
             statuses = {i.item_id: i.status for i in current.items}
+        if scope == "workcopy":
+            self._retain(wf, final)
         results = []
         for member in manifest.members:
             if self.cancel.is_set():
@@ -660,6 +694,49 @@ class Finalizer:
             reason = blocked[0].status if blocked else "部分文件已变化"
             waiting[wf.film_id] = f"待清理：{len(blocked)} 个文件未能删除（{reason}）"
         return True
+
+    def _retain(self, wf: m.FilmWorkflow, final: m.FinalManifest) -> None:
+        """#302: small history assets, outside all C10 work dirs; best effort."""
+        from . import board
+
+        rt = self.runtime
+        retained = rt.data_dir / "retained" / wf.film_id
+        try:
+            retained.mkdir(parents=True, exist_ok=True)
+            poster = board._poster_item(final)
+            thumb = next((i for i in final.items if i.role == "thumb"), None)
+            for item in (poster, thumb):
+                if item is None:
+                    continue
+                source = self._package_dir(final) / item.relative_path
+                if (
+                    not source.is_file()
+                ):  # cleanup resumed after this member was deleted
+                    continue
+                target = retained / item.relative_path
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = target.with_suffix(target.suffix + ".tmp")
+                    shutil.copyfile(source, tmp)
+                    tmp.replace(target)
+                except OSError as exc:
+                    log.warning("retained image for %s failed: %s", wf.film_id, exc)
+            nfo = board._item_path(rt, final, "nfo")
+            if nfo is not None:
+                title, actors, number = board._read_nfo(nfo)
+                atomic_json(
+                    retained / "summary.json",
+                    {
+                        "title": title,
+                        "actors": list(actors),
+                        "number": number,
+                        "marks": list(final.postprocess.actual_marks),
+                        "final_name": PurePosixPath(final.output_relative_path).name,
+                        "archive_path": wf.archive_path,
+                    },
+                )
+        except OSError as exc:
+            log.warning("retained history for %s failed: %s", wf.film_id, exc)
 
     def _admit(
         self,
@@ -800,19 +877,31 @@ class Finalizer:
     def _reclaim_film(self, film_id: str) -> bool:
         """Taskpaw's own per-film dirs: compute attempts, return package, scrape
         attempts and the Miko lookup cache (IR07)."""
-        rt = self.runtime
-        view = rt.store.get_film(rt.operator, film_id)
-        dirs = [
-            rt.work_dir / attempt.attempt_id
-            for stage in view.stages
-            if stage.stage in ("restore", "asr", "translate")
-            for attempt in rt.store.list_attempts(rt.operator, stage.job_id)
-        ]
-        for parent in ("return", "scrape", "lookup"):
-            dirs.extend((rt.work_dir / parent).glob(f"{film_id}-r*"))
+        film = self.runtime.store.get_film(self.runtime.operator, film_id).film
+        if film.current_final_revision is not None:
+            final = self.runtime.store.get_final_manifest(
+                self.runtime.operator, film_id, film.current_final_revision
+            )
+            _rmdir_empty(self._package_dir(final))
+        dirs = film_work_dirs(self.runtime, film_id)
         for path in dirs:
             shutil.rmtree(path, ignore_errors=True)  # a locked file: retried next tick
         return not any(path.exists() for path in dirs)
+
+
+def film_work_dirs(rt: LocalRuntime, film_id: str) -> list[Path]:
+    """The film's private dirs under the work dir: one per compute attempt, and
+    its return package, scrape attempts and Miko lookup cache (IR07)."""
+    view = rt.store.get_film(rt.operator, film_id)
+    dirs = [
+        rt.work_dir / attempt.attempt_id
+        for stage in view.stages
+        if stage.stage in ("restore", "asr", "translate")
+        for attempt in rt.store.list_attempts(rt.operator, stage.job_id)
+    ]
+    for parent in ("return", "scrape", "lookup"):
+        dirs.extend((rt.work_dir / parent).glob(f"{film_id}-r*"))
+    return dirs
 
 
 def _rmdir_empty(root: Path) -> None:

@@ -153,7 +153,7 @@ class WorkflowEvents:
 
             rt = host.runtime
             films = rt.store.film_board(rt.operator, done_limit=None, energies=False)
-            inputs = board_inputs(host, rt, films)  # P2-4 R1: as the board
+            inputs = board_inputs(host, rt, films, removal=False)  # P2-4 R1
             status = inputs.status
             dispatch = status.get("dispatch") or {}
             facts = board.row_facts(rt, films)

@@ -32,6 +32,7 @@ from .intake_protocol import ProbeArtifact
 from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
 from .lookup import MetadataLookup
+from .source_watch import SourceWatch
 from .timing import TaskLogSink, WorkflowLog
 from .transfer import Transfers, live_attempts
 
@@ -286,6 +287,8 @@ class LocalWorkflowHost:
         self.intake: Any = None
         self.dispatcher: LocalDispatcher | None = None
         self.finalizer: Finalizer | None = None
+        # P3 E1 (#304): films whose INBOX source vanished
+        self.sources: SourceWatch | None = None
         # P2-2: the workers' live state, while the worker API is on
         self.fleet: FleetLive | None = None
         self.transfers: Transfers | None = None
@@ -313,7 +316,13 @@ class LocalWorkflowHost:
 
     def _boot(self) -> None:
         try:
-            rt = self.runtime = LocalRuntime(self.data_dir, self.executors)
+            rt = self.runtime = LocalRuntime(
+                self.data_dir,
+                self.executors,
+                output_dir=Path(self.settings.output_dir)
+                if self.settings.output_dir
+                else None,
+            )
             if self.executor_factory is not None:  # executors that read the ledger
                 rt.executors = {e.stage: e for e in self.executor_factory(rt)}
             rt.open()
@@ -355,8 +364,12 @@ class LocalWorkflowHost:
                 Path(inbox) if inbox else None,
                 FilmpawClient(Path(data) if data else None),
             )
+            self.sources = SourceWatch(
+                rt, Path(inbox) if inbox else None, on_change=self._on_sources
+            )
             self.dispatcher = LocalDispatcher(
                 rt,
+                sources=self.sources,
                 return_step=self.return_step,
                 scrape_step=self.scrape_step,
                 off_reasons=self.off_reasons,
@@ -482,6 +495,12 @@ class LocalWorkflowHost:
         if self.scheduler is not None:
             self.scheduler.wake()
 
+    def _on_sources(self) -> None:
+        """A film entered or left 片源丢失: route again, dispatch again."""
+        self._wake_scheduler()
+        if self.dispatcher is not None:
+            self.dispatcher.wake()
+
     def _local_resolved(
         self, rt: LocalRuntime, job: m.PendingComputeJob, name: str, outcome: Any
     ) -> None:
@@ -525,6 +544,15 @@ class LocalWorkflowHost:
             return
         from .routing import run_pass
 
+        # P3 #304 IR1: the pass looks at the sources itself, whether or not
+        # the dispatcher is paused or busy with a stage
+        hold: frozenset[str] = frozenset()
+        if self.sources is not None:
+            try:
+                hold = self.sources.check_candidates()
+            except Exception:
+                log.exception("source check before the routing pass failed")
+                hold = self.sources.ids()
         outcome = run_pass(
             rt.store,
             rt.operator,
@@ -536,6 +564,7 @@ class LocalWorkflowHost:
             controller_free_bytes=inputs["controller_free_bytes"],
             remote_enabled=True,
             live_since=inputs["live_since"],
+            hold=hold,
         )
         self.last_pass = outcome.planned
         if (outcome.routed or outcome.withdrawn) and self.dispatcher is not None:

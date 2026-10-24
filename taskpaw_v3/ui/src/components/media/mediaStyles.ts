@@ -302,6 +302,8 @@ export const MEDIA_CSS = `
 .mw .detail-hero{display:flex;gap:22px;align-items:center;margin-bottom:24px}
 .mw .detail-hero h2{font-size:24px;margin-bottom:8px;overflow-wrap:anywhere}
 .mw .detail-hero p{font-size:12px;color:var(--muted);margin-top:8px}
+.mw .history-hero .cover.large{width:120px;height:160px}
+.mw .history-hero>div:last-child{min-width:0;flex:1}
 .mw .detail-progress{padding:18px;background:#0b1726;border:1px solid #2e465e;border-radius:10px}
 .mw .final-panel{padding:20px}
 .mw .confirmation-layout{display:grid;grid-template-columns:108px minmax(0,1fr);gap:20px;margin-bottom:20px}

@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from taskpaw_v3.core.config import AgentConfig, WorkflowSettings
@@ -60,6 +60,7 @@ STORE_TIMEOUT = 2.0  # seconds: the guard looks at the store, never waits on it
 PATHS = (
     "inbox_root",
     "data_dir",
+    "output_dir",
     "ffprobe_path",
     "jasna_exe_path",
     "whisperjav_exe_path",
@@ -69,7 +70,7 @@ PATHS = (
     "filmpaw_data_dir",
     "staging_dir",
 )
-_DIRS = ("inbox_root", "mdcx_root")
+_DIRS = ("inbox_root", "output_dir", "mdcx_root")
 _FILES = (
     "ffprobe_path",
     "jasna_exe_path",
@@ -102,10 +103,11 @@ def role_of(settings: WorkflowSettings) -> Role:
     return settings.role if settings.enabled else "off"
 
 
-def view(settings: WorkflowSettings) -> dict[str, Any]:
+def view(settings: WorkflowSettings, config_dir: Path | None = None) -> dict[str, Any]:
     """The section's fields (every one is a path, a switch or a number)."""
     value = settings.model_dump(include={"enabled", *FIELDS, "role"})
     value["role"] = role_of(settings)
+    value["output_dir"] = effective_output(settings, config_dir)
     return value
 
 
@@ -161,7 +163,7 @@ def miko_status(found: dict[str, str | None]) -> str:
     return "off" if all(state is None for state in states) else "partial"
 
 
-CREATABLE = ("inbox_root", "data_dir", "staging_dir")
+CREATABLE = ("inbox_root", "data_dir", "output_dir", "staging_dir")
 
 
 def parse_create_dirs(body: Any, fields: dict[str, Any]) -> tuple[str, ...]:
@@ -230,6 +232,11 @@ def default_data_dir(
     if settings.data_dir:
         return Path(settings.data_dir)
     return config_dir / "workflow" if config_dir is not None else None
+
+
+def effective_output(settings: WorkflowSettings, config_dir: Path | None) -> str | None:
+    data = default_data_dir(settings, config_dir)
+    return settings.output_dir or (str(data / "成品") if data else None)
 
 
 # ── the body ────────────────────────────────────────────────────────────
@@ -307,7 +314,7 @@ def validate(
         if name not in hidden and raw and (why := _path_error(raw)):
             errors[name] = why
     if role != "off":
-        _validate_role(new, config, errors, creating)
+        _validate_role(new, config, errors, creating, config_dir)
     if "data_dir" not in errors:
         held = _data_dir_held(new, (old, running), config_dir)
         if held:
@@ -320,6 +327,18 @@ def validate(
         errors.setdefault("worker_api_port", PORT_PAIRED)
     if errors:
         raise Refused(422, "设置有误", fields=errors)
+    if any(
+        _moved(effective_output(new, config_dir), effective_output(ref, config_dir))
+        for ref in (old, running)
+    ):
+        if not state.store_known:
+            raise Refused(409, UNKNOWN, code="workflow_busy")
+        if state.outputs:
+            raise Refused(
+                409,
+                "还有影片等待确认或归档，请先暂停派发并等待归档完成",
+                code="workflow_busy",
+            )
 
 
 def _validate_role(
@@ -327,6 +346,7 @@ def _validate_role(
     config: AgentConfig,
     errors: dict[str, str],
     creating: tuple[str, ...] = (),
+    config_dir: Path | None = None,
 ) -> None:
     from taskpaw_v3.workflow.staging import StagingError, validate_dir
 
@@ -337,10 +357,21 @@ def _validate_role(
     for name in needed:
         if not getattr(new, name):
             errors.setdefault(name, "请填写")
+    if role == "controller" and "output_dir" not in errors:
+        try:
+            path = validate_dir(effective_output(new, config_dir))
+            if sys.platform == "win32":
+                import ctypes
+
+                if ctypes.windll.kernel32.GetDriveTypeW(f"{path.drive}\\") != 3:
+                    errors["output_dir"] = "成品目录必须在本机固定磁盘上"
+        except StagingError as exc:
+            errors["output_dir"] = str(exc).replace("暂存目录", "成品目录")
     for name in _DIRS:
         raw = getattr(new, name)
         if (
             raw
+            and name not in _unused(new)
             and name not in errors
             and name not in creating
             and not Path(raw).is_dir()
@@ -385,7 +416,7 @@ def _unused(new: WorkflowSettings) -> tuple[str, ...]:
     WhisperJAV; a controller with GPU workers has no Jasna (ASR stays local)."""
     role = role_of(new)
     if role == "worker":
-        return ("whisperjav_exe_path",)
+        return ("whisperjav_exe_path", "output_dir")
     if role == "controller" and new.remote_workers:
         return ("jasna_exe_path",)
     return ()
@@ -464,6 +495,7 @@ class Retained:
     `store_known` / `worker_known` False: some state could not be read, and
     unknown is never idle."""
 
+    outputs: int = 0  # final packages waiting for confirmation/archive
     films: int = 0  # with an unresolved compute assignment, an open route or archive
     remote: int = 0  # of which on a GPU worker
     store_known: bool = True
@@ -491,7 +523,7 @@ def _open_store(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(uri, uri=True, timeout=STORE_TIMEOUT)
 
 
-def _read_store(directory: Path) -> tuple[set[str], set[str], bool]:
+def _read_store(directory: Path) -> tuple[set[str], set[str], bool, set[str]]:
     """(films in flight, of which on a GPU worker, pairs a worker) from the
     store in `directory`; `sqlite3.Error` when it cannot be read (locked,
     corrupt, not a workflow store)."""
@@ -517,6 +549,12 @@ def _read_store(directory: Path) -> tuple[set[str], set[str], bool]:
             "SELECT film_id FROM operations"
             " WHERE kind='archive' AND resolved_at IS NULL"
         ).fetchall()
+        outputs = conn.execute(
+            "SELECT f.film_id FROM films f JOIN stages s ON s.film_id=f.film_id"
+            " AND s.input_revision=f.current_input_revision"
+            " WHERE f.current_final_revision IS NOT NULL AND s.stage='archive'"
+            " AND s.status != 'succeeded' AND json_extract(f.body_json,'$.removed_at') IS NULL"
+        ).fetchall()
         (pairs,) = conn.execute(
             "SELECT COUNT(*) FROM workers"
             " WHERE enrollment_state != 'retired' AND worker_id != ?",
@@ -535,7 +573,7 @@ def _read_store(directory: Path) -> tuple[set[str], set[str], bool]:
         if kind != "local" and worker != controller:
             remote.add(film)
     films.update(film for (film,) in archives)
-    return films, remote, bool(pairs)
+    return films, remote, bool(pairs), {film for (film,) in outputs}
 
 
 def _controller_state(
@@ -549,19 +587,22 @@ def _controller_state(
 
     films: set[str] = set()
     remote: set[str] = set()
+    outputs: set[str] = set()
     for directory in directories:
         if not (directory / STORE_NAME).exists():
             continue
         try:
-            flight, far, pairs = _read_store(directory)
+            flight, far, pairs, ready = _read_store(directory)
         except sqlite3.Error:
             state.store_known, pairs = False, True
         else:
             films |= flight
             remote |= far
+            outputs |= ready
         if pairs:
             state.ports.add(pairing_port(directory) or running_port)
     state.films, state.remote = len(films), len(remote)
+    state.outputs = len(outputs)
 
 
 def _worker_state(
@@ -692,10 +733,15 @@ def register_workflow_settings(
     @app.get("/control/workflow/settings")
     def workflow_settings() -> dict[str, Any]:
         current = saved()
-        found = path_status(current)
+        found = path_status(
+            current.model_copy(
+                update={"output_dir": effective_output(current, config_dir)}
+            )
+        )
         return {
-            "saved": view(current),
-            "running": view(config.workflow),
+            "saved": view(current, config_dir),
+            "output_dir_default": current.output_dir is None,
+            "running": view(config.workflow, config_dir),
             "restart_required": current != config.workflow,
             "busy": busy(),
             "presets": presets(),
@@ -721,6 +767,23 @@ def register_workflow_settings(
             return await run_in_threadpool(create_dir, body)
         except Refused as exc:
             return _refusal(exc)
+
+    @app.post("/control/workflow/settings/directory/open", status_code=204)
+    async def workflow_directory_open(request: Request) -> Response:
+        from .workflow_reads import _mapped
+        from .workflow_routes import open_folder
+
+        body = await request.json()
+        raw = body.get("path") if isinstance(body, dict) else None
+        why = _path_error(raw) if isinstance(raw, str) and raw else "请填写"
+        if why:
+            return _refusal(Refused(422, "设置有误", fields={"path": why}))
+        path = Path(cast(str, raw))
+        if not path.is_dir():
+            raise HTTPException(status_code=409, detail="目录已不存在")
+        with _mapped():
+            open_folder(path)
+        return Response(status_code=204)
 
     @app.put("/control/workflow/settings")
     async def workflow_settings_put(request: Request) -> Any:

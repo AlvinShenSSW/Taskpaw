@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .auth import AuthProof
@@ -37,6 +37,15 @@ from .models import (
 )
 from .store_core import WorkflowCore, parse_time
 
+# P3 E3 (#304): a film the operator deleted is skipped by every board and queue read
+LIVE = "json_extract(f.body_json,'$.removed_at') IS NULL"
+DONE_SIZE = 20
+_DONE = (
+    "SELECT f.film_id,f.created_at FROM films f JOIN stages c ON c.film_id=f.film_id "
+    "AND c.input_revision=f.current_input_revision "
+    f"WHERE {LIVE} AND c.stage IN ('cleanup_input','cleanup_workcopy') AND c.status='succeeded' "
+    "GROUP BY f.film_id HAVING count(*)=2"
+)
 # Stages the controller's own runtime claims (compute on its GPU; return and
 # Miko scrape locally).
 _LOCAL_STAGES = frozenset({"restore", "asr", "translate", "return", "scrape"})
@@ -163,6 +172,7 @@ class ReadCommands(WorkflowCore):
                 "LEFT JOIN film_plans p ON p.film_id=s.film_id AND p.input_revision=s.input_revision "
                 f"WHERE s.status=? AND s.stage IN ({marks}) "
                 "AND (s.stage!='restore' OR p.film_id IS NOT NULL) "
+                f"AND {LIVE} "
                 "ORDER BY f.created_at,f.film_id,s.rowid",
                 (status, *stages),
             ).fetchall()
@@ -205,7 +215,7 @@ class ReadCommands(WorkflowCore):
                 "AND s.input_revision=f.current_input_revision AND s.stage='restore' "
                 "LEFT JOIN film_plans p ON p.film_id=f.film_id "
                 "AND p.input_revision=f.current_input_revision "
-                "WHERE s.status='pending' AND p.film_id IS NULL "
+                f"WHERE s.status='pending' AND p.film_id IS NULL AND {LIVE} "
                 "ORDER BY f.created_at,f.film_id"
             ).fetchall()
             return tuple(
@@ -342,6 +352,10 @@ class ReadCommands(WorkflowCore):
                             version=row["version"],
                             resolved=row["resolved_at"] is not None,
                             error_code=value.error_code,
+                            started_at=parse_time(row["created_at"]),
+                            ended_at=parse_time(row["resolved_at"])
+                            if row["resolved_at"]
+                            else None,
                         )
                     )
                     continue
@@ -361,10 +375,14 @@ class ReadCommands(WorkflowCore):
                             WorkflowCleanupItem(item_id=item[0], status=item[1])
                             for item in items
                         ),
+                        started_at=parse_time(row["created_at"]),
+                        ended_at=parse_time(row["resolved_at"])
+                        if row["resolved_at"]
+                        else None,
                     )
                 )
             receipt = self._conn.execute(
-                "SELECT r.receipt_id,r.approval_id FROM receipts r "
+                "SELECT r.receipt_id,r.approval_id,r.body_json FROM receipts r "
                 "JOIN operations o ON o.operation_id=r.operation_id "
                 "WHERE r.kind='archive' AND o.film_id=? ORDER BY r.rowid DESC LIMIT 1",
                 (film_id,),
@@ -387,6 +405,12 @@ class ReadCommands(WorkflowCore):
                 archive_operations=tuple(archives),
                 archive_receipt_id=receipt[0] if receipt else None,
                 archive_receipt_approval_id=receipt[1] if receipt else None,
+                archive_path=str(
+                    Path(json.loads(receipt[2])["target"]["export_identity"])
+                    / json.loads(receipt[2])["target"]["relative_path"]
+                )
+                if receipt
+                else None,
                 cleanup_operations=tuple(cleanups),
                 scrape_status=statuses.get("scrape"),
                 archive_status=statuses.get("archive"),
@@ -403,17 +427,33 @@ class ReadCommands(WorkflowCore):
                 package_current=bool(intake["package_current"]) if intake else False,
             )
 
+    def done_paging(self, auth: AuthProof, page: int = 1) -> dict[str, int]:
+        """#302: the completed count and clamped page, without building film rows."""
+        with self._lock:
+            principal = self._check_auth(auth, self._observe_time())
+            if principal["role"] != "operator":
+                raise WorkflowError("forbidden")
+            total = self._conn.execute(f"SELECT count(*) FROM ({_DONE})").fetchone()[0]
+        pages = max(1, (total + DONE_SIZE - 1) // DONE_SIZE)
+        return {
+            "total": total,
+            "size": DONE_SIZE,
+            "page": min(max(1, page), pages),
+            "pages": pages,
+        }
+
     def film_board(
         self,
         auth: AuthProof,
-        done_limit: int | None = 20,
+        done_limit: int | None = DONE_SIZE,
         *,
         film_id: str | None = None,
         energies: bool = True,
+        done_offset: int = 0,
     ) -> tuple[BoardFilm, ...]:
         """Every film's current-revision stages for the 媒体入库 page (T06-P1 D03, N01).
 
-        Oldest film first. `done_limit` keeps only the newest fully finished
+        Oldest film first. `done_limit` / `done_offset` page the newest fully finished
         films (both cleanups succeeded); `film_id` reads one film. `energies`
         False skips the attempt-evidence scan behind each stage's energy (a
         caller that never shows energy, e.g. the notification observer).
@@ -423,13 +463,13 @@ class ReadCommands(WorkflowCore):
         approvals. Per-row subqueries over operations made the board quadratic
         while it held the store lock.
         """
-        where: tuple[str, tuple[Any, ...]] = ("", ())
+        where: tuple[str, tuple[Any, ...]] = (f"WHERE {LIVE}", ())
         ops: tuple[str, tuple[Any, ...]] = ("", ())
         approved: tuple[str, tuple[Any, ...]] = ("", ())
         linked: tuple[str, tuple[Any, ...]] = ("", ())
         receipted: tuple[str, tuple[Any, ...]] = ("", ())
         if film_id is not None:
-            where = ("WHERE f.film_id=?", (film_id,))
+            where = (f"WHERE f.film_id=? AND {LIVE}", (film_id,))
             receipted = ("AND o.film_id=?", (film_id,))
             linked = (
                 "WHERE i.package_id IN "
@@ -444,15 +484,13 @@ class ReadCommands(WorkflowCore):
             )
             approved = ("AND f.film_id=?", (film_id,))
         elif done_limit is not None:
-            # D13 before reading stage bodies: drop all but the newest finished films
+            # Slice before reading stage bodies; unfinished films stay on every page.
             where = (
-                "WHERE f.film_id NOT IN (SELECT film_id FROM (SELECT d.film_id,"
+                f"WHERE {LIVE} AND "
+                "f.film_id NOT IN (SELECT film_id FROM (SELECT d.film_id,"
                 "row_number() OVER (ORDER BY d.created_at DESC,d.film_id DESC) AS newest "
-                "FROM films d JOIN stages c ON c.film_id=d.film_id "
-                "AND c.input_revision=d.current_input_revision "
-                "WHERE c.stage IN ('cleanup_input','cleanup_workcopy') AND c.status='succeeded' "
-                "GROUP BY d.film_id HAVING count(*)=2) WHERE newest>?)",
-                (done_limit,),
+                f"FROM ({_DONE}) d) WHERE newest<=? OR newest>?)",
+                (done_offset, done_offset + done_limit),
             )
         with self._lock:
             principal = self._check_auth(auth, self._observe_time())
@@ -490,7 +528,7 @@ class ReadCommands(WorkflowCore):
             counts = self._conn.execute(
                 "SELECT i.package_id,count(*) AS films FROM intake_films i "
                 "JOIN films f ON f.film_id=i.film_id "
-                f"AND f.current_input_revision=i.input_revision {linked[0]} "
+                f"AND f.current_input_revision=i.input_revision AND {LIVE} {linked[0]} "
                 "GROUP BY i.package_id",
                 linked[1],
             ).fetchall()
@@ -755,7 +793,7 @@ class ReadCommands(WorkflowCore):
             "AND s.input_revision=f.current_input_revision AND s.stage='cleanup_workcopy') "
             "FROM films f JOIN intake_films i ON i.film_id=f.film_id "
             "AND i.input_revision=f.current_input_revision WHERE i.package_id=? "
-            "ORDER BY f.created_at,f.film_id",
+            f"AND {LIVE} ORDER BY f.created_at,f.film_id",
             (package_id,),
         ).fetchall()
         return tuple(

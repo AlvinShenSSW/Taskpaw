@@ -147,11 +147,8 @@ def test_dropped_film_becomes_a_verified_return_package(tmp_path):
         package = package_dir(rt, film, 1)
         handoff = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
         names = sorted(i["relative_path"].rsplit("/", 1)[-1] for i in handoff["items"])
-        assert names == [
-            "AAA-001-破解.ja.srt",
-            "AAA-001-破解.mp4",
-            "AAA-001-破解.zh.srt",
-        ]
+        # #303: an LTX restore is 无码, and only the Chinese subtitle is packaged
+        assert names == ["AAA-001-无码.mp4", "AAA-001-无码.zh.srt"]
         assert handoff["subtitles"]["status"] == "present"
         assert handoff["restoration"]["status"] == "applied"
         assert tools.runs(tools.jasna_exe) and tools.runs(tools.whisper_exe)

@@ -99,9 +99,15 @@ monotonic = time.monotonic
 BITRATE_PROBE_SECONDS = 5.0
 _BITRATE_POLL = 0.05
 
-# The plugin's restored names (#187): `<stem>-破解.mp4`, legacy `<stem>_restored.mp4`.
+# The plugin's restored names (#187, #303): `<stem>-破解.mp4`, `<stem>-无码.mp4` (LTX),
+# legacy `<stem>_restored.mp4`.
 _RESTORED_SUFFIXES = tuple(
-    suffix.casefold() for suffix in (jasna._FINAL_SUFFIX, jasna._LEGACY_FINAL_SUFFIX)
+    suffix.casefold()
+    for suffix in (
+        jasna._FINAL_SUFFIX,
+        jasna._LTX_FINAL_SUFFIX,
+        jasna._LEGACY_FINAL_SUFFIX,
+    )
 )
 
 GpuQuery = Callable[[], "list[tuple[float, int]] | None"]
@@ -114,6 +120,11 @@ log = logging.getLogger("taskpaw.workflow.restore")
 def is_restored_name(name: str) -> bool:
     """Whether a file name is already a Jasna restore result (plugin rule)."""
     return name.casefold().endswith(_RESTORED_SUFFIXES)
+
+
+def is_ltx_name(name: str) -> bool:
+    """Whether a restored file was made with LTX: it is named `-无码` (#303)."""
+    return name.casefold().endswith(jasna._LTX_FINAL_SUFFIX.casefold())
 
 
 def needs_restore(manifest: m.InputManifest) -> bool:
@@ -763,7 +774,9 @@ class RestoreExecutor:
         if missing:
             raise attention(MISSING_LTX + "、".join(missing))
         names = [
-            jasna.output_path_for(str(context.workdir), Path(input_name(v))).name
+            jasna.output_path_for(
+                str(context.workdir), Path(input_name(v)), ltx=True
+            ).name
             for v in pending
         ]
         if len({name.casefold() for name in names}) != len(names):
@@ -807,8 +820,8 @@ class RestoreExecutor:
         """One video's Jasna run. `earlier`: the film's volumes before this one,
         so the step's live `timing` is the whole film's (U1e)."""
         workdir = context.workdir
-        staging = jasna.staging_path_for(str(workdir), source)
-        final = jasna.output_path_for(str(workdir), source)
+        staging = jasna.staging_path_for(str(workdir), source, ltx=True)
+        final = jasna.output_path_for(str(workdir), source, ltx=True)
         ltx_work = workdir / LTX_WORK_DIRNAME
         ltx_work.mkdir(parents=True, exist_ok=True)
         staging.unlink(missing_ok=True)

@@ -20,6 +20,7 @@ import {
 } from "./mediaModel";
 import { Chip, Icon, ItemCover, Notice, PageTitle, StageBlock, StatusChip } from "./parts";
 import { LostRow } from "./RemoteParts";
+import { SourceMissingRow } from "./SourceMissing";
 import { errorText, isPaused, MEDIA_FILMS_KEY, useWorkspace } from "./workspace";
 
 // 概览 (§4.1 + U1 V3): heading actions, the paused notice, four stats, the flow strip, the
@@ -51,6 +52,7 @@ export function OverviewPage() {
   // P2-4 R1/R3: remote mode's 设备失联 films and the films waiting for a machine, with the pass's reason
   const remote = items.some((i) => i.kind === "film" && isRemoteRow(i.row));
   const lost = items.filter((i) => i.status === "device_lost");
+  const missing = items.filter((i) => i.status === "source_missing");  // P3 E1: 片源丢失, in either mode
   const waitingRows = remote ? items.filter((i) => i.kind === "film" && i.status === "inbox") : [];
   const flow: Array<[string, number, StageFilter | "pending", boolean]> = [
     ["收件", count((i) => i.status === "inbox" || i.status === "receiving"), "inbox", false],
@@ -59,7 +61,7 @@ export function OverviewPage() {
     ["回传 / 刮削", count((i) => matchesStage(i, "preparing")), "preparing", false],
     ["待确认", review, "review", true],
     ["入库 / 清理", count((i) => ["archiving", "unknown", "cleanup"].includes(i.status)), "archive", false],
-    ["完成", count((i) => i.status === "completed"), "completed", false],
+    ["完成", data.films.data?.counts.done ?? 0, "completed", false],
   ];
 
   return (
@@ -119,6 +121,15 @@ export function OverviewPage() {
                 <Chip tone="red">{lost.length} 部</Chip>
               </div>
               <div className="film-list">{lost.map((item) => <LostRow key={item.id} item={item} />)}</div>
+            </section>
+          )}
+          {missing.length > 0 && (
+            <section className="panel lost-panel" aria-labelledby="ov-missing">
+              <div className="panel-head">
+                <div><h2 id="ov-missing">片源丢失 · {missing.length}</h2><p>INBOX 里的文件已不存在 · 不再派发</p></div>
+                <Chip tone="red">{missing.length} 部</Chip>
+              </div>
+              <div className="film-list">{missing.map((item) => <SourceMissingRow key={item.id} item={item} />)}</div>
             </section>
           )}
           <section className="panel" aria-labelledby="ov-active">

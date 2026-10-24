@@ -262,6 +262,9 @@ def test_rows_carry_the_frozen_shape():
         "actions",
         # #298 R1 (§9 CX27): the 失联 worker {id, name}
         "lost_worker",
+        # P3 E1/E3 (#304): 片源丢失 {paths, found_at}; 删除此任务 offered
+        "source_missing",
+        "can_remove",
     }
     assert (row["route"], row["pin"], row["actions"]) == (None, None, None)
     assert row["lost_worker"] is None
@@ -1126,3 +1129,80 @@ def test_without_a_landscape_image_there_is_no_cover(staged):
     assert (detail["has_cover"], detail["cover_source"]) == (False, None)
     assert board.cover_path(rt, value) is None
     assert board.cover_path(rt, identity()) is None
+
+
+def _final_with(poster_item_id, *roles_and_paths):
+    from types import SimpleNamespace
+
+    items = [
+        SimpleNamespace(item_id=f"i{n}", role=role, relative_path=path)
+        for n, (role, path) in enumerate(roles_and_paths)
+    ]
+    postprocess = SimpleNamespace(poster_item_id=poster_item_id)
+    return SimpleNamespace(items=items, postprocess=postprocess)
+
+
+def test_the_final_cover_is_the_recorded_first_volume_poster():
+    """#303: `<name>-poster.jpg` per volume; the recorded one (cd1's) is the cover."""
+    final = _final_with(
+        "i2",  # the postprocess recorded cd1's poster, not the first listed
+        ("poster", "ABC-123-cd2-poster.jpg"),
+        ("folder_cover", "folder.jpg"),
+        ("poster", "ABC-123-cd1-poster.jpg"),
+    )
+    assert board._poster_item(final).relative_path == "ABC-123-cd1-poster.jpg"
+
+
+@pytest.mark.parametrize(
+    ("items", "served"),
+    [
+        ([("poster", "poster.jpg")], "poster.jpg"),  # a final from before #303
+        ([("poster", "ABC-123-poster.jpg")], "ABC-123-poster.jpg"),
+        ([("folder_cover", "folder.jpg")], "folder.jpg"),
+        ([], None),
+    ],
+)
+def test_the_final_cover_accepts_every_poster_name(items, served):
+    item = board._poster_item(_final_with("missing", *items))
+    assert (item.relative_path if item else None) == served
+
+
+@pytest.mark.parametrize(
+    "progress",
+    [
+        {
+            "phase": 5,
+            "phase_n": 8,
+            "phase_label": "识别语音",
+            "scene": 214,
+            "scenes": 346,
+            "percent": 62,
+            "eta_s": 660,
+            "elapsed_s": 1122,
+            "console": "Generating scene 214/346",
+            "phases": [
+                {"n": 5, "label": "识别语音", "state": "current", "seconds": 900}
+            ],
+        },
+        {"elapsed_s": 1122, "console": "Scene 1/1"},
+    ],
+)
+def test_running_asr_passes_progress_start_and_console_only_to_its_film(progress):
+    value = film({**done_through("restore"), "asr": "running"})
+    current = {
+        "film_id": value.film_id,
+        "stage": "asr",
+        "progress": "识别语音",
+        "started_at": "2026-10-24T08:00:00+00:00",
+        "ltx": progress,
+    }
+    step = _step_of(board.film_row(value, {}, current=current), "asr")
+    assert step["progress"] == progress
+    assert step["started_at"] == current["started_at"]
+    assert step["console"] == progress["console"]
+    assert "ltx" not in step
+    other = _step_of(
+        board.film_row(value, {}, current={**current, "film_id": identity()}), "asr"
+    )
+    assert other["progress"] is None
+    assert "started_at" not in other and "console" not in other

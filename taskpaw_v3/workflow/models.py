@@ -514,6 +514,17 @@ class FilmRecord(FilmCreate):
     context_state: Literal["ready", "blocked", "invalidated"] | None = None
     version: Revision
     created_at: UtcTime
+    # P3 E3 (#304): the operator deleted the task; terminal, the readers skip it
+    removed_at: UtcTime | None = None
+
+    @model_serializer(mode="wrap")
+    def _legacy_shape(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.removed_at is None:
+            value.pop("removed_at", None)
+        return value
 
 
 def _members(items: tuple[ManifestItem, ...]) -> None:
@@ -703,7 +714,9 @@ class PostprocessEvidence(Model):
     nfo_item_id: Id
     poster_item_id: Id
     required_image_item_ids: tuple[Id, ...]
-    actual_marks: tuple[Literal["restored", "chinese_subtitles", "4k"], ...]
+    actual_marks: tuple[
+        Literal["restored", "uncensored", "chinese_subtitles", "4k"], ...
+    ]
     image_refresh: Literal["fresh", "refreshed", "not_needed", "failed", "unknown"]
     folder_required: bool
     folder_item_id: Id | None
@@ -728,6 +741,15 @@ class PostprocessEvidence(Model):
 
 
 class FinalManifest(Model):
+    @model_serializer(mode="wrap")
+    def _legacy_shape(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.output_directory is None:
+            value.pop("output_directory", None)
+        return value
+
     film_id: Id
     revision: Revision
     input_revision: Revision
@@ -735,6 +757,9 @@ class FinalManifest(Model):
     items: tuple[ManifestItem, ...]
     output_root_id: Id
     output_relative_path: RelativePath
+    output_directory: Text | None = (
+        None  # #301: recorded package, independent of later settings
+    )
     tool_versions: ToolVersions
     restoration: RestorationResult
     subtitles: SubtitleResult
@@ -790,7 +815,7 @@ class FinalManifest(Model):
             or self.subtitles.evidence.status != "passed"
         ):
             raise ValueError("false_chinese_subtitle_mark")
-        if "restored" in pp.actual_marks and (
+        if ("restored" in pp.actual_marks or "uncensored" in pp.actual_marks) and (
             self.restoration.status not in ("applied", "reused")
             or self.restoration.evidence.status != "passed"
         ):
@@ -1647,6 +1672,14 @@ class PinSet(VersionedCommand):
     withdraw_route_id: Id | None = None
 
 
+class FilmRemove(VersionedCommand):
+    """删除此任务 (P3 E3): a terminal `removed` mark on a film with no work in
+    flight and nothing archived; `expected_version` is the film's."""
+
+    film_id: Id
+    reason: Text
+
+
 class StoppedAttestation(VersionedCommand):
     """判定已停止: the operator attests an unresolved compute assignment stopped;
     `expected_version` is the assignment's."""
@@ -1820,6 +1853,8 @@ class WorkflowArchiveOperation(Model):
     version: Revision
     resolved: bool
     error_code: Text | None
+    started_at: UtcTime | None = None
+    ended_at: UtcTime | None = None
 
 
 class WorkflowCleanupItem(Model):
@@ -1844,6 +1879,8 @@ class WorkflowCleanupOperation(Model):
     status: Literal["admitted", "running", "unknown", "verified"]
     resolved: bool
     items: tuple[WorkflowCleanupItem, ...]
+    started_at: UtcTime | None = None
+    ended_at: UtcTime | None = None
 
 
 class FilmWorkflow(Model):
@@ -1858,6 +1895,7 @@ class FilmWorkflow(Model):
     archive_operations: tuple[WorkflowArchiveOperation, ...]
     archive_receipt_id: Id | None
     archive_receipt_approval_id: Id | None
+    archive_path: str | None = None
     cleanup_operations: tuple[WorkflowCleanupOperation, ...]
     scrape_status: StageStatus | None
     archive_status: StageStatus | None

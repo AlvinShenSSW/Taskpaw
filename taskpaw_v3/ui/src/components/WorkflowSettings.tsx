@@ -29,25 +29,25 @@ const ROLES: Array<[WorkflowRole, string]> = [
 const ROLE_SHORT: Record<WorkflowRole, string> = { controller: "媒体主控", worker: "GPU 工作机", off: "不参与" };
 const WINDOWS_ONLY_NOTE = "媒体主控和 GPU 工作机仅支持 Windows；这台电脑只能选「不参与」。";
 // IR3: the native picker per path field — a folder (选择) or a tool's file (更改)
-const DIR_FIELDS = ["inbox_root", "data_dir", "staging_dir", "mdcx_root", "filmpaw_data_dir"];
+const DIR_FIELDS = ["inbox_root", "output_dir", "data_dir", "staging_dir", "mdcx_root", "filmpaw_data_dir"];
 const FILE_FIELDS = ["ffprobe_path", "jasna_exe_path", "whisperjav_exe_path", "mdcx_python", "mdcx_profile"];
 const MISSING_DIR = "目录不存在";
 
 type Form = Record<string, string | boolean>;
 const TEXT_FIELDS = [
-  "inbox_root", "data_dir", "ffprobe_path", "jasna_exe_path", "whisperjav_exe_path", "ltx_gpu",
+  "inbox_root", "output_dir", "data_dir", "ffprobe_path", "jasna_exe_path", "whisperjav_exe_path", "ltx_gpu",
   "mdcx_python", "mdcx_root", "mdcx_profile", "filmpaw_data_dir", "staging_dir",
 ] as const;
 const NUMBER_FIELDS = ["worker_api_port", "staging_cap_gb"] as const;
 // The fields each role edits (the backend validates only the role's own; the rest stay as saved).
 const CONTROLLER_FIELDS = [
-  "inbox_root", "data_dir", "ffprobe_path", "remote_workers", "worker_api_port", "jasna_exe_path", "whisperjav_exe_path",
+  "inbox_root", "output_dir", "data_dir", "ffprobe_path", "remote_workers", "worker_api_port", "jasna_exe_path", "whisperjav_exe_path",
   "ltx_gpu", "mdcx_python", "mdcx_root", "mdcx_profile", "filmpaw_data_dir",
 ];
 // OD7 (#298 R11): a GPU worker restores only — no WhisperJAV (its saved value stays as is)
 const WORKER_FIELDS = ["data_dir", "jasna_exe_path", "ltx_gpu", "staging_dir", "staging_cap_gb"];
 const LABELS: Record<string, string> = {
-  role: "本机角色", inbox_root: "INBOX 目录", data_dir: "工作目录", ffprobe_path: "ffprobe", remote_workers: "允许 GPU 工作机接入",
+  output_dir: "成品目录", role: "本机角色", inbox_root: "INBOX 目录", data_dir: "工作目录", ffprobe_path: "ffprobe", remote_workers: "允许 GPU 工作机接入",
   worker_api_port: "工作机接口端口", jasna_exe_path: "Jasna", whisperjav_exe_path: "WhisperJAV", ltx_gpu: "LTX 显卡预设",
   mdcx_python: "Miko Python", mdcx_root: "Miko 目录", mdcx_profile: "Miko 配置", filmpaw_data_dir: "Filmpaw 数据目录",
   staging_dir: "暂存目录", staging_cap_gb: "暂存上限",
@@ -144,14 +144,14 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
   });
   // IR3: 「创建此目录」 for a missing INBOX (the backend validates it as the field)
   const createDir = useMutation({
-    mutationFn: (path: string) => api.workflowCreateDir(path),
-    onSuccess: () => {
-      setErrors((p) => { if (!("inbox_root" in p)) return p; const n = { ...p }; delete n.inbox_root; return n; });
-      setMade("已创建 INBOX 目录");
+    mutationFn: ({ path }: { key: string; path: string }) => api.workflowCreateDir(path),
+    onSuccess: (_, { key }) => {
+      setErrors((p) => { const n = { ...p }; delete n[key]; return n; });
+      setMade(`已创建 ${LABELS[key]}`);
       onSaved();
     },
-    onError: (e) => {
-      if (e instanceof HttpError && e.fields?.path) setErrors((p) => ({ ...p, inbox_root: e.fields?.path ?? "" }));
+    onError: (e, { key }) => {
+      if (e instanceof HttpError && e.fields?.path) setErrors((p) => ({ ...p, [key]: e.fields?.path ?? "" }));
       else setFailure(e instanceof Error ? e.message : String(e));
     },
   });
@@ -162,7 +162,7 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
     onError: (e) => setFailure(e instanceof Error ? e.message : String(e)),
   });
   const set = (k: string, v: string | boolean) => {
-    if (k === "inbox_root") setMade(null);
+    if (k === "inbox_root" || k === "output_dir") setMade(null);
     setForm((p) => ({ ...p, [k]: v }));
     setErrors((p) => { if (!(k in p)) return p; const n = { ...p }; delete n[k]; return n; });
   };
@@ -192,7 +192,7 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
     const picker = inTauri() && (directory || FILE_FIELDS.includes(k));
     const status = found(k);
     const missing = status === "missing" && FILE_FIELDS.includes(k) ? "文件不存在"
-      : status === "missing" && directory && k !== "inbox_root" ? MISSING_DIR : null;
+      : status === "missing" && directory && k !== "inbox_root" && k !== "output_dir" ? MISSING_DIR : null;
     const shown = errors[k] ?? missing ?? (status === "ok" && FILE_FIELDS.includes(k) ? "已找到" : helper);
     return (
       <TextField size="small" label={label} value={String(form[k] ?? "")} onChange={(e) => set(k, e.target.value)}
@@ -243,7 +243,12 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
     </Stack>
   );
   const inbox = String(form.inbox_root ?? "").trim();
-  const inboxMissing = Boolean(inbox) && (errors.inbox_root === MISSING_DIR || found("inbox_root") === "missing") && made === null;
+  const inboxMissing = Boolean(inbox) && (errors.inbox_root === MISSING_DIR || found("inbox_root") === "missing") && made !== "已创建 INBOX 目录";
+  const output = String(form.output_dir ?? "").trim();
+  const outputMissing = output && (errors.output_dir === MISSING_DIR || found("output_dir") === "missing") && made !== "已创建 成品目录";
+  const openDir = async (path: string) => {
+    try { await api.workflowOpenDir(path); } catch (e) { setFailure(e instanceof Error ? e.message : String(e)); }
+  };
   const miko = mikoText(state, unchanged);
   const number = (k: string, label: string, helper?: string) => (
     <TextField size="small" label={label} value={String(form[k] ?? "")} onChange={(e) => set(k, e.target.value)}
@@ -284,15 +289,23 @@ function WorkflowForm({ state, onSaved }: { state: WorkflowSettingsState; onSave
       {role === "controller" && (
         <>
           <Typography variant="subtitle2" component="h3">目录</Typography>
-          {text("inbox_root", "INBOX 目录", made ?? "未刮削的原样下载放在这里")}
+          {text("inbox_root", "INBOX 目录", made === "已创建 INBOX 目录" ? made : "未刮削的原样下载放在这里")}
           {inboxMissing && (
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ mt: "-4px !important" }}>
               <Typography variant="body2" color="warning.main">INBOX 目录不存在</Typography>
               <Button size="small" variant="outlined" sx={{ minHeight: 44 }} disabled={createDir.isPending}
-                onClick={() => createDir.mutate(inbox)}>创建此目录</Button>
+                onClick={() => createDir.mutate({ key: "inbox_root", path: inbox })}>创建此目录</Button>
             </Stack>
           )}
           {inbox && <DirFacts path={inbox} />}
+          {text("output_dir", "成品目录", "刮削完成、等待确认和归档的影片放在这里，每部一个文件夹（即最终的归档文件夹）；归档校验通过后删除。")}
+          <Stack direction="row" spacing={1}>
+            <Button size="small" sx={{ minHeight: 44 }} aria-label="打开 成品目录" disabled={!output} onClick={() => void openDir(output)}>打开</Button>
+            {outputMissing && <Button size="small" variant="outlined" sx={{ minHeight: 44 }} disabled={createDir.isPending}
+              onClick={() => createDir.mutate({ key: "output_dir", path: output })}>创建此目录</Button>}
+          </Stack>
+          {output && <DirFacts path={output} />}
+          <Alert severity="info" role="note">影片详情里的「打开文件夹」打开本片的 INBOX 目录；「打开成品目录」打开等待确认和归档的成品文件夹；「打开归档目录」打开 NAS 上已归档的影片文件夹。</Alert>
           {text("data_dir", "工作目录", "队列、记录与工作副本；留空用默认位置")}
           {String(form.data_dir ?? "").trim() && <DirFacts path={String(form.data_dir)} sameDriveAs={inbox} />}
           <Typography variant="subtitle2" component="h3">工具与工作机</Typography>

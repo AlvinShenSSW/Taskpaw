@@ -101,44 +101,61 @@ describe("待处理 machine select (R5/R6)", () => {
     await waitFor(() => expect(m.confirm).toHaveBeenLastCalledWith([{ film_id: "mtn-7", input_revision: 1, ltx_model: "good", machine: W.ti1.id }]));
   });
 
-  it("全部按推荐确认 sends 自动 (null) and leaves the 4K film on 待处理", async () => {
+  it("全部按推荐确认 sends 自动 (null), including the 4K film waiting for a device", async () => {
     const m = mockApi();
     wrap(<MediaWorkspace />);
     await go("待处理");
     await waitFor(() => expect(pendingCard("qlx-1")).toBeTruthy());
-    expect(screen.getByText("3 部可按推荐派发")).toBeInTheDocument();
-    expect(screen.getByText("1 部 4K 暂留")).toBeInTheDocument();
+    expect(screen.getByText("4 部可按推荐派发")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "全部按推荐确认" }));
     await waitFor(() => expect(m.confirm).toHaveBeenCalled());
     const sent = m.confirm.mock.calls[0][0];
-    expect(sent.map((p) => p.film_id)).toEqual(["far-1", "mtn-7", "pap-3"]);
+    expect(sent.map((p) => p.film_id)).toEqual(["far-1", "mtn-7", "qlx-1", "pap-3"]);
     expect(sent.every((p) => p.machine === null)).toBe(true);
   });
 
   it("IR9: a disabled 全部按推荐确认 says why", async () => {
     mockApi();
-    vi.spyOn(api, "workflowPlans").mockResolvedValue({ ...REMOTE_PLANS, plans: REMOTE_PLANS.plans.filter((p) => p.film_id === "qlx-1") });
+    vi.spyOn(api, "workflowPlans").mockResolvedValue({ ...REMOTE_PLANS,
+      plans: REMOTE_PLANS.plans.filter((p) => p.film_id === "qlx-1").map((p) => ({
+        ...p, recommendation: { ...p.recommendation, ltx_model: null },
+      })),
+    });
     wrap(<MediaWorkspace />);
     await go("待处理");
     await waitFor(() => expect(pendingCard("qlx-1")).toBeTruthy());
     const all = screen.getByRole("button", { name: "全部按推荐确认" });
     expect(all).toBeDisabled();
-    expect(all).toHaveAccessibleDescription("暂无可用机器 · 4K 全部不可选");
-    expect(all).toHaveAttribute("title", "暂无可用机器 · 4K 全部不可选");
+    const why = "没有可按推荐确认的影片：已调整、需重新查看或缺少选择的请单独确认";
+    expect(all).toHaveAccessibleDescription(why);
+    expect(all).toHaveAttribute("title", why);
   });
 
-  it("4K: every option greyed out, the tier and the confirm disabled, with the reason", async () => {
-    mockApi();
+  it("4K: shows device reasons when every worker is ineligible and confirms 自动 normally", async () => {
+    const m = mockApi();
     wrap(<MediaWorkspace />);
     await go("待处理");
     await waitFor(() => expect(pendingCard("qlx-1")).toBeTruthy());
     const c = within(pendingCard("qlx-1"));
     const select = c.getByLabelText("机器") as HTMLSelectElement;
-    expect(select).toBeDisabled();
-    expect(optionTexts(select)).toEqual([["暂无可用机器 · 4K 全部不可选", false]]);
-    expect(c.getByText("4K 暂不派发到工作机（后续版本开放），先留在待处理")).toBeInTheDocument();
-    for (const radio of c.getAllByRole("radio")) expect(radio).toBeDisabled();
-    expect(c.getByRole("button", { name: "确认入队" })).toBeDisabled();
+    expect(select).toHaveAccessibleDescription("等待设备：4K 需重新核验");
+    expect(select).toBeEnabled();
+    expect(optionTexts(select)).toEqual([
+      ["自动（推荐）· 等待设备：4K 需重新核验", false],
+      ["5070 Ti · 4K 需重新核验", true],
+      ["5060 Ti-1 · 4K 需重新核验", true],
+      ["5060 Ti-2 · 4K 需重新核验", true],
+      ["5060 Ti-3 · 离线", true],
+    ]);
+    expect(screen.queryByText(/4K 暂/)).toBeNull();
+    for (const radio of c.getAllByRole("radio")) expect(radio).toBeEnabled();
+    const confirm = c.getByRole("button", { name: "确认入队" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    await waitFor(() => expect(m.confirm).toHaveBeenCalledWith([
+      { film_id: "qlx-1", input_revision: 1, ltx_model: "high", machine: null },
+    ]));
+    await waitFor(() => expect(pendingCard("qlx-1")).toBeNull());
   });
 
   it("a film needing no GPU reads 「无需修复，本机完成」 with no device option", async () => {
@@ -414,7 +431,7 @@ describe("设备 (§4)", () => {
     await waitFor(() => expect(m.attest).toHaveBeenCalledWith("flt-2", "as-lost", 4));
   });
 
-  it("the expandable 领取资格 matrix: 1080p by tier, 4K 暂不派发", async () => {
+  it("the expandable 领取资格 matrix shows 1080p by tier without the obsolete 4K hold", async () => {
     mockApi();
     wrap(<MediaWorkspace />);
     await screen.findByRole("heading", { level: 1, name: "概览" });
@@ -423,7 +440,8 @@ describe("设备 (§4)", () => {
     fireEvent.click(within(card).getByRole("button", { name: "详情" }));
     const matrix = within(card).getByRole("region", { name: "5070 Ti 领取资格" });
     const rows = within(matrix).getAllByRole("row").map((r) => r.textContent);
-    expect(rows).toEqual(["分辨率标准良好高", "1080p可领取可领取可领取", "4K暂不派发暂不派发暂不派发"]);
+    expect(rows).toEqual(["分辨率标准良好高", "1080p可领取可领取可领取"]);
+    expect(matrix).not.toHaveTextContent(/后续版本开放|暂不派发/);
   });
 
   it("本机's 「主控设置」 opens 设置 · 媒体工作流 where the host offers it", async () => {
@@ -679,4 +697,30 @@ describe("Mac read-only (#286)", () => {
     expect(within(pendingCard("far-1")).queryByRole("combobox")).toBeNull();
     expect(pendingCard("far-1")).toHaveTextContent(`预计 ${FINISH_TEXT.ti70} 在 5070 Ti 完成`);
   });
+});
+
+
+it("成品目录 offers choose, open, create and saves the changed path (#301)", async () => {
+  vi.stubGlobal("__TAURI_INTERNALS__", {});
+  vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeError("offline"))));
+  dialog.open.mockResolvedValueOnce("E:\\Other");
+  const state = settingsState("controller");
+  state.saved.output_dir = "E:\\Output";
+  state.running.output_dir = state.saved.output_dir;
+  state.paths = { output_dir: "missing" };
+  vi.spyOn(api, "workflowSettings").mockResolvedValue(state);
+  const save = vi.spyOn(api, "workflowSaveSettings").mockResolvedValue({ ok: true, restart_required: true });
+  const create = vi.spyOn(api, "workflowCreateDir").mockResolvedValue({ ok: true, created: true });
+  const open = vi.spyOn(api, "workflowOpenDir").mockResolvedValue(undefined);
+  wrap(<WorkflowSettingsSection />);
+  expect(await screen.findByLabelText("成品目录")).toHaveValue(state.saved.output_dir);
+  expect(screen.getByText("刮削完成、等待确认和归档的影片放在这里，每部一个文件夹（即最终的归档文件夹）；归档校验通过后删除。")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "打开 成品目录" }));
+  await waitFor(() => expect(open).toHaveBeenCalledWith(state.saved.output_dir));
+  fireEvent.click(screen.getByRole("button", { name: "创建此目录" }));
+  await waitFor(() => expect(create).toHaveBeenCalledWith(state.saved.output_dir));
+  fireEvent.click(screen.getByRole("button", { name: "选择 成品目录" }));
+  await waitFor(() => expect(screen.getByLabelText("成品目录")).toHaveValue("E:\\Other"));
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith({ role: "controller", output_dir: "E:\\Other" }));
 });

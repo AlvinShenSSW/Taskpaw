@@ -10,14 +10,17 @@ import { LtxDownload } from "../LtxDownload";
 import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
 import { predictFromRates } from "../power/powerModel";
 import {
-  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
-  machineLabel, STATUS_META, stageName, stepDurations, tierLong, unroutedMachine, type WorkItem,
+  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, fmtDuration, fmtDurationMs, hasLtxTime, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
+  machineLabel, STATUS_META, stageName, stepDurations, TIER_SHORT, tierLong, unroutedMachine, type WorkItem,
 } from "./mediaModel";
 import { DeviceSection } from "./RemoteParts";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
 import { ModalHead, ModalShell } from "./ReviewDialog";
-import { RestoreLivePanel } from "./RestoreLivePanel";
-import { TimingBlock } from "./TimingParts";
+import { ArchiveLivePanel } from "./ArchiveLivePanel";
+import { AsrLivePanel } from "./AsrLivePanel";
+import { ParamsBlock, RestoreLivePanel } from "./RestoreLivePanel";
+import { RemoveTask, SourceMissingAlert } from "./SourceMissing";
+import { LtxTimingCard, TimingBlock } from "./TimingParts";
 import { errorText, MEDIA_FILMS_KEY, mediaFilmKey, useIntakeReasons, useWorkspace } from "./workspace";
 
 const BACKDROP = { sx: { backgroundColor: "#030812BA", backdropFilter: "blur(4px)" } };
@@ -28,7 +31,7 @@ export function FilmDrawer({ filmId, onClose }: { filmId: string | null; onClose
   return (
     <Drawer anchor="right" open={filmId !== null} onClose={onClose} ModalProps={{ disableAutoFocus: true }}
       slotProps={{ backdrop: BACKDROP }}
-      PaperProps={{ className: "mw mw-drawer", sx: { backgroundImage: "none" }, role: "dialog", "aria-modal": true, "aria-labelledby": "mw-drawer-title" } as object}>
+      PaperProps={{ className: "mw mw-drawer", sx: { backgroundImage: "none" }, role: "dialog", "aria-modal": true, "aria-label": "影片详情" } as object}>
       {filmId !== null && <DrawerPane key={filmId} filmId={filmId} onClose={onClose} />}
     </Drawer>
   );
@@ -41,12 +44,15 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   useEffect(() => { titleRef.current?.focus({ preventScroll: true }); }, []);
   const detail = useQuery({ queryKey: ws.filmKey(filmId), queryFn: () => ws.readFilm(filmId), refetchInterval: 5000 });
   const film = detail.data;
+  const finished = film?.group === "done";
   const item = ws.data.items.find((i) => i.id === filmId);
   const plan = ws.data.plans.data?.plans.find((e) => e.film_id === filmId);
   const open = useMutation({ mutationFn: () => {
     if (ws.readOnly) throw new Error("只读监控");
     return api.workflowOpen(filmId, "inbox");
   }, onError: (e) => ws.toast(errorText(e)) });
+  const folder = useMutation({ mutationFn: (which: "output" | "archive") => api.workflowOpenFolder(filmId, which),
+    onError: (e) => ws.toast(errorText(e)) });
   const retry = useMutation({
     mutationFn: (stage: string) => {
       if (ws.readOnly) throw new Error("只读监控");
@@ -82,20 +88,27 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     <>
       <div className="modal-head">
         <div>
-          <h2 id="mw-drawer-title" tabIndex={-1} ref={titleRef}>影片详情</h2>
-          <p className="mono">{film ? film.number || film.name : filmId}</p>
+          <h2 id="mw-drawer-title" tabIndex={-1} ref={titleRef}>{finished ? film.number || film.name : "影片详情"}</h2>
+          <p className="mono">{finished ? historyMeta(film) : film ? film.number || film.name : filmId}</p>
         </div>
         <button type="button" className="btn ghost icon-btn" aria-label="关闭对话框" onClick={onClose}><Icon of={CloseIcon} /></button>
       </div>
       <div className="modal-body">
         {detail.isLoading ? <p className="muted">正在读取影片详情…</p>
           : detail.error || !film ? <Notice tone="red">无法读取这部影片。</Notice>
-            : <DrawerBody film={film} item={item} status={status} plan={plan} />}
+            : finished ? <HistoryBody film={film} /> : <DrawerBody film={film} item={item} status={status} plan={plan} onClose={onClose} />}
       </div>
       <div className="modal-foot">
         <p>阶段结果与来源清理分别记录。</p>
         <div className="actions">
-          {!ws.readOnly && <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>}
+          {/* P3 E3: any film with no running or claimed stage that is not archived (a 片源丢失 film has it in its alert) */}
+          {!ws.readOnly && film?.can_remove && !film.source_missing && <RemoveTask film={film} onRemoved={onClose} />}
+          {!ws.readOnly && !finished && <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>}
+          {!ws.readOnly && film && (film.archive.status === "succeeded" ? (
+            <button type="button" className="btn ghost" disabled={folder.isPending} onClick={() => folder.mutate("archive")}>打开归档目录</button>
+          ) : film.revisions.final && (
+            <button type="button" className="btn ghost" disabled={folder.isPending} onClick={() => folder.mutate("output")}>打开成品目录</button>
+          ))}
           {primary()}
         </div>
       </div>
@@ -103,14 +116,79 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   );
 }
 
-function DrawerBody({ film, item, status, plan }: {
-  film: FilmDetail; item: WorkItem | undefined; status: keyof typeof STATUS_META; plan: PlanEntry | undefined;
+function historyMeta(film: FilmDetail): string {
+  const at = film.history?.completed_at ? new Date(film.history.completed_at) : null;
+  const two = (n: number) => String(n).padStart(2, "0");
+  const date = at ? `${two(at.getMonth() + 1)}-${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}` : "—";
+  return [film.resolution, film.plan?.ltx_model ? `画质 ${TIER_SHORT[film.plan.ltx_model]}` : "无需修复",
+    fmtDurationMs(film.duration_ms), `已完成 ${date}`].filter(Boolean).join(" · ");
+}
+
+const HISTORY_LABELS: Record<string, string> = {
+  intake: "下载片源", restore: "修复", return: "回传", asr: "识别", translate: "翻译", scrape: "刮削",
+  confirm: "确认入库", archive: "归档", cleanup: "清理",
+};
+
+function HistoryBody({ film }: { film: FilmDetail }) {
+  const [params, setParams] = useState(false);
+  const [ltx, setLtx] = useState(false);
+  const title = film.title || film.name;
+  const history = film.history;
+  const uncensored = film.files.some((f) => f.role === "main_video" && /-无码(?:-|\.|$)/u.test(f.path.split("/").pop() ?? ""));
+  const energy = film.energy?.stages.restore;
+  const breakdown = readFilmTiming(film.timing)?.restore_breakdown ?? null;
+  return (
+    <>
+      <div className="detail-hero history-hero">
+        <div>
+          <Cover filmId={film.film_id} hasPoster={film.has_poster} source={film.poster_source}
+            hasCover={film.has_cover} coverSource={film.cover_source} size="large" label={title} />
+          <div className="chips spacer-top">
+            {film.marks.restored && <Chip tone="green">{uncensored ? "无码" : "破解"}</Chip>}
+            {film.marks.chinese_subtitles && <Chip tone="green">字幕</Chip>}
+          </div>
+        </div>
+        <div>
+          <h2>{title}</h2>
+          <dl className="facts">
+            <dt>演员</dt><dd>{film.actors.join("、") || "—"}</dd>
+            <dt>归档到</dt><dd className="mono">{film.archive.target_path || "—"}</dd>
+          </dl>
+          <p>总用时 {fmtDuration(history?.total_seconds)}{energy && <> · 修复耗电 {(energy.wh / 1000).toFixed(3)} kWh{energy.partial ? "（部分估算）" : "（估算）"}</>}</p>
+        </div>
+      </div>
+      <Notice tone="green">✓ 全部完成</Notice>
+      <section className="spacer-top">
+        <h3>处理历史</h3>
+        <table className="files-table" aria-label="处理历史">
+          <thead><tr><th>步骤</th><th>设备</th><th>用时</th><th>结果</th></tr></thead>
+          <tbody>{history?.steps.map((step) => (
+            <tr key={step.key}><td>{HISTORY_LABELS[step.key] ?? step.key}</td><td>{step.device}</td>
+              <td className="mono">{fmtDuration(step.seconds)}</td><td>{step.result}</td></tr>
+          ))}</tbody>
+        </table>
+      </section>
+      <div className="actions spacer-top">
+        <button type="button" className="btn ghost" aria-expanded={params} onClick={() => setParams(!params)}>本片参数</button>
+        <button type="button" className="btn ghost" aria-expanded={ltx} onClick={() => setLtx(!ltx)}>LTX 用时明细</button>
+      </div>
+      {params && <div className="spacer-top"><ParamsBlock plan={film.plan} machine={history?.steps.find((s) => s.key === "restore")?.device} /></div>}
+      {ltx && <div className="spacer-top">{hasLtxTime(breakdown)
+        ? <LtxTimingCard timing={breakdown} /> : <p className="muted">未记录 LTX 用时</p>}</div>}
+    </>
+  );
+}
+
+function DrawerBody({ film, item, status, plan, onClose }: {
+  film: FilmDetail; item: WorkItem | undefined; status: keyof typeof STATUS_META; plan: PlanEntry | undefined; onClose: () => void;
 }) {
   const ws = useWorkspace();
   // Before Miko, an unplanned film's names come from the lookup preview (precedence: final > lookup > input).
   const title = film.title || plan?.title || film.name;
   const actors = film.actors.length ? film.actors : plan?.actors ?? [];
   const restore = restoreStep(film);
+  const archive = film.steps?.find((s) => s.key === "archive" && s.state === "running");
+  const asr = film.steps?.find((s) => s.key === "asr" && s.state === "running");
   const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
   // P2-3 R15: a restore or ASR running on a worker (its 设备, and 停止并重新排队)
   const remote = (film.steps ?? []).find((s) => s.state === "running" && (s.key === "restore" || s.key === "asr") && s.machine) ?? null;
@@ -177,16 +255,17 @@ function DrawerBody({ film, item, status, plan }: {
       <div className="detail-steps"><StepLine steps={film.steps} title={title} durations={stepDurations(timing)} /></div>
       <LivePowerRow power={film.live_power} />
       {multi && <DeviceSection film={film} />}
+      <SourceMissingAlert film={film} onRemoved={onClose} />
       {remote && <RemoteStep filmId={film.film_id} step={remote} bare={multi} />}
       {running ? (
         <div>
           <RestoreLivePanel step={running} />
           <p className="small muted" style={{ marginTop: 10 }}>由阶段日志提供；不包含翻译、回传、刮削与入库。</p>
         </div>
-      ) : download ? (
+      ) : archive ? <ArchiveLivePanel step={archive} /> : asr ? <AsrLivePanel step={asr} machine={machine} /> : download ? (
         <LtxDownload value={download} onRespond={ws.readOnly ? undefined : (requestId, approved) => api.workflowLtxDownload(requestId, approved)}
           onError={(e) => ws.toast(errorText(e))} />
-      ) : (
+      ) : film.source_missing ? null : (
         <Notice icon={InfoOutlinedIcon}>
           {status === "pending" ? "待处理 · 确认画质与设备后才进入影片队列。"
             : [STATUS_META[status][0], item?.kind === "film" ? item.row.note : film.note].filter(Boolean).join("：")}

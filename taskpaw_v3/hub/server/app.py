@@ -314,6 +314,7 @@ def _register_read_routes(
         sid: int,
         resource: WorkflowResource,
         film_id: str | None = None,
+        done_page: int = 1,
     ) -> Response:
         if not authorize(request):
             return _unauthorized()
@@ -331,6 +332,7 @@ def _register_read_routes(
                 service.poller._auth_headers(),
                 film_id=film_id,
                 timeout=service.poller.http_timeout,
+                done_page=done_page,
             )
             return Response(
                 body,
@@ -341,8 +343,10 @@ def _register_read_routes(
             return _workflow_error(exc.code)
 
     @app.get("/servers/{sid}/workflow/films")
-    def workflow_films(request: Request, sid: int) -> Response:
-        return _workflow(request, sid, "films")
+    def workflow_films(
+        request: Request, sid: int, done_page: int = Query(default=1, ge=1)
+    ) -> Response:
+        return _workflow(request, sid, "films", done_page=done_page)
 
     @app.get("/servers/{sid}/workflow/plans")
     def workflow_plans(request: Request, sid: int) -> Response:

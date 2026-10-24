@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from starlette.concurrency import run_in_threadpool
@@ -43,6 +43,11 @@ class RetryBody(BaseModel):
 class OpenBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     what: Literal["inbox", "output"]
+
+
+class OpenFolderBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    which: Literal["output", "archive"]
 
 
 class PlanItem(BaseModel):
@@ -167,8 +172,8 @@ def register_workflow_routes(
         return dispatcher
 
     @app.get("/control/workflow/films")
-    def workflow_films() -> dict[str, Any]:
-        return reads.films(settings, provider)
+    def workflow_films(done_page: int = Query(default=1, ge=1)) -> dict[str, Any]:
+        return reads.films(settings, provider, done_page)
 
     @app.get("/control/workflow/films/{film_id}")
     def workflow_film(film_id: str) -> dict[str, Any]:
@@ -349,6 +354,55 @@ def register_workflow_routes(
         _wake(host)
         return result
 
+    @app.post("/control/workflow/films/{film_id}/recheck-source")
+    def workflow_recheck_source(film_id: str) -> dict[str, Any]:
+        """重新检查 (P3 E2): the INBOX existence check at once; a returned
+        source takes the film out of 片源丢失 and wakes dispatch."""
+        from taskpaw_v3.workflow import board
+
+        host = _host()
+        sources = getattr(host, "sources", None)
+        if sources is None:
+            raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
+        with _mapped():
+            if board.board_film(_runtime(host), film_id) is None:
+                raise HTTPException(status_code=404, detail="未知影片")
+            missing = sources.check(film_id, force=True)
+        _wake(host)
+        return {
+            "ok": True,
+            # the share could not be reached: nothing was learned (#304 IR4)
+            "unreachable": sources.unknown(film_id),
+            "source_missing": None
+            if missing is None
+            else {
+                "paths": missing["paths"],
+                "found_at": board.iso(missing["found_at"]),
+            },
+        }
+
+    @app.post("/control/workflow/films/{film_id}/remove")
+    def workflow_remove(film_id: str) -> dict[str, Any]:
+        """删除此任务 (P3 E3): refused (409, coded) while a stage runs or is
+        claimed, a route is open, or the film was confirmed or archived;
+        otherwise the task and its private work dirs go. INBOX, the output
+        directory and NAS are never touched."""
+        from taskpaw_v3.workflow import operator_actions as ops
+
+        host = _host()
+        with _mapped():
+            try:
+                result = ops.remove_film(
+                    _runtime(host),
+                    film_id=film_id,
+                    sources=getattr(host, "sources", None),
+                    log=getattr(host, "workflow_log", None),
+                )
+            except ops.ActionRefused as exc:
+                raise CodedConflict(exc.detail, exc.code) from None
+        _wake(host)
+        return result
+
     @app.post("/control/workflow/ltx-download")
     def workflow_ltx_download(body: LtxDownloadBody) -> dict[str, bool]:
         """下载模型 (H3 M1): the session's own handshake refuses a stale or a
@@ -373,6 +427,23 @@ def register_workflow_routes(
         inbox = host.finalizer.inbox if host.finalizer is not None else None
         with _mapped():
             return _open(board.folder(_runtime(host), inbox, film_id, body.what))
+
+    @app.post("/control/workflow/films/{film_id}/open-folder", status_code=204)
+    def workflow_open_folder(film_id: str, body: OpenFolderBody) -> Response:
+        from taskpaw_v3.workflow import board
+
+        with _mapped():
+            path = board.folder(_runtime(_host()), None, film_id, body.which)
+            if path is None:
+                raise HTTPException(status_code=409, detail="目录已不存在")
+            try:
+                return _open(path)
+            except HTTPException as exc:
+                if exc.status_code == 500 and not path.is_dir():
+                    raise HTTPException(
+                        status_code=409, detail="目录已不存在"
+                    ) from None
+                raise
 
     # ── 设备 (P2-2): enrollment and admission of remote workers ─────────
     def _device(run: Any) -> Any:
