@@ -506,7 +506,7 @@ class ReadCommands(WorkflowCore):
             if principal["role"] != "operator":
                 raise WorkflowError("forbidden")
             rows = self._conn.execute(
-                "SELECT f.film_id,f.display_name,f.created_at,"
+                "SELECT f.film_id,f.display_name,f.created_at,d.completed_at,"
                 "f.current_input_revision AS input_revision,"
                 "json_extract(fm.body_json,'$.output_relative_path') AS output_path,"
                 "i.package_id,p.relative_path AS package_path,"
@@ -518,6 +518,7 @@ class ReadCommands(WorkflowCore):
                 "fp.backfilled AS plan_backfilled,im.manifest_hash AS input_hash,"
                 "fm.revision AS final_revision,fm.manifest_hash AS final_hash "
                 "FROM films f "
+                f"LEFT JOIN ({_DONE}) d ON d.film_id=f.film_id "
                 "LEFT JOIN manifests fm ON fm.film_id=f.film_id AND fm.kind='final' "
                 "AND fm.revision=f.current_final_revision "
                 "LEFT JOIN manifests im ON im.film_id=f.film_id AND im.kind='input' "
@@ -600,6 +601,9 @@ class ReadCommands(WorkflowCore):
                     "film_id": row["film_id"],
                     "display_name": row["display_name"],
                     "created_at": parse_time(row["created_at"]),
+                    "completed_at": parse_time(row["completed_at"])
+                    if row["completed_at"]
+                    else None,
                     "final_name": PurePosixPath(row["output_path"]).name
                     if row["output_path"]
                     else None,

@@ -151,17 +151,15 @@ def films(
     status = inputs.status
     dispatch = status.get("dispatch") or {}
     current, intake = dispatch.get("current"), status.get("intake")
-    with _mapped():
-        rows = board.film_rows(
-            films,
-            inputs.waiting,
-            inputs.currents,
-            status.get("ltx_download"),
-            facts=facts,
-            extras=inputs.extras,
-            names=inputs.names,
-            rt=rt,
-        )
+    rows = board.film_rows(
+        films,
+        inputs.waiting,
+        inputs.currents,
+        status.get("ltx_download"),
+        facts=facts,
+        extras=inputs.extras,
+        names=inputs.names,
+    )
     package_rows = board.package_rows(packages, intake)
     gpu = rt.gpu
     return {

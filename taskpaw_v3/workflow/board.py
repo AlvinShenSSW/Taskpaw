@@ -547,6 +547,7 @@ def film_row(
         "can_retry": place["retry_stage"] is not None,
         "retry_stage": place["retry_stage"],
         "created_at": _time(film.created_at),
+        "completed_at": _time(film.completed_at) if film.completed_at else None,
         "steps": _steps(film, place, waiting, kept or {}, current, download),
         # U1e: each finished stage's time, the restore breakdown and 修复→翻译
         "timing": film_timing(film),
@@ -586,19 +587,17 @@ def film_rows(
     facts: dict[str, Facts] | None = None,
     extras: Mapping[str, RowExtra] | None = None,
     names: Mapping[str, str] | None = None,
-    rt: LocalRuntime | None = None,
 ) -> list[dict[str, Any]]:
     """P2-3 R15: `currents` maps a film to its running stage — the
     controller's own and each worker's (`FleetLive.currents`). A film being
     fetched before its claim shows the download as its waiting note.
-    P2-4: `extras` per film and the workers' `names` (`reads.board_inputs`).
-    `rt` supplies recorded completion times for the films API."""
+    P2-4: `extras` per film and the workers' `names` (`reads.board_inputs`)."""
     currents = currents or {}
     waiting = dict(waiting)
     for film_id, value in currents.items():
         if value.get("fetching") and value.get("transfer"):
             waiting[film_id] = value["transfer"]
-    rows = [
+    return [
         film_row(
             film,
             waiting,
@@ -611,14 +610,6 @@ def film_rows(
         )
         for film in films
     ]
-    for row in rows:
-        completed = (
-            _completed_at(rt.store.film_workflow(rt.operator, row["film_id"]))
-            if rt is not None and row["group"] == "done"
-            else None
-        )
-        row["completed_at"] = _time(completed) if completed else None
-    return rows
 
 
 def _running_current(value: dict[str, Any] | None) -> dict[str, Any] | None:

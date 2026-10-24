@@ -487,6 +487,7 @@ describe("影片队列 / 待确认 / 异常", () => {
     await waitFor(() => expect(qc.isFetching()).toBe(0));
     read.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(screen.queryByText("没有符合条件的影片")).not.toBeInTheDocument();
     await waitFor(() => expect(order()).toEqual(sorted.slice(60)));
     expect(read.mock.calls).toEqual([[2]]);
     expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();

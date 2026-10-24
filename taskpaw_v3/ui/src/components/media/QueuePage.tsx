@@ -139,7 +139,7 @@ export function QueuePage() {
             </tr>)}</tbody>
           </table>
         </div> : <div className="queue-grid">{films.map((item) => <FilmCard key={item.id} item={item} />)}</div>
-      ) : (
+      ) : !changingPage && (
         <EmptyState title="没有符合条件的影片" description="试试更改阶段、分辨率或搜索词。" />
       )}
     </>
