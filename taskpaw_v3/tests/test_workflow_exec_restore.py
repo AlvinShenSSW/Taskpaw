@@ -79,7 +79,7 @@ def test_restores_each_video_and_records_verified_facts(rt, tools):
     facts = only.restore
     attempt = stage(rt, film, "restore").attempt_id
     assert facts.decision == "applied"
-    assert facts.file.path == f"{attempt}/movie-破解.mp4"
+    assert facts.file.path == f"{attempt}/movie-无码.mp4"  # #303: LTX is 无码
     assert (facts.width, facts.height, facts.duration_ms) == (1920, 1080, 120000)
     assert (facts.video_streams, facts.audio_streams) == (1, 1)
     check_file(rt.work_dir, facts.file)  # size and sha256 match the published file
@@ -88,7 +88,7 @@ def test_restores_each_video_and_records_verified_facts(rt, tools):
     assert not list(workdir.glob("*.tmp.mp4"))
     (argv,) = tools.runs(tools.jasna_exe)
     assert argv[argv.index("--input") + 1] == str(source)
-    assert argv[argv.index("--output") + 1] == str(workdir / "movie-破解.tmp.mp4")
+    assert argv[argv.index("--output") + 1] == str(workdir / "movie-无码.tmp.mp4")
     assert argv[argv.index("--restoration-model-name") + 1] == "ltx"
     assert "--ltx-fast" in argv  # unknown GPU keeps the preset's fast mode
     assert argv[argv.index("--working-directory") + 1] == str(workdir / ".jasna-work")
@@ -383,6 +383,16 @@ def test_restored_name_is_reused_without_a_child_or_the_gpu(rt, tools):
     assert tools.runs(tools.jasna_exe) == []
 
 
+@pytest.mark.parametrize("name", ["movie-无码.mp4", "movie_restored.mp4"])
+def test_every_restored_name_is_reused_without_a_child(rt, tools, name):
+    film = single(rt, name)
+    assert rt.executors["restore"].needs_gpu(manifest(rt, film)) is False
+    run = run_direct(rt, film, "restore")
+    (only,) = ledger(run).videos
+    assert only.restore.decision == "reused"
+    assert tools.runs(tools.jasna_exe) == []
+
+
 def test_mixed_volumes_restore_in_order_and_reuse_the_restored_one(rt, tools):
     film = add_film(
         rt,
@@ -398,13 +408,16 @@ def test_mixed_volumes_restore_in_order_and_reuse_the_restored_one(rt, tools):
     assert (first.volume_ordinal, first.restore.decision) == (1, "reused")
     assert first.restore.file.path.endswith("cd1_restored.mp4")
     assert (second.volume_ordinal, second.restore.decision) == (2, "applied")
-    assert second.restore.file.path.endswith("cd2-破解.mp4")
+    assert second.restore.file.path.endswith("cd2-无码.mp4")
     assert len(tools.runs(tools.jasna_exe)) == 1
     assert any("第 2/2 卷" in text for text in run.progress)
 
 
 def test_is_restored_name_follows_the_plugin_suffixes():
     assert is_restored_name("ABC-123-破解.mp4")
+    assert is_restored_name("ABC-123-无码.mp4")  # #303
+    assert is_restored_name("ABC-123-无码.MP4")
+    assert not is_restored_name("ABC-123-无码.tmp.mp4")
     assert is_restored_name("abc_RESTORED.MP4")
     assert not is_restored_name("abc-破解.mkv")
     assert not is_restored_name("abc.mp4")

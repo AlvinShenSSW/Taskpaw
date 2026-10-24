@@ -819,6 +819,20 @@ def _item_path(
     return path if path.is_file() else None
 
 
+def _poster_item(final: m.FinalManifest) -> m.ManifestItem | None:
+    """The cover item: the poster Miko's postprocess recorded (the first volume's
+    `<name>-poster.jpg`, #303), else any poster, else `folder.jpg`."""
+    by_id = {i.item_id: i for i in final.items}
+    recorded = by_id.get(final.postprocess.poster_item_id)
+    if recorded is not None and recorded.role == "poster":
+        return recorded
+    for role in ("poster", "folder_cover"):
+        item = next((i for i in final.items if i.role == role), None)
+        if item is not None:
+            return item
+    return None
+
+
 def _input_file(
     rt: LocalRuntime,
     manifest: m.InputManifest,
@@ -866,9 +880,13 @@ def _poster(
     the input's poster, thumb or first image attachment, from the intake work
     copy (H3 M2)."""
     if final is not None:
-        item = next((i for i in final.items if i.role == "poster"), None)
-        path = _item_path(rt, final, "poster")
-        return (path, f"final-{item.sha256[:16]}") if item and path else None
+        item = _poster_item(final)
+        path = output_dir(rt, final) / item.relative_path if item else None
+        return (
+            (path, f"final-{item.sha256[:16]}")
+            if item and path and path.is_file()
+            else None
+        )
     poster = getattr(looked, "poster", None)
     if poster is not None and poster.is_file():
         return poster, f"lookup-{looked.poster_sha or 'cover'}"
@@ -1067,7 +1085,7 @@ def film_detail(
         if lookup is not None and film.input_revision is not None
         else None,
         "marks": {
-            "restored": "restored" in marks,
+            "restored": bool(marks & {"restored", "uncensored"}),
             "chinese_subtitles": "chinese_subtitles" in marks,
             "uhd": "4k" in marks,
         },

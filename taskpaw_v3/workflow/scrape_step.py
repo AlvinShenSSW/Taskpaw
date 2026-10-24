@@ -1,8 +1,8 @@
 """M01-P1 scrape: Miko full post-processing of a return package, as a T01 final.
 
 The return package is staged privately (videos hard-linked, the Chinese subtitle
-copied as `<video>.srt`, old NFO/images left out), MDCX304's one-shot
-`postprocess_one` runs in its own environment inside the attempt's kill-on-close
+copied as `<video>.srt`, old NFO/images left out; a Japanese subtitle is never
+staged), MDCX304's one-shot `postprocess_one` runs in its own environment inside the attempt's kill-on-close
 Job, and its verified output becomes the film's FinalManifest. Contract:
 docs/specs/2026-10-20-media-workflow-m01-p1-{design,interface}.md.
 """
@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 from . import file_identity
 from . import models as m
-from .exec_restore import ffprobe_command, probe_video
+from .exec_restore import ffprobe_command, is_ltx_name, is_restored_name, probe_video
 from .executors import SUCCEEDED_KIND, ErrorClass, ExecOutcome
 from .local_dispatch import ReturnContext
 from .local_runtime import LocalRuntime
@@ -124,7 +124,7 @@ class LocalScrapeStep:
             path.mkdir(parents=True, exist_ok=True)
         self._copy_config(dirs["config"], tools.config_digest)
         package = package_dir(rt, job.film_id, job.input_revision)
-        videos, japanese = self._stage(handoff, package, dirs["in"])
+        videos = self._stage(handoff, package, dirs["in"])
         request = {
             "schema": SCHEMA,
             "attempt_id": context.attempt_id,
@@ -135,9 +135,7 @@ class LocalScrapeStep:
             json.dumps(request, ensure_ascii=False), encoding="utf-8"
         )
         result, result_sha = self._launch(context, attempt, dirs["config"])
-        film_dir = dirs["out"] / result["film_dir"]
         files = self._verify(dirs["out"], result)
-        files += self._place_japanese(japanese, package, film_dir, dirs["out"], files)
         final = self._final(
             context, tools, handoff, handoff_sha, result, result_sha, files, attempt
         )
@@ -202,11 +200,11 @@ class LocalScrapeStep:
 
     def _stage(
         self, handoff: dict[str, Any], package: Path, staging: Path
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> list[dict[str, Any]]:
         items = handoff["items"]
         zh_ids = set(handoff["subtitles"]["item_ids"])
         restored = handoff["restoration"]["status"] in ("applied", "reused")
-        videos, japanese = [], []
+        videos = []
         for entry in self._stage_index(handoff):
             item, staged, volume = entry["item"], entry["file"], entry["volume"]
             source = _checked(package, item)
@@ -223,18 +221,16 @@ class LocalScrapeStep:
                     _checked(package, sub),
                     staging / f"{PurePosixPath(staged).stem}.srt",
                 )
-            japanese += [
-                {**s, "staged_video": staged} for s in subs if s.get("language") == "ja"
-            ]
             videos.append(
                 {
                     "file": staged,
                     "volume": volume,
                     "restored": restored,
+                    "ltx": entry["ltx"],  # #303: Miko stamps 无码, not 破解
                     "zh_subtitle": bool(zh),
                 }
             )
-        return videos, japanese
+        return videos
 
     def _launch(
         self, context: ReturnContext, attempt: Path, config: Path
@@ -289,49 +285,6 @@ class LocalScrapeStep:
                 raise _Failure("needs_attention", f"输出文件核对失败：{path}")
         return list(listed.values())
 
-    @staticmethod
-    def _place_japanese(
-        japanese: list[dict[str, Any]],
-        package: Path,
-        film_dir: Path,
-        out: Path,
-        files: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        placed = []
-        # Each keeps its own format; a second one of a format is `.ja.<n>` (H1-3).
-        used = {f["path"].casefold() for f in files}
-        for sub in japanese:
-            video = next(
-                (
-                    f
-                    for f in files
-                    if f["role"] == "main_video" and f["video"] == sub["staged_video"]
-                ),
-                None,
-            )
-            if video is None:
-                raise _Failure("needs_attention", "日语字幕找不到对应的视频")
-            main = out / video["path"]
-            ext = PurePosixPath(sub["relative_path"]).suffix
-            target, n = main.with_name(f"{main.stem}.ja{ext}"), 0
-            while target.relative_to(out).as_posix().casefold() in used:
-                n += 1
-                target = main.with_name(f"{main.stem}.ja.{n}{ext}")
-            used.add(target.relative_to(out).as_posix().casefold())
-            shutil.copyfile(_checked(package, sub), target)
-            placed.append(
-                {
-                    "path": target.relative_to(out).as_posix(),
-                    "role": "subtitle",
-                    "video": sub["staged_video"],
-                    "sha256": sha256_file(target),
-                    "size": target.stat().st_size,
-                    "language": "ja",
-                    "source_role": sub["role"],
-                }
-            )
-        return placed
-
     # ── final manifest ─────────────────────────────────────────────────
     def _final(
         self,
@@ -372,6 +325,17 @@ class LocalScrapeStep:
         videos = {f["video"]: f for f in files if f["role"] == "main_video"}
         if set(videos) != set(staged):
             raise _Failure("needs_attention", "Miko 输出的视频数量不符")
+        for mark in result.get("expected_marks", ()):
+            # M7/#303: the stamp Miko judged must be the one this video was sent for
+            video = staged.get(mark.get("video"))
+            wanted = "无码" if video and video["ltx"] else "无码破解"
+            if video and mark.get("mosaic") and mark["mosaic"] != wanted:
+                raise _Failure(
+                    "needs_attention",
+                    f"Miko 判定为 {mark['mosaic']}，应为 {wanted}：{mark['video']}",
+                )
+        first_file = next(iter(staged), None)  # volume order (M8)
+        poster_id: str | None = None
         items: list[m.ManifestItem] = []
         by_role: dict[str, list[str]] = {}
         zh_items: list[str] = []
@@ -407,11 +371,14 @@ class LocalScrapeStep:
             )
             items.append(value)
             by_role.setdefault(entry["role"], []).append(value.item_id)
+            if role == "poster" and entry.get("video") == first_file:
+                poster_id = value.item_id  # the first volume's, never cd2's
             if language == "zh":
                 zh_items.append(value.item_id)
         for role in ("nfo", "poster"):
             if len(by_role.get(role, ())) < 1:
                 raise _Failure("needs_attention", f"缺少 {role}")
+        poster_id = poster_id or by_role["poster"][0]
         multi = len(videos) > 1
         folder = by_role.get("folder_cover", [None])[0]
         if multi and folder is None:
@@ -450,9 +417,13 @@ class LocalScrapeStep:
                     evidence=rt.evidence("media_probe", producer=signer),
                 )
             )
-        marks: list[Literal["restored", "chinese_subtitles", "4k"]] = []
+        marks: list[Literal["restored", "uncensored", "chinese_subtitles", "4k"]] = []
         if handoff["restoration"]["status"] in ("applied", "reused"):
-            marks.append("restored")
+            # an LTX video is stamped 无码, any other restored one 破解 (#303)
+            if any(not v["ltx"] for v in staged.values()):
+                marks.append("restored")
+            if any(v["ltx"] for v in staged.values()):
+                marks.append("uncensored")
         if present:
             marks.append("chinese_subtitles")
         definitions = [
@@ -502,8 +473,8 @@ class LocalScrapeStep:
                     for i in outputs
                 ),
                 nfo_item_id=by_role["nfo"][0],
-                poster_item_id=by_role["poster"][0],
-                required_image_item_ids=(by_role["poster"][0],),
+                poster_item_id=poster_id,
+                required_image_item_ids=(poster_id,),
                 actual_marks=tuple(marks),
                 image_refresh="fresh",
                 folder_required=multi,
@@ -535,13 +506,30 @@ class LocalScrapeStep:
             key=lambda i: (i["volume_ordinal"] or 0, i["relative_path"]),
         )
         multi = len(mains) > 1
+        status = handoff["restoration"]["status"]
         out = []
         for index, item in enumerate(mains, start=1):
             name = PurePosixPath(item["relative_path"])
             volume = (item["volume_ordinal"] or index) if multi else None
             staged = f"{name.stem}-cd{volume}{name.suffix}" if multi else name.name
-            out.append({"file": staged, "volume": volume, "item": item})
+            out.append(
+                {
+                    "file": staged,
+                    "volume": volume,
+                    "item": item,
+                    "ltx": _is_ltx(name.name, status),
+                }
+            )
         return out
+
+
+def _is_ltx(name: str, status: str) -> bool:
+    """Whether a video was restored with LTX (#303 D2): a `-无码` file is, a kept
+    `-破解` / `_restored` one is not; any other name was made by this workflow's
+    own (LTX) restore when the film's restoration was `applied`."""
+    if is_ltx_name(name):
+        return True
+    return status == "applied" and not is_restored_name(name)
 
 
 def _checked(package: Path, item: dict[str, Any]) -> Path:

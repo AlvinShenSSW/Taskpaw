@@ -1129,3 +1129,39 @@ def test_without_a_landscape_image_there_is_no_cover(staged):
     assert (detail["has_cover"], detail["cover_source"]) == (False, None)
     assert board.cover_path(rt, value) is None
     assert board.cover_path(rt, identity()) is None
+
+
+def _final_with(poster_item_id, *roles_and_paths):
+    from types import SimpleNamespace
+
+    items = [
+        SimpleNamespace(item_id=f"i{n}", role=role, relative_path=path)
+        for n, (role, path) in enumerate(roles_and_paths)
+    ]
+    postprocess = SimpleNamespace(poster_item_id=poster_item_id)
+    return SimpleNamespace(items=items, postprocess=postprocess)
+
+
+def test_the_final_cover_is_the_recorded_first_volume_poster():
+    """#303: `<name>-poster.jpg` per volume; the recorded one (cd1's) is the cover."""
+    final = _final_with(
+        "i2",  # the postprocess recorded cd1's poster, not the first listed
+        ("poster", "ABC-123-cd2-poster.jpg"),
+        ("folder_cover", "folder.jpg"),
+        ("poster", "ABC-123-cd1-poster.jpg"),
+    )
+    assert board._poster_item(final).relative_path == "ABC-123-cd1-poster.jpg"
+
+
+@pytest.mark.parametrize(
+    ("items", "served"),
+    [
+        ([("poster", "poster.jpg")], "poster.jpg"),  # a final from before #303
+        ([("poster", "ABC-123-poster.jpg")], "ABC-123-poster.jpg"),
+        ([("folder_cover", "folder.jpg")], "folder.jpg"),
+        ([], None),
+    ],
+)
+def test_the_final_cover_accepts_every_poster_name(items, served):
+    item = board._poster_item(_final_with("missing", *items))
+    assert (item.relative_path if item else None) == served
