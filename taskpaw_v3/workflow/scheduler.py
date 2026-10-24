@@ -735,8 +735,8 @@ def _route_films(
         if film.film_id not in waiting:
             continue
         pin = film.pin_worker_id
-        positions[pin] = positions.get(pin, 0) + 1
-        if waiting[film.film_id] == WAIT_SLOT:
+        if waiting[film.film_id] == WAIT_SLOT:  # Kimi: count only slot waiters
+            positions[pin] = positions.get(pin, 0) + 1
             note = f"第 {positions[pin]} 位"
             if pin is None:
                 note += " · 哪台先空给哪台"

@@ -65,7 +65,7 @@ export function QueuePage() {
           return <section className="panel panel-body" key={w.id} aria-label={w.name}>
             <h2>{w.name}</h2>
             <p>{current ? `修复中 ${itemTitle(current)}${percent != null ? `（${Math.round(percent)}%）` : ""}` : first?.kind === "film" ? statusLabel(first.status, first.row) : "空闲"}</p>
-            <p>{next?.kind === "film" ? next.row.note?.startsWith("已到 ") ? `下一部已到：${itemTitle(next)}` : next.row.note : "无预取"}</p>
+            <p>{next?.kind === "film" ? next.row.note?.startsWith("已到 ") ? `下一部已到：${itemTitle(next)}` : next.row.note ?? "无预取" : "无预取"}</p>
           </section>;
         })}
       </div>}
