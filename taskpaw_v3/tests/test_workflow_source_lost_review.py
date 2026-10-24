@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import shutil
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,6 +48,7 @@ from taskpaw_v3.workflow.executors import SyntheticExecutor
 from taskpaw_v3.workflow.fleet_live import FleetLive, Heartbeat
 from taskpaw_v3.workflow.intake_watch import DirtyBatch
 from taskpaw_v3.workflow.local_host import LocalWorkflowHost
+from taskpaw_v3.workflow.lookup import MetadataLookup
 from taskpaw_v3.workflow.scheduler import SOURCE_CHANGED
 
 package = fixtures.package
@@ -268,7 +271,9 @@ def test_an_approval_of_a_stale_context_does_not_block_delete_on_either_side(wor
     conn.commit()
     conn.execute("PRAGMA foreign_keys=ON")
     film = board.board_film(rt, film_id)
-    assert ops.removal_refusal(film, claimed=False, routed=False) is None  # board
+    assert (
+        ops.removal_refusal(world.rt, film, claimed=False, routed=False) is None
+    )  # board
     assert remove(world, film_id)["ok"] is True  # the store agrees
 
 
@@ -461,3 +466,157 @@ def test_member_oserror_preserves_state_and_recheck_reports_unreachable(
         "unreachable": False,
         "source_missing": None,
     }
+
+
+# CX7-CX9: concurrent source checks and removal during intake / lookup.
+def test_concurrent_source_checks_wait_for_the_completed_result(world, monkeypatch):
+    film_id = world.film()
+    world.lose()
+    entered, release, second_started, second_done = (
+        threading.Event() for _ in range(4)
+    )
+    original = world.watch._missing
+    checked = []
+
+    def blocked(film_id):
+        checked.append(film_id)
+        entered.set()
+        assert release.wait(5)
+        return original(film_id)
+
+    def second_check():
+        second_started.set()
+        result = world.watch.check(film_id)
+        second_done.set()
+        return result
+
+    monkeypatch.setattr(world.watch, "_missing", blocked)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(world.watch.check, film_id)
+        try:
+            assert entered.wait(5)
+            second = pool.submit(second_check)
+            assert second_started.wait(5)
+            returned_early = second_done.wait(0.2)
+        finally:
+            release.set()
+        one, two = first.result(timeout=5), second.result(timeout=5)
+    assert not returned_early
+    assert one is not None and two == one
+    assert checked == [film_id]
+    assert dispatcher(world.rt, sources=world.watch).run_once() is False
+
+
+def test_remove_refuses_an_open_intake_in_the_transaction_and_board(
+    world, api, monkeypatch
+):
+    rt = world.rt
+    film_id = world.film(plan=False)
+    other = world.film("other", plan=False)
+    package_id, operation_id = identity(), identity()
+    # Synthetic replacement operation and an existing publication link.
+    conn = rt.store._conn
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(
+        "INSERT INTO intake_films(film_id,input_revision,package_id,snapshot_id,"
+        "source_generation,grouping_revision,created_at) VALUES(?,1,?,?,1,1,'t')",
+        (film_id, package_id, identity()),
+    )
+    conn.execute(
+        "INSERT INTO intake_operations(operation_id,package_id,owner_principal_id,"
+        "root_id,root_config_revision,source_generation,owner_boot_id,state,"
+        "unresolved,publication_allowed,version,admission_json,observation_json,"
+        "config_json,created_at,updated_at) "
+        "VALUES(?,?,?, ?,1,2,?,'running',1,1,1,'{}','{}','{}','t','t')",
+        (operation_id, package_id, identity(), identity(), identity()),
+    )
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=ON")
+    command = m.FilmRemove(
+        film_id=film_id,
+        expected_version=rt.store.get_film(rt.operator, film_id).film.version,
+        reason="Delete task",
+    )
+    with pytest.raises(m.WorkflowError, match="film_intaking"):
+        rt.store.remove_film(rt.operator, rt.meta(), command)
+    assert api.row(film_id)["can_remove"] is False
+    assert api.row(other)["can_remove"] is True
+    url = f"/control/workflow/films/{film_id}/remove"
+    for bypass_precheck in (False, True):
+        with monkeypatch.context() as patch:
+            if bypass_precheck:
+                patch.setattr(ops, "removal_refusal", lambda *a, **kw: None)
+            response = api.post(url)
+        assert response.status_code == 409
+        assert response.json()["code"] == "film_intaking"
+        assert response.json()["detail"] == "正在收录这部片，稍后再删"
+    assert rt.store.get_film(rt.operator, film_id).film.removed_at is None
+    conn.execute(
+        "UPDATE intake_operations SET unresolved=0,state='completed' WHERE operation_id=?",
+        (operation_id,),
+    )
+    conn.commit()
+    assert api.row(film_id)["can_remove"] is True
+    assert api.post(url).status_code == 200
+    assert (
+        conn.execute(
+            "SELECT 1 FROM source_refs WHERE film_id=? AND retained=1", (film_id,)
+        ).fetchone()
+        is None
+    )
+
+
+def test_remove_refuses_metadata_lookup_until_its_result_is_written(
+    world, api, tmp_path, monkeypatch
+):
+    rt = world.rt
+    film_id = world.film(plan=False)
+    other = world.film("other", plan=False)
+    lookup = MetadataLookup(
+        rt,
+        python=sys.executable,
+        root=str(tmp_path),
+        profile=str(tmp_path / "fake.json"),
+    )
+    rt.lookup = lookup
+    working, finish_work, writing, finish_write = (threading.Event() for _ in range(4))
+    cache = lookup.cache_dir / f"{film_id}-r1"
+
+    def fake_lookup(*_):
+        cache.mkdir(parents=True)
+        (cache / "working.txt").write_text("fake lookup", encoding="utf-8")
+        working.set()
+        assert finish_work.wait(5)
+        return {"status": "failed", "message": "synthetic result"}
+
+    original_write = lookup._write
+
+    def blocked_write(*args):
+        writing.set()
+        assert finish_write.wait(5)
+        original_write(*args)
+
+    monkeypatch.setattr(lookup, "_lookup", fake_lookup)
+    monkeypatch.setattr(lookup, "_write", blocked_write)
+    url = f"/control/workflow/films/{film_id}/remove"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(lookup.run, film_id, 1, "movie.mkv")
+        try:
+            for entered, release in ((working, finish_work), (writing, finish_write)):
+                assert entered.wait(5)
+                response = api.post(url)
+                assert response.status_code == 409
+                assert response.json()["code"] == "film_lookup_running"
+                assert response.json()["detail"] == "正在查询元数据，稍后再删"
+                assert api.row(film_id)["can_remove"] is False
+                assert api.row(other)["can_remove"] is True
+                assert (cache / "working.txt").is_file()
+                release.set()
+        finally:
+            finish_work.set()
+            finish_write.set()
+        running.result(timeout=5)
+    assert (cache / "lookup.json").is_file()
+    assert api.row(film_id)["can_remove"] is True
+    assert api.post(url).status_code == 200
+    assert not cache.exists()

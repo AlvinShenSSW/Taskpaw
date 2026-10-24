@@ -462,10 +462,14 @@ _ARCHIVING = ("archive", "cleanup_input", "cleanup_workcopy")
 
 
 def removal_refusal(
-    film: m.BoardFilm, *, claimed: bool, routed: bool
+    rt: LocalRuntime, film: m.BoardFilm, *, claimed: bool, routed: bool
 ) -> tuple[str, str] | None:
     """Why the film cannot be deleted now (code, 原因), else None: a stage
     runs or is claimed, a route is open, or it was confirmed or archived."""
+    if rt.store.film_intake_open(rt.operator, film.film_id):
+        return "film_intaking", "正在收录这部片，稍后再删"
+    if rt.lookup is not None and rt.lookup.running(film.film_id):
+        return "film_lookup_running", "正在查询元数据，稍后再删"
     if any(s.status in ("running", "unknown") for s in film.stages):
         return "film_running", "有阶段正在运行，不能删除"
     if claimed:
@@ -514,7 +518,7 @@ def remove_film(
         raise m.WorkflowError("not_found")
     claimed, routed = busy_films(rt)
     refusal = removal_refusal(
-        film, claimed=film_id in claimed, routed=film_id in routed
+        rt, film, claimed=film_id in claimed, routed=film_id in routed
     )
     if refusal is not None:
         raise ActionRefused(*refusal)

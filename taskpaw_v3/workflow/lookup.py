@@ -199,6 +199,10 @@ class MetadataLookup:
             self._records.setdefault(key, value)
             return self._records[key]
 
+    def running(self, film_id: str) -> bool:
+        with self._lock:
+            return self._running is not None and self._running[0] == film_id
+
     def state(self, film_id: str, revision: int) -> dict[str, Any]:
         """The 待处理 card's lookup block: the result, or queued / running."""
         found = self.result(film_id, revision)
@@ -318,24 +322,25 @@ class MetadataLookup:
         with self._lock:
             self._running = (film_id, revision)
         try:
-            record = self._lookup(film_id, revision, file_name)
-        except _Stopped:
-            return  # an app shutdown is not a failed lookup: rerun on next start
-        except Exception as exc:  # never a stuck card: the failure is the result
-            log.exception("workflow lookup of %s failed", film_id)
-            record = _failure("needs_attention", f"资料查询异常：{exc}")
+            try:
+                record = self._lookup(film_id, revision, file_name)
+            except _Stopped:
+                return  # an app shutdown is not a failed lookup: rerun on next start
+            except Exception as exc:  # never a stuck card: the failure is the result
+                log.exception("workflow lookup of %s failed", film_id)
+                record = _failure("needs_attention", f"资料查询异常：{exc}")
+            record.update(
+                schema=SCHEMA,
+                cli_version=CLI_VERSION,
+                film_id=film_id,
+                input_revision=revision,
+                file_name=file_name or "",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+            )
+            self._write(film_id, revision, record)
         finally:
             with self._lock:
                 self._running = None
-        record.update(
-            schema=SCHEMA,
-            cli_version=CLI_VERSION,
-            film_id=film_id,
-            input_revision=revision,
-            file_name=file_name or "",
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
-        self._write(film_id, revision, record)
 
     def _lookup(
         self, film_id: str, revision: int, file_name: str | None

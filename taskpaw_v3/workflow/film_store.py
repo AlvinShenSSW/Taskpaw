@@ -1238,6 +1238,22 @@ class FilmCommands(WorkerCommands):
 
         return self._execute(auth, meta, command, "skip_stage", apply)
 
+    def film_intake_open(self, auth: AuthProof, film_id: str) -> bool:
+        """Shared removal guard: this film's package is still being copied."""
+        with self._lock:
+            self._check_auth(auth, self._observe_time())
+            return self._film_intake_open(film_id)
+
+    def _film_intake_open(self, film_id: str) -> bool:
+        return (
+            self._conn.execute(
+                "SELECT 1 FROM intake_operations o JOIN intake_films i "
+                "ON i.package_id=o.package_id WHERE i.film_id=? AND o.unresolved=1",
+                (film_id,),
+            ).fetchone()
+            is not None
+        )
+
     def remove_film(
         self, auth: AuthProof, meta: CommandMeta, command: FilmRemove
     ) -> CommandResult:
@@ -1254,6 +1270,8 @@ class FilmCommands(WorkerCommands):
                 raise WorkflowError("cas_conflict")
             film = FilmRecord.model_validate_json(row["body_json"])
             fid = command.film_id
+            if self._film_intake_open(fid):
+                raise WorkflowError("film_intaking")
             if (
                 film.removed_at is not None
                 or self._conn.execute(

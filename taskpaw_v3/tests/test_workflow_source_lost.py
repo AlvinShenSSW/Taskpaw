@@ -491,7 +491,7 @@ def board_film_with(world, film_id, **stages):
 def test_an_archived_or_archiving_film_cannot_be_deleted(world, stages):
     film_id = world.film()
     film = board_film_with(world, film_id, **stages)
-    code, _ = ops.removal_refusal(film, claimed=False, routed=False)
+    code, _ = ops.removal_refusal(world.rt, film, claimed=False, routed=False)
     assert code in ("film_archived", "film_running")
 
 
@@ -500,12 +500,15 @@ def test_a_confirmed_film_waiting_to_archive_cannot_be_deleted(world):
     film = board.board_film(world.rt, film_id).model_copy(
         update={"approval_active": True}
     )
-    assert ops.removal_refusal(film, claimed=False, routed=False)[0] == "film_archived"
+    assert (
+        ops.removal_refusal(world.rt, film, claimed=False, routed=False)[0]
+        == "film_archived"
+    )
     open_archive = film.model_copy(
         update={"approval_active": False, "archive_open": True}
     )
     assert (
-        ops.removal_refusal(open_archive, claimed=False, routed=False)[0]
+        ops.removal_refusal(world.rt, open_archive, claimed=False, routed=False)[0]
         == "film_archived"
     )
 
@@ -513,7 +516,7 @@ def test_a_confirmed_film_waiting_to_archive_cannot_be_deleted(world):
 def test_a_waiting_film_can_be_deleted(world):
     film_id = world.film()
     film = board.board_film(world.rt, film_id)
-    assert ops.removal_refusal(film, claimed=False, routed=False) is None
+    assert ops.removal_refusal(world.rt, film, claimed=False, routed=False) is None
 
 
 # ── the board and the control routes ────────────────────────────────────

@@ -62,6 +62,7 @@ class SourceWatch:
         self.runtime, self.inbox, self.interval = runtime, inbox, interval
         self._monotonic, self._on_change = monotonic, on_change
         self._lock = threading.Lock()
+        self._check_lock = threading.Lock()
         self._lost: dict[str, dict[str, Any]] = {}
         self._checked: dict[str, float] = {}
         self._unknown: set[str] = set()  # the last check could not tell
@@ -103,6 +104,10 @@ class SourceWatch:
 
     def check(self, film_id: str, *, force: bool = False) -> dict[str, Any] | None:
         """The film's 片源丢失 state after a (throttled) existence check."""
+        with self._check_lock:
+            return self._check(film_id, force=force)
+
+    def _check(self, film_id: str, *, force: bool) -> dict[str, Any] | None:
         if self.inbox is None:
             return self.get(film_id)
         now = self._monotonic()

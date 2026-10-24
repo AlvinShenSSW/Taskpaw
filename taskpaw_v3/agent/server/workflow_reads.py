@@ -32,6 +32,7 @@ _CONFLICTS = {
     "film_running": "有阶段正在运行，不能删除",
     "film_routed": "已派往设备，请稍后再试",
     "film_archived": "已确认入库或已入库的影片不能删除",
+    "film_intaking": "正在收录这部片，稍后再删",
 }
 
 
@@ -402,7 +403,7 @@ def _removal_and_sources(
         if missing is not None:
             waiting[film.film_id] = board.SOURCE_NOTE
         refusal = ops.removal_refusal(
-            film, claimed=film.film_id in claimed, routed=film.film_id in routed
+            rt, film, claimed=film.film_id in claimed, routed=film.film_id in routed
         )
         extras[film.film_id] = replace(
             extras.get(film.film_id) or board.RowExtra(),
