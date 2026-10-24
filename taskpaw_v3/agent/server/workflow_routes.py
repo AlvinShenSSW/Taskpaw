@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from starlette.concurrency import run_in_threadpool
@@ -172,8 +172,8 @@ def register_workflow_routes(
         return dispatcher
 
     @app.get("/control/workflow/films")
-    def workflow_films() -> dict[str, Any]:
-        return reads.films(settings, provider)
+    def workflow_films(done_page: int = Query(default=1, ge=1)) -> dict[str, Any]:
+        return reads.films(settings, provider, done_page)
 
     @app.get("/control/workflow/films/{film_id}")
     def workflow_film(film_id: str) -> dict[str, Any]:

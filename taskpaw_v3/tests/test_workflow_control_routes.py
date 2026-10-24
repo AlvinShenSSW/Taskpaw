@@ -257,6 +257,7 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
         "lookup",
         # U1e
         "timing",
+        "history",
         # PWR-2
         "duration_ms",
         "energy",
@@ -376,7 +377,7 @@ def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, clien
         )
         world.ticks(host.finalizer)
     data = client.get(f"{BASE}/films/{world.film}").json()
-    assert data["group"] == "done" and data["has_poster"] is False
+    assert data["group"] == "done" and data["has_poster"] is True
     assert data["has_cover"] is False
     assert data["archive"] == {
         "status": "succeeded",
@@ -388,8 +389,8 @@ def test_after_cleanup_detail_keeps_status_and_the_nas_target(world, host, clien
         "workcopy": "succeeded",
         "kept": [],
     }
-    assert data["title"] is None and data["actors"] == []
-    assert client.get(f"{BASE}/films/{world.film}/poster").status_code == 404
+    assert (data["title"], data["actors"]) == ("假的标题", ["Actor"])
+    assert client.get(f"{BASE}/films/{world.film}/poster").content == POSTER
     assert client.get(f"{BASE}/films/{world.film}/cover").status_code == 404
     assert (
         client.post(

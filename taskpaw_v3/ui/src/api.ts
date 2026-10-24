@@ -405,6 +405,7 @@ export interface WorkflowCounts {
 export interface WorkflowFilms {
   state: string; reason: string | null; current: WorkflowCurrent | null; intake: WorkflowIntake | null;
   films: FilmRow[]; packages: PackageRow[]; counts: WorkflowCounts;
+  done_paging?: { total: number; size: number; page: number; pages: number };
   // null without a host (dispatch) or without a probed GPU
   dispatch: WorkflowDispatch | null; gpu: WorkflowGpu | null;
   // PWR-2: the cluster's live estimate and the history behind 预计耗电 / 每片能耗
@@ -423,6 +424,8 @@ export interface FilmDetail extends FilmRemote {
   cleanup: { input: string | null; workcopy: string | null; kept: Array<{ path: string; status: string }> };
   resolution: Resolution | null; receipt_id: string | null; revisions: FilmRevisions; plan: FilmPlan | null;
   timing?: FilmTiming | null;
+  history?: { completed_at: string | null; total_seconds: number | null;
+    steps: Array<{ key: string; device: string; seconds: number | null; result: string }> } | null;
   duration_ms?: number | null; energy?: FilmEnergy | null; live_power?: LivePower | null;
   // null when Miko is not configured
   lookup: PlanLookup | null;
@@ -843,12 +846,12 @@ export const api = {
     send<{ ok: boolean }>("hub", "PATCH", "/config", { polling_token }),
   // Media workflow (T06-P1 §8): local control API only; paths are resolved by film id.
   power: (range: PowerRange) => get<PowerView>("agent", `/control/power?range=${range}`),
-  hubWorkflowFilms: (serverId: number) => get<WorkflowFilms>("hub", `/servers/${serverId}/workflow/films`),
+  hubWorkflowFilms: (serverId: number, donePage = 1) => get<WorkflowFilms>("hub", `/servers/${serverId}/workflow/films?done_page=${donePage}`),
   hubWorkflowFilm: (serverId: number, filmId: string) => get<FilmDetail>("hub", `/servers/${serverId}/workflow/films/${seg(filmId)}`),
   hubWorkflowPlans: (serverId: number) => get<WorkflowPlans>("hub", `/servers/${serverId}/workflow/plans`),
   hubWorkflowImagePath: (serverId: number, filmId: string, kind: "poster" | "cover") =>
     `/servers/${serverId}/workflow/films/${seg(filmId)}/${kind}`,
-  workflowFilms: () => get<WorkflowFilms>("agent", "/control/workflow/films"),
+  workflowFilms: (donePage = 1) => get<WorkflowFilms>("agent", `/control/workflow/films?done_page=${donePage}`),
   workflowFilm: (filmId: string) => get<FilmDetail>("agent", `/control/workflow/films/${seg(filmId)}`),
   performers: (query: string) =>
     get<{ items: Performer[] }>("agent", `/control/workflow/performers?${new URLSearchParams({ q: query })}`),

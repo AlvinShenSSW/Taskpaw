@@ -126,7 +126,7 @@ def runtime(host: WorkflowHostLike) -> LocalRuntime:
 
 
 def films(
-    settings: WorkflowSettings, provider: WorkflowProvider | None
+    settings: WorkflowSettings, provider: WorkflowProvider | None, done_page: int = 1
 ) -> dict[str, Any]:
     host = provider() if provider is not None else None
     if host is None:
@@ -139,7 +139,10 @@ def films(
 
     rt = host.runtime
     with _mapped():
-        films = rt.store.film_board(rt.operator)
+        paging = rt.store.done_paging(rt.operator, done_page)
+        films = rt.store.film_board(
+            rt.operator, done_offset=(paging["page"] - 1) * paging["size"]
+        )
         inputs = board_inputs(host, rt, films)
         packages = rt.store.list_intake_board(rt.operator)
         facts = board.row_facts(rt, films)
@@ -167,7 +170,8 @@ def films(
         "films": rows,
         "packages": package_rows,
         # U1 V' / V3 §7.4: the rail badges, the dispatch state and the card
-        "counts": board.counts(rows, package_rows),
+        "counts": {**board.counts(rows, package_rows), "done": paging["total"]},
+        "done_paging": paging,
         "dispatch": {
             "state": dispatch.get("state", "idle"),
             "reason": dispatch.get("reason", ""),

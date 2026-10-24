@@ -693,6 +693,7 @@ def test_the_network_films_snapshot_stays_inside_its_payload_budget(monkeypatch)
         identity=SimpleNamespace(worker_id="controller"),  # P2-4 board_inputs
         store=SimpleNamespace(
             film_board=lambda *_a, **_k: films,
+            done_paging=lambda *_a: {"total": 0, "size": 20, "page": 1, "pages": 1},
             list_intake_board=lambda _a: (),
             energy_history=lambda _a: (),
             list_workers=lambda _a: (),

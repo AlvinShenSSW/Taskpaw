@@ -1853,6 +1853,8 @@ class WorkflowArchiveOperation(Model):
     version: Revision
     resolved: bool
     error_code: Text | None
+    started_at: UtcTime | None = None
+    ended_at: UtcTime | None = None
 
 
 class WorkflowCleanupItem(Model):
@@ -1877,6 +1879,8 @@ class WorkflowCleanupOperation(Model):
     status: Literal["admitted", "running", "unknown", "verified"]
     resolved: bool
     items: tuple[WorkflowCleanupItem, ...]
+    started_at: UtcTime | None = None
+    ended_at: UtcTime | None = None
 
 
 class FilmWorkflow(Model):

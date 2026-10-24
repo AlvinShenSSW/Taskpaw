@@ -61,7 +61,7 @@ export function OverviewPage() {
     ["回传 / 刮削", count((i) => matchesStage(i, "preparing")), "preparing", false],
     ["待确认", review, "review", true],
     ["入库 / 清理", count((i) => ["archiving", "unknown", "cleanup"].includes(i.status)), "archive", false],
-    ["完成", count((i) => i.status === "completed"), "completed", false],
+    ["完成", data.films.data?.counts.done ?? 0, "completed", false],
   ];
 
   return (

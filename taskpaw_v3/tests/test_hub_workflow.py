@@ -21,6 +21,14 @@ AUTH = {"Authorization": "Bearer client-token"}
 RESOURCES = ("films", "plans", "films/movie", "films/movie/poster", "films/movie/cover")
 
 
+def test_completed_page_is_forwarded_to_agent(hub):
+    client, _, _, sid, _, opener, _ = hub
+    opener.open.return_value = Response()
+    response = client.get(f"/servers/{sid}/workflow/films?done_page=3", headers=AUTH)
+    assert response.status_code == 200
+    assert urlsplit(opener.open.call_args.args[0].full_url).query == "done_page=3"
+
+
 class Response(io.BytesIO):
     def __init__(
         self,
