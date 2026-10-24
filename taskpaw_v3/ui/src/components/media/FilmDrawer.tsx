@@ -11,7 +11,7 @@ import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
 import { predictFromRates } from "../power/powerModel";
 import {
   CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, fmtDuration, fmtDurationMs, hasLtxTime, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
-  machineLabel, statusLabel, STATUS_META, stageName, stepDurations, TIER_SHORT, tierLong, unroutedMachine, type WorkItem,
+  machineLabel, runningArchiveStep, statusLabel, STATUS_META, stageName, stepDurations, TIER_SHORT, tierLong, unroutedMachine, type WorkItem,
 } from "./mediaModel";
 import { DeviceSection } from "./RemoteParts";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
@@ -187,7 +187,7 @@ function DrawerBody({ film, item, status, plan, onClose }: {
   const title = film.title || plan?.title || film.name;
   const actors = film.actors.length ? film.actors : plan?.actors ?? [];
   const restore = restoreStep(film);
-  const archive = film.steps?.find((s) => s.key === "archive" && s.state === "running");
+  const archive = runningArchiveStep(film);
   const asr = film.steps?.find((s) => s.key === "asr" && s.state === "running");
   const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
   // P2-3 R15: a restore or ASR running on a worker (its 设备, and 停止并重新排队)

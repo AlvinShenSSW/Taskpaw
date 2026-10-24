@@ -117,6 +117,10 @@ export function restoreStep(row: { steps?: WorkflowStep[] | null }): WorkflowSte
   return (row.steps ?? []).find((s) => s.key === "restore");
 }
 
+export function runningArchiveStep(row: { steps?: WorkflowStep[] | null }): WorkflowStep | undefined {
+  return row.steps?.find((s) => s.key === "archive" && s.state === "running");
+}
+
 export function ltxOf(row: { steps?: WorkflowStep[] | null }): LtxSnapshot | null {
   const ltx = restoreStep(row)?.ltx;
   return ltx && typeof ltx === "object" ? readLtxProgress(ltx) : null;

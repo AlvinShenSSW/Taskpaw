@@ -335,6 +335,13 @@ class Finalizer:
             except m.WorkflowError as exc:
                 if str(exc) == "authority_unavailable":
                     raise
+                if (
+                    str(exc) == "cas_conflict"
+                ):  # a lost race: retried next tick, quietly
+                    log.info("finalize %s: cas_conflict, retrying", film_id)
+                    if film_id in self.waiting:
+                        waiting[film_id] = self.waiting[film_id]
+                    continue
                 log.warning("finalize %s: %s", film_id, exc)
                 waiting[film_id] = f"归档/清理暂停：{exc}"
             except Exception as exc:  # one broken film must not stop the others (IR04)
@@ -845,6 +852,7 @@ class Finalizer:
             package = self.inbox / wf.package_path
             if package.resolve() != self.inbox.resolve():  # never the INBOX root itself
                 _rmdir_empty(package)
+                _rmdir_parents(package, self.inbox)  # an actor folder left empty
         latest = rt.store.film_workflow(
             rt.operator, wf.film_id
         )  # rmdir may have bumped it
@@ -902,6 +910,20 @@ def film_work_dirs(rt: LocalRuntime, film_id: str) -> list[Path]:
     for parent in ("return", "scrape", "lookup"):
         dirs.extend((rt.work_dir / parent).glob(f"{film_id}-r*"))
     return dirs
+
+
+def _rmdir_parents(package: Path, inbox: Path) -> None:
+    """Remove the now-empty folders above `package`, up to but never the INBOX
+    root: an actor folder goes with its last film and stays while any other
+    film (any entry) is left in it."""
+    stop = inbox.resolve()
+    parent = package.parent
+    while parent.resolve() != stop and stop in parent.resolve().parents:
+        try:
+            parent.rmdir()  # fails while anything is left inside
+        except OSError:
+            return
+        parent = parent.parent
 
 
 def _rmdir_empty(root: Path) -> None:
