@@ -82,7 +82,8 @@ class StopCheck:
 
 
 def worker_address(worker: m.WorkerRecord) -> str:
-    """`host:port` of the worker's 5680 agent (`[v6]:port`), as power peers."""
+    """`host:port` of the worker's agent (`[v6]:port`), as power peers; the
+    port is the one the worker reports at pair/boot (#306)."""
     host = worker.address
     try:
         if ipaddress.ip_address(host).version == 6:

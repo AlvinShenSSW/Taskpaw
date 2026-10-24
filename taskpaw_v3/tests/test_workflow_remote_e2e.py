@@ -1068,9 +1068,9 @@ def test_cx18_an_unreadable_record_after_a_restart_is_held_not_interrupted(
     boots: list[list[dict[str, Any]]] = []
     real_boot = WorkerClient.boot
 
-    def boot(self, boot_id, attempts=None):
+    def boot(self, boot_id, attempts=None, *, agent_port=None):
         boots.append(list(attempts or []))
-        return real_boot(self, boot_id, attempts)
+        return real_boot(self, boot_id, attempts, agent_port=agent_port)
 
     monkeypatch.setattr(WorkerClient, "boot", boot)
     world.tools.set_jasna()  # a retry would succeed

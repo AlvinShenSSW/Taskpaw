@@ -760,7 +760,7 @@ def test_a_lost_withdrawal_frees_no_slot_for_the_pass(tmp_path, monkeypatch):
             if r.worker_id == worker.worker_id
         ]
         assert len(mine) == s.MAX_OPEN_ROUTES
-        assert outcome.planned.waiting[waiting] == f"等待设备：{s.QUEUE_FULL}"
+        assert outcome.planned.waiting[waiting] == "第 1 位 · 哪台先空给哪台"
     finally:
         rt.close()
 

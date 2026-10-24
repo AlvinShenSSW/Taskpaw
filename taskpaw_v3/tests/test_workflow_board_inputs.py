@@ -2,7 +2,7 @@
 
 `reads.board_inputs` feeds the list, the detail and the #286 observer. A
 film's note: the transfer, then the last routing pass's waiting reason, then
-「已派往 X」 for an open unclaimed route (「· 预取」 when second in line),
+the download / staged state of an open unclaimed route,
 then the dispatcher's. A film on a 失联 worker is an attention state. Each
 row carries its route and pin; each stage's energy names its machines."""
 
@@ -98,8 +98,8 @@ def test_note_precedence_route_prefetch_pass_and_dispatcher(world):
     last = s.SchedulePass((), (), {held: s.CONTROLLER_DISK}, {})
     waiting = {held: GPU_WAIT, plain: GPU_WAIT, first: GPU_WAIT}
     found = rows(Host(rt, world.fleet, waiting, last))
-    assert found[first]["note"] == "已派往 5060 Ti-1"
-    assert found[second]["note"] == "已派往 5060 Ti-1 · 预取"
+    assert found[first]["note"] == "下载到 5060 Ti-1 · 0%"
+    assert found[second]["note"] == "下载到 5060 Ti-1 · 0%"
     # the controller-disk gate never shows 「等待 GPU 设备」
     assert found[held]["note"] == s.CONTROLLER_DISK
     assert found[plain]["note"] == GPU_WAIT
@@ -133,9 +133,9 @@ def test_a_transfer_beats_the_pass_and_a_claimed_film_shows_no_route_note(world)
         "rate": 0.0,
     }
     online(world, w1, transfers=[transfer])
-    last = s.SchedulePass((), (), {fetched: "等待设备：设备队列已满"}, {})
+    last = s.SchedulePass((), (), {fetched: "第 1 位 · 哪台先空给哪台"}, {})
     found = rows(Host(rt, world.fleet, {}, last))
-    assert found[fetched]["note"] == "下载源文件 1.0/4.0 GB"
+    assert found[fetched]["note"] == "下载到 5060 Ti-1 · 25%"
     assert found[claimed]["note"] is None  # claimed: its step runs remotely
 
 
@@ -228,3 +228,23 @@ def test_energy_devices_name_each_attempts_machine_and_the_live_one():
         {"id": "w1", "name": "5070 Ti"},
         {"id": "w2", "name": "5060 Ti-2"},
     ]
+
+
+@pytest.mark.parametrize("downloaded", [False, True])
+def test_dispatch_download_copy_reaches_list_and_drawer(world, downloaded):
+    rt = world.rt
+    w = enrol_remote(rt, "GPU")
+    f = add_film(rt)
+    route(rt, f, w.worker_id)
+    online(
+        world,
+        w,
+        staged=[{"film": f, "rev": 1}] if downloaded else [],
+        transfers=[]
+        if downloaded
+        else [{"film": f, "dir": "down", "done": 25, "total": 100, "rate": 0.0}],
+    )
+    host = Host(rt, world.fleet)
+    expected = "已到 GPU · 等开始" if downloaded else "下载到 GPU · 25%"
+    assert rows(host)[f]["note"] == expected
+    assert reads.film(SETTINGS, lambda: host, f)["note"] == expected

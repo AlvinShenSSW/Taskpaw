@@ -228,8 +228,6 @@ def film(
 
 
 LOCAL_NAME = "本机"
-ROUTED = "已派往 {name}"  # P2-4 R1: an open route the worker has not claimed yet
-PREFETCH = " · 预取"  # its second route: fetched while the first runs (S4)
 
 
 @dataclass
@@ -288,8 +286,8 @@ def board_inputs(
     host: Any, rt: LocalRuntime, films: Sequence[Any], *, removal: bool = True
 ) -> BoardInputs:
     """A film's note, highest first: its transfer, the last routing pass's
-    waiting reason, 已派往 X for an open unclaimed route (· 预取 when second
-    in line), the controller's dispatcher's reason. A pass reason is left
+    waiting reason, download / staged state for an open unclaimed route,
+    the controller's dispatcher's reason. A pass reason is left
     out for a film routed or claimed since, so the controller-disk gate
     shows itself, never 等待 GPU 设备. Remote mode adds routes, pins and the
     设备失联 state (`scheduler.lost_films`)."""
@@ -344,10 +342,37 @@ def board_inputs(
         }
         for film_id, item in mine.items():
             if film_id not in claimed and item.worker_id != controller:
-                prefetch = PREFETCH if position[item.route_id] == 1 else ""
-                waiting[film_id] = (
-                    ROUTED.format(name=names.get(item.worker_id, "")) + prefetch
+                entry = fleet.entry(item.worker_id)
+                name = names.get(item.worker_id, "")
+                staged = entry is not None and any(
+                    f.film == film_id
+                    and f.rev == item.input_revision
+                    and not f.incomplete
+                    for f in entry.beat.staged
                 )
+                transfer = (
+                    next(
+                        (
+                            t
+                            for t in entry.beat.transfers
+                            if t.film == film_id and t.dir == "down"
+                        ),
+                        None,
+                    )
+                    if entry is not None
+                    else None
+                )
+                percent = (
+                    min(100, transfer.done * 100 // transfer.total)
+                    if transfer and transfer.total
+                    else 0
+                )
+                note = (
+                    f"已到 {name} · 等开始" if staged else f"下载到 {name} · {percent}%"
+                )
+                waiting[film_id] = note
+                if film_id in currents and currents[film_id].get("fetching"):
+                    currents[film_id]["transfer"] = note
         last = getattr(host, "last_pass", None)
         for film_id, why in dict(getattr(last, "waiting", None) or {}).items():
             if film_id not in mine and film_id not in claimed:

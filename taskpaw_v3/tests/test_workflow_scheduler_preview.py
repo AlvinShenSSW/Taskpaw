@@ -134,8 +134,8 @@ def test_preview_counts_the_queue_ahead_of_the_film():
         controller_id=CONTROLLER,
     )["standard"]
     assert view.machine is None
-    assert view.waiting == f"等待设备：{s.QUEUE_FULL}"
-    assert view.devices[0].reason == s.QUEUE_FULL
+    assert view.waiting == "第 2 位 · 哪台先空给哪台"
+    assert view.devices[0].reason == "已有影片等开始"
 
 
 def test_preview_greys_a_device_per_tier_and_offline():
@@ -359,9 +359,8 @@ def test_cx33_queued_finish_counts_only_the_routes_ahead_on_that_worker():
 def test_cx33_preview_can_keep_the_films_confirm_time():
     """CX33: 改派 previews the film at its own place in the confirm order."""
     w = fleet()[0]
-    occupied = film(0)
     target, later = film(10), film(20)
-    shot = snapshot([occupied, target, later], [w], routes=[open_route(occupied, w)])
+    shot = snapshot([target, later], [w])
     now_view = s.preview(
         shot,
         target.film_id,

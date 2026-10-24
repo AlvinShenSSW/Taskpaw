@@ -702,7 +702,8 @@ def test_a_worker_agent_starts_the_worker_host_and_joins_it_on_shutdown(
 
     started = {}
 
-    def fake_start(settings, config_dir):
+    def fake_start(settings, config_dir, *, agent_port=None):
+        started["agent_port"] = agent_port
         host = WorkerHost(settings, config_dir / "workflow", probe=fake_probe())
         host.start()
         started["host"] = host
@@ -724,6 +725,7 @@ def test_a_worker_agent_starts_the_worker_host_and_joins_it_on_shutdown(
     )
     try:
         host = started["host"]
+        assert started["agent_port"] == config.bind_port
         assert host.state == "unjoined"
     finally:
         shutdown.shutdown()
@@ -1094,7 +1096,7 @@ class FakeController:
         }
         return reply
 
-    def boot(self, boot_id, attempts=None):
+    def boot(self, boot_id, attempts=None, *, agent_port=None):
         return self._next("boot", {"status": "reconciled", "reconciled": True})
 
     def heartbeat(self, beat):
@@ -1912,7 +1914,7 @@ class _IdentityClient:
         worker_id = self.owner.worker_ids.get(self.cid, PENDING_WORKER)
         return {"worker": {"worker_id": worker_id}}
 
-    def pair(self, pairing_id, ticket, credential_id, secret):
+    def pair(self, pairing_id, ticket, credential_id, secret, *, agent_port=None):
         for cid in list(self.owner.kinds):  # the device's old credential goes
             if cid != self.cid:
                 self.owner.kinds[cid] = "401"
@@ -1922,7 +1924,7 @@ class _IdentityClient:
         self._answer()
         return {"revision": 1, "status": "applied"}
 
-    def boot(self, boot_id, attempts=None):
+    def boot(self, boot_id, attempts=None, *, agent_port=None):
         self._answer()
         return {"status": "reconciled", "reconciled": True}
 

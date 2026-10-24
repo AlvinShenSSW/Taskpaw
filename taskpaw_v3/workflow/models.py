@@ -1368,6 +1368,7 @@ class PairingIssue(Model):
 
 
 class PairingComplete(Model):
+    agent_port: int | None = Field(default=None, strict=True, ge=1, le=65535)
     pairing_id: Id
     worker_id: Id
     device_id: Id
@@ -1378,6 +1379,7 @@ class PairingComplete(Model):
 
 
 class BootObservation(VersionedCommand):
+    agent_port: int | None = Field(default=None, strict=True, ge=1, le=65535)
     worker_id: Id
     boot_id: Id
     known_epoch: Revision

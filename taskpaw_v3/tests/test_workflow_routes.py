@@ -920,7 +920,8 @@ def test_changed_sources_cannot_exhaust_a_workers_route_slots(rt, clock, changed
     changed.update(bad)
     fine = [auto_film(rt) for _ in range(2)]
     outcome = run_pass(rt, clock, [w])
-    assert {d.film_id for d in outcome.routed} == set(fine)
+    assert {d.film_id for d in outcome.routed} == {fine[0]}
+    assert outcome.planned.waiting[fine[1]] == "第 1 位 · 哪台先空给哪台"
     assert all(outcome.planned.waiting[f] == scheduler.SOURCE_CHANGED for f in bad)
 
 
@@ -930,6 +931,7 @@ def test_a_source_invalidated_mid_pass_is_a_tolerated_race(
     """CX8: intake dirties a source after the snapshot but before its route
     write; that film is skipped, the rest of the pass still routes."""
     w = enrol_remote(rt, "5060 Ti-1")
+    other = enrol_remote(rt, "5060 Ti-2")
     first, second = auto_film(rt), auto_film(rt)
     real = rt.store.route_film
 
@@ -939,7 +941,7 @@ def test_a_source_invalidated_mid_pass_is_a_tolerated_race(
         return real(auth, meta, command)
 
     monkeypatch.setattr(rt.store, "route_film", route_film)
-    outcome = run_pass(rt, clock, [w])
+    outcome = run_pass(rt, clock, [w, other])
     assert {d.film_id for d in outcome.planned.routes} == {first, second}
     assert [d.film_id for d in outcome.routed] == [second]
     assert open_route(rt, first) is None

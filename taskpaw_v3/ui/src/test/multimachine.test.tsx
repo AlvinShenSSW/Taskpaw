@@ -48,7 +48,7 @@ function mockApi(films = REMOTE_FILMS, film: (id: string) => FilmDetail = (id) =
 const rail = () => screen.getByRole("navigation", { name: "媒体处理中心导航" });
 const go = async (label: string) => {
   fireEvent.click(within(rail()).getByRole("button", { name: new RegExp(`^${label}`) }));
-  return screen.findByRole("heading", { level: 1, name: label });
+  return screen.findByRole("heading", { level: 1, name: label === "影片队列" ? "队列 · 派单状态" : label });
 };
 const pendingCard = (id: string) => document.querySelector(`[data-pending="${id}"]`) as HTMLElement;
 const optionTexts = (s: HTMLSelectElement) => Array.from(s.options).map((o) => [o.textContent, o.disabled]);
@@ -182,7 +182,7 @@ describe("待处理 machine select (R5/R6)", () => {
 
 describe("board: machine column, routing reasons and 设备失联 (R1–R3)", () => {
   it("machineOf: the route, 本机, the running stage's worker, 待派发", () => {
-    expect(REMOTE_ROWS.map(machineOf)).toEqual(["5060 Ti-3", "5070 Ti", "本机", "待派发", "5070 Ti"]);
+    expect(REMOTE_ROWS.map(machineOf)).toEqual(["5060 Ti-3", "5070 Ti", "本机", "自动", "5070 Ti"]);
   });
 
   it("CX30: after the GPU work, 本机 for the controller's stages and none once done — never 待派发", () => {
@@ -235,8 +235,8 @@ describe("board: machine column, routing reasons and 设备失联 (R1–R3)", ()
     wrap(<MediaWorkspace />);
     await screen.findByRole("heading", { level: 1, name: "概览" });
     await go("影片队列");
-    const machine = (id: string) => within(document.querySelector(`[data-film="${id}"]`) as HTMLElement).getByTestId("film-machine");
-    expect(machine("far-3")).toHaveTextContent("待派发");
+    const machine = (id: string) => (document.querySelector(`[data-film="${id}"]`) as HTMLElement).children[1];
+    expect(machine("far-3")).toHaveTextContent("自动");
     expect(machine("mist-18")).toHaveTextContent("5070 Ti");
     expect(machine("moon-6")).toHaveTextContent("本机");
     await go("异常");

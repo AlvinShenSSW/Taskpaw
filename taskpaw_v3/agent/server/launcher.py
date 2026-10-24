@@ -519,7 +519,9 @@ def run_agent(
             if config.workflow.role == "worker":  # P2-2: no store, no events
                 from taskpaw_v3.workflow.remote_worker import start_worker_host
 
-                worker_host = start_worker_host(config.workflow, config_dir)
+                worker_host = start_worker_host(
+                    config.workflow, config_dir, agent_port=config.bind_port
+                )
             else:
                 from taskpaw_v3.workflow.local_host import start_local_workflow
 

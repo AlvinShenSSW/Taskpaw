@@ -41,11 +41,13 @@ const STATE_TEXT: Record<string, [string, "green" | "amber" | "red" | "neutral"]
   no_power: ["无功耗数据（需升级 TaskPaw）", "amber"],
   not_found: ["无功耗数据（需升级 TaskPaw）", "amber"],
   pending: ["检查中", "neutral"],
-  unauthorized: ["API Token 不一致", "red"],
+  unreachable: ["连不上（检查网络 / 防火墙）", "red"],
+  timeout: ["连不上（检查网络 / 防火墙）", "red"],
   invalid_address: ["地址无效或为公网地址", "red"],
   self: ["就是本机，不重复计入", "amber"],
 };
-export function stateChip(m: Pick<Machine, "state" | "stale" | "duplicateOf">): [string, "green" | "amber" | "red" | "neutral"] {
+export function stateChip(m: Pick<Machine, "name" | "state" | "stale" | "duplicateOf">): [string, "green" | "amber" | "red" | "neutral"] {
+  if (m.state === "unauthorized") return [`令牌不一致：在 ${m.name} 的 设置 → 网络与访问 粘贴主控的访问令牌`, "red"];
   if (m.state === "duplicate") return [`与 ${m.duplicateOf ?? "另一项"} 是同一台机器，不重复计入`, "amber"];
   if (m.state === "ok" && m.stale) return ["数据过期", "amber"];
   return STATE_TEXT[m.state] ?? ["离线", "red"];

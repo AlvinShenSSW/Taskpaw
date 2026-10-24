@@ -44,7 +44,7 @@ FULL_HD = (1920, 1080)
 LOST = "设备失联"
 NO_HISTORY = "无历史，按排队先后"
 CONTROLLER_DISK = "主控磁盘空间不足"
-QUEUE_FULL = "设备队列已满"
+WAIT_SLOT = "等待设备空闲"
 NO_DEVICE = "没有可用的设备"
 NO_GPU = "无需修复，本机完成"  # P2-4 §9 CX2 / OD7 R7: no restore for a worker
 PIN_GONE = "指定设备不可用"
@@ -408,6 +408,7 @@ class _PassState:
     remaining: list[m.FilmRoute]
     attention: dict[str, str]
     counts: dict[str, int]
+    restoring: set[str]
     busy: dict[str, float]
     needs: dict[str, float]
     outputs: float
@@ -487,6 +488,7 @@ def _pass_state(
     # older revision's route still running there holds its slot (IR6) and its
     # own revision's busy time, staging and output (CX5)
     counts = {w.worker_id: 0 for w in targets}
+    restoring: set[str] = set()
     busy = {w.worker_id: 0.0 for w in targets}
     needs = {w.worker_id: 0.0 for w in targets}
     outputs = 0.0
@@ -497,6 +499,8 @@ def _pass_state(
         film = facts.get((route.film_id, route.input_revision))
         if film is None:
             continue
+        if film.claimed_stage == "restore" and film.restore == "running":
+            restoring.add(route.worker_id)
         stages = routed_stages(film, gpu_stages)
         busy[route.worker_id] += _cost(
             rates, workers[route.worker_id], film, stages, now
@@ -514,6 +518,7 @@ def _pass_state(
         remaining,
         attention,
         counts,
+        restoring,
         busy,
         needs,
         outputs,
@@ -578,15 +583,22 @@ def _devices(
         )
         if reason == REVOKED:
             continue
-        if reason is None and state.counts[worker.worker_id] >= MAX_OPEN_ROUTES:
-            reason = QUEUE_FULL
+        # Keep the existing pinned / 改派 estimate; busy is still never free.
         option = (
             None
-            if reason is not None
+            if reason is not None or state.counts[worker.worker_id] >= MAX_OPEN_ROUTES
             else _measure(
                 state.rates, film, stages, worker, now, state.counts, state.busy
             )
         )
+        if reason is None and state.counts[worker.worker_id]:
+            reason = (
+                "正在修复，下一部已排好"
+                if state.counts[worker.worker_id] >= MAX_OPEN_ROUTES
+                else "正在修复"
+                if worker.worker_id in state.restoring
+                else "已有影片等开始"
+            )
         found.append(
             DevicePreview(
                 worker_id=worker.worker_id,
@@ -625,7 +637,7 @@ def _route_films(
     gpu_stages: GpuStages | None,
     probe: _Probe | None = None,
 ) -> tuple[list[RouteDecision], dict[str, str]]:
-    """Step 4: the candidates, 4K first, then confirm time (§4.3)."""
+    """P3-6: pins first on their worker, then auto; each in confirm order."""
     open_films = {(route.film_id, route.input_revision) for route in state.remaining}
     ready = [
         film
@@ -641,7 +653,7 @@ def _route_films(
     candidates = sorted(
         (film for film in ready if film.source_admissible),
         key=lambda f: (
-            _class(f) != "4K",
+            f.pin_worker_id is None,
             f.confirmed_at or f.created_at,
             f.film_id,
         ),
@@ -674,6 +686,7 @@ def _route_films(
                 counts,
                 needs,
                 busy,
+                state.restoring,
             )
             if isinstance(choice, str):
                 waiting[film.film_id] = choice
@@ -717,6 +730,21 @@ def _route_films(
         busy[worker.worker_id] += _cost(rates, worker, film, stages, now)[0]
         needs[worker.worker_id] += staging_need(film)
         outputs += output
+    positions: dict[str | None, int] = {}
+    for film in candidates:
+        if film.film_id not in waiting:
+            continue
+        pin = film.pin_worker_id
+        if waiting[film.film_id] == WAIT_SLOT:  # Kimi: count only slot waiters
+            positions[pin] = positions.get(pin, 0) + 1
+            note = f"第 {positions[pin]} 位"
+            if pin is None:
+                note += " · 哪台先空给哪台"
+                if _class(film) == "4K":
+                    note += " · 只给 16 GB 卡"
+            waiting[film.film_id] = note
+            if probe is not None and probe.film_id == film.film_id:
+                probe.found = (None, note, [])
     state.outputs = outputs  # the fallback of `preview` gates on the same total
     return decisions, waiting
 
@@ -935,6 +963,7 @@ def _pinned(
     counts: Mapping[str, int],
     needs: Mapping[str, float],
     busy: Mapping[str, float],
+    restoring: set[str],
 ) -> _Option | str:
     """The pinned worker, or why the film waits; a pin never moves (§4.3)."""
     if worker is None or worker.worker_id not in counts:
@@ -947,10 +976,11 @@ def _pinned(
         now,
         queued_need=needs[worker.worker_id],
     )
-    if reason is None and counts[worker.worker_id] >= MAX_OPEN_ROUTES:
-        reason = QUEUE_FULL
     if reason is not None:
         return f"等待 {worker.name}：{reason}"
+    count = counts[worker.worker_id]
+    if count >= MAX_OPEN_ROUTES or (count and worker.worker_id not in restoring):
+        return WAIT_SLOT
     return _measure(rates, film, stages, worker, now, counts, busy)
 
 
@@ -968,7 +998,7 @@ def _options(
     """Every eligible worker with a free slot, or why the film waits."""
     options: list[_Option] = []
     reasons: list[str] = []
-    full = False
+    occupied = False
     for worker in targets:
         reason = eligibility(
             worker,
@@ -984,14 +1014,14 @@ def _options(
             if reason not in reasons:
                 reasons.append(reason)
             continue
-        if counts[worker.worker_id] >= MAX_OPEN_ROUTES:
-            full = True
+        if counts[worker.worker_id]:
+            occupied = True
             continue
         options.append(_measure(rates, film, stages, worker, now, counts, busy))
     if options:
         return options
-    if full:
-        return f"等待设备：{QUEUE_FULL}"
+    if occupied:
+        return WAIT_SLOT
     return f"等待设备：{'、'.join(reasons[:3]) if reasons else NO_DEVICE}"
 
 

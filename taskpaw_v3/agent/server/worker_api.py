@@ -136,6 +136,7 @@ class _Strict(BaseModel):
 
 
 class PairBody(_Strict):
+    agent_port: int | None = Field(default=None, strict=True, ge=1, le=65535)
     pairing_id: m.Id
     ticket: SecretStr = Field(max_length=256)
     credential_id: m.Id
@@ -208,6 +209,7 @@ class AttemptReportBody(_Strict):
 
 
 class BootBody(_Strict):
+    agent_port: int | None = Field(default=None, strict=True, ge=1, le=65535)
     boot_id: m.Id
     assignment_ids: list[m.Id] = Field(default=[], max_length=64)
     local_owners: list[m.LocalOwnerEvidence] = Field(default=[], max_length=64)
@@ -358,6 +360,7 @@ def create_worker_app(
                 rt.meta(),
                 m.PairingComplete(
                     pairing_id=body.pairing_id,
+                    agent_port=body.agent_port,
                     worker_id=worker_id,
                     device_id=device_id,
                     credential_id=body.credential_id,
@@ -436,6 +439,7 @@ def create_worker_app(
                         worker_id=me.worker.worker_id,
                         expected_version=me.worker.version,
                         boot_id=body.boot_id,
+                        agent_port=body.agent_port,
                         known_epoch=1,
                         # P2-3: the worker sends none; its attempt reports
                         # carry the ids, so one the controller resolved

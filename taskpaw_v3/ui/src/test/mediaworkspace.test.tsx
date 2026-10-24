@@ -9,7 +9,7 @@ import {
   ACTIVE_STATES, filmStatus, lifecycle, matchesStage, progressText, reviewStatus, stageLine, STATUS_META, workItems,
 } from "../components/media/mediaModel";
 import { PREFLIGHT_MS } from "../components/media/workspace";
-import { REMOTE_DEVICES } from "./fixtures/multiMachine";
+import { actions, REMOTE_DEVICES, REMOTE_PLANS, REMOTE_ROWS, W } from "./fixtures/multiMachine";
 import { LtxDownload } from "../components/LtxDownload";
 import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
@@ -1383,4 +1383,73 @@ describe("archive output (#301)", () => {
     fireEvent.click(await within(drawer).findByRole("button", { name: archived ? "打开归档目录" : "打开成品目录" }));
     await waitFor(() => expect(open).toHaveBeenCalledWith("folder-film", archived ? "archive" : "output"));
   });
+});
+
+
+describe("#305 dispatch board", () => {
+  function dispatchRows() {
+    const base = { actions: actions(), steps: steps("restore", "waiting") };
+    const route = REMOTE_ROWS[1].route!;
+    return [
+      row({ ...base, film_id: "auto", pin: { worker_id: null, name: "自动", version: 1 }, note: "第 1 位 · 哪台先空给哪台" }),
+      row({ ...base, film_id: "pin", pin: { worker_id: W.ti70.id, name: W.ti70.name, version: 1 }, note: "第 1 位" }),
+      row({ ...base, film_id: "down", route, note: "下载到 5070 Ti · 25%" }),
+      row({ ...base, film_id: "ready", route: { ...route, position: 1 }, note: "已到 5070 Ti · 等开始" }),
+      REMOTE_ROWS[1], REMOTE_ROWS[0],
+    ];
+  }
+  function setup() {
+    mockApi();
+    const films = dispatchRows();
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, packages: [] });
+    vi.spyOn(api, "workflowDevices").mockResolvedValue(REMOTE_DEVICES);
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail("pin", { ...films[1] }));
+    wrap(<MediaWorkspace />);
+  }
+  it("renders the approved worker cards and dispatch table with exact states", async () => {
+    setup();
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
+    await screen.findByRole("heading", { level: 1, name: "队列 · 派单状态" });
+    const table = within(screen.getByRole("table", { name: "派单状态" }));
+    for (const label of ["影片", "机器", "状态", "说明"]) expect(table.getByRole("columnheader", { name: label })).toBeInTheDocument();
+    for (const label of ["排队中（自动）", "排队中 · 等 5070 Ti", "下载到 5070 Ti · 25%", "已到 5070 Ti · 等开始", "修复中 · 5070 Ti"]) {
+      expect(table.getByText(label, { selector: ".chip" })).toBeInTheDocument();
+    }
+    expect(table.getByText("自动", { selector: "td" })).toBeInTheDocument();
+    expect(screen.getByText("修复中 白昼回声（41%）")).toBeInTheDocument();
+    expect(screen.getByText("下一部已到：READY")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: W.ti3.name })).toHaveTextContent("设备失联");
+    expect(screen.getByRole("region", { name: W.ti3.name })).not.toHaveTextContent("空闲");
+    expect(screen.getAllByText("无预取").length).toBeGreaterThan(0);
+  });
+  it("uses the same queue states in overview and drawer", async () => {
+    setup();
+    expect(await screen.findByText("排队中（自动）", { selector: ".chip" })).toBeInTheDocument();
+    expect(screen.getByText("修复中 · 5070 Ti", { selector: ".chip" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看 PIN 详情" }));
+    const drawer = within(await screen.findByRole("dialog"));
+    expect(await drawer.findByText("排队中 · 等 5070 Ti", { selector: ".chip" })).toBeInTheDocument();
+  });
+});
+
+
+it("#305 lets a busy pinned machine accept another controller-queued film", async () => {
+  const { confirmPlans } = mockApi();
+  const plans = structuredClone(REMOTE_PLANS);
+  plans.plans = [plans.plans[0]];
+  for (const routing of Object.values(plans.plans[0].routing!)) {
+    routing.devices[0].reason = "正在修复，下一部已排好";
+    routing.devices[0].finish_at = null;
+  }
+  vi.spyOn(api, "workflowPlans").mockResolvedValue(plans);
+  wrap(<MediaWorkspace />);
+  await go("待处理");
+  const option = await screen.findByRole("option", { name: /5070 Ti · 正在修复，下一部已排好/ });
+  expect(option).toBeEnabled();
+  fireEvent.change(option.parentElement!, { target: { value: W.ti70.id } });
+  fireEvent.click(screen.getByRole("button", { name: "确认入队" }));
+  await waitFor(() => expect(confirmPlans).toHaveBeenCalledWith(expect.arrayContaining([
+    expect.objectContaining({ machine: W.ti70.id }),
+  ])));
 });

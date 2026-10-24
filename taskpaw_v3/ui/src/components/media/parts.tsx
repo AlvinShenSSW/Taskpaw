@@ -6,10 +6,10 @@ import CloseIcon from "@mui/icons-material/Close";
 import { CircularProgress, Dialog } from "@mui/material";
 import { useQuery } from "@tanstack/react-query";
 import { useContext, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
-import { api, type StepKey, type WorkflowStep } from "../../api";
+import { api, type FilmRemote, type StepKey, type WorkflowStep } from "../../api";
 import {
   archiveBytes, archiveLive, asrLive, asrSummary, currentStep, elapsedClock, fmtDuration, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL,
-  STATUS_META, STEP_LABEL,
+  statusLabel, STATUS_META, STEP_LABEL,
   stageLine, type ChipTone, type RestoreLive, type StatusKey, type WorkItem,
 } from "./mediaModel";
 import { useNow } from "./useNow";
@@ -23,9 +23,8 @@ export function Chip({ tone = "neutral", children }: { tone?: ChipTone; children
   return <span className={`chip${tone === "neutral" ? "" : ` ${tone}`}`}>{children}</span>;
 }
 
-export function StatusChip({ status }: { status: StatusKey }) {
-  const [label, tone] = STATUS_META[status];
-  return <Chip tone={tone}>{label}</Chip>;
+export function StatusChip({ status, film }: { status: StatusKey; film?: FilmRemote & { note?: string | null } }) {
+  return <Chip tone={STATUS_META[status][1]}>{statusLabel(status, film)}</Chip>;
 }
 
 export function Notice({ tone, icon, children, id }: {

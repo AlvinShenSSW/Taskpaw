@@ -310,7 +310,7 @@ def test_status_carries_the_worker_summary(monkeypatch, tmp_path):
         def stop(self, timeout=30.0):
             return True
 
-    monkeypatch.setattr(remote_worker, "start_worker_host", lambda s, d: Stub())
+    monkeypatch.setattr(remote_worker, "start_worker_host", lambda s, d, **kw: Stub())
     monkeypatch.setattr(local_host, "start_local_workflow", lambda *a, **k: None)
     monkeypatch.setattr(
         launcher, "reclaim_ports_from_stale_instance", lambda *a, **k: None
