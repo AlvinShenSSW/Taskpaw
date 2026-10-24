@@ -58,7 +58,7 @@
           "preset": "5070ti-16",
           "preset_label": "RTX 5070 Ti · 16 GB",
           "preset_auto": true,
-          "argv": "jasna.exe --input movie.mkv --output movie-破解.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
+          "argv": "jasna.exe --input movie.mkv --output movie-无码.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
         },
         "timing": {
           "scan": 312.4,
@@ -110,9 +110,9 @@
           "Actor"
         ],
         "has_poster": true,
-        "poster_source": "final-c8947a4320f5def8",
+        "poster_source": "final-389f03873a38d442",
         "has_cover": true,
-        "cover_source": "final-ca1d8ffbc86c1e4d",
+        "cover_source": "final-367985e958d431fb",
         "resolution": "1080p",
         "plan": {
           "ltx_model": "standard",
@@ -636,7 +636,7 @@
               "preset": "5070ti-16",
               "preset_label": "RTX 5070 Ti · 16 GB",
               "preset_auto": true,
-              "argv": "jasna.exe --input movie.mkv --output movie-破解.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
+              "argv": "jasna.exe --input movie.mkv --output movie-无码.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
             },
             "timing": {
               "scan": 312.4,
@@ -1227,44 +1227,38 @@
       "files": [
         {
           "role": "main_video",
-          "path": "ABC-123.mkv",
+          "path": "ABC-123-无码-C.mkv",
           "size": 50,
           "volume": null
         },
         {
           "role": "generated_subtitle",
-          "path": "ABC-123.chs.srt",
+          "path": "ABC-123-无码-C.zh.srt",
           "size": 52,
           "volume": null
         },
         {
           "role": "nfo",
-          "path": "ABC-123.nfo",
-          "size": 111,
+          "path": "ABC-123-无码-C.nfo",
+          "size": 105,
           "volume": null
         },
         {
           "role": "poster",
-          "path": "poster.jpg",
-          "size": 16,
+          "path": "ABC-123-无码-C-poster.jpg",
+          "size": 29,
           "volume": null
         },
         {
           "role": "thumb",
-          "path": "thumb.jpg",
-          "size": 15,
+          "path": "ABC-123-无码-C-thumb.jpg",
+          "size": 28,
           "volume": null
         },
         {
           "role": "fanart",
-          "path": "fanart.jpg",
-          "size": 37,
-          "volume": null
-        },
-        {
-          "role": "source_subtitle",
-          "path": "ABC-123.ja.srt",
-          "size": 67,
+          "path": "ABC-123-无码-C-fanart.jpg",
+          "size": 50,
           "volume": null
         }
       ],
@@ -1278,11 +1272,11 @@
           "size": 67
         }
       ],
-      "workcopy_count": 7,
+      "workcopy_count": 6,
       "has_poster": true,
-      "poster_source": "final-c8947a4320f5def8",
+      "poster_source": "final-389f03873a38d442",
       "has_cover": true,
-      "cover_source": "final-ca1d8ffbc86c1e4d",
+      "cover_source": "final-367985e958d431fb",
       "group": "confirm",
       "attention_kind": null,
       "route": null,
@@ -2002,7 +1996,7 @@
             "preset": "5070ti-16",
             "preset_label": "RTX 5070 Ti · 16 GB",
             "preset_auto": true,
-            "argv": "jasna.exe --input movie.mkv --output movie-破解.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
+            "argv": "jasna.exe --input movie.mkv --output movie-无码.tmp.mp4 --max-clip-size 180 --temporal-overlap 8 --secondary-restoration none --codec hevc --cq 20 --detection-model rfdetr-v6 --restoration-model-name ltx --ltx-fast --ltx-auto-split 12 --working-directory .jasna-work --encoder-settings maxrate=12200000,qmax=51"
           },
           "timing": {
             "scan": 312.4,

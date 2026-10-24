@@ -39,6 +39,10 @@ from taskpaw_v3.workflow.local_host import film_policy, retry_failed_stage
 AUTH = {"Authorization": "Bearer t"}
 JACKET = jpeg(2184, 1477)
 SMALL = jpeg(840, 568)
+# #303: Miko's names for a workflow (LTX) restore with a Chinese subtitle
+STEM = f"{FILM_DIR}-无码-C"
+POSTER = f"image {STEM}-poster".encode()
+
 BASE = "/control/workflow"
 
 
@@ -271,7 +275,7 @@ def test_detail_shows_the_package_nfo_inputs_and_state(world, client):
     assert (data["title"], data["actors"]) == ("假的标题", ["Actor"])
     assert data["marks"] == {"restored": True, "chinese_subtitles": True, "uhd": False}
     roles = {f["path"]: f["role"] for f in data["files"]}
-    assert roles["poster.jpg"] == "poster" and roles[f"{FILM_DIR}.nfo"] == "nfo"
+    assert roles[f"{STEM}-poster.jpg"] == "poster" and roles[f"{STEM}.nfo"] == "nfo"
     assert all(set(f) == {"role", "path", "size", "volume"} for f in data["files"])
     video = next(f for f in data["files"] if f["role"] == "main_video")
     assert video["size"] > 0
@@ -299,7 +303,7 @@ def test_poster_is_served_by_film_id(world, client):
     response = client.get(f"{BASE}/films/{world.film}/poster")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/jpeg"
-    assert response.content == b"image poster.jpg"
+    assert response.content == POSTER
 
 
 def test_the_input_cover_shows_until_the_final_one_exists(tmp_path):
@@ -318,9 +322,7 @@ def test_the_input_cover_shows_until_the_final_one_exists(tmp_path):
         assert after["poster_source"].startswith("final")
         assert after["poster_source"] != before["poster_source"]
         assert (after["name"], after["title"]) == (FILM_DIR, "假的标题")
-        assert client.get(f"{BASE}/films/{world.film}/poster").content == (
-            b"image poster.jpg"
-        )
+        assert client.get(f"{BASE}/films/{world.film}/poster").content == (POSTER)
     finally:
         world.rt.close()
 
@@ -342,11 +344,11 @@ def test_the_full_jacket_is_served_by_film_id(tmp_path):
         after = client.get(f"{BASE}/films/{world.film}").json()
         assert after["cover_source"].startswith("final-")
         fanart = client.get(f"{BASE}/films/{world.film}/cover").content
-        assert fanart.startswith(b"\xff\xd8") and fanart.endswith(b"image fanart.jpg")
-        # the cards keep the poster
-        assert client.get(f"{BASE}/films/{world.film}/poster").content == (
-            b"image poster.jpg"
+        assert fanart.startswith(b"\xff\xd8") and fanart.endswith(
+            f"image {STEM}-fanart".encode()
         )
+        # the cards keep the poster
+        assert client.get(f"{BASE}/films/{world.film}/poster").content == (POSTER)
     finally:
         world.rt.close()
 

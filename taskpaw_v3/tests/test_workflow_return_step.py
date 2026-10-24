@@ -90,17 +90,19 @@ class _Fake:
 
 class FakeRestore(_Fake):
     stage = "restore"
+    decision = "applied"
+    name = "movie-无码.mkv"  # #303: a workflow (LTX) restore is 无码
 
     def run(self, context):
         videos = []
         for video in main_videos(context.manifest):
-            out = context.workdir / "movie-破解.mkv"
+            out = context.workdir / self.name
             shutil.copyfile(
                 workcopy_path(self.rt, context.manifest, video.item_id), out
             )
             ref = file_ref(self.rt.work_dir, out)
             facts = RestoreFacts(
-                decision="applied",
+                decision=self.decision,
                 file=ref,
                 width=1920,
                 height=1080,
@@ -149,7 +151,7 @@ class FakeTranslate(_Fake):
         (entry,) = asr.videos
         if entry.subtitle.decision not in ("source_ja", "generated_ja"):
             return self._done(context, [entry])  # reused zh / no speech: no-op
-        out = context.workdir / "movie-破解.zh.srt"
+        out = context.workdir / "movie-无码.zh.srt"
         out.write_bytes(ZH)
         facts = SubtitleFacts(
             decision=entry.subtitle.decision,
@@ -287,12 +289,10 @@ def test_return_builds_a_verified_package_with_the_m01_handoff(rt):
     run_all(dispatcher(rt))
     assert status(rt, film, "return") == "succeeded"
     package = package_dir(rt, film, 1)
-    assert (package / "movie-破解.mkv").read_bytes() == VIDEO
-    assert (package / "movie-破解.zh.srt").read_bytes() == ZH
-    assert (package / "movie-破解.ja.srt").read_bytes() == JA
-    assert not (
-        package / "movie.ja.srt"
-    ).exists()  # included once, under its final name
+    assert (package / "movie-无码.mkv").read_bytes() == VIDEO
+    assert (package / "movie-无码.zh.srt").read_bytes() == ZH
+    # #303 D3: only the Chinese subtitle is packaged; the .ja.srt stays a work file
+    assert not list(package.glob("*.ja.srt"))
     handoff = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
     assert handoff["film_id"] == film and handoff["input_revision"] == 1
     assert handoff["restoration"]["status"] == "applied"
@@ -301,9 +301,8 @@ def test_return_builds_a_verified_package_with_the_m01_handoff(rt):
     assert handoff["subtitles"]["language"] == "zh"
     roles = {i["relative_path"]: i["role"] for i in handoff["items"]}
     assert roles == {
-        "movie-破解.mkv": "main_video",
-        "movie-破解.zh.srt": "generated_subtitle",
-        "movie-破解.ja.srt": "source_subtitle",
+        "movie-无码.mkv": "main_video",
+        "movie-无码.zh.srt": "generated_subtitle",
     }
     assert "return" not in handoff["attempts"]
     # the intake work copy is untouched
@@ -545,11 +544,11 @@ def test_a_reused_chinese_subtitle_is_recognised_by_its_work_copy_path(rt):
     handoff = json.loads((package / MANIFEST_NAME).read_text(encoding="utf-8"))
     roles = {i["relative_path"]: i["role"] for i in handoff["items"]}
     assert roles == {
-        "movie-破解.mkv": "main_video",
-        "movie-破解.zh.srt": "source_subtitle",
+        "movie-无码.mkv": "main_video",
+        "movie-无码.zh.srt": "source_subtitle",
     }
     (zh_item,) = handoff["subtitles"]["item_ids"]
     assert next(i for i in handoff["items"] if i["item_id"] == zh_item)[
         "relative_path"
-    ] == ("movie-破解.zh.srt")
-    assert (package / "movie-破解.zh.srt").read_bytes() == ZH
+    ] == ("movie-无码.zh.srt")
+    assert (package / "movie-无码.zh.srt").read_bytes() == ZH

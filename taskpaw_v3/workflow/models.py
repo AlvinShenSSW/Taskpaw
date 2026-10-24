@@ -714,7 +714,9 @@ class PostprocessEvidence(Model):
     nfo_item_id: Id
     poster_item_id: Id
     required_image_item_ids: tuple[Id, ...]
-    actual_marks: tuple[Literal["restored", "chinese_subtitles", "4k"], ...]
+    actual_marks: tuple[
+        Literal["restored", "uncensored", "chinese_subtitles", "4k"], ...
+    ]
     image_refresh: Literal["fresh", "refreshed", "not_needed", "failed", "unknown"]
     folder_required: bool
     folder_item_id: Id | None
@@ -801,7 +803,7 @@ class FinalManifest(Model):
             or self.subtitles.evidence.status != "passed"
         ):
             raise ValueError("false_chinese_subtitle_mark")
-        if "restored" in pp.actual_marks and (
+        if ("restored" in pp.actual_marks or "uncensored" in pp.actual_marks) and (
             self.restoration.status not in ("applied", "reused")
             or self.restoration.evidence.status != "passed"
         ):

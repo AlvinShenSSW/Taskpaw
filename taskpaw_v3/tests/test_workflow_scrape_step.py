@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -97,15 +99,16 @@ def test_miko_output_becomes_the_published_final(rt, tmp_path, monkeypatch):
     assert ret.status(rt, film, "scrape") == "succeeded", d.status().reason
     assert final_of(rt, film) == 1
     assert package_hashes(rt, film) == before  # M2: the return package is untouched
-    out = next((rt.work_dir / "scrape").rglob("ABC-123.nfo")).parent
+    out = next((rt.work_dir / "scrape").rglob("ABC-123-无码-C.nfo")).parent
+    # #303: a workflow restore is LTX -> 无码 names, images named after the film, the
+    # Chinese subtitle only (the .ja.srt never reaches the scrape or the final)
     assert sorted(p.name for p in out.iterdir()) == [
-        "ABC-123.chs.srt",
-        "ABC-123.ja.srt",
-        "ABC-123.mkv",
-        "ABC-123.nfo",
-        "fanart.jpg",
-        "poster.jpg",
-        "thumb.jpg",
+        "ABC-123-无码-C-fanart.jpg",
+        "ABC-123-无码-C-poster.jpg",
+        "ABC-123-无码-C-thumb.jpg",
+        "ABC-123-无码-C.mkv",
+        "ABC-123-无码-C.nfo",
+        "ABC-123-无码-C.zh.srt",
     ]
     assert not any((rt.work_dir / "scrape").rglob("in"))  # staging inputs dropped
     # D08: every final item carries the identity the C6 delete will check
@@ -127,6 +130,7 @@ def test_miko_output_becomes_the_published_final(rt, tmp_path, monkeypatch):
         ("fail", failed_kind("transient"), 3),
         ("no_result", failed_kind("transient"), 3),
         ("extra_file", failed_kind("needs_attention"), 1),
+        ("wrong_mosaic", failed_kind("needs_attention"), 1),
         ("wrong_hash", failed_kind("needs_attention"), 1),
     ],
 )
@@ -276,39 +280,122 @@ def test_a_changed_return_package_file_stops_the_scrape(rt, tmp_path):
     assert final_of(rt, film) is None
 
 
-def test_japanese_subtitles_keep_their_format_and_never_share_a_name(tmp_path):
-    """H1-3: an input .ass beside the generated .ja.srt, and a second .srt."""
-    package, out = tmp_path / "pkg", tmp_path / "out"
-    (package / "F").mkdir(parents=True)
-    (out / "Film").mkdir(parents=True)
+def scrape_once(rt, tmp_path, monkeypatch):
+    """Run the scrape of the film in `rt`; (published final, the Miko request)."""
+    published = []
+    real_put = rt.store.put_final_manifest
 
-    def item(rel, data, role):
-        (package / rel).write_bytes(data)
-        return {
-            "relative_path": rel,
-            "size": len(data),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "role": role,
-            "language": "ja",
-            "staged_video": "ABC-001.mp4",
-        }
+    def spy(auth, meta, command):
+        published.append(command.manifest)
+        return real_put(auth, meta, command)
 
-    japanese = [
-        item("F/ABC-001.ja.srt", b"generated", "generated_subtitle"),
-        item("F/ABC-001.ja.ass", b"[Script Info]", "source_subtitle"),
-        item("F/extra.JA.SRT", b"second srt", "source_subtitle"),
-    ]
-    files = [{"role": "main_video", "video": "ABC-001.mp4", "path": "Film/ABC-001.mp4"}]
-    placed = LocalScrapeStep._place_japanese(
-        japanese, package, out / "Film", out, files
+    monkeypatch.setattr(rt.store, "put_final_manifest", spy)
+    ret.run_all(dispatcher(rt, scrape_step(tmp_path)))
+    request = None
+    for path in (rt.work_dir / "scrape").rglob("request.json"):
+        request = json.loads(path.read_text("utf-8"))
+    return (published[0] if published else None), request
+
+
+@pytest.mark.parametrize(
+    ("decision", "name", "ltx"),
+    [
+        ("applied", "movie-无码.mkv", True),  # this workflow's own LTX restore
+        ("applied", "movie-无码.mp4", True),
+        ("reused", "movie-无码.mp4", True),  # an earlier LTX result kept
+        ("reused", "movie-破解.mp4", False),  # an INBOX source already 破解
+        ("reused", "movie_restored.mp4", False),
+    ],
+)
+def test_the_request_says_whether_a_video_was_restored_with_ltx(
+    rt, tmp_path, monkeypatch, decision, name, ltx
+):
+    rt.executors["restore"].decision, rt.executors["restore"].name = decision, name
+    film = ret.add_real_film(rt)
+    final, request = scrape_once(rt, tmp_path, monkeypatch)
+    assert ret.status(rt, film, "scrape") == "succeeded"
+    (entry,) = request["videos"]
+    assert entry["restored"] is True and entry["ltx"] is ltx
+    marks = set(final.postprocess.actual_marks)
+    # Miko stamps 无码 on an LTX film and 破解 on any other restored one (M7)
+    assert "chinese_subtitles" in marks
+    assert ("uncensored" in marks, "restored" in marks) == (ltx, not ltx)
+    expected = "无码" if ltx else "破解"
+    assert any(expected in i.relative_path for i in final.items if i.role == "nfo")
+
+
+def test_only_the_chinese_subtitle_is_staged_and_kept(rt, tmp_path, monkeypatch):
+    film = ret.add_real_film(rt)  # a Japanese source subtitle, translated to zh
+    final, _ = scrape_once(rt, tmp_path, monkeypatch)
+    assert ret.status(rt, film, "scrape") == "succeeded"
+    subtitles = [i for i in final.items if i.language is not None]
+    assert [i.language for i in subtitles] == ["zh"]
+    assert not any(i.relative_path.endswith(".ja.srt") for i in final.items)
+    assert [p.name for p in (rt.work_dir / "scrape").rglob("*.ja.srt")] == []
+
+
+def test_the_poster_is_the_first_volumes_named_image(rt, tmp_path, monkeypatch):
+    film = ret.add_real_film(rt)
+    final, _ = scrape_once(rt, tmp_path, monkeypatch)
+    assert ret.status(rt, film, "scrape") == "succeeded"
+    poster_id = final.postprocess.poster_item_id
+    poster = next(i for i in final.items if i.item_id == poster_id)
+    assert poster.role == "poster"
+    assert poster.relative_path == "ABC-123-无码-C-poster.jpg"
+
+
+def test_the_fake_miko_lays_out_each_volume_and_a_folder_cover(tmp_path):
+    """The fake follows MDCX304 #299: per-volume files, folder.jpg of cd1's poster."""
+    inp, out = tmp_path / "in", tmp_path / "out"
+    inp.mkdir()
+    out.mkdir()
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "user-config.json").write_text("{}", encoding="utf-8")
+    videos = []
+    for volume in (1, 2):
+        name = f"ABC-123-无码-cd{volume}.mp4"
+        (inp / name).write_bytes(b"video")
+        (inp / f"ABC-123-无码-cd{volume}.srt").write_bytes(b"zh")
+        videos.append(
+            {
+                "file": name,
+                "volume": volume,
+                "restored": True,
+                "ltx": True,
+                "zh_subtitle": True,
+            }
+        )
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "staging": {"in": str(inp), "out": str(out), "failed": str(tmp_path)},
+                "videos": videos,
+            }
+        ),
+        encoding="utf-8",
     )
-    assert [p["path"] for p in placed] == [
-        "Film/ABC-001.ja.srt",
-        "Film/ABC-001.ja.ass",
-        "Film/ABC-001.ja.1.SRT",
-    ]
-    assert [(out / p["path"]).read_bytes() for p in placed] == [
-        b"generated",
-        b"[Script Info]",
-        b"second srt",
-    ]
+    result = tmp_path / "result.json"
+    env = {**os.environ, "MDCX_CONFIG_DIR": str(config)}
+    command = [sys.executable, str(FAKE_MDCX)]
+    command += ["--request", str(request), "--result", str(result)]
+    subprocess.run(command, check=True, env=env)
+    film = out / "Actor" / "ABC-123"
+    expected = {"folder.jpg"}
+    for volume in (1, 2):
+        stem = f"ABC-123-无码-C-cd{volume}"
+        expected |= {
+            f"{stem}.mp4",
+            f"{stem}.nfo",
+            f"{stem}.zh.srt",
+            f"{stem}-poster.jpg",
+            f"{stem}-fanart.jpg",
+            f"{stem}-thumb.jpg",
+        }
+    assert {p.name for p in film.iterdir()} == expected
+    first = film / "ABC-123-无码-C-cd1-poster.jpg"
+    assert (film / "folder.jpg").read_bytes() == first.read_bytes()
+    marks = json.loads(result.read_text("utf-8"))["expected_marks"]
+    assert [x["mosaic"] for x in marks] == ["无码", "无码"]

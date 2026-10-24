@@ -253,7 +253,7 @@ def test_generated_subtitle_follows_the_restored_name(rt, tools):
     film = add_film(rt, [File("movie.mkv", video())])
     assert dispatcher(rt).run_once() is True  # fake Jasna restores
     job = run_asr(rt, film)
-    assert subtitle(rt, film).ja.path == f"{job.attempt_id}/movie-破解.ja.srt"
+    assert subtitle(rt, film).ja.path == f"{job.attempt_id}/movie-无码.ja.srt"
 
 
 def test_stop_ends_whisperjav_and_reports_cancelled(rt, tools):
