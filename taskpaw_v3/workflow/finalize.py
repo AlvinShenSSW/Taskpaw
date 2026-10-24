@@ -439,6 +439,7 @@ class Finalizer:
     ) -> bool:
         approval = wf.approval
         if approval is None or approval.approval_id != op.approval_id:
+            self.progress.pop(wf.film_id, None)
             waiting[wf.film_id] = "归档审批已变化"
             return False
         try:
@@ -450,6 +451,7 @@ class Finalizer:
             waiting[wf.film_id] = f"Filmpaw 查询失败：{e.message}"
             return False
         if task is None:  # never accepted: the same operation key is safe to submit
+            self.progress.pop(wf.film_id, None)
             self._submit(wf.film_id, op.operation_id, approval.binding, waiting)
             return True
         status = task.get("status")

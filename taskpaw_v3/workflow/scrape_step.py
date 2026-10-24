@@ -12,6 +12,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import os
 import shutil
 import uuid
@@ -31,6 +32,7 @@ from .stage_results import sha256_file
 FORCED_TABLE_VERSION = 1  # must match mdcx.cmd.postprocess_one
 CLI_VERSION = "postprocess_one/1"
 SCHEMA = 1
+log = logging.getLogger(__name__)
 _ITEM_NS = uuid.UUID("7e3b9a41-2c6d-4f08-8a51-6d2c0b9e4f17")
 _VOLATILE = frozenset({"success.txt", "remain.txt"})  # interactive Miko rewrites
 _ROLES = {
@@ -111,6 +113,9 @@ class LocalScrapeStep:
     # ── steps ──────────────────────────────────────────────────────────
     def _run(self, context: ReturnContext) -> ExecOutcome:
         rt, job = context.runtime, context.job
+        _discard_placement(
+            rt.output_dir / f".placing-{job.film_id}", rt.identity.work_root_id
+        )
         handoff, handoff_sha = self._handoff(rt, job)
         tools = next(  # what was claimed, never recomputed (D10)
             a.tool_versions
@@ -141,17 +146,6 @@ class LocalScrapeStep:
             context, tools, handoff, handoff_sha, result, result_sha, files, attempt
         )
         final = self._place(context, final)
-        film = rt.store.get_film(rt.operator, job.film_id).film
-        rt.store.put_final_manifest(
-            rt.scrape_auth,
-            rt.meta(),
-            m.FinalManifestPut(
-                expected_version=film.version,
-                film_id=job.film_id,
-                attempt_id=context.attempt_id,
-                manifest=final,
-            ),
-        )
         shutil.rmtree(dirs["in"], ignore_errors=True)
         for old in base.iterdir() if base.is_dir() else ():
             if old.name != context.attempt_id:  # superseded attempts
@@ -159,67 +153,86 @@ class LocalScrapeStep:
         return ExecOutcome.succeeded("刮削完成", result_digest=final.manifest_hash)
 
     def _place(self, context: ReturnContext, final: m.FinalManifest) -> m.FinalManifest:
-        """Reserve one film folder; move locally or copy/verify/exact-delete across volumes."""
+        """Stage without consuming sources; publish only a complete, recorded package."""
         from .finalize import Finalizer, _rmdir_empty
 
         rt = context.runtime
         source = rt.final_dir(final)
-        rt.output_dir.mkdir(parents=True, exist_ok=True)
-        suffix = 1
-        while True:
-            name = source.name if suffix == 1 else f"{source.name} ({suffix})"
-            target = rt.output_dir / name
-            try:
-                target.mkdir()  # reserve, never merge with or overwrite another film
-                break
-            except FileExistsError:
-                suffix += 1
-        copied = []
+        staging = rt.output_dir / f".placing-{context.job.film_id}"
+        _discard_placement(staging, rt.identity.work_root_id)
         members = Finalizer._cleanup_manifest(
             "workcopy", final.manifest_hash, final.items
         ).members
+        try:
+            staging.mkdir(parents=True)
+            for member in members:
+                origin, dest = (
+                    source / member.relative_path,
+                    staging / member.relative_path,
+                )
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.link(origin, dest)
+                except OSError as exc:
+                    if exc.errno != errno.EXDEV:
+                        raise
+                    shutil.copyfile(origin, dest)
+                    if (
+                        dest.stat().st_size != member.size_bytes
+                        or sha256_file(dest, context.cancel) != member.sha256
+                    ):
+                        raise _Failure(
+                            "needs_attention",
+                            f"成品复制校验失败：{member.relative_path}",
+                        )
+            suffix, target = 1, rt.output_dir / source.name
+            while target.exists():
+                suffix += 1
+                target = rt.output_dir / f"{source.name} ({suffix})"
+            data = final.model_dump(mode="json")
+            data.update(output_relative_path=target.name, output_directory=str(target))
+            data["items"] = [
+                item.model_copy(
+                    update={
+                        "native_identity": file_identity.native(
+                            staging / item.relative_path, item.source_root_id
+                        )
+                    }
+                ).model_dump(mode="json")
+                for item in final.items
+            ]
+            data["manifest_hash"] = m.manifest_digest(data)
+            final = m.FinalManifest.model_validate(data)
+            # This candidate is not active until scrape succeeds. A crash here
+            # leaves only this film's staging for its next attempt to discard.
+            film = rt.store.get_film(rt.operator, context.job.film_id).film
+            rt.store.put_final_manifest(
+                rt.scrape_auth,
+                rt.meta(),
+                m.FinalManifestPut(
+                    expected_version=film.version,
+                    film_id=context.job.film_id,
+                    attempt_id=context.attempt_id,
+                    manifest=final,
+                ),
+            )
+            staging.rename(target)  # Windows refuses even an empty colliding directory.
+        except Exception:
+            _discard_placement(staging, rt.identity.work_root_id)
+            raise
+        # Only a complete, recorded package can consume its sources (C6).
         for member in members:
-            origin, dest = source / member.relative_path, target / member.relative_path
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                origin.rename(dest)
-            except OSError as exc:
-                if exc.errno != errno.EXDEV:
-                    raise
-                shutil.copyfile(origin, dest)
-                if (
-                    dest.stat().st_size != member.size_bytes
-                    or sha256_file(dest, context.cancel) != member.sha256
-                ):
-                    raise _Failure(
-                        "needs_attention", f"成品复制校验失败：{member.relative_path}"
-                    )
-                copied.append(member)
-        # All copied members verified before any source deletion (C6).
-        for member in copied:
             status = file_identity.delete_exact(
                 source / member.relative_path, member, context.cancel
             )
             if status not in ("deleted", "already_absent"):
-                raise _Failure(
-                    "needs_attention",
-                    f"成品来源清理失败：{member.relative_path}：{status}",
+                log.warning(
+                    "Placed source retained for reclaim: %s (%s)",
+                    member.relative_path,
+                    status,
                 )
         _rmdir_empty(source)
-        data = final.model_dump(mode="json")
-        data.update(output_relative_path=target.name, output_directory=str(target))
-        data["items"] = [
-            item.model_copy(
-                update={
-                    "native_identity": file_identity.native(
-                        target / item.relative_path, item.source_root_id
-                    )
-                }
-            ).model_dump(mode="json")
-            for item in final.items
-        ]
-        data["manifest_hash"] = m.manifest_digest(data)
-        return m.FinalManifest.model_validate(data)
+        return final
 
     def _handoff(
         self, rt: LocalRuntime, job: m.PendingComputeJob
@@ -615,3 +628,24 @@ def _checked(package: Path, item: dict[str, Any]) -> Path:
 
 def _relative(rt: LocalRuntime, path: Path) -> str:
     return PurePosixPath(path.resolve().relative_to(rt.work_dir.resolve())).as_posix()
+
+
+def _discard_placement(staging: Path, root_id: str) -> None:
+    """Exact-delete only this film's disposable staging, including incomplete copies."""
+    from .finalize import _rmdir_empty
+
+    for path in staging.rglob("*"):
+        if not path.is_file():
+            continue
+        member = m.CleanupMember(
+            item_id=str(uuid.uuid4()),
+            root_id=root_id,
+            relative_path=path.relative_to(staging).as_posix(),
+            native_identity=file_identity.native(path, root_id),
+            size_bytes=path.stat().st_size,
+            sha256=sha256_file(path),
+        )
+        status = file_identity.delete_exact(path, member)
+        if status not in ("deleted", "already_absent"):
+            raise _Failure("transient", f"成品暂存清理失败：{status}")
+    _rmdir_empty(staging)

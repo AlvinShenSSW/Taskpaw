@@ -314,7 +314,7 @@ def validate(
         if name not in hidden and raw and (why := _path_error(raw)):
             errors[name] = why
     if role != "off":
-        _validate_role(new, config, errors, creating)
+        _validate_role(new, config, errors, creating, config_dir)
     if "data_dir" not in errors:
         held = _data_dir_held(new, (old, running), config_dir)
         if held:
@@ -346,6 +346,7 @@ def _validate_role(
     config: AgentConfig,
     errors: dict[str, str],
     creating: tuple[str, ...] = (),
+    config_dir: Path | None = None,
 ) -> None:
     from taskpaw_v3.workflow.staging import StagingError, validate_dir
 
@@ -356,9 +357,9 @@ def _validate_role(
     for name in needed:
         if not getattr(new, name):
             errors.setdefault(name, "请填写")
-    if role == "controller" and new.output_dir and "output_dir" not in errors:
+    if role == "controller" and "output_dir" not in errors:
         try:
-            path = validate_dir(new.output_dir)
+            path = validate_dir(effective_output(new, config_dir))
             if sys.platform == "win32":
                 import ctypes
 

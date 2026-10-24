@@ -4,6 +4,7 @@
 import errno
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,202 @@ from taskpaw_v3.tests.test_workflow_control_routes import (  # noqa: F401
 from taskpaw_v3.tests.test_workflow_settings import World as SettingsWorld
 from taskpaw_v3.tests.test_workflow_settings import _tools
 from taskpaw_v3.workflow import board, file_identity
+
+
+@pytest.mark.parametrize("data_source", ["data_dir", "config_dir"])
+@pytest.mark.parametrize("drive", ["network", "removable"])
+def test_default_output_requires_a_fixed_local_disk(
+    tmp_path, monkeypatch, data_source, drive
+):
+    import ctypes
+    import sys
+
+    from taskpaw_v3.agent.server import workflow_settings as ws
+    from taskpaw_v3.core.config import AgentConfig, WorkflowSettings
+    from taskpaw_v3.workflow import staging
+
+    if drive == "removable" and sys.platform != "win32":
+        pytest.skip("Windows fixed-drive check")
+    settings = WorkflowSettings(
+        enabled=True,
+        role="controller",
+        data_dir=str(tmp_path / "data") if data_source == "data_dir" else None,
+        **_tools(tmp_path),
+    )
+    expected = Path(ws.effective_output(settings, tmp_path))
+    checked = []
+
+    def network(path):
+        checked.append(path)
+        return drive == "network"
+
+    monkeypatch.setattr(staging, "_network_drive", network)
+    if drive == "removable":
+        monkeypatch.setattr(ctypes.windll.kernel32, "GetDriveTypeW", lambda _: 2)
+    with pytest.raises(ws.Refused) as refused:
+        ws.validate(
+            settings,
+            settings,
+            AgentConfig(server_id="s", machine="m"),
+            tmp_path,
+            settings,
+            ws.Retained(),
+        )
+    assert "本机" in refused.value.fields["output_dir"]
+    assert checked == [expected]
+
+
+@pytest.mark.parametrize("failure", ["corrupt", "io", "rename", "crash", "link"])
+def test_failed_placement_keeps_sources_and_retry_uses_plain_name(
+    world, monkeypatch, failure
+):
+    from taskpaw_v3.tests import test_workflow_scrape_step as scr
+    from taskpaw_v3.tests.test_workflow_local_dispatch import Crash
+    from taskpaw_v3.workflow import scrape_step
+
+    step = scr.scrape_step(world.tmp)
+    captured = []
+
+    def capture(context, final):
+        captured.append((context, final))
+        raise Crash()
+
+    monkeypatch.setattr(step, "_place", capture)
+    dispatcher = scr.dispatcher(world.rt, step)
+    for _ in range(4):
+        assert dispatcher.run_once()
+    with pytest.raises(Crash):
+        dispatcher.run_once()
+    context, final = captured[0]
+    source = world.rt.final_dir(final)
+    before = {
+        p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()
+    }
+    output = world.rt.output_dir
+    other = output / ".placing-another-film"
+    other.mkdir(parents=True)
+    (other / "keep").write_bytes(b"keep")
+    real_rename, real_link, real_copy = (
+        Path.rename,
+        os.link,
+        scrape_step.shutil.copyfile,
+    )
+    copied = []
+    linked = []
+    source_deletes = []
+    real_delete = file_identity.delete_exact
+
+    def delete(path, member, cancel=None):
+        if path.is_relative_to(source):
+            source_deletes.append(path)
+        return real_delete(path, member, cancel)
+
+    def link(path, dest):
+        if failure == "link":
+            linked.append(dest)
+            if len(linked) == 2:
+                raise OSError("fake local link failure")
+            return real_link(path, dest)
+        if Path(dest).is_relative_to(output):
+            raise OSError(errno.EXDEV, "fake other volume")
+        return real_link(path, dest)
+
+    def rename(path, dest):
+        if path.is_relative_to(source):
+            raise OSError(errno.EXDEV, "fake other volume")
+        if Path(dest) == output / source.name and failure == "rename":
+            raise OSError("fake rename failure")
+        return real_rename(path, dest)
+
+    def copy(path, dest, *args, **kwargs):
+        result = real_copy(path, dest, *args, **kwargs)
+        copied.append(dest)
+        if len(copied) == 2:
+            if failure == "corrupt":
+                Path(dest).write_bytes(b"corrupt")
+            elif failure == "io":
+                raise OSError("fake copy failure")
+            elif failure == "crash":
+                raise Crash()
+        return result
+
+    monkeypatch.setattr(file_identity, "delete_exact", delete)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "link", link)
+        patch.setattr(Path, "rename", rename)
+        patch.setattr(scrape_step.shutil, "copyfile", copy)
+        with pytest.raises((scrape_step._Failure, OSError, Crash)):
+            scrape_step.LocalScrapeStep._place(step, context, final)
+    assert not source_deletes
+    assert {
+        p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()
+    } == before
+    if failure != "crash":
+        assert list(output.iterdir()) == [other]
+    else:
+        assert not (output / source.name).exists()
+    # A new attempt owns only this film's stale staging; other films are untouched.
+    latest = world.rt.store.latest_final_revision(world.rt.operator, world.film)
+    final = final.model_copy(update={"revision": latest + 1})
+    placed = scrape_step.LocalScrapeStep._place(step, context, final)
+    target = output / source.name
+    assert Path(placed.output_directory) == target
+    assert set(output.iterdir()) == {other, target}
+    assert (other / "keep").read_bytes() == b"keep"
+    assert {
+        p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()
+    } == before
+
+
+@pytest.mark.parametrize("reason", ["no_approval", "changed_approval", "vanished"])
+def test_archive_progress_cleared_before_wait_or_resubmit(monkeypatch, reason):
+    from taskpaw_v3.workflow.finalize import Finalizer
+
+    fin = Finalizer(SimpleNamespace(data_dir=Path("unused")), None, SimpleNamespace())
+    approval = SimpleNamespace(approval_id="current", binding=object())
+    wf = SimpleNamespace(film_id="film", approval=approval)
+    op = SimpleNamespace(approval_id="current", operation_id="operation")
+    if reason == "no_approval":
+        wf.approval = None
+    elif reason == "changed_approval":
+        op.approval_id = "old"
+    fin.progress[wf.film_id] = {"copied_bytes": 60}
+    fin.filmpaw.lookup = lambda _: None
+    submissions = []
+    monkeypatch.setattr(fin, "_submit", lambda *args: submissions.append(args))
+    assert fin._poll(wf, op, {}) == (reason == "vanished")
+    assert wf.film_id not in fin.progress
+    assert len(submissions) == (reason == "vanished")
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_placement_crash_at_manifest_write_retries_without_suffix(
+    world, monkeypatch, recorded
+):
+    from taskpaw_v3.tests import test_workflow_scrape_step as scr
+    from taskpaw_v3.tests.test_workflow_local_dispatch import Crash
+
+    step = scr.scrape_step(world.tmp)
+    dispatcher = scr.dispatcher(world.rt, step)
+    for _ in range(4):
+        assert dispatcher.run_once()
+    real_put = world.rt.store.put_final_manifest
+
+    def crash(*args):
+        if recorded:
+            real_put(*args)
+        raise Crash()
+
+    monkeypatch.setattr(world.rt.store, "put_final_manifest", crash)
+    with pytest.raises(Crash):
+        dispatcher.run_once()
+    assert not (world.rt.output_dir / "ABC-123").exists()
+    world.rt.close()
+    world.rt = world.runtime()
+    assert scr.dispatcher(world.rt, step).run_once()
+    final = board.final_manifest(world.rt, world.film)
+    assert board.output_dir(world.rt, final) == world.rt.output_dir / "ABC-123"
+    assert list(world.rt.output_dir.iterdir()) == [world.rt.output_dir / "ABC-123"]
 
 
 def test_output_default_and_creation(tmp_path):
@@ -78,25 +275,30 @@ def test_output_change_waits_for_confirmation_and_archive(world, approved):
 
 
 @pytest.mark.parametrize("cross_volume", [False, True])
-def test_output_placement_and_exact_cleanup(world, monkeypatch, cross_volume):
+@pytest.mark.parametrize("retain_source", [False, True])
+def test_output_placement_and_exact_cleanup(
+    world, monkeypatch, cross_volume, retain_source
+):
     target = world.tmp / "成品"
     world.rt.output_dir = target
     deleted = []
     real_delete = file_identity.delete_exact
-    real_rename = Path.rename
+    real_link = os.link
 
-    def rename(path, dest):
+    def link(path, dest):
         if cross_volume and Path(dest).is_relative_to(target):
             raise OSError(errno.EXDEV, "fake cross-volume")
-        return real_rename(path, dest)
+        return real_link(path, dest)
 
     def delete(path, member, cancel=None):
         # A whole verified package must exist before any source member is deleted.
         assert (target / "ABC-123" / member.relative_path).is_file()
         deleted.append(path)
+        if retain_source:
+            return "blocked_writing"
         return real_delete(path, member, cancel)
 
-    monkeypatch.setattr(Path, "rename", rename)
+    monkeypatch.setattr(os, "link", link)
     monkeypatch.setattr(file_identity, "delete_exact", delete)
     world.scrape()
     final = board.final_manifest(world.rt, world.film)
@@ -104,7 +306,8 @@ def test_output_placement_and_exact_cleanup(world, monkeypatch, cross_volume):
     out = board.output_dir(world.rt, final)
     assert out == target / "ABC-123"
     assert out.is_dir()
-    assert len(deleted) == (len(final.items) if cross_volume else 0)
+    assert len(deleted) == len(final.items)
+    assert all(path.exists() == retain_source for path in deleted)
     assert all(
         file_identity.check(out / member.relative_path, member) == "ok"
         for member in world.finalizer()
@@ -229,14 +432,15 @@ def test_cross_volume_verification_failure_keeps_every_source(world, monkeypatch
     from taskpaw_v3.workflow import scrape_step
 
     target = world.rt.output_dir
-    rename = Path.rename
+    link = os.link
     copy = scrape_step.shutil.copyfile
+    real_delete = file_identity.delete_exact
     deletes = []
 
     def cross_volume(path, dest):
         if Path(dest).is_relative_to(target):
             raise OSError(errno.EXDEV, "fake other volume")
-        return rename(path, dest)
+        return link(path, dest)
 
     def corrupt(source, dest, *args, **kwargs):
         result = copy(source, dest, *args, **kwargs)
@@ -244,11 +448,14 @@ def test_cross_volume_verification_failure_keeps_every_source(world, monkeypatch
             Path(dest).write_bytes(b"corrupt copy")
         return result
 
-    monkeypatch.setattr(Path, "rename", cross_volume)
+    def delete(path, member, cancel=None):
+        if not path.is_relative_to(target):
+            deletes.append(path)
+        return real_delete(path, member, cancel)
+
+    monkeypatch.setattr(os, "link", cross_volume)
     monkeypatch.setattr(scrape_step.shutil, "copyfile", corrupt)
-    monkeypatch.setattr(
-        file_identity, "delete_exact", lambda *args: deletes.append(args)
-    )
+    monkeypatch.setattr(file_identity, "delete_exact", delete)
     dispatcher = scr.dispatcher(world.rt, scr.scrape_step(world.tmp))
     for _ in range(6):
         dispatcher.run_once()
@@ -257,6 +464,7 @@ def test_cross_volume_verification_failure_keeps_every_source(world, monkeypatch
     assert not deletes
     assert list((world.rt.work_dir / "scrape").rglob("*.mkv"))
     assert list(world.inbox.rglob("*.mkv"))
+    assert not list(target.iterdir())
 
 
 def test_output_rejects_mapped_drive_before_reading_it(tmp_path, monkeypatch):
