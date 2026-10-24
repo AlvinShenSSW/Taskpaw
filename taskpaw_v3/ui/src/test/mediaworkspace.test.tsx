@@ -459,6 +459,37 @@ describe("待处理", () => {
 });
 
 describe("影片队列 / 待确认 / 异常", () => {
+  it.each([false, true])("orders active, waiting and newest completed films with completion times (remote=%s)", async (remote) => {
+    mockApi();
+    const films = [
+      row({ film_id: "done-null", group: "done", completed_at: null }),
+      row({ film_id: "queued" }),
+      row({ film_id: "done-old", group: "done", completed_at: new Date(2026, 9, 24, 8, 5).toISOString() }),
+      row({ film_id: "translating", stage: "translate", status: "running" }),
+      row({ film_id: "waiting-asr", stage: "asr" }),
+      row({ film_id: "done-new", group: "done", completed_at: new Date(2026, 9, 25, 9, 7).toISOString() }),
+      row({ film_id: "restoring", status: "running" }),
+      row({ film_id: "failed", group: "attention", stage: "asr", status: "failed" }),
+      row({ film_id: "review", group: "confirm", stage: "archive" }),
+    ];
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, packages: [PACKAGES[0]], counts: counts(films, [PACKAGES[0]]) });
+    if (remote) vi.spyOn(api, "workflowDevices").mockResolvedValue(REMOTE_DEVICES);
+    wrap(<MediaWorkspace />);
+    await screen.findByRole("heading", { level: 1, name: "概览" });
+    fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
+    await screen.findByRole("heading", { level: 1, name: remote ? "队列 · 派单状态" : "影片队列" });
+    const order = () => [...document.querySelectorAll("[data-film]")].map((e) => e.getAttribute("data-film"));
+    const done = ["done-new", "done-old", "done-null"];
+    await waitFor(() => expect(order()).toEqual(["translating", "restoring", "queued", "waiting-asr", "failed", "review", "pkg:p1", ...done]));
+    const newest = document.querySelector('[data-film="done-new"]')!;
+    expect(newest.querySelector(remote ? "td:last-child" : ".card-foot")).toHaveTextContent("完成于 10-25 09:07");
+    fireEvent.change(screen.getByLabelText("按影片阶段筛选"), { target: { value: "processing" } });
+    expect(order()).toEqual(["translating", "restoring", "waiting-asr"]);
+    fireEvent.change(screen.getByLabelText("按影片阶段筛选"), { target: { value: "completed" } });
+    await waitFor(() => expect(order()).toEqual(done));
+    expect(document.querySelector('[data-film="done-new"] .card-foot')).toHaveTextContent("完成于 10-25 09:07");
+  });
+
   it("queue cards carry status chips and the step line with 待处理; searching filters", async () => {
     mockApi();
     wrap(<MediaWorkspace />);

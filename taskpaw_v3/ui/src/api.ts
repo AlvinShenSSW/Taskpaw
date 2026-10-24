@@ -299,6 +299,7 @@ export interface FilmRow extends FilmRemote {
   film_id: string; name: string; group: FilmGroup; stage: string | null; status: string | null;
   note: string | null; can_confirm: boolean; can_retry: boolean; retry_stage: string | null;
   created_at: string | null; steps: WorkflowStep[];
+  completed_at?: string | null;
   // final NFO > lookup > input NFO; the cover by the same precedence
   number: string | null; title: string | null; actors: string[];
   has_poster: boolean; poster_source: string | null;

@@ -562,6 +562,13 @@ export function exceptionInfo(item: WorkItem, intakeReasons: (pkg: PackageRow) =
 }
 
 // ── formatting ──────────────────────────────────────────────────────────
+export function fmtDateTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const at = new Date(value);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${two(at.getMonth() + 1)}-${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}`;
+}
+
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];

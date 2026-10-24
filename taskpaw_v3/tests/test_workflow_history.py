@@ -29,6 +29,20 @@ def finish(world):
     assert world.status("cleanup_input") == "succeeded"
 
 
+def test_list_completion_time_matches_detail(world, client):
+    world.scrape()
+    rows = client.get(f"{BASE}/films").json()["films"]
+    assert rows[0]["group"] != "done"
+    assert rows[0]["completed_at"] is None
+
+    finish(world)
+    rows = client.get(f"{BASE}/films").json()["films"]
+    detail = client.get(f"{BASE}/films/{world.film}").json()
+    assert rows[0]["group"] == "done"
+    assert rows[0]["completed_at"] is not None
+    assert rows[0]["completed_at"] == detail["history"]["completed_at"]
+
+
 def test_history_retained_before_delete_and_survives_reclaim(
     world, monkeypatch, client
 ):

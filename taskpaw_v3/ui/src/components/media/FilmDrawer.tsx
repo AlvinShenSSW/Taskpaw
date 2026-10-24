@@ -10,7 +10,7 @@ import { LtxDownload } from "../LtxDownload";
 import { EnergyBlock, LivePowerRow, PredictBlock } from "../power/PowerParts";
 import { predictFromRates } from "../power/powerModel";
 import {
-  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, fmtDuration, fmtDurationMs, hasLtxTime, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
+  CLEANUP_STATE, EXCEPTION_STATES, exceptionInfo, fmtBytes, fmtDateTime, fmtDuration, fmtDurationMs, hasLtxTime, isRemoteRow, packageNote, readFilmTiming, REVIEW_STATES, restoreStep,
   machineLabel, runningArchiveStep, statusLabel, STATUS_META, stageName, stepDurations, TIER_SHORT, tierLong, unroutedMachine, type WorkItem,
 } from "./mediaModel";
 import { DeviceSection } from "./RemoteParts";
@@ -117,11 +117,8 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
 }
 
 function historyMeta(film: FilmDetail): string {
-  const at = film.history?.completed_at ? new Date(film.history.completed_at) : null;
-  const two = (n: number) => String(n).padStart(2, "0");
-  const date = at ? `${two(at.getMonth() + 1)}-${two(at.getDate())} ${two(at.getHours())}:${two(at.getMinutes())}` : "—";
   return [film.resolution, film.plan?.ltx_model ? `画质 ${TIER_SHORT[film.plan.ltx_model]}` : "无需修复",
-    fmtDurationMs(film.duration_ms), `已完成 ${date}`].filter(Boolean).join(" · ");
+    fmtDurationMs(film.duration_ms), `已完成 ${fmtDateTime(film.history?.completed_at)}`].filter(Boolean).join(" · ");
 }
 
 const HISTORY_LABELS: Record<string, string> = {

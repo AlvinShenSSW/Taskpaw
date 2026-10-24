@@ -16,7 +16,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -586,17 +586,19 @@ def film_rows(
     facts: dict[str, Facts] | None = None,
     extras: Mapping[str, RowExtra] | None = None,
     names: Mapping[str, str] | None = None,
+    rt: LocalRuntime | None = None,
 ) -> list[dict[str, Any]]:
     """P2-3 R15: `currents` maps a film to its running stage — the
     controller's own and each worker's (`FleetLive.currents`). A film being
     fetched before its claim shows the download as its waiting note.
-    P2-4: `extras` per film and the workers' `names` (`reads.board_inputs`)."""
+    P2-4: `extras` per film and the workers' `names` (`reads.board_inputs`).
+    `rt` supplies recorded completion times for the films API."""
     currents = currents or {}
     waiting = dict(waiting)
     for film_id, value in currents.items():
         if value.get("fetching") and value.get("transfer"):
             waiting[film_id] = value["transfer"]
-    return [
+    rows = [
         film_row(
             film,
             waiting,
@@ -609,6 +611,14 @@ def film_rows(
         )
         for film in films
     ]
+    for row in rows:
+        completed = (
+            _completed_at(rt.store.film_workflow(rt.operator, row["film_id"]))
+            if rt is not None and row["group"] == "done"
+            else None
+        )
+        row["completed_at"] = _time(completed) if completed else None
+    return rows
 
 
 def _running_current(value: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1202,6 +1212,19 @@ def film_detail(
     }
 
 
+def _completed_at(wf: m.FilmWorkflow) -> datetime | None:
+    return max(
+        (
+            o.ended_at
+            for o in wf.cleanup_operations
+            if o.approval_id == wf.archive_receipt_approval_id
+            and o.resolved
+            and o.ended_at
+        ),
+        default=None,
+    )
+
+
 def _history(
     film: m.BoardFilm, wf: m.FilmWorkflow, names: Mapping[str, str]
 ) -> dict[str, Any]:
@@ -1267,8 +1290,7 @@ def _history(
                 "result": result,
             }
         )
-    ends = [o.ended_at for o in cleanups if o.ended_at]
-    completed = max(ends) if ends else None
+    completed = _completed_at(wf)
     return {
         "steps": rows,
         "completed_at": _time(completed) if completed else None,

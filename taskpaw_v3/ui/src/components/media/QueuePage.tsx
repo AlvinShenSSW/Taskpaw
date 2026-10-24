@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { api, type WorkflowFilms } from "../../api";
 import { fmtKwhShort } from "../power/powerModel";
 import {
-  fmtBytes, fmtHoursMinutes, isRemoteRow, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, ltxOf, machineOf, matchesStage, restoreLive, restoreStep, statusLabel,
+  ACTIVE_STATES, fmtBytes, fmtDateTime, fmtHoursMinutes, isRemoteRow, isRestoring, itemActors, itemNumber, itemResolution, itemTitle, ltxOf, machineOf, matchesStage, restoreLive, restoreStep, statusLabel,
   readFilmTiming, STAGE_OPTIONS, stepDurations, workItems, type StageFilter, type WorkItem,
 } from "./mediaModel";
 import { Chip, EmptyState, Icon, ItemCover, PageTitle, StageBlock, StatusChip, StepLine } from "./parts";
@@ -48,7 +48,17 @@ export function QueuePage() {
   const films = items.filter((i) => i.status !== "intake_attention"
     && matchesStage(i, ws.queueStage)
     && (completed || resolution === "all" || itemResolution(i) === resolution)
-    && (completed || !q || `${itemTitle(i)} ${itemNumber(i) ?? ""} ${i.kind === "film" ? i.row.name : ""} ${itemActors(i)}`.toLowerCase().includes(q)));
+    && (completed || !q || `${itemTitle(i)} ${itemNumber(i) ?? ""} ${i.kind === "film" ? i.row.name : ""} ${itemActors(i)}`.toLowerCase().includes(q)))
+    .sort((a, b) => {
+      const tier = (item: WorkItem) => ACTIVE_STATES.includes(item.status) ? 0 : item.status === "completed" ? 2 : 1;
+      const order = tier(a) - tier(b);
+      if (order || a.status !== "completed" || a.kind !== "film" || b.kind !== "film") return order;
+      const at = a.row.completed_at;
+      const bt = b.row.completed_at;
+      if (!at) return bt ? 1 : 0;
+      if (!bt) return -1;
+      return Date.parse(bt) - Date.parse(at);
+    });
   return (
     <>
       <PageTitle title={remote && !completed ? "队列 · 派单状态" : "影片队列"} actions={
@@ -104,7 +114,8 @@ export function QueuePage() {
                 onClick={() => ws.openDetail(item.id)}>{itemTitle(item)}</button> : itemTitle(item)}</td>
               <td>{item.kind === "film" ? machineOf(item.row) : "本机"}</td>
               <td><StatusChip status={item.status} film={item.kind === "film" ? item.row : undefined} /></td>
-              <td>{item.kind === "film" ? item.row.note || item.row.route?.reason : item.pkg.reason}</td>
+              <td>{item.kind === "film" ? item.status === "completed" ? `完成于 ${fmtDateTime(item.row.completed_at)}`
+                : item.row.note || item.row.route?.reason : item.pkg.reason}</td>
             </tr>)}</tbody>
           </table>
         </div> : <div className="queue-grid">{films.map((item) => <FilmCard key={item.id} item={item} />)}</div>
@@ -160,6 +171,7 @@ function FilmCard({ item }: { item: WorkItem }) {
             ? machineOf(item.row) !== null && <span className="machine-name" data-testid="film-machine">{machineOf(item.row)}</span>
             : isRestoring(item.status) ? "本机" : "INBOX"}
           {run !== null && <span className="mono run-total" title="从首次开始修复到翻译完成"> · 全程 {fmtHoursMinutes(run)}</span>}
+          {item.kind === "film" && item.status === "completed" && <span> · 完成于 {fmtDateTime(item.row.completed_at)}</span>}
           {run !== null && energy && !energy.running && (
             <span className="pw-foot" title="能耗为估算"> · <strong>约 {fmtKwhShort(energy.total_wh)} 度</strong>{energy.partial ? "（部分）" : ""}</span>
           )}
