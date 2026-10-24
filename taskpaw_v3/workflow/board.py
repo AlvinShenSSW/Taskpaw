@@ -344,6 +344,13 @@ def _steps(
                     params=detail.get("params"),
                     timing=detail.get("timing"),
                 )
+            if mine and name == "asr":
+                detail = running.get("ltx") or {}
+                step.update(
+                    progress=detail or step["progress"],
+                    started_at=running.get("started_at"),
+                    console=detail.get("console"),
+                )
             if mine and running.get("machine"):  # P2-3 R15: a worker runs it
                 step.update(
                     machine=running["machine"],

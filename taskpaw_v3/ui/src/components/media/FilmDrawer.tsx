@@ -16,6 +16,7 @@ import {
 import { DeviceSection } from "./RemoteParts";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
 import { ModalHead, ModalShell } from "./ReviewDialog";
+import { AsrLivePanel } from "./AsrLivePanel";
 import { RestoreLivePanel } from "./RestoreLivePanel";
 import { RemoveTask, SourceMissingAlert } from "./SourceMissing";
 import { TimingBlock } from "./TimingParts";
@@ -114,6 +115,7 @@ function DrawerBody({ film, item, status, plan, onClose }: {
   const title = film.title || plan?.title || film.name;
   const actors = film.actors.length ? film.actors : plan?.actors ?? [];
   const restore = restoreStep(film);
+  const asr = film.steps?.find((s) => s.key === "asr" && s.state === "running");
   const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
   // P2-3 R15: a restore or ASR running on a worker (its 设备, and 停止并重新排队)
   const remote = (film.steps ?? []).find((s) => s.state === "running" && (s.key === "restore" || s.key === "asr") && s.machine) ?? null;
@@ -187,7 +189,7 @@ function DrawerBody({ film, item, status, plan, onClose }: {
           <RestoreLivePanel step={running} />
           <p className="small muted" style={{ marginTop: 10 }}>由阶段日志提供；不包含翻译、回传、刮削与入库。</p>
         </div>
-      ) : download ? (
+      ) : asr ? <AsrLivePanel step={asr} machine={machine} /> : download ? (
         <LtxDownload value={download} onRespond={ws.readOnly ? undefined : (requestId, approved) => api.workflowLtxDownload(requestId, approved)}
           onError={(e) => ws.toast(errorText(e))} />
       ) : film.source_missing ? null : (

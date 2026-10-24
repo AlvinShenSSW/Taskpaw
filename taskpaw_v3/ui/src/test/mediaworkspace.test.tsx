@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { api, HttpError, PLAN_BATCH_MAX, type PlanChoice, type TargetPreflight } from "../api";
 import { MediaWorkspace } from "../components/media/MediaWorkspace";
 import {
-  ACTIVE_STATES, filmStatus, lifecycle, matchesStage, reviewStatus, stageLine, STATUS_META, workItems,
+  ACTIVE_STATES, filmStatus, lifecycle, matchesStage, progressText, reviewStatus, stageLine, STATUS_META, workItems,
 } from "../components/media/mediaModel";
 import { PREFLIGHT_MS } from "../components/media/workspace";
 import { LtxDownload } from "../components/LtxDownload";
@@ -1111,5 +1111,88 @@ describe("deferred Codex r6 P2s", () => {
     await waitFor(() => expect(card("abf-422")).toBeNull());
     await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
     expect(card("abf-422")).toBeNull();
+  });
+});
+
+
+describe("ASR live progress (#300)", () => {
+  afterEach(() => vi.useRealTimers());
+  const labels = ["提取音频", "划分场景", "语音增强", "语音分段", "识别语音", "生成场景字幕", "合并字幕", "过滤与清理"];
+  const consoleLine = "[DecoupledPipeline] Generating scene 214/346 (26.1s audio)...";
+  const progress = {
+    phase: 5, phase_n: 8, phase_label: "识别语音", scene: 214, scenes: 346, percent: 62,
+    eta_s: 660, elapsed_s: 1122, console: consoleLine,
+    phases: labels.map((label, i) => ({ n: i + 1, label, state: i < 4 ? "done" : i === 4 ? "current" : "pending",
+      seconds: i < 4 ? 30 : i === 4 ? 1002 : null })),
+  };
+  it.each([[62, "62%"], [0, "0%"], [null, null]] as const)("reads ASR percent %s for the device summary", (percent, expected) => {
+    const film = row({ film_id: "asr-live", stage: "asr", status: "running", steps: steps("asr", "running", { progress: { ...progress, percent } }) });
+    expect(progressText({ kind: "film", id: film.film_id, row: film, status: "asr" })).toBe(expected);
+  });
+  function setup(p: Record<string, unknown> = progress) {
+    mockApi();
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-24T08:18:42Z"));
+    const film = row({ film_id: "asr-live", title: "识别测试", stage: "asr", status: "running",
+      steps: steps("asr", "running", { progress: p, started_at: "2026-10-24T08:00:00Z", console: String(p.console) }) });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film, actors: [] }));
+    return wrap(<MediaWorkspace />);
+  }
+  async function open() {
+    fireEvent.click(await screen.findByRole("button", { name: "查看 识别测试 详情" }));
+    return screen.findByRole("dialog", { name: "影片详情" });
+  }
+
+  it("renders the approved drawer heartbeat, percent, tiles, phases, console and step chip", async () => {
+    setup();
+    const drawer = await open();
+    const panel = await within(drawer).findByTestId("asr-live");
+    expect(panel).toHaveTextContent("已用 18:42");
+    expect(panel).toHaveTextContent("第 5/8 阶段 · 识别语音");
+    expect(within(panel).getByText("62%")).toBeInTheDocument();
+    expect(within(panel).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "62");
+    const tiles = within(panel).getByRole("list", { name: "识别数据" });
+    expect(within(tiles).getAllByRole("listitem")).toHaveLength(4);
+    expect(tiles).toHaveTextContent("场景214 / 346");
+    expect(tiles).toHaveTextContent("已用18:42");
+    expect(tiles).toHaveTextContent("预计剩余约 11 分钟");
+    expect(tiles).toHaveTextContent("设备本机 · RTX 5070 Ti");
+    const phases = within(panel).getByRole("list", { name: "识别阶段" });
+    const entries = within(phases).getAllByRole("listitem");
+    expect(entries).toHaveLength(8);
+    labels.forEach((label, i) => expect(entries[i]).toHaveTextContent(label));
+    expect(entries[0]).toHaveTextContent("✓");
+    expect(entries[0]).toHaveTextContent("00:30");
+    expect(entries[4]).toHaveTextContent("●");
+    expect(entries[4]).toHaveTextContent("场景 214/346");
+    expect(entries[4]).toHaveTextContent("16:42");
+    expect(entries[5]).toHaveTextContent("○");
+    fireEvent.click(within(panel).getByText("最新输出"));
+    expect(within(panel).getByTestId("asr-console-raw")).toHaveTextContent(consoleLine);
+    expect(within(drawer).getByText("识别 · 62%", { selector: "[aria-current=step]" })).toBeInTheDocument();
+  });
+
+  it("shows percent, scenes and ETA in the overview row", async () => {
+    setup();
+    expect(await screen.findByText("识别 · 62% · 场景 214/346 · 约 11 分钟")).toBeInTheDocument();
+    expect(screen.queryByText("此阶段不提供影片总体百分比")).not.toBeInTheDocument();
+  });
+
+  it("an untagged pipeline shows only a ticking heartbeat and console, with no percent", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    setup({ elapsed_s: 1122, console: "Loading balanced pipeline" });
+    const drawer = await open();
+    const panel = await within(drawer).findByTestId("asr-live");
+    expect(panel).toHaveTextContent("已用 18:42");
+    expect(within(panel).queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("list")).not.toBeInTheDocument();
+    expect(panel).not.toHaveTextContent("%");
+    expect(panel).not.toHaveTextContent("预计剩余");
+    expect(within(panel).getByTestId("asr-console-raw")).toHaveTextContent("Loading balanced pipeline");
+    expect(within(drawer).getByText("识别", { selector: "[aria-current=step]" })).toBeInTheDocument();
+    expect(screen.queryByText("此阶段不提供影片总体百分比")).not.toBeInTheDocument();
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-24T08:18:44Z"));
+    act(() => vi.advanceTimersByTime(2000));
+    expect(panel).toHaveTextContent("已用 18:44");
   });
 });

@@ -7,7 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useContext, useRef, useState, type ReactNode, type SyntheticEvent } from "react";
 import { api, type StepKey, type WorkflowStep } from "../../api";
 import {
-  currentStep, fmtDuration, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL,
+  asrLive, asrSummary, currentStep, elapsedClock, fmtDuration, heartbeatText, isRestoring, lifecycle, ltxOf, paramSummary, restoreLive, restoreStep, SPLIT_LABEL,
   STATUS_META, STEP_LABEL,
   stageLine, type ChipTone, type RestoreLive, type StatusKey, type WorkItem,
 } from "./mediaModel";
@@ -231,8 +231,18 @@ function ParamsLine({ live }: { live: RestoreLive | null }) {
 export function StageBlock({ item }: { item: WorkItem }) {
   const restoring = item.kind === "film" && isRestoring(item.status);
   const live = restoring && item.kind === "film" ? restoreLive(restoreStep(item.row)) : null;
-  const now = useNow(live !== null && live.startedAt !== null);
+  const asr = item.kind === "film" ? asrLive(item.row.steps?.find((s) => s.key === "asr")) : null;
+  const now = useNow((live !== null && live.startedAt !== null) || (asr !== null && asr.startedAt !== null));
   const beat = live ? heartbeatText(live, now) : null;
+  if (asr) {
+    return <>
+      <div className="film-stage"><span>{asrSummary(asr)}</span></div>
+      {asr.phase == null && <div className="stage-detail">
+        <span>{asr.startedAt === null ? "识别中" : `已用 ${elapsedClock(now - asr.startedAt)}`}</span>
+        <span>{asr.console}</span>
+      </div>}
+    </>;
+  }
   if (item.kind === "film" && restoring && live && beat && item.status === "restore") {
     return <RestorePhaseBlock title={item.row.title || item.row.name} live={live} beat={beat} />;
   }
@@ -289,12 +299,14 @@ export function StepLine({ steps, title, durations }: {
       {line.map((s, i) => {
         const failed = s.state === "failed";
         if (i === cur) {
+          const percent = asrLive(s)?.percent;
+          const activeLabel = percent == null ? STEP_LABEL[s.key] : `识别 · ${percent}%`;
           return (
             <li key={s.key} className={failed ? "failed" : "current"} aria-current="step" data-step={s.key}>
               {s.machine ? (
                 // P2-3 R15: the stage runs on a worker — its 设备 under the step
-                <span className="step-label">{STEP_LABEL[s.key]}<span className="step-time"><span className="sr-only">设备 </span>{s.machine.name}</span></span>
-              ) : STEP_LABEL[s.key]}
+                <span className="step-label">{activeLabel}<span className="step-time"><span className="sr-only">设备 </span>{s.machine.name}</span></span>
+              ) : activeLabel}
               {failed && <span className="sr-only">（失败）</span>}
             </li>
           );

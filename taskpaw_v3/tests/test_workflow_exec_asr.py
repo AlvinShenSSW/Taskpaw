@@ -281,3 +281,153 @@ def test_tools_profile_is_stable_and_follows_the_settings(rt, tools):
     assert tools.asr(rt).tools().config_digest == first.config_digest
     other = AsrExecutor(rt, str(tools.whisper_exe), engine="large-v3").tools()
     assert other.config_digest != first.config_digest
+
+
+# #300: replay captured output; no WhisperJAV process or GPU.
+def fake_asr_lines(monkeypatch, lines, interval=2.0, after_lines=lambda: 0):
+    from types import SimpleNamespace
+
+    from taskpaw_v3.workflow import exec_asr
+    from taskpaw_v3.workflow.owned_process import OwnedJob
+
+    clock = [0.0]
+    monkeypatch.setattr(exec_asr, "monotonic", lambda: clock[0], raising=False)
+    monkeypatch.setattr(
+        exec_asr.whisperjav,
+        "read_outcome",
+        lambda *args: SimpleNamespace(kind="no_speech"),
+    )
+
+    def launch(self, argv, *, on_line, **kwargs):
+        def wait(cancel):
+            for i, line in enumerate(lines):
+                clock[0] += interval
+                on_line("stdout" if i % 2 else "stderr", line)
+            return after_lines()
+
+        return SimpleNamespace(wait=wait)
+
+    monkeypatch.setattr(OwnedJob, "launch", launch)
+
+
+def test_asr_live_progress_replays_recorded_run(rt, monkeypatch):
+    from taskpaw_v3.monitors.subs.progress import AsrProgress
+    from taskpaw_v3.tests.test_subs_progress import RECORDED_RUN
+
+    film = film_with(rt)
+    lines = RECORDED_RUN.splitlines()
+    fake_asr_lines(monkeypatch, lines)
+    run = run_direct(rt, film, "asr")
+    assert run.outcome.ok
+    assert run.ltx, "ASR must publish structured progress through the callback"
+    assert len(run.ltx) == len(lines) + 1
+    parser = AsrProgress(0)
+    for i, line in enumerate(lines, 1):
+        parser.feed_text(line, i * 2.0)
+        expected = parser.snapshot(i * 2.0)
+        actual = run.ltx[i]
+        assert actual["console"] == line.strip()[:300]
+        if expected["phase"] is not None:
+            assert {key: actual[key] for key in expected} == expected
+            assert (
+                actual["phase_label"]
+                == actual["phases"][expected["phase"] - 1]["label"]
+            )
+    gen = next(s for s in run.ltx if "Generating scene 1/1" in s["console"])
+    assert [p["label"] for p in gen["phases"]] == [
+        "提取音频",
+        "划分场景",
+        "语音增强",
+        "语音分段",
+        "识别语音",
+        "生成场景字幕",
+        "合并字幕",
+        "过滤与清理",
+    ]
+    assert [p["state"] for p in gen["phases"]] == ["done"] * 4 + ["current"] + [
+        "pending"
+    ] * 3
+    starts = [
+        next(i * 2 for i, line in enumerate(lines, 1) if f"Phase {n}:" in line)
+        for n in range(1, 9)
+    ]
+    assert gen["phases"][0]["seconds"] == starts[1] - starts[0]
+    assert gen["phases"][4]["seconds"] == gen["elapsed_s"] - starts[4]
+    assert gen["phases"][5]["seconds"] is None
+    assert run.ltx[-1]["percent"] == 99
+
+
+def test_asr_live_progress_throttles_but_keeps_every_line(rt, monkeypatch):
+    from taskpaw_v3.tests.test_subs_progress import RECORDED_RUN
+
+    film = film_with(rt)
+    lines = RECORDED_RUN.splitlines()
+    fake_asr_lines(monkeypatch, lines, interval=0.001)
+    run = run_direct(rt, film, "asr")
+    assert 1 < len(run.ltx) <= 3
+    assert run.ltx[-1]["percent"] == 99
+    assert run.ltx[-1]["scene"] == 1
+    assert run.ltx[-1]["console"] == lines[-1]
+
+
+def test_asr_live_progress_untagged_has_only_elapsed_and_console(rt, monkeypatch):
+    film = film_with(rt)
+    fake_asr_lines(monkeypatch, ["Loading balanced pipeline", "Scene 1/1 (100%)"])
+    run = run_direct(rt, film, "asr")
+    assert run.outcome.ok
+    assert run.ltx[-1] == {"elapsed_s": 4, "console": "Scene 1/1 (100%)"}
+    assert all(set(s) == {"elapsed_s", "console"} for s in run.ltx)
+
+
+def test_asr_live_progress_eta_uses_scene_advances(rt, monkeypatch):
+    film = film_with(rt)
+    fake_asr_lines(
+        monkeypatch,
+        [
+            "[DecoupledPipeline] Generating scene 1/100",
+            "[DecoupledPipeline] Generating scene 2/100",
+            "[DecoupledPipeline] Generating scene 3/100",
+        ],
+        interval=20,
+    )
+    run = run_direct(rt, film, "asr")
+    assert run.ltx[-1]["eta_s"] == 2020
+
+
+@pytest.mark.parametrize("exit_code", [0, None])
+def test_asr_live_progress_flushes_while_quiet_and_stops_with_child(
+    rt, monkeypatch, exit_code
+):
+    from taskpaw_v3.workflow import board, exec_asr
+
+    film = film_with(rt)
+    d = dispatcher(rt)
+    observed = []
+
+    def while_quiet():
+        deadline = time.monotonic() + 3
+        while d.status().current["ltx"]["console"] != "last note":
+            assert time.monotonic() < deadline, (
+                "the quiet child's last line was not flushed"
+            )
+            time.sleep(0.01)
+        current = d.status().current
+        value = rt.store.film_board(rt.operator)[0]
+        row = board.film_row(value, {}, current=current)
+        step = next(s for s in row["steps"] if s["key"] == "asr")
+        assert step["progress"]["console"] == step["console"] == "last note"
+        assert step["started_at"] == current["started_at"]
+        observed.append(step)
+        return exit_code
+
+    fake_asr_lines(monkeypatch, ["first note", "last note"], after_lines=while_quiet)
+    monkeypatch.setattr(exec_asr, "monotonic", time.monotonic)
+    monkeypatch.setattr(exec_asr, "CONSOLE_INTERVAL_S", 0.05)
+    assert d.run_once()
+    assert stage(rt, film, "asr").status == (
+        "succeeded" if exit_code == 0 else "pending"
+    )
+    assert observed
+    if exit_code is None:
+        assert attempts(rt, film, "asr")[0].evidence[0].kind == failed_kind("cancelled")
+    assert not any(t.name == "asr-console-flush" for t in threading.enumerate())

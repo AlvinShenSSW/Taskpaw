@@ -1165,3 +1165,44 @@ def test_the_final_cover_is_the_recorded_first_volume_poster():
 def test_the_final_cover_accepts_every_poster_name(items, served):
     item = board._poster_item(_final_with("missing", *items))
     assert (item.relative_path if item else None) == served
+
+
+@pytest.mark.parametrize(
+    "progress",
+    [
+        {
+            "phase": 5,
+            "phase_n": 8,
+            "phase_label": "识别语音",
+            "scene": 214,
+            "scenes": 346,
+            "percent": 62,
+            "eta_s": 660,
+            "elapsed_s": 1122,
+            "console": "Generating scene 214/346",
+            "phases": [
+                {"n": 5, "label": "识别语音", "state": "current", "seconds": 900}
+            ],
+        },
+        {"elapsed_s": 1122, "console": "Scene 1/1"},
+    ],
+)
+def test_running_asr_passes_progress_start_and_console_only_to_its_film(progress):
+    value = film({**done_through("restore"), "asr": "running"})
+    current = {
+        "film_id": value.film_id,
+        "stage": "asr",
+        "progress": "识别语音",
+        "started_at": "2026-10-24T08:00:00+00:00",
+        "ltx": progress,
+    }
+    step = _step_of(board.film_row(value, {}, current=current), "asr")
+    assert step["progress"] == progress
+    assert step["started_at"] == current["started_at"]
+    assert step["console"] == progress["console"]
+    assert "ltx" not in step
+    other = _step_of(
+        board.film_row(value, {}, current={**current, "film_id": identity()}), "asr"
+    )
+    assert other["progress"] is None
+    assert "started_at" not in other and "console" not in other

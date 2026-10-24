@@ -147,6 +147,28 @@ export function restoreLive(step: WorkflowStep | undefined): RestoreLive | null 
   };
 }
 
+// #300: the existing ASR parser's snapshot, passed through by the board.
+interface AsrProgress {
+  phase?: number | null; phase_n?: number; phase_label?: string;
+  scene?: number | null; scenes?: number | null; percent?: number | null; eta_s?: number | null;
+  elapsed_s?: number; console?: string;
+  phases?: Array<{ n: number; label: string; state: "done" | "current" | "pending"; seconds: number | null }>;
+}
+
+export function asrLive(step: WorkflowStep | undefined) {
+  if (!step || step.key !== "asr" || step.state !== "running") return null;
+  const progress = (record(step.progress) ? step.progress : {}) as AsrProgress;
+  return { ...progress, startedAt: step.started_at ? Date.parse(step.started_at) : null,
+    console: step.console ?? progress.console ?? (typeof step.progress === "string" ? step.progress : null) };
+}
+
+export const asrEta = (seconds: number | null | undefined) => seconds == null ? null : `约 ${Math.ceil(seconds / 60)} 分钟`;
+
+export function asrSummary(live: NonNullable<ReturnType<typeof asrLive>>): string {
+  return ["识别", live.percent == null ? null : `${live.percent}%`,
+    live.scene == null ? null : `场景 ${live.scene}/${live.scenes}`, asrEta(live.eta_s)].filter(Boolean).join(" · ");
+}
+
 // ── 用时 (U1e): how long a film took, read defensively ──────────────────
 const seconds = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
 
@@ -620,6 +642,8 @@ export const percentOf = (ltx: ReturnType<typeof ltxOf>) => (ltx?.percent !== un
 // The running stage's progress as the board reports it (LTX percent, else a 0–1 fraction or a percent).
 export function progressText(item: WorkItem): string | null {
   if (item.kind !== "film") return null;
+  const asr = asrLive((item.row.steps ?? []).find((s) => s.key === item.row.stage));
+  if (asr) return asr.percent == null ? null : `${asr.percent}%`;
   const ltx = percentOf(ltxOf(item.row));
   if (ltx) return ltx;
   const step = (item.row.steps ?? []).find((s) => s.key === item.row.stage);
