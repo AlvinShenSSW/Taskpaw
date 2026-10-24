@@ -67,11 +67,13 @@ def run_pass(
     retry: bool = True,
     remote_enabled: bool = False,
     live_since: datetime | None = None,
+    hold: frozenset[str] = frozenset(),
 ) -> PassOutcome:
     """`executors`: the controller's own, so the pass decides which stages
     need a GPU worker by the dispatcher's rule (IR3). `remote_enabled`: the
-    `workflow.remote_workers` setting (P2-2 IR1)."""
-    snapshot = store.routing_snapshot(operator)
+    `workflow.remote_workers` setting (P2-2 IR1). `hold`: films in 片源丢失
+    (P3 E1), treated as an inadmissible source."""
+    snapshot = store.routing_snapshot(operator, hold)
     planned = schedule(
         snapshot,
         live=live,
@@ -119,6 +121,7 @@ def run_pass(
             retry=False,
             remote_enabled=remote_enabled,
             live_since=live_since,
+            hold=hold,
         )
         return PassOutcome(
             again.planned,

@@ -122,6 +122,7 @@ COMMAND_ROLES: dict[str, frozenset[str]] = {
         "withdraw_route",
         "set_pin",
         "attest_stopped",
+        "remove_film",
     )
 }
 COMMAND_ROLES.update(

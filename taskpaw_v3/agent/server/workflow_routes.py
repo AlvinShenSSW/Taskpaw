@@ -349,6 +349,53 @@ def register_workflow_routes(
         _wake(host)
         return result
 
+    @app.post("/control/workflow/films/{film_id}/recheck-source")
+    def workflow_recheck_source(film_id: str) -> dict[str, Any]:
+        """重新检查 (P3 E2): the INBOX existence check at once; a returned
+        source takes the film out of 片源丢失 and wakes dispatch."""
+        from taskpaw_v3.workflow import board
+
+        host = _host()
+        sources = getattr(host, "sources", None)
+        if sources is None:
+            raise HTTPException(status_code=503, detail="媒体流水线尚未启动")
+        with _mapped():
+            if board.board_film(_runtime(host), film_id) is None:
+                raise HTTPException(status_code=404, detail="未知影片")
+            missing = sources.check(film_id, force=True)
+        _wake(host)
+        return {
+            "ok": True,
+            "source_missing": None
+            if missing is None
+            else {
+                "paths": missing["paths"],
+                "found_at": board.iso(missing["found_at"]),
+            },
+        }
+
+    @app.post("/control/workflow/films/{film_id}/remove")
+    def workflow_remove(film_id: str) -> dict[str, Any]:
+        """删除此任务 (P3 E3): refused (409, coded) while a stage runs or is
+        claimed, a route is open, or the film was confirmed or archived;
+        otherwise the task and its private work dirs go. INBOX, the output
+        directory and NAS are never touched."""
+        from taskpaw_v3.workflow import operator_actions as ops
+
+        host = _host()
+        with _mapped():
+            try:
+                result = ops.remove_film(
+                    _runtime(host),
+                    film_id=film_id,
+                    sources=getattr(host, "sources", None),
+                    log=getattr(host, "workflow_log", None),
+                )
+            except ops.ActionRefused as exc:
+                raise CodedConflict(exc.detail, exc.code) from None
+        _wake(host)
+        return result
+
     @app.post("/control/workflow/ltx-download")
     def workflow_ltx_download(body: LtxDownloadBody) -> dict[str, bool]:
         """下载模型 (H3 M1): the session's own handshake refuses a stale or a

@@ -14,7 +14,7 @@ export type StatusKey =
   | "pending" | "receiving" | "postprocess_error" | "inbox" | "restore" | "encode" | "denoise" | "asr" | "translate"
   | "return" | "scrape" | "match" | "waiting" | "checking" | "ready" | "multi" | "nomatch" | "offline" | "permission" | "duplicate"
   | "unknown" | "archiving" | "cleanup" | "completed" | "skipped" | "stopping" | "failed" | "intake_attention" | "awaiting_confirmation"
-  | "device_lost";
+  | "device_lost" | "source_missing";
 
 export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   pending: ["待处理", "amber"],
@@ -58,12 +58,14 @@ export const STATUS_META: Record<StatusKey, [string, ChipTone]> = {
   intake_attention: ["收件需要处理", "amber"],
   // P2-4 R3 (OD2): the film's GPU worker stopped sending heartbeats; nothing moves until 处理.
   device_lost: ["设备失联", "red"],
+  // P3 E1 (#304): the INBOX source is gone; the film is never dispatched
+  source_missing: ["片源丢失", "red"],
 };
 
 export const REVIEW_STATES: StatusKey[] = ["awaiting_confirmation", "checking", "ready", "multi", "nomatch", "offline", "permission", "duplicate"];
 export const EXCEPTION_STATES: StatusKey[] = [
   "postprocess_error", "offline", "permission", "duplicate", "unknown", "cleanup", "stopping", "failed", "intake_attention",
-  "device_lost",
+  "device_lost", "source_missing",
 ];
 export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match"];
 
@@ -341,6 +343,7 @@ export function filmStatus(row: FilmRow, preflight?: TargetPreflight | null): St
     case "archiving": return stage === "archive" && row.status === "unknown" ? "unknown" : "archiving";
     case "attention":
       if (row.attention_kind === "device_lost") return "device_lost";
+      if (row.attention_kind === "source_missing") return "source_missing";
       if (stage === "scrape") return "postprocess_error";
       if (stage.startsWith("cleanup")) return "cleanup";
       if (stage === "intake") return "intake_attention";
@@ -493,6 +496,8 @@ export function exceptionInfo(item: WorkItem, intakeReasons: (pkg: PackageRow) =
     case "stopping": return ["正在确认停止", "等待本机任务确认停止；原始来源和已完成结果保留，确认前不能重试。", "", "none"];
     case "device_lost":
       return ["设备失联", note || "后台重连中；影片不会自动改派。", "处理", "detail"];
+    case "source_missing":
+      return ["片源丢失", note || "INBOX 里的文件已不存在 · 不再派发", "处理", "detail"];
     case "intake_attention":
       return ["收件需要处理", item.kind === "package" ? intakeReasons(item.pkg) : note || "", "打开文件夹", "open-package"];
     default: {

@@ -24,6 +24,7 @@ from .models import (
     FilmCreate,
     FilmPlanConfirm,
     FilmRecord,
+    FilmRemove,
     FilmRoute,
     FinalManifest,
     FinalManifestPut,
@@ -1232,6 +1233,51 @@ class FilmCommands(WorkerCommands):
             return Mutation(job["job_id"], version, "skipped")
 
         return self._execute(auth, meta, command, "skip_stage", apply)
+
+    def remove_film(
+        self, auth: AuthProof, meta: CommandMeta, command: FilmRemove
+    ) -> CommandResult:
+        """删除此任务 (P3 E3): mark the film `removed` — terminal, every reader
+        skips it, its history stays. Refused (`precondition_failed`) while any
+        of its stages runs, any assignment or route of it is open, or an
+        approval, archive or cleanup exists: the checks run in this
+        transaction, so a claim racing the delete wins and nothing changes.
+        Nothing on disk is touched here."""
+
+        def apply(principal: sqlite3.Row, now: datetime) -> Mutation:
+            row = self._film_row(command.film_id)
+            if row["version"] != command.expected_version:
+                raise WorkflowError("cas_conflict")
+            film = FilmRecord.model_validate_json(row["body_json"])
+            fid = command.film_id
+            if (
+                film.removed_at is not None
+                or self._conn.execute(
+                    "SELECT 1 FROM stages WHERE film_id=? AND status IN ('running','unknown') "
+                    "UNION ALL SELECT 1 FROM assignments a JOIN stages s ON s.job_id=a.job_id "
+                    "WHERE s.film_id=? AND a.resolved_at IS NULL "
+                    "UNION ALL SELECT 1 FROM film_routes WHERE film_id=? AND state='open' "
+                    "UNION ALL SELECT 1 FROM operations WHERE film_id=? "
+                    "AND kind IN ('archive','cleanup_input','cleanup_workcopy') "
+                    "UNION ALL SELECT 1 FROM approvals WHERE film_id=? AND revoked_at IS NULL "
+                    "LIMIT 1",
+                    (fid, fid, fid, fid, fid),
+                ).fetchone()
+            ):
+                raise WorkflowError("precondition_failed")
+            removed = film.model_copy(
+                update={"removed_at": now, "version": row["version"] + 1}
+            )
+            version = self._update(
+                "films",
+                "film_id",
+                fid,
+                row["version"],
+                body_json=canonical_json(removed),
+            )
+            return Mutation(fid, version, "removed")
+
+        return self._execute(auth, meta, command, "remove_film", apply)
 
     def accept_artifact_receipt(
         self, auth: AuthProof, meta: CommandMeta, command: ArtifactReceipt

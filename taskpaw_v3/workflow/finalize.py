@@ -800,19 +800,25 @@ class Finalizer:
     def _reclaim_film(self, film_id: str) -> bool:
         """Taskpaw's own per-film dirs: compute attempts, return package, scrape
         attempts and the Miko lookup cache (IR07)."""
-        rt = self.runtime
-        view = rt.store.get_film(rt.operator, film_id)
-        dirs = [
-            rt.work_dir / attempt.attempt_id
-            for stage in view.stages
-            if stage.stage in ("restore", "asr", "translate")
-            for attempt in rt.store.list_attempts(rt.operator, stage.job_id)
-        ]
-        for parent in ("return", "scrape", "lookup"):
-            dirs.extend((rt.work_dir / parent).glob(f"{film_id}-r*"))
+        dirs = film_work_dirs(self.runtime, film_id)
         for path in dirs:
             shutil.rmtree(path, ignore_errors=True)  # a locked file: retried next tick
         return not any(path.exists() for path in dirs)
+
+
+def film_work_dirs(rt: LocalRuntime, film_id: str) -> list[Path]:
+    """The film's private dirs under the work dir: one per compute attempt, and
+    its return package, scrape attempts and Miko lookup cache (IR07)."""
+    view = rt.store.get_film(rt.operator, film_id)
+    dirs = [
+        rt.work_dir / attempt.attempt_id
+        for stage in view.stages
+        if stage.stage in ("restore", "asr", "translate")
+        for attempt in rt.store.list_attempts(rt.operator, stage.job_id)
+    ]
+    for parent in ("return", "scrape", "lookup"):
+        dirs.extend((rt.work_dir / parent).glob(f"{film_id}-r*"))
+    return dirs
 
 
 def _rmdir_empty(root: Path) -> None:

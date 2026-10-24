@@ -285,9 +285,13 @@ export interface ReassignOption {
   // 预计 (scheduler.preview): the finish and energy when it can take the film; 自动 names its device
   finish_at?: string | null; energy_wh?: number | null; machine?: { id: string; name: string } | null;
 }
+// P3 E1 (#304): an INBOX source that vanished after intake — the missing paths and when it was found
+export interface SourceMissing { paths: string[]; found_at: string }
 export interface FilmRemote {
-  attention_kind?: "device_lost" | null; route?: FilmRouteInfo | null; pin?: FilmPin | null;
+  attention_kind?: "device_lost" | "source_missing" | null; route?: FilmRouteInfo | null; pin?: FilmPin | null;
   actions?: FilmActions | null;
+  // P3 E1/E3: 片源丢失 {paths, found_at}; whether 删除此任务 is offered (no stage running or claimed, not archived)
+  source_missing?: SourceMissing | null; can_remove?: boolean;
   // #298 (§9 CX27): the 失联 worker, also when its route is on an older input revision
   lost_worker?: { id: string; name: string } | null;
 }
@@ -895,6 +899,12 @@ export const api = {
   // P2-3 R9: 停止并重新排队 of a running remote restore or ASR
   workflowRequeue: (filmId: string, attemptId: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/requeue`, { attempt_id: attemptId }),
+  // P3 E2: 重新检查 of a 片源丢失 film; `source_missing` is null once the files are back
+  workflowRecheckSource: (filmId: string) =>
+    send<{ ok: boolean; source_missing: SourceMissing | null }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/recheck-source`, {}),
+  // P3 E3: 删除此任务 — 409 (coded) while a stage runs or is claimed, or the film was confirmed or archived
+  workflowRemove: (filmId: string) =>
+    send<{ ok: boolean; leftover: number }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/remove`, {}),
   // P2-4 R7: 改派 (null = 自动) — 409 `route_claimed` 「已开始处理」 when a claim won
   workflowPin: (filmId: string, input_revision: number, expected_version: number, worker_id: string | null) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/pin`, { input_revision, expected_version, worker_id }),

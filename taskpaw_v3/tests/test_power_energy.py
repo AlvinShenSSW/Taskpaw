@@ -695,6 +695,8 @@ def test_the_network_films_snapshot_stays_inside_its_payload_budget(monkeypatch)
             list_intake_board=lambda _a: (),
             energy_history=lambda _a: (),
             list_workers=lambda _a: (),
+            list_open_assignments=lambda _a: (),  # P3 #304: can_remove reads both
+            list_routes=lambda _a: (),
         ),
     )
     monkeypatch.setattr(board, "row_facts", lambda *_a: {})

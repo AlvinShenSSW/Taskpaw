@@ -37,6 +37,8 @@ from .models import (
 )
 from .store_core import WorkflowCore, parse_time
 
+# P3 E3 (#304): a film the operator deleted is skipped by every board and queue read
+LIVE = "json_extract(f.body_json,'$.removed_at') IS NULL"
 # Stages the controller's own runtime claims (compute on its GPU; return and
 # Miko scrape locally).
 _LOCAL_STAGES = frozenset({"restore", "asr", "translate", "return", "scrape"})
@@ -163,6 +165,7 @@ class ReadCommands(WorkflowCore):
                 "LEFT JOIN film_plans p ON p.film_id=s.film_id AND p.input_revision=s.input_revision "
                 f"WHERE s.status=? AND s.stage IN ({marks}) "
                 "AND (s.stage!='restore' OR p.film_id IS NOT NULL) "
+                f"AND {LIVE} "
                 "ORDER BY f.created_at,f.film_id,s.rowid",
                 (status, *stages),
             ).fetchall()
@@ -205,7 +208,7 @@ class ReadCommands(WorkflowCore):
                 "AND s.input_revision=f.current_input_revision AND s.stage='restore' "
                 "LEFT JOIN film_plans p ON p.film_id=f.film_id "
                 "AND p.input_revision=f.current_input_revision "
-                "WHERE s.status='pending' AND p.film_id IS NULL "
+                f"WHERE s.status='pending' AND p.film_id IS NULL AND {LIVE} "
                 "ORDER BY f.created_at,f.film_id"
             ).fetchall()
             return tuple(
@@ -423,13 +426,13 @@ class ReadCommands(WorkflowCore):
         approvals. Per-row subqueries over operations made the board quadratic
         while it held the store lock.
         """
-        where: tuple[str, tuple[Any, ...]] = ("", ())
+        where: tuple[str, tuple[Any, ...]] = (f"WHERE {LIVE}", ())
         ops: tuple[str, tuple[Any, ...]] = ("", ())
         approved: tuple[str, tuple[Any, ...]] = ("", ())
         linked: tuple[str, tuple[Any, ...]] = ("", ())
         receipted: tuple[str, tuple[Any, ...]] = ("", ())
         if film_id is not None:
-            where = ("WHERE f.film_id=?", (film_id,))
+            where = (f"WHERE f.film_id=? AND {LIVE}", (film_id,))
             receipted = ("AND o.film_id=?", (film_id,))
             linked = (
                 "WHERE i.package_id IN "
@@ -446,7 +449,8 @@ class ReadCommands(WorkflowCore):
         elif done_limit is not None:
             # D13 before reading stage bodies: drop all but the newest finished films
             where = (
-                "WHERE f.film_id NOT IN (SELECT film_id FROM (SELECT d.film_id,"
+                f"WHERE {LIVE} AND "
+                "f.film_id NOT IN (SELECT film_id FROM (SELECT d.film_id,"
                 "row_number() OVER (ORDER BY d.created_at DESC,d.film_id DESC) AS newest "
                 "FROM films d JOIN stages c ON c.film_id=d.film_id "
                 "AND c.input_revision=d.current_input_revision "
@@ -490,7 +494,7 @@ class ReadCommands(WorkflowCore):
             counts = self._conn.execute(
                 "SELECT i.package_id,count(*) AS films FROM intake_films i "
                 "JOIN films f ON f.film_id=i.film_id "
-                f"AND f.current_input_revision=i.input_revision {linked[0]} "
+                f"AND f.current_input_revision=i.input_revision AND {LIVE} {linked[0]} "
                 "GROUP BY i.package_id",
                 linked[1],
             ).fetchall()
@@ -755,7 +759,7 @@ class ReadCommands(WorkflowCore):
             "AND s.input_revision=f.current_input_revision AND s.stage='cleanup_workcopy') "
             "FROM films f JOIN intake_films i ON i.film_id=f.film_id "
             "AND i.input_revision=f.current_input_revision WHERE i.package_id=? "
-            "ORDER BY f.created_at,f.film_id",
+            f"AND {LIVE} ORDER BY f.created_at,f.film_id",
             (package_id,),
         ).fetchall()
         return tuple(

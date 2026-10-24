@@ -334,6 +334,19 @@ class WorkflowLog:
             data,
         )
 
+    def removed(self, film: str, film_id: str, *, leftover: int = 0) -> None:
+        """P3 E3 (#304): the operator deleted the task (只删除任务和临时文件)."""
+        self._record(
+            "workflow.film.removed",
+            film,
+            "warn" if leftover else "info",
+            {
+                "film_id": film_id,
+                "text": f"已删除任务 {film}：只删除任务和工作目录里的临时文件"
+                + (f"（{leftover} 个目录未能清除）" if leftover else ""),
+            },
+        )
+
     def translated(self, film: str, timing: dict[str, Any]) -> None:
         stages = timing.get("stages") or {}
         breakdown = timing.get("restore_breakdown") or {}

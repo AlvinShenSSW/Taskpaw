@@ -262,6 +262,9 @@ def test_rows_carry_the_frozen_shape():
         "actions",
         # #298 R1 (§9 CX27): the 失联 worker {id, name}
         "lost_worker",
+        # P3 E1/E3 (#304): 片源丢失 {paths, found_at}; 删除此任务 offered
+        "source_missing",
+        "can_remove",
     }
     assert (row["route"], row["pin"], row["actions"]) == (None, None, None)
     assert row["lost_worker"] is None

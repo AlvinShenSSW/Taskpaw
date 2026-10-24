@@ -431,11 +431,15 @@ class RouteCommands(FilmCommands):
             )[0]
             return row["worker_id"], row["device_id"], int(generation) + 1
 
-    def routing_snapshot(self, auth: AuthProof) -> RoutingSnapshot:
-        """The scheduler's store input, read in one locked snapshot (§5)."""
+    def routing_snapshot(
+        self, auth: AuthProof, hold: frozenset[str] = frozenset()
+    ) -> RoutingSnapshot:
+        """The scheduler's store input, read in one locked snapshot (§5).
+        `hold`: films the controller found without their INBOX source (P3 E1);
+        like any inadmissible source they are neither routed nor kept routed."""
         with self._lock:
             self._operator_read(auth)
-            films = self._routing_films()
+            films = self._routing_films(hold)
             return RoutingSnapshot(
                 films=tuple(film for current, film in films if current),
                 older_revisions=tuple(film for current, film in films if not current),
@@ -461,12 +465,15 @@ class RouteCommands(FilmCommands):
         ).fetchall()
         return {(row[0], row[1]): (row[2] or 0, row[3] or 0, row[4]) for row in rows}
 
-    def _routing_films(self) -> list[tuple[bool, RoutingFilm]]:
+    def _routing_films(
+        self, hold: frozenset[str] = frozenset()
+    ) -> list[tuple[bool, RoutingFilm]]:
         """(current, facts) of each current revision with GPU work left or an
         open route, and of each older revision an open route holds (CX5)."""
         rows = self._conn.execute(
             "WITH k(film_id,revision) AS (SELECT f.film_id,f.current_input_revision "
-            "FROM films f WHERE f.current_input_revision IS NOT NULL AND EXISTS "
+            "FROM films f WHERE f.current_input_revision IS NOT NULL "
+            "AND json_extract(f.body_json,'$.removed_at') IS NULL AND EXISTS "
             "(SELECT 1 FROM stages s WHERE s.film_id=f.film_id "
             "AND s.input_revision=f.current_input_revision "
             "AND s.stage IN ('restore','asr') AND s.status NOT IN ('succeeded','skipped')) "
@@ -506,8 +513,8 @@ class RouteCommands(FilmCommands):
         films = []
         for row in rows:
             film_id, revision = row["film_id"], row["revision"]
-            admissible = not row["current"] or self._source_admissible(
-                self._film_row(film_id)
+            admissible = not row["current"] or (
+                film_id not in hold and self._source_admissible(self._film_row(film_id))
             )
             stage = statuses.get((film_id, revision), {})
             claim = claims.get((film_id, revision))

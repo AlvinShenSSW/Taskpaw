@@ -514,6 +514,17 @@ class FilmRecord(FilmCreate):
     context_state: Literal["ready", "blocked", "invalidated"] | None = None
     version: Revision
     created_at: UtcTime
+    # P3 E3 (#304): the operator deleted the task; terminal, the readers skip it
+    removed_at: UtcTime | None = None
+
+    @model_serializer(mode="wrap")
+    def _legacy_shape(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.removed_at is None:
+            value.pop("removed_at", None)
+        return value
 
 
 def _members(items: tuple[ManifestItem, ...]) -> None:
@@ -1645,6 +1656,14 @@ class PinSet(VersionedCommand):
     worker_id: Id | None
     reason: Text
     withdraw_route_id: Id | None = None
+
+
+class FilmRemove(VersionedCommand):
+    """删除此任务 (P3 E3): a terminal `removed` mark on a film with no work in
+    flight and nothing archived; `expected_version` is the film's."""
+
+    film_id: Id
+    reason: Text
 
 
 class StoppedAttestation(VersionedCommand):

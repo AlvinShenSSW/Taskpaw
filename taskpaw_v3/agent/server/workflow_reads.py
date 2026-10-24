@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -28,6 +28,10 @@ _CONFLICTS = {
     "already_settled": "修复已完成，正在回传",
     # P2-4 R7: 改派 lost its race with the worker's claim
     "route_claimed": "已开始处理",
+    # P3 E3 (#304): 删除此任务 refused; the detail is `ActionRefused`'s own
+    "film_running": "有阶段正在运行，不能删除",
+    "film_routed": "已派往设备，请稍后再试",
+    "film_archived": "已确认入库或已入库的影片不能删除",
 }
 
 
@@ -273,7 +277,9 @@ def pass_inputs(host: Any, rt: LocalRuntime) -> dict[str, Any] | None:
     }
 
 
-def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInputs:
+def board_inputs(
+    host: Any, rt: LocalRuntime, films: Sequence[Any], *, removal: bool = True
+) -> BoardInputs:
     """A film's note, highest first: its transfer, the last routing pass's
     waiting reason, 已派往 X for an open unclaimed route (· 预取 when second
     in line), the controller's dispatcher's reason. A pass reason is left
@@ -360,10 +366,47 @@ def board_inputs(host: Any, rt: LocalRuntime, films: Sequence[Any]) -> BoardInpu
                 else None,
                 actions=actions,
             )
+    if removal:  # P3: the observer (#286) needs neither 片源丢失 nor 删除
+        _removal_and_sources(host, rt, films, waiting, extras)
     for film_id, value in currents.items():
         if value.get("fetching") and value.get("transfer"):
             waiting[film_id] = value["transfer"]
     return BoardInputs(status, currents, waiting, extras, names)
+
+
+def _removal_and_sources(
+    host: Any,
+    rt: LocalRuntime,
+    films: Sequence[Any],
+    waiting: dict[str, str],
+    extras: dict[str, Any],
+) -> None:
+    """P3 E1/E3 (#304), in either mode: a 片源丢失 film's `{paths, found_at}`
+    (its note is the film's waiting reason) and whether 删除此任务 is offered."""
+    from taskpaw_v3.workflow import board
+    from taskpaw_v3.workflow import operator_actions as ops
+
+    sources = getattr(host, "sources", None)
+    lost = sources.lost() if sources is not None else {}
+    claimed = set(claimed_films(rt))
+    routed = {route.film_id for route in rt.store.list_routes(rt.operator)}
+    for film in films:
+        missing = lost.get(film.film_id)
+        if missing is not None:
+            waiting[film.film_id] = board.SOURCE_NOTE
+        refusal = ops.removal_refusal(
+            film, claimed=film.film_id in claimed, routed=film.film_id in routed
+        )
+        extras[film.film_id] = replace(
+            extras.get(film.film_id) or board.RowExtra(),
+            source_missing=None
+            if missing is None
+            else {
+                "paths": missing["paths"],
+                "found_at": board.iso(missing["found_at"]),
+            },
+            can_remove=refusal is None,
+        )
 
 
 def _route(

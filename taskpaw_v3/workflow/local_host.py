@@ -32,6 +32,7 @@ from .intake_protocol import ProbeArtifact
 from .local_dispatch import LocalDispatcher, ReturnStep
 from .local_runtime import LocalRuntime, intake_profiles
 from .lookup import MetadataLookup
+from .source_watch import SourceWatch
 from .timing import TaskLogSink, WorkflowLog
 from .transfer import Transfers, live_attempts
 
@@ -286,6 +287,8 @@ class LocalWorkflowHost:
         self.intake: Any = None
         self.dispatcher: LocalDispatcher | None = None
         self.finalizer: Finalizer | None = None
+        # P3 E1 (#304): films whose INBOX source vanished
+        self.sources: SourceWatch | None = None
         # P2-2: the workers' live state, while the worker API is on
         self.fleet: FleetLive | None = None
         self.transfers: Transfers | None = None
@@ -355,8 +358,12 @@ class LocalWorkflowHost:
                 Path(inbox) if inbox else None,
                 FilmpawClient(Path(data) if data else None),
             )
+            self.sources = SourceWatch(
+                rt, Path(inbox) if inbox else None, on_change=self._on_sources
+            )
             self.dispatcher = LocalDispatcher(
                 rt,
+                sources=self.sources,
                 return_step=self.return_step,
                 scrape_step=self.scrape_step,
                 off_reasons=self.off_reasons,
@@ -482,6 +489,12 @@ class LocalWorkflowHost:
         if self.scheduler is not None:
             self.scheduler.wake()
 
+    def _on_sources(self) -> None:
+        """A film entered or left 片源丢失: route again, dispatch again."""
+        self._wake_scheduler()
+        if self.dispatcher is not None:
+            self.dispatcher.wake()
+
     def _local_resolved(
         self, rt: LocalRuntime, job: m.PendingComputeJob, name: str, outcome: Any
     ) -> None:
@@ -536,6 +549,7 @@ class LocalWorkflowHost:
             controller_free_bytes=inputs["controller_free_bytes"],
             remote_enabled=True,
             live_since=inputs["live_since"],
+            hold=self.sources.ids() if self.sources is not None else frozenset(),
         )
         self.last_pass = outcome.planned
         if (outcome.routed or outcome.withdrawn) and self.dispatcher is not None:

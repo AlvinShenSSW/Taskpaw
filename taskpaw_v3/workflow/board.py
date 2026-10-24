@@ -105,6 +105,8 @@ Summary = tuple[str | None, tuple[str, ...], str | None]
 GROUPS = ("planning", "active", "attention", "confirm", "archiving", "done")
 LOST_NOTE = "设备失联：{name} · 后台重连中"  # P2-4 R3 (OD2)
 DEVICE_LOST = "device_lost"
+SOURCE_MISSING = "source_missing"  # P3 E1 (#304): 片源丢失
+SOURCE_NOTE = "INBOX 里的文件已不存在 · 不再派发"
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,10 @@ class RowExtra:
     lost: dict[str, str] | None = None
     # R2: {can_reassign, stop} — 改派 and 判定已停止 (`operator_actions`)
     actions: dict[str, Any] | None = None
+    # P3 E1/E3 (#304): `{paths, found_at}` of a 片源丢失 film, and whether
+    # 删除此任务 is offered (`operator_actions.removal_refusal`)
+    source_missing: dict[str, Any] | None = None
+    can_remove: bool = False
 
 
 class Looked(Protocol):
@@ -475,6 +481,14 @@ def film_row(
         place = {**place, "group": "attention"}  # R3: 设备失联, OD2
         attention_kind = DEVICE_LOST
         note = LOST_NOTE.format(name=extra.lost["name"])
+    elif (
+        extra is not None
+        and extra.source_missing is not None
+        and place["group"] == "active"
+    ):
+        place = {**place, "group": "attention"}  # P3 E1: never dispatched
+        attention_kind = SOURCE_MISSING
+        note = SOURCE_NOTE
     if facts is None:
         facts = Facts(
             number=(label or (None, None))[0],
@@ -510,6 +524,8 @@ def film_row(
         # §9 CX27: the 失联 worker {id, name}, whatever revision its route has
         "lost_worker": extra.lost if extra is not None else None,
         "actions": extra.actions if extra is not None else None,
+        "source_missing": extra.source_missing if extra is not None else None,
+        "can_remove": extra.can_remove if extra is not None else False,
         "can_confirm": place["can_confirm"],
         "can_retry": place["retry_stage"] is not None,
         "retry_stage": place["retry_stage"],
@@ -1079,6 +1095,8 @@ def film_detail(
         "route": row["route"],
         "pin": row["pin"],
         "actions": row["actions"],
+        "source_missing": row["source_missing"],
+        "can_remove": row["can_remove"],
         # §2: the 改派 dialog's choices (remote mode, `reads.film`)
         "reassign_options": None,
         "can_confirm": row["can_confirm"],

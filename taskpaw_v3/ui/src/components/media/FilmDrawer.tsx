@@ -17,6 +17,7 @@ import { DeviceSection } from "./RemoteParts";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
 import { ModalHead, ModalShell } from "./ReviewDialog";
 import { RestoreLivePanel } from "./RestoreLivePanel";
+import { RemoveTask, SourceMissingAlert } from "./SourceMissing";
 import { TimingBlock } from "./TimingParts";
 import { errorText, MEDIA_FILMS_KEY, mediaFilmKey, useIntakeReasons, useWorkspace } from "./workspace";
 
@@ -90,11 +91,13 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
       <div className="modal-body">
         {detail.isLoading ? <p className="muted">正在读取影片详情…</p>
           : detail.error || !film ? <Notice tone="red">无法读取这部影片。</Notice>
-            : <DrawerBody film={film} item={item} status={status} plan={plan} />}
+            : <DrawerBody film={film} item={item} status={status} plan={plan} onClose={onClose} />}
       </div>
       <div className="modal-foot">
         <p>阶段结果与来源清理分别记录。</p>
         <div className="actions">
+          {/* P3 E3: any film with no running or claimed stage that is not archived (a 片源丢失 film has it in its alert) */}
+          {!ws.readOnly && film?.can_remove && !film.source_missing && <RemoveTask film={film} onRemoved={onClose} />}
           {!ws.readOnly && <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>}
           {primary()}
         </div>
@@ -103,8 +106,8 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
   );
 }
 
-function DrawerBody({ film, item, status, plan }: {
-  film: FilmDetail; item: WorkItem | undefined; status: keyof typeof STATUS_META; plan: PlanEntry | undefined;
+function DrawerBody({ film, item, status, plan, onClose }: {
+  film: FilmDetail; item: WorkItem | undefined; status: keyof typeof STATUS_META; plan: PlanEntry | undefined; onClose: () => void;
 }) {
   const ws = useWorkspace();
   // Before Miko, an unplanned film's names come from the lookup preview (precedence: final > lookup > input).
@@ -177,6 +180,7 @@ function DrawerBody({ film, item, status, plan }: {
       <div className="detail-steps"><StepLine steps={film.steps} title={title} durations={stepDurations(timing)} /></div>
       <LivePowerRow power={film.live_power} />
       {multi && <DeviceSection film={film} />}
+      <SourceMissingAlert film={film} onRemoved={onClose} />
       {remote && <RemoteStep filmId={film.film_id} step={remote} bare={multi} />}
       {running ? (
         <div>
@@ -186,7 +190,7 @@ function DrawerBody({ film, item, status, plan }: {
       ) : download ? (
         <LtxDownload value={download} onRespond={ws.readOnly ? undefined : (requestId, approved) => api.workflowLtxDownload(requestId, approved)}
           onError={(e) => ws.toast(errorText(e))} />
-      ) : (
+      ) : film.source_missing ? null : (
         <Notice icon={InfoOutlinedIcon}>
           {status === "pending" ? "待处理 · 确认画质与设备后才进入影片队列。"
             : [STATUS_META[status][0], item?.kind === "film" ? item.row.note : film.note].filter(Boolean).join("：")}

@@ -26,6 +26,7 @@ the route in it (§9 CX4), so a claim racing the request answers
 from __future__ import annotations
 
 import ipaddress
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -42,6 +43,8 @@ from .route_store import WITHDRAWN_LOST as WITHDRAWN_LOST  # re-exported
 if TYPE_CHECKING:
     from .fleet_live import FleetLive
     from .local_runtime import LocalRuntime
+    from .source_watch import SourceWatch
+    from .timing import WorkflowLog
 
 FRESH_SECONDS = 10.0  # C4: the /status cache (read every 5 s) is this fresh
 ATTESTED = "operator_attested_stopped"
@@ -448,3 +451,88 @@ def can_reassign(film: m.BoardFilm, claimed: bool) -> bool:
         and not claimed
         and any(s.stage == "restore" and s.status not in _FINISHED for s in film.stages)
     )
+
+
+# ── 删除此任务 (P3 E3, #304) ─────────────────────────────────────────────
+_ARCHIVING = ("archive", "cleanup_input", "cleanup_workcopy")
+
+
+def removal_refusal(
+    film: m.BoardFilm, *, claimed: bool, routed: bool
+) -> tuple[str, str] | None:
+    """Why the film cannot be deleted now (code, 原因), else None: a stage
+    runs or is claimed, a route is open, or it was confirmed or archived."""
+    if any(s.status in ("running", "unknown") for s in film.stages):
+        return "film_running", "有阶段正在运行，不能删除"
+    if claimed:
+        return "film_running", "设备已领取该任务，不能删除"
+    if routed:
+        return "film_routed", "已派往设备，请稍后再试"
+    if (
+        film.archive_open
+        or film.approval_active
+        or any(s.stage in _ARCHIVING and s.status != "pending" for s in film.stages)
+    ):
+        return "film_archived", "已确认入库或已入库的影片不能删除"
+    return None
+
+
+def remove_film(
+    rt: LocalRuntime,
+    *,
+    film_id: str,
+    sources: SourceWatch | None = None,
+    log: WorkflowLog | None = None,
+) -> dict[str, Any]:
+    """删除此任务: the guarded delete. The store marks the film `removed` in
+    one transaction that re-checks the guard; only then the film's private
+    work dirs go (`finalize.film_work_dirs`, and the intake snapshot when no
+    other film of its package is left). INBOX, the output directory and NAS
+    are never touched. WorkflowError `not_found`; ActionRefused otherwise."""
+    from . import board
+    from .finalize import film_work_dirs
+
+    op = rt.operator
+    film = board.board_film(rt, film_id)
+    if film is None:
+        raise m.WorkflowError("not_found")
+    claimed = any(
+        rt.store.get_stage(op, o.assignment.job_id).film_id == film_id
+        for o in rt.store.list_open_assignments(op)
+    )
+    routed = any(r.film_id == film_id for r in rt.store.list_routes(op))
+    refusal = removal_refusal(film, claimed=claimed, routed=routed)
+    if refusal is not None:
+        raise ActionRefused(*refusal)
+    name = board.name_of(rt, film_id) or film.display_name
+    wf = rt.store.film_workflow(op, film_id)
+    dirs = film_work_dirs(rt, film_id)
+    try:
+        rt.store.remove_film(
+            op,
+            rt.meta(),
+            m.FilmRemove(
+                film_id=film_id,
+                expected_version=rt.store.get_film(op, film_id).film.version,
+                reason="删除此任务",
+            ),
+        )
+    except m.WorkflowError as exc:
+        if exc.code in ("precondition_failed", "cas_conflict"):
+            raise ActionRefused(
+                "cas_conflict", "影片状态已变化，请刷新后重试"
+            ) from None
+        raise
+    if wf.package_id and wf.snapshot_work_path:  # shared: the last film takes it
+        if not rt.store.package_films(op, wf.package_id):
+            dirs.append(rt.work_dir / wf.snapshot_work_path)
+    root = rt.work_dir.resolve()
+    for path in dirs:
+        if path.resolve().is_relative_to(root) and path.resolve() != root:
+            shutil.rmtree(path, ignore_errors=True)
+    leftover = sum(1 for path in dirs if path.exists())
+    if sources is not None:
+        sources.forget(film_id)
+    if log is not None:
+        log.removed(name, film_id, leftover=leftover)
+    return {"ok": True, "leftover": leftover}
