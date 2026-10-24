@@ -66,6 +66,120 @@ const go = async (label: string) => {
 beforeEach(() => { setLang("zh-CN"); vi.spyOn(window, "scrollTo").mockImplementation(() => {}); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
+describe("#302 finished history", () => {
+  it.each([true, false])("shows retained facts, recorded steps and detail buttons (energy=%s)", async (energy) => {
+    mockApi();
+    const film = row({ film_id: "history", number: "ABC-123", title: "留存标题", actors: ["留存演员"], group: "done",
+      resolution: "4K", plan: { ltx_model: "high", machine: "worker" }, steps: steps("done", "done") });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    const keys = ["intake", "restore", "return", "asr", "translate", "scrape", "confirm", "archive", "cleanup"];
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film,
+      has_poster: true, poster_source: "retained-poster", marks: { restored: true, chinese_subtitles: true, uhd: true },
+      files: [{ role: "main_video", path: "ABC-123-无码-C.mp4", size: 1000, volume: null }],
+      duration_ms: 7293000, archive: { status: "succeeded", target_path: "fake-NAS/Actor/ABC-123", error: null },
+      history: { completed_at: "2026-10-24T07:42:00Z", total_seconds: 7200,
+        steps: keys.map((key) => ({ key, device: key === "restore" ? "工作机" : "本机", seconds: key === "confirm" ? null : 60,
+          result: key === "archive" ? "已校验入库" : key === "cleanup" ? "来源与工作副本已清理" : "已完成" })) },
+      timing: { stages: { restore: 60 }, total_restore_to_translate: 90, queue_wait: null,
+        restore_breakdown: { scan: 1, basicvsr: 1, ltx: 50, speed_test: 0, ltx_stages: { encode: 50 }, ltx_runs: 1, wall: 60 } },
+      energy: energy ? { total_wh: 9999, estimated: true, partial: false, running: false, stages: {
+        restore: { wh: 1234, gpu_wh: 1000, cpu_wh: 200, other_wh: 34, seconds: 60, avg_w: null, peak_w: null,
+          machine: "worker", attempts: 1, partial: false, running: false },
+      } } : null,
+    }));
+    const open = vi.spyOn(api, "workflowOpenFolder").mockResolvedValue(undefined);
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    fireEvent.click(await screen.findByRole("button", { name: "查看 留存标题 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    expect(await within(drawer).findByRole("heading", { name: "ABC-123" })).toBeInTheDocument();
+    expect(drawer).toHaveTextContent(/4K · 画质 高 · 2:01:33 · 已完成/);
+    expect(await within(drawer).findByAltText("留存标题 封面")).toBeInTheDocument();
+    for (const text of ["无码", "字幕", "演员", "留存演员", "归档到", "fake-NAS/Actor/ABC-123", "✓ 全部完成", "总用时 2:00:00"]) {
+      expect(drawer).toHaveTextContent(text);
+    }
+    if (energy) expect(drawer).toHaveTextContent("修复耗电 1.234 kWh");
+    else expect(drawer).not.toHaveTextContent("修复耗电");
+    const table = within(drawer).getByRole("table", { name: "处理历史" });
+    expect(within(table).getAllByRole("columnheader").map((e) => e.textContent)).toEqual(["步骤", "设备", "用时", "结果"]);
+    expect(within(table).getAllByRole("row")).toHaveLength(10);
+    for (const name of ["下载片源", "修复", "回传", "识别", "翻译", "刮削", "确认入库", "归档", "清理"]) {
+      expect(within(table).getByText(name)).toBeInTheDocument();
+    }
+    expect(table).toHaveTextContent("工作机");
+    fireEvent.click(within(drawer).getByRole("button", { name: "本片参数" }));
+    expect(within(drawer).getByTestId("restore-params")).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "LTX 用时明细" }));
+    expect(within(drawer).getByTestId("ltx-timing")).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "打开归档目录" }));
+    await waitFor(() => expect(open).toHaveBeenCalledWith("history", "archive"));
+  });
+
+  it("shows the full overview count and pages completed films", async () => {
+    mockApi();
+    const films = Array.from({ length: 21 }, (_, i) => row({ film_id: `done-${i}`, title: `历史影片${i}`, group: "done", steps: steps("done", "done") }));
+    const read = vi.spyOn(api, "workflowFilms").mockImplementation(async (page = 1) => ({ ...FILMS_RESPONSE,
+      films: films.slice((page - 1) * 20, page * 20), packages: [], counts: counts(films, []),
+      done_paging: { total: 21, size: 20, page, pages: 2 },
+    }));
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "完成 21" }));
+    expect(await screen.findByText("已完成 · 21")).toBeInTheDocument();
+    expect(screen.getByText("第 1 页 / 共 2 页")).toBeInTheDocument();
+    expect(document.querySelectorAll("[data-film]")).toHaveLength(20);
+    expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(await screen.findByText("历史影片20")).toBeInTheDocument();
+    expect(read).toHaveBeenCalledWith(2);
+    expect(screen.getByText("第 2 页 / 共 2 页")).toBeInTheDocument();
+    expect(screen.queryByText("历史影片0")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+    expect(await screen.findByText("历史影片0")).toBeInTheDocument();
+  });
+
+  it("keeps a reused 破解 mark and explains an empty LTX breakdown", async () => {
+    mockApi();
+    const film = row({ film_id: "reused", title: "沿用成品", group: "done", steps: steps("done", "done") });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film,
+      marks: { restored: true, chinese_subtitles: false, uhd: false },
+      files: [{ role: "main_video", path: "ABC-123-破解.mp4", size: 1000, volume: null }],
+      timing: { stages: {}, total_restore_to_translate: null, queue_wait: null,
+        restore_breakdown: { scan: 5, basicvsr: 0, ltx: 0, speed_test: 0, ltx_stages: {}, ltx_runs: 0, wall: 5 } },
+    }));
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    fireEvent.click(await screen.findByRole("button", { name: "查看 沿用成品 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    expect(await within(drawer).findByText("破解")).toBeInTheDocument();
+    expect(within(drawer).queryByText("无码")).not.toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole("button", { name: "LTX 用时明细" }));
+    expect(within(drawer).getByText("未记录 LTX 用时")).toBeInTheDocument();
+  });
+
+  it("keeps the completed page after a failed next-page request and allows retry", async () => {
+    mockApi();
+    let fail = true;
+    const read = vi.spyOn(api, "workflowFilms").mockImplementation(async (page = 1) => {
+      if (page === 2 && fail) throw new Error("temporary failure");
+      const films = [row({ film_id: `history-${page}`, title: `第${page}页影片`, group: "done", steps: steps("done", "done") })];
+      return { ...FILMS_RESPONSE, films, packages: [], counts: { ...counts(films, []), done: 21 },
+        done_paging: { total: 21, size: 20, page, pages: 2 } };
+    });
+    wrap(<MediaWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: "完成 21" }));
+    await screen.findByText("第1页影片");
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(read).toHaveBeenCalledWith(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled());
+    expect(screen.getByText("第1页影片")).toBeInTheDocument();
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(await screen.findByText("第2页影片")).toBeInTheDocument();
+  });
+});
+
 describe("MediaWorkspace shell", () => {
   it("lists the ten pages in order with badges on 待处理 / 待确认 / 异常 and 「后续」 on the later pages", async () => {
     mockApi();

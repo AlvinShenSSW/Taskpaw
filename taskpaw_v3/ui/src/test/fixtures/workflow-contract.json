@@ -1151,6 +1151,12 @@
       "packages_attention": 1,
       "waiting_for_you": 3
     },
+    "done_paging": {
+      "total": 0,
+      "size": 20,
+      "page": 1,
+      "pages": 1
+    },
     "dispatch": {
       "state": "running",
       "reason": "idle",
@@ -1429,6 +1435,7 @@
         "total_restore_to_translate": 7380.0,
         "queue_wait": 1800.0
       },
+      "history": null,
       "duration_ms": 120000,
       "energy": {
         "stages": {
@@ -1737,6 +1744,7 @@
         "total_restore_to_translate": null,
         "queue_wait": 1800.0
       },
+      "history": null,
       "duration_ms": 120000,
       "energy": {
         "stages": {
@@ -2066,6 +2074,7 @@
         "total_restore_to_translate": null,
         "queue_wait": 1800.0
       },
+      "history": null,
       "duration_ms": 120000,
       "energy": {
         "stages": {
@@ -2305,6 +2314,7 @@
         "total_restore_to_translate": null,
         "queue_wait": null
       },
+      "history": null,
       "duration_ms": 120000,
       "energy": null,
       "live_power": null,
@@ -2502,6 +2512,7 @@
         "total_restore_to_translate": null,
         "queue_wait": null
       },
+      "history": null,
       "duration_ms": 120000,
       "energy": null,
       "live_power": null,

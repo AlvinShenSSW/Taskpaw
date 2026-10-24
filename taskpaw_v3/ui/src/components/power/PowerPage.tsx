@@ -44,7 +44,7 @@ export function PowerPage({ onOpenMedia, onOpenSettings }: { onOpenMedia?: () =>
   const ranged = useQuery({
     queryKey: ["power", range], queryFn: () => api.power(range), refetchInterval: 60000, enabled: range !== "24h", retry: false,
   });
-  const films = useQuery({ queryKey: ["power", "films"], queryFn: api.workflowFilms, refetchInterval: 30000, retry: false });
+  const films = useQuery({ queryKey: ["power", "films"], queryFn: () => api.workflowFilms(), refetchInterval: 30000, retry: false });
   const config = useQuery({ queryKey: ["agentConfig"], queryFn: api.config });
   const view = range === "24h" ? day.data : ranged.data;
   const machines = useMemo(() => machinesOf(day.data, view), [day.data, view]);

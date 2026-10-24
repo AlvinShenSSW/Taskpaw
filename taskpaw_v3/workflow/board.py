@@ -12,6 +12,8 @@ Miko lookup (`rt.lookup`), else the input (precedence final > lookup > input).
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import timezone
@@ -641,6 +643,20 @@ def film_facts(
             rt.operator, film.film_id, film.final_revision
         )
     final_nfo = _read_nfo(_item_path(rt, final, "nfo")) if final else (None, (), None)
+    if final is not None and final_nfo == (None, (), None):
+        try:
+            summary = json.loads(
+                (rt.data_dir / "retained" / film.film_id / "summary.json").read_text(
+                    "utf-8"
+                )
+            )
+            final_nfo = summary["title"], tuple(summary["actors"]), summary["number"]
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logging.getLogger(__name__).warning(
+                "retained facts for %s: %s", film.film_id, exc
+            )
     source = manifest or _current_input(rt, film)
     found = _input_file(rt, source, "nfo") if source else None
     videos = main_videos(source) if source else []
@@ -897,6 +913,8 @@ def _poster(
     if final is not None:
         item = _poster_item(final)
         path = output_dir(rt, final) / item.relative_path if item else None
+        if item and path and not path.is_file():
+            path = rt.data_dir / "retained" / final.film_id / item.relative_path
         return (
             (path, f"final-{item.sha256[:16]}")
             if item and path and path.is_file()
@@ -934,6 +952,19 @@ def jacket(
                 if item.role == role
             ]
             tiers.append(("final", files))
+        tiers.append(
+            (
+                "retained",
+                [
+                    (
+                        item,
+                        rt.data_dir / "retained" / final.film_id / item.relative_path,
+                    )
+                    for item in final.items
+                    if item.role == "thumb"
+                ],
+            )
+        )
     if source is not None:
         for role in (*roles, "attachment"):
             tiers.append(("input", _input_files(rt, source, role, _IMAGE_TYPES)))
@@ -1149,19 +1180,99 @@ def film_detail(
         ],
         "steps": row["steps"],
         "timing": row["timing"],
+        "history": _history(film, wf, names or {}) if row["group"] == "done" else None,
         "duration_ms": row["duration_ms"],
         "energy": row["energy"],
         "live_power": row["live_power"],
         "archive": {
             "status": wf.archive_status,
             "error": film.archive_error,
-            "target_path": str(Path(target.export_identity) / target.relative_path)
-            if target
-            else None,
+            "target_path": wf.archive_path
+            or (
+                str(Path(target.export_identity) / target.relative_path)
+                if target
+                else None
+            ),
         },
         "cleanup": {
             "input": wf.cleanup_input_status,
             "workcopy": wf.cleanup_workcopy_status,
             "kept": [item for items in kept.values() for item in items],
         },
+    }
+
+
+def _history(
+    film: m.BoardFilm, wf: m.FilmWorkflow, names: Mapping[str, str]
+) -> dict[str, Any]:
+    """Recorded stage times, archive receipt and cleanup outcomes for a finished film."""
+    durations = film_timing(film)["stages"]
+    stages = {s.stage: s for s in film.stages}
+    rows = []
+    for key in ("intake", "restore", "return", "asr", "translate", "scrape"):
+        stage = stages.get(key)
+        devices = (
+            dict.fromkeys(names.get(w, w) if w else "本机" for w in stage.worker_ids)
+            if stage
+            else {}
+        )
+        rows.append(
+            {
+                "key": key,
+                "device": "、".join(devices) or "本机",
+                "seconds": durations.get(key),
+                "result": (
+                    stage.note
+                    or stage.reason
+                    or ("已跳过" if stage.status == "skipped" else "已完成")
+                )
+                if stage
+                else "—",
+            }
+        )
+    rows.append(
+        {
+            "key": "confirm",
+            "device": "主控",
+            "seconds": None,
+            "result": "已确认入库" if wf.approval else "—",
+        }
+    )
+    archives = [
+        o
+        for o in wf.archive_operations
+        if o.approval_id == wf.archive_receipt_approval_id
+        and o.resolved
+        and o.status == "verified"
+    ]
+    cleanups = [
+        o
+        for o in wf.cleanup_operations
+        if o.approval_id == wf.archive_receipt_approval_id and o.resolved
+    ]
+    for key, selected, result in (
+        ("archive", archives[-1:], "已校验入库" if wf.archive_receipt_id else "—"),
+        ("cleanup", cleanups, "来源与工作副本已清理"),
+    ):
+        seconds = [
+            (o.ended_at - o.started_at).total_seconds()
+            for o in selected
+            if o.started_at and o.ended_at
+        ]
+        rows.append(
+            {
+                "key": key,
+                "device": "Filmpaw" if key == "archive" else "主控",
+                "seconds": round(sum(seconds), 1) if seconds else None,
+                "result": result,
+            }
+        )
+    ends = [o.ended_at for o in cleanups if o.ended_at]
+    completed = max(ends) if ends else None
+    return {
+        "steps": rows,
+        "completed_at": _time(completed) if completed else None,
+        "total_seconds": round(max(0, (completed - film.created_at).total_seconds()), 1)
+        if completed
+        else None,
     }

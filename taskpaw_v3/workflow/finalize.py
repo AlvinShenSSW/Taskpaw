@@ -21,6 +21,8 @@ from datetime import timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
+from taskpaw_v3.core.state import atomic_json
+
 from . import file_identity
 from . import models as m
 from .filmpaw_client import FilmpawClient, FilmpawRefused, FilmpawUnavailable
@@ -626,6 +628,8 @@ class Finalizer:
         else:
             operation_id, version = current.operation_id, current.version
             statuses = {i.item_id: i.status for i in current.items}
+        if scope == "workcopy":
+            self._retain(wf, final)
         results = []
         for member in manifest.members:
             if self.cancel.is_set():
@@ -688,6 +692,49 @@ class Finalizer:
             reason = blocked[0].status if blocked else "部分文件已变化"
             waiting[wf.film_id] = f"待清理：{len(blocked)} 个文件未能删除（{reason}）"
         return True
+
+    def _retain(self, wf: m.FilmWorkflow, final: m.FinalManifest) -> None:
+        """#302: small history assets, outside all C10 work dirs; best effort."""
+        from . import board
+
+        rt = self.runtime
+        retained = rt.data_dir / "retained" / wf.film_id
+        try:
+            retained.mkdir(parents=True, exist_ok=True)
+            poster = board._poster_item(final)
+            thumb = next((i for i in final.items if i.role == "thumb"), None)
+            for item in (poster, thumb):
+                if item is None:
+                    continue
+                source = self._package_dir(final) / item.relative_path
+                if (
+                    not source.is_file()
+                ):  # cleanup resumed after this member was deleted
+                    continue
+                target = retained / item.relative_path
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = target.with_suffix(target.suffix + ".tmp")
+                    shutil.copyfile(source, tmp)
+                    tmp.replace(target)
+                except OSError as exc:
+                    log.warning("retained image for %s failed: %s", wf.film_id, exc)
+            nfo = board._item_path(rt, final, "nfo")
+            if nfo is not None:
+                title, actors, number = board._read_nfo(nfo)
+                atomic_json(
+                    retained / "summary.json",
+                    {
+                        "title": title,
+                        "actors": list(actors),
+                        "number": number,
+                        "marks": list(final.postprocess.actual_marks),
+                        "final_name": PurePosixPath(final.output_relative_path).name,
+                        "archive_path": wf.archive_path,
+                    },
+                )
+        except OSError as exc:
+            log.warning("retained history for %s failed: %s", wf.film_id, exc)
 
     def _admit(
         self,
