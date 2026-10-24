@@ -13,7 +13,7 @@ import { ModalHead, ModalShell } from "./ReviewDialog";
 import { Chip, Icon, Notice, PageTitle } from "./parts";
 import { clockText, progressText, silentText, stageName, TIER_ORDER, TIER_SHORT, type ChipTone } from "./mediaModel";
 import { AttestDialog } from "./RemoteParts";
-import { errorText, useWorkspace } from "./workspace";
+import { DEVICES_KEY, errorText, useWorkspace } from "./workspace";
 
 // 设备 (P2-2 #293 v1, P2-4 #295 §4 as the confirmed preview Devices / Phone-Devices): 本机 and the
 // enrolled GPU workers — state (在线 / 待核验 / 失联 N 分钟 / 停领), heartbeat age, GPU, disk and staging,
@@ -21,7 +21,6 @@ import { errorText, useWorkspace } from "./workspace";
 // unresolved assignments with 判定已停止 (C4), and add, 核验并启用, 停领/恢复, 重新配对, 撤销 and 退休 (all
 // confirmed where they cannot be undone). Every command carries the row's version (CAS). With
 // workflow.remote_workers off only 撤销 and 退休 remain (the controller refuses the rest).
-const DEVICES_KEY = ["workflowDevices"];
 const RESTORE_MIN_VRAM_MIB = 15360;
 const STAGE_LABEL: Record<string, string> = { restore: "修复", asr: "识别", translate: "翻译" };
 

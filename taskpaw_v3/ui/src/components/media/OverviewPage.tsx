@@ -8,7 +8,7 @@ import PauseIcon from "@mui/icons-material/Pause";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import VerifiedUserIcon from "@mui/icons-material/VerifiedUser";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ClusterPower } from "../../api";
 import { Bolt, Est, SplitBar, SplitLegend } from "../power/PowerParts";
 import { fmtKwhShort, fmtW, splitOf } from "../power/powerModel";
@@ -21,7 +21,7 @@ import {
 import { Chip, Icon, ItemCover, Notice, PageTitle, StageBlock, StatusChip } from "./parts";
 import { LostRow } from "./RemoteParts";
 import { SourceMissingRow } from "./SourceMissing";
-import { errorText, isPaused, MEDIA_FILMS_KEY, useWorkspace } from "./workspace";
+import { DEVICES_KEY, errorText, isPaused, MEDIA_FILMS_KEY, useWorkspace } from "./workspace";
 
 // 概览 (§4.1 + U1 V3): heading actions, the paused notice, four stats, the flow strip, the
 // active rows, the cleanup rule, the next films to confirm and the local GPU.
@@ -29,6 +29,12 @@ export function OverviewPage() {
   const ws = useWorkspace();
   const { data } = ws;
   const qc = useQueryClient();
+  const devices = useQuery({ queryKey: DEVICES_KEY, queryFn: api.workflowDevices, refetchInterval: 5000, enabled: !ws.readOnly });
+  const workers = !ws.readOnly && devices.data?.remote_workers
+    ? devices.data.workers.filter((w) => w.admission_state !== "revoked" && w.enrollment_state !== "pending_pairing" && w.enrollment_state !== "retired")
+    : [];
+  const total = 1 + workers.length;
+  const online = 1 + workers.filter((w) => w.heartbeat.state === "online").length;
   const paused = isPaused(data);
   const pause = useMutation({
     mutationFn: (next: boolean) => {
@@ -97,8 +103,8 @@ export function OverviewPage() {
         </div>
         <div className="panel stat">
           <div className="label">计算设备<Icon of={DesktopWindowsIcon} /></div>
-          <strong>1<em>/ 1 在线</em></strong>
-          <div className="note">{gpuLabel(gpu) || "本机 GPU"}</div>
+          <strong>{online}<em>/ {total} 在线</em></strong>
+          <div className="note">{workers.length > 0 ? `本机 + ${workers.length} 台工作机` : gpuLabel(gpu) || "本机 GPU"}</div>
         </div>
         {cluster && <ClusterStat power={cluster} onMore={ws.openPower} />}
       </div>

@@ -9,6 +9,7 @@ import {
   ACTIVE_STATES, filmStatus, lifecycle, matchesStage, progressText, reviewStatus, stageLine, STATUS_META, workItems,
 } from "../components/media/mediaModel";
 import { PREFLIGHT_MS } from "../components/media/workspace";
+import { REMOTE_DEVICES } from "./fixtures/multiMachine";
 import { LtxDownload } from "../components/LtxDownload";
 import { AgentConsole } from "../views/AgentConsole";
 import { theme } from "../theme";
@@ -65,6 +66,30 @@ const go = async (label: string) => {
 
 beforeEach(() => { setLang("zh-CN"); vi.spyOn(window, "scrollTo").mockImplementation(() => {}); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+describe("overview compute devices", () => {
+  it("counts the controller and one online worker", async () => {
+    mockApi();
+    vi.spyOn(api, "workflowDevices").mockResolvedValue({ ...REMOTE_DEVICES, workers: [REMOTE_DEVICES.workers[0]] });
+    wrap(<MediaWorkspace />);
+    const card = within((await screen.findByText("计算设备")).closest(".stat") as HTMLElement);
+    expect(await card.findByText("2", { selector: "strong" })).toBeInTheDocument();
+    expect(card.getByText("/ 2 在线")).toBeInTheDocument();
+    expect(card.getByText("本机 + 1 台工作机")).toBeInTheDocument();
+  });
+
+  it("keeps the local count and GPU label when remote workers are off", async () => {
+    mockApi();
+    vi.spyOn(api, "workflowDevices").mockResolvedValue({ ...REMOTE_DEVICES, remote_workers: false, workers: [REMOTE_DEVICES.workers[0]] });
+    const { qc } = wrap(<MediaWorkspace />);
+    const card = within((await screen.findByText("计算设备")).closest(".stat") as HTMLElement);
+    await waitFor(() => expect(qc.isFetching()).toBe(0));
+    expect(card.getByText("1", { selector: "strong" })).toBeInTheDocument();
+    expect(card.getByText("/ 1 在线")).toBeInTheDocument();
+    expect(card.getByText(/RTX 5070 Ti/)).toBeInTheDocument();
+    expect(card.queryByText(/台工作机/)).toBeNull();
+  });
+});
 
 describe("#302 finished history", () => {
   it.each([true, false])("shows retained facts, recorded steps and detail buttons (energy=%s)", async (energy) => {
