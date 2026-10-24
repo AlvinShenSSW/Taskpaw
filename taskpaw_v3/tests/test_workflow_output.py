@@ -62,7 +62,7 @@ def test_default_output_requires_a_fixed_local_disk(
     assert checked == [expected]
 
 
-@pytest.mark.parametrize("failure", ["corrupt", "io", "rename", "crash", "link"])
+@pytest.mark.parametrize("failure", ["corrupt", "io", "rename", "crash"])
 def test_failed_placement_keeps_sources_and_retry_uses_plain_name(
     world, monkeypatch, failure
 ):
@@ -159,6 +159,44 @@ def test_failed_placement_keeps_sources_and_retry_uses_plain_name(
     assert Path(placed.output_directory) == target
     assert set(output.iterdir()) == {other, target}
     assert (other / "keep").read_bytes() == b"keep"
+    assert {
+        p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()
+    } == before
+
+
+def test_placement_copies_when_the_volume_has_no_hard_links(world, monkeypatch):
+    """Kimi r2 F1: ReFS/exFAT refuse hard links with a non-EXDEV error; the
+    verified copy takes over instead of failing the stage."""
+    from taskpaw_v3.tests import test_workflow_scrape_step as scr
+    from taskpaw_v3.tests.test_workflow_local_dispatch import Crash
+    from taskpaw_v3.workflow import scrape_step
+
+    step = scr.scrape_step(world.tmp)
+    captured = []
+
+    def capture(context, final):
+        captured.append((context, final))
+        raise Crash()
+
+    monkeypatch.setattr(step, "_place", capture)
+    dispatcher = scr.dispatcher(world.rt, step)
+    for _ in range(4):
+        assert dispatcher.run_once()
+    with pytest.raises(Crash):
+        dispatcher.run_once()
+    context, final = captured[0]
+    source = world.rt.final_dir(final)
+    before = {
+        p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()
+    }
+
+    def no_links(path, dest):
+        raise OSError(errno.EINVAL, "fake: volume has no hard links")
+
+    monkeypatch.setattr(os, "link", no_links)
+    placed = scrape_step.LocalScrapeStep._place(step, context, final)
+    target = world.rt.output_dir / source.name
+    assert Path(placed.output_directory) == target
     assert {
         p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()
     } == before

@@ -9,7 +9,6 @@ docs/specs/2026-10-20-media-workflow-m01-p1-{design,interface}.md.
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
 import logging
@@ -173,9 +172,7 @@ class LocalScrapeStep:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     os.link(origin, dest)
-                except OSError as exc:
-                    if exc.errno != errno.EXDEV:
-                        raise
+                except OSError:  # cross-volume or no hard links (ReFS/exFAT)
                     shutil.copyfile(origin, dest)
                     if (
                         dest.stat().st_size != member.size_bytes
