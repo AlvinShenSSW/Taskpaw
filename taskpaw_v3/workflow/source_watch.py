@@ -38,7 +38,11 @@ _PENDING = ("pending", "skipped")
 def started(film: m.BoardFilm) -> bool:
     """Whether any stage after intake has begun (a retry waiting after a
     failure counts: the film no longer depends on its INBOX source to start)."""
-    return any(s.stage != "intake" and s.status not in _PENDING for s in film.stages)
+    return any(
+        s.stage != "intake"
+        and (s.status not in _PENDING or s.first_started_at is not None)
+        for s in film.stages
+    )
 
 
 class _Unknown(Exception):
@@ -167,8 +171,9 @@ class SourceWatch:
             try:
                 if not path.exists():
                     gone.append(str(path))
-            except OSError:
-                continue  # unreadable is unknown, not missing
+            except OSError as exc:
+                log.exception("source member check of %s failed: %s", film_id, path)
+                raise _Unknown from exc
         if gone and not inbox.is_dir():  # the share dropped while we looked
             raise _Unknown
         return gone

@@ -795,7 +795,9 @@ class IntakeCommands(ApprovalCommands):
                     "needs_attention"
                     if self._intake_archived(command.package_id)
                     else "missing"
-                    if command.kind == "missing"
+                    # A dirty hint cannot prove that a missing package returned.
+                    # Keep that fact until discovery can regroup a deleted film.
+                    if command.kind == "missing" or package["state"] == "missing"
                     else "receiving"
                 )
             )

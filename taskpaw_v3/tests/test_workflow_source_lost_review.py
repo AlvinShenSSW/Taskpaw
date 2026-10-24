@@ -17,9 +17,18 @@ from types import SimpleNamespace
 import pytest
 
 from taskpaw_v3.tests import test_workflow_intake_files as fixtures
+from taskpaw_v3.tests.test_workflow_approvals import (
+    archive,
+    archive_receipt,
+    cleanup_command,
+    h,
+    prepared,
+)
+from taskpaw_v3.tests.test_workflow_films import film
 from taskpaw_v3.tests.test_workflow_intake_discovery import config_for, scan
+from taskpaw_v3.tests.test_workflow_intake_service import service
 from taskpaw_v3.tests.test_workflow_intake_store import drop, intake
-from taskpaw_v3.tests.test_workflow_local_dispatch import dispatcher
+from taskpaw_v3.tests.test_workflow_local_dispatch import dispatcher, stage
 from taskpaw_v3.tests.test_workflow_source_lost import api, remove, world
 from taskpaw_v3.tests.test_workflow_store import identity
 from taskpaw_v3.tests.worker_api_helpers import VERSION, beat
@@ -30,9 +39,12 @@ from taskpaw_v3.tests.workflow_route_helpers import (
     route,
 )
 from taskpaw_v3.workflow import board, planning
+from taskpaw_v3.workflow import intake_models as im
 from taskpaw_v3.workflow import models as m
 from taskpaw_v3.workflow import operator_actions as ops
+from taskpaw_v3.workflow.executors import SyntheticExecutor
 from taskpaw_v3.workflow.fleet_live import FleetLive, Heartbeat
+from taskpaw_v3.workflow.intake_watch import DirtyBatch
 from taskpaw_v3.workflow.local_host import LocalWorkflowHost
 from taskpaw_v3.workflow.scheduler import SOURCE_CHANGED
 
@@ -299,4 +311,153 @@ def test_reassign_options_and_plans_do_not_offer_a_held_film(world):
     held = planning.plan_list(world.rt, remote=inputs, hold=frozenset({unplanned}))
     assert held["plans"][0]["routing"]["standard"]["auto"] == {
         "waiting": SOURCE_CHANGED
+    }
+
+
+# CX3-CX6: outer-gate regressions
+@pytest.mark.parametrize("reingest", [False, True])
+def test_removed_source_reference_does_not_block_input_cleanup(h, reingest):
+    removed_id, _, _, _ = film(h)
+    if not reingest:
+        _, final, _, approval = prepared(h)  # already shares the source
+    h.store.remove_film(
+        h.operator,
+        h.meta(),
+        m.FilmRemove(
+            film_id=removed_id,
+            reason="Delete task",
+            expected_version=h.store.get_film(h.operator, removed_id).film.version,
+        ),
+    )
+    if reingest:
+        _, final, _, approval = prepared(h)  # same source ingested after removal
+    admitted = archive(h, approval)
+    receipt = archive_receipt(h, admitted, final, approval)
+    h.store.accept_archive_receipt(admitted[1], h.meta(), receipt)
+    _, _, cleaner, _ = h.component("cleanup_adapter")
+    result = h.store.begin_cleanup(
+        h.operator,
+        h.meta(),
+        cleanup_command(h, approval, receipt, "input", cleaner.principal_id),
+    )
+    assert result.status == "admitted"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native source discovery")
+@pytest.mark.parametrize("trigger", ["rescan", "notification", "overflow"])
+def test_scan_of_returned_deleted_package_uses_a_fresh_film(service, package, trigger):
+    h, adapter, config, scanner, _ = service
+    assert scanner.scan_once()
+    (original,) = h.store.list_intakes(adapter, im.IntakeListQuery()).items
+    old_id = original.grouping.film_groups[0].film_id
+    h.store.create_film(
+        adapter,
+        h.meta(),
+        m.FilmCreate(
+            film_id=old_id,
+            intake_session_id=identity(),
+            display_name="movie",
+            policy=config.film_policy,
+        ),
+    )
+    # Synthetic publication link; discovery itself uses only the tmp package.
+    conn = h.store._conn
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(
+        "INSERT INTO intake_films(film_id,input_revision,package_id,snapshot_id,"
+        "source_generation,grouping_revision,created_at) VALUES(?,1,?,?,1,1,'t')",
+        (old_id, original.package_id, identity()),
+    )
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=ON")
+    h.store.remove_film(
+        h.operator,
+        h.meta(),
+        m.FilmRemove(film_id=old_id, expected_version=1, reason="Delete task"),
+    )
+    # Moving out and back preserves every member's native identity and mtime.
+    parked = package[0].parent / "parked"
+    package[1].rename(parked)
+    assert scanner.scan_once()
+    assert h.store.get_intake(adapter, original.package_id).state == "missing"
+    parked.rename(package[1])
+    batch = (
+        None
+        if trigger == "rescan"
+        else DirtyBatch((original.relative_path,), trigger == "overflow")
+    )
+    assert scanner.scan_once(trigger=trigger, batch=batch)
+    returned = h.store.get_intake(adapter, original.package_id)
+    assert returned.grouping.film_groups[0].film_id != old_id
+    assert returned.state == "waiting_stability"
+    (visible,) = h.store.list_intake_board(h.operator)
+    assert visible.package_id == original.package_id
+    assert (package[1] / "movie.mp4").read_bytes() == b"synthetic bytes\x00" * 100
+
+
+def test_pending_restore_retry_with_history_can_dispatch_after_source_loss(world):
+    rt = world.rt
+    film_id = world.film()
+    rt.executors["restore"] = SyntheticExecutor("restore", "raise SystemExit(77)")
+    d = dispatcher(rt, sources=world.watch)
+    assert d.run_once() is True
+    failed = stage(rt, film_id, "restore")
+    assert failed.status == "failed"
+    rt.store.retry_stage(
+        rt.operator,
+        rt.meta(),
+        m.StageRetry(
+            job_id=failed.job_id, expected_version=failed.version, reason="Retry"
+        ),
+    )
+    assert stage(rt, film_id, "restore").status == "pending"
+    restore = next(
+        s for s in board.board_film(rt, film_id).stages if s.stage == "restore"
+    )
+    assert restore.first_started_at is not None
+    assert restore.attempt_ids
+    world.lose()
+    assert world.watch.check(film_id, force=True) is None
+    assert world.watch.ids() == frozenset()
+    rt.executors["restore"] = SyntheticExecutor("restore")
+    assert d.run_once() is True
+    assert stage(rt, film_id, "restore").status == "succeeded"
+
+
+@pytest.mark.parametrize("already_lost", [False, True])
+def test_member_oserror_preserves_state_and_recheck_reports_unreachable(
+    world, api, monkeypatch, caplog, already_lost
+):
+    film_id = world.film()
+    if already_lost:
+        (world.inbox / "movie.mkv").unlink()
+    previous = world.watch.check(film_id, force=True)
+    previous_wire = api.row(film_id)["source_missing"]
+    world.restore()
+    real_exists = Path.exists
+
+    def unreadable(path):
+        if path == world.inbox / "movie.mkv":
+            raise OSError("synthetic member access failure")
+        return real_exists(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "exists", unreadable)
+        assert world.inbox.is_dir()  # only the member is inaccessible
+        response = api.post(f"/control/workflow/films/{film_id}/recheck-source")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "unreachable": True,
+        "source_missing": previous_wire,
+    }
+    assert world.watch.unknown(film_id) is True
+    assert world.watch.get(film_id) == previous
+    assert "synthetic member access failure" in caplog.text
+    assert "movie.mkv" in caplog.text
+    # A successful later check is the recovery proof.
+    assert api.post(f"/control/workflow/films/{film_id}/recheck-source").json() == {
+        "ok": True,
+        "unreachable": False,
+        "source_missing": None,
     }

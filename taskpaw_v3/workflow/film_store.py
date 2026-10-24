@@ -1283,6 +1283,10 @@ class FilmCommands(WorkerCommands):
                 row["version"],
                 body_json=canonical_json(removed),
             )
+            # Removal releases this film's cleanup hold, never the source files.
+            self._conn.execute(
+                "UPDATE source_refs SET retained=0 WHERE film_id=?", (fid,)
+            )
             return Mutation(fid, version, "removed")
 
         return self._execute(auth, meta, command, "remove_film", apply)
