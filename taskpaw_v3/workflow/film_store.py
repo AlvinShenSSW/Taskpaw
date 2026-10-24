@@ -1275,7 +1275,8 @@ class FilmCommands(WorkerCommands):
             if (
                 film.removed_at is not None
                 or self._conn.execute(
-                    "SELECT 1 FROM stages WHERE film_id=? AND status IN ('running','unknown') "
+                    "SELECT 1 FROM stages WHERE film_id=? "
+                    "AND input_revision=? AND status IN ('running','unknown') "
                     "UNION ALL SELECT 1 FROM assignments a JOIN stages s ON s.job_id=a.job_id "
                     "WHERE s.film_id=? AND a.resolved_at IS NULL "
                     "UNION ALL SELECT 1 FROM film_routes WHERE film_id=? AND state='open' "
@@ -1287,7 +1288,7 @@ class FilmCommands(WorkerCommands):
                     "ON f.film_id=p.film_id AND p.context_revision=f.current_context_revision "
                     "WHERE p.film_id=? AND p.revoked_at IS NULL AND f.context_state='ready' "
                     "LIMIT 1",
-                    (fid, fid, fid, fid, fid),
+                    (fid, row["current_input_revision"], fid, fid, fid, fid),
                 ).fetchone()
             ):
                 raise WorkflowError("precondition_failed")

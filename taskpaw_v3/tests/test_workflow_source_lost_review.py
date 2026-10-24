@@ -26,7 +26,7 @@ from taskpaw_v3.tests.test_workflow_approvals import (
     h,
     prepared,
 )
-from taskpaw_v3.tests.test_workflow_films import film
+from taskpaw_v3.tests.test_workflow_films import film, input_manifest
 from taskpaw_v3.tests.test_workflow_intake_discovery import config_for, scan
 from taskpaw_v3.tests.test_workflow_intake_service import service
 from taskpaw_v3.tests.test_workflow_intake_store import drop, intake
@@ -275,6 +275,33 @@ def test_an_approval_of_a_stale_context_does_not_block_delete_on_either_side(wor
         ops.removal_refusal(world.rt, film, claimed=False, routed=False) is None
     )  # board
     assert remove(world, film_id)["ok"] is True  # the store agrees
+
+
+@pytest.mark.parametrize("status", ["running", "unknown"])
+def test_stale_stage_of_superseded_input_does_not_block_removal(world, api, status):
+    rt = world.rt
+    film_id = world.film()
+    rt.store._conn.execute(
+        "UPDATE stages SET status=?, body_json=json_set(body_json,'$.status',?) "
+        "WHERE film_id=? AND input_revision=1 AND stage='restore'",
+        (status, status, film_id),
+    )
+    rt.store._conn.commit()
+    _, auth = rt.grant_intake_adapter()
+    rt.store.put_input_manifest(
+        auth,
+        rt.meta(),
+        m.InputManifestPut(
+            film_id=film_id,
+            expected_version=rt.store.get_film(rt.operator, film_id).film.version,
+            manifest=input_manifest(film_id, revision=2),
+        ),
+    )
+    assert api.row(film_id)["can_remove"] is True
+    response = api.post(f"/control/workflow/films/{film_id}/remove")
+    assert response.status_code == 200, response.json()
+    assert response.json()["ok"] is True
+    assert rt.store.get_film(rt.operator, film_id).film.removed_at is not None
 
 
 def test_the_board_counts_any_open_assignment_as_claimed(world, api):
