@@ -69,11 +69,10 @@ export function QueuePage() {
   const done = workItems(historyData, {}, ws.readOnly).filter((i) => i.status === "completed")
     .sort((a, b) => {
       if (a.kind !== "film" || b.kind !== "film") return 0;
-      const at = a.row.completed_at;
-      const bt = b.row.completed_at;
-      if (!at) return bt ? 1 : b.id.localeCompare(a.id);
-      if (!bt) return -1;
-      return Date.parse(bt) - Date.parse(at) || b.id.localeCompare(a.id);
+      // the server's order: completion, then creation time, newest first (a missing time last)
+      const time = (v: string | null | undefined) => (v ? Date.parse(v) : -Infinity);
+      return time(b.row.completed_at) - time(a.row.completed_at)
+        || time(b.row.created_at) - time(a.row.created_at) || b.id.localeCompare(a.id);
     });
   const films = completed ? done.slice(0, 20) : unfinished.slice(offset, offset + 20);
   if (includeDone && needsHistory && (paging?.page ?? 1) === donePage) {

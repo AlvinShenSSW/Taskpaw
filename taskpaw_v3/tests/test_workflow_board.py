@@ -919,9 +919,7 @@ def test_film_board_reads_every_film_state_at_once(seeded):
     assert groups["invalid"] == "confirm"  # confirm again, never a dead 'archiving'
     # D13: only the newest finished films are kept; unfinished ones always are
     names = [f.display_name for f in rt.store.film_board(rt.operator, done_limit=1)]
-    # These minimal rows have no completion timestamps; film_id breaks the tie.
-    last_done = max(("done1", "done2", "done3"), key=seed.ids.__getitem__)
-    assert names == list(seed.ids)[:-3] + [last_done]
+    assert names == list(seed.ids)[:-3] + ["done3"]
     assert len(rt.store.film_board(rt.operator)) == len(seed.ids)
     one = rt.store.film_board(rt.operator, done_limit=0, film_id=seed.ids["done1"])
     assert [_summary(f) for f in one] == [_summary(got["done1"])]
