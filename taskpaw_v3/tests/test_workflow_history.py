@@ -4,6 +4,7 @@
 
 import json
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -187,3 +188,60 @@ def test_completed_api_pages_total_clamp_and_every_film(
     last = client.get(f"{BASE}/films?done_page=999").json()
     assert last["done_paging"]["page"] == pages
     assert client.get(f"{BASE}/films?done_page=0").status_code == 422
+
+
+def test_done_pages_use_receipt_bound_completion_time(world):
+    rt = world.rt
+    seed = Seed(rt)
+    # Creation order is the reverse of completion order, across a page boundary.
+    with seed:
+        for n in range(21):
+            name = f"done-{n:02}"
+            fid = seed.film(name, done_through("cleanup_workcopy"), final=False)
+            approval = seed.approval(name)
+            seed.archive(name, approval)
+            operation = seed.conn.execute(
+                "SELECT operation_id FROM operations WHERE film_id=?", (fid,)
+            ).fetchone()[0]
+            seed.conn.execute(
+                "INSERT INTO receipts(receipt_id,kind,operation_id,approval_id,"
+                "producer_id,manifest_hash,accepted_at,body_json) "
+                "VALUES(?,'archive',?,?,'p','h','t','{}')",
+                (f"receipt-{n}", operation, approval),
+            )
+            for scope, bound, day in (
+                ("input", approval, 1),
+                ("workcopy", approval, 2),
+                ("input", seed.approval(name), 3),  # unrelated approval: ignored
+            ):
+                ended = (
+                    datetime(2026, 10, 22, tzinfo=timezone.utc)
+                    + timedelta(days=day, seconds=-n if day == 2 else n)
+                ).isoformat()
+                seed.conn.execute(
+                    "INSERT INTO operations(operation_id,film_id,kind,approval_id,"
+                    "owner_principal_id,status,created_at,updated_at,resolved_at,body_json) "
+                    "VALUES(?,?,?,?,'p','resolved',?,?,?,'{}')",
+                    (
+                        f"cleanup-{n}-{day}",
+                        fid,
+                        f"cleanup_{scope}",
+                        bound,
+                        ended,
+                        ended,
+                        ended,
+                    ),
+                )
+    assert rt.store.done_paging(rt.operator)["total"] == 21
+    first = rt.store.film_board(rt.operator)
+    second = rt.store.film_board(rt.operator, done_offset=20)
+    done_ids = set(seed.ids.values())
+    assert [f.film_id for f in first if f.film_id in done_ids] == list(
+        seed.ids.values()
+    )[:20]
+    assert [f.film_id for f in second if f.film_id in done_ids] == [seed.ids["done-20"]]
+    assert [
+        f.film_id
+        for f in rt.store.film_board(rt.operator, done_limit=1)
+        if f.film_id in done_ids
+    ] == [seed.ids["done-00"]]

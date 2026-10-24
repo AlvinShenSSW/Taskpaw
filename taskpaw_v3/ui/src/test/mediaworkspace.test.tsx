@@ -459,6 +459,83 @@ describe("待处理", () => {
 });
 
 describe("影片队列 / 待确认 / 异常", () => {
+  it.each([false, true])("pages 25 unfinished films into history without gaps (remote=%s)", async (remote) => {
+    mockApi();
+    const unfinished = Array.from({ length: 25 }, (_, i) => row({ film_id: `pending-${i}`, stage: "asr", status: i >= 22 ? "running" : "pending" }));
+    const done = Array.from({ length: 40 }, (_, i) => row({ film_id: `done-${i}`, group: "done",
+      completed_at: new Date(Date.UTC(2026, 9, 25, 0, 0, 40 - i)).toISOString() }));
+    const read = vi.spyOn(api, "workflowFilms").mockImplementation(async (page = 1) => ({ ...FILMS_RESPONSE,
+      films: [...unfinished, ...done.slice((page - 1) * 20, page * 20).reverse()], packages: [],
+      counts: counts([...unfinished, ...done], []), done_paging: { total: 40, size: 20, page, pages: 2 },
+    }));
+    if (remote) vi.spyOn(api, "workflowDevices").mockResolvedValue(REMOTE_DEVICES);
+    const { qc } = wrap(<MediaWorkspace />);
+    await screen.findByRole("heading", { name: "概览" });
+    fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
+    const order = () => [...document.querySelectorAll("[data-film]")].map((e) => e.getAttribute("data-film"));
+    const sorted = [...unfinished.slice(22), ...unfinished.slice(0, 22), ...done].map((f) => f.film_id);
+    await waitFor(() => expect(order()).toEqual(sorted.slice(0, 20)));
+    expect(screen.getByText("第 1 页 / 共 4 页")).toBeInTheDocument();
+    expect(read.mock.calls).toEqual([[]]); // No history needed on the first queue page.
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(order()).toEqual(sorted.slice(20, 40))); // 5 unfinished + 15 done
+    await waitFor(() => expect(qc.isFetching()).toBe(0));
+    read.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(order()).toEqual(sorted.slice(40, 60))); // spans done pages 1 and 2
+    expect(read.mock.calls).toEqual([[1], [2]]);
+    await waitFor(() => expect(qc.isFetching()).toBe(0));
+    read.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(order()).toEqual(sorted.slice(60)));
+    expect(read.mock.calls).toEqual([[2]]);
+    expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+    // A poll that removes rows clamps the queue page and hides the single-page pager.
+    act(() => qc.setQueryData(["mediaFilms"], { ...FILMS_RESPONSE, films: unfinished.slice(0, 1), packages: [],
+      counts: counts(unfinished.slice(0, 1), []), done_paging: { total: 0, size: 20, page: 1, pages: 1 } }));
+    await waitFor(() => expect(order()).toEqual([unfinished[0].film_id]));
+    expect(screen.queryByLabelText("影片队列分页")).not.toBeInTheDocument();
+  });
+
+  it("pages stage filters locally and resets search/resolution pages without completed matches", async () => {
+    mockApi();
+    const unfinished = Array.from({ length: 25 }, (_, i) => row({ film_id: `match-${i}`, stage: "asr", resolution: i === 24 ? "4K" : "1080p" }));
+    const done = row({ film_id: "match-done", group: "done" });
+    const films = [...unfinished, done];
+    const read = vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films, packages: [],
+      counts: counts(films, []), done_paging: { total: 1, size: 20, page: 1, pages: 1 } });
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    fireEvent.change(screen.getByLabelText("按影片阶段筛选"), { target: { value: "processing" } });
+    expect(document.querySelectorAll("[data-film]")).toHaveLength(20);
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(document.querySelectorAll("[data-film]")).toHaveLength(5);
+    expect(screen.getByText("第 2 页 / 共 2 页")).toBeInTheDocument();
+    expect(read.mock.calls).toEqual([[]]);
+    fireEvent.change(screen.getByLabelText("按影片阶段筛选"), { target: { value: "all" } });
+    expect(screen.getByText("第 1 页 / 共 2 页")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(document.querySelectorAll("[data-film]")).toHaveLength(6));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "match" } });
+    expect(screen.getByText("第 1 页 / 共 2 页")).toBeInTheDocument();
+    expect(screen.getByText("25 部")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(document.querySelectorAll("[data-film]")).toHaveLength(5);
+    expect(document.querySelector('[data-film="match-done"]')).toBeNull();
+    fireEvent.change(screen.getByLabelText("按分辨率筛选"), { target: { value: "1080p" } });
+    expect(screen.getByText("第 1 页 / 共 2 页")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(document.querySelectorAll("[data-film]")).toHaveLength(4);
+    expect(document.querySelector('[data-film="match-done"]')).toBeNull();
+    fireEvent.change(screen.getByLabelText("按分辨率筛选"), { target: { value: "4K" } });
+    expect(document.querySelectorAll("[data-film]")).toHaveLength(1);
+    expect(screen.queryByLabelText("影片队列分页")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("按影片阶段筛选"), { target: { value: "completed" } });
+    await waitFor(() => expect(document.querySelector('[data-film="match-done"]')).toBeInTheDocument());
+    expect(screen.queryByLabelText("影片队列分页")).not.toBeInTheDocument();
+  });
+
   it.each([false, true])("orders active, waiting and newest completed films with completion times (remote=%s)", async (remote) => {
     mockApi();
     const films = [
@@ -1121,6 +1198,7 @@ describe("target preflight polling (IR05)", () => {
     // on 影片队列 nothing asks for the targets
     fireEvent.click(within(rail()).getByRole("button", { name: /^影片队列/ }));
     await screen.findByRole("heading", { level: 1, name: "影片队列" });
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => expect(document.body.textContent).toContain("确认片 11"));
     expect(target).not.toHaveBeenCalled();
     await go("待确认");

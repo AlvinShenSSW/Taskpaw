@@ -41,8 +41,17 @@ from .store_core import WorkflowCore, parse_time
 LIVE = "json_extract(f.body_json,'$.removed_at') IS NULL"
 DONE_SIZE = 20
 _DONE = (
-    "SELECT f.film_id,f.created_at FROM films f JOIN stages c ON c.film_id=f.film_id "
+    "SELECT f.film_id,finished.completed_at FROM films f JOIN stages c ON c.film_id=f.film_id "
     "AND c.input_revision=f.current_input_revision "
+    # Same receipt approval and resolved cleanup times as board._completed_at.
+    # Aggregate once across operations/receipts, never once per film.
+    "LEFT JOIN (SELECT o.film_id,max(o.resolved_at) AS completed_at FROM operations o "
+    "JOIN (SELECT a.film_id,max(r.rowid) AS receipt_rowid FROM receipts r "
+    "JOIN operations a ON a.operation_id=r.operation_id WHERE r.kind='archive' "
+    "GROUP BY a.film_id) latest ON latest.film_id=o.film_id "
+    "JOIN receipts r ON r.rowid=latest.receipt_rowid AND r.approval_id=o.approval_id "
+    "WHERE o.kind IN ('cleanup_input','cleanup_workcopy') AND o.resolved_at IS NOT NULL "
+    "GROUP BY o.film_id) finished ON finished.film_id=f.film_id "
     f"WHERE {LIVE} AND c.stage IN ('cleanup_input','cleanup_workcopy') AND c.status='succeeded' "
     "GROUP BY f.film_id HAVING count(*)=2"
 )
@@ -453,7 +462,7 @@ class ReadCommands(WorkflowCore):
     ) -> tuple[BoardFilm, ...]:
         """Every film's current-revision stages for the 媒体入库 page (T06-P1 D03, N01).
 
-        Oldest film first. `done_limit` / `done_offset` page the newest fully finished
+        Oldest film first. `done_limit` / `done_offset` page the most recently finished
         films (both cleanups succeeded); `film_id` reads one film. `energies`
         False skips the attempt-evidence scan behind each stage's energy (a
         caller that never shows energy, e.g. the notification observer).
@@ -488,7 +497,7 @@ class ReadCommands(WorkflowCore):
             where = (
                 f"WHERE {LIVE} AND "
                 "f.film_id NOT IN (SELECT film_id FROM (SELECT d.film_id,"
-                "row_number() OVER (ORDER BY d.created_at DESC,d.film_id DESC) AS newest "
+                "row_number() OVER (ORDER BY d.completed_at DESC,d.film_id DESC) AS newest "
                 f"FROM ({_DONE}) d) WHERE newest<=? OR newest>?)",
                 (done_offset, done_offset + done_limit),
             )
