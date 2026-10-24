@@ -9,6 +9,7 @@ docs/specs/2026-10-20-media-workflow-m01-p1-{design,interface}.md.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -139,6 +140,7 @@ class LocalScrapeStep:
         final = self._final(
             context, tools, handoff, handoff_sha, result, result_sha, files, attempt
         )
+        final = self._place(context, final)
         film = rt.store.get_film(rt.operator, job.film_id).film
         rt.store.put_final_manifest(
             rt.scrape_auth,
@@ -155,6 +157,69 @@ class LocalScrapeStep:
             if old.name != context.attempt_id:  # superseded attempts
                 shutil.rmtree(old, ignore_errors=True)
         return ExecOutcome.succeeded("刮削完成", result_digest=final.manifest_hash)
+
+    def _place(self, context: ReturnContext, final: m.FinalManifest) -> m.FinalManifest:
+        """Reserve one film folder; move locally or copy/verify/exact-delete across volumes."""
+        from .finalize import Finalizer, _rmdir_empty
+
+        rt = context.runtime
+        source = rt.final_dir(final)
+        rt.output_dir.mkdir(parents=True, exist_ok=True)
+        suffix = 1
+        while True:
+            name = source.name if suffix == 1 else f"{source.name} ({suffix})"
+            target = rt.output_dir / name
+            try:
+                target.mkdir()  # reserve, never merge with or overwrite another film
+                break
+            except FileExistsError:
+                suffix += 1
+        copied = []
+        members = Finalizer._cleanup_manifest(
+            "workcopy", final.manifest_hash, final.items
+        ).members
+        for member in members:
+            origin, dest = source / member.relative_path, target / member.relative_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                origin.rename(dest)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                shutil.copyfile(origin, dest)
+                if (
+                    dest.stat().st_size != member.size_bytes
+                    or sha256_file(dest, context.cancel) != member.sha256
+                ):
+                    raise _Failure(
+                        "needs_attention", f"成品复制校验失败：{member.relative_path}"
+                    )
+                copied.append(member)
+        # All copied members verified before any source deletion (C6).
+        for member in copied:
+            status = file_identity.delete_exact(
+                source / member.relative_path, member, context.cancel
+            )
+            if status not in ("deleted", "already_absent"):
+                raise _Failure(
+                    "needs_attention",
+                    f"成品来源清理失败：{member.relative_path}：{status}",
+                )
+        _rmdir_empty(source)
+        data = final.model_dump(mode="json")
+        data.update(output_relative_path=target.name, output_directory=str(target))
+        data["items"] = [
+            item.model_copy(
+                update={
+                    "native_identity": file_identity.native(
+                        target / item.relative_path, item.source_root_id
+                    )
+                }
+            ).model_dump(mode="json")
+            for item in final.items
+        ]
+        data["manifest_hash"] = m.manifest_digest(data)
+        return m.FinalManifest.model_validate(data)
 
     def _handoff(
         self, rt: LocalRuntime, job: m.PendingComputeJob

@@ -71,6 +71,7 @@ class Finalizer:
     ) -> None:
         self.runtime, self.inbox, self.filmpaw = runtime, inbox, filmpaw
         self.waiting: dict[str, str] = {}
+        self.progress: dict[str, dict[str, Any]] = {}
         # set by the dispatcher: stop between films and between members on shutdown
         self.cancel = threading.Event()
         self.reclaim_dir = runtime.data_dir / "reclaim"
@@ -84,14 +85,14 @@ class Finalizer:
         if (
             member.root_id == rt.identity.work_root_id
         ):  # final items are film-dir relative
-            return rt.work_dir / final.output_relative_path / member.relative_path
+            return rt.final_dir(final) / member.relative_path
         if member.root_id == rt.identity.root_id and self.inbox is not None:
             base = self.inbox / package if package else self.inbox
             return base / member.relative_path
         raise ConfirmError(f"无法定位清理成员的根目录：{member.root_id}")
 
     def _package_dir(self, final: m.FinalManifest) -> Path:
-        return self.runtime.work_dir / final.output_relative_path
+        return self.runtime.final_dir(final)
 
     # ── 图文确认 preflight (V3 §7.3) ─────────────────────────────────────
     def preflight(self, film_id: str, performer_id: str | None) -> dict[str, Any]:
@@ -453,8 +454,35 @@ class Finalizer:
             return True
         status = task.get("status")
         if status in ("queued", "running"):
+            previous = self.progress.get(wf.film_id, {})
+            self.progress[wf.film_id] = {
+                "phase": "verifying"
+                if task.get("phase") in ("verifying", "committing")
+                else "copying",
+                "copied_bytes": task.get("progress_bytes", 0),
+                "verified_bytes": task.get("verified_bytes", 0),
+                "total_bytes": task.get("total_bytes", 0),
+                "files_done": task.get("completed_count", 0),
+                "files_total": task.get("total_count", 0),
+                "items": [
+                    {
+                        "name": item["name"],
+                        "bytes": item["progress_bytes"],
+                        "total": item["size_bytes"],
+                    }
+                    for item in task.get("items", [])
+                ],
+                "target": str(
+                    Path(approval.binding.target.export_identity)
+                    / approval.binding.target.relative_path
+                ),
+                "started_at": task.get("created_at")
+                or previous.get("started_at")
+                or self.runtime.clock.now().isoformat(),
+            }
             waiting[wf.film_id] = "归档中"
             return False
+        self.progress.pop(wf.film_id, None)
         if status == "completed" and task.get("receipt"):
             self._accept(wf, op, approval.binding, task)
             return True
@@ -800,6 +828,12 @@ class Finalizer:
     def _reclaim_film(self, film_id: str) -> bool:
         """Taskpaw's own per-film dirs: compute attempts, return package, scrape
         attempts and the Miko lookup cache (IR07)."""
+        film = self.runtime.store.get_film(self.runtime.operator, film_id).film
+        if film.current_final_revision is not None:
+            final = self.runtime.store.get_final_manifest(
+                self.runtime.operator, film_id, film.current_final_revision
+            )
+            _rmdir_empty(self._package_dir(final))
         dirs = film_work_dirs(self.runtime, film_id)
         for path in dirs:
             shutil.rmtree(path, ignore_errors=True)  # a locked file: retried next tick

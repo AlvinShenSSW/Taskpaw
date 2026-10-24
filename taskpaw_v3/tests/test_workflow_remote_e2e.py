@@ -109,13 +109,14 @@ class World:
         self.sampler = FakeSampler()
         clock = self.clock
 
-        def make_runtime(data_dir, executors):
+        def make_runtime(data_dir, executors, *, output_dir=None):
             return LocalRuntime(
                 data_dir,
                 executors,
                 gpu=lambda: GPU_8GB,
                 machine=lambda: "controller-machine",
                 clock_source=clock.now,
+                output_dir=output_dir,
             )
 
         monkeypatch.setattr(local_host, "LocalRuntime", make_runtime)

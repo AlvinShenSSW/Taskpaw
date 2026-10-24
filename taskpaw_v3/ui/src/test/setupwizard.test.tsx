@@ -160,8 +160,8 @@ describe("媒体主控: role → network → controller → done", () => {
     await waitFor(() => expect(saveWorkflow).toHaveBeenCalled());
     expect(create).not.toHaveBeenCalled(); // review IR10: the save makes them, after validating
     expect(saveWorkflow.mock.calls[0][0]).toMatchObject({
-      create_dirs: ["inbox_root", "data_dir"],
-      role: "controller", inbox_root: "D:\\TaskpawInbox", data_dir: "D:\\TaskpawWork", ffprobe_path: null,
+      create_dirs: ["inbox_root", "data_dir", "output_dir"],
+      role: "controller", inbox_root: "D:\\TaskpawInbox", data_dir: "D:\\TaskpawWork", output_dir: "D:\\TaskpawWork\\成品", ffprobe_path: null,
       whisperjav_exe_path: "C:\\WhisperJAV\\Scripts\\whisperjav.exe", remote_workers: true, worker_api_port: 5682,
       mdcx_root: "D:\\Work\\engines\\MDCX304",
     });
@@ -302,4 +302,29 @@ describe("resume after a restart (§6)", () => {
     expect(await screen.findByRole("radiogroup", { name: "这台电脑的角色" })).toBeInTheDocument();
     delete (window as { matchMedia?: unknown }).matchMedia;
   });
+});
+
+
+it("controller wizard offers 成品目录 and saves its suggested folder (#301)", async () => {
+  const save = vi.spyOn(api, "workflowSaveSettings").mockResolvedValue({ ok: true, restart_required: true });
+  const open = vi.spyOn(api, "workflowOpenDir").mockResolvedValue(undefined);
+  wrap({ status: "pending", step: "controller", role: "controller" });
+  const field = await screen.findByLabelText("成品目录");
+  expect(field).toHaveValue(`${DETECTED.suggested.data_dir}\\成品`);
+  fireEvent.click(screen.getByRole("button", { name: "打开 成品目录" }));
+  await waitFor(() => expect(open).toHaveBeenCalledWith(`${DETECTED.suggested.data_dir}\\成品`));
+  fireEvent.click(screen.getByRole("button", { name: "下一步：完成" }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
+    output_dir: `${DETECTED.suggested.data_dir}\\成品`, create_dirs: ["inbox_root", "data_dir", "output_dir"],
+  })));
+});
+
+
+it("wizard derives the default output from its chosen work directory, not the old runtime default", async () => {
+  saved = { ...settings({ output_dir: "C:\\FakeProfile\\workflow\\成品" }), output_dir_default: true };
+  wrap({ status: "pending", step: "controller", role: "controller" });
+  const output = await screen.findByLabelText("成品目录");
+  expect(output).toHaveValue(`${DETECTED.suggested.data_dir}\\成品`);
+  fireEvent.change(screen.getByLabelText("工作目录（处理中的副本）"), { target: { value: "E:\\Work" } });
+  expect(output).toHaveValue("E:\\Work\\成品");
 });

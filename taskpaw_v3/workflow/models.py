@@ -741,6 +741,15 @@ class PostprocessEvidence(Model):
 
 
 class FinalManifest(Model):
+    @model_serializer(mode="wrap")
+    def _legacy_shape(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, object]:
+        value: dict[str, object] = handler(self)
+        if self.output_directory is None:
+            value.pop("output_directory", None)
+        return value
+
     film_id: Id
     revision: Revision
     input_revision: Revision
@@ -748,6 +757,9 @@ class FinalManifest(Model):
     items: tuple[ManifestItem, ...]
     output_root_id: Id
     output_relative_path: RelativePath
+    output_directory: Text | None = (
+        None  # #301: recorded package, independent of later settings
+    )
     tool_versions: ToolVersions
     restoration: RestorationResult
     subtitles: SubtitleResult
@@ -1879,6 +1891,7 @@ class FilmWorkflow(Model):
     archive_operations: tuple[WorkflowArchiveOperation, ...]
     archive_receipt_id: Id | None
     archive_receipt_approval_id: Id | None
+    archive_path: str | None = None
     cleanup_operations: tuple[WorkflowCleanupOperation, ...]
     scrape_status: StageStatus | None
     archive_status: StageStatus | None

@@ -205,6 +205,12 @@ def test_routes_live_on_the_control_api_only(host):
     assert network.get(f"{BASE}/films").status_code == 404
     assert network.post(f"{BASE}/films/x/confirm", json={}).status_code == 404
     assert network.post(f"{BASE}/packages/x/open").status_code == 404
+    assert (
+        network.post(
+            f"{BASE}/films/x/open-folder", json={"which": "archive"}
+        ).status_code
+        == 404
+    )
     bare = TestClient(
         create_control_app(
             AgentConfig(server_id="s1", machine="dev"),
@@ -554,7 +560,7 @@ def test_open_resolves_folders_by_film_id(world, client, monkeypatch):
     final = world.rt.store.get_final_manifest(world.rt.operator, world.film, 1)
     assert opened == [
         world.inbox / "pkg",
-        world.rt.work_dir / final.output_relative_path,
+        world.rt.final_dir(final),
     ]
     assert client.post(url, json={"what": "elsewhere"}).status_code == 422
     assert (

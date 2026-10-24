@@ -67,7 +67,7 @@ export const EXCEPTION_STATES: StatusKey[] = [
   "postprocess_error", "offline", "permission", "duplicate", "unknown", "cleanup", "stopping", "failed", "intake_attention",
   "device_lost", "source_missing",
 ];
-export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match"];
+export const ACTIVE_STATES: StatusKey[] = ["restore", "encode", "denoise", "asr", "translate", "return", "scrape", "match", "archiving"];
 
 // ── tiers (U1 V2) ───────────────────────────────────────────────────────
 export const TIER_ORDER: LtxTier[] = ["standard", "good", "high"];
@@ -154,6 +154,21 @@ interface AsrProgress {
   elapsed_s?: number; console?: string;
   phases?: Array<{ n: number; label: string; state: "done" | "current" | "pending"; seconds: number | null }>;
 }
+
+interface ArchiveProgress {
+  phase: "copying" | "verifying"; copied_bytes: number; verified_bytes: number; total_bytes: number;
+  files_done: number; files_total: number; items: Array<{ name: string; bytes: number; total: number }>;
+  target: string; started_at: string;
+}
+
+export function archiveLive(step: WorkflowStep | undefined) {
+  if (!step || step.key !== "archive" || step.state !== "running" || !record(step.progress)) return null;
+  const progress = step.progress as unknown as ArchiveProgress;
+  return { ...progress, percent: progress.total_bytes > 0
+    ? Math.min(99, Math.floor((progress.copied_bytes + progress.verified_bytes) / (2 * progress.total_bytes) * 100)) : null };
+}
+
+export const archiveBytes = (bytes: number, total: number) => `${(bytes / 1e9).toFixed(1)} / ${(total / 1e9).toFixed(1)} GB`;
 
 export function asrLive(step: WorkflowStep | undefined) {
   if (!step || step.key !== "asr" || step.state !== "running") return null;
@@ -642,6 +657,8 @@ export const percentOf = (ltx: ReturnType<typeof ltxOf>) => (ltx?.percent !== un
 // The running stage's progress as the board reports it (LTX percent, else a 0–1 fraction or a percent).
 export function progressText(item: WorkItem): string | null {
   if (item.kind !== "film") return null;
+  const archive = archiveLive(item.row.steps?.find((s) => s.key === "archive"));
+  if (archive) return archive.percent == null ? null : `${archive.percent}%`;
   const asr = asrLive((item.row.steps ?? []).find((s) => s.key === item.row.stage));
   if (asr) return asr.percent == null ? null : `${asr.percent}%`;
   const ltx = percentOf(ltxOf(item.row));

@@ -16,6 +16,7 @@ import {
 import { DeviceSection } from "./RemoteParts";
 import { Chip, Cover, Icon, Notice, StatusChip, StepLine } from "./parts";
 import { ModalHead, ModalShell } from "./ReviewDialog";
+import { ArchiveLivePanel } from "./ArchiveLivePanel";
 import { AsrLivePanel } from "./AsrLivePanel";
 import { RestoreLivePanel } from "./RestoreLivePanel";
 import { RemoveTask, SourceMissingAlert } from "./SourceMissing";
@@ -49,6 +50,8 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
     if (ws.readOnly) throw new Error("只读监控");
     return api.workflowOpen(filmId, "inbox");
   }, onError: (e) => ws.toast(errorText(e)) });
+  const folder = useMutation({ mutationFn: (which: "output" | "archive") => api.workflowOpenFolder(filmId, which),
+    onError: (e) => ws.toast(errorText(e)) });
   const retry = useMutation({
     mutationFn: (stage: string) => {
       if (ws.readOnly) throw new Error("只读监控");
@@ -100,6 +103,11 @@ function DrawerPane({ filmId, onClose }: { filmId: string; onClose: () => void }
           {/* P3 E3: any film with no running or claimed stage that is not archived (a 片源丢失 film has it in its alert) */}
           {!ws.readOnly && film?.can_remove && !film.source_missing && <RemoveTask film={film} onRemoved={onClose} />}
           {!ws.readOnly && <button type="button" className="btn ghost" disabled={open.isPending} onClick={() => open.mutate()}>打开文件夹</button>}
+          {!ws.readOnly && film && (film.archive.status === "succeeded" ? (
+            <button type="button" className="btn ghost" disabled={folder.isPending} onClick={() => folder.mutate("archive")}>打开归档目录</button>
+          ) : film.revisions.final && (
+            <button type="button" className="btn ghost" disabled={folder.isPending} onClick={() => folder.mutate("output")}>打开成品目录</button>
+          ))}
           {primary()}
         </div>
       </div>
@@ -115,6 +123,7 @@ function DrawerBody({ film, item, status, plan, onClose }: {
   const title = film.title || plan?.title || film.name;
   const actors = film.actors.length ? film.actors : plan?.actors ?? [];
   const restore = restoreStep(film);
+  const archive = film.steps?.find((s) => s.key === "archive" && s.state === "running");
   const asr = film.steps?.find((s) => s.key === "asr" && s.state === "running");
   const running = restore?.state === "running" ? restore : null; // U1c: always shown alive
   // P2-3 R15: a restore or ASR running on a worker (its 设备, and 停止并重新排队)
@@ -189,7 +198,7 @@ function DrawerBody({ film, item, status, plan, onClose }: {
           <RestoreLivePanel step={running} />
           <p className="small muted" style={{ marginTop: 10 }}>由阶段日志提供；不包含翻译、回传、刮削与入库。</p>
         </div>
-      ) : asr ? <AsrLivePanel step={asr} machine={machine} /> : download ? (
+      ) : archive ? <ArchiveLivePanel step={archive} /> : asr ? <AsrLivePanel step={asr} machine={machine} /> : download ? (
         <LtxDownload value={download} onRespond={ws.readOnly ? undefined : (requestId, approved) => api.workflowLtxDownload(requestId, approved)}
           onError={(e) => ws.toast(errorText(e))} />
       ) : film.source_missing ? null : (

@@ -316,7 +316,13 @@ class LocalWorkflowHost:
 
     def _boot(self) -> None:
         try:
-            rt = self.runtime = LocalRuntime(self.data_dir, self.executors)
+            rt = self.runtime = LocalRuntime(
+                self.data_dir,
+                self.executors,
+                output_dir=Path(self.settings.output_dir)
+                if self.settings.output_dir
+                else None,
+            )
             if self.executor_factory is not None:  # executors that read the ledger
                 rt.executors = {e.stage: e for e in self.executor_factory(rt)}
             rt.open()

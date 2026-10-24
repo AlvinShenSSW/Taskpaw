@@ -391,7 +391,15 @@ def _steps(
     if archive == "succeeded":
         steps.append(_step("archive", "done"))
     elif film.archive_open or archive == "running":
-        steps.append(_step("archive", "running", wait))
+        progress = (
+            (current or {}).get("progress")
+            if (current or {}).get("stage") == "archive"
+            else None
+        )
+        step = _step("archive", "running", wait, progress)
+        if progress:
+            step["started_at"] = progress.get("started_at")
+        steps.append(step)
     elif archive == "unknown" or film.approval_active:
         steps.append(_step("archive", "waiting", wait))
     elif archive in _RETRYABLE:
@@ -813,7 +821,7 @@ def final_manifest(rt: LocalRuntime, film_id: str) -> m.FinalManifest | None:
 
 
 def output_dir(rt: LocalRuntime, final: m.FinalManifest) -> Path:
-    return rt.work_dir / final.output_relative_path
+    return rt.final_dir(final)
 
 
 def _item_path(
@@ -993,6 +1001,9 @@ def folder(
     if what == "inbox":
         package = rt.store.film_workflow(rt.operator, film_id).package_path
         path = inbox / package if inbox is not None and package else None
+    elif what == "archive":
+        recorded = rt.store.film_workflow(rt.operator, film_id).archive_path
+        path = Path(recorded) if recorded else None
     else:
         final = final_manifest(rt, film_id)
         path = output_dir(rt, final) if final else None

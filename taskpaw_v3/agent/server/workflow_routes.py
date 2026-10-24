@@ -45,6 +45,11 @@ class OpenBody(BaseModel):
     what: Literal["inbox", "output"]
 
 
+class OpenFolderBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    which: Literal["output", "archive"]
+
+
 class PlanItem(BaseModel):
     """One film as the 待处理 card showed it (U1 P3')."""
 
@@ -422,6 +427,23 @@ def register_workflow_routes(
         inbox = host.finalizer.inbox if host.finalizer is not None else None
         with _mapped():
             return _open(board.folder(_runtime(host), inbox, film_id, body.what))
+
+    @app.post("/control/workflow/films/{film_id}/open-folder", status_code=204)
+    def workflow_open_folder(film_id: str, body: OpenFolderBody) -> Response:
+        from taskpaw_v3.workflow import board
+
+        with _mapped():
+            path = board.folder(_runtime(_host()), None, film_id, body.which)
+            if path is None:
+                raise HTTPException(status_code=409, detail="目录已不存在")
+            try:
+                return _open(path)
+            except HTTPException as exc:
+                if exc.status_code == 500 and not path.is_dir():
+                    raise HTTPException(
+                        status_code=409, detail="目录已不存在"
+                    ) from None
+                raise
 
     # ── 设备 (P2-2): enrollment and admission of remote workers ─────────
     def _device(run: Any) -> Any:

@@ -306,6 +306,14 @@ def board_inputs(
         local = {**local, "device": {"id": controller, "name": LOCAL_NAME}}
     remote = dict(fleet.currents(rt.clock.now(), names)) if fleet is not None else {}
     currents = board.merged_currents(local, remote)
+    for film_id, progress in dict(
+        getattr(getattr(host, "finalizer", None), "progress", {})
+    ).items():
+        currents[film_id] = {
+            "film_id": film_id,
+            "stage": "archive",
+            "progress": progress,
+        }
     waiting = dict(dispatch.get("waiting") or {})
     extras: dict[str, Any] = {}
     if fleet is not None:

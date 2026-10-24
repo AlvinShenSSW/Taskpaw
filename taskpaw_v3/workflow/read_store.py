@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .auth import AuthProof
@@ -367,7 +367,7 @@ class ReadCommands(WorkflowCore):
                     )
                 )
             receipt = self._conn.execute(
-                "SELECT r.receipt_id,r.approval_id FROM receipts r "
+                "SELECT r.receipt_id,r.approval_id,r.body_json FROM receipts r "
                 "JOIN operations o ON o.operation_id=r.operation_id "
                 "WHERE r.kind='archive' AND o.film_id=? ORDER BY r.rowid DESC LIMIT 1",
                 (film_id,),
@@ -390,6 +390,12 @@ class ReadCommands(WorkflowCore):
                 archive_operations=tuple(archives),
                 archive_receipt_id=receipt[0] if receipt else None,
                 archive_receipt_approval_id=receipt[1] if receipt else None,
+                archive_path=str(
+                    Path(json.loads(receipt[2])["target"]["export_identity"])
+                    / json.loads(receipt[2])["target"]["relative_path"]
+                )
+                if receipt
+                else None,
                 cleanup_operations=tuple(cleanups),
                 scrape_status=statuses.get("scrape"),
                 archive_status=statuses.get("archive"),

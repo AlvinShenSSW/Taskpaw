@@ -35,6 +35,7 @@ class WorkflowSettings(BaseModel):
     enabled: bool = False
     inbox_root: Optional[str] = None
     data_dir: Optional[str] = None
+    output_dir: Optional[str] = None
     ffprobe_path: Optional[str] = None
     # T04-P1: the tools the local executors run; a missing path disables its stage.
     jasna_exe_path: Optional[str] = None

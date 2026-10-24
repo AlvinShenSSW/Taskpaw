@@ -1196,3 +1196,52 @@ describe("ASR live progress (#300)", () => {
     expect(panel).toHaveTextContent("已用 18:44");
   });
 });
+
+
+describe("archive output (#301)", () => {
+  const progress = { phase: "copying", copied_bytes: 2e9, verified_bytes: 0, total_bytes: 4e9,
+    files_done: 0, files_total: 1, items: [{ name: "ABC-123", bytes: 2e9, total: 4e9 }],
+    target: "fake-NAS/Actor/ABC-123", started_at: "2026-10-24T08:00:00Z" };
+
+  it("shows archive progress in the drawer, chip and overview", async () => {
+    mockApi();
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-24T08:01:00Z"));
+    const film = row({ film_id: "archive-live", title: "归档测试", group: "archiving", stage: "archive", status: "running",
+      steps: steps("archive", "running", { progress }) });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film }));
+    wrap(<MediaWorkspace />);
+    expect(await screen.findByText("归档 · 25% · 复制 2.0 / 4.0 GB")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看 归档测试 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    const panel = await within(drawer).findByTestId("archive-live");
+    expect(panel).toHaveTextContent("已用 01:00");
+    expect(panel).toHaveTextContent("复制 → 校验");
+    expect(within(panel).getByRole("progressbar", { name: "归档进度" })).toHaveAttribute("aria-valuenow", "25");
+    expect(panel).toHaveTextContent("已复制2.0 / 4.0 GB");
+    expect(panel).toHaveTextContent("已校验0.0 / 4.0 GB");
+    expect(panel).toHaveTextContent("文件夹0 / 1");
+    expect(panel).toHaveTextContent("速度—");
+    expect(panel).toHaveTextContent(progress.target);
+    expect(panel).toHaveTextContent("复制完会逐个校验；校验通过后才清理主控上的工作副本。");
+    expect(within(drawer).getByText("归档 · 25%", { selector: "[aria-current=step]" })).toBeInTheDocument();
+  });
+
+  it.each([false, true])("opens the recorded folder, including history (archived=%s)", async (archived) => {
+    mockApi();
+    const open = vi.spyOn(api, "workflowOpenFolder").mockResolvedValue(undefined);
+    const film = row({ film_id: "folder-film", title: "目录测试", group: archived ? "done" : "confirm",
+      stage: archived ? "done" : "archive", status: archived ? "succeeded" : "pending",
+      steps: steps(archived ? "done" : "confirm", archived ? "done" : "waiting") });
+    vi.spyOn(api, "workflowFilms").mockResolvedValue({ ...FILMS_RESPONSE, films: [film], packages: [], counts: counts([film], []) });
+    vi.spyOn(api, "workflowFilm").mockResolvedValue(detail(film.film_id, { ...film,
+      archive: { status: archived ? "succeeded" : "pending", target_path: archived ? "fake-NAS/ABC-123" : null, error: null },
+      revisions: revisions(1, 1) }));
+    wrap(<MediaWorkspace />);
+    await go("影片队列");
+    fireEvent.click(await screen.findByRole("button", { name: "查看 目录测试 详情" }));
+    const drawer = await screen.findByRole("dialog", { name: "影片详情" });
+    fireEvent.click(await within(drawer).findByRole("button", { name: archived ? "打开归档目录" : "打开成品目录" }));
+    await waitFor(() => expect(open).toHaveBeenCalledWith("folder-film", archived ? "archive" : "output"));
+  });
+});

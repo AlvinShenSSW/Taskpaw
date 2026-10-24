@@ -698,3 +698,29 @@ describe("Mac read-only (#286)", () => {
     expect(pendingCard("far-1")).toHaveTextContent(`预计 ${FINISH_TEXT.ti70} 在 5070 Ti 完成`);
   });
 });
+
+
+it("成品目录 offers choose, open, create and saves the changed path (#301)", async () => {
+  vi.stubGlobal("__TAURI_INTERNALS__", {});
+  vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeError("offline"))));
+  dialog.open.mockResolvedValueOnce("E:\\Other");
+  const state = settingsState("controller");
+  state.saved.output_dir = "E:\\Output";
+  state.running.output_dir = state.saved.output_dir;
+  state.paths = { output_dir: "missing" };
+  vi.spyOn(api, "workflowSettings").mockResolvedValue(state);
+  const save = vi.spyOn(api, "workflowSaveSettings").mockResolvedValue({ ok: true, restart_required: true });
+  const create = vi.spyOn(api, "workflowCreateDir").mockResolvedValue({ ok: true, created: true });
+  const open = vi.spyOn(api, "workflowOpenDir").mockResolvedValue(undefined);
+  wrap(<WorkflowSettingsSection />);
+  expect(await screen.findByLabelText("成品目录")).toHaveValue(state.saved.output_dir);
+  expect(screen.getByText("刮削完成、等待确认和归档的影片放在这里，每部一个文件夹（即最终的归档文件夹）；归档校验通过后删除。")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "打开 成品目录" }));
+  await waitFor(() => expect(open).toHaveBeenCalledWith(state.saved.output_dir));
+  fireEvent.click(screen.getByRole("button", { name: "创建此目录" }));
+  await waitFor(() => expect(create).toHaveBeenCalledWith(state.saved.output_dir));
+  fireEvent.click(screen.getByRole("button", { name: "选择 成品目录" }));
+  await waitFor(() => expect(screen.getByLabelText("成品目录")).toHaveValue("E:\\Other"));
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith({ role: "controller", output_dir: "E:\\Other" }));
+});

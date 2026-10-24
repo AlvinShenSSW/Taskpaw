@@ -518,12 +518,13 @@ export interface PlanChoice { film_id: string; input_revision: number; ltx_model
 export type WorkflowRole = "off" | "controller" | "worker";
 export interface WorkflowSettingsView {
   enabled: boolean; role: WorkflowRole;
-  inbox_root: string | null; data_dir: string | null; ffprobe_path: string | null;
+  inbox_root: string | null; data_dir: string | null; output_dir?: string | null; ffprobe_path: string | null;
   jasna_exe_path: string | null; whisperjav_exe_path: string | null; ltx_gpu: string;
   mdcx_python: string | null; mdcx_root: string | null; mdcx_profile: string | null; filmpaw_data_dir: string | null;
   remote_workers: boolean; worker_api_port: number; staging_dir: string | null; staging_cap_gb: number;
 }
 export interface WorkflowSettingsState {
+  output_dir_default?: boolean; // derived location; the wizard follows its chosen data_dir
   saved: WorkflowSettingsView; running: WorkflowSettingsView; restart_required: boolean;
   busy: { films: number; remote: number; unknown: boolean };
   presets: Array<{ id: string; label: string }>;
@@ -537,7 +538,7 @@ export interface WorkflowSettingsState {
 }
 // #299 review IR10: `create_dirs` names the suggested folders the save makes once it validated
 export type WorkflowSettingsPatch = { role: WorkflowRole } & Partial<Omit<WorkflowSettingsView, "enabled" | "role">>
-  & { create_dirs?: Array<"inbox_root" | "data_dir" | "staging_dir"> };
+  & { create_dirs?: Array<"inbox_root" | "data_dir" | "output_dir" | "staging_dir"> };
 // #299: the first-run wizard, 网络与访问, detection, 立即重启 and the Hub's settings.
 export type SetupRole = "agent" | "controller" | "worker";
 export type SetupStep = "role" | "network" | "controller" | "worker_fields" | "worker_join" | "done";
@@ -855,6 +856,8 @@ export const api = {
     send<{ approval_id: string }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/confirm`, { performer_id }),
   workflowRetry: (filmId: string, stage: string) =>
     send<{ ok: boolean }>("agent", "POST", `/control/workflow/films/${seg(filmId)}/retry`, { stage }),
+  workflowOpenFolder: (filmId: string, which: "output" | "archive") =>
+    send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open-folder`, { which }),
   workflowOpen: (filmId: string, what: "inbox" | "output") =>
     send<void>("agent", "POST", `/control/workflow/films/${seg(filmId)}/open`, { what }),
   // U1: the plan gate (待处理), the archive target preflight, metadata lookup and the global pause.
@@ -917,6 +920,8 @@ export const api = {
   workflowSaveSettings: (patch: WorkflowSettingsPatch) =>
     send<{ ok: boolean; restart_required: boolean; message?: string }>("agent", "PUT", "/control/workflow/settings", patch),
   // 「创建此目录」: a local absolute folder (422 `fields.path` otherwise)
+  workflowOpenDir: (path: string) =>
+    send<void>("agent", "POST", "/control/workflow/settings/directory/open", { path }),
   workflowCreateDir: (path: string) =>
     send<{ ok: boolean; created: boolean }>("agent", "POST", "/control/workflow/settings/directory", { path }),
   // #299: first-run wizard (§6), 网络与访问 (R4–R6), detection (§5), 立即重启 (§3)

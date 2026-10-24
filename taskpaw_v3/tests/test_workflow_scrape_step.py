@@ -99,7 +99,7 @@ def test_miko_output_becomes_the_published_final(rt, tmp_path, monkeypatch):
     assert ret.status(rt, film, "scrape") == "succeeded", d.status().reason
     assert final_of(rt, film) == 1
     assert package_hashes(rt, film) == before  # M2: the return package is untouched
-    out = next((rt.work_dir / "scrape").rglob("ABC-123-无码-C.nfo")).parent
+    out = rt.output_dir / "ABC-123"
     # #303: a workflow restore is LTX -> 无码 names, images named after the film, the
     # Chinese subtitle only (the .ja.srt never reaches the scrape or the final)
     assert sorted(p.name for p in out.iterdir()) == [
